@@ -93,6 +93,50 @@ const char* ownerModuleName(void* p, char* buf, size_t bufLen) {
     return buf;
 }
 
+// THE SAME ANSWER, SHORT ENOUGH TO PUT EIGHT OF THEM ON ONE LINE.
+//
+// ownerModuleName above spends a full path per name on purpose, and for the
+// reclaim and census lines -- one name, once a second -- that is right. The
+// timeline's lines are different arithmetic: a FLIP line carries three names, a
+// stack line carries eight, and Log::note stops at about 1167 bytes. At
+// 60-character paths the stack line truncated after four frames, and the frames
+// it dropped were the OUTERMOST ones -- the entries that say who CALLED the
+// writer, which is the question the stack was captured to answer. A breadcrumb
+// is worse: 224 bytes, so three paths did not fit and the writer, printed last,
+// was the field that fell off.
+//
+// So these lines get "d3d11.dll+0x44A14". The one thing a basename cannot say
+// on its own is which d3d11.dll -- the game loads EDVR's proxy under exactly
+// that name -- so EDVR's own image is prefixed rather than left ambiguous. The
+// module handle is this DLL's, taken from the address of this function, once.
+const char* ownerModuleBrief(void* p, char* buf, size_t bufLen) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi) || !mbi.AllocationBase) {
+        return "no module";
+    }
+    char path[MAX_PATH] = {};
+    if (!GetModuleFileNameA(static_cast<HMODULE>(mbi.AllocationBase), path,
+                            sizeof(path))) {
+        return "no module";
+    }
+    const char* leaf = path;
+    for (const char* c = path; *c; ++c) {
+        if (*c == '\\' || *c == '/') leaf = c + 1;
+    }
+    static HMODULE self = nullptr;
+    if (!self) {
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&ownerModuleBrief), &self);
+    }
+    _snprintf_s(buf, bufLen, _TRUNCATE, "%s%s+0x%llX",
+                (self && mbi.AllocationBase == self) ? "EDVR's own " : "", leaf,
+                static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(p) -
+                                                reinterpret_cast<uintptr_t>(
+                                                    mbi.AllocationBase)));
+    return buf;
+}
+
 // Which mapped image a pointer belongs to, or null for none. The same
 // VirtualQuery ownerModuleName uses, without the formatting -- this one is a
 // comparison, not a message, and it runs on the reclaim path rather than only
@@ -144,39 +188,59 @@ void appendSlot(char* list, size_t listSize, size_t slot) {
     strncat_s(list, listSize, one, _TRUNCATE);
 }
 
-// THE WRITE WATCH. One page, made read-only, so the next write to it faults and
-// the handler can read the faulting instruction's address out of the exception.
-// See the header for why naming the writer needed its own mechanism.
+// THE WRITE WATCH. The table's pages, made read-only, so the next write to them
+// faults and the handler can read the faulting instruction's address out of the
+// exception. See the header for why naming the writer needed its own mechanism.
+//
+// EVERY COUNTER HERE IS ATOMIC, and that is not defensive tidying. The page the
+// D3D11 context's table lives on is written from whatever threads the runtime
+// drives the context from, this handler runs on the writing thread, and a
+// plain `++` is a read-modify-write with no atomicity at all -- so two writers
+// produce a catch count that is simply wrong, and `sites[siteCount++]` produces
+// two threads claiming the same index or one claiming index 8 of an array of
+// eight. The numbers this instrument prints are the whole product; a number
+// nobody can trust is worse than no number.
 struct WriteWatch {
     void*     slotAddress = nullptr;
     uintptr_t tableLo = 0;           // the vtable array, so a write can be told
-    uintptr_t tableHi = 0;           // from a write merely sharing its page
-    void*     pageBase = nullptr;
-    SIZE_T    pageSize = 0;
-    DWORD     writableProtect = 0;   // what the page was, and is put back to
+    uintptr_t tableHi = 0;           // from a write merely sharing its pages
+    void*     pageBase = nullptr;    // the protected region: the table's whole
+    SIZE_T    pageSize = 0;          // span, rounded out to page boundaries
+    DWORD     writableProtect = 0;   // what the pages were, and are put back to
     DWORD     readOnlyProtect = 0;   // the same without write permission
     volatile LONG armed = 0;
     volatile LONG rearmWanted = 0;   // the frame-path fallback, see vtableWatchRearm
+    // Frames the frame-path re-arm has held off because a single step was still
+    // owed. Frame path only, so no atomics. See vtableWatchRearm.
+    uint32_t  rearmHeld = 0;
     volatile LONG stepPending = 0;   // a single step is owed to us
     volatile LONG stepThread = 0;    // ...by this thread, and no other
+    // A budget ran out and the frame path must stop the watch. Set in the
+    // handler, acted on from vtableWatchFrameTick -- see reportWatchSummary for
+    // why the handler may not do the stopping itself.
+    volatile LONG stopWanted = 0;
+    volatile LONG stopReason = 0;    // one of kStop* below
     bool      finished = false;
-    uint32_t  catches = 0;           // writes seen anywhere on the page
-    uint32_t  inTable = 0;           // ...of which, inside the vtable
-    uint32_t  reported = 0;          // in-table lines printed
+    volatile LONG catches = 0;       // writes seen anywhere on the pages
+    volatile LONG inTable = 0;       // ...of which, inside the vtable
+    volatile LONG reported = 0;      // in-table lines printed
     // Writes that faulted while the watch was mid-catch on another thread: let
     // through, not recorded, counted. A gap in an instrument's coverage has to
     // be a number rather than a silence. See the handler.
-    uint32_t  concurrent = 0;
-    uintptr_t lo = 0;                // span of addresses written
-    uintptr_t hi = 0;
+    volatile LONG concurrent = 0;
+    // Single steps that arrived without matching the pair we owed ourselves.
+    // Must be zero; see vtableWatchChimeras.
+    volatile LONG chimera = 0;
+    volatile LONG64 lo = 0;          // span of addresses written
+    volatile LONG64 hi = 0;
     void*     sites[8] = {};         // distinct writing instructions
-    uint32_t  siteCount = 0;
+    volatile LONG siteCount = 0;
     // WHICH SLOTS, as a bitmap over the 512 the probe will address. The scope
     // question the first proof left open: four draw entries were caught in one
     // burst, and whether the same sweep restores the other nineteen slots on
     // EDVR's list or only the draws decides how much of the permanent fix has
     // to exist. A count cannot answer that; the set can.
-    uint64_t  slotsWritten[8] = {};
+    volatile LONG64 slotsWritten[8] = {};
     char      who[48] = {};
     // THE FLIP TIMELINE, armed instead of the writer probe. See VTableFlip.
     bool      timeline = false;
@@ -214,17 +278,58 @@ PVOID      g_watchHandler = nullptr;
 // overrun is COUNTED and reported rather than papered over.
 constexpr uint32_t kFlipRing = 128;
 
-// The per-session budget for value-changing events, separate from
-// kMaxWatchCatches and much larger.
+// WHERE THE PER-EVENT NARRATION STOPS. A SOFT cap, and the word is the whole
+// point.
 //
-// The catches cap bounds the cost of an armed probe on a page nobody stops
-// writing to, and with the timeline on, that page is written hundreds of times
-// a frame with the same value every time -- so charging those against a 2000
-// cap would end the instrument in four frames, having recorded nothing. Same
-// -value writes are counted and never charged; only changes are, and 4000 of
-// those is far past anything a session should produce in the modes this exists
-// for.
+// It was a hard one: at 4000 value-changing writes the timeline disarmed
+// itself. In the shared hook mode EDVR's own per-frame re-patching is a change
+// like any other -- about 29 of them a frame on issue #21's rig -- so 4000 is
+// roughly a second and a half, and the instrument would switch off before the
+// event it exists for on precisely the rig it was built for. Now nothing stops
+// here: the per-event lines and the breadcrumbs stop (they have their own much
+// smaller caps anyway), the (slot, from, to, writer) table goes on folding
+// every event, the ring goes on holding the last 128 for the crash dump, and
+// the summary says the cap was hit and at which frame. What bounds the COST is
+// the catch budget and the cost ceiling below, which are measurements of what
+// the probe is doing to the frame rather than of how interesting it is.
 constexpr uint32_t kMaxFlipEvents = 4000;
+
+// THE SESSION BUDGET THAT DOES STOP IT, in caught page writes.
+//
+// kMaxWatchCatches (2000) bounds the writer probe, and the timeline used to
+// bypass it entirely -- there was no ceiling of any kind on a session-long
+// watch over a page the runtime writes hundreds of times a frame. At the
+// measured 3.65 us a catch this is about seven seconds of pure exception
+// handling spread over a session, which no session this exists for will reach
+// (the rig it was built for dies at 1.7 s), and it means a rig that DOES write
+// this page without pause stops the instrument loudly instead of running it
+// forever.
+constexpr uint32_t kMaxTimelineCatches = 2000000;
+
+// What one caught write costs, measured: the fault, the protection change, the
+// single step, and the protection change back. 3.65 us on the maintainer's rig,
+// timed over the writer probe's own catches. Used only to turn a catches-per-
+// frame rate into a milliseconds-per-frame one for the ceiling below; being
+// wrong by a factor of two moves the ceiling, it does not break anything.
+constexpr double kCatchCostUs = 3.65;
+
+// The cost ceiling, in milliseconds of exception handling per frame, and the
+// grace period before it may fire.
+//
+// A probe that costs 4 ms a frame has taken a third of a 90 Hz frame, which is
+// the point at which it is no longer observing the session but changing it. The
+// GRACE is the part that matters: the crash this instrument exists for lands
+// 1.7 seconds after the hooks arm, so a ceiling that could disarm inside those
+// ten seconds could remove the instrument from the one frame it was installed
+// to record. It cannot fire until the ten seconds are up, whatever the cost.
+constexpr double   kMaxCatchMsPerFrame = 4.0;
+constexpr double   kCostCeilingGraceS = 10.0;
+
+// Why a watch stopped, for the frame path's line. The handler cannot log.
+constexpr LONG kStopNone = 0;
+constexpr LONG kStopCatchBudget = 1;   // the timeline's session catch budget
+constexpr LONG kStopWriterProbe = 2;   // the writer probe's own small caps
+constexpr LONG kStopCostCeiling = 3;   // milliseconds per frame, over the ceiling
 
 // How many distinct (slot, old, new, writer) tuples the aggregate holds. A
 // runtime alternating one slot between two implementations is two rows; the 24
@@ -268,8 +373,8 @@ struct FlipTimeline {
     volatile LONG   count = 0;      // value-changing events recorded, ever
     uint32_t        reported = 0;   // ...of which the frame path has drained
     uint32_t        lost = 0;       // overwritten before it could be read
-    uint32_t        unfinished = 0; // faults whose single step never completed
-    uint32_t        idempotent = 0; // in-table writes that changed nothing
+    volatile LONG   unfinished = 0; // faults whose single step never completed
+    volatile LONG   idempotent = 0; // in-table writes that changed nothing
     FlipShape       shapes[kFlipShapes];
     uint32_t        shapeCount = 0;
     bool            shapeOverflow = false;
@@ -277,7 +382,17 @@ struct FlipTimeline {
     volatile LONG64 frameNo = 0;
     volatile LONG   frameThread = 0;
     uint64_t        frames = 0;     // frames the timeline has been armed over
+    // What the instrument COSTS, per frame, which is the number that decides
+    // whether it may go on running. Sampled on the frame path: catches is
+    // atomic and monotonic, so the difference between two ticks is this
+    // frame's, and no counter of its own is needed in the handler.
+    uint32_t        catchesAtLastTick = 0;
+    uint32_t        lastFrameCatches = 0;
     uint64_t        armedQpc = 0;
+    // When the soft cap was passed, so the summary can say WHEN the per-event
+    // narration stopped rather than only that it did. Zero until it is.
+    uint64_t        softCapFrame = 0;
+    double          softCapSeconds = 0.0;
     uint32_t        dumps = 0;
     bool            summarised = false;
 };
@@ -295,16 +410,22 @@ void resetFlipTimeline() {
     InterlockedExchange(&g_flip.count, 0);
     g_flip.reported = 0;
     g_flip.lost = 0;
-    g_flip.unfinished = 0;
-    g_flip.idempotent = 0;
+    InterlockedExchange(&g_flip.unfinished, 0);
+    InterlockedExchange(&g_flip.idempotent, 0);
     for (uint32_t i = 0; i < kFlipShapes; ++i) g_flip.shapes[i] = FlipShape();
     g_flip.shapeCount = 0;
     g_flip.shapeOverflow = false;
     g_flip.nextShapeReport = kFlipFullLines;
-    InterlockedExchange64(&g_flip.frameNo, 0);
-    InterlockedExchange(&g_flip.frameThread, 0);
+    // NOT frameNo or frameThread: those are the frame path's publication of
+    // where the session is, they are published whether or not anything is
+    // armed, and zeroing them here would make the first flip after an arming
+    // read as frame 0 -- the one number that means "before the first Present".
     g_flip.frames = 0;
+    g_flip.catchesAtLastTick = 0;
+    g_flip.lastFrameCatches = 0;
     g_flip.armedQpc = static_cast<uint64_t>(qpcNow());
+    g_flip.softCapFrame = 0;
+    g_flip.softCapSeconds = 0.0;
     g_flip.dumps = 0;
     g_flip.summarised = false;
 }
@@ -349,6 +470,14 @@ double flipSecondsSinceArm(uint64_t qpc) {
 // Modules are deliberately NOT resolved here -- that is a VirtualQuery and a
 // GetModuleFileName per frame, in a handler that can run hundreds of times a
 // frame. The addresses are raw and the frame path names them.
+// AND THE UNWINDER ITSELF IS GUARDED, which is not belt-and-braces.
+// RtlLookupFunctionEntry and RtlVirtualUnwind read the unwind tables of
+// whatever module the faulting instruction is in, and RtlVirtualUnwind reads
+// the stack the codes describe -- so a corrupt table, a JIT-generated frame
+// with a bad entry, or a stack that has already been smashed faults INSIDE the
+// unwind, on a thread that is already inside a fault handler. That is a double
+// fault with EDVR at the top of it. Guarded, the walk simply stops and the
+// event carries the frames it had.
 uint8_t captureWriterStack(const CONTEXT* from, void** out, uint8_t max) {
     if (!from || !out) return 0;
     // A copy, because unwinding mutates the context it walks and the one we
@@ -357,7 +486,12 @@ uint8_t captureWriterStack(const CONTEXT* from, void** out, uint8_t max) {
     uint8_t n = 0;
     while (n < max) {
         DWORD64 imageBase = 0;
-        PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(ctx.Rip, &imageBase, nullptr);
+        PRUNTIME_FUNCTION fn = nullptr;
+        if (!guarded("captureWriterStack/lookup", [&] {
+                fn = RtlLookupFunctionEntry(ctx.Rip, &imageBase, nullptr);
+            })) {
+            break;
+        }
         if (!fn) {
             if (n) break;   // deeper than the leaf: stop rather than guess twice
             const NT_TIB* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
@@ -373,8 +507,12 @@ uint8_t captureWriterStack(const CONTEXT* from, void** out, uint8_t max) {
         }
         PVOID   handlerData = nullptr;
         DWORD64 establisher = 0;
-        RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, ctx.Rip, fn, &ctx,
-                         &handlerData, &establisher, nullptr);
+        if (!guarded("captureWriterStack/unwind", [&] {
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, ctx.Rip, fn, &ctx,
+                                 &handlerData, &establisher, nullptr);
+            })) {
+            break;
+        }
         if (!ctx.Rip) break;
         out[n++] = reinterpret_cast<void*>(ctx.Rip);
     }
@@ -446,13 +584,22 @@ DWORD withoutWrite(DWORD p) {
 // a sweep, because it surrendered the page after the first store and did not
 // take it back until the next frame. A range that reaches the table proves the
 // sweep; one that stays pinned below it disproves it.
+//
+// FRAME PATH ONLY, and that is a rule the file's own header states and this
+// function used to break: it was called from inside the vectored handler when a
+// budget ran out, where it takes the log's lock, formats, writes a file and
+// calls GetModuleFileNameA -- which takes the loader lock -- on a thread that
+// is mid-store inside the D3D11 runtime. The handler now sets stopWanted and
+// vtableWatchFrameTick does the talking.
 void reportWatchSummary() {
     if (g_watch.finished) return;
     g_watch.finished = true;
     char siteBuf[MAX_PATH];
     char joined[4 * MAX_PATH];
     joined[0] = '\0';
-    for (uint32_t i = 0; i < g_watch.siteCount; ++i) {
+    const uint32_t siteCount =
+        static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.siteCount, 0, 0));
+    for (uint32_t i = 0; i < siteCount && i < 8; ++i) {
         char one[MAX_PATH + 4];
         _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s", i ? "; " : "",
                     ownerModuleName(g_watch.sites[i], siteBuf, sizeof(siteBuf)));
@@ -462,40 +609,71 @@ void reportWatchSummary() {
     char slots[512];
     slots[0] = '\0';
     for (size_t i = 0; i < 512; ++i) {
-        if (g_watch.slotsWritten[i >> 6] & (1ull << (i & 63))) {
+        const LONG64 word = InterlockedCompareExchange64(
+            &g_watch.slotsWritten[i >> 6], 0, 0);
+        if (static_cast<uint64_t>(word) & (1ull << (i & 63))) {
             appendSlot(slots, sizeof(slots), i);
         }
     }
     Log::get().note(
-        "VTableHook %s: write watch DISARMED. It saw %u write(s) to the page, "
-        "%u of them INSIDE the vtable itself, spanning %p to %p; the vtable "
-        "occupies %p to %p. The slots written were: %s. The instruction(s) "
-        "responsible: %s. If that slot list covers everything EDVR patches, one "
-        "sweep restores the whole table; if it is only part of it, the rest are "
-        "being lost some other way and that is a different question. The page is "
-        "back to normal and nothing further is intercepted.",
-        g_watch.who, static_cast<unsigned>(g_watch.catches),
-        static_cast<unsigned>(g_watch.inTable),
-        reinterpret_cast<void*>(g_watch.lo), reinterpret_cast<void*>(g_watch.hi),
+        "VTableHook %s: write watch DISARMED. It saw %u write(s) to the watched "
+        "pages, %u of them INSIDE the vtable itself, spanning %p to %p; the "
+        "vtable occupies %p to %p. The slots written were: %s. The "
+        "instruction(s) responsible: %s. If that slot list covers everything "
+        "EDVR patches, one sweep restores the whole table; if it is only part of "
+        "it, the rest are being lost some other way and that is a different "
+        "question. The pages are back to normal and nothing further is "
+        "intercepted.",
+        g_watch.who,
+        static_cast<unsigned>(InterlockedCompareExchange(&g_watch.catches, 0, 0)),
+        static_cast<unsigned>(InterlockedCompareExchange(&g_watch.inTable, 0, 0)),
+        reinterpret_cast<void*>(InterlockedCompareExchange64(&g_watch.lo, 0, 0)),
+        reinterpret_cast<void*>(InterlockedCompareExchange64(&g_watch.hi, 0, 0)),
         reinterpret_cast<void*>(g_watch.tableLo),
         reinterpret_cast<void*>(g_watch.tableHi),
         slots[0] ? slots : "none -- no write landed inside the table at all",
         joined[0] ? joined : "none recorded");
     if (g_watch.timeline) {
-        // Counts only, and no module lookups: this can be reached from inside
-        // the exception handler when the event budget runs out, and
-        // GetModuleFileName takes the loader lock. The table of who wrote what
-        // is printed by reportFlipSummary on the frame path.
+        // The cost, in the same line as the finding, because a probe whose cost
+        // nobody measured is a probe nobody can advise a user to run -- and the
+        // per-frame figure is the one that says whether the instrument was
+        // observing the session or changing it.
+        const uint32_t catches =
+            static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.catches, 0, 0));
+        const double perFrame =
+            g_flip.frames ? static_cast<double>(catches) /
+                                static_cast<double>(g_flip.frames)
+                          : 0.0;
         Log::get().note(
             "VTableHook %s: flip timeline -- %u write(s) into the table CHANGED "
             "a value, %u put the same value back and cost nothing but an "
-            "exception. The change budget is %u. The per-writer table and the "
-            "cost per frame follow on the next frame.",
+            "exception. Catches cost a mean of %.1f per frame over %llu frame(s) "
+            "(~%.2f ms/frame at %.2f us each), and the last frame took %u. The "
+            "per-writer table follows on the next frame.",
             g_watch.who,
             static_cast<unsigned>(InterlockedCompareExchange(&g_flip.count, 0, 0)),
-            static_cast<unsigned>(g_flip.idempotent),
-            static_cast<unsigned>(kMaxFlipEvents));
+            static_cast<unsigned>(InterlockedCompareExchange(&g_flip.idempotent, 0, 0)),
+            perFrame, static_cast<unsigned long long>(g_flip.frames),
+            perFrame * kCatchCostUs / 1000.0, kCatchCostUs,
+            static_cast<unsigned>(g_flip.lastFrameCatches));
     }
+}
+
+// Does the watch still want the pages read-only? False once a budget has asked
+// for the stop, or once the summary has printed -- the two states in which the
+// next write must go through without an exception.
+bool watchKeepsArming() {
+    return !g_watch.finished &&
+           !InterlockedCompareExchange(&g_watch.stopWanted, 0, 0);
+}
+
+// A budget is spent. The handler may not log, take a lock or resolve a module,
+// so all it does is say so and stop re-arming; vtableWatchFrameTick prints the
+// reason and does the disarming a few milliseconds later, on the render thread.
+void requestWatchStop(LONG reason) {
+    InterlockedCompareExchange(&g_watch.stopReason, reason, kStopNone);
+    InterlockedExchange(&g_watch.stopWanted, 1);
+    InterlockedExchange(&g_watch.rearmWanted, 0);
 }
 
 LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
@@ -503,7 +681,7 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     if (!er) return EXCEPTION_CONTINUE_SEARCH;
 
     // THE SECOND HALF OF EVERY CATCH. The write we let through has now
-    // happened, so take the page back before anything else touches it.
+    // happened, so take the pages back before anything else touches them.
     //
     // This is what the first cut of the probe lacked, and it is why that cut
     // could only ever see one write per frame: it opened the page and waited
@@ -511,9 +689,27 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     // unseen behind the first one. Re-protecting here instead means every
     // write is caught, which is the difference between "somebody wrote near our
     // table" and "somebody wrote OUR TABLE".
-    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP &&
-        InterlockedCompareExchange(&g_watch.stepPending, 0, 0) &&
-        g_watch.stepThread == static_cast<LONG>(GetCurrentThreadId())) {
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watch.pageBase) {
+        const bool mine =
+            InterlockedCompareExchange(&g_watch.stepPending, 0, 0) != 0 &&
+            InterlockedCompareExchange(&g_watch.stepThread, 0, 0) ==
+                static_cast<LONG>(GetCurrentThreadId());
+        if (!mine) {
+            // NEVER HAND BACK A TRAP WE SET.
+            //
+            // A single step arriving here while a watch exists and not matching
+            // the pair we owed ourselves is, one way or another, ours: the trap
+            // flag is not something anything else in this process sets. Passing
+            // it on means EXCEPTION_CONTINUE_SEARCH, and nobody downstream
+            // handles STATUS_SINGLE_STEP -- the process dies, EDVR is blamed,
+            // and correctly. Measured before the claim below became atomic: four
+            // writer threads, all dead inside 50 ms, three runs out of three.
+            // The pair is single-owner now, so this must never fire; the count
+            // is what says so rather than an assumption that it does not.
+            InterlockedIncrement(&g_watch.chimera);
+            if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         InterlockedExchange(&g_watch.stepPending, 0);
         if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
         // THE SECOND READ. The store has retired, so the cell now holds the
@@ -527,7 +723,7 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
             // to this exact address and completed, so the page is mapped.
             void* const now = *reinterpret_cast<void* const*>(g_watch.pendingCell);
             if (now == g_watch.pendingOld) {
-                ++g_flip.idempotent;
+                InterlockedIncrement(&g_flip.idempotent);
             } else {
                 recordFlip(g_watch.pendingSlot, g_watch.pendingOld, now,
                            g_watch.pendingRip, g_watch.pendingThread,
@@ -535,11 +731,29 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
                            g_watch.pendingStackCount);
             }
         }
-        if (!g_watch.finished) {
+        // ARMED FIRST, PROTECTED SECOND, and the order is the difference
+        // between a watch that loses a few catches and one that goes
+        // permanently blind.
+        //
+        // It was the other way round: re-protect, then set armed. A write
+        // arriving in that window takes the concurrent branch below, which makes
+        // the pages WRITABLE and returns -- and then this thread sets armed to 1
+        // with the pages writable and nothing pending. No write faults ever
+        // again, vtableWatchRearm has nothing to put back because rearmWanted is
+        // 0, and the instrument reports its findings up to that instant and
+        // silence after it. Measured with two writer threads: blind after about
+        // 250 ms, 282 catches, then nothing for the rest of the run.
+        //
+        // This way the window says "armed but writable", which loses the writes
+        // that land inside it -- a few microseconds of them -- and cannot lose
+        // the watch. A VirtualProtect that refuses hands the job to the frame
+        // path rather than leaving the flag lying about the pages.
+        if (watchKeepsArming()) {
+            InterlockedExchange(&g_watch.armed, 1);
             DWORD previous = 0;
-            if (VirtualProtect(g_watch.pageBase, g_watch.pageSize,
-                               g_watch.readOnlyProtect, &previous)) {
-                InterlockedExchange(&g_watch.armed, 1);
+            if (!VirtualProtect(g_watch.pageBase, g_watch.pageSize,
+                                g_watch.readOnlyProtect, &previous)) {
+                InterlockedExchange(&g_watch.rearmWanted, 1);
             }
         }
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -561,49 +775,46 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     const uintptr_t lo = reinterpret_cast<uintptr_t>(g_watch.pageBase);
     if (at < lo || at >= lo + g_watch.pageSize) return EXCEPTION_CONTINUE_SEARCH;
 
-    // A SECOND THREAD FAULTED INSIDE OUR OWN CATCH WINDOW, and the answer is
-    // NOT to walk away from it.
+    // CLAIM THE CATCH, ATOMICALLY, AND THE WHOLE PROCESS DEPENDS ON IT.
     //
-    // The armed test used to be the first thing this handler did, so an
-    // exception arriving while armed was 0 went straight to
-    // EXCEPTION_CONTINUE_SEARCH -- and for a write to OUR page, disarmed by US
-    // one instruction ago, there is nobody else to handle it. Nothing else in
-    // the process knows why that page is read-only. The exception goes
-    // unhandled and the game dies, blamed on EDVR, correctly.
+    // This was a read of `armed` with a no-op compare-exchange, a VirtualProtect
+    // syscall, and only then a clear -- so two threads faulting on the same page
+    // could both read 1, both come through, both set the trap flag and both
+    // write the single global stepThread. The loser's single step then failed
+    // the pair test above, fell through to EXCEPTION_CONTINUE_SEARCH, and
+    // nothing in the process handles STATUS_SINGLE_STEP: the game died. Measured
+    // with four writer threads -- all four dead within 50 ms, three runs out of
+    // three. One exchange claims it, so exactly one thread owns a catch at a
+    // time and every other faulting thread takes the branch below.
     //
-    // The window is two instructions wide, so this needs the D3D11 context
-    // being driven from two threads at once, which is exactly what multithread
-    // protection permits and what issue #21's rig may well be doing. It was
-    // survivable while the probe armed for a burst of 32 writes in one mode;
-    // the flip timeline arms for a whole session on a page the runtime writes
-    // hundreds of times a frame, which turns a race nobody had hit into one
-    // nobody should be running.
-    //
-    // The page is writable at this moment -- that is what being unarmed means
-    // here -- so re-asserting that and resuming lets the store complete. The
-    // write is LOST to the instrument rather than to the process, and the count
-    // says how many times that happened rather than leaving the gap silent. A
-    // VirtualProtect that refuses falls through to the old behaviour, so a
-    // genuinely unwritable page cannot spin here forever.
-    if (!InterlockedCompareExchange(&g_watch.armed, 0, 0)) {
+    // THE LOSER'S WRITE IS NOT LOST TO THE PROCESS, only to the instrument. The
+    // pages are writable at this moment -- that is what being unarmed means
+    // here -- so re-asserting that and resuming lets the store complete, the
+    // count says how many times that happened rather than leaving the gap
+    // silent, and rearmWanted asks the frame path to close the pages again in
+    // case this thread's catch was the one that was meant to. A VirtualProtect
+    // that refuses falls through to the old behaviour, so a genuinely
+    // unwritable page cannot spin here forever.
+    if (InterlockedCompareExchange(&g_watch.armed, 0, 1) != 1) {
         DWORD previous = 0;
         if (!VirtualProtect(g_watch.pageBase, g_watch.pageSize,
                             g_watch.writableProtect, &previous)) {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        ++g_watch.concurrent;
+        InterlockedIncrement(&g_watch.concurrent);
+        InterlockedExchange(&g_watch.rearmWanted, 1);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
     // Let the write through, then owe ourselves one instruction: set the trap
-    // flag and the page comes back the moment the store has retired.
-    InterlockedExchange(&g_watch.armed, 0);
+    // flag and the pages come back the moment the store has retired.
     DWORD ignored = 0;
     VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.writableProtect,
                    &ignored);
     if (ep->ContextRecord) {
         ep->ContextRecord->EFlags |= kTrapFlag;
-        g_watch.stepThread = static_cast<LONG>(GetCurrentThreadId());
+        InterlockedExchange(&g_watch.stepThread,
+                            static_cast<LONG>(GetCurrentThreadId()));
         InterlockedExchange(&g_watch.stepPending, 1);
     } else {
         // No context to step with. Fall back to the frame path, which is a
@@ -613,33 +824,69 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
         InterlockedExchange(&g_watch.rearmWanted, 1);
     }
 
-    ++g_watch.catches;
-    if (!g_watch.lo || at < g_watch.lo) g_watch.lo = at;
-    if (at > g_watch.hi) g_watch.hi = at;
+    const uint32_t catches =
+        static_cast<uint32_t>(InterlockedIncrement(&g_watch.catches));
+    for (;;) {
+        const LONG64 seen = InterlockedCompareExchange64(&g_watch.lo, 0, 0);
+        if (seen && seen <= static_cast<LONG64>(at)) break;
+        if (InterlockedCompareExchange64(&g_watch.lo, static_cast<LONG64>(at),
+                                         seen) == seen) {
+            break;
+        }
+    }
+    for (;;) {
+        const LONG64 seen = InterlockedCompareExchange64(&g_watch.hi, 0, 0);
+        if (seen >= static_cast<LONG64>(at)) break;
+        if (InterlockedCompareExchange64(&g_watch.hi, static_cast<LONG64>(at),
+                                         seen) == seen) {
+            break;
+        }
+    }
+    // The site table, with the index CLAIMED before it is written. `sites[n++]`
+    // from two threads writes one entry twice and, at the boundary, writes
+    // sites[8] of an array of eight -- which is the next member of this struct.
+    const LONG siteCount = InterlockedCompareExchange(&g_watch.siteCount, 0, 0);
     bool knownSite = false;
-    for (uint32_t i = 0; i < g_watch.siteCount; ++i) {
+    for (LONG i = 0; i < siteCount && i < 8; ++i) {
         if (g_watch.sites[i] == er->ExceptionAddress) { knownSite = true; break; }
     }
-    if (!knownSite && g_watch.siteCount < 8) {
-        g_watch.sites[g_watch.siteCount++] = er->ExceptionAddress;
+    if (!knownSite) {
+        for (;;) {
+            const LONG n = InterlockedCompareExchange(&g_watch.siteCount, 0, 0);
+            if (n >= 8) break;
+            if (InterlockedCompareExchange(&g_watch.siteCount, n + 1, n) == n) {
+                g_watch.sites[n] = er->ExceptionAddress;
+                break;
+            }
+        }
     }
 
     const bool inTable = at >= g_watch.tableLo && at < g_watch.tableHi;
     if (inTable) {
-        ++g_watch.inTable;
+        InterlockedIncrement(&g_watch.inTable);
         const size_t which = (at - g_watch.tableLo) / sizeof(void*);
-        if (which < 512) g_watch.slotsWritten[which >> 6] |= 1ull << (which & 63);
+        if (which < 512) {
+            InterlockedOr64(&g_watch.slotsWritten[which >> 6],
+                            static_cast<LONG64>(1ull << (which & 63)));
+        }
 
         // THE FIRST READ, and everything the frame path will need about this
         // write except what it is about to become. Owed to the single-step
         // handler, which reads the cell again and decides whether anything
-        // actually changed. A pending event still outstanding here -- the
-        // previous fault's step never arrived -- is counted and replaced: the
-        // pair is per-thread by construction (stepThread gates the completion),
-        // and an event with no second half is not one to report.
+        // actually changed.
+        //
+        // ONE OWNER, so these seven fields cannot be a chimera -- one thread's
+        // slot carrying another thread's value and a third's stack. The catch
+        // above is claimed with a single atomic exchange, so no second thread
+        // reaches here until this one's step has completed; before that claim
+        // was atomic, two threads could be in this block at once and the fields
+        // are one global set. A pending event still outstanding here -- the
+        // previous fault's step never arrived, or the frame path re-armed the
+        // pages under a store that had not run yet -- is counted and replaced:
+        // an event with no second half is not one to report.
         if (g_watch.timeline) {
             if (InterlockedCompareExchange(&g_watch.pendingLive, 0, 0)) {
-                ++g_flip.unfinished;
+                InterlockedIncrement(&g_flip.unfinished);
             }
             const uintptr_t cell = g_watch.tableLo + which * sizeof(void*);
             g_watch.pendingCell = cell;
@@ -663,8 +910,9 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     // takes and is not survivable at the rate a page holding a live dispatch
     // table is written. With the timeline on, the frame path does all the
     // talking.
-    if (inTable && !g_watch.timeline && g_watch.reported < kMaxWatchReports) {
-        ++g_watch.reported;
+    if (inTable && !g_watch.timeline &&
+        static_cast<uint32_t>(InterlockedIncrement(&g_watch.reported)) <=
+            kMaxWatchReports) {
         char modBuf[MAX_PATH];
         Log::get().note(
             "VTableHook %s: CAUGHT A WRITE TO THE VTABLE ITSELF. %p was written "
@@ -681,36 +929,43 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
 
     // THE TIMELINE HAS ITS OWN BUDGET, AND ITS OWN REASONS.
     //
-    // Neither cap above applies to it. kMaxWatchCatches bounds an armed probe's
-    // cost on a busy page, and with the timeline on that page is the runtime's
-    // live dispatch table being re-laid hundreds of times a frame with the same
-    // values -- 2000 of those is four frames, and the instrument would stop
-    // before the event it exists for. kMaxWatchReports stops the writer probe
-    // once it has named enough writers, which is not this instrument's job at
-    // all. What is charged instead is the thing the reader is reading: writes
-    // that CHANGED something.
+    // kMaxWatchReports stops the writer probe once it has named enough writers,
+    // which is not this instrument's job at all. kMaxWatchCatches (2000) is four
+    // frames on a page the runtime re-lays hundreds of times a frame, so the
+    // timeline would stop before the event it exists for. What bounds this one
+    // is a catch budget three orders of magnitude larger, and the cost ceiling
+    // the frame path applies -- and BOTH of them stop it loudly, which the
+    // bypass that used to live here did not: with the caps skipped and the
+    // change budget hit, the timeline simply left the pages open and said so in
+    // a summary printed from inside the handler.
+    //
+    // The change budget is now soft: it ends the narration, not the instrument.
+    // Only the FIRST crossing is stamped, and racily -- two threads can both see
+    // the crossing and write the same pair of fields, which costs a frame number
+    // that may be one frame out and is not worth a lock in here.
     if (g_watch.timeline) {
-        if (static_cast<uint32_t>(
-                InterlockedCompareExchange(&g_flip.count, 0, 0)) >=
-            kMaxFlipEvents) {
-            InterlockedExchange(&g_watch.rearmWanted, 0);
-            reportWatchSummary();
+        const uint32_t changes =
+            static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.count, 0, 0));
+        if (changes >= kMaxFlipEvents && !g_flip.softCapFrame) {
+            g_flip.softCapFrame = static_cast<uint64_t>(
+                InterlockedCompareExchange64(&g_flip.frameNo, 0, 0));
+            g_flip.softCapSeconds =
+                flipSecondsSinceArm(static_cast<uint64_t>(qpcNow()));
         }
+        if (catches >= kMaxTimelineCatches) requestWatchStop(kStopCatchBudget);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
-    if (g_watch.catches >= kMaxWatchCatches ||
-        g_watch.inTable >= kMaxWatchReports) {
-        // NOT `finished = true` here. reportWatchSummary sets it itself, and
-        // its first line is a guard against printing twice -- so setting it
-        // first made the guard fire on the only call there was, and the summary
-        // never printed at all. Reported from the field on the run that most
-        // needed it: thirty-two catches, then silence where the line that
-        // explains them should have been. The flag also stops the single step
-        // re-arming, and the summary sets it before it returns, so the ordering
-        // is unchanged.
-        InterlockedExchange(&g_watch.rearmWanted, 0);
-        reportWatchSummary();
+    if (catches >= kMaxWatchCatches ||
+        static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.inTable, 0, 0)) >=
+            kMaxWatchReports) {
+        // NOT reportWatchSummary() from in here, and not `finished = true`
+        // either. The summary takes the log's lock and resolves modules, which
+        // is a loader-lock call on a thread that is mid-store; and setting the
+        // flag first made the guard inside the summary fire on the only call
+        // there was, so thirty-two catches were followed by silence in the field.
+        // The frame path prints it, a few milliseconds later, off the flag.
+        requestWatchStop(kStopWriterProbe);
     }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -732,6 +987,52 @@ const char* flipThreadName(uint32_t tid, char* buf, size_t bufLen) {
     _snprintf_s(buf, bufLen, _TRUNCATE, "OTHER thread %lu",
                 static_cast<unsigned long>(tid));
     return buf;
+}
+
+// The writer's stack, on its own line, innermost first -- AND, IF IT WILL NOT
+// FIT, THE INNERMOST FRAMES ARE THE ONES THAT GO.
+//
+// The line used to be built front to back and stopped when the next name would
+// not fit, so a deep stack lost its OUTERMOST frames: the entries that name who
+// CALLED the writer, which is the only reason the stack is captured at all. The
+// innermost frame is already printed in the FLIP line above as the writer. So
+// the names are measured first and dropped from the near end until the rest
+// fits, with an ellipsis where they were, and what survives is always the part
+// that says who asked.
+void printWriterStack(uint32_t number, const VTableFlip& e) {
+    char names[8][MAX_PATH];
+    size_t lengths[8] = {};
+    const uint8_t count = e.stackCount < 8 ? e.stackCount : 8;
+    for (uint8_t i = 0; i < count; ++i) {
+        char one[MAX_PATH];
+        strncpy_s(names[i], ownerModuleBrief(e.stack[i], one, sizeof(one)),
+                  _TRUNCATE);
+        lengths[i] = strlen(names[i]) + 4;   // " <- "
+    }
+    // Log::note stops at about 1167 bytes and the prefix below takes some of
+    // it; 900 leaves room for the sentence and the ellipsis either way.
+    constexpr size_t kBudget = 900;
+    uint8_t first = 0;
+    for (;;) {
+        size_t total = 0;
+        for (uint8_t i = first; i < count; ++i) total += lengths[i];
+        if (total <= kBudget || first + 1 >= count) break;
+        ++first;
+    }
+    char stack[1000];
+    stack[0] = '\0';
+    if (first) strncat_s(stack, sizeof(stack), "... <- ", _TRUNCATE);
+    for (uint8_t i = first; i < count; ++i) {
+        if (i > first) strncat_s(stack, sizeof(stack), " <- ", _TRUNCATE);
+        strncat_s(stack, sizeof(stack), names[i], _TRUNCATE);
+    }
+    Log::get().note(
+        "VTableHook %s: FLIP #%u called from: %s%s", g_watch.who,
+        static_cast<unsigned>(number),
+        stack[0] ? stack : "nothing with unwind data above the store",
+        first ? "  (the innermost frames were dropped to fit; the outermost, "
+                "which say who asked, are kept)"
+              : "");
 }
 
 // Fold one event into the (slot, old, new, writer) table. Four facts, because
@@ -782,9 +1083,9 @@ void printFlipShapes(const char* why) {
         char one[3 * MAX_PATH];
         _snprintf_s(one, sizeof(one), _TRUNCATE,
                     "  slot %zu: %s -> %s, written by %s, x%u\n", s.slot,
-                    ownerModuleName(s.before, a, sizeof(a)),
-                    ownerModuleName(s.after, b, sizeof(b)),
-                    ownerModuleName(s.writer, c, sizeof(c)), s.count);
+                    ownerModuleBrief(s.before, a, sizeof(a)),
+                    ownerModuleBrief(s.after, b, sizeof(b)),
+                    ownerModuleBrief(s.writer, c, sizeof(c)), s.count);
         if (strlen(line) + strlen(one) >= sizeof(line)) {
             Log::get().note("%s", line);
             line[0] = '\0';
@@ -801,29 +1102,45 @@ void reportFlipSummary(const char* why) {
     g_flip.summarised = true;
     const uint32_t changes =
         static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.count, 0, 0));
+    const uint32_t catches =
+        static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.catches, 0, 0));
     const double perFrame =
-        g_flip.frames ? static_cast<double>(g_watch.catches) /
+        g_flip.frames ? static_cast<double>(catches) /
                             static_cast<double>(g_flip.frames)
                       : 0.0;
+    char softCap[240];
+    softCap[0] = '\0';
+    if (g_flip.softCapFrame || changes >= kMaxFlipEvents) {
+        _snprintf_s(softCap, sizeof(softCap), _TRUNCATE,
+                    " The per-event narration budget of %u changes ran out at "
+                    "frame %llu (%.4f s), so the shapes above cover the whole "
+                    "session while the individual lines stop there.",
+                    static_cast<unsigned>(kMaxFlipEvents),
+                    static_cast<unsigned long long>(g_flip.softCapFrame),
+                    g_flip.softCapSeconds);
+    }
     Log::get().note(
-        "VTableHook %s: flip timeline %s. %u write(s) to the page were caught "
-        "over %llu frame(s), a mean of %.1f per frame -- that is what this probe "
-        "costs, in exceptions. Of the writes INSIDE the table, %u changed a "
-        "value and %u put the same value back; %u event(s) were overwritten "
-        "before the frame path could read them, %u never had their second half, "
-        "and %u faulted on another thread while this one was mid-catch and were "
-        "let through unrecorded.%s",
-        g_watch.who, why, static_cast<unsigned>(g_watch.catches),
+        "VTableHook %s: flip timeline %s. %u write(s) to the watched pages were "
+        "caught over %llu frame(s) -- a mean of %.1f per frame, about %.2f ms of "
+        "exception handling per frame at the measured %.2f us each, and %u in "
+        "the last frame. That is what this probe costs. Of the writes INSIDE the "
+        "table, %u changed a value and %u put the same value back; %u event(s) "
+        "were overwritten before the frame path could read them, %u never had "
+        "their second half, %u faulted on another thread while this one was "
+        "mid-catch and were let through unrecorded, and %u single step(s) "
+        "arrived without matching the pair we owed ourselves (that last one must "
+        "be zero).%s",
+        g_watch.who, why, static_cast<unsigned>(catches),
         static_cast<unsigned long long>(g_flip.frames), perFrame,
+        perFrame * kCatchCostUs / 1000.0, kCatchCostUs,
+        static_cast<unsigned>(g_flip.lastFrameCatches),
         static_cast<unsigned>(changes),
-        static_cast<unsigned>(g_flip.idempotent),
+        static_cast<unsigned>(InterlockedCompareExchange(&g_flip.idempotent, 0, 0)),
         static_cast<unsigned>(g_flip.lost),
-        static_cast<unsigned>(g_flip.unfinished),
-        static_cast<unsigned>(g_watch.concurrent),
-        changes >= kMaxFlipEvents
-            ? " THE CHANGE BUDGET IS SPENT, so the timeline stopped here and "
-              "later changes are not recorded."
-            : "");
+        static_cast<unsigned>(InterlockedCompareExchange(&g_flip.unfinished, 0, 0)),
+        static_cast<unsigned>(InterlockedCompareExchange(&g_watch.concurrent, 0, 0)),
+        static_cast<unsigned>(InterlockedCompareExchange(&g_watch.chimera, 0, 0)),
+        softCap);
     printFlipShapes("summary");
 }
 
@@ -854,15 +1171,53 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
         return false;
     }
 
-    // ONE page, not the region. VirtualQuery reports the whole run of pages
-    // sharing a protection, which on a heap can be megabytes; making all of
-    // that read-only would fault on every unrelated write in it and bring the
-    // game to a halt.
+    // THE WHOLE TABLE, and NOT the whole region. VirtualQuery reports the entire
+    // run of pages sharing a protection, which on a heap can be megabytes;
+    // making all of that read-only would fault on every unrelated write in it
+    // and bring the game to a halt. So the protected range is exactly the
+    // table's own span rounded out to page boundaries -- one page for a small
+    // table, two for a ~300-entry one that straddles, and one VirtualProtect
+    // call either way.
+    //
+    // It was ONE page, anchored on the watched slot. A 302-entry table is 2416
+    // bytes, so wherever the heap puts it there is about a one-in-four chance
+    // that the anchor's page does not reach the far end of the table -- and on
+    // the reporter's rig the far end is slot 137, twenty-four of whose
+    // neighbours are the whole question. A slot outside the protected page
+    // produces no fault, no line and no mention, which reads exactly like a slot
+    // nobody wrote.
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
     const SIZE_T pageSize = si.dwPageSize ? si.dwPageSize : 4096;
-    void* const pageBase = reinterpret_cast<void*>(
-        reinterpret_cast<uintptr_t>(addr) & ~static_cast<uintptr_t>(pageSize - 1));
+    const uintptr_t tableLo = reinterpret_cast<uintptr_t>(vtable);
+    const uintptr_t tableHi = tableLo + slotCount * sizeof(void*);
+    uintptr_t spanLo = tableLo & ~static_cast<uintptr_t>(pageSize - 1);
+    uintptr_t spanHi = (tableHi + pageSize - 1) & ~static_cast<uintptr_t>(pageSize - 1);
+    // A span that reaches into a DIFFERENT allocation, or into pages with a
+    // different protection, is not one region to protect and restore: putting
+    // the anchor page's protection back onto somebody else's page afterwards
+    // would be a change EDVR never announced. Checked at the far end, and the
+    // span shrinks to the anchor page if the two disagree. (`farEnd`, because
+    // `far` is a windows.h macro and this file has been bitten by `near`.)
+    if (spanHi - spanLo > pageSize) {
+        MEMORY_BASIC_INFORMATION farEnd{};
+        const void* lastByte = reinterpret_cast<const void*>(spanHi - 1);
+        if (VirtualQuery(lastByte, &farEnd, sizeof(farEnd)) != sizeof(farEnd) ||
+            farEnd.AllocationBase != mbi.AllocationBase ||
+            farEnd.Protect != mbi.Protect) {
+            Log::get().note(
+                "VTableHook: the vtable at %p spans more than one page and its "
+                "far end is not the same allocation and protection as its near "
+                "end, so only the page holding slot %zu is watched. Slots on the "
+                "other page(s) are NOT seen.",
+                static_cast<void*>(vtable), slot);
+            spanLo = reinterpret_cast<uintptr_t>(addr) &
+                     ~static_cast<uintptr_t>(pageSize - 1);
+            spanHi = spanLo + pageSize;
+        }
+    }
+    void* const  pageBase = reinterpret_cast<void*>(spanLo);
+    const SIZE_T protectBytes = static_cast<SIZE_T>(spanHi - spanLo);
 
     if (!g_watchHandler) {
         // First in the chain: a handler that runs after somebody else's would
@@ -878,17 +1233,22 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
     g_watch.tableLo = reinterpret_cast<uintptr_t>(vtable);
     g_watch.tableHi = g_watch.tableLo + slotCount * sizeof(void*);
     g_watch.pageBase = pageBase;
-    g_watch.pageSize = pageSize;
+    g_watch.pageSize = protectBytes;
     g_watch.writableProtect = mbi.Protect;
     g_watch.readOnlyProtect = readOnly;
-    g_watch.catches = 0;
-    g_watch.inTable = 0;
-    g_watch.reported = 0;
-    g_watch.lo = 0;
-    g_watch.hi = 0;
-    g_watch.concurrent = 0;
-    g_watch.siteCount = 0;
-    for (uint32_t i = 0; i < 8; ++i) g_watch.slotsWritten[i] = 0;
+    InterlockedExchange(&g_watch.catches, 0);
+    InterlockedExchange(&g_watch.inTable, 0);
+    InterlockedExchange(&g_watch.reported, 0);
+    InterlockedExchange64(&g_watch.lo, 0);
+    InterlockedExchange64(&g_watch.hi, 0);
+    InterlockedExchange(&g_watch.concurrent, 0);
+    InterlockedExchange(&g_watch.chimera, 0);
+    InterlockedExchange(&g_watch.siteCount, 0);
+    InterlockedExchange(&g_watch.stopWanted, 0);
+    InterlockedExchange(&g_watch.stopReason, kStopNone);
+    InterlockedExchange(&g_watch.stepPending, 0);
+    g_watch.rearmHeld = 0;
+    for (uint32_t i = 0; i < 8; ++i) InterlockedExchange64(&g_watch.slotsWritten[i], 0);
     g_watch.finished = false;
     g_watch.timeline = timeline;
     InterlockedExchange(&g_watch.pendingLive, 0);
@@ -896,16 +1256,15 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
 
     resetFlipTimeline();
 
-    // WHICH SLOTS THIS PAGE ACTUALLY COVERS, stated rather than assumed.
+    // WHICH SLOTS THE PROTECTED RANGE ACTUALLY COVERS, stated rather than
+    // assumed.
     //
-    // One page is protected, not the whole table: a table of ~300 entries is
-    // 2.4 KB and can straddle a page boundary wherever the heap put it, so a
-    // watch anchored on one slot may not see a write to another. A reader who
-    // assumes the table is covered and finds a slot missing from the report has
-    // been told something false by omission; the range says exactly what was
-    // watched.
+    // With the whole span protected this should now always be the whole table,
+    // and the line is kept for exactly that reason: it is the assertion a reader
+    // can check. If it ever says anything narrower, the far-end refusal above
+    // fired and the report that follows has a hole in it with a known shape.
     const uintptr_t pageLo = reinterpret_cast<uintptr_t>(pageBase);
-    const uintptr_t pageHi = pageLo + pageSize;
+    const uintptr_t pageHi = pageLo + protectBytes;
     const size_t firstCovered =
         pageLo > g_watch.tableLo ? (pageLo - g_watch.tableLo) / sizeof(void*) : 0;
     size_t lastCovered = slotCount ? slotCount - 1 : 0;
@@ -914,28 +1273,31 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
     }
 
     DWORD previous = 0;
-    if (!VirtualProtect(pageBase, pageSize, readOnly, &previous)) {
-        Log::get().note("VTableHook: could not make the page at %p read-only "
-                        "(err %lu), so the write watch is off.",
-                        pageBase, GetLastError());
+    if (!VirtualProtect(pageBase, protectBytes, readOnly, &previous)) {
+        Log::get().note("VTableHook: could not make the %llu bytes at %p "
+                        "read-only (err %lu), so the write watch is off.",
+                        static_cast<unsigned long long>(protectBytes), pageBase,
+                        GetLastError());
         g_watch.slotAddress = nullptr;
+        g_watch.pageBase = nullptr;
+        g_watch.pageSize = 0;
         g_watch.timeline = false;
         return false;
     }
     InterlockedExchange(&g_watch.armed, 1);
     Log::get().note(
         "VTableHook %s: %s ARMED on slot %zu at %p. The table runs %p to %p and "
-        "its page is %p (%llu bytes, %s), which covers slots %zu to %zu -- a "
-        "write to any slot outside that range is NOT seen. The page is "
-        "read-only, every write to it is caught, and the page is taken straight "
-        "back after each one, so a whole sweep of stores is seen and not just "
-        "the first. Diagnostic only: every write anywhere on this page takes two "
-        "exceptions while this is armed.",
+        "the %llu bytes protected for it start at %p (%s) and cover slots %zu to "
+        "%zu -- a write to any slot outside that range is NOT seen. Those pages "
+        "are read-only, every write to them is caught, and they are taken "
+        "straight back after each one, so a whole sweep of stores is seen and "
+        "not just the first. Diagnostic only: every write anywhere in that range "
+        "takes two exceptions while this is armed.",
         g_watch.who, timeline ? "FLIP TIMELINE" : "WRITE WATCH", slot, addr,
         reinterpret_cast<void*>(g_watch.tableLo),
-        reinterpret_cast<void*>(g_watch.tableHi), pageBase,
-        static_cast<unsigned long long>(pageSize), protectName(mbi.Protect),
-        firstCovered, lastCovered);
+        reinterpret_cast<void*>(g_watch.tableHi),
+        static_cast<unsigned long long>(protectBytes), pageBase,
+        protectName(mbi.Protect), firstCovered, lastCovered);
     if (timeline) {
         Log::get().note(
             "VTableHook %s: what the timeline records -- a write that puts the "
@@ -945,13 +1307,16 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
             "frame, the time, the slot, both values, the instruction, the thread "
             "and eight frames of the writer's stack. The first %u get a line "
             "each and the first %u also go to edvr_breadcrumbs.txt, which "
-            "survives the process being killed. In the shared hook mode EDVR's "
-            "own re-patching is a change like any other and appears here under "
-            "EDVR's own module name, which is the honest answer rather than a "
-            "filtered one. Set advanced.vtable_flip_timeline back to 0 "
-            "afterwards.",
+            "survives the process being killed; after %u changes the per-event "
+            "lines stop and the shape table carries on. EDVR'S OWN WRITES ARE "
+            "NOT HERE: every re-patch this DLL makes goes through a function "
+            "that makes the page writable first, so it never faults and the "
+            "watch never sees it -- and while that page is open, a write by "
+            "anybody else lands unseen too. Set advanced.vtable_flip_timeline "
+            "back to 0 afterwards.",
             g_watch.who, static_cast<unsigned>(kFlipFullLines),
-            static_cast<unsigned>(kFlipCrumbs));
+            static_cast<unsigned>(kFlipCrumbs),
+            static_cast<unsigned>(kMaxFlipEvents));
     } else {
         Log::get().note(
             "VTableHook %s: only writes INSIDE the table are reported; the rest "
@@ -964,6 +1329,32 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
 
 void vtableWatchRearm() {
     if (!InterlockedCompareExchange(&g_watch.rearmWanted, 0, 0)) return;
+    if (!g_watch.pageBase || !watchKeepsArming()) {
+        InterlockedExchange(&g_watch.rearmWanted, 0);
+        return;
+    }
+    // NOT WHILE A STORE IS STILL IN FLIGHT BEHIND AN OPEN PAGE.
+    //
+    // A thread that has taken a catch is between its fault and its single step
+    // with the trap flag set and its store not yet retired. Closing the pages
+    // under it faults that store a SECOND time, and the second fault hands the
+    // catch to whichever thread claims it -- overwriting the one global that
+    // says whose step is owed, so the first thread's step then arrives as an
+    // orphan. That is the chimera counter's whole population, and this is the
+    // only path in the file that can produce one now.
+    //
+    // Held, not abandoned: rearmWanted stays set and the next frame tries
+    // again. The escape exists because a step that never arrives (a debugger
+    // swallowing it, a thread killed mid-catch) would otherwise leave the pages
+    // open for the session -- eight frames is a hundred milliseconds past any
+    // single instruction, so it is counted as unfinished and the pages come back.
+    constexpr uint32_t kMaxRearmHolds = 8;
+    if (InterlockedCompareExchange(&g_watch.stepPending, 0, 0)) {
+        if (++g_watch.rearmHeld < kMaxRearmHolds) return;
+        InterlockedExchange(&g_watch.stepPending, 0);
+        InterlockedIncrement(&g_flip.unfinished);
+    }
+    g_watch.rearmHeld = 0;
     InterlockedExchange(&g_watch.rearmWanted, 0);
     DWORD previous = 0;
     if (VirtualProtect(g_watch.pageBase, g_watch.pageSize,
@@ -972,15 +1363,104 @@ void vtableWatchRearm() {
     }
 }
 
+// What a stopped watch says on its way out, in the words of whichever budget
+// stopped it. From the frame path, because the handler that decided may not
+// log; see requestWatchStop.
+static void reportWatchStop() {
+    const LONG reason = InterlockedCompareExchange(&g_watch.stopReason, 0, 0);
+    const uint32_t catches =
+        static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.catches, 0, 0));
+    const double perFrame =
+        g_flip.frames ? static_cast<double>(catches) /
+                            static_cast<double>(g_flip.frames)
+                      : 0.0;
+    if (reason == kStopCatchBudget) {
+        Log::get().note(
+            "VTableHook %s: THE FLIP TIMELINE HAS SWITCHED ITSELF OFF -- it has "
+            "caught %u page writes, which is its whole-session budget of %u. At "
+            "the measured %.2f us a catch that is about %.1f seconds of pure "
+            "exception handling, and a page this busy is one the instrument is "
+            "changing rather than observing. Everything recorded up to here "
+            "stands; nothing after it is seen.",
+            g_watch.who, static_cast<unsigned>(catches),
+            static_cast<unsigned>(kMaxTimelineCatches), kCatchCostUs,
+            static_cast<double>(catches) * kCatchCostUs / 1000000.0);
+    } else if (reason == kStopCostCeiling) {
+        Log::get().note(
+            "VTableHook %s: THE FLIP TIMELINE HAS SWITCHED ITSELF OFF BECAUSE OF "
+            "WHAT IT COSTS. It is catching a mean of %.1f page writes a frame "
+            "(%u in the last frame), which at the measured %.2f us each is about "
+            "%.2f ms of exception handling per frame -- over the %.1f ms ceiling, "
+            "and enough to change the frame times it was installed to observe. "
+            "It ran for the first %.0f seconds whatever the cost, because the "
+            "crash this exists for lands 1.7 s in and an instrument that is not "
+            "there for it answers nothing. Everything recorded up to here stands.",
+            g_watch.who, perFrame,
+            static_cast<unsigned>(g_flip.lastFrameCatches), kCatchCostUs,
+            perFrame * kCatchCostUs / 1000.0, kMaxCatchMsPerFrame,
+            kCostCeilingGraceS);
+    } else {
+        Log::get().note(
+            "VTableHook %s: the write watch has seen enough (%u write(s) caught, "
+            "%u of them inside the table) and is disarming itself. The summary "
+            "follows.",
+            g_watch.who, static_cast<unsigned>(catches),
+            static_cast<unsigned>(InterlockedCompareExchange(&g_watch.inTable, 0, 0)));
+    }
+}
+
 void vtableWatchFrameTick(uint64_t frameNo) {
-    if (!g_watch.timeline) return;
-    // The frame the handler stamps events with, and which thread the render
-    // thread is. Published before the drain, so an event arriving during this
-    // frame is stamped with this frame's number.
+    // THE FRAME NUMBER IS PUBLISHED WHETHER OR NOT ANYTHING IS ARMED, because it
+    // is not the timeline's number: it is the session's, and perf_monitor prints
+    // it beside a long frame so that a flip and a hang can be ordered against
+    // each other. Two counters that both mean "the frame" is how that ordering
+    // gets answered wrongly, which is the whole of finding F10.
     InterlockedExchange64(&g_flip.frameNo, static_cast<LONG64>(frameNo));
     InterlockedExchange(&g_flip.frameThread,
                         static_cast<LONG>(GetCurrentThreadId()));
+    if (!g_watch.slotAddress) return;
+
+    // What this frame cost, and the last frame's number kept for the lines that
+    // print both. catches is atomic and monotonic, so the difference between two
+    // ticks is this frame's and the handler needs no counter of its own.
+    const uint32_t catchesNow =
+        static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.catches, 0, 0));
+    g_flip.lastFrameCatches = catchesNow >= g_flip.catchesAtLastTick
+                                  ? catchesNow - g_flip.catchesAtLastTick
+                                  : 0;
+    g_flip.catchesAtLastTick = catchesNow;
     ++g_flip.frames;
+
+    // A budget spent in the handler, which could not say so. The line, then the
+    // disarm, then out: everything below wants a watch that is still running.
+    if (InterlockedCompareExchange(&g_watch.stopWanted, 0, 0)) {
+        InterlockedExchange(&g_watch.stopWanted, 0);
+        reportWatchStop();
+        vtableWatchStop();
+        return;
+    }
+
+    // THE COST CEILING, and the grace period that keeps it from removing the
+    // instrument from the frame it exists for.
+    //
+    // Nothing here may disarm during the first ten seconds: the crash this was
+    // built for lands 1.7 s after the hooks arm. After that, a probe costing
+    // more than a few milliseconds a frame is changing the session rather than
+    // recording it, and it says so and stops. Measured per-catch cost, measured
+    // catch rate; no guesswork in the number that appears in the line.
+    if (g_watch.timeline && g_flip.frames > 60 &&
+        flipSecondsSinceArm(static_cast<uint64_t>(qpcNow())) > kCostCeilingGraceS) {
+        const double perFrame =
+            static_cast<double>(catchesNow) / static_cast<double>(g_flip.frames);
+        if (perFrame * kCatchCostUs / 1000.0 > kMaxCatchMsPerFrame) {
+            InterlockedExchange(&g_watch.stopReason, kStopCostCeiling);
+            reportWatchStop();
+            vtableWatchStop();
+            return;
+        }
+    }
+
+    if (!g_watch.timeline) return;
 
     const uint32_t total =
         static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.count, 0, 0));
@@ -1020,44 +1500,35 @@ void vtableWatchFrameTick(uint64_t frameNo) {
                 "VTableHook %s: FLIP #%u -- frame %llu, %.4f s after the "
                 "timeline armed, slot %zu went from %s to %s. Written by %s, on "
                 "%s. This is a write that CHANGED the entry; same-value writes "
-                "are counted and not reported.",
+                "are counted and not reported. The watch has caught %u write(s) "
+                "this frame, %.1f a frame on average.",
                 g_watch.who, static_cast<unsigned>(index + 1),
                 static_cast<unsigned long long>(e.frame),
                 flipSecondsSinceArm(e.qpc), e.slot,
-                ownerModuleName(e.before, from, sizeof(from)),
-                ownerModuleName(e.after, to, sizeof(to)),
-                ownerModuleName(e.writer, by, sizeof(by)),
-                flipThreadName(e.thread, tid, sizeof(tid)));
-            // The stack on its own line: eight module+offset frames do not fit
-            // beside the sentence above, and a line that truncates loses the
-            // OUTERMOST frames, which are the ones that say who asked.
-            char stack[1000];
-            stack[0] = '\0';
-            for (uint8_t i = 0; i < e.stackCount; ++i) {
-                char f[MAX_PATH], one[MAX_PATH + 8];
-                _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s", i ? " <- " : "",
-                            ownerModuleName(e.stack[i], f, sizeof(f)));
-                if (strlen(stack) + strlen(one) >= sizeof(stack)) break;
-                strncat_s(stack, sizeof(stack), one, _TRUNCATE);
-            }
-            Log::get().note(
-                "VTableHook %s: FLIP #%u called from: %s",
-                g_watch.who, static_cast<unsigned>(index + 1),
-                stack[0] ? stack : "nothing with unwind data above the store");
+                ownerModuleBrief(e.before, from, sizeof(from)),
+                ownerModuleBrief(e.after, to, sizeof(to)),
+                ownerModuleBrief(e.writer, by, sizeof(by)),
+                flipThreadName(e.thread, tid, sizeof(tid)),
+                static_cast<unsigned>(g_flip.lastFrameCatches),
+                g_flip.frames ? static_cast<double>(catchesNow) /
+                                    static_cast<double>(g_flip.frames)
+                              : 0.0);
+            printWriterStack(index + 1, e);
         }
         if (index < kFlipCrumbs) {
             // The breadcrumb file is unbuffered and outlives a TDR, which is
             // how the sessions this exists for end. Terse on purpose: the line
-            // buffer is 256 bytes.
+            // buffer is 224 bytes, which is why these names are basenames -- at
+            // full paths the writer, printed last, was the field that fell off.
             char from[MAX_PATH], to[MAX_PATH], by[MAX_PATH], crumb[224];
             _snprintf_s(crumb, sizeof(crumb), _TRUNCATE,
-                        "gfx: FLIP f=%llu t=%.4f slot=%zu %s -> %s by %s tid=%lu",
+                        "gfx: FLIP f=%llu t=%.4f slot=%zu by %s tid=%lu %s -> %s",
                         static_cast<unsigned long long>(e.frame),
                         flipSecondsSinceArm(e.qpc), e.slot,
-                        ownerModuleName(e.before, from, sizeof(from)),
-                        ownerModuleName(e.after, to, sizeof(to)),
-                        ownerModuleName(e.writer, by, sizeof(by)),
-                        static_cast<unsigned long>(e.thread));
+                        ownerModuleBrief(e.writer, by, sizeof(by)),
+                        static_cast<unsigned long>(e.thread),
+                        ownerModuleBrief(e.before, from, sizeof(from)),
+                        ownerModuleBrief(e.after, to, sizeof(to)));
             breadcrumb(crumb);
         }
     }
@@ -1089,13 +1560,29 @@ void vtableWatchDumpRecent(const char* why) {
     ++g_flip.dumps;
 
     const uint32_t want = total < 8 ? total : 8;
+    // THE HEADER CARRIES THE FRAME AND THE CLOCK, which is what makes the last
+    // sentence checkable rather than an instruction to guess. Both sides of the
+    // ordering question now print the same frame number, published by the same
+    // tick: the flips below carry theirs, this line carries the frame in
+    // progress, and perf_monitor's long-frame line carries the frame that just
+    // ended. A reader can put them in order off one file.
     Log::get().note(
-        "VTableHook %s: %s -- the last %u of %u value-changing write(s) to the "
-        "context's table follow, newest last. If one of them lands in the same "
-        "frame as this, the change PRECEDED whatever this line is about; if the "
-        "newest is frames old, it did not.",
-        g_watch.who, why ? why : "?", static_cast<unsigned>(want),
-        static_cast<unsigned>(total));
+        "VTableHook %s: %s -- this is frame %llu, %.4f s after the timeline "
+        "armed, and the watch caught %u write(s) in the last frame (%.1f a frame "
+        "on average). The last %u of %u value-changing write(s) to the context's "
+        "table follow, newest last. If one of them lands in the same frame as "
+        "this, the change PRECEDED whatever this line is about; if the newest is "
+        "frames old, it did not.",
+        g_watch.who, why ? why : "?",
+        static_cast<unsigned long long>(
+            InterlockedCompareExchange64(&g_flip.frameNo, 0, 0)),
+        flipSecondsSinceArm(static_cast<uint64_t>(qpcNow())),
+        static_cast<unsigned>(g_flip.lastFrameCatches),
+        g_flip.frames
+            ? static_cast<double>(InterlockedCompareExchange(&g_watch.catches, 0, 0)) /
+                  static_cast<double>(g_flip.frames)
+            : 0.0,
+        static_cast<unsigned>(want), static_cast<unsigned>(total));
     for (uint32_t k = want; k > 0; --k) {
         const uint32_t index = total - k;
         const uint32_t at = index % kFlipRing;
@@ -1108,9 +1595,9 @@ void vtableWatchDumpRecent(const char* why) {
             "by %s on %s",
             g_watch.who, static_cast<unsigned>(index + 1),
             static_cast<unsigned long long>(e.frame), flipSecondsSinceArm(e.qpc),
-            e.slot, ownerModuleName(e.before, from, sizeof(from)),
-            ownerModuleName(e.after, to, sizeof(to)),
-            ownerModuleName(e.writer, by, sizeof(by)),
+            e.slot, ownerModuleBrief(e.before, from, sizeof(from)),
+            ownerModuleBrief(e.after, to, sizeof(to)),
+            ownerModuleBrief(e.writer, by, sizeof(by)),
             flipThreadName(e.thread, tid, sizeof(tid)));
         char crumb[224];
         _snprintf_s(crumb, sizeof(crumb), _TRUNCATE,
@@ -1118,8 +1605,8 @@ void vtableWatchDumpRecent(const char* why) {
                     why ? why : "?", static_cast<unsigned>(index + 1),
                     static_cast<unsigned long long>(e.frame),
                     flipSecondsSinceArm(e.qpc), e.slot,
-                    ownerModuleName(e.before, from, sizeof(from)),
-                    ownerModuleName(e.after, to, sizeof(to)));
+                    ownerModuleBrief(e.before, from, sizeof(from)),
+                    ownerModuleBrief(e.after, to, sizeof(to)));
         breadcrumb(crumb);
     }
 }
@@ -1128,11 +1615,26 @@ uint32_t vtableWatchFlips() {
     return static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.count, 0, 0));
 }
 
-uint32_t vtableWatchIdempotentWrites() { return g_flip.idempotent; }
+uint32_t vtableWatchIdempotentWrites() {
+    return static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.idempotent, 0, 0));
+}
 
 uint32_t vtableWatchFlipShapes() { return g_flip.shapeCount; }
 
 bool vtableWatchFlipSummarised() { return g_flip.summarised; }
+
+uint64_t vtableWatchFrame() {
+    return static_cast<uint64_t>(InterlockedCompareExchange64(&g_flip.frameNo, 0, 0));
+}
+
+double vtableWatchSecondsSinceArm() {
+    if (!g_watch.slotAddress) return 0.0;
+    return flipSecondsSinceArm(static_cast<uint64_t>(qpcNow()));
+}
+
+const char* vtableWatchArmedBy() {
+    return g_watch.slotAddress ? g_watch.who : nullptr;
+}
 
 bool vtableWatchFlipAt(uint32_t index, VTableFlip* out) {
     if (!out) return false;
@@ -1148,7 +1650,17 @@ bool vtableWatchFlipAt(uint32_t index, VTableFlip* out) {
     return true;
 }
 
-uint32_t vtableWatchCatches() { return g_watch.catches; }
+uint32_t vtableWatchCatches() {
+    return static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.catches, 0, 0));
+}
+
+uint32_t vtableWatchInTableWrites() {
+    return static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.inTable, 0, 0));
+}
+
+uint32_t vtableWatchChimeras() {
+    return static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.chimera, 0, 0));
+}
 
 bool vtableWatchSummarised() { return g_watch.finished; }
 
@@ -1158,10 +1670,11 @@ void vtableWatchStop() {
     // span and the slot set are the whole product, and a watch that caught
     // twenty things and then had the game closed on it should not take them
     // with it. No-op when the budget already printed one.
-    if (g_watch.catches) reportWatchSummary();
+    if (InterlockedCompareExchange(&g_watch.catches, 0, 0)) reportWatchSummary();
     InterlockedExchange(&g_watch.armed, 0);
     InterlockedExchange(&g_watch.rearmWanted, 0);
     InterlockedExchange(&g_watch.pendingLive, 0);
+    InterlockedExchange(&g_watch.stopWanted, 0);
     DWORD previous = 0;
     VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.writableProtect,
                    &previous);
@@ -1175,7 +1688,7 @@ void vtableWatchStop() {
     g_watch.slotAddress = nullptr;
     g_watch.pageBase = nullptr;
     g_watch.pageSize = 0;
-    g_watch.catches = 0;
+    InterlockedExchange(&g_watch.catches, 0);
 }
 
 const char* vtableOwnerModuleName(void* p, char* buf, size_t bufLen) {

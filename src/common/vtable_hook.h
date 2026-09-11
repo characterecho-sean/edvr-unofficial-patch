@@ -191,8 +191,20 @@ const char* vtableOwnerModuleName(void* p, char* buf, size_t bufLen);
 // `timeline` turns the watch from a writer-naming probe into the FLIP TIMELINE
 // below, which is a different instrument answering a different question off the
 // same mechanism. See the struct.
+//
+// THE WHOLE TABLE IS COVERED, not the slot's page. `slot` only says where to
+// anchor the log lines; the protected region is [vtable, vtable+slotCount)
+// rounded out to page boundaries, which for a ~300-entry table is one or two
+// pages and one VirtualProtect call. It was one page anchored on the slot,
+// which on a 2.4 KB table left roughly a quarter of the placements reporting
+// nothing at all about the slots that fell off the end -- silently, because
+// "no write was seen" and "that slot was never watched" are the same line.
 bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
                      const char* who, bool timeline = false);
+
+// Who armed the one watch, or null when nothing is armed. For a caller that
+// has just been refused and has to say WHICH setting is holding it.
+const char* vtableWatchArmedBy();
 
 // ONE VALUE-CHANGING WRITE INTO THE TABLE -- WHO, WHEN, AND FROM WHAT TO WHAT.
 //
@@ -237,7 +249,23 @@ struct VTableFlip {
 // stamps events with, records which thread the render thread IS (so an event
 // from anywhere else can be called out as such), then drains the ring and
 // prints what arrived. Free when no watch is armed.
+//
+// THE ONE FRAME NUMBER, and it is published whether or not anything is armed,
+// because two counters that mean "the frame" are how an ordering question gets
+// answered wrongly. device_hook owns the count; this publishes it; the handler
+// stamps flips with it; perf_monitor prints it beside a long frame. Frame N is
+// everything between Present N-1 returning and Present N returning, so the
+// number to pass here is the frame the work about to be done BELONGS to --
+// which, at the top of a post-Present block, is the frame that is only now
+// beginning. See the call site.
 void vtableWatchFrameTick(uint64_t frameNo);
+
+// The frame number last published by vtableWatchFrameTick, and how long the
+// watch has been armed. Zero before the first tick; the seconds are zero when
+// nothing is armed. For any other instrument that has to say WHEN it is
+// speaking in terms a flip can be compared against.
+uint64_t vtableWatchFrame();
+double   vtableWatchSecondsSinceArm();
 
 // Write the last few recorded flips to the log AND the breadcrumb file, with a
 // reason. For the paths that fire when something has just gone wrong -- a long
@@ -279,6 +307,26 @@ void vtableWatchRearm();
 // How many writes the watch has caught. For the unit cell, and for anyone
 // asking whether an armed watch ever fired.
 uint32_t vtableWatchCatches();
+
+// ...of which, how many landed INSIDE the watched table rather than merely
+// sharing its pages. The cell that proves the whole table is covered writes to
+// the first and last slot of a table that straddles a page boundary and
+// requires both to be counted here: a slot on an unprotected page does not
+// fault at all, so this number is the coverage.
+uint32_t vtableWatchInTableWrites();
+
+// Single-step exceptions that arrived while a watch existed and did NOT match
+// the fault/step pair the handler owed itself.
+//
+// It must read zero. The pair is claimed with one atomic exchange, so exactly
+// one thread can own a catch and only that thread's step can complete it --
+// and a step arriving on any other thread means two threads believed they were
+// mid-catch, which is the state that produced a chimera event (one thread's
+// slot with another's value) before the claim was atomic. Such a step is still
+// SWALLOWED rather than passed on: the trap flag was ours, and handing an
+// orphaned single step back to a process that has no handler for it kills the
+// process outright, which is how this was found.
+uint32_t vtableWatchChimeras();
 
 // Has the watch printed its closing summary? For the unit cell, which exists
 // because the field found that summary never printing: the disarm path set the

@@ -229,7 +229,12 @@ struct State {
     uint32_t lastJournalDisembarks = 0;
     uint32_t lastJournalEmbarks = 0;
     uint32_t lastCameraEnters = 0;
-    uint64_t frameCounter = 0;
+    // THE frame number for this session, in the numbering every instrument
+    // prints: frame N is everything between Present N-1 returning and Present N
+    // returning, so this is the frame IN PROGRESS and it starts at 1 -- the
+    // frame the game is drawing before it has presented anything. It advances
+    // at the top of the post-Present block; see hookedPresent.
+    uint64_t frameCounter = 1;
     uint64_t configPollMs = 0;
     // For the crash sentinel's confirm window: the previous Present, and the
     // frame time credited so far. See kSentinelConfirmMs.
@@ -418,7 +423,30 @@ void armFlipTimeline(Config& cfg, void** table, size_t span, const char* who) {
             table ? "the table is shorter than the slot it anchors on" : "no hook took the context");
         return;
     }
-    vtableWatchSlot(table, kFlipTimelineAnchorSlot, span, who, /*timeline=*/true);
+    if (vtableWatchSlot(table, kFlipTimelineAnchorSlot, span, who,
+                        /*timeline=*/true)) {
+        return;
+    }
+    // IT WAS ASKED FOR AND IT DID NOT ARM, so say so in the terms the reader
+    // can act on. There is one watch, and advanced.vtable_writer_probe takes it
+    // first -- it arms inside installVScreenFixes, which runs before this. Both
+    // settings then sit at 1 in the ini, one of them silently doing nothing, and
+    // the session produces the wrong instrument's output.
+    const char* holder = vtableWatchArmedBy();
+    if (holder) {
+        Log::get().note(
+            "advanced.vtable_flip_timeline = 1 could NOT arm: the one write "
+            "watch is already held by \"%s\", which advanced.vtable_writer_probe "
+            "arms. Only one of the two may run. Set advanced.vtable_writer_probe "
+            "= 0 and relaunch if the timeline is the one you want.",
+            holder);
+    } else {
+        Log::get().note(
+            "advanced.vtable_flip_timeline = 1 could NOT arm on the context "
+            "table at %p (the lines above say why). Nothing is watched this "
+            "session.",
+            static_cast<void*>(table));
+    }
 }
 
 // Defined below ensureState; used by the frame-path bindings-change check.
@@ -806,6 +834,32 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // frame's row says what EDVR's boundary work cost in it.
     const int64_t boundaryT0 = qpcNow();
     guardedBudget(g_frameBudget, [&] {
+        // THE FRAME NUMBER, ADVANCED AND PUBLISHED BEFORE ANYTHING USES IT.
+        //
+        // FRAME N IS EVERYTHING BETWEEN PRESENT N-1 RETURNING AND PRESENT N
+        // RETURNING. The Present that got us here has just returned, so the
+        // frame it ended is over and the one this block belongs to is the next:
+        // frameCounter is the frame IN PROGRESS, it starts at 1 (the frame the
+        // game is drawing before it has presented anything), and it advances
+        // here, at the boundary, rather than four hundred lines below.
+        //
+        // Both of those were wrong. The counter advanced at the END of this
+        // block, so every flip recorded during frame N+1 was stamped N -- and
+        // the monitor kept a SECOND counter of its own, so the long-frame line
+        // and the flips it was supposed to be ordered against were numbered in
+        // two different systems. The whole question issue #21 turns on is
+        // whether the table changed before the hang or after it, and neither
+        // number could answer it. One counter, published here, printed by both.
+        ++g_state->frameCounter;
+        // The write watch's per-frame work, here rather than inside
+        // vScreenReclaimTick where the re-arm used to sit behind
+        // `if (!g_state) return;`. In the two context probes vScreen never
+        // installs, so g_state is null, so neither the re-arm nor the flip
+        // timeline's drain ran at all -- in exactly the sessions the
+        // instruments exist for. Both are no-ops when nothing is armed, and the
+        // tick publishes the frame number whether or not anything is.
+        vtableWatchRearm();
+        vtableWatchFrameTick(g_state->frameCounter);
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.
@@ -1151,15 +1205,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         //
         // These passes vouch NOTHING; see vScreenReclaimTick for why that is
         // the whole safety argument rather than a shortcut.
-        //
-        // The write watch's per-frame work comes FIRST and lives here rather
-        // than inside vScreenReclaimTick, where the re-arm used to sit behind
-        // `if (!g_state) return;`. In the two context probes vScreen never
-        // installs, so g_state is null, so neither the re-arm nor the flip
-        // timeline's drain ran at all -- in exactly the sessions the
-        // instruments exist for. Both are no-ops when nothing is armed.
-        vtableWatchRearm();
-        vtableWatchFrameTick(g_state->frameCounter);
         vScreenReclaimTick();
         exposureFixReclaimTick();
 
@@ -1208,7 +1253,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // headset and cannot see a text editor, so the settings that are worth
         // tuning by feel have to take effect without a restart. Was every 90
         // frames, which is once a second on exactly one of the three rates.
-        ++g_state->frameCounter;
+        //
+        // (frameCounter advances at the TOP of this block now, not here; see
+        // the comment there for which frame a number means.)
+        //
         // The menu asks for the poll NOW after each write it made, so the
         // change lands this frame through the same configure path a hand
         // edit takes -- nothing applies a value except the reload.

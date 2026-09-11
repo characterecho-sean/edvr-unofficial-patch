@@ -246,6 +246,50 @@ static DWORD WINAPI watchStoreThread(LPVOID param) {
     return 0;
 }
 
+// A WRITER THAT DOES NOT STOP, for the two multithread cells.
+//
+// `a` and `b` are what it alternates between: two different pointers make every
+// write a FLIP, the same pointer twice makes every write an idempotent restore
+// -- which is what the runtime does hundreds of times a frame on a healthy rig,
+// and the population the timeline has to drop without spending anything on.
+//
+// The store goes through watchStore, out of line and volatile, for the reason
+// everything in this file does: a store nobody reads back is a store MSVC may
+// drop, and a thread that never wrote anything cannot race anything.
+struct StormJob {
+    void**        table;
+    size_t        slot;
+    void*         a;
+    void*         b;
+    volatile LONG* stop;
+    volatile LONG  writes;
+};
+
+static DWORD WINAPI stormThread(LPVOID param) {
+    StormJob* job = static_cast<StormJob*>(param);
+    LONG n = 0;
+    while (!InterlockedCompareExchange(job->stop, 0, 0)) {
+        watchStore(job->table, job->slot, (n & 1) ? job->b : job->a);
+        ++n;
+        // A pause, so four threads hammering one page for 300 ms do not spend
+        // the whole run inside the handler -- the cell is about the RACE, and a
+        // race needs both threads making progress.
+        Sleep(0);
+    }
+    InterlockedExchange(&job->writes, n);
+    return 0;
+}
+
+// Is the watched page read-only right now? The F2 cell's whole assertion: a
+// watch that has gone blind is one whose page is writable with nothing pending,
+// and no counter inside the watch can see that -- only the page can.
+static bool pageIsReadOnly(const void* p) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
+    return (mbi.Protect & 0xFF) == PAGE_READONLY ||
+           (mbi.Protect & 0xFF) == PAGE_EXECUTE_READ;
+}
+
 // A third party's write into the live table, without a VTableHook.
 static void writeSlot(void* object, size_t slot, void* value) {
     void** vt = *reinterpret_cast<void***>(object);
@@ -1062,6 +1106,249 @@ int main() {
                   "a stopped timeline records nothing more",
                   "stopping the timeline did not disarm it");
             VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
+    // THE STORM -- four threads writing the watched page at once, which is the
+    // shape that killed the process.
+    //
+    // The catch used to be claimed in three steps: read `armed` with a no-op
+    // compare-exchange, spend a VirtualProtect syscall, then clear it. Two
+    // threads faulting inside that window both passed, both set the trap flag,
+    // and both wrote the ONE global that says whose single step is owed -- so
+    // the loser's step failed the pair test, fell through to
+    // EXCEPTION_CONTINUE_SEARCH, and nothing in the process handles
+    // STATUS_SINGLE_STEP. Measured: four writer threads, all dead inside 50 ms,
+    // three runs out of three. The instrument was killing the sessions it was
+    // installed to record.
+    //
+    // So: the process must SURVIVE this, the chimera counter must read zero (no
+    // step ever arrived on a thread that did not own the catch), writes must
+    // still be caught, and every recorded event must be a real change -- a
+    // thread restoring the same value must never appear as a flip, however many
+    // other threads are faulting around it.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the four-writer cell", "allocation refused");
+        } else {
+            for (size_t i = 0; i < 8; ++i) fake[i] = reinterpret_cast<void*>(&thunkOne);
+            // Slot 5's writer restores ONE value forever, so the slot must
+            // already hold it: otherwise its very first write is a genuine
+            // change and the "only slot 3 ever flips" assertion below would be
+            // failing on a real event rather than on a mixed one.
+            fake[5] = reinterpret_cast<void*>(&chainerOne);
+            check(vtableWatchSlot(fake, 3, 8, "storm-cell", true),
+                  "the flip timeline arms for the four-writer storm",
+                  "arming refused");
+            vtableWatchFrameTick(200);
+
+            volatile LONG stop = 0;
+            // Two inside the table -- one alternating (every write a flip), one
+            // restoring (every write an idempotent) -- and two writing the rest
+            // of the page, which is the traffic that shares a vtable's page in
+            // the field and must be counted without being reported.
+            StormJob jobs[4] = {
+                {fake, 3, reinterpret_cast<void*>(&thunkOne),
+                 reinterpret_cast<void*>(&toolkitOne), &stop, 0},
+                {fake, 5, reinterpret_cast<void*>(&chainerOne),
+                 reinterpret_cast<void*>(&chainerOne), &stop, 0},
+                {fake, 200, reinterpret_cast<void*>(&thunkOne),
+                 reinterpret_cast<void*>(&toolkitOne), &stop, 0},
+                {fake, 400, reinterpret_cast<void*>(&chainerOne),
+                 reinterpret_cast<void*>(&thunkOneB), &stop, 0},
+            };
+            HANDLE threads[4] = {};
+            bool started = true;
+            for (int i = 0; i < 4; ++i) {
+                threads[i] = CreateThread(nullptr, 0, stormThread, &jobs[i], 0, nullptr);
+                if (!threads[i]) started = false;
+            }
+            if (!started) {
+                fail("CreateThread for the four-writer cell", "a thread refused");
+                InterlockedExchange(&stop, 1);
+            } else {
+                // 300 ms of it, with the frame path doing exactly what the game's
+                // does: re-arm what a catch left open, then drain.
+                const DWORD start = GetTickCount();
+                uint64_t frame = 200;
+                while (GetTickCount() - start < 300) {
+                    vtableWatchRearm();
+                    vtableWatchFrameTick(++frame);
+                    Sleep(1);
+                }
+                InterlockedExchange(&stop, 1);
+            }
+            for (int i = 0; i < 4; ++i) {
+                if (!threads[i]) continue;
+                WaitForSingleObject(threads[i], INFINITE);
+                CloseHandle(threads[i]);
+            }
+            vtableWatchFrameTick(9000);
+
+            check(true,
+                  "four threads wrote the watched page for 300 ms and the "
+                  "process is still alive",
+                  "unreachable -- an orphaned single step kills the process "
+                  "before this line");
+            check(vtableWatchChimeras() == 0,
+                  "...with no single step arriving on a thread that did not own "
+                  "the catch",
+                  "a step was handled by the wrong thread, which means two "
+                  "threads believed they were mid-catch -- the state that "
+                  "produced chimera events and, one instruction later, the "
+                  "orphaned trap that killed the process");
+            check(vtableWatchCatches() > 0,
+                  "...and writes were still being caught",
+                  "the watch saw nothing at all, so the cell proves nothing");
+
+            // Every event must be a real change, and must come from one of the
+            // two in-table slots. The restoring thread's writes are idempotent
+            // by construction; if one of them is ever recorded as a flip, the
+            // before/after pair has been mixed between two threads.
+            bool allReal = true;
+            bool allKnown = true;
+            const uint32_t got = vtableWatchFlips();
+            for (uint32_t i = 0; i < got; ++i) {
+                VTableFlip e{};
+                if (!vtableWatchFlipAt(i, &e)) continue;   // lapped the ring
+                if (e.before == e.after) allReal = false;
+                if (e.slot != 3) allKnown = false;
+            }
+            check(allReal,
+                  "...and every recorded event is a write that really changed "
+                  "the entry",
+                  "an event carries the same value before and after, which is a "
+                  "same-value write reported as a change");
+            check(allKnown,
+                  "...from the slot that was actually alternating, not the one "
+                  "being restored",
+                  "an event names a slot whose writer never changed its value -- "
+                  "the pending fields were mixed between two threads");
+            vtableWatchStop();
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
+    // THE WATCH THAT WENT BLIND, and it went blind SILENTLY, which is worse.
+    //
+    // The single-step handler re-protected the page and THEN set `armed`. A
+    // second thread faulting between those two takes the concurrent branch,
+    // which makes the page writable and returns -- and then the first thread
+    // sets armed to 1 over a writable page with nothing pending. No write ever
+    // faults again; vtableWatchRearm has nothing to put back because rearmWanted
+    // is 0; the log shows a healthy instrument reporting nothing. Measured with
+    // two writers: 282 catches in the first 250 ms and not one after.
+    //
+    // The cell runs two writers for half a second with the frame path re-arming
+    // every simulated frame, and asserts the two things that separate a working
+    // watch from a blind one: the page is READ-ONLY at the end (or one rearm
+    // makes it so), and the catch count kept growing in the second half.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the blind-watch cell", "allocation refused");
+        } else {
+            for (size_t i = 0; i < 8; ++i) fake[i] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(fake, 3, 8, "blind-cell", true),
+                  "the flip timeline arms for the blindness cell",
+                  "arming refused");
+            vtableWatchFrameTick(300);
+
+            volatile LONG stop = 0;
+            StormJob jobs[2] = {
+                {fake, 3, reinterpret_cast<void*>(&thunkOne),
+                 reinterpret_cast<void*>(&toolkitOne), &stop, 0},
+                {fake, 300, reinterpret_cast<void*>(&chainerOne),
+                 reinterpret_cast<void*>(&thunkOneB), &stop, 0},
+            };
+            HANDLE threads[2] = {};
+            threads[0] = CreateThread(nullptr, 0, stormThread, &jobs[0], 0, nullptr);
+            threads[1] = CreateThread(nullptr, 0, stormThread, &jobs[1], 0, nullptr);
+            uint32_t halfway = 0;
+            if (!threads[0] || !threads[1]) {
+                fail("CreateThread for the blind-watch cell", "a thread refused");
+                InterlockedExchange(&stop, 1);
+            } else {
+                const DWORD start = GetTickCount();
+                uint64_t frame = 300;
+                while (GetTickCount() - start < 500) {
+                    if (!halfway && GetTickCount() - start >= 250) {
+                        halfway = vtableWatchCatches();
+                    }
+                    vtableWatchRearm();
+                    vtableWatchFrameTick(++frame);
+                    Sleep(1);
+                }
+                InterlockedExchange(&stop, 1);
+            }
+            for (int i = 0; i < 2; ++i) {
+                if (!threads[i]) continue;
+                WaitForSingleObject(threads[i], INFINITE);
+                CloseHandle(threads[i]);
+            }
+            const uint32_t atEnd = vtableWatchCatches();
+            check(halfway > 0 && atEnd > halfway,
+                  "the watch was still catching writes in the second half of a "
+                  "two-writer run",
+                  "catches stopped partway through: the watch is armed over a "
+                  "writable page and every write from here on is invisible");
+            // The last catch on either thread has completed, so nothing is
+            // mid-step: the page must be closed. One rearm is allowed, because a
+            // VirtualProtect that failed inside the handler deliberately hands
+            // the job to the frame path rather than lying about the page.
+            if (!pageIsReadOnly(fake)) vtableWatchRearm();
+            check(pageIsReadOnly(fake),
+                  "...and the page is read-only again once the writers stop",
+                  "the page is writable with nothing pending, which is what "
+                  "being permanently blind looks like from outside");
+            vtableWatchStop();
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
+    // THE WHOLE TABLE, NOT THE ANCHOR'S PAGE. A ~300-entry vtable is 2.4 KB and
+    // lands wherever the heap puts it, so about a quarter of the time the page
+    // holding the anchor slot does not reach the far end of the table -- and on
+    // the reporting rig the far end is slot 137, whose neighbours are the whole
+    // question. A write to a slot on an unprotected page raises nothing, prints
+    // nothing and is mentioned nowhere, which reads exactly like a slot nobody
+    // wrote.
+    //
+    // So: a table deliberately straddling a page boundary, and the first and
+    // last slots both written. Both must be caught. Anchored on slot 0, which is
+    // on the FIRST page, so the old one-page watch could not see slot 7 at all.
+    {
+        uint8_t* block = static_cast<uint8_t*>(
+            VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!block) {
+            fail("VirtualAlloc for the page-straddle cell", "allocation refused");
+        } else {
+            // Four slots on the first page, four on the second.
+            void** table = reinterpret_cast<void**>(block + 4096 - 4 * sizeof(void*));
+            for (size_t i = 0; i < 8; ++i) table[i] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(table, 0, 8, "straddle-cell"),
+                  "the write watch arms on a table that straddles a page "
+                  "boundary",
+                  "arming refused");
+            watchStore(table, 0, reinterpret_cast<void*>(&toolkitOne));
+            watchStore(table, 7, reinterpret_cast<void*>(&toolkitOne));
+            check(vtableWatchCatches() == 2,
+                  "...and catches writes to BOTH pages of it",
+                  "one of the two writes did not fault, so the slots on that "
+                  "page are not being watched at all -- and a slot nobody "
+                  "watches reads in the report exactly like a slot nobody wrote");
+            check(vtableWatchInTableWrites() == 2,
+                  "...counting both as writes INSIDE the table",
+                  "a write inside the table was booked as page traffic");
+            check(readTableSlot(table, 0) == reinterpret_cast<void*>(&toolkitOne) &&
+                      readTableSlot(table, 7) == reinterpret_cast<void*>(&toolkitOne),
+                  "...and both writes still landed",
+                  "the watch swallowed a write it was only supposed to observe");
+            vtableWatchStop();
+            VirtualFree(block, 0, MEM_RELEASE);
         }
     }
 
