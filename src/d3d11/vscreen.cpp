@@ -3956,11 +3956,12 @@ bool vScreenReclaimHooks() {
 void vScreenReclaimTick() {
     State* s = g_state;
     if (!s) return;
-    // Put the write watch back if a catch let a write through last frame. Free
-    // when nothing is armed, and it has to happen on a frame path rather than
-    // inside the handler -- the faulting instruction needs a writable page to
-    // finish on.
-    vtableWatchRearm();
+    // The write watch's re-arm used to be HERE, below that early return, which
+    // meant it never ran in the two context probes -- the sessions where vScreen
+    // does not install and the watch is the only thing running. It now sits in
+    // device_hook's frame path beside the flip timeline's drain, above this
+    // call, where it runs whether or not any fix installed.
+    //
     // Nothing to patrol in either private mode: the object dispatches through a
     // table only EDVR can write, so there is no slot for anyone to take.
     // reclaim's private branch does real work -- a breach scan and a 300-entry
@@ -5110,7 +5111,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                 "context is hooked by a private vtable, where THIS hook's table "
                 "is the exposure hook's private buffer rather than the one the "
                 "runtime writes. Set context_hook_mode = shared to use the "
-                "probe.",
+                "probe, or advanced.vtable_flip_timeline = 1, which arms on the "
+                "runtime's own table in every mode.",
                 probeSlot);
         }
     }

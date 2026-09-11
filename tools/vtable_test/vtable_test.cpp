@@ -215,6 +215,37 @@ static void* readTableSlot(void** table, size_t slot) {
     return *reinterpret_cast<void* volatile*>(&table[slot]);
 }
 
+// ONE STORE INSTRUCTION, at one address, for the flip timeline's cells.
+//
+// The timeline aggregates by (slot, old, new, WRITER), and the writer is the
+// faulting instruction's address. A store written inline in a loop is one
+// address or six depending on whether the optimiser unrolled it, so a cell
+// asserting how the table collapses would be asserting something about the
+// optimiser. Out of line, it is one address, always -- and that is also what
+// the instrument sees in the field, where the writer is one routine in
+// system32\d3d11.dll called over and over.
+//
+// volatile for the reason everything else in this file is: a store nobody reads
+// back is a store MSVC may drop, and a cell whose write never happened passes
+// the way an empty test passes.
+__declspec(noinline) static void watchStore(void** table, size_t slot,
+                                            void* value) {
+    *reinterpret_cast<void* volatile*>(&table[slot]) = value;
+}
+
+// The same store, from a thread that is not the one draining the timeline.
+struct WatchStoreJob {
+    void** table;
+    size_t slot;
+    void*  value;
+};
+
+static DWORD WINAPI watchStoreThread(LPVOID param) {
+    const WatchStoreJob* job = static_cast<const WatchStoreJob*>(param);
+    watchStore(job->table, job->slot, job->value);
+    return 0;
+}
+
 // A third party's write into the live table, without a VTableHook.
 static void writeSlot(void* object, size_t slot, void* value) {
     void** vt = *reinterpret_cast<void***>(object);
@@ -889,6 +920,147 @@ int main() {
             check(vtableWatchCatches() == 0,
                   "a stopped watch is silent and the page is writable again",
                   "stopping the watch did not disarm it");
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
+    // THE FLIP TIMELINE -- the same mechanism asked a different question: not
+    // "who writes this table" but "when did a write CHANGE something, and what
+    // did it change from".
+    //
+    // The distinction is the whole instrument. On the maintainer's rig the
+    // runtime re-lays the context's table hundreds of times a frame with the
+    // values it already held, which is why a frozen copy has never hurt him; on
+    // the rig that hangs, twenty-four work-emitting slots were holding a SECOND
+    // variant at the frame the GPU died, and nobody can say whether that
+    // preceded the hang or followed it. A probe that reports every write cannot
+    // separate those two populations. One that reports only the changes, with a
+    // frame number and a microsecond on each, can.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the flip-timeline cell", "allocation refused");
+        } else {
+            fake[3] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(fake, 3, 8, "timeline-cell", true),
+                  "the flip timeline arms on a writable page",
+                  "arming refused with the timeline asked for");
+            // The render thread's identity and the frame the next events belong
+            // to, exactly as the frame path publishes them.
+            vtableWatchFrameTick(100);
+
+            // A RESTORE IS NOT A FLIP. Twice, because once could be a counter
+            // that has simply not been incremented yet.
+            watchStore(fake, 3, reinterpret_cast<void*>(&thunkOne));
+            watchStore(fake, 3, reinterpret_cast<void*>(&thunkOne));
+            vtableWatchFrameTick(101);
+            check(vtableWatchFlips() == 0,
+                  "a write that puts the same value back is not a flip",
+                  "the timeline recorded a change where nothing changed -- on a "
+                  "rig with hundreds of those a frame it would record nothing "
+                  "else");
+            check(vtableWatchIdempotentWrites() == 2,
+                  "...but it is counted, so the negative can be stated",
+                  "same-value writes vanish without trace, and 'no flips' would "
+                  "be indistinguishable from 'the probe never fired'");
+            check(vtableWatchCatches() == 2,
+                  "...and both were caught, so the watch really did see them",
+                  "the writes went through unseen");
+
+            // A CHANGE IS. One event, with both values, the slot, the frame it
+            // happened in and the thread it happened on.
+            watchStore(fake, 3, reinterpret_cast<void*>(&toolkitOne));
+            vtableWatchFrameTick(102);
+            check(vtableWatchFlips() == 1,
+                  "a write that changes the value IS a flip",
+                  "the change was not recorded");
+            VTableFlip e{};
+            check(vtableWatchFlipAt(0, &e),
+                  "...and the recorded event can be read back",
+                  "the ring did not publish the event");
+            check(e.slot == 3 &&
+                      e.before == reinterpret_cast<void*>(&thunkOne) &&
+                      e.after == reinterpret_cast<void*>(&toolkitOne),
+                  "...carrying the slot and BOTH values",
+                  "old or new is wrong -- a changed entry only means something "
+                  "next to the one it changed from");
+            check(e.frame == 101,
+                  "...stamped with the frame that was in progress",
+                  "the frame number is not the one published before the write, "
+                  "so the timeline cannot be lined up against a hang");
+            check(e.thread == GetCurrentThreadId(),
+                  "...and the thread that wrote it",
+                  "the writing thread was not recorded");
+            check(e.stackCount > 0 && e.stack[0] != nullptr,
+                  "...with the writer's call stack unwound from the fault",
+                  "no stack was captured, so the report names the store and not "
+                  "who asked for it");
+            check(vtableWatchFlipShapes() == 1,
+                  "...and one distinct shape so far",
+                  "the aggregate did not see the event");
+
+            // FROM ANOTHER THREAD, which is the difference between the runtime
+            // doing this inside the game's own submission and something doing
+            // it from the side.
+            WatchStoreJob job{fake, 3, reinterpret_cast<void*>(&chainerOne)};
+            HANDLE t = CreateThread(nullptr, 0, watchStoreThread, &job, 0, nullptr);
+            if (!t) {
+                fail("CreateThread for the other-thread flip",
+                     "the thread could not be started");
+            } else {
+                WaitForSingleObject(t, INFINITE);
+                CloseHandle(t);
+                vtableWatchFrameTick(103);
+                check(vtableWatchFlips() == 2,
+                      "a flip from another thread is recorded too",
+                      "the watch only sees the thread that armed it");
+                VTableFlip other{};
+                check(vtableWatchFlipAt(1, &other) &&
+                          other.thread != GetCurrentThreadId() &&
+                          other.after == reinterpret_cast<void*>(&chainerOne),
+                      "...and carries THAT thread's id, not the reader's",
+                      "the thread id is the draining thread's, so every event "
+                      "would read as the render thread's own");
+            }
+
+            // THE AGGREGATE. Six more changes through one store instruction,
+            // alternating between two values: that is two shapes however many
+            // times it happens, which is what keeps a runtime re-selecting
+            // every frame from filling a log with the fact.
+            const uint32_t shapesBefore = vtableWatchFlipShapes();
+            const uint32_t flipsBefore = vtableWatchFlips();
+            for (int i = 0; i < 3; ++i) {
+                watchStore(fake, 3, reinterpret_cast<void*>(&toolkitOne));
+                watchStore(fake, 3, reinterpret_cast<void*>(&thunkOne));
+            }
+            vtableWatchFrameTick(104);
+            check(vtableWatchFlips() == flipsBefore + 6,
+                  "six changing writes are six flips",
+                  "the ring lost events between two frame ticks");
+            check(vtableWatchFlipShapes() <= shapesBefore + 2,
+                  "...collapsing into at most two (slot, from, to, writer) "
+                  "shapes rather than six rows",
+                  "the aggregate grows per event, so a runtime that re-selects "
+                  "every frame overflows the table in a second");
+
+            // And the closing report, which must actually print. The write
+            // watch's own summary was found in the field never printing at all,
+            // because the disarm path set the flag that guards it against
+            // printing twice; this is the same assertion for the same reason.
+            check(!vtableWatchFlipSummarised(),
+                  "the timeline has not summarised while it is still running",
+                  "the summary fired early");
+            vtableWatchStop();
+            check(vtableWatchFlipSummarised(),
+                  "...and stopping it prints the cost and the shape table",
+                  "the disarm path produced no timeline summary, so a session "
+                  "ends with the events and never the tally");
+
+            watchStore(fake, 3, reinterpret_cast<void*>(&toolkitOne));
+            check(vtableWatchFlips() == flipsBefore + 6,
+                  "a stopped timeline records nothing more",
+                  "stopping the timeline did not disarm it");
             VirtualFree(fake, 0, MEM_RELEASE);
         }
     }

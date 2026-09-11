@@ -214,6 +214,23 @@ the VR half.
 Please report which of the three you needed, with the log from each -- that is
 the measurement that turns a workaround into a fix.
 
+If you are willing to run one more session for the diagnosis rather than for
+your own comfort, add
+
+```ini
+[advanced]
+vtable_flip_timeline = 1
+```
+
+to whichever of the three you ended up on. It logs every change to the game's
+Direct3D function table -- what changed, from what to what, at which frame, and
+which instruction did it -- and writes the first few to
+`edvr_breadcrumbs.txt`, which survives a crash that eats the log. That file is
+what says whether the table changed *before* the crash or *after* it, which is
+the one thing the reports so far cannot settle. It makes every write to one
+memory page take an exception, so leave it on for one session and then set it
+back to 0.
+
 ### Uninstall
 
 Run `edvr-installer.exe` and press **Uninstall**. It removes EDVR's files,

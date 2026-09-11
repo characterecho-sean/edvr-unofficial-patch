@@ -391,6 +391,36 @@ constexpr uint32_t kMissedDumpNotes = 3;
 
 State* g_state = nullptr;
 
+// Which slot the flip timeline anchors its page on.
+//
+// DrawIndexed, because it is the entry the field evidence names: on the rig
+// that hangs, slot 12 was measured switching from TID3D11DeviceContext_
+// DrawIndexed_<1> to ..._DrawIndexed_Amortized<1> at the frame the GPU died,
+// along with 23 of its neighbours. One PAGE is protected, not the whole table
+// -- read-protecting a heap region can be megabytes and would fault on every
+// unrelated write in it -- so the anchor decides which slots are covered, and
+// the armed line prints that range rather than leaving it to be assumed.
+constexpr size_t kFlipTimelineAnchorSlot = 12;
+
+// Arm the flip timeline on the table the RUNTIME writes, if it was asked for.
+//
+// `table` must be the bottom hook's -- the context's own embedded table. Both
+// call sites hand it one: the exposure hook's (it installs first, so its table
+// is the runtime's in every mode) and, in the probe modes where no installer
+// runs at all, the bare probe hook's.
+void armFlipTimeline(Config& cfg, void** table, size_t span, const char* who) {
+    if (!cfg.getBool("advanced.vtable_flip_timeline", false)) return;
+    if (!table || span <= kFlipTimelineAnchorSlot) {
+        Log::get().note(
+            "advanced.vtable_flip_timeline = 1, but there is no context table to "
+            "watch (%s). Nothing is armed. This needs the render context hooked, "
+            "so it cannot work with advanced.d3d11_fixes = 0.",
+            table ? "the table is shorter than the slot it anchors on" : "no hook took the context");
+        return;
+    }
+    vtableWatchSlot(table, kFlipTimelineAnchorSlot, span, who, /*timeline=*/true);
+}
+
 // Defined below ensureState; used by the frame-path bindings-change check.
 void readoptGameBindings();
 
@@ -1121,6 +1151,15 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         //
         // These passes vouch NOTHING; see vScreenReclaimTick for why that is
         // the whole safety argument rather than a shortcut.
+        //
+        // The write watch's per-frame work comes FIRST and lives here rather
+        // than inside vScreenReclaimTick, where the re-arm used to sit behind
+        // `if (!g_state) return;`. In the two context probes vScreen never
+        // installs, so g_state is null, so neither the re-arm nor the flip
+        // timeline's drain ran at all -- in exactly the sessions the
+        // instruments exist for. Both are no-ops when nothing is armed.
+        vtableWatchRearm();
+        vtableWatchFrameTick(g_state->frameCounter);
         vScreenReclaimTick();
         exposureFixReclaimTick();
 
@@ -2114,6 +2153,15 @@ void hookDevice(ID3D11Device* device) {
                           "skipped anyway, so this session tests nothing -- set "
                           "advanced.context_hook_probe back to off.");
             }
+            if (swapped) {
+                // No installer ran, so the bare probe hook is the only thing
+                // holding the context's own table -- and in a probe session it
+                // is the table the runtime writes, which is what the timeline
+                // has to watch.
+                armFlipTimeline(sentinelCfg, s.bareContextHook.originalVTable(),
+                                s.bareContextHook.executablePrefix(),
+                                "probe context");
+            }
         } else {
             if (!probe.empty() && _stricmp(probe.c_str(), "off") != 0) {
                 Log::get().note(
@@ -2128,6 +2176,19 @@ void hookDevice(ID3D11Device* device) {
             // order.
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
+
+            // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
+            // own commit writes two dozen entries of this table in the shared
+            // mode; arming before that would spend the timeline's first two
+            // dozen lines on EDVR patching itself in, which is the one set of
+            // changes nobody needs a timeline to know about.
+            //
+            // The exposure hook's table and not vScreen's: it installs first,
+            // so its is the runtime's own in every mode. See
+            // exposureFixContextTable.
+            size_t span = 0;
+            void** table = exposureFixContextTable(&span);
+            armFlipTimeline(sentinelCfg, table, span, "context");
         }
     }
 
@@ -2292,15 +2353,29 @@ void shutdownDeviceHooks() {
         g_state->multithread->Release();
         g_state->multithread = nullptr;
     }
+    // The write watch, before anything that could free the page it is holding
+    // read-only.
+    //
+    // shutdownVScreenFixes does this too, and until the flip timeline that was
+    // enough, because the only thing that armed a watch was vScreen's own
+    // install. The timeline arms in the two context probes as well, where
+    // vScreen never installs and its shutdown returns immediately -- so without
+    // this, a probe session's page would be left read-only after EDVR had gone,
+    // which is not a thing to do to a process. Idempotent: the second call sees
+    // no armed watch and returns.
+    vtableWatchStop();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
     shutdownGlitchFrameFix();
     shutdownVScreenFixes();
     shutdownExposureFix();
-    // The swap-only probe's bare copy, if that was what ran instead of the two
-    // installers above. Restoring the vptr frees nothing anyone dispatches
-    // through: the copy held no thunks, so nothing chained into it.
+    // The swap-only or live-only probe's bare table, if that was what ran
+    // instead of the two installers above. Restoring the vptr frees nothing
+    // anyone dispatches through: the table held no thunks, so nothing chained
+    // into it. (The live mode's stub page is leaked rather than freed, by
+    // VTableHook, for a reason that has nothing to do with chaining -- a thread
+    // can still be inside a stub. See m_stubs.)
     if (g_state) g_state->bareContextHook.uninstall();
     if (!g_state) return;
     deviceHookNoteCleanExit();

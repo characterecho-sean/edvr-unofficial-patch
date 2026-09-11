@@ -17,6 +17,7 @@
 #include "../common/log.h"
 #include "../common/perf_math.h"
 #include "../common/timing.h"
+#include "../common/vtable_hook.h"  // vtableWatchDumpRecent, the flip timeline
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 
@@ -445,6 +446,14 @@ void dropLine(const Frame& f, float budgetMs) {
         static_cast<double>(f.cpuBoundaryMs), static_cast<double>(f.cpuDoorMs),
         static_cast<double>(f.cpuDrawsMs), static_cast<double>(f.doorGpuMs), ev,
         static_cast<unsigned>(kDropLogEveryMs / 1000), kDropLogMax);
+    // A frame that took far too long is the shape a GPU hang makes on its way
+    // out, and issue #21's whole question is whether the context's dispatch
+    // table changed BEFORE that or after. So a long frame drops the last few
+    // recorded changes into the log and the breadcrumb file, beside this line,
+    // where the ordering can simply be read. No-op unless
+    // advanced.vtable_flip_timeline armed the timeline.
+    vtableWatchDumpRecent(f.dropped ? "monitor: DROPPED FRAME"
+                                    : "monitor: LONG FRAME");
 }
 
 void noteDrop(const Frame& f, float budgetMs) {

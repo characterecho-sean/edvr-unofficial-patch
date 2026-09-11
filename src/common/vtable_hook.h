@@ -187,8 +187,87 @@ const char* vtableOwnerModuleName(void* p, char* buf, size_t bufLen);
 // if the page cannot be made read-only, if it is read-only already (in which
 // case the writer is un-protecting it and this cannot see that), or if a watch
 // is already armed -- one at a time, because one answer is what is wanted.
+//
+// `timeline` turns the watch from a writer-naming probe into the FLIP TIMELINE
+// below, which is a different instrument answering a different question off the
+// same mechanism. See the struct.
 bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
-                     const char* who);
+                     const char* who, bool timeline = false);
+
+// ONE VALUE-CHANGING WRITE INTO THE TABLE -- WHO, WHEN, AND FROM WHAT TO WHAT.
+//
+// THE QUESTION IT EXISTS FOR. On two rigs the private-copy mode dies 1.7 s
+// after install with the GPU hung, and the once-a-second walk saw 24
+// work-emitting slots holding a second variant AT THE FRAME THAT HUNG (slot 12
+// DrawIndexed on ..._DrawIndexed_Amortized<1>). Nobody can say whether that
+// switch happened BEFORE the hang -- a live method dispatched against state
+// prepared for its sibling, which is a cause -- or AFTER it, the runtime
+// reacting to a device that was already gone, which is a consequence. A
+// once-a-second sample cannot tell those apart, and they are opposite
+// conclusions.
+//
+// So the watch already in this file is extended rather than duplicated: the
+// page is read-only, every write faults, and the handler now reads the slot
+// before the store and again after the single step. A write that puts back the
+// SAME value is counted and dropped -- on the maintainer's rig there are
+// hundreds of those per frame, and they are the reason a frozen copy has never
+// hurt him. A write that CHANGES the value is recorded with a timestamp, the
+// frame number, the slot, both values, the faulting instruction, the thread and
+// eight frames of the writer's stack.
+//
+// Nothing is resolved, logged or locked inside the handler. Module names cost a
+// VirtualQuery each and the events are drained on the frame path, which is the
+// only thread that may spend a syscall. The first few also go to the breadcrumb
+// file, which is unbuffered and survives the process being killed by a TDR --
+// which is how these sessions end, and the reason a log-only instrument would
+// answer nothing on the one rig it was built for.
+struct VTableFlip {
+    uint64_t qpc = 0;            // QueryPerformanceCounter at the fault
+    uint64_t frame = 0;          // the render frame in progress
+    size_t   slot = 0;
+    void*    before = nullptr;
+    void*    after = nullptr;
+    void*    writer = nullptr;   // the faulting instruction
+    uint32_t thread = 0;
+    uint8_t  stackCount = 0;
+    void*    stack[8] = {};
+};
+
+// Once per frame, on the render thread. Publishes the frame number the handler
+// stamps events with, records which thread the render thread IS (so an event
+// from anywhere else can be called out as such), then drains the ring and
+// prints what arrived. Free when no watch is armed.
+void vtableWatchFrameTick(uint64_t frameNo);
+
+// Write the last few recorded flips to the log AND the breadcrumb file, with a
+// reason. For the paths that fire when something has just gone wrong -- a long
+// or dropped frame, the copy-mode census reporting the table has moved -- so
+// that a rig which dies leaves behind the answer to "did the flip precede the
+// hang, and who did it". Safe to call when nothing is armed; bounded per
+// session so it cannot fill the breadcrumb file.
+void vtableWatchDumpRecent(const char* why);
+
+// Value-changing writes recorded, and in-table writes that put the same value
+// back. For the unit cells, and for anyone asking whether an armed timeline
+// ever saw anything.
+uint32_t vtableWatchFlips();
+uint32_t vtableWatchIdempotentWrites();
+
+// Distinct (slot, old, new, writer) tuples seen. The aggregate the timeline
+// collapses to once the per-event lines stop: a runtime alternating one slot
+// between two entries is two rows with big counts, not ten thousand lines.
+uint32_t vtableWatchFlipShapes();
+
+// Read back one recorded flip by index, oldest first, for the unit cells.
+// False when the index is past what has been recorded or has been overwritten.
+bool vtableWatchFlipAt(uint32_t index, VTableFlip* out);
+
+// Has the timeline printed its closing report -- the cost per frame and the
+// table of who wrote what? The twin of vtableWatchSummarised, and it exists for
+// the same reason: the field found the WRITE watch's summary never printing at
+// all, because the flag guarding it against printing twice had been set by the
+// disarm path first. A summary nothing asserts is a summary that can vanish.
+bool vtableWatchFlipSummarised();
 
 // Put the watch back after a catch let a write through. Cheap and safe to call
 // every frame; does nothing unless a catch is pending. Re-arming here rather

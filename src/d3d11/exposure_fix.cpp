@@ -1638,6 +1638,13 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     ctx->Release();
 }
 
+void** exposureFixContextTable(size_t* spanOut) {
+    State* s = g_state;
+    if (!s || !s->hook.committed()) return nullptr;
+    if (spanOut) *spanOut = s->hook.executablePrefix();
+    return s->hook.originalVTable();
+}
+
 void exposureFixReclaimHooks(bool sceneRendered) {
     State* s = g_state;
     if (!s) return;
