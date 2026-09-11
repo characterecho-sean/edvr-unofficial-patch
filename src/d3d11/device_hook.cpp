@@ -1342,6 +1342,10 @@ void readoptGameBindings() {
             "hotkey: your Elite bindings files changed, but both camera keys "
             "read the same as before.");
     }
+    // The menu's panel keys follow the same rebind; reached only while
+    // hotkey.read_game_bindings is on (the poll above gates on it), and
+    // it says "same as before" for itself.
+    menuAdoptGameBindings(true, "your Elite bindings changed");
 }
 
 // The Instruments page's rows: the same functions the diagnostic hotkeys
@@ -1554,6 +1558,12 @@ State& ensureState() {
             }
             g_state->bindsFingerprint = eliteBindsFingerprint();
         }
+        // The settings menu's Elite panel keys, after the camera keys and
+        // OUTSIDE the block above: unconditional, so the disabled case logs
+        // its own "menu keys:" line too, and a session log with none means
+        // this call never ran. menuConfigure has already placed the summon
+        // key and the menu's own keys, which the rules check against.
+        menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();

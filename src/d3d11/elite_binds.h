@@ -14,6 +14,20 @@
 // or HOTAS is reported and skipped -- EDVR watches the keyboard. An explicit
 // hotkey.* value in edvr.ini always wins over what is read here, so nothing
 // changes for anyone who has already set up.
+//
+// A third consumer since 2026-09-11: the settings menu reads Elite's ten
+// panel-navigation elements (UI_Up/Down/Left/Right/Select/Back and the four
+// Cycle*Panel/Page keys) so the panel answers to the keys the player already
+// uses in the cockpit. That reader wants every slot of an element, not the
+// first watchable one, and it is the only caller allowed to see a modifier
+// key (Key_LeftControl...) as a MAIN key: under kEliteKeyAllowModifierMain
+// the translation answers "0xA2" where the camera path refuses. The camera
+// path never passes the flag -- a bare Ctrl as a camera watch would fire on
+// every chord the player types. The slot parser also bounds each slot's
+// <Modifier> by the NEXT slot's tag, while parseElementIn (the camera's)
+// deliberately scans to the element's end: changing the camera parser would
+// change its answer for a bare-Primary/chorded-Secondary element, and that
+// answer is pinned by the smoke fixtures.
 #pragma once
 
 #include <cstddef>
@@ -63,8 +77,62 @@ bool eliteBindsLookupDir(const wchar_t* dir, const char* element,
 
 // The Elite-name to EDVR-name translation, exposed for the smoke test:
 // "Key_F11" -> "F11", "Key_RightArrow" -> "RIGHT", "Key_BackSlash" -> "\\",
-// "Key_SemiColon" -> "SEMICOLON". Returns false for names it cannot map.
+// "Key_SemiColon" -> "SEMICOLON". Returns false for names it cannot map,
+// and that includes the six modifier keys as main keys.
 bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen);
+
+// The multi-slot form, for the settings menu.
+//
+// eliteBindsLookup answers "which ONE key can EDVR watch for this element"
+// and stops at the first slot it can name. The menu wants every slot of an
+// element as Elite wrote it -- a gamepad Primary beside a keyboard Secondary
+// is the shape of every UI_* element in a pad-and-keyboard file -- so it can
+// adopt the keyboard ones and say in the log why the others were not.
+enum EliteKeyFlags : unsigned {
+    kEliteKeyPlain = 0,
+    // Admit the six modifier keys as MAIN keys, translated to the raw
+    // "0x.." form virtualKeyFromName already parses. Menu only.
+    kEliteKeyAllowModifierMain = 1u << 0,
+};
+
+struct EliteKeySlot {
+    bool keyboard;        // Device="Keyboard"
+    bool chorded;         // a keyboard <Modifier> sits between this slot's
+                          // tag and the next slot's tag / the element's close
+    bool modifierMain;    // the main key is itself a modifier (LeftControl
+                          // ...), translated only under the flag
+    char binding[32];     // EDVR binding string: "W", "UP", "SHIFT+E",
+                          // "0xA2"; empty when not keyboard or unnamed
+    char eliteName[32];   // the raw Key_/GamePad_/Mouse_ name as written
+};
+struct EliteKeySlots {
+    bool present;         // the element tag exists in the answering file
+    int  count;           // slots found in file order (Primary, Secondary):
+                          // 0..2
+    EliteKeySlot slot[2];
+    int  filesSeen;       // candidate .binds files the walk opened (0 = no
+                          // preset or no .binds at all)
+    char file[64];        // UTF-8 basename of the answering file, "" when
+                          // none
+};
+
+// eliteBindsTranslateKey's answer, and under kEliteKeyAllowModifierMain ALSO
+// the six modifier keys as MAIN keys, in the raw "0x.." form
+// virtualKeyFromName already parses: LeftShift 0xA0, RightShift 0xA1,
+// LeftControl 0xA2, RightControl 0xA3, LeftAlt 0xA4, RightAlt 0xA5.
+// `modifierMain` (optional) says which answer it was.
+bool eliteBindsTranslateKeyEx(const char* eliteKey, unsigned flags, char* out,
+                              size_t outLen, bool* modifierMain);
+
+// Every slot of one element from the active preset's files. The first file
+// that CONTAINS the element answers alone, as for the camera lookup; there
+// is no fallback element. Logs nothing -- the menu prints one summary line
+// over all ten elements. Returns `present`; `out` is fully written either
+// way (filesSeen tells "no files at all" from "the element is not there").
+bool eliteBindsLookupSlots(const char* element, unsigned flags,
+                           EliteKeySlots* out);
+bool eliteBindsLookupSlotsDir(const wchar_t* dir, const char* element,
+                              unsigned flags, EliteKeySlots* out);
 
 // A cheap stamp over the bindings directory: names, sizes and write times of
 // its files, folded together. It changes when the player applies a rebind or

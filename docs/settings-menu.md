@@ -291,11 +291,50 @@ This path is independent of the VR runtime and applies to both SteamVR and
 OpenComposite. `menu.keyboard = private` remains the default. All keyboard
 state reads and buffered presses are suppressed while the menu is drawn,
 except on **Monitor** and **Status**, which pass keys through and say so in
-their footers; the menu summon key remains reserved on every page;
+their footers (adopted Elite keys are inert there -- see "Your Elite keys"
+below); the menu summon key remains reserved on every page;
 buffered releases still reach the game, and joystick devices keep their input.
 Keys held when the menu closes wait for release before they can act in Elite.
 No new configuration is required; installing this change requires a game
 restart so the initial DirectInput creation can be captured.
+
+**The footer never fit (MEASURED 2026-09-11).** The 115-character
+navigation footer measured 1520 px in a 770 px line at the default
+`width_degrees = 30` / `text_degrees = 1.1` (`DrawTextW DT_CALCRECT`,
+Segoe UI at the raster's own em; 2518 in 1284 at cap 50, 1107 in 566 at
+cap 22 -- the budget is headset-independent at 25.7 em), and it was drawn
+`DT_SINGLELINE | DT_END_ELLIPSIS`, so it was cut after about 55
+characters: "Tab page", "R twice resets", "Esc close", the pending-restart
+count and KEYS SHARED WITH THE GAME had never been visible. The likeliest
+root of "how do I change tabs". The footer is now **two lines**, its box
+always two lines tall so the panel's height never jumps when a warning
+appears, and it is COMPOSED against the raster's ruler
+(`menuPanelMeasureLine`, `menuComposeFooter` in `menu_keys.cpp`) rather
+than clipped: line 1 is the legend -- `Arrows pick/change  Enter select
+Tab page  Esc close` (53 characters, 702 px at cap 30), or with Elite's
+keys live `W/S pick  A/D change  Space select  Q/E page  Esc close` (55,
+745 px) -- dropping `change`, then `pick`, then `select` where it does
+not fit (a 1600 px card at cap 80 keeps `Space select  Q/E page  Esc
+close`), and never `page` or `close`. Line 2 carries one item by
+precedence: `KEYS SHARED WITH THE GAME` (private wanted, gate not
+private), `keys shared (Monitor)  Q/E off here`, `keys shared
+(menu.keyboard)  Q/E off`, `2 changes at next launch`, or `Tab, arrows and
+Enter work too`. Editing reads `Type a value  Backspace deletes  Enter
+writes  Esc cancels` (752 px at cap 30, `Type a value` dropped first).
+The fault line wins in every state, typing included: a stalled draw drops
+the gate while a value is typed, and the typing keys are W/A/S/D/Space.
+Each footer line is drawn as its own single-line op in its half of the
+box (MEASURED 2026-09-11: `DT_END_ELLIPSIS` on a multi-line `DrawTextW`
+ellipsises only the LAST line, so one op for both lines clipped line 1 at
+the rect's edge with no `...`). The gate is decided BEFORE the content is
+built each tick, so the open tick's raster reads the gate the menu will
+have (built first, it read the closed menu's 0 and composed the warning
+on every open); the warning is tracked like the legend, so it appears and
+goes with the gate on a rig with nothing adopted too.
+Every string is pinned against real GDI at cap 22, 30, 50 and 80 in
+`menu_test`, and the flight instrument is `menu panel: footer line N
+measures X px in a Y px line` (four per session), which says
+`-- ellipsised` if the measurement above was wrong.
 
 `input_gate_test` exercises independent private factory/device tables, original
 call chaining, shared-table joysticks, buffered peek/read semantics, input loss,
@@ -307,19 +346,128 @@ These tests do not replace an in-headset confirmation on each VR runtime.
 
 Head-aim and keys coexist; whichever moved last owns the highlight.
 
-**Keys, while the menu is open** (all private to the menu):
+**Keys, while the menu is open** (all private to the menu; the "your
+Elite key" column is read from your bindings, stock KeyboardMouseOnly
+names in brackets):
 
-| Key | Does |
-|---|---|
-| Up / Down | move the highlight; hold to repeat (400 ms, then 12 Hz) |
-| Left / Right | step the highlighted row: toggle, cycle a choice, step a number; hold to repeat; Shift steps a number by ten steps |
-| Enter / Space | activate: flip a switch, next choice, or open a number or string for typing; on an action row, fire it |
-| Tab / Shift+Tab | next / previous page |
-| PageUp / PageDown | read on through the explanation beside the row, three lines at a time; changes the page when there is nothing to scroll |
-| Home / End | first / last row |
-| R | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
-| Escape, the summon key | close (fade out, keys released); Escape first abandons a value being typed |
-| the summon key with Shift | recentre: re-anchor the panel where you are looking now |
+| Key | your Elite key | Does |
+|---|---|---|
+| Up / Down | UI_Up / UI_Down (W / S) | move the highlight; hold to repeat (400 ms, then 12 Hz) |
+| Left / Right | UI_Left / UI_Right (A / D) | step the highlighted row: toggle, cycle a choice, step a number; hold to repeat; Shift steps a number by ten steps |
+| Enter / Space | UI_Select (Space) | activate: flip a switch, next choice, or open a number or string for typing; on an action row, fire it |
+| Tab / Shift+Tab | CycleNextPanel / CyclePreviousPanel (E / Q) | next / previous page (the Elite keys do not repeat when held) |
+| PageUp / PageDown | CyclePreviousPage / CycleNextPage (Z / C) | read on through the explanation beside the row, three lines at a time; changes the page when there is nothing to scroll |
+| Home / End | -- | first / last row |
+| R | -- | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
+| Escape, the summon key | UI_Back (Backspace) | close (fade out, keys released); Escape first abandons a value being typed; UI_Back never cancels an edit |
+| the summon key with Shift | -- | recentre: re-anchor the panel where you are looking now |
+
+**Your Elite keys (2026-09-11).** The ten elements that walk Elite's own
+cockpit panels -- `UI_Up`, `UI_Down`, `UI_Left`, `UI_Right`, `UI_Select`,
+`UI_Back`, `CycleNextPanel`, `CyclePreviousPanel`, `CycleNextPage`,
+`CyclePreviousPage` -- are read from the player's `.binds` (both slots of
+each, `eliteBindsLookupSlots`, the same newest-maintained-file rule as the
+camera keys) and become ALIASES of the actions in the table above: the
+same dispatcher (`dispatchNav` in `menu.cpp`), never a second one, and
+never a `Hotkey` binding (the registry holds sixteen and the d3d11 half
+already fills up to twelve). The rules, applied per slot in table order
+(`menuAliasResolve`, `menu_keys.h`), each with the reason it records for
+the log: R9 a gamepad or mouse slot is never adopted; R8 a keyboard key
+this build cannot name is reported with Elite's spelling; R6 a chorded
+slot is refused (the poll is a bare vk; MEASURED: no UI_*/Cycle* keyboard
+slot in the thirty stock schemes or in Sean's file carries a `<Modifier>`,
+and the parser bounds each slot's Modifier by the next slot's tag, where
+the camera parser deliberately scans to the element's end); R4 Shift is
+the menu's own modifier; R3 the summon key, or a Ctrl/Alt that is half of
+its chord, would close what it opens; R1 a key with the SAME meaning as a
+fixed key (stock UI_Select = Space) is left to the fixed key but still
+names the legend; R2 a key with ANOTHER meaning (stock CycleNextPanel =
+End, CycleNextPage = Home) keeps its documented one; R5 a registered EDVR
+hotkey is polled whether or not the menu is open; R7 first in table order
+wins a duplicate. A modifier used as a plain key is admitted (Sean's
+`UI_Back = Key_LeftControl`: Ctrl alone closes the menu; it reaches the
+game only after a release and a fresh press, through the gate's release
+tail). The invariant `menu_test` pins: every adopted vk is unique and none
+is a fixed key, Escape, the summon key or a registered hotkey.
+
+**When they act -- one predicate.** An adopted key acts only when
+`menuAliasMayAct(inputGateHoldsGameKeyboard(), editing, statusPage)` is
+true: the gate PROVABLY holds the game's keyboard (the flag AND a live
+DirectInput door AND the game seen reaching it -- `inputGatePrivate()`
+reports the flag alone, which a retired door does not clear, and on a rig
+whose game device dispatches through a table the door is not on the flag
+is set while every key still reaches the ship), not while a value is
+typed, not on Monitor or Status. Everywhere the predicate is false an
+adopted key IS a game key: on a shared page one press of E would cycle
+the ship's panel AND the menu's page. So they are inert on the shared
+pages, under `menu.keyboard = shared`, on the first tick after open (the
+flag is set at the end of the tick), while the draw is stale, on a
+retired door, on a rig where the game's keyboard has never been seen
+reaching a door (the "Tab boosts" case above; the Status row reads `held
+back (see log)` and the log says so once), and while typing (W, A, S, D,
+Q, E, Z, C, Space and Backspace are typing keys). The fixed keys keep
+their documented shared behaviour on those pages, and `input_gate.cpp`
+gains no swallow and no injection. MEASURED on Sean's rig 2026-09-11: the
+"reached" evidence arrives in the same millisecond as the first open.
+The legend follows the same predicate, never mere adoption, so it never
+names a dead key -- one extra raster on the tick after open.
+
+**Swallow until release.** Every key -- fixed, typing and alias -- goes
+through one tracker (`keyRepeatStep`): stepped with `act=false` it is
+tracked and PARKED until released, so a key held across a state change
+never fires when the state later allows it, neither the edge nor the
+repeat train. Two primes: at `openMenu` every tracker is seeded from the
+raw key (a W held for thrust when F8 opens the menu moves nothing until
+released; this changes the fixed keys too -- a Down held through the
+summon no longer fires once and repeats), and at `beginEdit` every typing
+key is (a letter held when a Number row opens cannot land in the buffer
+it opened; also the Space-appended-at-open case commitEdit's trim only
+papered over). While typing the aliases are stepped `act=false`; outside
+an edit the typing keys are stepped against their REAL state `act=false`
+(the old poll passed focused=false, which forced every tracker up each
+tick and tracked nothing -- the opposite of what its comment said).
+Fixes -> Monitor by a held E: fired in frame N, gate shared at the end of
+N, E captured into the release tail, parked on N+1. Monitor -> Fixes by
+Tab with Q held: Q was parked, nothing until release. Page keys are
+edge-only (BELIEVED: Elite's own tab key does not repeat).
+
+**Left out, and why.** `UI_Toggle` (stock `=`): its in-game meaning is
+not measured (BELIEVED: "UI Nested Toggle", expands a nested list item;
+check the label in Options > Controls > Interface Mode); the only
+plausible menu meaning is already UI_Select. `UIFocus` (Sean:
+Key_LeftShift, a hold modifier) -- Shift is the menu's own. `FocusLeftPanel
+/ Comms / Radar / RightPanel` (1/2/3/4) and `QuickCommsPanel` (Enter) would
+be new navigation, the digits are typing keys and Enter is fixed.
+`UI_Back` closes the menu on the BELIEF that it backs out of a cockpit
+panel in Elite; if it does not, drop it from `kMenuUiElements`.
+
+**Re-read, and the gaps.** The keys follow `device_hook`'s bindings
+fingerprint: a rebind applied in Elite is re-read within two 5 s checks
+and logged as `menu keys: your Elite bindings changed -- ...` or `... read
+the same as before` (silence there is indistinguishable from a dead
+mechanism). `hotkey.read_game_bindings = 0` drops them (the same switch as
+the camera keys); the live flip is handled in `menuConfigure`, because an
+unchanged fingerprint would never re-read. A `hotkey.menu` change
+re-resolves the cached slots without a file read. BELIEVED: a player on a
+stock preset has NO `.binds` under `Options\Bindings` (Elite writes
+`Custom.*.binds` only after a rebind; Sean's directory holds only Custom
+files), so the confused majority gets `menu keys: no bindings files were
+found` and only the footer fix helps them -- the
+`ControlSchemes\<preset>.binds` fallback is the follow-up. BELIEVED:
+Elite's `Key_` names are DirectInput scan-code names while
+`virtualKeyFromName` maps letters by VK, so on AZERTY/Dvorak the adopted
+`W` could be a different physical key from the one Elite acts on (the
+camera keys carry the same belief). The log's arc: `edvr_log.py --grep
+"menu keys:"`; exactly one outcome line per session, from an
+unconditional call after the camera keys' adoption, so a log with none
+means the call never ran.
+
+**Not folded in, recorded here.** The pre-existing arrow /
+VanityCameraScroll overlap: `device_hook`'s game-mirrored watchers poll
+their keys while the menu is private, so an arrow bound to the view cycle
+counts a press the game never saw. And `inputGatePrivate()`'s blind spot
+for the FIXED keys on a retired door: they keep acting on the flag alone,
+as before; only the adopted keys ask the stricter question.
 
 **Head-aim.** The head ray (from `headPose()`, the raw pose the openvr half
 publishes every frame) is intersected with the panel in its anchor frame;
@@ -345,8 +493,9 @@ Escape leaves it alone, and moving off the row abandons it. A number is
 checked before it is written: one that does not parse, or falls outside
 the row's own range, is refused with the range named on the Status page's
 last-write line rather than written and clamped silently. While a row is
-being typed the arrows and Tab belong to the editor, and head-aim is
-parked, so a look that wanders cannot take the row away mid-value.
+being typed the arrows and Tab belong to the editor, no adopted Elite key
+acts (they are typing keys), and head-aim is parked, so a look that
+wanders cannot take the row away mid-value.
 Typing is what the keyboard gate makes possible and Feature 4 could not
 offer.
 
@@ -457,6 +606,12 @@ they were there (flown 2026-09-07).
    under scale.
    UI/smoke depth and station motion follow the AA mode automatically.
    Supersample filtering is on the Experimental page and its resolve defaults off.
+   At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
+   its `ui:` line tagged `menu performance`), so the extra pages can be
+   turned on from inside the headset; flipping it rebuilds the pages, and
+   the page being read keeps its highlight and scroll through the rebuild
+   rather than jumping back to the first row under the hand that had
+   just reached the last one.
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.
@@ -589,7 +744,13 @@ they were there (flown 2026-09-07).
    OpenComposite, or unknown, by the launch centre's export test); eye
    texture size and tangents; guard stage; temporal mode and whether
    NVIDIA's library loaded; the gate's state (which doors are armed, which
-   the game has reached, keys private or shared); this panel's own price
+   the game has reached, keys private or shared); the **Elite keys** row
+   (`W/S A/D Space Q/E Z/C L-Ctrl` -- the adopted keys by group -- or why
+   there are none: `none adopted (see log)`, `no bindings files found`,
+   `off (read_game_bindings)`, `not read yet`, `off while keys are shared`,
+   or `held back (see log)` when adopted but the game's keyboard has not
+   been seen reaching a door; the back key is named here and in the log,
+   never on the footer); this panel's own price
    (bitmap size, raster time, the composite's measured GPU time per eye);
    the list of changes waiting for a restart; and the result of the last
    ini write.
@@ -733,8 +894,10 @@ Sean's addition, made a first-class mechanism rather than a badge:
   is the failure this exists to prevent.
 - **Shown three ways.** The row wears a `restart` badge always. After a
   change it shows the running value and the pending one (`stock -> early
-  at next launch`). The panel footer counts them ("2 changes take effect
-  at the next launch"), and the Status page lists them by name.
+  at next launch`). The panel footer counts them on its second line
+  (`2 changes at next launch`; since 2026-09-11 the count yields to a
+  keys-shared warning, which is shown nowhere else), and the Status page
+  lists them by name and remains the complete list.
 - **Known, not guessed.** At its first parse the d3d11 half snapshots the
   values of every restart key (the generated table says which). Any later
   parse -- a menu write, a hand edit, the installer -- diffs against that
@@ -899,7 +1062,9 @@ toasts = on
 # Adds the Advanced, Experimental and Instruments pages, and shows each
 # setting's ini name. Everything on those pages is a safety valve or a
 # developer instrument; the log names one when it wants you to change it.
-# Live.
+# Also a switch at the bottom of the menu's own Performance page, so the
+# extra pages can be turned on from inside the headset. Live.
+# ui: Developer mode | menu performance
 developer = off
 ```
 
@@ -1006,6 +1171,24 @@ one-value merge and gains the atomic-write case.
     the overlay (Shift+Tab) opens and closes cleanly with the menu up.
 12. **G12, the restart snapshot.** Change a launch-time key by hand and by
     menu; the pending list, the footer count and the new audit line agree.
+13. **G13, your Elite keys** (first flight on Sean's rig, 2026-09-11's
+    change): W/S, A/D, Space, Q/E and L-Ctrl respond on Fixes;
+    `menu: closed (UI_Back).` appears (the proof that
+    `GetAsyncKeyState(VK_LCONTROL)` polls on this rig); `menu panel: footer
+    line` says no line is ellipsised; on Monitor press E -> the ship's
+    panel cycles and the menu's page does not; hold E on Fixes so the page
+    lands on Monitor -> the ship does nothing until E is released and
+    pressed again; hold W, press F8 -> the highlight does not move; open a
+    Number row with Enter while holding a letter -> the buffer is
+    unchanged; hold Q on Status, press Tab -> nothing fires on Performance.
+    Desk half, no headset: with Elite at its main menu, rebind
+    CycleNextPanel in Options > Controls > Interface Mode and Apply; within
+    15 s the log shows `hotkey: your Elite bindings files changed...`
+    followed by exactly one `menu keys: your Elite bindings changed -- ...`
+    line naming the new key.
+14. **G14, the leak audit** (G3's shape): every adopted and fixed key
+    pressed on Fixes moves nothing in the ship; `advanced.input_probe`
+    counts zero game-side downs.
 
 ## Phasing
 

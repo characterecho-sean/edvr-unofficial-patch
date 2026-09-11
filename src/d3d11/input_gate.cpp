@@ -729,6 +729,27 @@ void probeLine() {
         g_private.load() ? "PRIVATE" : "shared");
 }
 
+// The DirectInput door's evidence, the two facts the Status page prints and
+// the menu's alias predicate consults: is a door installed and not retired,
+// and has the game's keyboard been seen reaching one. A retired door does
+// not clear g_private (inputGateSetPrivate only follows the menu's wish),
+// so the flag alone cannot say the ship is deaf to a key.
+void doorEvidence(bool* di, bool* reached) {
+    bool any = (g_diW.installed && !g_diW.retired) || (g_diA.installed && !g_diA.retired);
+    for (const auto& d : g_gameDi) any |= d.installed && !d.retired;
+    // The budget is what actually decides pass-through: once it is spent
+    // guardedBudget skips every door's lambda, and only the door whose next
+    // GetDeviceState observes that marks itself retired -- a door the game
+    // reads through GetDeviceData alone never would. So a spent budget is
+    // no live door, whatever the per-door flags say.
+    if (!g_budgetDi.shouldRun()) any = false;
+    *di = any;
+    *reached = g_diW.stateForeign.load() + g_diA.stateForeign.load() + g_diW.dataKeyboard.load() +
+                       g_diA.dataKeyboard.load() >
+                   0 ||
+               g_gameKeyboardCalls.load() != 0;
+}
+
 }  // namespace
 
 uint8_t inputGateDikOf(int vk) {
@@ -853,6 +874,19 @@ void inputGateSetPrivate(bool priv) {
 
 bool inputGatePrivate() { return g_private.load() != 0; }
 
+bool inputGateHoldsGameKeyboard() {
+    if (g_private.load() == 0) return false;
+    bool di = false, reached = false;
+    doorEvidence(&di, &reached);
+    return di && reached;
+}
+
+bool inputGateGameKeyboardSeen() {
+    bool di = false, reached = false;
+    doorEvidence(&di, &reached);
+    return di && reached;
+}
+
 void inputGateTick() {
     if (!g_installTried) return;
     refreshReleaseTail(&GetAsyncKeyState);
@@ -923,11 +957,8 @@ void inputGateTick() {
 
 void inputGateStatusLine(char* buf, size_t bufLen) {
     if (!buf || !bufLen) return;
-    bool di = (g_diW.installed && !g_diW.retired) || (g_diA.installed && !g_diA.retired);
-    for (const auto& d : g_gameDi) di |= d.installed && !d.retired;
-    const bool reached = g_diW.stateForeign.load() + g_diA.stateForeign.load() +
-                             g_diW.dataKeyboard.load() + g_diA.dataKeyboard.load() >
-                         0 || g_gameKeyboardCalls.load() != 0;
+    bool di = false, reached = false;
+    doorEvidence(&di, &reached);
     const bool trio = g_user.asyncKey.applied && !g_user.retired2;
     const bool pump = g_user.peek.applied && !g_user.retired3;
     snprintf(buf, bufLen, "keys %s -- doors: dinput %s%s, key-state %s, pump %s",

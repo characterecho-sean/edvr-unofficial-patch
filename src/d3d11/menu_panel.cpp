@@ -237,13 +237,30 @@ int measureWrapped(const std::wstring& s, int widthPx, int emPx) {
     return r.bottom - r.top;
 }
 
+// The footer's box is ALWAYS two lines tall. The model composes a legend
+// line and, when there is one, a status line after a '\n' (menu_keys.h,
+// menuComposeFooter): the pending count, a shared-keys warning. Sizing the
+// box to the lines present would make the whole panel grow and shrink by
+// 1.6 cap as a warning came and went, under a head that had just aimed at
+// a row; the box keeps its two lines and the second is simply empty. Each
+// line is its own single-line op in its own half of the box: MEASURED
+// 2026-09-11 that DT_END_ELLIPSIS on a multi-line DrawTextW ellipsises
+// only the LAST line, so a two-line footer drawn as one op had its first
+// line clipped at the rect's edge with nothing to say so.
+constexpr int kFooterLines = 2;
+
 // Lay the content out into ops and line rectangles. All sizes derive from
 // the cap height in pixels, so the panel reads the same in degrees on any
 // headset. `popupBodyH` is the measured height of the tooltip's body, 0
-// when there is none.
+// when there is none. `outFootRect` receives the footer's box when one was
+// made and `outFootLines` the number of line ops drawn into it (the test
+// reads both).
 void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& lines, int* outH,
-            int popupBodyH, int* outPopupScrollMax) {
+            int popupBodyH, int* outPopupScrollMax, RECT* outFootRect = nullptr,
+            int* outFootLines = nullptr) {
     if (outPopupScrollMax) *outPopupScrollMax = 0;
+    if (outFootRect) *outFootRect = {-1, -1, -1, -1};
+    if (outFootLines) *outFootLines = 0;
     const int cap = c.capPx;
     const int W = c.widthPx;
     // The MENU CARD's width. The bitmap is wider: the pixels past the card
@@ -253,7 +270,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int rowPitch = c.compact ? cap * 17 / 10 : cap * 2;
     const int tabH = c.toast ? 0 : cap * 24 / 10;
     const int hintH = c.toast ? 0 : cap * 34 / 10;   // two lines of hint
-    const int footH = c.toast ? 0 : cap * 16 / 10;
+    const int footH = c.toast ? 0 : kFooterLines * cap * 16 / 10;
     const int graphOneH = cap * 32 / 10;
     const int graphH = c.graphCount * graphOneH;
     const int rows = c.lineCount;
@@ -556,14 +573,29 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         }
         y += hintHUsed;
         if (c.footer[0]) {
-            Op f;
-            f.text = true;
-            f.str = widen(c.footer);
-            f.rect = {pad, y, cardW - pad, y + footH};
-            f.align = DT_LEFT;
-            f.font = Font::Small;
-            f.rgb = kFooter;
-            ops.push_back(f);
+            // One single-line op per '\n'-separated line, each in its own
+            // slot of the two-line box, so the single-line draw path
+            // ellipsises every line -- and a one-line footer sits where
+            // the first line of a two-line one does, rather than centred
+            // in the taller box.
+            const int lineH = footH / kFooterLines;
+            const char* line = c.footer;
+            int n = 0;
+            while (line && *line && n < kFooterLines) {
+                const char* nl = strchr(line, '\n');
+                Op f;
+                f.text = true;
+                f.str = widen((nl ? std::string(line, static_cast<size_t>(nl - line)) : std::string(line)).c_str());
+                f.rect = {pad, y + n * lineH, cardW - pad, y + (n + 1) * lineH};
+                f.align = DT_LEFT;
+                f.font = Font::Small;
+                f.rgb = kFooter;
+                ops.push_back(f);
+                ++n;
+                line = nl ? nl + 1 : nullptr;
+            }
+            if (outFootRect) *outFootRect = {pad, y, cardW - pad, y + footH};
+            if (outFootLines) *outFootLines = n;
         }
     }
 
@@ -1566,6 +1598,45 @@ bool menuPanelStats(int* w, int* h, double* lastMs, float* gpuMs) {
     if (lastMs) *lastMs = g_w.lastMs;
     if (gpuMs) *gpuMs = g_gpuMsAvg.load();
     return true;
+}
+
+int menuPanelMeasureLine(const char* utf8, int emPx) {
+    if (!utf8 || !*utf8 || emPx <= 0) return 0;
+    const std::wstring s = widen(utf8);
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return 0;
+    HFONT f = makeFont(emPx, false);
+    HGDIOBJ old = f ? SelectObject(dc, f) : nullptr;
+    RECT r = {0, 0, 1, 1};
+    // The same flags execute() draws a single line with, less the ellipsis:
+    // the width DT_CALCRECT reports is the width the line needs.
+    DrawTextW(dc, s.c_str(), -1, &r, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    if (old) SelectObject(dc, old);
+    if (f) DeleteObject(f);
+    DeleteDC(dc);
+    return r.right - r.left;
+}
+
+int menuPanelLayoutHeightForTest(const MenuContent& c, int* footTop, int* footBottom,
+                                 float* rowEdges, int maxRows, int* footLines) {
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int H = 0;
+    int scrollMax = 0;
+    RECT foot = {-1, -1, -1, -1};
+    int footN = 0;
+    layout(c, ops, lines, &H, 0, &scrollMax, &foot, &footN);
+    if (footTop) *footTop = foot.top;
+    if (footBottom) *footBottom = foot.bottom;
+    if (footLines) *footLines = footN;
+    if (rowEdges && maxRows > 0) {
+        for (int i = 0; i < maxRows; ++i) {
+            const bool have = i < static_cast<int>(lines.size());
+            rowEdges[i * 2] = have ? lines[static_cast<size_t>(i)].y0 : -1.0f;
+            rowEdges[i * 2 + 1] = have ? lines[static_cast<size_t>(i)].y1 : -1.0f;
+        }
+    }
+    return H;
 }
 
 void menuPanelShutdown() {

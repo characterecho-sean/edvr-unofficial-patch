@@ -14,6 +14,15 @@
 // panel that is not reaching the headset never takes the keyboard.
 // The read-only Status and Monitor pages deliberately pass keys to the game.
 //
+// Elite's own panel keys -- UI_Up .. CyclePreviousPage, the ones that walk
+// the cockpit panels -- are read from the player's bindings and become
+// ALIASES of the menu's own actions: the same dispatcher, never a second
+// one, and never registered as Hotkeys. They are inert unless the gate
+// provably holds the game's keyboard (elsewhere an adopted key IS a game
+// key), inert while a value is typed, and a key held across a state change
+// is swallowed until released. menu_keys.h holds the rules; the panel's
+// bottom line names the live keys.
+//
 // This half owns the model, the keys, the aim, the ini write and the restart
 // bookkeeping. menu_panel.h owns the pixels: the GDI rasterisation and the
 // compute composite the openvr half calls at the door.
@@ -29,6 +38,14 @@ class Config;
 
 // Reads hotkey.menu and every [menu] key. Install AND reload.
 void menuConfigure(Config& cfg);
+
+// Read (or, with enabled=false, drop) Elite's panel keys from the player's
+// bindings and resolve them into the menu's aliases. Frame thread only;
+// after menuConfigure, which places the summon key the rules check
+// against. `why` is null on the first read and names the reason on a
+// re-read ("your Elite bindings changed"). Exactly one "menu keys:" line
+// follows every call, so a session log with none means it never ran.
+void menuAdoptGameBindings(bool enabled, const char* why);
 
 // Once per frame, from the frame boundary. dev may be null before the game
 // has a device; nothing is drawn or uploaded until it has one.

@@ -278,6 +278,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
+    "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
@@ -539,15 +540,19 @@ echo [edvr] === menu_test.exe ===
 REM The settings menu's pure parts (docs\settings-menu.md): the keyboard
 REM gate's filter policies (zeroed state, ups kept and downs dropped, the
 REM summon swallow, the scan-code map), the panel's ray intersection flat
-REM and curved, the door's eye transform against a hand-worked pose, and
-REM the one-value ini write's merge -- each one a place a wrong sign or an
-REM off-by-one would otherwise be found in a headset.
+REM and curved, the door's eye transform against a hand-worked pose, the
+REM one-value ini write's merge, and the key rules (menu_keys.cpp: the
+REM swallow-until-release tracker, which Elite panel keys are adopted and
+REM why not, and a footer measured against the real GDI face) -- each one
+REM a place a wrong sign or an off-by-one would otherwise be found in a
+REM headset.
 if not exist "%OBJ%\menutest" mkdir "%OBJ%\menutest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
     /Fo"%OBJ%\menutest"\ /Fe"%BUILD%\menu_test.exe" ^
     "tools\menu_test\menu_test.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\menu_keys.cpp" ^
     "src\openvr\menu_door.cpp" "src\d3d11\shader_swap.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\hotkey.cpp" ^

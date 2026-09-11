@@ -77,6 +77,24 @@ void inputGateInstall();
 void inputGateSetPrivate(bool priv);
 bool inputGatePrivate();
 
+// The stricter question the menu's adopted Elite keys ask (menu_keys.h):
+// is the flag set AND a DirectInput door installed and not retired AND the
+// game's keyboard seen reaching one -- the same two facts the Status
+// page's doors line prints. inputGatePrivate() reports the flag alone: a
+// door that faulted and retired does not clear it, and on a rig whose game
+// device dispatches through a table the door is not on ("Tab boosts") the
+// flag is set while every key still reaches the ship. An Elite panel key
+// acting on the menu there would drive the ship and the menu at once.
+// MEASURED 2026-09-11 on the maintainer's rig: "reached" arrives in the
+// same millisecond as the first open.
+bool inputGateHoldsGameKeyboard();
+
+// The door evidence alone -- a live DirectInput door the game has been
+// seen reaching -- without the flag. For the Status page's "Elite keys"
+// row: that page is never private by design, so the question there is
+// whether the keys WOULD act on a settings page, not whether they do now.
+bool inputGateGameKeyboardSeen();
+
 // Once per frame, from the frame boundary: reclaim on the dinput table,
 // the probe's periodic line.
 void inputGateTick();
