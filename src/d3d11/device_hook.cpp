@@ -1302,6 +1302,15 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             // RENDERED SCENE is evidence of bypass.
             const bool sceneRendered = vScreenReclaimHooks();
             exposureFixReclaimHooks(sceneRendered);
+            // AND THE PROBE HOOK, which nothing else on this path touches.
+            //
+            // In the two context probes no installer runs, so neither reclaim
+            // tick above reaches a hook -- and the census and the recent-flip
+            // dump ride inside reclaim's private branch. The sessions whose
+            // entire purpose is to ask what the runtime does to the context's
+            // table were therefore the sessions that reported nothing about it.
+            // No-op unless a probe actually installed.
+            g_state->bareContextHook.censusTick("probe context");
         }
     });
     if (qpcFrequency() > 0) {
@@ -1669,6 +1678,34 @@ State& ensureState() {
 }
 
 }  // namespace
+
+// The two entries the investigation turns on, named at install. See the header
+// for what they are and why the departure point matters as much as the
+// destination.
+//
+// IT LIVED INSIDE installExposureFix, which does not run in either context
+// probe -- so `context_hook_probe = swap` and `= live`, the two sessions whose
+// entire purpose is to ask what the runtime does to this table, were the two
+// that never printed what it started at. Hoisted here and called from all
+// three.
+void logContextTableVariants(void** table, size_t span, const char* who) {
+    if (!table || span <= 50) return;
+    void* drawIndexed = nullptr;
+    void* clearRtv = nullptr;
+    guarded("context/install-variant-read", [&] {
+        drawIndexed = table[12];
+        clearRtv = table[50];
+    });
+    char a[MAX_PATH], b[MAX_PATH];
+    Log::get().note(
+        "context table at install (%s): slot 12 (DrawIndexed) = %s; slot 50 "
+        "(ClearRenderTargetView) = %s. These are the entries the runtime had "
+        "selected when EDVR arrived -- quote them beside any later line about "
+        "entries changing, because a changed entry only means something next to "
+        "the one it changed FROM.",
+        who ? who : "?", vtableOwnerModuleName(drawIndexed, a, sizeof(a)),
+        vtableOwnerModuleName(clearRtv, b, sizeof(b)));
+}
 
 // ELITE'S OWN VR RENDER-TARGET MULTIPLIER, for advanced.texture_lod_bias
 // = auto.
@@ -2205,7 +2242,11 @@ void hookDevice(ID3D11Device* device) {
                 // No installer ran, so the bare probe hook is the only thing
                 // holding the context's own table -- and in a probe session it
                 // is the table the runtime writes, which is what the timeline
-                // has to watch.
+                // has to watch, and the table whose starting variant is worth
+                // naming.
+                logContextTableVariants(s.bareContextHook.originalVTable(),
+                                        s.bareContextHook.executablePrefix(),
+                                        "probe context");
                 armFlipTimeline(sentinelCfg, s.bareContextHook.originalVTable(),
                                 s.bareContextHook.executablePrefix(),
                                 "probe context");

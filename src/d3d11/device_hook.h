@@ -44,6 +44,22 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx);
 // impossible to gather. Null before the proxy has resolved it.
 void* systemD3D11Module();
 
+// The two entries the whole issue #21 investigation turns on, named by module
+// and offset, at install.
+//
+// The field logs say the DESTINATION -- ..._DrawIndexed_Amortized<1> -- and
+// never the departure point, so "24 entries changed" cannot be matched between
+// two runs or against a PDB. Slot 12 is DrawIndexed, which the field data says
+// moves; slot 50 is ClearRenderTargetView, the same family and a different
+// block of the table. Two VirtualQuery calls, once.
+//
+// `table` must be the table the CONTEXT itself holds -- the bottom hook's --
+// and `who` says which hook is speaking. Called from installExposureFix and
+// from both context probes, because it lived inside the exposure installer and
+// the probes do not run it: the two sessions that exist to ask what the runtime
+// does to this table were the two that never printed what it started at.
+void logContextTableVariants(void** table, size_t span, const char* who);
+
 void hookDevice(ID3D11Device* device);
 void hookSwapChain(IDXGISwapChain* swapChain);
 void hookFactoryForDevice(ID3D11Device* device);

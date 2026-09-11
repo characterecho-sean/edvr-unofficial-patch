@@ -290,6 +290,35 @@ static bool pageIsReadOnly(const void* p) {
            (mbi.Protect & 0xFF) == PAGE_EXECUTE_READ;
 }
 
+// THE STALE-FORWARD CHECK, modelled exactly as vscreen.cpp runs it: one load
+// from the RUNTIME'S table and one compare against the frozen forward the hook
+// handed back.
+//
+// The whole of the bug it was found with is in the first argument. vscreen read
+// its OWN hook's table, and in every private mode that table is the hook
+// underneath's private buffer -- so `now` was the value vscreen itself had
+// frozen, the compare could not fail, and "STALE FORWARD has never been
+// observed" was never evidence of anything. The fixed code reads the bottom
+// hook's table, which is the one the context itself holds.
+static int    g_staleHits = 0;
+static size_t g_staleSlot = 0;
+static void*  g_staleFrozen = nullptr;
+static void*  g_staleNow = nullptr;
+
+static void noteStaleForwardLike(void** runtimeTable, size_t slot, void* frozen) {
+    if (!runtimeTable) return;
+    void* now = readTableSlot(runtimeTable, slot);
+    if (now == frozen) return;
+    ++g_staleHits;
+    g_staleSlot = slot;
+    g_staleFrozen = frozen;
+    g_staleNow = now;
+}
+
+// The shipped derivation of whether that check is armed at all, which must be
+// read off the mode the hook ACTUALLY took and not the one that was asked for.
+static bool staleWatchFor(HookMode m) { return m == HookMode::CopyVptr; }
+
 // A third party's write into the live table, without a VTableHook.
 static void writeSlot(void* object, size_t slot, void* value) {
     void** vt = *reinterpret_cast<void***>(object);
@@ -1821,6 +1850,18 @@ int main() {
               "a stacked live table froze somewhere in the middle");
         writeTableSlot(birth, 0, birthSlot0);
 
+        // AND THE UPPER HOOK'S METHOD COUNT IS THE LOWER HOOK'S, not its
+        // buffer's. A live table is 512 executable stub addresses, so the
+        // plausibility walk runs to the end of it and the upper hook announces
+        // 512 methods where the hook underneath says 302 -- and "(N methods)" is
+        // the number the field has read since issue #6 to tell a real context
+        // from a wrapper's proxy. The registry in vtable_hook.cpp is what lets
+        // the upper hook ask.
+        check(upper.entryCount() == lower.entryCount(),
+              "the upper live hook reports the LOWER hook's method count",
+              "it measured the stub buffer instead, so the install line names a "
+              "method count that belongs to no interface");
+
         upper.uninstall();
         g_ownerHits = 0;
         check(o->one() == 1001 && g_ownerHits == 1,
@@ -1909,6 +1950,164 @@ int main() {
                   "other's method");
             live.uninstall();
         }
+    }
+
+    // ===================================================================
+    // THE STALE-FORWARD CHECK -- which table it reads, and when it is armed.
+    // ===================================================================
+
+    // (a) STACKED PRIVATE HOOKS, THE SHIPPED ARRANGEMENT. Two hooks take one
+    // object: the lower one (exposure, here on slot 1) attaches to the object
+    // while its vptr is still the runtime's, the upper one (vScreen, here on
+    // slot 0) attaches afterwards and therefore reads the vptr the lower one
+    // already moved. So the UPPER hook's "runtime table" is the LOWER hook's
+    // private buffer -- which nothing outside EDVR writes.
+    //
+    // That is why the shipped check could never fire. It read the upper hook's
+    // own table, compared the frozen forward against the value it had itself
+    // frozen, and found them equal forever; "STALE FORWARD has never been
+    // observed" was never evidence, it was a compare that could not fail. Read
+    // the BOTTOM hook's table -- the one the context itself holds -- and a
+    // re-point of the embedded table is seen on the very next call.
+    {
+        RealThing obj;
+        IThing*   o = &obj;
+        void**    birth = *reinterpret_cast<void***>(&obj);
+        void*     birthSlot0 = readTableSlot(birth, 0);
+
+        VTableHook lower, upper;
+        g_owner = &obj;
+        lower.attach(&obj);
+        lower.setMode(HookMode::CopyVptr);
+        // Slot 1, NOT slot 0: every slot vscreen's stale check covers is one the
+        // exposure hook does not patch, so the forward it freezes really is the
+        // runtime's entry rather than the hook underneath's thunk. If that ever
+        // stops being true, the check compares against a co-owner's thunk and
+        // reports a healthy stack as a divergence.
+        void* lowerOrigTwo = nullptr;
+        lower.replace(1, reinterpret_cast<void*>(&thunkOneB), &lowerOrigTwo);
+        lower.commit();
+
+        upper.attach(&obj);
+        upper.setMode(HookMode::CopyVptr);
+        upper.replace(0, reinterpret_cast<void*>(&thunkOne),
+                      reinterpret_cast<void**>(&g_realOne));
+        upper.commit();
+
+        check(lower.originalVTable() == birth &&
+                  upper.originalVTable() != birth,
+              "the upper private hook's table is the LOWER hook's, not the "
+              "object's own",
+              "the two hooks did not stack, so this cell is not modelling the "
+              "shipped arrangement");
+        check(reinterpret_cast<void*>(g_realOne) == birthSlot0,
+              "...and the upper hook's frozen forward is the runtime's entry",
+              "the forward is somebody's thunk, and comparing THAT against the "
+              "runtime's table would report a healthy stack as a divergence");
+
+        // The runtime re-selects its own entry, the way Windows' d3d11.dll does
+        // to the context. Nothing about EDVR's tables changes.
+        g_toolkitClean = reinterpret_cast<PFN_One>(birthSlot0);
+        writeTableSlot(birth, 0, reinterpret_cast<void*>(&toolkitOne));
+        check(readTableSlot(birth, 0) == reinterpret_cast<void*>(&toolkitOne),
+              "the embedded re-point actually landed",
+              "the store was optimised away, so this cell proves nothing");
+
+        // The check as it was SHIPPED: read this hook's own table.
+        g_staleHits = 0;
+        noteStaleForwardLike(upper.originalVTable(), 0,
+                             reinterpret_cast<void*>(g_realOne));
+        check(g_staleHits == 0,
+              "reading the hook's OWN table, the stale check cannot fire at all",
+              "the cell is not reproducing the bug it exists for");
+
+        // The check as FIXED: read the bottom hook's table, which is the one the
+        // context itself holds.
+        g_staleHits = 0;
+        noteStaleForwardLike(lower.originalVTable(), 0,
+                             reinterpret_cast<void*>(g_realOne));
+        check(g_staleHits == 1,
+              "...and reading the CONTEXT's table it fires, exactly once",
+              "the fixed check missed a divergence that is there");
+        check(g_staleSlot == 0 && g_staleFrozen == birthSlot0 &&
+                  g_staleNow == reinterpret_cast<void*>(&toolkitOne),
+              "...carrying the slot and BOTH pointers",
+              "the report names the wrong slot or the wrong pair of values");
+
+        // And the call really does go to the frozen entry, which is what makes
+        // the divergence matter rather than merely exist.
+        g_ownerHits = 0;
+        g_toolkitHits = 0;
+        check(o->one() == 1001 && g_ownerHits == 1 && g_toolkitHits == 0,
+              "...while the object still calls the entry EDVR froze",
+              "the copy followed the re-point, so there was nothing stale to "
+              "report");
+
+        writeTableSlot(birth, 0, birthSlot0);
+        upper.uninstall();
+        lower.uninstall();
+    }
+
+    // (b) NOT IN LIVE MODE, where the forward IS a stub and every call would be
+    // reported as a divergence. The policy is read off the mode the hook took;
+    // this cell shows what it would cost to arm it anyway.
+    {
+        RealThing obj;
+        void**    birth = *reinterpret_cast<void***>(&obj);
+        VTableHook live;
+        g_owner = &obj;
+        live.attach(&obj);
+        check(live.setMode(HookMode::LiveCopy), "the live hook builds",
+              "setMode refused");
+        void* forward = nullptr;
+        live.replace(0, reinterpret_cast<void*>(&thunkOne), &forward);
+        live.commit();
+
+        check(!staleWatchFor(live.mode()),
+              "the stale check is NOT armed in live mode",
+              "a stub's address would be compared against a function's and every "
+              "call reported as a divergence");
+        // What it would say if it were, with nothing whatever having changed.
+        g_staleHits = 0;
+        noteStaleForwardLike(live.originalVTable(), 0, forward);
+        check(g_staleHits == 1,
+              "...and this is why: armed, it fires immediately on a table that "
+              "has not moved",
+              "the demonstration is broken, so the policy above rests on "
+              "nothing");
+        live.uninstall();
+        check(*reinterpret_cast<void***>(&obj) == birth,
+              "...cleanup restored the vptr", "the cell left the object hooked");
+    }
+
+    // (c) THE MODE THAT WAS TAKEN, NOT THE ONE THAT WAS ASKED FOR. setMode can
+    // refuse -- the live block may not allocate, and it refuses outright once
+    // anything has been staged -- and a refusal leaves the hook in InPlace.
+    // Deriving the stale watch from the REQUESTED mode then arms it over a
+    // shared-table hook whose forward is the entry we replaced, and the first
+    // draw prints "STALE FORWARD ... the private-copy mode's failure case ...
+    // has never been observed before" against EDVR's own thunk. There is no
+    // louder false report in this codebase.
+    {
+        RealThing obj;
+        VTableHook refused;
+        g_owner = &obj;
+        refused.attach(&obj);
+        refused.replace(0, reinterpret_cast<void*>(&thunkOne),
+                        reinterpret_cast<void**>(&g_realOne));
+        const HookMode requested = HookMode::CopyVptr;
+        check(!refused.setMode(requested),
+              "setMode refuses once a slot has been staged",
+              "the mode changed under staged patches");
+        check(refused.mode() == HookMode::InPlace,
+              "...and the hook is left in the mode it can actually honour",
+              "a refused setMode left the hook half converted");
+        check(staleWatchFor(requested) && !staleWatchFor(refused.mode()),
+              "...so the stale watch must be derived from mode(), which says "
+              "off, and not from the request, which says on",
+              "the two agree here, so this cell cannot tell the derivations "
+              "apart");
+        refused.uninstall();
     }
 
     // The module probe that drives the whole decision: a vtable inside a

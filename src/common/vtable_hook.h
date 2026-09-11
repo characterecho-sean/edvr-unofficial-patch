@@ -561,6 +561,17 @@ public:
     size_t reclaim(const char* name, const size_t* quietSlots = nullptr,
                    size_t quietCount = 0);
 
+    // THE CENSUS ON ITS OWN, for a hook nobody calls reclaim() on.
+    //
+    // The drift walk and the flip dump ride inside reclaim's private branch,
+    // and the two context probes (context_hook_probe = swap and live) install
+    // no fix, so nothing on the frame path ever calls reclaim -- which means
+    // those sessions, the ones that exist to ask what the runtime is doing to
+    // the table, reported nothing about it at all. Call this about once a
+    // second from a frame path instead. No-op unless the hook is committed in a
+    // private mode.
+    void censusTick(const char* name);
+
     // How many committed slots the last reclaim() pass found holding something
     // that is neither our replacement nor a co-owner's -- whether or not it
     // re-patched any of them.
@@ -655,9 +666,33 @@ private:
     // how uninstall peels a stack, and that there is no shared slot to patrol.
     bool usesPrivateTable() const { return m_mode != HookMode::InPlace; }
 
-    // LiveCopy only: allocate the stub page and fill m_copy with its entries.
-    // Called from setMode, once, before anything is staged.
+    // The table the object dispatches through in a private mode, and how many
+    // entries it has. CopyVptr's lives in m_copy; LiveCopy's lives at the front
+    // of the never-freed stub allocation, because a table whose cells an upper
+    // hook's stubs dereference must outlive this hook exactly as the stubs do.
+    // Null and 0 in place, where the object dispatches through the shared table.
+    void** dispatchTable() const {
+        if (m_mode == HookMode::LiveCopy) return m_liveTable;
+        if (m_mode == HookMode::CopyVptr) return const_cast<void**>(m_copy.data());
+        return nullptr;
+    }
+    size_t dispatchCount() const {
+        if (m_mode == HookMode::LiveCopy) return m_stubCount;
+        if (m_mode == HookMode::CopyVptr) return m_copy.size();
+        return 0;
+    }
+
+    // LiveCopy only: allocate the block that holds BOTH the private table and
+    // its stubs, and fill both in. Called from setMode, once, before anything
+    // is staged. See m_liveBlock for why they share one allocation.
     bool buildLiveStubs();
+
+    // LiveCopy only: make the whole block execute-read, once, after commit has
+    // written its patches into the table and before the vptr moves onto it.
+    // Never PAGE_EXECUTE_READWRITE -- a writable-executable page is the single
+    // strongest heuristic every antivirus scanner looks for, and EDVR already
+    // carries a Defender false positive without handing it one.
+    bool sealLiveBlock();
 
     // The one aligned pointer store that moves the object onto m_copy, shared
     // by commit(), commitUnpatched() and commitLive() so that three entry
@@ -711,16 +746,27 @@ private:
     // report all 302 entries as changed on the first pass, every pass, forever.
     // It is read-only after setMode and is never dispatched through.
     std::vector<void*> m_frozen;
-    // LiveCopy only: the executable page holding one stub per entry.
+    // LiveCopy only: one allocation holding the private TABLE and then one stub
+    // per entry -- m_liveTable points at its front, the stubs follow.
     //
     // DELIBERATELY LEAKED at uninstall, and this is not an oversight to tidy up
     // later. A thread can be executing inside a stub at the instant the vptr is
     // restored -- the call was dispatched before the store and returns after it
     // -- and freeing the page under it is an access violation in somebody
-    // else's code with EDVR nowhere on the stack. It is a few kilobytes, once
-    // per hook per session, on a teardown that only runs under FreeLibrary
-    // (the game exits by TerminateProcess). Forgetting the pointer IS the leak.
-    uint8_t*           m_stubs = nullptr;
+    // else's code with EDVR nowhere on the stack.
+    //
+    // THE TABLE IS IN THE SAME ALLOCATION FOR THE SAME REASON, and it was in a
+    // std::vector that uninstall cleared. An upper live hook's stubs hold the
+    // addresses of THIS hook's table cells as immediates and dereference them at
+    // every call, so freeing the table while such a hook is still installed is a
+    // read of freed memory on the next draw -- reached by unwinding the two
+    // hooks in the wrong order, which the shipped teardown does not do and which
+    // nothing enforced. Now there is nothing to free: one VirtualAlloc, never
+    // released, a few kilobytes once per hook per session, on a teardown that
+    // only runs under FreeLibrary (the game exits by TerminateProcess).
+    // Forgetting the pointer IS the leak.
+    uint8_t*           m_liveBlock = nullptr;
+    void**             m_liveTable = nullptr;
     size_t             m_stubCount = 0;
     bool               m_copyBreachNoted = false;  // the copy-mode breach line, said once
     // How many passes found the live shared table saying something our copy

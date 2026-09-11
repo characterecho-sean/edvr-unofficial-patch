@@ -1550,7 +1550,20 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     // The mechanism, decided once per device by the caller and shared with the
     // vScreen hooks so the two never disagree about this one object. Between
     // attach and the first replace, which is the only window setMode allows.
-    s.hook.setMode(mode);
+    //
+    // THE RETURN VALUE IS READ, because setMode can refuse -- the live mode's
+    // block may not allocate -- and a refusal leaves the hook in InPlace while
+    // every line downstream goes on describing the mode that was asked for. The
+    // install line below prints mode() and is therefore honest either way; this
+    // says plainly that the two differ, because "EDVR is in shared mode" is the
+    // single most load-bearing fact in an issue #21 log.
+    if (!s.hook.setMode(mode) && mode != HookMode::InPlace) {
+        Log::get().note(
+            "exposure fix: the context hook could NOT take the mode it was "
+            "given, so it is patching the shared table in place instead. Every "
+            "line below says what it actually did; if advanced.context_hook_mode "
+            "asked for private or live, this session is not testing it.");
+    }
     // Same implementation module as vScreen's hook on the same object -- the
     // two must agree about this as well, or one of them would take a slot back
     // from the runtime while the other conceded it (issue #21).
@@ -1601,39 +1614,14 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
 
     // WHICH VARIANT THE TABLE WAS ON AT INSTALL, named by module and offset.
     //
-    // Issue #21's whole question is whether the runtime SWITCHES the
-    // work-emitting family between two implementations, and the reporter's
-    // logs name the destination (..._DrawIndexed_Amortized<1>) without ever
-    // naming the departure point -- so "24 entries changed" cannot be matched
-    // up between two runs, or between a run and a PDB. Two slots are enough to
-    // fix that: DrawIndexed, which the field data says moves, and
-    // ClearRenderTargetView, which is the same family and a different block of
-    // the table. Costs two VirtualQuery calls, once, at install.
-    //
-    // Read from THIS hook and not vScreen's. The exposure hook installs first,
-    // so its m_vtable is the runtime's real embedded table in every mode; once
-    // a private mode is in play vScreen's is this hook's private buffer, and
-    // printing that would name EDVR's own stubs as the runtime's variant.
-    {
-        void** table = s.hook.originalVTable();
-        if (table && s.hook.executablePrefix() > 50) {
-            void* drawIndexed = nullptr;
-            void* clearRtv = nullptr;
-            guarded("exposure/install-variant-read", [&] {
-                drawIndexed = table[12];
-                clearRtv = table[50];
-            });
-            char a[MAX_PATH], b[MAX_PATH];
-            Log::get().note(
-                "context table at install: slot 12 (DrawIndexed) = %s; slot 50 "
-                "(ClearRenderTargetView) = %s. These are the entries the runtime "
-                "had selected when EDVR arrived -- quote them beside any later "
-                "line about entries changing, because a changed entry only means "
-                "something next to the one it changed FROM.",
-                vtableOwnerModuleName(drawIndexed, a, sizeof(a)),
-                vtableOwnerModuleName(clearRtv, b, sizeof(b)));
-        }
-    }
+    // From THIS hook and not vScreen's: the exposure hook installs first, so its
+    // m_vtable is the runtime's real embedded table in every mode, while
+    // vScreen's is this hook's private buffer the moment a private mode is in
+    // play -- and printing that would name EDVR's own stubs as the runtime's
+    // variant. The body lives in device_hook now because the two context probes
+    // need it too and never ran this function; see logContextTableVariants.
+    logContextTableVariants(s.hook.originalVTable(), s.hook.executablePrefix(),
+                            "exposure context");
     exposureConfigure(cfg);
     ctx->Release();
 }

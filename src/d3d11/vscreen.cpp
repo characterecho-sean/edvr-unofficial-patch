@@ -2315,10 +2315,32 @@ void endPanelOverride(ID3D11DeviceContext* self) {
 // mismatch goes to the BREADCRUMB file as well as the log, because that file is
 // written unbuffered and survives the process being killed by a TDR -- which is
 // how these sessions end.
+//
+// WHICH TABLE IT READS IS THE WHOLE DETECTOR, and it read the wrong one. It took
+// THIS hook's table, and in every private mode that is the EXPOSURE hook's
+// private buffer -- vScreen attaches to the context after exposure has already
+// moved its vptr. So `now` was the value this file had itself frozen, the
+// compare could not fail, and the conclusion drawn from its silence ("STALE
+// FORWARD has never been observed, so the frozen copy is harmless") was never
+// evidence of anything: it was a load and a compare of one variable against
+// itself, on every draw, all session. exposureFixContextTable() hands back the
+// bottom hook's table, which IS the one the context holds, in every mode.
+//
+// AND EVERY SLOT THIS IS CALLED FOR IS ONE THE EXPOSURE HOOK DOES NOT PATCH --
+// it takes CSSetShader, CSSetUAVs, Dispatch, DispatchIndirect and ClearState,
+// none of which is below. That is what makes `frozen` the runtime's own entry
+// rather than a co-owner's thunk; if the two lists ever overlap, this compares
+// vScreen's forward against the exposure thunk sitting in the slot and reports a
+// perfectly healthy stack as a divergence.
 inline void noteStaleForward(size_t slot, const void* frozen, const char* what) {
     State* s = g_state;
     if (!s || !s->watchStale) return;
-    void** live = s->hook.originalVTable();
+    size_t span = 0;
+    void** live = exposureFixContextTable(&span);
+    // No exposure hook (it failed to install, or a future build stops hooking
+    // the context): this hook's own table is then the context's, because nothing
+    // moved the vptr before it.
+    if (!live) live = s->hook.originalVTable();
     if (!live) return;
     void* now = nullptr;
     if (!guarded("vScreen/stale-check", [&] { now = live[slot]; })) return;
@@ -4993,7 +5015,18 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // The mechanism, decided once per device by the caller and shared with the
     // exposure hooks so the two agree about this one object. Between attach
     // and the first replace, the only window setMode allows.
-    s.hook.setMode(mode);
+    //
+    // The return value is read, because setMode can refuse -- the live mode's
+    // block may not allocate -- and a refusal leaves this hook patching the
+    // shared table while the config still says private. Everything below reports
+    // mode(), so the lines stay honest; this says plainly that they differ.
+    if (!s.hook.setMode(mode) && mode != HookMode::InPlace) {
+        Log::get().note(
+            "vScreen: the context hook could NOT take the mode it was given, so "
+            "it is patching the shared table in place instead. If "
+            "advanced.context_hook_mode asked for private or live, this session "
+            "is not testing it.");
+    }
     // And who implements this context, so reclaim can take a slot back from
     // the runtime's own re-pointing without waiting for call evidence that a
     // total bypass never produces (issue #21).
@@ -5003,7 +5036,15 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // that reads the live entry, so it cannot be stale by construction and a
     // detector for it would compare a stub's address against a function's and
     // report every call as a divergence. Off in both.
-    s.watchStale = (mode == HookMode::CopyVptr);
+    //
+    // FROM mode(), NOT from the mode that was REQUESTED. A refused setMode
+    // leaves this hook in place with the forward being the entry we replaced,
+    // and the requested mode would then arm a detector that fires on the first
+    // draw -- printing "STALE FORWARD ... THIS is the private-copy mode's
+    // failure case and it has never been observed before" against EDVR's own
+    // thunk, in a session that is not even in that mode. There is no louder
+    // false report in this codebase.
+    s.watchStale = (s.hook.mode() == HookMode::CopyVptr);
 
     s.hook.replace(kSlotClearRenderTargetView, &hookedClearRtv,
                    reinterpret_cast<void**>(&s.realClearRtv));

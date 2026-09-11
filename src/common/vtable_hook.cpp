@@ -45,6 +45,35 @@ size_t    g_slotOwnerCount = 0;
 // "in practice" from that sentence.
 SRWLOCK g_slotOwnersLock = SRWLOCK_INIT;
 
+// WHICH TABLES ARE EDVR'S OWN, and how long each of them really is.
+//
+// Two hooks stack on the one context: exposure commits first, vScreen attaches
+// afterwards and therefore reads the vptr exposure already moved. So in every
+// private mode the UPPER hook's "runtime table" is the LOWER hook's private
+// buffer, and two of its reports are then false by construction:
+//
+//   * the census walks that buffer against its own copy of it, finds zero
+//     drift every pass forever, and prints "the context's own table still
+//     holds every entry it held when EDVR attached" -- a confident sentence
+//     about a table nothing outside EDVR can write. On the rig whose runtime
+//     re-lays the real table every frame, that line is the opposite of true.
+//   * the method count is the BUFFER's length, not the interface's. A live
+//     lower hook's table is 512 executable stub addresses, so the upper hook
+//     announces 512 methods where the exposure hook says 302 -- and "(N
+//     methods)" is the number the field has been reading since issue #6 to tell
+//     a real context from a wrapper's.
+//
+// The registry answers both: a hook can ask whether its table belongs to
+// another EDVR hook, and if so, how many entries that hook believes in.
+struct PrivateTable {
+    void**            table = nullptr;
+    size_t            logical = 0;   // the OWNER's method count, not the buffer's
+    const VTableHook* owner = nullptr;
+};
+constexpr size_t kMaxPrivateTables = 8;
+PrivateTable g_privateTables[kMaxPrivateTables];
+size_t       g_privateTableCount = 0;   // under g_slotOwnersLock
+
 // Set when the registry overflows. Reclaim then stops FOR EVERY HOOK, not just
 // the overflowing one: a hook that is patched but invisible to the registry is
 // read by its shared-slot co-owner as an intruder, and "re-claiming" a
@@ -61,6 +90,45 @@ bool g_slotOwnersPoisoned = false;
 // before the concession -- still bounded, still loud, and slow enough that
 // the log shows the rhythm of the fight rather than a blur.
 constexpr uint32_t kMaxRepatchesPerSlot = 64;
+
+// Is this table another EDVR hook's private one? Copies out what the caller
+// needs rather than handing back a pointer into a table the lock protects.
+bool findPrivateTable(void** table, const VTableHook* notThis, size_t* logicalOut) {
+    if (!table) return false;
+    bool found = false;
+    AcquireSRWLockShared(&g_slotOwnersLock);
+    for (size_t i = 0; i < g_privateTableCount; ++i) {
+        if (g_privateTables[i].table != table) continue;
+        if (g_privateTables[i].owner == notThis) continue;
+        if (logicalOut) *logicalOut = g_privateTables[i].logical;
+        found = true;
+        break;
+    }
+    ReleaseSRWLockShared(&g_slotOwnersLock);
+    return found;
+}
+
+void registerPrivateTable(void** table, size_t logical, const VTableHook* owner) {
+    if (!table) return;
+    AcquireSRWLockExclusive(&g_slotOwnersLock);
+    if (g_privateTableCount < kMaxPrivateTables) {
+        PrivateTable& p = g_privateTables[g_privateTableCount++];
+        p.table = table;
+        p.logical = logical;
+        p.owner = owner;
+    }
+    ReleaseSRWLockExclusive(&g_slotOwnersLock);
+}
+
+void unregisterPrivateTable(const VTableHook* owner) {
+    AcquireSRWLockExclusive(&g_slotOwnersLock);
+    size_t kept = 0;
+    for (size_t i = 0; i < g_privateTableCount; ++i) {
+        if (g_privateTables[i].owner != owner) g_privateTables[kept++] = g_privateTables[i];
+    }
+    g_privateTableCount = kept;
+    ReleaseSRWLockExclusive(&g_slotOwnersLock);
+}
 
 // Which DLL owns this pointer, for the reclaim log lines.
 //
@@ -208,13 +276,25 @@ struct WriteWatch {
     SIZE_T    pageSize = 0;          // span, rounded out to page boundaries
     DWORD     writableProtect = 0;   // what the pages were, and are put back to
     DWORD     readOnlyProtect = 0;   // the same without write permission
-    volatile LONG armed = 0;
+    // ONE WORD FOR THE WHOLE STATE MACHINE: whether the pages are closed, and
+    // who is mid-catch. kCatchArmed, kCatchIdle, or a thread id.
+    //
+    // It was two -- an `armed` flag and an owner -- and no ordering of two words
+    // is safe, because a claim is "take armed" THEN "publish the owner" with a
+    // VirtualProtect syscall in between. The frame path's re-arm, checking the
+    // owner in that gap, saw nobody, armed the pages, and a SECOND thread then
+    // claimed while the first was still mid-catch: two owners, and the first
+    // one's single step arrived as an orphan. Measured at roughly one run in
+    // three of the four-writer cell with the words separate, and never once with
+    // them merged. A claim is now a compare-exchange from ARMED to this thread,
+    // a release is a compare-exchange from this thread back to IDLE, and neither
+    // can be observed half done.
+    volatile LONG catchState = 0;    // set to kCatchIdle at arming, see below
     volatile LONG rearmWanted = 0;   // the frame-path fallback, see vtableWatchRearm
-    // Frames the frame-path re-arm has held off because a single step was still
-    // owed. Frame path only, so no atomics. See vtableWatchRearm.
-    uint32_t  rearmHeld = 0;
-    volatile LONG stepPending = 0;   // a single step is owed to us
-    volatile LONG stepThread = 0;    // ...by this thread, and no other
+    // When the frame-path re-arm first held off because a single step was still
+    // owed, as a QPC stamp; 0 when it is not holding. Frame path only, so no
+    // atomics. See vtableWatchRearm.
+    uint64_t  rearmHeldSince = 0;
     // A budget ran out and the frame path must stop the watch. Set in the
     // handler, acted on from vtableWatchFrameTick -- see reportWatchSummary for
     // why the handler may not do the stopping itself.
@@ -565,6 +645,13 @@ constexpr uint32_t kMaxWatchCatches = 2000;
 // raises a single-step exception after exactly one instruction.
 constexpr DWORD kTrapFlag = 0x100;
 
+// The two values of WriteWatch::catchState that are not a thread id. Zero is
+// not used for either, so a zero-initialised watch is neither armed nor idle
+// and the handler's compare-exchanges all fail against it -- which is the right
+// behaviour for a watch nobody has armed.
+constexpr LONG kCatchArmed = -1;   // pages read-only, nobody mid-catch
+constexpr LONG kCatchIdle = -2;    // pages writable, nobody mid-catch
+
 // The same protection without write permission, or 0 if there is nothing to
 // take away (already read-only, or no access at all).
 DWORD withoutWrite(DWORD p) {
@@ -689,28 +776,36 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     // unseen behind the first one. Re-protecting here instead means every
     // write is caught, which is the difference between "somebody wrote near our
     // table" and "somebody wrote OUR TABLE".
-    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watch.pageBase) {
+    // ANY SINGLE STEP, WHILE THIS HANDLER HAS EVER ARMED A WATCH -- not only
+    // while one is armed NOW. The trap flag is ours and nothing else in this
+    // process sets one, so a step arriving after the watch has been stopped is
+    // still a trap we set, and handing it back kills the process just as surely.
+    // g_watchHandler is registered on the first arming and never removed, which
+    // makes it exactly the test "EDVR has used the trap flag in this process".
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watchHandler) {
+        // Claim the release, do not merely test it: the state word says who owns
+        // the catch, and letting go of it has to be one operation for the same
+        // reason taking it does. IDLE, not ARMED -- the pages are still writable
+        // at this instant and saying otherwise is the blindness below.
+        const LONG me = static_cast<LONG>(GetCurrentThreadId());
         const bool mine =
-            InterlockedCompareExchange(&g_watch.stepPending, 0, 0) != 0 &&
-            InterlockedCompareExchange(&g_watch.stepThread, 0, 0) ==
-                static_cast<LONG>(GetCurrentThreadId());
+            InterlockedCompareExchange(&g_watch.catchState, kCatchIdle, me) == me;
         if (!mine) {
             // NEVER HAND BACK A TRAP WE SET.
             //
-            // A single step arriving here while a watch exists and not matching
-            // the pair we owed ourselves is, one way or another, ours: the trap
-            // flag is not something anything else in this process sets. Passing
-            // it on means EXCEPTION_CONTINUE_SEARCH, and nobody downstream
-            // handles STATUS_SINGLE_STEP -- the process dies, EDVR is blamed,
-            // and correctly. Measured before the claim below became atomic: four
+            // A single step arriving here while a watch exists and not owned by
+            // this thread is, one way or another, ours: the trap flag is not
+            // something anything else in this process sets. Passing it on means
+            // EXCEPTION_CONTINUE_SEARCH, and nobody downstream handles
+            // STATUS_SINGLE_STEP -- the process dies, EDVR is blamed, and
+            // correctly. Measured before the claim below became atomic: four
             // writer threads, all dead inside 50 ms, three runs out of three.
-            // The pair is single-owner now, so this must never fire; the count
-            // is what says so rather than an assumption that it does not.
+            // Ownership is one word now, so this must never fire; the count is
+            // what says so rather than an assumption that it does not.
             InterlockedIncrement(&g_watch.chimera);
             if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        InterlockedExchange(&g_watch.stepPending, 0);
         if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
         // THE SECOND READ. The store has retired, so the cell now holds the
         // value the writer meant to put there. Same value as before: a restore,
@@ -737,23 +832,29 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
         //
         // It was the other way round: re-protect, then set armed. A write
         // arriving in that window takes the concurrent branch below, which makes
-        // the pages WRITABLE and returns -- and then this thread sets armed to 1
-        // with the pages writable and nothing pending. No write faults ever
-        // again, vtableWatchRearm has nothing to put back because rearmWanted is
-        // 0, and the instrument reports its findings up to that instant and
-        // silence after it. Measured with two writer threads: blind after about
-        // 250 ms, 282 catches, then nothing for the rest of the run.
+        // the pages WRITABLE and returns -- and then this thread sets armed with
+        // the pages writable and nothing pending. No write faults ever again,
+        // vtableWatchRearm has nothing to put back because rearmWanted is 0, and
+        // the instrument reports its findings up to that instant and silence
+        // after it. Measured with two writer threads: blind after about 250 ms,
+        // 282 catches, then nothing for the rest of the run.
         //
         // This way the window says "armed but writable", which loses the writes
         // that land inside it -- a few microseconds of them -- and cannot lose
         // the watch. A VirtualProtect that refuses hands the job to the frame
-        // path rather than leaving the flag lying about the pages.
-        if (watchKeepsArming()) {
-            InterlockedExchange(&g_watch.armed, 1);
-            DWORD previous = 0;
-            if (!VirtualProtect(g_watch.pageBase, g_watch.pageSize,
-                                g_watch.readOnlyProtect, &previous)) {
-                InterlockedExchange(&g_watch.rearmWanted, 1);
+        // path rather than leaving the state lying about the pages. And the arm
+        // is a compare-exchange FROM idle, so if the frame path or another
+        // thread has taken the state in the meantime this leaves it alone rather
+        // than stamping ARMED over somebody's catch.
+        if (g_watch.pageBase && watchKeepsArming()) {
+            const LONG prev = InterlockedCompareExchange(
+                &g_watch.catchState, kCatchArmed, kCatchIdle);
+            if (prev == kCatchIdle || prev == kCatchArmed) {
+                DWORD previous = 0;
+                if (!VirtualProtect(g_watch.pageBase, g_watch.pageSize,
+                                    g_watch.readOnlyProtect, &previous)) {
+                    InterlockedExchange(&g_watch.rearmWanted, 1);
+                }
             }
         }
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -777,15 +878,16 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
 
     // CLAIM THE CATCH, ATOMICALLY, AND THE WHOLE PROCESS DEPENDS ON IT.
     //
-    // This was a read of `armed` with a no-op compare-exchange, a VirtualProtect
-    // syscall, and only then a clear -- so two threads faulting on the same page
-    // could both read 1, both come through, both set the trap flag and both
-    // write the single global stepThread. The loser's single step then failed
-    // the pair test above, fell through to EXCEPTION_CONTINUE_SEARCH, and
-    // nothing in the process handles STATUS_SINGLE_STEP: the game died. Measured
-    // with four writer threads -- all four dead within 50 ms, three runs out of
-    // three. One exchange claims it, so exactly one thread owns a catch at a
-    // time and every other faulting thread takes the branch below.
+    // This was a read of an `armed` flag with a no-op compare-exchange, a
+    // VirtualProtect syscall, and only then a clear -- so two threads faulting
+    // on the same page could both read it, both come through, both set the trap
+    // flag and both write the one global that says whose step is owed. The
+    // loser's single step then failed the ownership test above, fell through to
+    // EXCEPTION_CONTINUE_SEARCH, and nothing in the process handles
+    // STATUS_SINGLE_STEP: the game died. Measured with four writer threads --
+    // all four dead within 50 ms, three runs out of three. ONE compare-exchange
+    // takes the state from ARMED to this thread, so exactly one thread owns a
+    // catch at a time and every other faulting thread takes the branch below.
     //
     // THE LOSER'S WRITE IS NOT LOST TO THE PROCESS, only to the instrument. The
     // pages are writable at this moment -- that is what being unarmed means
@@ -795,12 +897,21 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     // case this thread's catch was the one that was meant to. A VirtualProtect
     // that refuses falls through to the old behaviour, so a genuinely
     // unwritable page cannot spin here forever.
-    if (InterlockedCompareExchange(&g_watch.armed, 0, 1) != 1) {
+    const LONG me = static_cast<LONG>(GetCurrentThreadId());
+    if (InterlockedCompareExchange(&g_watch.catchState, me, kCatchArmed) !=
+        kCatchArmed) {
         DWORD previous = 0;
         if (!VirtualProtect(g_watch.pageBase, g_watch.pageSize,
                             g_watch.writableProtect, &previous)) {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+        // THE CATCH'S OWN THREAD CAN LAND HERE, and it is not a lost write when
+        // it does. A thread that has already claimed and had its pages closed
+        // again underneath it -- by the frame path, or by another thread's step
+        // -- faults a second time on the same store, finds the catch taken (by
+        // itself), opens the pages and carries on with its trap flag and its
+        // ownership intact. Its step still completes normally. Measured at one
+        // or two occurrences per 300 ms of four-thread hammering.
         InterlockedIncrement(&g_watch.concurrent);
         InterlockedExchange(&g_watch.rearmWanted, 1);
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -813,14 +924,16 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
                    &ignored);
     if (ep->ContextRecord) {
         ep->ContextRecord->EFlags |= kTrapFlag;
-        InterlockedExchange(&g_watch.stepThread,
-                            static_cast<LONG>(GetCurrentThreadId()));
-        InterlockedExchange(&g_watch.stepPending, 1);
+        // Ownership is already ours -- the compare-exchange above wrote this
+        // thread's id into the state word. There is nothing further to publish,
+        // which is the point: it cannot be half claimed.
     } else {
-        // No context to step with. Fall back to the frame path, which is a
-        // whole frame late and will miss the rest of any sweep -- said nowhere
-        // because it has never been observed; the fallback exists so that a
-        // missing context cannot silently end the watch.
+        // No context to step with, so no step will ever come: hand the state
+        // back and let the frame path close the pages. A whole frame late, and
+        // it will miss the rest of any sweep -- said nowhere because it has
+        // never been observed; the fallback exists so that a missing context
+        // cannot silently end the watch.
+        InterlockedCompareExchange(&g_watch.catchState, kCatchIdle, me);
         InterlockedExchange(&g_watch.rearmWanted, 1);
     }
 
@@ -1246,8 +1359,7 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
     InterlockedExchange(&g_watch.siteCount, 0);
     InterlockedExchange(&g_watch.stopWanted, 0);
     InterlockedExchange(&g_watch.stopReason, kStopNone);
-    InterlockedExchange(&g_watch.stepPending, 0);
-    g_watch.rearmHeld = 0;
+    g_watch.rearmHeldSince = 0;
     for (uint32_t i = 0; i < 8; ++i) InterlockedExchange64(&g_watch.slotsWritten[i], 0);
     g_watch.finished = false;
     g_watch.timeline = timeline;
@@ -1284,7 +1396,7 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
         g_watch.timeline = false;
         return false;
     }
-    InterlockedExchange(&g_watch.armed, 1);
+    InterlockedExchange(&g_watch.catchState, kCatchArmed);
     Log::get().note(
         "VTableHook %s: %s ARMED on slot %zu at %p. The table runs %p to %p and "
         "the %llu bytes protected for it start at %p (%s) and cover slots %zu to "
@@ -1344,23 +1456,42 @@ void vtableWatchRearm() {
     // only path in the file that can produce one now.
     //
     // Held, not abandoned: rearmWanted stays set and the next frame tries
-    // again. The escape exists because a step that never arrives (a debugger
-    // swallowing it, a thread killed mid-catch) would otherwise leave the pages
-    // open for the session -- eight frames is a hundred milliseconds past any
-    // single instruction, so it is counted as unfinished and the pages come back.
-    constexpr uint32_t kMaxRearmHolds = 8;
-    if (InterlockedCompareExchange(&g_watch.stepPending, 0, 0)) {
-        if (++g_watch.rearmHeld < kMaxRearmHolds) return;
-        InterlockedExchange(&g_watch.stepPending, 0);
+    // again. The owner's own step re-protects the pages a microsecond later
+    // anyway, so holding costs nothing at all in the ordinary case.
+    //
+    // The escape exists because a step that never arrives -- a debugger
+    // swallowing it, a thread killed mid-catch -- would otherwise leave the
+    // pages open for the session, which is the blindness this whole ordering was
+    // rewritten to prevent. TWO SECONDS, and not the eight frames it was first
+    // written as: eight frames is eight milliseconds, a thread under contention
+    // is off the CPU for longer than that routinely, and clearing the flag under
+    // a step that is merely LATE manufactures exactly the orphaned step the
+    // handler counts as a chimera. Two seconds is past any scheduling delay and
+    // still bounded.
+    constexpr double kRearmHoldLimitS = 2.0;
+    LONG prev = InterlockedCompareExchange(&g_watch.catchState, kCatchArmed,
+                                           kCatchIdle);
+    if (prev != kCatchIdle && prev != kCatchArmed) {
+        // A thread is mid-catch. Hold.
+        const uint64_t now = static_cast<uint64_t>(qpcNow());
+        if (!g_watch.rearmHeldSince) g_watch.rearmHeldSince = now;
+        const int64_t freq = qpcFrequency();
+        const double held =
+            freq > 0 ? static_cast<double>(now - g_watch.rearmHeldSince) /
+                           static_cast<double>(freq)
+                     : 0.0;
+        if (held < kRearmHoldLimitS) return;
+        InterlockedExchange(&g_watch.catchState, kCatchArmed);
         InterlockedIncrement(&g_flip.unfinished);
     }
-    g_watch.rearmHeld = 0;
+    g_watch.rearmHeldSince = 0;
     InterlockedExchange(&g_watch.rearmWanted, 0);
+    // The state says ARMED from here whether it was idle or already armed; the
+    // pages may still be open either way (a concurrent catch opens them without
+    // touching the state), so protect unconditionally.
     DWORD previous = 0;
-    if (VirtualProtect(g_watch.pageBase, g_watch.pageSize,
-                       g_watch.readOnlyProtect, &previous)) {
-        InterlockedExchange(&g_watch.armed, 1);
-    }
+    VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.readOnlyProtect,
+                   &previous);
 }
 
 // What a stopped watch says on its way out, in the words of whichever budget
@@ -1671,7 +1802,11 @@ void vtableWatchStop() {
     // twenty things and then had the game closed on it should not take them
     // with it. No-op when the budget already printed one.
     if (InterlockedCompareExchange(&g_watch.catches, 0, 0)) reportWatchSummary();
-    InterlockedExchange(&g_watch.armed, 0);
+    // ARMED to IDLE, and only from ARMED: a thread may be between its fault and
+    // its step at this instant, and taking its ownership away would make its
+    // step an orphan -- which is the fault that kills the process. It releases
+    // the state itself, finds the watch finished, and re-protects nothing.
+    InterlockedCompareExchange(&g_watch.catchState, kCatchIdle, kCatchArmed);
     InterlockedExchange(&g_watch.rearmWanted, 0);
     InterlockedExchange(&g_watch.pendingLive, 0);
     InterlockedExchange(&g_watch.stopWanted, 0);
@@ -1861,6 +1996,17 @@ bool VTableHook::attach(void* object, size_t maxEntries) {
     // The executable prefix is a sanity check only -- it says "this really is a
     // vtable" and bounds which slots we are willing to patch.
     m_execPrefix = probeVTableLength(vt, maxEntries);
+    // EXCEPT WHEN THE TABLE IS ANOTHER EDVR HOOK'S, where the probe measures the
+    // BUFFER and not the interface. A live lower hook's table is 512 executable
+    // stub addresses, so this walks all 512 and the upper hook announces "512
+    // methods" where the hook underneath says 302 -- and that number is what the
+    // field has been reading since issue #6 to tell a real context from a
+    // wrapper's proxy. The registry knows what the lower hook believes; take it.
+    size_t lowerLogical = 0;
+    if (findPrivateTable(vt, this, &lowerLogical) && lowerLogical &&
+        lowerLogical < m_execPrefix) {
+        m_execPrefix = lowerLogical;
+    }
     if (m_execPrefix < 4) {
         Log::get().note("VTableHook: implausible vtable at %p (%zu executable entries)",
                         object, m_execPrefix);
@@ -1888,26 +2034,36 @@ bool VTableHook::attach(void* object, size_t maxEntries) {
 // a 32-bit displacement cannot promise that. Ten bytes buys unconditional
 // reach.
 //
-// Written READ-WRITE and then flipped to EXECUTE-READ, never allocated RWX: a
-// writable-executable page is the single strongest heuristic every antivirus
-// scanner looks for, and EDVR already carries a Defender false positive without
-// handing it one. FlushInstructionCache afterwards because these bytes were
-// written as data and are about to be fetched as code.
+// Written READ-WRITE and then flipped to EXECUTE-READ by sealLiveBlock once the
+// patches are in, never allocated RWX: a writable-executable page is the single
+// strongest heuristic every antivirus scanner looks for, and EDVR already
+// carries a Defender false positive without handing it one.
+//
+// THE TABLE LIVES AT THE FRONT OF THE SAME ALLOCATION, and that is not tidiness.
+// See m_liveBlock: an upper live hook bakes the ADDRESSES of this table's cells
+// into its own stubs, so the table has to outlive this hook exactly as the stubs
+// do, and a std::vector that uninstall clears does not.
 bool VTableHook::buildLiveStubs() {
-    const size_t count = m_copy.size();
+    const size_t count = m_frozen.size();
     if (!count) return false;
-    const size_t bytes = count * kLiveStubBytes;
-    uint8_t* page = static_cast<uint8_t*>(
+    // The table rounded up to the stub alignment, so every stub still starts on
+    // a sixteen-byte boundary and the slot index stays a shift in a disassembly.
+    const size_t tableBytes =
+        ((count * sizeof(void*)) + kLiveStubBytes - 1) & ~(kLiveStubBytes - 1);
+    const size_t bytes = tableBytes + count * kLiveStubBytes;
+    uint8_t* block = static_cast<uint8_t*>(
         VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (!page) {
+    if (!block) {
         Log::get().note("VTableHook: could not allocate %zu bytes for the live "
-                        "vtable's jump stubs (err %lu), so the live mode is off "
-                        "and the caller keeps the mode it had.",
+                        "vtable and its jump stubs (err %lu), so the live mode "
+                        "is off and the caller keeps the mode it had.",
                         bytes, GetLastError());
         return false;
     }
+    uint8_t* stubs = block + tableBytes;
+    void**   table = reinterpret_cast<void**>(block);
     for (size_t i = 0; i < count; ++i) {
-        uint8_t* s = page + i * kLiveStubBytes;
+        uint8_t* s = stubs + i * kLiveStubBytes;
         void* const cell = static_cast<void*>(&m_vtable[i]);
         s[0] = 0x48;
         s[1] = 0xB8;
@@ -1915,23 +2071,30 @@ bool VTableHook::buildLiveStubs() {
         s[10] = 0xFF;
         s[11] = 0x20;
         for (size_t k = 12; k < kLiveStubBytes; ++k) s[k] = 0xCC;
+        table[i] = static_cast<void*>(s);
     }
+    m_liveBlock = block;
+    m_liveTable = table;
+    m_stubCount = count;
+    return true;
+}
+
+bool VTableHook::sealLiveBlock() {
+    if (m_mode != HookMode::LiveCopy) return true;
+    if (!m_liveBlock || !m_stubCount) return false;
+    const size_t tableBytes =
+        ((m_stubCount * sizeof(void*)) + kLiveStubBytes - 1) & ~(kLiveStubBytes - 1);
+    const size_t bytes = tableBytes + m_stubCount * kLiveStubBytes;
     DWORD previous = 0;
-    if (!VirtualProtect(page, bytes, PAGE_EXECUTE_READ, &previous)) {
-        Log::get().note("VTableHook: the live vtable's stub page at %p could not "
-                        "be made executable (err %lu), so the live mode is off. "
+    if (!VirtualProtect(m_liveBlock, bytes, PAGE_EXECUTE_READ, &previous)) {
+        Log::get().note("VTableHook: the live vtable's page at %p could not be "
+                        "made executable (err %lu), so the live mode is off. "
                         "Nothing was installed.",
-                        static_cast<void*>(page), GetLastError());
-        // Safe to release: no vptr points at it and no thread can be inside it.
-        VirtualFree(page, 0, MEM_RELEASE);
+                        static_cast<void*>(m_liveBlock), GetLastError());
         return false;
     }
-    FlushInstructionCache(GetCurrentProcess(), page, bytes);
-    m_stubs = page;
-    m_stubCount = count;
-    for (size_t i = 0; i < count; ++i) {
-        m_copy[i] = static_cast<void*>(page + i * kLiveStubBytes);
-    }
+    // These bytes were written as data and are about to be fetched as code.
+    FlushInstructionCache(GetCurrentProcess(), m_liveBlock, bytes);
     return true;
 }
 
@@ -1963,16 +2126,20 @@ bool VTableHook::setMode(HookMode mode) {
             return false;
         }
         if (mode == HookMode::LiveCopy) {
-            // The census baseline, taken BEFORE the stubs overwrite m_copy --
-            // see m_frozen. The stub build is the only part of this that can
-            // fail on its own, and a failure leaves the hook exactly as it was
-            // rather than half converted.
+            // The census baseline -- see m_frozen -- and the count the stub
+            // build works from. The stub build is the only part of this that
+            // can fail on its own, and a failure leaves the hook exactly as it
+            // was rather than half converted.
             m_frozen = m_copy;
             if (!buildLiveStubs()) {
                 m_copy.clear();
                 m_frozen.clear();
                 return false;
             }
+            // The live table is the block's, not this vector's, and nothing may
+            // be left believing otherwise: dispatchTable() answers for both
+            // modes and m_copy holds only CopyVptr's.
+            m_copy.clear();
         }
     } else {
         m_copy.clear();
@@ -1992,7 +2159,8 @@ bool VTableHook::replace(size_t index, void* replacement, void** origOut) {
     // now", which is what the caller must forward to -- and in LiveCopy that
     // answer is the slot's stub, so the caller's forward resolves the runtime's
     // current entry at every call instead of freezing this one.
-    void** table = usesPrivateTable() ? m_copy.data() : m_vtable;
+    void** table = usesPrivateTable() ? dispatchTable() : m_vtable;
+    if (!table) return false;
     void* original = nullptr;
     if (!guarded("VTableHook::replace/read-slot",
                  [&] { original = table[index]; })) {
@@ -2017,6 +2185,11 @@ bool VTableHook::replace(size_t index, void* replacement, void** origOut) {
 // changes somebody else's object is three places for the protection dance to
 // drift, so there is one.
 bool VTableHook::installVptr(const char* why) {
+    void** const table = dispatchTable();
+    if (!table) return false;
+    // Sealed here, not in setMode: the live block stays writable until the last
+    // patch has gone into its table, and one flip covers both halves of it.
+    if (!sealLiveBlock()) return false;
     void** target = reinterpret_cast<void**>(m_object);
     DWORD oldProtect = 0;
     if (!VirtualProtect(target, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
@@ -2025,12 +2198,16 @@ bool VTableHook::installVptr(const char* why) {
         return false;
     }
     const bool ok = guarded(why, [&] {
-        *target = reinterpret_cast<void*>(m_copy.data());
+        *target = reinterpret_cast<void*>(table);
     });
     DWORD ignored = 0;
     VirtualProtect(target, sizeof(void*), oldProtect, &ignored);
     if (!ok) return false;
     m_committed = true;
+    // Now that the object dispatches through it, say so: a hook that later
+    // attaches to this same object reads THIS table as "the runtime's", and the
+    // registry is the only thing that can tell it otherwise. See PrivateTable.
+    registerPrivateTable(table, m_execPrefix, this);
     return true;
 }
 
@@ -2038,7 +2215,7 @@ bool VTableHook::commitUnpatched() {
     if (!m_object || m_committed) return false;
     if (m_mode != HookMode::CopyVptr) return false;
     if (!m_patches.empty()) return false;   // that is what commit() is for
-    if (m_copy.empty()) return false;
+    if (!dispatchCount()) return false;
 
     // Into a copy that differs from the original in nothing but its address.
     // See the header for why anyone would want that.
@@ -2049,7 +2226,7 @@ bool VTableHook::commitLive() {
     if (!m_object || m_committed) return false;
     if (m_mode != HookMode::LiveCopy) return false;
     if (!m_patches.empty()) return false;   // that is what commit() is for
-    if (m_copy.empty()) return false;
+    if (!dispatchCount()) return false;
 
     // Into a table of stubs that differs from the original in nothing but its
     // address and two jumps. See the header for the experiment this is half of.
@@ -2069,8 +2246,11 @@ bool VTableHook::commit() {
         // caller already holds it as its forward -- so the patched slot runs our
         // thunk, and our thunk's "original" is the stub that reads the runtime's
         // current entry. Nothing about a thunk body changes between the modes.
+        void** const table = dispatchTable();
+        const size_t count = dispatchCount();
+        if (!table || !count) return false;
         for (const Patch& p : m_patches) {
-            if (p.slot < m_copy.size()) m_copy[p.slot] = p.replacement;
+            if (p.slot < count) table[p.slot] = p.replacement;
         }
         return installVptr("VTableHook::commit/vptr");
     }
@@ -2149,14 +2329,15 @@ void VTableHook::uninstall() {
             // point at our copy, so this restores the copy underneath and the
             // stack peels as it was built.
             //
-            // THAT TEST CARRIES MORE WEIGHT IN LIVE MODE, and it already
-            // carries it correctly. A live hook stacked ON TOP of this one has
-            // baked the addresses of OUR m_copy cells into its own stubs and
-            // dereferences them at every call -- so freeing our table while it
-            // is still installed would dangle on the next draw. The test below
-            // sees that case as "somebody swapped on top of us", takes the leak
-            // path, and never frees. Unwinding in the shipped upper-first order
-            // never reaches it.
+            // IN LIVE MODE THE TABLE IS NOT FREED AT ALL, whichever branch is
+            // taken, and this is where that stopped being a question of order.
+            // A live hook stacked ON TOP of this one bakes the ADDRESSES of our
+            // table's cells into its own stubs and dereferences them at every
+            // call -- so the cells have to outlive us, exactly as our stubs do.
+            // They now share one never-freed allocation, so there is nothing
+            // here that could dangle no matter which way the stack is unwound.
+            // The test below still matters for CopyVptr, whose table IS a
+            // vector this function clears.
             //
             // If the object points SOMEWHERE ELSE, a later tool swapped the
             // vptr on top of us and it belongs to them now: writing our stale
@@ -2169,7 +2350,7 @@ void VTableHook::uninstall() {
             void*  live = nullptr;
             guarded("VTableHook::uninstall/vptr-read",
                     [&] { live = *target; });
-            if (live == static_cast<void*>(m_copy.data())) {
+            if (live == static_cast<void*>(dispatchTable())) {
                 DWORD oldProtect = 0;
                 if (VirtualProtect(target, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
                     guarded("VTableHook::uninstall/vptr", [&] {
@@ -2179,9 +2360,10 @@ void VTableHook::uninstall() {
                     VirtualProtect(target, sizeof(void*), oldProtect, &ignored);
                 }
                 // Restored: nothing dispatches through our copy any more, so
-                // it can go. The live mode's STUB PAGE still cannot -- a thread
+                // it can go. The live mode's BLOCK still cannot -- a thread
                 // dispatched before the store above is still inside a stub and
-                // returns after it -- so that is leaked, always. See m_stubs.
+                // returns after it -- so that is leaked, always, table and all.
+                // See m_liveBlock.
                 m_committed = false;
                 forgetObject();
                 m_copy.clear();
@@ -2273,12 +2455,18 @@ void VTableHook::forgetObject() {
     m_object = nullptr;
     m_vtable = nullptr;
     m_execPrefix = 0;
-    // The stub page is NOT freed here, and forgetting the pointer is exactly
-    // what makes it a leak rather than a use-after-free. See m_stubs: a thread
-    // can be executing inside a stub at this instant, and the page must outlive
-    // it. A re-attach builds a fresh one.
-    m_stubs = nullptr;
+    // The live block is NOT freed here, and forgetting the pointer is exactly
+    // what makes it a leak rather than a use-after-free. See m_liveBlock: a
+    // thread can be executing inside a stub at this instant, and an upper live
+    // hook can still be dereferencing the table's cells, so both must outlive
+    // this. A re-attach builds a fresh one.
+    m_liveBlock = nullptr;
+    m_liveTable = nullptr;
     m_stubCount = 0;
+    // Out of the private-table registry, so a hook attaching after this one
+    // does not read a table nobody owns as somebody's. Safe on the leak path
+    // too: the memory stays mapped, but this object no longer speaks for it.
+    unregisterPrivateTable(this);
     m_patches.clear();
     m_reclaimEvents = 0;
     m_implModule = nullptr;
@@ -2344,9 +2532,39 @@ void VTableHook::noteCopyDrift(const char* who) {
     // copy-mode wording in live mode would send a reader chasing a fault that
     // cannot exist there, which is the sort of false alarm this file has spent
     // three releases learning to avoid.
+    // A HOOK SITTING ON ANOTHER EDVR HOOK'S TABLE HAS NOTHING TO CENSUS, and
+    // saying so is the only honest thing it can do.
+    //
+    // In every private mode the upper of two stacked hooks attached to an object
+    // whose vptr the lower one had already moved, so its "runtime table" is the
+    // lower hook's private buffer. Nothing outside EDVR writes that, so the walk
+    // below finds zero drift on every pass forever and prints a confident
+    // sentence -- "the context's own table still holds every entry it held when
+    // EDVR attached" -- about a table that is not the context's. On the rig
+    // whose runtime re-lays the real table every frame, that is the opposite of
+    // what the log then says. The lower hook's census is the real one and it
+    // prints under its own name.
+    size_t lowerLogical = 0;
+    if (findPrivateTable(m_vtable, this, &lowerLogical)) {
+        if (!m_copyCleanNoted) {
+            m_copyCleanNoted = true;
+            Log::get().note(
+                "VTableHook %s: no census from this hook -- it sits on ANOTHER "
+                "EDVR hook's private table (%p, %zu entries), not on the one the "
+                "context itself holds, and nothing outside EDVR can write that. "
+                "The hook underneath is the one whose table the runtime writes "
+                "and its census is the measurement; a walk here would report "
+                "\"nothing has changed\" every second for the session and mean "
+                "nothing by it.",
+                who, static_cast<void*>(m_vtable), lowerLogical);
+        }
+        return;
+    }
+
     const bool live = (m_mode == HookMode::LiveCopy);
     // What the runtime's table said when we attached. m_copy is that in copy
-    // mode; in live mode m_copy holds stubs and m_frozen is the baseline.
+    // mode; in live mode the private table holds stubs and m_frozen is the
+    // baseline.
     const std::vector<void*>& base = live ? m_frozen : m_copy;
     size_t drifted = 0;
     void*  firstNow = nullptr;
@@ -2470,6 +2688,15 @@ void VTableHook::noteCopyDrift(const char* who) {
     vtableWatchDumpRecent("the census found the runtime's table has moved");
 }
 
+void VTableHook::censusTick(const char* name) {
+    // The same walk reclaim's private branch runs, reachable without it. The two
+    // context probes install no fix, so nothing on the frame path calls reclaim
+    // in exactly the sessions that exist to ask what the runtime is doing to the
+    // table -- and those sessions reported nothing about it at all.
+    if (!m_committed || !usesPrivateTable()) return;
+    noteCopyDrift(name ? name : "?");
+}
+
 size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
                            size_t quietCount) {
     // Answered fresh by every pass, including the passes that re-patch nothing:
@@ -2498,9 +2725,11 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         guarded("VTableHook::reclaim/copy-vptr-read", [&] {
             live = *reinterpret_cast<void***>(m_object);
         });
-        if (live == m_copy.data()) {
+        void** const table = dispatchTable();
+        const size_t count = dispatchCount();
+        if (live == table && table) {
             for (const Patch& p : m_patches) {
-                if (p.slot < m_copy.size() && m_copy[p.slot] != p.replacement &&
+                if (p.slot < count && table[p.slot] != p.replacement &&
                     !m_copyBreachNoted) {
                     m_copyBreachNoted = true;
                     char modBuf[MAX_PATH];
@@ -2521,7 +2750,7 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
                         "log only if the fixes reading this call have actually "
                         "gone quiet. Said once.",
                         who, p.slot,
-                        ownerModuleName(m_copy[p.slot], modBuf, sizeof(modBuf)));
+                        ownerModuleName(table[p.slot], modBuf, sizeof(modBuf)));
                 }
             }
         }
