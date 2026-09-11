@@ -231,3 +231,89 @@ optional captured-camera run passes 18216 checks. NVIDIA smoke passes
 TAA, DLAA, DLSS, foveated reconstruction and motion/jitter conventions.
 These desk checks do not establish the final appearance of the next
 headset flight.
+
+## Follow-up flight, 14:36
+
+`edvr_gfx_20260911_143626.log` matches `c7774fd`. The run uses SteamVR,
+2268x2240 input, 4536x4480 output, preset K and a 5120x2880
+virtual-screen source. Captures 143911/143933 show the flight HUD;
+144027/144054/144106 are on foot. The user reports good walking scene
+clarity and remaining target-box blur. The 144054 raw/DLSS pair visibly
+separates crisp source nameplate letters from their doubled
+reconstructed edges.
+
+Ruled out: missing flight HUD transforms, because both flight captures
+match all 12 eligible hologram/sprite records. The new GUI snapshots
+contain 41 and 44 source draws without missing inputs, failed copies or
+declined ranges. An offline WARP replay of all 41 original shader draws
+reproduces the 742x742 source with 99.12% of pixels identical and
+maximum channel difference 3/255. Replaying at twice the source
+dimensions makes some vector edges finer but does not restore new detail
+in the baked font atlas. That experiment does not establish an
+improvement at the actual eye projection, so it does not justify a
+source-size change.
+
+Ruled out: a reciprocal-W error in the sprite coverage shader, because
+the existing production GPU test supplies physical clip W and verifies
+0.025/W against near and distant scene depths in all three depth
+formats. Do not invert that expression based on a remembered semantic
+convention.
+
+The flight HUD's remaining vertical softness is not declared fixed. The
+source replay and exact current sprite transform are available; mixed
+foreground UI/background reconstruction and source raster quality remain
+distinct questions. No sharpening or blanket fresh-frame policy is added
+to the flight HUD.
+
+### Source UI coverage
+
+The on-foot captures have source-camera motion (ScreenMotion flag 32),
+but no eye UI coverage. Final LDR source draws 932--938 in the 144054
+census composite GUI canvases after the scene: B10B032BDFD46700 /
+DB899F4BD577F2E5, C4B4B334B26E81A9 / 0146ABCC53240479 and
+A888D51024D9798E / 015EF9349EC097E8. They use straight or premultiplied
+alpha, depth disabled and unconditional stencil. Their pixels previously
+inherited the scene depth and motion beneath the UI. The exact
+individual nameplate draw is not established by the older source-camera
+snapshot; the correction covers all three observed late GUI families.
+
+For those shader pairs and verified render-state contracts, the original
+draw is reissued to an R8 transparency target. The original shader,
+discard, UVs and alpha are retained; zero source colour and inverse
+source alpha multiply a target cleared to one. This unions visible GUI
+coverage independently of its colour and premultiplication. No game
+colour/depth is copied or modified. The mask is associated with the
+exact source colour resource and frame, then sampled through the actual
+screen geometry. ScreenMotion.w=3 identifies these pixels in the eye
+dump.
+
+Source UI uses the outer screen's motion and fresh current
+reconstruction after DLSS, including the existing departing-UI influence
+cleanup. Native TAA rejects history there. Source scene pixels retain
+the previous motion path. This does not claim motion tracking of the
+individual nameplate: fresh reconstruction also handles its changing
+source-image position.
+
+The mask costs about 14.1 MiB at this source size, one clear per frame
+with matching GUI, and one reissue per matching draw (seven observed).
+There is no CPU readback or full source colour copy in normal rendering.
+The additional cost and visible nameplate result need flight validation.
+The mask's frame and resource checks prevent absent or unrelated UI from
+reusing stale coverage.
+
+The full SDK build and all gates pass: 20439 UI checks, 32899 screen
+motion/consumer checks, snapshot fixtures and the unchanged 243-key
+configuration contract. Replaying the previous 1152 captured camera
+points passes 37514 checks. Coverage tests verify actual shader alpha
+and discard, opacity accumulation, premultiplied blends, all three
+observed shader pairs, both eyes, frame expiry, resource identity,
+original colour/depth/state preservation and exclusion of world draws.
+Resolve tests include a cropped eye region and noninteger output sizes.
+NVIDIA smoke passes TAA, DLAA, DLSS, foveated reconstruction and
+motion/jitter conventions. Headset confirmation of the target-box fix is
+still required.
+
+A NVIDIA shader-only measurement at 2268x2240 is 0.032--0.043 ms per eye
+with a synthetic source UI mask, versus 0.026--0.029 ms without the
+mask. This measures screen reprojection, not the mask clear, original
+GUI shader reissues, post-resolve work or total in-game overhead.

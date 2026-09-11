@@ -38,11 +38,11 @@ void __stdcall draw(ID3D11DeviceContext* c,unsigned,unsigned,unsigned,int,unsign
 std::vector<float> read(ID3D11Device* d,ID3D11DeviceContext* c,ID3D11Texture2D* t){
     D3D11_TEXTURE2D_DESC td{};t->GetDesc(&td);td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> st;hr(d->CreateTexture2D(&td,nullptr,&st));c->CopyResource(st.Get(),t);
-    const unsigned channels=td.Format==DXGI_FORMAT_R32_FLOAT?1:td.Format==DXGI_FORMAT_R32G32_FLOAT?2:4;
+    const unsigned channels=(td.Format==DXGI_FORMAT_R32_FLOAT || td.Format==DXGI_FORMAT_R32_TYPELESS || td.Format==DXGI_FORMAT_R8_UNORM)?1:td.Format==DXGI_FORMAT_R32G32_FLOAT?2:4;
     D3D11_MAPPED_SUBRESOURCE m{};hr(c->Map(st.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> a(td.Width*td.Height*channels);
     for(UINT y=0;y<td.Height;++y)for(UINT x=0;x<td.Width*channels;++x){
         const auto* row=static_cast<const unsigned char*>(m.pData)+y*m.RowPitch;
-        a[y*td.Width*channels+x]=td.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const uint16_t*>(row)[x]):reinterpret_cast<const float*>(row)[x];
+        a[y*td.Width*channels+x]=(td.Format==DXGI_FORMAT_R8_UNORM || td.Format==DXGI_FORMAT_R8G8B8A8_UNORM)?row[x]/255.f:td.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const uint16_t*>(row)[x]):reinterpret_cast<const float*>(row)[x];
     }c->Unmap(st.Get(),0);return a;
 }
 #include "screen_consumer_test.h"
@@ -98,7 +98,54 @@ int main(int argc,char** argv){
     check(screenMotionView(0,W,H) && screenMotionView(1,W,H),"independent eye maps available");
     for(auto& e:g.eyes){auto a=read(dev.Get(),ctx.Get(),e.map.Get());for(unsigned i=0;i<W*H;++i)if(a[i*4+3]==1){check(std::fabs(a[i*4]-.64f)<.001f,"walking uses completed depth and source camera");check(std::fabs(a[i*4+1])<.001f,"walking X does not move Y");}}
     screenMotionFrameBoundary();check(!screenMotionView(0,W,H),"map cannot outlive its frame");
-    screenMotionFrameBoundary();sourceDraw();screenDraw(0);check(!screenMotionView(0,W,H),"missing screen frame breaks history");
+    screenMotionFrameBoundary();sourceDraw();screenDraw(0);screenDraw(1);check(!screenMotionView(0,W,H),"missing screen frame breaks history");
+    // Original source UI alpha (including discard), straight/premultiplied
+    // blend contracts, source identity and per-frame mask lifetime.
+    {
+        screenMotionFrameBoundary();source[275][0]+=.1f;sourceDraw();
+        auto uc=compile("float4 main(float4 p:SV_Position):SV_Target{if(p.x>48)discard;return float4(0,1,0,p.x<16?0:p.x<32?.25:1);}","ps_5_0");
+        ComPtr<ID3D11PixelShader> up;hr(dev->CreatePixelShader(uc->GetBufferPointer(),uc->GetBufferSize(),nullptr,&up));
+        D3D11_BLEND_DESC ub{};auto& r=ub.RenderTarget[0];r.BlendEnable=TRUE;r.SrcBlend=D3D11_BLEND_SRC_ALPHA;r.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=D3D11_BLEND_OP_ADD;
+        r.SrcBlendAlpha=D3D11_BLEND_ONE;r.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=7;
+        ComPtr<ID3D11BlendState> blend;hr(dev->CreateBlendState(&ub,&blend));
+        D3D11_DEPTH_STENCIL_DESC ud{};ud.DepthFunc=D3D11_COMPARISON_ALWAYS;
+        ComPtr<ID3D11DepthStencilState> uds;hr(dev->CreateDepthStencilState(&ud,&uds));
+        ctx->PSSetShader(up.Get(),nullptr,0);ctx->OMSetBlendState(blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(uds.Get(),14);
+        const float live[4]={.125f,.25f,.5f,1};ctx->ClearRenderTargetView(rt.Get(),live);auto liveBefore=read(dev.Get(),ctx.Get(),colour.Get());
+        auto uiDraw=[&](){screenMotionUiDraw(ctx.Get(),draw,6,1,0,0,0);};
+        testVs=0xB10B032BDFD46700ull;testPs=0;uiDraw();check(!g.ui,"unknown material cannot allocate or mark source UI");
+        testPs=0xDB899F4BD577F2E5ull;uiDraw();check(g.uiDraws==1,"known source GUI draw captured");
+        auto coverage=read(dev.Get(),ctx.Get(),g.ui.Get());
+        for(UINT y=0;y<H;++y)for(UINT x=0;x<W;++x)check(std::fabs(coverage[y*W+x]-(x<16||x>=48?1:x<32?191/255.f:0))<1e-6,"original alpha and discard determine coverage, independent of RGB");
+        uiDraw();coverage=read(dev.Get(),ctx.Get(),g.ui.Get());check(std::fabs(coverage[20]-143/255.f)<1e-6,"overlapping source UI accumulates opacity");
+        ComPtr<ID3D11RenderTargetView> restored;ComPtr<ID3D11DepthStencilView> restoredDepth;ctx->OMGetRenderTargets(1,&restored,&restoredDepth);
+        check(restored.Get()==rt.Get() && restoredDepth.Get()==ds.Get(),"UI reissue restores original targets");
+        ComPtr<ID3D11BlendState> restoredBlend;FLOAT f[4];UINT bits;ctx->OMGetBlendState(&restoredBlend,f,&bits);check(restoredBlend.Get()==blend.Get() && bits==~0u,"UI reissue restores blend and sample mask");
+        ComPtr<ID3D11DepthStencilState> restoredDs;UINT ref;ctx->OMGetDepthStencilState(&restoredDs,&ref);check(restoredDs.Get()==uds.Get() && ref==14,"UI reissue restores depth/stencil state");
+        ComPtr<ID3D11PixelShader> restoredPs;ctx->PSGetShader(&restoredPs,nullptr,nullptr);check(restoredPs.Get()==up.Get(),"UI reissue uses and preserves original shader");
+        for(float z:read(dev.Get(),ctx.Get(),depth.Get()))check(std::fabs(z-.0025f)<1e-6,"UI coverage cannot write game depth");
+        check(read(dev.Get(),ctx.Get(),colour.Get())==liveBefore,"UI coverage cannot change source colour");
+        for(auto pair:{std::pair{0xB10B032BDFD46700ull,0xDB899F4BD577F2E5ull},std::pair{0xC4B4B334B26E81A9ull,0x0146ABCC53240479ull},std::pair{0xA888D51024D9798Eull,0x015EF9349EC097E8ull}}){
+            testVs=pair.first;testPs=pair.second;ub.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;
+            ComPtr<ID3D11BlendState> premult;hr(dev->CreateBlendState(&ub,&premult));ctx->OMSetBlendState(premult.Get(),nullptr,~0u);
+            unsigned before=g.uiDraws;uiDraw();check(g.uiDraws==before+1,"all observed GUI pairs support premultiplied alpha");
+        }
+        ud.DepthEnable=TRUE;ud.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+        ComPtr<ID3D11DepthStencilState> worldDs;hr(dev->CreateDepthStencilState(&ud,&worldDs));ctx->OMSetDepthStencilState(worldDs.Get(),0);
+        unsigned before=g.uiDraws;uiDraw();check(g.uiDraws==before,"depth-tested world draw cannot claim source UI");ctx->OMSetDepthStencilState(uds.Get(),14);
+        ctx->OMSetRenderTargets(1,er[0].GetAddressOf(),nullptr);uiDraw();check(g.uiDraws==before,"different same-size target cannot contaminate source coverage");ctx->OMSetRenderTargets(1,rt.GetAddressOf(),ds.Get());
+        ctx->PSSetShader(ps.Get(),nullptr,0);screenDraw(0);screenDraw(1);
+        for(auto& e:g.eyes){auto a=read(dev.Get(),ctx.Get(),e.map.Get());for(UINT y=1;y+1<H;++y)for(UINT x=2;x+2<W;++x){unsigned i=(y*W+x)*4;
+            if(x>=18&&x<=46){check(a[i+3]==3,"source UI survives projection into both eye maps");check(std::fabs(a[i])<.001f,"source UI does not receive scenery translation");}
+            if(x<14||x>50){check(a[i+3]==1,"transparent source/UI discard retains scenery");check(std::fabs(a[i]-.32f)<.001f,"scenery still receives source camera translation");}
+        }}
+        screenMotionFrameBoundary();sourceDraw();screenDraw(0);
+        auto a=read(dev.Get(),ctx.Get(),g.eyes[0].map.Get());for(UINT i=0;i<W*H;++i)check(a[i*4+3]!=3,"absent source UI cannot retain stale coverage");
+        screenMotionFrameBoundary();sourceDraw();ctx->PSSetShader(up.Get(),nullptr,0);ctx->OMSetBlendState(blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(uds.Get(),14);
+        testVs=0xA888D51024D9798Eull;testPs=0x015EF9349EC097E8ull;uiDraw();
+        coverage=read(dev.Get(),ctx.Get(),g.ui.Get());check(std::fabs(coverage[20]-191/255.f)<1e-6,"new source frame clears previous opacity");
+        ctx->PSSetShader(ps.Get(),nullptr,0);screenDraw(0);
+    }
     // Optional recorded source/eye matrices and double-precision expected
     // projection. No proprietary assets are committed with the test.
     if(argc>1 && std::strcmp(argv[1],"--self-test")!=0){

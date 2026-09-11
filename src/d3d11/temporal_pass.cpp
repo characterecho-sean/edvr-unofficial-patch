@@ -917,7 +917,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         if((uint(probe.w+.5)&32u)!=0u) {
             float4 s=Screen.Load(int3(region.xy+int2(p),0));
             if(s.w>0) {
-                motion=s.w==1?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;
+                motion=s.w!=2?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;
                 // The eye-space prediction above is not source-scene depth.
                 // Do not apply its mover rejection to screen pixels.
                 mover=0;
@@ -5130,9 +5130,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // says why). Inside the timed region, so the price is honest.
                     if (usedDlaa && uiResolve) {
                         ctx->CSSetShaderResources(0,15,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
-                        ID3D11ShaderResourceView* srvs[6]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv,uiDepthContentChanges(w,h,eye)};
+                        auto* resolveScreen=screenSrv;
+                        if(screenSrv && (p.region[0]!=int32_t(region[0]) || p.region[1]!=int32_t(region[1]))) {
+                            // Raw colour is cropped, but the screen map is in
+                            // the original eye texture even on the copy path.
+                            PassParams resolveParams=p;
+                            for(int i=0;i<4;++i)resolveParams.region[i]=int32_t(region[i]);
+                            if(!setParams(ctx,resolveParams))resolveScreen=nullptr;
+                        }
+                        ID3D11ShaderResourceView* srvs[7]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv,uiDepthContentChanges(w,h,eye),resolveScreen};
                         ID3D11UnorderedAccessView* uavs[2]={e.dlSubmitUav,e.uiHistoryUav[1-e.uiHistoryRead]};
-                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,6,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
+                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,7,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
                         // NGX may change compute bindings, including b0.
                         ctx->CSSetConstantBuffers(0,1,&g_cb);
                         ctx->Dispatch((w+7)/8,(h+7)/8,1);

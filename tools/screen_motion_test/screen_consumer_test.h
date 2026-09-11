@@ -68,7 +68,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     D3D11_SAMPLER_DESC sd{};sd.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU=sd.AddressV=sd.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sd.MaxLOD=D3D11_FLOAT32_MAX;
     ComPtr<ID3D11SamplerState> sampler;hr(dev->CreateSamplerState(&sd,&sampler));
-    for(int enabled:{0,32}) for(int valid:{0,1,2}) {
+    for(int enabled:{0,32}) for(int valid:{0,1,2,3}) {
         std::fill(pixels.begin(),pixels.end(),0.0f);
         // The first column is outside screen coverage. This also verifies
         // that region offsets do not bleed screen motion onto other pixels.
@@ -83,7 +83,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
         ctx->CSSetShader(mv.Get(),nullptr,0);ctx->Dispatch(1,1,1);
         auto m=read(dev,ctx,motion.Get()),d=read(dev,ctx,depth.Get()),k=read(dev,ctx,mask.Get());
         for(int y=0;y<8;++y)for(int x=0;x<8;++x){unsigned i=y*8+x;bool screen=enabled && valid && x>0;
-            float mx=screen?(valid==1?1.0f:16.0f):0.0f,my=screen?(valid==1?-1.0f:16.0f):0.0f;
+            float mx=screen?(valid!=2?1.0f:16.0f):0.0f,my=screen?(valid!=2?-1.0f:16.0f):0.0f;
             check(std::fabs(m[2*i]-mx)<1e-5f && std::fabs(m[2*i+1]-my)<1e-5f,"DLSS consumes screen motion once with correct jitter and coverage");
             check(std::fabs(d[i]-(screen?.005f:.25f))<1e-6f,"DLSS consumes exact source depth only inside screen");
             if(screen)check(k[i]==0,"screen bypasses unrelated eye-space mover rejection");
@@ -92,7 +92,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
         ctx->CSSetUnorderedAccessViews(0,1,ru.GetAddressOf(),nullptr);ctx->CSSetShader(native.Get(),nullptr,0);ctx->Dispatch(1,1,1);
         auto n=read(dev,ctx,result.Get());
         for(int y=1;y<7;++y)for(int x=0;x<7;++x){unsigned i=y*8+x;bool screen=enabled && valid && x>0;
-            if(screen && valid==2)check(n[4*i+3]==0,"native TAA rejects screen disocclusion");
+            if(screen && valid>1)check(n[4*i+3]==0,"native TAA rejects source disocclusion and source UI history");
             else {
                 check(n[4*i+3]==1,"native TAA accepts valid history");
                 check(std::fabs(n[4*i]-(screen?1.0f:0))<1e-5f && std::fabs(n[4*i+1]-(screen?-1.0f:0))<1e-5f,"native TAA uses same screen motion and jitter");

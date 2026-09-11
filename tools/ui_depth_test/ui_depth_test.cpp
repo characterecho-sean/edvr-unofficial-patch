@@ -678,6 +678,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         constexpr UINT w=13,h=9;
         auto raw=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),mask=texture(w,h,DXGI_FORMAT_R8_UNORM),edits=texture(w,h,DXGI_FORMAT_R8_UNORM);
         auto editsV=srv(edits.Get());
+        auto screen=texture(w+4,h+6,DXGI_FORMAT_R32G32B32A32_FLOAT);auto screenV=srv(screen.Get());
         auto previous=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),next=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM);
         auto velocity=texture(w,h,DXGI_FORMAT_R32G32_FLOAT);auto velocityV=srv(velocity.Get());
         auto rawV=srv(raw.Get()),maskV=srv(mask.Get()),previousV=srv(previous.Get());auto nextU=uav(next.Get());
@@ -691,6 +692,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             std::vector<unsigned char> colour(w*h*4,0),mark(w*h,0),old(w*h*4,0),model(ow*oh*4,0);
             std::vector<float> motion(w*h*2,0);
             std::vector<unsigned char> edit(w*h,0);
+            std::vector<float> screenPixels((w+4)*(h+6)*4,0);
             for(UINT i=0;i<ow*oh;++i){model[4*i]=static_cast<unsigned char>(64+i%100);model[4*i+3]=127;}
             auto run=[&](bool haveHistory){
                 ctx->UpdateSubresource(raw.Get(),0,nullptr,colour.data(),w*4,0);ctx->UpdateSubresource(mask.Get(),0,nullptr,mark.data(),w,0);
@@ -698,10 +700,11 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);
                 ctx->UpdateSubresource(velocity.Get(),0,nullptr,motion.data(),w*8,0);
                 ctx->UpdateSubresource(edits.Get(),0,nullptr,edit.data(),w,0);
-                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr,velocityV.Get(),editsV.Get()};
+                ctx->UpdateSubresource(screen.Get(),0,nullptr,screenPixels.data(),(w+4)*16,0);
+                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr,velocityV.Get(),editsV.Get(),screenV.Get()};
                 ID3D11UnorderedAccessView* out[]={outputU.Get(),nextU.Get()};
                 const float poison[4]={1,1,1,1};ctx->ClearUnorderedAccessViewFloat(outputU.Get(),poison);
-                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,6,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
+                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,7,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
                 ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
                 return read(dev.Get(),ctx.Get(),output.Get());
             };
@@ -763,7 +766,18 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 else {check(a[y*ow+x]!=b[y*ow+x],"static UI retains model antialiasing beside changed text");++stable;}
             }
             check(changed && stable,"dynamic/static resolve controls both exercised at every output ratio");
+            edit.assign(w*h,0);mark.assign(w*h,0);screenPixels[4*((4+3)*(w+4)+6+2)+3]=3;
+            p.region[0]=2;p.region[1]=3;
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=80;
+            auto screenA=run(false);
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=170;
+            auto screenB=run(false);
+            for(UINT y=1;y+1<oh;++y)for(UINT x=2;x+2<ow;++x){
+                const UINT qx=x*w/ow,qy=y*h/oh;const bool sourceUi=qx>=5&&qx<=7&&qy>=3&&qy<=5;
+                check(sourceUi?screenA[y*ow+x]==screenB[y*ow+x]:screenA[y*ow+x]!=screenB[y*ow+x],"source UI resolves fresh without eye coverage while world keeps trained detail");
+            }
             for(float alpha:read(dev.Get(),ctx.Get(),output.Get(),3))check(std::fabs(alpha-127/255.f)<1e-6,"dynamic reconstruction preserves submission alpha");
+            p.region[0]=p.region[1]=0;
         }
         std::puts("PASS: post-DLSS UI resolve bounds stale colour, retains AA/alpha, excludes world/smoke, and covers noninteger output sizes.");
     }

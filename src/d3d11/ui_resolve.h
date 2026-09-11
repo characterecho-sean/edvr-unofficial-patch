@@ -12,6 +12,7 @@ Texture2D<float> Coverage:register(t2);
 Texture2D<float4> Previous:register(t3);
 Texture2D<float2> Motion:register(t4);
 Texture2D<float> Edits:register(t5);
+Texture2D<float4> Screen:register(t6);
 RWTexture2D<float4> Output:register(u0);
 RWTexture2D<float4> Next:register(u1);
 cbuffer P:register(b0){int4 region;int2 size;int2 texSize;float4 tanNow;float4 tanPrev;float4 jit;}
@@ -20,10 +21,15 @@ float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2
 [numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
     if(any(id.xy>=uint2(size)))return;
     int2 q=int2(id.xy),r=int2(floor(float2(q)+jit.xy+.5));
+    uint screenW,screenH;Screen.GetDimensions(screenW,screenH);
     bool here=false,edited=false;
     [unroll] for(int y=-1;y<=1;++y)[unroll] for(int x=-1;x<=1;++x){
         int2 p=r+int2(x,y);here=here||marked(p);
         edited=edited||Edits.Load(int3(clamp(p,0,size-1),0))>0;
+        if(screenW>0) {
+            bool screenUi=Screen.Load(int3(region.xy+clamp(p,0,size-1),0)).w==3;
+            here=here||screenUi;edited=edited||screenUi;
+        }
     }
     float remaining=Previous.Load(int3(q,0)).a;
     // DLSS can transport an old glyph along the newly exposed world's
