@@ -408,8 +408,14 @@ float adaptiveUiReactive(int2 q, float2 previous) {
     if ((flags & 2u) == 0u) return current.a;
     int2 pq = int2(floor(previous + 0.5));
     if (any(pq < 0) || any(pq >= size)) return current.a;
-    float4 oldCentre = UP.Load(int3(pq,0));
-    if (current.a == 0.0 && oldCentre.a == 0.0) return 0.0;
+    if (current.a == 0.0 && UP.Load(int3(pq,0)).a == 0.0) {
+        // A fast empty-footprint test keeps the full colour comparison local
+        // to UI. Four overlapping 2x2 gathers cover the required 3x3 area.
+        float4 nearby=0;
+        [unroll] for(int y=-1;y<=0;++y) [unroll] for(int x=-1;x<=0;++x)
+            nearby=max(nearby,UP.GatherAlpha(L,(float2(pq+int2(x,y))+.5)/float2(size)));
+        if(!any(nearby>0)) return 0.0;
+    }
     float3 lo = 1e10, hi = -1e10;
     float nowCount = 0.0, oldCount = 0.0;
     [unroll] for (int y=-1; y<=1; ++y) [unroll] for (int x=-1; x<=1; ++x) {
@@ -425,6 +431,11 @@ float adaptiveUiReactive(int2 q, float2 previous) {
             error = min(error,max(e.x,max(e.y,e.z))); oldCount += 1.0;
         }
     }
+    // Reconstruction samples a footprint, not just its centre. During a
+    // roll, sky motion can put a transparent pixel beside a previous glyph
+    // even when both centres are unmarked. Reject that departing footprint
+    // before DLSS carries it into another transparent pixel next frame.
+    if (nowCount == 0.0 && oldCount == 0.0) return 0.0;
     if (nowCount == 0.0 || oldCount == 0.0) return 1.0;
     return saturate((error - 0.03) / 0.17);
 }
@@ -441,9 +452,10 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     if((uint(probe.w+.5)&16u)==0u || holoJitter.z==0) return false;
     int2 q=region.xy+int2(round(p+offset));
     float2 cov=HC.Load(int3(q,0)); uint index=uint(cov.x+.5);
-    if(index==0 || index>128 || !uiCovered(q)) return false;
+    if(index==0 || index>128) return false;
     if(cov.y<=knobs.x || abs(zSceneAt(q)-cov.y)>abs(cov.y)*1e-6) return false;
     HoloRecord r=HR[index-1]; if(r.meta.w!=1) return false;
+    if(r.key[3].w==1 ? uiCovered(q) : !uiCovered(q)) return false;
     float z=knobs.z/(cov.y-knobs.x);
     float2 ndc=(p+offset+region.xy+.5)/r.meta.yz*float2(2,-2)+float2(-1,1);
     float4 current=float4(ndc*z,z,1);

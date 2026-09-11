@@ -1,5 +1,6 @@
 #include "ui_depth.h"
 #include "ui_depth_layer.h"
+#include "stellar_coverage.h"
 
 #include <windows.h>
 
@@ -87,6 +88,8 @@ constexpr uint64_t kSpritePs  = 0x63ABD86359B57D01ull;
 // disassembly, 2026-09-08 -- the same shape as the menu panel's, which
 // takes t1 through s1 at TEXCOORD6).
 constexpr uint64_t kHoloPanelPs = 0xA2965EC2931A39C8ull;
+constexpr uint64_t kRingVs=0xB12F7A618E1BDE98ull, kRingPs=0x42AC0CACC9CDF72Bull;
+constexpr uint64_t kOrbitalVs=0xC7FA0C0F5DD49180ull, kOrbitalPs=0x6EEF165A350DA30Full;
 // THE DRIVES' SMOKE (fix.temporal_aa_smoke, 2026-09-09): the trail a ship
 // leaves is a ribbon of fifty translucent quads -- vs 5E417E9DF2E7F9E6, ps
 // BD801F2FB02522EB, additive, a 1024x512 streak scrolled twice and a
@@ -151,6 +154,11 @@ HoloMotion g_holoMotion[2];
 HoloDraw g_holoDraw;
 bool g_holoBound=false, g_holoNoted=false;
 ID3D11Buffer* g_savedHoloInfo=nullptr;
+Microsoft::WRL::ComPtr<ID3D11VertexShader> g_orbitalVs,g_savedOrbitalVs;
+Microsoft::WRL::ComPtr<ID3D11Buffer> g_savedOrbitalInfo;
+ID3D11ClassInstance* g_savedOrbitalClasses[256]{};
+UINT g_savedOrbitalClassCount=0;
+bool g_orbitalBound=false,g_stellarNoted[2]{};
 Microsoft::WRL::ComPtr<ID3D11Buffer> g_holoDump;
 unsigned g_holoDumpCount=0;
 float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
@@ -573,7 +581,7 @@ struct DepthShader {
     ID3D11PixelShader*  shader;
     bool                tried;
 };
-DepthShader g_depthShaders[6] = {
+DepthShader g_depthShaders[8] = {
     {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, {kPanelVs, 0, 0, 0}, 1,
      kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
     // The flight HUD's coverage (kHudDepthHlsl): its slot is the depth
@@ -590,6 +598,10 @@ DepthShader g_depthShaders[6] = {
      kSmokeDepthHlsl, sizeof(kSmokeDepthHlsl) - 1, "ui_depth_smoke_ps", nullptr, false},
     {{kSpritePs, 0, 0, 0}, {kHudSprite, 0, 0, 0}, 0,
      kSpriteDepthHlsl, sizeof(kSpriteDepthHlsl) - 1, "ui_depth_sprite_ps", nullptr, false},
+    {{kRingPs,0,0,0},{kRingVs,0,0,0},0xFFFFu,
+     kRingCoverage,sizeof(kRingCoverage)-1,"ring_coverage_ps",nullptr,false},
+    {{kOrbitalPs,0,0,0},{kOrbitalVs,0,0,0},0xFFFFu,
+     kOrbitalCoveragePs,sizeof(kOrbitalCoveragePs)-1,"orbital_coverage_ps",nullptr,false},
 };
 struct FloorCb {
     float          cockpitMetres = -1.0f;
@@ -1560,7 +1572,8 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // (a couple of dozen a frame); otherwise the direct list, which is the
     // only test left for the other draws.
     const uint64_t h = boundVsHash(ctx);
-    if (!composite && !(h && inList(g_families, g_familyCount, h))) return false;
+    const bool stellar=h==kRingVs || h==kOrbitalVs;
+    if (!stellar && !composite && !(h && inList(g_families, g_familyCount, h))) return false;
     if (h && inList(g_exclude, g_excludeCount, h)) return false;
 
     // WHICH PROJECTION. The cockpit's families bind the scene pair and
@@ -1570,7 +1583,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // measured 2026-09-07) and gets the alpha-aware depth pass instead,
     // whichever depth it binds.
     const bool scenePair = dsvIsSceneDepth(dsv);
-    const bool sceneFamily = h == kHoloPanel || h == kHudSprite ||
+    const bool sceneFamily = stellar || h == kHoloPanel || h == kHudSprite ||
                              inList(g_families, g_familyCount, h);
     if (scenePair && sceneFamily) {
         g_mode = Mode::kReissueScene;
@@ -1794,14 +1807,23 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         if (g_reissueMaskSlot != 3 && scene && g_drawEye >= 0 && g_drawEye < 2)
             target = g_uiDepth[g_drawEye].acquire(ctx, scene);
         bool holo=false;
-        if (target && scene && mask && shader==&g_depthShaders[3]) {
-            holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres);
+        const bool ring=shader==&g_depthShaders[6],orbital=shader==&g_depthShaders[7];
+        if(orbital && !g_orbitalVs) g_orbitalVs.Attach(shaderSwapCompileVs(ctx,kOrbitalCoverageVs,sizeof(kOrbitalCoverageVs)-1,"main","orbital coverage",nullptr,"stellar motion"));
+        if (target && scene && mask && (shader==&g_depthShaders[3] || ring || (orbital && g_orbitalVs))) {
+            holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:0);
             if(holo && !g_holoNoted) {
                 g_holoNoted=true;
                 Log::get().note("holo motion: draw-time cockpit transform history active; 128 draws per eye, pool-slot-independent matching, TAA/DLSS.");
             }
         }
         if (scene) scene->Release();
+        // A stellar coverage draw requires its complete transform/VS path.
+        // Never write anonymous depth if that path declined.
+        if((ring || orbital) && !holo) { releaseSavedOm(); return; }
+        if((ring || orbital) && !g_stellarNoted[orbital?1:0]) {
+            g_stellarNoted[orbital?1:0]=true;
+            Log::get().note("stellar motion: %s coverage and draw-transform history active; shared 128-record eye budget.",orbital?"orbital line":"opaque ring");
+        }
         if (g_reissueMaskSlot != 3 && !target) {
             releaseSavedOm();
             ++g_wNoPair;
@@ -1877,6 +1899,11 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
         ctx->PSGetConstantBuffers(13, 1, &g_savedFloorCb);
         if(holo) ctx->PSGetConstantBuffers(12,1,&g_savedHoloInfo);
+        if(orbital) {
+            g_savedOrbitalClassCount=256;
+            ctx->VSGetShader(&g_savedOrbitalVs,g_savedOrbitalClasses,&g_savedOrbitalClassCount);
+            ctx->VSGetConstantBuffers(12,1,&g_savedOrbitalInfo);
+        }
         if (hudScene) ctx->PSGetShaderResources(2, 1, &g_savedHudScene);
         if (mask) ctx->OMGetBlendState(&g_reSavedBlend, g_reSavedBlendFactor, &g_reSavedSampleMask);
         g_reBlendSaved = mask != nullptr;
@@ -1891,6 +1918,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         if(holo) {
             g_holoBound=true;
             ID3D11Buffer* info=g_holoMotion[g_drawEye].info(); ctx->PSSetConstantBuffers(12,1,&info);
+            if(orbital) { g_orbitalBound=true;ctx->VSSetShader(g_orbitalVs.Get(),nullptr,0);ctx->VSSetConstantBuffers(12,1,&info); }
         }
         if (hudScene) {
             g_hudSceneBound = true;
@@ -1938,6 +1966,10 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
             ctx->PSSetShader(g_savedPs, nullptr, 0);
             ctx->PSSetConstantBuffers(13, 1, &g_savedFloorCb);
             if(g_holoBound) ctx->PSSetConstantBuffers(12,1,&g_savedHoloInfo);
+            if(g_orbitalBound) {
+                ctx->VSSetShader(g_savedOrbitalVs.Get(),g_savedOrbitalClasses,g_savedOrbitalClassCount);
+                ctx->VSSetConstantBuffers(12,1,g_savedOrbitalInfo.GetAddressOf());
+            }
             if (g_hudSceneBound) ctx->PSSetShaderResources(2, 1, &g_savedHudScene);
             ctx->OMSetDepthStencilState(g_reSavedDss, g_reSavedRef);
             if (g_reBlendSaved) {
@@ -1949,6 +1981,10 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
         if (g_savedFloorCb) { g_savedFloorCb->Release(); g_savedFloorCb = nullptr; }
         if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }
         g_holoBound=false;
+        if(g_orbitalBound) {
+            for(UINT i=0;i<g_savedOrbitalClassCount;++i) g_savedOrbitalClasses[i]->Release();
+            g_savedOrbitalClassCount=0;g_savedOrbitalVs.Reset();g_savedOrbitalInfo.Reset();g_orbitalBound=false;
+        }
         if (g_savedHudScene) { g_savedHudScene->Release(); g_savedHudScene = nullptr; }
         g_hudSceneBound = false;
         if (g_savedPs) {
@@ -2113,6 +2149,7 @@ void uiDepthShutdown() {
     for(auto& motion:g_holoMotion) motion=HoloMotion{};
     if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }
     g_holoBound=g_holoNoted=false;
+    g_orbitalVs.Reset();g_stellarNoted[0]=g_stellarNoted[1]=false;
     if (g_savedFloorCb) { g_savedFloorCb->Release(); g_savedFloorCb = nullptr; }
     if (g_savedPs) {
         g_savedPs->Release();

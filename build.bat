@@ -707,6 +707,16 @@ if errorlevel 1 ( echo [edvr] ERROR: hologram motion test build failed & exit /b
 "%OBJ%\holomotion\holo_motion_test.exe" || exit /b 1
 python "tools\holo_motion.py" --self-test || exit /b 1
 
+echo [edvr] === stellar motion regression ===
+if not exist "%OBJ%\stellarmotion" mkdir "%OBJ%\stellarmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\stellarmotion\\" /Fe"%OBJ%\stellarmotion\stellar_motion_test.exe" ^
+    "tools\stellar_motion_test\stellar_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: stellar motion test build failed & exit /b 1 )
+"%OBJ%\stellarmotion\stellar_motion_test.exe" || exit /b 1
+
 echo [edvr] === terrain motion regression ===
 if not exist "%OBJ%\terrainmotion" mkdir "%OBJ%\terrainmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^

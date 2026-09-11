@@ -48,6 +48,15 @@ int wmain(int argc, wchar_t** argv) {
     ComPtr<ID3D11RenderTargetView> boundRt; ctx->OMGetRenderTargets(1, &boundRt, nullptr);
     check(boundRt.Get() == rtv.Get(), "capture changed render target");
     check(snap.surfaces.size() == 1 && snap.draws.size() == 3, "duplicate source or lost draw");
+    bd.ByteWidth=64;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;ComPtr<ID3D11Buffer> vertices;hr(dev->CreateBuffer(&bd,nullptr,&vertices));
+    UINT stride=16,offset=8;ctx->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
+    for(UINT i=0;i<2;++i){
+        uint8_t data[64];for(UINT k=0;k<64;++k)data[k]=static_cast<uint8_t>(k+i*64);
+        ctx->UpdateSubresource(vertices.Get(),0,nullptr,data,0,0);
+        snap.capture(ctx.Get(),101,7+i,edvr::EyeDrawSnapshot::kHud,0,'X',3,1,0,2,-3);
+    }
+    uint8_t overwritten[64]{};ctx->UpdateSubresource(vertices.Get(),0,nullptr,overwritten,0,0);
+    check(snap.vertexDraws==2&&snap.vertexBytes==112,"per-draw vertex snapshots counted");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
@@ -60,6 +69,7 @@ int wmain(int argc, wchar_t** argv) {
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));
+    edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHud, shaderBytes, sizeof(shaderBytes));
     std::wstring directory = argv[1]; directory.resize(directory.find_last_of(L"\\/"));
     check(snap.writeShaders(directory.c_str()) == 0, "retained shader write");
     const std::wstring shaderPath = directory + L"\\vs_81216C77F90DEDD6.dxbc";
@@ -68,6 +78,10 @@ int wmain(int argc, wchar_t** argv) {
     check(fread(saved, 1, sizeof(saved), shader) == sizeof(saved), "shader payload length");
     check(std::memcmp(saved, shaderBytes, sizeof(saved)) == 0, "shader payload content");
     fclose(shader);
+    snap.capture(ctx.Get(),103,10,edvr::EyeDrawSnapshot::kHud,0,'X',3,1,0);
+    check(snap.vertexBytes==112,"vertex capture stops after three frames");
+    snap.vertexBytes=32*1024*1024;snap.capture(ctx.Get(),102,11,edvr::EyeDrawSnapshot::kHud,0,'X',3,1,0);
+    check(snap.vertexDeclined==1,"vertex byte budget declines explicitly");
     snap.draws.resize(edvr::EyeDrawSnapshot::kMaxDraws);
     snap.capture(ctx.Get(), 103, 6, edvr::EyeDrawSnapshot::kHolo, 0, 'X', 6, 1, 0);
     check(snap.dropped == 1 && snap.draws.size() == edvr::EyeDrawSnapshot::kMaxDraws, "capture cap");

@@ -2619,7 +2619,7 @@ void paletteCapture(ID3D11DeviceContext* ctx) {
 // -- three COM calls on each instanced draw for twenty frames, a millisecond
 // or two a frame, and only then.
 void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
-                    uint32_t startInstance) {
+                    uint32_t startInstance,uint32_t start,int32_t base) {
     const uint32_t frame = g_frame + 1;   // this frame's draws precede its boundary, where g_frame steps
     if (frame < g_ledgerFrame0 || frame > g_ledgerLastFrame) return;
     LedgerDraw d{};
@@ -2630,7 +2630,7 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     d.kind = static_cast<uint8_t>(kind);
     if (EyeDrawSnapshot::watches(d.vs)) {
         g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
-                               d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance);
+                               d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance,start,base);
     }
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
@@ -2904,6 +2904,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.draws.size()),
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
+    Log::get().note("object probe: target UI vertex snapshots: %u draws, %u bytes, %u budget declines; first three watched frames, 256 KiB per stream, 32 MiB total. Draw offsets and VB0/VB1/IB bindings are in snapshot version 2.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
     g_ledgerOn = false;
     ledgerRelease();
 }
@@ -3075,9 +3076,9 @@ void objectShipsSetRange(float metres) {
 }
 
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
-                          uint32_t startInstance) {
+                          uint32_t startInstance,uint32_t start,int32_t base) {
     if ((!g_on && !g_ledgerOn) || !ctx) return;
-    if (g_ledgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance);
+    if (g_ledgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance,start,base);
     if (g_checksLeft == 0) return;
     // The record-carrying families are instanced (question 5: every carrier
     // declares INSTANCEANDMODELDATAINDEX); a plain draw is not asked.
@@ -3241,8 +3242,8 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
 bool objectProbeLedgerActive() { return g_ledgerOn; }
 
 void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                             uint32_t instances, uint32_t startInstance) {
-    if (objectProbeLedgerActive() && ctx) ledgerNoteDraw(ctx, kind, count, instances, startInstance);
+                             uint32_t instances, uint32_t startInstance,uint32_t start,int32_t base) {
+    if (objectProbeLedgerActive() && ctx) ledgerNoteDraw(ctx, kind, count, instances, startInstance,start,base);
 }
 
 void objectProbeArmLedger(const wchar_t* stamp) {

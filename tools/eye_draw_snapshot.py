@@ -2,6 +2,9 @@
 """Read drawstate_HHMMSS.bin from an eye run (eye_draw_snapshot.h).
 
 Each draw preserves VS b0/b1/b2 and PS b2 at the draw, before buffer reuse.
+Version 2 also preserves draw start/base and bounded HUD/sprite VB0/VB1/IB
+payloads, beginning at each recorded binding offset, for the first three
+watched frames. Version 1 captures remain readable.
 Frames/ordinals join draws_HHMMSS.bin, whose crop map joins the eye images.
 Holo t2 surfaces are copied once per resource; their alpha is diagnostic,
 not a per-frame history. No resource address is a persistent object ID.
@@ -31,9 +34,10 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version != 1 or nd > 2048 or ns > 24:
+    if version not in (1, 2) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
+    vertex_bytes = 0
     for _ in range(nd):
         d = dict(zip(('vs', 'ps', 'target'), unpack('<3Q')))
         d.update(zip(('frame', 'ordinal', 'kind', 'count', 'instances', 'start_instance',
@@ -46,6 +50,17 @@ def read(path):
             if size > min(whole, 1024 if slot == 0 else 8192) or size % 16:
                 raise ValueError('Invalid constant-buffer payload')
             d['buffers'].append(dict(identity=identity, whole=whole, data=take(size)))
+        d['streams'] = []
+        if version == 2:
+            d['start'], d['base'] = unpack('<Ii')
+            for slot in range(3):
+                offset, stride, whole, size = unpack('<4I')
+                if size > min(max(0, whole-offset), 256*1024):
+                    raise ValueError('Invalid vertex payload')
+                vertex_bytes += size
+                if vertex_bytes > 32*1024*1024:
+                    raise ValueError('Vertex payload budget exceeded')
+                d['streams'].append(dict(offset=offset, stride=stride, whole=whole, data=take(size)))
         draws.append(d)
     total = 0
     for _ in range(ns):
@@ -88,9 +103,9 @@ def export_surfaces(capture, directory, dry_run=False):
 
 
 def verify_fixture(capture):
-    assert len(capture['draws']) == 3 and len(capture['surfaces']) == 1
+    assert len(capture['draws']) == 5 and len(capture['surfaces']) == 1
     assert capture['dropped'] == 0 and capture['failures'] == 0
-    for i, d in enumerate(capture['draws']):
+    for i, d in enumerate(capture['draws'][:3]):
         assert (d['frame'], d['ordinal'], d['width'], d['height']) == (100+i, i*2, 8, 8)
         assert d['buffers'][0]['whole'] == 192
         vals = struct.unpack('<48f', d['buffers'][0]['data'])
@@ -100,6 +115,11 @@ def verify_fixture(capture):
     s = capture['surfaces'][0]
     assert (s['width'], s['height'], s['format']) == (3, 2, 28)
     assert s['data'] == bytes(range(24)), 'Texture rows or first-draw timing differ'
+    for i, d in enumerate(capture['draws'][3:]):
+        assert (d['start'], d['base']) == (2, -3)
+        v = d['streams'][0]
+        assert (v['offset'], v['stride'], v['whole']) == (8, 16, 64)
+        assert v['data'] == bytes(range(8+i*64, 64+i*64)), 'Vertex buffer captured after reuse'
 
 
 def self_test():
@@ -110,8 +130,8 @@ def self_test():
         c = read(p)
         assert c['draws'] == [] and c['surfaces'] == []
         for bad in (b'', head, head+b'\0'*5, head.replace(b'EDVRDRW1', b'EDVRBAD1'),
-                    b'EDVRDRW1'+struct.pack('<4I', 2, 0, 0, 0),
-                    b'EDVRDRW1'+struct.pack('<4I', 1, 2049, 0, 0)):
+                    b'EDVRDRW1'+struct.pack('<4I', 3, 0, 0, 0),
+                    b'EDVRDRW1'+struct.pack('<4I', 1, 4097, 0, 0)):
             p.write_bytes(bad)
             try:
                 read(p)
@@ -144,7 +164,9 @@ def main():
         verify_fixture(c)
         print('GPU draw snapshot fixture passed')
         return
-    print(json.dumps(dict(draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],
+    print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],
+                          vertex_draws=sum(any(s['data'] for s in d['streams']) for d in c['draws']),
+                          vertex_bytes=sum(len(s['data']) for d in c['draws'] for s in d['streams']),
                           failures=c['failures'], shaders=Counter(f"{d['vs']:016X}" for d in c['draws'])), indent=2))
     if a.surfaces:
         for path in export_surfaces(c, a.surfaces, a.dry_run):

@@ -19,14 +19,17 @@ class EyeDrawSnapshot {
     using Buffer = Microsoft::WRL::ComPtr<ID3D11Buffer>;
     using Texture = Microsoft::WRL::ComPtr<ID3D11Texture2D>;
 public:
-    static constexpr uint32_t kMaxDraws = 2048;
+    static constexpr uint32_t kMaxDraws = 4096;
     static constexpr uint32_t kMaxTextures = 24;
     static constexpr uint32_t kMaxTextureBytes = 16 * 1024 * 1024;
     static constexpr uint32_t kTotalTextureBytes = 64 * 1024 * 1024;
     static constexpr uint64_t kHolo = 0x81216C77F90DEDD6ull;
+    static constexpr uint64_t kHud = 0xB7790CBFC6554097ull, kSprite=0xE508648660A352B2ull;
     static bool watches(uint64_t vs) {
         switch (vs) {
         case kHolo:
+        case kHud:
+        case kSprite:
         case 0xACE405F428C17EF6ull: // matching 2304/104448-index depth/colour draws
         case 0x72BDD292154158ADull:
         case 0x19F70CE80DA3242Bull: // sphere draw using cb0[9..11], cb1[270..273]
@@ -47,6 +50,9 @@ public:
         uint64_t source[4] = {}; // VS b0,b1,b2; PS b2
         uint32_t whole[4] = {}, copied[4] = {};
         Buffer stage[4];
+        uint32_t start=0;int32_t base=0;
+        struct Stream {uint32_t offset=0,stride=0,whole=0,copied=0;Buffer stage;};
+        Stream streams[3]; // VB0, VB1, index buffer; copied from binding offset
     };
     struct Surface {
         Texture source, stage;
@@ -55,6 +61,7 @@ public:
     std::vector<Draw> draws;
     std::vector<Surface> surfaces;
     uint32_t dropped = 0, failures = 0, textureBytes = 0;
+    uint32_t firstFrame=0,vertexBytes=0,vertexDraws=0,vertexDeclined=0;
 
     // The game may create these before a dump is armed. Retain only this
     // bounded VS set, then write only shaders seen in the requested run.
@@ -89,17 +96,19 @@ public:
 
     void reset() {
         draws.clear(); surfaces.clear(); dropped = failures = textureBytes = 0;
+        firstFrame=vertexBytes=vertexDraws=vertexDeclined=0;
     }
 
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
-                 uint32_t instances, uint32_t startInstance) {
+                 uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0) {
         if (!ctx || !watches(vs)) return;
         if (draws.size() >= kMaxDraws) { ++dropped; return; }
         Draw d;
         d.frame = frame; d.ordinal = ordinal; d.vs = vs; d.ps = ps;
         d.kind = static_cast<uint8_t>(kind); d.count = count;
         d.instances = instances; d.startInstance = startInstance;
+        d.start=start;d.base=base;if(!firstFrame)firstFrame=frame;
         Microsoft::WRL::ComPtr<ID3D11Device> dev; ctx->GetDevice(&dev);
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rt;
         ctx->OMGetRenderTargets(1, &rt, nullptr);
@@ -130,7 +139,28 @@ public:
             ctx->CopySubresourceRegion(d.stage[i].Get(), 0, 0, 0, 0, src.Get(), 0, &box);
             d.copied[i] = bd.ByteWidth;
         }
-        if (vs == kHolo) d.texture = captureSurface(ctx, dev.Get(), frame);
+        if (vs == kHolo || vs==kSprite) d.texture = captureSurface(ctx, dev.Get(), frame,vs==kSprite?0:2);
+        // Target labels and vector widgets can move inside their dynamic
+        // vertex streams. Preserve each draw, not the first binding of a VS.
+        // Three frames and 32 MiB bound this explicit diagnostic's cost.
+        if((vs==kHud || vs==kSprite) && frame-firstFrame<3) {
+            ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
+            ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
+            bool copied=false;
+            for(int i=0;i<3;++i) {
+                Buffer src;src.Attach(raw[i]);if(!src)continue;
+                auto& s=d.streams[i];s.offset=i==2?ibOffset:offsets[i];s.stride=i==2?(fmt==DXGI_FORMAT_R16_UINT?2u:fmt==DXGI_FORMAT_R32_UINT?4u:0u):strides[i];
+                D3D11_BUFFER_DESC bd{};src->GetDesc(&bd);s.whole=bd.ByteWidth;
+                if(s.offset>=s.whole || !s.stride)continue;
+                UINT bytes=s.whole-s.offset;if(bytes>256*1024)bytes=256*1024;
+                if(vertexBytes+bytes>32*1024*1024){++vertexDeclined;continue;}
+                bd.ByteWidth=bytes;bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                if(FAILED(dev->CreateBuffer(&bd,nullptr,&s.stage))){++failures;continue;}
+                D3D11_BOX box{s.offset,0,0,s.offset+bytes,1,1};ctx->CopySubresourceRegion(s.stage.Get(),0,0,0,0,src.Get(),0,&box);
+                s.copied=bytes;vertexBytes+=bytes;copied=true;
+            }
+            vertexDraws+=copied?1u:0u;
+        }
         draws.push_back(std::move(d));
     }
 
@@ -143,7 +173,7 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(1); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        u32(2); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,
@@ -166,6 +196,8 @@ public:
                 u64(d.source[i]); u32(d.whole[i]);
                 payload(d.stage[i].Get(), d.copied[i], 0, 0);
             }
+            u32(d.start);u32(static_cast<uint32_t>(d.base));
+            for(auto& s:d.streams){u32(s.offset);u32(s.stride);u32(s.whole);payload(s.stage.Get(),s.copied,0,0);}
         }
         for (Surface& s : surfaces) {
             u32(s.frame); u32(s.width); u32(s.height); u32(s.format);
@@ -181,9 +213,9 @@ private:
     static std::map<uint64_t, std::vector<uint8_t>>& shaderBytes() {
         static std::map<uint64_t, std::vector<uint8_t>> s; return s;
     }
-    uint32_t captureSurface(ID3D11DeviceContext* ctx, ID3D11Device* dev, uint32_t frame) {
+    uint32_t captureSurface(ID3D11DeviceContext* ctx, ID3D11Device* dev, uint32_t frame,UINT slot) {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-        ctx->PSGetShaderResources(2, 1, &srv);
+        ctx->PSGetShaderResources(slot, 1, &srv);
         if (!srv) return UINT32_MAX;
         Microsoft::WRL::ComPtr<ID3D11Resource> res; srv->GetResource(&res);
         Texture tex;

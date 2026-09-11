@@ -36,22 +36,40 @@ float3 turn(float4 q, float3 v) {
     // b2 animates the material's glow coordinates every frame; it does
     // not move vertices or the primary surface UVs and is not identity.
     [unroll] for(uint k=0;k<4;++k) n.key[k]=mesh[k];
-    uint index=Instance.Load(0), count,stride; Pool.GetDimensions(count,stride);
-    if(index>=count) { Current[info.x]=n; return; }
-    PoolRecord p=Pool[index];
-    float scale=asfloat(p.data[0].y);
-    uint2 packed=p.data[0].zw;
-    float4 q=float4(packed.x&65535,packed.x>>16,packed.y&65535,packed.y>>16)*(2.0/65535.0)-1;
-    float3 pos=asfloat(p.data[1].xyz)-scene[275].xyz;
-    float3 x=turn(q,float3(scale,0,0)),y=turn(q,float3(0,scale,0)),z=turn(q,float3(0,0,scale));
-    [unroll] for(uint r=0;r<3;++r) {
-        float4 c=model[r==2?7:4+r];
-        n.clip[r]=float4(dot(c.xyz,x),dot(c.xyz,y),dot(c.xyz,z),dot(c,float4(pos,1)));
+    bool valid=true;
+    if(info.z==1) {
+        [unroll] for(uint r=0;r<3;++r) n.clip[r]=model[r==2?7:4+r];
+        [unroll] for(uint k=0;k<4;++k) n.key[4+k]=asuint(material[k]);
+        valid=all(abs(model[6].xyz)<1e-10) && model[6].w>0;
+    } else {
+        float3 scale,pos; float4 q;
+        if(info.z==2) {
+            uint at=id.x*60;
+            pos=asfloat(Instance.Load3(at))-scene[275].xyz;
+            q=asfloat(Instance.Load4(at+16)); scale=asfloat(Instance.Load3(at+32));
+            n.key[4]=Instance.Load4(at+16); n.key[5]=uint4(Instance.Load3(at+32),Instance.Load(at+12));
+            // Geometry lies at local Z=0. A comparable unused Z axis avoids
+            // an ill-conditioned inverse for billion-metre orbital ellipses.
+            scale.z=max(abs(scale.x),abs(scale.y));
+        } else {
+            uint index=Instance.Load(0), count,stride; Pool.GetDimensions(count,stride);
+            if(index>=count) { Current[info.x]=n; return; }
+            PoolRecord p=Pool[index]; valid=p.data[0].x==0;
+            scale=asfloat(p.data[0].y);
+            uint2 packed=p.data[0].zw;
+            q=float4(packed.x&65535,packed.x>>16,packed.y&65535,packed.y>>16)*(2.0/65535.0)-1;
+            pos=asfloat(p.data[1].xyz)-scene[275].xyz;
+        }
+        float3 x=turn(q,float3(scale.x,0,0)),y=turn(q,float3(0,scale.y,0)),z=turn(q,float3(0,0,scale.z));
+        [unroll] for(uint r=0;r<3;++r) {
+            uint row=r==2?3:r;
+            float4 c=info.z==2 ? float4(scene[270][row],scene[271][row],scene[272][row],scene[273][row]) : model[r==2?7:4+r];
+            n.clip[r]=float4(dot(c.xyz,x),dot(c.xyz,y),dot(c.xyz,z),dot(c,float4(pos,1)));
+        }
+        valid=valid && all(isfinite(scale)) && all(abs(scale)>1e-8) && all(isfinite(pos)) && abs(dot(q,q)-1)<.002;
+        if(info.z==0) valid=valid && all(abs(model[6].xyz)<1e-10) && model[6].w>0 && n.clip[2].w<limits.x;
     }
-    bool valid=p.data[0].x==0 && isfinite(scale) && abs(scale)>1e-8 &&
-        all(isfinite(pos)) && abs(dot(q,q)-1)<.002 &&
-        all(abs(model[6].xyz)<1e-10) && model[6].w>0 &&
-        n.clip[2].w>.025 && n.clip[2].w<limits.x;
+    valid=valid && n.clip[2].w>.025 && all(isfinite(n.clip[0])) && all(isfinite(n.clip[1])) && all(isfinite(n.clip[2]));
     float3 a=cross(n.clip[1].xyz,n.clip[2].xyz),b=cross(n.clip[2].xyz,n.clip[0].xyz),c=cross(n.clip[0].xyz,n.clip[1].xyz);
     float det=dot(n.clip[0].xyz,a);
     valid=valid && isfinite(det) && abs(det)>1e-12;
@@ -65,7 +83,14 @@ float3 turn(float4 q, float3 v) {
         float2 here=float2(n.clip[0].w,n.clip[1].w)/n.clip[2].w;
         float2 there=float2(old.clip[0].w,old.clip[1].w)/old.clip[2].w;
         same=same && all(abs(here-there)<.2) && old.clip[2].w>n.clip[2].w*.5 && old.clip[2].w<n.clip[2].w*2;
-        if(same) { ++matches; match=i; }
+        if(same) {
+            // Identical ring passes may repeat the same geometry/material.
+            // They are interchangeable only when their complete transforms
+            // are identical. Cockpit ambiguity remains a hard rejection.
+            bool duplicate=info.z==1 && matches==1;
+            [unroll] for(uint row=0;row<3;++row) duplicate=duplicate && all(old.clip[row]==Previous[match].clip[row]);
+            if(!duplicate) { ++matches; match=i; }
+        }
     }
     if(valid && matches==1) {
         Record old=Previous[match]; float3 t=float3(n.clip[0].w,n.clip[1].w,n.clip[2].w);
@@ -75,7 +100,7 @@ float3 turn(float4 q, float3 v) {
         }
         n.meta.w=all(isfinite(n.map[0])) && all(isfinite(n.map[1])) && all(isfinite(n.map[2])) ? 1:0;
     }
-    Current[info.x]=n;
+    Current[info.x+id.x]=n;
 }
 )HLSL";
 
@@ -112,10 +137,10 @@ class HoloMotion {
             FAILED(dev->CreateUnorderedAccessView(e.buffer.Get(),nullptr,&e.uav))) return false;
         bd={}; bd.ByteWidth=96; bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&draw))) return false;
-        bd={}; bd.ByteWidth=16; bd.BindFlags=D3D11_BIND_SHADER_RESOURCE; bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        bd={}; bd.ByteWidth=4096; bd.BindFlags=D3D11_BIND_SHADER_RESOURCE; bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&instance))) return false;
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format=DXGI_FORMAT_R32_TYPELESS; sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
-        sd.BufferEx.NumElements=4; sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
+        sd.BufferEx.NumElements=1024; sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
         if(FAILED(dev->CreateShaderResourceView(instance.Get(),&sd,&instanceSrv))) return false;
         shader.Attach(shaderSwapCompileCs(ctx,kHoloMotionBuild,sizeof(kHoloMotionBuild)-1,"main","holo motion",nullptr,"holo motion"));
         return shader!=nullptr;
@@ -123,40 +148,49 @@ class HoloMotion {
 public:
     // Called only for the recognized holo VS/PS, one unskinned instance,
     // and the normal full-eye viewport. Does not replace the original draw.
-    bool prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* source,const HoloDraw& args,float metres) {
-        if(failed || !source || args.kind!='X' || args.instances!=1 || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
+    // mode 0: cockpit pool, 1: ring local-to-clip, 2: orbital instance stream.
+    bool prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* source,const HoloDraw& args,float metres,unsigned mode=0) {
+        const unsigned count=mode==2?args.instances:1;
+        if(failed || !source || mode>2 || (mode==2 ? (args.kind!='N' || args.startInstance!=0 || count==0 || count>64) : (args.kind!='X' || args.instances!=1)) || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
         D3D11_TEXTURE2D_DESC td{}; source->GetDesc(&td);
         UINT nvp=1; D3D11_VIEWPORT vp{}; ctx->RSGetViewports(&nvp,&vp);
         if(nvp!=1 || vp.TopLeftX!=0 || vp.TopLeftY!=0 || vp.Width!=td.Width || vp.Height!=td.Height || vp.MinDepth!=0 || vp.MaxDepth!=1) return false;
         Ptr<ID3D11Device> dev; ctx->GetDevice(&dev);
         if(scene.Get()!=source && !create(ctx,dev.Get(),source)) { failed=true; return false; }
-        auto& now=history[write]; auto& prev=history[1-write]; if(now.count>=kMax) return false;
+        auto& now=history[write]; auto& prev=history[1-write]; if(now.count+count>kMax) return false;
         Ptr<ID3D11Buffer> vb[2],ib; UINT strides[2]{},offsets[2]{},ibOffset=0; DXGI_FORMAT fmt;
         ID3D11Buffer* rawVb[2]{}; ctx->IAGetVertexBuffers(0,2,rawVb,strides,offsets);
         for(int i=0;i<2;++i) vb[i].Attach(rawVb[i]);
         ctx->IAGetIndexBuffer(&ib,&fmt,&ibOffset);
-        if(!vb[0] || !vb[1] || !ib || strides[0]!=8 || strides[1]!=40) return false;
-        D3D11_BUFFER_DESC vd{}; vb[0]->GetDesc(&vd);
-        uint64_t at=uint64_t(offsets[0])+uint64_t(args.startInstance)*strides[0]; if(at+4>vd.ByteWidth) return false;
-        Ptr<ID3D11ShaderResourceView> pool,surface; ctx->VSGetShaderResources(33,1,&pool); ctx->PSGetShaderResources(2,1,&surface);
-        if(!pool || !surface) return false;
-        D3D11_SHADER_RESOURCE_VIEW_DESC pd{}; pool->GetDesc(&pd); if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER) return false;
-        Ptr<ID3D11Resource> resource; pool->GetResource(&resource); Ptr<ID3D11Buffer> poolBuffer;
-        if(FAILED(resource.As(&poolBuffer))) return false;
-        D3D11_BUFFER_DESC pbd{}; poolBuffer->GetDesc(&pbd); if(pbd.StructureByteStride!=336) return false;
+        if(!vb[0] || (mode==0 && (!vb[1] || !ib || strides[0]!=8 || strides[1]!=40)) ||
+           (mode==1 && !ib) || (mode==2 && (!vb[1] || strides[0]!=16 || strides[1]!=60))) return false;
+        unsigned stream=mode==2?1:0,bytes=mode==2?count*60:4;
+        D3D11_BUFFER_DESC vd{}; vb[stream]->GetDesc(&vd);
+        uint64_t at=uint64_t(offsets[stream])+uint64_t(args.startInstance)*strides[stream];
+        if(mode!=1 && at+bytes>vd.ByteWidth) return false;
+        Ptr<ID3D11ShaderResourceView> pool,surface;
+        if(mode!=2) ctx->PSGetShaderResources(mode==1?3:2,1,&surface);
+        if(mode==0) {
+            ctx->VSGetShaderResources(33,1,&pool); if(!pool || !surface) return false;
+            D3D11_SHADER_RESOURCE_VIEW_DESC pd{}; pool->GetDesc(&pd); if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER) return false;
+            Ptr<ID3D11Resource> resource; pool->GetResource(&resource); Ptr<ID3D11Buffer> poolBuffer;
+            if(FAILED(resource.As(&poolBuffer))) return false;
+            D3D11_BUFFER_DESC pbd{}; poolBuffer->GetDesc(&pbd); if(pbd.StructureByteStride!=336) return false;
+        }
+        if(mode==1 && !surface) return false;
         ID3D11Buffer* cb[3]{}; ctx->VSGetConstantBuffers(0,3,cb);
-        bool enough=true; const UINT minimum[3]={128,276*16,64};
+        bool enough=true; const UINT minimum[3]={mode==2?0u:128u,276*16,mode==2?0u:64u};
         for(int i=0;i<3;++i) { D3D11_BUFFER_DESC bd{}; if(cb[i]) cb[i]->GetDesc(&bd); enough=enough && bd.ByteWidth>=minimum[i]; }
         if(!enough) { for(auto* p:cb) if(p) p->Release(); return false; }
         struct Data { UINT info[4],key[16]; float limits[4]; } data{};
-        data.info[0]=now.count; data.info[1]=prev.count;
-        IUnknown* objects[3]={surface.Get(),vb[1].Get(),ib.Get()};
+        data.info[0]=now.count; data.info[1]=prev.count; data.info[2]=mode; data.info[3]=count;
+        IUnknown* objects[3]={surface.Get(),vb[mode==0?1:0].Get(),mode==2?nullptr:ib.Get()};
         for(int i=0;i<3;++i) { uint64_t v=reinterpret_cast<uint64_t>(objects[i]); data.key[2*i]=UINT(v); data.key[2*i+1]=UINT(v>>32); now.sources[now.count][i]=objects[i]; }
-        data.key[6]=UINT(args.base); data.key[7]=args.start; data.key[8]=UINT(fmt); data.key[9]=ibOffset;
-        data.key[10]=strides[1]; data.key[11]=offsets[1]; data.key[12]=args.count;
+        data.key[6]=UINT(args.base); data.key[7]=args.start; data.key[8]=mode==2?0:UINT(fmt); data.key[9]=mode==2?0:ibOffset;
+        data.key[10]=strides[mode==0?1:0]; data.key[11]=offsets[mode==0?1:0]; data.key[12]=args.count; data.key[15]=mode;
         data.limits[0]=metres; data.limits[1]=float(w); data.limits[2]=float(h);
         ctx->UpdateSubresource(draw.Get(),0,nullptr,&data,0,0);
-        D3D11_BOX box{UINT(at),0,0,UINT(at+4),1,1}; ctx->CopySubresourceRegion(instance.Get(),0,0,0,0,vb[0].Get(),0,&box);
+        if(mode!=1) { D3D11_BOX box{UINT(at),0,0,UINT(at+bytes),1,1}; ctx->CopySubresourceRegion(instance.Get(),0,0,0,0,vb[stream].Get(),0,&box); }
         Ptr<ID3D11ComputeShader> saved; ID3D11ClassInstance* classes[256]{}; UINT nc=256;
         ID3D11Buffer* savedCb[4]{}; ID3D11ShaderResourceView* savedSrv[3]{}; Ptr<ID3D11UnorderedAccessView> savedUav;
         ctx->CSGetShader(&saved,classes,&nc); ctx->CSGetConstantBuffers(0,4,savedCb);
@@ -164,14 +198,14 @@ public:
         ID3D11Buffer* buildCb[4]={cb[0],cb[1],cb[2],draw.Get()};
         ID3D11ShaderResourceView* srvs[3]={prev.srv.Get(),pool.Get(),instanceSrv.Get()};
         ctx->CSSetShader(shader.Get(),nullptr,0); ctx->CSSetConstantBuffers(0,4,buildCb);
-        ctx->CSSetShaderResources(0,3,srvs); ctx->CSSetUnorderedAccessViews(0,1,now.uav.GetAddressOf(),nullptr); ctx->Dispatch(1,1,1);
+        ctx->CSSetShaderResources(0,3,srvs); ctx->CSSetUnorderedAccessViews(0,1,now.uav.GetAddressOf(),nullptr); ctx->Dispatch(count,1,1);
         ID3D11UnorderedAccessView* zeroUav=nullptr; ID3D11ShaderResourceView* zeroSrv[3]{};
         ctx->CSSetUnorderedAccessViews(0,1,&zeroUav,nullptr); ctx->CSSetShaderResources(0,3,zeroSrv);
         ctx->CSSetShaderResources(0,3,savedSrv); ctx->CSSetUnorderedAccessViews(0,1,savedUav.GetAddressOf(),nullptr);
         ctx->CSSetConstantBuffers(0,4,savedCb); ctx->CSSetShader(saved.Get(),classes,nc);
         for(UINT i=0;i<nc;++i) classes[i]->Release();
-        for(auto* p:savedCb) if(p) p->Release(); for(auto* p:savedSrv) if(p) p->Release(); for(auto* p:cb) p->Release();
-        ++now.count;
+        for(auto* p:savedCb) if(p) p->Release(); for(auto* p:savedSrv) if(p) p->Release(); for(auto* p:cb) if(p) p->Release();
+        now.count+=count;
         if(!cleared) { const float zero[4]{}; ctx->ClearRenderTargetView(rtv.Get(),zero); cleared=true; }
         return true;
     }

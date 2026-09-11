@@ -11,7 +11,9 @@
 #include <iterator>
 
 using Microsoft::WRL::ComPtr;
+ComPtr<ID3DBlob> compile(const char*,const char*);
 namespace edvr {
+ID3D11VertexShader* shaderSwapCompileVs(ID3D11DeviceContext*,const char*,size_t,const char*,const char*,const SwapMacro*,const char*) { std::abort(); }
 ID3D11Texture2D* testScene = nullptr;
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
@@ -29,8 +31,11 @@ uint64_t bindingShaderHash(BindSlot) { std::abort(); }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
 bool depthProbeIsSceneDepth(const void*) { std::abort(); }
 uint64_t lookupShaderHash(void*) { std::abort(); }
-ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext*, const char*, size_t,
-    const char*, const char*, const SwapMacro*, const char*) { std::abort(); }
+ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx, const char* source, size_t,
+    const char*, const char*, const SwapMacro*, const char*) {
+    auto code=::compile(source,"cs_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
+    if(FAILED(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader)))std::abort();return shader;
+}
 ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext*, const char*, size_t,
     const char*, const char*, const SwapMacro*, const char*) { std::abort(); }
 float temporalPassDepthAt(float metres) { return 0.025f / metres; }
@@ -82,7 +87,7 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
     ComPtr<ID3D11Texture2D> stage; hr(dev->CreateTexture2D(&td, nullptr, &stage));
     ctx->CopyResource(stage.Get(), tex.Get());
     D3D11_MAPPED_SUBRESOURCE map{}; hr(ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &map));
-    UINT stride = td.Format == DXGI_FORMAT_R8_UNORM ? 1 : td.Format == DXGI_FORMAT_R32G8X24_TYPELESS ? 8 : td.Format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 16 : 4;
+    UINT stride = td.Format == DXGI_FORMAT_R8_UNORM ? 1 : (td.Format == DXGI_FORMAT_R32G8X24_TYPELESS || td.Format==DXGI_FORMAT_R32G32_FLOAT) ? 8 : td.Format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 16 : 4;
     std::vector<float> values(td.Width * td.Height);
     for (UINT y = 0; y < td.Height; ++y) for (UINT x = 0; x < td.Width; ++x) {
         const auto* p = static_cast<const unsigned char*>(map.pData) + y * map.RowPitch + x * stride;
@@ -415,6 +420,30 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
         }
         testScene=scene.tex.Get();ctx->ClearState();uiDepthFrameBoundary(ctx.Get());
     }
+    // Exercise the orbital reissue through the actual private-depth pass,
+    // including multi-instance indices and restoration of both shader stages.
+    {
+        ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_holoMotion[0]=HoloMotion{};
+        auto code=compile(kOrbitalCoverageVs,"vs_5_0");hr(dev->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&g_orbitalVs));
+        D3D11_INPUT_ELEMENT_DESC elements[]={{"POSTANGENT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},{"OSTOWST",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,0,D3D11_INPUT_PER_INSTANCE_DATA,1},{"OSTOWSR",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,16,D3D11_INPUT_PER_INSTANCE_DATA,1},{"OSTOWSS",0,DXGI_FORMAT_R32G32B32_FLOAT,1,32,D3D11_INPUT_PER_INSTANCE_DATA,1},{"COLOUR",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,44,D3D11_INPUT_PER_INSTANCE_DATA,1}};
+        ComPtr<ID3D11InputLayout> layout;hr(dev->CreateInputLayout(elements,5,code->GetBufferPointer(),code->GetBufferSize(),&layout));
+        auto make=[&](UINT bytes,UINT bind,const void* data){D3D11_BUFFER_DESC desc{};desc.ByteWidth=bytes;desc.BindFlags=bind;D3D11_SUBRESOURCE_DATA init{data,0,0};ComPtr<ID3D11Buffer> b;hr(dev->CreateBuffer(&desc,&init,&b));return b;};
+        float sc[333*4]{};sc[270*4]=sc[271*4+1]=sc[272*4+3]=sc[277*4]=sc[278*4+1]=sc[279*4+2]=1;sc[273*4+2]=.025f;sc[332*4+2]=sc[332*4+3]=.125f;
+        float material[8]{};material[6]=1;UINT orbitalSentinel[4]={91,0,0,0};auto sceneCb=make(sizeof(sc),D3D11_BIND_CONSTANT_BUFFER,sc),materialCb=make(sizeof(material),D3D11_BIND_CONSTANT_BUFFER,material),savedCb=make(sizeof(orbitalSentinel),D3D11_BIND_CONSTANT_BUFFER,orbitalSentinel);
+        float vertices[16]={-.5f,0,1,0,-.5f,0,1,0,.5f,0,1,0,.5f,0,1,0},instances[30]{};
+        for(int i=0;i<2;++i){float* p=instances+i*15;p[1]=i?.5f:-.5f;p[2]=1;p[3]=1;p[7]=1;p[8]=p[9]=p[10]=p[11]=p[12]=p[13]=p[14]=1;}
+        auto vb0=make(sizeof(vertices),D3D11_BIND_VERTEX_BUFFER,vertices),vb1=make(sizeof(instances),D3D11_BIND_VERTEX_BUFFER,instances);
+        ID3D11Buffer* vb[]={vb0.Get(),vb1.Get()};UINT strides[]={16,60},offsets[]={0,0};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);ctx->IASetInputLayout(layout.Get());ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,sceneCb.GetAddressOf());ctx->PSSetConstantBuffers(2,1,materialCb.GetAddressOf());ctx->VSSetConstantBuffers(12,1,savedCb.GetAddressOf());ctx->PSSetConstantBuffers(12,1,savedCb.GetAddressOf());
+        ctx->RSSetState(raster.Get());D3D11_VIEWPORT orbitalVp{0,0,8,8,0,1};ctx->RSSetViewports(1,&orbitalVp);ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);testScene=scene.tex.Get();ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),scene.dsv.Get());
+        g_on=true;g_mode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+        check(uiDepthReissueBegin(ctx.Get()),"orbital private reissue begins");ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
+        ComPtr<ID3D11VertexShader> afterVs;ctx->VSGetShader(&afterVs,nullptr,nullptr);check(afterVs.Get()==vs.Get(),"orbital reissue restores original vertex shader");
+        ComPtr<ID3D11Buffer> afterCb;ctx->VSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores VS constants");afterCb.Reset();ctx->PSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores PS constants");
+        ID3D11ShaderResourceView* views[2]{};g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> orbitalCoverage;views[0]->GetResource(&orbitalCoverage);auto indices=read(dev.Get(),ctx.Get(),orbitalCoverage.Get());unsigned counts[3]{};for(float v:indices)if(v>=0&&v<=2)++counts[unsigned(v)];
+        std::printf("orbital indices %u/%u/%u\n",counts[0],counts[1],counts[2]);check(counts[1]>0&&counts[2]>0,"orbital pixels carry their actual instance index");for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==0,"orbital coverage preserves live game depth");
+        ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_holoDraw={};
+    }
     // Execute the actual adaptive UI helper, including its production t8/u6
     // bindings. Previous evidence is raw UI colour, not temporal output.
     {
@@ -493,8 +522,11 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         reactivity=run();check(reactivity[27]>.999f,"changed UI colour rejects stale UI");
         reset();stroke(3,3,true);reactivity=run();check(reactivity[27]>.999f,"appearing UI is fresh");
         reset();stroke(3,3,false);reactivity=run();check(reactivity[27]>.999f,"erased isolated stroke clears its history");
+        check(reactivity[35]>.999f,"transparent centre rejects a departed glyph in the history footprint");
+        check(reactivity[36]>.999f,"diagonal reconstruction footprint rejects departing UI");
+        check(reactivity[63]<.001f,"unrelated sky retains history");
         reset();stroke(4,3,true);stroke(3,3,false);
-        for(float v:run())check(v<.001f,"one pixel raster shift tolerates matching UI colour");
+        reactivity=run();check(reactivity[28]<.001f,"one pixel raster shift tolerates matching UI colour at the stroke");
         params.offset[0]=-1;
         reactivity=run();check(reactivity[28]<.001f,"motion aligns UI evidence");
         reset();stroke(3,3,true);stroke(3,3,false);

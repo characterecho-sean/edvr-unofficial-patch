@@ -2,6 +2,7 @@
 """Read eye_HHMMSS_Holo.bin and join HoloCoverage's one-based indices.
 
 Records are the first captured frame's GPU state, not every crop's state.
+The shared table also contains ring and orbital coverage (key word 15).
 The three map rows take current (clip X, clip Y, clip W, 1) to the previous
 clip X/Y/W. Raster jitter is removed by the temporal consumer separately.
 """
@@ -23,7 +24,9 @@ def read(path):
     for i in range(count):
         at = 16 + i * stride
         values = struct.unpack_from('<28f', data, at + 128)
-        records.append(dict(index=i+1, key=struct.unpack_from('<32I', data, at),
+        key = struct.unpack_from('<32I', data, at)
+        records.append(dict(index=i+1, key=key,
+                            family={0: 'cockpit', 1: 'ring', 2: 'orbital'}.get(key[15], 'unknown'),
                             clip=[values[j:j+4] for j in range(0, 12, 4)],
                             rows=[values[j:j+4] for j in range(12, 24, 4)],
                             eligible=values[24] == 1, matched=values[27] == 1))

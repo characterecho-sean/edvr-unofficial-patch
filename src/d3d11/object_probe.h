@@ -56,14 +56,14 @@ bool objectProbeWantsDraws();
 // index count and startInstance its StartInstanceLocation -- the ledger's
 // row (objectProbeArmLedger below); nothing else reads them.
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
-                          uint32_t startInstance);
+                          uint32_t startInstance,uint32_t start=0,int32_t base=0);
 
 // Visible draws routed before the normal eye-draw hook (particle billboards).
 // The caller establishes that the target is an eye. Record the original
 // shader in an active ledger, without probing its unrelated instance pool.
 bool objectProbeLedgerActive();
 void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                             uint32_t instances, uint32_t startInstance);
+                             uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0);
 
 // THE EYE RUN'S LEDGER (2026-09-10). The run's raw crops say how much each
 // part of a station turned from one frame to the next; the pool says how
