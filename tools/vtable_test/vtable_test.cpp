@@ -1,4 +1,4 @@
-// vtable_test -- the object-wrapping collision, reproduced without ReShade.
+﻿// vtable_test -- the object-wrapping collision, reproduced without ReShade.
 //
 // WHY THIS EXISTS
 //
@@ -288,6 +288,35 @@ static bool pageIsReadOnly(const void* p) {
     if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
     return (mbi.Protect & 0xFF) == PAGE_READONLY ||
            (mbi.Protect & 0xFF) == PAGE_EXECUTE_READ;
+}
+
+// ONE STORE, FOREVER, until told to stop -- and no Sleep at all.
+//
+// The abandoned-catch cell needs to suspend a thread at a moment it cannot
+// choose, so it suspends and looks: with this the ONLY actor on the page, the
+// page is writable exactly when this thread is between its fault and its single
+// step. A Sleep in the loop would make that window a vanishing fraction of the
+// run; without one it is most of it.
+struct SpinJob {
+    void**         table;
+    size_t         slot;
+    void*          value;
+    volatile LONG* stop;
+};
+
+static DWORD WINAPI spinStoreThread(LPVOID param) {
+    SpinJob* job = static_cast<SpinJob*>(param);
+    while (!InterlockedCompareExchange(job->stop, 0, 0)) {
+        watchStore(job->table, job->slot, job->value);
+    }
+    return 0;
+}
+
+// One store, once, on its own thread -- for "is a FRESH write still caught".
+static DWORD WINAPI oneStoreThread(LPVOID param) {
+    const WatchStoreJob* job = static_cast<const WatchStoreJob*>(param);
+    watchStore(job->table, job->slot, job->value);
+    return 0;
 }
 
 // THE STALE-FORWARD CHECK, modelled exactly as vscreen.cpp runs it: one load
@@ -716,7 +745,7 @@ int main() {
         // (3b) AN OWNER RE-POINT IS NEVER CAPPED, INCLUDING WHEN IT IS ALSO
         // VOUCHED. The cap ends a tug-of-war between two TOOLS; the module that
         // implements the method will not tire and conceding to it just switches
-        // EDVR off. This was written as `ownerRepoint = !vouched && …`, so a
+        // EDVR off. This was written as `ownerRepoint = !vouched && â€¦`, so a
         // slot that happened to be vouched as well was booked against the cap
         // and retired after 64 exchanges -- the exact concession the exemption
         // exists to prevent, arriving on whichever slots the once-a-second
@@ -1333,6 +1362,169 @@ int main() {
                   "...and the page is read-only again once the writers stop",
                   "the page is writable with nothing pending, which is what "
                   "being permanently blind looks like from outside");
+            vtableWatchStop();
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
+    // THE CATCH NOBODY WAS WATCHING, which is how the watch went blind with no
+    // counter moving at all.
+    //
+    // The frame path's re-arm returns at its first line unless rearmWanted is
+    // set, and an ordinary claim set it nowhere -- rearmWanted was written only
+    // by the concurrent branch and by a failed VirtualProtect. So a catch whose
+    // single step never arrived (the thread terminated mid-store, a debugger ate
+    // the trap, an unwind took the store's own frame away) left the state owned
+    // by a thread that would never release it, the pages PAGE_READWRITE, and the
+    // two-second escape that exists for exactly this state unreachable -- for the
+    // rest of the session. Measured before the fix: suspend a writer mid-catch,
+    // tick frames for four seconds, and the pages are still writable and a fresh
+    // store is not caught, 5 runs out of 5.
+    //
+    // The cell suspends a thread mid-catch on purpose. With that thread the only
+    // actor on the page, "the page is writable" IS "a catch is outstanding", so
+    // the state can be entered deterministically by suspending and looking.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the abandoned-catch cell", "allocation refused");
+        } else {
+            for (size_t i = 0; i < 8; ++i) fake[i] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(fake, 3, 8, "abandoned-cell", true),
+                  "the flip timeline arms for the abandoned-catch cell",
+                  "arming refused");
+            vtableWatchFrameTick(400);
+
+            volatile LONG stop = 0;
+            SpinJob job{fake, 3, reinterpret_cast<void*>(&toolkitOne), &stop};
+            HANDLE spinner = CreateThread(nullptr, 0, spinStoreThread, &job, 0, nullptr);
+            if (!spinner) {
+                fail("CreateThread for the abandoned-catch cell", "thread refused");
+            } else {
+                // Suspend it until it is caught mid-catch: the page being
+                // writable with nobody else running is exactly that state.
+                bool midCatch = false;
+                for (int tries = 0; tries < 2000 && !midCatch; ++tries) {
+                    SuspendThread(spinner);
+                    if (!pageIsReadOnly(fake)) {
+                        midCatch = true;
+                        break;
+                    }
+                    ResumeThread(spinner);
+                    Sleep(0);
+                }
+                check(midCatch,
+                      "a writer can be stopped between its fault and its single "
+                      "step",
+                      "the cell never caught the thread mid-catch, so it is not "
+                      "testing the abandoned state");
+
+                // The frame path, for longer than the two-second escape. The
+                // suspended thread cannot re-protect anything: whatever closes
+                // the pages here is the escape.
+                const DWORD start = GetTickCount();
+                uint64_t frame = 400;
+                while (GetTickCount() - start < 2600) {
+                    vtableWatchRearm();
+                    vtableWatchFrameTick(++frame);
+                    Sleep(2);
+                }
+                check(pageIsReadOnly(fake),
+                      "...and a catch that never completes is given up on, so the "
+                      "pages come back",
+                      "the pages are still writable seconds later: the escape was "
+                      "unreachable, and every write from here on is invisible");
+
+                // And the watch really is working again, not merely protected.
+                const uint32_t caughtBefore = vtableWatchCatches();
+                WatchStoreJob fresh{fake, 4, reinterpret_cast<void*>(&chainerOne)};
+                HANDLE f2 = CreateThread(nullptr, 0, oneStoreThread, &fresh, 0, nullptr);
+                if (f2) {
+                    WaitForSingleObject(f2, INFINITE);
+                    CloseHandle(f2);
+                }
+                check(vtableWatchCatches() > caughtBefore,
+                      "...and a fresh write from another thread is caught again",
+                      "the pages are read-only but nothing is being caught, so "
+                      "the watch is armed over a state it cannot act on");
+
+                // THE ORPHANED STEP, delivered on purpose. The pages are opened
+                // by hand first so the resumed thread's store does NOT fault a
+                // second time and re-claim: that leaves its trap flag standing
+                // over a catch the escape has already given away, which is the
+                // one state that reaches the escaped-step path.
+                DWORD prot = 0;
+                VirtualProtect(fake, 4096, PAGE_READWRITE, &prot);
+                InterlockedExchange(&stop, 1);
+                ResumeThread(spinner);
+                WaitForSingleObject(spinner, INFINITE);
+                CloseHandle(spinner);
+                check(true,
+                      "...and the abandoned thread's late step does not kill the "
+                      "process",
+                      "unreachable -- an orphaned single step handed back kills "
+                      "it here");
+                check(vtableWatchChimeras() == 0,
+                      "...and is counted as a step the frame path gave up on, "
+                      "not as a chimera",
+                      "the summary calls the chimera count impossible, so an "
+                      "event this file caused on purpose must not land in it");
+                check(vtableWatchEscapedSteps() >= 1,
+                      "...which is a number of its own",
+                      "the escaped step was not counted anywhere, so the gap it "
+                      "represents is silent");
+            }
+            vtableWatchStop();
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
+    // WHICH FRAME THE DUMP IS ABOUT. The monitor's long-frame path runs in the
+    // block for frame N and reports the frame that just ENDED, N-1 -- and the
+    // flips inside that frame carry N-1 as well. The dump printed the frame in
+    // PROGRESS and told the reader that a change stamped with it had preceded
+    // whatever the line was about, so the change that DID precede the hang read
+    // as one that had not: the opposite answer, on the only question the
+    // instrument exists for, in the one dump that survives the crash.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the dump-subject cell", "allocation refused");
+        } else {
+            fake[3] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(fake, 3, 8, "subject-cell", true),
+                  "the flip timeline arms for the dump-subject cell",
+                  "arming refused");
+            // A flip inside frame 500, then the frame the monitor would be in
+            // when it reports on it.
+            vtableWatchFrameTick(500);
+            watchStore(fake, 3, reinterpret_cast<void*>(&toolkitOne));
+            vtableWatchFrameTick(501);
+            check(vtableWatchFlips() == 1, "one flip, stamped with frame 500",
+                  "the flip was not recorded");
+
+            vtableWatchDumpRecent("cell: the frame that just ended", 500);
+            check(vtableWatchLastDumpFrame() == 500,
+                  "the dump is about the frame it was TOLD it is about, not the "
+                  "one in progress",
+                  "the header names the frame the process is in, so a reader "
+                  "following its own instruction gets the ordering backwards");
+            check(vtableWatchLastDumpInside() == 1,
+                  "...and it classifies a change stamped with that frame as "
+                  "INSIDE it",
+                  "a flip in the subject frame was not recognised as being in it");
+
+            // And the census's caller, which really is speaking about the frame
+            // it is in: the same flip is then in the PAST, not inside.
+            vtableWatchDumpRecent("cell: the frame in progress", 501);
+            check(vtableWatchLastDumpFrame() == 501 &&
+                      vtableWatchLastDumpInside() == 0,
+                  "...while a dump about the frame in progress puts the same "
+                  "change before it",
+                  "the two callers cannot mean different frames, which is the "
+                  "whole reason the subject is a parameter");
             vtableWatchStop();
             VirtualFree(fake, 0, MEM_RELEASE);
         }

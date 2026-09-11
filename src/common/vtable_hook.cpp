@@ -291,10 +291,11 @@ struct WriteWatch {
     // can be observed half done.
     volatile LONG catchState = 0;    // set to kCatchIdle at arming, see below
     volatile LONG rearmWanted = 0;   // the frame-path fallback, see vtableWatchRearm
-    // When the frame-path re-arm first held off because a single step was still
-    // owed, as a QPC stamp; 0 when it is not holding. Frame path only, so no
-    // atomics. See vtableWatchRearm.
+    // When the frame-path re-arm first held off for the catch it is holding
+    // for, as a QPC stamp, and whose catch that was; 0 when it is not holding.
+    // Frame path only, so no atomics. See vtableWatchRearm.
     uint64_t  rearmHeldSince = 0;
+    LONG      rearmHeldOwner = 0;
     // A budget ran out and the frame path must stop the watch. Set in the
     // handler, acted on from vtableWatchFrameTick -- see reportWatchSummary for
     // why the handler may not do the stopping itself.
@@ -311,6 +312,12 @@ struct WriteWatch {
     // Single steps that arrived without matching the pair we owed ourselves.
     // Must be zero; see vtableWatchChimeras.
     volatile LONG chimera = 0;
+    // The thread whose catch the two-second escape gave up on, and how many
+    // late steps have arrived for one. See vtableWatchEscapedSteps: the escape
+    // is something this file CHOSE to do, so the step it orphans must not be
+    // counted beside the one the summary calls impossible.
+    volatile LONG escapedOwner = 0;
+    volatile LONG escaped = 0;
     volatile LONG64 lo = 0;          // span of addresses written
     volatile LONG64 hi = 0;
     void*     sites[8] = {};         // distinct writing instructions
@@ -474,6 +481,10 @@ struct FlipTimeline {
     uint64_t        softCapFrame = 0;
     double          softCapSeconds = 0.0;
     uint32_t        dumps = 0;
+    // What the last dump was about and how many of its rows fell inside that
+    // frame -- for the cell that holds the dump's own sentence to its word.
+    uint64_t        lastDumpFrame = 0;
+    uint32_t        lastDumpInside = 0;
     bool            summarised = false;
 };
 FlipTimeline g_flip;
@@ -507,6 +518,8 @@ void resetFlipTimeline() {
     g_flip.softCapFrame = 0;
     g_flip.softCapSeconds = 0.0;
     g_flip.dumps = 0;
+    g_flip.lastDumpFrame = 0;
+    g_flip.lastDumpInside = 0;
     g_flip.summarised = false;
 }
 
@@ -802,7 +815,18 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
             // writer threads, all dead inside 50 ms, three runs out of three.
             // Ownership is one word now, so this must never fire; the count is
             // what says so rather than an assumption that it does not.
-            InterlockedIncrement(&g_watch.chimera);
+            //
+            // EXCEPT for the one case this file causes on purpose: the frame
+            // path's re-arm gives up on a catch after two seconds and takes the
+            // pages back, and if that thread then turns up after all its step
+            // owns nothing through no fault of its own. Counting that beside a
+            // number the summary calls "must be zero" would make the summary
+            // lie about its own escape hatch. One late step per escape.
+            if (InterlockedCompareExchange(&g_watch.escapedOwner, 0, me) == me) {
+                InterlockedIncrement(&g_watch.escaped);
+            } else {
+                InterlockedIncrement(&g_watch.chimera);
+            }
             if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -926,7 +950,10 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
         ep->ContextRecord->EFlags |= kTrapFlag;
         // Ownership is already ours -- the compare-exchange above wrote this
         // thread's id into the state word. There is nothing further to publish,
-        // which is the point: it cannot be half claimed.
+        // which is the point: it cannot be half claimed, and nothing else here
+        // has to be reached for the frame path to know a catch is outstanding.
+        // See vtableWatchRearm: it reads the STATE, not a flag this handler
+        // might be interrupted before setting.
     } else {
         // No context to step with, so no step will ever come: hand the state
         // back and let the frame path close the pages. A whole frame late, and
@@ -1242,8 +1269,9 @@ void reportFlipSummary(const char* why) {
         "their second half, %u faulted while a catch was already in progress and "
         "were let through unrecorded (that includes a catching thread's own "
         "store faulting a second time after its pages were closed under it, "
-        "which loses nothing), and %u single step(s) arrived on a thread that "
-        "did not own the catch (that last one must be zero).%s",
+        "which loses nothing), %u step(s) arrived for a catch the frame path had "
+        "already given up on after two seconds, and %u single step(s) arrived on "
+        "a thread that did not own the catch (that last one must be zero).%s",
         g_watch.who, why, static_cast<unsigned>(catches),
         static_cast<unsigned long long>(g_flip.frames), perFrame,
         perFrame * kCatchCostUs / 1000.0, kCatchCostUs,
@@ -1253,6 +1281,7 @@ void reportFlipSummary(const char* why) {
         static_cast<unsigned>(g_flip.lost),
         static_cast<unsigned>(InterlockedCompareExchange(&g_flip.unfinished, 0, 0)),
         static_cast<unsigned>(InterlockedCompareExchange(&g_watch.concurrent, 0, 0)),
+        static_cast<unsigned>(InterlockedCompareExchange(&g_watch.escaped, 0, 0)),
         static_cast<unsigned>(InterlockedCompareExchange(&g_watch.chimera, 0, 0)),
         softCap);
     printFlipShapes("summary");
@@ -1310,21 +1339,41 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
     // A span that reaches into a DIFFERENT allocation, or into pages with a
     // different protection, is not one region to protect and restore: putting
     // the anchor page's protection back onto somebody else's page afterwards
-    // would be a change EDVR never announced. Checked at the far end, and the
-    // span shrinks to the anchor page if the two disagree. (`farEnd`, because
-    // `far` is a windows.h macro and this file has been bitten by `near`.)
+    // would be a change EDVR never announced.
+    //
+    // BOTH ENDS ARE CHECKED, and only the far one used to be. The anchor slot
+    // is 12, so the query above lands on the page holding slot 12 -- and when
+    // the table starts late enough in its own first page (about one placement in
+    // fifty, with a 4 KB page and a 2.4 KB table) slot 12 is already on the
+    // SECOND page and the first one was never queried at all. Its protection
+    // would still have been restored as the anchor page's, which is a change to
+    // a page EDVR never looked at. Either end disagreeing shrinks the span to
+    // the anchor's own page, and the covered-slot line below then says so.
+    // (`farEnd`, because `far` is a windows.h macro and this file has been
+    // bitten by `near`.)
     if (spanHi - spanLo > pageSize) {
         MEMORY_BASIC_INFORMATION farEnd{};
+        MEMORY_BASIC_INFORMATION nearEnd{};
         const void* lastByte = reinterpret_cast<const void*>(spanHi - 1);
-        if (VirtualQuery(lastByte, &farEnd, sizeof(farEnd)) != sizeof(farEnd) ||
-            farEnd.AllocationBase != mbi.AllocationBase ||
-            farEnd.Protect != mbi.Protect) {
+        const void* firstByte = reinterpret_cast<const void*>(spanLo);
+        const bool farOk =
+            VirtualQuery(lastByte, &farEnd, sizeof(farEnd)) == sizeof(farEnd) &&
+            farEnd.AllocationBase == mbi.AllocationBase &&
+            farEnd.Protect == mbi.Protect;
+        const bool nearOk =
+            VirtualQuery(firstByte, &nearEnd, sizeof(nearEnd)) == sizeof(nearEnd) &&
+            nearEnd.AllocationBase == mbi.AllocationBase &&
+            nearEnd.Protect == mbi.Protect;
+        if (!farOk || !nearOk) {
             Log::get().note(
                 "VTableHook: the vtable at %p spans more than one page and its "
-                "far end is not the same allocation and protection as its near "
-                "end, so only the page holding slot %zu is watched. Slots on the "
+                "%s is not the same allocation and protection as the page "
+                "holding slot %zu, so only that page is watched. Slots on the "
                 "other page(s) are NOT seen.",
-                static_cast<void*>(vtable), slot);
+                static_cast<void*>(vtable),
+                !nearOk ? (farOk ? "first page" : "first and last page")
+                        : "last page",
+                slot);
             spanLo = reinterpret_cast<uintptr_t>(addr) &
                      ~static_cast<uintptr_t>(pageSize - 1);
             spanHi = spanLo + pageSize;
@@ -1360,7 +1409,10 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
     InterlockedExchange(&g_watch.siteCount, 0);
     InterlockedExchange(&g_watch.stopWanted, 0);
     InterlockedExchange(&g_watch.stopReason, kStopNone);
+    InterlockedExchange(&g_watch.escaped, 0);
+    InterlockedExchange(&g_watch.escapedOwner, 0);
     g_watch.rearmHeldSince = 0;
+    g_watch.rearmHeldOwner = 0;
     for (uint32_t i = 0; i < 8; ++i) InterlockedExchange64(&g_watch.slotsWritten[i], 0);
     g_watch.finished = false;
     g_watch.timeline = timeline;
@@ -1385,19 +1437,24 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
         lastCovered = (pageHi - g_watch.tableLo) / sizeof(void*) - 1;
     }
 
+    // ARMED BEFORE PROTECTED, the same order the step handler uses and for the
+    // same reason: a write faulting between the two would find a state that is
+    // not ARMED, take the concurrent branch, open the pages -- and then this
+    // line would declare the watch armed over pages anybody can write.
+    InterlockedExchange(&g_watch.catchState, kCatchArmed);
     DWORD previous = 0;
     if (!VirtualProtect(pageBase, protectBytes, readOnly, &previous)) {
         Log::get().note("VTableHook: could not make the %llu bytes at %p "
                         "read-only (err %lu), so the write watch is off.",
                         static_cast<unsigned long long>(protectBytes), pageBase,
                         GetLastError());
+        InterlockedExchange(&g_watch.catchState, kCatchIdle);
         g_watch.slotAddress = nullptr;
         g_watch.pageBase = nullptr;
         g_watch.pageSize = 0;
         g_watch.timeline = false;
         return false;
     }
-    InterlockedExchange(&g_watch.catchState, kCatchArmed);
     Log::get().note(
         "VTableHook %s: %s ARMED on slot %zu at %p. The table runs %p to %p and "
         "the %llu bytes protected for it start at %p (%s) and cover slots %zu to "
@@ -1441,7 +1498,24 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
 }
 
 void vtableWatchRearm() {
-    if (!InterlockedCompareExchange(&g_watch.rearmWanted, 0, 0)) return;
+    // THE STATE FIRST, AND THE FLAG SECOND, because a flag is something the
+    // handler has to REACH and the state is something it has already written.
+    //
+    // This began with `if (!rearmWanted) return;`, and an ordinary claim set
+    // rearmWanted nowhere -- it was written only by the concurrent branch and by
+    // a failed VirtualProtect. So a catch whose single step never arrived left
+    // the state owned by a thread that would never release it, the pages
+    // PAGE_READWRITE, and the two-second escape below unreachable, for the rest
+    // of the session, with no counter moving. Measured: suspend a writer
+    // mid-catch, tick frames for four seconds, and the pages are still writable
+    // and a fresh store is not caught, 5 runs out of 5.
+    //
+    // Setting the flag at the claim was tried first and is not enough: the claim
+    // is a compare-exchange, then a VirtualProtect syscall, then the flag, and a
+    // thread stopped anywhere in that window leaves exactly the same unsupervised
+    // state -- which is how the cell below failed 5 runs out of 6 against that
+    // version. Reading the state costs one compare-exchange per frame and cannot
+    // be outrun.
     if (!g_watch.pageBase || !watchKeepsArming()) {
         InterlockedExchange(&g_watch.rearmWanted, 0);
         return;
@@ -1474,18 +1548,45 @@ void vtableWatchRearm() {
                                            kCatchIdle);
     if (prev != kCatchIdle && prev != kCatchArmed) {
         // A thread is mid-catch. Hold.
+        //
+        // The clock is per CATCH, not per hold: now that every claim asks the
+        // frame path to look, a busy page has some thread mid-catch on a good
+        // many of the frames the frame path samples, and a timer that only
+        // restarted on a SUCCESSFUL re-arm would have been measuring "how long
+        // since the last frame that happened to land between catches" rather
+        // than "how long this catch has been outstanding". Two seconds of that
+        // would give up on a catch that was a microsecond old.
         const uint64_t now = static_cast<uint64_t>(qpcNow());
-        if (!g_watch.rearmHeldSince) g_watch.rearmHeldSince = now;
+        if (!g_watch.rearmHeldSince || g_watch.rearmHeldOwner != prev) {
+            g_watch.rearmHeldSince = now;
+            g_watch.rearmHeldOwner = prev;
+        }
         const int64_t freq = qpcFrequency();
         const double held =
             freq > 0 ? static_cast<double>(now - g_watch.rearmHeldSince) /
                            static_cast<double>(freq)
                      : 0.0;
         if (held < kRearmHoldLimitS) return;
+        // Remember WHOSE catch is being given up on. If that thread turns up
+        // afterwards its step owns nothing, and the reason it owns nothing is
+        // this line rather than anything the handler got wrong -- so it is
+        // counted apart from the chimeras the summary calls impossible.
+        InterlockedExchange(&g_watch.escapedOwner, prev);
         InterlockedExchange(&g_watch.catchState, kCatchArmed);
         InterlockedIncrement(&g_flip.unfinished);
+    } else if (prev == kCatchArmed &&
+               !InterlockedCompareExchange(&g_watch.rearmWanted, 0, 0)) {
+        // Armed, nobody mid-catch, and nobody has asked for anything: the pages
+        // are as the owner's own step left them, which is closed. This is the
+        // ordinary frame and it costs one compare-exchange. (kCatchIdle is NOT
+        // this case: the state says nobody owns the catch but nothing has
+        // necessarily closed the pages, so that one falls through and protects.)
+        g_watch.rearmHeldSince = 0;
+        g_watch.rearmHeldOwner = 0;
+        return;
     }
     g_watch.rearmHeldSince = 0;
+    g_watch.rearmHeldOwner = 0;
     InterlockedExchange(&g_watch.rearmWanted, 0);
     // The state says ARMED from here whether it was idle or already armed; the
     // pages may still be open either way (a concurrent catch opens them without
@@ -1683,29 +1784,41 @@ void vtableWatchFrameTick(uint64_t frameNo) {
     if (g_watch.finished) reportFlipSummary("stopped at the budget");
 }
 
-void vtableWatchDumpRecent(const char* why) {
+void vtableWatchDumpRecent(const char* why, uint64_t subjectFrame) {
     if (!g_watch.timeline) return;
     if (g_flip.dumps >= kFlipDumps) return;
     const uint32_t total =
         static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.count, 0, 0));
     if (!total) return;
     ++g_flip.dumps;
+    g_flip.lastDumpFrame = subjectFrame;
+    g_flip.lastDumpInside = 0;
 
     const uint32_t want = total < 8 ? total : 8;
-    // THE HEADER CARRIES THE FRAME AND THE CLOCK, which is what makes the last
-    // sentence checkable rather than an instruction to guess. Both sides of the
-    // ordering question now print the same frame number, published by the same
-    // tick: the flips below carry theirs, this line carries the frame in
-    // progress, and perf_monitor's long-frame line carries the frame that just
-    // ended. A reader can put them in order off one file.
+    // THE HEADER NAMES THE FRAME THE LINE IS ABOUT, which is not always the
+    // frame the process is in.
+    //
+    // It printed the frame in PROGRESS for both callers, and for the monitor
+    // those differ by one: the long-frame path runs in the block for frame N
+    // about the frame that just ended, N-1. So a flip inside the frame that hung
+    // carried N-1, the header said N, and the sentence underneath -- if one of
+    // them lands in the same frame as this, the change PRECEDED what this line
+    // is about -- told the reader it did NOT precede the hang. The opposite of
+    // the truth, on the one question the instrument exists to answer, in the one
+    // dump that survives the crash.
+    //
+    // So the subject is the caller's to state, and the sentence says what each
+    // number means rather than leaving the arithmetic to be done under a
+    // deadline.
     Log::get().note(
-        "VTableHook %s: %s -- this is frame %llu, %.4f s after the timeline "
-        "armed, and the watch caught %u write(s) in the last frame (%.1f a frame "
-        "on average). The last %u of %u value-changing write(s) to the context's "
-        "table follow, newest last. If one of them lands in the same frame as "
-        "this, the change PRECEDED whatever this line is about; if the newest is "
-        "frames old, it did not.",
+        "VTableHook %s: %s -- this line is about FRAME %llu (the frame in "
+        "progress is %llu), %.4f s after the timeline armed, and the watch "
+        "caught %u write(s) in the last frame (%.1f a frame on average). The "
+        "last %u of %u value-changing write(s) to the context's table follow, "
+        "newest last. A change stamped %llu happened INSIDE the frame this line "
+        "is about; a smaller number happened BEFORE it; a larger one AFTER it.",
         g_watch.who, why ? why : "?",
+        static_cast<unsigned long long>(subjectFrame),
         static_cast<unsigned long long>(
             InterlockedCompareExchange64(&g_flip.frameNo, 0, 0)),
         flipSecondsSinceArm(static_cast<uint64_t>(qpcNow())),
@@ -1714,34 +1827,52 @@ void vtableWatchDumpRecent(const char* why) {
             ? static_cast<double>(InterlockedCompareExchange(&g_watch.catches, 0, 0)) /
                   static_cast<double>(g_flip.frames)
             : 0.0,
-        static_cast<unsigned>(want), static_cast<unsigned>(total));
+        static_cast<unsigned>(want), static_cast<unsigned>(total),
+        static_cast<unsigned long long>(subjectFrame));
     for (uint32_t k = want; k > 0; --k) {
         const uint32_t index = total - k;
         const uint32_t at = index % kFlipRing;
         const LONG64 ready = InterlockedCompareExchange64(&g_flip.ready[at], 0, 0);
         if (ready != static_cast<LONG64>(index) + 1) continue;
         const VTableFlip e = g_flip.ring[at];
+        // Said per row as well as in the header, because a reader chasing this
+        // is reading a crash log under time pressure and one subtraction done
+        // wrongly is the whole answer done wrongly.
+        const char* when = e.frame == subjectFrame  ? "INSIDE this frame"
+                           : e.frame < subjectFrame ? "before it"
+                                                    : "after it";
+        if (e.frame == subjectFrame) ++g_flip.lastDumpInside;
         char from[MAX_PATH], to[MAX_PATH], by[MAX_PATH], tid[64];
         Log::get().note(
-            "VTableHook %s:   flip #%u, frame %llu (%.4f s), slot %zu: %s -> %s, "
-            "by %s on %s",
+            "VTableHook %s:   flip #%u, frame %llu (%s, %.4f s), slot %zu: %s -> "
+            "%s, by %s on %s",
             g_watch.who, static_cast<unsigned>(index + 1),
-            static_cast<unsigned long long>(e.frame), flipSecondsSinceArm(e.qpc),
+            static_cast<unsigned long long>(e.frame), when,
+            flipSecondsSinceArm(e.qpc),
             e.slot, ownerModuleBrief(e.before, from, sizeof(from)),
             ownerModuleBrief(e.after, to, sizeof(to)),
             ownerModuleBrief(e.writer, by, sizeof(by)),
             flipThreadName(e.thread, tid, sizeof(tid)));
         char crumb[224];
         _snprintf_s(crumb, sizeof(crumb), _TRUNCATE,
-                    "gfx: %s / flip #%u f=%llu t=%.4f slot=%zu %s -> %s",
+                    "gfx: %s / flip #%u f=%llu (%s f=%llu) slot=%zu %s -> %s",
                     why ? why : "?", static_cast<unsigned>(index + 1),
-                    static_cast<unsigned long long>(e.frame),
-                    flipSecondsSinceArm(e.qpc), e.slot,
+                    static_cast<unsigned long long>(e.frame), when,
+                    static_cast<unsigned long long>(subjectFrame), e.slot,
                     ownerModuleBrief(e.before, from, sizeof(from)),
                     ownerModuleBrief(e.after, to, sizeof(to)));
         breadcrumb(crumb);
     }
 }
+
+uint64_t vtableWatchLastDumpFrame() { return g_flip.lastDumpFrame; }
+
+uint32_t vtableWatchLastDumpInside() { return g_flip.lastDumpInside; }
+
+uint32_t vtableWatchEscapedSteps() {
+    return static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.escaped, 0, 0));
+}
+
 
 uint32_t vtableWatchFlips() {
     return static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.count, 0, 0));
@@ -2686,7 +2817,11 @@ void VTableHook::noteCopyDrift(const char* who) {
     // whether the switch preceded the hang or followed it -- and reading them
     // side by side in one log is what makes the ordering legible. No-op unless
     // advanced.vtable_flip_timeline armed one.
-    vtableWatchDumpRecent("the census found the runtime's table has moved");
+    // The census speaks about the frame it is IN -- it has just read the table
+    // and found it changed -- so that is the frame it hands the dump.
+    vtableWatchDumpRecent("the census found the runtime's table has moved",
+                          static_cast<uint64_t>(InterlockedCompareExchange64(
+                              &g_flip.frameNo, 0, 0)));
 }
 
 void VTableHook::censusTick(const char* name) {

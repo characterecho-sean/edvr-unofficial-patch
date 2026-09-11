@@ -273,7 +273,22 @@ double   vtableWatchSecondsSinceArm();
 // that a rig which dies leaves behind the answer to "did the flip precede the
 // hang, and who did it". Safe to call when nothing is armed; bounded per
 // session so it cannot fill the breadcrumb file.
-void vtableWatchDumpRecent(const char* why);
+//
+// `subjectFrame` IS THE FRAME THE LINE IS ABOUT, and it is a parameter because
+// the two callers mean different frames. The monitor's long-frame path runs in
+// the block for frame N about the frame that just ENDED, N-1; the census runs
+// about the frame it is in. Printing "the frame in progress" for both made the
+// dump's own instruction -- if a change lands in the same frame as this, it
+// PRECEDED what this line is about -- give the opposite of the right answer for
+// the monitor: a flip inside the hung frame carries N-1 against a header saying
+// N, and a reader following the sentence concludes it did not precede the hang.
+// On the one question this instrument exists for.
+void vtableWatchDumpRecent(const char* why, uint64_t subjectFrame);
+
+// What the last dump was ABOUT, and how many of the flips it listed fell inside
+// that frame. For the cell that holds the paragraph above to its word.
+uint64_t vtableWatchLastDumpFrame();
+uint32_t vtableWatchLastDumpInside();
 
 // Value-changing writes recorded, and in-table writes that put the same value
 // back. For the unit cells, and for anyone asking whether an armed timeline
@@ -314,6 +329,16 @@ uint32_t vtableWatchCatches();
 // requires both to be counted here: a slot on an unprotected page does not
 // fault at all, so this number is the coverage.
 uint32_t vtableWatchInTableWrites();
+
+// Single steps that arrived for a catch the frame path had already given up on.
+//
+// The re-arm waits two seconds for a step that is merely late and then takes
+// the pages back anyway, because a step that never comes would otherwise leave
+// them open for the session. If that thread then turns up after all, its step
+// no longer owns anything -- and counting it as a chimera would put a number
+// the summary calls "must be zero" next to an event the file deliberately
+// caused. It is counted here instead, and swallowed exactly the same way.
+uint32_t vtableWatchEscapedSteps();
 
 // Single-step exceptions that arrived while a watch existed and did NOT match
 // the fault/step pair the handler owed itself.

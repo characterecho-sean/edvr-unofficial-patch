@@ -490,8 +490,17 @@ void noteDrop(const Frame& f, float budgetMs) {
     // (there are always several) suppressed the dump on the fatal frame, which
     // is the only frame it exists for. It has its own cap of sixteen a session
     // and writes the breadcrumb file, so it does not need that one.
-    vtableWatchDumpRecent(f.dropped ? "monitor: DROPPED FRAME"
-                                    : "monitor: LONG FRAME");
+    //
+    // THE FRAME IT IS ABOUT IS THE ONE THAT JUST ENDED. This runs inside the
+    // post-Present block for frame N, and the long frame it is reporting is
+    // N-1; the flips recorded inside that frame carry N-1 too. The dump used to
+    // print the frame in PROGRESS and tell the reader that a change stamped with
+    // it had preceded the hang -- so the change that DID precede the hang, at
+    // N-1, read as one that had not.
+    const uint64_t inProgressNow = vtableWatchFrame();
+    vtableWatchDumpRecent(
+        f.dropped ? "monitor: DROPPED FRAME" : "monitor: LONG FRAME",
+        inProgressNow ? inProgressNow - 1 : 0);
     dropLine(f, budgetMs);
 }
 

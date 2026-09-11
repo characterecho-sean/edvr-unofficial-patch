@@ -828,6 +828,9 @@ struct State {
     // the thing in question. See noteStaleForward.
     bool     watchStale = false;
     bool     staleNoted = false;
+    // The "this check is reading its own table" notice, said once. See
+    // noteStaleForward: which table it reads is the whole detector.
+    bool     staleFallbackNoted = false;
     uint64_t staleForwards = 0;
     bool     lowPeakNoted = false;
     // When the journal first said gameplay had started, 0 until it does. The
@@ -2340,7 +2343,27 @@ inline void noteStaleForward(size_t slot, const void* frozen, const char* what) 
     // No exposure hook (it failed to install, or a future build stops hooking
     // the context): this hook's own table is then the context's, because nothing
     // moved the vptr before it.
-    if (!live) live = s->hook.originalVTable();
+    //
+    // SAID OUT LOUD, ONCE, because the whole value of this detector is which
+    // table it is reading and a silent fallback is how it came to be reading the
+    // wrong one for three releases. The fallback is correct only while nothing
+    // has moved the vptr ahead of this hook, and the one thing that normally
+    // does is the exposure hook -- so a reader who sees this line knows the
+    // check is resting on an assumption rather than on exposure's word for it.
+    if (!live) {
+        live = s->hook.originalVTable();
+        if (!s->staleFallbackNoted) {
+            s->staleFallbackNoted = true;
+            Log::get().note(
+                "vScreen: the stale-forward check is reading THIS hook's table, "
+                "not the exposure hook's -- the exposure fix did not install on "
+                "this context, so there is no lower hook to ask. That table is "
+                "the context's own only while nothing moved the object's vptr "
+                "before vScreen attached; if something did, this check is "
+                "comparing EDVR's own buffer against itself and cannot fire. "
+                "Said once.");
+        }
+    }
     if (!live) return;
     void* now = nullptr;
     if (!guarded("vScreen/stale-check", [&] { now = live[slot]; })) return;

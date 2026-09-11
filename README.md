@@ -231,10 +231,12 @@ the one thing the reports so far cannot settle. Every line that carries a frame
 number now counts frames the same way, including the monitor's "LONG FRAME"
 line, so the ordering can be read straight off the file.
 
-On `context_hook_mode = shared` the table changes every frame anyway (that is
-EDVR putting its own hooks back), so the per-change lines stop after the first
-few thousand and only the running tally continues — that is expected, not a
-fault. It makes every write to the memory the table lives on take an exception,
+On `context_hook_mode = shared` the table changes every frame anyway — that is
+Windows' own `d3d11.dll` writing its entry back over EDVR's hook — so the
+per-change lines stop after the first few thousand and only the running tally
+continues. That is expected, not a fault. (EDVR's own writes never appear in
+the list: it unlocks the memory before writing, so they raise nothing for the
+watch to see.) It makes every write to the memory the table lives on take an exception,
 which costs a few milliseconds a frame; it prints what it cost, switches itself
 off if that ever gets serious (never in the first ten seconds, which is where
 the crash is), and is meant for one session. Set it back to 0 afterwards.
