@@ -124,6 +124,30 @@ int wmain(int argc, wchar_t** argv) {
     for(int i=0;i<2;++i){float values[48];for(float& v:values)v=float(7+i);ctx->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);gui.capture(ctx.Get(),200,guiHash,guiPs,'X',6,1,150000,0,0);}
     gui.capture(ctx.Get(),201,guiHash,guiPs,'X',6,1,0,0,0);check(gui.count()==2,"GUI captures one source frame only");
     ctx->ClearRenderTargetView(rtv.Get(),bg);ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+    edvr::EyeDrawSnapshot meshSnap;
+    ComPtr<ID3D11Buffer> meshPool,meshBones,meshIds;
+    ComPtr<ID3D11ShaderResourceView> meshPoolView,meshBoneView;
+    bd={};bd.ByteWidth=672;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.StructureByteStride=336;
+    hr(dev->CreateBuffer(&bd,nullptr,&meshPool));hr(dev->CreateShaderResourceView(meshPool.Get(),nullptr,&meshPoolView));
+    bd.ByteWidth=48*24000;bd.StructureByteStride=48; // palette extends past the old 1 MiB cap
+    hr(dev->CreateBuffer(&bd,nullptr,&meshBones));hr(dev->CreateShaderResourceView(meshBones.Get(),nullptr,&meshBoneView));
+    bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;bd.MiscFlags=bd.StructureByteStride=0;
+    hr(dev->CreateBuffer(&bd,nullptr,&meshIds));
+    ctx->VSSetShaderResources(33,1,meshPoolView.GetAddressOf());ctx->VSSetShaderResources(38,1,meshBoneView.GetAddressOf());
+    UINT meshStride=8;ctx->IASetVertexBuffers(0,1,meshIds.GetAddressOf(),&meshStride,&zero);
+    constexpr uint64_t meshVs=0x7B0DC42D383F694Cull;
+    for(unsigned i=0;i<2;++i) {
+        std::vector<uint8_t> pool(672,uint8_t(21+i)),bones(48*24000,uint8_t(31+i)),ids(32,uint8_t(41+i));
+        ctx->UpdateSubresource(meshPool.Get(),0,nullptr,pool.data(),0,0);
+        ctx->UpdateSubresource(meshBones.Get(),0,nullptr,bones.data(),0,0);
+        ctx->UpdateSubresource(meshIds.Get(),0,nullptr,ids.data(),0,0);
+        meshSnap.captureSourceMesh(ctx.Get(),300+i,meshVs,0,'X',6,1,2,0,0);
+        meshSnap.captureSourceMesh(ctx.Get(),300+i,meshVs,0,'X',6,1,3,0,0);
+    }
+    check(meshSnap.draws.size()==4 && meshSnap.meshBuffers.size()==6 && !meshSnap.meshDeclined,"source buffer deduplication is per frame");
+    ComPtr<ID3D11ShaderResourceView> checkPool;ctx->VSGetShaderResources(33,1,&checkPool);
+    check(checkPool.Get()==meshPoolView.Get(),"source capture changed SRV binding");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
@@ -133,6 +157,12 @@ int wmain(int argc, wchar_t** argv) {
     while ((ready = ctx->GetData(query.Get(), nullptr, 0, 0)) == S_FALSE && GetTickCount64()<deadline) Sleep(1);
     hr(ready); check(ready == S_OK, "GPU timeout");
     check(snap.write(ctx.Get(), argv[1]), "snapshot write");
+    check(meshSnap.write(ctx.Get(),(std::wstring(argv[1])+L".mesh").c_str()),"source mesh snapshot write");
+    check(!meshSnap.failures,"source mesh copies complete");
+    meshSnap.meshBytes=edvr::EyeDrawSnapshot::kMeshBudget;
+    meshSnap.captureSourceMesh(ctx.Get(),302,meshVs,0,'X',6,1,0,0,0);
+    check(meshSnap.meshDeclined==3,"source buffer budget declines all new copies explicitly");
+    meshSnap.reset();check(meshSnap.meshBuffers.empty() && !meshSnap.meshBytes,"source reset releases retained buffers");
     check(vscreenSnap.write(ctx.Get(),(std::wstring(argv[1])+L".vscreen").c_str()),"on-foot snapshot write");
     check(vscreenSnap.failures==0,"on-foot capture completed without missing copies");
     check(snap.failures == 0, "missing copies");

@@ -2912,6 +2912,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     for(const auto& d:g_drawSnapshot.draws) {sourceCameras+=d.ordinal==UINT32_MAX;screenDraws+=d.vs==EyeDrawSnapshot::kVscreen;}
     for(const auto& t:g_drawSnapshot.surfaces)sourceDepths+=t.format==20 || t.format==40 || t.format==45 || t.format==55;
     if(screenDraws)Log::get().note("object probe: on-foot source capture: %u camera frames, %u screen draws, %u completed depth surfaces; colour/depth copied at first composite, no temporal changes.",sourceCameras,screenDraws,sourceDepths);
+    if(screenDraws)Log::get().note("object probe: source mesh snapshots: %u draws, %u frame-local buffers, %u bytes, %u range/format/budget declines. Drawstate v4 records original draw cameras, full t33/t38 and VB0 at first use per resource per frame; firstDraw identifies that copy. No render or pacing changes.",g_drawSnapshot.meshDraws,unsigned(g_drawSnapshot.meshBuffers.size()),g_drawSnapshot.meshBytes,g_drawSnapshot.meshDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
     Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
@@ -3090,6 +3091,8 @@ void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count
     if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureSource(ctx,g_frame+1,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),
                                  kind,count,instances,startInstance,start,base);
+    g_drawSnapshot.captureSourceMesh(ctx,g_frame+1,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),
+                                     kind,count,instances,startInstance,start,base);
 }
 
 void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
