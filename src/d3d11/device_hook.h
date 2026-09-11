@@ -34,6 +34,8 @@ namespace edvr {
 HookMode contextHookModeFor(ID3D11DeviceContext* ctx);
 
 void hookDevice(ID3D11Device* device);
+// Sticky for the process, including later devices and submit-side passes.
+bool deviceHookRecoveryDisabled();
 void hookSwapChain(IDXGISwapChain* swapChain);
 void hookFactoryForDevice(ID3D11Device* device);
 // The process is exiting cleanly, so the crash sentinel must not be left

@@ -129,7 +129,7 @@ void drawCensusEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 // A draw the verdict chain returned on BEFORE either census call could
 // record it: a substituted particle billboard ('p', fix.particle_billboard
 // = steady, legacy bucket), a withheld witchspace star ('w'), FSS chrome
-// quad ('f'), heat haze ('h') or drive smoke ('t'). Visible substituted
+// quad ('f'). Visible substituted
 // particles now use drawCensusEarlyDraw. Counted only while a census is recording,
 // printed as unseen= on the frame and end lines and explained once at the
 // end when nonzero -- so a census taken with a fix on says how much of the

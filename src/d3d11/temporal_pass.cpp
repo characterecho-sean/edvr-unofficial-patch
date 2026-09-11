@@ -2048,6 +2048,26 @@ int acquireSlot(ID3D11Device* dev) {
 
 FaultBudget g_budget("temporalPass", 8);
 
+// Every cached shader, query and texture below belongs to one device.
+// Retain its identity so even an address reused after Release cannot pass.
+ID3D11Device*              g_passDevice = nullptr;
+bool                      g_otherDeviceNoted = false;
+bool acceptPassDevice(ID3D11Device* dev) {
+    if (!dev || deviceHookRecoveryDisabled()) return false;
+    if (!g_passDevice) {
+        dev->AddRef();
+        g_passDevice = dev;
+    }
+    if (dev == g_passDevice) return true;
+    if (!g_otherDeviceNoted) {
+        g_otherDeviceNoted = true;
+        Log::get().note("temporal aa: refusing device %p; cached GPU resources belong to %p. "
+                        "No cross-device commands were issued. Please report this log.",
+                        (void*)dev, (void*)g_passDevice);
+    }
+    return false;
+}
+
 ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
 ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for DLAA
@@ -3335,6 +3355,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         src->GetDevice(&dev);
         if (dev) dev->GetImmediateContext(&ctx);
         ok = dev != nullptr && ctx != nullptr;
+        if (ok && !acceptPassDevice(dev)) {
+            // Leave before the capture-completion path too: its staging
+            // textures are also owned by the original device.
+            ctx->Release();
+            dev->Release();
+            src->Release();
+            return nullptr;
+        }
     }
     if (ok) pollSlots(ctx);
 
@@ -5612,6 +5640,12 @@ void temporalPassConfigure(Config& cfg) {
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
+    if (!ctx || (!g_wanted && !g_eyeRunReady)) return;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    const bool accepted = acceptPassDevice(dev);
+    if (dev) dev->Release();
+    if (!accepted) return;
     if (g_eyeRunReady && ctx) {
         writeEyeRun(ctx, g_eyeRunWidth, g_eyeRunHeight);
         g_eyeRunReady = false;
@@ -6129,6 +6163,7 @@ void temporalPassShutdown() {
     dlaaShutdown();
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
+    if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }
     if (g_csFovea) { g_csFovea->Release(); g_csFovea = nullptr; }
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
@@ -6225,7 +6260,7 @@ extern "C" __declspec(dllexport) void* edvrTemporalAa(
     const float* headTrans, const float* headTransSwapped, float nearZ,
     float farZ, float headDeg, int motion, float blend, float clampSigma,
     unsigned outW, unsigned outH, unsigned flags) {
-    if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
+    if (!srcTex || eye < 0 || eye > 1 || !tanNow || edvr::deviceHookRecoveryDisabled()) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev, jxNow,

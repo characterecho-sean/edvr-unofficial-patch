@@ -1929,6 +1929,11 @@ void menuTick(ID3D11Device* dev) {
                 closeMenu("the menu key");
             }
         }
+        if (s.summon.takeMissedWhileUnfocused()) {
+            Log::get().note("menu: %s was received but another application had focus. "
+                            "Focus Elite's desktop window and press it again.",
+                            s.summonName.c_str());
+        }
 
         if (s.open) {
             // Escape, then the navigation keys, then the head. Escape ends

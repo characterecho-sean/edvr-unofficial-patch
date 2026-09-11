@@ -1624,19 +1624,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (drawCensusArmed()) drawCensusNoteUnseen('w');
         return DrawVerdict::kSkip;
     }
-    // The heat haze behind drives, withheld when asked (fix.heat_haze): the
-    // same identification, by shader hash, in the same place.
-    if (heatHazeSkip(self, kind, count, instances)) {
-        if (drawCensusArmed()) drawCensusNoteUnseen('h');
-        return DrawVerdict::kSkip;
-    }
-    // The smoke trail behind drives, withheld when asked (fix.drives_smoke):
-    // the same identification, in the same place.
-    if (drivesSmokeSkip(self, kind, count, instances)) {
-        if (drawCensusArmed()) drawCensusNoteUnseen('t');
-        return DrawVerdict::kSkip;
-    }
-
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Cand = -1;
@@ -3155,15 +3142,13 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
 }
 
 // The argument buffer holds the counts, so the census records n=0 i=0
-// and args= names the buffer. Shader-identified drive switches do not need
-// those counts, and must also apply here. Kind 'Z' indexed, 'Y' not.
+// and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) {
-        if (heatHazeSkip(self, 'Z', 0, 0) || drivesSmokeSkip(self, 'Z', 0, 0)) return;
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
     }
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
@@ -3175,7 +3160,6 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) {
-        if (heatHazeSkip(self, 'Y', 0, 0) || drivesSmokeSkip(self, 'Y', 0, 0)) return;
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
     }
     g_state->realDrawInstancedIndirect(self, args, off);

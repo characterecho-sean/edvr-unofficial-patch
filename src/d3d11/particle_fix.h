@@ -40,23 +40,6 @@ bool particleSteady();
 bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                          uint32_t instances);
 
-// Both drive switches match exact shader identities on direct and indirect
-// draws. Counts/kind are not recognition gates; indirect callers pass zero
-// counts. Call only on the context owning the binding shadow.
-//
-// Is this draw the heat haze behind a ship's drives -- the refraction
-// ribbons that trail it and the shimmer at its nozzles -- with fix.heat_haze
-// withholding them (off, or auto under the temporal pass)? True means do
-// not forward it; the smoke, the glow and everything else stay. Costs one
-// comparison per draw when the key leaves them on. When withheld, the
-// binding shadow identifies them, with a context audit every 64 matches.
-bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances);
-
-// Is this draw the identified grey smoke ribbon, with fix.drives_smoke = off
-// withholding them? True means do not forward it. One comparison per draw
-// when the key leaves them on (the default).
-bool drivesSmokeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances);
-
 // The matched draw, for the verdict chain: this draw is a particle
 // billboard AND a substitute is ready to bind.
 bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,

@@ -689,6 +689,8 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const float hz = s.haveSample && s.lastSample.displayHz > 0.0f ? s.lastSample.displayHz : 0.0f;
     const float budget = hz > 0.0f ? 1000.0f / hz : 11.1f;
     const float windowS = ps.count ? ps.count * ps.avgMs / 1000.0f : 0.0f;
+    const char* noTiming = runtimeKind() == 2 ? "OpenComposite: unavailable" :
+                           glitchConsumerPresent() ? "no compositor timing" : "no openvr half";
 
     // Row 1: the frame, as fpsVR reports it. Both come from Valve's own
     // worked example on the Compositor_FrameTiming page: the GPU frame is
@@ -715,7 +717,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
         snprintf(sub, sizeof(sub), "ms now; %.1f over 10 s", gf.avgMs);
         tile("GPU TIME", v, sub);
     } else {
-        tile("GPU TIME", "--", glitchConsumerPresent() ? "no compositor timing" : "no openvr half");
+        tile("GPU TIME", "--", noTiming);
     }
     if (ps.count) {
         const PerfStats bs = perfStatsOf(busy, cnt);
@@ -740,7 +742,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
         snprintf(sub, sizeof(sub), "ms scene; %.1f compositor", cg.avgMs);
         tile("APP GPU", v, sub);
     } else {
-        tile("APP GPU", "--", "");
+        tile("APP GPU", "--", noTiming);
     }
     if (compCnt) {
         snprintf(v, sizeof(v), "%d", dropped);
@@ -758,9 +760,9 @@ int perfMonitorTiles(PerfTile* out, int max) {
         snprintf(v, sizeof(v), "%.0f%%", 100.0f * static_cast<float>(reproj) / static_cast<float>(compCnt));
         tile("REPROJECTED", v, "of frames");
     } else {
-        tile("DROPPED", "--", "no compositor timing");
+        tile("DROPPED", "--", noTiming);
         tile("BY CAUSE", "--", "");
-        tile("REPROJECTED", "--", "");
+        tile("REPROJECTED", "--", noTiming);
     }
 
     // Row 3: the display and the machine.

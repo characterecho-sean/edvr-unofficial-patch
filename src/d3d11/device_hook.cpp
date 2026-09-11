@@ -1,6 +1,7 @@
 ﻿#include "device_hook.h"
 
 #include "shader_sig.h"
+#include "input_gate.h"
 #include "vr_runtime.h"
 
 #include <windows.h>
@@ -269,6 +270,7 @@ struct State {
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
     bool      sentinelConfirmed = false;
+    bool      recoveryDisabled = false;
 };
 
 // How long the hooks must survive before install is treated as having worked.
@@ -1766,9 +1768,14 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
     return s.realCreateSamplerState(self, &d, out);
 }
 
+bool deviceHookRecoveryDisabled() {
+    return g_state && g_state->recoveryDisabled;
+}
+
 void hookDevice(ID3D11Device* device) {
     if (!device) return;
     State& s = ensureState();
+    if (s.recoveryDisabled) return;
     if (s.device) {
         // SAID OUT LOUD, once per extra device (2026-08-24).
         //
@@ -1806,15 +1813,22 @@ void hookDevice(ID3D11Device* device) {
         // future launch -- the same bargain the compositor hook struck, and for
         // the same reason: quitting from the menu before the confirmation looks
         // identical to crashing from in here.
+        // clearTrip clears the in-memory trip as well as its file. Keep
+        // THIS process disabled when OpenComposite creates another device.
+        // Otherwise the capability device owns the warmed shaders while
+        // Submit supplies textures from the game's first device.
+        s.recoveryDisabled = true;
         s.sentinel->clearTrip();
+        inputGateShutdown();
         Log::get().note(
             "SENTINEL TRIPPED: the previous run installed the d3d11 hooks and never "
             "confirmed them, which usually means it crashed -- though a session that "
             "ended in the first few seconds looks the same from here. EVERY fix in "
-            "d3d11.dll is off for THIS session only, and it will try again next "
+            "d3d11.dll is off for THIS session only, on every device, and it will try again next "
             "launch: the black void, the panel distance, the exposure share, the "
             "transition flash detector and Explorer Cam's half of the gate. The game "
-            "renders exactly as it would without EDVR installed.\n"
+            "renders without EDVR's graphics treatments; the EDVR menu is unavailable "
+            "until the next launch. The OpenVR half has its own recovery guard.\n"
             "  If this keeps happening, the hooks really are crashing and the log is "
             "worth reporting. To force them on anyway, set ignore_sentinel = 1 under "
             "[advanced].");
@@ -1981,6 +1995,7 @@ void hookDevice(ID3D11Device* device) {
 void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!swapChain) return;
     State& s = ensureState();
+    if (s.recoveryDisabled) return;
     if (s.swapChain) return;
 
     if (!s.swapChainHook.attach(swapChain) ||
@@ -2001,6 +2016,7 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
 void hookFactoryForDevice(ID3D11Device* device) {
     if (!device) return;
     State& s = ensureState();
+    if (s.recoveryDisabled) return;
     if (s.factoryHook.attached()) return;
 
     IDXGIDevice*  dxgiDevice = nullptr;

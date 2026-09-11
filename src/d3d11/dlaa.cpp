@@ -497,6 +497,16 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         g_qring[qs].inUse = true;
     }
     if (NVSDK_NGX_FAILED(er)) {
+        ID3D11Device* failedDevice = nullptr;
+        ctx->GetDevice(&failedDevice);
+        if (failedDevice) {
+            Log::get().note("dlaa: NVIDIA evaluation failed (0x%08X), "
+                            "GetDeviceRemovedReason=0x%08X on device %p.",
+                            static_cast<unsigned>(er),
+                            static_cast<unsigned>(failedDevice->GetDeviceRemovedReason()),
+                            (void*)failedDevice);
+            failedDevice->Release();
+        }
         snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the evaluation failed: %s (0x%08X)",
                  ngxResultName(er), static_cast<unsigned>(er));
         g_reason = g_reasonBuf;

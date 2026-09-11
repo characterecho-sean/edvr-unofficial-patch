@@ -288,8 +288,11 @@ bool eyeTextureSize(uint32_t* width, uint32_t* height);
 void announceEyeTangents(float outerMag, float innerMag);
 bool eyeTangents(float* outerMag, float* innerMag);
 
-// The VERTICAL frustum of one eye, magnitudes of the top and bottom
-// tangents. Both eyes share these -- measured identical on every headset
+// The VERTICAL frustum of one eye, magnitudes of OpenVR's pfTop and
+// pfBottom. Those API names are reversed physically: pfBottom describes
+// the +Y edge and pfTop the -Y edge. Ray consumers must swap the pair;
+// projection-matrix consumers retain the API order. Both eyes share these
+// -- measured identical on every headset
 // seen -- so there is one pair, not two.
 //
 // This exists because the vertical span used to be DERIVED, from the

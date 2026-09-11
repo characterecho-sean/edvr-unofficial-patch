@@ -680,14 +680,6 @@ if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
     exit /b 1
 )
 
-echo [edvr] === drive switch regression checks ===
-REM Compile the actual skip functions and indirect hooks against a context
-REM double: disabled effects must stay disabled across draw API/count changes.
-python.exe tools\check_drive_switches.py || (
-    echo [edvr] ERROR: drive smoke / heat haze suppression regression
-    exit /b 1
-)
-
 echo [edvr] === private UI depth regression ===
 REM Keep the executable away from build\d3d11.dll: these tests use system
 REM D3D11 WARP and include the production coverage pass directly.

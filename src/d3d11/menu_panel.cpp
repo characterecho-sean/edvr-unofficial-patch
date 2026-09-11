@@ -1275,18 +1275,8 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // The eye's frustum: the outer tangent is temporal (left edge of the
         // left eye, right edge of the right); the vertical pair as measured,
         // or derived symmetric from the region's shape when unpublished.
-        float outer = 0.0f, inner = 0.0f, top = 0.0f, bot = 0.0f;
-        if (!eyeTangents(&outer, &inner)) {
-            outer = inner = 1.0f;
-        }
-        if (!eyeTangentsVertical(&top, &bot)) {
-            top = bot = (outer + inner) * 0.5f * (static_cast<float>(regionH) / static_cast<float>(regionW));
-        }
         Params p{};
-        p.tans[0] = eye == 0 ? outer : inner;
-        p.tans[1] = eye == 0 ? inner : outer;
-        p.tans[2] = top;
-        p.tans[3] = bot;
+        menuPanelFrustum(eye, regionW, regionH, p.tans);
         // Where the panel lands in this eye. Outside it entirely: forward
         // the frame untouched, nothing copied, nothing dispatched. Behind
         // the eye (a look away from a world-anchored panel): the whole
@@ -1430,6 +1420,25 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
 }  // namespace
 
 // ---------------------------------------------------------------------------
+
+void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]) {
+    float outer = 1.0f, inner = 1.0f;
+    eyeTangents(&outer, &inner);
+    float rawTop = 0.0f, rawBottom = 0.0f;
+    if (!eyeTangentsVertical(&rawTop, &rawBottom)) {
+        rawTop = rawBottom = (outer + inner) * 0.5f *
+                            static_cast<float>(h) / static_cast<float>(w ? w : 1);
+    }
+    tans[0] = eye == 0 ? outer : inner;
+    tans[1] = eye == 0 ? inner : outer;
+    // OpenVR pfBottom is the +Y edge; pfTop is the -Y edge. The channel
+    // preserves those API names (intro_panel reconstructs the projection
+    // matrix from them), but our ray shader needs physical up then down.
+    // Reversing these displaces a Quest 3 panel and makes it swim on turns;
+    // a symmetric headset conceals the error entirely.
+    tans[2] = rawBottom;
+    tans[3] = rawTop;
+}
 
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve, float halfW,
                   float halfH, float shift, float* su, float* sv) {

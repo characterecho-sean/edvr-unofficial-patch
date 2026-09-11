@@ -318,6 +318,61 @@ void testXform() {
           "xform: a head facing world -Z looks along the +X of an anchor that faces -X");
 }
 
+// Project a fixed panel with the measured runtime matrix, then recover
+// its points through the production menu frustum and ray intersection.
+void testAsymmetricProjection() {
+    announceEyeTangents(1.376f, 0.839f);
+    announceEyeTangentsVertical(1.428f, 0.966f);
+    const float identity[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
+    bool all = true;
+    int samples = 0;
+    for (int eye = 0; eye < 2; ++eye) {
+        float tans[4];
+        menuPanelFrustum(eye, 2528, 2704, tans);
+        const float l = eye == 0 ? -1.376f : -0.839f;
+        const float r = eye == 0 ? 0.839f : 1.376f;
+        const float p00 = 2 / (r-l), p02 = (r+l) / (r-l);
+        const float p11 = 2 / (0.966f+1.428f);
+        const float p12 = (0.966f-1.428f) / (0.966f+1.428f);
+        const float offset[3] = {eye ? 0.0319f : -0.0319f, 0, 0};
+        for (float yaw : {-25.0f, 0.0f, 30.0f}) {
+            for (float pitch : {-20.0f, 0.0f, 25.0f}) {
+                float current[12], xf[12];
+                menuHeadLockAnchor(identity, yaw, pitch, current);
+                current[3] = 0.07f; current[7] = -0.04f;
+                menuDoorXform(identity, current, offset, xf);
+                for (float curve : {0.0f, 0.2f}) {
+                    for (float x : {-0.2f, 0.0f, 0.2f}) {
+                        for (float y : {-0.1f, 0.0f, 0.1f}) {
+                            const float R = curve > 0 ? 1.4f / curve : 1.0f;
+                            const float world[3] = {curve > 0 ? R*sinf(x/R) : x, y,
+                                curve > 0 ? R-1.4f-R*cosf(x/R) : -1.4f};
+                            float view[3] = {};
+                            for (int i=0;i<3;++i) {
+                                for (int j=0;j<3;++j)
+                                    view[i] += current[j*4+i]*(world[j]-current[j*4+3]);
+                                view[i] -= offset[i];
+                            }
+                            const float u = (p00*view[0]/-view[2]-p02+1)*0.5f;
+                            const float v = (1-(p11*view[1]/-view[2]-p12))*0.5f;
+                            const float ray[3] = {-tans[0]+u*(tans[0]+tans[1]),
+                                                  tans[2]-v*(tans[2]+tans[3]), -1};
+                            float dir[3] = {};
+                            for (int i=0;i<3;++i)
+                                for (int j=0;j<3;++j) dir[i] += xf[i*3+j]*ray[j];
+                            float su=0, sv=0;
+                            all &= menuPanelHit(xf+9, dir, 1.4f, curve, 0.3f, 0.2f, 0, &su, &sv)
+                                && approx(su, (x+0.3f)/0.6f) && approx(sv, (y+0.2f)/0.4f);
+                            ++samples;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    check(all && samples == 324, "Quest projection: fixed panel survives stereo, head turns and translation");
+}
+
 // --- the one-value ini write -------------------------------------------------
 
 void testIniWrite() {
@@ -391,6 +446,7 @@ int main() {
     testHeadLockAngles();
     testHeadLockDirection();
     testXform();
+    testAsymmetricProjection();
     testIniWrite();
     testPerfStats();
     if (g_fails) {
