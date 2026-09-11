@@ -315,6 +315,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\supersample_pass.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
+    "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\foveation.cpp" ^
@@ -694,6 +695,18 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
     echo [edvr] ERROR: private UI depth regression
     exit /b 1
 )
+
+echo [edvr] === terrain motion regression ===
+if not exist "%OBJ%\terrainmotion" mkdir "%OBJ%\terrainmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\terrainmotion\\" /Fe"%OBJ%\terrainmotion\celestial_motion_test.exe" ^
+    "tools\celestial_motion_test\celestial_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: terrain motion test build failed & exit /b 1 )
+"%OBJ%\terrainmotion\celestial_motion_test.exe" || exit /b 1
+python "tools\terrain_motion.py" --self-test || exit /b 1
+python "tools\terrain_motion.py" "%OBJ%\terrainmotion\eye_fixture_Terrain.bin" --verify-fixture || exit /b 1
 
 echo [edvr] === eye draw snapshot regression ===
 if not exist "%OBJ%\drawsnapshot" mkdir "%OBJ%\drawsnapshot"

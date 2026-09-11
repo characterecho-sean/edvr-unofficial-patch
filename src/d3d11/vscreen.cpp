@@ -59,6 +59,7 @@
 #include "wake_pulse.h"
 #include "hud_grain.h"
 #include "ui_depth.h"
+#include "celestial_motion.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -3054,6 +3055,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         if (uiDepthReissueBegin(self)) draw();
         uiDepthReissueEnd(self);
     }
+    if (self == g_state->ownerCtx &&
+        celestialMotionBegin(self, bindingShaderHash(BindSlot::Vs))) {
+        draw();
+        celestialMotionEnd(self);
+    }
     if (v == DrawVerdict::kBackdrop) backdropEnd(self);
     // The splash screen's dim under the loader's dialogs (splash_dim.h):
     // the still's composite and the intro movie's composite are the two
@@ -4033,6 +4039,7 @@ void vScreenFrameBoundary() {
         panelUpscaleFrameEnd();
         wakePulseReport();
         uiDepthFrameBoundary(g_state->ownerCtx);
+        celestialMotionFrameBoundary();
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -5172,6 +5179,7 @@ void shutdownVScreenFixes() {
     remlokShutdown();
     holoShutdown();
     uiDepthShutdown();
+    celestialMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();

@@ -27,6 +27,8 @@ def read(path):
         image = np.frombuffer(data, '<f2', offset=44).reshape(h, w, 2).astype('float32')
     elif fmt in (39, 40, 41):
         image = np.frombuffer(data, '<f4', offset=44).reshape(h, w)
+    elif fmt == 42:  # R32_UINT: exact terrain patch index, zero = no coverage
+        image = np.frombuffer(data, '<u4', offset=44).reshape(h, w)
     elif fmt in (19, 20):
         image = np.frombuffer(data, '<f4', offset=44).reshape(h, w, 2)[..., 0]
     elif fmt in (44, 45):

@@ -6,6 +6,7 @@
 #include <d3d11.h>
 
 #include <cstdint>
+#include <cmath>
 #include <cstdlib>   // _strtoui64, strtod: the hash lists and the planes
 #include <cstring>
 #include <string>
@@ -144,6 +145,7 @@ bool     g_eyesSwapped = false; // advanced.ui_depth_eyes = swapped: the A/B for
 float    g_uiNear = 0.1f;       // advanced.ui_depth_planes
 float    g_uiFar = 1000.0f;
 float    g_alphaFloor = 0.5f;   // advanced.ui_depth_alpha: below it, no depth
+float    g_cockpitMetres = kTemporalShipMetres; // same near-field domain as temporal AA
 float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
 bool     g_scaleNoted = false;
 constexpr uint32_t kMaxViewports = 16;
@@ -344,13 +346,16 @@ float4 main(In i, out float depth : SV_Depth) : SV_Target {
 // 1e-5), and in place each marker corner wrote its depth over the station
 // around it. Now this shader writes the depth too, through the second draw
 // in the scene's projection (Mode::kReissueScene), under the surface's
-// strokes at the floor and not under the glow. A panel's translucent
-// background under the floor keeps the scene's depth -- a flat dark colour,
-// which no reprojection can smear visibly; its text and frame keep theirs.
+// strokes at the floor and not under the glow. The captured rank labels
+// peak at alpha 124/255: the surface stores dimming in alpha, so a 0.5
+// cutoff removes every letter. Cockpit-distance surfaces instead retain
+// nonzero source coverage, like the comms panel. This includes translucent
+// panel backing; one composited pixel cannot carry both panel and sky
+// motion. Distant markers retain the old cutoff and never stamp their glow.
 const char kHoloDepthHlsl[] =
     "Texture2D<float4> Surf : register(t2);\n"
     "SamplerState Smp : register(s1);\n"
-    "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
+    "cbuffer P : register(b13) { float4 floorAndStrength; float4 sceneProjection; };\n"
     "struct In {\n"
     "    float4 tc0 : TEXCOORD0;\n"
     "    float3 tc4 : TEXCOORD4;\n"
@@ -360,7 +365,8 @@ const char kHoloDepthHlsl[] =
     "};\n"
     "float4 main(In i) : SV_Target {\n"
     "    float a = Surf.Sample(Smp, i.tc8).a;\n"
-    "    clip(a - floorAndStrength.x);\n"
+    "    bool cockpit = i.tc6.z > 0 && i.tc6.z < sceneProjection.z;\n"
+    "    clip(a - (cockpit ? min(floorAndStrength.x, 1.0 / 255.0) : floorAndStrength.x));\n"
     "    return floorAndStrength.w;\n"
     "}\n";
 
@@ -575,6 +581,7 @@ DepthShader g_depthShaders[6] = {
      kSpriteDepthHlsl, sizeof(kSpriteDepthHlsl) - 1, "ui_depth_sprite_ps", nullptr, false},
 };
 struct FloorCb {
+    float          cockpitMetres = -1.0f;
     ID3D11Buffer* cb = nullptr;
     float         floor = -1.0f;
     float         strength = -1.0f;
@@ -1133,6 +1140,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     const float depthAt2 = temporalPassDepthAt(2.0f);
     const bool smoke = slotIndex == 3;
     if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth &&
+        slot.cockpitMetres == g_cockpitMetres &&
         slot.depthAt2 == depthAt2 &&
         (!smoke || (slot.smokeFloor == g_smokeFloor && slot.smokeMax == g_smokeReactive))) {
         return slot.cb;
@@ -1172,7 +1180,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     const float projB = 2.0f * (nearDepth - depthAt2);
     const float projA = nearDepth - projB;
     const float data[8] = {g_alphaFloor, slotIndex <= 0 ? flt : ride, smoke ? g_smokeFloor : nearDepth,
-                           smoke ? g_smokeReactive : flt, projA, projB, 0.0f, 0.0f};
+                           smoke ? g_smokeReactive : flt, projA, projB, g_cockpitMetres, 0.0f};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1183,6 +1191,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     dev->Release();
     if (FAILED(hr)) slot.cb = nullptr;
     slot.floor = g_alphaFloor;
+    slot.cockpitMetres = g_cockpitMetres;
     slot.strength = strength;
     slot.nearDepth = nearDepth;
     slot.smokeFloor = g_smokeFloor;
@@ -1311,6 +1320,9 @@ void restoreOm(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void uiDepthConfigure(Config& cfg) {
+    float cockpit = cfg.getFloat("advanced.temporal_aa_ship_metres", kTemporalShipMetres);
+    if (!std::isfinite(cockpit) || cockpit < 0) cockpit = 0;
+    g_cockpitMetres = cockpit > 100000.0f ? 100000.0f : cockpit;
     // UI and smoke depth are required inputs of every temporal mode.
     const std::string aa = cfg.getString("fix.temporal_aa", "off");
     g_passOn = temporalModeEnabled(aa);

@@ -216,6 +216,29 @@ int main(int argc, char** argv) {
         check(d[6]==0,"transparent comms pixel preserves sky depth");
         check(read(dev.Get(),ctx.Get(),scene.tex.Get())[1]==0,"comms coverage leaves original depth untouched");
     }
+    // The rank panel's dim glyphs peak at 124/255 alpha. Exercise the
+    // actual holo shader at cockpit and target distances, including fully
+    // transparent texels and sub-quantum source/glow values.
+    auto holoVsCode=compile("cbuffer C:register(b0){float4 v;} struct O{float4 tc0:TEXCOORD0;float3 tc4:TEXCOORD4;float3 view:TEXCOORD6;float3 tc7:TEXCOORD7;float2 uv:TEXCOORD8;float4 p:SV_Position;}; O main(uint id:SV_VertexID){O o=(O)0;float2 p=float2((id<<1)&2,id&2);o.p=float4(p*float2(2,-2)+float2(-1,1),.025/v.x,1);o.uv=p;o.view=float3(0,0,v.x);return o;}","vs_5_0");
+    ComPtr<ID3D11VertexShader> holoVs;
+    hr(dev->CreateVertexShader(holoVsCode->GetBufferPointer(),holoVsCode->GetBufferSize(),nullptr,&holoVs));
+    for (float distance : {.6f, 16000.0f}) for (float alpha : {124.0f/255,33.0f/255,1.0f/255,.001f,0.0f,.8f}) {
+        surface[3]=alpha; ctx->UpdateSubresource(surf.Get(),0,nullptr,surface,sizeof(surface),0);
+        uiDepthFrameBoundary(ctx.Get()); ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+        bind(scene.dsv.Get()); setZ(distance); ctx->VSSetShader(holoVs.Get(),nullptr,0);
+        ctx->PSSetShaderResources(2,1,surfSrv.GetAddressOf()); ctx->PSSetSamplers(1,1,sampler.GetAddressOf());
+        g_on=true; g_mode=Mode::kReissueScene; g_reissueShader=&g_depthShaders[3];
+        g_drawEye=0; g_reissueMaskSlot=1; g_rebindW=g_rebindH=8; g_wantMask=true;
+        check(uiDepthReissueBegin(ctx.Get()),"holo coverage begins"); ctx->Draw(3,0); uiDepthReissueEnd(ctx.Get());
+        check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&ui),"holo private depth published");
+        ui->GetResource(privateRes.ReleaseAndGetAddressOf());
+        const auto d=read(dev.Get(),ctx.Get(),privateRes.Get());
+        const bool visible=alpha >= (distance<10 ? 1.0f/255 : .5f);
+        check(std::fabs(d[1]-(visible?.025f/distance:0))<1e-8f,"dim cockpit text retains depth; distant marker fringe excluded");
+        check(d[6]==0,"transparent holo texel never stamps depth");
+        check((read(dev.Get(),ctx.Get(),g_mask[0].tex)[1]>0)==visible,"holo mask follows physical coverage");
+        check(read(dev.Get(),ctx.Get(),scene.tex.Get())[1]==0,"holo coverage leaves game depth untouched");
+    }
     surface[3]=1;
     ctx->UpdateSubresource(surf.Get(),0,nullptr,surface,sizeof(surface),0);
     uiDepthFrameBoundary(ctx.Get());
