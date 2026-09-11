@@ -1,4 +1,6 @@
 #include "../../src/d3d11/eye_draw_snapshot.h"
+#include "../../src/d3d11/gui_draw_snapshot.h"
+#include <d3dcompiler.h>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -104,6 +106,24 @@ int wmain(int argc, wchar_t** argv) {
     vscreenSnap.capture(ctx.Get(),100,1,edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,'X',6,1,0);
     ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,0,0);
     check(vscreenSnap.surfaces.size()==2,"on-foot source colour and completed depth copied once for both eyes");
+    edvr::GuiDrawSnapshot gui;
+    ctx->OMSetRenderTargets(1,&r,sourceDsv.Get());
+    const FLOAT bg[4]={.2f,.4f,.6f,1};ctx->ClearRenderTargetView(rtv.Get(),bg);ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,.75f,0);
+    ctx->VSSetConstantBuffers(2,1,cb.GetAddressOf());
+    td.Width=td.Height=8;td.Format=DXGI_FORMAT_BC7_UNORM;td.MipLevels=3;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    uint8_t compressed[3][64]{};D3D11_SUBRESOURCE_DATA atlasData[3]{};
+    for(int i=0;i<3;++i){std::memset(compressed[i],17+i,64);atlasData[i]={compressed[i],i?16u:32u,0};}
+    ComPtr<ID3D11Texture2D> atlas;ComPtr<ID3D11ShaderResourceView> atlasSrv;hr(dev->CreateTexture2D(&td,atlasData,&atlas));hr(dev->CreateShaderResourceView(atlas.Get(),nullptr,&atlasSrv));ctx->PSSetShaderResources(1,1,atlasSrv.GetAddressOf());
+    const char* guiVs="float4 main(float2 p:POSITION):SV_Position{return float4(p,0,1);}";
+    ComPtr<ID3DBlob> code;hr(D3DCompile(guiVs,strlen(guiVs),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&code,nullptr));
+    D3D11_INPUT_ELEMENT_DESC element{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};ComPtr<ID3D11InputLayout> layout;hr(dev->CreateInputLayout(&element,1,code->GetBufferPointer(),code->GetBufferSize(),&layout));
+    constexpr uint64_t guiHash=0x666EF0C4C616F67Eull,guiPs=0xC0C4E6413DF14E9Aull;
+    edvr::GuiDrawSnapshot::rememberLayout(layout.Get(),&element,1,guiHash);ctx->IASetInputLayout(layout.Get());
+    edvr::GuiDrawSnapshot::rememberShader(guiHash,code->GetBufferPointer(),code->GetBufferSize());edvr::GuiDrawSnapshot::rememberShader(guiPs,code->GetBufferPointer(),code->GetBufferSize());
+    ctx->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,4);
+    for(int i=0;i<2;++i){float values[48];for(float& v:values)v=float(7+i);ctx->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);gui.capture(ctx.Get(),200,guiHash,guiPs,'X',6,1,150000,0,0);}
+    gui.capture(ctx.Get(),201,guiHash,guiPs,'X',6,1,0,0,0);check(gui.count()==2,"GUI captures one source frame only");
+    ctx->ClearRenderTargetView(rtv.Get(),bg);ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,0,0);
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
@@ -122,6 +142,8 @@ int wmain(int argc, wchar_t** argv) {
     for(uint64_t hash:{edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,edvr::EyeDrawSnapshot::kScene})
         edvr::EyeDrawSnapshot::rememberShader(hash,shaderBytes,sizeof(shaderBytes));
     std::wstring directory = argv[1]; directory.resize(directory.find_last_of(L"\\/"));
+    check(gui.write(ctx.Get(),(std::wstring(argv[1])+L".gui").c_str(),directory.c_str()),"GUI source snapshot write");
+    check(gui.failures==0 && gui.missingLayouts==0 && gui.declined==0,"GUI source payloads and layout complete");
     check(snap.writeShaders(directory.c_str()) == 0, "retained shader write");
     check(vscreenSnap.writeShaders(directory.c_str())==0,"on-foot vertex and pixel shader writes");
     const std::wstring shaderPath = directory + L"\\vs_81216C77F90DEDD6.dxbc";
@@ -132,6 +154,7 @@ int wmain(int argc, wchar_t** argv) {
     fclose(shader);
     snap.capture(ctx.Get(),103,10,edvr::EyeDrawSnapshot::kHud,0,'X',3,1,0);
     check(snap.vertexBytes==capturedBytes,"vertex capture stops after three frames");
+    ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_R16_UINT,0);
     snap.vertexBytes=32*1024*1024;snap.capture(ctx.Get(),102,11,edvr::EyeDrawSnapshot::kHud,0,'X',3,1,0);
     check(snap.vertexDeclined==1,"vertex byte budget declines explicitly");
     snap.draws.resize(edvr::EyeDrawSnapshot::kMaxDraws);

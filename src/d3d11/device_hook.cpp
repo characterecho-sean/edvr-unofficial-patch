@@ -29,6 +29,7 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
+#include "gui_draw_snapshot.h"
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
@@ -48,6 +49,7 @@ namespace {
 // CreateTexture1D or CreateTexture3D.
 constexpr size_t kDevCreateTexture2D     = 5;
 constexpr size_t kDevCreateVertexShader  = 12;
+constexpr size_t kDevCreateInputLayout   = 11;
 constexpr size_t kDevCreatePixelShader   = 15;
 constexpr size_t kDevCreateComputeShader = 18;
 // CreateSamplerState, counted against the SDK's ID3D11DeviceVtbl the same
@@ -87,6 +89,7 @@ constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
 
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateShader)(ID3D11Device*, const void*, SIZE_T,
                                                      ID3D11ClassLinkage*, void**);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateLayout)(ID3D11Device*,const D3D11_INPUT_ELEMENT_DESC*,UINT,const void*,SIZE_T,ID3D11InputLayout**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateTexture2D)(
     ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*,
     ID3D11Texture2D**);
@@ -123,6 +126,7 @@ struct State {
 
     PFN_CreateShader realCreateCS = nullptr;
     PFN_CreateShader realCreateVS = nullptr;
+    PFN_CreateLayout realCreateLayout = nullptr;
     PFN_CreateShader realCreatePS = nullptr;
     PFN_CreateTexture2D realCreateTexture2D = nullptr;
     PFN_CreateSamplerState realCreateSamplerState = nullptr;
@@ -436,6 +440,12 @@ uint64_t texture2DBytes(const D3D11_TEXTURE2D_DESC& d) {
     return bytes;
 }
 
+HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPUT_ELEMENT_DESC* elements,UINT count,const void* bytecode,SIZE_T len,ID3D11InputLayout** out) {
+    const HRESULT hr=g_state->realCreateLayout(self,elements,count,bytecode,len,out);
+    if(self==g_state->device && SUCCEEDED(hr) && bytecode && len && out && *out)
+        guardedBudget(g_createBudget,[&]{GuiDrawSnapshot::rememberLayout(*out,elements,count,fnv1a64(bytecode,len));});
+    return hr;
+}
 HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecode,
                                          SIZE_T len, ID3D11ClassLinkage* linkage,
                                          void** out) {
@@ -454,6 +464,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
+        GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
     });
     return hr;
@@ -472,6 +483,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
         if(hash==EyeDrawSnapshot::kVscreenPs) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
+        GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
     });
     return hr;
@@ -1866,6 +1878,7 @@ void hookDevice(ID3D11Device* device) {
     }
     s.deviceHook.replace(kDevCreateVertexShader, &hookedCreateVS,
                          reinterpret_cast<void**>(&s.realCreateVS));
+    s.deviceHook.replace(kDevCreateInputLayout,&hookedCreateLayout,reinterpret_cast<void**>(&s.realCreateLayout));
     s.deviceHook.replace(kDevCreatePixelShader, &hookedCreatePS,
                          reinterpret_cast<void**>(&s.realCreatePS));
     s.deviceHook.replace(kDevCreateComputeShader, &hookedCreateCS,

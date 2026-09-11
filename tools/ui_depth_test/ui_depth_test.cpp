@@ -260,10 +260,14 @@ int main(int argc, char** argv) {
     std::ifstream source("src/d3d11/temporal_pass.cpp");
     std::string temporal((std::istreambuf_iterator<char>(source)), {});
     std::string merge;
-    for(const char* start : {"Texture2D<float> Z :", "Texture2D<float> ZS :", "Texture2D<float> ZUI :", "float zSceneAt("}) {
+    for(const char* start : {"Texture2D<float> Z :", "Texture2D<float> ZS :", "Texture2D<float> ZUI :", "Texture2D<float4> Screen :"}) {
         auto begin=temporal.find(start); check(begin!=std::string::npos,"temporal depth source found");
         merge += temporal.substr(begin,temporal.find('\n',begin)-begin)+"\n";
     }
+    merge+="static const float4 probe=0;\n";
+    auto depthBegin=temporal.find("float zSceneAt("),depthEnd=temporal.find("float zAt(",depthBegin);
+    check(depthBegin!=std::string::npos && depthEnd!=std::string::npos,"complete temporal depth accessor found");
+    merge+=temporal.substr(depthBegin,depthEnd-depthBegin);
     merge += "RWTexture2D<float> Result:register(u0);[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){Result[id.xy]=zSceneAt(id.xy);}";
     auto mergeCode=compile(merge.c_str(),"cs_5_0"); ComPtr<ID3D11ComputeShader> mergeCs;
     hr(dev->CreateComputeShader(mergeCode->GetBufferPointer(),mergeCode->GetBufferSize(),nullptr,&mergeCs));

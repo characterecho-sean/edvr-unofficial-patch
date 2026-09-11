@@ -298,7 +298,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_theater.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
-    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" ^
+    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" ^
     "src\d3d11\shader_sig.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" ^
@@ -705,6 +705,13 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: hologram motion test build failed & exit /b 1 )
 "%OBJ%\holomotion\holo_motion_test.exe" || exit /b 1
+
+if not exist "%OBJ%\screenmotion" mkdir "%OBJ%\screenmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\screenmotion\\" /Fe"%OBJ%\screenmotion\screen_motion_test.exe" ^
+    "tools\screen_motion_test\screen_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
+"%OBJ%\screenmotion\screen_motion_test.exe" --self-test || exit /b 1
 python "tools\holo_motion.py" --self-test || exit /b 1
 
 echo [edvr] === stellar motion regression ===
@@ -735,11 +742,14 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\drawsnapshot\\" /Fe"%OBJ%\drawsnapshot\eye_draw_snapshot_test.exe" ^
     "tools\eye_draw_snapshot_test\eye_draw_snapshot_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: eye draw snapshot test build failed & exit /b 1 )
 "%OBJ%\drawsnapshot\eye_draw_snapshot_test.exe" "%OBJ%\drawsnapshot\fixture.bin" || exit /b 1
 python "tools\eye_draw_snapshot.py" --self-test || exit /b 1
 python "tools\eye_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin" --verify-fixture || exit /b 1
+python "tools\gui_draw_snapshot.py" --self-test || exit /b 1
+python "tools\eye_inputs.py" --self-test || exit /b 1
+python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
 
 echo [edvr] === fakevr.dll + openvr_smoke.exe ===
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"

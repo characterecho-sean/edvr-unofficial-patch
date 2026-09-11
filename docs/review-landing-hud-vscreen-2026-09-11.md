@@ -101,12 +101,13 @@ captures one source camera per frame from the known world/terrain VS,
 the screen VS/PS, its original draw constants/vertices, and source
 colour plus completed scene depth at its first composite. Source records
 use ordinal UINT32_MAX; depth surfaces carry their DSV format. The
-existing snapshot layout remains version 3. The larger explicit on-foot
-capture has a 128 MiB per-surface / 256 MiB total limit; normal UI
-surface limits remain 16/64 MiB. There are no source copies outside an
-armed eye run. The log reports camera, screen and depth counts,
-including zero cameras or depth so a missed path cannot look like a
-successful capture.
+existing snapshot layout remains version
+3. The larger explicit on-foot capture has a 128 MiB per-surface / 256
+   MiB
+total limit; normal UI surface limits remain 16/64 MiB. There are no
+source copies outside an armed eye run. The log reports camera, screen
+and depth counts, including zero cameras or depth so a missed path
+cannot look like a successful capture.
 
 The next flight must verify target-circle/pitch-ladder stability,
 absence of the two terrain bands and retained changing-text clarity. A
@@ -120,3 +121,113 @@ round-trip and the 243-key configuration contract. The separate NVIDIA
 smoke test passes native TAA, DLAA, DLSS, foveated paths and projection
 conventions. These are desk validations; headset appearance and live
 cost of the sprite tracking still require the next flight.
+
+## Follow-up flight, 13:26
+
+`edvr_gfx_20260911_132608.log` matches `439d9bf`, with the same SteamVR,
+2268x2240 input, 4536x4480 output and preset K. Runs 132823 and 132827
+are stationary and walking; 132914 and 132945 show the landing HUD.
+
+Ruled out: sprite transform tracking alone fixes the HUD's low
+resolution, because both HUD runs match all 16 eligible transforms while
+the user still sees pixelation, also visible in the raw crops before
+DLSS.
+
+Both on-foot captures contain 19 source camera frames, 38 screen draws,
+5120x2880 colour and completed D32/S8 scene depth, without failed
+copies. The depth covers 58.7% of the source; the submitted eye depth is
+zero everywhere. In the walking run the supplied eye vectors stay within
+0.23 pixels. Reconstructing source positions with the captured camera
+and depth, then projecting through the actual 64-segment curved screen,
+predicts terrain image motion reaching 16 pixels over the sampled
+frames. Registration of 123--124 textured patches has median residual
+below 0.29 input pixels and 90th percentile below 0.96. The stationary
+control has median residual below 0.32 pixels. This validates using the
+source camera independently of the outer headset camera; source DLSS
+itself would additionally need source projection jitter.
+
+The pitch/altitude texture is 742x742. The spool-up animation is on the
+1424x306 hologram surface. Both contain the corresponding graphics
+before the eye composite. The source textures, source projection and the
+post-resolve handling must be checked separately from motion; sharpening
+the final eye cannot recover detail lost at source rasterization.
+
+### Walking correction
+
+The next build supplies source-scene motion to the existing eye TAA/DLSS
+pass. It snapshots source camera constants on the first recognized
+world/terrain draw and reads the completed source depth when the virtual
+screen is drawn. GPU reprojection places the previous source UV on the
+previous screen mesh, including its actual curvature segments, size,
+distance transform and eye projection. The resulting eye-sized map
+carries raster motion, source depth and validity; both temporal
+consumers remove the raster jitter delta once. Pixels outside the screen
+retain the existing eye motion. Source-image disocclusions reject
+history, and missing/consecutive-history transitions reset temporal
+accumulation.
+
+There are two RGBA16F eye maps, approximately 77.5 MiB together at
+2268x2240, plus small GPU constant/size buffers. Source depth is
+retained by reference; normal frames do not copy the 5120x2880 colour or
+depth and do not read them back to the CPU. Tracking wakes only after
+the known screen composite is observed with temporal AA enabled, and
+resources expire after 120 frames without it. Screen correction does not
+modify cockpit HUD source rendering, add configuration keys or jitter
+the source projection.
+
+The WARP test exercises the production capture lifecycle and both
+temporal shader consumers. It checks completed-depth timing, independent
+eyes, missing history, region offsets, jitter convention, screen
+boundaries and disocclusion. The source motion override also clears the
+unrelated eye-space mover rejection. Captured-camera replay covers 1152
+points from both eyes of the stationary and walking runs, checked
+against double-precision curved-screen projection within 0.005 input
+pixels. Desk image registration validates the source camera's
+correspondence separately from that mathematical replay.
+
+The NVIDIA shader-only benchmark is approximately 0.03 ms per eye at
+2268x2240 with the captured 5120x2880 depth. This excludes clearing the
+map, resource copies, CPU draw overhead and additional temporal input
+bandwidth; it is not the measured cost of the complete in-game change.
+Headset appearance and total flight cost remain to be verified.
+
+### HUD source capture
+
+The remaining ladder/altimeter, spool icon and terrain-behind-UI
+complaints are not declared fixed. The existing dumps include completed
+GUI textures and their eye composites but lack the original GUI drawing
+inputs needed to validate a source-resolution change. Prior surface
+inflation alone was inconclusive; there is no new arbitrary sharpening
+or inflation setting in this build.
+
+An explicit eye dump now adds `pool/gui_HHMMSS.bin`. It captures the
+first matching source frame for the known GUI vector, glyph and icon
+shader families on square/wide targets up to 2048 pixels. Records
+include draw arguments, original input layout, vertex/index streams,
+structured transform pool, constant buffers, atlas mip levels, samplers,
+render state and initial colour/depth. Shader bytecode is saved beside
+the dump. The reader is `tools/gui_draw_snapshot.py`; capture data is
+never treated as instructions.
+
+The capture is limited to 512 draws and 96 MiB, with 16 MiB per texture
+including all mip levels. It runs only during an explicitly requested
+eye capture. The log reports draws, declined ranges/formats/budgets,
+failed copies or missing shaders, missing layouts and file-write status,
+including zero-draw results. GPU/reader fixtures verify initial contents
+before subsequent changes, original constants, layout, BC7 mip blocks
+and first-frame selection. The next ladder/altimeter and engine-spool
+dumps should permit direct replay of source quality and compositing
+separately.
+
+Source-scene DLSS/DLAA remains a separate step: it requires validated
+source projection jitter and source-HUD treatment. This build corrects
+missing walking motion in the existing eye reconstruction; it does not
+introduce a second DLSS evaluation on the virtual-screen source.
+
+The full SDK build and its regression gates pass, including 19785 UI
+checks, 13601 screen-motion/consumer checks, both GPU snapshot fixtures,
+their readers and the unchanged 243-key configuration contract. The
+optional captured-camera run passes 18216 checks. NVIDIA smoke passes
+TAA, DLAA, DLSS, foveated reconstruction and motion/jitter conventions.
+These desk checks do not establish the final appearance of the next
+headset flight.

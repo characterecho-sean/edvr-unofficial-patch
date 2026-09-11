@@ -25,6 +25,7 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
+#include "gui_draw_snapshot.h"
 
 namespace edvr {
 namespace {
@@ -570,6 +571,7 @@ struct AuxSlot {
 AuxSlot g_aux[kLedgerAux];
 int     g_auxCount = 0;
 EyeDrawSnapshot g_drawSnapshot;
+GuiDrawSnapshot g_guiSnapshot;
 struct AuxFrame {   // one watched shader's buffers in one frame
     uint64_t vs;
     uint32_t instances, count;
@@ -585,6 +587,7 @@ void releaseCopy(LedgerCopy& c) {
 }
 void ledgerRelease() {
     g_drawSnapshot.reset();
+    g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
     g_instBytes = 0;
@@ -2909,6 +2912,9 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     for(const auto& d:g_drawSnapshot.draws) {sourceCameras+=d.ordinal==UINT32_MAX;screenDraws+=d.vs==EyeDrawSnapshot::kVscreen;}
     for(const auto& t:g_drawSnapshot.surfaces)sourceDepths+=t.format==20 || t.format==40 || t.format==45 || t.format==55;
     if(screenDraws)Log::get().note("object probe: on-foot source capture: %u camera frames, %u screen draws, %u completed depth surfaces; colour/depth copied at first composite, no temporal changes.",sourceCameras,screenDraws,sourceDepths);
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
+    const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
+    Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
     g_ledgerOn = false;
     ledgerRelease();
 }
@@ -3084,6 +3090,13 @@ void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count
     if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureSource(ctx,g_frame+1,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),
                                  kind,count,instances,startInstance,start,base);
+}
+
+void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
+                                 uint32_t startInstance,uint32_t start,int32_t base) {
+    if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
+    const uint64_t vs=bindingShaderHash(BindSlot::Vs);if(!GuiDrawSnapshot::gui(vs))return;
+    g_guiSnapshot.capture(ctx,g_frame+1,vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,start,base,startInstance);
 }
 
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,

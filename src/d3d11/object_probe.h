@@ -64,6 +64,8 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 bool objectProbeLedgerActive();
 void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
                               uint32_t startInstance,uint32_t start,int32_t base);
+void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
+                                 uint32_t startInstance,uint32_t start,int32_t base);
 void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                              uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0);
 

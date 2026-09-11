@@ -26,6 +26,7 @@
 #include "binding_shadow.h"
 #include "cb_peek.h"
 #include "panel_curve.h"
+#include "screen_motion.h"
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
@@ -1686,6 +1687,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
                        bindingGet(BindSlot::Rtv0) == nullptr);
     if (!s->rtv0Eye) {
+        screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);
         // NOT an eye texture -- but it is still a DRAW, and where the draws
         // are going is the entire question when the eye textures are getting
         // almost none. Counted here rather than inside the recogniser,
@@ -1697,6 +1699,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
         }
         if(objectProbeLedgerActive()) {
+            objectProbeNoteGuiSourceDraw(self,kind,count,instances,args.startInstance,args.start,args.base);
             ResourceInfo source;
             if(bindingResolve(bindingGet(BindSlot::Rtv0),&source) && source.isTexture2D &&
                source.a==(s->panelW?s->panelW:1920) && source.b==(s->panelH?s->panelH:1080))
@@ -3417,6 +3420,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         if (clock.on) clock.realCall(r0);
+        if(self==g_state->ownerCtx)
+            screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
@@ -3931,6 +3936,7 @@ void vScreenRefreshConfig() {
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
+    screenMotionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -4053,6 +4059,7 @@ void vScreenFrameBoundary() {
         panelUpscaleFrameEnd();
         wakePulseReport();
         uiDepthFrameBoundary(g_state->ownerCtx);
+        screenMotionFrameBoundary();
         celestialMotionFrameBoundary();
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
@@ -4962,6 +4969,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
+    screenMotionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -5193,6 +5201,7 @@ void shutdownVScreenFixes() {
     remlokShutdown();
     holoShutdown();
     uiDepthShutdown();
+    screenMotionShutdown();
     celestialMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
