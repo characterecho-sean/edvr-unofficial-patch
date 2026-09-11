@@ -404,3 +404,89 @@ GPU-query regression. `test-perf-transport.log` also passes the captured
 cockpit/stellar transform and original shader fixtures. The production DLL
 passes `smoke-perf-transport.log`, including actual NVIDIA evaluation. These
 checks do not replace the remaining headset verification described above.
+
+### Changing speed/ammo and exit profile, 11:31 flight
+
+The user confirms that the RIKEN trail is fixed. The new flight matches
+`c5e0d7b` (graphics build `6AA437BE`), SteamVR, DLSS 310.7.0.0 preset K,
+2268x2240 input to 4536x4480 output per eye. Temporal work measures about 2.1
+ms/eye and the separate ring query about 0.24-0.28 ms/stereo frame. The large
+first-dump hitch is diagnostic readback, not normal-play cost.
+
+Ruled out: missing UI coverage explains the changing ammunition or exit
+profile. In `113506`, 206/207 bright ammo pixels have kind-1 coverage; all
+6,201 bright profile pixels in `113528` do too. Every dump matches all 15
+eligible holo transforms. The ammo capture's frame 15 raw counter reads 68
+while its treated counterpart retains 69. Current four-texel colour bounds can
+admit the wrong digit even when they remove a transported name trail.
+
+The weapons surface is 949x593, sampled at PS t2 by the known holo family; the
+speed display is on its 1020x834 sibling. A content edit can be detected by
+comparing these source texels before eye projection, independently of head
+motion. The proposed correction rejects learned digit content only in recently
+edited source regions. A synthetic changing-digit DLSS replay and
+GPU/state/budget regressions must validate this before installation.
+
+The exit profile is already small in the raw eye. Current draw snapshots omit
+its menu/screen composite families, so source resolution versus reconstruction
+softness cannot yet be separated using that source capture. The diagnostic
+needs those known families as well; valid coverage alone is not evidence that
+the profile's blur has been corrected.
+
+The implemented tracker retains at most 24 GPU-rendered RGBA/BGRA UI surfaces
+and 64 MiB of history (previous source plus two R8 edit-age textures). It
+compares exact premultiplied RGBA texels, ignores invisible RGB, and shares one
+update across both eyes and all meshes using that source in a frame. Static
+atlases, unsupported formats/mips and excess active-frame surfaces are
+declined. Gaps invalidate history; idle resources retire after 120 frames. The
+source snapshot is copied at the first composite, before a later repaint. This
+assumes a shared surface is painted once before its stereo composites; the
+existing capture records only the first source version, so a game that repaints
+it between eyes would require update-generation tracking.
+
+The coverage reissue projects edit age through the original UVs into a separate
+R8 target. Recently erased glyphs retain private UI depth/coverage until the
+edit expires, but never modify the game's depth. The post-DLSS resolve uses
+current-sample cubic reconstruction, bounded by the existing four raw texels,
+in these edited regions for up to 32 frames. Unchanged UI keeps its trained
+subpixel reconstruction and the previous RIKEN transport correction. This
+rejects old character identity, including an old digit inside today's valid
+colour range; it cannot recover detail absent from the current input raster.
+Rapidly edited thin strokes can consequently still expose raw sampling limits.
+Source edit age and the interface's existing mask/config encoding are separate.
+
+The actual NVIDIA K replay uses 128 frames of a moving panel with dim speed
+text and ammo changing every four frames. At frame 32 the source changes 70 to
+69; the old result retains 70 through frame 36, while the edit path shows the
+new numbers. Against direct full-resolution text, mean absolute RGB error over
+the dynamic region falls from 1.965 to 1.873 on a 0-255 scale; the region
+includes unchanged characters, so this is not a digit-recognition score. The
+unchanged label has zero differing channels between the two paths. Fresh thin
+strokes show the input-sampling limitation above, not additional source
+resolution. Both paths return to the same stable 54 after edit expiry.
+
+At 2268x2240 to 4536x4480, the five captured surface sizes use 35.38 MiB of
+source history and measure 0.09-0.11 ms GPU/stereo frame in isolation. The
+resolve measures 0.12-0.15 ms/eye versus 0.11-0.13 before; a synthetic changing
+counter region covering 0.77% of the input measures 0.144 ms/eye. The extreme
+all-pixels-edited case measures 0.187 ms/eye. These are isolated workloads, not
+whole-game timings; the extra coverage MRT is not included. Bounded GPU queries
+now report source comparison/copy cost separately from submission, with
+explicit completion/skipped/invalid counts and no readback wait.
+
+The UI GPU fixture passes 19,558 checks, including erasure and one-quantum dim
+edits, stable/sRGB inputs, expiry, frame gaps, state restoration, stereo
+sharing, source/byte budget eviction, and changed versus static post-resolve
+pixels at four output ratios. The captured cockpit/stellar shader regressions
+also pass. Eye dumps now include `UiEdits` and the menu/screen source families
+using their verified t1/t0 slots. Exit-profile softness still needs that new
+source capture; no surface inflation or global sharpening is enabled by this
+change.
+
+Validation: `build-ui-content.log` passes the complete production build and all
+gates, including the unchanged 243-key configuration contract and the extended
+menu source snapshot fixture. `smoke-ui-content.log` passes the production DLL
+smoke test and actual NVIDIA motion/jitter checks. The next flight should
+verify changing speed/ammo text, source-edit activity/cost and capture the exit
+profile again. Static profile sharpness is not yet a verified fix, and the
+isolated cost measurements need confirmation in normal play.

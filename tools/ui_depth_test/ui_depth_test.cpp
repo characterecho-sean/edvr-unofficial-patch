@@ -553,6 +553,87 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         for(float v:run())check(v<.001f,"unbound coverage cannot mark scene content as UI");
         std::puts("PASS: production adaptive UI shader keeps stable strokes and rejects changed, new and erased UI.");
     }
+    // Actual source edits, independent of projection, jitter and both eyes.
+    {
+        ctx->ClearState();
+        auto make=[&](UINT w,UINT h,DXGI_FORMAT f=DXGI_FORMAT_R8G8B8A8_UNORM,UINT flags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET){
+            D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;d.Format=f;d.BindFlags=flags;
+            ComPtr<ID3D11Texture2D> t;hr(dev->CreateTexture2D(&d,nullptr,&t));return t;
+        };
+        auto view=[&](ID3D11Texture2D* t){ComPtr<ID3D11ShaderResourceView> v;hr(dev->CreateShaderResourceView(t,nullptr,&v));return v;};
+        auto valuesOf=[&](ID3D11ShaderResourceView* v){check(v!=nullptr,"UI edit view available");ComPtr<ID3D11Resource> r;v->GetResource(&r);return read(dev.Get(),ctx.Get(),r.Get());};
+        for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM}) {
+            UiContent tracker;auto t=make(13,9,format);auto v=view(t.Get());
+            std::vector<unsigned char> bytes(13*9*4,0);
+            bytes[4*55]=128;bytes[4*55+3]=124;
+            ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
+            for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),100)))check(a==0,"new source starts with no fabricated edits");
+            for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),101)))check(a==0,"identical source stays stable across frames and SRV decoding");
+            // An alpha-only erasure and a newly visible dim stroke are real
+            // edits; invisible RGB changes must not affect reconstruction.
+            bytes[4*55+3]=0;bytes[4*58]=8;bytes[4*58+3]=1;bytes[4*59]=255;
+            ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
+            auto changed=valuesOf(tracker.prepare(ctx.Get(),v.Get(),102));
+            for(unsigned i=0;i<changed.size();++i)check(changed[i]==(i==55||i==58?1.f:0.f),"source edit footprint includes erased/dim strokes only");
+            auto* same=tracker.prepare(ctx.Get(),v.Get(),102);
+            check(tracker.totals.updates==2 && tracker.totals.hits==1,"both eyes and repeated meshes compare once per frame");
+            check(valuesOf(same)==changed,"second eye observes the same edit age");
+            for(unsigned f=103;f<=134;++f)changed=valuesOf(tracker.prepare(ctx.Get(),v.Get(),f));
+            for(float a:changed)check(a==0,"unchanged edits expire after 32 frames");
+            bytes[4*55+3]=123;ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
+            check(valuesOf(tracker.prepare(ctx.Get(),v.Get(),135))[55]==1,"later change rearms edit history");
+            for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),137)))check(a==0,"skipped surface frame resets history");
+            tracker.retire(258);check(tracker.allocated==0,"idle source releases retained textures");
+        }
+        // Preserve the game's compute bindings, including a live UAV.
+        auto t=make(13,9);auto v=view(t.Get());std::vector<unsigned char> bytes(13*9*4,127);
+        ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);UiContent tracker;
+        tracker.prepare(ctx.Get(),v.Get(),1);
+        auto sentinelT=make(8,8,DXGI_FORMAT_R8_UNORM,D3D11_BIND_UNORDERED_ACCESS);
+        ComPtr<ID3D11UnorderedAccessView> sentinelU;hr(dev->CreateUnorderedAccessView(sentinelT.Get(),nullptr,&sentinelU));
+        auto code=compile("[numthreads(1,1,1)]void main(){}","cs_5_0");ComPtr<ID3D11ComputeShader> sentinelCs;
+        hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&sentinelCs));
+        ctx->CSSetShader(sentinelCs.Get(),nullptr,0);ctx->CSSetUnorderedAccessViews(0,1,sentinelU.GetAddressOf(),nullptr);
+        for(UINT slot=0;slot<3;++slot)ctx->CSSetShaderResources(slot,1,v.GetAddressOf());
+        tracker.prepare(ctx.Get(),v.Get(),2);
+        ComPtr<ID3D11ComputeShader> afterCs;ctx->CSGetShader(&afterCs,nullptr,nullptr);check(afterCs==sentinelCs,"UI edit compute shader restored");
+        ComPtr<ID3D11UnorderedAccessView> afterU;ctx->CSGetUnorderedAccessViews(0,1,&afterU);check(afterU==sentinelU,"UI edit compute UAV restored");
+        for(UINT slot=0;slot<3;++slot){ComPtr<ID3D11ShaderResourceView> after;ctx->CSGetShaderResources(slot,1,&after);check(after==v,"UI edit compute input restored");}
+        ctx->ClearState();
+        UiContent bounded;std::vector<ComPtr<ID3D11Texture2D>> textures;std::vector<ComPtr<ID3D11ShaderResourceView>> views;
+        for(unsigned i=0;i<25;++i){textures.push_back(make(4,4));views.push_back(view(textures.back().Get()));
+            check((bounded.prepare(ctx.Get(),views.back().Get(),1)!=nullptr)==(i<24),"cache count bounded without evicting active-frame surfaces");}
+        check(bounded.prepare(ctx.Get(),views.back().Get(),2)!=nullptr && bounded.totals.evicted==1,"older cache entry can be evicted safely");
+        auto atlas=make(4,4,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_SHADER_RESOURCE);auto atlasV=view(atlas.Get());
+        check(!bounded.prepare(ctx.Get(),atlasV.Get(),3),"static atlas is not copied each frame");
+        UiContent budget;auto big=make(4096,1536),big2=make(4096,1536);auto bigV=view(big.Get()),bigV2=view(big2.Get());
+        check(budget.prepare(ctx.Get(),bigV.Get(),1)!=nullptr,"bounded large UI surface supported");
+        check(budget.prepare(ctx.Get(),bigV2.Get(),1)==nullptr,"history byte cap enforced independently of entry count");
+        check(budget.allocated<=UiContent::kBudget,"allocated UI history fits budget");
+        check(budget.prepare(ctx.Get(),bigV2.Get(),2)!=nullptr && budget.totals.evicted==1,"byte pressure evicts only an older frame");
+        // End-to-end source -> existing coverage draw -> borrowed eye SRV.
+        // t14 must be restored and erased glyphs must keep their edit mark
+        // even though the current source alpha is zero.
+        auto uiSurface=make(4,4);auto uiView=view(uiSurface.Get());std::vector<unsigned char> pixels(4*4*4,0);pixels[4*5+3]=124;
+        ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
+        g_trained=true;
+        for(unsigned f=0;f<2;++f){
+            uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+            bind(scene.dsv.Get());setZ(.6f);ctx->PSSetShaderResources(0,1,uiView.GetAddressOf());ctx->PSSetShaderResources(14,1,v.GetAddressOf());
+            coverage(false,true);
+            ComPtr<ID3D11ShaderResourceView> after;ctx->PSGetShaderResources(14,1,&after);check(after==v,"source edit PS binding restored");
+            auto edit=valuesOf(uiDepthContentChanges(8,8,0));
+            check(!uiDepthContentChanges(8,8,1) && !uiDepthContentChanges(7,8,0),"source edits respect eye and render dimensions");
+            if(f==0)for(float a:edit)check(a==0,"unchanged first UI frame has no projected edits");
+            else {
+                check(edit[3*8+3]==1,"erased glyph edit survives the source alpha discard");
+                for(float z:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(z==0,"erased UI never writes game depth");
+            }
+            pixels.assign(4*4*4,0);ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
+        }
+        ctx->ClearState();uiDepthFrameBoundary(ctx.Get());check(!uiDepthContentChanges(8,8,0),"projected edit mask clears after both eyes submit");g_trained=false;
+        std::puts("PASS: UI source edits preserve stable/dim text, detect erasure, expire, restore state, and respect eye/cache/byte bounds.");
+    }
     // Exercise the model-independent resolve itself. Odd dimensions and
     // noninteger output ratios catch holes/overlap in block ownership.
     {
@@ -567,7 +648,8 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         auto srv=[&](ID3D11Texture2D* t){ComPtr<ID3D11ShaderResourceView> v;hr(dev->CreateShaderResourceView(t,nullptr,&v));return v;};
         auto uav=[&](ID3D11Texture2D* t){ComPtr<ID3D11UnorderedAccessView> v;hr(dev->CreateUnorderedAccessView(t,nullptr,&v));return v;};
         constexpr UINT w=13,h=9;
-        auto raw=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),mask=texture(w,h,DXGI_FORMAT_R8_UNORM);
+        auto raw=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),mask=texture(w,h,DXGI_FORMAT_R8_UNORM),edits=texture(w,h,DXGI_FORMAT_R8_UNORM);
+        auto editsV=srv(edits.Get());
         auto previous=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),next=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM);
         auto velocity=texture(w,h,DXGI_FORMAT_R32G32_FLOAT);auto velocityV=srv(velocity.Get());
         auto rawV=srv(raw.Get()),maskV=srv(mask.Get()),previousV=srv(previous.Get());auto nextU=uav(next.Get());
@@ -580,16 +662,18 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             auto trainedV=srv(trained.Get());auto outputU=uav(output.Get());
             std::vector<unsigned char> colour(w*h*4,0),mark(w*h,0),old(w*h*4,0),model(ow*oh*4,0);
             std::vector<float> motion(w*h*2,0);
+            std::vector<unsigned char> edit(w*h,0);
             for(UINT i=0;i<ow*oh;++i){model[4*i]=static_cast<unsigned char>(64+i%100);model[4*i+3]=127;}
             auto run=[&](bool haveHistory){
                 ctx->UpdateSubresource(raw.Get(),0,nullptr,colour.data(),w*4,0);ctx->UpdateSubresource(mask.Get(),0,nullptr,mark.data(),w,0);
                 ctx->UpdateSubresource(previous.Get(),0,nullptr,old.data(),w*4,0);ctx->UpdateSubresource(trained.Get(),0,nullptr,model.data(),ow*4,0);
                 ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);
                 ctx->UpdateSubresource(velocity.Get(),0,nullptr,motion.data(),w*8,0);
-                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr,velocityV.Get()};
+                ctx->UpdateSubresource(edits.Get(),0,nullptr,edit.data(),w,0);
+                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr,velocityV.Get(),editsV.Get()};
                 ID3D11UnorderedAccessView* out[]={outputU.Get(),nextU.Get()};
                 const float poison[4]={1,1,1,1};ctx->ClearUnorderedAccessViewFloat(outputU.Get(),poison);
-                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,5,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
+                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,6,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
                 ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
                 return read(dev.Get(),ctx.Get(),output.Get());
             };
@@ -636,6 +720,22 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             p.jit[0]=.49f;p.jit[1]=-.49f;resolvedValues=run(false);
             for(UINT y=1;y+1<oh;++y)for(UINT x=2;x+2<ow;++x)check(std::fabs(resolvedValues[y*ow+x]-128/255.f)<1e-6,"valid subpixel UI colour retains trained antialiasing under jitter");
             p.jit[0]=p.jit[1]=0;
+            // Two obsolete model images both fit within the raw bounds.
+            // A real edit must produce the same fresh samples for either,
+            // without changing the static text elsewhere in the frame.
+            edit[4*w+6]=255;
+            for(UINT i=0;i<ow*oh;++i)model[4*i+3]=127;
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=80;
+            auto a=run(false);
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=170;
+            auto b=run(false);unsigned changed=0,stable=0;
+            for(UINT y=1;y+1<oh;++y)for(UINT x=2;x+2<ow;++x){
+                const UINT qx=x*w/ow,qy=y*h/oh;
+                if(qx>=5&&qx<=7&&qy>=3&&qy<=5){check(a[y*ow+x]==b[y*ow+x],"changed digit does not inherit model history even inside valid colour bounds");++changed;}
+                else {check(a[y*ow+x]!=b[y*ow+x],"static UI retains model antialiasing beside changed text");++stable;}
+            }
+            check(changed && stable,"dynamic/static resolve controls both exercised at every output ratio");
+            for(float alpha:read(dev.Get(),ctx.Get(),output.Get(),3))check(std::fabs(alpha-127/255.f)<1e-6,"dynamic reconstruction preserves submission alpha");
         }
         std::puts("PASS: post-DLSS UI resolve bounds stale colour, retains AA/alpha, excludes world/smoke, and covers noninteger output sizes.");
     }

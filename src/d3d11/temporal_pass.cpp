@@ -2328,9 +2328,10 @@ wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
-ID3D11Texture2D*  g_eyeInputs[8] = {};
+constexpr int kEyeInputs=9;
+ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[8]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage"};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits"};
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
@@ -2609,7 +2610,12 @@ uint32_t g_rowsFrame = 0; // scene boundary counter, shared by captures and row 
 void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
                     ID3D11Texture2D* ui,float uiBound,float uiFlags) {
     if(g_eyeRunLeft<=0 || g_eyeRunTaken!=0 || g_eyeInputs[0])return;
-    ID3D11Texture2D* textures[8]={e.dlMv,e.dlDepth,ui,e.dlMask,nullptr,nullptr,nullptr,nullptr};
+    ID3D11Texture2D* textures[kEyeInputs]={e.dlMv,e.dlDepth,ui,e.dlMask};
+    if(e.dlMv) {
+        D3D11_TEXTURE2D_DESC d{};e.dlMv->GetDesc(&d);
+        auto* edits=uiDepthContentChanges(d.Width,d.Height,0);
+        if(edits) {Microsoft::WRL::ComPtr<ID3D11Resource> r;edits->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[8]));}
+    }
     if(scene) {
         ID3D11Resource* res=nullptr;scene->GetResource(&res);
         if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[4]));res->Release();}
@@ -2630,14 +2636,14 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
             if(res) { res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[7])); res->Release(); }
         }
     }
-    for(int k=0;k<8;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
-    for(int k=5;k<8;++k)if(textures[k])textures[k]->Release();
+    for(int k=0;k<kEyeInputs;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
+    for(int k=5;k<kEyeInputs;++k)if(textures[k])textures[k]->Release();
     if(textures[4])textures[4]->Release();
     g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
     g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags);
 }
 void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
-    for(int k=0;k<8;++k) {
+    for(int k=0;k<kEyeInputs;++k) {
         auto* texture=g_eyeInputs[k];if(!texture)continue;
         D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
         uint32_t bytes=0;
@@ -5078,9 +5084,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // says why). Inside the timed region, so the price is honest.
                     if (usedDlaa && uiResolve) {
                         ctx->CSSetShaderResources(0,14,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
-                        ID3D11ShaderResourceView* srvs[5]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv};
+                        ID3D11ShaderResourceView* srvs[6]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv,uiDepthContentChanges(w,h,eye)};
                         ID3D11UnorderedAccessView* uavs[2]={e.dlSubmitUav,e.uiHistoryUav[1-e.uiHistoryRead]};
-                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,5,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
+                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,6,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
                         // NGX may change compute bindings, including b0.
                         ctx->CSSetConstantBuffers(0,1,&g_cb);
                         ctx->Dispatch((w+7)/8,(h+7)/8,1);

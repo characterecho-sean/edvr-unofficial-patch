@@ -2,6 +2,7 @@
 #include "ui_depth_layer.h"
 #include "stellar_coverage.h"
 #include "gpu_interval.h"
+#include "ui_content.h"
 
 #include <windows.h>
 
@@ -302,7 +303,7 @@ uint32_t g_variantLoggedCount = 0;
 // where the interface covers, and with the mask bound as its colour target
 // it marks the same pixels for NVIDIA. b13 carries (alpha floor, strength);
 // the game's composites declare b2 alone, so b13 is free.
-const char kPanelDepthHlsl[] =
+const char kPanelDepthHlsl[] = EDVR_UI_CHANGE_INPUT
     "Texture2D<float4> Surf : register(t1);\n"
     "SamplerState Smp : register(s1);\n"
     "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
@@ -313,9 +314,10 @@ const char kPanelDepthHlsl[] =
     "    float3 tc5 : TEXCOORD5;\n"
     "    float2 tc6 : TEXCOORD6;\n"
     "};\n"
-    "float4 main(In i) : SV_Target {\n"
+    "float4 main(In i, out float edit : SV_Target2) : SV_Target0 {\n"
     "    float a = Surf.Sample(Smp, i.tc6).a;\n"
-    "    clip(a - floorAndStrength.x);\n"
+    "    edit = uiEdit(i.tc6);\n"
+    "    clip(max(a - floorAndStrength.x, edit - 1.0/255.0));\n"
     "    return floorAndStrength.w;\n"
     "}\n";
 // These direct screen composites do not add the holo material's glow.
@@ -323,14 +325,15 @@ const char kPanelDepthHlsl[] =
 // them gave the visible strokes sky motion (eye_164038). Keep all visible
 // coverage down to one 8-bit alpha step, including their antialiased edges.
 // Sprite/target-marker and hologram thresholds remain separate.
-const char kScreenDepthHlsl[] =
+const char kScreenDepthHlsl[] = EDVR_UI_CHANGE_INPUT
     "Texture2D<float4> Surf : register(t0);\n"
     "SamplerState Smp : register(s0);\n"
     "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
     "struct In { float2 tc0 : TEXCOORD0; };\n"
-    "float4 main(In i) : SV_Target {\n"
+    "float4 main(In i, out float edit : SV_Target2) : SV_Target0 {\n"
     "    float a = Surf.Sample(Smp, i.tc0).a;\n"
-    "    clip(a - min(floorAndStrength.x, 1.0 / 255.0));\n"
+    "    edit = uiEdit(i.tc0);\n"
+    "    clip(max(a - min(floorAndStrength.x, 1.0 / 255.0), edit - 1.0/255.0));\n"
     "    return floorAndStrength.w;\n"
     "}\n";
 // Unlike the screen composite, sprite VS E508648660A352B2 explicitly
@@ -341,14 +344,15 @@ const char kScreenDepthHlsl[] =
 // sprite records sit at 16.6 km, exactly over the chevrons with depth 1.
 // The original sprite draw disables depth testing; preserve that visible
 // coverage over nearer scene geometry without replacing its nearer depth.
-const char kSpriteDepthHlsl[] = R"HLSL(
+const char kSpriteDepthHlsl[] = EDVR_UI_CHANGE_INPUT R"HLSL(
 Texture2D<float4> Surf : register(t0);
 Texture2D<float> SceneDeviceDepth : register(t2);
 SamplerState Smp : register(s0);
 cbuffer P : register(b13) { float4 floorAndStrength; float4 sceneProjection; };
 struct In { float2 tc0 : TEXCOORD0; float4 pos : SV_Position; };
-float4 main(In i, out float depth : SV_Depth) : SV_Target {
-    clip(Surf.Sample(Smp, i.tc0).a - floorAndStrength.x);
+float4 main(In i, out float depth : SV_Depth, out float edit : SV_Target2) : SV_Target0 {
+    edit = uiEdit(i.tc0);
+    clip(max(Surf.Sample(Smp, i.tc0).a - floorAndStrength.x, edit - 1.0/255.0));
     float own = sceneProjection.x + sceneProjection.y / max(i.pos.w, 0.000001);
     depth = max(own, SceneDeviceDepth.Load(int3(int2(i.pos.xy),0)));
     return floorAndStrength.w;
@@ -368,7 +372,7 @@ float4 main(In i, out float depth : SV_Depth) : SV_Target {
 // nonzero source coverage, like the comms panel. This includes translucent
 // panel backing; one composited pixel cannot carry both panel and sky
 // motion. Distant markers retain the old cutoff and never stamp their glow.
-const char kHoloDepthHlsl[] =
+const char kHoloDepthHlsl[] = EDVR_UI_CHANGE_INPUT
     "Texture2D<float4> Surf : register(t2);\n"
     "SamplerState Smp : register(s1);\n"
     "cbuffer P : register(b13) { float4 floorAndStrength; float4 sceneProjection; };\n"
@@ -381,11 +385,12 @@ const char kHoloDepthHlsl[] =
     "    float2 tc8 : TEXCOORD8;\n"
     "    float4 pos : SV_Position;\n"
     "};\n"
-    "float4 main(In i, out float2 motion : SV_Target1) : SV_Target0 {\n"
+    "float4 main(In i, out float2 motion : SV_Target1, out float edit : SV_Target2) : SV_Target0 {\n"
     "    float a = Surf.Sample(Smp, i.tc8).a;\n"
     "    float den = i.pos.z - sceneProjection.x;\n"
     "    bool cockpit = den > 0 && sceneProjection.y > 0 && sceneProjection.y / den < sceneProjection.z;\n"
-    "    clip(a - (cockpit ? min(floorAndStrength.x, 1.0 / 255.0) : floorAndStrength.x));\n"
+    "    edit = uiEdit(i.tc8);\n"
+    "    clip(max(a - (cockpit ? min(floorAndStrength.x, 1.0 / 255.0) : floorAndStrength.x), edit - 1.0/255.0));\n"
     "    motion = float2(motionInfo.x+1, i.pos.z);\n"
     "    return floorAndStrength.w;\n"
     "}\n";
@@ -633,10 +638,14 @@ bool          g_reissueDssFailedNoted = false;
 struct Mask {
     ID3D11Texture2D*        tex = nullptr;
     ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
     uint32_t                w = 0, h = 0;
     bool                    marked = false;   // anything drawn since the clear
 };
 Mask     g_mask[2];
+Mask     g_edits[2];
+UiContent g_uiContent;
+bool g_contentNoted=false;
 bool     g_maskFailedNoted = false;
 bool     g_maskSizeNoted = false;
 // THE SMOKE'S OWN DEPTH TARGET (the review of 2026-09-10 on the trail's
@@ -736,6 +745,8 @@ int                      g_reissueMaskSlot = 0;   // which cached constant buffe
 ID3D11PixelShader*       g_savedPs = nullptr;
 ID3D11Buffer*            g_savedFloorCb = nullptr;
 ID3D11ShaderResourceView* g_savedHudScene = nullptr;
+ID3D11ShaderResourceView* g_savedEdits = nullptr;
+bool                     g_editsBound = false;
 bool                     g_hudSceneBound = false;
 // State restored after the private coverage draw.
 ID3D11DepthStencilState* g_reSavedDss = nullptr;
@@ -1025,11 +1036,12 @@ DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps, uint64_t vs, 
 }
 
 // The reactive mask for one eye at this size, made on demand.
-Mask* maskFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
+Mask* maskFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h, Mask* masks = g_mask) {
     if (eye < 0 || eye > 1 || !w || !h) return nullptr;
-    Mask& m = g_mask[eye];
+    Mask& m = masks[eye];
     if (m.tex && m.w == w && m.h == h) return &m;
     if (m.rtv) { m.rtv->Release(); m.rtv = nullptr; }
+    if (m.srv) { m.srv->Release(); m.srv = nullptr; }
     if (m.tex) { m.tex->Release(); m.tex = nullptr; }
     m.w = 0;
     m.h = 0;
@@ -1048,9 +1060,11 @@ Mask* maskFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     HRESULT hr = dev->CreateTexture2D(&td, nullptr, &m.tex);
     if (SUCCEEDED(hr) && m.tex) hr = dev->CreateRenderTargetView(m.tex, nullptr, &m.rtv);
+    if (SUCCEEDED(hr) && m.tex) hr = dev->CreateShaderResourceView(m.tex, nullptr, &m.srv);
     dev->Release();
     if (FAILED(hr) || !m.tex || !m.rtv) {
         if (m.rtv) { m.rtv->Release(); m.rtv = nullptr; }
+        if (m.srv) { m.srv->Release(); m.srv = nullptr; }
         if (m.tex) { m.tex->Release(); m.tex = nullptr; }
         if (!g_maskFailedNoted) {
             g_maskFailedNoted = true;
@@ -1063,6 +1077,7 @@ Mask* maskFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
     }
     m.w = w;
     m.h = h;
+    const FLOAT zero[4]{};ctx->ClearRenderTargetView(m.rtv,zero);
     return &m;
 }
 
@@ -1135,6 +1150,7 @@ ID3D11BlendState* maskBlend(ID3D11DeviceContext* ctx) {
     bd.RenderTarget[0].BlendEnable = FALSE;
     bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED;
     bd.RenderTarget[1].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    bd.RenderTarget[2].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED;
     const HRESULT hr = dev->CreateBlendState(&bd, &g_maskBlend);
     dev->Release();
     if (FAILED(hr)) g_maskBlend = nullptr;
@@ -1911,6 +1927,22 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
                                 sdp->w, sdp->h, g_drawEye);
             }
         }
+        const bool surfaceComposite=shader==&g_depthShaders[0] || shader==&g_depthShaders[2] ||
+                                    shader==&g_depthShaders[3] || shader==&g_depthShaders[5];
+        Mask* edits=nullptr;ID3D11ShaderResourceView* changes=nullptr;
+        if(g_trained && mask && surfaceComposite) {
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source;
+            ctx->PSGetShaderResources(shader->slot,1,&source);
+            // A declined source must bind null at t14 too; never sample a
+            // game's unrelated binding as UI edit evidence.
+            changes=g_uiContent.prepare(ctx,source.Get(),g_frame,(g_frame&15u)==0u);
+            if(changes) edits=maskFor(ctx,g_drawEye,g_rebindW,g_rebindH,g_edits);
+            if(!edits)changes=nullptr;
+            if(edits && !g_contentNoted) {
+                g_contentNoted=true;
+                Log::get().note("UI content: source-texel edit tracking active for DLSS; 24 surfaces, 64 MiB history cap, 32-frame edit expiry, shared across eyes. Changed/erased glyphs use fresh raster reconstruction; static UI retains DLSS.");
+            }
+        }
         // Capture every changed binding before any mutation. The failure
         // path uses the same restoration as a completed coverage draw.
         ctx->OMGetDepthStencilState(&g_reSavedDss, &g_reSavedRef);
@@ -1923,6 +1955,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
             ctx->VSGetConstantBuffers(12,1,&g_savedOrbitalInfo);
         }
         if (hudScene) ctx->PSGetShaderResources(2, 1, &g_savedHudScene);
+        if(surfaceComposite) ctx->PSGetShaderResources(14,1,&g_savedEdits);
         if (mask) ctx->OMGetBlendState(&g_reSavedBlend, g_reSavedBlendFactor, &g_reSavedSampleMask);
         g_reBlendSaved = mask != nullptr;
         g_reissueOn = true;
@@ -1931,8 +1964,12 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // otherwise; through the original entry so the binding shadow keeps
         // describing the game's bindings.
         ID3D11RenderTargetView* rtv = mask ? mask->rtv : nullptr;
-        ID3D11RenderTargetView* rtvs[2]={rtv,holo?g_holoMotion[g_drawEye].target():nullptr};
-        vScreenSetRenderTargetsRaw(ctx, holo?2:(mask?1:0), mask?rtvs:nullptr, target);
+        ID3D11RenderTargetView* rtvs[3]={rtv,holo?g_holoMotion[g_drawEye].target():nullptr,edits?edits->rtv:nullptr};
+        vScreenSetRenderTargetsRaw(ctx, edits?3:holo?2:(mask?1:0), mask?rtvs:nullptr, target);
+        if(surfaceComposite) {
+            g_editsBound=true;ctx->PSSetShaderResources(14,1,&changes);
+            if(edits)edits->marked=true;
+        }
         if(holo) {
             g_holoBound=true;
             ID3D11Buffer* info=g_holoMotion[g_drawEye].info(); ctx->PSSetConstantBuffers(12,1,&info);
@@ -1989,6 +2026,7 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
                 ctx->VSSetConstantBuffers(12,1,g_savedOrbitalInfo.GetAddressOf());
             }
             if (g_hudSceneBound) ctx->PSSetShaderResources(2, 1, &g_savedHudScene);
+            if(g_editsBound) ctx->PSSetShaderResources(14,1,&g_savedEdits);
             ctx->OMSetDepthStencilState(g_reSavedDss, g_reSavedRef);
             if (g_reBlendSaved) {
                 ctx->OMSetBlendState(g_reSavedBlend, g_reSavedBlendFactor,
@@ -2005,6 +2043,7 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
         }
         if (g_savedHudScene) { g_savedHudScene->Release(); g_savedHudScene = nullptr; }
         g_hudSceneBound = false;
+        if(g_savedEdits){g_savedEdits->Release();g_savedEdits=nullptr;}g_editsBound=false;
         if (g_savedPs) {
             g_savedPs->Release();
             g_savedPs = nullptr;
@@ -2032,6 +2071,11 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
         sample.ticks+=qpcNow()-g_stellarCpuStart;++sample.samples;
         g_stellarGpu[g_stellarCpuActive].end(ctx);g_stellarCpuActive=-1;
     }
+}
+
+ID3D11ShaderResourceView* uiDepthContentChanges(uint32_t w,uint32_t h,int eye) {
+    if(!g_on || !g_trained || g_stoodDown || eye<0 || eye>1)return nullptr;
+    const auto& m=g_edits[eye];return m.marked && m.w==w && m.h==h?m.srv:nullptr;
 }
 
 bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
@@ -2116,6 +2160,8 @@ void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,cons
 
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
+    g_uiContent.retire(g_frame);
+    if(ctx)g_uiContent.gpu.poll(ctx);
     if(ctx) for(auto& sample:g_stellarGpu) sample.poll(ctx);
     for (UiDepthLayer& layer : g_uiDepth) layer.frameBoundary();
     for(auto& motion:g_holoMotion) motion.frameBoundary();
@@ -2123,7 +2169,8 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     // The masks are marked during the frame and read at its submits, so
     // the clear belongs here, after both.
     if (ctx) {
-        for (Mask& m : g_mask) {
+        for(auto* masks:{g_mask,g_edits}) for(unsigned eye=0;eye<2;++eye) {
+            Mask& m=masks[eye];
             if (!m.rtv || !m.marked) continue;
             const FLOAT zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             guardedBudget(g_budget, [&] { ctx->ClearRenderTargetView(m.rtv, zero); });
@@ -2143,6 +2190,12 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
                         g_wWrote, g_wComposite, g_surfaceCount, g_wDirect, g_wReissued);
     }
     if (g_wFrames >= kTotalsFrames) {
+        const auto& edits=g_uiContent.totals;
+        if(g_trained) Log::get().note("UI content totals: compared=%u reused=%u declined=%u reset=%u evicted=%u history=%.2f MiB (session totals; zero comparisons means inactive).",
+            edits.updates,edits.hits,edits.declined,edits.resets,edits.evicted,double(g_uiContent.allocated)/(1024*1024));
+        const auto& editGpu=g_uiContent.gpu.totals;
+        if(g_trained)Log::get().note("UI content GPU: completed=%u skipped=%u invalid=%u, %.3f us/source update (includes history copy; sampled every 16th frame, no wait or flush; separate from EDVR-at-door GPU).",
+            editGpu.samples,editGpu.skipped,editGpu.invalid,editGpu.samples?editGpu.ms*1000/editGpu.samples:0.0);
         for(int i=0;i<2;++i) {
             const auto& s=g_stellarCpu[i];
             if(s.calls) Log::get().note("stellar coverage CPU: %s calls=%u sampled=%u frames=%u, %.3f us/call (prepare, reissue and restore; sampled every 16th frame; no GPU wait).",
@@ -2181,6 +2234,8 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void uiDepthShutdown() {
+    g_uiContent=UiContent{};g_contentNoted=false;
+    if(g_savedEdits){g_savedEdits->Release();g_savedEdits=nullptr;}g_editsBound=false;
     for(auto& sample:g_stellarGpu) sample={};
     g_stellarCpuActive=-1;
     g_holoDump.Reset(); g_holoDumpCount=0;
@@ -2207,8 +2262,10 @@ void uiDepthShutdown() {
     releaseSavedOm();
     for (UiDepthLayer& layer : g_uiDepth) layer.release();
     releaseStates();
-    for (Mask& m : g_mask) {
+    for(auto* masks:{g_mask,g_edits}) for(unsigned eye=0;eye<2;++eye) {
+        Mask& m=masks[eye];
         if (m.rtv) m.rtv->Release();
+        if (m.srv) m.srv->Release();
         if (m.tex) m.tex->Release();
         m = Mask();
     }

@@ -82,6 +82,8 @@ bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex)
 // its upper six bits carry fixed bias. Classification remains at zero
 // fixed bias and under native TAA. Smoke is not adaptive UI evidence.
 bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
+// Borrowed current-frame R8 edit coverage for the post-DLSS UI resolve.
+ID3D11ShaderResourceView* uiDepthContentChanges(uint32_t w, uint32_t h, int eye);
 
 // The drives' smoke's own depth for one eye (fix.temporal_aa_smoke): the
 // coverage pass writes it into a target of EDVR's, the scene depth's size,

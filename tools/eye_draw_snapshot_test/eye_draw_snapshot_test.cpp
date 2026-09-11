@@ -48,6 +48,16 @@ int wmain(int argc, wchar_t** argv) {
     ComPtr<ID3D11RenderTargetView> boundRt; ctx->OMGetRenderTargets(1, &boundRt, nullptr);
     check(boundRt.Get() == rtv.Get(), "capture changed render target");
     check(snap.surfaces.size() == 1 && snap.draws.size() == 3, "duplicate source or lost draw");
+    // Exit-profile/menu and direct-screen composites use t1 and t0,
+    // respectively. They were previously absent from an otherwise valid
+    // eye dump, leaving the profile's actual source resolution unknown.
+    edvr::EyeDrawSnapshot menuSnap;
+    ctx->PSSetShaderResources(1,1,&s);
+    menuSnap.capture(ctx.Get(),102,0,edvr::EyeDrawSnapshot::kPanel,0x9107E72CB016CC02ull,'X',6,1,0);
+    ctx->PSSetShaderResources(0,1,&s);
+    menuSnap.capture(ctx.Get(),102,1,edvr::EyeDrawSnapshot::kScreen,0x85565E9261812E2Full,'X',6,1,0);
+    check(menuSnap.draws.size()==2 && menuSnap.surfaces.size()==1,"menu and screen sources captured with deduplication");
+    check(menuSnap.draws[0].texture==0 && menuSnap.draws[1].texture==0,"menu and screen use their actual source slots");
     bd.ByteWidth=64;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;ComPtr<ID3D11Buffer> vertices;hr(dev->CreateBuffer(&bd,nullptr,&vertices));
     UINT stride=16,offset=8;ctx->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
     for(UINT i=0;i<2;++i){

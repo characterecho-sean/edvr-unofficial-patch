@@ -25,11 +25,14 @@ public:
     static constexpr uint32_t kTotalTextureBytes = 64 * 1024 * 1024;
     static constexpr uint64_t kHolo = 0x81216C77F90DEDD6ull;
     static constexpr uint64_t kHud = 0xB7790CBFC6554097ull, kSprite=0xE508648660A352B2ull;
+    static constexpr uint64_t kPanel=0xA888D51024D9798Eull,kScreen=0x4EF6DDB075A927FAull;
     static bool watches(uint64_t vs) {
         switch (vs) {
         case kHolo:
         case kHud:
         case kSprite:
+        case kPanel:
+        case kScreen:
         case 0xACE405F428C17EF6ull: // matching 2304/104448-index depth/colour draws
         case 0x72BDD292154158ADull:
         case 0x19F70CE80DA3242Bull: // sphere draw using cb0[9..11], cb1[270..273]
@@ -139,7 +142,8 @@ public:
             ctx->CopySubresourceRegion(d.stage[i].Get(), 0, 0, 0, 0, src.Get(), 0, &box);
             d.copied[i] = bd.ByteWidth;
         }
-        if (vs == kHolo || vs==kSprite) d.texture = captureSurface(ctx, dev.Get(), frame,vs==kSprite?0:2);
+        if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen)
+            d.texture=captureSurface(ctx,dev.Get(),frame,vs==kHolo?2:vs==kPanel?1:0);
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
