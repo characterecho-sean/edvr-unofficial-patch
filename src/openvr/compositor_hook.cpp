@@ -1,3 +1,4 @@
+#include "../common/vr_census.h"
 #include "compositor_hook.h"
 
 #include "../common/timing.h"
@@ -9,10 +10,12 @@
 #include <d3d11.h>   // GetDesc on the submitted texture, for its size only
 
 #include <cmath>
+#include <atomic>
 #include <cstring>
 #include <string>
 
 #include "../common/config.h"
+#include "../common/d3d11_device_identity.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
@@ -305,6 +308,16 @@ struct State {
     float   boundsLogged[2][4] = {};   // per eye: uMin vMin uMax vMax
     uint8_t boundsState[2] = {};       // 0 never seen, 1 logged null, 2 logged values
     uint8_t boundsLinesLeft = 12;      // a pathological per-frame toggler stays bounded
+
+    struct ResourceCensus {
+        void* texture = nullptr;
+        void* device = nullptr;  // identity only; never dereferenced after sampling
+        D3D11_TEXTURE2D_DESC desc{};
+        int32_t colorSpace = 0;
+        int32_t flags = 0;
+        uint64_t sampledMs = 0;
+    } resourceCensus[2];
+    uint8_t resourceCensusLinesLeft = 16;
 
     // THE POSE RING. Forensics, and only forensics.
     //
@@ -813,6 +826,58 @@ void noteEyeTextureSize(State* s, vr::EVREye eye, const vr::Texture_t* texture,
 // Where the game says each eye lives in the submitted texture. One line per
 // eye per distinct answer, because the values are design inputs, not events:
 // a session's worth of identical bounds is one line.
+// First validated observation and sampled changes, before any EDVR substitution.
+// The texture is queried on a pointer change or every six seconds, not per draw.
+void noteSubmitResource(State* s, vr::EVREye eye, const vr::Texture_t* texture,
+                        vr::EVRSubmitFlags flags) {
+    static FaultBudget budget("vr: submit resource census", 3);
+    if (!budget.shouldRun()) return;
+    if (!vrCensusEnabled() || !s->validated || !s->resourceCensusLinesLeft || !texture || !texture->handle ||
+        texture->eType != vr::TextureType_DirectX ||
+        (eye != vr::Eye_Left && eye != vr::Eye_Right)) return;
+    auto& prior = s->resourceCensus[eye == vr::Eye_Left ? 0 : 1];
+    if (prior.texture == texture->handle && prior.sampledMs &&
+        prior.colorSpace == static_cast<int32_t>(texture->eColorSpace) &&
+        prior.flags == static_cast<int32_t>(flags) &&
+        !elapsedMs(prior.sampledMs, kEyeSizeRecheckMs)) return;
+    prior.sampledMs = stampMs();
+    guardedBudget(budget, [&] {
+        auto* tex = static_cast<ID3D11Texture2D*>(texture->handle);
+        D3D11_TEXTURE2D_DESC desc{};
+        tex->GetDesc(&desc);
+        Microsoft::WRL::ComPtr<ID3D11Device> dev;
+        tex->GetDevice(&dev);
+        if (!dev) return;
+        const bool changed = prior.texture != texture->handle || prior.device != dev.Get() ||
+            memcmp(&prior.desc, &desc, sizeof(desc)) != 0 ||
+            prior.colorSpace != static_cast<int32_t>(texture->eColorSpace) ||
+            prior.flags != static_cast<int32_t>(flags);
+        if (!changed) return;
+        LUID luid{};
+        const bool known = d3d11AdapterLuid(dev.Get(), &luid);
+        Log::get().note(
+            "VR resource census: eye=%d texture=%p device=%p published=%p sameDevice=%u "
+            "adapterLuid=%08lX:%08lX known=%u featureLevel=0x%04X "
+            "size=%ux%u format=%u samples=%u quality=%u array=%u mips=%u "
+            "usage=%u bind=0x%X cpu=0x%X misc=0x%X colorSpace=%d submitFlags=0x%X "
+            "thread=%lu (%s; descriptors sampled at most every 6 s for unchanged handles)",
+            static_cast<int>(eye), texture->handle, static_cast<void*>(dev.Get()), gameDevice(),
+            dev.Get() == gameDevice() ? 1u : 0u, static_cast<unsigned long>(luid.HighPart),
+            luid.LowPart, known ? 1u : 0u, static_cast<unsigned>(dev->GetFeatureLevel()),
+            desc.Width, desc.Height, static_cast<unsigned>(desc.Format), desc.SampleDesc.Count,
+            desc.SampleDesc.Quality, desc.ArraySize, desc.MipLevels, static_cast<unsigned>(desc.Usage),
+            desc.BindFlags, desc.CPUAccessFlags, desc.MiscFlags, static_cast<int>(texture->eColorSpace),
+            static_cast<unsigned>(flags), GetCurrentThreadId(),
+            prior.texture ? "changed" : "first validated observation");
+        prior.texture = texture->handle;
+        prior.device = dev.Get();
+        prior.desc = desc;
+        prior.colorSpace = static_cast<int32_t>(texture->eColorSpace);
+        prior.flags = static_cast<int32_t>(flags);
+        --s->resourceCensusLinesLeft;
+    });
+}
+
 void noteSubmitBounds(State* s, vr::EVREye eye, const vr::VRTextureBounds_t* bounds) {
     if (!s->validated || s->boundsLinesLeft == 0) return;
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
@@ -1126,6 +1191,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     EDVR_BREADCRUMB_ONCE("vr: hookedSubmit entered");
     State* s = g_state;
     if (!s || !s->realSubmit) return 0;
+    VrCensusScope census(VrCensusEvent::SubmitEnter, VrCensusEvent::SubmitExit,
+                          self, static_cast<int>(eye), s->pace_boundaryNo);
     // Before the owner test, like the d3d11 counters: raw invocation is the
     // reclaim evidence, whoever the caller was.
     ++s->submitHits;
@@ -1137,6 +1204,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         return s->realSubmit(self, eye, texture, bounds, flags);
     }
     if (s->inert) return s->realSubmit(self, eye, texture, bounds, flags);
+
+    noteSubmitResource(s, eye, texture, flags);
 
     // The supersample resolve (docs\anti-aliasing.md, Feature A), applied
     // to whatever texture a path is about to forward -- EVERY forwarding
@@ -1827,6 +1896,8 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                    gameCount);
     }
 
+    vrCensusNote(VrCensusEvent::WaitEnter, self, 0, s->pace_boundaryNo);
+
     // WaitGetPoses blocks until the compositor releases the app, which makes it
     // the natural frame boundary. How long it blocked crosses to the monitor:
     // with the time blocked in Present, it is what the frame period loses to
@@ -1836,6 +1907,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     const vr::EVRCompositorError result =
         s->realWaitGetPoses(self, renderPoses, renderCount, gamePoses, gameCount);
     QueryPerformanceCounter(&waitT1);
+    vrCensusNote(VrCensusEvent::WaitExit, self, result, s->pace_boundaryNo + 1);
     QueryPerformanceFrequency(&waitF);
     if (waitF.QuadPart > 0 && waitT1.QuadPart > waitT0.QuadPart) {
         const int64_t us = (waitT1.QuadPart - waitT0.QuadPart) * 1000000 / waitF.QuadPart;

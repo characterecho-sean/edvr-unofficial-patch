@@ -1,4 +1,5 @@
-﻿#include "exposure_fix.h"
+﻿#include "../common/vr_census.h"
+#include "exposure_fix.h"
 
 #include <windows.h>
 
@@ -924,6 +925,7 @@ bool isExposureDispatch() {
 // of the three ways that could be true.
 void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
                                               ID3D11Buffer* args, UINT off) {
+    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DispatchIndirect, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (drawCensusArmed()) {
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
@@ -934,6 +936,7 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
 }
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
+    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Dispatch, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     ++s->thunkHits[kHitDispatch];
     if (foreignContext(self)) {

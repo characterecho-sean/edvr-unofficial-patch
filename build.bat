@@ -396,6 +396,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "src\openvr\sharpen.cpp" "src\openvr\menu_door.cpp" "src\openvr\frame_timing.cpp" ^
     "src\openvr\early_session.cpp" "src\openvr\launch_centre.cpp" ^
     "src\openvr\gaze_probe.cpp" ^
+    "src\openvr\call_census.cpp" ^
     "src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
 
@@ -763,6 +764,23 @@ python "tools\eye_inputs.py" --self-test || exit /b 1
 python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
 
 echo [edvr] === fakevr.dll + openvr_smoke.exe ===
+if not exist "%OBJ%\openvr_abi" mkdir "%OBJ%\openvr_abi"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
+    /Fo"%OBJ%\openvr_abi\\" /Fe"%BUILD%\openvr_abi_test.exe" ^
+    "tools\openvr_abi_test\openvr_abi_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: OpenVR ABI test build failed & exit /b 1 )
+"%BUILD%\openvr_abi_test.exe" --self-test || exit /b 1
+
+REM Headset-free OpenXR enumeration contract tests. The probe is standalone;
+REM the shipping proxies do not load OpenXR or create an OpenXR session.
+if not exist "%OBJ%\openxr_probe" mkdir "%OBJ%\openxr_probe"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
+    /I"third_party\openxr\include" /Fo"%OBJ%\openxr_probe\\" ^
+    /Fe"%BUILD%\openxr_probe.exe" "tools\openxr_probe\openxr_probe.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: OpenXR probe build failed & exit /b 1 )
+"%BUILD%\openxr_probe.exe" --self-test || exit /b 1
+
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     /Fo"%OBJ%\fakevr\\" /Fe"%BUILD%\fakevr.dll" ^

@@ -13,6 +13,7 @@
 // Uninstalling is renaming two files back. Nothing is written to the game's
 // code, and nothing survives deleting this DLL.
 #include <windows.h>
+#include "../common/vr_census.h"
 
 #include <cstring>  // strncmp, for the interface suppression prefixes
 #include <string>
@@ -22,6 +23,7 @@
 #include "../common/log.h"
 #include "../common/proxy.h"
 #include "compositor_hook.h"
+#include "call_census.h"
 #include "early_session.h"
 #include "gaze_probe.h"
 #include "launch_centre.h"
@@ -190,6 +192,8 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().open(cfg.logDir(), L"vr");
     edvr::Log::get().note("EDVR openvr proxy attached; module dir %S",
                           g_moduleDir->c_str());
+    edvr::vrCensusConfigure();
+    edvr::configureCallCensus();
     if (g_missingExports) {
         edvr::Log::get().note(
             "WARNING: %zu of %zu openvr exports did not resolve. The real DLL is a "
@@ -324,6 +328,7 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
     void* result = iface;
     edvr::guardedBudget(g_interfaceBudget, [&] {
         result = edvr::interceptInterface(iface, interfaceVersion);
+        result = edvr::wrapCensusInterface(result, interfaceVersion);
     });
     return result;
 }

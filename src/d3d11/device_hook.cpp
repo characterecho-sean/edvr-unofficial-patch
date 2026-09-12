@@ -1,4 +1,5 @@
-﻿#include "device_hook.h"
+﻿#include "../common/vr_census.h"
+#include "device_hook.h"
 
 #include "shader_sig.h"
 #include "input_gate.h"
@@ -766,6 +767,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
+    VrCensusScope census(VrCensusEvent::PresentEnter, VrCensusEvent::PresentExit,
+                          self, self == g_state->swapChain ? 1 : 0);
     // Not our swapchain: forward and do no frame work. A second swapchain
     // (an overlay's, a mod's) shares this vtable and its Present is not our
     // frame boundary. See vtable_hook.h.
