@@ -63,6 +63,7 @@
 #include "hud_grain.h"
 #include "ui_depth.h"
 #include "celestial_motion.h"
+#include "mesh_motion.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -3594,6 +3595,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         if(self==g_state->ownerCtx) {
             screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+            meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
@@ -4287,6 +4289,7 @@ void vScreenFrameBoundary() {
         screenMotionFrameBoundary();
         weaponStabilityFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
+        meshMotionFrameBoundary(g_state->ownerCtx);
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -5554,6 +5557,7 @@ void shutdownVScreenFixes() {
     weaponStabilityShutdown();
     nightVisionShutdown();
     celestialMotionShutdown();
+    meshMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();

@@ -1,10 +1,13 @@
 # External-camera hull motion, September 12
 
 The user confirmed the weapon/night-vision update and then reported hull
-blurring and shimmering after taking off in the external camera. This
-investigation confirms a large error in the DLSS motion supplied for
-that hull. The change in this commit extends the explicit eye capture;
-it does not claim to correct the rendering yet.
+blurring and shimmering after taking off in the external camera, then
+reported cockpit geometry ghosting during roll. This investigation
+confirms a large error in the DLSS motion supplied for the exterior
+hull. The correction now uses original draw transforms and visible
+coverage for supported rigid hull/cockpit geometry; it no longer relies
+on the ship-metres split for those parts. Headset validation is still
+pending.
 
 ## Flight and image evidence
 
@@ -149,7 +152,98 @@ blurs. A second capture while orbiting the free camera would distinguish
 camera attachment from ship-relative motion in the same session. No AA,
 cockpit, weapon or night-vision settings need changing.
 
-## Validation
+## Follow-up capture, 12:28 flight
+
+The new flight verifies installed code `f1dac91`; the intervening
+commits only changed these notes. Captures `123222` (cockpit) and
+`123235` (exterior) contain 144 and 702 original eye mesh draws,
+respectively, with no failed buffer copies or missing vertex shaders.
+Draw frame IDs are one above the paired motion CSV IDs; the original
+scene projection confirms the alignment. The user also confirms the
+exterior ship is sharp while stationary.
+
+The original EB5234DB6ADB491D and DE545DC8EE4FBB87 shaders use the
+draw-time t33 pool and scene b1[270..275], including packed quaternion
+rounding. A CPU decode of captured indexed vertices, skinning and these
+transforms confirms the exterior hull's motion differs from the world
+prediction by tens to hundreds of input pixels. After accounting for the
+recorded raster jitter, the main exterior hull happens to agree with
+head motion within 0.006 pixels in this attached camera. That does not
+justify assigning head motion to an arbitrary distance band.
+
+Cockpit rigid rails differ from head-only prediction by up to 0.30 input
+pixels in the measured pair; captured nearby skinned parts differ by up
+to 0.14 pixels. These are smaller than the exterior failure but
+establish that the head delta is not exact draw motion. The correction
+tracks rigid mesh transforms and exact visible coverage, independent of
+the ship-metres split. Animated geometry must not be silently treated as
+rigid. The completed original-shader replay below is the ground truth
+for the implemented transform arithmetic.
+
+- Ruled out: a uniform world-motion error in both views; the original
+  cockpit transforms disagree with that prediction by much more than
+  with the head delta.
+- Ruled out: increasing render scale as a correction for this hull
+  registration error; the source geometry and supplied motion disagree.
+
+### Exact rigid mesh correction
+
+`mesh_motion` captures the actual scene b1 and selected t33 records at
+each supported opaque indexed draw. It reuses the original vertex shader
+to record private coverage with equal-depth testing, then matches all
+transforms in one batched GPU dispatch at eye consumption. There is no
+normal-play CPU readback. Each eye has an independent 512-instance
+history. Geometry buffer, original shader, layout, index range and pool
+material flags identify candidates; mutable pool slots do not. Repeated
+indistinguishable instances decline instead of borrowing a neighbour's
+history. Vertex/index writes and missing frames invalidate history.
+
+The consumer uses the actual part's projective mapping and verifies its
+coverage against final scene depth, excluding UI and later foreground
+draws. Both native TAA and DLSS remove the recorded raster-jitter delta.
+This path overrides `advanced.temporal_aa_ship_metres` for supported
+rigid geometry at any distance. The setting still supplies fallback
+motion for unsupported/animated or ambiguous geometry; it has not been
+removed or renamed. The known EB5234DB6ADB491D and DE545DC8EE4FBB87
+families cover the measured opaque hull and rigid cockpit pieces.
+Skinned pilot/body geometry retains its existing motion.
+
+Two replay findings are enforced by the tests. Visible cockpit rails
+have their mesh origin behind the eye (about -2.835 metres in clip W),
+so projected-origin tests that require positive W reject them. Matching
+uses homogeneous origin direction instead. The original shaders decode
+their packed quaternion using the literal `0x38000100` (`1/32767`), not
+`2/65535`; substituting the latter produced a 0.025-pixel error in the
+cockpit replay. The production correction uses the actual literal.
+Original inter-stage register layouts, including unused lighting/UV
+outputs, are preserved in the coverage pixel shaders.
+
+Six captured rigid meshes, including both vertex shader families and
+three consecutive states, were replayed through the original DXBC and
+packed geometry on WARP and NVIDIA hardware. Stream-output positions
+provide independent ground truth: 109,785 visible vertex comparisons
+give maximum reconstruction errors of 0.001979 input pixels on WARP and
+0.001658 on hardware. The gate requires less than 0.003 pixels.
+
+The offline hardware stress repeats 32 draws of captured hull geometry
+at 2774 by 2740. It measured 0.040 ms CPU per eye, 11.796 microseconds
+per sampled capture/reissue bracket (21 completed samples), and 5.621
+microseconds per batched match (29 samples). This is an added-pass
+microbenchmark, not an in-flight total. The flight log reports sampled
+draw cost separately from batched matching. Explicit eye dumps now
+include `MeshCoverage` and `Mesh` records, with eligible/matched counts
+and explicit absent/failed-readback reporting.
+
+The full absolute-path worktree build passed, including 844 mesh-motion
+checks, original coverage/register linkage, independent stereo history,
+pool reorder, origin-behind-eye, ambiguity, missing frames, geometry
+writes, capacity bounds, exact dump serialization and both temporal
+consumer grids. Existing UI, weapon, night-vision and configuration
+gates passed as well. The NVIDIA DLL smoke test passed. Logs and local
+original-shader replay assets remain under the ignored
+`build/review_motion/sep12/flight1228/` directory.
+
+### Earlier diagnostic validation
 
 The GPU snapshot test and Python reader jointly verify three consecutive
 frames, two targets reusing and overwriting the same

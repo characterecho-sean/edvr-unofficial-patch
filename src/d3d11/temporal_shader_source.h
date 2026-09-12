@@ -36,6 +36,8 @@ struct TerrainRecord { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
 Texture2D<float2> HC : register(t12);
 struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 StructuredBuffer<HoloRecord> HR : register(t13);
+Texture2D<float2> MC : register(t15);
+StructuredBuffer<HoloRecord> MR : register(t16);
 Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
@@ -439,6 +441,24 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     zp=before.z;
     return all(isfinite(pp));
 }
+)HLSL"
+R"HLSL(
+// Rigid draw motion has priority over the distance-based camera fallback.
+// Test original depth at the same raster sample: a later foreground draw
+// or UI must never inherit an occluded hull's transform.
+bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
+    pp=0;zp=0;if(holoJitter.z==0)return false;
+    int2 q=region.xy+int2(round(p+offset));float2 cov=MC.Load(int3(q,0));uint index=uint(cov.x+.5);
+    if(index==0 || index>512 || uiCovered(q) || cov.y<=knobs.x || abs(zSceneAt(q)-cov.y)>abs(cov.y)*1e-6)return false;
+    HoloRecord r=MR[index-1];if(r.meta.w!=1)return false;
+    float z=knobs.z/(cov.y-knobs.x);
+    float2 ndc=(p+offset+region.xy+.5)/r.meta.yz*float2(2,-2)+float2(-1,1);
+    float4 current=float4(ndc*z,z,1);
+    float3 before=float3(dot(r.map[0],current),dot(r.map[1],current),dot(r.map[2],current));
+    if(before.z<=0 || !all(isfinite(before)))return false;
+    pp=(before.xy/before.z*float2(.5,-.5)+.5)*r.meta.yz-.5-region.xy+holoJitter.xy-offset;
+    zp=before.z;return all(isfinite(pp));
+}
 // Exact terrain coverage only. The patch transform is in DirectX view
 // space (+Z forward); the pass's rays use the runtime's -Z convention.
 bool terrainPixel(float2 p, float3 d, out float2 pp, out float zp) {
@@ -573,6 +593,13 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         }
     }
     hy = 0.0;
+    float2 meshP;float meshZ;
+    if(allowWorld && meshPixel(p,jit.xy,meshP,meshZ)) {
+        if(any(meshP<0) || any(meshP>float2(size)-1))return false;
+        mvOut=meshP-p;zPred=meshZ;world=0;
+        hy=rgbToYcocg(catmullRom((meshP+.5)/float2(size),float2(size)).rgb);
+        return true;
+    }
     if (dp.z >= -1e-6) return false;
     float xt = dp.x / -dp.z;
     float yt = dp.y / -dp.z;
@@ -884,6 +911,11 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 mover = moverAt(pp, zPred, depthN >= 6);
                 if (mover != 0.0) count28 = 1;
             }
+        }
+        float2 meshP;float meshZ;
+        if(meshPixel(p,0,meshP,meshZ)) {
+            motion=meshP-p;zPred=meshZ;
+            mover=movers.x!=0 && all(meshP>=0) && all(meshP<float2(size)) ? moverAt(meshP,meshZ,depthN>=6):0;
         }
         if((uint(probe.w+.5)&32u)!=0u) {
             float4 s=Screen.Load(int3(region.xy+int2(p),0));

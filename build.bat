@@ -332,6 +332,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\supersample_pass.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
+    "src\d3d11\mesh_motion.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\foveation.cpp" ^
@@ -746,6 +747,12 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     "tools\weapon_motion_test\weapon_motion_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\weaponmotion\weapon_motion_test.exe" --self-test || exit /b 1
+if not exist "%OBJ%\meshmotion" mkdir "%OBJ%\meshmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\meshmotion\\" /Fe"%OBJ%\meshmotion\mesh_motion_test.exe" ^
+    "tools\mesh_motion_test\mesh_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
+"%OBJ%\meshmotion\mesh_motion_test.exe" --self-test || exit /b 1
 if not exist "%OBJ%\nightvision" mkdir "%OBJ%\nightvision"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\nightvision\\" /Fe"%OBJ%\nightvision\night_vision_test.exe" ^
