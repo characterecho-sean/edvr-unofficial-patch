@@ -6,7 +6,10 @@
 
 #include <windows.h>
 
+#include <d3d11_4.h>   // ID3D11Multithread, for the protection probe
 #include <dxgi1_2.h>
+
+#include "graphics_runtime.h"
 
 #include <atomic>
 
@@ -114,6 +117,11 @@ struct State {
     VTableHook deviceHook;
     VTableHook swapChainHook;
     VTableHook factoryHook;
+    // The swap-only and live-only probes' hook on the immediate context: a
+    // private table with nothing patched in it -- frozen for one, live stubs
+    // for the other -- standing in for BOTH context installers. See
+    // advanced.context_hook_probe.
+    VTableHook bareContextHook;
 
     ID3D11Device*   device = nullptr;
     IDXGISwapChain* swapChain = nullptr;
@@ -237,7 +245,12 @@ struct State {
     uint32_t lastJournalDisembarks = 0;
     uint32_t lastJournalEmbarks = 0;
     uint32_t lastCameraEnters = 0;
-    uint64_t frameCounter = 0;
+    // THE frame number for this session, in the numbering every instrument
+    // prints: frame N is everything between Present N-1 returning and Present N
+    // returning, so this is the frame IN PROGRESS and it starts at 1 -- the
+    // frame the game is drawing before it has presented anything. It advances
+    // at the top of the post-Present block; see hookedPresent.
+    uint64_t frameCounter = 1;
     uint64_t configPollMs = 0;
     // For the crash sentinel's confirm window: the previous Present, and the
     // frame time credited so far. See kSentinelConfirmMs.
@@ -275,6 +288,46 @@ struct State {
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
     bool      sentinelConfirmed = false;
+    // The advanced.d3d11_fixes = 0 paragraph, said once. hookDevice runs per
+    // created device and the game creates more than one.
+    bool      fixesOffNoted = false;
+
+    // MULTITHREAD PROTECTION, watched but never touched.
+    //
+    // Issue #21's rig has Windows' own d3d11.dll rewriting the immediate
+    // context's whole dispatch table every frame. Reading the binary
+    // (10.0.26100.9278) says what that code IS: two complete sets of method
+    // implementations, 97 entries each with no function in common, and a
+    // three-instruction test picking between them --
+    // `cmp byte ptr [rcx+0xE46], 0` in front of each writer block. A boolean in
+    // the context object selects which whole table the object gets.
+    //
+    // D3D11 has exactly one documented boolean of that shape: multithread
+    // protection. Turning it on makes every context method take the runtime's
+    // critical section, and the natural way to implement that is a second
+    // complete set of implementations rather than a branch in every method --
+    // which is what the binary shows.
+    //
+    // That is an INFERENCE, and this exists to end it rather than repeat it.
+    // Two facts are wanted and they are different questions: what the flag IS,
+    // and whether it CHANGES. The table being rewritten every frame does not
+    // prove the flag moves -- the writer routine could be reached for some
+    // other reason and simply re-lay whichever table the flag currently
+    // selects. If the value never changes while the rewriting continues, the
+    // flag is a red herring and the hunt moves to what keeps calling that
+    // routine, which is worth learning from one line of log rather than from
+    // building the wrong thing.
+    //
+    // Read-only, always. Setting it would be a real change to the game's
+    // threading contract -- on costs a lock in every D3D11 call, off is a data
+    // race if something in the process needs it -- and neither belongs in a
+    // measurement.
+    ID3D11Multithread* multithread = nullptr;
+    int       mtProtected = -1;      // -1 until asked; 0 or 1 after
+    uint32_t  mtChanges = 0;         // how many times it has flipped
+    uint32_t  mtReports = 0;         // change lines printed
+    uint64_t  mtFrames = 0;          // frames it has been sampled over
+    bool      mtSettledNoted = false;  // the standing answer, said once
     bool      recoveryDisabled = false;
 };
 
@@ -359,6 +412,59 @@ constexpr uint64_t kConfigPollMs = 1000;
 constexpr uint32_t kMissedDumpNotes = 3;
 
 State* g_state = nullptr;
+
+// Which slot the flip timeline anchors its page on.
+//
+// DrawIndexed, because it is the entry the field evidence names: on the rig
+// that hangs, slot 12 was measured switching from TID3D11DeviceContext_
+// DrawIndexed_<1> to ..._DrawIndexed_Amortized<1> at the frame the GPU died,
+// along with 23 of its neighbours. One PAGE is protected, not the whole table
+// -- read-protecting a heap region can be megabytes and would fault on every
+// unrelated write in it -- so the anchor decides which slots are covered, and
+// the armed line prints that range rather than leaving it to be assumed.
+constexpr size_t kFlipTimelineAnchorSlot = 12;
+
+// Arm the flip timeline on the table the RUNTIME writes, if it was asked for.
+//
+// `table` must be the bottom hook's -- the context's own embedded table. Both
+// call sites hand it one: the exposure hook's (it installs first, so its table
+// is the runtime's in every mode) and, in the probe modes where no installer
+// runs at all, the bare probe hook's.
+void armFlipTimeline(Config& cfg, void** table, size_t span, const char* who) {
+    if (!cfg.getBool("advanced.vtable_flip_timeline", false)) return;
+    if (!table || span <= kFlipTimelineAnchorSlot) {
+        Log::get().note(
+            "advanced.vtable_flip_timeline = 1, but there is no context table to "
+            "watch (%s). Nothing is armed. This needs the render context hooked, "
+            "so it cannot work with advanced.d3d11_fixes = 0.",
+            table ? "the table is shorter than the slot it anchors on" : "no hook took the context");
+        return;
+    }
+    if (vtableWatchSlot(table, kFlipTimelineAnchorSlot, span, who,
+                        /*timeline=*/true)) {
+        return;
+    }
+    // IT WAS ASKED FOR AND IT DID NOT ARM, so say so in the terms the reader
+    // can act on. There is one watch, and advanced.vtable_writer_probe takes it
+    // first -- it arms inside installVScreenFixes, which runs before this. Both
+    // settings then sit at 1 in the ini, one of them silently doing nothing, and
+    // the session produces the wrong instrument's output.
+    const char* holder = vtableWatchArmedBy();
+    if (holder) {
+        Log::get().note(
+            "advanced.vtable_flip_timeline = 1 could NOT arm: the one write "
+            "watch is already held by \"%s\", which advanced.vtable_writer_probe "
+            "arms. Only one of the two may run. Set advanced.vtable_writer_probe "
+            "= 0 and relaunch if the timeline is the one you want.",
+            holder);
+    } else {
+        Log::get().note(
+            "advanced.vtable_flip_timeline = 1 could NOT arm on the context "
+            "table at %p (the lines above say why). Nothing is watched this "
+            "session.",
+            static_cast<void*>(table));
+    }
+}
 
 // Defined below ensureState; used by the frame-path bindings-change check.
 void readoptGameBindings();
@@ -817,6 +923,33 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // frame's row says what EDVR's boundary work cost in it.
     const int64_t boundaryT0 = qpcNow();
     guardedBudget(g_frameBudget, [&] {
+        // THE FRAME NUMBER, ADVANCED AND PUBLISHED BEFORE ANYTHING USES IT.
+        //
+        // FRAME N IS EVERYTHING BETWEEN PRESENT N-1 RETURNING AND PRESENT N
+        // RETURNING. The Present that got us here has just returned, so the
+        // frame it ended is over and the one this block belongs to is the next:
+        // frameCounter is the frame IN PROGRESS, it starts at 1 (the frame the
+        // game is drawing before it has presented anything), and it advances
+        // here, at the boundary, rather than four hundred lines below.
+        //
+        // Both of those were wrong. The counter advanced at the END of this
+        // block, so every flip recorded during frame N+1 was stamped N -- and
+        // the monitor kept a SECOND counter of its own, so the long-frame line
+        // and the flips it was supposed to be ordered against were numbered in
+        // two different systems. The whole question issue #21 turns on is
+        // whether the table changed before the hang or after it, and neither
+        // number could answer it. One counter, published here, printed by both.
+        ++g_state->frameCounter;
+        // The write watch's per-frame work, here rather than inside
+        // vScreenReclaimTick where the re-arm used to sit behind
+        // `if (!g_state) return;`. In the two context probes vScreen never
+        // installs, so g_state is null, so neither the re-arm nor the flip
+        // timeline's drain ran at all -- in exactly the sessions the
+        // instruments exist for. Both are no-ops when nothing is armed, and the
+        // tick publishes the frame number whether or not anything is.
+        vtableWatchRearm();
+        vtableWatchFrameTick(g_state->frameCounter);
+        if (graphicsRuntimeDisabled()) return;
         // WHICH VR BACK END THIS ACTUALLY IS, said once near the top of the
         // log. Inside the budget because it reads the process module list;
         // rate-limited to once a second by the module itself, and silent from
@@ -1153,12 +1286,76 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         bindingFrameBoundary();
         exposureFixFrameBoundary();
         vScreenFrameBoundary();
+
+        // THE FAST PATROL on the two context hooks, every frame.
+        //
+        // Their opponent is not a tool that installs once. On issue #21's rig
+        // the D3D11 runtime rewrites the same slots about once a second for the
+        // whole session, and against a one-hertz rewriter the once-a-second
+        // pass below is the worst cadence available: our thunks end up in the
+        // table for part of every second and out of it for the rest, so the
+        // fixes do not fail, they STROBE. This closes the window to a frame.
+        //
+        // Only the two CONTEXT hooks. The device, swapchain and factory tables
+        // have never been contested by anything in the field, they carry no
+        // per-thunk counters to vouch with, and their reclaim cannot heal
+        // anything without one -- so running them at frame rate would buy a
+        // VirtualQuery per foreign entry per frame and nothing else.
+        //
+        // These passes vouch NOTHING; see vScreenReclaimTick for why that is
+        // the whole safety argument rather than a shortcut.
+        vScreenReclaimTick();
+        exposureFixReclaimTick();
+
+        // The multithread-protection sample. One virtual call that reads a
+        // flag, per frame, and a line only when the answer differs from last
+        // time -- so a rig where nothing moves pays a compare and says nothing,
+        // and a rig where it toggles every frame says so in the first second
+        // and then at doublings. See the State field for what it settles.
+        if (g_state->multithread) {
+            ++g_state->mtFrames;
+            const int now = g_state->multithread->GetMultithreadProtected() ? 1 : 0;
+            if (now != g_state->mtProtected) {
+                g_state->mtProtected = now;
+                ++g_state->mtChanges;
+                const uint32_t n = g_state->mtChanges;
+                if (n <= 4 || (n & (n - 1)) == 0) {
+                    ++g_state->mtReports;
+                    Log::get().note(
+                        "multithread protection CHANGED to %s (change #%u, "
+                        "frame %llu). Every one of these makes Windows re-lay "
+                        "the context's entire function table, which is what "
+                        "removes EDVR's hooks from it. Reported for the first "
+                        "few and then at doublings.",
+                        now ? "ON" : "off", n,
+                        static_cast<unsigned long long>(g_state->mtFrames));
+                }
+            }
+            // The standing answer, said once, because a NEGATIVE has to be
+            // stated to be read. A session where this never changes prints no
+            // change lines at all, and "no lines" is indistinguishable from
+            // "the probe never ran" -- which is the shape of mistake this
+            // investigation has already made three times.
+            if (g_state->mtFrames == 1800 && !g_state->mtSettledNoted) {
+                g_state->mtSettledNoted = true;
+                Log::get().note(
+                    "multithread protection after 1800 frames: %s, changed %u "
+                    "time(s). If that count is zero on a rig whose context "
+                    "table is still being rewritten every frame, then this flag "
+                    "is NOT what is causing it and the cause is something else "
+                    "reaching the same routine.",
+                    g_state->mtProtected ? "ON" : "off", g_state->mtChanges);
+            }
+        }
         // Polled rather than watched, twice a second by the journal watcher
         // and once a second here. The user is wearing a
         // headset and cannot see a text editor, so the settings that are worth
         // tuning by feel have to take effect without a restart. Was every 90
         // frames, which is once a second on exactly one of the three rates.
-        ++g_state->frameCounter;
+        //
+        // (frameCounter advances at the TOP of this block now, not here; see
+        // the comment there for which frame a number means.)
+        //
         // The menu asks for the poll NOW after each write it made, so the
         // change lands this frame through the same configure path a hand
         // edit takes -- nothing applies a value except the reload.
@@ -1204,6 +1401,15 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             // RENDERED SCENE is evidence of bypass.
             const bool sceneRendered = vScreenReclaimHooks();
             exposureFixReclaimHooks(sceneRendered);
+            // AND THE PROBE HOOK, which nothing else on this path touches.
+            //
+            // In the two context probes no installer runs, so neither reclaim
+            // tick above reaches a hook -- and the census and the recent-flip
+            // dump ride inside reclaim's private branch. The sessions whose
+            // entire purpose is to ask what the runtime does to the context's
+            // table were therefore the sessions that reported nothing about it.
+            // No-op unless a probe actually installed.
+            g_state->bareContextHook.censusTick("probe context");
         }
     });
     if (qpcFrequency() > 0) {
@@ -1387,6 +1593,11 @@ void menuActionMarker(void*) {
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
+        if (!Config::get().getBool("advanced.d3d11_fixes", true)) {
+            disableGraphicsRuntime();
+            inputGateShutdown();
+            return *g_state;
+        }
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
         // The settings menu, read here for install and on vScreen's reload
@@ -1604,6 +1815,34 @@ State& ensureState() {
 
 }  // namespace
 
+// The two entries the investigation turns on, named at install. See the header
+// for what they are and why the departure point matters as much as the
+// destination.
+//
+// IT LIVED INSIDE installExposureFix, which does not run in either context
+// probe -- so `context_hook_probe = swap` and `= live`, the two sessions whose
+// entire purpose is to ask what the runtime does to this table, were the two
+// that never printed what it started at. Hoisted here and called from all
+// three.
+void logContextTableVariants(void** table, size_t span, const char* who) {
+    if (!table || span <= 50) return;
+    void* drawIndexed = nullptr;
+    void* clearRtv = nullptr;
+    guarded("context/install-variant-read", [&] {
+        drawIndexed = table[12];
+        clearRtv = table[50];
+    });
+    char a[MAX_PATH], b[MAX_PATH];
+    Log::get().note(
+        "context table at install (%s): slot 12 (DrawIndexed) = %s; slot 50 "
+        "(ClearRenderTargetView) = %s. These are the entries the runtime had "
+        "selected when EDVR arrived -- quote them beside any later line about "
+        "entries changing, because a changed entry only means something next to "
+        "the one it changed FROM.",
+        who ? who : "?", vtableOwnerModuleName(drawIndexed, a, sizeof(a)),
+        vtableOwnerModuleName(clearRtv, b, sizeof(b)));
+}
+
 // ELITE'S OWN VR RENDER-TARGET MULTIPLIER, for advanced.texture_lod_bias
 // = auto.
 //
@@ -1798,7 +2037,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
 }
 
 bool deviceHookRecoveryDisabled() {
-    return g_state && g_state->recoveryDisabled;
+    return graphicsRuntimeDisabled();
 }
 
 void hookDevice(ID3D11Device* device) {
@@ -1833,8 +2072,53 @@ void hookDevice(ID3D11Device* device) {
     }
 
     Config& sentinelCfg = Config::get();
+
+    // THE OFF SWITCH FOR THIS HALF, which until issue #21 did not exist.
+    //
+    // The sentinel disables these hooks for ONE launch after a crash, which is
+    // right for a crash that happens once. It is the wrong shape entirely for a
+    // rig where they crash EVERY launch: the game then alternates crash, play,
+    // crash, play, and there is no setting anywhere that says "stop trying".
+    // The reporter of #21 found the only lever the code left them -- making
+    // edvr_logs\d3d11_hooks.armed read-only so the sentinel can never clear its
+    // own trip -- and it worked, which is the part that should be embarrassing.
+    // A user who has diagnosed their way to a workaround out of a file
+    // permission was owed a documented setting three releases ago.
+    //
+    // The explicit off switch retains the Present and DXGI factory hooks;
+    // Present only updates its bookkeeping while graphicsRuntimeDisabled is
+    // set. Sentinel recovery additionally skips installing those hooks. The
+    // OpenVR half remains available in either case.
+    //
+    // The order below is load-bearing. This check sits AFTER the Sentinel is
+    // constructed, so that a .armed file left behind by an earlier crashing
+    // session is still cleared: putting it above meant the first launch after a
+    // user set the switch back to 1 was eaten by a stale SENTINEL TRIPPED, and
+    // the log said "no hooks are installed" while never touching the file that
+    // proves otherwise.
     if (!s.sentinel) {
         s.sentinel = new Sentinel(sentinelCfg.logDir().c_str(), L"d3d11_hooks");
+    }
+    if (graphicsRuntimeDisabled()) {
+        if (s.sentinel->trippedOnStartup()) s.sentinel->clearTrip();
+        // Said once. hookDevice runs per device, and Elite creates more than
+        // one; the paragraph is for the reader, not for every device.
+        if (!s.fixesOffNoted) {
+            s.fixesOffNoted = true;
+            Log::get().note(
+                "d3d11 fixes are OFF by request (advanced.d3d11_fixes = 0), so no "
+                "hooks are installed on the device or on its context, this session "
+                "or any other: the black void, the panel distance, the exposure "
+                "share, the transition flash detector, the anti-aliasing passes, "
+                "the shader replacements and Explorer Cam's half of the gate are "
+                "all inert, and the game renders as it would without this half "
+                "installed. What is still hooked is the swapchain's Present and "
+                "the DXGI factory, which carry the frame boundary the openvr half "
+                "runs on. Submit-side graphics processing and the EDVR menu are "
+                "also disabled. If a crash survives this setting, please report "
+                "both logs. Set it back to 1 and restart to try the fixes again.");
+        }
+        return;
     }
     if (s.sentinel->trippedOnStartup() &&
         !sentinelCfg.getBool("advanced.ignore_sentinel", false)) {
@@ -1847,6 +2131,7 @@ void hookDevice(ID3D11Device* device) {
         // Otherwise the capability device owns the warmed shaders while
         // Submit supplies textures from the game's first device.
         s.recoveryDisabled = true;
+        disableGraphicsRuntime();
         s.sentinel->clearTrip();
         inputGateShutdown();
         Log::get().note(
@@ -1977,16 +2262,173 @@ void hookDevice(ID3D11Device* device) {
         device->GetImmediateContext(&ctx);
         if (ctx) {
             ctxMode = contextHookModeFor(ctx);
+
+            // The multithread-protection probe, opened here because this is
+            // where the immediate context is already in hand. Asked of the
+            // CONTEXT first and the device second: the flag the disassembly
+            // found lives in the context object, and the two are documented
+            // inconsistently enough that trying both costs less than being
+            // sure. Absent on neither, in practice -- and if it is, the log
+            // says so once and nothing else changes.
+            if (FAILED(ctx->QueryInterface(__uuidof(ID3D11Multithread),
+                                           reinterpret_cast<void**>(&s.multithread)))) {
+                s.multithread = nullptr;
+                device->QueryInterface(__uuidof(ID3D11Multithread),
+                                       reinterpret_cast<void**>(&s.multithread));
+            }
+            if (s.multithread) {
+                s.mtProtected = s.multithread->GetMultithreadProtected() ? 1 : 0;
+                Log::get().note(
+                    "multithread protection is %s at install. It decides which "
+                    "of two complete sets of context methods this device "
+                    "dispatches through -- the protected set takes the "
+                    "runtime's lock in every call -- and switching it makes "
+                    "Windows rewrite the context's whole function table. EDVR "
+                    "only reads it; every change is reported below. If it never "
+                    "changes and the table is still being rewritten, the cause "
+                    "is something else and that is worth knowing.",
+                    s.mtProtected ? "ON" : "off");
+            } else {
+                Log::get().note(
+                    "multithread protection could not be queried on this device "
+                    "(no ID3D11Multithread), so this session cannot say whether "
+                    "it changes. Nothing else is affected.");
+            }
             ctx->Release();
         }
     }
 
-    installExposureFix(device, ctxMode);
-    // Before the vScreen fixes, which ask it whether it needs the eye-draw
-    // count. It installs no hooks of its own -- it is driven from vScreen's Map
-    // and Unmap -- so nothing else depends on the order.
-    installGlitchFrameFix();
-    installVScreenFixes(device, ctxMode);
+    // THE SWAP-ONLY PROBE, which stands in for both context installers.
+    //
+    // Two users' machines die 1.7 seconds after the private-copy mode goes in.
+    // The in-place mode is stable on both -- and on both, the runtime
+    // overwrites every in-place thunk before the first frame, so in that mode
+    // EDVR's thunks never run at all. That is the one clean difference between
+    // the mode that dies and the mode that lives: whether our code executes on
+    // the context's calls. And it leaves exactly two suspects with nothing in
+    // between: the vptr swap itself, or what twenty-nine thunks DO once they are
+    // running.
+    //
+    // This removes the second. The context gets a private copy of its table
+    // with nothing patched -- every call runs the code it always ran, from a
+    // different address -- and neither installer runs, so no thunk exists to
+    // execute. If the game still dies, the swap is fatal on its own and the
+    // thunks were never the problem. If it lives, the mechanism is innocent,
+    // the bug is in what a thunk does, and that is a bisection rather than a
+    // new hooking design.
+    //
+    // A pass-through thunk was considered and is not built, because from the
+    // GPU's side it is the swap plus one extra call frame -- it would answer
+    // the same question as this, less cleanly.
+    // AND ITS TWIN, which takes the other half away instead.
+    //
+    // The swap-only probe removes the thunks and keeps two things: the vptr is
+    // RELOCATED and the table is FROZEN. If it crashes, that is still ambiguous
+    // -- "relocating the vptr is fatal" and "freezing the table is fatal" are
+    // different bugs with different fixes and the one probe cannot separate
+    // them. The LIVE-ONLY probe keeps the relocation and removes the freeze:
+    // every entry of the private table is a stub that reads the context's own
+    // slot at the moment of the call, so no call can ever reach an
+    // implementation the runtime has moved on from, and still no EDVR code runs
+    // inside any context method. Run the two and the answer is arithmetic.
+    {
+        const std::string probe =
+            sentinelCfg.getString("advanced.context_hook_probe", "off");
+        const bool wantSwap = _stricmp(probe.c_str(), "swap") == 0;
+        const bool wantLive = _stricmp(probe.c_str(), "live") == 0;
+        if (wantSwap || wantLive) {
+            ID3D11DeviceContext* ctx = nullptr;
+            device->GetImmediateContext(&ctx);
+            bool swapped = false;
+            if (ctx) {
+                if (s.bareContextHook.attach(ctx) &&
+                    s.bareContextHook.setMode(wantLive ? HookMode::LiveCopy
+                                                       : HookMode::CopyVptr) &&
+                    (wantLive ? s.bareContextHook.commitLive()
+                              : s.bareContextHook.commitUnpatched())) {
+                    swapped = true;
+                }
+                ctx->Release();
+            }
+            if (wantLive) {
+                Log::get().note(
+                    swapped
+                        ? "LIVE-ONLY PROBE: the immediate context now dispatches "
+                          "through a private table of EDVR's in which every entry "
+                          "is a jump stub that reads the context's OWN slot at "
+                          "the moment of the call. Nothing is patched, neither "
+                          "context installer ran, and no EDVR code is in the path "
+                          "of any context call -- so every d3d11 fix is off this "
+                          "session. The only thing not stock is WHERE the vptr "
+                          "points. If this dies the way the private-copy mode "
+                          "does, relocating the vptr is fatal on its own and "
+                          "following the runtime perfectly does not help; if it "
+                          "lives while the swap-only probe dies, the frozen table "
+                          "was the cause. Set advanced.context_hook_probe back to "
+                          "off afterwards."
+                        : "LIVE-ONLY PROBE asked for, but the live table could "
+                          "not be installed (see above). The context installers "
+                          "were skipped anyway, so this session tests nothing -- "
+                          "set advanced.context_hook_probe back to off.");
+            } else {
+                Log::get().note(
+                    swapped
+                        ? "SWAP-ONLY PROBE: the immediate context now dispatches "
+                          "through a byte-identical private copy of its table, with "
+                          "NOTHING patched in it and neither context installer run. "
+                          "No EDVR code is in the path of any context call. Every "
+                          "d3d11 fix is therefore off this session. If this session "
+                          "dies the way the normal private-copy mode does, the vptr "
+                          "swap is fatal on its own; if it survives, the swap is "
+                          "innocent and the cause is inside a thunk. Set "
+                          "advanced.context_hook_probe back to off afterwards."
+                        : "SWAP-ONLY PROBE asked for, but the bare copy could not be "
+                          "installed (see above). The context installers were "
+                          "skipped anyway, so this session tests nothing -- set "
+                          "advanced.context_hook_probe back to off.");
+            }
+            if (swapped) {
+                // No installer ran, so the bare probe hook is the only thing
+                // holding the context's own table -- and in a probe session it
+                // is the table the runtime writes, which is what the timeline
+                // has to watch, and the table whose starting variant is worth
+                // naming.
+                logContextTableVariants(s.bareContextHook.originalVTable(),
+                                        s.bareContextHook.executablePrefix(),
+                                        "probe context");
+                armFlipTimeline(sentinelCfg, s.bareContextHook.originalVTable(),
+                                s.bareContextHook.executablePrefix(),
+                                "probe context");
+            }
+        } else {
+            if (!probe.empty() && _stricmp(probe.c_str(), "off") != 0) {
+                Log::get().note(
+                    "edvr.ini: advanced.context_hook_probe = \"%s\" is not one of "
+                    "off, swap or live, so it was IGNORED. Check the spelling.",
+                    probe.c_str());
+            }
+            installExposureFix(device, ctxMode);
+            // Before the vScreen fixes, which ask it whether it needs the
+            // eye-draw count. It installs no hooks of its own -- it is driven
+            // from vScreen's Map and Unmap -- so nothing else depends on the
+            // order.
+            installGlitchFrameFix();
+            installVScreenFixes(device, ctxMode);
+
+            // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
+            // own commit writes two dozen entries of this table in the shared
+            // mode; arming before that would spend the timeline's first two
+            // dozen lines on EDVR patching itself in, which is the one set of
+            // changes nobody needs a timeline to know about.
+            //
+            // The exposure hook's table and not vScreen's: it installs first,
+            // so its is the runtime's own in every mode. See
+            // exposureFixContextTable.
+            size_t span = 0;
+            void** table = exposureFixContextTable(&span);
+            armFlipTimeline(sentinelCfg, table, span, "context");
+        }
+    }
 
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.
@@ -2168,12 +2610,36 @@ void shutdownDeviceHooks() {
     // keyboard the game never gets back.
     menuShutdown();
     journalWatchShutdown();
+    // The probe's reference on the device. Read-only for its whole life, so
+    // there is nothing to put back -- only the reference to let go.
+    if (g_state && g_state->multithread) {
+        g_state->multithread->Release();
+        g_state->multithread = nullptr;
+    }
+    // The write watch, before anything that could free the page it is holding
+    // read-only.
+    //
+    // shutdownVScreenFixes does this too, and until the flip timeline that was
+    // enough, because the only thing that armed a watch was vScreen's own
+    // install. The timeline arms in the two context probes as well, where
+    // vScreen never installs and its shutdown returns immediately -- so without
+    // this, a probe session's page would be left read-only after EDVR had gone,
+    // which is not a thing to do to a process. Idempotent: the second call sees
+    // no armed watch and returns.
+    vtableWatchStop();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
     shutdownGlitchFrameFix();
     shutdownVScreenFixes();
     shutdownExposureFix();
+    // The swap-only or live-only probe's bare table, if that was what ran
+    // instead of the two installers above. Restoring the vptr frees nothing
+    // anyone dispatches through: the table held no thunks, so nothing chained
+    // into it. (The live mode's stub page is leaked rather than freed, by
+    // VTableHook, for a reason that has nothing to do with chaining -- a thread
+    // can still be inside a stub. See m_stubs.)
+    if (g_state) g_state->bareContextHook.uninstall();
     if (!g_state) return;
     deviceHookNoteCleanExit();
     g_state->factoryHook.uninstall();

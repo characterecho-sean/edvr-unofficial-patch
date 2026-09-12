@@ -11,8 +11,10 @@
 // before anyone noticed.
 //
 // Usage: smoke.exe [path\to\d3d11.dll]
-// Optional second argument: --recovery-device or --foreign-device. These
+// Optional second argument: --recovery-device, --foreign-device, or
+// --fixes-off-device (with advanced.d3d11_fixes=0 in a fixture ini). These
 // focused hardware checks require the default log directory beside smoke.exe.
+// --warp runs the normal smoke checks on the software D3D11 device.
 #include <windows.h>
 
 #include <d3d11.h>
@@ -264,9 +266,13 @@ void resolveRef(int filter, float width, const std::vector<float>& img, int inW,
 }  // namespace
 
 int main(int argc, char** argv) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     const char* proxy = argc > 1 ? argv[1] : "build\\d3d11.dll";
     const bool recoveryCheck = argc > 2 && strcmp(argv[2], "--recovery-device") == 0;
     const bool foreignCheck = argc > 2 && strcmp(argv[2], "--foreign-device") == 0;
+    const bool offCheck = argc > 2 && strcmp(argv[2], "--fixes-off-device") == 0;
+    const bool warpCheck = offCheck || (argc > 2 && strcmp(argv[2], "--warp") == 0);
+    const bool disabledCheck = recoveryCheck || offCheck;
     printf("edvr smoke\nproxy: %s\n\n", proxy);
 
     char full[MAX_PATH];
@@ -317,7 +323,9 @@ int main(int argc, char** argv) {
     ID3D11DeviceContext* ctx = nullptr;
     D3D_FEATURE_LEVEL got{};
     const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_0};
-    HRESULT hr = create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 1,
+    const D3D_DRIVER_TYPE driver = warpCheck ? D3D_DRIVER_TYPE_WARP
+                                            : D3D_DRIVER_TYPE_HARDWARE;
+    HRESULT hr = create(nullptr, driver, nullptr, 0, want, 1,
                         D3D11_SDK_VERSION, &device, &got, &ctx);
     if (FAILED(hr)) {
         printf("  note  no hardware device, falling back to WARP\n");
@@ -327,14 +335,14 @@ int main(int argc, char** argv) {
     if (FAILED(hr) || !device || !ctx) return fail("could not create a device");
     printf("  ok    device created through the proxy\n");
 
-    if (recoveryCheck || foreignCheck) {
+    if (disabledCheck || foreignCheck) {
         ID3D11Device* second = nullptr;
         ID3D11DeviceContext* secondCtx = nullptr;
-        hr = create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 1,
+        hr = create(nullptr, driver, nullptr, 0, want, 1,
                     D3D11_SDK_VERSION, &second, &got, &secondCtx);
         if (FAILED(hr) || !second || !secondCtx) return fail("second hardware device unavailable");
         bool pass = true;
-        if (recoveryCheck) {
+        if (disabledCheck) {
             unsigned char a[3] = {}, b[3] = {};
             pass = clearGreyReadBack(device, ctx, 2048, 2048, a) &&
                    clearGreyReadBack(second, secondCtx, 2048, 2048, b) &&
@@ -357,8 +365,22 @@ int main(int argc, char** argv) {
             return taa(src,0,nullptr,tan,tan,0,0,ident,nullptr,nullptr,0,0,0,1,0.9f,1,0,0,1);
         };
         void* firstOut = treat(a);
-        pass &= recoveryCheck ? firstOut == nullptr : firstOut != nullptr;
+        pass &= disabledCheck ? firstOut == nullptr : firstOut != nullptr;
         pass &= treat(b) == nullptr;
+        if (offCheck) {
+            using Sharpen = void* (*)(void*, int, const float*, float);
+            using Resolve = void* (*)(void*, int, const float*, unsigned, unsigned,
+                                      int, float, int);
+            auto sharpen = reinterpret_cast<Sharpen>(GetProcAddress(mod, "edvrSharpen"));
+            auto resolve = reinterpret_cast<Resolve>(GetProcAddress(mod, "edvrSupersampleResolve"));
+            const bool aaOff = firstOut == nullptr;
+            const bool sharpenOff = sharpen && sharpen(a, 0, nullptr, 0.5f) == nullptr;
+            const bool resolveOff = resolve && resolve(a, 0, nullptr, 32, 32, 0, 1, 0) == nullptr;
+            printf("  %s  graphics off blocks submit-time AA/sharpen/resolve: %d/%d/%d\n",
+                   aaOff && sharpenOff && resolveOff ? "ok  " : "FAIL",
+                   aaOff, sharpenOff, resolveOff);
+            pass &= aaOff && sharpenOff && resolveOff;
+        }
         if (foreignCheck) {
             pass &= checkResolved(device,ctx,treat(a),"original device remains usable",64,64,
                                    32,32,64,128,191,2);
@@ -366,7 +388,7 @@ int main(int argc, char** argv) {
         pass &= SUCCEEDED(device->GetDeviceRemovedReason()) && SUCCEEDED(second->GetDeviceRemovedReason());
         a->Release(); b->Release(); secondCtx->Release(); second->Release();
         ctx->Release(); device->Release();
-        printf("%s: %s\n", recoveryCheck ? "RECOVERY DEVICE" : "FOREIGN DEVICE", pass ? "PASSED" : "FAILED");
+        printf("%s: %s\n", offCheck ? "FIXES OFF DEVICE" : recoveryCheck ? "RECOVERY DEVICE" : "FOREIGN DEVICE", pass ? "PASSED" : "FAILED");
         return pass ? 0 : 1;
     }
 
@@ -1039,6 +1061,8 @@ int main(int argc, char** argv) {
                 if (!fovProbe) {
                     printf("  FAIL  edvrFoveationProbe is not exported\n");
                     rc = 1;
+                } else if (warpCheck) {
+                    printf("  skip  foveation: NvAPI shading-rate images require a hardware device\n");
                 } else {
                     static char report4[16384];
                     const int fv = fovProbe(device, ctx, report4, sizeof(report4));

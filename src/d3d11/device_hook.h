@@ -16,9 +16,11 @@ namespace edvr {
 
 // Which hook mechanism the context fixes should use, decided from the
 // immediate context's vtable: does the runtime's own code back its methods
-// (CopyVptr, immune to the runtime re-pointing its shared table between
-// variants -- measured 2026-08-18) or does a wrapper like ReShade (InPlace,
-// because swapping a wrapper's object vptr is issue #6)?
+// (LiveCopy, what auto chooses for these: a private table that follows the
+// runtime as it re-points its own shared table between variants, and is
+// immune to a tool writing that shared table -- measured 2026-08-18) or does
+// a wrapper like ReShade (InPlace, because swapping a wrapper's object vptr
+// is issue #6)?
 //
 // Defined in d3d11_proxy.cpp, which owns the system module handle. Returns
 // InPlace when the module or context is unavailable: the mode that never
@@ -33,8 +35,36 @@ namespace edvr {
 // just orphaned. Sharing one answer removes the straddle entirely.
 HookMode contextHookModeFor(ID3D11DeviceContext* ctx);
 
+// Windows' own d3d11.dll, as a module base -- NOT this DLL, which the game
+// also has loaded under the name d3d11.dll.
+//
+// For VTableHook::setImplementationModule on the context hooks: this is the
+// image that implements ID3D11DeviceContext, and it re-points its own vtable
+// entries as it re-selects internal variants (issue #21, where it took all 29
+// of EDVR's patched slots 57 ms after install). Naming it lets reclaim take
+// those slots back without waiting for call evidence that a total bypass makes
+// impossible to gather. Null before the proxy has resolved it.
+void* systemD3D11Module();
+
+// The two entries the whole issue #21 investigation turns on, named by module
+// and offset, at install.
+//
+// The field logs say the DESTINATION -- ..._DrawIndexed_Amortized<1> -- and
+// never the departure point, so "24 entries changed" cannot be matched between
+// two runs or against a PDB. Slot 12 is DrawIndexed, which the field data says
+// moves; slot 50 is ClearRenderTargetView, the same family and a different
+// block of the table. Two VirtualQuery calls, once.
+//
+// `table` must be the table the CONTEXT itself holds -- the bottom hook's --
+// and `who` says which hook is speaking. Called from installExposureFix and
+// from both context probes, because it lived inside the exposure installer and
+// the probes do not run it: the two sessions that exist to ask what the runtime
+// does to this table were the two that never printed what it started at.
+void logContextTableVariants(void** table, size_t span, const char* who);
+
 void hookDevice(ID3D11Device* device);
 // Sticky for the process, including later devices and submit-side passes.
+// True for either sentinel recovery or advanced.d3d11_fixes=0.
 bool deviceHookRecoveryDisabled();
 void hookSwapChain(IDXGISwapChain* swapChain);
 void hookFactoryForDevice(ID3D11Device* device);

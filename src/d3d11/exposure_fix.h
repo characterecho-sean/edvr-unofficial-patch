@@ -32,6 +32,17 @@ class Config;
 // device_hook.h.
 void installExposureFix(ID3D11Device* device, HookMode mode);
 
+// THE RUNTIME'S OWN TABLE, for an instrument that has to watch it rather than
+// ours. Null, and *spanOut untouched, when the exposure fix did not install.
+//
+// This hook goes on the context FIRST, so its vtable pointer is the table the
+// runtime keeps inside the context object -- in every mode. vScreen's is the
+// same table only while the hooks are in place; the moment a private mode is in
+// play it is THIS hook's private buffer, which nothing outside EDVR ever
+// writes. An instrument armed on that would watch a page nobody touches and
+// report, truthfully and uselessly, that nothing ever happened.
+void** exposureFixContextTable(size_t* spanOut);
+
 // Retired instrument (no key read; always off) -- the damping workstream's measurement
 // instrument: log the exposure pass's output buffers once a second so a
 // head-pitch sweep can name the float the breathing lives in. Called on
@@ -67,6 +78,12 @@ void exposureFixFrameBoundary();
 // over EDVR (OpenXR Toolkit under OpenComposite, in the field) leaves
 // detection finding nothing forever with nothing said.
 void exposureFixReclaimHooks(bool sceneRendered);
+
+// The per-frame half, nothing vouched -- the twin of vScreenReclaimTick, on the
+// other hook of the same object. Both or neither: run one at frame rate and the
+// other once a second and the runtime's rewrite leaves one of them out of the
+// table for up to a second while the other is already back in.
+void exposureFixReclaimTick();
 
 // Runtime toggle, for comparing against stock behaviour without restarting.
 void toggleExposureFix();

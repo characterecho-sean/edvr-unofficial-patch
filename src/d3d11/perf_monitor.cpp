@@ -17,7 +17,9 @@
 #include "../common/log.h"
 #include "../common/perf_math.h"
 #include "../common/timing.h"
+#include "../common/vtable_hook.h"  // vtableWatchDumpRecent, the flip timeline
 #include "device_hook.h"
+#include "graphics_runtime.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 
@@ -442,18 +444,44 @@ void dropLine(const Frame& f, float budgetMs) {
                  static_cast<double>(f.frameReadyMs), f.dropped ? "" : ", no drop reported");
     }
     const float busy = f.presentMs - f.presentWaitMs - f.posesWaitMs;
+    // WHICH FRAME THIS IS, in the ONE numbering the flip timeline stamps its
+    // events with -- and until now neither side printed a frame number at all,
+    // so the question issue #21 turns on (did the context's table change before
+    // the hang or after it?) could not be answered from the log even when both
+    // instruments were running.
+    //
+    // vtableWatchFrame() is the frame IN PROGRESS, published by device_hook's
+    // frame path the instant this Present returned. Frame N is everything
+    // between Present N-1 returning and Present N returning, so the frame THIS
+    // LINE IS ABOUT is the one that just ended: one less. A flip stamped with
+    // that number happened inside the long frame; one stamped lower did not.
+    const uint64_t inProgress = vtableWatchFrame();
+    const double   sinceArm = vtableWatchSecondsSinceArm();
+    char stamp[220];
+    if (sinceArm > 0.0) {
+        snprintf(stamp, sizeof(stamp),
+                 " This is frame %llu (the frame now in progress is %llu), "
+                 "%.4f s after the flip timeline armed.",
+                 static_cast<unsigned long long>(inProgress ? inProgress - 1 : 0),
+                 static_cast<unsigned long long>(inProgress), sinceArm);
+    } else {
+        snprintf(stamp, sizeof(stamp),
+                 " This is frame %llu; the flip timeline is not armed, so there "
+                 "are no table changes to order against it.",
+                 static_cast<unsigned long long>(inProgress ? inProgress - 1 : 0));
+    }
     Log::get().note(
         "monitor: %s -- %.1f ms between Presents (budget %.1f), of which the thread waited %.1f in "
         "Present and %.1f in WaitGetPoses (busy %.1f); %s; the game's creations in it: %u "
         "textures, %u buffers (%.1f MB together), %u shaders; EDVR this frame: boundary %.2f ms, "
-        "door %.2f ms, draw hooks ~%.2f ms (sampled), door GPU %.2f ms; EDVR events: %s. At most "
+        "door %.2f ms, draw hooks ~%.2f ms (sampled), door GPU %.2f ms; EDVR events: %s.%s At most "
         "one of these lines every %u s, %u a session.",
         f.dropped ? "DROPPED FRAME" : "LONG FRAME", static_cast<double>(f.presentMs),
         static_cast<double>(budgetMs), static_cast<double>(f.presentWaitMs),
         static_cast<double>(f.posesWaitMs), static_cast<double>(busy > 0.0f ? busy : 0.0f), comp,
         f.createTextures, f.createBuffers, static_cast<double>(f.createMb), f.createShaders,
         static_cast<double>(f.cpuBoundaryMs), static_cast<double>(f.cpuDoorMs),
-        static_cast<double>(f.cpuDrawsMs), static_cast<double>(f.doorGpuMs), ev,
+        static_cast<double>(f.cpuDrawsMs), static_cast<double>(f.doorGpuMs), ev, stamp,
         static_cast<unsigned>(kDropLogEveryMs / 1000), kDropLogMax);
 }
 
@@ -463,6 +491,27 @@ void noteDrop(const Frame& f, float budgetMs) {
     s.lastDropFrameMs = f.presentMs;
     s.lastDropEvents = f.events;
     s.lastDropEventMs = f.eventMs;
+    // ABOVE dropLine, and OUTSIDE its rate limit, which is the whole point.
+    //
+    // A frame that took far too long is the shape a GPU hang makes on its way
+    // out, and issue #21's question is whether the context's dispatch table
+    // changed BEFORE that or after. The dump used to sit at the bottom of
+    // dropLine, under a five-second-and-forty-lines-a-session gate meant for
+    // the LOG's volume -- so a shader compile in the previous five seconds
+    // (there are always several) suppressed the dump on the fatal frame, which
+    // is the only frame it exists for. It has its own cap of sixteen a session
+    // and writes the breadcrumb file, so it does not need that one.
+    //
+    // THE FRAME IT IS ABOUT IS THE ONE THAT JUST ENDED. This runs inside the
+    // post-Present block for frame N, and the long frame it is reporting is
+    // N-1; the flips recorded inside that frame carry N-1 too. The dump used to
+    // print the frame in PROGRESS and tell the reader that a change stamped with
+    // it had preceded the hang -- so the change that DID precede the hang, at
+    // N-1, read as one that had not.
+    const uint64_t inProgressNow = vtableWatchFrame();
+    vtableWatchDumpRecent(
+        f.dropped ? "monitor: DROPPED FRAME" : "monitor: LONG FRAME",
+        inProgressNow ? inProgressNow - 1 : 0);
     dropLine(f, budgetMs);
 }
 
@@ -951,6 +1000,7 @@ void perfMonitorShutdown() {
 
 extern "C" __declspec(dllexport) void edvrDoorGpuBegin(void* tex, int eye) {
     using namespace edvr;
+    if (graphicsRuntimeDisabled()) return;
     if (!tex || eye < 0 || eye > 1) return;
     State& s = g_s;
     if (s.doorOpen[eye] >= 0) return;   // a pair already open: the End never came; leave it

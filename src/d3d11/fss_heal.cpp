@@ -1,4 +1,5 @@
 #include "fss_heal.h"
+#include "graphics_runtime.h"
 
 #include <windows.h>
 
@@ -385,7 +386,7 @@ extern "C" __declspec(dllexport) void* edvrFssHealLeft(void* leftTex,
                                                        float innerMag,
                                                        int mode,
                                                        const float* rect) {
-    if (!leftTex || !rightTex) return nullptr;
+    if (edvr::graphicsRuntimeDisabled() || !leftTex || !rightTex) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::healInner(leftTex, rightTex, outerMag, innerMag, mode,

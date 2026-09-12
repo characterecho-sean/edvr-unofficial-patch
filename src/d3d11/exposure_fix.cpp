@@ -1560,7 +1560,24 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     // The mechanism, decided once per device by the caller and shared with the
     // vScreen hooks so the two never disagree about this one object. Between
     // attach and the first replace, which is the only window setMode allows.
-    s.hook.setMode(mode);
+    //
+    // THE RETURN VALUE IS READ, because setMode can refuse -- the live mode's
+    // block may not allocate -- and a refusal leaves the hook in InPlace while
+    // every line downstream goes on describing the mode that was asked for. The
+    // install line below prints mode() and is therefore honest either way; this
+    // says plainly that the two differ, because "EDVR is in shared mode" is the
+    // single most load-bearing fact in an issue #21 log.
+    if (!s.hook.setMode(mode) && mode != HookMode::InPlace) {
+        Log::get().note(
+            "exposure fix: the context hook could NOT take the mode it was "
+            "given, so it is patching the shared table in place instead. Every "
+            "line below says what it actually did; if advanced.context_hook_mode "
+            "asked for private or live, this session is not testing it.");
+    }
+    // Same implementation module as vScreen's hook on the same object -- the
+    // two must agree about this as well, or one of them would take a slot back
+    // from the runtime while the other conceded it (issue #21).
+    s.hook.setImplementationModule(systemD3D11Module());
 
     s.hook.replace(kSlotCSSetShader, &hookedCSSetShader,
                    reinterpret_cast<void**>(&s.realCSSetShader));
@@ -1594,12 +1611,36 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     }
 
     Log::get().note("exposure fix installed on %p (%zu methods), currently %s, "
-                    "target %s",
+                    "target %s, hooking %s",
                     static_cast<void*>(ctx), s.hook.executablePrefix(),
                     s.enabled ? "ON" : "off",
-                    s.pinned ? "pinned by config" : "detected automatically");
+                    s.pinned ? "pinned by config" : "detected automatically",
+                    s.hook.mode() == HookMode::CopyVptr
+                        ? "by private vtable copy"
+                    : s.hook.mode() == HookMode::LiveCopy
+                        ? "by live private vtable (stubs that read the context's "
+                          "own slot at each call)"
+                        : "in place");
+
+    // WHICH VARIANT THE TABLE WAS ON AT INSTALL, named by module and offset.
+    //
+    // From THIS hook and not vScreen's: the exposure hook installs first, so its
+    // m_vtable is the runtime's real embedded table in every mode, while
+    // vScreen's is this hook's private buffer the moment a private mode is in
+    // play -- and printing that would name EDVR's own stubs as the runtime's
+    // variant. The body lives in device_hook now because the two context probes
+    // need it too and never ran this function; see logContextTableVariants.
+    logContextTableVariants(s.hook.originalVTable(), s.hook.executablePrefix(),
+                            "exposure context");
     exposureConfigure(cfg);
     ctx->Release();
+}
+
+void** exposureFixContextTable(size_t* spanOut) {
+    State* s = g_state;
+    if (!s || !s->hook.committed()) return nullptr;
+    if (spanOut) *spanOut = s->hook.executablePrefix();
+    return s->hook.originalVTable();
 }
 
 void exposureFixReclaimHooks(bool sceneRendered) {
@@ -1627,6 +1668,18 @@ void exposureFixReclaimHooks(bool sceneRendered) {
         }
     }
     s->hook.reclaim("exposure context", quiet, n);
+}
+
+// The fast patrol, per frame, nothing vouched. vScreenReclaimTick's comment
+// carries the argument; this is the same pass on the other hook of the same
+// object, and the two must run at the same cadence or the runtime's rewrite
+// leaves one of them out of the table for a second while the other is back in.
+void exposureFixReclaimTick() {
+    State* s = g_state;
+    if (!s) return;
+    // A private table has no slot to lose; see vScreenReclaimTick.
+    if (s->hook.mode() != HookMode::InPlace) return;
+    s->hook.reclaim("exposure context", nullptr, 0);
 }
 
 void shutdownExposureFix() {

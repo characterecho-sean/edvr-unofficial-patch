@@ -1,4 +1,4 @@
-﻿#include "vscreen.h"
+#include "vscreen.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
 #include "vr_runtime.h"
@@ -846,6 +846,27 @@ struct State {
     // consumed and zeroed by vScreenReclaimHooks.
     uint32_t eyeDrawsSinceReclaim = 0;
     bool     starvationNoted = false;
+    // The duty cycle, sampled once a frame by vScreenReclaimTick and reported
+    // with the totals. hookFrames counts the samples; hookFramesHeld counts the
+    // ones where every patched slot still held our thunk. Their ratio is the
+    // fraction of frames the fixes were actually in the dispatch path, which on
+    // a rig whose runtime rewrites the table all session is NOT the same
+    // question as whether they are installed.
+    uint32_t hookFrames = 0;
+    uint32_t hookFramesHeld = 0;
+    // Slots given up for good -- excluded from the ratio above, because a
+    // permanent known loss counted as displacement pins the ratio at zero for
+    // the session and hides the slots that ARE being held. Reported as its own
+    // number instead.
+    uint32_t hookConceded = 0;
+    // The staleness detector: armed only in copy mode, where a frozen table is
+    // the thing in question. See noteStaleForward.
+    bool     watchStale = false;
+    bool     staleNoted = false;
+    // The "this check is reading its own table" notice, said once. See
+    // noteStaleForward: which table it reads is the whole detector.
+    bool     staleFallbackNoted = false;
+    uint64_t staleForwards = 0;
     bool     lowPeakNoted = false;
     // When the journal first said gameplay had started, 0 until it does. The
     // low-peak notice is timed off this rather than off install, because
@@ -2400,8 +2421,107 @@ void endPanelOverride(ID3D11DeviceContext* self) {
 
 // --- hooks ------------------------------------------------------------------
 
+// THE STALENESS DETECTOR, and it is the one measurement this whole arc still
+// lacks.
+//
+// In the private-copy mode the object dispatches through a table EDVR froze at
+// install, while Windows' d3d11.dll goes on re-laying the REAL table inside the
+// context object every frame. The question nobody has answered is whether those
+// two ever say different things. If they do not -- if the runtime writes the
+// same pointers back forever -- the frozen copy is harmless and the crash on
+// two users' rigs is something else. If they DO, the game is calling last
+// second's implementation with this second's state, which is exactly how a GPU
+// gets wedged, and the crash has its mechanism.
+//
+// Everything measuring this so far has been a once-a-second sample taken after
+// Present. That is three samples on a rig that dies in 1.7 seconds, it cannot
+// see a value that changes and changes back within a frame, and the eye-draw
+// counts (243 patched in place versus 682 copied) say the re-lay lands about a
+// third of the way THROUGH a frame -- exactly where a post-Present sample is
+// blind. So this asks at the only moment that settles it: the instant before
+// the call is forwarded.
+//
+// One load and one compare, on the draw path, only in copy mode. The first
+// mismatch goes to the BREADCRUMB file as well as the log, because that file is
+// written unbuffered and survives the process being killed by a TDR -- which is
+// how these sessions end.
+//
+// WHICH TABLE IT READS IS THE WHOLE DETECTOR, and it read the wrong one. It took
+// THIS hook's table, and in every private mode that is the EXPOSURE hook's
+// private buffer -- vScreen attaches to the context after exposure has already
+// moved its vptr. So `now` was the value this file had itself frozen, the
+// compare could not fail, and the conclusion drawn from its silence ("STALE
+// FORWARD has never been observed, so the frozen copy is harmless") was never
+// evidence of anything: it was a load and a compare of one variable against
+// itself, on every draw, all session. exposureFixContextTable() hands back the
+// bottom hook's table, which IS the one the context holds, in every mode.
+//
+// AND EVERY SLOT THIS IS CALLED FOR IS ONE THE EXPOSURE HOOK DOES NOT PATCH --
+// it takes CSSetShader, CSSetUAVs, Dispatch, DispatchIndirect and ClearState,
+// none of which is below. That is what makes `frozen` the runtime's own entry
+// rather than a co-owner's thunk; if the two lists ever overlap, this compares
+// vScreen's forward against the exposure thunk sitting in the slot and reports a
+// perfectly healthy stack as a divergence.
+inline void noteStaleForward(size_t slot, const void* frozen, const char* what) {
+    State* s = g_state;
+    if (!s || !s->watchStale) return;
+    size_t span = 0;
+    void** live = exposureFixContextTable(&span);
+    // No exposure hook (it failed to install, or a future build stops hooking
+    // the context): this hook's own table is then the context's, because nothing
+    // moved the vptr before it.
+    //
+    // SAID OUT LOUD, ONCE, because the whole value of this detector is which
+    // table it is reading and a silent fallback is how it came to be reading the
+    // wrong one for three releases. The fallback is correct only while nothing
+    // has moved the vptr ahead of this hook, and the one thing that normally
+    // does is the exposure hook -- so a reader who sees this line knows the
+    // check is resting on an assumption rather than on exposure's word for it.
+    if (!live) {
+        live = s->hook.originalVTable();
+        if (!s->staleFallbackNoted) {
+            s->staleFallbackNoted = true;
+            Log::get().note(
+                "vScreen: the stale-forward check is reading THIS hook's table, "
+                "not the exposure hook's -- the exposure fix did not install on "
+                "this context, so there is no lower hook to ask. That table is "
+                "the context's own only while nothing moved the object's vptr "
+                "before vScreen attached; if something did, this check is "
+                "comparing EDVR's own buffer against itself and cannot fire. "
+                "Said once.");
+        }
+    }
+    if (!live) return;
+    void* now = nullptr;
+    if (!guarded("vScreen/stale-check", [&] { now = live[slot]; })) return;
+    if (now == frozen) return;
+
+    ++s->staleForwards;
+    if (!s->staleNoted) {
+        s->staleNoted = true;
+        char crumb[192];
+        _snprintf_s(crumb, sizeof(crumb), _TRUNCATE,
+                    "gfx: STALE FORWARD on %s (slot %zu): copy holds %p, the "
+                    "live table now holds %p",
+                    what, slot, frozen, now);
+        breadcrumb(crumb);
+        char modBuf[MAX_PATH];
+        Log::get().note(
+            "vScreen: STALE FORWARD. %s (slot %zu) is about to be called "
+            "through EDVR's frozen copy, which holds %p -- but the context's "
+            "own table now holds %p (%s). The two have diverged, so the game is "
+            "calling an implementation the runtime has moved on from. THIS is "
+            "the private-copy mode's failure case and it has never been "
+            "observed before. Said once; the count is reported with the totals.",
+            what, slot, frozen, now,
+            vtableOwnerModuleName(now, modBuf, sizeof(modBuf)));
+    }
+}
+
 void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
+    noteStaleForward(kSlotClearRenderTargetView, reinterpret_cast<const void*>(g_state->realClearRtv),
+                     "ClearRenderTargetView");
     State* s = g_state;
     ++s->thunkHits[kHitClearRtv];
     if (foreignContext(self)) {
@@ -3125,6 +3245,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
+    noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
+                     "CopyResource");
     if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
@@ -3139,6 +3261,8 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
                                       ID3D11DepthStencilView* dsv, UINT flags,
                                       FLOAT depth, UINT8 stencil) {
+    noteStaleForward(kSlotClearDepthStencilView, reinterpret_cast<const void*>(g_state->realClearDsv),
+                     "ClearDepthStencilView");
     if (drawCensusArmed()) {
         drawCensusClearDepth(dsv, flags, depth, stencil,
                              foreignContext(self));
@@ -3173,6 +3297,8 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
 // and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
+                     "DrawIndexedInstancedIndirect");
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
     }
@@ -3184,6 +3310,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
+    noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
+                     "DrawInstancedIndirect");
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
     }
@@ -3205,6 +3333,8 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
+                     "CopySubresourceRegion");
     if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
@@ -3224,6 +3354,8 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
+    noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
+                     "UpdateSubresource");
     if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
@@ -3254,6 +3386,8 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
                                                 ID3D11Resource* dst, UINT dstSub,
                                                 ID3D11Resource* src, UINT srcSub,
                                                 DXGI_FORMAT fmt) {
+    noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
+                     "ResolveSubresource");
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -3348,6 +3482,8 @@ struct DrawClock {
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
+    noteStaleForward(kSlotDraw, reinterpret_cast<const void*>(g_state->realDraw),
+                     "Draw");
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     DrawArgs args;
     args.base = static_cast<int32_t>(start);
@@ -3363,6 +3499,9 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
+    noteStaleForward(kSlotDrawIndexed,
+                     reinterpret_cast<const void*>(g_state->realDrawIndexed),
+                     "DrawIndexed");
     DrawArgs args;
     args.start = startIndex;
     args.base = baseVertex;
@@ -3377,6 +3516,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
+                     "DrawInstanced");
     DrawClock clock;
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
@@ -3408,6 +3549,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
+                     "DrawIndexedInstanced");
     DrawClock clock;
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
@@ -4072,6 +4215,56 @@ bool vScreenReclaimHooks() {
     return sceneRendered;
 }
 
+// The FAST PATROL: the same repair, every frame, with NOTHING VOUCHED.
+//
+// Once a second was sized for the opponent this code was written against -- a
+// tool that hooks once at its own startup, where being a second late costs a
+// second. Issue #21's rig is a different opponent: the D3D11 runtime rewrites
+// the same 23 slots about once a second, for the whole session, and against a
+// one-hertz rewriter a one-hertz repair is the worst cadence available. Our
+// thunks end up installed for part of every second and out of the table for
+// the rest, so the fixes do not fail -- they STROBE, and a black void that
+// paints on some frames and not others is worse than one that never paints.
+// This closes the window to a frame.
+//
+// The vouch list is deliberately empty, and that is the whole safety argument.
+// quietSlots is measured silence over CONSECUTIVE PASSES, and its thresholds
+// mean seconds; handing this pass a vouch list would reinterpret "three
+// consecutive quiet passes" as thirty milliseconds and let a chainer's ordinary
+// lull earn adoption -- the call loop the gate exists to prevent, rebuilt by
+// the cadence change alone. With no vouches the only thing this pass can adopt
+// is a re-point from the module named by setImplementationModule, which needs
+// no traffic evidence because it cannot be a chainer. Everything else waits for
+// the once-a-second pass and its full discipline, unchanged.
+//
+// Also the sampling point for the duty-cycle figure in the totals line: whether
+// the hooks were found installed is asked once per frame, here, because that is
+// the only cadence at which the answer means anything.
+void vScreenReclaimTick() {
+    State* s = g_state;
+    if (!s) return;
+    // The write watch's re-arm used to be HERE, below that early return, which
+    // meant it never ran in the two context probes -- the sessions where vScreen
+    // does not install and the watch is the only thing running. It now sits in
+    // device_hook's frame path beside the flip timeline's drain, above this
+    // call, where it runs whether or not any fix installed.
+    //
+    // Nothing to patrol in either private mode: the object dispatches through a
+    // table only EDVR can write, so there is no slot for anyone to take.
+    // reclaim's private branch does real work -- a breach scan and a 300-entry
+    // census walk -- and running that per frame would buy the same answer 144
+    // times a second and make its own "this check repeats about once a second"
+    // a lie. The once-a-second pass still runs it.
+    if (s->hook.mode() != HookMode::InPlace) return;
+    s->hook.reclaim("vScreen context", nullptr, 0);
+    if (!s->hook.lastPassRan()) return;   // unpatrolled is not "held"
+    ++s->hookFrames;
+    if (s->hook.lastPassDisplaced() == 0) ++s->hookFramesHeld;
+    if (s->hook.lastPassConceded() > s->hookConceded) {
+        s->hookConceded = static_cast<uint32_t>(s->hook.lastPassConceded());
+    }
+}
+
 void vScreenFrameBoundary() {
     // The quad probe's readback: a capture taken a few frames ago is decoded
     // here, where the copy has certainly executed and mapping cannot stall
@@ -4711,6 +4904,44 @@ void vScreenFrameBoundary() {
             windowFrames, s->eyeDrawsWindowMax, s->eyeDrawsMax,
             windowFrames, static_cast<uint32_t>(windowMs), windowFps);
 
+        // A LINE OF ITS OWN, not a tail on the one above.
+        //
+        // Log::note truncates at about 1167 bytes and the totals line already
+        // runs near a thousand; appending this took it 70 to 110 bytes past the
+        // cut, so the sentence explaining a sub-100% figure was the part that
+        // got chopped -- the explanation lost precisely when it was printed. The
+        // line above it splits for the same reason, twenty lines up.
+        //
+        // Only when there is something to say. A hook nobody contests holds the
+        // table on every frame and does not need a line saying so every twenty
+        // seconds for the rest of the session.
+        // The staleness count, whenever there is one. Its first occurrence has
+        // its own line and a breadcrumb; this says whether it was a one-off or
+        // the steady state, which is the difference between a curiosity and the
+        // reason two users' machines die.
+        if (s->staleForwards) {
+            Log::get().note(
+                "vScreen: %llu draw(s) so far have been forwarded through an "
+                "entry EDVR's frozen copy holds and the context's own table no "
+                "longer does. See the STALE FORWARD line above for the first "
+                "one; this is the running total.",
+                static_cast<unsigned long long>(s->staleForwards));
+        }
+        if (s->hookFrames && (s->hookFramesHeld < s->hookFrames || s->hookConceded)) {
+            const unsigned held =
+                static_cast<unsigned>((s->hookFramesHeld * 100ull) / s->hookFrames);
+            Log::get().note(
+                "vScreen hooks: EDVR's draw and bind hooks were in the context's "
+                "table on %u%% of %u checked frames this window, and %u slot(s) "
+                "are conceded for good. On the frames they were not, something "
+                "had re-pointed slots EDVR patched and the fixes reading those "
+                "calls did nothing for part of the frame -- which looks like "
+                "flicker rather than like a fix that is off. The VTableHook "
+                "lines name who. A tool that CHAINS through EDVR counts here "
+                "too and is harmless, so read this with them, not alone.",
+                held, s->hookFrames, s->hookConceded);
+        }
+
         // The supersample resolve's count and price, while they move. The
         // decision lives in the openvr half's Submit hook but the pass and
         // its timestamp queries live here, and this is the only totals
@@ -4888,6 +5119,12 @@ void vScreenFrameBoundary() {
         s->voidFrameMin = 0xFFFFFFFFu;
         s->voidFrameMax = 0;
         s->eyeDrawsWindowMax = 0;
+        // Per window like the rest, and for the same reason: a duty cycle
+        // averaged over the whole session hides the minute it went wrong.
+        s->hookFrames = 0;
+        s->hookFramesHeld = 0;
+        // NOT hookConceded: a concession is permanent, so a per-window reset
+        // would report it once and then claim it had healed.
         s->windowStartMs = now;
         s->windowStartFrame = s->frameNo;
     }
@@ -5064,7 +5301,36 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // The mechanism, decided once per device by the caller and shared with the
     // exposure hooks so the two agree about this one object. Between attach
     // and the first replace, the only window setMode allows.
-    s.hook.setMode(mode);
+    //
+    // The return value is read, because setMode can refuse -- the live mode's
+    // block may not allocate -- and a refusal leaves this hook patching the
+    // shared table while the config still says private. Everything below reports
+    // mode(), so the lines stay honest; this says plainly that they differ.
+    if (!s.hook.setMode(mode) && mode != HookMode::InPlace) {
+        Log::get().note(
+            "vScreen: the context hook could NOT take the mode it was given, so "
+            "it is patching the shared table in place instead. If "
+            "advanced.context_hook_mode asked for private or live, this session "
+            "is not testing it.");
+    }
+    // And who implements this context, so reclaim can take a slot back from
+    // the runtime's own re-pointing without waiting for call evidence that a
+    // total bypass never produces (issue #21).
+    s.hook.setImplementationModule(systemD3D11Module());
+    // The frozen table is only a question in copy mode. In place there is one
+    // table and nothing to diverge from; in LIVE mode the forward IS the stub
+    // that reads the live entry, so it cannot be stale by construction and a
+    // detector for it would compare a stub's address against a function's and
+    // report every call as a divergence. Off in both.
+    //
+    // FROM mode(), NOT from the mode that was REQUESTED. A refused setMode
+    // leaves this hook in place with the forward being the entry we replaced,
+    // and the requested mode would then arm a detector that fires on the first
+    // draw -- printing "STALE FORWARD ... THIS is the private-copy mode's
+    // failure case and it has never been observed before" against EDVR's own
+    // thunk, in a session that is not even in that mode. There is no louder
+    // false report in this codebase.
+    s.watchStale = (s.hook.mode() == HookMode::CopyVptr);
 
     s.hook.replace(kSlotClearRenderTargetView, &hookedClearRtv,
                    reinterpret_cast<void**>(&s.realClearRtv));
@@ -5133,12 +5399,55 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                     (s.distanceEnabled || s.countForFlashFix)
                         ? "on"
                         : "OFF -- the transition flash fix cannot act without it",
+                    // WHAT the mode is, never WHY it was picked. This line used
+                    // to explain the choice -- "the context is a wrapper's, e.g.
+                    // ReShade" for in-place -- and advanced.context_hook_mode
+                    // made that a lie the first time anyone used it: issue #21's
+                    // logs say "the context is a wrapper's" three lines under a
+                    // probe result of 96 of 96 entries inside Windows' own
+                    // d3d11.dll. The reason belongs to whoever decided, and
+                    // contextHookModeFor already prints it, twice when forced.
                     s.hook.mode() == HookMode::CopyVptr
-                        ? "by private vtable copy (the context is the runtime's own, "
-                          "which re-points its shared table between modes -- a copy is "
-                          "immune)"
-                        : "in place (the context is a wrapper's, e.g. ReShade; reclaim "
-                          "watches for another tool re-pointing our slots)");
+                        ? "by private vtable copy (this object dispatches through "
+                          "a table of EDVR's own, so a tool writing the shared "
+                          "one cannot bypass the fixes -- but one that writes "
+                          "through the OBJECT still reaches the copy, and the "
+                          "copy does not follow the table it was taken from)"
+                    : s.hook.mode() == HookMode::LiveCopy
+                        ? "by LIVE private vtable (this object dispatches through "
+                          "a table of EDVR's own in which every entry is a stub "
+                          "that reads the context's own slot at the moment of the "
+                          "call, so a tool writing the shared table cannot bypass "
+                          "the fixes AND nothing is ever frozen -- the runtime may "
+                          "re-select its variants as often as it likes and the "
+                          "next call follows it)"
+                        : "in place (the shared table is patched, so anything else "
+                          "that writes those slots composes with EDVR; reclaim "
+                          "watches for our entries being re-pointed)");
+    // The write watch, if somebody has asked for it. AFTER commit, so what it
+    // catches is whoever puts the ORIGINAL back rather than EDVR putting its
+    // own thunk in; and only in the shared mode, because in the private mode
+    // this table is not the one the object dispatches through and nobody has
+    // any reason to write it.
+    {
+        const int probeSlot =
+            cfg.getIntInRange("advanced.vtable_writer_probe", 0, 0, 511);
+        if (probeSlot > 0 && s.hook.mode() == HookMode::InPlace) {
+            vtableWatchSlot(s.hook.originalVTable(),
+                            static_cast<size_t>(probeSlot),
+                            s.hook.executablePrefix(), "vScreen context");
+        } else if (probeSlot > 0) {
+            Log::get().note(
+                "advanced.vtable_writer_probe asked to watch slot %d, but this "
+                "context is hooked by a private vtable, where THIS hook's table "
+                "is the exposure hook's private buffer rather than the one the "
+                "runtime writes. Set context_hook_mode = shared to use the "
+                "probe, or advanced.vtable_flip_timeline = 1, which arms on the "
+                "runtime's own table in every mode.",
+                probeSlot);
+        }
+    }
+
     ctx->Release();
 }
 
@@ -5198,6 +5507,11 @@ namespace edvr {
 
 void shutdownVScreenFixes() {
     if (!g_state) return;
+
+    // Disarm the write watch before anything else. Leaving a page of somebody
+    // else's memory read-only after EDVR has gone is not a thing to do to a
+    // process, however diagnostic the reason was.
+    vtableWatchStop();
 
     // How often each fix actually did something.
     //

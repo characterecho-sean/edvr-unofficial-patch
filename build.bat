@@ -288,7 +288,7 @@ if defined NGX (
 cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
-    "src\common\guard.cpp" "src\common\vtable_hook.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
@@ -401,7 +401,7 @@ if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for system_thunks & exit /b 1 )
 cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
-    "src\common\guard.cpp" "src\common\vtable_hook.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
     "src\common\frame_flag.cpp" ^
     "src\openvr\openvr_proxy.cpp" "src\openvr\compositor_hook.cpp" ^
@@ -541,8 +541,8 @@ REM it, which is the only reason to believe them now.
 if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
-    /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
-    "src\common\vtable_hook.cpp" "src\common\guard.cpp" ^
+    /DEDVR_VTABLE_TEST /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
@@ -571,7 +571,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\d3d11\menu_keys.cpp" ^
     "src\openvr\menu_door.cpp" "src\d3d11\shader_swap.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
-    "src\common\vtable_hook.cpp" "src\common\hotkey.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     "src\common\guard.cpp" "src\common\frame_flag.cpp" ^
     "src\common\proxy.cpp" ^
