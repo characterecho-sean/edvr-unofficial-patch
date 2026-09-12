@@ -173,17 +173,6 @@ extern "C" unsigned int edvr_selftest_system_hook(void);
 // of the true frustum within the reported one.
 extern "C" unsigned int edvr_selftest_cull_guard(int eye, float out[4]);
 
-// Test seam for the canted fold: build the canonical projection from the
-// tangents, fold in a yaw of `yawDeg` (positive turns the panel toward -x,
-// which is OUTWARD for the left eye), project the view-space point `dir` and
-// write its NDC x,y. Returns 0 for a point behind the eye or degenerate
-// tangents. Exists because both of this project's headsets report 0.00
-// degrees of cant, so the fold cannot be exercised on either of them.
-extern "C" unsigned int edvr_selftest_canted(float yawDeg, float l, float r,
-                                             float t, float b,
-                                             const float dir[3],
-                                             float outNdc[2]);
-
 // Test seam for the stage 1 -> 2 adoption rule, which is pure arithmetic and
 // has no other coverage: the live path needs a game rebuilding its targets.
 // Returns 1 if a submission of subW x subH counts as the game having adopted

@@ -170,20 +170,6 @@ struct State {
     // thread and the reload poll on the frame thread) and read everywhere;
     // single-word writes, and a torn read costs one oddly-margined frame in
     // an opt-in experiment.
-    // --- the canted fold (fix.canted_projection) ---
-    // Read at configure like the guard's mode; the rotations themselves are
-    // fetched at a FRAME BOUNDARY and cached, never from inside the receiver.
-    // systemHookEyeToHead calls the runtime through the original entry, and
-    // doing that from inside the runtime's own GetProjectionMatrix would be a
-    // re-entrant call on the game's hot path -- the boundary is the safe
-    // place, and the answer never changes within a session anyway.
-    bool  cantWanted = false;
-    bool  cantReady = false;     // both eyes' rotations cached
-    bool  cantLive = false;      // ready AND actually canted
-    bool  cantNoted = false;
-    float cantReT[2][9] = {};    // head -> eye, per eye
-    float cantDeg[2] = {0.0f, 0.0f};
-
     GuardMode modeRequested = GuardMode::Off;
     // Written by the same configure, read the same way. Both is the shipped
     // guard; a split channel is the separability probe and never renders
@@ -386,11 +372,6 @@ bool lieActiveFor(const State* s, int32_t eye) {
     return s->lieLive && !s->guardInert && s->modeRequested != GuardMode::Off &&
            eye >= 0 && eye < 2 && s->trueSeen[eye];
 }
-
-// Defined below with the rest of the canted fold; declared here because the
-// matrix receiver, which sits above it, is where the fold is applied.
-void cantedFold(const vr::HmdMatrix44_t& p, const float reT[9],
-                vr::HmdMatrix44_t* out);
 
 // A split channel lies through one call only, and pays nothing on the submit
 // side: no larger targets, no crop. Everything that widens or narrows the
@@ -688,20 +669,6 @@ vr::HmdMatrix44_t MatrixReceiver::GetProjectionMatrix(int32_t eye, float nearZ,
             m.m[1][2] = (tt[3] + tt[2]) / dv;
         }
     }
-    // The canted fold goes on LAST, over whatever the frustum ended up being
-    // -- true, widened by the guard, or jittered by the temporal pass. Those
-    // three all describe the frustum's SHAPE, and the fold describes where it
-    // POINTS, so composing shape-then-rotation is the right order and the
-    // only one that leaves the other three meaning what they meant.
-    //
-    // matrixFormulaOk is required because the fold multiplies the whole
-    // matrix: on a runtime whose projection is not the shape we think it is,
-    // this would be rotating something we do not understand.
-    if (s->cantLive && s->matrixFormulaOk[eye] && eye >= 0 && eye < 2) {
-        vr::HmdMatrix44_t folded{};
-        cantedFold(m, s->cantReT[eye], &folded);
-        m = folded;
-    }
     return m;
 }
 
@@ -866,71 +833,6 @@ bool cropFractions(const State* s, int eye, float out[4]) {
     out[2] = (t[1] - lie[0]) / du;   // right
     out[3] = (lie[3] - t[2]) / dv;   // bottom
     return true;
-}
-
-// The canted fold: hand the game a projection that already carries the eye's
-// rotation, so it renders the panel's true view without knowing it did.
-//
-// OpenVR describes a canted headset in two places -- the frustum SHAPE in
-// GetProjectionRaw, and the panel's ROTATION in GetEyeToHeadTransform's 3x3.
-// Elite takes the translation out of that transform and throws the rotation
-// away (issue 24, 2026-09-08: each eye correct alone, a rotational mismatch
-// between them, fixed to the head, growing toward the edges -- and nothing
-// else fits). Parallel projection is the runtime working around exactly that:
-// it rotates each frustum back into head space and draws an axis-aligned box
-// round the result, and that box is 52% more pixels per eye, measured.
-//
-// The rotation does not have to arrive through the channel the game ignores.
-// The game computes clip = P * V, with V head-aligned and carrying only the
-// half-IPD offset. We want clip = P * Re^T * V, where Re is the eye's
-// rotation and Re^T takes head space into the eye's. So hand it P * Re^T and
-// the composition is exact -- the same rotation parallel projection applies,
-// in the opposite direction, without the bounding box that costs the pixels.
-//
-// The field says this reaches the rasterizer: on the separability probe, the
-// matrix channel visibly widened the world while the raw channel did not
-// (issue 24, 2026-09-09). It also says the CULLER follows neither call alone,
-// so the culler keeps aiming at the un-rotated frustum and trims the outer
-// edges early. That cost is accepted deliberately, by the commander who asked
-// for this: "some artifacts in the outermost areas may be acceptable".
-//
-// Row-major, and the fourth column is untouched: R is a rotation, so
-// R[k][3] = R[3][k] = 0 and R[3][3] = 1, which leaves P's near/far term
-// exactly where it was. Row 2 becomes m22 * (row 2 of R), so clip depth ends
-// up encoding distance along the EYE's forward axis rather than the head's --
-// which is what a canted eye's depth buffer should hold, and what the
-// temporal pass already composes for (temporal_aa.cpp).
-void cantedFold(const vr::HmdMatrix44_t& p, const float reT[9],
-                vr::HmdMatrix44_t* out) {
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            out->m[i][j] = p.m[i][0] * reT[0 * 3 + j] +
-                           p.m[i][1] * reT[1 * 3 + j] +
-                           p.m[i][2] * reT[2 * 3 + j];
-        }
-        out->m[i][3] = p.m[i][3];
-    }
-}
-
-// The eye's rotation, transposed, from the 3x4 the runtime hands back.
-// Transposing a rotation inverts it, which is the direction we need: the
-// stored matrix takes the EYE into the HEAD, and the game's view is already
-// in the head's frame.
-void cantTranspose3(const float e2h[12], float out[9]) {
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) out[c * 3 + r] = e2h[r * 4 + c];
-    }
-}
-
-// How far this eye sits from the head's frame, in degrees, from the rotation
-// angle of its 3x3. Zero on parallel panels, which is what makes the whole
-// feature self-disabling: the fold becomes the identity and nothing changes.
-float cantDegrees(const float e2h[12]) {
-    const float trace = e2h[0] + e2h[5] + e2h[10];
-    float c = (trace - 1.0f) * 0.5f;
-    if (c > 1.0f) c = 1.0f;
-    if (c < -1.0f) c = -1.0f;
-    return acosf(c) * 57.29577951f;
 }
 
 // Has this eye's target actually been rebuilt at the widened size?
@@ -1289,77 +1191,11 @@ void systemHookPeriodic() {
     InterlockedExchange(&g_periodicBusy, 0);
 }
 
-// The canted fold's one-time preparation, at a frame boundary and nowhere
-// else: ask the runtime for both eyes' rotations, transpose them, and decide
-// whether this headset is canted at all. A parallel headset lands on
-// cantLive = false and the receiver never folds anything.
-void cantPrepare(State* s) {
-    if (!s->cantWanted || s->cantReady) return;
-    float e2h[2][12];
-    if (!systemHookEyeToHead(vr::Eye_Left, e2h[0]) ||
-        !systemHookEyeToHead(vr::Eye_Right, e2h[1])) {
-        return;   // not answered yet; try again at the next boundary
-    }
-    for (int e = 0; e < 2; ++e) {
-        cantTranspose3(e2h[e], s->cantReT[e]);
-        s->cantDeg[e] = cantDegrees(e2h[e]);
-    }
-    s->cantReady = true;
-    // A quarter of a degree is below anything a lens shows and well above
-    // the noise in a rigid transform; either eye being canted arms both,
-    // because a headset with one tilted panel is still a canted headset.
-    const float kMinDeg = 0.25f;
-    s->cantLive = s->cantDeg[0] > kMinDeg || s->cantDeg[1] > kMinDeg;
-    // THE FOLD AND THE GUARD'S CROP CANNOT BOTH RUN. The guard renders a
-    // widened frustum and then copies the true-frustum REGION back out, and
-    // it locates that region with fractions derived from tangents -- an
-    // axis-aligned rectangle. Once the fold is live the rendered image is
-    // that rectangle ROTATED, so the same fractions cut the wrong pixels and
-    // the player gets a crop sliding under every head turn. The guard is the
-    // one that stands down: it is off by default and optional, while the fold
-    // is what the commander turned on.
-    if (s->cantLive && s->modeRequested != GuardMode::Off && !s->guardInert) {
-        s->guardInert = true;
-        Log::get().note(
-            "cull guard STANDING DOWN: canted_projection is live on this "
-            "headset, and the guard's submit crop assumes the rendered frustum "
-            "is square to the eye -- which it is not once the panel's angle is "
-            "folded in. Running both would slide the crop under every head "
-            "turn. The fold keeps going; the guard forwards the truth for the "
-            "rest of the session. Terrain trimming at the outer edges is the "
-            "known price of the fold (issue 24).");
-    }
-    if (!s->cantNoted) {
-        s->cantNoted = true;
-        if (s->cantLive) {
-            Log::get().note(
-                "canted projection LIVE: the eyes sit %.2f and %.2f degrees "
-                "from the head's frame, and that rotation is now folded into "
-                "the projection matrix the game renders through -- so it draws "
-                "each panel's true view without knowing it, and parallel "
-                "projection can come off. The TERRAIN CULLER does not follow "
-                "this (measured, issue 24), so expect terrain to be trimmed a "
-                "little early at the outer edges; that is the known price. "
-                "fix.canted_projection = off puts it back.",
-                static_cast<double>(s->cantDeg[0]),
-                static_cast<double>(s->cantDeg[1]));
-        } else {
-            Log::get().note(
-                "canted projection: idle -- this headset's panels are parallel "
-                "(%.2f and %.2f degrees), so the fold would be the identity "
-                "and nothing is changed. The setting costs nothing here.",
-                static_cast<double>(s->cantDeg[0]),
-                static_cast<double>(s->cantDeg[1]));
-        }
-    }
-}
-
 void systemHookFrameBoundary() {
     State* s = g_state;
     if (!s || !s->installed) return;
     s->lastBoundaryMs = stampMs();
     guarded("sysHook/boundary", [&] { promoteOrDemote(s); });
-    guarded("sysHook/cant", [&] { cantPrepare(s); });
     systemHookPeriodic();
 }
 
@@ -1435,13 +1271,6 @@ void systemHookConfigure() {
     // bounds mechanism was refuted in the field the day it flew: correct by
     // the OpenVR contract, ignored by OpenComposite over VDXR, experienced
     // as the world distorting with every head turn. See guard_crop.h.
-    // The canted fold. Install-time only: it decides whether the receiver has
-    // work to do at all, and turning it on mid-session would change what the
-    // game renders through between one frame and the next.
-    if (!s->cantWanted && cfg.getBool("fix.canted_projection", false)) {
-        s->cantWanted = true;
-    }
-
     const std::string sub = cfg.getString("advanced.cull_guard_submit", "copy");
     const bool copyMode = _stricmp(sub.c_str(), "bounds") != 0;
 
@@ -1704,8 +1533,7 @@ void maybeObserveSystemInterface(void* iface, const char* interfaceVersion) {
     const std::string editKey = cfg.getString("advanced.projection_edit", "on");
     const bool editWanted = editKey.empty() || _stricmp(editKey.c_str(), "off") != 0;
     const bool wantReceiver =
-        editWanted || s.modeRequested != GuardMode::Off || s.receiverForTemporal ||
-        s.cantWanted;   // the fold has nowhere else to happen
+        editWanted || s.modeRequested != GuardMode::Off || s.receiverForTemporal;
 
     void* matrixEntry;
     if (wantReceiver) {
@@ -1915,49 +1743,6 @@ extern "C" unsigned int edvr_selftest_system_hook(void) {
     v |= sat(edvr_sysCounts[4]) << 16;
     v |= sat(edvr_sysCounts[2]) << 24;
     return v;
-}
-
-// Test seam for the canted fold. Builds the canonical projection from the
-// tangents given, folds in a yaw of `yawDeg` (positive = the panel turned
-// toward -x, which is OUTWARD for the left eye), projects the view-space
-// point `dir`, and writes its NDC x,y. Returns 0 if the point is behind the
-// eye or the tangents are degenerate.
-//
-// The fold's real hazard is the SIGN, and a sign error is not subtle: it is
-// the two-images-that-will-not-fuse failure the commander described flying
-// with parallel projection off. So the smoke asserts the physical direction,
-// not just the arithmetic.
-extern "C" unsigned int edvr_selftest_canted(float yawDeg, float l, float r,
-                                             float t, float b,
-                                             const float dir[3],
-                                             float outNdc[2]) {
-    if (!dir || !outNdc) return 0;
-    const float du = r - l, dv = b - t;
-    if (!(du > 1e-4f) || !(dv > 1e-4f)) return 0;
-
-    vr::HmdMatrix44_t p{};
-    p.m[0][0] = 2.0f / du;
-    p.m[0][2] = (r + l) / du;
-    p.m[1][1] = 2.0f / dv;
-    p.m[1][2] = (b + t) / dv;
-    p.m[2][2] = -1.0f;      // the z terms do not matter to an NDC x,y check
-    p.m[2][3] = -1.0f;
-    p.m[3][2] = -1.0f;
-
-    const float a = yawDeg * 0.01745329252f;
-    const float c = cosf(a), s = sinf(a);
-    // Re = R_y(yaw), so Re^T = R_y(-yaw), row-major.
-    const float reT[9] = {c, 0.0f, -s, 0.0f, 1.0f, 0.0f, s, 0.0f, c};
-
-    vr::HmdMatrix44_t f{};
-    edvr::cantedFold(p, reT, &f);
-
-    const float x = dir[0], y = dir[1], z = dir[2];
-    const float cw = f.m[3][0] * x + f.m[3][1] * y + f.m[3][2] * z + f.m[3][3];
-    if (cw <= 1e-6f) return 0;   // behind the eye
-    outNdc[0] = (f.m[0][0] * x + f.m[0][1] * y + f.m[0][2] * z + f.m[0][3]) / cw;
-    outNdc[1] = (f.m[1][0] * x + f.m[1][1] * y + f.m[1][2] * z + f.m[1][3]) / cw;
-    return 1;
 }
 
 extern "C" unsigned int edvr_selftest_cull_adopt(unsigned int preW,
