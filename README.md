@@ -160,11 +160,24 @@ the thread, and an issue is what remembers a problem long enough to fix it.
 
 ### If the game dies a second or two after launch
 
+**As of this version this fixes itself — update and it should just work, with
+no `edvr.ini` change.** The launch crash
+([#20](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/20)
+and
+[#21](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/21))
+was EDVR taking a *frozen* copy of the render context's dispatch table on rigs
+where Windows' `d3d11.dll` re-lays that table every frame; the copy fell out of
+step and hung the GPU about a second and a half in. `auto` now gives those rigs
+a *live* table instead — one that follows the runtime call by call — so the
+default no longer crashes. If you were on a crashing build, the fix is to
+update, nothing more.
+
 `edvr_breadcrumbs.txt` ending at `arming d3d11 hooks` means the Direct3D half
 got its hooks in and the game died shortly after. EDVR's crash sentinel turns
-those hooks off for the **next** launch on its own, so the usual shape of this
-is crash, play, crash, play. Three settings under `[advanced]` in `edvr.ini`
-are worth trying, in this order:
+those hooks off for the **next** launch on its own, so before this fix the
+usual shape was crash, play, crash, play. If a rig somehow still dies that way
+after updating, three settings under `[advanced]` in `edvr.ini` are worth
+trying, in this order:
 
 ```ini
 [advanced]
@@ -172,31 +185,35 @@ context_hook_mode = shared
 ```
 
 changes how EDVR attaches to the game's render context. `auto` (the default)
-asks whose code implements the context and picks for you: a private copy of the
-dispatch table when the methods are Windows' own, the shared table when another
-mod wraps them. The log line says which it chose. `shared` forces the second,
-and on at least one rig the private copy is fatal where `shared` is not
-([#21](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/21)).
-If anything pushes EDVR out of a slot the log says so by name.
+asks whose code implements the context and picks for you: a *live* private copy
+of the dispatch table (described under `live` below) when the methods are
+Windows' own, the shared table when another mod wraps them. The log line says
+which it chose. `shared` forces the shared table — the most conservative mode,
+the one that composes with a wrapper like ReShade, and the one to reach for
+first if a rig somehow still crashes after updating. If anything pushes EDVR
+out of a slot the log says so by name.
 
 ```ini
 [advanced]
 context_hook_mode = live
 ```
 
-is the one to try after `shared`. It gives the context a dispatch table of
-EDVR's own, like `private` does — so nothing else in the process can write the
-table the game dispatches through — but every entry in it reads the game's own
-entry at the moment of each call instead of remembering what it said at
-startup. That matters because Windows' `d3d11.dll` re-lays the context's table
-while the game runs, sometimes onto a different internal implementation, and a
-copy taken at startup does not follow it. `live` follows it, call by call. The
-cost is two extra jumps per Direct3D call, which is below anything that has
-been measurable in a frame time; the risk is the same as `private`'s, which is
-that a mod wrapping Direct3D objects (ReShade as `dxgi.dll`) does not expect
-its object to be re-pointed. If `shared` keeps the game alive but the log then
-says EDVR's hooks keep being pushed out of the table, this is the mode that is
-both unbypassable and never out of date.
+is what `auto` already gives a rig whose render context is Windows' own, so on
+most machines you are running it without setting anything — name it by hand
+only to come back to it after trying `shared`. It gives the context a dispatch
+table of EDVR's own — so nothing else in the process can write the table the
+game dispatches through — and every entry in it reads the game's own entry at
+the moment of each call instead of remembering what it said at startup. That
+matters because Windows' `d3d11.dll` re-lays the context's table while the game
+runs, sometimes onto a different internal implementation, and a copy taken at
+startup does not follow it (that frozen copy is the `private` mode, and it is
+what issues #20/#21 hung on). `live` follows it, call by call. The cost is two
+extra jumps per Direct3D call, which is below anything that has been measurable
+in a frame time; the risk is that a mod wrapping Direct3D objects (ReShade as
+`dxgi.dll`) does not expect its object to be re-pointed, which is why `auto`
+gives those rigs `shared` instead. If `shared` keeps the game alive but the log
+then says EDVR's hooks keep being pushed out of the table, this is the mode
+that is both unbypassable and never out of date.
 
 ```ini
 [advanced]

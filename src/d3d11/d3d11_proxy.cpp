@@ -372,11 +372,14 @@ namespace edvr {
 // mislabelled the object.
 //
 // Entries pointing into g_systemModule (Windows' own d3d11.dll) mean the
-// runtime owns this object: CopyVptr is safe and immune. A ReShade wrapper's
-// entries point into ReShade's module, so they do NOT count here and the
-// object stays InPlace -- issue #6 avoided. A threshold, not all-or-nothing,
-// because a thin wrapper may forward some slots straight to d3d11.dll; a
-// clear majority in d3d11.dll is the runtime's own table.
+// runtime owns this object: a vptr swap is safe -- there is no wrapper to
+// break -- and `auto` gives it the LIVE private table, which stays in step
+// with the runtime re-pointing its own entries (the #20/#21 hang) because
+// every slot forwards to the runtime's current one at the moment of the call.
+// A ReShade wrapper's entries point into ReShade's module, so they do NOT
+// count here and the object stays InPlace -- issue #6 avoided. A threshold,
+// not all-or-nothing, because a thin wrapper may forward some slots straight
+// to d3d11.dll; a clear majority in d3d11.dll is the runtime's own table.
 void* systemD3D11Module() { return g_systemModule; }
 
 // The mode's name for a log line. One function because three call sites in
@@ -419,7 +422,7 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
     // runtime and a 65-point gap above any wrapper, and InPlace (the safe
     // default) catches everything that does not clearly clear it.
     const HookMode probed =
-        (inSystem * 4 >= kSample * 3) ? HookMode::CopyVptr : HookMode::InPlace;
+        (inSystem * 4 >= kSample * 3) ? HookMode::LiveCopy : HookMode::InPlace;
 
     // THE OVERRIDE, and why the probe needs one.
     //
@@ -453,12 +456,12 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
         forced = "private";
     } else if (_stricmp(want.c_str(), "live") == 0 ||
                _stricmp(want.c_str(), "livecopy") == 0) {
-        // The third mechanism (issue #21). Never chosen by the probe: `auto`
-        // decides whose CODE backs the object, which is the issue #6 question,
-        // and that answer has never been a reason to prefer this over the plain
-        // private copy. It is reached on purpose, from a log, by a rig where the
-        // private copy is fatal -- so leaving the probe's policy exactly as it
-        // was is deliberate rather than unfinished.
+        // The third mechanism (issue #21), and since the launch-crash fix what
+        // `auto` ALREADY picks when the runtime's own code backs the object --
+        // see the probe above. Naming it here only changes the outcome on a rig
+        // the probe reads as a wrapper (where auto lands on InPlace) and
+        // otherwise just pins the choice explicitly for a log. The frozen
+        // private copy is now the one reached only by asking, as `private`.
         mode = HookMode::LiveCopy;
         forced = "live";
     } else if (!want.empty() && _stricmp(want.c_str(), "auto") != 0) {
@@ -477,12 +480,14 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
 
     Log::get().note(
         "context hook mode: %s -- %zu of %zu sampled vtable entries are inside "
-        "Windows' d3d11.dll, and the vtable array itself is %s it. CopyVptr is "
-        "chosen when the runtime's own code backs the methods (immune to the "
-        "runtime re-pointing its shared table); InPlace when a wrapper owns "
-        "them (issue #6 safety). LiveCopy is the same swap with nothing frozen "
-        "-- every entry a stub that reads the runtime's own slot at the call -- "
-        "and is only ever reached by asking for it.",
+        "Windows' d3d11.dll, and the vtable array itself is %s it. The live "
+        "private table is chosen when the runtime's own code backs the methods: "
+        "the object then dispatches through a table of EDVR's own in which every "
+        "entry forwards to the runtime's current method for that slot, read at "
+        "the call, so the runtime re-laying its own table every frame -- the "
+        "#20/#21 hang -- cannot desync it. InPlace when a wrapper owns them "
+        "(issue #6 safety). CopyVptr is the older frozen copy, kept as an opt-in "
+        "escape hatch and reached only by asking for it.",
         hookModeName(mode), inSystem, kSample,
         arrayInside ? "inside" : "outside");
     if (forced) {
