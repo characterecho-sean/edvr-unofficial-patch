@@ -23,11 +23,12 @@ struct Screen {
 struct State {
     bool enabled=false,failed=false,noted=false;
     bool seen=false;
+    bool weapon=true,weaponNoted=false;
     unsigned lastScreen=0;
     unsigned frame=0,sourceFrame=~0u,sourceWrite=0,sourcePrevious=~0u;
     Ptr<ID3D11Buffer> camera[2];
     Ptr<ID3D11Texture2D> depth;
-    Ptr<ID3D11ShaderResourceView> depthSrv;
+    Ptr<ID3D11ShaderResourceView> depthSrv,stencilSrv;
     Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11BlendState> blend;
     Ptr<ID3D11DepthStencilState> ds;
@@ -81,6 +82,7 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,uns
 void screenMotionConfigure(Config& cfg) {
     bool on=temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
     if(on!=g.enabled){g=State{};g.enabled=on;}
+    g.weapon=cfg.getBool("fix.weapon_stability",true);
 }
 bool screenMotionRecognize() {
     bool matched=g.enabled && !g.failed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
@@ -103,9 +105,14 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     if(fmt==DXGI_FORMAT_UNKNOWN)return;
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
     if(g.depth.Get()!=tex.Get()) {
-        g.depthSrv.Reset();D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=fmt;
+        g.depthSrv.Reset();g.stencilSrv.Reset();D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=fmt;
         sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
         if(FAILED(dev->CreateShaderResourceView(tex.Get(),&sd,&g.depthSrv)))return;
+        if(fmt==DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS){
+            sd.Format=DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+            // Optional view of the existing texture, with no new surface.
+            dev->CreateShaderResourceView(tex.Get(),&sd,&g.stencilSrv);
+        }
         g.depth=tex;g.sourceFrame=~0u;
     }
     unsigned next=1-g.sourceWrite;
@@ -191,23 +198,25 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     const float zero[4]{};ctx->ClearRenderTargetView(e.rtv.Get(),zero);e.written=false;
     if(consecutive) {
         bool ui=g.uiFrame==g.frame && g.uiDraws && g.uiTarget.Get()==cr.Get();
-        float data[8]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,0};ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
+        bool weapon=g.weapon && g.stencilSrv;
+        float data[8]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,weapon?1.0f:0.0f};ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
         ID3D11RenderTargetView* savedRt[8]{};Ptr<ID3D11DepthStencilView> savedDepth;ctx->OMGetRenderTargets(8,savedRt,&savedDepth);
         Ptr<ID3D11BlendState> savedBlend;FLOAT factors[4];UINT mask;ctx->OMGetBlendState(&savedBlend,factors,&mask);
         Ptr<ID3D11DepthStencilState> savedDs;UINT stencil;ctx->OMGetDepthStencilState(&savedDs,&stencil);
         Ptr<ID3D11PixelShader> savedPs;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->PSGetShader(&savedPs,classes,&nc);
         ID3D11Buffer* savedCb[5]{};ctx->PSGetConstantBuffers(2,5,savedCb);
-        ID3D11ShaderResourceView* savedSrv[3]{};ctx->PSGetShaderResources(8,3,savedSrv);
+        ID3D11ShaderResourceView* savedSrv[4]{};ctx->PSGetShaderResources(8,4,savedSrv);
         ID3D11Buffer* cb[5]={g.camera[g.sourceWrite].Get(),g.camera[1-g.sourceWrite].Get(),e.model[e.write].Get(),e.camera[e.write].Get(),e.settings.Get()};
-        ID3D11ShaderResourceView* srvs[3]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr};
+        ID3D11ShaderResourceView* srvs[4]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr};
         vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(g.ds.Get(),0);
-        ctx->PSSetConstantBuffers(2,5,cb);ctx->PSSetShaderResources(8,3,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
+        ctx->PSSetConstantBuffers(2,5,cb);ctx->PSSetShaderResources(8,4,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
         draw(ctx,count,instances,start,base,startInstance);
-        ID3D11ShaderResourceView* nulls[3]{};ctx->PSSetShaderResources(8,3,nulls);
+        ID3D11ShaderResourceView* nulls[4]{};ctx->PSSetShaderResources(8,4,nulls);
         vScreenSetRenderTargetsRaw(ctx,8,savedRt,savedDepth.Get());ctx->OMSetBlendState(savedBlend.Get(),factors,mask);ctx->OMSetDepthStencilState(savedDs.Get(),stencil);
-        ctx->PSSetConstantBuffers(2,5,savedCb);ctx->PSSetShaderResources(8,3,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
+        ctx->PSSetConstantBuffers(2,5,savedCb);ctx->PSSetShaderResources(8,4,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
         for(auto* p:savedRt)if(p)p->Release();for(auto* p:savedCb)if(p)p->Release();for(auto* p:savedSrv)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
         e.written=true;
+        if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil separates camera-attached weapon history from source scenery; original stencil texture reused.");}
         if(!g.noted){g.noted=true;Log::get().note("screen motion: source camera/depth projected through the actual screen mesh at %ux%u per eye; GPU-only history, no source colour copies.",e.width,e.height);}
     }
     for(int i=0;i<4;++i)e.shape[i]=curve?curve[i]:0;
@@ -219,7 +228,7 @@ ID3D11ShaderResourceView* screenMotionView(int eye,unsigned w,unsigned h) {
 }
 void screenMotionFrameBoundary(){
     ++g.frame;
-    if(g.seen && g.frame-g.lastScreen>120){bool on=g.enabled;g=State{};g.enabled=on;}
+    if(g.seen && g.frame-g.lastScreen>120){bool on=g.enabled,weapon=g.weapon;g=State{};g.enabled=on;g.weapon=weapon;}
 }
 void screenMotionShutdown(){g=State{};}
 }

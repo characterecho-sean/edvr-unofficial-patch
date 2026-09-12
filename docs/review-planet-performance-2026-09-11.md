@@ -640,3 +640,106 @@ replayed over all 38 frames from the two on-foot captures, with the
 captured draw arguments and original index windows reconstructed from
 their saved offsets. Its corrected outputs match the independently
 translated emitter in every frame. Hip-fire behaviour is retained.
+## Flight 06:56: landed night-vision pulse and remaining ghosting
+
+Verified 0879045, v0.15.1-41-g0879045, in the Steam install. Captures
+065827 and 065830 show head movement with night vision; 065841 catches
+the startup pulse while landed. 065915 shows aiming/crouching on foot.
+The user confirms the detached aiming ball is gone. Remaining ghosting
+has not yet been localized to weapon geometry versus the nearby ammo UI.
+
+Ruled out: the pulse occurs only in flight. The user captured it shortly
+after enabling night vision while landed; PS b2[1].x is 962.975 metres.
+
+Ruled out: missing night-vision inputs or reduced-size depth/normal
+textures explain these captures. All six first-eye draws have all five
+inputs, both samplers, geometry and complete camera/settings constants;
+there are no failed copies. Depth and normals are 2774x2740, matching
+the input eye. The depth/normal sampler is point-clamp with no mip bias.
+
+Replaying the exact original VS/PS on NVIDIA reproduces 93.7-94.9% of
+terrain pixels bit-for-bit; remaining absolute error is 0.58-0.72% of
+the added night-vision signal. WARP differs by about 6%, so it is not a
+pixel-exact substitute for the captured GPU. A readable HLSL
+transcription reproduces the NVIDIA original replay to rounding error.
+The capture comparison is close, not pixel-exact, and does not establish
+a headset improvement by itself.
+
+Two shader defects are independently testable. First, the pulse uses
+linear camera-forward depth, produced by PS CB95394B50D737D6, as though
+it were distance from the viewer. A head rotation changes that quantity
+for a fixed landscape point. Reconstructing the per-pixel ray from the
+actual asymmetric eye projection gives radial distance without changing
+the range fade, pulse timing, exposure or normal-edge filter. Second,
+instructions 290-303 always quantize the centre normal lookup into 2x2
+cells even though b2[11].z disables pixelation on the other 13 lookups.
+The cell centre is also a texel boundary for point sampling. Respecting
+the existing pixelation flag restores the current pixel's normal.
+
+These are the scope of the proposed live Night vision stability toggle.
+They do not establish that every distant fuzzy outline is resolved. The
+scalar normal-gradient filter also varies with view direction, but
+replacing it with a full-vector gradient changes the intended edge
+response and has not been justified as a fix for the reported blur.
+
+Implemented `fix.night_vision_stability = 1`, **Night vision stability**
+in Fixes, live and independent of AA mode. Off binds the original game
+PS. Only the exact measured VS/PS, 240-index single-instance eye draw
+and matching depth/normal/camera resource contract engage. The shader
+adds no texture copies, readbacks, extra draws or history surfaces.
+Compile failure retains the original draw. Other runtime paths are
+unchanged; this is a D3D11 eye-draw correction with no OpenVR compositor
+dependency.
+
+Targeted GPU validation: 32,844 checks cover the pulse under rotated
+asymmetric cameras, native centre sampling, intentional pixelation,
+singular-camera fallback, unknown resource formats, live Off/On,
+deferred-context refusal, compile failure and shader restoration. All
+six NVIDIA capture replays pass: the test-only stock transcription
+matches the original PS replay at 99.9962-99.9984% of terrain pixels;
+signal-relative error is below 0.000014%. Fixed output is finite in all
+six captures. Headset clarity and residual ghosting remain unverified.
+
+### Weapon history motion
+
+The first 065915 motion input assigns the solid gun housing a median
+9.93 input pixels of vertical source motion (10.26 after jitter), while
+paired raw C00/C07/C15 crops show the housing holding its screen
+position. The ammo UI is already classified separately with
+ScreenMotion.w=3. The weapon is w=1 and follows the source camera's
+world reconstruction. This treats camera-attached geometry as stationary
+scenery while the player crouches or walks, introducing false motion.
+
+The source depth texture already provides a reliable discriminator:
+stencil bit 0x10 covers the first-person weapon and arms. The final
+5120x2880 source has values 4 for scenery and 20 for the weapon. An
+overlay of that bit follows the opaque rifle silhouette exactly,
+including the sight housing; it excludes the scenery visible through the
+glass. Confirmed on 065915/060857 aiming captures and
+060838/052141/045429/041300 hip-fire captures, covering 10.1% and 14.8%
+of the source respectively. No colour/depth threshold is needed.
+
+Use that existing stencil plane to retain source UV for first-person
+geometry while continuing to project it through the actual previous
+screen/eye mesh. This preserves temporal AA and runtime reprojection. It
+removes false player-camera motion; it does not manufacture previous
+skinned animation poses. Large weapon animations still rely on temporal
+disocclusion handling. Keep it under the existing Weapon stability
+toggle, and fall back when the source has no stencil plane.
+
+Implemented without another pass or source copy: an optional stencil SRV
+shares the already retained source depth texture, with one stencil
+lookup per screen pixel. The added t11 binding is saved/restored. The
+existing Weapon stability setting controls this with live reload and
+survives inactive-screen resource release. The screen-motion GPU suite
+passes 51,384 checks, including tagged/untagged surfaces at equal depth,
+both eyes, retained previous-screen motion, Off/On, absent stencil,
+replaced source textures and restoration of the original t11 binding.
+
+The final full build and all gates pass, including the unchanged 1,080
+weapon attachment checks. NVIDIA smoke passes. The generated settings
+schema exposes Night vision stability as a live Fixes toggle, grouped
+under Night vision. Next flight: compare that toggle while rotating the
+head through the landed startup pulse, then crouch/aim with Weapon
+stability on to assess residual ghosting. These tests validate code and
+captured inputs; neither visual improvement is claimed headset-verified.

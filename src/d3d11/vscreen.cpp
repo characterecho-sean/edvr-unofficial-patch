@@ -28,6 +28,7 @@
 #include "panel_curve.h"
 #include "screen_motion.h"
 #include "weapon_stability.h"
+#include "night_vision.h"
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
@@ -1336,6 +1337,7 @@ enum class DrawVerdict {
     // The target direction indicator, reconstructed rather than smeared
     // (target_sharp.h): forwarded through a replacement pixel shader.
     kTargetSharp,
+    kNightVision,
     // A HUD sprite atlas, resampled once and substituted (hud_sprite.h).
     kHudSprite,
     // A cockpit holo panel, reconstructed once a frame (panel_upscale.h).
@@ -2095,6 +2097,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             return DrawVerdict::kSkip;
         }
     }
+
+    if(nightVisionMatches(kind,count,instances))return DrawVerdict::kNightVision;
 
     // The RemLok overlay fix, after the probes so a census taken while it
     // runs still records the draw the game submitted.
@@ -3161,6 +3165,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpBegin(self);
+    if (v == DrawVerdict::kNightVision) nightVisionBegin(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteBegin(self);
     if (v == DrawVerdict::kPanelUpscale) panelUpscaleBegin(self);
     if (v == DrawVerdict::kHudGrain) hudGrainBegin(self);
@@ -3222,6 +3227,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kPanelUpscale) panelUpscaleEnd(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteEnd(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpEnd(self);
+    if (v == DrawVerdict::kNightVision) nightVisionEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
@@ -4104,6 +4110,7 @@ void vScreenRefreshConfig() {
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
+    nightVisionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -5233,6 +5240,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
+    nightVisionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -5543,6 +5551,7 @@ void shutdownVScreenFixes() {
     uiDepthShutdown();
     screenMotionShutdown();
     weaponStabilityShutdown();
+    nightVisionShutdown();
     celestialMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
