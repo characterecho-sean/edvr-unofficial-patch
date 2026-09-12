@@ -10,7 +10,8 @@ struct LocateDispatch {PFN_xrLocateViews locateViews=nullptr;PFN_xrLocateSpace l
 // frames for startup. Both locates use exactly the same predicted time/LOCAL.
 inline XrResult locateGeometry(const LocateDispatch& api,const SessionBinding& binding,
                               const Frame& frame,uint64_t generation,
-                              const XrViewConfigurationView (&sizes)[2],GeometryInput& out) {
+                              const XrViewConfigurationView (&sizes)[2],GeometryInput& out,
+                              XrSpaceVelocity* headVelocity=nullptr) {
   if(!api.locateViews||!api.locateSpace)return XR_ERROR_FUNCTION_UNSUPPORTED;
   if(!binding.session()||!binding.localSpace()||!binding.viewSpace())return XR_ERROR_HANDLE_INVALID;
   if(!generation||!frame.sequence||(frame.status!=FrameStatus::Open&&frame.status!=FrameStatus::NoRender&&frame.status!=FrameStatus::Discarded))
@@ -23,11 +24,15 @@ inline XrResult locateGeometry(const LocateDispatch& api,const SessionBinding& b
   XrResult r=api.locateViews(binding.session(),&locate,&state,2,&count,input.views);if(r!=XR_SUCCESS)return r;
   if(count!=2)return XR_ERROR_RUNTIME_FAILURE;
   input.viewFlags=state.viewStateFlags;
+  XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
   XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+  if(headVelocity)head.next=&velocity;
   r=api.locateSpace(binding.viewSpace(),binding.localSpace(),frame.predictedDisplayTime,&head);if(r!=XR_SUCCESS)return r;
+  if(head.type!=XR_TYPE_SPACE_LOCATION||head.next!=(headVelocity?&velocity:nullptr)||
+     velocity.type!=XR_TYPE_SPACE_VELOCITY||velocity.next)return XR_ERROR_VALIDATION_FAILURE;
   input.headFlags=head.locationFlags;input.headPose=head.pose;
   // Missing validity bits are an ordinary tracking result, not fabricated
   // geometry or a runtime error. Publication validates/invalidate that sample.
-  out=input;return XR_SUCCESS;
+  out=input;if(headVelocity)*headVelocity=velocity;return XR_SUCCESS;
 }
 }

@@ -61,6 +61,17 @@ stable head tracking, normal color/clarity and normal exit. This is still
 preparation for the owned compositor ABI and game feature integration; no
 shipping discovery or Frontier installation changes are made.
 
+The [owned compositor-interface
+checkpoint](openxr-compositor-interface-2026-09-12.md) adds the exact 29-method
+`IVRCompositor_014` facade, independent render/gameplay predictions and a
+generation-aware cache. The native diagnostic calls its historical virtual
+wait, cached-pose, Submit and handoff methods. Desktop fixtures cover array
+boundaries, unavailable methods and cache access during a blocked wait. The
+full build passed, including 201 compositor, 173 timed-pose and 470 binding
+checks. Native qualification remains pending; the preceding visual pass does
+not qualify this executable. Startup origins/recenter/events, export lifecycle,
+required compositor features and game integration remain open.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;

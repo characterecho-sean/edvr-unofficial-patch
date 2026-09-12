@@ -18,6 +18,9 @@
 #include "../../src/openxr/runtime_gate.h"
 #include "../../src/openxr/frame_boundary.h"
 #include "../../src/openxr/eye_capture.h"
+#include "../../src/openxr/openvr_compositor.h"
+#include "../../src/openxr/compositor_publication.h"
+#include "../../src/openxr/space_pose.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -26,6 +29,7 @@
 #include <algorithm>
 
 using namespace edvr::openxr;
+extern "C" vr::IVRCompositor* nativeCompositorCaller(vr::IVRCompositor*);
 namespace {
 struct Options { std::wstring loader; unsigned seconds=10; bool dry=false, self=false; };
 bool absolute(const std::wstring& s) {
@@ -98,7 +102,7 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
-class Host : public SystemSource, public FrameSink {
+class Host : public SystemSource, public FrameSink, public CompositorSource {
  public:
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
@@ -110,10 +114,93 @@ class Host : public SystemSource, public FrameSink {
   uint64_t copiedEyes=0, composedPairs=0;
   SystemPublication geometry; uint64_t geometryGeneration=0;
   OpenVRSystem systemInterface{*this};
+  CompositorPublication poses;uint64_t compositorGeneration=0;
+  OpenVRCompositor compositorInterface{this};
+  GeometryInput frameGeometry{};bool frameGeometryAvailable=false;
+  XrResult lastCompositorResult=XR_SUCCESS;
+  uint64_t compositorWaits=0,compositorSubmits=0,compositorHandoffs=0,validGamePoses=0;
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
   bool clean=true;
+  CompositorRead compositorRead() const override {return poses.read();}
+  void compositorUnsupported(unsigned slot) noexcept override {std::printf("compositor_unavailable,slot=%u\n",slot);}
+  vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
+    if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal())
+      return vr::VRCompositorError_InvalidTexture;
+    ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
+    auto fail=[&](XrResult error){lastCompositorResult=error;poses.invalidate(generation);return vr::VRCompositorError_InvalidTexture;};
+    lastCompositorResult=boundary.waitAndBegin();
+    if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
+      return fail(lastCompositorResult);
+    const Frame frame=boundary.frame();
+    if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
+    GeometryInput located{};XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+    auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity);
+    if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return fail(r);}
+    TimedHeadPose render{},game{};
+    if(!makeHeadPose(located.headPose,located.headFlags,velocity.velocityFlags,velocity.linearVelocity,velocity.angularVelocity,true,render))
+      {boundary.clear();return fail(XR_ERROR_POSE_INVALID);}
+    render.time=frame.predictedDisplayTime;game.pose=invalidHeadPose(true);
+    XrTime gameplayTime=0;
+    if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)) {
+      r=locateHeadAt(api.locateSpace,view,local,gameplayTime,true,game);
+      // A runtime may not locate an additional frame ahead. Leave that
+      // independent gameplay prediction invalid rather than reusing render.
+      if(r!=XR_SUCCESS&&r!=XR_ERROR_TIME_INVALID) {if(!XR_FAILED(r))boundary.clear();return fail(r);}
+    }
+    if(game.pose.bPoseIsValid)++validGamePoses;
+    const bool geometryValid=geometry.publish(located,false,false);
+    boundary.setGeometryReady(geometryValid);
+    frameGeometry=located;frameGeometryAvailable=true;
+    frameViews[0]=located.views[0];frameViews[1]=located.views[1];
+    auto snapshot=poses.read();snapshot.sequence=frame.sequence;snapshot.renderTime=render.time;snapshot.gameTime=game.time;
+    snapshot.renderPose=render.pose;snapshot.gamePose=game.pose;snapshot.posesAvailable=true;
+    if(!poses.publish(snapshot)){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
+    out=snapshot;lastCompositorResult=XR_SUCCESS;return vr::VRCompositorError_None;
+  }
+  bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    // Only the already-created LOCAL/seated origin is available in this test.
+    return operation&&generation==compositorGeneration&&origin==vr::TrackingUniverseSeated;
+  }
+  vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
+    if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration)return vr::VRCompositorError_InvalidTexture;
+    const auto r=boundary.submit(eye,texture,bounds,flags);
+    lastCompositorResult=boundary.lastResult();
+    if(r==vr::VRCompositorError_None)++compositorSubmits;
+    return r;
+  }
+  bool clearSubmitted(uint64_t generation) override {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration)return false;
+    boundary.clear();
+    return false; // pending frame closed, but no historical compositor grid
+  }
+  bool handoff(uint64_t generation) override {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||state.frameOpen())return false;
+    ++compositorHandoffs;return true; // the completed pair already ended its frame
+  }
+  XrResult drawDiagnosticEye(unsigned eye,ID3D11Texture2D*& out) {
+    out=nullptr;
+    if(GetCurrentThreadId()!=ownerThread||eye>=2)return XR_ERROR_CALL_ORDER_INVALID;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    return operation?stereo.drawEye(eye,frameViews[eye],out):XR_ERROR_CALL_ORDER_INVALID;
+  }
+  XrResult closeDiagnosticFrame() {
+    if(GetCurrentThreadId()!=ownerThread)return XR_ERROR_CALL_ORDER_INVALID;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    return operation?boundary.clear():XR_ERROR_CALL_ORDER_INVALID;
+  }
   vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
     const auto r=captured.capture(eye,texture,bounds,flags,copyPixels);
@@ -156,6 +243,7 @@ class Host : public SystemSource, public FrameSink {
       if(!gate.canDestroy(runtimeGeneration))return false;
     }
     geometry.retire(geometryGeneration);
+    poses.retire(compositorGeneration);
     captured.shutdown();
     clean=result("destroy_swapchains",stereo.shutdown())&&clean;
     clean=result("destroy_binding",binding.shutdown())&&clean;
@@ -260,23 +348,33 @@ class Host : public SystemSource, public FrameSink {
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
     runtimeGeneration=gate.beginGeneration();
-    return runtimeGeneration!=0;
+    compositorGeneration=poses.begin();
+    return runtimeGeneration!=0&&compositorGeneration!=0;
   }
 };
 void printPose(const char* name,const XrPosef& p) {
   std::printf("%s,position=%.9g/%.9g/%.9g,orientation=%.9g/%.9g/%.9g/%.9g\n",name,
     p.position.x,p.position.y,p.position.z,p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w);
 }
+bool samePose(const vr::TrackedDevicePose_t& a,const vr::TrackedDevicePose_t& b) {
+  return std::memcmp(&a.mDeviceToAbsoluteTracking,&b.mDeviceToAbsoluteTracking,sizeof(a.mDeviceToAbsoluteTracking))==0&&
+    std::memcmp(&a.vVelocity,&b.vVelocity,sizeof(a.vVelocity))==0&&std::memcmp(&a.vAngularVelocity,&b.vAngularVelocity,sizeof(a.vAngularVelocity))==0&&
+    a.eTrackingResult==b.eTrackingResult&&a.bPoseIsValid==b.bPoseIsValid&&a.bDeviceIsConnected==b.bDeviceIsConnected;
+}
 int run(const Options& options) {
   Host host; if(!host.open(options)) return 3;
+  vr::IVRCompositor* compositor=nativeCompositorCaller(&host.compositorInterface);
+  compositor->SetTrackingSpace(vr::TrackingUniverseSeated);
+  if(compositor->GetTrackingSpace()!=vr::TrackingUniverseSeated)return 3;
   const ULONGLONG startup=GetTickCount64(); ULONGLONG started=0,exitRequested=0;
-  uint64_t frames=0,layers=0,empty=0,valid=0,invalid=0,headValid=0;
+  uint64_t frames=0,layers=0,empty=0,valid=0,invalid=0,headValid=0,cachedChecks=0;
   bool stopped=false, failed=false, bootstrapComplete=false; Lifecycle previous=Lifecycle::Uninitialized;
   while(true) {
     auto operation=host.gate.tryEnter(host.runtimeGeneration);
     if(!operation){std::puts("error,runtime_operation_unavailable");failed=true;break;}
     XrResult r=host.state.pollEvents();
     const auto lifecycle=host.state.lifecycle();
+    host.poses.focus(host.compositorGeneration,true,host.state.running()&&!host.state.terminal()&&lifecycle==Lifecycle::Focused);
     if(lifecycle!=previous) {std::printf("lifecycle,%d\n",int(lifecycle));previous=lifecycle;}
     if(XR_FAILED(r)||host.state.terminal()) {result("poll_terminal",r);failed=true;break;}
     if(lifecycle==Lifecycle::Stopping) {
@@ -295,17 +393,25 @@ int run(const Options& options) {
       exitRequested=now;
     }
     if(!host.state.running()) {Sleep(10);continue;}
-    r=host.boundary.waitAndBegin();const Frame frame=host.boundary.frame();
-    if(r!=XR_SUCCESS && r!=XR_FRAME_DISCARDED && r!=XR_SESSION_LOSS_PENDING) {result("wait_begin",r);failed=true;break;}
+    operation=RuntimeGate::Lease{};
+    vr::TrackedDevicePose_t renderPoses[4]{},gamePoses[2]{};
+    const auto waited=compositor->WaitGetPoses(renderPoses,4,gamePoses,2);
+    if(waited!=vr::VRCompositorError_None){std::printf("compositor_wait_failed,vr=%d,xr=%d\n",int(waited),int(host.lastCompositorResult));failed=true;break;}
+    const Frame frame=host.boundary.frame();
+    vr::TrackedDevicePose_t cachedRender[4]{},cachedGame[2]{},singleRender{},singleGame{};
+    const auto waitsBefore=host.compositorWaits;
+    if(compositor->GetLastPoses(cachedRender,4,cachedGame,2)!=vr::VRCompositorError_None||
+       compositor->GetLastPoseForTrackedDeviceIndex(0,&singleRender,&singleGame)!=vr::VRCompositorError_None||
+       host.compositorWaits!=waitsBefore||!samePose(renderPoses[0],cachedRender[0])||!samePose(gamePoses[0],cachedGame[0])||
+       !samePose(singleRender,renderPoses[0])||!samePose(singleGame,gamePoses[0])||
+       renderPoses[1].bDeviceIsConnected||renderPoses[2].bPoseIsValid||renderPoses[3].bDeviceIsConnected||gamePoses[1].bPoseIsValid)
+      {std::puts("error,compositor_pose_cache");failed=true;host.closeDiagnosticFrame();break;}
+    ++cachedChecks;
     ++frames; bool submittedLayer=false;
     bool abortAfterEnd=host.state.terminal();
-    GeometryInput located{};bool haveLocation=false;
+    GeometryInput located=host.frameGeometry;bool haveLocation=host.frameGeometryAvailable;
     if(!exitRequested && !abortAfterEnd) {
-      r=locateGeometry({host.api.locateViews,host.api.locateSpace},host.binding,frame,host.geometryGeneration,host.sizes,located);
-      // An external hard failure retires this owner; do not use possibly lost handles to end a frame.
-      if(XR_FAILED(r)) {result("locateGeometry",r);failed=true;break;}
-      abortAfterEnd=r!=XR_SUCCESS;
-      haveLocation=r==XR_SUCCESS;GeometrySnapshot candidate{};
+      GeometrySnapshot candidate{};
       const bool geometry=haveLocation && makeGeometrySnapshot(located,candidate);
       if(geometry) {
         if(!valid) for(unsigned eye=0;eye<2;++eye) {
@@ -325,17 +431,15 @@ int run(const Options& options) {
       // Complete a zero-layer bootstrap frame before the diagnostic renders.
       // System readers can then consume native geometry before first Submit.
       if(!abortAfterEnd && bootstrapComplete && geometry && frame.shouldRender) {
-        host.frameViews[0]=located.views[0];host.frameViews[1]=located.views[1];
-        host.boundary.setGeometryReady(true);
         // Alternate Submit order each frame; capture pixels before drawing
         // the other eye, then compose the private pair at the second Submit.
         for(unsigned n=0;n<2;++n) {
           const unsigned eye=n ^ unsigned(frames&1);
           ID3D11Texture2D* source=nullptr;
-          r=host.stereo.drawEye(eye,located.views[eye],source);
+          r=host.drawDiagnosticEye(eye,source);
           if(r!=XR_SUCCESS){result("draw_eye",r);failed=true;break;}
           const vr::Texture_t texture{source,vr::API_DirectX,vr::ColorSpace_Gamma};
-          const auto submitted=host.boundary.submit(vr::EVREye(eye),&texture);
+          const auto submitted=compositor->Submit(vr::EVREye(eye),&texture);
           if(submitted!=vr::VRCompositorError_None) {
             std::printf("error,submit_eye,%u,%d,xr=%d\n",eye,int(submitted),int(host.boundary.lastResult()));failed=true;break;
           }
@@ -346,19 +450,19 @@ int run(const Options& options) {
           // refuses further dispatch after an uncertain external XR failure.
           // Device loss instead requires owner destruction without more work.
           if(SUCCEEDED(host.graphics.device()->GetDeviceRemovedReason()))
-            result("close_failed_local_frame",host.boundary.clear());
+            result("close_failed_local_frame",host.closeDiagnosticFrame());
           break;
         }
         submittedLayer=true;
+        compositor->PostPresentHandoff();
       }
     }
-    r=host.boundary.clear();
+    r=host.closeDiagnosticFrame();
     if(!result("xrEndFrame",r)) {failed=true;break;}
     if(submittedLayer) ++layers; else ++empty;
-    operation=RuntimeGate::Lease{};
     if(abortAfterEnd) {std::puts("error,pending_or_external_frame_result");failed=true;break;}
     if(haveLocation) {
-      const bool published=host.geometry.publish(located,false,false);
+      const bool published=host.read().geometryValid;
       if(published&&!bootstrapComplete) {
         const auto snapshot=host.read();vr::IVRSystem* system=&host.systemInterface;
         uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
@@ -374,17 +478,25 @@ int run(const Options& options) {
         std::printf("bootstrap,ready=1,generation=%llu,sequence=%llu,prior_stereo=%llu,size=%ux%u,left_eye_to_head_translation=%.9g/%.9g/%.9g\n",
           (unsigned long long)snapshot.generation,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)layers,width,height,eye.m[0][3],eye.m[1][3],eye.m[2][3]);
         std::printf("system_abi,version=IVRSystem_012,absolute_pose_valid=1,prediction_seconds=0,clock=QPC_to_XrTime,model_bytes=%u,adapter=%d\n",nameLength,snapshot.adapterIndex);
+        const auto poseFrame=host.compositorRead();
+        std::printf("compositor_abi,version=IVRCompositor_014,render_time=%lld,game_time=%lld,period=%lld,render_valid=%u,game_valid=%u,cached_equal=1\n",
+          (long long)poseFrame.renderTime,(long long)poseFrame.gameTime,(long long)frame.predictedDisplayPeriod,
+          unsigned(renderPoses[0].bPoseIsValid),unsigned(gamePoses[0].bPoseIsValid));
       }
     }
   }
   const bool cleanup=host.close();
+  std::printf("compositor_boundary,waits=%llu,submits=%llu,handoffs=%llu,cached_checks=%llu,valid_game_poses=%llu\n",
+    (unsigned long long)host.compositorWaits,(unsigned long long)host.compositorSubmits,(unsigned long long)host.compositorHandoffs,
+    (unsigned long long)cachedChecks,(unsigned long long)host.validGamePoses);
   std::printf("frame_boundary,copied_eyes=%llu,composed_pairs=%llu,alternate_order=1,lifetime_gate=1\n",
     (unsigned long long)host.copiedEyes,(unsigned long long)host.composedPairs);
   std::printf("summary,frames=%llu,stereo=%llu,empty=%llu,valid_views=%llu,invalid_views=%llu,valid_head=%llu,normal_stop=%u,cleanup=%u\n",
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
   const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&
-    host.copiedEyes==layers*2 && host.composedPairs==layers;
+    host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
+    host.compositorWaits==frames&&cachedChecks==frames&&host.compositorHandoffs==layers&&host.validGamePoses;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;
 }
 int selfTest() {

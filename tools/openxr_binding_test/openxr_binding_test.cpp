@@ -22,6 +22,7 @@ struct Fake {
   std::vector<std::string> trace;std::string failure;XrResult result=XR_ERROR_RUNTIME_FAILURE;
   bool live=false,localLive=false,viewLive=false,wrongAdapter=false,wrongLevel=false;
   bool missingSpace=false,grow=false,badCount=false,hugeCount=false,neverFits=false,invalidTracking=false;
+  bool expectVelocity=false,badVelocityChain=false;
   uint32_t viewCount=2;XrTime lastTime=0;unsigned enumCalls=0;
 };
 Fake* fake=nullptr;
@@ -73,10 +74,18 @@ XrResult XRAPI_PTR locateViews(XrSession s,const XrViewLocateInfo* info,XrViewSt
   return XR_SUCCESS;
 }
 XrResult XRAPI_PTR locateSpace(XrSpace from,XrSpace base,XrTime time,XrSpaceLocation* out){
-  check(from==view&&base==local&&time==fake->lastTime&&out->type==XR_TYPE_SPACE_LOCATION&&!out->next,"head shares exact time/base with eye views");
+  check(from==view&&base==local&&time==fake->lastTime&&out->type==XR_TYPE_SPACE_LOCATION&&bool(out->next)==fake->expectVelocity,"head shares exact time/base with eye views");
   const XrResult r=call("locateHead");if(r!=XR_SUCCESS)return r;
   out->locationFlags=fake->invalidTracking?0:XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-  out->pose={{0,0,0,1},{10,20,30}};return XR_SUCCESS;
+  out->pose={{0,0,0,1},{10,20,30}};
+  if(fake->expectVelocity) {
+    auto* velocity=static_cast<XrSpaceVelocity*>(out->next);
+    check(velocity&&velocity->type==XR_TYPE_SPACE_VELOCITY&&!velocity->next,"typed optional head velocity");
+    velocity->velocityFlags=XR_SPACE_VELOCITY_LINEAR_VALID_BIT|XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+    velocity->linearVelocity={1,2,3};velocity->angularVelocity={4,5,6};
+    if(fake->badVelocityChain)velocity->next=out;
+  }
+  return XR_SUCCESS;
 }
 BindingDispatch dispatch(){return {requirements,createSession,destroySession,enumerateSpaces,createSpace,destroySpace};}
 struct Fixture {
@@ -143,6 +152,17 @@ int selfTest(){
     check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,out)==XR_SUCCESS,"geometry located on no-render startup frame");
     check(f.runtime.trace==std::vector<std::string>({"locateViews","locateHead"})&&out.displayTime==123456789&&out.sequence==11&&out.generation==5,"locator does not wait or advance frame");
     check(out.headPose.position.x==10&&out.views[0].pose.position.x==0&&out.views[1].pose.position.x==1,"head is located separately, never eye average");
+    f.runtime.expectVelocity=true;XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};f.runtime.trace.clear();
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,out,&velocity)==XR_SUCCESS&&
+      velocity.linearVelocity.y==2&&velocity.angularVelocity.z==6&&velocity.next==nullptr&&
+      f.runtime.trace==std::vector<std::string>({"locateViews","locateHead"}),"render velocity from same head locate and time");
+    const auto originalVelocity=velocity;const auto originalGeometry=out;f.runtime.badVelocityChain=true;
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,out,&velocity)==XR_ERROR_VALIDATION_FAILURE&&
+      std::memcmp(&velocity,&originalVelocity,sizeof(velocity))==0&&std::memcmp(&out,&originalGeometry,sizeof(out))==0,"malformed velocity chain publishes neither output");
+    f.runtime.badVelocityChain=false;f.runtime.failure="locateHead";f.runtime.result=XR_SESSION_LOSS_PENDING;
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,out,&velocity)==XR_SESSION_LOSS_PENDING&&
+      std::memcmp(&velocity,&originalVelocity,sizeof(velocity))==0,"positive head result leaves velocity unchanged");
+    f.runtime.failure.clear();f.runtime.expectVelocity=false;
     const auto canary=out;
     for(const char* point:{"locateViews","locateHead"})for(XrResult r:{XR_ERROR_SESSION_LOST,XR_SESSION_LOSS_PENDING}){
       f.runtime.failure=point;f.runtime.result=r;f.runtime.trace.clear();
