@@ -9,6 +9,12 @@ movement. Frontier was restored to the exact `cc3d882` DLL pair. The cause
 remains unresolved; the timing implementation is not qualified for promotion.
 See the regression record below.
 
+The rollback also shimmers and blurs during head movement. Both rollback logs
+and installed DLLs match `cc3d882`, and the INI still matches the earlier run.
+Ruled out: the new outer frame instrument as a necessary cause, because the
+symptom persists without that implementation. The report affects scene geometry
+and text, and switching AA off makes the moving image clearer.
+
 ## What the value means
 
 The start marker precedes the first covered call on the bound immediate context
@@ -204,18 +210,34 @@ End. The new context hooks forward the existing commands and the four added
 slots match the SDK. This rules out those direct code couplings, not an
 indirect scheduling or driver interaction.
 
-The next discrimination is the same scene and head movement on the restored
-baseline, with current settings preserved. If the shimmer disappears, isolate
-the new instrument with an enabled/disabled comparison of the same newer binary
-before changing motion math. Disappearance with queries disabled would
-implicate the active query path; persistence would leave the bridge/hooks and
-other differences open. If baseline also shimmers, capture the affected
-scene/AA mode and actual camera, jitter and depth inputs rather than assuming
-this checkpoint introduced it. No rendering-code fix has been made on the
+The rollback did not restore visual quality. The next discrimination uses the
+existing paired eye capture on that baseline: one still-head sample and one
+sample during a slow head turn, in the same stationary cockpit scene with DLSS
+enabled. Paired capture is already the default; no new build or configuration
+edit is needed. The Instruments action "Dump both eyes as seen" collects the
+raw and treated sequences before the later EDVR menu overlay, plus motion
+metadata and first-frame shader inputs.
+
+Check history flags and reset reasons, camera continuity, depth coverage and
+the actual motion texture against displacement measured from raw frames. The
+first-frame motion texture must be aligned to its capture frame; later frames
+have metadata, not a separate captured motion texture. Compare input/output
+crop coordinates at their recorded resolutions. These observations distinguish
+history resets, incorrect reprojection and reconstruction blur; aggregate
+projection counts cannot do so. No rendering-code fix has been made on the
 current evidence.
+
+The existing hardware smoke also passed using the restored graphics DLL and the
+same DLSS runtime in an isolated fixture. NVIDIA's history accumulated across
+evaluations, the motion probe ran successfully, and the shipped motion/jitter
+pairing had the lowest error among the tested conventions. Those synthetic
+results do not establish which projection or pose the game actually consumed.
+They do not rule out game-driven resets or mismatched camera/depth inputs
+during the reported head movement.
 
 The exact retained baseline backups were hash-checked, staged separately from
 the current build outputs, installed through `tools/install_edvr.py`, and
 verified again. Current INI bytes were preserved. Use `--expect-build cc3d882`
 for the next flight and the staged rollback root when verifying the current
-installation. Baseline visual recovery still needs the headset comparison.
+installation. The subsequent headset comparison confirmed that the rollback did
+not recover visual quality.

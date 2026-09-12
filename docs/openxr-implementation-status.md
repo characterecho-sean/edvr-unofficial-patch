@@ -251,3 +251,9 @@ before any speculative rendering fix. The implementation remains on this branch
 and must not advance until this gate is resolved. See the [regression evidence
 and rollback
 record](render-to-submit-gpu-2026-09-12.md#head-movement-regression-and-rollback).
+
+The verified rollback still shimmers and blurs during head movement, on both
+scene geometry and text; AA off is clearer. That rules out the new outer
+instrument as a necessary cause. The current investigation follows temporal
+reconstruction using the existing paired raw/treated eye capture and motion
+inputs. The baseline remains installed while this is resolved.
