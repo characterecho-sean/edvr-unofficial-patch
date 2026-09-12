@@ -362,3 +362,75 @@ original particle replay passes 484,454 checks; the emissive transform
 replay passes 819. NVIDIA TAA/DLAA/DLSS integration smoke passes. The
 optional D3D debug layer remains unavailable on this machine; functional
 GPU output and state restoration are checked explicitly.
+
+## Flight 04:51, remaining pink flicker
+
+Ruled out: adding the 88DCF1164C640EC3 emissive triangle resolves the
+remaining pink flicker. The user still observes it on verified build
+affebe2, capture 045429. The cockpit UI correction is now confirmed by
+the user and should remain intact. Inspect the newly captured triangle
+geometry and its screen position before attributing the fleck to it.
+
+The actual triangle uses instance 568, pool record 148, stride-40 packed
+vertices, indices 0/1/2 and the captured cb0 projection. Replaying it
+through the original 88DCF1164C640EC3 shader places it outside the image
+before and after correction. All 19 frames match the independent root
+translation within 1e-5, with unchanged UVs (857 checks). This rules out
+that triangle as the visible fleck in this capture. Unlike the preceding
+synthetic test, this replay uses the actual triangle and projection.
+
+The single complete 9AEC particle frame also matches the independent
+correction through the original VS (26,394 checks). The other 18
+particle VBs were declined: repeated per-material copies of VB0, already
+present in the frame-local mesh table, consumed the 32 MiB diagnostic
+vertex budget. Flare vertices alone do not make a complete weapon-effect
+frame. Retain that distinction in the reported counts.
+
+Plausible remaining causes and their discriminating evidence:
+
+- Independent point/spot lights (0357BBB2DEE43C1F and 963B52C73B4143AC):
+  a pink contribution appears between the before/after copies of those
+  draws, with nearby light positions still following the original weapon
+  origin.
+- Streak/beam effects (E904D334BC8B11EA and 359BF8FF5CFAA4C3): their
+  independent model/vertex positions project to the fleck, and their
+  individual draw adds it to the colour target.
+- The corrected particle pass: the fleck first appears across its own
+  draw despite a correct transform replay. Inspect depth/material
+  interaction rather than moving the emitter farther.
+
+These are hypotheses, not rendering fixes. Drawstate v6 captures all of
+those vertex layouts, instance streams and constants in the same run. It
+also brackets each candidate draw in the first source frame with a
+native lower-right colour crop up to 1024x1024. The exact draw index,
+before/after phase, crop origin, full target dimensions and original HDR
+format are saved. R11G11B10_FLOAT is the actual 5120x2880 scene target
+in this flight. Crops have a separate 64 MiB limit and explicit
+declines; they are not whole-screen captures. Normal play performs no
+such copies.
+
+Avoid duplicate mesh VB0 payloads when the full frame-local table
+already contains them. Effect input layouts also bound the unused tail
+of known instance/nonindexed streams. Keep original binding offsets,
+indexed windows and all existing caps. These changes recover diagnostic
+space, not rendering performance. The UI and weapon corrections are
+unchanged.
+
+Environment: Valve SteamVR through the OpenVR proxy, reported 103x103
+degree projection, 4404x4348 submitted eyes and 5120x2880 on-foot
+source. The log does not establish the headset model. The capture works
+before AA and does not depend on a DLSS model or compositor reprojection
+mode. Evidence and replays are in build/review_motion/sep12/flight0451/.
+
+Targeted GPU capture and parser tests verify packed HDR bytes before and
+after target mutation, crop coordinates, binding preservation,
+first-frame restriction, budget declines, reset, and backward-compatible
+reading of older drawstate versions. The exporter keeps raw HDR in the
+binary and clips its PNG preview for display; compare raw values for
+attribution.
+
+The full SDK build and NVIDIA DLL smoke checks pass, including 20,924
+UI, 213 holo-motion, 32,899 screen-motion and 524 weapon checks. The
+capture fixture verifies the new writer/parser and exact HDR crop bytes.
+No rendering fix for the remaining flicker is claimed from these tests;
+the additional draw-time evidence still requires a flight.

@@ -36,7 +36,15 @@ public:
     // billboard/flare vertices, not the weapon's t33 instance records.
     // Capture their placement; do not infer attachment from proximity.
     static bool sourceEffect(uint64_t vs) {
-        return vs==0x9AEC596A2B036EA6ull || vs==0x3D05E7CF11AC9BEEull;
+        return vs==0x9AEC596A2B036EA6ull || vs==0x3D05E7CF11AC9BEEull ||
+               vs==0x0357BBB2DEE43C1Full || vs==0x963B52C73B4143ACull ||
+               vs==0xE904D334BC8B11EAull || vs==0x359BF8FF5CFAA4C3ull;
+    }
+    static bool effectImage(uint64_t vs) {
+        // 04:54:29: point/spot lighting, streaks, beams and local particles
+        // are separate from the corrected weapon mesh. Preserve the pixels
+        // each pass adds, without changing or suppressing any of those draws.
+        return sourceEffect(vs) && vs!=0x3D05E7CF11AC9BEEull;
     }
     struct Layout {char semantic[64]{};uint32_t index=0,format=0,slot=0,offset=0,classification=0,step=0;};
     static const GUID& effectLayoutKey() {
@@ -124,6 +132,22 @@ public:
     Texture sourceDepth;
     DXGI_FORMAT sourceDepthFormat=DXGI_FORMAT_UNKNOWN;
     uint32_t sourceFrame=0;
+    struct EffectImage {
+        Texture source,stage;
+        uint32_t draw=0,after=0,x=0,y=0,width=0,height=0,sourceWidth=0,sourceHeight=0,format=0,bytes=0;
+    };
+    std::vector<EffectImage> effectImages;
+    uint32_t effectImageBytes=0,effectImageDeclined=0,pendingEffectImage=UINT32_MAX;
+    static constexpr uint32_t kEffectImageBudget=64*1024*1024;
+
+    void captureEffectEnd(ID3D11DeviceContext* ctx) {
+        const uint32_t before=pendingEffectImage;pendingEffectImage=UINT32_MAX;
+        if(!ctx || before>=effectImages.size())return;
+        // Copy the original target even if a wrapped draw restored bindings.
+        // The index identifies the exact draw, not merely its shader family.
+        const auto& b=effectImages[before];
+        captureEffectImage(ctx,b.source.Get(),static_cast<DXGI_FORMAT>(b.format),b.draw,true);
+    }
 
     // The game may create these before a dump is armed. Retain only this
     // bounded VS set, then write only shaders seen in the requested run.
@@ -170,6 +194,7 @@ public:
     void reset() {
         draws.clear(); surfaces.clear(); dropped = failures = textureBytes = 0;
         firstFrame=vertexBytes=vertexDraws=vertexDeclined=0;
+        effectImages.clear();effectImageBytes=effectImageDeclined=0;pendingEffectImage=UINT32_MAX;
         meshBuffers.clear();meshBytes=meshDeclined=meshDraws=0;
         sourceDepth.Reset();sourceDepthFormat=DXGI_FORMAT_UNKNOWN;sourceFrame=0;
     }
@@ -193,6 +218,7 @@ public:
 
     void captureSourceMesh(ID3D11DeviceContext* ctx,uint32_t frame,uint64_t vs,uint64_t ps,
                            char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
+        pendingEffectImage=UINT32_MAX;
         if(sourceEffect(vs)) {
             capture(ctx,frame,UINT32_MAX-2,vs,ps,kind,count,instances,startInstance,start,base,true);
             return;
@@ -311,6 +337,9 @@ public:
                 auto& s=d.streams[i];s.offset=i==2?ibOffset:offsets[i];s.stride=i==2?(fmt==DXGI_FORMAT_R16_UINT?2u:fmt==DXGI_FORMAT_R32_UINT?4u:0u):strides[i];
                 D3D11_BUFFER_DESC bd{};src->GetDesc(&bd);s.whole=bd.ByteWidth;
                 if(s.offset>=s.whole || !s.stride)continue;
+                // Mesh VB0 is already retained in full by the frame-local
+                // table. Recopying it for every material starved effect VBs.
+                if(mesh && i==0 && d.mesh[2]!=UINT32_MAX)continue;
                 // These watched packed families use VB0 for per-instance
                 // IDs and VB1 for vertices. Shared buffers can place a
                 // six-index sprite megabytes beyond the binding offset.
@@ -327,6 +356,23 @@ public:
                 s.captureOffset=static_cast<uint32_t>(begin);
                 UINT bytes=s.whole-s.captureOffset;if(bytes>256*1024)bytes=256*1024;
                 if(i==2 && indexed && uint64_t(count)*s.stride<bytes)bytes=count*s.stride;
+                if(effect && i<2 && !d.layout.empty()) {
+                    bool used=false,perInstance=true,knownStep=true;uint64_t instanceElements=0;
+                    for(const auto& e:d.layout)if(e.slot==uint32_t(i)) {
+                        used=true;perInstance=perInstance && e.classification==D3D11_INPUT_PER_INSTANCE_DATA;
+                        knownStep=knownStep && e.step>0;
+                        if(e.step) {
+                            const uint64_t end=uint64_t(startInstance)+(uint64_t(instances)+e.step-1)/e.step;
+                            if(end>instanceElements)instanceElements=end;
+                        }
+                    }
+                    // Keep the original binding origin. Only trim its tail
+                    // when the layout/draw proves the last accessed element.
+                    uint64_t elements=0;
+                    if(used && perInstance && knownStep)elements=instanceElements;
+                    else if(used && !perInstance && !indexed)elements=uint64_t(base>0?base:0)+count;
+                    if(elements && elements*s.stride<bytes)bytes=static_cast<UINT>(elements*s.stride);
+                }
                 if(!bytes)continue;
                 if(vertexBytes+bytes>32*1024*1024){++vertexDeclined;continue;}
                 bd.ByteWidth=bytes;bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
@@ -337,6 +383,12 @@ public:
             vertexDraws+=copied?1u:0u;
         }
         draws.push_back(std::move(d));
+        if(effect && effectImage(vs) && frame==firstFrame && rt) {
+            Microsoft::WRL::ComPtr<ID3D11Resource> res;rt->GetResource(&res);Texture tex;
+            D3D11_RENDER_TARGET_VIEW_DESC rd{};rt->GetDesc(&rd);
+            if(rd.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D && rd.Texture2D.MipSlice==0 && SUCCEEDED(res.As(&tex)))
+                pendingEffectImage=captureEffectImage(ctx,tex.Get(),rd.Format,uint32_t(draws.size()-1),false);
+        }
     }
 
     // Called after the ledger's readback grace period. No waits/flushes:
@@ -348,7 +400,7 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(5); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        u32(6); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,
@@ -389,12 +441,41 @@ public:
             u32(b.frame);u32(b.firstDraw);u32(b.bytes);u32(b.stride);
             payload(b.stage.Get(),b.bytes,0,0);
         }
+        u32(uint32_t(effectImages.size()));u32(effectImageDeclined);
+        for(auto& e:effectImages) {
+            u32(e.draw);u32(e.after);u32(e.x);u32(e.y);u32(e.width);u32(e.height);
+            u32(e.sourceWidth);u32(e.sourceHeight);u32(e.format);
+            payload(e.stage.Get(),e.bytes,e.bytes/e.height,e.height);
+        }
         u32(failures);
         ok = !ferror(f) && ok;
         return fclose(f) == 0 && ok;
     }
 
 private:
+    uint32_t captureEffectImage(ID3D11DeviceContext* ctx,ID3D11Texture2D* tex,DXGI_FORMAT format,uint32_t draw,bool after) {
+        D3D11_TEXTURE2D_DESC td{};tex->GetDesc(&td);
+        const uint32_t bpp=format==DXGI_FORMAT_R16G16B16A16_FLOAT?8:
+            (format==DXGI_FORMAT_R11G11B10_FLOAT || format==DXGI_FORMAT_R8G8B8A8_UNORM ||
+             format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)?4:0;
+        EffectImage e;e.source=tex;e.draw=draw;e.after=after?1:0;e.format=format;
+        e.sourceWidth=td.Width;e.sourceHeight=td.Height;
+        // Native pixels at the lower right, where the reported rifle fleck
+        // lies. Store the crop origin; never pass this off as a whole image.
+        e.width=td.Width<1024?td.Width:1024;e.height=td.Height<1024?td.Height:1024;
+        e.x=td.Width-e.width;e.y=td.Height-e.height;e.bytes=e.width*e.height*bpp;
+        if(!bpp || !e.bytes || td.SampleDesc.Count!=1 || td.ArraySize!=1 ||
+           effectImages.size()>=32 || e.bytes>kEffectImageBudget-effectImageBytes) {
+            ++effectImageDeclined;return UINT32_MAX;
+        }
+        td.Width=e.width;td.Height=e.height;td.MipLevels=1;td.Usage=D3D11_USAGE_STAGING;
+        td.BindFlags=td.MiscFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        Microsoft::WRL::ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        if(FAILED(dev->CreateTexture2D(&td,nullptr,&e.stage))){++failures;return UINT32_MAX;}
+        D3D11_BOX box{e.x,e.y,0,e.x+e.width,e.y+e.height,1};
+        ctx->CopySubresourceRegion(e.stage.Get(),0,0,0,0,tex,0,&box);
+        effectImageBytes+=e.bytes;effectImages.push_back(std::move(e));return uint32_t(effectImages.size()-1);
+    }
     static std::mutex& shaderMutex() { static std::mutex m; return m; }
     static std::map<uint64_t, std::vector<uint8_t>>& shaderBytes() {
         static std::map<uint64_t, std::vector<uint8_t>> s; return s;

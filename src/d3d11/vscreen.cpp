@@ -2898,6 +2898,10 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         RealDraw&& draw) {
+    struct EffectCaptureScope {
+        ID3D11DeviceContext* ctx;
+        ~EffectCaptureScope(){if(ctx)objectProbeSourceDrawEnd(ctx);}
+    } effectCaptureScope{objectProbeLedgerActive() && self==g_state->ownerCtx?self:nullptr};
     // Per-draw coverage classification is cleared on every exit, including
     // skips and fixes that draw their own geometry. The original draw keeps
     // its depth state; supported coverage is reissued into private depth below.

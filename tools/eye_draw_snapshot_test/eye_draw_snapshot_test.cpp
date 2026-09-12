@@ -115,6 +115,28 @@ int wmain(int argc, wchar_t** argv) {
     effects.vertexBytes=32*1024*1024;
     effects.captureSourceMesh(ctx.Get(),119,0x9AEC596A2B036EA6ull,0,'X',6,1,0,0,0);
     check(effects.vertexDeclined>0 && effects.draws.size()==5,"effect vertex budget declines explicitly but retains constants");
+    // A real HDR target changed between the two capture boundaries. The
+    // Python fixture checks exact packed pixels after subsequent overwrites.
+    edvr::EyeDrawSnapshot cropSnap;
+    D3D11_TEXTURE2D_DESC cropDesc{};cropDesc.Width=1026;cropDesc.Height=1027;
+    cropDesc.MipLevels=cropDesc.ArraySize=cropDesc.SampleDesc.Count=1;
+    cropDesc.Format=DXGI_FORMAT_R11G11B10_FLOAT;cropDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> cropTarget;hr(dev->CreateTexture2D(&cropDesc,nullptr,&cropTarget));
+    ComPtr<ID3D11RenderTargetView> cropRt;hr(dev->CreateRenderTargetView(cropTarget.Get(),nullptr,&cropRt));
+    ctx->OMSetRenderTargets(1,cropRt.GetAddressOf(),nullptr);
+    const float cropBefore[4]={1,.5f,.25f,1},cropAfter[4]={0,0,1,1},black[4]={};
+    ctx->ClearRenderTargetView(cropRt.Get(),cropBefore);
+    cropSnap.captureSourceMesh(ctx.Get(),400,0x0357BBB2DEE43C1Full,0,'X',14,1,0,0,0);
+    ctx->ClearRenderTargetView(cropRt.Get(),cropAfter);cropSnap.captureEffectEnd(ctx.Get());
+    ctx->ClearRenderTargetView(cropRt.Get(),black);cropSnap.captureEffectEnd(ctx.Get());
+    check(cropSnap.effectImages.size()==2,"one before/after pair per source draw; no stale end capture");
+    ctx->OMGetRenderTargets(1,&boundRt,nullptr);check(boundRt.Get()==cropRt.Get(),"effect crop preserves render target binding");
+    cropSnap.captureSourceMesh(ctx.Get(),401,0x0357BBB2DEE43C1Full,0,'X',14,1,0,0,0);cropSnap.captureEffectEnd(ctx.Get());
+    check(cropSnap.effectImages.size()==2,"effect images restricted to first watched source frame");
+    cropSnap.effectImageBytes=edvr::EyeDrawSnapshot::kEffectImageBudget;
+    cropSnap.captureSourceMesh(ctx.Get(),400,0x359BF8FF5CFAA4C3ull,0,'X',6,1,0,0,0);cropSnap.captureEffectEnd(ctx.Get());
+    check(cropSnap.effectImageDeclined==1,"effect image budget decline visible without unmatched end capture");
+    ctx->OMSetRenderTargets(1,&r,nullptr);
     ID3D11Buffer* noBuffer=nullptr;UINT zero=0;ctx->IASetVertexBuffers(1,1,&noBuffer,&zero,&zero);ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_R16_UINT,0);
     edvr::EyeDrawSnapshot vscreenSnap;
     td.Width=td.Height=8;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
@@ -195,6 +217,7 @@ int wmain(int argc, wchar_t** argv) {
     check(vscreenSnap.write(ctx.Get(),(std::wstring(argv[1])+L".vscreen").c_str()),"on-foot snapshot write");
     check(vscreenSnap.failures==0,"on-foot capture completed without missing copies");
     check(effects.write(ctx.Get(),(std::wstring(argv[1])+L".effects").c_str()) && effects.failures==0,"effect snapshot writes complete GPU copies");
+    check(cropSnap.write(ctx.Get(),(std::wstring(argv[1])+L".crops").c_str()) && cropSnap.failures==0,"effect colour crop write");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));
@@ -221,5 +244,7 @@ int wmain(int argc, wchar_t** argv) {
     snap.capture(ctx.Get(), 103, 6, edvr::EyeDrawSnapshot::kHolo, 0, 'X', 6, 1, 0);
     check(snap.dropped == 1 && snap.draws.size() == edvr::EyeDrawSnapshot::kMaxDraws, "capture cap");
     snap.reset(); check(snap.draws.empty() && snap.surfaces.empty() && !snap.dropped, "reset");
+    cropSnap.reset();check(cropSnap.effectImages.empty() && !cropSnap.effectImageBytes &&
+        !cropSnap.effectImageDeclined && cropSnap.pendingEffectImage==UINT32_MAX,"effect capture reset releases images and pending work");
     std::puts("GPU draw snapshot capture passed");
 }
