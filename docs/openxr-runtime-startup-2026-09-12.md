@@ -146,9 +146,9 @@ without the watchdog firing.
 
 Init completed one zero-layer frame, published geometry on sequence 1 with no
 prior Submit, and exposed all four interfaces. Repeated Init kept token 1 and
-the same Compositor identity. The unknown-interface rejection and second-thread
-cached geometry checks passed before Compositor retrieval. The virtual display
-reported 10848 x 5356.
+the same Compositor identity. The second-thread cached geometry check passed
+before Compositor retrieval; unknown-interface rejection passed afterward. The
+virtual display reported 10848 x 5356.
 
 Both seated resets passed the position/yaw bounds, advanced origin generation
 to 2 then 3, invalidated the caches and produced one event each. Geometry was
