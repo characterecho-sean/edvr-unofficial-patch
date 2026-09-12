@@ -133,3 +133,30 @@ Matched-frame SteamVR correlation and a controlled enabled/disabled overhead
 comparison remain required before treating the local value as qualified. Other
 runtime/headset configurations and complete lifecycle/command coverage remain
 separate Phase 0 gates.
+
+
+## Installed checkpoint
+
+Commit `0ac3095` (`v0.15.1-54-g0ac3095`) was rebuilt from a clean working tree.
+`build/frontier-render-submit-clean-build.log` passed the full suite, including
+599 shared/frame timing checks and all five actual-proxy modes. The isolated
+production WARP smoke passed in `build/render-submit-clean-smoke.log`,
+including black void, temporal history/cuts, supersample and sharpening checks.
+Its log confirms the clean version, LiveCopy and a completed existing
+shared-clock pass sample. NGX/foveation runtime checks remain unavailable on
+WARP.
+
+Both DLLs were installed and independently verified in Frontier at 08:22 local
+on 2026-09-12. Steam was not changed and the game was not launched.
+
+| Payload | Linked stamp | SHA-256 |
+| --- | --- | --- |
+| `d3d11.dll` | `6AA55F6D` | `168425BDAEE2DA1EF174A1069E3D539E100F5CD685F8072FC010E423ED969FAA` |
+| `openvr_api.dll` | `6AA55F75` | `1DBDCB030D962E5E312393138DD54714BCCADAA0BB89897B54A9D19ED97A4D4B` |
+
+The tuned root INI remained byte-identical, SHA-256
+`A32D631834E5C1EEEFAA03367750A7A4211652869EB4976900DC11CF530EC1A9`. There was
+no separate Openvr/win64 INI before or after installation. Previous DLLs were
+retained with suffix `.pre-0ac3095-20260912-082225.bak`. The later
+installation-record commit does not change the installed DLL version; use
+`0ac3095` when verifying the next flight logs.
