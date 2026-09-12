@@ -239,7 +239,7 @@ struct PassParams {
     float   shDir[kObjectShipsMax][4];     // xyz its way (unit), w its tail plane
     float   shParts[kObjectShipsMax * kObjectShipParts][4];   // its parts' positions, shBox0[i].w of them
     float   shRect[kObjectShipsMax][4];    // its box's footprint on the image, pixels
-    float   holoJitter[4];
+    float   holoJitter[4]; // xy raster delta, z consecutive frames, w valid DLSS depth history
 };
 static_assert(sizeof(PassParams) == 6624, "the cbuffer is 414 16-byte rows");
 
@@ -1982,7 +1982,7 @@ bool ensureBiasMask(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
     return maskFormatOk(dev) && makeTex(dev,w,h,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_UNORM,
         D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,&e.dlMask,nullptr,&e.dlMaskUav);
 }
-bool ensureMoverPair(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+bool ensureMoverPair(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h, bool withMask=true) {
     if (!e.dlDepth || e.dlW != w || e.dlH != h) {
         releaseDl(e);
         if (!makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
@@ -2004,8 +2004,11 @@ bool ensureMoverPair(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
             if (e.zPrev) { e.zPrev->Release(); e.zPrev = nullptr; }
             return false;
         }
+        Log::get().note("temporal aa: per-eye depth history ready at %ux%u (%.1f MiB); "
+                        "available for DLSS background occlusion rejection. "
+                        "Depth textures swap without a frame copy.",w,h,double(w)*h*4/1048576.0);
     }
-    if (!e.dlMask && maskFormatOk(dev)) {
+    if (withMask && !e.dlMask && maskFormatOk(dev)) {
         if (!makeTex(dev, w, h, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM,
                      D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                      &e.dlMask, nullptr, &e.dlMaskUav)) {
@@ -3546,12 +3549,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         e.dlH = h;
                         e.dlOutW = oW;
                         e.dlOutH = oH;
-                        if (g_moversOn) ensureMoverPair(dev, e, w, h);
+                        if (haveDepth || g_moversOn) ensureMoverPair(dev, e, w, h, g_moversOn);
                     } else {
                         releaseDl(e);
                     }
-                } else if (made && g_moversOn && !e.zPrev) {
-                    ensureMoverPair(dev, e, w, h);   // the mask switched on under a live set
+                } else if (made && (haveDepth || g_moversOn) && (!e.zPrev || (g_moversOn && !e.dlMask))) {
+                    ensureMoverPair(dev, e, w, h, g_moversOn);   // depth became available under a live set
                 }
                 if (made && setParams(ctx, p)) {
                     // The colour, typed, whichever way the source came.
@@ -3611,8 +3614,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (!uiDepthCoverageMask(w, h, eye, &coverageMask)) coverageMask = nullptr;
                     // Bound for the fold when the mover mask is on, and for
                     // the body path's exclusion whenever that is on.
+                    p.holoJitter[3] = haveDepth && e.zPrevValid && e.zPrevSrv && useTanPrev && haveDelta && p.holoJitter[2] != 0 ? 1.0f : 0.0f;
                     const bool wantUi = coverageMask != nullptr &&
-                                        ((p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f ||
+                                        (p.holoJitter[3] != 0.0f || (p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f ||
                                          p.ships[0] != 0.0f || uiTrack);
                     const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, coverageMask);
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
@@ -3637,7 +3641,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ID3D11ShaderResourceView* srvsM[17] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
-                                                          p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
+                                                          (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
                                                           uiBound ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,
@@ -3809,7 +3813,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (!usedDlaa) {
             if(e.uiResolvedHistory){e.uiHistoryValid=false;e.uiResolvedHistory=false;}
             ID3D11Texture2D* rm = nullptr;
-            const bool uiOwn = (p.tvSt[3] != 0.0f || p.ships[0] != 0.0f || uiTrack) && uiDepthCoverageMask(w, h, eye, &rm) && rm &&
+            const bool uiOwn = (trainedWanted || p.tvSt[3] != 0.0f || p.ships[0] != 0.0f || uiTrack) && uiDepthCoverageMask(w, h, eye, &rm) && rm &&
                                ensureUiMaskSrv(dev, e, rm);
             p.probe[2] = uiOwn ? 1.0f : 0.0f;
             p.probe[3] = uiFlags();
@@ -3871,12 +3875,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                    &e.dlOut, &e.dlOutSrv, &e.dlOutUav);
                     if (made) {
                         e.dlW = w; e.dlH = h; e.dlOutW = foW; e.dlOutH = foH;
-                        if (g_moversOn) ensureMoverPair(dev, e, w, h);
+                        if (haveDepth || g_moversOn) ensureMoverPair(dev, e, w, h, g_moversOn);
                     } else {
                         releaseDl(e);
                     }
-                } else if (made && g_moversOn && !e.zPrev) {
-                    ensureMoverPair(dev, e, w, h);
+                } else if (made && (haveDepth || g_moversOn) && (!e.zPrev || (g_moversOn && !e.dlMask))) {
+                    ensureMoverPair(dev, e, w, h, g_moversOn);
                 }
                 if (made && (!e.foveaOut || e.foveaW != foW || e.foveaH != foH)) {
                     if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
@@ -3911,7 +3915,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         releasePeriph(e);
                     }
                 }
-                if (made && e.outSrv && e.dlOutSrv) {
+                p.holoJitter[3] = haveDepth && e.zPrevValid && e.zPrevSrv && useTanPrev && haveDelta && p.holoJitter[2] != 0 ? 1.0f : 0.0f;
+                if (made && e.outSrv && e.dlOutSrv && setParams(ctx,p)) {
                     // The colour, typed, whichever way the source came (the
                     // full path's copy logic).
                     D3D11_BOX box{};
@@ -3941,7 +3946,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[17] = {inSrv, e.histSrv[readIdx], depthSrv,
-                                                          p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
+                                                          (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,

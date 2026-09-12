@@ -24,7 +24,7 @@ RWTexture2D<float4> N : register(u1);    // the new history
 RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 pixels on a moving ship's path (tier 2, 2026-09-09); 40-45 the ships' claim by reason: 40 in a ship's footprint with a depth and not claimed, 41 of those outside the box at their depth, 42 behind the tail, 43 beyond the parts' reach, 44 the sum over 41 of (the pixel's depth less the box centre's) in decimetres (signed), 45 in a footprint with no depth
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
-Texture2D<float> ZP : register(t3);      // LAST frame's ZC, when the mover mask is on (movers.x)
+Texture2D<float> ZP : register(t3);      // last frame's ZC; movers.x or holoJitter.w validates it
 Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
 Texture3D<float> BG : register(t5);      // the dominant body's occupancy grid over box0..box1 (tier 2), when tvSt.w says the body's path is on
 Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
@@ -101,7 +101,7 @@ cbuffer P : register(b0) {
     float4 shDir[8];    // xyz the way the ship flies (unit, world; zero when unknown), w its tail plane: a point whose dot with xyz is under w is behind the ship -- its plume, which is not the ship's
     float4 shParts[256];   // per ship kObjectShipParts of its parts' positions (xyz, this frame's frame), shBox0[i].w of them: the ship's claim is the space within objects.z (a reach, squared) of one
     float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; empty when a corner is behind the eye), for the claim's counters
-    float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames
+    float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -458,6 +458,24 @@ bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
     if(before.z<=0 || !all(isfinite(before)))return false;
     pp=(before.xy/before.z*float2(.5,-.5)+.5)*r.meta.yz-.5-region.xy+holoJitter.xy-offset;
     zp=before.z;return all(isfinite(pp));
+}
+// A background vector can land on last frame's moving hull. Modern DLSS
+// presets ignore the reactive mask and otherwise carry that bright edge
+// into the sky on each roll. Reject this hidden history explicitly. The
+// three-pixel footprint includes filtered colour at a silhouette; the
+// relative depth margin keeps ordinary surface rounding out of the test.
+bool backgroundHistoryHidden(float2 p,float2 motion,float zraw,float zPred) {
+    if(holoJitter.w==0 || holoJitter.z==0) return false;
+    float2 pp=p+motion-holoJitter.xy; // ZP uses last frame's raw raster
+    if(!all(isfinite(pp)) || any(pp<0) || any(pp>float2(size)-1)) return false;
+    int2 q=int2(round(pp));
+    float nearest=0;
+    [unroll]for(int y=-1;y<=1;++y) [unroll]for(int x=-1;x<=1;++x)
+        nearest=max(nearest,ZP.Load(int3(clamp(q+int2(x,y),int2(0,0),size-1),0))-knobs.x);
+    // Use this pixel's depth validity, not the foreground depth used by
+    // the camera fallback's 3x3 dilation beside the hull.
+    if(zraw<=knobs.x) return nearest>0;
+    return zPred>0 && nearest>knobs.z/zPred*1.03;
 }
 // Exact terrain coverage only. The patch transform is in DirectX view
 // space (+Z forward); the pass's rays use the runtime's -Z convention.
@@ -822,6 +840,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         float2 motion = 0.0;
         float mover = 0.0;
+        bool trackedForeground = false;
         if (dp.z < -1e-6) {
             float xt = dp.x / -dp.z;
             float yt = dp.y / -dp.z;
@@ -878,6 +897,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float2 holoP; float holoZ;
             if(holoPixel(p,0,holoP,holoZ)) {
                 pp=holoP; motion=pp-p; zPred=holoZ;
+                trackedForeground=true;
             }
             // The ships' claim, counted (Stats 40-45, the registration
             // line): a pixel in a ship's footprint the ship did not claim,
@@ -915,18 +935,19 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float2 meshP;float meshZ;
         if(meshPixel(p,0,meshP,meshZ)) {
             motion=meshP-p;zPred=meshZ;
+            trackedForeground=true;
             mover=movers.x!=0 && all(meshP>=0) && all(meshP<float2(size)) ? moverAt(meshP,meshZ,depthN>=6):0;
         }
         if((uint(probe.w+.5)&32u)!=0u) {
             float4 s=Screen.Load(int3(region.xy+int2(p),0));
             if(s.w>0) {
                 motion=s.w!=2?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;
+                trackedForeground=true;
                 // The eye-space prediction above is not source-scene depth.
                 // Do not apply its mover rejection to screen pixels.
                 mover=0;
             }
         }
-        MV[id.xy] = motion;
         // Combine detected UI changes and the optional fixed UI bias.
         // World-mover rejection must not override stable marked UI.
         uint mark = probe.z != 0.0 ? uint(UM.Load(int3(id.xy,0))*255.0+0.5) : 0u;
@@ -934,6 +955,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float ui = (kind == 3u || (uint(probe.w + 0.5) & 1u) != 0u) ? float(mark >> 2u)/63.0 : 0.0;
         float adaptive = adaptiveUiReactive(int2(id.xy), p + motion - holoJitter.xy);
         bool uiHere = kind == 1u || kind == 2u;
+        bool hidden = !trackedForeground && !uiHere && backgroundHistoryHidden(p,motion,zraw,zPred);
+        // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
+        // history lookup is invalidated, as with new source-screen pixels.
+        MV[id.xy] = hidden ? float2(size)*2 : motion;
         MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output

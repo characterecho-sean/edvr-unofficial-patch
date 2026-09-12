@@ -316,6 +316,67 @@ confirmation of the newly covered hull/tip surfaces still requires the
 next flight; the previous build's working frame vectors were not proof
 that these separate surfaces were fixed.
 
+## Follow-up capture, 13:48 flight
+
+Installed `32a6009` is verified. The user reports improvement in
+straight flight, with trails still visible during rolls. Captures
+`135127` and `135134` show the exterior; `135221` and `135230` show the
+cockpit.
+
+- Ruled out: the main hull still lacks exact motion coverage. Exterior
+  captures contain 751,445 and 740,890 eligible pixels. All eleven rigid
+  cockpit records match; the forward tips now have coverage. Saved
+  vectors agree with the exact mesh maps after the raster jitter delta,
+  within half-float rounding.
+- Confirmed: repeated stripes above the left tip in `135230` appear in
+  DLSS output but not its raw input. The tip moves a fraction of a pixel
+  while the adjacent sky's roll vectors move 7–9 pixels per frame. Those
+  sky vectors lead back into the previous hull silhouette.
+- A local NVIDIA preset K replay freezes the captured colour/depth and
+  repeats the measured background vectors, with zero motion on the fixed
+  geometry. It reproduces the stripes. Rejecting history where the
+  reprojected background was occupied removes them; checking the
+  surrounding depth footprint also catches filtered edge colour outside
+  the exact raster coverage.
+- Ruled out: enabling the old reactive mover mask solves this. The
+  replay with bias set on these disocclusions is identical to the
+  baseline; preset K does not consume that input. Dilating the current
+  hull's vectors by one pixel also leaves the stripes.
+
+The correction now rejects hidden background history through an invalid
+DLSS lookup, using consecutive per-eye depth and a jitter-corrected
+previous-raster coordinate. It checks both sky and distant scenery
+behind nearer geometry, with a 3% relative depth margin. UI, source
+screens, exact hull and exact hologram motion retain their own paths.
+Current colour/depth and physical vectors used by diagnostics are not
+changed. The old experimental mover setting remains independent.
+
+The full and foveated DLSS paths retain their previous depth using the
+existing texture swap. This adds one R32_FLOAT surface per eye (about 58
+MiB for both eyes here), with no additional frame copy or draw replay.
+The native TAA path does not enable this DLSS-specific rejection. Reset,
+missing-frame, viewport-size and source-screen changes invalidate the
+carry before it can be read.
+
+The focused GPU gate passes 54,901 checks. New cases run against the
+production source and both shipping MV blobs, covering prior occlusion,
+valid sky, finite background, same/nearer surfaces, jitter, region
+offsets, missing history, out-of-image motion, both UI kinds, source
+screens, exact meshes and holograms. Current depth remains unchanged.
+
+An isolated NVIDIA RTX 5090 benchmark at 2774 by 2740, using the
+captured depth/UI/mesh inputs, measures median MV dispatch time
+increasing from 0.11485 to 0.14019 ms per eye across 40 interleaved
+measurements. This is about 0.051 ms per stereo frame, not a measurement
+of the entire live game frame. Captures, benchmark and replay files
+remain local under `build/review_motion/sep12/flight1348/`. A flight
+must still confirm the visible result during both cockpit rolls and
+exterior maneuvers.
+
+The complete absolute-path worktree build, all regression/configuration
+gates and the NVIDIA DLL smoke test passed. No live INI change is
+needed.
+
 ### Earlier diagnostic validation
 
 The GPU snapshot test and Python reader jointly verify three consecutive
