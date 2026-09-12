@@ -3953,6 +3953,7 @@ void vScreenRefreshConfig() {
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
+    weaponStabilityConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -4987,6 +4988,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
+    weaponStabilityConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);

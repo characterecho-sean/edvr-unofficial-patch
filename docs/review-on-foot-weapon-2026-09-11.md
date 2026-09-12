@@ -207,3 +207,67 @@ passed. On the local RTX 5090, an offline timestamp benchmark of the
 captured 2048-record pool measured 0.0211 ms for both compute passes and
 scoped bindings (three batches of 512 updates). This is an isolated
 steady-state GPU cost, not an in-game total frametime measurement.
+
+## Detached material pieces in the 18:21 captures
+
+The user confirms a18c55d is much smoother but some weapon/tool pieces
+separate while moving. Gfx log `edvr_gfx_20260911_181154.log` matches
+a18c55d. Runs 182106, 182117, 182123, 182127 and 182133 cover the
+pistol, rifle and three tools. All five contain 19 source mesh frames
+with zero capture failures or declines. The attachment correction is
+active; the captured main meshes all satisfy its instance selection.
+
+Confirmed: the material-family allowlist missed five additional source
+passes. Tool components use AACFDCF2FB9AD809; the rifle also uses
+34CCFAAB1EAD90BE, 174E8D76363BE337 and 7F9B650EC1A1E570 for its optical
+pieces. 025B4B9FF54622ED draws additional weapon/tool surfaces. Their
+census instance IDs resolve to the same near-camera attachment records
+as the corrected meshes, using the captured full instance-ID stream and
+pool. For example, the 182133 tool's opaque record 57 also feeds the
+uncorrected AACF 84- and 36-index draws. Rifle optical records
+26/33/81/92/98 are 0.259 m from the arm origin, and record 84 is 0.438 m
+away. All are rigid attachments selected in the private pool; the draw
+allowlist alone prevented those passes from using it.
+
+Recovered the missing original shaders from the installed EffectsBinary
+archives, verifying EDVR's bytecode hash. All five vertex shaders read
+t33 at stride 336, use its primary translation at byte 16 minus b1[275],
+and project through b1[270..273]. They support the existing correction
+directly; no change to its magnitude or attachment detection is needed.
+
+Ruled out: adding a second offset to the late B10B032BDFD46700 UI
+labels. Their records already contain camera-relative placement. After
+transforming them back through the captured source camera, their local
+offset from the corrected tool stays constant within 0.014 mm across the
+first 16 frames (0.252 mm on the animated rifle). Offsetting them again
+would introduce a new separation. Keep the late UI and unrelated
+full-screen triangle passes outside the material extension.
+
+Extended the correction and explicit eye-dump source-mesh capture to all
+five confirmed material families. An offline WARP replay executes each
+original vertex shader against the captured camera, bones and instance
+pool, streaming its position output directly. Its clip-space
+displacement matches the primary attachment correction within 7.5e-8
+across all five shaders. No D3D debug warnings or errors. This verifies
+the material transforms; headset confirmation that all visible pieces
+stay attached is still required.
+
+## Live A/B control
+
+Added `fix.weapon_stability = 1`, exposed as **Weapon stability** under
+**Fixes > The on-foot screen**. It defaults on, including existing INIs
+without the new key. Off immediately bypasses the complete source
+attachment correction; on applies it again using fresh camera/pool data.
+The setting survives leaving and reentering the on-foot screen. Compiled
+shaders and buffers can be reused across a live toggle, but prepared
+corrections and pending status samples cannot. An existing GPU
+initialization failure remains latched until normal resource teardown.
+The setting changes neither AA nor runtime reprojection.
+
+The production-path regression covers live off/on, fresh input after
+reenabling, allocation reuse, setting persistence after inactivity, the
+five added material passes and exclusion of camera-relative GUI. It
+passes 149 checks. The generated menu row is a live Fix toggle, default
+1, in the intended page/group. Full SDK build and the 244-key config
+contract pass. NVIDIA TAA/DLAA/DLSS, foveation and motion-convention
+smoke checks pass.

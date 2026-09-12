@@ -2,6 +2,8 @@
 #include "panel_curve.h"
 struct ID3D11Resource;
 namespace edvr {
+class Config;
+void weaponStabilityConfigure(Config&);
 void weaponStabilityObserveScreen();
 // nullptr invalidates all cached inputs (command-list execution); otherwise
 // only writes to the source instance, bone or camera buffer invalidate them.

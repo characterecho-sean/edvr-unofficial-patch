@@ -3,9 +3,12 @@
 #include <wrl/client.h>
 #include "binding_shadow.h"
 #include "shader_swap.h"
+#include "../common/config.h"
 #include "../common/log.h"
 namespace edvr { namespace {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
+// Configuration survives release of inactive on-foot GPU resources.
+bool g_enabled=true,g_configured=false;
 struct State {
     unsigned frame=0,lastScreen=0,prepared=~0u,bytes=0,pendingFrame=0,nextReport=0;
     bool seen=false,failed=false,pending=false;
@@ -16,7 +19,14 @@ struct State {
 } g;
 bool family(uint64_t vs) {
     return vs==0xF516BF0201303B87ull || vs==0x8B589D25B2A0ADDCull ||
-           vs==0x7B0DC42D383F694Cull || vs==0x114AF608F86D9ED8ull;
+           vs==0x7B0DC42D383F694Cull || vs==0x114AF608F86D9ED8ull ||
+           // Tool material surfaces and rifle optics share the same source
+           // attachment records. Missing these passes separated their pieces
+           // from the corrected opaque mesh (18:21 captures). The late GUI
+           // uses an already camera-relative placement and must stay outside.
+           vs==0xAACFDCF2FB9AD809ull || vs==0x34CCFAAB1EAD90BEull ||
+           vs==0x174E8D76363BE337ull || vs==0x025B4B9FF54622EDull ||
+           vs==0x7F9B650EC1A1E570ull;
 }
 bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11ShaderResourceView* bonesView,
               ID3D11Buffer* pool,ID3D11Buffer* bones,ID3D11Buffer* camera,unsigned bytes) {
@@ -55,9 +65,18 @@ bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11
     g.pool=pool;g.bones=bones;g.camera=camera;g.prepared=g.frame;return true;
 }
 }
+void weaponStabilityConfigure(Config& cfg) {
+    const bool enabled=cfg.getBool("fix.weapon_stability",true);
+    if(g_configured && enabled==g_enabled)return;
+    g_enabled=enabled;g_configured=true;
+    // Keep compiled shaders and screen recognition for a live A/B. Never
+    // reuse a pre-toggle pool or report a pending sample from the old mode.
+    g.prepared=~0u;g.pending=false;g.nextReport=0;
+    Log::get().note("weapon stability: %s (live; independent of AA and runtime reprojection).",enabled?"on":"off");
+}
 void weaponStabilityObserveScreen() {
     if(bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull && bindingShaderHash(BindSlot::Ps)==0xCFE84157BC76E921ull) {
-        if(!g.seen)Log::get().note("weapon stability: on-foot screen observed; waiting for source attachment draws.");
+        if(!g.seen && g_enabled)Log::get().note("weapon stability: on-foot screen observed; waiting for source attachment draws.");
         g.seen=true;g.lastScreen=g.frame;
     }
 }
@@ -66,6 +85,7 @@ void weaponStabilityResourceWritten(ID3D11Resource* resource) {
 }
 bool weaponStabilityDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                          unsigned start,int base,unsigned startInstance,unsigned w,unsigned h) {
+    if(!g_enabled)return false;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs);
     if(!g.seen || g.failed || g.frame-g.lastScreen>2 || !family(vs) || !ctx || !draw || !instances || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
     ResourceInfo rt;if(!bindingResolve(bindingGet(BindSlot::Rtv0),&rt) || !rt.isTexture2D || rt.a!=w || rt.b!=h)return false;

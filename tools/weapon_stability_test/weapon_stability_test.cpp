@@ -19,6 +19,11 @@ ComPtr<ID3DBlob> compile(const char* s,const char* entry){
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+bool testEnabled=true;
+Config& Config::get(){static Config cfg;return cfg;}
+bool Config::getBool(const char* key,bool def) const {
+    check(!strcmp(key,"fix.weapon_stability") && def,"weapon stability config key defaults on");return testEnabled;
+}
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 void* bindingGet(BindSlot s){return s==BindSlot::Rtv0?testRtv:nullptr;}
@@ -80,6 +85,7 @@ struct Harness {
 };
 void selfTest(){
     Harness h;std::vector<Instance> p(256);float b[16][3][4]{};float c[276][4]{};
+    weaponStabilityConfigure(Config::get());
     c[270][0]=c[271][1]=c[272][3]=1;c[273][2]=.025f;c[275][0]=10;c[275][1]=20;c[275][2]=30;
     for(auto& r:p)position(r,100,100,100);
     for(unsigned i:{7u,8u}){b[i][0][0]=b[i][1][1]=b[i][2][2]=1;b[i][1][3]=-1.7f;b[i][2][3]=-.08f;}
@@ -96,6 +102,16 @@ void selfTest(){
     ID3D11ShaderResourceView* sv[]={h.ps.Get(),h.bs.Get()};h.ctx->CSSetShaderResources(0,2,sv);h.ctx->CSSetConstantBuffers(0,1,h.camera.GetAddressOf());
     auto code=compile("[numthreads(1,1,1)]void main(){}","main");ComPtr<ID3D11ComputeShader> old;hr(h.dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&old));h.ctx->CSSetShader(old.Get(),nullptr,0);
     check(h.run() && draws==1 && drawnPool==g.fixedSrv.Get(),"draw reads private corrected pool exactly once");
+    // Separate materials on the same attachment must use the very same pool
+    // as its opaque mesh, without another dispatch or another correction.
+    for(uint64_t vs:{0xAACFDCF2FB9AD809ull,0x34CCFAAB1EAD90BEull,0x174E8D76363BE337ull,0x025B4B9FF54622EDull,0x7F9B650EC1A1E570ull}) {
+        auto* fixed=g.fixed.Get();const unsigned before=draws;testVs=vs;
+        check(h.run() && draws==before+1 && drawnPool==g.fixedSrv.Get() && g.fixed.Get()==fixed,"additional material uses shared corrected pool exactly once");
+    }
+    for(uint64_t vs:{0xB10B032BDFD46700ull,0xC4B4B334B26E81A9ull,0xA888D51024D9798Eull,0xCFCA8FFC6B058630ull,0x88DCF1164C640EC3ull}) {
+        testVs=vs;const unsigned before=draws;check(!h.run() && draws==before,"camera-relative UI and full-screen passes stay original");
+    }
+    testVs=0x8B589D25B2A0ADDCull;
     auto raw=h.read(h.pool.Get()),result=h.read(g.fixed.Get());check(!memcmp(raw.data(),p.data(),raw.size()),"original pool untouched");
     auto expected=p;float dx=c[275][0]-getFloat(p[12],4);for(unsigned i:{12u,90u,52u})setFloat(expected[i],4,getFloat(expected[i],4)+dx);
     check(!memcmp(result.data(),expected.data(),result.size()),"only weapon/arm translation changes; animation and other records byte-identical");
@@ -105,6 +121,15 @@ void selfTest(){
     ID3D11UnorderedAccessView* ru[2]{};h.ctx->CSGetUnorderedAccessViews(0,2,ru);for(int i=0;i<2;++i){check(ru[i]==uavs[i],"CS UAVs restored");ru[i]->Release();}
     ComPtr<ID3D11Buffer> cb;h.ctx->CSGetConstantBuffers(0,1,&cb);check(cb.Get()==h.camera.Get(),"CS CB restored");
     check(h.run() && g.prepared==g.frame,"same frame reuses private pool");weaponStabilityResourceWritten(h.bones.Get());check(g.prepared==~0u,"bone rewrite invalidates cache");check(h.run(),"bone rewrite recovers");
+    auto* compiled=g.find.Get();auto* fixed=g.fixed.Get();const unsigned beforeToggle=draws;
+    weaponStabilityConfigure(Config::get());check(g.prepared==g.frame,"unchanged config preserves prepared pool");
+    testEnabled=false;weaponStabilityConfigure(Config::get());
+    check(!h.run() && draws==beforeToggle && !g.pending && g.prepared==~0u,"live off immediately bypasses correction and clears pending work");
+    c[275][0]+=.05f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,c,0,0);
+    testEnabled=true;weaponStabilityConfigure(Config::get());check(h.run(),"live on resumes without screen rediscovery");
+    check(g.find.Get()==compiled && g.fixed.Get()==fixed,"live toggle retains shader and buffer allocations");
+    result=h.read(g.fixed.Get());
+    check(std::fabs(getFloat(reinterpret_cast<Instance*>(result.data())[52],4)-(getFloat(p[52],4)+c[275][0]-getFloat(p[12],4)))<1e-5,"live on uses current camera rather than cached correction");
     weaponStabilityResourceWritten(h.pool.Get());check(g.prepared==~0u,"instance rewrite invalidates cache");check(h.run(),"instance rewrite recovers");
     c[275][0]+=.1f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,c,0,0);weaponStabilityResourceWritten(h.camera.Get());check(h.run(),"same-buffer camera update regenerates");
     result=h.read(g.fixed.Get());check(reinterpret_cast<Instance*>(result.data())[52].words[0]==0,"rigid skin base preserved");
@@ -121,7 +146,10 @@ void selfTest(){
     testVs=0xEB5234DB6ADB491Dull;check(!h.run(),"other scenery shader families excluded");testVs=0x8B589D25B2A0ADDCull;
     D3D11_VIEWPORT bad{0,0,32,48,0,1};h.ctx->RSSetViewports(1,&bad);check(!h.run(),"partial viewport excluded");bad.Width=64;h.ctx->RSSetViewports(1,&bad);
     for(int i=0;i<3;++i)weaponStabilityFrameBoundary(h.ctx.Get());check(!h.run(),"stale on-foot screen expires");
-    for(int i=0;i<121;++i)weaponStabilityFrameBoundary(h.ctx.Get());check(!g.fixed && !g.seen,"inactive resources released");h.clean();
+    testEnabled=false;weaponStabilityConfigure(Config::get());
+    for(int i=0;i<121;++i)weaponStabilityFrameBoundary(h.ctx.Get());check(!g.fixed && !g.seen,"inactive resources released");
+    h.screen();check(!h.run() && !g.fixed,"off setting survives leaving and reentering on-foot screen");
+    testEnabled=true;weaponStabilityConfigure(Config::get());check(h.run(),"on setting resumes after resource release");h.clean();
 }
 std::vector<unsigned char> file(const std::filesystem::path& p){std::ifstream f(p,std::ios::binary);check(bool(f),"capture input exists");return {std::istreambuf_iterator<char>(f),std::istreambuf_iterator<char>()};}
 void capture(const std::filesystem::path& dir){

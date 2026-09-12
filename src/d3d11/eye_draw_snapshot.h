@@ -39,7 +39,12 @@ public:
         case 0xDE545DC8EE4FBB87ull:case 0x889A5279E68F0672ull:
         case kScene:case 0x154FB5A453F3D2E9ull:
         case 0x8106B439CD518CFCull:case 0x39CC20727A27FD17ull:
-        case 0xA4A19FAF8D08E1D6ull:case 0x114AF608F86D9ED8ull:return true;
+        case 0xA4A19FAF8D08E1D6ull:case 0x114AF608F86D9ED8ull:
+        // Complete the weapon/tool material evidence, including optics and
+        // additional surfaces drawn separately from the opaque mesh.
+        case 0xAACFDCF2FB9AD809ull:case 0x34CCFAAB1EAD90BEull:
+        case 0x174E8D76363BE337ull:case 0x025B4B9FF54622EDull:
+        case 0x7F9B650EC1A1E570ull:return true;
         default:return false;
         }
     }
