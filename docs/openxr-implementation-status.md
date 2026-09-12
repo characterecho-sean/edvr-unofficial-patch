@@ -207,3 +207,14 @@ for caller coverage, inactive-producer recovery, explicit cleanup, desk results
 and the next Frontier check. The render-to-submit frame instrument is still
 inactive. This checkpoint must pass its Frontier regression before broader
 measurement is enabled.
+
+The `cc3d882` Frontier functional check passed: Sean reported normal behavior,
+both logs match the installed checkpoint, the shared clock produced completed
+and nonzero pass samples, LiveCopy remained active, and the 32 captured pairs
+retained the same immediate-context owner and order. F8 was closed and
+reopened, and the exited process had no matching Windows crash/hang event. The
+roughly 4.5-minute run included an initial period dominated by SteamVR pose
+waits, so it is not a controlled performance comparison. Full evidence and
+limits are recorded in the migration document. The next implementation step is
+the guarded render-to-submit span and frame-associated Monitor output; accuracy
+and overhead remain separate gates.

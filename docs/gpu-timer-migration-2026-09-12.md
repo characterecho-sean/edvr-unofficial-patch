@@ -1,7 +1,7 @@
 # Existing GPU timer migration
 
-Status: source review, full paired build and desk checks passed; Frontier
-regression flight pending. This checkpoint converts existing measurements to
+Status: source review, full paired build, desk checks and the initial Frontier
+functional regression passed. This checkpoint converts existing measurements to
 the shared disjoint clock. The render-to-submit frame instrument and OpenXR
 transport remain inactive.
 
@@ -155,3 +155,64 @@ This flight is a functional regression gate for the migration. Matched-frame
 SteamVR correlation, enabled/disabled overhead, frame sequence/age/validity in
 Monitor, the render-to-submit boundary and subsequent OpenXR implementation
 remain separate work.
+
+## Frontier result: cc3d882, 07:12 local
+
+Sean reported that the run seemed normal. Both logs independently matched the
+installed `v0.15.1-51-gcc3d882` build and its recorded link stamps. The session
+spans approximately 4 minutes 33 seconds, from 07:12:09.786 to 07:16:42.647 on
+2026-09-12. This is an initial functional check, shorter than the planned 5-10
+minute session, and not an overhead or accuracy qualification.
+
+| Half | Log | Linked build stamp |
+| --- | --- | --- |
+| Graphics | `edvr_gfx_20260912_071209.log` | `6AA54E5C` |
+| VR | `edvr_vr_20260912_071211.log` | `6AA54E64` |
+
+The configured test remains Pimax through SteamVR; the runtime log identifies
+Valve SteamVR. Creation, shared-clock binding, Present and the captured
+submissions use thread `30288`. The sole sampled immediate context is
+`000002A5AAAF0D88`, and all 16 eye-resource observations match published device
+`000002A5A9E3B7B0`, adapter LUID `00000000:00013F22`, with `2774x2740`
+single-sample, format-27 input textures. DLSS quality/preset K created both eye
+features at `4268x4216` output, matching the recommended size.
+
+The shared-clock bind appears at 07:12:10.064 and its first completed interval
+at 07:12:15.227, with frequency 1,000,000,000. That first duration printed
+`0.0000 ms`; it proves completion, not positive GPU work. Later changing
+door-GPU samples (for example 3.94 ms at 07:12:21.675 and 3.58 ms at
+07:16:39.483) and the menu panel's measured 0.046 ms per eye average, 0.234 ms
+maximum, establish nonzero measurements through the migrated callers. These
+values are existing pass measurements and have not been matched against SteamVR
+frame records.
+
+Both context hooks selected LiveCopy with 96/96 sampled native methods.
+Exposure was confirmed once per eye. On-foot panel/void counters advanced from
+413/414 to 12,165/12,168, with two void clears per measured on-foot frame;
+cockpit-like eye-draw counts reached 682. F8 opened/closed at
+07:14:46.795/47.935 and again at 07:14:49.945/52.280. This exercises reopening
+after a roughly two-second closed interval; it does not independently prove
+that an expired abandoned query existed in the game. That failure path remains
+covered by the desk test.
+
+All 32 complete captured stereo pairs retain wait, left Submit, right Submit,
+Present ordering on the same owner. The bounded samples also contain one Copy
+after final Submit before Present, and six Updates after Present before the
+next wait. These reinforce the render-to-submit boundary limitation; exhausted
+capture budgets still cannot establish full command coverage. All ten VR pacing
+summaries report zero split pairs.
+
+The three embedded temporal shaders were created in 0.165, 0.247 and 0.370 ms,
+totaling 0.782 ms. No shared-clock-unavailable, hook-starvation or exception
+report appeared. Elite was no longer running when checked, and Windows had no
+matching Application Error, WER or Application Hang event in the 07:12-07:19
+window. The user reported normal behavior; the logs do not contain an explicit
+DLL shutdown acknowledgment.
+
+The initial slow period needs context before any performance comparison:
+roughly 13 fps through 07:14:38, with ordinary sampled frames spending about
+70-76 ms in `WaitGetPoses`, followed by roughly 83-90 fps in later gameplay
+windows. A headset-idle explanation was asked about but is not assumed from
+those timings. This run supports the migration's functional gate; it does not
+show unchanged overhead, certify every migrated feature independently, or
+enable the outer frame instrument.
