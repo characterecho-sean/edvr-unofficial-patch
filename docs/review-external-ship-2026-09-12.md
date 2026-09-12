@@ -243,6 +243,79 @@ gates passed as well. The NVIDIA DLL smoke test passed. Logs and local
 original-shader replay assets remain under the ignored
 `build/review_motion/sep12/flight1228/` directory.
 
+## Follow-up capture, 13:18 flight
+
+The installed build is verified as `da4736f`. The user reports no
+visible improvement. Captures `132013` and `132016` are cockpit rolls;
+`132033` is the exterior ship. `131903` is the main menu/hangar.
+
+- Ruled out: an inactive mesh hook or missing GPU history. Both cockpit
+  captures match all four rigid records; their saved DLSS vectors agree
+  with the saved exact mesh mapping after the measured raster jitter
+  delta, within half-float and arithmetic rounding.
+- Ruled out: fixing the two initial shader families covers the exterior
+  hull. Only 950 pixels in `132033` pass matched coverage, final depth
+  and UI checks. The existing coverage is mainly hidden parts, correctly
+  rejected behind nearer hull surfaces.
+- Confirmed coverage gap: the first-eye census draws 249 and 250 render
+  the main hull through previously unsupported vertex shaders
+  `66DE2CADB1F4AE6B` (30,540 indices) and `61AE8EB05FDC18DD` (157,398
+  indices). Both use rigid pool record 204, also used by adjacent
+  supported hull parts. The original shaders use the same packed
+  position, quaternion, pool and scene projection, with different
+  material outputs. Additional `AACFDCF2FB9AD809` opaque material draws
+  also use this transform path.
+
+The correction must extend original-shader coverage to these material
+layouts and validate their actual DXBC, including pixel-stage linkage.
+Increasing the ship-metres cutoff or relaxing final-depth rejection
+would conceal this gap by assigning hidden geometry's motion to other
+surfaces. Cockpit skinned geometry remains a separate limitation; the
+working rigid path does not establish that all cockpit shading is
+temporally stable.
+
+Local evidence is retained under
+`build/review_motion/sep12/flight1318/`; raw captures and game shader
+assets are not distributed.
+
+The user clarified the cockpit report with a screenshot: the two forward
+ship tips trail repeated edges when rolling. The first-eye cockpit
+census also has the missing material families: draws 59/60
+(28,668/38,610 indices) use rigid pool record 115, followed by two
+smaller pairs on records 27 and 3. The large pair shares record 115 with
+the tracked rigid frame. The screenshot's white surfaces have no old
+mesh coverage. This is distinct from the correctly tracked frame and the
+skinned pilot.
+
+Coverage now handles five original output layouts, preserving the
+multi-UV hull's additional registers and the detailed material's two
+integer outputs. Each uses the original VS and the same exact rigid
+transform calculation. Final-depth rejection, UI exclusion and the
+512-instance bound stay in force. The two previously uncaptured hull
+families are included in future explicit draw snapshots.
+
+Validation: all five layouts pass the WARP regression (1,046 checks).
+The expanded local replay runs the three added original DXBC shaders on
+captured packed geometry and pose inputs, alongside the six original
+cases. These added cases isolate shader/layout compatibility; they are
+not a reconstruction of the new hull's complete triangle buffers. Every
+rasterized depth sample receives matching coverage on WARP and NVIDIA
+hardware. Across 240,105 vertex comparisons the maximum motion error is
+0.001979 input pixels on WARP and 0.001658 on hardware.
+
+A separate controlled NVIDIA DLSS K test at 65% input scale checks a
+stationary white hull tip against rolling sky vectors. With correct
+surface motion, it does not reproduce the long trails, and adding the
+experimental depth-rejection mask makes no measurable difference in the
+tail region (maximum 2/255). This does not rule out every disocclusion
+case, but does not justify enabling that broader experimental feature
+for this report. No live INI setting was changed.
+
+The full absolute-path build and NVIDIA DLL smoke test passed. Visual
+confirmation of the newly covered hull/tip surfaces still requires the
+next flight; the previous build's working frame vectors were not proof
+that these separate surfaces were fixed.
+
 ### Earlier diagnostic validation
 
 The GPU snapshot test and Python reader jointly verify three consecutive

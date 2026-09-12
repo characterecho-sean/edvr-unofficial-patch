@@ -36,7 +36,7 @@ float3 turn(float4 q,float3 v) {
         float4 c=float4(scene[270][row],scene[271][row],scene[272][row],scene[273][row]);
         n.clip[r]=float4(dot(c.xyz,x),dot(c.xyz,y),dot(c.xyz,z),dot(c,float4(pos,1)));
     }
-    // These two original shaders have constant reversed clip Z. A skin
+    // These original shaders have constant reversed clip Z. A skin
     // palette changes individual vertices and cannot use a rigid inverse.
     bool valid=p.data[0].x==0 && isfinite(scale) && abs(scale)>1e-8 && abs(dot(q,q)-1)<.002 &&
         all(isfinite(pos)) && all(isfinite(n.clip[0])) && all(isfinite(n.clip[1])) && all(isfinite(n.clip[2])) && scene[273].z>0 &&
@@ -113,5 +113,31 @@ struct FaceInput {
 };
 float2 material(MaterialInput v):SV_Target{return coverage(v.p,v.id.y);}
 float2 face(FaceInput v):SV_Target{return coverage(v.p,v.id);}
+struct MultiUvInput {
+    nointerpolation uint id:__USER_VERTEX_FACEINVARIANT;
+    float3 normal:__USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 tangent:__USER_VERTEX_M_LIGHTINGTANGENT;
+    float4 uv:__USER_VERTEX_M_TEXCOORD;
+    float4 p:SV_Position;
+};
+struct LitMultiUvInput {
+    nointerpolation uint id:__USER_VERTEX_FACEINVARIANT;
+    float3 normal:__USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 position:__USER_VERTEX_M_LIGHTINGPOSITION;
+    float3 tangent:__USER_VERTEX_M_LIGHTINGTANGENT;
+    float4 uv:__USER_VERTEX_M_TEXCOORD;
+    float2 uv2:__USER_VERTEX_M_TEXCOORD2;
+    float4 p:SV_Position;
+};
+struct DetailInput {
+    nointerpolation uint2 id:__USER_VERTEX_FACEINVARIANT;
+    float3 normal:__USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 tangent:__USER_VERTEX_M_LIGHTINGTANGENT;
+    float2 uv:__USER_VERTEX_M_TEXCOORD;
+    float4 p:SV_Position;
+};
+float2 multiUv(MultiUvInput v):SV_Target{return coverage(v.p,v.id);}
+float2 litMultiUv(LitMultiUvInput v):SV_Target{return coverage(v.p,v.id);}
+float2 detail(DetailInput v):SV_Target{return coverage(v.p,v.id.x);}
 )HLSL";
 }

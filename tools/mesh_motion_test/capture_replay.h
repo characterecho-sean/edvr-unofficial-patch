@@ -35,6 +35,14 @@ void replayMeshes(ID3D11Device* dev,ID3D11DeviceContext* ctx,const char* path,bo
             auto current=readBuffer(dev,ctx,positions.Get());
             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);issue(ctx,count,1,0,0,0);meshMotionDraw(ctx,issue,count,1,0,0,0,hash);
             ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx,scene.Get(),views);check(views[1]!=nullptr,"original shader captured");auto record=readBuffer(dev,ctx,eyes[0].history[eyes[0].write].buffer.Get());
+            // Transform-only replay missed material families whose visible
+            // surfaces had no coverage. Compare every original depth sample
+            // with the reissue, including the actual VS-to-PS register link.
+            auto depthPixels=readTexture(dev,ctx,scene.Get()),coverage=readTexture(dev,ctx,eyes[0].coverage.Get());
+            unsigned visible=0,covered=0;
+            for(unsigned i=0;i<W*H;++i)if(depthPixels[i]>0){++visible;covered+=coverage[i*2]==1 && coverage[i*2+1]==depthPixels[i];}
+            std::printf("original raster %u frame %u: %u/%u depth samples covered\n",sample,frame,covered,visible);
+            check(covered==visible,"coverage matches every original raster depth sample");
             if(frame){
                 check(record[59]==1,"original draw transforms matched");double largest=0;unsigned tested=0;
                 for(unsigned i=0;i<count;++i){auto* q=current.data()+i*4;auto* old=previous.data()+i*4;if(q[3]<=.025f || old[3]<=.025f || std::fabs(q[0])>q[3] || std::fabs(q[1])>q[3])continue;

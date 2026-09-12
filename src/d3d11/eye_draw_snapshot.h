@@ -75,6 +75,9 @@ public:
         // Complete the weapon/tool material evidence, including optics and
         // additional surfaces drawn separately from the opaque mesh.
         case 0xAACFDCF2FB9AD809ull:case 0x34CCFAAB1EAD90BEull:
+        // Multi-UV hull materials share the rigid pool transform but have
+        // distinct output registers; retain their draw evidence as well.
+        case 0x61AE8EB05FDC18DDull:case 0x66DE2CADB1F4AE6Bull:
         case 0x174E8D76363BE337ull:case 0x025B4B9FF54622EDull:
         case 0x7F9B650EC1A1E570ull:
         case 0x88DCF1164C640EC3ull:return true;

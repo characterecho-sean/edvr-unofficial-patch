@@ -1,4 +1,4 @@
-// WARP regression of the production terrain history, rasterised coverage
+// WARP regression of the production mesh history, rasterised coverage
 // and temporal consumer. No game/runtime or synchronous render-path readback.
 #include "../../src/d3d11/mesh_motion.cpp"
 #include <d3dcompiler.h>
@@ -106,7 +106,8 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
         ctx->VSSetConstantBuffers(1,1,cb.GetAddressOf());ctx->VSSetShaderResources(33,1,poolView.GetAddressOf());
         ctx->UpdateSubresource(cb.Get(),0,nullptr,sceneData,0,0);ctx->UpdateSubresource(pool.Get(),0,nullptr,poolData,0,0);ctx->UpdateSubresource(iv.Get(),0,nullptr,ids,0,0);
     };
-    auto run=[&](int eye=0,UINT n=1){bind(eye);ctx->ClearDepthStencilView(dsv[eye].Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx.Get(),6,n,0,0,0);meshMotionDraw(ctx.Get(),issue,6,n,0,0,0,materialVs);
+    uint64_t testHash=materialVs;
+    auto run=[&](int eye=0,UINT n=1){bind(eye);ctx->ClearDepthStencilView(dsv[eye].Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx.Get(),6,n,0,0,0);meshMotionDraw(ctx.Get(),issue,6,n,0,0,0,testHash);
         ComPtr<ID3D11PixelShader> after;ctx->PSGetShader(&after,nullptr,nullptr);check(after==ps,"original PS restored");ComPtr<ID3D11DepthStencilView> afterDepth;ctx->OMGetRenderTargets(0,nullptr,&afterDepth);check(afterDepth==dsv[eye],"depth target restored");
         ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx.Get(),scene[eye].Get(),views);check(views[0] && views[1],"mesh views available");return readBuffer(dev.Get(),ctx.Get(),eyes[eye].history[eyes[eye].write].buffer.Get());};
     auto reset=[&](){ctx->ClearState();meshMotionShutdown();std::memset(poolData,0,sizeof(poolData));std::memset(sceneData,0,sizeof(sceneData));std::memset(ids,0,sizeof(ids));sceneData[270][0]=sceneData[271][1]=sceneData[272][3]=1;sceneData[273][2]=.025f;};
@@ -133,6 +134,24 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     reset();pose(1,0);run();meshMotionFrameBoundary(ctx.Get());bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx.Get(),6,1,0,0,0);
     for(unsigned i=0;i<513;++i)meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
     check(eyes[0].history[eyes[0].write].count==512,"record cap bounds excess draws");
+    // Each material uses the original output register order. In particular
+    // the lit multi-UV hull puts SV_POSITION in register 6, not register 4.
+    const char* outputs[]={
+        "uint id:__USER_VERTEX_FACEINVARIANT;float3 normal:__USER_VERTEX_M_LIGHTINGNORMAL;float3 tangent:__USER_VERTEX_M_LIGHTINGTANGENT;float2 uv:__USER_VERTEX_M_TEXCOORD;float4 pos:SV_Position;",
+        "uint id:__USER_VERTEX_FACEINVARIANT;float3 normal:__USER_VERTEX_M_LIGHTINGNORMAL;float3 tangent:__USER_VERTEX_M_LIGHTINGTANGENT;float4 uv:__USER_VERTEX_M_TEXCOORD;float4 pos:SV_Position;",
+        "uint id:__USER_VERTEX_FACEINVARIANT;float3 normal:__USER_VERTEX_M_LIGHTINGNORMAL;float3 position:__USER_VERTEX_M_LIGHTINGPOSITION;float3 tangent:__USER_VERTEX_M_LIGHTINGTANGENT;float4 uv:__USER_VERTEX_M_TEXCOORD;float2 uv2:__USER_VERTEX_M_TEXCOORD2;float4 pos:SV_Position;",
+        "uint2 id:__USER_VERTEX_FACEINVARIANT;float3 normal:__USER_VERTEX_M_LIGHTINGNORMAL;float3 tangent:__USER_VERTEX_M_LIGHTINGTANGENT;float2 uv:__USER_VERTEX_M_TEXCOORD;float4 pos:SV_Position;"};
+    uint64_t hashes[]={faceVs,multiUvVs,litMultiUvVs,detailVs};auto originalVs=vs;
+    for(unsigned i=0;i<4;++i){
+        std::string source=shader;auto from=source.find("struct O{"),to=source.find("};",from);
+        source.replace(from+9,to-from-9,outputs[i]);from=source.find("uint3(0,id.x,0)");source.replace(from,15,i==3?"uint2(id.x,0)":"id.x");
+        auto shaderCode=compile(source.c_str(),"vs_5_0");vs.Reset();hr(dev->CreateVertexShader(shaderCode->GetBufferPointer(),shaderCode->GetBufferSize(),nullptr,&vs));testHash=hashes[i];
+        reset();pose(12,0);run();meshMotionFrameBoundary(ctx.Get());pose(12,.24f);a=run();check(a[59]==1,"material family matches exact rigid motion");
+        auto cov=readTexture(dev.Get(),ctx.Get(),eyes[0].coverage.Get()),dep=readTexture(dev.Get(),ctx.Get(),scene[0].Get());unsigned visible=0,covered=0;
+        for(unsigned p=0;p<W*H;++p)if(dep[p]>0){++visible;covered+=cov[2*p]==1 && cov[2*p+1]==dep[p];}
+        check(visible>0 && visible==covered,"every material raster sample retains its exact visible depth and record ID");
+    }
+    vs=originalVs;testHash=materialVs;
     // The consumer must obey exact scene depth, UI coverage, frame history
     // and raster jitter in both DLSS and native TAA coordinate grids.
     reset();pose(1,0);run();meshMotionFrameBoundary(ctx.Get());pose(1,.02f);a=run();

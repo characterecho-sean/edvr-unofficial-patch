@@ -13,6 +13,12 @@ namespace edvr { namespace mesh_motion_detail {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 constexpr unsigned maxRecords=512,stride=240;
 constexpr uint64_t materialVs=0xEB5234DB6ADB491Dull,faceVs=0xDE545DC8EE4FBB87ull;
+constexpr uint64_t multiUvVs=0x61AE8EB05FDC18DDull,litMultiUvVs=0x66DE2CADB1F4AE6Bull,detailVs=0xAACFDCF2FB9AD809ull;
+enum CoverageKind { Material,Face,MultiUv,LitMultiUv,Detail,CoverageCount };
+CoverageKind coverageKind(uint64_t hash){
+    switch(hash){case materialVs:return Material;case faceVs:return Face;case multiUvVs:return MultiUv;
+    case litMultiUvVs:return LitMultiUv;case detailVs:return Detail;default:return CoverageCount;}
+}
 struct History {
     Ptr<ID3D11Buffer> buffer;
     Ptr<ID3D11ShaderResourceView> srv;
@@ -30,7 +36,7 @@ struct Eye {
 } eyes[2];
 bool enabled=false,failed=false,noted=false,capped=false;
 Ptr<ID3D11ComputeShader> capture,match;
-Ptr<ID3D11PixelShader> material,face;
+Ptr<ID3D11PixelShader> coverageShaders[CoverageCount];
 Ptr<ID3D11Buffer> settings,instances;
 Ptr<ID3D11ShaderResourceView> instanceView;
 Ptr<ID3D11DepthStencilState> depthState;
@@ -59,8 +65,11 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev){
     if(capture)return true;
     capture.Attach(shaderSwapCompileCs(ctx,kMeshMotionHlsl,sizeof(kMeshMotionHlsl)-1,"capture","mesh capture",nullptr,"mesh motion"));
     match.Attach(shaderSwapCompileCs(ctx,kMeshMotionHlsl,sizeof(kMeshMotionHlsl)-1,"match","mesh match",nullptr,"mesh motion"));
-    material.Attach(shaderSwapCompilePs(ctx,kMeshCoverageHlsl,sizeof(kMeshCoverageHlsl)-1,"material","mesh coverage",nullptr,"mesh motion"));
-    face.Attach(shaderSwapCompilePs(ctx,kMeshCoverageHlsl,sizeof(kMeshCoverageHlsl)-1,"face","mesh coverage",nullptr,"mesh motion"));
+    const char* entries[CoverageCount]={"material","face","multiUv","litMultiUv","detail"};
+    for(unsigned i=0;i<CoverageCount;++i){
+        coverageShaders[i].Attach(shaderSwapCompilePs(ctx,kMeshCoverageHlsl,sizeof(kMeshCoverageHlsl)-1,entries[i],"mesh coverage",nullptr,"mesh motion"));
+        if(!coverageShaders[i])return false;
+    }
     D3D11_BUFFER_DESC b{};b.ByteWidth=sizeof(Settings);b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     if(FAILED(dev->CreateBuffer(&b,nullptr,&settings)))return false;
     b.ByteWidth=64*8;b.BindFlags=D3D11_BIND_SHADER_RESOURCE;b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
@@ -68,7 +77,7 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev){
     if(FAILED(dev->CreateBuffer(&b,nullptr,&instances)) || FAILED(dev->CreateShaderResourceView(instances.Get(),&s,&instanceView)))return false;
     D3D11_DEPTH_STENCIL_DESC d{};d.DepthEnable=TRUE;d.DepthFunc=D3D11_COMPARISON_EQUAL;d.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
     D3D11_BLEND_DESC blend{};blend.RenderTarget[0].RenderTargetWriteMask=3;
-    return capture && match && material && face && SUCCEEDED(dev->CreateDepthStencilState(&d,&depthState)) && SUCCEEDED(dev->CreateBlendState(&blend,&blendState));
+    return capture && match && SUCCEEDED(dev->CreateDepthStencilState(&d,&depthState)) && SUCCEEDED(dev->CreateBlendState(&blend,&blendState));
 }
 bool createEye(ID3D11Device* dev,ID3D11Texture2D* source,Eye& e){
     D3D11_TEXTURE2D_DESC td{};source->GetDesc(&td);e=Eye{};e.scene=source;e.width=td.Width;e.height=td.Height;
@@ -84,7 +93,8 @@ void fail(){failed=true;Log::get().note("mesh motion: resource setup failed; exi
 void meshMotionConfigure(bool on){using namespace mesh_motion_detail;if(on!=enabled){meshMotionShutdown();enabled=on;}}
 void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned count,unsigned n,unsigned start,int base,unsigned startInstance,uint64_t hash){
     using namespace mesh_motion_detail;
-    if(!enabled || failed || (hash!=materialVs && hash!=faceVs) || !ctx || !issue || !n || n>64 || !count || count%3 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+    const auto kind=coverageKind(hash);
+    if(!enabled || failed || kind==CoverageCount || !ctx || !issue || !n || n>64 || !count || count%3 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     auto* bound=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!bound)return;
     Ptr<ID3D11Resource> res;bound->GetResource(&res);Ptr<ID3D11Texture2D> scene;if(FAILED(res.As(&scene)) || !depthProbeIsSceneDepth(scene.Get()))return;
     D3D11_TEXTURE2D_DESC td{};scene->GetDesc(&td);if(td.ArraySize!=1 || td.SampleDesc.Count!=1)return;
@@ -132,7 +142,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     Ptr<ID3D11PixelShader> ps;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->PSGetShader(&ps,classes,&nc);
     Ptr<ID3D11Buffer> psCb;Ptr<ID3D11ShaderResourceView> psSrv;ctx->PSGetConstantBuffers(13,1,&psCb);ctx->PSGetShaderResources(15,1,&psSrv);
     vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),originalDepth.Get());ctx->OMSetDepthStencilState(depthState.Get(),0);ctx->OMSetBlendState(blendState.Get(),nullptr,mask);
-    ctx->PSSetShader(hash==materialVs?material.Get():face.Get(),nullptr,0);ctx->PSSetConstantBuffers(13,1,settings.GetAddressOf());ctx->PSSetShaderResources(15,1,now.srv.GetAddressOf());
+    ctx->PSSetShader(coverageShaders[kind].Get(),nullptr,0);ctx->PSSetConstantBuffers(13,1,settings.GetAddressOf());ctx->PSSetShaderResources(15,1,now.srv.GetAddressOf());
     issue(ctx,count,n,start,base,startInstance);
     ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(15,1,&none);
     ctx->PSSetShader(ps.Get(),classes,nc);ctx->PSSetConstantBuffers(13,1,psCb.GetAddressOf());ctx->PSSetShaderResources(15,1,psSrv.GetAddressOf());
@@ -171,7 +181,7 @@ void meshMotionResourceWritten(ID3D11Resource* resource){
     watched.clear();
 }
 void meshMotionShutdown(){
-    using namespace mesh_motion_detail;for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();material.Reset();face.Reset();settings.Reset();instances.Reset();instanceView.Reset();depthState.Reset();blendState.Reset();
+    using namespace mesh_motion_detail;for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();depthState.Reset();blendState.Reset();
     failed=noted=capped=false;drawGpu={};matchGpu={};frames=draws=0;watched.clear();dump.Reset();dumpCount=0;
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene){
