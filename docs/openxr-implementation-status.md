@@ -68,9 +68,12 @@ generation-aware cache. The native diagnostic calls its historical virtual
 wait, cached-pose, Submit and handoff methods. Desktop fixtures cover array
 boundaries, unavailable methods and cache access during a blocked wait. The
 full build passed, including 201 compositor, 173 timed-pose and 470 binding
-checks. Native qualification remains pending; the preceding visual pass does
-not qualify this executable. Startup origins/recenter/events, export lifecycle,
-required compositor features and game integration remain open.
+checks. The `10eb85d` PiOpenXR run passed 1800 wait/cache comparisons, 3596
+Submit calls, 1798 stereo pairs and normal shutdown, with valid gameplay
+predictions and SteamVR absent before and after. The user confirmed both eyes,
+stable head tracking, normal color/clarity and normal exit. Startup
+origins/recenter/events, export lifecycle, required compositor features and
+game integration remain open.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact

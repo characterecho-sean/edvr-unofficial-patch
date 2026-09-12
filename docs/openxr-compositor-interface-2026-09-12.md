@@ -115,13 +115,27 @@ tools run their no-write dry-run and self-test modes in the build. The exact
 source and executable hashes are retained in
 `build/openxr-compositor-validation.json` with the full-build log.
 
-The native run remains pending. The existing copied-eye visual pass belongs to
-the preceding executable and does not qualify the new compositor path. The new
-native receipt must show successful historical calls, equal cached samples,
-distinct prediction timestamps, one wait/cache check per begun frame, two
-submits and one handoff per stereo pair, valid gameplay poses, and normal
-cleanup. Then the user checks both eyes, world stability during head movement,
-color/clarity and normal visible closure.
+The `10eb85d` compositor diagnostic passed its 20-second PiOpenXR run with the
+executable, sources, loader and runtime manifest matched to the full-build
+record. Frontier and SteamVR were absent before and after. Pimax OpenXR 0.1.0
+reported D3D11.1 and two 5424 x 5356 sRGB eye swapchains. The child exited 0
+after approximately 20.39 seconds, without the watchdog firing.
+
+Startup geometry was published on frame 1 before stereo, and the historical
+System query remained valid. The compositor's initial render and gameplay
+timestamps differed by exactly the reported 11,111,128 ns display period; both
+poses were valid. All 1800 waits passed the cached-pose equality check, and all
+1800 gameplay predictions were valid. There were 3596 Submit calls and private
+captures, 1798 stereo pairs and handoffs, two zero-layer frames, 1799 valid
+view/head samples, and no invalid view sample. Normal session stop and resource
+cleanup succeeded. These counters establish execution of the historical
+compositor path; they are not a game performance measurement.
+
+The user confirmed both eyes, world stability during head movement, normal
+color and clarity, and normal visible closure. This completes the native
+functional gate for this standalone compositor checkpoint. The exact receipt
+and output are retained under `build/openxr-native-20260912-160707`, with the
+validation record updated to include the matching counters and confirmation.
 
 ## Remaining integration
 
