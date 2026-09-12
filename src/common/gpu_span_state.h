@@ -1,6 +1,6 @@
 #pragma once
 
-// Desk prototype: CPU policy, not a D3D11 adapter or a shipping measurement.
+// CPU policy for asynchronous frame-associated GPU timestamps.
 // All mutable access belongs to one verified immediate-context thread. The
 // identities passed below must come from the adapter, not from cached guesses.
 // A future pose-wait publisher uses a separate atomic mailbox, never this ring.
@@ -178,7 +178,22 @@ public:
             return close(GpuSpanReason::DriverFailure, now);
         s.ended |= 1u << eye;
         s.activeEye = -1;
-        return s.ended == 3 ? close(GpuSpanReason::Valid, now) : GpuSpanReason::Valid;
+        return GpuSpanReason::Valid;
+    }
+    // Eye intervals cover EDVR work. The outer marker follows the second
+    // submit's final work, which can occur after the eye's own interval ended.
+    GpuSpanReason finishFrame(uint64_t now, const GpuSpanOwner& owner) noexcept {
+        const auto checked = gate(owner);
+        if (checked != GpuSpanReason::Valid) return checked;
+        if (open_ < 0) return GpuSpanReason::NoOpenFrame;
+        const Slot& s = slots_[static_cast<unsigned>(open_)];
+        return close(s.ended == 3 && s.activeEye < 0 ? GpuSpanReason::Valid :
+                     GpuSpanReason::Incomplete, now);
+    }
+    GpuSpanReason invalidateFrame(uint64_t now, const GpuSpanOwner& owner) noexcept {
+        const auto checked = gate(owner);
+        if (checked != GpuSpanReason::Valid) return checked;
+        return open_ < 0 ? GpuSpanReason::NoOpenFrame : close(GpuSpanReason::Incomplete, now);
     }
     unsigned poll(uint64_t now, const GpuSpanOwner& owner, Results& out) noexcept {
         if (!identity(owner)) return 0;

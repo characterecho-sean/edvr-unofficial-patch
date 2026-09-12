@@ -105,8 +105,10 @@ struct Fixture {
         check(state.endEye(first, 2, owner) == R::Valid, "first eye end");
         check(driver.liveOuter >= 0, "first eye leaves outer open");
         check(state.beginEye(1 - first, 3, owner) == R::Valid, "second eye begin");
-        check(state.endEye(1 - first, closed, owner) == R::Valid, "second eye end closes outer");
-        check(driver.liveOuter < 0, "second distinct eye closes outer");
+        check(state.endEye(1 - first, closed, owner) == R::Valid, "second eye end");
+        check(driver.liveOuter >= 0, "second eye leaves outer open for final submit work");
+        check(state.finishFrame(closed, owner) == R::Valid, "finish complete stereo frame");
+        check(driver.liveOuter < 0, "explicit final boundary closes outer");
     }
 };
 
@@ -179,6 +181,7 @@ static void failures() {
         if (r == R::Valid) r = f.state.endEye(0, 2, owner);
         if (r == R::Valid) r = f.state.beginEye(1, 3, owner);
         if (r == R::Valid) r = f.state.endEye(1, 4, owner);
+        if (r == R::Valid) r = f.state.finishFrame(4, owner);
         check(r == R::DriverFailure && f.driver.ends == 1 && f.driver.liveOuter < 0,
               "every timestamp failure attempts outer closure once");
         f.driver.pending = false;
@@ -213,6 +216,36 @@ static void failures() {
     check(poll.state.poll(10, owner, poll.results) == 1 && poll.results[0].reason == R::DriverFailure,
           "GetData failure retires explicitly");
 }
+static void finalBoundary() {
+    Fixture f;
+    check(f.state.beginFrame(1, 101, 0, owner) == R::Valid, "final boundary frame");
+    check(f.state.beginEye(0, 1, owner) == R::Valid && f.state.endEye(0, 2, owner) == R::Valid &&
+          f.state.beginEye(1, 3, owner) == R::Valid && f.state.endEye(1, 4, owner) == R::Valid,
+          "both EDVR intervals complete before final submit");
+    f.driver.pending = false;
+    check(f.state.poll(4, owner, f.results) == 0, "complete eyes are not a closed frame");
+    f.driver.tick += 100; // Simulated runtime/final-copy work outside EDVR intervals.
+    check(f.state.finishFrame(5, owner) == R::Valid &&
+          f.state.finishFrame(5, owner) == R::NoOpenFrame, "finish closes exactly once");
+    check(f.state.poll(6, owner, f.results) == 1 && f.results[0].outerMs == 160 &&
+          f.results[0].leftMs == 12 && f.results[0].rightMs == 18,
+          "post-eye work extends only the outer interval");
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        Fixture partial;
+        check(partial.state.beginFrame(1, 1, 0, owner) == R::Valid, "early finish frame");
+        if (mode) check(partial.state.beginEye(0, 1, owner) == R::Valid, "early finish eye");
+        if (mode == 2) check(partial.state.endEye(0, 2, owner) == R::Valid, "one complete eye");
+        check(partial.state.finishFrame(3, owner) == R::Incomplete, "unfinished stereo pair invalid");
+        partial.driver.pending = false;
+        check(partial.state.poll(4, owner, partial.results) == 1 &&
+              partial.results[0].reason == R::Incomplete && partial.results[0].outerMs == 0,
+              "early final boundary never publishes a valid duration");
+    }
+    Fixture rejected;
+    check(rejected.state.beginFrame(1, 1, 0, owner) == R::Valid &&
+          rejected.state.invalidateFrame(1, owner) == R::Incomplete,
+          "rejected submit can explicitly invalidate the open span");
+}
 static void pressureAndOwner() {
     Fixture f;
     for (uint64_t i = 1; i <= 8; ++i) f.pair(i, static_cast<unsigned>(i % 2), 100);
@@ -242,6 +275,8 @@ static void pressureAndOwner() {
         check(wrong.state.beginFrame(1,1,0,bad) == R::WrongOwner &&
               wrong.state.beginEye(0,0,bad) == R::WrongOwner &&
               wrong.state.endEye(0,0,bad) == R::WrongOwner &&
+              wrong.state.finishFrame(0,bad) == R::WrongOwner &&
+              wrong.state.invalidateFrame(0,bad) == R::WrongOwner &&
               wrong.state.poll(0,bad,wrong.results) == 0 && !wrong.state.shutdown(0,bad) &&
               wrong.driver.calls == calls, "wrong owner cannot access driver through any entry");
         wrong.pair(1);
@@ -257,7 +292,7 @@ static void pressureAndOwner() {
 }
 int main(int argc, char** argv) {
     check(argc == 2 && std::strcmp(argv[1], "--self-test") == 0, "expected --self-test");
-    validAndReuse(); pairing(); failures(); pressureAndOwner();
+    validAndReuse(); pairing(); failures(); finalBoundary(); pressureAndOwner();
     std::printf("PASS: %u GPU span CPU policy and command-driven fake-driver checks (no GPU measurement).\n", checks);
     return 0;
 }

@@ -134,4 +134,26 @@ Before treating Phase 0 as complete, still collect and review:
    source/validity changes. The OpenXR backend, transport parity, field
    qualification and retirement proposal follow those gates.
 
+The CPU policy now separates `endEye` from `finishFrame`: both EDVR eye
+intervals can end before the outer marker is placed after final submit work.
+Explicit rejection or an early final boundary produces an incomplete sample.
+The updated command-derived tests also prove that extra work after the eye
+intervals extends only the outer duration. The full build passed with 2,465 CPU
+policy assertions; that count includes repeated driver/resource checks, not
+2,465 independent scenarios.
+
+The first real D3D11 adapter and shared-clock drafts failed review and runtime
+tests. They were moved out of the source tree to an ignored local draft
+directory and are not linked into either DLL. They require a fresh reviewed
+implementation: partial-issued timestamp handling, actual OS-thread ownership,
+COM/module lifetime and meaningful controlled workloads remain mandatory. The
+integration audit also found disjoint clocks in the temporal, sharpening,
+supersample, DLAA, menu and sampled-draw instruments; sharing only the Monitor
+door clock would not resolve the overlap risk.
+
+New GPU work is paused while the reported crash is addressed. The later Windows
+crash-record findings in `openxr-flight-2026-09-11.md` qualify the earlier
+normal-rendering report: the repeat capture passed its bounded ordering gate,
+but its process aborted in a menu-worker exit destructor.
+
 No configuration key or existing feature has been retired.
