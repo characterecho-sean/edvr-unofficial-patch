@@ -63,8 +63,18 @@ here.
   boundary, while camera records describe the rendering interval.
   Combining consecutive boundary pools with those cameras leaves
   residual translations ranging from centimetres to 17.77 metres in this
-  run, despite the stable raw hull. These sources cannot validate a
-  draw-time hull correction.
+  run, despite the stable raw hull. They must not be combined by nominal
+  frame number.
+
+A follow-up offset test resolves that timing discrepancy: use the pool
+pair one frame later than the camera interval. For representative hull
+record 4, all fourteen tested displacement residuals then fall between
+0.00012 and 0.00090 metres. This confirms that the hull travels with
+this camera and that the boundary ledger is offset; it is not evidence
+of erratic ship movement. It still does not supply the missing hull draw
+constants, geometry or animated part transforms. The additional
+draw-time capture is for that remaining gap, not because aligned pool
+data is inherently unusable.
 
 The desired correction uses actual hull transforms and visible geometry,
 including external-camera movement relative to the ship. Substituting
