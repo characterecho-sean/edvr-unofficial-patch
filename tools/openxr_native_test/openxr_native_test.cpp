@@ -15,6 +15,9 @@
 #include "../../src/openxr/openvr_system.h"
 #include "../../src/openxr/system_publication.h"
 #include "../../src/openxr/head_locator.h"
+#include "../../src/openxr/runtime_gate.h"
+#include "../../src/openxr/frame_boundary.h"
+#include "../../src/openxr/eye_capture.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -95,22 +98,40 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
-class Host : public SystemSource {
+class Host : public SystemSource, public FrameSink {
  public:
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
+  EyeCapture captured;
+  FrameBoundary boundary{state,*this};
+  RuntimeGate gate; uint64_t runtimeGeneration=0;
+  XrView frameViews[2]{};
+  uint64_t copiedEyes=0, composedPairs=0;
   SystemPublication geometry; uint64_t geometryGeneration=0;
   OpenVRSystem systemInterface{*this};
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
   bool clean=true;
+  vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
+    const auto r=captured.capture(eye,texture,bounds,flags,copyPixels);
+    if(r==vr::VRCompositorError_None && copyPixels)++copiedEyes;
+    return r;
+  }
+  XrResult compose(XrCompositionLayerProjection& layer) override {
+    const auto r=stereo.renderCaptured(frameViews,local,captured,layer);
+    if(r==XR_SUCCESS)++composedPairs;
+    return r;
+  }
   SystemRead read() const override {return geometry.read();}
   bool locateHead(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,vr::TrackedDevicePose_t& out) override {
-    // This diagnostic only exercises callers on its existing frame owner.
-    // The future game backend must marshal/protect lifetime across threads.
-    if(GetCurrentThreadId()!=ownerThread||generation!=geometryGeneration||!read().connected||
+    // Cached reads need no operation lease. Handle-using calls fail promptly
+    // while another operation is in flight or shutdown has been requested.
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=geometryGeneration||!read().connected||
        !state.running()||state.terminal()||origin!=vr::TrackingUniverseSeated)return false;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,prediction,head,&lastHeadTime,counterNow);
@@ -128,7 +149,14 @@ class Host : public SystemSource {
   void unsupported(unsigned slot) noexcept override {std::printf("system_unavailable,slot=%u\n",slot);}
   ~Host() {close();}
   bool close() {
+    if(runtimeGeneration) {
+      gate.requestStop(runtimeGeneration);
+      // The diagnostic joins all operations before destruction. A future
+      // multi-thread host must defer its own lifetime too until this succeeds.
+      if(!gate.canDestroy(runtimeGeneration))return false;
+    }
     geometry.retire(geometryGeneration);
+    captured.shutdown();
     clean=result("destroy_swapchains",stereo.shutdown())&&clean;
     clean=result("destroy_binding",binding.shutdown())&&clean;
     view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
@@ -136,6 +164,10 @@ class Host : public SystemSource {
     graphics.reset();
     if(instance && api.destroyInstance) {clean=result("xrDestroyInstance",api.destroyInstance(instance))&&clean;instance=XR_NULL_HANDLE;}
     if(api.module) {FreeLibrary(api.module);api.module=nullptr;}
+    if(runtimeGeneration) {
+      clean=gate.finishGeneration(runtimeGeneration)&&clean;
+      runtimeGeneration=0;
+    }
     return clean;
   }
   bool open(const Options& options) {
@@ -224,8 +256,11 @@ class Host : public SystemSource {
     geometryGeneration=geometry.begin(metadata);
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
     if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes))) return false;
+    if(FAILED(captured.initialize(graphics.device())))return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
-    return result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE));
+    if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
+    runtimeGeneration=gate.beginGeneration();
+    return runtimeGeneration!=0;
   }
 };
 void printPose(const char* name,const XrPosef& p) {
@@ -238,6 +273,8 @@ int run(const Options& options) {
   uint64_t frames=0,layers=0,empty=0,valid=0,invalid=0,headValid=0;
   bool stopped=false, failed=false, bootstrapComplete=false; Lifecycle previous=Lifecycle::Uninitialized;
   while(true) {
+    auto operation=host.gate.tryEnter(host.runtimeGeneration);
+    if(!operation){std::puts("error,runtime_operation_unavailable");failed=true;break;}
     XrResult r=host.state.pollEvents();
     const auto lifecycle=host.state.lifecycle();
     if(lifecycle!=previous) {std::printf("lifecycle,%d\n",int(lifecycle));previous=lifecycle;}
@@ -258,10 +295,9 @@ int run(const Options& options) {
       exitRequested=now;
     }
     if(!host.state.running()) {Sleep(10);continue;}
-    Frame frame; r=host.state.waitAndBegin(frame);
+    r=host.boundary.waitAndBegin();const Frame frame=host.boundary.frame();
     if(r!=XR_SUCCESS && r!=XR_FRAME_DISCARDED && r!=XR_SESSION_LOSS_PENDING) {result("wait_begin",r);failed=true;break;}
-    ++frames; XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-    const XrCompositionLayerBaseHeader* layerHeader=nullptr;
+    ++frames; bool submittedLayer=false;
     bool abortAfterEnd=host.state.terminal();
     GeometryInput located{};bool haveLocation=false;
     if(!exitRequested && !abortAfterEnd) {
@@ -289,16 +325,37 @@ int run(const Options& options) {
       // Complete a zero-layer bootstrap frame before the diagnostic renders.
       // System readers can then consume native geometry before first Submit.
       if(!abortAfterEnd && bootstrapComplete && geometry && frame.shouldRender) {
-        r=host.stereo.render(located.views,host.local,layer);
-        if(XR_FAILED(r)) {result("stereo_render",r);failed=true;break;}
-        if(r!=XR_SUCCESS) {result("stereo_render",r);abortAfterEnd=true;}
-        else layerHeader=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
+        host.frameViews[0]=located.views[0];host.frameViews[1]=located.views[1];
+        host.boundary.setGeometryReady(true);
+        // Alternate Submit order each frame; capture pixels before drawing
+        // the other eye, then compose the private pair at the second Submit.
+        for(unsigned n=0;n<2;++n) {
+          const unsigned eye=n ^ unsigned(frames&1);
+          ID3D11Texture2D* source=nullptr;
+          r=host.stereo.drawEye(eye,located.views[eye],source);
+          if(r!=XR_SUCCESS){result("draw_eye",r);failed=true;break;}
+          const vr::Texture_t texture{source,vr::API_DirectX,vr::ColorSpace_Gamma};
+          const auto submitted=host.boundary.submit(vr::EVREye(eye),&texture);
+          if(submitted!=vr::VRCompositorError_None) {
+            std::printf("error,submit_eye,%u,%d,xr=%d\n",eye,int(submitted),int(host.boundary.lastResult()));failed=true;break;
+          }
+        }
+        if(failed) {
+          // A rejected texture or local offscreen allocation failure still
+          // leaves a valid session's frame to close. The boundary itself
+          // refuses further dispatch after an uncertain external XR failure.
+          // Device loss instead requires owner destruction without more work.
+          if(SUCCEEDED(host.graphics.device()->GetDeviceRemovedReason()))
+            result("close_failed_local_frame",host.boundary.clear());
+          break;
+        }
+        submittedLayer=true;
       }
     }
-    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=layerHeader?1:0;end.layers=layerHeader?&layerHeader:nullptr;
-    r=host.state.end(frame,end);
+    r=host.boundary.clear();
     if(!result("xrEndFrame",r)) {failed=true;break;}
-    if(layerHeader) ++layers; else ++empty;
+    if(submittedLayer) ++layers; else ++empty;
+    operation=RuntimeGate::Lease{};
     if(abortAfterEnd) {std::puts("error,pending_or_external_frame_result");failed=true;break;}
     if(haveLocation) {
       const bool published=host.geometry.publish(located,false,false);
@@ -321,10 +378,13 @@ int run(const Options& options) {
     }
   }
   const bool cleanup=host.close();
+  std::printf("frame_boundary,copied_eyes=%llu,composed_pairs=%llu,alternate_order=1,lifetime_gate=1\n",
+    (unsigned long long)host.copiedEyes,(unsigned long long)host.composedPairs);
   std::printf("summary,frames=%llu,stereo=%llu,empty=%llu,valid_views=%llu,invalid_views=%llu,valid_head=%llu,normal_stop=%u,cleanup=%u\n",
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
-  const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete;
+  const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&
+    host.copiedEyes==layers*2 && host.composedPairs==layers;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;
 }
 int selfTest() {

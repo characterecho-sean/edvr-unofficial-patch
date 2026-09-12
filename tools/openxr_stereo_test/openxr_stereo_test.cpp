@@ -116,6 +116,107 @@ void checkRayPixel(uint32_t pixel,unsigned x,unsigned y,double headX,double yaw,
   const unsigned expected[]={encode(r),encode(g),encode(b),255};
   for(unsigned i=0;i<4;++i)check(std::abs(int((pixel>>(i*8))&255)-int(expected[i]))<=3,"independent transformed ray color");
 }
+
+ComPtr<ID3D11Texture2D> pattern(Fixture& f,bool bgra) {
+  D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=4;d.MipLevels=d.ArraySize=1;
+  d.Format=bgra?DXGI_FORMAT_B8G8R8A8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;d.SampleDesc.Count=1;
+  d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+  uint32_t pixels[16]{};
+  const uint32_t rgba[]={0xff0000ff,0xff00ff00,0xffff0000,0xff808080};
+  for(unsigned y=0;y<4;++y)for(unsigned x=0;x<4;++x) {
+    auto color=rgba[(y/2)*2+x/2];
+    if(bgra)color=(color&0xff00ff00)|((color&255)<<16)|((color>>16)&255);
+    pixels[y*4+x]=color;
+  }
+  D3D11_SUBRESOURCE_DATA data{pixels,16,0};ComPtr<ID3D11Texture2D> texture;
+  check(SUCCEEDED(f.runtime.device->CreateTexture2D(&d,&data,&texture)),"pattern texture");return texture;
+}
+void pixelNear(uint32_t actual,uint32_t expected,const char* name) {
+  bool match=true;for(unsigned c=0;c<4;++c)match=match&&std::abs(int((actual>>(8*c))&255)-int((expected>>(8*c))&255))<=2;
+  check(match,name);
+}
+void capturedSelfTest() {
+  for(bool unorm:{false,true})for(bool bgra:{false,true}) {
+    Fixture f;f.runtime.unorm=unorm;check(f.init()==XR_SUCCESS,"captured initialize");
+    EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"captured owner");
+    for(auto color:{vr::ColorSpace_Auto,vr::ColorSpace_Gamma,vr::ColorSpace_Linear})
+      for(unsigned crop=0;crop<3;++crop) {
+        auto source=pattern(f,bgra);if(!source)return;
+        const vr::Texture_t texture{source.Get(),vr::API_DirectX,color};
+        const vr::VRTextureBounds_t bounds[]={{0,0,1,1},{0,0,.5f,1},{.5f,1,0,0}};
+        for(auto eye:{vr::Eye_Right,vr::Eye_Left})
+          check(capture.capture(eye,&texture,&bounds[crop])==vr::VRCompositorError_None,"pattern capture");
+        const uint32_t overwritten[16]{};
+        f.runtime.context->UpdateSubresource(source.Get(),0,nullptr,overwritten,16,0);
+        // Wrong inherited state must not disable the standalone diagnostic pass.
+        D3D11_BLEND_DESC blend{};ComPtr<ID3D11BlendState> noWrites;
+        check(SUCCEEDED(f.runtime.device->CreateBlendState(&blend,&noWrites)),"no write blend");
+        f.runtime.context->OMSetBlendState(noWrites.Get(),nullptr,~0u);
+        D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_WIREFRAME;rd.CullMode=D3D11_CULL_FRONT;
+        ComPtr<ID3D11RasterizerState> wrongRaster;check(SUCCEEDED(f.runtime.device->CreateRasterizerState(&rd,&wrongRaster)),"wrong raster");
+        f.runtime.context->RSSetState(wrongRaster.Get());
+        XrCompositionLayerProjection layer{};f.runtime.trace.clear();
+        const unsigned image=f.runtime.eyes[0].calls%2;
+        check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_SUCCESS,"captured shader path");
+        check(f.runtime.trace==std::vector<std::string>({"A0","W0","R0","A1","W1","R1"}),"captured image order");
+        for(unsigned eye=0;eye<2;++eye)for(unsigned y:{16u,111u})for(unsigned x:{16u,111u,127u}) {
+          unsigned quadrant=0;
+          if(crop==0)quadrant=(y>64?2:0)+(x>64?1:0);
+          if(crop==1)quadrant=y>64?2:0;
+          if(crop==2)quadrant=y>64?0:2;
+          const unsigned gray=color==vr::ColorSpace_Linear?encode(128.0/255):128;
+          const uint32_t expected[]={0xff0000ff,0xff00ff00,0xffff0000,0xff000000|gray|(gray<<8)|(gray<<16)};
+          pixelNear(f.pixel(eye,image,x,y),expected[quadrant],"RGBA/BGRA, crop/flip, gamma/linear and crop edge");
+        }
+      }
+    capture.reset();f.runtime.trace.clear();XrCompositionLayerProjection layer{};
+    check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_ERROR_VALIDATION_FAILURE&&f.runtime.trace.empty(),"missing pair no acquire");
+    auto source=pattern(f,false);vr::Texture_t t{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    check(capture.capture(vr::Eye_Left,&t)==vr::VRCompositorError_None,"left only");
+    check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_ERROR_VALIDATION_FAILURE&&f.runtime.trace.empty(),"missing right no acquire");
+    check(capture.capture(vr::Eye_Right,&t)==vr::VRCompositorError_None,"right for validation");
+    XrView invalid[2]={f.views[0],f.views[1]};invalid[1].pose.orientation.w=2;
+    check(f.renderer.renderCaptured(invalid,space,capture,layer)==XR_ERROR_VALIDATION_FAILURE&&f.runtime.trace.empty(),"invalid second view no acquire");
+    check(f.renderer.renderCaptured(f.views,XR_NULL_HANDLE,capture,layer)==XR_ERROR_HANDLE_INVALID&&f.runtime.trace.empty(),"invalid space no acquire");
+  }
+  for(bool unorm:{false,true}) {
+    Fixture f;f.runtime.unorm=unorm;check(f.init()==XR_SUCCESS,"offscreen fixture");
+    f.views[0].pose.position.x=.2f;f.views[1].pose.orientation={0,float(std::sin(.1)),0,float(std::cos(.1))};
+    XrCompositionLayerProjection layer{};check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"direct reference scene");
+    uint32_t reference[2]={f.pixel(0,0,58,59),f.pixel(1,0,77,59)};
+    EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"offscreen capture owner");
+    for(unsigned eye=0;eye<2;++eye) {
+      ID3D11Texture2D* source=nullptr;const auto trace=f.runtime.trace;
+      check(f.renderer.drawEye(eye,f.views[eye],source)==XR_SUCCESS&&source&&f.runtime.trace==trace,"offscreen draw has no XR calls");
+      vr::Texture_t t{source,vr::API_DirectX,vr::ColorSpace_Gamma};
+      check(capture.capture(vr::EVREye(eye),&t)==vr::VRCompositorError_None,"offscreen eye copied");
+    }
+    check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_SUCCESS,"offscreen pair composed");
+    pixelNear(f.pixel(0,1,58,59),reference[0],"offscreen translated view matches direct scene");
+    pixelNear(f.pixel(1,1,77,59),reference[1],"offscreen rotated view matches direct scene");
+    for(auto& v:f.views){v.pose.position.x=0;v.pose.orientation={0,0,0,1};v.fov={float(std::atan(-.8)),float(std::atan(1.2)),float(std::atan(1.0)),float(std::atan(-.7))};}
+    for(unsigned eye=0;eye<2;++eye) {
+      ID3D11Texture2D* source=nullptr;check(f.renderer.drawEye(eye,f.views[eye],source)==XR_SUCCESS,"asymmetric offscreen draw");
+      vr::Texture_t t{source,vr::API_DirectX,vr::ColorSpace_Gamma};
+      check(capture.capture(vr::EVREye(eye),&t)==vr::VRCompositorError_None,"asymmetric capture");
+    }
+    check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_SUCCESS,"asymmetric captured pair");
+    checkRayPixel(f.pixel(0,0,51,67),51,67,0,0,-.8,1.2,1,-.7);
+  }
+  for(const char* point:{"A0","W0","R0","A1","W1","R1"})for(XrResult error:{XR_ERROR_RUNTIME_FAILURE,XR_SESSION_LOSS_PENDING,XR_TIMEOUT_EXPIRED}) {
+    if(error==XR_TIMEOUT_EXPIRED&&point[0]!='W')continue;
+    Fixture f;check(f.init()==XR_SUCCESS,"captured failure fixture");EyeCapture capture;
+    check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"captured failure owner");
+    auto source=pattern(f,false);vr::Texture_t t{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    check(capture.capture(vr::Eye_Left,&t)==vr::VRCompositorError_None&&capture.capture(vr::Eye_Right,&t)==vr::VRCompositorError_None,"failure fixture captures");
+    f.runtime.failure=point;f.runtime.error=error;f.runtime.trace.clear();XrCompositionLayerProjection layer{};
+    check(f.renderer.renderCaptured(f.views,space,capture,layer)==error&&!layer.views&&!layer.viewCount,"captured failure never publishes partial pair");
+    const auto trace=f.runtime.trace;
+    check(!trace.empty()&&trace.back()==point,"captured failure stops exact operation");
+    check(f.renderer.renderCaptured(f.views,space,capture,layer)==error&&f.runtime.trace==trace,"captured failure blocks retry");
+    if(point[0]=='W')check(f.pixel(point[1]-'0',0,0,0)==0xffff00ff,"unwaited captured target untouched");
+  }
+}
 int selfTest(){
   for(bool unorm:{false,true}){
     Fixture f;f.runtime.unorm=unorm;f.runtime.grow=true;check(f.init()==XR_SUCCESS,"initialize actual swapchains/RTVs/shaders");
@@ -169,6 +270,7 @@ int selfTest(){
   }
   {Fixture f;check(f.init()==XR_SUCCESS,"cleanup error fixture");f.runtime.failure="D0";
     check(f.renderer.shutdown()==XR_ERROR_RUNTIME_FAILURE&&f.runtime.destroys==2,"cleanup error reported, second chain attempted");}
+  capturedSelfTest();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
 }

@@ -10,6 +10,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include <wrl/client.h>
+#include "eye_capture.h"
 #include <vector>
 
 namespace edvr::openxr {
@@ -38,6 +39,9 @@ class D3D11Stereo final {
   XrResult initialize(const StereoDispatch&, XrSession, ID3D11Device*,
                       const XrViewConfigurationView (&)[2]);
   XrResult render(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
+  XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
+  XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
+                          XrCompositionLayerProjection&);
   XrResult shutdown();
   int64_t format() const { return format_; }
 
@@ -46,6 +50,8 @@ class D3D11Stereo final {
     XrSwapchain swapchain = XR_NULL_HANDLE;
     std::vector<ID3D11Texture2D*> images;
     std::vector<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>> rtvs;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> diagnosticTexture;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> diagnosticRtv;
     uint32_t width = 0, height = 0;
   } eyes_[2];
   XrCompositionLayerProjectionView layerViews_[2]{};
@@ -60,6 +66,10 @@ class D3D11Stereo final {
   Microsoft::WRL::ComPtr<ID3D11Buffer> constants_;
   Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizer_;
   Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_;
+  Microsoft::WRL::ComPtr<ID3D11VertexShader> blitVertexShader_;
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> blitPixelShader_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> blitConstants_;
+  Microsoft::WRL::ComPtr<ID3D11SamplerState> blitSampler_;
   int64_t format_ = 0;
   bool ready_ = false;
   XrResult lastResult_ = XR_SUCCESS;

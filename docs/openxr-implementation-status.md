@@ -50,6 +50,15 @@ submissions and normal shutdown with SteamVR absent before and after. The user
 confirmed both eyes, stable tracking during head movement and normal exit.
 Frontier integration remains separate.
 
+The next [eye-capture and frame-ownership
+checkpoint](openxr-frame-boundary-2026-09-12.md) connects Submit-style pairing,
+private per-eye copies and a runtime operation lifetime gate to the standalone
+diagnostic. It adds desktop coverage for copy isolation, bounds/color
+conversion, incomplete frames and shutdown during a blocked wait. The revised
+PiOpenXR visual gate is pending. This is still preparation for the owned
+compositor ABI and game feature integration; no shipping discovery or Frontier
+installation changes are made.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;
