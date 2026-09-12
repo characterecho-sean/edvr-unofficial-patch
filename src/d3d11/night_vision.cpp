@@ -2,6 +2,8 @@
 #include "night_vision_shader.h"
 #include <d3d11.h>
 #include <wrl/client.h>
+#include <algorithm>
+#include <cmath>
 #include "binding_shadow.h"
 #include "shader_swap.h"
 #include "vscreen.h"
@@ -10,8 +12,11 @@
 namespace edvr { namespace {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 bool enabled=true,configured=false;
+float brightness=2.0f;
 struct State {
     Ptr<ID3D11PixelShader> shader,saved;
+    Ptr<ID3D11Buffer> control,savedControl;
+    float uploadedBrightness=-1;
     Ptr<ID3D11ComputeShader> classify;
     Ptr<ID3D11Texture2D> exterior;
     Ptr<ID3D11ShaderResourceView> exteriorView,savedExterior;
@@ -80,8 +85,11 @@ bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
 }
 void nightVisionConfigure(Config& cfg){
     bool on=cfg.getBool("fix.night_vision_stability",true);
-    if(!configured || on!=enabled)Log::get().note("night vision stability: %s; depth-geometry outlines, neutral terrain brightness up to 2x, cockpit/body exclusion, no surface fill, radial pulse. AA-independent, live A/B.",on?"on":"off (original shader)");
-    configured=true;enabled=on;
+    float gain=cfg.getFloat("advanced.night_vision_brightness",2.0f);
+    if(!std::isfinite(gain))gain=2.0f;
+    gain=(std::max)(1.0f,(std::min)(gain,16.0f));
+    if(!configured || on!=enabled || gain!=brightness)Log::get().note("night vision stability: %s; depth-geometry outlines, neutral terrain brightness up to %.2fx, cockpit/body exclusion, no surface fill, radial pulse. AA-independent, live A/B.",on?"on":"off (original shader)",gain);
+    configured=true;enabled=on;brightness=gain;
 }
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances){
     return enabled && !state.failed && kind=='X' && count==240 && instances==1 &&
@@ -148,15 +156,30 @@ void nightVisionBegin(ID3D11DeviceContext* ctx){
         }
     }
     if(!exteriorMask(ctx,w,h))return;
+    if(!state.control){
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        D3D11_BUFFER_DESC controlDesc{};controlDesc.ByteWidth=16;controlDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        if(FAILED(dev->CreateBuffer(&controlDesc,nullptr,&state.control))){
+            state.failed=true;Log::get().note("night vision stability: control buffer creation failed; retaining original draw.");return;
+        }
+    }
+    // Upload only on creation or a live setting change. Keep the game's
+    // constants intact; this private slot is restored after the draw.
+    if(state.uploadedBrightness!=brightness){
+        const float value[4]={brightness,0,0,0};ctx->UpdateSubresource(state.control.Get(),0,nullptr,value,0,0);
+        state.uploadedBrightness=brightness;
+    }
+    ctx->PSGetConstantBuffers(3,1,&state.savedControl);ctx->PSSetConstantBuffers(3,1,state.control.GetAddressOf());
     ctx->PSGetShaderResources(5,1,&state.savedExterior);ctx->PSSetShaderResources(5,1,state.exteriorView.GetAddressOf());
     state.count=256;ctx->PSGetShader(&state.saved,state.classes,&state.count);
     state.savedBlend=original;for(UINT i=0;i<4;++i)state.blendFactors[i]=factors[i];state.sampleMask=mask;
     ctx->OMSetBlendState(state.blend.Get(),factors,mask);
     ctx->PSSetShader(state.shader.Get(),nullptr,0);state.engaged=true;
-    if(!state.noted){state.noted=true;Log::get().note("night vision stability: engaged at %ux%u; geometry contours and neutral terrain gain 2, cockpit/body and contour-footprint exclusion, R8 GPU mask; original PS/blend restored after each matched draw.",w,h);}
+    if(!state.noted){state.noted=true;Log::get().note("night vision stability: engaged at %ux%u; geometry contours and neutral terrain gain %.2f, cockpit/body and contour-footprint exclusion, R8 GPU mask; original PS/blend restored after each matched draw.",w,h,brightness);}
 }
 void nightVisionEnd(ID3D11DeviceContext* ctx){
     if(!state.engaged)return;
+    ctx->PSSetConstantBuffers(3,1,state.savedControl.GetAddressOf());state.savedControl.Reset();
     ctx->PSSetShaderResources(5,1,state.savedExterior.GetAddressOf());state.savedExterior.Reset();
     ctx->PSSetShader(state.saved.Get(),state.classes,state.count);state.saved.Reset();
     ctx->OMSetBlendState(state.savedBlend.Get(),state.blendFactors,state.sampleMask);state.savedBlend.Reset();

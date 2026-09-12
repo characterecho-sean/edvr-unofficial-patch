@@ -19,6 +19,7 @@ RWTexture2D<float> Outside:register(u0);
 constexpr char kNightVisionPs[]=R"HLSL(
 cbuffer Camera:register(b1){float4 c[333];}
 cbuffer Night:register(b2){float4 n[12];}
+cbuffer NightControl:register(b3){float4 edvrNight;}
 Texture2D<float4> Exposure:register(t0);
 Texture2D<float> Depth:register(t1);
 Texture2D<float4> Normals:register(t2);
@@ -185,7 +186,7 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
     // Lift contour radiance without thickening its footprint. Keep opacity,
     // footprint and the original stencil writes intact; do not darken the
     // underlying terrain by increasing blend alpha or add a surface fill.
-    if(geometry)radiance*=2;
+    if(geometry)radiance*=edvrNight.x;
 #endif
 #if EDVR_NIGHT_STOCK
     return float4(radiance,saturate(alpha));
@@ -197,7 +198,7 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
     // is already exposed, so the Exposure texture must not be applied again.
     float amount=geometry && n[6].z>0 && d>0 && d>=n[7].x && d<=n[7].y?
         saturate(mask*nearFade*fade*n[0].w)*outside:0;
-    o.scene=(1-saturate(alpha))*(1+amount);
+    o.scene=(1-saturate(alpha))*(1+(edvrNight.x-1)*amount);
     return o;
 #endif
 }

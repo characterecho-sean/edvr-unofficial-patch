@@ -1059,3 +1059,44 @@ brightness still need a headset check.
 The full build, all regression gates and NVIDIA DLL smoke pass. The menu
 and installer schemas both expose Realistic nightvision while retaining
 the existing saved key and default.
+
+
+### Flight 10:22: stale installation; live brightness control
+
+The user reports improved weapon behaviour, remaining green body
+outlines and trails when pitching down, and requests adjustable
+night-vision brightness. Verify-first identifies the installed build as
+a1d91b1 (v0.15.1-45), not the pushed 22a0527 (v0.15.1-46). The previous
+turn could not install because Elite was still running. The sanctioned
+installer's verify-only also confirms both DLL hashes are old. The
+10:22:50 log explicitly engages the old 1.25-gain shader, and still logs
+repeated weapon mesh identity. The user-observed weapon improvement is
+not evidence that the new matching code ran.
+
+Ruled out: this flight disproves the new bit-16 cockpit/body exclusion
+or its edge-footprint correction. Neither was in the running DLL. Retain
+the already-tested correction and install it before further motion
+changes.
+
+Add advanced.night_vision_brightness as a live Advanced menu control
+named Night vision brightness, range 1.0 to 16.0, default 2.0. This
+scales both existing exterior terrain RGB and contour radiance,
+retaining texture, original contour alpha and cockpit/body exclusion. It
+applies only with Realistic nightvision enabled. A value of 1 removes
+the extra brightness lift; 4 gives the user a useful brighter
+comparison. Invalid nonfinite values fall back to 2; other out-of-range
+values clamp. A private 16-byte PS constant buffer updates only on
+creation or a setting change; original slot 3 is restored after each
+draw. No additional rendering pass, surface copy, shader recompilation
+or CPU readback is required for adjustment.
+
+Validation: 214940 NVIDIA GPU checks pass. They cover live brightness
+changes, default compatibility, neutral RGB scaling, retained texture
+contrast and alpha, contour gain, minimum/maximum values, nonfinite
+settings, cockpit exclusion even at maximum brightness, original PS
+constant-buffer restoration and the unchanged original shader with the
+fix off.
+
+Full build, all regression gates and NVIDIA DLL smoke pass. The
+generated menu row is a live Advanced numeric setting with the
+documented bounds.

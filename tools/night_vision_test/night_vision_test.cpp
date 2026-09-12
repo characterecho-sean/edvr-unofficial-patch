@@ -9,6 +9,7 @@
 #include <cmath>
 #include <vector>
 #include <string>
+#include <limits>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
 void check(bool b,const char* why){++checks;if(!b){std::printf("FAIL: %s\n",why);std::exit(1);}}
@@ -18,9 +19,11 @@ ComPtr<ID3DBlob> compile(const char* s,const char* entry,const char* profile,con
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+float testBrightness=2.0f;
 bool testOn=true,testFail=false;uint64_t testVs=0xFCF7BD2896751D96ull,testPs=0xF786D34B5E118D5Eull;
 Config& Config::get(){static Config c;return c;}
 bool Config::getBool(const char* key,bool def)const{check(!strcmp(key,"fix.night_vision_stability")&&def,"live key defaults on");return testOn;}
+float Config::getFloat(const char* key,float def)const{check(!strcmp(key,"advanced.night_vision_brightness")&&def==2.0f,"brightness key and default");return testBrightness;}
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:testPs;}
 ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro*,const char*){
@@ -95,7 +98,9 @@ struct Rig {
         ctx->UpdateSubresource(camera.Get(),0,nullptr,c,0,0);ctx->UpdateSubresource(settings.Get(),0,nullptr,n,0,0);
         ctx->UpdateSubresource(target.Get(),0,nullptr,scene.data(),64*16,0);
         ComPtr<ID3D11BlendState> beforeBlend;FLOAT beforeFactors[4];UINT beforeMask;ctx->OMGetBlendState(&beforeBlend,beforeFactors,&beforeMask);
+        ComPtr<ID3D11Buffer> beforeControl;ctx->PSGetConstantBuffers(3,1,&beforeControl);
         if(fix)nightVisionBegin(ctx.Get());ctx->Draw(3,0);if(fix)nightVisionEnd(ctx.Get());
+        ComPtr<ID3D11Buffer> afterControl;ctx->PSGetConstantBuffers(3,1,&afterControl);check(afterControl==beforeControl,"original PS constant buffer 3 restored");
         ComPtr<ID3D11PixelShader> ps;ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==stock.Get(),"original PS restored");
         ComPtr<ID3D11BlendState> afterBlend;FLOAT afterFactors[4];UINT afterMask;ctx->OMGetBlendState(&afterBlend,afterFactors,&afterMask);
         check(afterBlend==beforeBlend && !memcmp(beforeFactors,afterFactors,sizeof(beforeFactors)) && beforeMask==afterMask,"original blend, factors and sample mask restored");
@@ -230,4 +235,28 @@ void geometryTest(){
     fixed=r.draw(true);check(fixed==r.scene,"zero effect mask leaves original scene intact");
     r.clean();
 }
-int main(int argc,char** argv){if(argc!=2||strcmp(argv[1],"--self-test")){std::puts("Usage: night_vision_test --self-test");return 2;}test();geometryTest();std::printf("PASS: night vision (%u checks)\n",checks);}
+void brightnessTest(){
+    Rig r;r.n[11][0]=0;r.n[10][1]=0;r.n[5][3]=r.n[7][1]=1000000;
+    r.ctx->PSSetConstantBuffers(3,1,r.camera.GetAddressOf());
+    for(unsigned i=0;i<64*64;++i){r.scene[i*4]=.002f;r.scene[i*4+1]=i%2?.008f:.004f;r.scene[i*4+2]=.006f;r.scene[i*4+3]=.375f;}
+    for(float value:{1.f,2.f,4.f,16.f,-2.f,100.f,std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity()}){
+        testBrightness=value;nightVisionConfigure(Config::get());
+        const float gain=std::isfinite(value)?(std::max)(1.f,(std::min)(16.f,value)):2.f;
+        auto out=r.draw(true);const float scale=1+(gain-1)*(1-400.f/1000000);
+        for(unsigned i=0;i<64*64;++i){
+            for(unsigned c=0;c<3;++c)check(std::isfinite(out[i*4+c]) && std::fabs(out[i*4+c]-r.scene[i*4+c]*scale)<1e-6,"live brightness is bounded and preserves texture/hue");
+            check(out[i*4+3]==r.scene[i*4+3],"brightness preserves target alpha");
+        }
+    }
+    testBrightness=16;nightVisionConfigure(Config::get());r.setStencil(std::vector<unsigned>(64*64,16));
+    auto out=r.draw(true);check(out==r.scene,"maximum brightness never illuminates excluded body");
+    r.setStencil(std::vector<unsigned>(64*64,5));r.scene.assign(64*64*4,0);r.n[11][0]=40;
+    std::vector<float> plane(64*64);for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)plane[y*64+x]=x<32?100.f:300.f;
+    r.ctx->UpdateSubresource(r.depth.Get(),0,nullptr,plane.data(),64*4,0);
+    testBrightness=2;nightVisionConfigure(Config::get());auto baseline=r.draw(true);
+    testBrightness=4;nightVisionConfigure(Config::get());out=r.draw(true);
+    const unsigned edge=(32*64+31)*4+1;check(baseline[edge]>.1f && std::fabs(out[edge]-2*baseline[edge])<1e-5,"brightness also scales contour radiance");
+    testOn=false;nightVisionConfigure(Config::get());check(r.draw(true)==r.draw(false),"brightness has no effect with Realistic nightvision off");
+    testBrightness=2;testOn=true;nightVisionConfigure(Config::get());r.clean();
+}
+int main(int argc,char** argv){if(argc!=2||strcmp(argv[1],"--self-test")){std::puts("Usage: night_vision_test --self-test");return 2;}test();geometryTest();brightnessTest();std::printf("PASS: night vision (%u checks)\n",checks);}
