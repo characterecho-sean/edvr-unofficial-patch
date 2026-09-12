@@ -17,6 +17,12 @@ ComPtr<ID3DBlob> compile(const char* s,const char* profile,const char* entry="ma
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+ID3D11ShaderResourceView* testWeaponMotion=nullptr;
+void weaponMotionConfigure(bool){}
+void weaponMotionSource(ID3D11Texture2D*){}
+ID3D11ShaderResourceView* weaponMotionView(){return testWeaponMotion;}
+void weaponMotionFrameBoundary(){}
+void weaponMotionShutdown(){}
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 std::string Config::getString(const char*,const char*)const{return "dlss";}
@@ -153,6 +159,11 @@ int main(int argc,char** argv){
     {
         td.Format=DXGI_FORMAT_R32G8X24_TYPELESS;td.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
         depth.Reset();ds.Reset();hr(dev->CreateTexture2D(&td,nullptr,&depth));dd.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;hr(dev->CreateDepthStencilView(depth.Get(),&dd,&ds));
+        auto motionDesc=td;motionDesc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;motionDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        std::vector<float> motion(W*H*4);for(UINT i=0;i<W*H;++i){motion[i*4]=2;motion[i*4+2]=.0025f;motion[i*4+3]=1;}
+        D3D11_SUBRESOURCE_DATA mi{};mi.pSysMem=motion.data();mi.SysMemPitch=W*16;
+        ComPtr<ID3D11Texture2D> mt;ComPtr<ID3D11ShaderResourceView> mv;hr(dev->CreateTexture2D(&motionDesc,&mi,&mt));hr(dev->CreateShaderResourceView(mt.Get(),nullptr,&mv));
+        testWeaponMotion=mv.Get();
         for(int pass=0;pass<4;++pass){
             screenMotionFrameBoundary();source[275][0]+=.1f;sourceDraw();
             check(bool(g.stencilSrv),"stencil SRV created from source depth");
@@ -163,13 +174,16 @@ int main(int argc,char** argv){
             ctx->OMSetRenderTargets(0,nullptr,nullptr);ctx->PSSetShaderResources(11,1,csrv.GetAddressOf());
             screenDraw(0);screenDraw(1);
             ComPtr<ID3D11ShaderResourceView> restored;ctx->PSGetShaderResources(11,1,&restored);check(restored.Get()==csrv.Get(),"original stencil-slot binding restored");
-            for(auto& e:g.eyes){auto a=read(dev.Get(),ctx.Get(),e.map.Get());for(UINT i=0;i<W*H;++i){
+            for(auto& e:g.eyes){auto a=read(dev.Get(),ctx.Get(),e.map.Get());UINT valid=0;for(UINT i=0;i<W*H;++i){
                 if(a[i*4+3]!=1)continue;
-                check(std::fabs(a[i*4]-(pass==3?8:pass==1||pass==2?.32f:0))<.001f,"first-person motion follows screen; Off and scenery retain world motion");
-            }}
+                ++valid;
+                check(std::fabs(a[i*4]-(pass==3?10:pass==1||pass==2?.32f:2))<.001f,"animated weapon motion composes with screen; Off and scenery retain world motion");
+            }check(pass==0 || valid>W*H/2,"weapon vectors actually reach both eye maps");}
             ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(11,1,&none);
         }
         // Keep default fixture path unchanged, including missing-stencil fallback.
+        testWeaponMotion=nullptr;screenMotionFrameBoundary();sourceDraw();ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_STENCIL,1,20);screenDraw(0);
+        auto rejected=read(dev.Get(),ctx.Get(),g.eyes[0].map.Get());for(UINT i=0;i<W*H;++i)check(rejected[i*4+3]!=1,"missing weapon motion rejects history instead of assuming fixed UV");
         ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(11,1,&none);
         model[9][3]=0;td.Format=DXGI_FORMAT_R32_TYPELESS;depth.Reset();ds.Reset();hr(dev->CreateTexture2D(&td,nullptr,&depth));dd.Format=DXGI_FORMAT_D32_FLOAT;hr(dev->CreateDepthStencilView(depth.Get(),&dd,&ds));
         screenMotionFrameBoundary();sourceDraw();check(!g.stencilSrv,"new source without stencil drops old mask");screenDraw(0);

@@ -24,6 +24,7 @@ Texture2D<float> Depth:register(t8);
 ByteAddressBuffer Sizes:register(t9);
 Texture2D<float> UiTransparency:register(t10);
 Texture2D<uint2> SourceStencil:register(t11);
+Texture2D<float4> WeaponMotion:register(t12);
 cbuffer SourceNow:register(b2){float4 src[276];}
 cbuffer SourceBefore:register(b3){float4 old[276];}
 cbuffer ScreenBefore:register(b4){float4 model[12];}
@@ -40,12 +41,18 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
             ui=ui || UiTransparency.Load(int3(clamp(at+int2(x,y),0,int2(w,h)-1),0))<1;
     }
     float2 prev=uv;
-    // First-person opaque geometry carries the game's 0x10 stencil bit.
-    // It moves with the source camera, so source-world reprojection would
-    // invent motion on a stationary gun (065915: about 10 px/frame).
-    // Keep temporal AA; the previous screen/eye transform still applies.
+    // Stencil identifies the opaque source mesh; it does not tell us how
+    // that mesh animated. Use its actual post-VS movement, including aiming.
     bool attached=false;
     if(extent.w>0)attached=(SourceStencil.Load(int3(clamp(int2(uv*float2(w,h)),0,int2(w,h)-1),0)).y&16)!=0;
+    if(!ui && attached) {
+        float4 motion=WeaponMotion.Load(int3(clamp(int2(uv*float2(w,h)),0,int2(w,h)-1),0));
+        // R16 depth has at most half a ULP of rounding. Missing, occluded,
+        // new or ambiguous meshes must not borrow world or fixed-UV history.
+        if(motion.w!=1 || abs(motion.z-z)>max(abs(z)*.0005,3e-8) || !all(isfinite(motion)))return float4(0,0,z,2);
+        prev+=motion.xy/float2(w,h);
+        if(any(prev<0) || any(prev>1))return float4(0,0,z,2);
+    }
     if(!ui && !attached) {
     float3 a=float3(src[270].x,src[271].x,src[272].x);
     float3 b=float3(src[270].y,src[271].y,src[272].y);

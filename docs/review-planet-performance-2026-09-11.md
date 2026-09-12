@@ -743,3 +743,118 @@ under Night vision. Next flight: compare that toggle while rotating the
 head through the landed startup pulse, then crouch/aim with Weapon
 stability on to assess residual ghosting. These tests validate code and
 captured inputs; neither visual improvement is claimed headset-verified.
+
+## Flight 07:41: aiming regression and unchanged night vision
+
+Verified v0.15.1-42-g68ed193, linked 13:37:34 UTC. New night captures
+074418/074420/074423 and weapon captures 074545/074557 are from this
+build. The log confirms night vision engaged at 2774x2740 and source
+weapon stencil motion engaged before the weapon captures.
+
+Ruled out: fixed source UV is a sufficient weapon-motion model. It
+removes false walking/crouching camera motion but ghosts during aiming
+and mouse-driven weapon movement. The new user report refutes that
+shortcut; the replacement must measure the rendered geometry's own
+motion, including animation and projection changes.
+
+Ruled out: correcting pulse distance and centre-normal quantization is
+sufficient to fix the reported night-vision fuzziness. Both changes ran
+and the user sees no meaningful improvement. Do not re-propose these as
+the main blur fix or add sharpening over the unresolved source.
+
+### Rendered weapon motion
+
+The replacement captures original post-VS positions while the attachment
+correction's private pool is still bound. It includes the game's own
+skinning, aiming projection and animation. Stream output uses the
+original vertex bytecode's position signature, avoiding a second
+implementation of the packed vertex and bone formats. Point-list capture
+preserves repeated and degenerate indices; the motion raster uses the
+original triangle list. The pixel shader interpolates previous
+homogeneous clip positions with current perspective, producing
+previous-minus-current source pixels. ScreenMotion then composes those
+with the actual prior curved screen and eye transform. It does not
+freeze the weapon in source UV.
+
+The existing Weapon stability toggle controls this, and AA Off allocates
+no temporal weapon resources. The successful
+attachment/pink-fleck/aiming ball corrections are retained. Runtime
+reprojection and presentation timing are unchanged. This path is
+D3D11-side; the observed flight uses OpenVR, preset K, 2774x2740 input
+and 4268x4216 output per eye, with a 5120x2880 on-foot source. No
+headset model or alternate runtime improvement is inferred from these
+captures.
+
+Only supported opaque source draws that write the game's stencil bit
+0x10 and source depth qualify. This bit also occurs on generic meshes;
+it is not a globally unique weapon identifier. Replaying their actual
+geometry handles those too. Geometry identity includes retained vertex/
+index buffers, layout, shader and draw windows, excluding reordered
+instance slots. Ambiguous repeated identities reject the frame's weapon
+history. Missing, changed, oversized and newly visible meshes reject
+history rather than borrowing scenery motion. Index/vertex writes
+invalidate correspondence; bone/camera changes are the motion to track.
+Depth equality restricts the motion raster to visible fragments; saved
+source depth rejects later occlusion at the screen consumer.
+
+The cache is bounded to 64 records, 131072 indices per draw and 32 MiB
+of position buffers. The source motion/depth target costs 112.5 MiB at
+5120x2880, with a 128 MiB cap. A 0.5 MiB sequential index buffer permits
+both passes to use the original draw entry point. All three are released
+when AA/Weapon stability is disabled or the source becomes inactive. No
+per-frame CPU readback or source-colour copy is added. Explicit eye
+dumps include WeaponMotion beside ScreenMotion, so coverage and vectors
+can be checked without another motion-model assumption.
+
+Validation: 57370 production GPU checks pass on WARP and NVIDIA,
+covering aiming translation, asymmetric bone movement, projection
+changes, perspective interpolation, degenerate indices, live Off/On,
+missed frames, duplicate identity, changed indices, size limits and
+state restoration. The screen consumer passes 54278 checks, including
+composition of animated source vectors into both eyes and rejection when
+the new map is absent. The full build, all gates and NVIDIA DLL smoke
+pass.
+
+The original VS stream-output probe executes on 228 mesh/frame records,
+but these dump tables retain each pool/bone resource once per frame,
+before some later viewmodel updates. Their reconstructed positions are
+therefore not reliable ground truth for the visible aiming pose. Do not
+use the initially calculated 100+ pixel changes as actual weapon motion.
+The production capture avoids this limitation by running at the actual
+draw. The new WeaponMotion dump records that result directly.
+
+An initial raw-capture timing replay had no visible coverage and was
+rejected. A corrected cost experiment repositions four complete captured
+meshes in the diagnostic camera, retaining original VS/skinning and
+86592 indices at 5120x2880. With 842133 motion pixels, NVIDIA timings
+are 0.0134 ms without the added pass and 0.2404-0.2465 ms with it; CPU
+submit cost is 0.0004 versus 0.0078-0.0115 ms. This is an isolated RTX
+5090 cost check, not an in-game frametime prediction or a complete gun
+replay.
+
+### Night-vision component isolation
+
+Replaying the shipped shader with all new draw-time inputs matches the
+recorded distant-terrain pixels at 99.9983-99.9991% in the three
+left-eye crops. Resource size constants are exactly 2774x2740 and its
+reciprocal, so a stale sampling size is ruled out. Component-isolation
+replays show the normal-edge filter contributes 95.5-95.7% of the added
+distant green signal, surface orientation about 4%, and the procedural
+grid none in these regions. This identifies the dominant fuzzy pattern
+before DLSS.
+
+The edge detector measures only the camera-Z component of the normal
+gradient. Holding the captured gradient fixed while rotating it between
+the two captured head bases changes its response by a median 38.1% (95th
+percentile 254%). That establishes an orientation-dependent brightness
+mechanism, not a complete explanation of perceived blur. A scratch
+full-vector-gradient replacement removes this directional dependency but
+increases mean response by 76.8% in the tested terrain and leaves the
+dense fuzzy pattern. It is not included in the build.
+
+Ruled out: replacing scalar normal gradients with their raw full-vector
+magnitude is a sufficient clarity fix; the replay mainly brightens the
+same dense pattern. Night-vision rendering remains unchanged this turn.
+The next investigation should address generation/filtering of the
+terrain normal edges, using the captured inputs, rather than requesting
+another identical flight or treating the pulse as the main blur cause.

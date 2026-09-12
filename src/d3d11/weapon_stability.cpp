@@ -1,4 +1,5 @@
 #include "weapon_stability.h"
+#include "weapon_motion.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include "binding_shadow.h"
@@ -168,6 +169,7 @@ void weaponStabilityObserveScreen() {
     }
 }
 void weaponStabilityResourceWritten(ID3D11Resource* resource) {
+    weaponMotionResourceWritten(resource);
     if(!resource)g.sourceFrame=~0u;
     if(!resource || resource==g.pool.Get() || resource==g.bones.Get() || resource==g.camera.Get())g.prepared=~0u;
 }
@@ -193,7 +195,9 @@ bool weaponStabilityDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned
     if(!generate(ctx,pv.Get(),bv.Get(),pool.Get(),bones.Get(),camera.Get(),pd.ByteWidth)){
         g.failed=true;Log::get().note("weapon stability: resource/shader failure; original geometry retained.");return false;
     }
-    ctx->VSSetShaderResources(33,1,g.fixedSrv.GetAddressOf());draw(ctx,count,instances,start,base,startInstance);ctx->VSSetShaderResources(33,1,pv.GetAddressOf());return true;
+    ctx->VSSetShaderResources(33,1,g.fixedSrv.GetAddressOf());draw(ctx,count,instances,start,base,startInstance);
+    weaponMotionDraw(ctx,draw,count,instances,start,base,startInstance);
+    ctx->VSSetShaderResources(33,1,pv.GetAddressOf());return true;
 }
 void weaponStabilityFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g.frame;

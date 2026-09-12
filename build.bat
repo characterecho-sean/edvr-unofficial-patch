@@ -314,7 +314,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_theater.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
-    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_stability.cpp" ^
+    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_stability.cpp" "src\d3d11\weapon_motion.cpp" ^
     "src\d3d11\shader_sig.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
@@ -740,6 +740,12 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     "tools\weapon_stability_test\weapon_stability_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\weaponstability\weapon_stability_test.exe" --self-test || exit /b 1
+if not exist "%OBJ%\weaponmotion" mkdir "%OBJ%\weaponmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\weaponmotion\\" /Fe"%OBJ%\weaponmotion\weapon_motion_test.exe" ^
+    "tools\weapon_motion_test\weapon_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
+"%OBJ%\weaponmotion\weapon_motion_test.exe" --self-test || exit /b 1
 if not exist "%OBJ%\nightvision" mkdir "%OBJ%\nightvision"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\nightvision\\" /Fe"%OBJ%\nightvision\night_vision_test.exe" ^

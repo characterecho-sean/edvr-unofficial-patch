@@ -1,4 +1,5 @@
 #include "screen_motion.h"
+#include "weapon_motion.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include "binding_shadow.h"
@@ -83,6 +84,7 @@ void screenMotionConfigure(Config& cfg) {
     bool on=temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
     if(on!=g.enabled){g=State{};g.enabled=on;}
     g.weapon=cfg.getBool("fix.weapon_stability",true);
+    weaponMotionConfigure(g.enabled && g.weapon);
 }
 bool screenMotionRecognize() {
     bool matched=g.enabled && !g.failed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
@@ -118,6 +120,7 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     unsigned next=1-g.sourceWrite;
     if(!copyCb(ctx,dev.Get(),1,g.camera[next],276*16))return;
     g.sourcePrevious=g.sourceFrame;g.sourceFrame=g.frame;g.sourceWrite=next;
+    weaponMotionSource(tex.Get());
 }
 void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance) {
@@ -205,18 +208,18 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         Ptr<ID3D11DepthStencilState> savedDs;UINT stencil;ctx->OMGetDepthStencilState(&savedDs,&stencil);
         Ptr<ID3D11PixelShader> savedPs;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->PSGetShader(&savedPs,classes,&nc);
         ID3D11Buffer* savedCb[5]{};ctx->PSGetConstantBuffers(2,5,savedCb);
-        ID3D11ShaderResourceView* savedSrv[4]{};ctx->PSGetShaderResources(8,4,savedSrv);
+        ID3D11ShaderResourceView* savedSrv[5]{};ctx->PSGetShaderResources(8,5,savedSrv);
         ID3D11Buffer* cb[5]={g.camera[g.sourceWrite].Get(),g.camera[1-g.sourceWrite].Get(),e.model[e.write].Get(),e.camera[e.write].Get(),e.settings.Get()};
-        ID3D11ShaderResourceView* srvs[4]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr};
+        ID3D11ShaderResourceView* srvs[5]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr,weapon?weaponMotionView():nullptr};
         vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(g.ds.Get(),0);
-        ctx->PSSetConstantBuffers(2,5,cb);ctx->PSSetShaderResources(8,4,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
+        ctx->PSSetConstantBuffers(2,5,cb);ctx->PSSetShaderResources(8,5,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
         draw(ctx,count,instances,start,base,startInstance);
-        ID3D11ShaderResourceView* nulls[4]{};ctx->PSSetShaderResources(8,4,nulls);
+        ID3D11ShaderResourceView* nulls[5]{};ctx->PSSetShaderResources(8,5,nulls);
         vScreenSetRenderTargetsRaw(ctx,8,savedRt,savedDepth.Get());ctx->OMSetBlendState(savedBlend.Get(),factors,mask);ctx->OMSetDepthStencilState(savedDs.Get(),stencil);
-        ctx->PSSetConstantBuffers(2,5,savedCb);ctx->PSSetShaderResources(8,4,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
+        ctx->PSSetConstantBuffers(2,5,savedCb);ctx->PSSetShaderResources(8,5,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
         for(auto* p:savedRt)if(p)p->Release();for(auto* p:savedCb)if(p)p->Release();for(auto* p:savedSrv)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
         e.written=true;
-        if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil separates camera-attached weapon history from source scenery; original stencil texture reused.");}
+        if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion; uncovered or invalid history rejected.");}
         if(!g.noted){g.noted=true;Log::get().note("screen motion: source camera/depth projected through the actual screen mesh at %ux%u per eye; GPU-only history, no source colour copies.",e.width,e.height);}
     }
     for(int i=0;i<4;++i)e.shape[i]=curve?curve[i]:0;
@@ -227,8 +230,9 @@ ID3D11ShaderResourceView* screenMotionView(int eye,unsigned w,unsigned h) {
     return e.written && e.frame==g.frame && e.width==w && e.height==h?e.srv.Get():nullptr;
 }
 void screenMotionFrameBoundary(){
+    weaponMotionFrameBoundary();
     ++g.frame;
     if(g.seen && g.frame-g.lastScreen>120){bool on=g.enabled,weapon=g.weapon;g=State{};g.enabled=on;g.weapon=weapon;}
 }
-void screenMotionShutdown(){g=State{};}
+void screenMotionShutdown(){g=State{};weaponMotionShutdown();}
 }

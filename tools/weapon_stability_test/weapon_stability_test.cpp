@@ -19,6 +19,8 @@ ComPtr<ID3DBlob> compile(const char* s,const char* entry){
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned,unsigned,unsigned,int,unsigned){}
+void weaponMotionResourceWritten(ID3D11Resource*){}
 bool testEnabled=true;
 Config& Config::get(){static Config cfg;return cfg;}
 bool Config::getBool(const char* key,bool def) const {
