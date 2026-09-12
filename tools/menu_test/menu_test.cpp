@@ -952,6 +952,26 @@ void testAliasMayAct() {
           "may act: never while a value is typed");
     check(!menuAliasMayAct(true, false, true), "may act: never on a status page");
     check(menuAliasMayAct(true, false, false), "may act: only with the gate, not typing, on a settings page");
+    // The page pair follows Tab: it acts on a status page and without the
+    // gate (menu.keyboard = shared, a door not reached), and only typing
+    // holds it. Every other nav is the predicate above.
+    check(menuAliasFollowsTab(kNavPageNext) && menuAliasFollowsTab(kNavPagePrev) &&
+              !menuAliasFollowsTab(kNavUp) && !menuAliasFollowsTab(kNavSelect) &&
+              !menuAliasFollowsTab(kNavBack) && !menuAliasFollowsTab(kNavReadOn),
+          "follows Tab: exactly the two page navs");
+    check(menuAliasMayActNav(kNavPageNext, false, false, true) &&
+              menuAliasMayActNav(kNavPagePrev, false, false, true) &&
+              menuAliasMayActNav(kNavPageNext, false, false, false) &&
+              menuAliasMayActNav(kNavPageNext, true, false, false),
+          "per nav: a page key acts on a status page and without the gate");
+    check(!menuAliasMayActNav(kNavPageNext, true, true, false) &&
+              !menuAliasMayActNav(kNavPagePrev, false, true, true),
+          "per nav: a page key is held while a value is typed");
+    check(!menuAliasMayActNav(kNavUp, false, false, true) && !menuAliasMayActNav(kNavUp, true, false, true) &&
+              !menuAliasMayActNav(kNavSelect, false, false, false) &&
+              !menuAliasMayActNav(kNavBack, true, false, true) &&
+              menuAliasMayActNav(kNavUp, true, false, false),
+          "per nav: every other key keeps the strict predicate");
 }
 
 void testKeyDisplayName() {
@@ -1050,10 +1070,11 @@ void testFooterComposeExact() {
                     got, sizeof(got)) &&
               strlen(got) == 86,
           "footer 3: stock live, 86 bytes", got);
-    // The legend follows the LIVE predicate, never mere adoption.
+    // The legend follows the LIVE predicate, never mere adoption -- except
+    // the page pair, which follows Tab and is named wherever it is adopted.
     in = footerInput(&stock, false);
-    check(composeIs(in, fakeMeasure, kPx13, "Arrows pick/change  Enter select  Tab page  Esc close", got, sizeof(got)),
-          "footer: adopted but not live shows the fixed names", got);
+    check(composeIs(in, fakeMeasure, kPx13, "Arrows pick/change  Enter select  Q/E page  Esc close", got, sizeof(got)),
+          "footer: adopted but not live shows the fixed names, the page pair excepted", got);
     // 5: the pending count.
     in = footerInput(&stock, true);
     in.pendingN = 2;
@@ -1069,17 +1090,18 @@ void testFooterComposeExact() {
     in.gatePrivate = false;
     in.pendingN = 2;
     check(composeIs(in, fakeMeasure, kPx13,
-                    "Arrows pick/change  Enter select  Tab page  Esc close\nKEYS SHARED WITH THE GAME", got, sizeof(got)),
+                    "Arrows pick/change  Enter select  Q/E page  Esc close\nKEYS SHARED WITH THE GAME", got, sizeof(got)),
           "footer 6: the fault line beats the pending count", got);
-    // 7: a status page, adopted and not.
+    // 7: a status page, adopted and not. The page pair is named and ON
+    // there (it follows Tab), so no "off" note.
     in = footerInput(&stock, false);
     in.statusPage = true;
     in.pageName = "Monitor";
-    check(composeIs(in, fakeMeasure, kPx13, "Tab page  Esc close\nkeys shared (Monitor)  Q/E off here", got, sizeof(got)),
-          "footer 7: Monitor with adopted keys", got);
+    check(composeIs(in, fakeMeasure, kPx13, "Q/E page  Esc close\nkeys shared (Monitor)", got, sizeof(got)),
+          "footer 7: Monitor with adopted keys names the page pair", got);
     in.pageName = "Status";
-    check(composeIs(in, fakeMeasure, kPx13, "Tab page  Esc close\nkeys shared (Status)  Q/E off here", got, sizeof(got)),
-          "footer 7: Status with adopted keys", got);
+    check(composeIs(in, fakeMeasure, kPx13, "Q/E page  Esc close\nkeys shared (Status)", got, sizeof(got)),
+          "footer 7: Status with adopted keys names the page pair", got);
     in = footerInput(&none, false);
     in.statusPage = true;
     in.pageName = "Monitor";
@@ -1090,8 +1112,10 @@ void testFooterComposeExact() {
     in.privateWanted = false;
     in.gatePrivate = false;
     in.pendingN = 3;
+    // The page pair is on in shared mode too; the off note names the pick
+    // pair, the first pair that is adopted and not Tab's.
     check(composeIs(in, fakeMeasure, kPx13,
-                    "Arrows pick/change  Enter select  Tab page  Esc close\nkeys shared (menu.keyboard)  Q/E off",
+                    "Arrows pick/change  Enter select  Q/E page  Esc close\nkeys shared (menu.keyboard)  W/S off",
                     got, sizeof(got)),
           "footer 8: shared keyboard with adopted keys beats the pending count", got);
     in = footerInput(&none, false);
@@ -1142,16 +1166,31 @@ void testFooterComposeExact() {
     in = footerInput(&none, true);
     menuComposeTipAction(in.navName, false, got, sizeof(got));
     check(strcmp(got, "Enter or Left/Right changes it.") == 0, "footer 12: the fixed names give today's line", got);
-    // The reminder line's "off" pair follows what is adopted: with the
-    // page keys the menu's own, the pick pair is named instead.
+    // With the page keys the menu's own (both slots on End/Home, say), the
+    // status page's legend is the fixed "Tab page", and the shared-mode
+    // off note still names the pick pair. Half a pair reads "Tab/E page".
     MenuAliasTable noPage = stock;
     strcpy(noPage.navName[kNavPagePrev], "Tab");
     strcpy(noPage.navName[kNavPageNext], "Tab");
     in = footerInput(&noPage, false);
     in.statusPage = true;
     in.pageName = "Monitor";
-    check(composeIs(in, fakeMeasure, kPx13, "Tab page  Esc close\nkeys shared (Monitor)  W/S off here", got, sizeof(got)),
-          "footer: with no page alias the off note names the pick pair", got);
+    check(composeIs(in, fakeMeasure, kPx13, "Tab page  Esc close\nkeys shared (Monitor)", got, sizeof(got)),
+          "footer: with no page alias the status page names Tab", got);
+    in = footerInput(&noPage, false);
+    in.privateWanted = false;
+    in.gatePrivate = false;
+    check(composeIs(in, fakeMeasure, kPx13,
+                    "Arrows pick/change  Enter select  Tab page  Esc close\nkeys shared (menu.keyboard)  W/S off",
+                    got, sizeof(got)),
+          "footer: with no page alias the shared-mode off note names the pick pair", got);
+    MenuAliasTable halfPage = stock;
+    strcpy(halfPage.navName[kNavPagePrev], "Tab");
+    in = footerInput(&halfPage, false);
+    in.statusPage = true;
+    in.pageName = "Status";
+    check(composeIs(in, fakeMeasure, kPx13, "Tab/E page  Esc close\nkeys shared (Status)", got, sizeof(got)),
+          "footer: half an adopted page pair reads Tab/E", got);
     // At most one '\n', never over 159 bytes: the widest names, LIVE so
     // the legend carries them, with no ruler at all (nothing dropped) --
     // line 1 is 107 bytes and line 2 52, 160 with the break, so the cap
@@ -1221,16 +1260,17 @@ void testFooterFitsGdi() {
     const Tier tiers[3] = {{22, 600}, {30, 818}, {50, 1364}};
     const char* lines[] = {
         "Arrows pick/change  Enter select  Tab page  Esc close",
+        "Arrows pick/change  Enter select  Q/E page  Esc close",
         "W/S pick  A/D change  Space select  Q/E page  Esc close",
         "Tab, arrows and Enter work too",
         "2 changes at next launch",
         "1 change at next launch",
         "KEYS SHARED WITH THE GAME",
         "Tab page  Esc close",
-        "keys shared (Monitor)  Q/E off here",
-        "keys shared (Status)  Q/E off here",
+        "Q/E page  Esc close",
         "keys shared (Monitor)",
-        "keys shared (menu.keyboard)  Q/E off",
+        "keys shared (Status)",
+        "keys shared (menu.keyboard)  W/S off",
         "keys shared (menu.keyboard)",
         "Type a value  Backspace deletes  Enter writes  Esc cancels",
     };

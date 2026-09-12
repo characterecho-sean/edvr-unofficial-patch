@@ -857,10 +857,19 @@ void buildStatus(MenuContent& c) {
             snprintf(v, sizeof(v), "no bindings files found");
         } else if (s.aliasSource == 3) {
             snprintf(v, sizeof(v), "none adopted (see log)");
-        } else if (!s.privateWanted) {
-            snprintf(v, sizeof(v), "off while keys are shared");
-        } else if (!inputGateGameKeyboardSeen()) {
-            snprintf(v, sizeof(v), "held back (see log)");
+        } else if (!s.privateWanted || !inputGateGameKeyboardSeen()) {
+            // The page pair follows Tab, so it works in shared mode and on
+            // a rig whose game keyboard has not reached a door; only the
+            // rest is off or held back.
+            bool pageAdopted = false;
+            for (int i = 0; i < s.aliases.count; ++i) {
+                pageAdopted |= menuAliasFollowsTab(s.aliases.alias[i].nav);
+            }
+            if (!s.privateWanted) {
+                snprintf(v, sizeof(v), "%s (keys shared)", pageAdopted ? "page keys only" : "off");
+            } else {
+                snprintf(v, sizeof(v), "%sheld back (see log)", pageAdopted ? "page keys only; rest " : "");
+            }
         } else {
             menuAliasStatusValue(s.aliases, v, sizeof(v));
         }
@@ -1805,9 +1814,9 @@ void handleKeys(uint64_t now) {
     // game's keyboard, never while typing, never on a status page: there
     // an adopted key IS a game key, and one press of E would cycle the
     // ship's panel and the menu's page at once. The fixed keys keep their
-    // documented, shared behaviour on those pages. (The predicate itself is
-    // evaluated per alias below, since this tick's fixed keys can change
-    // its inputs.)
+    // documented, shared behaviour on those pages -- and so does the page
+    // pair, which follows Tab. (The predicate itself is evaluated per alias
+    // below, since this tick's fixed keys can change its inputs.)
     const bool gateHolds = inputGateHoldsGameKeyboard();
     // While a value is being typed the navigation keys are the editor's:
     // Enter commits, the arrows and Tab are held (Escape cancels, from the
@@ -1858,16 +1867,21 @@ void handleKeys(uint64_t now) {
     // stale answer -- moving the highlight off the row just opened, so the
     // next tick's check cancelled the edit, or paging a second time from a
     // page where aliases are inert. Asked afresh, the held key is parked
-    // until released, the swallow-until-release rule.
+    // until released, the swallow-until-release rule. The page pair is the
+    // exception and follows Tab (menuAliasMayActNav): on Monitor and Status
+    // it acts, and reaches the ship as Tab does there -- asked for after
+    // the first flight, when Q/E did nothing on the very pages a player
+    // wants to leave.
     bool swallowedEdge = false;
     for (int i = 0; i < s.aliases.count; ++i) {
         const MenuAlias& a = s.aliases.alias[i];
         KeyRepeat& k = s.aliasKeys[i];
         const bool wasDown = k.down;
         const bool isDown = focused && rawKeyDown(a.vk);
-        const bool liveNow = menuAliasMayAct(gateHolds, s.editEntry >= 0, s.pages[s.page].status);
+        const bool liveNow =
+            menuAliasMayActNav(a.nav, gateHolds, s.editEntry >= 0, s.pages[s.page].status);
         const int n = keyRepeatStep(k, isDown, now, liveNow);
-        if (!liveNow && isDown && !wasDown) swallowedEdge = true;
+        if (!liveNow && isDown && !wasDown && !menuAliasFollowsTab(a.nav)) swallowedEdge = true;
         if (!n) continue;
         if (!a.repeats && wasDown) continue;
         any = true;

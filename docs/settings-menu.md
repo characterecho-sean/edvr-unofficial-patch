@@ -291,8 +291,9 @@ This path is independent of the VR runtime and applies to both SteamVR and
 OpenComposite. `menu.keyboard = private` remains the default. All keyboard
 state reads and buffered presses are suppressed while the menu is drawn,
 except on **Monitor** and **Status**, which pass keys through and say so in
-their footers (adopted Elite keys are inert there -- see "Your Elite keys"
-below); the menu summon key remains reserved on every page;
+their footers (adopted Elite keys are inert there, except the next and
+previous tab pair, which follows Tab -- see "Your Elite keys" below); the
+menu summon key remains reserved on every page;
 buffered releases still reach the game, and joystick devices keep their input.
 Keys held when the menu closes wait for release before they can act in Elite.
 No new configuration is required; installing this change requires a game
@@ -315,12 +316,15 @@ Tab page  Esc close` (53 characters, 702 px at cap 30), or with Elite's
 keys live `W/S pick  A/D change  Space select  Q/E page  Esc close` (55,
 745 px) -- dropping `change`, then `pick`, then `select` where it does
 not fit (a 1600 px card at cap 80 keeps `Space select  Q/E page  Esc
-close`), and never `page` or `close`. Line 2 carries one item by
-precedence: `KEYS SHARED WITH THE GAME` (private wanted, gate not
-private), `keys shared (Monitor)  Q/E off here`, `keys shared
-(menu.keyboard)  Q/E off`, `2 changes at next launch`, or `Tab, arrows and
-Enter work too`. Editing reads `Type a value  Backspace deletes  Enter
-writes  Esc cancels` (752 px at cap 30, `Type a value` dropped first).
+close`), and never `page` or `close`. The page item names the adopted
+pair on EVERY page and in every keyboard mode (`Q/E page`), because that
+pair follows Tab and acts there; the other items follow the live
+predicate. Line 2 carries one item by precedence: `KEYS SHARED WITH THE
+GAME` (private wanted, gate not private), `keys shared (Monitor)`, `keys
+shared (menu.keyboard)  W/S off` (the adopted pick or change pair, never
+the page pair), `2 changes at next launch`, or `Tab, arrows and Enter
+work too`. Editing reads `Type a value  Backspace deletes  Enter writes
+Esc cancels` (752 px at cap 30, `Type a value` dropped first).
 The fault line wins in every state, typing included: a stalled draw drops
 the gate while a value is typed, and the typing keys are W/A/S/D/Space.
 Each footer line is drawn as its own single-line op in its half of the
@@ -355,7 +359,7 @@ names in brackets):
 | Up / Down | UI_Up / UI_Down (W / S) | move the highlight; hold to repeat (400 ms, then 12 Hz) |
 | Left / Right | UI_Left / UI_Right (A / D) | step the highlighted row: toggle, cycle a choice, step a number; hold to repeat; Shift steps a number by ten steps |
 | Enter / Space | UI_Select (Space) | activate: flip a switch, next choice, or open a number or string for typing; on an action row, fire it |
-| Tab / Shift+Tab | CycleNextPanel / CyclePreviousPanel (E / Q) | next / previous page (the Elite keys do not repeat when held) |
+| Tab / Shift+Tab | CycleNextPanel / CyclePreviousPanel (E / Q) | next / previous page (the Elite keys do not repeat when held, and they work on Monitor and Status too, exactly as Tab does there) |
 | PageUp / PageDown | CyclePreviousPage / CycleNextPage (Z / C) | read on through the explanation beside the row, three lines at a time; changes the page when there is nothing to scroll |
 | Home / End | -- | first / last row |
 | R | -- | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
@@ -412,6 +416,25 @@ gains no swallow and no injection. MEASURED on Sean's rig 2026-09-11: the
 The legend follows the same predicate, never mere adoption, so it never
 names a dead key -- one extra raster on the tick after open.
 
+**The one exception: the page pair follows Tab (2026-09-11, after the
+first flight).** Sean, from the headset: Monitor and Status let keys fall
+through, so Q/E did nothing on exactly the pages a player wants to leave.
+The next and previous tab aliases (`kNavPageNext`, `kNavPagePrev`;
+`menuAliasFollowsTab`, `menuAliasMayActNav` in `menu_keys.h`) now act
+wherever Tab acts: on Monitor and Status, under `menu.keyboard = shared`,
+and on a rig whose game keyboard never reached a door -- and there they
+reach the ship as well, exactly as Tab does there (BELIEVED harmless:
+CycleNextPanel/CyclePreviousPanel move between the tabs of a focused
+cockpit panel and do nothing with no panel up; check by pressing E on
+Monitor with a panel open and closed). Only typing holds them, since the
+arrows and Tab are the editor's then. Every other alias keeps the strict
+predicate: pick, change, select and back on a shared page would move a
+row and the ship at once. The legend names the adopted page pair on every
+page for the same reason; the Status row reads `page keys only (keys
+shared)` or `page keys only; rest held back (see log)` where the rest is
+off. Tested in `menu_test` (`testAliasMayAct`, the status-page and
+shared-mode footers).
+
 **Swallow until release.** Every key -- fixed, typing and alias -- goes
 through one tracker (`keyRepeatStep`): stepped with `act=false` it is
 tracked and PARKED until released, so a key held across a state change
@@ -427,9 +450,10 @@ an edit the typing keys are stepped against their REAL state `act=false`
 (the old poll passed focused=false, which forced every tracker up each
 tick and tracked nothing -- the opposite of what its comment said).
 Fixes -> Monitor by a held E: fired in frame N, gate shared at the end of
-N, E captured into the release tail, parked on N+1. Monitor -> Fixes by
-Tab with Q held: Q was parked, nothing until release. Page keys are
-edge-only (BELIEVED: Elite's own tab key does not repeat).
+N, E captured into the release tail; edge-only, so the held E fires no
+second time on Monitor even though it acts there. Monitor -> Fixes by Tab
+with W held: W was parked, nothing until release. Page keys are edge-only
+(BELIEVED: Elite's own tab key does not repeat).
 
 **Left out, and why.** `UI_Toggle` (stock `=`): its in-game meaning is
 not measured (BELIEVED: "UI Nested Toggle", expands a nested list item;
@@ -1175,12 +1199,15 @@ one-value merge and gains the atomic-write case.
     change): W/S, A/D, Space, Q/E and L-Ctrl respond on Fixes;
     `menu: closed (UI_Back).` appears (the proof that
     `GetAsyncKeyState(VK_LCONTROL)` polls on this rig); `menu panel: footer
-    line` says no line is ellipsised; on Monitor press E -> the ship's
-    panel cycles and the menu's page does not; hold E on Fixes so the page
-    lands on Monitor -> the ship does nothing until E is released and
-    pressed again; hold W, press F8 -> the highlight does not move; open a
-    Number row with Enter while holding a letter -> the buffer is
-    unchanged; hold Q on Status, press Tab -> nothing fires on Performance.
+    line` says no line is ellipsised; on Monitor press E -> the menu's
+    page changes (and E reaches the ship as Tab does there; with a cockpit
+    panel open its tab cycles, with none open nothing happens -- the
+    BELIEVED half); on Monitor press W -> nothing in the menu; hold E on
+    Fixes so the page lands on Monitor -> one page change only, and the
+    ship does nothing until E is released and pressed again; hold W, press
+    F8 -> the highlight does not move; open a Number row with Enter while
+    holding a letter -> the buffer is unchanged; hold W on Status, press
+    Tab -> nothing fires on Performance.
     Desk half, no headset: with Elite at its main menu, rebind
     CycleNextPanel in Options > Controls > Interface Mode and Apply; within
     15 s the log shows `hotkey: your Elite bindings files changed...`
