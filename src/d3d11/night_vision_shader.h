@@ -6,6 +6,16 @@
 // EDVR_NIGHT_STOCK is a test-only reference; the live Off setting binds
 // the game's original shader. See review-planet-performance-2026-09-11.md.
 namespace edvr {
+// A compact classification surface avoids simultaneous stencil sampling
+// and writing on the original DSV. No scene copy or CPU readback.
+constexpr char kNightExteriorCs[]=R"HLSL(
+Texture2D<uint2> Stencil:register(t0);
+RWTexture2D<float> Outside:register(u0);
+[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){
+    uint w,h;Outside.GetDimensions(w,h);if(id.x>=w || id.y>=h)return;
+    Outside[id.xy]=(Stencil.Load(int3(id.xy,0)).y&16)==0?1:0;
+}
+)HLSL";
 constexpr char kNightVisionPs[]=R"HLSL(
 cbuffer Camera:register(b1){float4 c[333];}
 cbuffer Night:register(b2){float4 n[12];}
@@ -14,6 +24,7 @@ Texture2D<float> Depth:register(t1);
 Texture2D<float4> Normals:register(t2);
 Texture2D<float4> Colour:register(t3);
 Texture2D<float> Mask:register(t4);
+Texture2D<float> Exterior:register(t5);
 SamplerState Linear:register(s0);
 SamplerState Point:register(s1);
 #ifndef EDVR_NIGHT_STOCK
@@ -52,6 +63,21 @@ float geometryEdge(float2 uv,float2 dx,float2 dy){
     float xy=(a+i-c0-g)*.25/sum;
     return sqrt(xx*xx+yy*yy+2*xy*xy);
 }
+float exteriorAt(float2 uv){
+    uint w,h;Exterior.GetDimensions(w,h);
+    return Exterior.Load(int3(clamp(int2(uv*float2(w,h)),int2(0,0),int2(w-1,h-1)),0));
+}
+float exteriorKernel(float2 uv,float2 dx,float2 dy,float radius){
+    // Include every point used by the depth filter. A cockpit silhouette
+    // must not emit onto a background pixel carrying terrain/sky motion.
+    float2 x=dx*radius,y=dy*radius;
+    return min(min(min(exteriorAt(uv-x-y),exteriorAt(uv-y)),min(exteriorAt(uv+x-y),exteriorAt(uv-x))),
+        min(min(exteriorAt(uv),exteriorAt(uv+x)),min(min(exteriorAt(uv-x+y),exteriorAt(uv+y)),exteriorAt(uv+x+y))));
+}
+float exteriorFootprint(float2 uv,float2 dx,float2 dy){
+    float base=exteriorKernel(uv,dx,dy,1);
+    return n[11].y==1?base:min(base,exteriorKernel(uv,dx,dy,n[11].y));
+}
 float grid(float2 uv,float4 setting,float fade){
     float2 p=uv*setting.z;
     float2 f=abs(frac(p-.5)-.5)/(abs(ddx_coarse(p))+abs(ddy_coarse(p)));
@@ -79,11 +105,15 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
     // Preserve deliberately pixelated or sampled-colour artistic modes.
     // The measured terrain night-vision pass uses neither of these flags.
     bool geometry=!asuint(n[11].z) && !asuint(n[10].w);
+    // Identity blending, not discard: the original pass must still stamp
+    // its stencil bit 4 on body pixels for subsequent game passes.
+    if(geometry && exteriorAt(uv)==0){NightOutput o;o.colour=0;o.scene=1;return o;}
+    float outside=geometry?exteriorFootprint(uv,dx,dy):1;
 #endif
     float edge=0,orientation=0;float3 worldNormal=.5;
     if(d>=n[7].x && d<=n[7].y){
 #if !EDVR_NIGHT_STOCK
-        if(geometry)edge=geometryEdge(uv,dx,dy);
+        if(geometry)edge=outside>0?geometryEdge(uv,dx,dy):0;
         else {
 #endif
         float2 x=dx*n[11].y,y=dy*n[11].y;
@@ -152,10 +182,10 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
     }
     float3 radiance=colour/(worldNormal+.5)*c[1].w*alpha*exposure*c[90].y;
 #if !EDVR_NIGHT_STOCK
-    // A modest brightness lift for the geometry contours. Keep opacity,
-    // footprint and the game's cockpit stencil intact; do not darken the
+    // Lift contour radiance without thickening its footprint. Keep opacity,
+    // footprint and the original stencil writes intact; do not darken the
     // underlying terrain by increasing blend alpha or add a surface fill.
-    if(geometry)radiance*=1.25;
+    if(geometry)radiance*=2;
 #endif
 #if EDVR_NIGHT_STOCK
     return float4(radiance,saturate(alpha));
@@ -166,8 +196,8 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
     // and the game's mask/range/fade and cockpit stencil. The source colour
     // is already exposed, so the Exposure texture must not be applied again.
     float amount=geometry && n[6].z>0 && d>0 && d>=n[7].x && d<=n[7].y?
-        saturate(mask*nearFade*fade*n[0].w):0;
-    o.scene=(1-saturate(alpha))*(1+.25*amount);
+        saturate(mask*nearFade*fade*n[0].w)*outside:0;
+    o.scene=(1-saturate(alpha))*(1+amount);
     return o;
 #endif
 }

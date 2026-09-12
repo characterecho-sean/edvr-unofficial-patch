@@ -27,9 +27,24 @@ ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,si
     if(testFail)return nullptr;auto code=compile(s,entry,"ps_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* p=nullptr;
     hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&p));return p;
 }
+void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTargetView*const* r,ID3D11DepthStencilView* d){c->OMSetRenderTargets(n,r,d);}
+ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro*,const char*){
+    if(testFail)return nullptr;auto code=compile(s,entry,"cs_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* p=nullptr;
+    hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&p));return p;
+}
 }
 using namespace edvr;
 struct Rig {
+    ComPtr<ID3D11Texture2D> stencil;
+    ComPtr<ID3D11DepthStencilView> dsv;
+    ComPtr<ID3D11DepthStencilState> stencilState;
+    void setStencil(const std::vector<unsigned>& values){
+        ctx->OMSetRenderTargets(0,nullptr,nullptr);dsv.Reset();
+        std::vector<unsigned> packed(64*64*2);for(unsigned i=0;i<64*64;++i){packed[i*2]=0x3f800000;packed[i*2+1]=values[i];}
+        stencil=texture(DXGI_FORMAT_R32G8X24_TYPELESS,packed.data(),64*8,D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE);
+        D3D11_DEPTH_STENCIL_VIEW_DESC dd{};dd.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;dd.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+        hr(dev->CreateDepthStencilView(stencil.Get(),&dd,&dsv));ctx->OMSetRenderTargets(1,rt.GetAddressOf(),dsv.Get());
+    }
     ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> ctx;ComPtr<ID3D11InfoQueue> queue;
     ComPtr<ID3D11Buffer> camera,settings;ComPtr<ID3D11Texture2D> target,stage,depth,normals;
     ComPtr<ID3D11RenderTargetView> rt;
@@ -65,7 +80,11 @@ struct Rig {
         n[10][0]=.2f;n[10][1]=.6f;n[10][2]=10;n[11][1]=1;
         // Finite procedural grid derivatives, zero amplitudes.
         n[2][2]=n[3][2]=n[4][2]=.1f;n[2][3]=n[3][3]=n[4][3]=1;
-        setDepth(400);nightVisionConfigure(Config::get());
+        D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthFunc=D3D11_COMPARISON_ALWAYS;ds.StencilEnable=TRUE;
+        ds.StencilReadMask=128;ds.StencilWriteMask=4;ds.FrontFace.StencilFunc=D3D11_COMPARISON_EQUAL;
+        ds.FrontFace.StencilFailOp=ds.FrontFace.StencilDepthFailOp=D3D11_STENCIL_OP_KEEP;ds.FrontFace.StencilPassOp=D3D11_STENCIL_OP_REPLACE;ds.BackFace=ds.FrontFace;
+        hr(dev->CreateDepthStencilState(&ds,&stencilState));ctx->OMSetDepthStencilState(stencilState.Get(),4);
+        setStencil(std::vector<unsigned>(64*64,5));setDepth(400);nightVisionConfigure(Config::get());
     }
     ~Rig(){nightVisionShutdown();ctx->ClearState();}
     ComPtr<ID3D11Buffer> buffer(UINT bytes){D3D11_BUFFER_DESC d{};d.ByteWidth=bytes;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ComPtr<ID3D11Buffer> b;hr(dev->CreateBuffer(&d,nullptr,&b));return b;}
@@ -128,7 +147,7 @@ void test(){
     auto other=r.texture(DXGI_FORMAT_R32G32B32A32_FLOAT,nullptr,64*16,D3D11_BIND_RENDER_TARGET);ComPtr<ID3D11RenderTargetView> otherRT;
     hr(r.dev->CreateRenderTargetView(other.Get(),nullptr,&otherRT));ID3D11RenderTargetView* mrt[]{r.rt.Get(),otherRT.Get()};
     r.ctx->OMSetRenderTargets(2,mrt,nullptr);nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);
-    check(ps==r.stock,"MRT pass keeps original shader");nightVisionEnd(r.ctx.Get());r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),nullptr);
+    check(ps==r.stock,"MRT pass keeps original shader");nightVisionEnd(r.ctx.Get());r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),r.dsv.Get());
     // Nested Begin is harmless, including live disabling before End.
     nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps!=r.stock,"known single target engages");
     nightVisionBegin(r.ctx.Get());testOn=false;nightVisionConfigure(Config::get());nightVisionEnd(r.ctx.Get());
@@ -179,27 +198,31 @@ void geometryTest(){
     fixed=r.draw(true);
     for(unsigned y=3;y<61;++y)for(unsigned x=3;x<61;++x){size_t i=(y*64+x)*4;
         for(unsigned ch=0;ch<3;++ch)
-            check(std::fabs(fixed[i+ch]-r.scene[i+ch]*(1+.25f*(1-400.f/1000000)))<1e-7,
+            check(std::fabs(fixed[i+ch]-r.scene[i+ch]*(2-400.f/1000000))<1e-7,
                 "surface channels brighten equally, preserving hue and texture");
         check(fixed[i+3]==r.scene[i+3],"target alpha is untouched");}
     check(std::fabs(fixed[(32*64+31)*4+1]/fixed[(32*64+30)*4+1]-4)<1e-5,"texture contrast is retained");
     auto stable=fixed;r.c[277][0]=0;r.c[277][2]=1;r.c[279][0]=-1;r.c[279][2]=0;fixed=r.draw(true);
     check(fixed==stable,"surface appearance is independent of night vision normal-map lighting");
-    // The original draw's stencil exclusion must protect cockpit pixels
-    // from both contour emission and the neutral scene multiplier.
-    std::vector<unsigned> stencil(64*64);for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)stencil[y*64+x]=x>=32?0x01000000u:0;
-    auto stencilTex=r.texture(DXGI_FORMAT_D24_UNORM_S8_UINT,stencil.data(),64*4,D3D11_BIND_DEPTH_STENCIL);
-    ComPtr<ID3D11DepthStencilView> dsv;hr(r.dev->CreateDepthStencilView(stencilTex.Get(),nullptr,&dsv));
-    D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=FALSE;ds.DepthFunc=D3D11_COMPARISON_ALWAYS;
-    ds.StencilEnable=TRUE;ds.StencilReadMask=1;ds.FrontFace.StencilFunc=D3D11_COMPARISON_EQUAL;
-    ds.FrontFace.StencilFailOp=ds.FrontFace.StencilDepthFailOp=ds.FrontFace.StencilPassOp=D3D11_STENCIL_OP_KEEP;ds.BackFace=ds.FrontFace;
-    ComPtr<ID3D11DepthStencilState> stencilState;hr(r.dev->CreateDepthStencilState(&ds,&stencilState));
-    r.ctx->OMSetDepthStencilState(stencilState.Get(),1);r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),dsv.Get());fixed=r.draw(true);
+    // Captured cockpit contract: bit 128 skips static cockpit; bit 16
+    // also marks body/chair. Verify both interior pixels and the adjacent
+    // terrain pixel that previously inherited a false cockpit contour.
+    std::vector<unsigned> stencil(64*64);
+    for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)stencil[y*64+x]=x<16?144:x<32?16:1;
+    r.setStencil(stencil);r.n[11][0]=40;
+    for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)plane[y*64+x]=x<32?1.f:400.f;
+    r.ctx->UpdateSubresource(r.depth.Get(),0,nullptr,plane.data(),64*4,0);fixed=r.draw(true);
     for(unsigned y=3;y<61;++y)for(unsigned x=3;x<61;++x)for(unsigned ch=0;ch<4;++ch){size_t i=(y*64+x)*4+ch;
-        check(fixed[i]==(x<32?r.scene[i]:stable[i]),"original stencil excludes cockpit from brightness and outlines");}
+        check(std::fabs(fixed[i]-(x<=32?r.scene[i]:stable[i]))<1e-7,"cockpit, body and exterior edge footprint excluded; terrain retained");}
     ComPtr<ID3D11DepthStencilState> savedStencil;UINT savedRef;r.ctx->OMGetDepthStencilState(&savedStencil,&savedRef);
-    check(savedStencil==stencilState && savedRef==1,"original stencil state and reference stay bound");
-    r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),nullptr);r.ctx->OMSetDepthStencilState(nullptr,0);
+    check(savedStencil==r.stencilState && savedRef==4,"original stencil state and reference stay bound");
+    D3D11_TEXTURE2D_DESC sd{};r.stencil->GetDesc(&sd);sd.Usage=D3D11_USAGE_STAGING;sd.BindFlags=0;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> readback;hr(r.dev->CreateTexture2D(&sd,nullptr,&readback));r.ctx->CopyResource(readback.Get(),r.stencil.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};hr(r.ctx->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped));
+    for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x){auto* row=reinterpret_cast<unsigned*>(static_cast<char*>(mapped.pData)+y*mapped.RowPitch);
+        check((row[x*2+1]&255)==(x<16?144u:x<32?20u:5u),"original stencil writes retained on excluded body pixels");}
+    r.ctx->Unmap(readback.Get(),0);
+    r.setStencil(std::vector<unsigned>(64*64,5));r.setDepth(400);r.n[11][0]=0;
     r.n[0][3]=0;fixed=r.draw(true);check(fixed==r.scene,"disabled effect leaves original scene intact");r.n[0][3]=1;
     r.n[6][2]=0;fixed=r.draw(true);check(fixed==r.scene,"zero effect intensity leaves original scene intact");r.n[6][2]=1;
     r.n[7][1]=100;fixed=r.draw(true);check(fixed==r.scene,"surface outside night vision range is untouched");r.n[7][1]=1000000;

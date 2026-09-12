@@ -2742,7 +2742,8 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     }
     forgetBindings(s);
     foveationOnClearState();
-    weaponStabilityResourceWritten(nullptr);
+    // ClearState changes bindings, not resource contents. Retain the
+    // captured weapon vertices and attachment inputs across this call.
     s->realClearState(self);
 }
 

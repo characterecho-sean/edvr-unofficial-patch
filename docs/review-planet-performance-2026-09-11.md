@@ -956,3 +956,106 @@ the production GPU test exercises the actual stencil exclusion path.
 The full build, all regression gates and NVIDIA DLL smoke pass with the
 neutral exterior brightness change. The final brightness preference is
 pending the user's next headset check.
+
+### Flight 09:33: rapid-motion ghosting and cockpit outlines
+
+Verified v0.15.1-45-ga1d91b1, linked 15:30:24 UTC; latest captures are
+093653 (weapon), 093744 and 093817 (night vision). The user reports
+residual weapon ghosting during rapid mouse/walking motion, a new
+night-vision contour trail while moving the ship, insufficient terrain
+detail in the dark, and green outlines around the cockpit body/chair.
+
+Ruled out: enabling original-vertex weapon history guarantees usable
+motion in the actual flight. The log reports repeated mesh identity and
+the weapon eye inputs contain no WeaponMotion map. Trace why the map is
+rejected before adjusting temporal response.
+
+Ruled out: retaining the original night-vision stencil semantically
+excludes the body/chair. The new images visibly outline them. The prior
+synthetic test verifies preservation of an exclusion mask, not that the
+game uses that mask for these specific cockpit surfaces. Identify their
+actual depth/stencil or draw provenance before suppressing them.
+
+
+The original NV draw reads stencil bit 128 and writes bit 4 (census
+`so=r80/w04/f3/1,1,3`, reference 4). Captured SceneZ stencil bit 16 also
+identifies the body/chair: values 20/21 and 144/148/149. The exterior
+uses 5. Keeping the original stencil therefore misses the body. In
+addition, the geometry kernel samples across cockpit silhouettes,
+creating green lines on adjacent exterior pixels whose motion belongs to
+the background. In 093817 these dashboard-edge trails are visible in T00
+but not the raw C00.
+
+The replacement now classifies bit 16 into one R8 GPU surface and checks
+all depth-filter sample locations before emitting contours or applying
+terrain gain. Excluded pixels use identity blending rather than discard,
+so the original stencil writes still occur. Temporarily unbind the
+original DSV while classifying its stencil, then restore all OM and CS
+state. This avoids sampling a DSV while the game writes stencil. No
+scene-colour copy or CPU readback is introduced. The original shader is
+retained on a changed depth/stencil, format, MRT, blend or context
+contract. A two-entry depth-SRV cache and one R8 output are bounded to
+16 million pixels; the output is reused between eyes.
+
+Increase contour radiance and neutral terrain gain from 1.25 to 2. Keep
+the original contour alpha and multiply existing RGB equally, retaining
+texture and colour instead of adding a flat green fill. The user's
+follow-up names the menu toggle **Realistic nightvision**. Preserve
+`fix.night_vision_stability` for existing configurations and live A/B.
+
+The weapon snapshot repeats the same arm geometry in two render passes:
+draws 32/75 share count 13260, start 6341848 and base 2870464. The
+camera buffer object is also shared; its contents and instance slots
+change. The first-frame pool distinguishes skeleton bases 92 and 740,
+while camera row 273.z gives projection depths 0.0675 and 0.025. The
+original 7B0DC42D383F694C VS writes this constant directly to clip Z.
+Projection alone is insufficient when aiming gives both passes the same
+near plane. Skeleton identity must distinguish those passes too.
+
+Keep up to four occurrences of each geometry key, with independent
+current/previous vertex buffers. Copy just the current four-byte
+instance index and resolve its skeleton allocation and instance flags on
+the GPU. Match prior vertices by this identity and original clip Z,
+independently of draw order. A missing or ambiguous match rejects that
+geometry's history, retaining the motion map for other weapon parts.
+More than four occurrences keeps the conservative whole-frame fallback.
+The existing 64-record / 32 MiB vertex-history limits remain; identity
+metadata adds at most 2 KiB plus one shared 16-byte buffer. Original
+animation, source-depth validation and compositor reprojection remain.
+
+Also stop treating ClearState as an unknown resource write. It resets
+bindings, not captured vertices or attachment data. Command-list
+execution and actual geometry-buffer writes still invalidate history;
+one-time reason logs now distinguish those cases. ClearState is observed
+in this flight, but its per-frame frequency was not recorded, so this is
+a verified API-semantics correction rather than proof that it explains
+every missing-history frame.
+
+Validation: 80493 production weapon checks pass on NVIDIA, including
+rapid animated perspective motion, ClearState/rebind, reordered
+occurrences, missing draws, matching skeletons with equal projections,
+ambiguous history and D3D state restoration. Screen composition passes
+54278 checks. The final night shader passes 83720 NVIDIA checks,
+including exact body/chair exclusion, the adjacent background pixel,
+original stencil writes, texture contrast, artistic modes and live A/B.
+Full captured-stencil replay checks every pixel in both 2774x2740
+inputs: 2394201 and 3912702 cockpit/body pixels are classified exactly.
+The R8 classification dispatch measures 0.069-0.076 ms per eye on NVIDIA
+with the debug layer; this excludes the NV pixel shader and is not a
+flight frametime measurement.
+
+Six saved night-input replays remain finite and produce median exterior
+brightness ratios 1.591-1.596 against the installed 1.25-gain shader.
+These isolate brightness on prior captured exterior crops; they do not
+include current cockpit stencil or prove temporal stability in a
+headset. The four-mesh / 86592-vertex weapon benchmark at 5120x2880
+measures 0.093-0.095 ms with history versus 0.013 ms without, with
+842133 covered pixels. It is an isolated GPU workload, not a forecast of
+game timing. The latest flight uses OpenVR and DLSS preset K at
+2774x2740, upscaled to 4268x4216, and an on-foot source of 5120x2880.
+Headset model is unverified. Visual ghosting reduction and final
+brightness still need a headset check.
+
+The full build, all regression gates and NVIDIA DLL smoke pass. The menu
+and installer schemas both expose Realistic nightvision while retaining
+the existing saved key and default.
