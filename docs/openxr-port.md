@@ -1,32 +1,38 @@
 # Elite on OpenXR: a drop-in `openvr_api.dll` that speaks OpenXR
 
-*A design document, written before the code (2026-09-11). Claims about EDVR
-cite the source; claims about the game and the runtimes are labelled measured
-(this repo's logs, the game's binaries, field reports), vendor-stated (specs,
-headers, published source) or believed; what can only be settled at
-implementation time or in a live session is collected under Phase 0. Nothing
-here is implemented.*
+*Design, reviewed against the source and API contracts on 2026-09-11. The
+replacement transport and whole-frame GPU instrument are not implemented. The
+session inventory below is retained from the original investigation; this
+review checked source and vendor documentation, not new headset flights or a
+fresh scan of the installed game. Phase 0 must preserve reproducible evidence
+before an observation becomes a compatibility requirement.*
+
+**Approval boundary:** this revision is for review. After Sean confirms it,
+Luna agents can implement the bounded work packages below, with the parent
+agent reviewing their changes and validation. Flights remain explicit gates; an
+implementation or passing desk test is not a flight result.
 
 ## The ask
 
-Today EDVR's `openvr_api.dll` is a proxy: it forwards every export to the real
-runtime DLL underneath (Valve's, or OpenComposite's) and patches two vtables in
-place to reach the frame boundary and the submit
-(`src/openvr/openvr_proxy.cpp`, `compositor_hook.cpp`, `system_hook.cpp`). The
-proposal is to stop forwarding. EDVR's file becomes the OpenVR runtime as far
-as Elite is concerned, implements the interfaces the game asks for, and speaks
-OpenXR to whatever runtime the machine has. Elite keeps calling OpenVR and
-nothing in the game changes.
+Today EDVR's `openvr_api.dll` is a proxy: it forwards exports to the real
+runtime DLL underneath (Valve's, or OpenComposite's), wrapping
+`VR_GetGenericInterface`, and patches two vtables in place to reach the frame
+boundary and the submit (`src/openvr/openvr_proxy.cpp`, `compositor_hook.cpp`,
+`system_hook.cpp`). The proposal is to stop forwarding. EDVR's file becomes the
+OpenVR runtime as far as Elite is concerned, implements the interfaces the game
+asks for, and speaks OpenXR to whatever runtime the machine has. Elite keeps
+calling OpenVR and nothing in the game changes.
 
 Two requirements come with it:
 
 1. **OpenXR exclusively.** No SteamVR-native forwarding path is kept once the
    layer is trusted. SteamVR is itself an OpenXR runtime, so SteamVR users are
    served through it.
-2. **The Monitor page keeps its GPU figures.** OpenComposite never provided
-   them, and OpenXR has no compositor-timing call at all, so the design has to
-   find them elsewhere. It does -- see "The Monitor page's GPU figures" below,
-   which is also the first thing to build.
+2. **The Monitor keeps useful, measured GPU figures.** App GPU time must work
+   independently of the runtime. Core OpenXR does not provide the equivalent of
+   OpenVR's compositor timing record. Exact compositor GPU time, drops and
+   reprojection are optional capabilities, not numbers to manufacture from
+   cadence. Preserve the existing SteamVR measurements during migration.
 
 ## Where this stands against the 2026-09-01 goal
 
@@ -37,27 +43,29 @@ cull guard's two-stage go-live and canonical-size snap, the copy-not-bounds
 crop (`guard_crop.h`), the early handover (`early_session.cpp`), the launch
 centre (`launch_centre.cpp`).
 
-This design does not reverse that goal; it reaches it by the other road. It
-drops OpenComposite by replacing it, instead of by walking away from the
-native-runtime population -- which is where both field rigs live (a Quest 3
-over Virtual Desktop and a Pimax Crystal Super over PiOpenXR, both through
-OpenComposite: README, "Field-verified") and where most reports come from. What
-the goal had right still stands: the tolerance machinery exists because
-OpenComposite has to guess things, and a layer that does not guess does not
-need it.
+This retains the aim of dropping OpenComposite, but changes the proposed
+transport from native SteamVR to OpenXR. That is a deliberate scope change. The
+README records a Quest 3 over Virtual Desktop and a Pimax Crystal Super over
+PiOpenXR, both through OpenComposite, as field-verified configurations; it does
+not establish the size of any runtime's user population.
 
-## What Elite needs from `openvr_api.dll` (measured)
+Owning the transport removes the need to patch foreign OpenVR objects. It does
+not remove Elite's terrain-culling defect, render-size transitions, tracking
+discontinuities, or the graphics half's hooks. Retire each workaround only
+after its replacement preserves the behaviour it protected.
 
-How it was measured, 2026-09-11: the delay-load import table of
-`EliteDangerous64.exe` in the Steam install, parsed with a stdlib PE reader in
-the manner of `tools/gen_exports.py`; the `IVR*_nnn` literals from a string
-scan of the same binary (also recorded at the top of `compositor_hook.cpp`);
-the export tables of the game's `openvr_api_orig.dll` and of EDVR's proxy; and
-the `VR_GetGenericInterface("...")` lines the proxy writes, in the three newest
-VR logs across the two installs (Frontier 2026-09-10 19:51 and 20:06, Steam
-2026-09-11 07:42).
+## What Elite needs from `openvr_api.dll` (recorded inventory)
 
-| What | Measured |
+The original document reports these measurements on 2026-09-11: the delay-load
+import table of `EliteDangerous64.exe` in the Steam install, parsed with a
+stdlib PE reader in the manner of `tools/gen_exports.py`; the `IVR*_nnn`
+literals from a string scan of the same binary (also recorded at the top of
+`compositor_hook.cpp`); the export tables of the game's `openvr_api_orig.dll`
+and of EDVR's proxy; and the `VR_GetGenericInterface("...")` lines the proxy
+writes, in the three newest VR logs across the two installs (Frontier
+2026-09-10 19:51 and 20:06, Steam 2026-09-11 07:42).
+
+| What | Recorded observation or source check |
 |---|---|
 | How the DLL is loaded | delay-load import: mapped at the first call, about 1.2 s after the game's device exists, and never at all on the Oculus path |
 | Exports imported | 5: `VR_InitInternal`, `VR_ShutdownInternal`, `VR_GetGenericInterface`, `VR_IsInterfaceVersionValid`, `VR_GetInitToken` |
@@ -66,30 +74,40 @@ VR logs across the two installs (Frontier 2026-09-10 19:51 and 20:06, Steam
 | Interfaces requested in a session, in order | `IVRSystem_012` at t=0; `IVRExtendedDisplay_001` within 15 ms; `IVRCompositor_014` 2 to 2.5 s later; `IVRChaperone_003` up to 3 s after that |
 | Never requested in any log | `IVROverlay_011`. The one `IVROverlay_028` request on record came from something injected, not the game (`openvr_proxy.cpp`) |
 | Compositor re-requests per session | 2 to 3, each a few seconds before the eye textures change size ("ONE EYE ... CHANGED") |
-| Methods across the four requested interfaces, per the openvr 0.9.20 header | about 85 (exact count from the header at implementation); the proxy hooks or calls 8 of them |
+| Methods across the four requested interfaces | 84 in Valve's 0.9.20 header: System 44, Compositor 29, Chaperone 8, ExtendedDisplay 3. Hook coverage is not a census of what the game calls |
 | System calls per frame | `GetRecommendedRenderTargetSize`, `GetProjectionMatrix`, `GetProjectionRaw`, `GetEyeToHeadTransform`, each about 12 times a frame (~1080/s at 90 Hz: `system_hook.cpp`) |
 | Compositor calls per frame | `WaitGetPoses` once, `Submit` twice; `SetSkyboxOverride` once at startup with a 1x1 texture (OpenComposite's log, `early_session.cpp`) |
 | Projection planes asked for | 0.025..50000 for the scene and 0.1..1000 for something else (`system_hook.cpp`) |
 | Tracking space | seated (the launch centre's reset reached it) |
 | Eye-to-head rotation | dropped by the game (docs/canted-projection.md) |
 | Submit shape | one texture per eye, null bounds, on both rigs now; one double-wide texture with per-eye bounds on a Quest 3 over Steam Link, 2026-08-17 (`noteEyeTextureSize`) |
-| Submit formats seen | the 8-bit RGBA and BGRA family: typeless, UNORM and sRGB (`supersample_resolve.cpp`) |
+| Submit format support in EDVR | the 8-bit RGBA and BGRA family: typeless, UNORM and sRGB (`supersample_resolve.cpp`). Supported formats in code do not prove which formats each rig submits |
 | Threads | Submit and Present on one thread (measured 2026-08-15); VR init off the render thread (measured 2026-08-29); WaitGetPoses' thread not yet logged |
 | The environment on the two installs, latest logs | Steam: Valve's DLL, 4536x4480 recommended per eye. Frontier: OpenComposite, 5424x5356 recommended per eye, and "the recentre DID NOT TAKE" |
 
-Two consequences worth stating up front. The replacement keeps every one of the
-14 export names (delay-load binds by name, and other clients may ask for the
-rest), answers `VR_IsInterfaceVersionValid` true for exactly the five literals,
-and hands back the same interface object on every re-request. And
-`IVRSystem_012` is the generation whose `GetProjectionMatrix` takes a fourth
-parameter and returns a 4x4 by value: implemented as a C++ class compiled
-against that generation's header, the by-value return and the hidden `this` are
-the compiler's business, which is the whole difference from hooking.
+The replacement preserves the recorded 14-name export surface and EDVR's
+self-test exports, with explicit signatures and failure behaviour rather than
+generic zero-return thunks. `VR_IsInterfaceVersionValid` and
+`VR_GetGenericInterface` must share one support table: initially the **four
+implemented interfaces**, not all five binary literals. `IVROverlay_011` and
+unknown versions return unsupported without a fatal dialog. Re-requests return
+the same object within an initialization generation; init tokens invalidate
+cached state across shutdown/re-init.
+
+Use the exact [Valve 0.9.20
+header](https://raw.githubusercontent.com/ValveSoftware/openvr/v0.9.20/headers/openvr.h),
+whose declarations were counted for this review. `IVRSystem_012` has the fourth
+projection-convention argument and by-value matrix returns. Pin the header and
+test the real C++ member ABI, struct packing, buffer lengths and enum values.
+`openvr_min.h` and the eight-slot fake system are not complete implementations
+of that interface. Modern submit flags used internally by EDVR must not be
+mistaken for features promised by the old game's ABI.
 
 ## What the VR half does at those seams today
 
-Everything below keeps its seam under the layer; it is listed so nothing is
-lost in the move.
+These behaviours need explicit owners under the new transport. This is a
+preservation inventory, not a claim that the current hook bodies can be moved
+unchanged.
 
 At the frame boundary (`hookedWaitGetPoses`): the launch centre; the gaze probe
 and the gaze source; the compositor timing read; the pacing statistics;
@@ -98,11 +116,14 @@ pose ring and the pose hold; the ship-forward publication; the head offset
 (Explorer Cam); the theater's freeze; the cull guard's stage transitions and
 the temporal jitter (`systemHookFrameBoundary`); the wait time for the Monitor.
 
-At the door (`hookedSubmit`, in order): the temporal pass, the guard crop, the
-supersample resolve, the sharpen, the menu; the theater and the eye heal
-substitutions; the FSS arrival-mono swap; the transition-flash withhold with
-the resubmit shadow; the eye-size and bounds publication;
-`Submit_TextureWithPose` for the pose hold; the door GPU bracket.
+At the door (`hookedSubmit`): the ordinary path applies temporal, guard crop,
+supersample resolve, sharpen, then menu. Theater/heal and arrival-mono paths
+branch earlier; withholding either reprocesses a raw shadow through crop,
+resolve, sharpen and menu, or forwards no image. Snapshot mode captures before
+the ordinary passes; the usual resubmit shadow captures the game's full raw
+texture after a successful forward. Preserve eye-size/bounds publication and
+temporal invalidation on every branch. The present GPU bracket covers selected
+passes, not all work in these branches.
 
 At the system interface: observing the size, both projection forms and
 eye-to-head; the guard's lie and the temporal jitter, told through the raw
@@ -115,368 +136,603 @@ And the scaffolding that exists only because these are hooks on objects EDVR
 does not own: slot tables marked unverified, argument-shape validation before a
 slot is trusted, crash sentinels around every install, the owner-identity test
 on every call, the reclaim pass and its vouching, the executable-prefix range
-checks, the convention-capture thunks in `system_thunks.asm`, and the 6c rule.
-None of it carries over. That is the size of the simplification, and also the
-size of the safety net being replaced.
+checks and the convention-capture thunks in `system_thunks.asm`. These can go
+from the replacement OpenVR backend. Keep argument validation, fault reporting,
+resource ownership checks and recovery behaviour where they still apply. The
+graphics half and proxy build continue to need `vtable_hook.*`; do not delete
+shared hook machinery as part of retiring the VR hooks. Old comments about the
+6c rule are historical: current code deliberately calls selected system slots.
 
 ## Pros
 
-- **EDVR owns the seams instead of patching them.** The pose wait, the submit
-  and the projection answers become EDVR's own implementation. The whole hook
-  scaffolding above exists because the VR half patches someone else's objects;
-  a class compiled against the exact 0.9.20 header makes by-value returns and
-  the hidden `this` the compiler's problem.
-- **One source of truth for the frustum.** Tangents, the 4x4 and eye-to-head
-  all derive from one OpenXR field-of-view and one view pose. The cull guard,
-  the temporal jitter and the canted-panel fold (docs/canted-projection.md)
-  become edits to one struct, and the formula check and the never-mixed-answers
-  rule become structural rather than policed.
-- **The OpenComposite bug class dies at the root.** The session rebuild that
-  stalled the intro movie, the temp session behind the yaw-180, the origin that
-  lands somewhere new each launch, the 2026-09-10 "recentre DID NOT TAKE", the
-  ignored submit bounds (commit 8c55791, the reason the guard crops by
-  copying), the fabricated frame timing
-  (docs/review-opencomposite-startup-2026-09-10.md) and the fatal dialog for an
-  unknown interface all come from OpenComposite guessing the game's device and
-  rebuilding, or from it filling what it cannot know. The d3d11 half publishes
-  the game's device before the first VR call, and the early handover proved
-  that device is the one the game submits from (the rebuild moved, 2513 ms to
-  22 ms, `early_session.cpp`). The layer can create one session on the right
-  device and never rebuild.
-- **Performance for the non-Valve majority.** PimaxXR, VDXR and Varjo get the
-  frame without the SteamVR compositor hop, which is the reason people install
-  OpenComposite at all. Valve-runtime users should see no change, because
-  SteamVR is itself an OpenXR runtime; that parity is a Phase 2 measurement,
-  not an assumption.
-- **The render pose travels with the frame.** An OpenXR projection layer
-  carries the pose each eye was rendered from (vendor-stated:
-  `XrCompositionLayerProjectionView::pose`). The pose-hold instrument, the
-  theater's world lock and any withheld frame tell the compositor the truth by
-  construction, instead of through a flag OpenVR makes optional and a
-  translation layer may not honour.
-- **Standard eye tracking and other extensions.** `XR_EXT_eye_gaze_interaction`
-  in a session EDVR owns, which reaches the focused state, on the Pimax runtime
-  that already implements it properly (docs/eye-tracking.md, "Two things noted
-  on the way"); the driver frame repair becomes unnecessary there. Depth layers
-  from the depth the d3d11 half already has, a quad layer for the settings
-  menu, the refresh rate and the visibility mask all become available where a
-  runtime offers them.
-- **One copy fewer at the door when a pass is on.** Today the last EDVR pass
-  writes an EDVR texture and the runtime copies it again. Under OpenXR the last
-  pass writes straight into the acquired swapchain image. With no pass on, the
-  runtime's copy simply becomes EDVR's, at the same cost.
-- **Runtime choice under EDVR's control.** Setting the runtime path before
-  instance creation gives an ini key that picks SteamVR, Virtual Desktop or
-  Pimax per install, with no system-wide switch. OpenXR API layers reach Elite
-  on SteamVR rigs for the first time.
-- **Licensing stays clean.** The OpenXR loader and headers are Apache-2.0 and
-  BSD-3, so EDVR stays MIT. OpenComposite is GPL-3.0-or-later, so nothing can
-  be lifted from it either way, only re-derived from the spec.
+- **Owned OpenVR interfaces.** Exact C++ implementations replace foreign vtable
+  interception and its ABI recovery paths.
+- **Direct OpenXR transport.** Native OpenXR runtimes can receive frames
+  without OpenComposite. SteamVR remains reachable through its OpenXR runtime;
+  equal performance, startup and image quality require measurement.
+- **Coherent projection state.** A frame record can tie together tracking,
+  game-facing projection, crop, temporal processing and submitted geometry.
+  These are related representations, not always identical FOVs.
+- **Explicit image metadata.** OpenXR submission can carry the pose and FOV
+  appropriate to the final image. EDVR must retain and transform that metadata
+  through every substitution; the API does not infer it from pixels.
+- **Optional runtime features.** A session EDVR owns enables gaze actions and
+  other extensions where the selected runtime supports them. Quad menu layers,
+  depth and direct rendering into swapchain images are later optimizations.
 
-## Cons
+## Cons and limits
 
-- **The environment matrix grows.** Two transports today (Valve's DLL, and
-  OpenComposite over anything) become one layer over SteamVR's OpenXR, VDXR,
-  PimaxXR and Varjo, and every runtime's quirk becomes an EDVR bug report.
-  Three of those can be flown from the desk; Varjo is field-only. Meta's own
-  runtime is mostly out of reach anyway, because Elite prefers its Oculus path
-  whenever the Meta app is running (README, "Does not work").
-- **The session state machine is where OpenComposite spent years.** Headset
-  doffed, dashboard open, runtime restarted, resolution changed under the game
-  (Elite re-requests the compositor when its targets change, measured above),
-  and the two D3D11 devices Elite creates at startup (feature level 12.0 then
-  11.0, docs/review-opencomposite-startup-2026-09-10.md), where binding the
-  wrong one is the DEVICE_REMOVED class from issue 21. Elite's render loop
-  never stops, so the pose wait must keep answering through every session
-  state. Each of these is a flight per runtime.
-- **Some OpenVR semantics have no OpenXR equivalent and must be emulated.** The
-  seated recentre becomes recreating the local space with an offset, plus
-  handling recentres the runtime does on its own. Compositor frame timing has
-  no counterpart at all, so the Monitor's compositor columns go blank
-  everywhere -- including on SteamVR, where they work today
-  (`frame_timing.cpp`) -- unless a source in the Monitor section below exists.
-  Events must be synthesised from session states, and how Elite reacts to a
-  quit or a focus loss decides what happens when a runtime goes away.
-- **The frame loop translation is a new place to be subtly wrong.** One
-  blocking call becomes wait, begin and locate, and two submits become one
-  end-frame. Elite runs VR init off the render thread and submits and presents
-  on one thread, and the layer must enforce OpenXR's ordering across that. The
-  colour-space rule must copy OpenVR's exactly (vendor-stated, `openvr.h`
-  `EColorSpace`: Auto means gamma for 8-bit formats and linear otherwise) or
-  the washed-out class comes back. Both submit shapes in the table must work.
-- **Transition-flash withholding changes shape.** Swapchain images rotate, so
-  re-showing the previous frame means copying the shadow into the acquired
-  image. The copy exists today (`resubmit_shadow.cpp`), but the
-  second-withheld-frame logic of docs/transition-flash.md needs
-  re-verification.
-- **Scope is bounded, verification is not.** A single-game layer over D3D11
-  with no controllers, overlays or actions is plausibly a few thousand lines,
-  against the VR half's 8,945 today. Flights are the binding resource on this
-  project, and a layer with no fallback ships with every runtime's quirks
-  unflown.
-- **Keeping the proxy path as a fallback doubles the surface.** Both code paths
-  stay alive, the hook scaffolding and the layer, for as long as the fallback
-  exists.
-- **Nothing changes for the Oculus-native population.** Elite on LibOVR never
-  loads this file (docs/troubleshooting.md, `vr_runtime.cpp`), and the README
-  should keep saying so.
-- **Deployment gains a moving part.** The OpenXR loader, statically linked or
-  as a third file; the registry-selected active runtime as a new support
-  question; and Defender's history with new EDVR binaries.
+- **EDVR becomes responsible for compatibility.** Session lifecycle, adapter
+  selection, frame ordering, events, poses, properties, loading screens and
+  texture conversion currently have another implementation underneath them. An
+  unobserved method is not necessarily safe to ignore.
+- **The runtime matrix expands.** Qualify SteamVR OpenXR, VDXR and the actual
+  Pimax runtime installed on the desk. PiOpenXR and the separate [PimaxXR
+  project](https://github.com/mbucchia/Pimax-OpenXR) are distinct
+  implementations; record manifest path, runtime name/version, headset and
+  transport rather than using their names interchangeably. Varjo and reachable
+  Meta OpenXR configurations require field coverage.
+- **Some Monitor data will remain unavailable.** Local GPU queries measure the
+  application's command stream, not the compositor or the headset's actual
+  presentation outcome. Optional timing experiments must not block the core
+  transport or appear as measured results before validation.
+- **Feature preservation is substantial work.** Terrain overscan, temporal AA,
+  Explorer Cam, theater/heal, loading panels, menu anchoring and transition
+  withholding all depend on the current pose/projection/submit contract.
+  Removing OpenComposite alone does not establish correctness for any of them.
+- **Oculus-native Elite remains outside scope.** It does not load this DLL. The
+  replacement also does not promise general OpenVR compatibility, controller
+  support, overlay support, other graphics APIs or quad-view stereo.
+- **Migration and distribution need work.** The current build generates exports
+  from the game's DLL; the installer backs up and chains an existing runtime. A
+  standalone backend needs its own reproducible export definitions, loader
+  dependency, notices and install/rollback tests.
 
-## The layer, sketched
+## The layer, specified enough to implement
 
-What follows is the shape, not the code. Each item names the OpenVR call it
-answers and the OpenXR call it stands on; "believed" marks the ones Phase 0 has
-to confirm.
+### ABI and initialization
 
-**Lifecycle.** `VR_InitInternal` creates the instance (loader statically
-linked, `XR_KHR_D3D11_enable` required), gets the system, checks
-`xrGetD3D11GraphicsRequirementsKHR` against the game's adapter, and creates ONE
-session on the device the d3d11 half has already published (`gameDevice()`, the
-`_v20` field of the shared block) -- so the session exists on the right device
-before the game's first interface request, and there is never a temp session to
-rebuild. This makes `d3d11.dll` a requirement of the VR half, which the
-settings menu already is; an openvr-only install is a decision below. Session
-states: begin on READY, end on STOPPING, and while the session is not running
-the pose wait answers with the last pose and runs no frame loop, because
-Elite's loop never stops. Instance loss becomes `VREvent_Quit`.
-`VR_ShutdownInternal` tears it all down; Elite is known to re-request
-interfaces mid-session but has not been seen to re-init (believed; the census
-below settles it).
+Implement the four versioned interfaces in an isolated compatibility module,
+using the pinned historical SDK. Keep backend-independent EDVR frame logic
+behind internal C++ contracts. Calls from EDVR itself should use those
+contracts rather than asking its own OpenVR facade for newer interfaces or
+patching its own objects. In particular, replace `gazeProbeNoteGetter`,
+`systemInterfaceV012` and `predictDisplayPose` consumers deliberately.
 
-**The frame loop.** `WaitGetPoses` is: end the previous frame if it is still
-open, `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews` at the predicted display
-time in the seated space, and from that the HMD pose (device 0) and the two eye
-poses. `Submit(left)` stores; `Submit(right)` acquires, waits, copies (the
-bounds become a sub-rectangle, and a v that runs backwards a flip), releases
-both images and calls `xrEndFrame` with one projection layer whose per-view
-pose is the pose the game rendered from -- the frozen one when EDVR fed it one.
-`PostPresentHandoff` is a no-op. A frame that submits one eye or none ends with
-what it has; two waits without a submit end the open frame with no layers
-first. Ordering is enforced by the layer, and the wait's thread is Phase 0 item
-2.
+Initialization and shutdown run outside `DllMain`, as the current proxy's lazy
+loader already requires. Define repeated init, failed init, shutdown and
+re-init behaviour, error strings and init-token changes in desk tests. Reject
+unsupported application types and interface versions with the historical API's
+error values. Presence/runtime probes must not create a temporary session just
+to answer a boolean.
 
-**Projection.** One `XrFovf` per eye from `xrLocateViews` is the single source:
-`GetProjectionRaw` returns its tangents in OpenVR's order (`pfTop` is the
-physical -Y edge, the reversal docs/settings-menu.md records);
-`GetProjectionMatrix` composes the DirectX-convention 4x4 with the game's
-planes; the guard's lie and the temporal jitter are applied to the one struct
-before either is answered. `GetEyeToHeadTransform` is the eye pose relative to
-the view space, rotation included, which is where the canted fold of
-docs/canted-projection.md would be applied. `GetRecommendedRenderTargetSize` is
-the recommended view size, multiplied by the guard and scale factors exactly as
-today.
+The first backend supports D3D11, primary stereo and an opaque blend mode.
+Require `XR_KHR_D3D11_enable`; enumerate and validate the view configuration,
+blend modes and graphics requirements before creating rendering resources.
 
-**Colour.** The swapchain format follows OpenVR's own Auto rule: an 8-bit UNORM
-or typeless submit gets an sRGB-typed swapchain, everything else a linear one,
-chosen from `xrEnumerateSwapchainFormats`. A copy between UNORM and UNORM_SRGB
-of the same family is a bitwise copy, so the compositor sees the bits Elite
-wrote, interpreted as SteamVR interprets them.
+### Device and session ownership
 
-**Spaces and recentre.** The seated universe is the LOCAL reference space.
-`ResetSeatedZeroPose` recreates it with the current head yaw and position as
-its origin, which is what OpenComposite does too. A
-`REFERENCE_SPACE_CHANGE_PENDING` event is a runtime-side recentre, the pose
-ring's "moved and STAYED" case. The launch centre becomes internal and
-runtime-agnostic: the layer centres on the first valid pose itself, and the
-export-based runtime test is retired.
+Require a matching EDVR `d3d11.dll` for the first implementation. With no
+published device, fail initialization promptly with a useful error; do not wait
+indefinitely or create a throwaway device/session.
 
-**Events.** `PollNextEvent` drains a queue the layer fills from session states:
-focused and visible map to input-focus captured and released (believed:
-dashboard events too); stopping, exiting and instance loss map to
-`VREvent_Quit`; an eye-to-head change maps to `VREvent_IpdChanged`. Which of
-these Elite consumes, and what it does on a quit, is Phase 0.
+`gameDevice()` is currently a raw pointer in the versioned shared mapping (the
+field was introduced in v20; the mapping is now v30). In
+`src/d3d11/d3d11_proxy.cpp::attachToDevice`, the first device wins and gets a
+process-lifetime `AddRef`. This guarantees lifetime, not that it is Elite's
+submitted-texture device. The two-device incident in [the startup
+review](review-opencomposite-startup-2026-09-10.md) is a reason to verify
+identity, not proof that device selection is already solved.
 
-**Stubs.** `IVRExtendedDisplay_001` reports no extended mode.
-`IVRChaperone_003` reports calibrated, with the play area from the stage bounds
-where the runtime has them and zero otherwise. `IVROverlay_011` is answered
-"interface not found", which is what OpenComposite answers and what the game
-has never been seen to ask for. Everything else on the four interfaces that the
-census finds uncalled returns the documented failure value, and a first call to
-any of them is logged once, so the stub list is checked by the field rather
-than trusted.
+Before `xrCreateSession`, compare the candidate's adapter LUID and feature
+level with `xrGetD3D11GraphicsRequirementsKHR`. Retain an owned reference and
+validate each submitted texture against that device. The runtime requires a
+compatible device; matching the adapter alone does not make resources on two
+D3D11 devices interchangeable. [D3D11 binding
+contract](https://raw.githubusercontent.com/KhronosGroup/OpenXR-Docs/main/specification/sources/chapters/extensions/khr/khr_d3d11_enable.adoc).
 
-**The withhold.** The resubmit shadow is copied into the acquired image instead
-of being handed over as a texture; the rest of the transition-flash machinery
-keeps its seam.
+Phase 0 logs all created devices and the devices of the first skybox and eye
+textures. If the first-device policy fails, revise publication/selection before
+making the backend usable on that configuration. Do not silently copy across
+devices or rebuild during `Submit`. A removed or replaced device stops
+submission and reports a restart requirement in the first implementation. Keep
+one session during ordinary startup and resolution changes; this is not a
+promise that a lost session can live forever.
 
-**Runtime selection.** A `[vr]` key, final name subject to the ini rule that
-values name what the player gets -- `runtime = auto | steamvr |
-virtual_desktop | pimax` -- sets the runtime path before instance creation;
-`auto` is the registry's active runtime. One line at startup names the runtime
-and its version from `xrGetInstanceProperties`, replacing the export sniff.
+### Session state and startup geometry
 
-**Extensions used where present** (vendor-stated names): the
-performance-counter time conversion, for correlating predicted display times
-with EDVR's own clocks; the depth layer (Phase 2 option, and whether an
-infinite-far reversed-Z depth can be described is Phase 0); the visibility mask
-for `GetHiddenAreaMesh`; the refresh-rate extension; eye gaze; and the Meta
-performance-metrics extension for the Monitor. Each is optional, announced
-once, and its absence is not an error.
+Pump events during initialization and idle periods as well as frame calls;
+progress must not depend solely on the game calling `PollNextEvent`.
+
+| OpenXR state | Backend behaviour |
+|---|---|
+| IDLE | Poll events; no frame calls; return initialized, invalid poses if no valid tracking exists |
+| READY | Begin the session once and start frame synchronization |
+| SYNCHRONIZED / VISIBLE / FOCUSED | Keep wait/begin/end running; render only when `shouldRender` and view validity permit |
+| STOPPING | Finish/abandon outstanding work according to handle validity, call `xrEndSession`, then wait for further state events |
+| LOSS_PENDING / instance loss | Retire affected handles and histories; first version reports loss and requires restart |
+| EXITING | End the XR experience; do not automatically restart it |
+
+STOPPING can occur on headset disengagement and is not itself a request to quit
+Elite. FOCUSED controls XR input; lack of focus does not imply an invisible
+application. These distinctions come from the [session-state
+contract](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrSessionState.html).
+Translate terminal loss/exit into OpenVR events only after the census confirms
+Elite's reaction. Never terminate the game from the bridge.
+
+Size can be queried from view-configuration recommendations before drawing;
+per-eye FOV and eye-to-head geometry come from located views, not that size.
+Elite requests system/extended-display interfaces before its compositor. Phase
+0 must capture its first geometry calls, and the desk harness must prove how
+the backend obtains valid geometry before answering them. A bounded startup
+pump with zero-layer frames is a candidate. Do not invent symmetric FOVs, treat
+invalid views as valid, or block an init thread indefinitely waiting for the
+render thread it is preventing from starting.
+
+### Frame ownership and submit pairing
+
+Use one frame record with an increasing sequence, predicted display time,
+`shouldRender`, tracking validity, reference-space generation, real tracking
+pose, game-facing pose, per-eye render/output geometry and eye completion mask.
+System queries read a coherent snapshot; repeated getters cannot change the
+frame. Define the bootstrap snapshot separately from a begun render frame.
+
+`WaitGetPoses` closes any prior incomplete frame without a projection layer,
+then waits/begins and locates the next frame. Locate the HMD using a VIEW space
+relative to the selected tracking space; do not derive head position by
+averaging the eye views. Fill both OpenVR pose arrays within caller capacity;
+non-HMD devices are disconnected/invalid. `GetLastPoses` reads the cache and
+must not advance the frame. Absolute-pose queries use their requested time and
+origin, or report invalid data when unavailable. Invalid tracking must not be
+returned as `Running_OK` merely because an old matrix exists.
+
+Each `Submit` validates eye, flags, texture, bounds and device, then captures
+that eye's content on the owning immediate context before returning. Keeping
+only the first texture pointer until the second eye arrives is insufficient:
+Elite reuses textures, and `AddRef` protects lifetime, not pixel contents.
+Accept left-first or right-first; reject a duplicate eye without replacing the
+accepted eye. The second distinct eye completes the pair. End exactly one frame
+with both projection views, or zero layers if the pair is incomplete, invalid
+or intentionally withheld without a usable stereo shadow. A stereo projection
+layer cannot contain only one view. [Projection-layer
+contract](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrCompositionLayerProjection.html).
+
+`shouldRender == false` still requires frame synchronization while running;
+omit layers and avoid EDVR's expensive post-processing. The bridge cannot
+assume that Elite itself will stop drawing. [Frame-state
+contract](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrFrameState.html).
+`PostPresentHandoff` may be a no-op only after the census/harness establishes
+that pair completion and the next wait close every frame. A submit without a
+begun frame is rejected; startup skyboxes are a separate path.
+
+Serialize frame transitions and teardown without holding a lock across a
+blocking wait when another required call needs that lock. OpenXR allows
+`xrWaitFrame` on a different thread, but concurrent waits require external
+synchronization. Test actual Elite ordering, shutdown during a wait and session
+events during an incomplete pair. [Frame
+synchronization](https://raw.githubusercontent.com/KhronosGroup/OpenXR-Docs/main/specification/sources/chapters/rendering.adoc).
+
+### Swapchains, bounds and colour
+
+Start with one swapchain per eye and a final copy/blit from EDVR's existing
+pass outputs. For each accepted eye: acquire, successfully wait, enqueue its
+copy/blit, then release. Only use a swapchain image while it is acquired and
+ready. Track acquisition and release state on every failure path, including
+positive timeout/loss statuses; a timeout is not permission to write or release
+an unwaited image. [Release
+contract](https://registry.khronos.org/OpenXR/specs/1.1/man/html/xrReleaseSwapchainImage.html).
+Follow the D3D11 binding's GPU submission requirements before release; avoid
+CPU waits for GPU completion as normal frame-loop policy.
+
+Validate null/full bounds, double-wide subrectangles, and reversed U and V.
+Compose the game's bounds with the cull-guard crop once. Copies cannot flip,
+resize or convert between RGBA and BGRA: use a shader blit when needed. Check
+sample count, array/mip shape, dimensions and resource formats; implement an
+explicit MSAA resolve or reject unsupported input. Preserve immediate-context
+state and EDVR's binding shadow around new rendering work.
+
+Honour `Texture_t::eColorSpace` before applying Auto: Gamma uses an sRGB
+interpretation, Linear a linear interpretation; Auto follows the historical
+8-bit rule. Select an enumerated concrete swapchain format, with an explicit
+conversion path if the desired family is unavailable. Compatible UNORM/sRGB
+resource copies preserve bits; shader SRV/RTV choices can decode or encode
+them. Check ramps and known colours so a pass does not apply gamma twice.
+OpenXR's [swapchain colour
+rules](https://raw.githubusercontent.com/KhronosGroup/OpenXR-Docs/main/specification/sources/chapters/rendering.adoc)
+determine how the runtime interprets those bits.
+
+A recommended size is not a requirement to resize every submitted image. Key
+swapchains by actual outgoing image requirements, keeping size, crop and FOV
+consistent; validate against device/runtime limits. Recreate affected
+swapchains at a safe frame boundary when format or dimensions change, without
+recreating the session. Compositor interface re-requests alone do not trigger
+resource destruction.
+
+Writing the final EDVR pass directly into a runtime image is a later
+optimization. Existing passes return owned textures and rely on particular
+SRV/UAV/RTV formats. Direct output requires destination-aware pass APIs and
+runtime-supported usage flags; a runtime image must never become a persistent
+temporal history or published source texture. No copy saving is promised in the
+first implementation.
+
+### Projection and pose semantics
+
+Retain separately: runtime view geometry; game render projection including
+overscan/jitter; and final submitted image pose/FOV after crop, temporal
+reconstruction or a substitution. One immutable frame record links them. The
+compositor must receive geometry describing the outgoing pixels, not blindly
+the widened or jittered projection the game queried.
+
+For the normal parallel-eye case, convert OpenXR angles to tangents, preserving
+this codebase's raw order: left/right are `tan(angleLeft/angleRight)`, raw
+`pfTop` is `tan(angleDown)` and raw `pfBottom` is `tan(angleUp)`. Verify
+against asymmetric vertical fixtures, the independent projection matrix and
+[the menu projection regression](review-opencomposite-startup-2026-09-10.md).
+Support the historical projection-convention argument explicitly. Apply
+render-size scaling, cull coverage and jitter once at the same frame boundary,
+including their publications to the graphics half.
+
+OpenVR returns one recommended per-eye width/height pair. If OpenXR recommends
+different sizes for the eyes, choose a size that accommodates both, then apply
+the existing scale policy within device/runtime limits. Derive eye-to-head
+transforms from head and eye locations at the same time and in the same space.
+
+Canted displays require a distinct implementation gate. Returning eye rotation
+unchanged does not fix a game that discards it. The proposal in
+[canted-projection.md](canted-projection.md) deliberately gives the culler
+bounded raw tangents and the rasterizer a rotated matrix. Those cannot both be
+represented by one identical four-tangent FOV. Preserve a tested parallel
+projection configuration for initial parity, or implement and validate the
+matrix fold and all consumers before claiming PP-off support. This port does
+not automatically deliver the proposed pixel savings.
+
+Pose modes also need separate contracts. `forwardSubmit` currently implements
+headset pose-hold by tagging the frozen image with a freshly predicted headset
+pose to reduce reprojection; substituting the old render pose would change that
+instrument. Theater output is rendered through `theaterXform` using real and
+frozen poses. Explorer Cam applies a deliberate camera offset. Trace each
+mode's final pixels back into the composition space, retaining its intended
+world/head lock rather than assuming every freeze should use the same pose. Use
+`XrCompositionLayerProjectionView::pose` and, where appropriate, layer space to
+express that result; validate ordinary tracking, both hold modes, theater and
+Explorer Cam independently.
+
+### Spaces, recentre and events
+
+Maintain an unmodified LOCAL base, a VIEW space and an offset LOCAL space for
+seated coordinates. `ResetSeatedZeroPose` establishes the current position and
+yaw as the seated origin while preserving gravity alignment. Replace offsets
+relative to the base, not cumulatively relative to the already-offset space.
+Support standing via STAGE when present; define a documented fallback and
+consistent seated/standing transforms otherwise. Raw tracking has no exact
+portable equivalent; any emulation must be explicit and tested if called.
+
+Handle `XrEventDataReferenceSpaceChangePending` at its `changeTime`, with its
+validity and previous-space transform. It is a reference-space change, not
+always a user recentre. Transform retained anchors or invalidate affected pose
+rings, temporal history and stereo shadows together at a frame boundary.
+[Reference-space
+contract](https://raw.githubusercontent.com/KhronosGroup/OpenXR-Docs/main/specification/sources/chapters/spaces.adoc).
+
+Preserve `fix.launch_centre`'s user choice: today `auto` enables it only under
+OpenComposite, `on` enables it explicitly and `off` disables it. A
+runtime-independent implementation needs an agreed new Auto policy; do not
+silently centre everyone on first pose, particularly users who chose off.
+
+Synthesize only events whose OpenVR semantics are defined and exercised. A
+FOCUSED transition alone does not prove a dashboard opened or closed; an
+arbitrary eye-to-head change is not necessarily an IPD change. Preserve event
+buffer sizes, queue ordering and the corresponding state/property answers.
+
+### Properties, display compatibility and optional interfaces
+
+Implement a minimum coherent HMD, including connectivity/class, requested
+properties, DXGI adapter selection, tracking origin, pose caches and focus.
+Unknown properties return the appropriate property error; strings respect
+required-size and termination rules. Do not fabricate physical vsync timing or
+successful compositor timing to fill unsupported methods.
+
+`IVRExtendedDisplay_001` has three output methods: window bounds, eye viewport
+and DXGI output information. It has no method that simply reports "no extended
+mode". Define safe direct-mode/virtual-display answers and verify Elite accepts
+them. `IVRChaperone_003` returns available stage bounds or failure with
+initialized outputs; it must not claim calibrated bounds when none exist. The
+baseline excludes `IVROverlay_011` consistently from both discovery calls.
+
+Count all 84 methods, but specify every method's behaviour even if uncalled.
+Prioritize any observed skybox, fade, clear-frame, suspend-rendering and
+low-resource calls: returning success without doing their requested work can
+break loading transitions. Log first use of a stub once; initialize output
+buffers and return a defined failure when one exists. If a required behaviour
+cannot be implemented, it is a release blocker rather than a silent no-op.
+
+### Withholding and history
+
+The current `resubmit_shadow.cpp` holds raw game textures per eye, with no
+associated pose, FOV, bounds, colour interpretation or stereo generation. It
+cannot simply become the source of an OpenXR projection layer with the current
+frame's metadata.
+
+Define a last-accepted **stereo** shadow with image data and matching geometry,
+space generation and colour. Promote both eyes atomically only after a
+successful complete submission; successful submission is not proof of display.
+Re-show it with its appropriate stored metadata, or deliberately re-render it
+under the selected hold/theater semantics. Copy it into acquired images when
+needed; retaining a released runtime image as writable storage is invalid. With
+no compatible pair, submit zero layers. Invalidate on device, size, projection
+or coordinate changes unless an explicit transform preserves it. Keep the
+existing temporal-withheld notification and verify consecutive withholds,
+camera-return detection, snapshot mode and recovery independently.
+
+### Runtime selection and extensions
+
+Begin with `auto`: honour an inherited `XR_RUNTIME_JSON`, otherwise use the
+64-bit active-runtime registry selection. Any later EDVR override is a
+startup-only absolute manifest path resolved before loader discovery, not a
+runtime DLL path or a live switch. Friendly runtime names require reliable
+manifest discovery; do not hardcode a Pimax name to the wrong implementation.
+Log selected manifest where known, runtime name/version and enabled extensions.
+Do not edit the machine-wide registry. [Loader selection
+rules](https://registry.khronos.org/OpenXR/specs/1.1/loader.html).
+
+Pin the loader/headers and verify static linking with this MSVC build. If a
+shared loader is needed, include it in packaging, installer ownership and
+uninstall tests. Keep third-party notices for the exact versions used. Reuse
+permissively licensed SDK declarations; do not incorporate OpenComposite
+implementation code into this MIT project. A separate OpenVR backend build
+initially provides an easier rollback boundary than a live transport switch.
+
+Optional features are separate capabilities, not prerequisites for frames:
+
+| Capability | Contract and scope |
+|---|---|
+| `XR_KHR_win32_convert_performance_counter_time` | Correlate QPC and XrTime; never cast between clock domains |
+| `XR_EXT_eye_gaze_interaction` | Check system support; create an action set and pose action, suggest gaze bindings, attach the set, create an action space, sync and validate gaze, then convert to EDVR's head-relative ray |
+| `XR_KHR_visibility_mask` | Convert the hidden-triangle mask to the old OpenVR representation and current projection; return an empty mesh until that conversion is correct |
+| `XR_FB_display_refresh_rate` | Physical display Hz where offered; absence does not make predicted frame cadence a measured display rate |
+| `XR_KHR_composition_layer_depth` | Later feature: submit depth matching final colour, projection, crop, temporal treatment and pose |
+| `XR_META_performance_metrics` | Enumerate actual counter paths, enable collection and check units/validity; no desktop runtime support is assumed |
+
+Gaze still needs OpenXR actions even though the game does not use controller
+actions. Preserve the current validity/blink handling and fixed-centre
+fallback. Availability of the extension alone does not prove tracking is active
+or correct on that runtime. [Gaze
+extension](https://raw.githubusercontent.com/KhronosGroup/OpenXR-Docs/main/specification/sources/chapters/extensions/ext/ext_eye_gaze_interaction.adoc).
+
+Reversed/infinite depth is representable: `minDepth=0`, `maxDepth=1`,
+`nearZ=+infinity`, `farZ=physicalNear` describes an infinite reversed mapping.
+The unresolved issue is whether EDVR can supply matching final depth for all
+relevant pixels, including UI, temporal reconstruction and substituted frames.
+Omit depth unless it can. [Depth
+contract](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrCompositionLayerDepthInfoKHR.html).
 
 ## The Monitor page's GPU figures
 
-Every GPU tile on the Monitor page today comes from the compositor's own
-record, `IVRCompositor::GetFrameTiming`, read once a frame by
-`frame_timing.cpp` and published on the channel; `perf_monitor.h` lists each
-tile's source. OpenComposite fills that record with constants, so the tiles are
-blank there, and OpenXR has no equivalent call, so the layer would leave them
-blank too. The number those tiles exist for -- the game's GPU frame time
-against the display budget, which is what every settings trade turns on -- does
-not have to come from the runtime, and should not. The half that owns the
-immediate context can measure it, on every transport, and it already does so
-for EDVR's own passes: the door bracket (`edvrDoorGpuBegin` / `edvrDoorGpuEnd`,
-`perf_monitor.cpp`) is a timestamp pair on the game's context, never awaited,
-polled on later frames. Widening that bracket to the whole frame is the fix, it
-ships in the current proxy before any OpenXR code exists, and the layer
-inherits it unchanged.
+`frame_timing.cpp` reads validated legacy/modern OpenVR records. The Monitor
+already has independent per-eye door GPU queries and CPU/Present sampling; not
+every GPU figure comes from the compositor. See
+[`perf_monitor.h`](../src/d3d11/perf_monitor.h),
+[`perf_monitor.cpp`](../src/d3d11/perf_monitor.cpp) and
+[`frame_timing.cpp`](../src/openvr/frame_timing.cpp).
 
-| Tile | Today, SteamVR | Today, OpenComposite | Under the layer |
-|---|---|---|---|
-| App GPU | compositor's record | blank | EDVR's frame bracket: first GPU command after the boundary to the end of the swapchain copy |
-| EDVR at the door | door bracket | door bracket | door bracket, extended to the swapchain copy |
-| GPU time, total | compositor's record | blank | app GPU against the display budget; the compositor's cost n/a unless a source below exists |
-| Compositor GPU | compositor's record | blank | SteamVR sidecar where the runtime is SteamVR; the Meta metrics extension where offered; otherwise "n/a on this runtime" |
-| Dropped | compositor's count | blank | inferred: the predicted display time stepping by more than one display period |
-| Reprojected | compositor's flags | blank | inferred: a sustained two-period cadence while the app delivers every period |
-| Display Hz | device property | device property | the predicted display period; the refresh-rate extension where offered |
-| CPU time, wait, Present | EDVR's own clocks | EDVR's own | unchanged; the wait becomes the block inside `xrWaitFrame` |
-| GPU load, temperature | NvAPI, NVIDIA only | same | same, plus a per-process GPU engine counter from PDH as the vendor-neutral fallback |
+Build a runtime-independent **app GPU span** first, in the current proxy. It
+measures elapsed GPU time across an identified application command-stream
+interval, including bubbles and contention. It is not GPU busy time, total
+system cost or the compositor's own timing definition.
 
-**Where the frame bracket's stamps go.**
+| Readout | Proxy migration | OpenXR backend |
+|---|---|---|
+| App GPU | New measured span alongside the existing SteamVR scene measurement | Same instrument, ending after final eye transfer |
+| EDVR GPU | Preserve per-eye pass intervals; audit uncovered branches/copies | Sum measured EDVR intervals for the same stereo frame, including final transfer |
+| GPU TIME | Keep SteamVR's measured total and label local-span fallback | Label as app GPU span; do not imply compositor cost is included |
+| Compositor GPU | Existing validated SteamVR record | Unavailable unless a separately validated runtime source exists |
+| Dropped / reprojected | Existing validated SteamVR counters | Unavailable without an actual runtime source |
+| App cadence | Present and pose-wait intervals, clearly labelled | Add predicted cadence as a separate diagnostic |
+| Display Hz / budget | Existing property when available | Refresh-rate extension when available; otherwise unknown physical Hz and an explicitly labelled predicted app budget |
+| CPU / wait / Present | Existing measured clocks | Preserve thread-time fallback; time `xrWaitFrame` separately |
+| GPU utilization / temperature | Existing NvAPI | Same; optional PDH process-engine data is a distinct readout |
 
-- The **begin** stamp is issued at the first hooked GPU command after the frame
-  boundary, by the d3d11 half, on whatever thread issues that command. That is
-  thread-safe by construction and assumes nothing about which thread calls the
-  pose wait. It also mirrors the compositor's own definition, which starts
-  counting at the app's first work after running start rather than at the
-  previous present, so a light GPU reads well under budget instead of at it.
-- The **door** stamp is where the existing bracket begins, so the frame splits
-  into the game's part and EDVR's part, which is the split the settings rows
-  need.
-- The **end** stamp lands after the last door pass -- under the layer, the copy
-  into the acquired swapchain image -- on the submit thread, which is measured
-  to be the Present thread. One disjoint query wraps all three; the existing
-  query ring and its polling loop are reused.
-- **A span, not busy time.** A timestamp pair measures when the GPU started and
-  finished, bubbles included, which is also what the compositor's figure means.
-  The GPU load tile beside it is what tells a CPU-bound frame from a GPU-bound
-  one: the pairing docs/performance.md's foveation flights needed and lacked
-  for three flights.
+### Bracket placement and query ownership
 
-**Validation.** One flight on the Steam install, with the current proxy, prints
-the compositor's scene and total GPU figures beside EDVR's bracket for the same
-frames. Agreement licenses the bracket on VDXR and PimaxXR, where there is no
-reference at all. The flight rides on any other test.
+- **Start:** publish a frame sequence at the pose boundary. The graphics half
+  consumes it on the game's immediate-context execution path, inserting a
+  timestamp before the first covered GPU command. Inventory draws, dispatches,
+  clears, copies, resolves and `ExecuteCommandList`; a draw hook alone does not
+  prove coverage of the first command. Exclude EDVR's own instrumentation from
+  recursively opening a bracket. If complete coverage is impractical, label the
+  narrower interval honestly.
+- **End:** after the second distinct eye's final work/transfer on that context.
+  In the proxy, identify whether the marker includes runtime submit work and
+  document that boundary. This excludes any mirror/post-submit work after the
+  marker; it is not automatically the whole Present-to-Present GPU workload.
+  Missing eyes or a new boundary retire an incomplete sample as invalid.
+- **EDVR cost:** keep per-eye intervals around EDVR work, including relevant
+  early-return branches and copies. Do not call everything between first-eye
+  door entry and second-eye completion "EDVR": the game may render between
+  submits. App-minus-EDVR is not an exact game-only measurement without
+  matching coverage and a valid accounting model.
+- **Threading:** all query issue/poll calls use the owning context's serialized
+  execution path. An atomic boundary flag makes publication safe, not the
+  immediate context or query ring. Microsoft explicitly requires one thread at
+  a time on an immediate context. [D3D11
+  threading](https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-render-multi-thread-intro).
+- **Queries:** use a bounded ring keyed by device and frame sequence, with
+  explicit open/pending/invalid states. Poll older samples with
+  `D3D11_ASYNC_GETDATA_DONOTFLUSH`; pending stays pending, failure/disjoint
+  retires the sample, ring exhaustion skips measurement. Never flush or wait
+  for telemetry. Avoid overlapping disjoint scopes when combining the frame and
+  door instruments; additional timestamps can share a valid outer scope.
+  [Timestamp
+  validity](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_query_data_timestamp_disjoint).
+- **Publication:** attach both eye timings to their original frame, not the
+  latest completed sample from each eye. The current door ring stores only
+  latest per-eye milliseconds, and the Monitor rings frames at Present;
+  widening that implementation unchanged would mix delayed GPU results with
+  newer frames. Publish source, sequence, validity and age. Clear stale values
+  on loss/re-init and version any shared-layout change in both DLLs.
 
-**What stays runtime-dependent, and how each is handled.**
+Validate with a controlled D3D11 workload, query failures/disjoint data, ring
+pressure and two-device ownership first. Then compare local and SteamVR timing
+on matched frame sequences, accounting for the compositor's delayed records.
+Explain systematic differences rather than demanding numerical equality.
+Measure telemetry overhead with it enabled/disabled. This validates the
+instrument; other runtime/device combinations still need their own checks.
 
-- The compositor's own cost runs in another process and cannot be
-  self-measured. Where the runtime is SteamVR, a second OpenVR init as a
-  background application from inside the process reads the same record fpsVR
-  reads (believed; two clients in one process on top of SteamVR's OpenXR
-  runtime is a desk test before it is a design). Where a runtime offers the
-  Meta performance-metrics extension, take it. Elsewhere the tile says "n/a on
-  this runtime", and the page leads with app GPU against budget.
-- Drops become inference. The layer is handed the predicted display time every
-  frame; a step of two periods is a missed interval, and a sustained two-period
-  cadence is the runtime synthesising frames. Standard practice for OpenXR
-  applications, and exact from the layer's position, but not the compositor's
-  own count: the tile's caption becomes "late" rather than "dropped".
-- The GPU load tile is NvAPI today; a per-process GPU engine counter from PDH
-  gives the same reading on any vendor at a once-a-second sample, and belongs
-  beside it.
+### Measurements that remain optional
 
-The bracket is the first thing to build, in the current proxy: it is the only
-part of this design that both populations need today, and the port inherits it
-for free.
+A predicted display-time jump or a two-period cadence is not proof of a dropped
+frame, motion smoothing or reprojection. The runtime can change its predicted
+period independently of physical refresh. If displayed, name these observations
+"predicted cadence" or "prediction gaps", never dropped/reprojected counts. The
+existing drop attribution must not treat them as compositor evidence.
+[XrFrameState
+semantics](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrFrameState.html).
 
-## Decisions the design has to settle
+A SteamVR timing sidecar is a research spike. Start in a separate helper
+process with Valve's runtime; do not load a second OpenVR initialization into
+Elite or assume a background client's record refers to Elite's OpenXR frame.
+Prove application identity and frame correlation before adding an optional
+source. No sidecar is required to ship the app-span instrument.
 
-1. **Migration shape.** A build flavour, or a developer-tier key
-   (`advanced.vr_transport = layer | passthrough`, name subject to the ini
-   rule), with the proxy path kept for a fixed number of releases and then
-   deleted together with its scaffolding. Not a permanent dual path.
-2. **The device policy.** Require `d3d11.dll` and bind the session to the
-   published device at the first interface request. An openvr-only install is
-   either unsupported, and says so in one line, or gets an OpenComposite-style
-   temp session; the first is recommended.
-3. **The Phase 0 census before any new code** (below): which of the roughly 85
-   methods Elite calls, how often, with what arguments.
-4. **The runtime matrix with a name against each row**: SteamVR's OpenXR (Steam
-   Link, Pimax Play's SteamVR mode, lighthouse headsets), VDXR, PimaxXR, Varjo,
-   and WMR recorded as retired by Microsoft.
-5. **The retired keys and their replacements**: `advanced.real_openvr_dll`
-   chaining, `advanced.suppress_interfaces`, the launch centre's export-based
-   runtime detection, `advanced.compositor_timing`, the handover's
-   `fix.vr_handover`.
-6. **Alternatives rejected in writing** (next section).
+For Meta metrics, enumerate supported paths and verify collection, units,
+validity and freshness per counter. A headset vendor name does not establish
+that its Windows runtime exposes this extension. [Counter
+enumeration](https://registry.khronos.org/OpenXR/specs/1.0/man/html/xrEnumeratePerformanceMetricsCounterPathsMETA.html),
+[counter
+queries](https://registry.khronos.org/OpenXR/specs/1.1/man/html/xrQueryPerformanceMetricsCounterMETA.html).
 
-## Alternatives rejected
+PDH process-engine utilization is an optional later sampler. It is not the same
+quantity as NvAPI's adapter load and does not supply temperature. Specify PID,
+adapter/engine selection and aggregation; do not sum unrelated engines into a
+misleading percentage. Preserve unavailable values when there is no source.
 
-- **Fork OpenComposite.** GPL-3.0-or-later against EDVR's MIT; a codebase many
-  times the size of this layer, covering every OpenVR generation, Vulkan,
-  OpenGL, input actions and overlays; an upstream whose last commit on the
-  OpenXR branch is 2025-07-21 (reviewed 2026-08-29, `early_session.h`); and
-  EDVR would still be hooking it rather than owning the seam. The 2026-08-29
-  question, "fork or not", was answered "not yet, fix it from our side"; the
-  list of things fixed from our side since is the pros section above, and it is
-  why the answer changes.
-- **The SteamVR-only goal as stated.** It leaves the native-runtime users on a
-  dead layer, and both field rigs are among them.
-- **A permanent dual path.** Every fix would be written twice or apply to one
-  population only; the hook scaffolding would never be deleted.
+## Migration decisions
 
-## Phase 0: measure before building
+1. **Separate build first.** Keep the shipping proxy default while the OpenXR
+   backend is qualified. Select transport before initialization; no live switch
+   or silent fallback after an OpenXR session fails. Keep a documented rollback
+   artifact. Retire the proxy only after acceptance gates, not an arbitrary
+   number of releases.
+2. **Paired DLLs required.** Match shared protocol/build capabilities and
+   verify the device before session creation. No openvr-only temporary-session
+   path.
+3. **Preserve configuration until retirement.** The table below records
+   candidates, not authorization to remove settings in the first code change.
+   Keep `edvr.ini`, config audit, generated menu/installer schema and support
+   documentation synchronized when a migration is implemented.
+4. **Baseline before optimizations.** No mandatory sidecar, PDH, direct
+   swapchain pass output, PP-off fold, depth layer or quad menu in initial
+   transport parity. Gaze migration is required before claiming parity for
+   configurations that use EDVR's current eye-driven foveation.
 
-Each item names what to log and what the answer decides. Items 1 to 3 and 7
-extend the current proxy and cost no new DLL.
+| Existing key | Current behaviour | Proposed OpenXR treatment |
+|---|---|---|
+| `advanced.real_openvr_dll` | Chooses the forwarded DLL | Proxy-only during migration; retire with proxy |
+| `advanced.suppress_interfaces` | Refuses configured interface prefixes before reaching the runtime | Keep proxy behaviour; owned backend has a fixed supported-interface table |
+| `advanced.compositor_timing` | Enables existing compositor timing collection | Define separate measured-source behaviour before changing this switch; never make local queries depend accidentally on a legacy timing decoder |
+| `fix.vr_handover` | `early` submits a 1x1 texture before the game's compositor calls; `stock` does not | Not used by owned session initialization; retire only with proxy |
+| `fix.launch_centre` | `auto` is OpenComposite-only; `on`/`off` explicit | Preserve explicit choice; review new Auto policy before changing behaviour |
 
-1. **The slot census.** Count every vtable slot on all four requested
-   interfaces (the proxy already patches in place; counting thunks on the
-   remaining slots is the same mechanism), and for the calls that carry
-   arguments worth knowing, their values: events polled and which event types
-   the runtime delivers, controller state, the hidden area mesh, the skybox,
-   fades, `PostPresentHandoff`, `SetTrackingSpace`. One flight per desk
-   runtime. This turns "about 85, 8 used" into an implemented list and a stub
-   list with evidence.
-2. **The pose wait's thread id**, one log line beside the submit thread's
-   (`compositor_hook.cpp` already logs the latter). Decides whether the begin
-   stamp and the frame-loop calls can sit in the layer's own pose wait or must
-   ride the draw hooks.
-3. **The frame bracket validated against the compositor's record** on the Steam
-   install, one flight, as described above.
-4. **The extension lists of the three desk runtimes** (SteamVR, VDXR, PimaxXR),
-   from `xrEnumerateInstanceExtensionProperties` in a small desk program. No
-   flight. Answers the metrics, refresh-rate, eye-gaze, visibility-mask and
-   depth rows.
-5. **The SteamVR sidecar desk test**: a background OpenVR init in a process
-   that also holds an OpenXR session on SteamVR, and whether `GetFrameTiming`
-   answers for the scene application. Decides the compositor-GPU tile on
-   SteamVR.
-6. **Which device the publication picks** when the game creates two: log the
-   published device at publication and the submitted texture's device at the
-   first submit, and confirm they agree (the early handover's result says they
-   do, on one rig).
-7. **The submitted formats per rig**, by adding the format to the "ONE EYE is"
-   line. Decides the swapchain format table.
-8. **How Elite reacts to a quit and to focus loss**, from the events the
-   runtime delivers today (item 1) and the game's behaviour after them. Decides
-   the event mapping.
-9. **Whether a reversed-Z, infinite-far depth can be described to the depth
-   layer extension** (vendor-stated at implementation, from the spec text).
-   Decides whether depth submission is an option at all.
+The OpenXR loader/SDK and OpenVR declarations must retain their upstream
+license notices. Forking OpenComposite would be a different project and
+licensing/distribution decision; the implementation plan here is an independent
+bridge using public API contracts. Do not base a present-day decision on the
+old draft's unrefreshed upstream last-commit date.
 
-## Phasing
+## Phase 0: evidence before backend integration
 
-- **Phase 0**: the measurements above, in the current proxy, one flight per
-  desk runtime plus the desk programs.
-- **Phase 1**: the frame GPU bracket and the Monitor changes, in the current
-  proxy. Ships to everyone; fixes OpenComposite's blank tiles without waiting
-  for the port.
-- **Phase 2**: the layer behind the migration key, on the three desk runtimes,
-  with the census-derived implemented and stub lists, the SteamVR parity
-  measurement, and the transition-flash re-verification.
-- **Phase 3**: the field (Varjo, and Meta's runtime where it is reachable),
-  then the proxy path retired at a named release and its scaffolding deleted.
+Use existing sanctioned log/build tools. Preserve executable build/hash, DLL
+build identities, runtime manifest/name/version, headset, render size, settings
+and log timestamps with each capture. Tag calls from Elite separately from
+EDVR's own probes and injected clients. "Not observed" is a bounded result, not
+proof that a method will never be called.
+
+1. **ABI census and reproducible inventory.** Pin the historical header, record
+   all 84 method signatures and the export table, and capture init,
+   shutdown/re-init, validity checks and first geometry requests. Instrument
+   known exact signatures; do not patch every slot with a generic C thunk. Test
+   instrumentation in the existing fake/runtime smoke harness before a flight.
+   Capture meaningful arguments for events, properties, controller queries,
+   tracking space, hidden mesh, skybox/fades and handoff.
+2. **Frame and context ordering.** Record thread IDs and ordered sequences for
+   pose wait, both eyes, Present, relevant GPU commands and teardown. Record
+   deferred-context execution if present. This decides safe query placement,
+   eye capture and the synchronization contract.
+3. **Device and texture ownership.** Record every created device, feature
+   level/adapter and submitted texture device, including first skybox and eye
+   submissions. Capture full descriptors, colour space, bounds and flags at
+   first use and changes. Confirm both eye orders and double-wide fixtures in
+   desk tests even if only one order is observed in flights.
+4. **Monitor prototype and validation.** Build the bracket in the proxy after
+   its ownership contract is established. Compare with delayed SteamVR records
+   on matched frames; exercise AA/pass settings and post-submit mirror work.
+   Phase 0 establishes the instrument; Phase 1 qualifies and ships it.
+5. **Runtime capability desk program.** Enumerate extensions, system support,
+   adapter requirements, primary-stereo views, blend modes and limits. Session
+   tests obtain actual formats, startup geometry, refresh rate and gaze state.
+   Run against the actual installed SteamVR, VDXR and Pimax implementations;
+   extension enumeration alone does not establish functional support.
+6. **Lifecycle and event behaviour.** Exercise headset doff/don, dashboard,
+   focus loss, runtime exit, tracking invalidity and recentre. Record the
+   events Elite consumes and its response; do not map STOPPING to quit by
+   assumption. Test session-loss handling without requiring a game crash.
+7. **Optional research.** Sidecar correlation, metrics counters, final-depth
+   suitability and direct-output format capabilities get their own findings.
+   Their absence must not hold up the baseline backend.
+
+## Phasing and acceptance
+
+| Phase | Deliverable | Gate |
+|---|---|---|
+| 0 | Census, ownership evidence, bracket prototype, runtime desk harness | Reproducible evidence and safe instrument operation; unresolved first-device/geometry assumptions recorded as blockers |
+| 1 | App GPU span and Monitor source/validity changes in proxy | Desk failures covered; SteamVR correlation explained; useful measured values on native-runtime rigs; existing SteamVR counters preserved |
+| 2 | Opt-in OpenXR backend with required EDVR features | ABI and fake-XR tests pass; real loader validation; initial geometry, stereo/colour/pose and lifecycle parity on each desk runtime |
+| 3 | Field qualification and retirement proposal | Named runtime matrix with results, rollback/install verification and explicit sign-off on exact retired settings/features |
+
+Headset acceptance includes intro/menu/loading, cockpit and terrain edges, FSS
+entry/exit, theater/heal, on-foot screen, Explorer Cam, temporal modes and
+render-scale changes, settings reload, consecutive withheld frames and normal
+shutdown. Repeat relevant cases with asymmetric and canted headset geometry.
+Preserve current PP requirements until separately validated. Record frame
+cadence, GPU span, image quality and startup duration against the same proxy
+configuration; a smooth desk harness is not SteamVR performance parity.
+
+## Implementation work packages after confirmation
+
+Luna agents get bounded ownership and must return changes, tests run and
+remaining evidence gaps. The parent agent owns shared contracts, reviews all
+diffs and integrates sequentially. Parallel work is limited to independent
+files; agents must not race edits to `frame_flag.*`, `build.bat` or config.
+
+1. **Census and ABI fixtures:** exact header/export manifest, safe call census
+   and member-ABI tests, including failure buffers and re-init. Start here
+   alongside independent Monitor design/desk instrumentation work.
+2. **GPU instrument and Monitor:** frame-associated asynchronous queries,
+   device ownership, unavailable/stale handling, graphs/overlay/tile sources
+   and focused tests. Integrate shared-channel changes through the parent.
+3. **OpenXR core:** dispatch interface for a fake runtime, init/device/session
+   lifecycle, startup geometry, spaces, events and immutable frame records.
+   Begin after the necessary census contracts are reviewed; do not guess past
+   an unresolved flight-dependent decision.
+4. **Submission and feature integration:** pair state, swapchains/conversion,
+   projection and shadow metadata, then extract/adapt existing feature paths.
+   This depends on reviewed core contracts and must preserve each branch.
+5. **Build and distribution:** pinned dependencies/notices, backend selection,
+   both build flavours, installer/rollback and config documentation. Begin
+   after artifact and configuration contracts are agreed.
+
+Required desk tests cover incomplete/reversed/duplicate eye pairs,
+`shouldRender=false`, invalid tracking, acquire/wait/release failures, missing
+formats, resize, recenter, device mismatch/removal, loss/shutdown/re-init and
+missing optional extensions. ABI tests use the real historical declarations;
+projection/colour tests compare against independent expected outputs. Extend
+`tools/fakevr` and `tools/openvr_smoke` where appropriate, and add a fake-XR
+call-order harness rather than depending on a headset for failure coverage.
+
+Every C++ change must pass `build.bat` by absolute path and the relevant
+existing gates. New Python tools have `--self-test` and enter the build gate;
+config changes pass `tools/check_config_contract.py`, exit changes pass the
+existing exit-path checks. The parent reviews resource lifetimes, frame/pose
+semantics and claimed test coverage before integration. If a gate needs a
+flight, prepare the exact instrumented build and capture instructions and
+report that remaining requirement explicitly.
