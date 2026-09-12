@@ -70,18 +70,21 @@ error dialogs. No installed runtime or game file is used by these fixtures.
 The full absolute-path build passed, including all four actual-proxy export
 children, the typed ABI harness, paired-proxy WARP/LiveCopy checks, GPU timing
 lifecycle tests, temporal shader and motion regressions, Python tool self-tests
-and the 252-key config contract. Hardware startup with the new census remains
-untested.
+and the 252-key config contract. The subsequent [Frontier
+flight](openxr-semantic-flight-2026-09-12.md) passed the ordinary
+startup-to-shutdown capture with a normal user report; the remaining lifecycle
+and coverage limits still apply.
 
 ## Remaining evidence and next test
 
-The next Frontier run should include normal startup, a short cockpit/on-foot
-session, and normal exit using the existing Pimax-through-SteamVR setup. Check
-both DLL build identities before interpreting the logs. Review export ordering,
-init/error/token values, the requested property IDs and sizes, both eyes'
-initial geometry, tracking-origin arguments and any captured event headers. The
-game may not perform in-process re-init in an ordinary session; its absence
-from that capture does not qualify re-init.
+The subsequent Frontier run used the existing Pimax-through-SteamVR setup and
+supplied the [initial semantic results](openxr-semantic-flight-2026-09-12.md).
+Future qualification should cover the remaining lifecycle and feature cases.
+Check both DLL build identities before interpreting the logs. Review export
+ordering, init/error/token values, the requested property IDs and sizes, both
+eyes' initial geometry, tracking-origin arguments and any captured event
+headers. The game may not perform in-process re-init in an ordinary session;
+its absence from that capture does not qualify re-init.
 
 This capture is deliberately bounded. Four projection samples per eye can miss
 later near/far conventions or geometry changes. Four successful events can miss

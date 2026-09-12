@@ -907,6 +907,18 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR probe build failed & exit /b 1 )
 "%BUILD%\openxr_probe.exe" --self-test || exit /b 1
 
+REM Reusable OpenXR core policies. These tests inject dispatch and geometry;
+REM no loader/session is opened and the shipping proxies do not use them yet.
+if not exist "%OBJ%\openxr_core" mkdir "%OBJ%\openxr_core"
+for %%T in (session projection) do (
+    cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
+        /Fo"%OBJ%\openxr_core\\" /Fe"%BUILD%\openxr_%%T_test.exe" ^
+        "tools\openxr_%%T_test\openxr_%%T_test.cpp" /link /INCREMENTAL:NO
+    if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
+    "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
+    "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
+)
+
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     /Fo"%OBJ%\fakevr\\" /Fe"%BUILD%\fakevr.dll" ^

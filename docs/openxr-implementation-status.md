@@ -5,8 +5,14 @@ The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
 OpenXR backend or a completed Phase 0 qualification. The latest checkpoint adds
 a [bounded semantic and export census](openxr-semantic-census-2026-09-12.md)
 and an [installed runtime inventory](openxr-runtime-inventory-2026-09-12.md),
-following the render-to-submit measurement and Frontier timer-migration check.
-Earlier review decisions below record the state at those checkpoints.
+followed by a successful [Frontier semantic census
+flight](openxr-semantic-flight-2026-09-12.md). It confirms paired init/shutdown
+records, stable interface identity, seated tracking and three projection plane
+pairs. Native OpenXR session creation and game transport remain unimplemented.
+Reusable [session/frame and projection
+policies](openxr-core-policy-2026-09-12.md) now exist under desktop tests; they
+are not connected to the shipping proxies. Earlier review decisions below
+record the state at those checkpoints.
 
 The original motion regression has recovered on the corrected `f622cd2`
 main-menu capture. The user deferred the remaining stationary wing-line flicker
@@ -136,8 +142,8 @@ Before treating Phase 0 as complete, still collect and review:
 1. Exact init/shutdown/re-init and interface-validity export traffic,
    meaningful property/controller/event arguments and returned events, first
    geometry results, skybox descriptors and complete lifecycle behaviour. The
-   new semantic/export census is ready for capture; its bounded observations
-   cannot establish this full semantic inventory alone.
+   new semantic/export census has passed an ordinary Frontier capture; its
+   bounded observations cannot establish this full semantic inventory alone.
 2. Real startup and flight order/context/device evidence, including texture
    reuse, both eyes, mirror work and deferred command-list execution. A missing
    line is not proof of absence. The first published device matched the sampled
