@@ -188,4 +188,13 @@ the bounded VR census survived the merge, as did the startup and worker-exit
 fixes. The full paired build passed. The next flight uses Pimax through SteamVR
 and explicitly checks LiveCopy activation, working rendering fixes, startup,
 exit and refreshed ordering evidence; see the [Frontier flight
-checklist](frontier-livecopy-flight-2026-09-12.md). Its results remain pending.
+checklist](frontier-livecopy-flight-2026-09-12.md).
+
+The `f08098c` Frontier check passed on Pimax through SteamVR: Sean confirmed
+normal on-foot/cockpit rendering, prompt intro and clean exit. Both logs match
+the installed build; LiveCopy is active in both context hooks, feature counters
+advance, and all 32 captured stereo pairs retain wait/both-eyes/Present order
+on one immediate context and thread. The flight lasted about 3 minutes 15
+seconds and included AA changes and the existing culling diagnostic, so it is
+functional integration evidence rather than a controlled overhead measurement.
+The shared-clock migration and later GPU accuracy/overhead gates remain open.

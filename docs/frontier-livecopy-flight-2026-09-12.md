@@ -1,10 +1,10 @@
 # Frontier LiveCopy integration flight
 
-Status: installed, not yet flown. Sean confirmed Pimax through SteamVR for this
-test. Main's PR #33 was merged into `codex/openxr-port` at `06636b2`; the full
-paired build and its regression gates passed. The startup shader bytecode and
-menu-worker exit fixes remain in this branch. No OpenXR transport or new game
-GPU timer is enabled.
+Status: initial functional flight passed. Sean confirmed Pimax through SteamVR
+for this test. Main's PR #33 was merged into `codex/openxr-port` at `06636b2`;
+the full paired build and its regression gates passed. The startup shader
+bytecode and menu-worker exit fixes remain in this branch. No OpenXR transport
+or new game GPU timer is enabled.
 
 ## Installation and environment
 
@@ -87,3 +87,68 @@ observations here after review. This run checks merged hook behavior and
 startup/exit regressions; dispatch overhead and GPU timing accuracy still need
 their later matched measurements. The native shared-query test is desk evidence
 only.
+
+## Flight result: f08098c, 06:11 local
+
+Sean reported that on-foot play and sitting in the cockpit looked good, then
+explicitly confirmed prompt intro playback and normal exit without a crash or
+hang. The captured session spans approximately 3 minutes 15 seconds, from
+06:11:52 to 06:15:07 on 2026-09-12. This is an initial functional check,
+shorter than the planned 5–10 minute run; it is not an extended stability or
+performance qualification.
+
+Both logs passed `--expect-build f08098c` independently, with version
+`v0.15.1-48-gf08098c`:
+
+| Half | Log | Linked build stamp |
+| --- | --- | --- |
+| Graphics | `edvr_gfx_20260912_061152.log` | `6AA54063` |
+| VR | `edvr_vr_20260912_061153.log` | `6AA5406D` |
+
+The runtime identified itself as Valve SteamVR by its exports. All 16 sampled
+eye-resource observations were `2774x2740`, format 27, single-sample textures
+on the published device `0000018E16C9C070` (adapter LUID `00000000:00013F22`).
+DLSS engaged and returned `4268x4216` per eye, also the runtime's recommended
+size. These log excerpts do not establish an exact GPU model or DLSS DLL
+version. AA was switched off and back to DLSS during the run; the existing
+raw-channel symmetric culling diagnostic also became active at 06:12:18.800.
+Preserve these conditions when interpreting the capture. That culling probe is
+separate from the context-hook probe; both production context hooks were
+active.
+
+At startup, auto selected LiveCopy with 96/96 sampled methods in Windows' D3D11
+runtime. Exposure and vScreen both installed live private tables on context
+`0000018E17A41398`. Exposure confirmed its once-per-eye compute shader at
+06:11:57.792. The on-foot counters then advanced from 3,259 panel-distance
+adjustments and 3,260 black-void clears at 06:13:52 to 6,469 and 6,472 at
+06:14:12, with a 2–2 void-clear range in both windows. Later cockpit windows
+continued receiving eye draws (peaks 650 and 644) while the on-foot counters
+stayed flat, consistent with leaving that scene. Menu open/close pairs were
+logged twice. These observations establish that the rendering hooks continued
+doing work, beyond merely reporting successful installation.
+
+The merged bounded ordering capture also passed. All 32 fully captured stereo
+pairs follow WaitEnter/Exit, left SubmitEnter/Exit, right SubmitEnter/Exit,
+then PresentEnter/Exit before the next wait. Each core event kind has 64
+samples; all sampled VR-phase calls use thread `28276`, and all sampled
+graphics commands use the context above. The command census records ClearRtv,
+ClearDsv, CopyRegion, DrawInstanced, Dispatch, Copy, DrawIndexedInstanced,
+Update and DispatchIndirect, each with its bounded 16 samples. One Copy and two
+Updates occur after final Submit within those captured pair windows. No command
+after Present was observed in those pair windows, which does not overturn the
+earlier flight's positive evidence: exhausted per-kind budgets cannot establish
+absence. The future timing span remains explicitly render-to-submit.
+
+The three precompiled temporal shaders were created in 0.160, 0.220 and 0.405
+ms (0.785 ms total), and the log confirms no runtime HLSL compilation for that
+warm-up. No context-hook starvation, stale-forward warning, degraded
+hook-retention warning, sentinel trip or exception was found. Elite was no
+longer running at inspection, and Windows Application Error, WER and
+Application Hang records contained no matching event in the flight window.
+Neither DLL logged an explicit shutdown acknowledgement; the clean-exit result
+is supported by Sean's confirmation and the separate process/event checks.
+
+PR #33's initial LiveCopy functional check passes on this Pimax/SteamVR setup.
+Long-frame diagnostics remain in the log; the active culling diagnostic and AA
+changes also make this unsuitable as a controlled overhead comparison. No new
+GPU timing result or OpenXR transport behavior has been qualified by this run.
