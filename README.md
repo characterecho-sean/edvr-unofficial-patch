@@ -192,6 +192,111 @@ The [Discord](https://discord.gg/ynkdf6Gdua) is good for setup questions and
 for "is this normal". Bugs still want an issue: chat loses attachments and
 the thread, and an issue is what remembers a problem long enough to fix it.
 
+### If the game dies a second or two after launch
+
+**As of this version this fixes itself — update and it should just work, with
+no `edvr.ini` change.** The launch crash
+([#20](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/20)
+and
+[#21](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/21))
+was EDVR taking a *frozen* copy of the render context's dispatch table on rigs
+where Windows' `d3d11.dll` re-lays that table every frame; the copy fell out of
+step and hung the GPU about a second and a half in. `auto` now gives those rigs
+a *live* table instead — one that follows the runtime call by call — so the
+default no longer crashes. If you were on a crashing build, the fix is to
+update, nothing more.
+
+`edvr_breadcrumbs.txt` ending at `arming d3d11 hooks` means the Direct3D half
+got its hooks in and the game died shortly after. EDVR's crash sentinel turns
+those hooks off for the **next** launch on its own, so before this fix the
+usual shape was crash, play, crash, play. If a rig somehow still dies that way
+after updating, three settings under `[advanced]` in `edvr.ini` are worth
+trying, in this order:
+
+```ini
+[advanced]
+context_hook_mode = shared
+```
+
+changes how EDVR attaches to the game's render context. `auto` (the default)
+asks whose code implements the context and picks for you: a *live* private copy
+of the dispatch table (described under `live` below) when the methods are
+Windows' own, the shared table when another mod wraps them. The log line says
+which it chose. `shared` forces the shared table — the most conservative mode,
+the one that composes with a wrapper like ReShade, and the one to reach for
+first if a rig somehow still crashes after updating. If anything pushes EDVR
+out of a slot the log says so by name.
+
+```ini
+[advanced]
+context_hook_mode = live
+```
+
+is what `auto` already gives a rig whose render context is Windows' own, so on
+most machines you are running it without setting anything — name it by hand
+only to come back to it after trying `shared`. It gives the context a dispatch
+table of EDVR's own — so nothing else in the process can write the table the
+game dispatches through — and every entry in it reads the game's own entry at
+the moment of each call instead of remembering what it said at startup. That
+matters because Windows' `d3d11.dll` re-lays the context's table while the game
+runs, sometimes onto a different internal implementation, and a copy taken at
+startup does not follow it (that frozen copy is the `private` mode, and it is
+what issues #20/#21 hung on). `live` follows it, call by call. The cost is two
+extra jumps per Direct3D call, which is below anything that has been measurable
+in a frame time; the risk is that a mod wrapping Direct3D objects (ReShade as
+`dxgi.dll`) does not expect its object to be re-pointed, which is why `auto`
+gives those rigs `shared` instead. If `shared` keeps the game alive but the log
+then says EDVR's hooks keep being pushed out of the table, this is the mode
+that is both unbypassable and never out of date. Each `live` hook forwards
+through a small executable stub page EDVR generates -- mapped
+`PAGE_EXECUTE_READ`, executable but never also writable -- so it can reach the
+runtime's current method for that slot; that generated code is something an
+antivirus heuristic may weigh, and a process that force-enables Control Flow
+Guard could refuse a call through one.
+
+```ini
+[advanced]
+d3d11_fixes = 0
+```
+
+turns the Direct3D fixes off for good. Nothing is hooked on the device or on
+its render context, so the black void, the panel fixes, the shader
+replacements and the anti-aliasing passes are all inert. The `openvr_api.dll`
+half keeps working, and so do the swapchain and DXGI hooks that carry the
+frame boundary it runs on -- so this is not "EDVR loads and does nothing", and
+if a crash survives it, that is worth reporting: it is in one of those or in
+the VR half.
+
+Please report which of the three you needed, with the log from each -- that is
+the measurement that turns a workaround into a fix.
+
+If you are willing to run one more session for the diagnosis rather than for
+your own comfort, add
+
+```ini
+[advanced]
+vtable_flip_timeline = 1
+```
+
+to whichever of the three you ended up on. It logs every change to the game's
+Direct3D function table -- what changed, from what to what, at which frame, and
+which instruction did it -- and writes the first few to
+`edvr_breadcrumbs.txt`, which survives a crash that eats the log. That file is
+what says whether the table changed *before* the crash or *after* it, which is
+the one thing the reports so far cannot settle. Every line that carries a frame
+number now counts frames the same way, including the monitor's "LONG FRAME"
+line, so the ordering can be read straight off the file.
+
+On `context_hook_mode = shared` the table changes every frame anyway — that is
+Windows' own `d3d11.dll` writing its entry back over EDVR's hook — so the
+per-change lines stop after the first few thousand and only the running tally
+continues. That is expected, not a fault. (EDVR's own writes never appear in
+the list: it unlocks the memory before writing, so they raise nothing for the
+watch to see.) It makes every write to the memory the table lives on take an exception,
+which costs a few milliseconds a frame; it prints what it cost, switches itself
+off if that ever gets serious (never in the first ten seconds, which is where
+the crash is), and is meant for one session. Set it back to 0 afterwards.
+
 ### Uninstall
 
 Run `edvr-installer.exe` and press **Uninstall**. It removes EDVR's files,

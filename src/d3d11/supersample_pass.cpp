@@ -1,4 +1,5 @@
 #include "supersample_pass.h"
+#include "graphics_runtime.h"
 
 #include <cstring>
 
@@ -922,7 +923,7 @@ void supersamplePassShutdown() {
 extern "C" __declspec(dllexport) void* edvrSupersampleResolve(
     void* srcTex, int eye, const float* bounds, unsigned outW, unsigned outH,
     int filter, float width, int gamma) {
-    if (!srcTex || eye < 0 || eye > 1) return nullptr;
+    if (edvr::graphicsRuntimeDisabled() || !srcTex || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::resolveInner(srcTex, eye, bounds, outW, outH, filter, width,

@@ -1,4 +1,5 @@
 #include "fss_theater.h"
+#include "graphics_runtime.h"
 
 #include <cstring>
 
@@ -507,7 +508,7 @@ extern "C" __declspec(dllexport) void* edvrFssTheater(void* contentTex,
                                                       float curve,
                                                       float aspect,
                                                       const float* rect) {
-    if (!contentTex || !xf || eye < 0 || eye > 1) return nullptr;
+    if (edvr::graphicsRuntimeDisabled() || !contentTex || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::theaterInner(contentTex, contentTexR, eye, outerMag,

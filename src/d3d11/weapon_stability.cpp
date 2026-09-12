@@ -10,12 +10,15 @@ template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 // Configuration survives release of inactive on-foot GPU resources.
 bool g_enabled=true,g_configured=false;
 struct State {
-    unsigned frame=0,lastScreen=0,prepared=~0u,bytes=0,pendingFrame=0,nextReport=0;
+    unsigned frame=0,lastScreen=0,prepared=~0u,sourceFrame=~0u,bytes=0,pendingFrame=0,nextReport=0;
     bool seen=false,failed=false,pending=false;
     Ptr<ID3D11Buffer> pool,bones,camera,fixed,anchor,stage;
-    Ptr<ID3D11ShaderResourceView> fixedSrv;
+    Ptr<ID3D11ShaderResourceView> fixedSrv,poolView,bonesView;
     Ptr<ID3D11UnorderedAccessView> fixedUav,anchorUav;
     Ptr<ID3D11ComputeShader> find,apply;
+    Ptr<ID3D11ComputeShader> emitterShader;
+    Ptr<ID3D11Buffer> emitterOutput,emitterCb;
+    Ptr<ID3D11UnorderedAccessView> emitterUav;
 } g;
 bool family(uint64_t vs) {
     return vs==0xF516BF0201303B87ull || vs==0x8B589D25B2A0ADDCull ||
@@ -26,7 +29,12 @@ bool family(uint64_t vs) {
            // uses an already camera-relative placement and must stay outside.
            vs==0xAACFDCF2FB9AD809ull || vs==0x34CCFAAB1EAD90BEull ||
            vs==0x174E8D76363BE337ull || vs==0x025B4B9FF54622EDull ||
-           vs==0x7F9B650EC1A1E570ull;
+           vs==0x7F9B650EC1A1E570ull ||
+           // The small emissive skinned surface in draw 387 of 04:13:00.
+           // Its instance 135 shares the arms' attachment origin. Unlike
+           // the late GUI, its original VS subtracts camera[275] from t33,
+           // so it needs the same correction as the surrounding geometry.
+           vs==0x88DCF1164C640EC3ull;
 }
 bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11ShaderResourceView* bonesView,
               ID3D11Buffer* pool,ID3D11Buffer* bones,ID3D11Buffer* camera,unsigned bytes) {
@@ -62,7 +70,41 @@ bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11
     ctx->CSSetShaderResources(0,2,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->CSSetShader(saved.Get(),classes,nc);
     for(auto* p:srvs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
     if(!g.pending && g.frame>=g.nextReport){ctx->CopyResource(g.stage.Get(),g.anchor.Get());g.pending=true;g.pendingFrame=g.frame;g.nextReport=g.frame+1800;}
-    g.pool=pool;g.bones=bones;g.camera=camera;g.prepared=g.frame;return true;
+    g.pool=pool;g.bones=bones;g.camera=camera;g.poolView=poolView;g.bonesView=bonesView;
+    g.prepared=g.sourceFrame=g.frame;return true;
+}
+bool particleDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,unsigned start,int base,unsigned startInstance) {
+    // Only the verified local particle PS/VS pair. The shared vertex shader
+    // also renders world effects; the GPU validates projection and proximity.
+    if(bindingShaderHash(BindSlot::Ps)!=0x3789CA2062E196FBull || g.sourceFrame!=g.frame || !g.poolView || !g.bonesView)return false;
+    Ptr<ID3D11Buffer> model,camera;ctx->VSGetConstantBuffers(0,1,&model);ctx->VSGetConstantBuffers(1,1,&camera);
+    if(!model || !camera)return false;
+    D3D11_BUFFER_DESC md{},cd{};model->GetDesc(&md);camera->GetDesc(&cd);
+    if(md.ByteWidth!=13*16 || cd.ByteWidth<276*16)return false;
+    // The camera buffer is rewritten between world and viewmodel draws.
+    // Refresh the existing GPU anchor with this draw's actual camera rows.
+    if(!generate(ctx,g.poolView.Get(),g.bonesView.Get(),g.pool.Get(),g.bones.Get(),camera.Get(),g.bytes))return false;
+    if(!g.emitterShader)g.emitterShader.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"applyEmitter","weapon emitter",nullptr,"weapon stability"));
+    if(!g.emitterShader)return false;
+    if(!g.emitterCb) {
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=13*16;bd.StructureByteStride=16;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+        g.emitterOutput.Reset();g.emitterUav.Reset();
+        if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.emitterOutput)) || FAILED(dev->CreateUnorderedAccessView(g.emitterOutput.Get(),nullptr,&g.emitterUav)))return false;
+        bd.StructureByteStride=bd.MiscFlags=0;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.emitterCb)))return false;
+    }
+    Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->CSGetShader(&saved,classes,&nc);
+    ID3D11Buffer* cbs[2]{};ctx->CSGetConstantBuffers(0,2,cbs);
+    ID3D11UnorderedAccessView* uavs[2]{};ctx->CSGetUnorderedAccessViews(1,2,uavs);
+    ID3D11Buffer* inputs[2]={camera.Get(),model.Get()};ID3D11UnorderedAccessView* outputs[2]={g.anchorUav.Get(),g.emitterUav.Get()};
+    ctx->CSSetConstantBuffers(0,2,inputs);ctx->CSSetUnorderedAccessViews(1,2,outputs,nullptr);
+    ctx->CSSetShader(g.emitterShader.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+    ID3D11UnorderedAccessView* nulls[2]{};ctx->CSSetUnorderedAccessViews(1,2,nulls,nullptr);
+    ctx->CopyResource(g.emitterCb.Get(),g.emitterOutput.Get());
+    ctx->CSSetConstantBuffers(0,2,cbs);ctx->CSSetUnorderedAccessViews(1,2,uavs,nullptr);ctx->CSSetShader(saved.Get(),classes,nc);
+    for(auto* p:cbs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
+    ctx->VSSetConstantBuffers(0,1,g.emitterCb.GetAddressOf());draw(ctx,count,instances,start,base,startInstance);ctx->VSSetConstantBuffers(0,1,model.GetAddressOf());return true;
 }
 }
 void weaponStabilityConfigure(Config& cfg) {
@@ -71,7 +113,7 @@ void weaponStabilityConfigure(Config& cfg) {
     g_enabled=enabled;g_configured=true;
     // Keep compiled shaders and screen recognition for a live A/B. Never
     // reuse a pre-toggle pool or report a pending sample from the old mode.
-    g.prepared=~0u;g.pending=false;g.nextReport=0;
+    g.prepared=g.sourceFrame=~0u;g.pending=false;g.nextReport=0;
     Log::get().note("weapon stability: %s (live; independent of AA and runtime reprojection).",enabled?"on":"off");
 }
 void weaponStabilityObserveScreen() {
@@ -81,16 +123,19 @@ void weaponStabilityObserveScreen() {
     }
 }
 void weaponStabilityResourceWritten(ID3D11Resource* resource) {
+    if(!resource)g.sourceFrame=~0u;
     if(!resource || resource==g.pool.Get() || resource==g.bones.Get() || resource==g.camera.Get())g.prepared=~0u;
 }
 bool weaponStabilityDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                          unsigned start,int base,unsigned startInstance,unsigned w,unsigned h) {
     if(!g_enabled)return false;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs);
-    if(!g.seen || g.failed || g.frame-g.lastScreen>2 || !family(vs) || !ctx || !draw || !instances || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
+    const bool particle=vs==0x9AEC596A2B036EA6ull;
+    if(!g.seen || g.failed || g.frame-g.lastScreen>2 || (!family(vs) && !particle) || !ctx || !draw || !instances || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
     ResourceInfo rt;if(!bindingResolve(bindingGet(BindSlot::Rtv0),&rt) || !rt.isTexture2D || rt.a!=w || rt.b!=h)return false;
     D3D11_VIEWPORT vp{};UINT nv=0;ctx->RSGetViewports(&nv,nullptr);if(nv!=1)return false;ctx->RSGetViewports(&nv,&vp);
     if(nv!=1 || vp.TopLeftX!=0 || vp.TopLeftY!=0 || vp.Width!=w || vp.Height!=h)return false;
+    if(particle)return particleDraw(ctx,draw,count,instances,start,base,startInstance);
     Ptr<ID3D11ShaderResourceView> pv,bv;ctx->VSGetShaderResources(33,1,&pv);ctx->VSGetShaderResources(38,1,&bv);if(!pv || !bv)return false;
     Ptr<ID3D11Buffer> pool,bones,camera;Ptr<ID3D11Resource> pr,br;pv->GetResource(&pr);bv->GetResource(&br);
     if(FAILED(pr.As(&pool)) || FAILED(br.As(&bones)))return false;

@@ -172,3 +172,15 @@ extern "C" unsigned int edvr_selftest_system_hook(void);
 // otherwise 1, with out[4] = the crop fractions {left, top, right, bottom}
 // of the true frustum within the reported one.
 extern "C" unsigned int edvr_selftest_cull_guard(int eye, float out[4]);
+
+// Test seam for the stage 1 -> 2 adoption rule, which is pure arithmetic and
+// has no other coverage: the live path needs a game rebuilding its targets.
+// Returns 1 if a submission of subW x subH counts as the game having adopted
+// the widened size, measured from the preW x preH it was submitting when
+// stage 1 began. See sizeAdopted for why that baseline and not the runtime's
+// recommendation.
+extern "C" unsigned int edvr_selftest_cull_adopt(unsigned int preW,
+                                                 unsigned int preH,
+                                                 unsigned int subW,
+                                                 unsigned int subH,
+                                                 float factorH, float factorV);

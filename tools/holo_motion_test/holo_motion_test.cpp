@@ -62,10 +62,14 @@ int main(int argc,char** argv) {
         ctx->VSSetShaderResources(33,1,poolSrv.GetAddressOf()); ctx->PSSetShaderResources(2,1,surface.GetAddressOf());
         D3D11_VIEWPORT vp{0,0,8,8,0,1}; ctx->RSSetViewports(1,&vp);
     };
-    auto run=[&](unsigned mode=0) {
+    auto run=[&](unsigned mode=0,unsigned sourceSlot=2) {
         bind(); ctx->CSSetConstantBuffers(1,1,cb[1].GetAddressOf()); ctx->CSSetShaderResources(2,1,poolSrv.GetAddressOf());
         if(mode==3)ctx->PSSetShaderResources(0,1,surface.GetAddressOf());
-        check(motion.prepare(ctx.Get(),scene.Get(),args,10,mode),"production history prepared");
+        if(mode==0 && sourceSlot==1) {
+            ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(2,1,&none);
+            ctx->PSSetShaderResources(1,1,surface.GetAddressOf());
+        }
+        check(motion.prepare(ctx.Get(),scene.Get(),args,10,mode,sourceSlot),"production history prepared");
         ComPtr<ID3D11Buffer> after; ctx->CSGetConstantBuffers(1,1,&after); check(after.Get()==cb[1].Get(),"caller CS constants restored");
         ComPtr<ID3D11ShaderResourceView> afterSrv; ctx->CSGetShaderResources(2,1,&afterSrv); check(afterSrv.Get()==poolSrv.Get(),"caller CS resource restored");
         ID3D11ShaderResourceView* views[2]{}; motion.views(scene.Get(),views); check(views[0] && views[1],"current-eye inputs exposed"); return read(dev.Get(),ctx.Get(),views[1]);
@@ -73,6 +77,8 @@ int main(int argc,char** argv) {
     auto values=run(); check(values[56]==1 && values[59]==0,"first frame valid geometry, no invented predecessor");
     motion.frameBoundary(); model[4][3]=.02f; values=run();
     check(values[59]==1 && std::fabs(values[47]+.02f)<1e-6,"draw-time clip translation captured");
+    motion.frameBoundary(); values=run(0,1);
+    check(values[59]==1 && std::fabs(values[47])<1e-6,"unlit t1 material matches the same surface history without a t2 binding");
     // Reorder the pool and its instance stream without changing the object.
     std::memcpy(records[1],records[0],sizeof(records[0])); std::memset(records[0],0,sizeof(records[0])); inst[0]=1;
     motion.frameBoundary(); model[4][3]=.03f; values=run(); check(values[59]==1 && std::fabs(values[47]+.01f)<1e-6,"pool-slot reordering preserves history");

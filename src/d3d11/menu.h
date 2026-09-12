@@ -20,8 +20,9 @@
 // one, and never registered as Hotkeys. They are inert unless the gate
 // provably holds the game's keyboard (elsewhere an adopted key IS a game
 // key), inert while a value is typed, and a key held across a state change
-// is swallowed until released. menu_keys.h holds the rules; the panel's
-// bottom line names the live keys.
+// is swallowed until released -- except the next/previous tab pair, which
+// follows Tab and changes the page on the shared pages too. menu_keys.h
+// holds the rules; the panel's bottom line names the live keys.
 //
 // This half owns the model, the keys, the aim, the ini write and the restart
 // bookkeeping. menu_panel.h owns the pixels: the GDI rasterisation and the

@@ -55,7 +55,7 @@ std::vector<float> readTexture(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11
     D3D11_TEXTURE2D_DESC td{}; src->GetDesc(&td); td.BindFlags=0; td.Usage=D3D11_USAGE_STAGING; td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> stage; hr(dev->CreateTexture2D(&td,nullptr,&stage)); ctx->CopyResource(stage.Get(),src);
     D3D11_MAPPED_SUBRESOURCE map{}; hr(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&map));
-    unsigned channels=td.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?4:1;
+    unsigned channels=td.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?4:td.Format==DXGI_FORMAT_R32G8X24_TYPELESS?2:1;
     std::vector<float> values(td.Width*td.Height*channels);
     for (unsigned y=0;y<td.Height;++y) std::memcpy(values.data()+y*td.Width*channels,static_cast<const char*>(map.pData)+y*map.RowPitch,td.Width*channels*4);
     ctx->Unmap(stage.Get(),0); return values;
@@ -161,6 +161,22 @@ int main(int argc,char** argv) {
     values=run(); check(values[55]==0,"right eye cannot consume left-eye history");
     celestialMotionFrameBoundary(); values=run(); check(values[55]==1,"right-eye history advances independently");
     scene=oldScene; depth=oldDepth; testScene=scene.Get(); testDepth=depth.Get(); testEye=0;
+    // Exercise the parallel search across lanes and loop strides, including
+    // the final slot. These are complete production keys/records from run().
+    celestialMotionFrameBoundary();celestialMotionFrameBoundary();
+    auto& searchEye=g_eyes[0];auto& previous=searchEye.records[1-searchEye.write];
+    std::vector<float> searchHistory(kRecords*68,0);
+    auto search=[&](std::initializer_list<unsigned> slots,const char* label,bool matched) {
+        std::fill(searchHistory.begin(),searchHistory.end(),0.f);
+        for(unsigned slot:slots)std::memcpy(searchHistory.data()+slot*68,values.data(),kRecordBytes);
+        ctx->UpdateSubresource(previous.buffer.Get(),0,nullptr,searchHistory.data(),0,0);previous.count=kRecords;
+        searchEye.records[searchEye.write].count=0;
+        auto result=run();check((result[55]==1)==matched,label);
+    };
+    for(unsigned slot:{0u,63u,64u,511u})search({slot},"unique history matches across every search stride",true);
+    search({0,511},"duplicate keys across distant lanes decline history",false);
+    search({447,511},"duplicate keys in one lane's different strides decline history",false);
+    search({},"full history with no matching key declines",false);
     g_eyes[0].records[g_eyes[0].write].count=kRecords;
     check(!celestialMotionBegin(ctx.Get(),kTerrainDepth),"draw limit declines safely");
     g_eyes[0].records[g_eyes[0].write].count=0;
@@ -183,6 +199,65 @@ int main(int argc,char** argv) {
         }
         std::printf("Captured terrain replay: %u pairs\n",pairs);
     }
+    // Original null-PS depth prepass: capture both coverage outputs during
+    // the game's draw. Compare its D32S8 depth/stencil with an untouched
+    // prepass, including rejected fragments, stencil failures and sample mask.
+    celestialMotionFrameBoundary();celestialMotionFrameBoundary();
+    td.Format=DXGI_FORMAT_R32G8X24_TYPELESS;td.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
+    dd.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    hr(dev->CreateTexture2D(&td,nullptr,scene.ReleaseAndGetAddressOf()));
+    hr(dev->CreateDepthStencilView(scene.Get(),&dd,depth.ReleaseAndGetAddressOf()));
+    testScene=scene.Get();testDepth=depth.Get();testEye=0;
+    td.Format=DXGI_FORMAT_R32_FLOAT;td.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> colour;ComPtr<ID3D11RenderTargetView> colourRtv;
+    hr(dev->CreateTexture2D(&td,nullptr,&colour));hr(dev->CreateRenderTargetView(colour.Get(),nullptr,&colourRtv));
+    D3D11_DEPTH_STENCIL_DESC state{};state.DepthEnable=TRUE;state.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+    state.DepthFunc=D3D11_COMPARISON_GREATER;state.StencilEnable=TRUE;state.StencilReadMask=state.StencilWriteMask=0xff;
+    state.FrontFace.StencilFunc=D3D11_COMPARISON_EQUAL;
+    state.FrontFace.StencilFailOp=D3D11_STENCIL_OP_INVERT;state.FrontFace.StencilDepthFailOp=D3D11_STENCIL_OP_INCR_SAT;
+    state.FrontFace.StencilPassOp=D3D11_STENCIL_OP_REPLACE;state.BackFace=state.FrontFace;
+    ComPtr<ID3D11DepthStencilState> gameDepth;hr(dev->CreateDepthStencilState(&state,&gameDepth));
+    for(unsigned mode=0;mode<6;++mode) {
+        const float clearZ=mode==1?.5f:0.f,clearColour[4]={.375f,0,0,0};
+        const UINT ref=mode==2?18:17,mask=mode==3?0:~0u;
+        auto originalBind=[&] {
+            upload();bind();ctx->PSSetShader(nullptr,nullptr,0);
+            ctx->OMSetRenderTargets(1,colourRtv.GetAddressOf(),depth.Get());
+            ctx->OMSetDepthStencilState(gameDepth.Get(),ref);ctx->OMSetBlendState(nullptr,nullptr,mask);
+            if(mode==4) {
+                auto biased=rd;biased.DepthBias=500000;
+                ComPtr<ID3D11RasterizerState> b;hr(dev->CreateRasterizerState(&biased,&b));ctx->RSSetState(b.Get());
+            }
+            if(mode==5) {D3D11_VIEWPORT vp{0,0,8,8,.2f,.8f};ctx->RSSetViewports(1,&vp);}
+            ctx->ClearRenderTargetView(colourRtv.Get(),clearColour);
+            ctx->ClearDepthStencilView(depth.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,clearZ,17);
+        };
+        originalBind();ctx->Draw(3,0);auto stock=readTexture(dev.Get(),ctx.Get(),scene.Get());
+        celestialMotionFrameBoundary();originalBind();
+        check(celestialMotionBeginOriginal(ctx.Get(),kTerrainDepth),"null PS captured in original draw");
+        ctx->Draw(3,0);celestialMotionEnd(ctx.Get());
+        auto fused=readTexture(dev.Get(),ctx.Get(),scene.Get());
+        // D32S8's unused upper 24 bits are unspecified. Compare depth and
+        // the stencil byte independently, not that padding.
+        bool equal=true;for(unsigned i=0;i<64;++i)equal=equal && stock[i*2]==fused[i*2] &&
+            (reinterpret_cast<const unsigned*>(stock.data())[i*2+1]&255)==(reinterpret_cast<const unsigned*>(fused.data())[i*2+1]&255);
+        check(equal,"original depth and stencil identical with coverage capture");
+        auto c=readTexture(dev.Get(),ctx.Get(),colour.Get());check(std::all_of(c.begin(),c.end(),[](float x){return x==.375f;}),"original colour untouched");
+        ComPtr<ID3D11DepthStencilState> restored;UINT restoredRef=0;ctx->OMGetDepthStencilState(&restored,&restoredRef);
+        check(restored.Get()==gameDepth.Get() && restoredRef==ref,"game stencil/depth state restored");
+        UINT restoredMask=0;ctx->OMGetBlendState(nullptr,nullptr,&restoredMask);check(restoredMask==mask,"original sample mask preserved");
+        celestialMotionViews(scene.Get(),views);check(views[1]==g_eyes[0].originalDepthSrv.Get(),"original draw depth published");
+        auto z=readTexture(dev.Get(),ctx.Get(),g_eyes[0].originalDepth.Get());
+        auto ix=readTexture(dev.Get(),ctx.Get(),g_eyes[0].index.Get());
+        check(z[27]==(mode==0 || mode>=4?fused[27*2]:0.f),"coverage depth follows visibility, raster bias and viewport depth");
+        check(reinterpret_cast<unsigned*>(ix.data())[27]==(mode==0 || mode>=4?1u:0u),"coverage index follows original visibility");
+        // Mixed fallback modes cannot leave mismatched index and depth.
+        check(!celestialMotionBegin(ctx.Get(),kTerrainDepth),"mixed original/reissue layer declines safely");
+    }
+    celestialMotionFrameBoundary();bind();
+    check(!celestialMotionBeginOriginal(ctx.Get(),kTerrainDepth),"non-null game PS retains reissue path");
+    check(celestialMotionBegin(ctx.Get(),kTerrainDepth),"non-null PS fallback remains available");celestialMotionEnd(ctx.Get());
+    celestialMotionConfigure(false);check(!celestialMotionBeginOriginal(ctx.Get(),kTerrainDepth),"AA off bypasses original capture too");
     // Both production temporal entries must compile with the added inputs.
     auto start=text.find("R\"HLSL(")+7;
     const auto last=text.find(")HLSL\";",start);

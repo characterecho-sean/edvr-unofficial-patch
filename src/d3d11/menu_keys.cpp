@@ -306,6 +306,17 @@ bool menuAliasMayAct(bool gateHoldsGameKeyboard, bool editing, bool statusPage) 
     return gateHoldsGameKeyboard && !editing && !statusPage;
 }
 
+bool menuAliasFollowsTab(MenuNav nav) { return nav == kNavPageNext || nav == kNavPagePrev; }
+
+bool menuAliasMayActNav(MenuNav nav, bool gateHoldsGameKeyboard, bool editing, bool statusPage) {
+    // A page key is Tab: it acts wherever Tab does, which on the shared
+    // pages means it reaches the ship as well, exactly as Tab does there.
+    // Typing is the one state that holds it, since the arrows and Tab are
+    // the editor's then.
+    if (menuAliasFollowsTab(nav)) return !editing;
+    return menuAliasMayAct(gateHoldsGameKeyboard, editing, statusPage);
+}
+
 // ---------------------------------------------------------------------------
 // Names and text
 
@@ -537,16 +548,16 @@ void fitLine(FooterItem* items, int count, int widthPx, MenuMeasureFn measure, v
     }
 }
 
-// The pair the shared-page line says is off: the page keys when they are
-// adopted, else pick, else change. A pair whose both names are the fixed
-// key's own is not adopted (a same-as-fixed slot names the fixed key
-// itself), and Select is never used because a same-as-fixed Space would
-// read as an adopted key.
+// The pair the shared-keyboard line says is off: pick when it is adopted,
+// else change. Never the page pair -- it follows Tab and is never off. A
+// pair whose both names are the fixed key's own is not adopted (a
+// same-as-fixed slot names the fixed key itself), and Select is never used
+// because a same-as-fixed Space would read as an adopted key.
 bool offPair(const MenuFooterInput& in, char* out, size_t n) {
     auto nameOf = [&](MenuNav nav) {
         return in.navName[nav] && in.navName[nav][0] ? in.navName[nav] : kFixedNavName[nav];
     };
-    const MenuNav pairs[3][2] = {{kNavPagePrev, kNavPageNext}, {kNavUp, kNavDown}, {kNavLeft, kNavRight}};
+    const MenuNav pairs[2][2] = {{kNavUp, kNavDown}, {kNavLeft, kNavRight}};
     for (const auto& p : pairs) {
         const char* a = nameOf(p[0]);
         const char* b = nameOf(p[1]);
@@ -555,6 +566,23 @@ bool offPair(const MenuFooterInput& in, char* out, size_t n) {
         return true;
     }
     return false;
+}
+
+// The legend's page item: the adopted pair wherever any of it is adopted
+// (a page key follows Tab, so it is live on every page and in every
+// keyboard mode), else the fixed key's own "Tab page". Half a pair reads
+// "Tab/E page": Tab stands for Shift+Tab as it does in the fixed legend.
+void pageItem(const MenuFooterInput& in, char* out, size_t n) {
+    auto nameOf = [&](MenuNav nav) {
+        return in.navName[nav] && in.navName[nav][0] ? in.navName[nav] : kFixedNavName[nav];
+    };
+    const char* a = nameOf(kNavPagePrev);
+    const char* b = nameOf(kNavPageNext);
+    if (strcmp(a, kFixedNavName[kNavPagePrev]) == 0 && strcmp(b, kFixedNavName[kNavPageNext]) == 0) {
+        snprintf(out, n, "Tab page");
+    } else {
+        snprintf(out, n, "%s/%s page", a, b);
+    }
 }
 
 }  // namespace
@@ -577,13 +605,18 @@ void menuComposeFooter(const MenuFooterInput& in, MenuMeasureFn measure, void* c
         it.dropRank = rank;
         it.dropped = false;
     };
+    // The page item follows Tab (menuAliasFollowsTab): the adopted pair is
+    // named on every page and in every keyboard mode, because it acts
+    // there; the other items follow the live predicate.
+    char page[48];
+    pageItem(in, page, sizeof(page));
     if (in.editing) {
         item("Type a value", 1);
         item("Backspace deletes", 2);
         item("Enter writes", 0);
         item("Esc cancels", 0);
     } else if (in.statusPage) {
-        item("Tab page", 0);
+        item(page, 0);
         item("Esc close", 0);
     } else if (in.aliasesLive) {
         char b[48];
@@ -593,15 +626,14 @@ void menuComposeFooter(const MenuFooterInput& in, MenuMeasureFn measure, void* c
         item(b, 1);
         snprintf(b, sizeof(b), "%s select", nameOf(kNavSelect));
         item(b, 3);
-        snprintf(b, sizeof(b), "%s/%s page", nameOf(kNavPagePrev), nameOf(kNavPageNext));
-        item(b, 0);
+        item(page, 0);
         // Always Esc: a back alias is on the Status row and in the log
         // (MEASURED: "L-Ctrl or Esc close" pushes the line to 861 px in 770).
         item("Esc close", 0);
     } else {
         item("Arrows pick/change", 1);
         item("Enter select", 3);
-        item("Tab page", 0);
+        item(page, 0);
         item("Esc close", 0);
     }
     char line1[160];
@@ -618,12 +650,9 @@ void menuComposeFooter(const MenuFooterInput& in, MenuMeasureFn measure, void* c
     if (in.privateWanted && !in.statusPage && !in.gatePrivate) {
         snprintf(line2, sizeof(line2), "KEYS SHARED WITH THE GAME");
     } else if (in.statusPage) {
+        // No "off" note here: the legend above names only the page pair,
+        // and that pair is on.
         snprintf(line2, sizeof(line2), "keys shared (%s)", in.pageName ? in.pageName : "");
-        if (in.adopted && offPair(in, pair, sizeof(pair))) {
-            append(line2, sizeof(line2), "  ");
-            append(line2, sizeof(line2), pair);
-            append(line2, sizeof(line2), " off here");
-        }
     } else if (!in.privateWanted) {
         snprintf(line2, sizeof(line2), "keys shared (menu.keyboard)");
         if (in.adopted && offPair(in, pair, sizeof(pair))) {

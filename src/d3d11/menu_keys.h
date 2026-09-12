@@ -42,6 +42,11 @@
 // live door, and the game seen reaching it), never while a value is typed,
 // never on a status page. Everywhere else an adopted key IS a game key, and
 // one press of E on Monitor would cycle the ship's panel AND the menu's page.
+// THE ONE EXCEPTION IS THE PAGE PAIR (menuAliasFollowsTab): the next and
+// previous tab keys act wherever Tab acts, Monitor and Status included --
+// there every key reaches the ship anyway, Tab among them, and a player
+// parked on Monitor with Q/E in their fingers must be able to leave it
+// (asked for after the first flight, 2026-09-11). Only typing holds them.
 //
 // THE TRACKER swallows until release. A key stepped with act=false is
 // tracked and parked, so that when the state later allows it neither the
@@ -199,6 +204,15 @@ void menuAliasResolve(const MenuAliasInput* in, int n, const MenuFixedKeys& fixe
 // The one predicate: gate && !editing && !statusPage.
 bool menuAliasMayAct(bool gateHoldsGameKeyboard, bool editing, bool statusPage);
 
+// The page pair follows Tab: PageNext and PagePrev are the two navs whose
+// aliases act on the shared pages too, and under menu.keyboard = shared,
+// exactly as the fixed Tab does there.
+bool menuAliasFollowsTab(MenuNav nav);
+
+// The predicate for ONE alias: a page key needs only "not typing"; every
+// other nav is menuAliasMayAct.
+bool menuAliasMayActNav(MenuNav nav, bool gateHoldsGameKeyboard, bool editing, bool statusPage);
+
 // A key's name as the panel prints it: letters and digits as themselves,
 // Backspace, Del, Ins, PgUp, PgDn, Home, End, Tab, Enter, Space, Esc, the
 // arrows, L-Shift .. R-Alt, F1..F24, Num 0..9, Num ., Num -; a punctuation
@@ -249,12 +263,15 @@ struct MenuFooterInput {
 
 // Compose the footer: a legend line, and at most one status line after a
 // '\n'. The legend names the live keys (fixed names when the aliases are
-// not live), and drops items in a fixed order until it measures within
-// widthPx -- change, pick, select; "page" and "close" are never dropped.
-// The status line, by precedence: KEYS SHARED WITH THE GAME (private
-// wanted but the gate is not), keys shared (<page>) on a status page, keys
-// shared (menu.keyboard), the pending-restart count, the reminder that the
-// fixed keys still work; dropped when it does not fit. At most 159 bytes.
+// not live -- except the page pair, which follows Tab and is named
+// wherever it is adopted, the shared pages included), and drops items in a
+// fixed order until it measures within widthPx -- change, pick, select;
+// "page" and "close" are never dropped. The status line, by precedence:
+// KEYS SHARED WITH THE GAME (private wanted but the gate is not), keys
+// shared (<page>) on a status page, keys shared (menu.keyboard) with the
+// adopted pick or change pair named as off, the pending-restart count, the
+// reminder that the fixed keys still work; dropped when it does not fit.
+// At most 159 bytes.
 void menuComposeFooter(const MenuFooterInput& in, MenuMeasureFn measure, void* ctx, char* out,
                        size_t n);
 

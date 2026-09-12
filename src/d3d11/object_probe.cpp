@@ -2907,11 +2907,16 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.draws.size()),
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
-    Log::get().note("object probe: target UI vertex snapshots: %u draws, %u bytes, %u range/budget declines; first three watched frames, 256 KiB per stream, 32 MiB total. Snapshot version 3 preserves draw offsets, bindings and capture ranges around base/start.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
-    uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0;
+    Log::get().note("object probe: UI/mesh/effect vertex snapshots: %u draws, %u bytes, %u range/budget declines; UI first three watched frames, meshes first source frame, effects throughout run; 256 KiB per stream, 32 MiB total. Draw offsets, bindings and capture ranges are retained.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0,effectDraws=0,effectVertices=0,effectLayouts=0;
+    for(const auto& d:g_drawSnapshot.draws)if(d.ordinal==UINT32_MAX-2) {
+        ++effectDraws;effectVertices+=d.streams[0].copied || d.streams[1].copied;effectLayouts+=!d.layout.empty();
+    }
     for(const auto& d:g_drawSnapshot.draws) {sourceCameras+=d.ordinal==UINT32_MAX;screenDraws+=d.vs==EyeDrawSnapshot::kVscreen;}
     for(const auto& t:g_drawSnapshot.surfaces)sourceDepths+=t.format==20 || t.format==40 || t.format==45 || t.format==55;
     if(screenDraws)Log::get().note("object probe: on-foot source capture: %u camera frames, %u screen draws, %u completed depth surfaces; colour/depth copied at first composite, no temporal changes.",sourceCameras,screenDraws,sourceDepths);
+    if(screenDraws)Log::get().note("object probe: source effect snapshots: %u draws, %u with vertex payloads, %u with original input layouts. Drawstate v6 ordinal UINT32_MAX-2; constants and bounded VB0/VB1/IB across the run; shared 32 MiB vertex budget, no normal-play copies or effect changes.",effectDraws,effectVertices,effectLayouts);
+    if(screenDraws)Log::get().note("object probe: effect colour crops: %u images, %u bytes, %u format/range/budget declines; first source frame, before/after each light/beam/streak/particle draw. Native lower-right 1024-square crops, original HDR format and crop origin in drawstate v6; separate 64 MiB cap.",unsigned(g_drawSnapshot.effectImages.size()),g_drawSnapshot.effectImageBytes,g_drawSnapshot.effectImageDeclined);
     if(screenDraws)Log::get().note("object probe: source mesh snapshots: %u draws, %u frame-local buffers, %u bytes, %u range/format/budget declines. Drawstate v4 records original draw cameras, full t33/t38 and VB0 at first use per resource per frame; firstDraw identifies that copy. No render or pacing changes.",g_drawSnapshot.meshDraws,unsigned(g_drawSnapshot.meshBuffers.size()),g_drawSnapshot.meshBytes,g_drawSnapshot.meshDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
@@ -3093,6 +3098,11 @@ void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count
                                  kind,count,instances,startInstance,start,base);
     g_drawSnapshot.captureSourceMesh(ctx,g_frame+1,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),
                                      kind,count,instances,startInstance,start,base);
+}
+
+void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
+    if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
+    g_drawSnapshot.captureEffectEnd(ctx);
 }
 
 void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,

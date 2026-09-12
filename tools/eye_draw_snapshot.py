@@ -9,6 +9,14 @@ watched frames. Earlier captures remain readable.
 Version 4 adds source mesh records (ordinal UINT32_MAX-1), first-frame
 geometry, and references to frame-local t33/t38/VB0 copies. Each buffer's
 first_draw states when it was copied; later references are not new copies.
+Source effect records (ordinal UINT32_MAX-2) retain b0/b1/b2 and the
+bounded VB0/VB1/IB binding windows throughout the run. They have no mesh
+references: billboard/flare placement is independent of the instance pool.
+Version 5 adds each effect draw's original input layout so its separate
+vertex and instance streams can be decoded without guessing their packing.
+Version 6 appends before/after source-effect colour crops, keyed to the
+exact draw. These are native pixels from the lower right (up to 1024 square),
+not whole images. Original target size, crop origin and HDR format are kept.
 
 On-foot source records use ordinal UINT32_MAX. Their DSV is copied when
 the screen composite runs, alongside its source colour; depth surfaces
@@ -43,7 +51,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -73,6 +81,20 @@ def read(path):
                     raise ValueError('Vertex payload budget exceeded')
                 d['streams'].append(dict(offset=offset, stride=stride, whole=whole, capture_offset=capture_offset, data=take(size)))
         d['mesh'] = list(unpack('<3I')) if version >= 4 else [0xffffffff]*3
+        d['layout'] = []
+        if version >= 5:
+            elements, = unpack('<I')
+            if elements > 32:
+                raise ValueError('Invalid input layout size')
+            for _ in range(elements):
+                semantic = take(64)
+                if b'\0' not in semantic:
+                    raise ValueError('Unterminated input semantic')
+                e = dict(zip(('index', 'format', 'slot', 'offset', 'classification', 'step'), unpack('<6I')))
+                e['semantic'] = semantic.split(b'\0', 1)[0].decode('ascii')
+                if e['slot'] >= 32 or e['classification'] > 1:
+                    raise ValueError('Invalid input layout element')
+                d['layout'].append(e)
         draws.append(d)
     total = 0
     for _ in range(ns):
@@ -108,11 +130,66 @@ def read(path):
                 b = mesh_buffers[ref]
                 if b['frame'] != d['frame'] or b['first_draw'] > i or b['stride'] != (336,48,8)[role]:
                     raise ValueError('Source buffer belongs to a different frame, role, or later draw')
+    effect_images, effect_image_declined = [], 0
+    if version >= 6:
+        ni, effect_image_declined = unpack('<2I')
+        if ni > 32:
+            raise ValueError('Invalid effect image count')
+        total = 0
+        for _ in range(ni):
+            e = dict(zip(('draw', 'after', 'x', 'y', 'width', 'height', 'source_width', 'source_height', 'format', 'size'), unpack('<10I')))
+            bpp = {10: 8, 26: 4, 28: 4, 29: 4}.get(e['format'], 0)
+            expected = e['width'] * e['height'] * bpp
+            total += expected
+            if (e['draw'] >= nd or draws[e['draw']]['ordinal'] != 0xfffffffd or e['after'] > 1 or
+                    not 0 < e['width'] <= 1024 or not 0 < e['height'] <= 1024 or
+                    e['x'] + e['width'] != e['source_width'] or e['y'] + e['height'] != e['source_height'] or
+                    not bpp or total > 64*1024*1024 or e['size'] not in (0, expected)):
+                raise ValueError('Invalid effect image descriptor')
+            e['data'] = take(e['size'])
+            effect_images.append(e)
     failures, = unpack('<I')
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
     return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
-                mesh_buffers=mesh_buffers, mesh_declined=mesh_declined)
+                mesh_buffers=mesh_buffers, mesh_declined=mesh_declined,
+                effect_images=effect_images, effect_image_declined=effect_image_declined)
+
+
+def packed_float_channel(value, mantissa_bits):
+    """Unsigned R11/G11/B10 float to a display byte; raw HDR stays in the dump."""
+    import math
+    exponent, mantissa = value >> mantissa_bits, value & ((1 << mantissa_bits)-1)
+    if exponent == 31:
+        return 0 if mantissa else 255
+    linear = (math.ldexp(mantissa, 1-15-mantissa_bits) if exponent == 0 else
+              math.ldexp(1 + mantissa / (1 << mantissa_bits), exponent-15))
+    return max(0, min(255, round(linear * 255)))
+
+
+def export_effect_images(capture, directory, dry_run=False):
+    directory = Path(directory)
+    paths = [directory / f"effect_{e['draw']:04d}_{'after' if e['after'] else 'before'}_x{e['x']}_y{e['y']}.png"
+             for e in capture['effect_images'] if e['data']]
+    if dry_run:
+        return paths
+    from PIL import Image
+    if paths:
+        directory.mkdir(parents=True, exist_ok=True)
+    lut11 = [packed_float_channel(i, 6) for i in range(2048)]
+    lut10 = [packed_float_channel(i, 5) for i in range(1024)]
+    for e, path in zip((e for e in capture['effect_images'] if e['data']), paths):
+        if e['format'] == 26:
+            rgba = bytearray()
+            for (pixel,) in struct.iter_unpack('<I', e['data']):
+                rgba.extend((lut11[pixel & 2047], lut11[(pixel >> 11) & 2047], lut10[pixel >> 22], 255))
+            data = bytes(rgba)
+        elif e['format'] == 10:
+            data = bytes(max(0, min(255, round(v[0] * 255))) for v in struct.iter_unpack('<e', e['data']))
+        else:
+            data = e['data']
+        Image.frombytes('RGBA', (e['width'], e['height']), data).save(path)
+    return paths
 
 
 def export_surfaces(capture, directory, dry_run=False):
@@ -179,6 +256,19 @@ def self_test():
         good = h4+draw+refs+table+blob
         p.write_bytes(good)
         assert len(read(p)['mesh_buffers'][0]['data']) == 336
+        h5 = b'EDVRDRW1' + struct.pack('<4I',5,1,0,0)
+        layout = b'POSITION'.ljust(64,b'\0')+struct.pack('<6I',0,2,1,16,1,1)
+        v5 = h5+draw+refs+struct.pack('<I',1)+layout+table+blob
+        p.write_bytes(v5)
+        assert read(p)['draws'][0]['layout'] == [dict(semantic='POSITION',index=0,format=2,slot=1,offset=16,classification=1,step=1)]
+        for bad in (v5[:-1],h5+draw+refs+struct.pack('<I',33),h5+draw+refs+struct.pack('<I',1)+b'X'*64+layout[64:]+table+blob):
+            p.write_bytes(bad)
+            try:
+                read(p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Invalid effect layout accepted')
         malformed_mesh = [good[:-1], h4+draw+struct.pack('<3I',1,0xffffffff,0xffffffff)+table+blob]
         for frame,first,whole,stride,size in ((8,0,336,336,336),(7,1,336,336,336),(7,0,336,48,336),(7,0,336,336,335),(7,0,17*1024*1024,336,0)):
             malformed_mesh.append(h4+draw+refs+table+struct.pack('<5I',frame,first,whole,stride,size)+bytes(336)+struct.pack('<I',0))
@@ -204,6 +294,26 @@ def self_test():
         before = sorted(Path(td).rglob('*'))
         assert export_surfaces(c, Path(td)/'absent', True) == [Path(td)/'absent/surface_00.png']
         assert before == sorted(Path(td).rglob('*')), '--dry-run wrote files'
+        h6 = b'EDVRDRW1' + struct.pack('<4I',6,0,0,0)
+        p.write_bytes(h6 + struct.pack('<5I',0,0,0,0,0))
+        assert read(p)['effect_images'] == []
+        for bad in (h6 + struct.pack('<4I',0,0,33,0), h6 + struct.pack('<4I',0,0,1,0) + bytes(40)):
+            p.write_bytes(bad)
+            try:
+                read(p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Invalid effect image accepted')
+        c['effect_images'] = [dict(draw=0, after=1, x=4, y=5, width=1, height=1, format=26, data=bytes(4))]
+        before = sorted(Path(td).rglob('*'))
+        assert export_effect_images(c, Path(td)/'missing', True)
+        assert before == sorted(Path(td).rglob('*')), 'Effect image dry-run wrote files'
+        for bits in (5,6):
+            assert packed_float_channel(0,bits) == 0
+            assert packed_float_channel(15 << bits,bits) == 255
+            assert packed_float_channel(14 << bits,bits) == 128
+            assert packed_float_channel((31 << bits)+1,bits) == 0
     print('eye draw snapshot self-test passed')
 
 
@@ -211,6 +321,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('path', nargs='?')
     ap.add_argument('--surfaces', help='Export original RGBA panel textures to this directory')
+    ap.add_argument('--effects', help='Export before/after effect colour crops to this directory')
     ap.add_argument('--dry-run', action='store_true', help='Report exports without writing anything')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--verify-fixture', action='store_true', help=argparse.SUPPRESS)
@@ -223,6 +334,12 @@ def main():
     c = read(a.path)
     if a.verify_fixture:
         verify_fixture(c)
+        effects = read(str(a.path)+'.effects')
+        assert effects['version'] == 6 and len(effects['draws']) == 5 and effects['failures'] == 0
+        for i,d in enumerate(effects['draws']):
+            assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
+            assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
+            assert bool(d['streams'][0]['data']) == (i < 4) and bool(d['streams'][1]['data']) == (i < 4)
         mesh = read(str(a.path)+'.mesh')
         assert mesh['failures'] == mesh['mesh_declined'] == 0 and len(mesh['draws']) == 4 and len(mesh['mesh_buffers']) == 6
         for i,d in enumerate(mesh['draws']):
@@ -238,15 +355,26 @@ def main():
         assert v['draws'][1]['texture'] == 0 and v['draws'][2]['texture'] == 0
         assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
         assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
+        crops = read(str(a.path)+'.crops')
+        assert crops['version'] == 6 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
+        assert len(crops['effect_images']) == 2
+        for i,e in enumerate(crops['effect_images']):
+            assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
+            expected = (15<<6) | ((14<<6)<<11) | ((13<<5)<<22) if i == 0 else ((15<<5)<<22)
+            assert all(v[0] == expected for v in struct.iter_unpack('<I',e['data'])), 'Effect crop timing or HDR copy differs'
         print('GPU draw snapshot fixture passed')
         return
     print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],
                           source_buffers=len(c['mesh_buffers']), source_bytes=sum(b['size'] for b in c['mesh_buffers']), source_declined=c['mesh_declined'],
                           vertex_draws=sum(any(s['data'] for s in d['streams']) for d in c['draws']),
                           vertex_bytes=sum(len(s['data']) for d in c['draws'] for s in d['streams']),
+                          effect_images=len(c['effect_images']), effect_image_declined=c['effect_image_declined'],
                           failures=c['failures'], shaders=Counter(f"{d['vs']:016X}" for d in c['draws'])), indent=2))
     if a.surfaces:
         for path in export_surfaces(c, a.surfaces, a.dry_run):
+            print(('Would write ' if a.dry_run else 'Wrote ') + str(path))
+    if a.effects:
+        for path in export_effect_images(c, a.effects, a.dry_run):
             print(('Would write ' if a.dry_run else 'Wrote ') + str(path))
 
 

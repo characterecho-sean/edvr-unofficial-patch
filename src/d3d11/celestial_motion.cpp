@@ -3,6 +3,7 @@
 #include "depth_probe.h"
 #include "shader_swap.h"
 #include "vscreen.h"
+#include "gpu_interval.h"
 #include "../common/log.h"
 #include <wrl/client.h>
 #include <utility>
@@ -31,7 +32,12 @@ float3 rotate(float4 q, float3 v) { return v + 2 * cross(q.xyz, cross(q.xyz,v) +
 float4 multiply(float4 a, float4 b) {
     return float4(a.w*b.xyz + b.w*a.xyz + cross(a.xyz,b.xyz), a.w*b.w-dot(a.xyz,b.xyz));
 }
-[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) {
+// A local-space eye can contain dozens of patches. Serial comparison of
+// every 192-byte key stalls one GPU lane for milliseconds across the eye.
+// Search independent predecessors in parallel, retaining exact full keys
+// and the unique-match rule (including duplicates in different lanes).
+groupshared uint matchCounts[64],matchIndices[64];
+[numthreads(64,1,1)] void main(uint lane : SV_GroupIndex) {
     Record n = (Record)0;
     n.key[0] = asuint(patch[0]);
     [unroll] for (uint k=0;k<5;++k) n.key[k+1] = asuint(patch[k+3]);
@@ -50,11 +56,22 @@ float4 multiply(float4 a, float4 b) {
         valid = valid && all(abs(col-expected) < 0.0002);
     }
     uint found=0, match=0;
-    [loop] for (uint i=0;i<info.y;++i) {
+    [loop] for (uint i=lane;i<info.y;i+=64) {
         bool same=true;
         [unroll] for (uint k=0;k<12;++k) same = same && all(n.key[k]==Previous[i].key[k]);
         if (same) { ++found; match=i; }
     }
+    matchCounts[lane]=found;matchIndices[lane]=match;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint step=32;step;step>>=1) {
+        if (lane<step) {
+            matchCounts[lane]+=matchCounts[lane+step];
+            matchIndices[lane]=max(matchIndices[lane],matchIndices[lane+step]);
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane!=0) return;
+    found=matchCounts[0];match=matchIndices[0];
     if (valid && found==1) {
         Record p=Previous[match];
         float4 dq=normalize(multiply(p.q,float4(-n.q.xyz,n.q.w)));
@@ -73,6 +90,10 @@ float4 multiply(float4 a, float4 b) {
 constexpr char kIndexHlsl[] = R"HLSL(
 cbuffer Draw : register(b13) { uint4 info; uint4 texKey[2]; }
 uint main(float4 p:SV_Position):SV_Target { return info.x+1; }
+struct Coverage { uint index:SV_Target0; float depth:SV_Target1; };
+Coverage original(float4 p:SV_Position) {
+    Coverage o; o.index=info.x+1; o.depth=p.z; return o;
+}
 )HLSL";
 
 struct Records {
@@ -87,19 +108,30 @@ struct Eye {
     ComPtr<ID3D11RenderTargetView> rtv;
     ComPtr<ID3D11DepthStencilView> dsv;
     ComPtr<ID3D11ShaderResourceView> indexSrv, depthSrv;
+    ComPtr<ID3D11Texture2D> originalDepth;
+    ComPtr<ID3D11RenderTargetView> originalDepthRtv;
+    ComPtr<ID3D11ShaderResourceView> originalDepthSrv;
     Records records[2];
     unsigned write=0, width=0, height=0;
-    bool cleared=false;
+    bool cleared=false, original=false;
 };
 Eye g_eyes[2];
 bool g_enabled=false, g_failed=false, g_noted=false, g_capNoted=false;
 ComPtr<ID3D11ComputeShader> g_build;
-ComPtr<ID3D11PixelShader> g_index;
+ComPtr<ID3D11PixelShader> g_index, g_indexOriginal;
 ComPtr<ID3D11Buffer> g_draw;
 ComPtr<ID3D11BlendState> g_blend;
 ComPtr<ID3D11DepthStencilState> g_depth;
 ComPtr<ID3D11Buffer> g_dump;
 unsigned g_dumpCount=0;
+GpuIntervals<16> g_gpu;
+unsigned g_costFrames=0,g_costDraws=0,g_originalDraws=0;
+void reportCost() {
+    const auto& t=g_gpu.totals;
+    if(g_costDraws || t.samples || t.invalid || t.skipped)
+        Log::get().note("terrain motion GPU: %u patches (%u original draws, %u reissues) in %u frames; completed=%u skipped=%u invalid=%u, %.3f us/patch bracket (includes game's terrain draw for original capture; every 64th draw; no wait/flush; separate from EDVR-at-door GPU).",
+            g_costDraws,g_originalDraws,g_costDraws-g_originalDraws,g_costFrames,t.samples,t.skipped,t.invalid,t.samples?t.ms*1000/t.samples:0.0);
+}
 struct Saved {
     ID3D11RenderTargetView* rt[8]{};
     ID3D11DepthStencilView* ds=nullptr;
@@ -110,7 +142,7 @@ struct Saved {
     ComPtr<ID3D11BlendState> blend;
     ComPtr<ID3D11DepthStencilState> depth;
     FLOAT factor[4]{};
-    bool active=false;
+    bool active=false,timed=false;
 } g_saved;
 
 bool createRecords(ID3D11Device* dev, Records& r) {
@@ -132,24 +164,29 @@ bool createEye(ID3D11Device* dev, ID3D11Texture2D* scene, Eye& e) {
     if (FAILED(dev->CreateTexture2D(&td,nullptr,&e.index)) ||
         FAILED(dev->CreateRenderTargetView(e.index.Get(),nullptr,&e.rtv)) ||
         FAILED(dev->CreateShaderResourceView(e.index.Get(),nullptr,&e.indexSrv))) return false;
+    return createRecords(dev,e.records[0]) && createRecords(dev,e.records[1]);
+}
+bool createPrivateDepth(ID3D11Device* dev,Eye& e) {
+    D3D11_TEXTURE2D_DESC td{};td.Width=e.width;td.Height=e.height;
+    td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R32_TYPELESS; td.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
     D3D11_DEPTH_STENCIL_VIEW_DESC dd{}; dd.Format=DXGI_FORMAT_D32_FLOAT; dd.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format=DXGI_FORMAT_R32_FLOAT;
     sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels=1;
     return SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&e.depth)) &&
         SUCCEEDED(dev->CreateDepthStencilView(e.depth.Get(),&dd,&e.dsv)) &&
-        SUCCEEDED(dev->CreateShaderResourceView(e.depth.Get(),&sd,&e.depthSrv)) &&
-        createRecords(dev,e.records[0]) && createRecords(dev,e.records[1]);
+        SUCCEEDED(dev->CreateShaderResourceView(e.depth.Get(),&sd,&e.depthSrv));
 }
 bool ensure(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
-    if (g_build && g_index && g_draw && g_blend && g_depth) return true;
+    if (g_build && g_index && g_indexOriginal && g_draw && g_blend && g_depth) return true;
     g_build.Attach(shaderSwapCompileCs(ctx,kBuildHlsl,sizeof(kBuildHlsl)-1,"main","terrain motion",nullptr,"terrain motion"));
     g_index.Attach(shaderSwapCompilePs(ctx,kIndexHlsl,sizeof(kIndexHlsl)-1,"main","terrain coverage",nullptr,"terrain motion"));
+    g_indexOriginal.Attach(shaderSwapCompilePs(ctx,kIndexHlsl,sizeof(kIndexHlsl)-1,"original","terrain original coverage",nullptr,"terrain motion"));
     D3D11_BUFFER_DESC bd{}; bd.ByteWidth=48; bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     D3D11_BLEND_DESC blend{}; blend.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;
     D3D11_DEPTH_STENCIL_DESC depth{}; depth.DepthEnable=TRUE;
     depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL; depth.DepthFunc=D3D11_COMPARISON_GREATER_EQUAL;
-    return g_build && g_index && SUCCEEDED(dev->CreateBuffer(&bd,nullptr,&g_draw)) &&
+    return g_build && g_index && g_indexOriginal && SUCCEEDED(dev->CreateBuffer(&bd,nullptr,&g_draw)) &&
         SUCCEEDED(dev->CreateBlendState(&blend,&g_blend)) && SUCCEEDED(dev->CreateDepthStencilState(&depth,&g_depth));
 }
 void fail() {
@@ -162,8 +199,18 @@ void celestialMotionConfigure(bool enabled) {
     if (g_enabled!=enabled) celestialMotionShutdown();
     g_enabled=enabled;
 }
-bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
+static bool begin(ID3D11DeviceContext* ctx, uint64_t vs, bool original) {
     if (!g_enabled || g_failed || vs!=kTerrainDepth || g_saved.active) return false;
+    if (original) {
+        // The observed prepass has no PS: adding colour outputs cannot
+        // replace game shading/discard/depth export. Keep its actual DSV,
+        // depth/stencil state, sample mask, viewport and geometry intact.
+        ComPtr<ID3D11PixelShader> ps; ctx->PSGetShader(&ps,nullptr,nullptr);
+        if (ps) return false;
+        ComPtr<ID3D11BlendState> blend;ctx->OMGetBlendState(&blend,nullptr,nullptr);
+        D3D11_BLEND_DESC bd{};if(blend)blend->GetDesc(&bd);
+        if(bd.AlphaToCoverageEnable)return false;
+    }
     // A depth prepass can have no colour target. Identify the eye by its
     // actual scene-depth resource, not by colour-target order.
     auto* bound=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
@@ -182,6 +229,18 @@ bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     ComPtr<ID3D11Device> dev; ctx->GetDevice(&dev);
     if (!ensure(ctx,dev.Get())) { fail(); return false; }
     if (e.scene.Get()!=scene.Get() && !createEye(dev.Get(),scene.Get(),e)) { fail(); return false; }
+    // One layer cannot mix private depth testing and scene depth testing.
+    // An unexpected mixed prepass retains camera motion for excess draws.
+    if (e.cleared && e.original!=original) return false;
+    if (!original && !e.depth && !createPrivateDepth(dev.Get(),e)) { fail(); return false; }
+    if (original && !e.originalDepth) {
+        D3D11_TEXTURE2D_DESC od{}; od.Width=e.width; od.Height=e.height;
+        od.MipLevels=od.ArraySize=od.SampleDesc.Count=1;
+        od.Format=DXGI_FORMAT_R32_FLOAT; od.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev->CreateTexture2D(&od,nullptr,&e.originalDepth)) ||
+            FAILED(dev->CreateRenderTargetView(e.originalDepth.Get(),nullptr,&e.originalDepthRtv)) ||
+            FAILED(dev->CreateShaderResourceView(e.originalDepth.Get(),nullptr,&e.originalDepthSrv))) { fail(); return false; }
+    }
     Records& now=e.records[e.write]; Records& prev=e.records[1-e.write];
     if (now.count==kRecords) {
         if (!g_capNoted) { g_capNoted=true; Log::get().note("terrain motion: 512 draws per eye reached; excess patches retain camera motion."); }
@@ -195,6 +254,8 @@ bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
         enough=enough && bd.ByteWidth>=minimum[i];
     }
     if (!enough) { for (auto* b:cb) if (b) b->Release(); return false; }
+    if((++g_costDraws&63u)==0)g_saved.timed=g_gpu.begin(ctx);
+    if(original)++g_originalDraws;
     ID3D11ShaderResourceView* sources[4]{}; ctx->VSGetShaderResources(0,4,sources);
     UINT data[12]={now.count,prev.count,0,0};
     for (int i=0;i<4;++i) {
@@ -224,24 +285,34 @@ bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     ++now.count;
     if (!e.cleared) {
         const float zero[4]{}; ctx->ClearRenderTargetView(e.rtv.Get(),zero);
-        ctx->ClearDepthStencilView(e.dsv.Get(),D3D11_CLEAR_DEPTH,0,0); e.cleared=true;
+        if(original)ctx->ClearRenderTargetView(e.originalDepthRtv.Get(),zero);
+        else ctx->ClearDepthStencilView(e.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+        e.cleared=true; e.original=original;
     }
     ctx->OMGetRenderTargets(8,g_saved.rt,&g_saved.ds);
     ctx->PSGetShader(&g_saved.ps,g_saved.classes,&g_saved.classCount);
     ctx->PSGetConstantBuffers(13,1,&g_saved.cb);
     ctx->OMGetBlendState(&g_saved.blend,g_saved.factor,&g_saved.sampleMask);
     ctx->OMGetDepthStencilState(&g_saved.depth,&g_saved.stencil);
-    vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),e.dsv.Get());
-    ctx->OMSetBlendState(g_blend.Get(),nullptr,0xffffffff);
-    ctx->OMSetDepthStencilState(g_depth.Get(),0);
-    ctx->PSSetShader(g_index.Get(),nullptr,0); ctx->PSSetConstantBuffers(13,1,g_draw.GetAddressOf());
+    if(original) {
+        ID3D11RenderTargetView* rt[2]={e.rtv.Get(),e.originalDepthRtv.Get()};
+        vScreenSetRenderTargetsRaw(ctx,2,rt,g_saved.ds);
+        ctx->OMSetBlendState(g_blend.Get(),nullptr,g_saved.sampleMask);
+    } else {
+        vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),e.dsv.Get());
+        ctx->OMSetBlendState(g_blend.Get(),nullptr,0xffffffff);
+        ctx->OMSetDepthStencilState(g_depth.Get(),0);
+    }
+    ctx->PSSetShader(original?g_indexOriginal.Get():g_index.Get(),nullptr,0); ctx->PSSetConstantBuffers(13,1,g_draw.GetAddressOf());
     g_saved.active=true;
     if (!g_noted) {
         g_noted=true;
-        Log::get().note("terrain motion: draw-time GPU transform history and private coverage active (%ux%u); 512 patches per eye, TAA/DLSS; missing or changed patches retain camera motion.",td.Width,td.Height);
+        Log::get().note("terrain motion: draw-time GPU transform history and private coverage active (%ux%u); null-PS prepasses captured in original draw, other passes reissued; 512 patches per eye, TAA/DLSS; missing or changed patches retain camera motion.",td.Width,td.Height);
     }
     return true;
 }
+bool celestialMotionBegin(ID3D11DeviceContext* ctx,uint64_t vs) { return begin(ctx,vs,false); }
+bool celestialMotionBeginOriginal(ID3D11DeviceContext* ctx,uint64_t vs) { return begin(ctx,vs,true); }
 void celestialMotionEnd(ID3D11DeviceContext* ctx) {
     if (!g_saved.active) return;
     vScreenSetRenderTargetsRaw(ctx,8,g_saved.rt,g_saved.ds);
@@ -252,10 +323,13 @@ void celestialMotionEnd(ID3D11DeviceContext* ctx) {
     for (auto* p:g_saved.rt) if (p) p->Release();
     if (g_saved.ds) g_saved.ds->Release();
     for (UINT i=0;i<g_saved.classCount;++i) g_saved.classes[i]->Release();
+    if(g_saved.timed)g_gpu.end(ctx);
     g_saved=Saved{};
 }
-void celestialMotionFrameBoundary() {
+void celestialMotionFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_enabled) return;
+    if(ctx)g_gpu.poll(ctx);
+    if(++g_costFrames%1800==0)reportCost();
     for (auto& e:g_eyes) {
         e.write=1-e.write; Records& next=e.records[e.write];
         for (unsigned i=0;i<next.count;++i) for (auto& view:next.sources[i]) view.Reset();
@@ -266,14 +340,15 @@ void celestialMotionViews(ID3D11Texture2D* scene, ID3D11ShaderResourceView** vie
     views[0]=views[1]=views[2]=nullptr;
     if (!g_enabled || g_failed || !scene) return;
     for (auto& e:g_eyes) if (e.scene.Get()==scene && e.cleared && e.records[e.write].count) {
-        views[0]=e.indexSrv.Get(); views[1]=e.depthSrv.Get(); views[2]=e.records[e.write].srv.Get();
+        views[0]=e.indexSrv.Get(); views[1]=e.original?e.originalDepthSrv.Get():e.depthSrv.Get(); views[2]=e.records[e.write].srv.Get();
         return;
     }
 }
 void celestialMotionShutdown() {
     for (auto& e:g_eyes) e=Eye{};
-    g_build.Reset(); g_index.Reset(); g_draw.Reset(); g_blend.Reset(); g_depth.Reset();
+    g_build.Reset(); g_index.Reset(); g_indexOriginal.Reset(); g_draw.Reset(); g_blend.Reset(); g_depth.Reset();
     g_dump.Reset(); g_dumpCount=0;
+    g_gpu={};g_costFrames=g_costDraws=g_originalDraws=0;
     g_failed=g_noted=g_capNoted=false;
 }
 void celestialMotionStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
@@ -292,6 +367,7 @@ void celestialMotionStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) 
     }
 }
 void celestialMotionWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const wchar_t* stamp) {
+    reportCost();
     if (!g_dump) {
         Log::get().note("terrain motion: eye run %ls has no terrain records.",stamp);
         return;
