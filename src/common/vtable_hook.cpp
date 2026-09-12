@@ -363,6 +363,11 @@ struct WriteWatch {
 };
 WriteWatch g_watch;
 PVOID      g_watchHandler = nullptr;
+// A pending step belongs to the thread whose context we changed, including
+// after the global watch has stopped or abandoned that catch. Other VEH users
+// may set TF or hardware breakpoints independently of EDVR.
+thread_local bool g_stepPending = false;
+thread_local bool g_stepHadTrap = false;
 
 // How many events the ring holds between two frame-path drains.
 //
@@ -505,6 +510,9 @@ struct FlipTimeline {
     bool            summarised = false;
 };
 FlipTimeline g_flip;
+#ifdef EDVR_VTABLE_TEST
+void (*g_publishObserver)(uint32_t) = nullptr;
+#endif
 
 // Back to nothing, field by field rather than by assigning a fresh instance:
 // the volatile members make a member-wise copy assignment a construct nobody
@@ -637,8 +645,14 @@ void recordFlip(size_t slot, void* before, void* after, void* rip,
     const uint32_t index =
         static_cast<uint32_t>(InterlockedIncrement(&g_flip.count)) - 1;
     const uint32_t at = index % kFlipRing;
+    // Invalidate the previous generation before touching its fields. Publishing
+    // only at the end lets a reader validate the old serial around mixed data.
+    InterlockedExchange64(&g_flip.ready[at], 0);
     VTableFlip& e = g_flip.ring[at];
     e.qpc = qpc;
+#ifdef EDVR_VTABLE_TEST
+    if (g_publishObserver) g_publishObserver(index);
+#endif
     e.frame = static_cast<uint64_t>(
         InterlockedCompareExchange64(&g_flip.frameNo, 0, 0));
     e.slot = slot;
@@ -806,48 +820,30 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     // unseen behind the first one. Re-protecting here instead means every
     // write is caught, which is the difference between "somebody wrote near our
     // table" and "somebody wrote OUR TABLE".
-    // ANY SINGLE STEP, WHILE THIS HANDLER HAS EVER ARMED A WATCH -- not only
-    // while one is armed NOW. The trap flag is ours and nothing else in this
-    // process sets one, so a step arriving after the watch has been stopped is
-    // still a trap we set, and handing it back kills the process just as surely.
-    // g_watchHandler is registered on the first arming and never removed, which
-    // makes it exactly the test "EDVR has used the trap flag in this process".
-    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watchHandler) {
-        // Claim the release, do not merely test it: the state word says who owns
-        // the catch, and letting go of it has to be one operation for the same
-        // reason taking it does. IDLE, not ARMED -- the pages are still writable
-        // at this instant and saying otherwise is the blindness below.
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_stepPending) {
+        g_stepPending = false;
+        const bool foreignStep = g_stepHadTrap || (ep->ContextRecord &&
+            (ep->ContextRecord->Dr6 & 0x200F)); // hardware breakpoints / debug access
+        if (ep->ContextRecord && !g_stepHadTrap)
+            ep->ContextRecord->EFlags &= ~kTrapFlag;
+        const LONG disposition = foreignStep ? EXCEPTION_CONTINUE_SEARCH
+                                             : EXCEPTION_CONTINUE_EXECUTION;
+        // Keep ownership while reading the pending event and publishing it.
+        // Releasing to IDLE here would let the frame path arm another writer
+        // before we finished consuming the shared pending fields.
         const LONG me = static_cast<LONG>(GetCurrentThreadId());
         const bool mine =
-            InterlockedCompareExchange(&g_watch.catchState, kCatchIdle, me) == me;
+            InterlockedCompareExchange(&g_watch.catchState, me, me) == me;
         if (!mine) {
-            // NEVER HAND BACK A TRAP WE SET.
-            //
-            // A single step arriving here while a watch exists and not owned by
-            // this thread is, one way or another, ours: the trap flag is not
-            // something anything else in this process sets. Passing it on means
-            // EXCEPTION_CONTINUE_SEARCH, and nobody downstream handles
-            // STATUS_SINGLE_STEP -- the process dies, EDVR is blamed, and
-            // correctly. Measured before the claim below became atomic: four
-            // writer threads, all dead inside 50 ms, three runs out of three.
-            // Ownership is one word now, so this must never fire; the count is
-            // what says so rather than an assumption that it does not.
-            //
-            // EXCEPT for the one case this file causes on purpose: the frame
-            // path's re-arm gives up on a catch after two seconds and takes the
-            // pages back, and if that thread then turns up after all its step
-            // owns nothing through no fault of its own. Counting that beside a
-            // number the summary calls "must be zero" would make the summary
-            // lie about its own escape hatch. One late step per escape.
+            // TLS proves we owe this thread a step even if the global owner
+            // was retired by the timeout. Never consume an unowned exception.
             if (InterlockedCompareExchange(&g_watch.escapedOwner, 0, me) == me) {
                 InterlockedIncrement(&g_watch.escaped);
             } else {
                 InterlockedIncrement(&g_watch.chimera);
             }
-            if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
-            return EXCEPTION_CONTINUE_EXECUTION;
+            return disposition;
         }
-        if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
         // THE SECOND READ. The store has retired, so the cell now holds the
         // value the writer meant to put there. Same value as before: a restore,
         // which is what a healthy rig does hundreds of times a frame and which
@@ -867,6 +863,7 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
                            g_watch.pendingStackCount);
             }
         }
+        InterlockedCompareExchange(&g_watch.catchState, kCatchIdle, me);
         // ARMED FIRST, PROTECTED SECOND, and the order is the difference
         // between a watch that loses a few catches and one that goes
         // permanently blind.
@@ -898,7 +895,7 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
                 }
             }
         }
-        return EXCEPTION_CONTINUE_EXECUTION;
+        return disposition;
     }
 
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
@@ -964,6 +961,8 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.writableProtect,
                    &ignored);
     if (ep->ContextRecord) {
+        g_stepHadTrap = (ep->ContextRecord->EFlags & kTrapFlag) != 0;
+        g_stepPending = true;
         ep->ContextRecord->EFlags |= kTrapFlag;
         // Ownership is already ours -- the compare-exchange above wrote this
         // thread's id into the state word. There is nothing further to publish,
@@ -1782,19 +1781,8 @@ void vtableWatchFrameTick(uint64_t frameNo) {
             g_flip.reported = total - kFlipRing;
             continue;
         }
-        const uint32_t at = index % kFlipRing;
-        const LONG64 want = static_cast<LONG64>(index) + 1;
         VTableFlip e;
-        if (InterlockedCompareExchange64(&g_flip.ready[at], 0, 0) != want) {
-            // Allocated but not yet published, or already overwritten.
-            ++g_flip.lost;
-            ++g_flip.reported;
-            continue;
-        }
-        e = g_flip.ring[at];
-        if (InterlockedCompareExchange64(&g_flip.ready[at], 0, 0) != want) {
-            // Overwritten DURING the copy, so the fields may be a mix of two
-            // events. Checked on both sides for exactly that reason.
+        if (!vtableWatchFlipAt(index, &e)) {
             ++g_flip.lost;
             ++g_flip.reported;
             continue;
@@ -1906,10 +1894,8 @@ void vtableWatchDumpRecent(const char* why, uint64_t subjectFrame) {
         static_cast<unsigned long long>(subjectFrame));
     for (uint32_t k = want; k > 0; --k) {
         const uint32_t index = total - k;
-        const uint32_t at = index % kFlipRing;
-        const LONG64 ready = InterlockedCompareExchange64(&g_flip.ready[at], 0, 0);
-        if (ready != static_cast<LONG64>(index) + 1) continue;
-        const VTableFlip e = g_flip.ring[at];
+        VTableFlip e;
+        if (!vtableWatchFlipAt(index, &e)) continue;
         // Said per row as well as in the header, because a reader chasing this
         // is reading a crash log under time pressure and one subtraction done
         // wrongly is the whole answer done wrongly.
@@ -1988,9 +1974,18 @@ bool vtableWatchFlipAt(uint32_t index, VTableFlip* out) {
         static_cast<LONG64>(index) + 1) {
         return false;
     }
-    *out = g_flip.ring[at];
+    const VTableFlip snapshot = g_flip.ring[at];
+    if (InterlockedCompareExchange64(&g_flip.ready[at], 0, 0) !=
+        static_cast<LONG64>(index) + 1) return false;
+    *out = snapshot;
     return true;
 }
+
+#ifdef EDVR_VTABLE_TEST
+void vtableWatchSetPublishObserverForTest(void (*observer)(uint32_t)) {
+    g_publishObserver = observer;
+}
+#endif
 
 uint32_t vtableWatchCatches() {
     return static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.catches, 0, 0));

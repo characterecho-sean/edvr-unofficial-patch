@@ -362,7 +362,23 @@ static void* readSlot(void* object, size_t slot) {
     return (*reinterpret_cast<void***>(object))[slot];
 }
 
+static LONG g_otherSteps = 0;
+static LONG CALLBACK otherStepHandler(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    ++g_otherSteps;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static bool g_reusedSlotReadable = false;
+static void observeFlipPublication(uint32_t index) {
+    if (index < 128) return;
+    VTableFlip old;
+    if (vtableWatchFlipAt(index - 128, &old)) g_reusedSlotReadable = true;
+}
+
 int main() {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("edvr vtable / wrapper collision\n");
 
@@ -2524,6 +2540,59 @@ int main() {
         check(!vtableInsideModule(heapTable, nullptr),
               "a null module base fails safe (false -> in-place)",
               "the module probe did not fail safe on a null base");
+    }
+
+    // A second VEH owns exceptions unrelated to our page writes. It must
+    // receive them both during a watch and after the watch has stopped.
+    {
+        void** table = static_cast<void**>(VirtualAlloc(
+            nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        PVOID other = AddVectoredExceptionHandler(0, otherStepHandler);
+        if (!table || !other) {
+            fail("independent single-step fixture", "allocation/handler failed");
+        } else {
+            table[0] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(table, 0, 8, "foreign-step", true),
+                  "foreign-step watch arms", "watch refused");
+            RaiseException(EXCEPTION_SINGLE_STEP, 0, 0, nullptr);
+            check(g_otherSteps == 1, "unowned single step reaches the next handler",
+                  "EDVR swallowed another tool's exception");
+            table[0] = reinterpret_cast<void*>(&thunkOneB);
+            check(g_otherSteps == 1 && vtableWatchFlips() == 1,
+                  "EDVR still completes its own write/step pair",
+                  "our trap escaped or the write was missed");
+            vtableWatchStop();
+            RaiseException(EXCEPTION_SINGLE_STEP, 0, 0, nullptr);
+            check(g_otherSteps == 2, "unowned step passes through after disarm",
+                  "the inactive watch still consumes other tools' traps");
+        }
+        if (other) RemoveVectoredExceptionHandler(other);
+        if (table) VirtualFree(table, 0, MEM_RELEASE);
+    }
+    // Stop a writer halfway through reusing the ring's first record. The
+    // previous event must already be unavailable while its fields change.
+    {
+        void** table = static_cast<void**>(VirtualAlloc(
+            nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!table) {
+            fail("publication fixture", "allocation failed");
+        } else {
+            table[0] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(table, 0, 8, "publication", true),
+                  "publication watch arms", "watch refused");
+            vtableWatchSetPublishObserverForTest(observeFlipPublication);
+            for (int i = 0; i < 129; ++i) {
+                *reinterpret_cast<void* volatile*>(table) = i % 2
+                    ? reinterpret_cast<void*>(&thunkOne)
+                    : reinterpret_cast<void*>(&thunkOneB);
+            }
+            vtableWatchSetPublishObserverForTest(nullptr);
+            check(vtableWatchFlips() == 129 && !g_reusedSlotReadable,
+                  "ring invalidates a reused event before changing its fields",
+                  "a reader accepted a partially overwritten event");
+            vtableWatchStop();
+            VirtualFree(table, 0, MEM_RELEASE);
+        }
     }
 
     if (g_fails) {

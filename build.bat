@@ -541,7 +541,7 @@ REM it, which is the only reason to believe them now.
 if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
-    /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
+    /DEDVR_VTABLE_TEST /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" ^

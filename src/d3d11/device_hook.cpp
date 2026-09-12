@@ -9,6 +9,8 @@
 #include <d3d11_4.h>   // ID3D11Multithread, for the protection probe
 #include <dxgi1_2.h>
 
+#include "graphics_runtime.h"
+
 #include <atomic>
 
 #include "../common/config.h"
@@ -947,6 +949,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // tick publishes the frame number whether or not anything is.
         vtableWatchRearm();
         vtableWatchFrameTick(g_state->frameCounter);
+        if (graphicsRuntimeDisabled()) return;
         // WHICH VR BACK END THIS ACTUALLY IS, said once near the top of the
         // log. Inside the budget because it reads the process module list;
         // rate-limited to once a second by the module itself, and silent from
@@ -1590,6 +1593,11 @@ void menuActionMarker(void*) {
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
+        if (!Config::get().getBool("advanced.d3d11_fixes", true)) {
+            disableGraphicsRuntime();
+            inputGateShutdown();
+            return *g_state;
+        }
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
         // The settings menu, read here for install and on vScreen's reload
@@ -2029,7 +2037,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
 }
 
 bool deviceHookRecoveryDisabled() {
-    return g_state && g_state->recoveryDisabled;
+    return graphicsRuntimeDisabled();
 }
 
 void hookDevice(ID3D11Device* device) {
@@ -2077,12 +2085,10 @@ void hookDevice(ID3D11Device* device) {
     // A user who has diagnosed their way to a workaround out of a file
     // permission was owed a documented setting three releases ago.
     //
-    // What it leaves running is exactly what a tripped sentinel leaves running,
-    // which is NOT nothing: the swapchain's Present hook and the DXGI factory
-    // hooks are installed from hookSwapChain and hookFactoryForDevice, which
-    // the proxy calls independently of this function, and the whole openvr half
-    // never needed this device at all. The frame boundary the VR half's fixes
-    // ride on is one of those, so the switch has to leave them.
+    // The explicit off switch retains the Present and DXGI factory hooks;
+    // Present only updates its bookkeeping while graphicsRuntimeDisabled is
+    // set. Sentinel recovery additionally skips installing those hooks. The
+    // OpenVR half remains available in either case.
     //
     // The order below is load-bearing. This check sits AFTER the Sentinel is
     // constructed, so that a .armed file left behind by an earlier crashing
@@ -2093,7 +2099,7 @@ void hookDevice(ID3D11Device* device) {
     if (!s.sentinel) {
         s.sentinel = new Sentinel(sentinelCfg.logDir().c_str(), L"d3d11_hooks");
     }
-    if (!sentinelCfg.getBool("advanced.d3d11_fixes", true)) {
+    if (graphicsRuntimeDisabled()) {
         if (s.sentinel->trippedOnStartup()) s.sentinel->clearTrip();
         // Said once. hookDevice runs per device, and Elite creates more than
         // one; the paragraph is for the reader, not for every device.
@@ -2108,9 +2114,9 @@ void hookDevice(ID3D11Device* device) {
                 "all inert, and the game renders as it would without this half "
                 "installed. What is still hooked is the swapchain's Present and "
                 "the DXGI factory, which carry the frame boundary the openvr half "
-                "runs on -- so if a crash survives this setting, it is in one of "
-                "those or in the openvr half, and that is worth reporting. Set it "
-                "back to 1 to try the fixes again.");
+                "runs on. Submit-side graphics processing and the EDVR menu are "
+                "also disabled. If a crash survives this setting, please report "
+                "both logs. Set it back to 1 and restart to try the fixes again.");
         }
         return;
     }
@@ -2125,6 +2131,7 @@ void hookDevice(ID3D11Device* device) {
         // Otherwise the capability device owns the warmed shaders while
         // Submit supplies textures from the game's first device.
         s.recoveryDisabled = true;
+        disableGraphicsRuntime();
         s.sentinel->clearTrip();
         inputGateShutdown();
         Log::get().note(

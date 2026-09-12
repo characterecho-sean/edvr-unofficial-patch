@@ -308,6 +308,11 @@ uint32_t vtableWatchFlipShapes();
 // Read back one recorded flip by index, oldest first, for the unit cells.
 // False when the index is past what has been recorded or has been overwritten.
 bool vtableWatchFlipAt(uint32_t index, VTableFlip* out);
+#ifdef EDVR_VTABLE_TEST
+// Pauses publication after the first field is written, for a deterministic
+// reader/writer interleaving in the test executable only.
+void vtableWatchSetPublishObserverForTest(void (*observer)(uint32_t));
+#endif
 
 // Has the timeline printed its closing report -- the cost per frame and the
 // table of who wrote what? The twin of vtableWatchSummarised, and it exists for

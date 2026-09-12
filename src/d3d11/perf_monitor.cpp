@@ -19,6 +19,7 @@
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"  // vtableWatchDumpRecent, the flip timeline
 #include "device_hook.h"
+#include "graphics_runtime.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 
@@ -999,6 +1000,7 @@ void perfMonitorShutdown() {
 
 extern "C" __declspec(dllexport) void edvrDoorGpuBegin(void* tex, int eye) {
     using namespace edvr;
+    if (graphicsRuntimeDisabled()) return;
     if (!tex || eye < 0 || eye > 1) return;
     State& s = g_s;
     if (s.doorOpen[eye] >= 0) return;   // a pair already open: the End never came; leave it

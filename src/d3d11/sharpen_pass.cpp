@@ -1,4 +1,5 @@
 #include "sharpen_pass.h"
+#include "graphics_runtime.h"
 
 #include <cmath>
 #include <cstring>
@@ -741,7 +742,7 @@ void sharpenPassShutdown() {
 extern "C" __declspec(dllexport) void* edvrSharpen(void* srcTex, int eye,
                                                    const float* bounds,
                                                    float strength) {
-    if (!srcTex || eye < 0 || eye > 1) return nullptr;
+    if (edvr::graphicsRuntimeDisabled() || !srcTex || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::sharpenInner(srcTex, eye, bounds, strength);

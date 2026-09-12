@@ -64,6 +64,7 @@ void logContextTableVariants(void** table, size_t span, const char* who);
 
 void hookDevice(ID3D11Device* device);
 // Sticky for the process, including later devices and submit-side passes.
+// True for either sentinel recovery or advanced.d3d11_fixes=0.
 bool deviceHookRecoveryDisabled();
 void hookSwapChain(IDXGISwapChain* swapChain);
 void hookFactoryForDevice(ID3D11Device* device);
