@@ -1,7 +1,8 @@
 #pragma once
 // Night PS F786D34B5E118D5E, transcribed and replayed against captured
-// depth, normals, exposure, mask, geometry and constants. Only the pulse
-// distance and unconditional centre-normal pixelation are corrected.
+// depth, normals, exposure, mask, geometry and constants. The fixed path
+// outlines depth geometry without shading over the existing surface texture
+// or outlining fine normal maps. It also corrects pulse distance.
 // EDVR_NIGHT_STOCK is a test-only reference; the live Off setting binds
 // the game's original shader. See review-planet-performance-2026-09-11.md.
 namespace edvr {
@@ -28,6 +29,29 @@ float3 normalAt(float2 uv,float2 dx,float2 dy){
     float2 e=Normals.SampleGrad(Point,uv,dx,dy).gb*4-2;
     float d=dot(e,e);return normalize(float3(e*sqrt(max(1-d*.25,0)),d*.5-1));
 }
+float inverseDepthAt(float2 uv,float2 dx,float2 dy){
+    float d=Depth.SampleGrad(Point,coord(uv),dx,dy);
+    // Missing/background samples represent infinity, never NaN or division
+    // by zero. Their silhouettes still border valid foreground samples.
+    float inverse=rcp(d);
+    return d>0 && isfinite(d) && isfinite(inverse)?inverse:0;
+}
+float geometryEdge(float2 uv,float2 dx,float2 dy){
+    float2 x=dx*n[11].y,y=dy*n[11].y;
+    float a=inverseDepthAt(uv-x-y,dx,dy),b=inverseDepthAt(uv-y,dx,dy),c0=inverseDepthAt(uv+x-y,dx,dy);
+    float d=inverseDepthAt(uv-x,dx,dy),e=inverseDepthAt(uv,dx,dy),f=inverseDepthAt(uv+x,dx,dy);
+    float g=inverseDepthAt(uv-x+y,dx,dy),h=inverseDepthAt(uv+y,dx,dy),i=inverseDepthAt(uv+x+y,dx,dy);
+    float sum=a+b+c0+d+e+f+g+h+i;
+    if(sum<=0 || !isfinite(sum))return 0;
+    // Inverse forward-depth is affine over a projected plane. Its Hessian
+    // is zero there, including a sloped plane; textured surface normals do
+    // not affect it. The mixed derivative includes diagonal silhouettes.
+    // Normalize by all nine samples to bound near/far discontinuities and
+    // remove absolute-distance scaling, rather than multiplying by centre Z.
+    float xx=(d+f-2*e)/sum,yy=(b+h-2*e)/sum;
+    float xy=(a+i-c0-g)*.25/sum;
+    return sqrt(xx*xx+yy*yy+2*xy*xy);
+}
 float grid(float2 uv,float4 setting,float fade){
     float2 p=uv*setting.z;
     float2 f=abs(frac(p-.5)-.5)/(abs(ddx_coarse(p))+abs(ddy_coarse(p)));
@@ -44,8 +68,17 @@ float4 main(float2 tex:TEXCOORD4,float4 pos:SV_Position):SV_Target{
     float range=n[5].z-n[5].w;
     float fade=saturate((d-n[5].w)/range);
     float nearFade=n[5].x>0?saturate((d-n[7].x)/n[5].x):1;
+#if !EDVR_NIGHT_STOCK
+    // Preserve deliberately pixelated or sampled-colour artistic modes.
+    // The measured terrain night-vision pass uses neither of these flags.
+    bool geometry=!asuint(n[11].z) && !asuint(n[10].w);
+#endif
     float edge=0,orientation=0;float3 worldNormal=.5;
     if(d>=n[7].x && d<=n[7].y){
+#if !EDVR_NIGHT_STOCK
+        if(geometry)edge=geometryEdge(uv,dx,dy);
+        else {
+#endif
         float2 x=dx*n[11].y,y=dy*n[11].y;
         float3 tl=normalAt(coord(uv-y-x),dx,dy),tm=normalAt(coord(uv-y),dx,dy),tr=normalAt(coord(uv-y+x),dx,dy);
         float3 ml=normalAt(coord(uv-x),dx,dy),mr=normalAt(coord(uv+x),dx,dy);
@@ -53,8 +86,12 @@ float4 main(float2 tex:TEXCOORD4,float4 pos:SV_Position):SV_Target{
         float3 gx=(tr+br-tl-bl)*.09375+(mr-ml)*.3125;
         float3 gy=(bl+br-tl-tr)*.09375+(bm-tm)*.3125;
         edge=length(float2(gx.z,gy.z));
+#if !EDVR_NIGHT_STOCK
+        }
+#endif
         edge*=fade*fade*n[11].x;
 #if !EDVR_NIGHT_STOCK
+        if(!geometry){
         float3 local=normalAt(coord(uv),dx,dy);
 #else
         float3 local=normalAt(quantize(uv),dx,dy);
@@ -62,10 +99,19 @@ float4 main(float2 tex:TEXCOORD4,float4 pos:SV_Position):SV_Target{
         worldNormal=local.x*c[277].xyz+local.y*c[278].xyz+local.z*c[279].xyz;
         orientation=fade*pow(abs(worldNormal.z+n[9].z),n[9].y)*n[9].x;
         worldNormal=worldNormal*.5+.5;
+#if !EDVR_NIGHT_STOCK
+        }
+#endif
     }
     float lattice=saturate(grid(tex-.5,n[2],fade)+grid(tex-.5,n[3],fade)+grid(tex-.5,n[4],fade));
     if(d<n[7].x)lattice=0;
+#if !EDVR_NIGHT_STOCK
+    // Leave the original scene visible between contours. No constant green
+    // fill, colour tint or normal-map orientation shading in geometry mode.
+    float intensity=(lattice+(geometry?edge:fade*.01+edge+orientation))*mask*n[6].z*nearFade;
+#else
     float intensity=(lattice+fade*.01+edge+orientation)*mask*n[6].z*nearFade;
+#endif
     float alpha;float3 colour;
     if(asuint(n[10].w)){
         float4 sampled=Colour.Sample(Point,uv);colour=sampled.rgb*n[8].rgb;

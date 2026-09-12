@@ -1,4 +1,5 @@
-// GPU regression for the live fix and the two corrected shader operations.
+// GPU regression for night vision without surface fill, geometry contours,
+// corrected radial pulse and the live A/B replacement's state contract.
 #include "../../src/d3d11/night_vision.cpp"
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
@@ -31,6 +32,9 @@ using namespace edvr;
 struct Rig {
     ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> ctx;ComPtr<ID3D11InfoQueue> queue;
     ComPtr<ID3D11Buffer> camera,settings;ComPtr<ID3D11Texture2D> target,stage,depth,normals;
+    ComPtr<ID3D11RenderTargetView> rt;
+    ComPtr<ID3D11BlendState> originalBlend;
+    std::vector<float> scene=std::vector<float>(64*64*4,0);
     ComPtr<ID3D11PixelShader> stock;float c[333][4]{},n[12][4]{};
     Rig(){
         D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
@@ -43,7 +47,11 @@ struct Rig {
         hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&stock));ctx->PSSetShader(stock.Get(),nullptr,0);
         camera=buffer(sizeof(c));settings=buffer(sizeof(n));ctx->PSSetConstantBuffers(1,1,camera.GetAddressOf());ctx->PSSetConstantBuffers(2,1,settings.GetAddressOf());
         target=texture(DXGI_FORMAT_R32G32B32A32_FLOAT,nullptr,64*16,D3D11_BIND_RENDER_TARGET);
-        ComPtr<ID3D11RenderTargetView> rt;hr(dev->CreateRenderTargetView(target.Get(),nullptr,&rt));ctx->OMSetRenderTargets(1,rt.GetAddressOf(),nullptr);
+        hr(dev->CreateRenderTargetView(target.Get(),nullptr,&rt));ctx->OMSetRenderTargets(1,rt.GetAddressOf(),nullptr);
+        D3D11_BLEND_DESC bd{};auto& blend=bd.RenderTarget[0];blend.BlendEnable=TRUE;
+        blend.SrcBlend=blend.SrcBlendAlpha=D3D11_BLEND_ONE;blend.DestBlend=blend.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;
+        blend.BlendOp=blend.BlendOpAlpha=D3D11_BLEND_OP_ADD;blend.RenderTargetWriteMask=7;
+        hr(dev->CreateBlendState(&bd,&originalBlend));FLOAT factors[4]{.125f,.25f,.5f,.75f};ctx->OMSetBlendState(originalBlend.Get(),factors,~0u);
         D3D11_TEXTURE2D_DESC td{};target->GetDesc(&td);td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;td.BindFlags=0;hr(dev->CreateTexture2D(&td,nullptr,&stage));
         D3D11_VIEWPORT vp{0,0,64,64,0,1};ctx->RSSetViewports(1,&vp);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;ComPtr<ID3D11RasterizerState> rs;hr(dev->CreateRasterizerState(&rd,&rs));ctx->RSSetState(rs.Get());
@@ -66,8 +74,12 @@ struct Rig {
     void setDepth(float value){std::vector<float> d(64*64,value);depth=texture(DXGI_FORMAT_R32_FLOAT,d.data(),64*4,D3D11_BIND_SHADER_RESOURCE);bind(1,depth);}
     std::vector<float> draw(bool fix){
         ctx->UpdateSubresource(camera.Get(),0,nullptr,c,0,0);ctx->UpdateSubresource(settings.Get(),0,nullptr,n,0,0);
+        ctx->UpdateSubresource(target.Get(),0,nullptr,scene.data(),64*16,0);
+        ComPtr<ID3D11BlendState> beforeBlend;FLOAT beforeFactors[4];UINT beforeMask;ctx->OMGetBlendState(&beforeBlend,beforeFactors,&beforeMask);
         if(fix)nightVisionBegin(ctx.Get());ctx->Draw(3,0);if(fix)nightVisionEnd(ctx.Get());
         ComPtr<ID3D11PixelShader> ps;ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==stock.Get(),"original PS restored");
+        ComPtr<ID3D11BlendState> afterBlend;FLOAT afterFactors[4];UINT afterMask;ctx->OMGetBlendState(&afterBlend,afterFactors,&afterMask);
+        check(afterBlend==beforeBlend && !memcmp(beforeFactors,afterFactors,sizeof(beforeFactors)) && beforeMask==afterMask,"original blend, factors and sample mask restored");
         ctx->CopyResource(stage.Get(),target.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> out(64*64*4);
         for(UINT y=0;y<64;++y)memcpy(out.data()+y*64*4,static_cast<char*>(m.pData)+y*m.RowPitch,64*16);ctx->Unmap(stage.Get(),0);return out;
     }
@@ -79,6 +91,10 @@ void test(){
     // The same world point under two camera rotations, placed at pixel
     // centre with asymmetric projection offsets. Its radial pulse must
     // agree with the analytic distance even though forward depth changes.
+    // Use the intentionally pixelated artistic mode to isolate the pulse
+    // from the new geometry/texture treatment. Calibrate its colour scale
+    // using the constant pulse floor; the nonzero pulse has analytic 0.6.
+    unsigned one=1;memcpy(&r.n[11][2],&one,4);
     float pulse[2]{},oldPulse[2]{};
     for(int i=0;i<2;++i){
         float angle=i*.6f,cs=cosf(angle),sn=sinf(angle);float x=200*cs-400*sn,z=200*sn+400*cs;
@@ -86,20 +102,17 @@ void test(){
         float offset=1.f/64-x/z;r.c[270][0]+=offset*sn;r.c[272][0]+=offset*cs;
         r.c[271][1]=1;r.c[270][1]=-sn/64;r.c[272][1]=-cs/64;
         r.setDepth(z);r.n[1][0]=547.2136f;
-        auto a=r.draw(true),b=r.draw(false);float fade=1-z/1000;
-        pulse[i]=a[(32*64+32)*4+3]/(.01f*fade);oldPulse[i]=b[(32*64+32)*4+3]/(.01f*fade);
+        auto a=r.draw(true),b=r.draw(false);r.n[10][1]=0;auto floor=r.draw(true);r.n[10][1]=.6f;
+        pulse[i]=a[(32*64+32)*4+1]/floor[(32*64+32)*4+1]*.2f;oldPulse[i]=b[(32*64+32)*4+1]/floor[(32*64+32)*4+1]*.2f;
         check(fabsf(pulse[i]-.6f)<.0001f,"radial pulse matches fixed-point analytic distance");
     }
     check(fabsf(pulse[0]-pulse[1])<.0001f&&fabsf(oldPulse[0]-oldPulse[1])>.02f,"head rotation moves stock pulse but not corrected pulse");
-    // Pixelation off must retain a one-pixel normal pattern rather than
-    // duplicating the neighbour's orientation across a forced 2x2 cell.
+    // Intentional pixelation keeps its original artistic normal shading.
     r.n[10][1]=0;r.n[9][0]=.218f;r.n[9][1]=.5f;r.n[9][2]=-.5f;
     std::vector<unsigned> pattern(64*64);for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)pattern[y*64+x]=((x%2?750u:512u)<<10)|(512u<<20);
     r.ctx->UpdateSubresource(r.normals.Get(),0,nullptr,pattern.data(),64*4,0);
     auto fixed=r.draw(true),stock=r.draw(false);
-    check(fabsf(fixed[(32*64+30)*4+1]-fixed[(32*64+31)*4+1])>.0001f,"native centre normal retains per-pixel detail");
     check(fabsf(stock[(32*64+30)*4+1]-stock[(32*64+31)*4+1])<1e-6f,"reference reproduces forced 2x2 normal lookup");
-    unsigned one=1;memcpy(&r.n[11][2],&one,4);fixed=r.draw(true);stock=r.draw(false);
     for(size_t i=0;i<fixed.size();++i)check(std::isfinite(fixed[i])&&fabsf(fixed[i]-stock[i])<1e-5f,"intentional pixelation and non-pulse shading preserved");
     r.n[10][1]=.6f;r.c[270][0]=r.c[271][0]=r.c[272][0]=0;
     fixed=r.draw(true);stock=r.draw(false);
@@ -108,6 +121,10 @@ void test(){
     r.ctx->PSSetConstantBuffers(2,1,r.camera.GetAddressOf());nightVisionBegin(r.ctx.Get());
     ComPtr<ID3D11PixelShader> ps;r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==r.stock.Get(),"wrong settings size rejected");nightVisionEnd(r.ctx.Get());r.ctx->PSSetConstantBuffers(2,1,r.settings.GetAddressOf());
     r.bind(2,r.depth);fixed=r.draw(true);stock=r.draw(false);check(fixed==stock,"wrong normal format draws stock");r.bind(2,r.normals);stock=r.draw(false);
+    // Nested Begin is harmless, including live disabling before End.
+    nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps!=r.stock,"known single target engages");
+    nightVisionBegin(r.ctx.Get());testOn=false;nightVisionConfigure(Config::get());nightVisionEnd(r.ctx.Get());
+    ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps==r.stock,"live disabling restores an engaged draw");testOn=true;nightVisionConfigure(Config::get());
     ComPtr<ID3D11DeviceContext> deferred;hr(r.dev->CreateDeferredContext(0,&deferred));nightVisionBegin(deferred.Get());ps.Reset();deferred->PSGetShader(&ps,nullptr,nullptr);check(!ps,"deferred context rejected");
     testOn=false;nightVisionConfigure(Config::get());check(!nightVisionMatches('X',240,1),"live Off bypasses fix");fixed=r.draw(true);
     check(fixed==stock,"live Off draws original pixels");
@@ -115,4 +132,54 @@ void test(){
     nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"compile failure draws stock and stands down");testFail=false;
     r.clean();
 }
-int main(int argc,char** argv){if(argc!=2||strcmp(argv[1],"--self-test")){std::puts("Usage: night_vision_test --self-test");return 2;}test();std::printf("PASS: night vision (%u checks)\n",checks);}
+void geometryTest(){
+    Rig r;r.n[10][1]=0;r.n[11][0]=40;r.n[5][3]=r.n[7][1]=1000000;
+    // Material normal-map ridges on a perfectly flat depth surface must
+    // not acquire geometry outlines or directional normal-map colour.
+    std::vector<unsigned> pattern(64*64);for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)
+        pattern[y*64+x]=((x%8<4?750u:512u)<<10)|(512u<<20);
+    r.ctx->UpdateSubresource(r.normals.Get(),0,nullptr,pattern.data(),64*4,0);
+    auto fixed=r.draw(true),stock=r.draw(false);float lo=1e9f,hi=0,oldLo=1e9f,oldHi=0;
+    for(unsigned y=3;y<61;++y)for(unsigned x=3;x<61;++x){size_t i=(y*64+x)*4+1;lo=(std::min)(lo,fixed[i]);hi=(std::max)(hi,fixed[i]);oldLo=(std::min)(oldLo,stock[i]);oldHi=(std::max)(oldHi,stock[i]);}
+    check(hi-lo<1e-6 && oldHi-oldLo>.01,"flat textured surface is shaded, not outlined");
+    // A tilted perspective plane has affine reciprocal depth, unlike
+    // forward depth. Its surface must stay free of false contour bands.
+    std::vector<float> plane(64*64);for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)plane[y*64+x]=1/(.002f+x*.00001f+y*.00002f);
+    r.ctx->UpdateSubresource(r.depth.Get(),0,nullptr,plane.data(),64*4,0);fixed=r.draw(true);
+    for(unsigned y=3;y<61;++y)for(unsigned x=3;x<61;++x)
+        check(std::fabs(fixed[(y*64+x)*4+1])<2e-6,"sloped plane remains free of outlines");
+    // A physical depth step survives, with bounded response even against
+    // arbitrarily distant background. Scaling the scene keeps its contour.
+    float contour[2]{};
+    for(int scale=0;scale<2;++scale){
+        for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)plane[y*64+x]=(x<32?100.f:300.f)*(scale?10:1);
+        r.ctx->UpdateSubresource(r.depth.Get(),0,nullptr,plane.data(),64*4,0);fixed=r.draw(true);
+        float fade=1-plane[32*64+31]/1000000;
+        contour[scale]=fixed[(32*64+31)*4+1]/.2f/(fade*fade);
+        check(contour[scale]>.1 && contour[scale]<40,"actual object silhouette receives a bounded outline");
+        check(fixed[(32*64+20)*4+1]<1e-6,"object interior stays a shaded surface");
+    }
+    check(std::fabs(contour[0]-contour[1])<1e-5,"contours do not depend on absolute scene scale");
+    for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)plane[y*64+x]=x<32?.025f:50000.f;
+    r.ctx->UpdateSubresource(r.depth.Get(),0,nullptr,plane.data(),64*4,0);fixed=r.draw(true);
+    for(size_t i=0;i<fixed.size();++i)check(std::isfinite(fixed[i])&&fixed[i]>=0,"extreme near/far silhouette stays finite");
+    // No green fill or tint: texture colours and their bright/dark ratio
+    // must survive exactly between outlines, with no normal-map overlay.
+    r.setDepth(400);r.n[11][0]=0;r.n[8][0]=.012f;r.n[8][1]=1;r.n[8][2]=.742f;
+    for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x){size_t i=(y*64+x)*4;float value=x%2?.004f:.001f;
+        r.scene[i]=value*.5f;r.scene[i+1]=value;r.scene[i+2]=value*.75f;r.scene[i+3]=.375f;}
+    fixed=r.draw(true);
+    for(unsigned y=3;y<61;++y)for(unsigned x=3;x<61;++x){size_t i=(y*64+x)*4;
+        for(unsigned ch=0;ch<3;++ch)
+            check(fixed[i+ch]==r.scene[i+ch],"existing texture colour is untouched between contours");
+        check(fixed[i+3]==r.scene[i+3],"target alpha is untouched");}
+    check(std::fabs(fixed[(32*64+31)*4+1]/fixed[(32*64+30)*4+1]-4)<1e-5,"texture contrast is retained");
+    auto stable=fixed;r.c[277][0]=0;r.c[277][2]=1;r.c[279][0]=-1;r.c[279][2]=0;fixed=r.draw(true);
+    check(fixed==stable,"surface appearance is independent of night vision normal-map lighting");
+    r.n[0][3]=0;fixed=r.draw(true);check(fixed==r.scene,"disabled effect leaves original scene intact");r.n[0][3]=1;
+    r.n[7][1]=100;fixed=r.draw(true);check(fixed==r.scene,"surface outside night vision range is untouched");r.n[7][1]=1000000;
+    std::vector<float> zero(64*64,0);r.bind(4,r.texture(DXGI_FORMAT_R32_FLOAT,zero.data(),64*4,D3D11_BIND_SHADER_RESOURCE));
+    fixed=r.draw(true);check(fixed==r.scene,"zero effect mask leaves original scene intact");
+    r.clean();
+}
+int main(int argc,char** argv){if(argc!=2||strcmp(argv[1],"--self-test")){std::puts("Usage: night_vision_test --self-test");return 2;}test();geometryTest();std::printf("PASS: night vision (%u checks)\n",checks);}

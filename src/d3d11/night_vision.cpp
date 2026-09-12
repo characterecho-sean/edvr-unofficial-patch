@@ -18,7 +18,7 @@ struct State {
 }
 void nightVisionConfigure(Config& cfg){
     bool on=cfg.getBool("fix.night_vision_stability",true);
-    if(!configured || on!=enabled)Log::get().note("night vision stability: %s; radial pulse and native centre-normal sampling. AA-independent, live A/B.",on?"on":"off (original shader)");
+    if(!configured || on!=enabled)Log::get().note("night vision stability: %s; depth-geometry outlines, no surface fill, radial pulse. AA-independent, live A/B.",on?"on":"off (original shader)");
     configured=true;enabled=on;
 }
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances){
@@ -53,7 +53,7 @@ void nightVisionBegin(ID3D11DeviceContext* ctx){
     }
     state.count=256;ctx->PSGetShader(&state.saved,state.classes,&state.count);
     ctx->PSSetShader(state.shader.Get(),nullptr,0);state.engaged=true;
-    if(!state.noted){state.noted=true;Log::get().note("night vision stability: engaged at %ux%u; original PS restored after each matched draw.",w,h);}
+    if(!state.noted){state.noted=true;Log::get().note("night vision stability: engaged at %ux%u; geometry contours without surface fill; original PS restored after each matched draw.",w,h);}
 }
 void nightVisionEnd(ID3D11DeviceContext* ctx){
     if(!state.engaged)return;

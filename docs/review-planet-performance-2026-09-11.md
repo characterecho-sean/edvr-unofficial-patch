@@ -858,3 +858,56 @@ same dense pattern. Night-vision rendering remains unchanged this turn.
 The next investigation should address generation/filtering of the
 terrain normal edges, using the captured inputs, rather than requesting
 another identical flight or treating the pulse as the main blur cause.
+
+### Follow-up: geometry contours with no surface fill
+
+The user identified the dense pixelated patch before the mountain ridge
+and requested outlines for actual geometry rather than fine surface
+detail. Replacing the normal-map edge contribution with depth geometry
+removes that dense patch in the same captured inputs while retaining the
+ridge, mound and rock silhouettes. This confirms the dominant noisy
+signal comes from normal-detail amplification. It does not establish why
+the patch's boundary is circular; a specific terrain LOD or material
+transition remains unverified.
+
+Ruled out: an unnormalized inverse-depth Hessian multiplied by centre
+depth, because near/far discontinuities become excessively bright in the
+replay. Normalize by the sum of the nine inverse-depth samples instead.
+This bounds the response and makes it independent of absolute scene
+scale. Inverse forward-depth is affine on a perspective plane; its
+Hessian avoids outlining an ordinary slope. The mixed derivative
+includes diagonal contours. It is a geometric edge detector, not an
+object-category classifier, so real terrain folds can still get lines.
+
+An additive green surface prototype hid texture contrast. A subsequent
+texture-multiplication prototype preserved that contrast, but the user's
+final direction was "No green fill please." Neither surface treatment is
+shipped. The final geometry path adds no constant fill, tint or
+normal-map orientation shading. Between contours, the game's existing
+surface colours and texture remain visible. Unlit ground consequently
+stays dark. The pulse, exposure, mask and range still control the
+geometry contours. Deliberately pixelated and sampled-colour artistic
+modes keep their existing shading path.
+
+This stays under the existing live Night vision stability toggle, with
+the exact original game shader when Off. It changes only the matched
+pixel shader: no blend-state replacement, scene-colour copy, additional
+draw, history surface or CPU readback. Its normal terrain path uses nine
+depth samples for geometry instead of the nine material-normal samples.
+The existing runtime-independent D3D11 eye/resource gates remain.
+
+Validation: 66138 production GPU checks pass on both WARP and NVIDIA.
+They cover flat and sloped planes, material-normal detail rejection,
+physical depth steps, absolute-scale invariance, extreme near/far
+boundaries, exact preservation of surface colour/contrast between lines,
+mask/range/on-off behaviour, radial pulse under rotated asymmetric
+cameras, deliberate pixelation, compile failure and shader/blend state
+preservation. All six NVIDIA replays of 074418/074420/074423 are finite
+and retain geometry silhouettes without the dense normal-map patch.
+Replay comparisons use a shared exposure scale. Near cockpit differences
+are not a full accuracy check because the scratch replay lacks the
+original stencil state; the production draw retains it. Headset clarity
+and motion stability remain to be validated in the next flight.
+
+The full build, all regression gates and NVIDIA DLL smoke pass with this
+final no-fill shader and the rendered-weapon-motion correction.
