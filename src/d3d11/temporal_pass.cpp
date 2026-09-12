@@ -5071,6 +5071,7 @@ float temporalPassDepthAt(float metres) {
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) void edvrEyeCaptureUntreated(void* texture,int eye,const float* bounds) {
+    if (edvr::deviceHookRecoveryDisabled()) return;
     edvr::guarded("eye capture/untreated",[&]{edvr::captureUntreatedEye(static_cast<ID3D11Texture2D*>(texture),eye,bounds);});
 }
 // Also available to the diagnostic tools; the hotkey uses the same arm.
