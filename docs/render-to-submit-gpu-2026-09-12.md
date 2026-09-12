@@ -15,6 +15,12 @@ Ruled out: the new outer frame instrument as a necessary cause, because the
 symptom persists without that implementation. The report affects scene geometry
 and text, and switching AA off makes the moving image clearer.
 
+The subsequent paired captures established a separate projection mismatch under
+the active raw-only culling probe. Temporal reconstruction was using the
+widened raw frustum while the game rendered through its original matrix. See
+the [projection diagnosis and
+correction](temporal-projection-probe-2026-09-12.md).
+
 ## What the value means
 
 The start marker precedes the first covered call on the bound immediate context

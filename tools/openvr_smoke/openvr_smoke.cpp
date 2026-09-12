@@ -565,6 +565,36 @@ int censusChild(const char* dir) {
 // Same fixture and same margins as guardChild, so the lied numbers are the
 // ones documented there: left eye truth l=-1.25 r=+0.75 t=-1.2 b=+0.8 ->
 // lie l=-1.25 r=+1.25 t=-1.2 b=+1.0 at fraction_v = 0.5.
+using RenderTangentsFn = unsigned int(*)(int, float*);
+
+int checkRenderTangents(fakevr::ISystem012* sys, RenderTangentsFn renderTangents,
+                        const char* chan, int& bad) {
+    for (int e = 0; e < 2; ++e) {
+        float effective[4] = {};
+        fakevr::M44 actual = sys->GetProjectionMatrix(e, 0.5f, 100.0f, 0);
+        float expected[4] = {
+            (actual.m[0][2] - 1.0f) / actual.m[0][0],
+            (actual.m[0][2] + 1.0f) / actual.m[0][0],
+            (actual.m[1][2] - 1.0f) / actual.m[1][1],
+            (actual.m[1][2] + 1.0f) / actual.m[1][1]};
+        if (renderTangents(e, effective) == 0u) {
+            printf("  FAIL  probe child (%s): effective render tangents unavailable for eye %d\n",
+                   chan, e);
+            ++bad;
+            continue;
+        }
+        for (int k = 0; k < 4; ++k) {
+            if (!std::isfinite(effective[k]) || !std::isfinite(expected[k]) ||
+                fabsf(effective[k] - expected[k]) > 1e-5f) {
+                printf("  FAIL  probe child (%s): effective eye %d tangent[%d]=%g, expected %g\n",
+                       chan, e, k, effective[k], expected[k]);
+                ++bad;
+            }
+        }
+    }
+    return bad;
+}
+
 int probeChild(const char* dir, bool rawChannel) {
     const char* chan = rawChannel ? "raw" : "matrix";
     wchar_t proxy[MAX_PATH];
@@ -578,6 +608,12 @@ int probeChild(const char* dir, bool rawChannel) {
     auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
         GetProcAddress(m, "VR_GetGenericInterface"));
     if (!getIface) { printf("  FAIL  probe child (%s): no VR_GetGenericInterface\n", chan); return 11; }
+    auto renderTangents = reinterpret_cast<RenderTangentsFn>(
+        GetProcAddress(m, "edvr_selftest_render_tangents"));
+    if (!renderTangents) {
+        printf("  FAIL  probe child (%s): edvr_selftest_render_tangents not exported\n", chan);
+        return 11;
+    }
     int err = -1;
     void* iface = getIface("IVRSystem_012", &err);
     if (!iface) { printf("  FAIL  probe child (%s): interface came back null\n", chan); return 12; }
@@ -633,6 +669,9 @@ int probeChild(const char* dir, bool rawChannel) {
         ++bad;
     }
 
+    // Temporal consumers must receive the same frustum as the matrix path.
+    checkRenderTangents(sys, renderTangents, chan, bad);
+
     // And the image path is untouched on BOTH channels. This is the half
     // that makes the probe readable: the game renders exactly what it would
     // have rendered anyway, so anything that moves is the lie's doing.
@@ -675,6 +714,12 @@ int guardChild(const char* dir) {
     auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
         GetProcAddress(m, "VR_GetGenericInterface"));
     if (!getIface) { printf("  FAIL  guard child: no VR_GetGenericInterface\n"); return 11; }
+    auto renderTangents = reinterpret_cast<RenderTangentsFn>(
+        GetProcAddress(m, "edvr_selftest_render_tangents"));
+    if (!renderTangents) {
+        printf("  FAIL  guard child: edvr_selftest_render_tangents not exported\n");
+        return 11;
+    }
     int err = -1;
     void* iface = getIface("IVRSystem_012", &err);
     if (!iface) { printf("  FAIL  guard child: interface came back null\n"); return 12; }
@@ -748,6 +793,7 @@ int guardChild(const char* dir) {
                "(m00 %g want %g)\n", got.m[0][0], want.m[0][0]);
         ++bad;
     }
+    checkRenderTangents(sys, renderTangents, "guard-pre", bad);
 
     // The churn-attribution channel (frame_flag, spec §1g) is silent before
     // go-live: zero is "no answer" and the d3d11 half must read guard-off.
@@ -816,6 +862,7 @@ int guardChild(const char* dir) {
                got.m[1][2], -0.2f / 2.2f);
         ++bad;
     }
+    checkRenderTangents(sys, renderTangents, "guard-post", bad);
     if (fabsf(got.m[2][2] - want.m[2][2]) > 1e-5f ||
         fabsf(got.m[2][3] - want.m[2][3]) > 1e-5f ||
         got.m[3][1] != want.m[3][1] || got.m[3][2] != want.m[3][2]) {

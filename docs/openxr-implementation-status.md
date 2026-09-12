@@ -257,3 +257,11 @@ scene geometry and text; AA off is clearer. That rules out the new outer
 instrument as a necessary cause. The current investigation follows temporal
 reconstruction using the existing paired raw/treated eye capture and motion
 inputs. The baseline remains installed while this is resolved.
+
+The captures identified a projection mismatch under the existing raw-only
+culling probe: the game renders through its true matrix while temporal motion
+and jitter use the widened raw frustum. The fix makes temporal consumers follow
+the matrix channel. See the [captured evidence and regression
+gate](temporal-projection-probe-2026-09-12.md). The next paired build includes
+this correction and the current timing work; visual recovery still needs a
+headset check before advancing the OpenXR work.
