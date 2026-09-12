@@ -27,6 +27,7 @@
 #include "../../src/openxr/reset_events.h"
 #include "../../src/openxr/runtime_exports.h"
 #include "../../src/openxr/openvr_auxiliary.h"
+#include "../../src/openxr/owner_service.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -34,6 +35,7 @@
 #include <cmath>
 #include <algorithm>
 #include <thread>
+#include <memory>
 
 using namespace edvr::openxr;
 extern "C" vr::IVRCompositor* nativeCompositorCaller(vr::IVRCompositor*);
@@ -112,8 +114,13 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
 bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
 class Host : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
+  explicit Host(OwnerService& owner):service(owner){}
+  OwnerService& service;
   Options startupOptions;
   uint64_t starts=0,stops=0,startupFrames=0;
+  uint64_t eventPumps=0;
+  std::atomic<uint64_t> publishedPumps{0};
+  bool serviceStopped=false,serviceFailed=false;
   OpenVRExtendedDisplay displayInterface{*this};OpenVRChaperone chaperoneInterface{*this};
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
@@ -151,8 +158,8 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   }
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
     ++starts;
-    // This diagnostic's frame/device owner is its main thread. Moving that
-    // ownership to a game service/renderer remains a separate integration step.
+    // Constructed on the service thread with its thread-bound frame/device
+    // members. The diagnostic owns its device; game-device use remains separate.
     if(GetCurrentThreadId()!=ownerThread||starts!=1)return vr::VRInitError_Init_Internal;
     if(cancelled.load(std::memory_order_acquire))return vr::VRInitError_Init_ShuttingDown;
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
@@ -190,6 +197,27 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     if(GetCurrentThreadId()!=ownerThread)return false;
     return close();
   }
+  void pumpEvents() {
+    if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceStopped||serviceFailed)return;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation){serviceFailed=true;return;}
+    ++eventPumps;
+    XrResult r=state.pollEvents();
+    publishedPumps.store(eventPumps,std::memory_order_release);
+    const auto lifecycle=state.lifecycle();
+    poses.focus(compositorGeneration,true,state.running()&&!state.terminal()&&lifecycle==Lifecycle::Focused);
+    if(XR_FAILED(r)||state.terminal()||!changes.active()) {
+      serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+      result("service_poll_terminal",r);return;
+    }
+    if(lifecycle==Lifecycle::Stopping) {
+      r=boundary.clear();
+      if(r==XR_SUCCESS)r=state.stop();
+      serviceStopped=r==XR_SUCCESS;serviceFailed=!serviceStopped;
+      geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+      result("service_xrEndSession",r);
+    }
+  }
   static void referenceEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
     auto& host=*static_cast<Host*>(context);
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
@@ -204,6 +232,10 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   CompositorRead compositorRead() const override {return poses.read();}
   void compositorUnsupported(unsigned slot) noexcept override {std::printf("compositor_unavailable,slot=%u\n",slot);}
   vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
+    if(!service.isOwner()) {
+      auto result=vr::VRCompositorError_InvalidTexture;
+      return service.invoke([&]{result=waitPoses(generation,out);})?result:vr::VRCompositorError_InvalidTexture;
+    }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||!seated.space()||!changes.active())
@@ -245,6 +277,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     out=snapshot;lastCompositorResult=XR_SUCCESS;return vr::VRCompositorError_None;
   }
   bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=setTrackingSpace(generation,origin);})&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     // Standing/raw need their own supported runtime spaces and remain absent.
@@ -252,6 +285,10 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   }
   vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
+    if(!service.isOwner()) {
+      auto result=vr::VRCompositorError_InvalidTexture;
+      return service.invoke([&]{result=submitEye(generation,eye,texture,bounds,flags);})?result:vr::VRCompositorError_InvalidTexture;
+    }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return vr::VRCompositorError_InvalidTexture;
@@ -261,6 +298,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     return r;
   }
   bool clearSubmitted(uint64_t generation) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=clearSubmitted(generation);})&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return false;
@@ -268,6 +306,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     return false; // pending frame closed, but no historical compositor grid
   }
   bool handoff(uint64_t generation) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=handoff(generation);})&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||state.frameOpen())return false;
@@ -297,6 +336,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   }
   SystemRead read() const override {return geometry.read();}
   bool locateHead(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,vr::TrackedDevicePose_t& out) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHead(generation,origin,prediction,out);})&&result;}
     // Cached reads need no operation lease. Handle-using calls fail promptly
     // while another operation is in flight or shutdown has been requested.
     if(GetCurrentThreadId()!=ownerThread)return false;
@@ -315,6 +355,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     out=pose;return true;
   }
   bool resetSeated(uint64_t generation) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeated(generation);})&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=geometryGeneration||!state.running()||state.terminal()||
@@ -343,6 +384,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     ++recenters;return true;
   }
   bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);})&&result;}
     if(generation!=geometryGeneration)return false;
     const bool found=resetEvents.pop(generation,poses.read().originGeneration,origin,GetTickCount64(),event,pose);
     if(found)++resetPolls;return found;
@@ -473,6 +515,33 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     return runtimeGeneration!=0&&compositorGeneration!=0;
   }
 };
+// The facade objects survive explicit Shutdown. Their resources and all
+// thread-bound members are constructed/cleaned on the service thread.
+class NativeBackend final:public RuntimeBackend {
+ public:
+  OwnerService owner;
+  std::unique_ptr<Host> host;
+  Options options;
+  vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out)override {
+    if(host)return vr::VRInitError_Init_Internal; // native diagnostic: one generation per process
+    if(!owner.start([this]{if(host)host->pumpEvents();}))return vr::VRInitError_Init_Internal;
+    auto error=vr::VRInitError_Init_Internal;
+    if(!owner.invoke([&]{
+      host=std::make_unique<Host>(owner);host->startupOptions=options;
+      error=host->start(token,cancelled,out);
+    }))return vr::VRInitError_Init_Internal;
+    return error;
+  }
+  bool stop()noexcept override {
+    bool cleaned=!host;
+    const bool joined=owner.stop([&]{cleaned=host?host->stop():true;});
+    return joined&&cleaned;
+  }
+};
+struct StopServiceOnExit {
+  OwnerService& service;
+  ~StopServiceOnExit(){service.stop();}
+};
 void printPose(const char* name,const XrPosef& p) {
   std::printf("%s,position=%.9g/%.9g/%.9g,orientation=%.9g/%.9g/%.9g/%.9g\n",name,
     p.position.x,p.position.y,p.position.z,p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w);
@@ -485,30 +554,45 @@ bool samePose(const vr::TrackedDevicePose_t& a,const vr::TrackedDevicePose_t& b)
 int run(const Options& options) {
   // Process-lifetime objects back the exported function pointers. Their
   // resources are still explicitly retired through Shutdown before return.
-  static Host host;host.startupOptions=options;
-  static RuntimeLifecycle runtime(host);
+  static NativeBackend backend;backend.options=options;
+  static RuntimeLifecycle runtime(backend);
   if(!bindRuntimeExports(runtime))return 3;
   vr::EVRInitError initError=vr::VRInitError_Unknown;
   const uint32_t initToken=edvr_native_VR_InitInternal(&initError,vr::VRApplication_Scene);
   if(!initToken||initError!=vr::VRInitError_None){std::printf("error,runtime_init,%d\n",int(initError));return 3;}
   struct ShutdownOnExit {~ShutdownOnExit(){edvr_native_VR_ShutdownInternal();}} shutdownOnExit;
+  Host& host=*backend.host;
+  const DWORD initThread=GetCurrentThreadId();
   auto* system=static_cast<vr::IVRSystem*>(edvr_native_VR_GetGenericInterface(vr::IVRSystem_Version,&initError));
   auto* display=static_cast<vr::IVRExtendedDisplay*>(edvr_native_VR_GetGenericInterface(vr::IVRExtendedDisplay_Version,&initError));
   if(!system||!display||initError!=vr::VRInitError_None)return 3;
+  system=nativeSystemCaller(system);
   uint32_t earlyWidth=0,earlyHeight=0;system->GetRecommendedRenderTargetSize(&earlyWidth,&earlyHeight);
   int32_t windowX=0,windowY=0;uint32_t windowWidth=0,windowHeight=0;
   display->GetWindowBounds(&windowX,&windowY,&windowWidth,&windowHeight);
+  OwnerService systemClient;
+  std::atomic<bool> liveQueries{false};
+  DWORD systemThread=0;uint64_t systemQueries=0,validSystemQueries=0;
+  if(!systemClient.start([&]{
+    if(!liveQueries.load(std::memory_order_acquire))return;
+    vr::TrackedDevicePose_t pose{};
+    system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseSeated,0,&pose,1);
+    ++systemQueries;if(pose.bPoseIsValid)++validSystemQueries;
+  }))return 3;
+  StopServiceOnExit stopSystemClient{systemClient};
   bool workerRead=false;
-  std::thread reader([&]{uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
+  if(!systemClient.invoke([&]{systemThread=GetCurrentThreadId();uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
     const auto matrix=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000,vr::API_DirectX);
-    workerRead=width==earlyWidth&&height==earlyHeight&&width&&height&&matrix.m[3][2]==-1;});
-  reader.join();
-  if(!earlyWidth||!earlyHeight||!windowWidth||!windowHeight||!workerRead||host.compositorSubmits)return 3;
+    workerRead=width==earlyWidth&&height==earlyHeight&&width&&height&&matrix.m[3][2]==-1;
+  }))return 3;
+  bool untouched=false;
+  if(!backend.owner.invoke([&]{untouched=host.compositorSubmits==0&&host.starts==1;}))return 3;
+  if(!earlyWidth||!earlyHeight||!windowWidth||!windowHeight||!workerRead||!untouched)return 3;
   auto* compositor=static_cast<vr::IVRCompositor*>(edvr_native_VR_GetGenericInterface(vr::IVRCompositor_Version,&initError));
   auto* chaperone=static_cast<vr::IVRChaperone*>(edvr_native_VR_GetGenericInterface(vr::IVRChaperone_Version,&initError));
   if(!compositor||!chaperone||initError!=vr::VRInitError_None)return 3;
   compositor=nativeCompositorCaller(compositor);
-  if(edvr_native_VR_InitInternal(nullptr,vr::VRApplication_Scene)!=initToken||host.starts!=1||
+  if(edvr_native_VR_InitInternal(nullptr,vr::VRApplication_Scene)!=initToken||
      edvr_native_VR_GetInitToken()!=initToken||edvr_native_VR_GetGenericInterface(vr::IVRCompositor_Version,nullptr)!=compositor||
      edvr_native_VR_IsInterfaceVersionValid("IVROverlay_011")||edvr_native_VR_GetGenericInterface("IVROverlay_011",&initError)||
      initError!=vr::VRInitError_Init_InterfaceNotFound)return 3;
@@ -518,15 +602,45 @@ int run(const Options& options) {
     initToken,windowWidth,windowHeight);
   compositor->SetTrackingSpace(vr::TrackingUniverseSeated);
   if(compositor->GetTrackingSpace()!=vr::TrackingUniverseSeated)return 3;
-  const ULONGLONG startup=GetTickCount64(); ULONGLONG started=host.state.running()?startup:0,exitRequested=0;
+  bool resetsPassed=true;
+  if(!systemClient.invoke([&]{
+    for(unsigned reset=0;reset<2;++reset) {
+      system->ResetSeatedZeroPose();
+      vr::VREvent_t event{};vr::TrackedDevicePose_t atEvent{},stale{};
+      const auto cache=compositor->GetLastPoses(&stale,1,nullptr,0);
+      const bool eventValid=system->PollNextEventWithPose(vr::TrackingUniverseSeated,&event,sizeof(event),&atEvent)&&
+        event.eventType==vr::VREvent_SeatedZeroPoseReset&&!event.data.seatedZeroPoseReset.bResetBySystemMenu&&
+        atEvent.bPoseIsValid&&!system->PollNextEvent(&event,sizeof(event));
+      bool stateValid=false;
+      if(!backend.owner.invoke([&]{
+        stateValid=host.recenters==reset+1&&host.lastResetResult==XR_SUCCESS&&!host.read().geometryValid&&
+          cache!=vr::VRCompositorError_None&&!stale.bPoseIsValid&&host.resetPositionError<=.01f&&host.resetYawError<=.01f;
+        std::printf("seated_reset,count=%llu,time=%lld,origin_generation=%llu,position_error=%g,yaw_error=%g,event=804,cache_invalidated=%u\n",
+          (unsigned long long)host.recenters,(long long)host.lastResetTime,(unsigned long long)host.compositorRead().originGeneration,
+          host.resetPositionError,host.resetYawError,unsigned(stateValid));
+      })||!eventValid||!stateValid){resetsPassed=false;break;}
+    }
+  })||!resetsPassed)return 3;
+  // No render commands during this interval: the persistent owner must still
+  // poll lifecycle events, without advancing the game's frame sequence.
+  const auto beforePumps=host.publishedPumps.load(std::memory_order_acquire);
+  const auto pumpDeadline=GetTickCount64()+1000;
+  while(host.publishedPumps.load(std::memory_order_acquire)<beforePumps+2&&GetTickCount64()<pumpDeadline)Sleep(2);
+  if(host.publishedPumps.load(std::memory_order_acquire)<beforePumps+2)return 3;
+  if(initThread==systemThread||initThread==host.ownerThread||systemThread==host.ownerThread)return 3;
+  std::printf("runtime_threads,init=%lu,system=%lu,render_owner=%lu,idle_pump=1,system_resets=2\n",
+    (unsigned long)initThread,(unsigned long)systemThread,(unsigned long)host.ownerThread);
+  liveQueries.store(true,std::memory_order_release);
+  const ULONGLONG startup=GetTickCount64(); ULONGLONG started=startup,exitRequested=0;
   uint64_t frames=0,layers=0,empty=0,valid=0,invalid=0,headValid=0,cachedChecks=0;
   bool stopped=false, failed=false, bootstrapComplete=false; Lifecycle previous=Lifecycle::Uninitialized;
-  while(true) {
+  auto renderStep=[&] { do {
+    if(host.serviceStopped){stopped=true;break;}
+    if(host.serviceFailed){failed=true;break;}
     auto operation=host.gate.tryEnter(host.runtimeGeneration);
     if(!operation){std::puts("error,runtime_operation_unavailable");failed=true;break;}
-    XrResult r=host.state.pollEvents();
+    XrResult r=host.state.lastResult();
     const auto lifecycle=host.state.lifecycle();
-    host.poses.focus(host.compositorGeneration,true,host.state.running()&&!host.state.terminal()&&lifecycle==Lifecycle::Focused);
     if(lifecycle!=previous) {std::printf("lifecycle,%d\n",int(lifecycle));previous=lifecycle;}
     if(XR_FAILED(r)||host.state.terminal()||!host.changes.active()) {result("poll_terminal",r);failed=true;break;}
     if(lifecycle==Lifecycle::Stopping) {
@@ -616,7 +730,7 @@ int run(const Options& options) {
     if(haveLocation) {
       const bool published=host.read().geometryValid;
       if(published&&!bootstrapComplete) {
-        const auto snapshot=host.read();system=nativeSystemCaller(system);
+        const auto snapshot=host.read();
         uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
         const auto eye=system->GetEyeToHeadTransform(vr::Eye_Left);
         const auto projection=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000,vr::API_DirectX);
@@ -626,26 +740,6 @@ int run(const Options& options) {
         if(!width||!height||projection.m[3][2]!=-1||host.lastHeadResult!=XR_SUCCESS||
            !nameLength||propertyError!=vr::TrackedProp_Success){result("system_bootstrap_pose",host.lastHeadResult);failed=true;break;}
         if(!head.bPoseIsValid)continue; // bounded startup; ordinary invalid tracking may recover
-        // This explicit diagnostic exercises the user-reset API twice before
-        // displaying its scene. It changes only this application's XR space.
-        if(host.recenters<2) {
-          const auto before=host.recenters;system->ResetSeatedZeroPose();
-          vr::VREvent_t event{};vr::TrackedDevicePose_t atEvent{},stale{};
-          const auto cache=compositor->GetLastPoses(&stale,1,nullptr,0);
-          if(host.recenters!=before+1||host.lastResetResult!=XR_SUCCESS||host.read().geometryValid||
-             cache==vr::VRCompositorError_None||stale.bPoseIsValid||
-             !system->PollNextEventWithPose(vr::TrackingUniverseSeated,&event,sizeof(event),&atEvent)||
-             event.eventType!=vr::VREvent_SeatedZeroPoseReset||event.data.seatedZeroPoseReset.bResetBySystemMenu||
-             !atEvent.bPoseIsValid||host.resetPositionError>.01f||host.resetYawError>.01f||
-             system->PollNextEvent(&event,sizeof(event))) {
-            std::printf("error,seated_reset,result=%d,position_error=%g,yaw_error=%g\n",int(host.lastResetResult),host.resetPositionError,host.resetYawError);
-            failed=true;break;
-          }
-          std::printf("seated_reset,count=%llu,time=%lld,origin_generation=%llu,position_error=%g,yaw_error=%g,event=804,cache_invalidated=1\n",
-            (unsigned long long)host.recenters,(long long)host.lastResetTime,(unsigned long long)host.compositorRead().originGeneration,
-            host.resetPositionError,host.resetYawError);
-          continue;
-        }
         bootstrapComplete=true;
         std::printf("bootstrap,ready=1,generation=%llu,sequence=%llu,prior_stereo=%llu,size=%ux%u,left_eye_to_head_translation=%.9g/%.9g/%.9g\n",
           (unsigned long long)snapshot.generation,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)layers,width,height,eye.m[0][3],eye.m[1][3],eye.m[2][3]);
@@ -656,9 +750,18 @@ int run(const Options& options) {
           unsigned(renderPoses[0].bPoseIsValid),unsigned(gamePoses[0].bPoseIsValid));
       }
     }
+  } while(false); };
+  while(!failed&&!stopped) {
+    if(!backend.owner.invoke(renderStep)){failed=true;break;}
   }
-  edvr_native_VR_ShutdownInternal();
-  const bool cleanup=host.clean&&!runtime.running()&&host.runtimeGeneration==0&&host.stops==1;
+  // Stop the System producer, then issue exported Shutdown from that same
+  // caller thread. The runtime owner cancels queued work, cleans and joins.
+  DWORD shutdownThread=0;
+  const bool systemJoined=systemClient.stop([&]{shutdownThread=GetCurrentThreadId();edvr_native_VR_ShutdownInternal();});
+  const bool cleanup=systemJoined&&shutdownThread==systemThread&&!backend.owner.running()&&host.clean&&!runtime.running()&&host.runtimeGeneration==0&&host.stops==1;
+  std::printf("runtime_service,event_pumps=%llu,system_queries=%llu,valid_system_queries=%llu,shutdown_on_system=%u,owner_joined=%u\n",
+    (unsigned long long)host.eventPumps,(unsigned long long)systemQueries,(unsigned long long)validSystemQueries,
+    unsigned(shutdownThread==systemThread),unsigned(systemJoined&&!backend.owner.running()));
   if(edvr_native_VR_GetInitToken()==initToken||edvr_native_VR_GetGenericInterface(vr::IVRSystem_Version,&initError)||
      initError!=vr::VRInitError_Init_NotInitialized)failed=true;
   std::printf("runtime_shutdown,token=%u,starts=%llu,stops=%llu,interfaces_retired=%u,startup_frames=%llu\n",
@@ -674,6 +777,7 @@ int run(const Options& options) {
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
   const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&host.recenters==2&&host.resetPolls==2&&
+    systemQueries&&validSystemQueries&&host.eventPumps>beforePumps&&
     host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
     host.compositorWaits==frames+host.startupFrames&&cachedChecks==frames&&host.compositorHandoffs==layers&&host.validGamePoses;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;
@@ -699,6 +803,19 @@ int selfTest() {
   XrViewConfigurationView size{XR_TYPE_VIEW_CONFIGURATION_VIEW};size.recommendedImageRectWidth=size.recommendedImageRectHeight=128;
   size.maxImageRectWidth=size.maxImageRectHeight=512;size.maxSwapchainSampleCount=1;
   check(validSize(size),"valid size");size.recommendedImageRectHeight=0;check(!validSize(size),"zero height");
+  // Exercise the real native adapter's worker construction and partial-start
+  // cleanup without ever opening a loader or contacting an installed runtime.
+  NativeBackend backend;std::atomic<bool> cancelled{true};RuntimeInterfaces interfaces{};
+  const auto callerThread=GetCurrentThreadId();
+  check(backend.start(7,cancelled,interfaces)==vr::VRInitError_Init_ShuttingDown&&!interfaces.complete(),"cancelled native startup stays unpublished");
+  bool owned=false,unopened=false;
+  check(backend.owner.invoke([&]{
+    owned=backend.host&&backend.host->ownerThread==GetCurrentThreadId()&&GetCurrentThreadId()!=callerThread;
+    unopened=backend.host&&!backend.host->api.module&&!backend.host->runtimeGeneration&&backend.host->starts==1;
+  })&&owned&&unopened,"native members constructed on owner before cancelled open");
+  check(backend.stop(),"cancelled native startup cleanup and join");
+  check(!backend.owner.running()&&backend.host&&backend.host->clean&&backend.host->stops==1&&
+    !backend.host->api.module&&!backend.host->runtimeGeneration,"native cleanup finished once before returning");
   std::printf("openxr_native_test: %u checks, %u failures (no runtime)\n",checks,failures);return failures?1:0;
 }
 } // namespace

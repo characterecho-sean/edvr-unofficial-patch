@@ -103,6 +103,15 @@ normal exit. Complete legacy exports, persistent game-thread ownership,
 required compositor features and Frontier integration remain open; the
 installed Frontier pair stays `f3c205e`.
 
+The [owner-service checkpoint](openxr-owner-service-2026-09-12.md) moves
+diagnostic runtime construction, event pumping, frame work and cleanup to an
+explicit owner thread. A separate System caller dispatches live pose/reset
+requests and invokes exported Shutdown; cached geometry remains directly
+readable. The full build passed, including 62 service and 28 native checks
+covering queue cancellation, cleanup order, concurrent stop, restart and idle
+pumping. A fresh native thread-ownership flight remains pending. Production
+game-device ownership and Frontier integration are still separate work.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;
