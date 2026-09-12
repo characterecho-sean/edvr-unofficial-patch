@@ -33,6 +33,10 @@ struct ID3D11DeviceContext;
 
 namespace edvr {
 
+// GPU ray tangents: physical left/right/up/down magnitudes. The shared
+// vertical pair uses OpenVR's historical pfTop/pfBottom names instead.
+void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]);
+
 enum MenuLineStyle : uint8_t {
     kMenuRow = 0,       // label left, value right
     kMenuRowHi = 1,     // the highlighted row
@@ -186,6 +190,26 @@ bool menuPanelHit(const float org[3], const float dir[3], float dist, float curv
 // For the Status page: the raster's size, how long the last one took on the
 // CPU, and the composite's measured GPU price per eye (0 until measured).
 bool menuPanelStats(int* w, int* h, double* lastMs, float* gpuMs);
+
+// The footer's ruler: the single-line pixel width of `utf8` in the raster's
+// own face at `emPx` (the footer's em is capPx), measured by the same
+// DrawTextW that will draw it. The model composes the footer against it
+// (menu_keys.h, menuComposeFooter) so what is drawn is what fits, rather
+// than what an ellipsis leaves; MEASURED 2026-09-11: the old 115-character
+// footer was 1520 px in a 770 px line at the default size. GDI only; no
+// device, callable from a test.
+int menuPanelMeasureLine(const char* utf8, int emPx);
+
+// For the test: lay `c` out without rasterising. Returns the bitmap's
+// height; `footTop`/`footBottom` receive the footer box's edges in pixels
+// (-1 when no footer op was made); `rowEdges` receives up to `maxRows`
+// row rectangles as y0,y1 pairs, fractions of the height as menuPanelLineAt
+// reads them (-1 past the rows present); `footLines` receives the number
+// of single-line ops the footer was split into (one per '\n'-separated
+// line, so a second line is drawn as its own line and not appended to the
+// first).
+int menuPanelLayoutHeightForTest(const MenuContent& c, int* footTop, int* footBottom,
+                                 float* rowEdges, int maxRows, int* footLines = nullptr);
 
 void menuPanelShutdown();
 

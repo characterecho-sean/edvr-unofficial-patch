@@ -465,9 +465,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.pInBiasCurrentColorMask = reactive;
     if (reactive && !g_maskNoted) {
         g_maskNoted = true;
-        Log::get().note("dlaa: a bias-current-colour mask is being handed to NVIDIA "
-                        "with each evaluation -- where it is set, the runtime favours "
-                        "this frame's colour over the history.");
+        Log::get().note("dlaa: a bias-current-colour mask is being handed to NVIDIA. "
+                        "Only preset F supports this input; modern presets use EDVR's separate UI resolve.");
     }
     ep.InJitterOffsetX = jx;
     ep.InJitterOffsetY = jy;
@@ -482,7 +481,6 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     // to denoise or anti-alias based on the speed of the object"); zero
     // when unknown, which the runtime treats as unstated.
     ep.InFrameTimeDeltaInMsec = frameMs;
-
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     const int qs = dev ? acquireQuerySlot(dev) : -1;
@@ -498,6 +496,16 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         g_qring[qs].inUse = true;
     }
     if (NVSDK_NGX_FAILED(er)) {
+        ID3D11Device* failedDevice = nullptr;
+        ctx->GetDevice(&failedDevice);
+        if (failedDevice) {
+            Log::get().note("dlaa: NVIDIA evaluation failed (0x%08X), "
+                            "GetDeviceRemovedReason=0x%08X on device %p.",
+                            static_cast<unsigned>(er),
+                            static_cast<unsigned>(failedDevice->GetDeviceRemovedReason()),
+                            (void*)failedDevice);
+            failedDevice->Release();
+        }
         snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the evaluation failed: %s (0x%08X)",
                  ngxResultName(er), static_cast<unsigned>(er));
         g_reason = g_reasonBuf;

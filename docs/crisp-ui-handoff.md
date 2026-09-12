@@ -1237,3 +1237,91 @@ view's green), `crisp_ui.cpp` (the re-issue and the depth target).
    should the layer refuse below a VRAM floor?
 5. Whether the CAS resample path (A5, second option) is worth carrying at
    all, given inflation.
+
+## 2026-09-08, later: the flight HUD's depth under its strokes
+
+Found by the per-object motion work: once the temporal pass registered a
+station's turn, the station under a target bracket showed a blurred quad
+the size of the bracket's bounding box, at any reactive strength. The
+flight HUD family (`vs B7790CBFC6554097`) draws into the scene's pair under
+the writing twin, and its pixel shader (`8DEF46452FA459F5`) marches a
+noise-modulated capsule per stroke and emits the quad's empty corners at
+alpha nought without a discard -- so the twin wrote the bracket's depth
+over the whole quad. It had no coverage shader either, so the reactive
+mask never covered it.
+
+`kHudDepthHlsl` (ui_depth.cpp) transcribes the shader's pre-march part
+register for register -- the manual depth test at t0, the fade, the
+capsule's geometry and the normalised squared distance q from its axis,
+the screen-space mode -- and bounds the march (density is nought past
+q = 0.571 at full noise; the stand-in ramps to nought at q = 0.35, times
+the fade, clipped below the floor). `Mode::kReissueScene` sends the family
+through the second draw in the scene's own viewport: no writing twin, depth
+by the reissue with the nearer-wins test, the mask marked by the same draw.
+The family line reads "the flight HUD; its depth written by the coverage
+pass in the scene's projection". If a HUD element ever loses depth it
+should have, q's ramp (0.35) is the knob; if a quad gains it, the ramp is
+too wide.
+
+Flown 2026-09-08 (v0.14.1-70-g4a3b71f, the slot, the station targeted):
+"The UI targeting symbols seem to be fixed" -- the bracket quad is gone
+and the station stays clear under it.
+
+## 2026-09-09: the holo material's depth under its strokes, not its glow
+
+The holo panel family (`vs 81216C77F90DEDD6`, `ps A2965EC2931A39C8`) draws
+the cockpit's panels AND the target markers, instanced from the pool at the
+target. Its alpha is the surface's own plus an eight-tap smear of it along
+a direction (the hologram's glow), and the game discards only under 1e-5;
+written in place under the writing twin, each target-marker corner wrote
+its depth over the station in the glow's square, and once the temporal
+pass carried the station's turn (per-object motion, tier 2) the station
+there reprojected as a point at the marker's depth near the axis: "small
+blurry quads under each of the four brackets". The family now goes through
+`Mode::kReissueScene` like the flight HUD: no writing twin, depth and mask
+by the second draw with `kHoloDepthHlsl` (the surface's alpha at the
+floor). A panel's translucent background under the floor keeps the scene's
+depth -- a flat dark colour, which no reprojection can smear visibly -- and
+its text and frame keep theirs. If a panel ever shows its background
+swimming, the floor (`advanced.ui_depth_alpha`) is the knob.
+
+## 2026-09-09, later: the mask tells the holo markers from the interface
+
+The temporal pass keeps the interface's pixels off a turning body's path
+(per-object motion, tier 2: a label at a station's distance does not turn
+with it), and it reads that from the reactive mask. The holo material's
+target markers, which sit at the target too, must ride the body's path
+instead -- an eye dump showed the station smeared under each excluded
+chevron and its halo. The mask carries the distinction: the holo family's
+coverage (`DepthShader::maskOffset`, `-3/255`) marks it three quanta under
+`advanced.ui_depth_reactive`, and the pass tests the mask against the
+strength less a quantum and a half (`uiCovered`, `probe.w`). NVIDIA reads
+three quanta as the same strength. The mask is R8_UNORM, so the two values
+are one quantum apart on either side of the test at any strength.
+
+Corrected the same day: the target's chevrons are the flight HUD's capsule
+strokes, and a third family appears at targeting, the target-time sprite
+(`vs E508648660A352B2`, `ps 63ABD86359B57D01`, "writes its depth in place"
+before). The mask offset is per family now (`g_reissueMaskOffset`, set in
+the classification): the flight HUD, the holo material and the sprite mark
+three quanta under the strength and ride a turning body's path; the
+composites mark at the strength and stay off it. The sprite also goes
+through `Mode::kReissueScene`, its depth from `kScreenDepthHlsl` (alpha at
+TEXCOORD0 over the floor) under its opaque core only.
+
+## The mask's parity (2026-09-09, v0.14.1-94)
+
+The per-family mask offset above still sets each family's reactive
+strength (the interface proper at the strength, the holo material and
+the sprite three quanta under it, the flight HUD's strokes at half),
+but it no longer says which pixels ride a turning body's path. That is
+the value's quantum's parity now: even rides, odd floats. `floorBuffer`
+quantises two values per family, the flight HUD's coverage shader
+returns the riding one for a core drawn at the surface (its own depth
+within half again of the scene's) and the floating one otherwise, every
+other coverage shader returns the floating one, and the temporal pass's
+`uiCovered` reads the parity. The reason: a floating core takes the
+scene's depth, and where that depth fell inside the station's cells the
+core rode the station's spin -- the station's target brackets shimmered
+on the side over the silhouette and not on the side over the sky. The
+strengths are unchanged; `probe.w` in the pass is unused.

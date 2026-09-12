@@ -55,8 +55,12 @@ from collections import Counter, OrderedDict
 # a log that had one in every frame, which reads exactly like the pass having
 # been off. So a miss is no longer silent: mvCandidates() below names the
 # dispatches that look like it, and the report tells you to re-run with --mv.
-MV_HASH = 'F2245E4791F22F7F'
-MV_HASH_PRIOR = '6D94E9C00DCE909F'   # before 2026-09-07; still read
+# It went stale again on 2026-09-08 (the mover mask changed the shader), and
+# the recovery named the new one on the first log; every hash the pass has
+# had is still read, so an older log keeps parsing.
+MV_HASH = '860998BA3E70923D'
+MV_HASHES_PRIOR = ('F2245E4791F22F7F',   # 2026-09-07 to 2026-09-08
+                   '6D94E9C00DCE909F')   # before 2026-09-07
 
 DXGI = {
     0: 'UNKNOWN', 19: 'R32G8X24_TYPELESS', 20: 'D32F_S8X24',
@@ -424,7 +428,7 @@ def mv_reads(census):
     deadline = {}
     seen = {}
     for ev in census.events:
-        if ev.tag != 'DCX' or ev.ch not in (MV_HASH, MV_HASH_PRIOR):
+        if ev.tag != 'DCX' or ev.ch not in (MV_HASH,) + tuple(MV_HASHES_PRIOR):
             continue
         if ev.frame not in seen or ev.q < seen[ev.frame]:
             seen[ev.frame] = ev.q
@@ -556,16 +560,44 @@ def report(census, w, listing):
             if e.sten.enable is None or (full and not e.sten.full
                                          and e.sten.enable):
                 unknown += 1
+        # Where in the pass each state first appears: the draw's ordinal
+        # among this target's draws of its frame, by q. The unions above
+        # are order-blind, and order is what decides a reader's verdict
+        # on a tag (2026-09-08, in space): FC1193AFFC596F74 reads the whole
+        # plane through r=FF LEQUAL, which makes the union say "no bit
+        # free" -- but it is the sixth draw of each eye's pass, before the
+        # thirteen hundred that could stamp a tag, and a reader that runs
+        # before the tag exists never sees it.
+        per_frame = {}
+        for e in draws:
+            per_frame.setdefault(e.frame, []).append(e)
+        ordinal = {}
+        frame_size = {}
+        for f, es in per_frame.items():
+            es_sorted = sorted(es, key=lambda e: e.q)
+            frame_size[f] = len(es_sorted)
+            for i, e in enumerate(es_sorted):
+                ordinal[id(e)] = i
+        first_at = {}
         for e in draws:
             rb, wb = e.sten.read_bits(), e.sten.write_bits()
             read_mask |= rb
             write_mask |= wb
+            key = (e.vh, e.sten.text())
             if rb:
-                readers.setdefault((e.vh, e.sten.text()), 0)
-                readers[(e.vh, e.sten.text())] += 1
+                readers.setdefault(key, 0)
+                readers[key] += 1
             if wb:
-                writers.setdefault((e.vh, e.sten.text()), 0)
-                writers[(e.vh, e.sten.text())] += 1
+                writers.setdefault(key, 0)
+                writers[key] += 1
+            at = (e.frame, ordinal[id(e)], e.q)
+            if key not in first_at or at < first_at[key]:
+                first_at[key] = at
+
+        def first_where(key):
+            f, i, q = first_at[key]
+            return 'first at draw #%d of %d (frame %d, q=%d)' % (
+                i, frame_size[f], f, q)
         clear_all = [c for c in clears if c.flags & 2]
         if clear_all:
             # ClearDepthStencilView ignores the write mask and sets the whole
@@ -611,13 +643,15 @@ def report(census, w, listing):
         if full:
             w('    (a) bits READ   %s\n' % bits(read_mask))
             for (vh, text), n in sorted(readers.items(), key=lambda kv: -kv[1]):
-                w('          vs %s  %s  x%d\n' % (vh or '?', text, n))
+                w('          vs %s  %s  x%d  %s\n' % (vh or '?', text, n,
+                                                   first_where((vh, text))))
             w('    (b) bits WRITTEN %s%s\n' % (
                 bits(write_mask),
                 '  (0xFF because a stencil CLEAR sets the whole plane)'
                 if clear_all else ''))
             for (vh, text), n in sorted(writers.items(), key=lambda kv: -kv[1]):
-                w('          vs %s  %s  x%d\n' % (vh or '?', text, n))
+                w('          vs %s  %s  x%d  %s\n' % (vh or '?', text, n,
+                                                   first_where((vh, text))))
             free = (~(read_mask | write_mask)) & 0xFF
             w('    (c) bits FREE   %s\n' % bits(free))
             if unknown:
@@ -726,7 +760,11 @@ def self_test():
         # The clear, first thing in the frame.
         'DCL 0 #0 D dsv=@10 f=3 z=0.000 s=0 q=1',
         # Scene draws: stencil on, ref 4, reads through mask FF, all KEEP.
-        'DC 0 #1 X n=900 i=1 r=@1 d=@10 c=@9 s=@3,-,-,- vh=AAAA000000000001 '
+        # This one carries the whole IA tail with ia=/ib= (2026-09-08), the
+        # draw's own arguments and index buffer: two more key=value pairs
+        # this reader must parse past without losing q= or so=.
+        'DC 0 #1 X n=900 i=1 r=@1 d=@10 c=@9 s=@3,-,-,- vs=@30 '
+        'vh=AAAA000000000001 vb=@31 sd=32 of=0 tp=4 ia=1536,-12,0 ib=@32+64 '
         'ds=17wA st=14 bm=F pr=- bl=0,2,1,1/2,1,1 sm=FFFFFFFF '
         'so=rFF/wFF/f7/1,1,1 q=2',
         # ...the same target through its OTHER view token: one target.
@@ -865,8 +903,8 @@ def self_test():
     # recovery names candidates by what they READ, which no hash can stale.
     saved = globals()['MV_HASH']
     globals()['MV_HASH'] = 'DEADBEEFDEADBEEF'
-    prior = globals()['MV_HASH_PRIOR']
-    globals()['MV_HASH_PRIOR'] = 'DEADBEEFDEADBEEF'
+    prior = globals()['MV_HASHES_PRIOR']
+    globals()['MV_HASHES_PRIOR'] = ()
     try:
         dl, sn = mv_reads(c1)
         if dl or sn:
@@ -879,7 +917,7 @@ def self_test():
             return 1
     finally:
         globals()['MV_HASH'] = saved
-        globals()['MV_HASH_PRIOR'] = prior
+        globals()['MV_HASHES_PRIOR'] = prior
 
     # A stencil-disabled draw must contribute nothing in either direction.
     off = [e for e in draws if e.sten.enable is False]

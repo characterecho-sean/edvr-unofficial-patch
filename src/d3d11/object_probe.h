@@ -1,0 +1,262 @@
+// The pool probe -- tier 2 stage 1 of docs/per-object-motion.md (2026-09-08).
+//
+// WHY THIS EXISTS. Tier 2 gives each rigid mover its own motion in the
+// temporal pass by reading the pose the game itself stores per instance: a
+// 336-byte record in a structured buffer the scene's vertex shaders index at
+// t33 (bone base at byte 0, scale at 4, the orientation as four unorm16 at
+// 8, the position at 16 -- the head the FSS shader replacement already
+// transcribes, fss_panel_vs.h). Two questions gate the design and neither
+// can be answered from a census: does a RECORD keep its slot in the pool
+// from one frame to the next (question 3 -- the identity the classifier
+// would key on, now that question 4 has shown no draw-level identity
+// survives a frame), and how many distinct rigid motions does a frame carry
+// (question 6 -- the tag budget's demand, against the two codes the stencil
+// offers)? Both are read off the pool's bytes on two consecutive frames.
+//
+// HOW. Once the pool is recognised (the first instanced eye draws of a frame
+// are asked for their t33 binding until one resolves to a 336-stride
+// structured buffer; after that, one look a second), two frames in a row
+// are copied on the GPU into staging buffers every eighth frame and mapped
+// three frames later, never waited on. The pair is diffed record by record:
+// unchanged, pose changed with the rest of the record intact, rewritten, or
+// found at another slot (the same bytes elsewhere last frame: a repacked
+// pool). The changed records' rigid motions -- D = W_prev * W_now^-1, the
+// same transform for every part of one assembly -- are bucketed within a
+// hundredth of a degree and a centimetre, and a pair where more than half
+// the pool's positions shifted by one translation is an origin rebase
+// (question 7's first half). A totals line prints every 20 s.
+//
+// A mapped WRITE_DISCARD pointer is write-combined memory and reading
+// megabytes of it on the CPU costs milliseconds, which is why the copy is
+// the GPU's and the readback is late; the diff itself runs on one sampled
+// pair in eight, off the draw path. Off by default (advanced.object_probe).
+#pragma once
+
+#include <cstdint>
+
+struct ID3D11DeviceContext;
+
+namespace edvr {
+
+// Stepped pool records do not describe the rendered animation. Keep their
+// producer and GPU consumer gated together; diagnostics may still measure them.
+inline constexpr bool kObjectSteppedMotionEnabled = false;
+
+class Config;
+
+// advanced.object_probe, live.
+void objectProbeConfigure(Config& cfg);
+
+// For the draw chain's early-return list: true while the probe is on.
+bool objectProbeWantsDraws();
+
+// One eye draw, after the eye gate: an instanced draw may be asked for its
+// t33 binding, a few times a frame until the pool is known and then once a
+// second. One bool when the probe is off. count is the draw's vertex or
+// index count and startInstance its StartInstanceLocation -- the ledger's
+// row (objectProbeArmLedger below); nothing else reads them.
+void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                          uint32_t startInstance,uint32_t start=0,int32_t base=0);
+
+// Visible draws routed before the normal eye-draw hook (particle billboards).
+// The caller establishes that the target is an eye. Record the original
+// shader in an active ledger, without probing its unrelated instance pool.
+bool objectProbeLedgerActive();
+void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
+                              uint32_t startInstance,uint32_t start,int32_t base);
+void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
+                                 uint32_t startInstance,uint32_t start,int32_t base);
+void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                             uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0);
+
+// THE EYE RUN'S LEDGER (2026-09-10). The run's raw crops say how much each
+// part of a station turned from one frame to the next; the pool says how
+// much its RECORDS turned. At ten kilometres the two disagreed -- the drawn
+// ring at a third of its records' turn, the hub's face at nearly all of it
+// (the flight of 04:16) -- and nothing in hand said which draws paint the
+// ring at that range, from which records, through which bones. So the key
+// that takes the run also arms this: for the same frames, every frame's
+// pool copy is kept; the scene's instance stream (the per-instance record
+// indices every pool draw reads, 8 bytes each) and the first megabyte of
+// every bone palette the pool draws bind at VS t38 (up to four) are copied
+// and kept; every eye draw is noted with its shader, its counts, its start
+// instance and whether t33 was the pool; and the big instanced draws that
+// read no pool (the first run's ledger, 05:19: the whole station's records
+// were drawn and turned as one, so the slow ring is drawn by something
+// else -- a ring of segments placed by a world matrix, say) have their
+// per-draw constant buffer, t0 and first two vertex buffers copied at each
+// frame's first draw -- all written beside the crops after the run, for
+// tools/eye_run_ledger.py: which records were drawn, how far each turned
+// between consecutive crops, how the bones moved, and how each of those
+// draws' matrices turned. Nothing of it runs unarmed. stamp is the run's
+// HHMMSS, shared with the crops' names.
+// drawstate_<stamp>.bin also keeps each watched celestial/holo draw's VS
+// b0/b1/b2 and PS b2, plus the first t2 image of each holo surface. These
+// draws often have one instance and were absent from the old aux capture.
+// tools/eye_draw_snapshot.py reads them. The watched VS bytecode is kept
+// at creation and written with the run; no broad shader-dump switch is needed.
+void objectProbeArmLedger(const wchar_t* stamp);
+// The pass took the run's crop k this frame: the ledger notes the frame.
+void objectProbeLedgerMark(int k);
+
+// The frame edge, with the owner context: the pair's copies, the late
+// readbacks, the diff and the totals.
+void objectProbeFrameBoundary(ID3D11DeviceContext* ctx);
+
+// The temporal pass's chosen camera this frame (its rows' position column):
+// the frame the pool's positions are read in, stamped on the pair captured
+// this frame. The scene buffer's own end-of-frame contents are whichever
+// camera wrote it last, another's often enough (2026-09-09).
+void objectProbeNoteCamera(const float pos[3]);
+
+void objectProbeShutdown();
+
+// The dominant rigid body's motion between two consecutive frames, in the
+// game's world frame (the one the camera rows share, docs/per-object-motion.md
+// phase 0 question 7): a point at p now was at R p + t last frame. From the
+// largest rigid cluster of the last pair diffed -- a station's turn, with
+// every part of it in one cluster -- and held for a while after, since a
+// station's rate is constant. False until a pair has given one, and again
+// once it has gone stale.
+// Cells a side of the body's occupancy grid: 128 (2 MB) since 2026-09-09,
+// from 64. A station's cluster spans 14 km along its axis and its unslotted
+// tips a couple more, which at 62 cells of 256 m did not fit with the
+// reach either side and would have doubled the cell; 126 cells hold it at
+// 256 m, and a Coriolis at 32 m. The dilation's cost is the grid's
+// occupied lines, not the reach, so the finer grid costs the upload alone.
+constexpr uint32_t kObjectGrid = 128;
+struct ObjectMotion {
+    float    R[9];       // row-major 3x3, over the pair's own interval (for the record)
+    float    t[3];
+    // The motion as RATES, per millisecond: the axis-angle and the
+    // translation of the least-squares rigid fit over the cluster's parts,
+    // divided by the pair's interval, so a reader scales them by its own
+    // frame's length (a pair on a long frame is a larger turn, and a station
+    // turns at a constant rate). Rodrigues of omega * dt is the frame's R.
+    float    omegaPerMs[3];
+    float    tPerMs[3];
+    float    dtMs;       // the pair's own interval
+    float    rms;        // the fit's residual, metres
+    float    share;      // of the pair's pose changes the cluster held, 0..1
+    uint32_t records;    // records in it
+    uint32_t age;        // frames since the pair's second frame
+    // The camera's position in the pair's second frame, from its scene
+    // block: the frame the positions and the box below are in. The floating
+    // origin moves on an approach (a rebase of 13 km read from the dumps of
+    // 2026-09-08), so a reader whose own camera rows stand far from this is
+    // in another frame and should wait for a pair taken in its own.
+    float    camPos[3];
+    // Where the body IS: the box around its parts' positions now (world
+    // frame, padded by the reach), and an occupancy grid over that box --
+    // a cell is set within the reach of any part -- so a pixel whose depth
+    // puts it inside a set cell is the body's, and one in the empty space
+    // between (a ship crossing the slot) is not. The grid is the probe's
+    // own buffer, kObjectGrid cubed bytes, x fastest; gridVersion bumps on
+    // every rebuild so a reader uploads only what changed.
+    float    bmin[3];
+    float    bmax[3];
+    uint32_t gridVersion;
+    const uint8_t* grid;
+    // THE SECOND BODY (2026-09-09, the thirty-third flight): the pool's
+    // second-largest rigid cluster when it sits among the body's parts. An
+    // Orbis's docking hub at ten kilometres turns AGAINST its ring in the
+    // pool's records -- 211 parts within 475 m of the axis at 0.044 deg a
+    // frame one way, 641 parts out to 2.4 km the other (the pairs of
+    // 15:42 and 15:43) -- and under the ring's path its face smeared while
+    // the ring stayed crisp, since the hub's parts share the ring's types
+    // and seeded its cells. So the hub gets rates of its own: its cells in
+    // the grid hold 128 where the body's hold 255, and a reader with no
+    // second body in hand leaves those pixels to the camera's path (off by
+    // one turn there, not two).
+    bool     body2;
+    uint32_t records2;
+    float    omega2PerMs[3];
+    float    t2PerMs[3];
+    float    R2[9];      // over the pair, for the record
+    float    t2[3];
+};
+bool objectMotionGet(ObjectMotion* out);
+// The reach, metres, that a part marks around itself in the grid (the
+// temporal pass's setting, read once a reload); before a rebuild it takes
+// the value it finds here.
+void objectMotionSetReach(float metres);
+
+// THE STEPPED PARTS (2026-09-09, the thirty-fifth flight). The game
+// updates some of a station's instances at a lower rate than the frame --
+// the docking hub's skin and the solar panel arrays at ten kilometres: 290
+// records within 500 m of the axis and 19 at the panels' radius held the
+// same pose across a two-frame pair while the ring turned, and the flight
+// before had them present on alternate frames only -- and what it draws
+// for them steps, or alternates between two buffered poses, so a smooth
+// vector cannot match them and DLSS smears them: "the solar panels blur as
+// they move", and the hub's face smeared at range in every flight, which
+// read as a counter-turn and was not one (the pilot: "to my eye they all
+// appear to spin in one direction"). So the probe copies the pool EVERY
+// frame, measures each record's own turn against the body's, keeps a short
+// history per slot, and predicts the multiple of the body's turn each
+// stepped record will make on the frame the pass draws next (a stepping
+// part repeats with a period of two frames). Their cells carry the
+// multiple, and the pass reprojects them by that much.
+constexpr int     kSteppedMin = -3;        // the multiples the grid can hold...
+constexpr int     kSteppedMax = 8;
+constexpr uint8_t kSteppedCellBase = 64;   // ...as the cell's byte: base + (m - kSteppedMin), 64..75
+struct SteppedCell {
+    uint32_t index;   // x + 128 (y + 128 z)
+    uint8_t  value;
+};
+// This frame's stamps over the grid's current lattice, none when nothing
+// steps; read on the render thread after the frame boundary ran.
+uint32_t objectSteppedCells(const SteppedCell** cells);
+
+// A MOVING SHIP's motion (2026-09-09, the twenty-third flight's ask: "the
+// same thing with moving ships in our field of view ... within a certain
+// distance, maybe 1k or less"): a rigid cluster of the pair that is not
+// the dominant body's, not a slice of it, not standing still, and not
+// the player's own parts, whose parts' centroid sits within
+// objectShipsSetRange of the camera. Rates as ObjectMotion's, from the
+// same rigid fit; the box is its parts' positions padded by a part's own
+// size, and there is no grid -- a ship is compact, and its box is its
+// claim. Nearest first, up to kObjectShipsMax of them.
+constexpr uint32_t kObjectShipsMax = 8;
+constexpr uint32_t kObjectShipParts = 32;
+struct ObjectShip {
+    float    omegaPerMs[3];
+    float    tPerMs[3];
+    // The centroid's own motion, metres per ms, now less last: what the
+    // ship DID over the pair, for carrying its box and for its tail.
+    // tPerMs is the rigid motion's translation term about the world origin
+    // (p_prev = R p_now + t), which carries (I - R) times the parts'
+    // distance from the floating origin -- metres a frame for a turning
+    // body kilometres out, in a direction the body does not move -- and
+    // is the path's, not the box's (the review of 2026-09-09).
+    float    movePerMs[3];
+    float    bmin[3];
+    float    bmax[3];
+    float    distM;      // its centroid's distance from the camera at the pair
+    float    rms;        // the rigid fit's residual, metres
+    uint32_t records;    // parts in the fit
+    // Where the ship IS within its box: its parts' positions (every
+    // stride-th when there are more than kObjectShipParts), each claiming
+    // the space within the pass's reach of it, and its tail -- the way it
+    // flies (unit, world; zero when it is too slow to say) and the plane
+    // behind its rearmost part along that way: a point whose dot with dir
+    // is under rear is behind the ship. The plume of a ship's drives is
+    // particles left in space as the ship goes, and inside the box at the
+    // ship's depth they took the ship's motion: "weird rectangular
+    // artifacts in the smoke trail behind the ship" (the ships' second
+    // flight, 2026-09-09 11:57). Behind the tail nothing is the ship's.
+    uint32_t partCount;
+    float    parts[kObjectShipParts][3];
+    float    dir[3];
+    float    rear;
+};
+// The ships in hand, with the camera position of the pair they were read
+// in (the frame their boxes are in, as ObjectMotion::camPos) and the
+// frames since. Zero until a pair has given any, and again once they
+// have gone stale.
+uint32_t objectShipsGet(ObjectShip* out, uint32_t cap, float camPos[3], uint32_t* age);
+// The range, metres, within which a moving ship is taken (0 = none; the
+// temporal pass's setting, read once a reload).
+void objectShipsSetRange(float metres);
+
+}  // namespace edvr

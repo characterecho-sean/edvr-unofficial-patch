@@ -27,6 +27,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "../../src/common/frame_flag.h"
@@ -491,6 +492,118 @@ int guardCropChecks() {
 // promotes the lie; the crop fractions through the selftest export; and a
 // second object of the hooked class still receiving pure truth while the
 // lie is live for the game's own interface.
+// The separability probe (advanced.cull_guard_channel = raw | matrix).
+//
+// This is the cell that keeps a flight honest. The probe's whole value is
+// that ONE call lies and the other tells the truth while the image is left
+// completely alone -- and every way that can break silently produces a
+// plausible-looking flight that means nothing. If the split does not split,
+// or the size lie or the crop still runs, the tiles and the picture move for
+// reasons that have nothing to do with what Elite reads, and the wrong
+// conclusion gets drawn about the culler. So: assert the lie lands on the
+// named call, assert the OTHER call is untouched, and assert nothing on the
+// image path moved at all.
+//
+// Same fixture and same margins as guardChild, so the lied numbers are the
+// ones documented there: left eye truth l=-1.25 r=+0.75 t=-1.2 b=+0.8 ->
+// lie l=-1.25 r=+1.25 t=-1.2 b=+1.0 at fraction_v = 0.5.
+int probeChild(const char* dir, bool rawChannel) {
+    const char* chan = rawChannel ? "raw" : "matrix";
+    wchar_t proxy[MAX_PATH];
+    _snwprintf_s(proxy, _TRUNCATE, L"%hs\\openvr_api.dll", dir);
+    HMODULE m = LoadLibraryW(proxy);
+    if (!m) { printf("  FAIL  probe child (%s) could not load the proxy\n", chan); return 10; }
+
+    typedef void*(__cdecl* PFN_GetGenericInterface)(const char*, int*);
+    typedef unsigned int(*PFN_Crop)(int, float*);
+
+    auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
+        GetProcAddress(m, "VR_GetGenericInterface"));
+    if (!getIface) { printf("  FAIL  probe child (%s): no VR_GetGenericInterface\n", chan); return 11; }
+    int err = -1;
+    void* iface = getIface("IVRSystem_012", &err);
+    if (!iface) { printf("  FAIL  probe child (%s): interface came back null\n", chan); return 12; }
+    auto* sys = static_cast<fakevr::ISystem012*>(iface);
+
+    int bad = 0;
+    float l = 0, r = 0, t = 0, b = 0;
+
+    // Both eyes' truth is what arms the lie; then the boundary-less
+    // fallback in periodic() promotes. A split channel goes from a standing
+    // start STRAIGHT to stage 2 -- there is no size stage to pass through --
+    // so one warmup call is enough, and a second costs nothing.
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    sys->GetProjectionRaw(1, &l, &r, &t, &b);
+    Sleep(2300);
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+
+    // The named call lies; the other one does not.
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    float wantRaw[4];
+    fakevr::expectedRaw(0, wantRaw);
+    if (rawChannel) {
+        if (l != -1.25f || r != 1.25f || t != -1.2f || fabsf(b - 1.0f) > 1e-5f) {
+            printf("  FAIL  probe child (raw): the raw answer is %g/%g/%g/%g, "
+                   "expected the lie -1.25/+1.25/-1.2/+1.0 -- the channel did "
+                   "not reach the tangents\n", l, r, t, b);
+            ++bad;
+        }
+    } else if (l != wantRaw[0] || r != wantRaw[1] || t != wantRaw[2] ||
+               b != wantRaw[3]) {
+        printf("  FAIL  probe child (matrix): the raw answer is %g/%g/%g/%g "
+               "but should be untouched truth %g/%g/%g/%g -- the split leaked\n",
+               l, r, t, b, wantRaw[0], wantRaw[1], wantRaw[2], wantRaw[3]);
+        ++bad;
+    }
+
+    fakevr::M44 got = sys->GetProjectionMatrix(0, 0.5f, 100.0f, 0);
+    fakevr::M44 want = fakevr::expectedMatrix(0, 0.5f, 100.0f, 0);
+    if (rawChannel) {
+        if (memcmp(&got, &want, sizeof(got)) != 0) {
+            printf("  FAIL  probe child (raw): the matrix was edited (m00 %g "
+                   "want %g) -- the split leaked, and a flight on this build "
+                   "would move the picture for the wrong reason\n",
+                   got.m[0][0], want.m[0][0]);
+            ++bad;
+        }
+    } else if (fabsf(got.m[0][0] - 0.8f) > 1e-5f || fabsf(got.m[0][2]) > 1e-5f ||
+               fabsf(got.m[1][1] - 2.0f / 2.2f) > 1e-4f) {
+        printf("  FAIL  probe child (matrix): the matrix is %g/%g/%g, expected "
+               "the lie 0.8/0/%g -- the channel did not reach the matrix\n",
+               got.m[0][0], got.m[0][2], got.m[1][1], 2.0f / 2.2f);
+        ++bad;
+    }
+
+    // And the image path is untouched on BOTH channels. This is the half
+    // that makes the probe readable: the game renders exactly what it would
+    // have rendered anyway, so anything that moves is the lie's doing.
+    {
+        uint32_t w = 0, h = 0;
+        sys->GetRecommendedRenderTargetSize(&w, &h);
+        if (w != fakevr::kSizeW || h != fakevr::kSizeH) {
+            printf("  FAIL  probe child (%s): the target size was inflated to "
+                   "%ux%u -- a split channel must never ask for more pixels\n",
+                   chan, w, h);
+            ++bad;
+        }
+    }
+    {
+        auto crop = reinterpret_cast<PFN_Crop>(
+            GetProcAddress(m, "edvr_selftest_cull_guard"));
+        float f[4] = {};
+        if (crop && crop(0, f) != 0u) {
+            printf("  FAIL  probe child (%s): the submit crop is armed "
+                   "(%g..%g) -- nothing was rendered wider, so cropping would "
+                   "shrink a true-frustum image\n", chan, f[0], f[2]);
+            ++bad;
+        }
+    }
+
+    FreeLibrary(m);
+    return bad ? 20 : 0;
+}
+
 int guardChild(const char* dir) {
     wchar_t proxy[MAX_PATH];
     _snwprintf_s(proxy, _TRUNCATE, L"%hs\\openvr_api.dll", dir);
@@ -511,6 +624,54 @@ int guardChild(const char* dir) {
 
     int bad = 0;
     float l = 0, r = 0, t = 0, b = 0, e[4];
+
+    // The stage 1 -> 2 adoption rule, as arithmetic. It has no other
+    // coverage: reaching it live needs a game that rebuilds its targets, and
+    // this harness goes live through the boundary-less fallback instead. The
+    // field case it exists for is issue 24 -- HMD Quality 0.5 on a 4550x3948
+    // recommendation submits 2957x2566, and a bar keyed to the RECOMMENDATION
+    // wanted 6664 wide from a game that would never offer more than 4479. The
+    // guard stalled at stage 1 four times in one flight and the whole control
+    // measured nothing. The baseline has to be what the game was actually
+    // submitting.
+    {
+        typedef unsigned int(*PFN_Adopt)(unsigned, unsigned, unsigned, unsigned, float, float);
+        auto adopt = reinterpret_cast<PFN_Adopt>(
+            GetProcAddress(m, "edvr_selftest_cull_adopt"));
+        if (!adopt) {
+            printf("  FAIL  guard child: edvr_selftest_cull_adopt not exported\n");
+            ++bad;
+        } else {
+            // Issue 24's numbers, rebuilt: 2957 * 1.51 = 4465 submitted
+            // against a bar of 2957 * 1.51 * 0.97 = 4331. Adopts. Under the
+            // old recommendation-keyed bar this was 6664 and never could.
+            if (adopt(2957, 2566, 4465, 2566, 1.51f, 1.0f) != 1u) {
+                printf("  FAIL  guard child: a quality-0.5 rig that DID rebuild "
+                       "(2957 -> 4465 at 1.51x) is not counted as adopted -- "
+                       "issue 24's stall would still happen\n");
+                ++bad;
+            }
+            // Not rebuilt yet: same size as before stage 1.
+            if (adopt(2957, 2566, 2957, 2566, 1.51f, 1.0f) != 0u) {
+                printf("  FAIL  guard child: an UNCHANGED submission counted as "
+                       "adopted -- the canonical would freeze on a size the "
+                       "game is about to abandon\n");
+                ++bad;
+            }
+            // Rebuilt, but not far enough (a partial resize seen mid-flight).
+            if (adopt(2957, 2566, 3600, 2566, 1.51f, 1.0f) != 0u) {
+                printf("  FAIL  guard child: a submission below the margin "
+                       "counted as adopted\n");
+                ++bad;
+            }
+            // No baseline at all: never adopt on zeroes.
+            if (adopt(0, 0, 4465, 2566, 1.51f, 1.0f) != 0u) {
+                printf("  FAIL  guard child: adoption without a seeded "
+                       "baseline\n");
+                ++bad;
+            }
+        }
+    }
 
     // Before go-live: pure truth, both eyes (which is also what arms the
     // lie -- it waits for both eyes' true tangents).
@@ -1513,6 +1674,532 @@ int hotkeyChecks() {
     return bad;
 }
 
+// The multi-slot bindings lookup the settings menu reads its Elite panel
+// keys through (2026-09-11). The camera lookup above answers "which one key
+// can be watched"; this one answers "what is in every slot", and the shapes
+// that matter are the ones MEASURED in real files: the stock scheme's two
+// keyboard slots, Sean's gamepad-Primary-keyboard-Secondary, a modifier key
+// as a main key (Sean's UI_Back = Key_LeftControl), and a chord on one slot
+// only -- where the two parsers deliberately disagree, and the test says so.
+//
+// A bindings directory fixture: files are written under %TEMP%, optionally
+// aged, and every file written is deleted with the directory.
+struct BindsFixture {
+    wchar_t dir[MAX_PATH] = {};
+    std::vector<std::wstring> written;
+    explicit BindsFixture(const wchar_t* leaf) {
+        wchar_t tmp[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tmp);
+        swprintf_s(dir, L"%s%s", tmp, leaf);
+        CreateDirectoryW(dir, nullptr);
+    }
+    ~BindsFixture() {
+        for (const std::wstring& n : written) {
+            wchar_t path[MAX_PATH];
+            swprintf_s(path, L"%s\\%s", dir, n.c_str());
+            DeleteFileW(path);
+        }
+        RemoveDirectoryW(dir);
+    }
+    void write(const wchar_t* name, const char* body, int yearsOld = 0) {
+        wchar_t path[MAX_PATH];
+        swprintf_s(path, L"%s\\%s", dir, name);
+        HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD wrote = 0;
+        WriteFile(f, body, (DWORD)strlen(body), &wrote, nullptr);
+        if (yearsOld > 0) {
+            FILETIME now{};
+            GetSystemTimeAsFileTime(&now);
+            ULARGE_INTEGER u{};
+            u.LowPart = now.dwLowDateTime;
+            u.HighPart = now.dwHighDateTime;
+            u.QuadPart -= 365ull * 24 * 3600 * 10000000ull * yearsOld;
+            FILETIME old{};
+            old.dwLowDateTime = u.LowPart;
+            old.dwHighDateTime = u.HighPart;
+            SetFileTime(f, nullptr, nullptr, &old);
+        }
+        CloseHandle(f);
+        written.push_back(name);
+    }
+};
+
+// Stock KeyboardMouseOnly's UI_Up: two keyboard slots, both named.
+int testSlotsStockShape() {
+    int bad = 0;
+    BindsFixture fx(L"edvr_binds_slots_stock");
+    fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+    fx.write(L"Custom.4.2.binds",
+             "<Root>\n"
+             "<UI_Up><Primary Device=\"Keyboard\" Key=\"Key_W\" />"
+             "<Secondary Device=\"Keyboard\" Key=\"Key_UpArrow\" /></UI_Up>\n"
+             "</Root>\n");
+    edvr::EliteKeySlots s{};
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up", edvr::kEliteKeyPlain,
+                                        &s) ||
+        !s.present || s.count != 2) {
+        printf("  FAIL  stock UI_Up did not read as two slots (present=%d "
+               "count=%d)\n", s.present, s.count);
+        ++bad;
+        return bad;
+    }
+    if (!s.slot[0].keyboard || strcmp(s.slot[0].binding, "W") != 0 ||
+        strcmp(s.slot[0].eliteName, "Key_W") != 0) {
+        printf("  FAIL  stock UI_Up Primary read as '%s' (%s)\n",
+               s.slot[0].binding, s.slot[0].eliteName);
+        ++bad;
+    }
+    if (!s.slot[1].keyboard || strcmp(s.slot[1].binding, "UP") != 0 ||
+        strcmp(s.slot[1].eliteName, "Key_UpArrow") != 0) {
+        printf("  FAIL  stock UI_Up Secondary read as '%s' (%s)\n",
+               s.slot[1].binding, s.slot[1].eliteName);
+        ++bad;
+    }
+    if (s.slot[0].chorded || s.slot[1].chorded || s.slot[0].modifierMain ||
+        s.slot[1].modifierMain) {
+        printf("  FAIL  a bare stock slot read as chorded or modifier-main\n");
+        ++bad;
+    }
+    if (strcmp(s.file, "Custom.4.2.binds") != 0 || s.filesSeen != 1) {
+        printf("  FAIL  the answering file was reported as '%s' after %d "
+               "files\n", s.file, s.filesSeen);
+        ++bad;
+    }
+    if (bad == 0) printf("  ok    binds slots: the stock two-keyboard-slot shape\n");
+    return bad;
+}
+
+// Sean's Custom.4.2 shape: a gamepad Primary the menu cannot use, named so
+// the log can say "on your gamepad", beside a keyboard Secondary it can.
+int testSlotsSeanShape() {
+    int bad = 0;
+    BindsFixture fx(L"edvr_binds_slots_sean");
+    fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+    fx.write(L"Custom.4.2.binds",
+             "<Root>\n"
+             "<UI_Up><Primary Device=\"GamePad\" Key=\"GamePad_DPadUp\" />"
+             "<Secondary Device=\"Keyboard\" Key=\"Key_S\" /></UI_Up>\n"
+             "<UI_Toggle><Primary Device=\"{NoDevice}\" Key=\"\" />"
+             "<Secondary Device=\"Keyboard\" Key=\"Key_Equals\" /></UI_Toggle>\n"
+             "</Root>\n");
+    edvr::EliteKeySlots s{};
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up", edvr::kEliteKeyPlain,
+                                        &s) ||
+        s.count != 2) {
+        printf("  FAIL  a pad-Primary/keyboard-Secondary element did not "
+               "read as two slots (count=%d)\n", s.count);
+        ++bad;
+        return bad;
+    }
+    if (s.slot[0].keyboard || s.slot[0].binding[0] != '\0' ||
+        strcmp(s.slot[0].eliteName, "GamePad_DPadUp") != 0) {
+        printf("  FAIL  the gamepad Primary read as keyboard='%d' binding='%s' "
+               "name='%s'\n", s.slot[0].keyboard, s.slot[0].binding,
+               s.slot[0].eliteName);
+        ++bad;
+    }
+    if (!s.slot[1].keyboard || strcmp(s.slot[1].binding, "S") != 0) {
+        printf("  FAIL  the keyboard Secondary beside a pad Primary read as "
+               "'%s'\n", s.slot[1].binding);
+        ++bad;
+    }
+    // An UNBOUND Primary (Elite writes Device="{NoDevice}" Key="" -- 430 of
+    // them in Sean's file) is not a slot at all, so the keyboard Secondary
+    // is the only one and nothing is reported as "on a controller".
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Toggle",
+                                        edvr::kEliteKeyPlain, &s) ||
+        s.count != 1 || !s.slot[0].keyboard ||
+        strcmp(s.slot[0].binding, "EQUALS") != 0) {
+        printf("  FAIL  an unbound {NoDevice} Primary was counted as a slot "
+               "(count=%d, slot[0]='%s')\n", s.count, s.slot[0].binding);
+        ++bad;
+    }
+    if (bad == 0) printf("  ok    binds slots: a gamepad Primary beside a keyboard Secondary\n");
+    return bad;
+}
+
+// A modifier key as the MAIN key (Sean's UI_Back = Key_LeftControl): unnamed
+// through the plain path, which is what the camera lookup must keep seeing,
+// and "0xA2" under the menu-only flag.
+int testSlotsModifierMain() {
+    int bad = 0;
+    uint32_t m = 0;
+    BindsFixture fx(L"edvr_binds_slots_modmain");
+    fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+    fx.write(L"Custom.4.2.binds",
+             "<Root>\n"
+             "<UI_Back><Secondary Device=\"Keyboard\" "
+             "Key=\"Key_LeftControl\"/></UI_Back>\n"
+             "</Root>\n");
+    edvr::EliteKeySlots s{};
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Back", edvr::kEliteKeyPlain,
+                                        &s) ||
+        s.count != 1 || !s.slot[0].keyboard) {
+        printf("  FAIL  UI_Back on Key_LeftControl did not read as one "
+               "keyboard slot (count=%d)\n", s.count);
+        ++bad;
+        return bad;
+    }
+    if (s.slot[0].binding[0] != '\0' || s.slot[0].modifierMain ||
+        strcmp(s.slot[0].eliteName, "Key_LeftControl") != 0) {
+        printf("  FAIL  plain flags named a modifier main key ('%s', "
+               "modifierMain=%d, name '%s')\n", s.slot[0].binding,
+               s.slot[0].modifierMain, s.slot[0].eliteName);
+        ++bad;
+    }
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Back",
+                                        edvr::kEliteKeyAllowModifierMain, &s) ||
+        s.count != 1 || strcmp(s.slot[0].binding, "0xA2") != 0 ||
+        !s.slot[0].modifierMain) {
+        printf("  FAIL  the menu flag did not name Key_LeftControl as 0xA2 "
+               "(got '%s', modifierMain=%d)\n", s.slot[0].binding,
+               s.slot[0].modifierMain);
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName("0xA2", &m) != VK_LCONTROL || m != 0) {
+        printf("  FAIL  0xA2 did not parse as VK_LCONTROL with no modifiers\n");
+        ++bad;
+    }
+    // The translation on its own: the flag changes nothing for a name the
+    // plain path can name, and the plain path still refuses a modifier.
+    char t[32] = {};
+    bool mm = true;
+    if (!edvr::eliteBindsTranslateKeyEx("Key_W", edvr::kEliteKeyAllowModifierMain,
+                                        t, sizeof(t), &mm) ||
+        strcmp(t, "W") != 0 || mm) {
+        printf("  FAIL  the flag changed the plain answer for Key_W ('%s', "
+               "modifierMain=%d)\n", t, mm);
+        ++bad;
+    }
+    if (edvr::eliteBindsTranslateKeyEx("Key_LeftControl", edvr::kEliteKeyPlain,
+                                       t, sizeof(t), &mm) || mm) {
+        printf("  FAIL  plain flags translated Key_LeftControl as a main key\n");
+        ++bad;
+    }
+    if (!edvr::eliteBindsTranslateKeyEx("Key_RightAlt",
+                                        edvr::kEliteKeyAllowModifierMain, t,
+                                        sizeof(t), &mm) ||
+        strcmp(t, "0xA5") != 0 || !mm ||
+        edvr::virtualKeyFromName(t, &m) != VK_RMENU) {
+        printf("  FAIL  Key_RightAlt did not translate to 0xA5 under the flag "
+               "(got '%s')\n", t);
+        ++bad;
+    }
+    // The camera path on the same file: the modifier main key reaches the
+    // "IS on a keyboard key ... no name" refusal and never becomes a watch.
+    char v[48] = {};
+    if (edvr::eliteBindsLookupDir(fx.dir, "UI_Back", v, sizeof(v))) {
+        printf("  FAIL  the camera lookup adopted a modifier main key (%s)\n", v);
+        ++bad;
+    }
+    if (bad == 0) printf("  ok    binds slots: a modifier key as a main key, menu only\n");
+    return bad;
+}
+
+// A chord on ONE slot: bare Primary W, Secondary E with a LeftShift
+// Modifier. The slot parser bounds the Modifier by the next slot, so W is
+// bare and E is SHIFT+E. The camera parser scans to the element's end and
+// answers SHIFT+W -- deliberately unchanged, because that answer is the
+// camera path's and changing it would change a camera watch. Both are
+// pinned here so the divergence is a documented fact, not a surprise.
+int testSlotsChordPerSlot() {
+    int bad = 0;
+    BindsFixture fx(L"edvr_binds_slots_chord");
+    fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+    fx.write(L"Custom.4.2.binds",
+             "<Root>\n"
+             "<CycleNextPanel><Primary Device=\"Keyboard\" Key=\"Key_W\" />"
+             "<Secondary Device=\"Keyboard\" Key=\"Key_E\">"
+             "<Modifier Device=\"Keyboard\" Key=\"Key_LeftShift\" />"
+             "</Secondary></CycleNextPanel>\n"
+             "</Root>\n");
+    edvr::EliteKeySlots s{};
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "CycleNextPanel",
+                                        edvr::kEliteKeyPlain, &s) ||
+        s.count != 2) {
+        printf("  FAIL  the chorded element did not read as two slots "
+               "(count=%d)\n", s.count);
+        ++bad;
+        return bad;
+    }
+    if (strcmp(s.slot[0].binding, "W") != 0 || s.slot[0].chorded) {
+        printf("  FAIL  the bare Primary borrowed the Secondary's chord "
+               "('%s', chorded=%d)\n", s.slot[0].binding, s.slot[0].chorded);
+        ++bad;
+    }
+    if (strcmp(s.slot[1].binding, "SHIFT+E") != 0 || !s.slot[1].chorded) {
+        printf("  FAIL  the chorded Secondary read as '%s' (chorded=%d)\n",
+               s.slot[1].binding, s.slot[1].chorded);
+        ++bad;
+    }
+    char v[48] = {};
+    if (!edvr::eliteBindsLookupDir(fx.dir, "CycleNextPanel", v, sizeof(v)) ||
+        strcmp(v, "SHIFT+W") != 0) {
+        printf("  FAIL  the camera parser's answer for a bare-Primary/"
+               "chorded-Secondary element changed (got '%s', pinned "
+               "'SHIFT+W')\n", v);
+        ++bad;
+    }
+    if (bad == 0) printf("  ok    binds slots: a chord bounds to its own slot; the camera parser unchanged\n");
+    return bad;
+}
+
+// The stale previous-format relic beside the maintained file: the newest
+// answers, and the relic is never opened.
+int testSlotsNewestFile() {
+    int bad = 0;
+    BindsFixture fx(L"edvr_binds_slots_newest");
+    fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+    fx.write(L"Custom.4.1.binds",
+             "<Root>\n"
+             "<UI_Up><Primary Device=\"Keyboard\" Key=\"Key_I\" /></UI_Up>\n"
+             "</Root>\n",
+             1);
+    fx.write(L"Custom.4.2.binds",
+             "<Root>\n"
+             "<UI_Up><Primary Device=\"Keyboard\" Key=\"Key_W\" /></UI_Up>\n"
+             "</Root>\n");
+    edvr::EliteKeySlots s{};
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up", edvr::kEliteKeyPlain,
+                                        &s) ||
+        s.count != 1 || strcmp(s.slot[0].binding, "W") != 0 ||
+        strcmp(s.file, "Custom.4.2.binds") != 0) {
+        printf("  FAIL  a stale previous-format preset outranked the "
+               "maintained one for the slots lookup (got '%s' from '%s')\n",
+               s.slot[0].binding, s.file);
+        ++bad;
+    }
+    if (s.filesSeen != 1) {
+        printf("  FAIL  the walk went past the answering file (%d opened)\n",
+               s.filesSeen);
+        ++bad;
+    }
+    if (bad == 0) printf("  ok    binds slots: the maintained file answers, the relic is not opened\n");
+    return bad;
+}
+
+// "Not in the file" and "no files at all" must be told apart: the menu says
+// one thing for an element Elite dropped and another for a player on a stock
+// preset with nothing under Options\Bindings.
+int testSlotsAbsentAndNoFiles() {
+    int bad = 0;
+    edvr::EliteKeySlots s{};
+    {
+        BindsFixture fx(L"edvr_binds_slots_absent");
+        fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+        fx.write(L"Custom.4.1.binds",
+                 "<Root>\n"
+                 "<UI_Down><Primary Device=\"Keyboard\" Key=\"Key_S\" /></UI_Down>\n"
+                 "</Root>\n",
+                 1);
+        fx.write(L"Custom.4.2.binds",
+                 "<Root>\n"
+                 "<UI_Up><Primary Device=\"Keyboard\" Key=\"Key_W\" /></UI_Up>\n"
+                 "</Root>\n");
+        // Absent from every candidate: both files are opened, none answers.
+        s.present = true;
+        if (edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Toggle",
+                                           edvr::kEliteKeyPlain, &s) ||
+            s.present || s.count != 0 || s.filesSeen != 2 || s.file[0] != '\0') {
+            printf("  FAIL  an absent element read as present=%d count=%d "
+                   "filesSeen=%d file='%s'\n", s.present, s.count, s.filesSeen,
+                   s.file);
+            ++bad;
+        }
+        // Present only in the relic: the walk reaches it, and it answers.
+        if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Down",
+                                            edvr::kEliteKeyPlain, &s) ||
+            strcmp(s.slot[0].binding, "S") != 0 ||
+            strcmp(s.file, "Custom.4.1.binds") != 0 || s.filesSeen != 2) {
+            printf("  FAIL  an element only the older file carries did not "
+                   "answer from it (got '%s' from '%s' after %d)\n",
+                   s.slot[0].binding, s.file, s.filesSeen);
+            ++bad;
+        }
+    }
+    {
+        // A preset file naming files that are not there: no .binds at all.
+        BindsFixture fx(L"edvr_binds_slots_nofiles");
+        fx.write(L"StartPreset.4.start", "KeyboardMouseOnly\n");
+        s.filesSeen = 7;
+        if (edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up",
+                                           edvr::kEliteKeyPlain, &s) ||
+            s.present || s.filesSeen != 0) {
+            printf("  FAIL  a directory with no .binds read as filesSeen=%d\n",
+                   s.filesSeen);
+            ++bad;
+        }
+    }
+    {
+        // Nothing at all, not even a preset file (a fresh profile).
+        BindsFixture fx(L"edvr_binds_slots_empty");
+        s.filesSeen = 7;
+        if (edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up",
+                                           edvr::kEliteKeyPlain, &s) ||
+            s.present || s.filesSeen != 0) {
+            printf("  FAIL  an empty bindings directory read as filesSeen=%d\n",
+                   s.filesSeen);
+            ++bad;
+        }
+    }
+    if (bad == 0) printf("  ok    binds slots: absent element vs no files at all\n");
+    return bad;
+}
+
+// The three lookups share one file walk (collectActiveBindsFiles). The
+// camera fixtures in hotkeyChecks pin the camera answers across the move;
+// this pins that all three consumers select the SAME file by the same
+// rules: newest of the active preset, the preset name plus its version dot
+// (so "Custom" does not claim "Custom2"), and an empty preset file admitting
+// every .binds.
+int testWalkFactoringEquivalence() {
+    int bad = 0;
+    BindsFixture fx(L"edvr_binds_walk_equiv");
+    fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+    // The relic, two years old, answering everything with the wrong keys.
+    fx.write(L"Custom.4.1.binds",
+             "<Root>\n"
+             "<UI_Up><Primary Device=\"GamePad\" Key=\"GamePad_DPadDown\" />"
+             "<Secondary Device=\"Keyboard\" Key=\"Key_I\" /></UI_Up>\n"
+             "</Root>\n",
+             2);
+    // The maintained file of the active preset. Aged a year so its write
+    // time cannot tie with the file below -- two files written in the same
+    // timer tick would leave the newest-first sort to decide by chance.
+    fx.write(L"Custom.4.2.binds",
+             "<Root>\n"
+             "<UI_Up><Primary Device=\"GamePad\" Key=\"GamePad_DPadUp\" />"
+             "<Secondary Device=\"Keyboard\" Key=\"Key_W\" /></UI_Up>\n"
+             "</Root>\n",
+             1);
+    // A different preset's file, NEWER than both, that the prefix-plus-dot
+    // rule must not claim for "Custom".
+    fx.write(L"Custom2.4.2.binds",
+             "<Root>\n"
+             "<UI_Up><Primary Device=\"GamePad\" Key=\"GamePad_DPadLeft\" />"
+             "<Secondary Device=\"Keyboard\" Key=\"Key_X\" /></UI_Up>\n"
+             "</Root>\n");
+    char v[48] = {};
+    edvr::EliteKeySlots s{};
+    if (!edvr::eliteBindsLookupDir(fx.dir, "UI_Up", v, sizeof(v)) ||
+        strcmp(v, "W") != 0) {
+        printf("  FAIL  the keyboard lookup did not pick the maintained file "
+               "of the active preset (got '%s')\n", v);
+        ++bad;
+    }
+    if (!edvr::eliteBindsLookupPadDir(fx.dir, "UI_Up", v, sizeof(v)) ||
+        strcmp(v, "GamePad_DPadUp") != 0) {
+        printf("  FAIL  the gamepad lookup did not pick the maintained file "
+               "of the active preset (got '%s')\n", v);
+        ++bad;
+    }
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up", edvr::kEliteKeyPlain,
+                                        &s) ||
+        s.count != 2 || strcmp(s.slot[1].binding, "W") != 0 ||
+        strcmp(s.file, "Custom.4.2.binds") != 0) {
+        printf("  FAIL  the slots lookup did not pick the maintained file of "
+               "the active preset (got '%s' from '%s')\n", s.slot[1].binding,
+               s.file);
+        ++bad;
+    }
+    // An EMPTY preset file admits every .binds, and then the newest of all
+    // three -- the other preset's -- answers for every lookup alike.
+    fx.write(L"StartPreset.4.start", "");
+    if (!edvr::eliteBindsLookupDir(fx.dir, "UI_Up", v, sizeof(v)) ||
+        strcmp(v, "X") != 0) {
+        printf("  FAIL  with no preset names the keyboard lookup did not take "
+               "the newest file of all (got '%s')\n", v);
+        ++bad;
+    }
+    if (!edvr::eliteBindsLookupPadDir(fx.dir, "UI_Up", v, sizeof(v)) ||
+        strcmp(v, "GamePad_DPadLeft") != 0) {
+        printf("  FAIL  with no preset names the gamepad lookup did not take "
+               "the newest file of all (got '%s')\n", v);
+        ++bad;
+    }
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up", edvr::kEliteKeyPlain,
+                                        &s) ||
+        strcmp(s.slot[1].binding, "X") != 0 ||
+        strcmp(s.file, "Custom2.4.2.binds") != 0) {
+        printf("  FAIL  with no preset names the slots lookup did not take "
+               "the newest file of all (got '%s' from '%s')\n",
+               s.slot[1].binding, s.file);
+        ++bad;
+    }
+    // No preset file at all: every lookup refuses, none guesses.
+    {
+        wchar_t path[MAX_PATH];
+        swprintf_s(path, L"%s\\StartPreset.4.start", fx.dir);
+        DeleteFileW(path);
+    }
+    if (edvr::eliteBindsLookupDir(fx.dir, "UI_Up", v, sizeof(v)) ||
+        edvr::eliteBindsLookupPadDir(fx.dir, "UI_Up", v, sizeof(v)) ||
+        edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up", edvr::kEliteKeyPlain,
+                                       &s) ||
+        s.filesSeen != 0) {
+        printf("  FAIL  a lookup answered with no preset file present\n");
+        ++bad;
+    }
+    if (bad == 0) printf("  ok    binds slots: all three lookups walk the files by one rule\n");
+    return bad;
+}
+
+// An element whose ONLY slot is a Secondary, followed by another element's
+// Primary: the slot search starts at the element's open tag and would land
+// in the next element without the element-end bound (elite_binds.cpp,
+// parseElementSlotsIn's `s > end`). Every other slots fixture carries both
+// tags inside the element or is alone in its file, so deleting that bound
+// passed all of them; this one reads W as UI_Back's Primary without it,
+// and the menu would adopt W as Back (and refuse UI_Up's W as a duplicate).
+// The shape is not one Elite writes (it emits a {NoDevice} Primary for an
+// unbound slot; MEASURED: 0 Secondary-only elements across the 30 stock
+// schemes and Sean's file), so this pins the guard, not a field case.
+int testSlotsSecondaryOnlyBeforeNextPrimary() {
+    int bad = 0;
+    BindsFixture fx(L"edvr_binds_slots_secondary_only");
+    fx.write(L"StartPreset.4.start", "Custom\nCustom\n");
+    fx.write(L"Custom.4.2.binds",
+             "<Root>\n"
+             "<UI_Back><Secondary Device=\"Keyboard\" "
+             "Key=\"Key_Backspace\" /></UI_Back>\n"
+             "<UI_Up><Primary Device=\"Keyboard\" Key=\"Key_W\" /></UI_Up>\n"
+             "</Root>\n");
+    edvr::EliteKeySlots s{};
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Back", edvr::kEliteKeyPlain,
+                                        &s) ||
+        s.count != 1 || !s.slot[0].keyboard ||
+        strcmp(s.slot[0].eliteName, "Key_Backspace") != 0 ||
+        strcmp(s.slot[0].binding, "BACKSPACE") != 0) {
+        printf("  FAIL  a Secondary-only UI_Back read the next element's "
+               "Primary (count=%d, slot[0]='%s' %s)\n", s.count,
+               s.slot[0].binding, s.slot[0].eliteName);
+        ++bad;
+    }
+    if (!edvr::eliteBindsLookupSlotsDir(fx.dir, "UI_Up", edvr::kEliteKeyPlain,
+                                        &s) ||
+        s.count != 1 || strcmp(s.slot[0].binding, "W") != 0) {
+        printf("  FAIL  UI_Up after a Secondary-only element did not read "
+               "as W (count=%d, slot[0]='%s')\n", s.count, s.slot[0].binding);
+        ++bad;
+    }
+    if (bad == 0) printf("  ok    binds slots: a Secondary-only element does not read the next element's Primary\n");
+    return bad;
+}
+
+int bindsSlotChecks() {
+    int bad = 0;
+    bad += testSlotsStockShape();
+    bad += testSlotsSeanShape();
+    bad += testSlotsSecondaryOnlyBeforeNextPrimary();
+    bad += testSlotsModifierMain();
+    bad += testSlotsChordPerSlot();
+    bad += testSlotsNewestFile();
+    bad += testSlotsAbsentAndNoFiles();
+    bad += testWalkFactoringEquivalence();
+    return bad;
+}
+
 // The heartbeat, which is the part that decides whether a player's viewpoint
 // stays moved after the gate stops running.
 //
@@ -1665,6 +2352,8 @@ int sentinelChecks() {
 int main(int argc, char** argv) {
     if (argc >= 3 && strcmp(argv[2], "--fault-child") == 0) return faultChild(argv[1]);
     if (argc >= 3 && strcmp(argv[2], "--guard-child") == 0) return guardChild(argv[1]);
+    if (argc >= 3 && strcmp(argv[2], "--probe-raw-child") == 0) return probeChild(argv[1], true);
+    if (argc >= 3 && strcmp(argv[2], "--probe-matrix-child") == 0) return probeChild(argv[1], false);
 
     printf("edvr openvr smoke\n");
     if (argc < 2) {
@@ -1822,6 +2511,68 @@ int main(int argc, char** argv) {
                "matrix rebuilt, crop correct, strangers untouched\n");
     }
 
+    // The separability probe, one child per channel. Staged the same way as
+    // the guard child and for the same reason -- the channel is read when
+    // the hook installs, and this parent's proxy installed with the guard
+    // off. See probeChild for why each assertion is load-bearing.
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool rawPass = (pass == 0);
+        const char* chan = rawPass ? "raw" : "matrix";
+        char dirP[MAX_PATH * 2];
+        snprintf(dirP, sizeof(dirP), "%s_probe_%s", argv[1], chan);
+        CreateDirectoryA(dirP, nullptr);
+        char src[MAX_PATH * 2], dst[MAX_PATH * 2];
+        snprintf(src, sizeof(src), "%s\\openvr_api.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api.dll", dirP);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the probe child's proxy");
+        snprintf(src, sizeof(src), "%s\\openvr_api_orig.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api_orig.dll", dirP);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the probe child's stand-in");
+        snprintf(dst, sizeof(dst), "%s\\edvr.ini", dirP);
+        {
+            FILE* f = nullptr;
+            if (fopen_s(&f, dst, "w") != 0 || !f) {
+                return fail("could not write the probe child's edvr.ini");
+            }
+            fprintf(f,
+                    "[fix]\ncull_guard = symmetric\ncull_guard_fraction_v = 0.5\n"
+                    "cull_guard_headsets = 88x89\n"
+                    "\n[advanced]\ncull_guard_channel = %s\n",
+                    chan);
+            fclose(f);
+        }
+        wchar_t armed[MAX_PATH];
+        _snwprintf_s(armed, _TRUNCATE, L"%hs\\edvr_logs\\system_hook.armed", dirP);
+        DeleteFileW(armed);
+
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        wchar_t cmd[MAX_PATH * 2];
+        _snwprintf_s(cmd, _TRUNCATE, L"\"%s\" \"%hs\" --probe-%hs-child", self,
+                     dirP, chan);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr,
+                            nullptr, &si, &pi)) {
+            return fail("could not start the probe child");
+        }
+        WaitForSingleObject(pi.hProcess, 30000);
+        DWORD code = 0xFFFFFFFF;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (code != 0) {
+            printf("  FAIL  the %s probe child exited 0x%08lX -- the channel "
+                   "split leaked, or the probe touched the image (its FAIL "
+                   "lines are above)\n", chan, code);
+            printf("\nOPENVR SMOKE FAILED\n");
+            return 1;
+        }
+        printf("  ok    cull guard probe (channel %s): only that call lies, "
+               "the other stays true, target size and crop untouched\n", chan);
+    }
+
     // Shared code with no other coverage. Runs last because it touches nothing
     // the assertions above depend on.
     //
@@ -1837,6 +2588,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (hotkeyChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
+    if (bindsSlotChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;
     }

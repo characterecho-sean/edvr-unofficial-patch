@@ -5,13 +5,16 @@ branch `claude/asteroid-ao-inconsistency-xt19n7` off main `dc3ebad`. Claims
 about EDVR cite the source; claims about the game are labelled measured
 (this repo's censuses, dumps and disassemblies), read (taken from a
 captured shader's bytecode), or believed; what only a live session can
-settle is collected under Phase 0. Nothing here is built. The first capture
-arrived the same day, on issue #23; the worksheet's half is under
-[What the first worksheet said](#what-the-first-worksheet-said) and the
-files' half under [What the capture said](#what-the-capture-said). The
-pass now has a name, HBAO, and it is a chain of compute shaders -- but its
-hashes are still unknown, because the capture's two census presses were
-both discarded on the foreground check and no census recorded.*
+settle is collected under Phase 0. Nothing here is built. Two captures have
+arrived on issue #23, and their readings are under
+[What the first worksheet said](#what-the-first-worksheet-said),
+[What the capture said](#what-the-capture-said) and
+[What the second capture said](#what-the-second-capture-said). **The pass
+is named**: Elite's ambient occlusion is HBAO, a chain of three compute
+dispatches per eye per frame -- `FB277B33F0865348`, `9347F8FC2DCE0248`,
+`D31E7812990B19A6` -- and mechanism C is measured, its sixteen-layer
+deinterleave anchored to the pixel grid. Mechanism A is the one thing left
+open, and no shipped instrument can reach it.*
 
 ## The ask
 
@@ -688,9 +691,11 @@ eye is the worse one.
 
 The reporter's shader dump is complete and useful, and it cannot contain
 the pass. 348 blobs arrived, 200 pixel shaders and 148 vertex shaders and
-no compute shader at all, because the dump writes only `vs` and `ps`
-(`device_hook.cpp:397` and `:413`). Every stage of Elite's HBAO ends in
-`_CS`.
+no compute shader at all, because the dump on that build writes only `vs`
+and `ps`. Every stage of Elite's HBAO ends in `_CS`. (`192a36d`, later the
+same day, added the `cs` case at `device_hook.cpp:680` -- from another
+workstream, for another reason. It is on `main` and in no release, so it
+does not help this capture, and it changes everything about the next one.)
 
 All 200 pixel shaders were disassembled and read anyway, twice, under two
 different briefs. What that found:
@@ -731,7 +736,13 @@ C is the mechanism the evidence names and A is not excluded, and a single
 census settles both -- it names the dispatch, and `census_cb_watch` on that
 name reads `c_jitter` per eye. Nothing else is worth building first.
 
-### The second capture
+*That last sentence is half wrong, and the second capture is what showed
+it: the census does name the dispatch, but `census_cb_watch` cannot reach
+`c_jitter`, which turns out to live in a shader-resource buffer rather than
+a constant buffer. See
+[What the second capture said](#what-the-second-capture-said).*
+
+### The second capture, as it was asked for
 
 One more session, nothing new built into the game, and the census armed
 from a clock so that no key has to be pressed and no window has to be
@@ -805,6 +816,205 @@ dispatch_pair_sync   = <ch>:all      # both eyes read one eye's occlusion
 suffixes; `:all` is needed because its default gate is the FSS scanner
 being up. `census_cb_watch` matches compute shaders and dumps b0 and b1 as
 the DCW lines' x and y slots (`edvr.ini`, the `census_cb_watch` block).
+
+## What the second capture said
+
+It arrived on 2026-09-10, three days later, and the reporter improved on
+the instructions in two ways worth recording. They did not use the clock:
+they pressed the key and **watched for the log line confirming it had been
+taken**, which is the same lesson from the other end. And they took the
+censuses in the reverse of the order asked for -- **census 1 with ambient
+occlusion at High, census 2 with it Off** -- and said so.
+
+Both censuses are complete: `truncated=0`, `overflow=0`, both `DC end`
+lines present, 1.82 MB of log under the default 4 MB cap because two
+censuses at these scene sizes cost 2450 and 2435 lines, not the 16384 the
+cap allows.
+
+```
+[14:25:23.602] DC begin census=1 frames=2 frame=28749 offscreen=yes
+[14:25:23.649] DC end census=1 draws=764 off=1317 copies=65 disp=87 lines=2450 interned=801 overflow=0 truncated=0
+[14:26:23.246] DC begin census=2 frames=2 frame=33014 offscreen=yes
+[14:26:23.292] DC end census=2 draws=748 off=1317 copies=76 disp=76 lines=2435 interned=788 overflow=0 truncated=0
+```
+
+The reversed order needs no correction and no trust: **87 dispatches
+against 76**, and the hashes that appear in one census and not the other
+appear in census 1. The data says which one had the effect.
+
+### The chain, named
+
+The comparison was done by hand, for the reason the section above gives:
+`diff_draw_census.py` parses draw lines only. Grouping every `DCX` line by
+its `ch=` and subtracting leaves **three compute shaders present with
+ambient occlusion on and absent with it off**, four dispatches each across
+the census's two frames:
+
+| hash | reads | writes | thread groups |
+|---|---|---|---|
+| `FB277B33F0865348` | the eye's linear depth, 1896x2028 `R32_FLOAT`, at `s0` and `s1` | 474x507 `R32_FLOAT` at `u0` | 119x127x1 |
+| `9347F8FC2DCE0248` | the G-buffer normals 1896x2028 `R10G10B10A2` at `s0`; the 474x507 depth at `s1`; **a 768-byte buffer at `s2`** | 474x507 `R8_UNORM` at `u0` | 30x32x**16** |
+| `D31E7812990B19A6` | the 474x507 depth at `s0` and the 474x507 occlusion at `s1` | **1896x2028 `R8_UNORM`** at `u0` | 119x127x1 |
+
+Four numbers make that unambiguous, and they are the whole of mechanism C:
+
+- **1896 / 4 = 474 and 2028 / 4 = 507, exactly.** The middle stage's
+  layers are a quarter of the frame in each axis.
+- **The middle stage's z is 16.** Sixteen layers, dispatched together. That
+  is the 4x4 lattice, and which layer a pixel is estimated in is its
+  position modulo four.
+- **768 bytes is 16 x 48** -- sixteen entries of three float4s, indexed by
+  the layer. That is `g_performAOData`, and it is where `c_float2Offset`
+  and `c_jitter` live. It is bound at `s2` rather than as a constant buffer
+  because all sixteen passes run in one dispatch and the shader indexes it
+  by `SV_DispatchThreadID.z`.
+- The outer two stages dispatch 119x127 groups over 1896x2028 (118.5 and
+  126.75, rounded up) and the middle 30x32 over 474x507 (29.6 and 31.7).
+  16x16 threads throughout.
+
+Against the executable's five entry points, the mapping is forced:
+`FB277B33F0865348` is `HBAO_CONSTRUCT_LINEAR_DEPTH_ONLY_CS` rather than the
+normal-and-depth variant, because it writes one target and no normal
+texture and the AO pass takes its normals from the G-buffer instead;
+`9347F8FC2DCE0248` is `HBAO_PERFORM_AO_CS`; and `D31E7812990B19A6` is
+`HBAO_REINTERLEAVE_AND_BLUR_CS` and not the `_UPSAMPLE_` variant, which is
+what `ResolutionScale` 1.0 predicts. The two the game did not run are the
+two a lower tier would.
+
+### Q1 and Q2, measured at last
+
+In frame 0 the three dispatches run at `q=956,957,958` on one eye's depth
+and again at `q=974,975,976` on the other's, with every resource distinct
+between them -- separate depth inputs, separate layer arrays, separate
+outputs, separate constant buffers. Frame 1 repeats it. `q=` is one shared
+per-frame ordinal across draws, copies, clears and dispatches alike
+(`draw_census.h`), so adjacency in `q` is adjacency in the frame.
+
+**Both eyes, every frame, nothing alternating. B is closed by measurement
+now, not only by the worksheet.** And Q2's answer, taken from the
+executable's symbol names three days ago, is confirmed from the census
+itself: dispatches.
+
+### The consumer, and Q3
+
+The differ, run with the AO-off census as the baseline (`--a 2 --b 1`,
+because the reporter reversed the order), names one draw and only one:
+
+```
+DrawInstanced n=3  target=tex1896x2028f27  depth=none  samples=tex1896x2028f60
+  topology=tristrip  stride=20  vshader=DEF19B035D5EDEDC
+  draws per frame: 2,2   render targets hit: @137 x2, @329 x2
+  census_skip spec: N:3
+```
+
+A three-vertex full-screen draw, twice a frame into two different targets,
+sampling the 1896x2028 one-channel target the chain's last dispatch wrote.
+That is `RenderSSAO`, which the executable lists beside
+`RenderDirectionalLights` and the rest of the deferred lighting techniques.
+`REMOVED` is empty and `CHANGED` is scene churn -- instance counts drifting
+by a percent or two between two captures a minute apart, which is what a
+live ring does.
+
+**Q3 answered:** the occlusion target is `R8_TYPELESS` viewed as
+`R8_UNORM`, at the scene's render size.
+
+One footnote that closes Q4 twice over. The render size this session is
+1896x2028, not the 2528x2704 the runtime publishes as an eye, because the
+reporter's `HMDRenderTargetMultiplier` is 0.750 in this bundle where it was
+1.000 in the first. So the occlusion buffer misses the eye-split dump's
+two-pixel size gate by six hundred pixels quite apart from being a UAV that
+no draw ever binds. Two independent reasons that instrument could never
+have photographed it.
+
+### Where A and C stand
+
+**C is measured.** Not inferred from symbol names any more: the layer a
+pixel is estimated in is its screen position modulo four, the rotation is
+one of sixteen entries selected by that layer, and the same surface point
+falls on a different pixel -- and therefore in a different layer, under a
+different rotation -- in each eye. There is nothing left to capture for it.
+
+**A is not settled, and no shipped instrument can settle it.** The per-pass
+table is bound at `s2`, a shader-resource slot, and `census_cb_watch` reads
+a dispatch's constant buffers only -- `CSGetConstantBuffers(0, 2, ...)` in
+`cbWatchOnDispatch` (`draw_census.cpp`) -- so the 192-byte `b0` of globals
+and a `b1` are the whole of its reach. Whether the two eyes' 768-byte
+tables hold the same sixteen rotations is unmeasured, and the census cannot
+say: it records what is bound, not what is written.
+
+It may not matter. C is present by construction whatever those tables hold.
+If they are identical the fault is C alone; if they differ, that is A **on
+top of** C, and both live inside the same three dispatches. One shipped key
+tests that in one flight -- and a build carrying `192a36d` would put
+`9347F8FC2DCE0248`'s own bytecode on disk, which answers A by reading the
+shader rather than by guessing at its inputs. See the instrument list
+below; that commit exists and is unreleased.
+
+### Phase 2, as it can be typed today
+
+Both of these are shipped keys and neither needs anything built. One flight
+each, in this order.
+
+```
+[advanced]
+census_skip_dispatch = 9347F8FC2DCE0248
+```
+
+The occlusion should vanish, exactly as turning the setting off does. That
+proves the census named the right pass, from EDVR's side, which the setting
+cannot prove. Up to four comma-separated hashes if the whole chain is
+wanted; the scene may look very wrong while it is set, and that is the
+probe working.
+
+```
+[experimental]
+dispatch_pair_sync = D31E7812990B19A6:all
+```
+
+`D31E7812990B19A6` is the reinterleave, and its `u0` is the finished
+full-resolution occlusion -- so this copies the first eye's occlusion over
+the second's after it runs. It is **not a fix**: one eye's occlusion is
+wrong for the other at every near silhouette, and that wrongness is the
+point of the measurement. What survives is the parallax the eyes are
+*supposed* to disagree about; what disappears is everything the pass itself
+introduced. If the reporter's cracks stop disagreeing under it, the fault
+is entirely inside these three dispatches and the fix is a substitution.
+The `:all` suffix is required: the key's default gate is the FSS scanner
+being up, and this pass runs game-wide.
+
+### What this capture changes about the instruments
+
+The list from three days ago reorders, and gains two entries.
+
+1. **Dump compute shaders -- already built, not yet released.** This was
+   written up as the blocker and it is not one: `192a36d` added it on
+   2026-09-07, the same day this document said it was missing, from the
+   per-object-motion work rather than from here
+   (`dumpShaderBlob(L"cs", ...)`, `device_hook.cpp:680`). The hash it names
+   the file by is `fnv1a64` of the bytecode, which is the same value
+   `lookupShaderHash` gives the census for its `ch=` column
+   (`draw_census.cpp:1345`), so a dump on a build carrying that commit
+   writes **`cs_9347F8FC2DCE0248.dxbc`** and the pass's own code can be
+   read at last. It is on `main` and in no release: the reporter is on
+   v0.14.0 and the newest tag, v0.14.1, predates the commit by hours.
+   **Everything C1 needs, and the only desk-side answer to A, is behind
+   shipping a build with it.**
+2. **Read a dispatch's SRV-bound buffer** (new, and the only genuinely
+   missing one). `cbWatchOnDispatch` would need a companion that maps a
+   named dispatch's `s` slot rather than its `b` slots. It is the direct
+   way to compare the two eyes' sixteen rotations -- though if item 1
+   ships, the disassembly may make it unnecessary by showing what the
+   shader does with the table rather than what is in it.
+3. **A census key that does not need window focus.** Still wanted. The
+   reporter worked around it by watching for the confirmation line, which
+   works and should not have to be discovered.
+4. **A differ that reads `DCX`.** Still wanted. The comparison above took
+   twenty lines of Python that should live in `diff_draw_census.py`, and
+   the risk it carries is the one that file already documents: a line the
+   regex misses reads as a line that was not there.
+5. **A staging copy of a named dispatch's `u0`.** Drops to last. It was
+   the way to photograph the occlusion buffer, and the census has now
+   answered everything that photograph was for.
 
 ## Phase 1: reading the capture
 
@@ -927,12 +1137,12 @@ Each with what answers it, and what the first capture did to it.
    So the probes are `census_skip_dispatch`, `dispatch_pair_sync` and
    `census_cb_watch` on a compute hash, and the fix is a dispatch-shaped
    substitution. A draw-shaped tail exists too (`ReinterleaveAOPS`).
-3. **What size and format is the target?** Half answered. The tier's
-   `ResolutionScale` is 1.0 (0.5 at Medium, 0.25 at Low), so at the
-   reporter's setting the pass runs at full eye size; the format is
-   whatever `g_performAOOutputTexture` is created as, and nothing in the
-   capture says. The dump's eye-sized `R8_TYPELESS` target is the shadow
-   mask, not this.
+3. **What size and format is the target?** **ANSWERED by the second
+   census.** The final occlusion is 1896x2028 `R8_TYPELESS` viewed as
+   `R8_UNORM` -- the scene's render size, which on that session is 0.750 of
+   the published eye. The chain's middle is a 474x507 `R8_UNORM` array of
+   sixteen layers, fed by a 474x507 `R32_FLOAT` depth array. The dump's
+   eye-sized `R8_TYPELESS` target was the shadow mask, not this.
 4. **Did the dump catch it?** **ANSWERED: no, and it cannot as built.**
    `eye_split` records the render target bound at slot 0 of a *draw*
    (`eye_split.cpp:244-250`, from `vscreen.cpp:2053`), and the HBAO chain
@@ -943,20 +1153,32 @@ Each with what answers it, and what the first capture did to it.
    which aliases away a rotation grain on a four-pixel lattice, and its
    size gate is within two pixels of the eye (`near2`,
    `vscreen.cpp:876`), so at Low or Medium nothing of the chain is
-   captured at all. **Copying a named dispatch's `u0` at the boundary --
-   `dispatch_pair_sync`'s copy pointed at a staging texture -- is the
-   first instrument change this hunt makes**, and a second dump is not
-   worth taking before it exists.
-5. **Does a constant step per pass?** Open, and now specific: the constant
-   is `c_jitter` (with `c_float2Offset` and `c_jitterPositionScaler`), and
-   `census_cb_watch` on the AO dispatch dumps a compute shader's b0 and b1
-   as the DCW lines' x and y slots.
-6. **Is there a noise table, and at which slot?** ANSWERED in kind, not in
-   slot. The pass carries both idioms: `c_deinterleavedTexturing` with
-   `c_float2Offset` and a per-layer `c_jitter`, splitting the depth buffer
-   by the pixel's position modulo four; and `c_useJitterTexture` with
-   `c_randomTexture`, a tiling table read at the pixel grid. Which is bound
-   at this tier, and at which slot, needs the census.
+   captured at all -- and the second capture adds a third gate for free:
+   the occlusion target is the render size, 1896x2028, which misses the
+   two-pixel eye-size test by six hundred pixels on its own. Copying a
+   named dispatch's `u0` at the boundary would lift the first of those,
+   but the census has since answered everything that photograph was for,
+   so it is now the LAST instrument change this hunt wants rather than the
+   first.
+5. **Does a constant step per pass?** **The one question still open, and
+   no shipped instrument reaches it.** The second census located the
+   table: `c_jitter` and `c_float2Offset` live in a 768-byte buffer -- 16
+   entries of 48 bytes, one per deinterleaved layer -- bound at `s2` of
+   `9347F8FC2DCE0248`, a shader-resource slot, because all sixteen layers
+   run in one dispatch and the shader indexes it by the thread id's z.
+   `census_cb_watch` reads a dispatch's CONSTANT buffers only
+   (`CSGetConstantBuffers(0, 2, ...)` in `cbWatchOnDispatch`), so it can
+   dump the 192-byte `b0` of globals and nothing else. Whether the two
+   eyes' tables hold the same sixteen rotations needs an instrument that
+   does not exist. Note that C stands either way: if they are identical
+   the fault is C alone, and if they differ that is A on top of C.
+6. **Is there a noise table, and at which slot?** **ANSWERED: `s2` of
+   `9347F8FC2DCE0248`, 768 bytes, sixteen entries.** The deinterleaved
+   path is the one this tier runs -- the middle dispatch's z is 16 and its
+   layers are exactly a quarter of the frame in each axis -- so the
+   rotation is selected by the pixel's position modulo four. The
+   `c_useJitterTexture` / `c_randomTexture` path is present in the code and
+   not bound here.
 7. **Level or pattern?** **Still open.** The reporter says level; nothing
    in the capture photographed the occlusion, so the dump cannot second
    them. What it did measure is the sun-shadow mask, which agrees between
@@ -964,9 +1186,12 @@ Each with what answers it, and what the first capture did to it.
    darker eye a coin flip tile to tile) -- so shadows are not the fault
    and can be set aside.
 8. **Stock, temporal AA off, and Low?** ANSWERED by the worksheet: all
-   three still show it. One thread left -- Low is a quarter-resolution pass
-   with a blur sharpness of 8 against 256, and "looks exactly the same as
-   High" is worth re-asking.
+   three still show it. Two threads left -- Low is a quarter-resolution
+   pass with a blur sharpness of 8 against 256, and "looks exactly the
+   same as High" is worth re-asking; and the second capture was taken at
+   `HMDRenderTargetMultiplier` 0.750 where the first was at 1.000, so the
+   occlusion has now run at two different resolutions on this rig without
+   the report changing.
 9. **What do the levels change?** **ANSWERED**, read from the reporter's
    own `GraphicsConfiguration.xml`: only `HBAO2_Bias`,
    `HBAO2_BlurSharpness` and `ResolutionScale`. Not the sample count, not
@@ -979,11 +1204,13 @@ Each with what answers it, and what the first capture did to it.
 11. **Everywhere, or only asteroids?** Open. The worksheet says "only icy
     rings so far" and the arm and the hangar are still unlooked at
     ([Beyond asteroids](#beyond-asteroids)).
-12. **Is the deinterleave on at this tier, and how many layers?** New.
-    `SeparateDepthTextureInto8Targets` says eight render targets at a time,
-    which is sixteen layers in two passes, the ordinary 4x4 HBAO lattice --
-    but that is the pixel-shader path's name and the compute path may
-    differ. The census's DCX lines and their `u` columns say.
+12. **Is the deinterleave on at this tier, and how many layers?**
+    **ANSWERED: on, sixteen layers.** `9347F8FC2DCE0248` dispatches
+    30x32x**16** groups over layers of 474x507, and 1896/4 = 474 and
+    2028/4 = 507 exactly. The `SeparateDepthTextureInto8Targets` name
+    belongs to the pixel-shader path, which this build does not run.
+13. **Do the two eyes' sixteen rotations differ?** New, and it is Q5 from
+    the other end -- the only thing between this hunt and a fix.
 
 ## What this document does not do
 

@@ -142,6 +142,13 @@ bool hotkeyWouldFire(int vk, uint32_t mods, uint32_t held) {
 
 void hotkeyResetBindings() { g_bindingCount = 0; }
 
+int hotkeyRegisteredKeys(int* vks, int max) {
+    if (!vks || max <= 0) return 0;
+    int n = 0;
+    for (unsigned i = 0; i < g_bindingCount && n < max; ++i) vks[n++] = g_bindings[i].vk;
+    return n;
+}
+
 bool Hotkey::pressed() {
     if (m_vk == 0) return false;
     // A game-mirrored binding is never filtered by focus; see the note above.

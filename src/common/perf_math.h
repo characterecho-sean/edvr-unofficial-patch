@@ -64,4 +64,21 @@ inline PerfStats perfStatsOf(const float* ms, int n, float capMs = 500.0f) {
 // Frames per second for a frame time, 0 for nothing.
 inline float perfFpsOf(float ms) { return ms > 0.0f ? 1000.0f / ms : 0.0f; }
 
+// Both monitor surfaces use this same recent window and source selection.
+// App time is the compositor's poses-to-submit measurement; thread time
+// also includes work outside that interval and must be labelled separately.
+struct PerfRecentTimes {
+    double gpuSum = 0, appSum = 0, threadSum = 0;
+    int gpuCount = 0, appCount = 0, threadCount = 0;
+    void add(float period, float presentWait, float posesWait, bool settled, float gpu, float app) {
+        if (settled && gpu > 0 && gpu < 500) { gpuSum += gpu; ++gpuCount; }
+        if (settled && app > 0 && app < 500) { appSum += app; ++appCount; }
+        const float thread = period - presentWait - posesWait;
+        if (thread > 0 && thread < 500) { threadSum += thread; ++threadCount; }
+    }
+    float gpuMs() const { return gpuCount ? float(gpuSum / gpuCount) : 0; }
+    float threadMs() const { return threadCount ? float(threadSum / threadCount) : 0; }
+    float cpuMs() const { return appCount ? float(appSum / appCount) : threadMs(); }
+};
+
 }  // namespace edvr

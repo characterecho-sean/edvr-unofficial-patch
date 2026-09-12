@@ -12,6 +12,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "binding_shadow.h"
+#include "screen_motion.h"
 
 namespace edvr {
 namespace {
@@ -652,6 +653,9 @@ bool panelCurveSubstitute(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw) {
         // our own thunk, and calling it here would recognise this composite
         // again and substitute again, without end.
         draw(ctx, g_indexCount, 1, 0, 0, 0);
+        const float shape[4]={kPi*g_builtCurvature,float(g_builtSegments),
+            kTowardViewer*float(g_builtSign)*g_builtGain,g_builtZTest};
+        screenMotionDraw(ctx,draw,g_indexCount,1,0,0,0,shape);
 
         restoreSaved(ctx);
 

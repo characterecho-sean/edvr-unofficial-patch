@@ -69,6 +69,12 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 
+// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
+// sixteen paired raw/treated left-eye crops, a whole treated overview,
+// and per-eye motion metadata in edvr_logs\eyes. The paired run is the
+// default; advanced.eye_run_paired=0 keeps the older single-run selection.
+void temporalPassArmEyeDump();
+
 // The eye's offset from the head as the runtime last handed it to the pass
 // (metres, x toward the right), for the foveation's nasal shift. False
 // until a frame has been treated with a head delta and an offset: the
@@ -124,6 +130,13 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
 // composite's depth from the interface projection's encoding into the
 // scene's. False until a treat has run.
 bool temporalPassPlanes(float* nearZ, float* farZ);
+
+// The depth-buffer value the scene's own projection writes for a surface
+// this many metres away (the scene block's row when it has been read, else
+// the planes above in the same reversed-Z form); 0 when neither is known.
+// ui_depth writes a floating HUD stroke's core at one metre with it, so the
+// stroke sits inside the ship split and reprojects with the head alone.
+float temporalPassDepthAt(float metres);
 
 void temporalPassShutdown();
 

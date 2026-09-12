@@ -22,6 +22,7 @@
 #include "../common/log.h"
 #include "../common/proxy.h"
 #include "device_hook.h"
+#include "input_gate.h"
 
 extern "C" {
 extern void* edvr_realProcs_d3d11[];
@@ -567,6 +568,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             g_selfModule = module;
             DisableThreadLibraryCalls(module);
             loaderPhase();
+            edvr::inputGateInstallEarly();
             break;
 
         case DLL_PROCESS_DETACH:

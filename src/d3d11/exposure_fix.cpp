@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -1401,12 +1402,21 @@ void exposureConfigure(Config& cfg) {
     }
 }
 
+// Bumped after every registration, read by the memos before their lookup:
+// a memo that read the old count and then missed the map holds a zero,
+// which it asks again; one that read it and hit holds the answer the
+// registry had, and the next set sees the count move and asks again.
+static std::atomic<uint32_t> g_shaderGen{0};
+
 void registerShaderHash(void* shader, uint64_t hash) {
     if (!g_state || !shader || !g_state->lockReady) return;
     EnterCriticalSection(&g_state->lock);
     g_state->shaderHashes[shader] = hash;
     LeaveCriticalSection(&g_state->lock);
+    g_shaderGen.fetch_add(1, std::memory_order_release);
 }
+
+uint32_t shaderRegistryGeneration() { return g_shaderGen.load(std::memory_order_acquire); }
 
 void exposureFixFrameBoundary() {
     State* s = g_state;

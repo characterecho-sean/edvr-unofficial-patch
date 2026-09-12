@@ -58,6 +58,11 @@ void registerShaderHash(void* shader, uint64_t hash);
 // vertex and pixel shaders this way. 0 if never registered.
 uint64_t lookupShaderHash(void* shader);
 
+// How many registrations there have been: a memo of pointer -> hash asks
+// again when this moves, because a destroyed shader's address comes back as
+// another shader's (vscreen's shaderHashMemo, 2026-09-09).
+uint32_t shaderRegistryGeneration();
+
 // Called once per frame from Present. The pairing of first and second eye is
 // only meaningful within a frame.
 void exposureFixFrameBoundary();

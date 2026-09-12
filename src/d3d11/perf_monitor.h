@@ -56,15 +56,16 @@ void perfMonitorLastDropLine(char* buf, size_t bufLen);
 // One strip of the last `max` frames in milliseconds, oldest first, and the
 // display's frame budget (1000 / Hz, or 11.1 when the rate is unknown).
 // Returns how many. `which` picks what is plotted: the GPU frame the
-// compositor measured, or the render thread's own busy time -- fpsVR draws
+// compositor measured, or its app CPU time (render-thread fallback) -- fpsVR draws
 // the two as separate strips, and a frame over budget on one of them is a
 // different problem from a frame over budget on the other.
 enum PerfGraph { kGraphGpu = 0, kGraphCpu = 1, kGraphPeriod = 2 };
 int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 
 // The one-line readout for the head-locked overlay (menu.fps_overlay):
-// frame rate and time over the last second, the app's GPU time, and the
-// frames dropped in the last ten seconds. Needs nothing the slow samplers
+// frame rate over the last second, CPU/GPU over the menu's recent window,
+// and frames dropped in the last ten seconds. Without app timing the CPU
+// fallback is labelled "thread". Needs nothing the slow samplers
 // gather.
 void perfMonitorOverlayLine(char* buf, size_t bufLen);
 

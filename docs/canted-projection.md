@@ -4,7 +4,17 @@ Pimax headsets angle their two panels outward. Elite requires those users to
 turn **parallel projection** on, and it costs them roughly a third of their
 frame rate. This document records what that setting actually does — measured
 from outside the game, to four decimal places — what the game does wrong
-without it, and the shape of the fix that follows.
+without it, what was tried, and why the cost turns out to be **irreducible
+from outside the game**.
+
+**The conclusion, up front (2026-09-12):** parallel projection is close to
+the cheapest possible way to drive a canted headset from this game, because
+Elite rebuilds its projection from four tangent numbers and a rotation cannot
+pass through four numbers. Every route that avoids the cost has to make the
+game render in the panel's own rotated frame, and nothing the runtime can
+say to the game achieves that. Four field flights and one built-and-flown
+fix established this; the reasoning is in *What was tried*, so it is not
+re-derived.
 
 Everything below was measured through EDVR's `openvr_api.dll` proxy, which
 records what the game asks the VR runtime. No game file, game memory or game
@@ -141,50 +151,145 @@ about a dozen times a frame. Every Pimax owner would then turn parallel
 projection off and get 34% of their pixels back, and nothing else in the
 renderer would need to change.
 
-## What EDVR could do about it
+## What was tried, and why the cost is irreducible
 
-The rotation does not have to arrive through the channel the game ignores.
-`P · Reᵀ` is the same result, and a 4×4 can carry a rotation where four
-tangent floats mathematically cannot. EDVR already rewrites that 4×4 per eye,
-per frame, in `MatrixReceiver::GetProjectionMatrix` (`src/openvr/system_hook.cpp`)
-— the cull guard widens it and the temporal pass shifts it sub-pixel, and the
-rendered image demonstrably follows.
+The measurements above suggested a fix: the rotation does not have to arrive
+through the channel the game ignores. `P · Reᵀ` is the same result as applying
+the eye's rotation in the view, and a 4×4 can carry a rotation where four
+tangent floats cannot. EDVR already rewrites that 4×4 per eye, per frame, in
+`MatrixReceiver::GetProjectionMatrix`, and the cull guard's edits to it
+demonstrably reach the rendered image. Three experiments followed, in order,
+and each closed a door.
 
-The design the numbers point at:
+### 1. The separability probe — which call does the culler read?
 
-> **The bounded tangents to the culler, the canted matrix to the rasterizer.**
+`advanced.cull_guard_channel = raw | matrix` lies through one projection call
+and leaves the other true, touching nothing on the image path: no wider
+targets, no crop. Whatever moves is what that one call feeds. Flown on the
+8KX, parked on Shinrarta Dezhra A1 (2026-09-09), with `both` as the control:
 
-Fold `Reᵀ` into the 4×4 so the game rasterizes the *true* canted frustum, and
-report the wider bounded tangents — parallel projection's own numbers —
-through the raw thunk so the culler over-covers. A generous culler costs no
-fill, so the wide half is free. And because the runtime already recommends the
-smaller target with parallel projection off, the pixel saving arrives without
-touching `GetRecommendedRenderTargetSize` at all.
+| channel | lied to | terrain quads | the picture |
+|---|---|---|---|
+| `raw` | tangents only | no change | unchanged |
+| `matrix` | matrix only | no change | **visibly widened** |
+| `both` | both, plus wider targets and the crop | **covered** | unchanged, as designed |
 
-### The gates, before anyone builds it
+Two things were learned. **The rasterizer follows the matrix and ignores the
+tangents** — the only channel that moved the picture was the matrix. And
+**the culler follows neither call alone**; only the full guard, which changes
+both answers *and* the render target size, moved the quads. So there is no
+way to widen what the culler sees without also widening what is rendered:
+the idea of a cull guard that costs no pixels is dead, and stays dead.
 
-1. **Separability, which is phase 0.** Nobody has yet shown that the culler
-   reads the raw tangents while the renderer reads the matrix. The cull guard
-   always edited both together, deliberately, so it cannot tell them apart.
-   The experiment is to edit one channel only and watch whether the terrain
-   tiles move or the image does.
-2. **This would be the first deliberate disagreement between the two
-   channels.** `system_hook.cpp` states the opposite as policy — *"the game
-   must never see mixed answers within one frame"* — and the whole go-live
-   discipline is built around it. The canted fix needs them to differ on
-   purpose, which is a real departure and should be a conscious one.
-3. **Every pass must render through the runtime's matrix.** The frame census
-   shows several — the scene at ~300 draws an eye, a separate cockpit layer,
-   shadow maps. Any pass building its own projection from the tangents would
-   stay parallel while the main pass turns, and the layers would disagree.
-4. **Depth reconstruction.** A rotation makes clip-space depth depend on x and
-   y, so anything inverting depth with the canonical formula needs the
-   composition — Elite's own HBAO, and EDVR's temporal reprojection. That
-   composition is already written for canted panels in
-   `src/openvr/temporal_aa.cpp`, and has been a no-op on every flight so far
-   because neither of this project's headsets is canted.
-5. **Native SteamVR is untested.** The measurement above came through
-   OpenComposite → PimaxXR.
+(The `both` control differs from the split channels in three ways, not one,
+so "the culler wants both calls to agree" and "the culler follows the render
+target size" were never separated. It does not change either conclusion.)
+
+The probe also found, as a side effect, that the guard's stage-1 adoption
+test was keyed to the runtime's recommendation rather than to what the game
+actually submits, so it could never go live on any rig with HMD Quality below
+about 1.0. Fixed the same day (`sizeAdopted`); see the cull guard notes.
+
+### 2. The fold — `P · Reᵀ` handed to the game
+
+Built as `fix.canted_projection` (v0.14.1-49-g21b7d5f, reverted in
+8c26729, the code remains in history). Rotations fetched at a frame boundary
+and cached; the fold applied last in the receiver, over the true, widened or
+jittered frustum; six arithmetic cells around the sign, the mirror between
+eyes, and the identity on parallel panels.
+
+Flown on the 8KX with parallel projection off (2026-09-10). The plumbing
+worked — `canted projection LIVE: the eyes sit 10.00 and 10.00 degrees` — and
+the result was **a perfectly rendered, undistorted cockpit against a black
+world, with the two eyes horizontally offset from each other.** Not the
+predicted edge trimming. Everything beyond the canopy was gone.
+
+The explanation fits every earlier observation: **Elite does not render
+through the runtime's matrix. It reads the four tangent-carrying elements
+out of it and builds its own projection** — which is why the game's real
+render projection is infinite-far reversed-Z when the runtime's is not, and
+why the `matrix` channel widened the picture (it changed the *extracted*
+tangents, not the matrix the game drew with). A rotation lives in
+`m01 m10 m20 m21 m30 m31`, every one of which is zero in every projection the
+game has ever seen, and none of which survive a tangent extraction. What
+survives is a *corrupted* tangent pair: on the 8KX's numbers the true
+`l = −1.7422, r = +1.2616` extracts as roughly `l ≈ −2.03, r ≈ +1.16` —
+shifted a third of the way the cant needs, and 6% wider. That is the
+horizontal offset, exactly.
+
+So the matrix channel is the same wall as the raw one. Four numbers get
+through. A rotation is not four numbers.
+
+### 3. The remap — do what parallel projection does, but cheaper
+
+Parallel projection fixes the stereo entirely through the tangents, which is
+*why* it works on a game that ignores the eye rotation. Its 52% splits into
+two costs that can be measured separately from the 8KX's tangents:
+
+| | horizontal tangent span | cost |
+|---|---|---|
+| the true canted frustum | 3.0038 | — |
+| PP's horizontal remap into head space | 3.657 | ×1.217 |
+| PP's vertical padding | ×1.25 | ×1.52 in all |
+
+The remap is an exact rotation re-expressed as a frustum (the
+tangent-addition formula reproduces PP's numbers to every printed digit).
+The padding looked discretionary — so the plan was to report the remapped
+tangents ourselves, skip the padding, and warp the head-space render into
+the eye's frame at submit, for a cost of ×1.217 instead of ×1.52.
+
+Two things kill it. First, the warp is not optional either: with parallel
+projection off the runtime displays each submitted image straight onto its
+panel, expecting the eye's frame, so a head-space render lands 10° wrong
+per eye — the original divergence, reproduced. Second, and decisively,
+**the vertical padding is not discretionary.** A rotated frustum sampled
+from a head-space render needs source pixels above and below the rendered
+rectangle by a factor of `1 / (cos θ · (1 − x·tan θ))`, which grows toward
+the outer edge. On the 8KX:
+
+| column of the eye | factor | black at top and bottom with no padding |
+|---|---|---|
+| centre | 1.015 | ~2% |
+| halfway out | 1.113 | ~10% |
+| three-quarters out | 1.232 | ~19% |
+| the outer edge | 1.466 | ~32% |
+
+Without padding that is a black wedge along the top and bottom of the entire
+outer half of each eye. PP's own ×1.25 already leaves ~15% black at the
+extreme corners, which the lens evidently hides; anything less lands in view.
+Restore enough padding to avoid it and the cost is ×1.217 × 1.25 = **PP,
+exactly.** There is no middle that saves anything visible.
+
+### Why nothing else works either
+
+Every route that saves pixels has to make the game render in the panel's own
+rotated frame, so that the panel needs no covering from head space. The game
+will not do that from the eye transform (it discards the rotation), cannot be
+made to through the projection (only tangents survive), and cannot be told to
+through the pose (both eyes share one head pose and need opposite rotations).
+An OpenXR runtime with per-view pose and field of view could *submit* a
+canted view correctly, but the game would still have rendered head-space,
+which still has to cover the panel, which is the same padding and the same
+cost.
+
+The one route left is rewriting the game's per-eye view matrices in its own
+constant buffers from the D3D11 side — per draw, in every pass, with the
+CPU-side culler and the interface not following. That is the "too deep in
+the pipeline" answer the original question anticipated, and it is the
+correct one.
+
+### What the workstream produced instead
+
+- **The diagnosis**, which is complete and stands: Elite drops the eye
+  rotation, parallel projection is an exact rotation plus a bounding box,
+  and the box costs 52% per eye. That belongs on Frontier's tracker.
+- **The separability probe** stays in the build as a permanent diagnostic
+  (`advanced.cull_guard_channel`).
+- **The adoption fix**, a shipped-feature bug affecting anyone below HMD
+  Quality 1.0, found from a stall line most people would have scrolled past.
+- **A field method** — the parked spot, the same head sweep, one screenshot
+  per setting — that turned "practically random" terrain quads into a
+  readable instrument.
 
 ## Reproducing the measurement
 
@@ -218,6 +323,16 @@ PimaxXR (OpenXR Toolkit 1.3.2), EDVR v0.14.1 (build 6A9F3230), 2026-09-08.
 Headset FOV signature `112x116`. IPD ±0.0301 m, identical in both runs. Both
 sessions clean — no `INERT`, no refusal, no stand-down.
 
-With thanks to the owner, who ran it: neither of this project's own headsets
-has canted panels, and both report exactly 0.00°, so every cant-aware line in
-EDVR had never once been exercised against a real angle before this.
+The three later flights (2026-09-09 probe, 2026-09-09 probe rerun with the
+adoption fix, 2026-09-10 fold) were the same rig under **native SteamVR**
+(`launch centre: the runtime under this proxy reads as SteamVR (Valve's
+own)`), at FOV Wide with parallel projection on for the probes — signature
+`122x104`, tangents `l=-2.7692 r=+1.2616 t/b=±1.2698`, recommended
+5016×3160 — and parallel projection off for the fold. Logs and screenshots
+for every flight are attached to issue 24.
+
+With thanks to the owner, who ran all four: neither of this project's own
+headsets has canted panels, and both report exactly 0.00°, so every
+cant-aware line in EDVR had never once been exercised against a real angle
+before this — and the fold could only ever have been tested in his cockpit.
+The answer is a negative one, and it is his.
