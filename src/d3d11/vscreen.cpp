@@ -641,6 +641,9 @@ struct State {
     void*    camResource = nullptr;
     void*    camData = nullptr;
     uint32_t camBytes = 0;
+    void* scenePoolResource = nullptr;
+    void* scenePoolData = nullptr;
+    uint32_t scenePoolBytes = 0;
 
     // A third mapped-buffer shadow, for the constant-buffer peek. Separate
     // from the two above for the reason they are separate from each other:
@@ -2764,6 +2767,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                         kSlotExecuteCommandList, restoreContextState ? 1 : 0);
     }
     weaponStabilityResourceWritten(nullptr);
+    glitchFrameInvalidatePool(nullptr);
     s->realExecuteCommandList(self, list, restoreContextState);
     // After the call, and only when the context was not restored: with
     // RestoreContextState TRUE the bindings we recorded are put back, so
@@ -2852,6 +2856,20 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->camBytes = mm.byteWidth;
         }
     }
+    if(SUCCEEDED(hr) && mapped && mapped->pData && sub==0 && res){
+        const uint32_t bytes=glitchFrameWantsPool(res);
+        if(bytes){
+            // A resource address may be recycled. Verify the current mapping's
+            // extent instead of trusting the old nominated byte count.
+            D3D11_RESOURCE_DIMENSION kind{};res->GetType(&kind);
+            if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){
+                D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+                if(d.StructureByteStride==336 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)){
+                    s->scenePoolResource=res;s->scenePoolData=mapped->pData;s->scenePoolBytes=d.ByteWidth;
+                }
+            }
+        }
+    }
     // The peek target, independent of the chain above on purpose: the buffer
     // the sprite family reads may BE the composite's or the camera's, and a
     // peek must not steal either shadow's slot. Pointer compare only; the
@@ -2937,6 +2955,11 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         return;
     }
     weaponStabilityResourceWritten(res);
+    glitchFrameInvalidatePool(res);
+    if(res==s->scenePoolResource && s->scenePoolData){
+        guardedBudget(g_cameraBudget,[&]{glitchFrameObservePool(res,s->scenePoolData,s->scenePoolBytes);});
+        s->scenePoolResource=nullptr;s->scenePoolData=nullptr;s->scenePoolBytes=0;
+    }
     // The census CB watch reads the write BEFORE the real Unmap, exactly as
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
@@ -3255,7 +3278,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
-    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
+    if (!foreignContext(self)) {weaponStabilityResourceWritten(dst);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -3343,7 +3366,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
-    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
+    if (!foreignContext(self)) {weaponStabilityResourceWritten(dst);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -3364,7 +3387,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                UINT rowPitch, UINT depthPitch) {
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
-    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
+    if (!foreignContext(self)) {weaponStabilityResourceWritten(dst);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
                        nullptr, 0, box != nullptr,
@@ -3596,7 +3619,24 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             if(g_state->rtv0Eye && perInstance && instances &&
                glitchFrameWantsSceneDraw(bindingShaderHash(BindSlot::Vs))){
                 ID3D11Buffer* scene=nullptr;self->VSGetConstantBuffers(1,1,&scene);
-                if(scene){glitchFrameNoteSceneDraw(scene);scene->Release();}
+                if(scene){
+                    const bool sampled=glitchFrameNoteSceneDraw(scene);scene->Release();
+                    if(sampled){
+                        ID3D11ShaderResourceView* pool=nullptr;self->VSGetShaderResources(33,1,&pool);
+                        if(pool){
+                            ID3D11Resource* resource=nullptr;pool->GetResource(&resource);pool->Release();
+                            if(resource){
+                                D3D11_RESOURCE_DIMENSION kind{};resource->GetType(&kind);
+                                if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){
+                                    D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(resource)->GetDesc(&d);
+                                    if(d.StructureByteStride==336 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED))
+                                        glitchFrameNoteScenePool(resource,d.ByteWidth);
+                                }
+                                resource->Release();
+                            }
+                        }
+                    }
+                }
             }
             screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);

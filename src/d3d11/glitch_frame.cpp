@@ -399,6 +399,7 @@ struct RingEntry {
     float    pos[3];
     float    scenePos[3];
     bool     sceneValid;
+    GlitchSceneGeometry geometry;
 
     // THE CULL GUARD'S STATE while this frame was drawn, packed as the
     // channel carries it (frame_flag.h), zero when the guard was off.
@@ -738,6 +739,16 @@ struct State {
     uint32_t sceneDrawFrame=~0u;
     float sceneDrawPos[3]{};
     bool sceneDrawNoted=false;
+    struct ScenePool {
+        const void* resource=nullptr;
+        uint32_t bytes=0,lastBound=0;
+        glitch_scene_detail::Sample write,prev,older;
+    };
+    ScenePool scenePools[4];
+    GlitchSceneGeometry sceneGeometry;
+    uint32_t scenePoolFrame=~0u;
+    bool scenePoolNoted=false;
+    uint32_t scenePoolReadFrame=~0u,scenePoolReads=0,scenePoolCapped=0;
 
     RingEntry ring[kRingFrames] = {};
     uint64_t  ringHead = 0;
@@ -1978,7 +1989,59 @@ void recordScenePosition(RingEntry& e,const State* s){
     // Boundary advances frameNo before recording the frame just completed.
     e.sceneValid=s->sceneDrawFrame+1==s->frameNo;
     for(unsigned a=0;a<3;++a)e.scenePos[a]=s->sceneDrawPos[a];
+    e.geometry=s->scenePoolFrame+1==s->frameNo?s->sceneGeometry:GlitchSceneGeometry{};
 }
+}
+uint32_t glitchFrameWantsPool(const void* resource){
+    State* s=g_state;if(!s || !s->observing || !resource || s->scenePoolFrame==s->frameNo)return 0;
+    for(const auto& p:s->scenePools)if(p.resource==resource && s->frameNo-p.lastBound<=2)return p.bytes;
+    return 0;
+}
+void glitchFrameObservePool(const void* resource,const void* data,uint32_t bytes){
+    State* s=g_state;if(!s || !s->observing || !resource)return;
+    for(auto& p:s->scenePools)if(p.resource==resource){
+        if(s->scenePoolReadFrame!=s->frameNo){s->scenePoolReadFrame=s->frameNo;s->scenePoolReads=0;}
+        if(s->scenePoolFrame==s->frameNo || ++s->scenePoolReads>4){
+            p.write.valid=false;
+            if(s->scenePoolReads==5)++s->scenePoolCapped;
+            return;
+        }
+        if(bytes==p.bytes)glitch_scene_detail::readPool(p.write,data,bytes,s->frameNo);
+        else p.write.valid=false;
+        return;
+    }
+}
+void glitchFrameInvalidatePool(const void* resource){
+    State* s=g_state;if(!s)return;
+    for(auto& p:s->scenePools)if(!resource || p.resource==resource)p.write.valid=false;
+}
+void glitchFrameNoteScenePool(const void* resource,uint32_t bytes){
+    State* s=g_state;
+    if(!s || !s->observing || !resource || !bytes || bytes%glitch_scene_detail::kPoolStride ||
+       s->sceneDrawFrame!=s->frameNo || s->scenePoolFrame==s->frameNo)return;
+    uint32_t at=0;
+    for(uint32_t i=0;i<4;++i){
+        if(s->scenePools[i].resource==resource){at=i;break;}
+        if(!s->scenePools[i].resource){at=i;break;}
+        if(s->scenePools[i].lastBound<s->scenePools[at].lastBound)at=i;
+    }
+    auto& p=s->scenePools[at];
+    if(p.resource!=resource || p.bytes!=bytes){p=State::ScenePool{};p.resource=resource;p.bytes=bytes;}
+    p.lastBound=s->frameNo;s->scenePoolFrame=s->frameNo;s->sceneGeometry={};
+    if(p.write.valid && p.write.frame==s->frameNo){
+        for(unsigned a=0;a<3;++a)p.write.camera[a]=s->sceneDrawPos[a];
+        s->sceneGeometry=glitch_scene_detail::compare(p.write,p.prev,p.older);
+        p.older=p.prev;p.prev=p.write;
+        if(!s->scenePoolNoted){s->scenePoolNoted=true;Log::get().note(
+            "transition flash: bound-pool coherence recording before Submit; "
+            "128 sampled records, at most 4608 bytes read per observed pool write, "
+            "at most four reads before the first claimed draw per frame, "
+            "no GPU copy or readback. Pause reports camera/pool steps and relative "
+            "motion. Observation only; missing pairs report matched=0.");}
+    }
+}
+GlitchSceneGeometry glitchFrameSceneGeometry(){
+    State* s=g_state;return s && s->scenePoolFrame==s->frameNo?s->sceneGeometry:GlitchSceneGeometry{};
 }
 void glitchFrameBoundary(uint32_t eyeDraws) {
     State* s = g_state;
@@ -2015,14 +2078,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // because a history is the whole reason to run with it off: nothing withheld
     // means anything seen was somebody else's.
     if (!s->enabled) {
-        if (s->frameFarMag2 >= 0.0f) {
+        if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
             RingEntry& e = s->ring[s->ringHead % kRingFrames];
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
             ++s->ringHead;
         }
@@ -2105,14 +2168,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // flash produced the ten seconds before the fix gave up, minutes
         // earlier, with nothing saying so. That is worse than an empty dump: the
         // frames looked plausible and described a completely different moment.
-        if (s->frameFarMag2 >= 0.0f) {
+        if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
             RingEntry& e = s->ring[s->ringHead % kRingFrames];
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
             ++s->ringHead;
         }
@@ -2405,14 +2468,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
 
     // Record the frame, whether or not anything was wrong with it. The value of
     // the history is the frames either side of an event, not the event alone.
-    if (s->frameFarMag2 >= 0.0f) {
+    if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
         RingEntry& e = s->ring[s->ringHead % kRingFrames];
         e.qpc = static_cast<uint64_t>(qpcNow());
         e.frame = s->frameNo;
         e.eyeDraws = eyeDraws;
         e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
-        for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+        for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
         recordScenePosition(e,s);
         ++s->ringHead;
     }
@@ -2595,6 +2658,9 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
         if(e.sceneValid)Log::get().note("    f%u scene=(%+.2f %+.2f %+.2f) [bound VS b1]",
             e.frame,e.scenePos[0],e.scenePos[1],e.scenePos[2]);
         else Log::get().note("    f%u scene=unavailable [no fresh recognised eye draw]",e.frame);
+        const auto& g=e.geometry;
+        Log::get().note("    f%u geometry matched=%u predicted=%u cameraStep=%.3f poolStep=%.3f relativeMedian=%.3f relativeP90=%.3f predictionP90=%.3f",
+            e.frame,g.matched,g.predicted,g.cameraStep,g.poolStep,g.relativeMedian,g.relativeP90,g.predictionP90);
     }
     // WAS ANY OF THIS OURS? The question every one of these dumps has been
     // opened to answer, worked out by hand every time.
@@ -2706,6 +2772,7 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
                 s->shellEvictedCertified);
         }
     }
+    Log::get().note("--- bound-pool coherence: %u frame(s) exceeded the four-write sampling cap; unavailable pairs stay matched=0. Observation only. ---",s->scenePoolCapped);
     Log::get().note("--- end camera history ---");
 }
 

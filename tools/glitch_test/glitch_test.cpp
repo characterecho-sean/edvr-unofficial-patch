@@ -1749,6 +1749,61 @@ int main(int argc, char** argv) {
         sceneBuffer.setPos(0,0,0);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
         check("diagnostic preserves an origin at zero",glitchFrameNoteSceneDraw(sceneBuffer.res,sampled) && sampled[0]==0 && sampled[2]==0);
     }
+    // The geometry observation must distinguish a shared origin change
+    // from a camera displaced relative to its objects, without deciding
+    // either case. Production observes the pool before Unmap and claims
+    // the fresh write at the recognised eye draw, before either Submit.
+    {
+        advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();
+        constexpr unsigned count=glitch_scene_detail::kSamples;
+        uint32_t pool[count*84]{};
+        const void* resource=reinterpret_cast<const void*>(0x123456);
+        Buffer scene;
+        auto positions=[&](float offset){
+            for(unsigned i=0;i<count;++i){
+                auto* p=pool+i*84;p[0]=0;p[1]=0x3f800000;p[2]=0x7fff7fff;p[3]=0xffff7fff;p[7]=i+1;
+                float v[3]={1000.f+offset+i*2,200.f+i,300.f};memcpy(p+4,v,sizeof(v));
+            }
+        };
+        auto begin=[&](float camera,bool write=true){
+            if(write)glitchFrameObservePool(resource,pool,sizeof(pool));
+            scene.setPos(camera,0,0);glitchFrameObserve(scene.f,kBytes,scene.res);
+            glitchFrameNoteSceneDraw(scene.res);
+        };
+        auto end=[&](){advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();};
+        positions(0);begin(1000);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("pool observation waits for a write after nomination",glitchFrameSceneGeometry().matched==0);
+        check("pool reads stop after the first claimed eye draw",glitchFrameWantsPool(resource)==0);end();
+        check("only the nominated pool is watched on the next frame",glitchFrameWantsPool(resource)==sizeof(pool) && glitchFrameWantsPool(nullptr)==0);
+        positions(1);begin(1001);glitchFrameNoteScenePool(resource,sizeof(pool));end();
+        positions(2);begin(1002);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("fresh same-frame pool pair is compared",glitchFrameSceneGeometry().matched==count);end();
+        positions(5002);begin(6002);const bool marked=glitchFrameMarked();glitchFrameNoteScenePool(resource,sizeof(pool));
+        auto g=glitchFrameSceneGeometry();
+        check("a shared 5 km origin move cancels in camera-relative geometry",g.matched==count && g.predicted==count && g.cameraStep==5000 && g.poolStep==5000 && g.relativeP90<.001f && g.predictionP90<.001f);
+        check("geometry observation cannot excuse a marked frame",glitchFrameMarked()==marked);end();
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));g=glitchFrameSceneGeometry();
+        check("camera-only placement error remains visible after an origin move",g.matched==count && g.relativeP90>13.5f && g.predictionP90>13.5f);end();
+        pool[7]=0x7654321;begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("reused pool slots do not acquire old geometry identity",glitchFrameSceneGeometry().matched==count-1);end();
+        begin(6015.54f,false);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("an old pool write is not a current observation",glitchFrameSceneGeometry().matched==0);end();
+        begin(6015.54f);glitchFrameInvalidatePool(resource);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("an unobserved overwrite invalidates the pending pool sample",glitchFrameSceneGeometry().matched==0);end();
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("missing frame pairs are explicitly unavailable",glitchFrameSceneGeometry().matched==0);end();
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("pool observation recovers after consecutive fresh frames",glitchFrameSceneGeometry().matched==count);end();
+        for(unsigned i=0;i<count;++i)pool[i*84]=1;
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("skinned records do not masquerade as rigid geometry",glitchFrameSceneGeometry().matched==0);end();
+        positions(5002);begin(6015.54f);
+        for(unsigned i=0;i<4;++i)glitchFrameObservePool(resource,pool,sizeof(pool));
+        glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("the read budget refuses stale data after too many writes",glitchFrameSceneGeometry().matched==0);end();
+        for(unsigned i=0;i<3;++i){begin(6015.54f,false);end();}
+        check("unbound pool watches expire",glitchFrameWantsPool(resource)==0);
+    }
     clearGlitchFrame();
     shutdownGlitchFrameFix();
 

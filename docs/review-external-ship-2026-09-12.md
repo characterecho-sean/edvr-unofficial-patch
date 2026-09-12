@@ -532,6 +532,123 @@ passes, and the mesh-history regression also passes all 1,109 checks on
 the hardware adapter. The corresponding build, smoke and hardware logs
 are retained in the same ignored analysis directory.
 
+## Normal flight above a planet, 16:51 flight
+
+Both DLLs in the new session verify as `83dbf3f`. The user reports
+occasional flickers and confirms ordinary flight in normal space above a
+planet, without supercruise, system jumps or map changes. Pause was
+pressed at 16:53:26. The graphics and VR logs agree on six withheld
+frames before the press, in three pairs. The two histories cover 1,380
+unique frames, 12801 through 14180; every frame has a fresh bound-scene
+sample. Four of the six withholds are inside that interval.
+
+- Frames 13382/13383, about 6.86 seconds before Pause: the legacy camera
+  changes by 6,860 units, but the bound scene moves only 4.65 and 4.95
+  units, with prediction residuals of 0.53 and 0.31. This is a
+  render-pass switch, not movement of the rendered scene.
+- Frames 13732/13733, about 2.97 seconds before Pause: the legacy camera
+  changes by 11,817 units while the bound scene moves from
+  `(-2893.74,3595.04,-2011.31)` to `(-17.26,30.84,-11.10)`, a 4,998-unit
+  origin change. The following frame resumes the ordinary 4.50-unit
+  step. The user explicitly rules out a transition at this event.
+- The earlier pair, 12754/12755, is outside both histories. Its decision
+  log reports a roughly 5,000-unit change, and the independent object
+  probe reports a 4,955 m origin move just afterward. The bound scene
+  values for that pair were not retained, so it cannot be reconstructed
+  as completely as the later pairs.
+
+Ruled out: these six withholds being a failure of the newly retained
+certified starting value. At Pause none of the five separation entries
+has earned three marks; there are no evictions or relearns. The
+remaining false detections include the initial learning cost and
+legitimate origin changes, not just destructive forgetting of
+certification.
+
+Ruled out as a complete fix: using only continuity of `scene[275]` to
+excuse the frame. It identifies the camera-switch pair, but the later
+normal-flight rebase also changes that value by about 5 km. Conversely,
+the original real-transition capture in `docs/transition-flash.md`
+changes its dominant eye camera from 885 units to zero to 59, while an
+auxiliary camera provides the large excursion. A broad continuity
+threshold on the bound origin could silence a real flash.
+
+The same installed build can supply the missing actual-transition
+comparison. No additional DLL or INI change is needed to capture it.
+Read-only analysis and parsed frame histories are retained under
+`build/review_motion/sep12/flight1650/`; raw logs are local artifacts.
+
+### Clean transition comparison and reproducible high-wake flash
+
+The next session, 17:00, also verifies both DLLs as `83dbf3f`. The user
+captured a real transition, pressed Pause and reports that it looked
+clean. Frames 15185/15186 were replaced in both eyes, about 0.4 seconds
+before the press. The bound scene origin changes from
+`(-549.07,-3255.48,2429.53)` to `(-0.03,-0.01,0.06)`, then
+`(1.29,-11.73,6.71)`. The first step is about 4.1 km; the next is 13.54
+m. The raw appearance of those replaced frames was not captured, so this
+establishes a clean treated transition, not a direct image of its bad
+frame. An earlier 5 km rebase in the same history again cost two frames.
+
+The user subsequently reports a reliably visible flash on high wake.
+That is the outstanding failure case; the clean transition above does
+not establish that high wake is handled. Do not claim the transition
+flash request is fixed.
+
+The camera position alone cannot establish whether an origin rewrite was
+coherent with the geometry. A bounded read-only pool observation now
+accompanies the same recognised eye draw. It samples the first 128
+records of the structured pool actually bound at VS t33, retaining rigid
+records with matching slot identities and scale across successive
+frames. It reports camera and median object steps,
+median/90th-percentile camera-relative steps, and the 90th-percentile
+change in relative step over three frames. These are pool-population
+measurements, not proof that every sampled record was visible or that
+its geometry was unchanged.
+
+A shared coordinate translation cancels in `object position - scene
+origin`, the subtraction in the captured mesh shaders. A
+camera-placement error relative to those objects remains. Measuring both
+cases during normal flight and a visible high-wake flash is the next
+discriminator. No decision, threshold, learned separation or live
+setting changes in this diagnostic build.
+
+The feed reads before the game's Unmap, requires a current-frame write,
+and is claimed before Submit. Unobserved copies, updates and command
+lists invalidate the pending sample; missing or invalid pairs explicitly
+report zero matches. Buffer type, structure stride and current extent
+are checked before reading, including when a resource address is reused.
+The four-resource watch expires after two unbound frames. Reads stop
+after the first claimed eye draw and are capped at four per frame; the
+Pause report includes the number of capped frames. There is no GPU copy,
+readback, new dispatch or full-pool CPU copy. Near-zero bound-scene
+frames are also retained when the legacy detector found no world camera;
+their legacy position is reported as NaN rather than a stale previous
+value.
+
+The focused regression verifies nomination, freshness, shared 5 km
+rebasing, a 13.54 m camera-only offset, identity changes, missing
+frames, unobserved overwrites, skinned-record rejection, watch expiry
+and the read cap. It also verifies that observing geometry cannot
+withdraw a marked frame. Every existing transition-detector test still
+passes.
+
+An independent replay of three actual `161657` mesh snapshots matches
+all 128 sampled records. The 90th-percentile camera-relative steps are
+0.000520 and 0.000372 m; the three-frame prediction residual is 0.000307
+m. A hardware WRITE_DISCARD mapping benchmark measures about 33.2
+microseconds per sample, or 0.133 ms at the four-read cap. That is the
+read/decode cost, not a measurement of total in-game frame overhead. The
+scene query and small population comparison also run. Local replay and
+benchmark artifacts are retained in the same analysis directory.
+
+The complete absolute-path worktree build passes, including the existing
+rendering regressions and 252-key configuration contract. The NVIDIA DLL
+smoke test also passes. Tracing the hook code confirms that the sample
+is claimed on the owner context after the original recognised draw and
+before Submit; success emits the new bound-pool note, while absent or
+stale data produces zero matches in the Pause history. The high-wake
+field comparison remains outstanding.
+
 ### Earlier diagnostic validation
 
 The GPU snapshot test and Python reader jointly verify three consecutive

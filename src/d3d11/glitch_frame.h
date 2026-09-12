@@ -18,6 +18,8 @@
 // already filled and writes nothing to it. No game code is modified.
 #pragma once
 
+#include "glitch_scene.h"
+
 namespace edvr {
 // Registered by vscreen at install: the arrival-mono frame count (0 = off)
 // and whether the scanner's chrome drew recently. Unregistered = off.
@@ -44,6 +46,15 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
 // furthest-camera history; this does not change the withhold decision.
 bool glitchFrameWantsSceneDraw(uint64_t vertexShaderHash);
 bool glitchFrameNoteSceneDraw(const void* resource, float* sampledPosition = nullptr);
+
+// The bounded geometry cross-check follows the pool actually bound at that
+// same draw. Writes are read before Unmap; missing/overwritten data stays
+// explicitly unavailable. These functions never change the frame decision.
+void glitchFrameNoteScenePool(const void* resource, uint32_t bytes);
+uint32_t glitchFrameWantsPool(const void* resource);
+void glitchFrameObservePool(const void* resource, const void* data, uint32_t bytes);
+void glitchFrameInvalidatePool(const void* resource);
+GlitchSceneGeometry glitchFrameSceneGeometry();
 
 // Called once per frame, after Present. eyeDraws is the number of draws that
 // reached the eye textures in the frame just finished -- used to tell a rendered
