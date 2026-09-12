@@ -348,7 +348,8 @@ REM there runs its DllMain under the loader lock.
 python "tools\gen_exports.py" --source "%OPENVR_SRC%" ^
     --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy ^
     --extra-export edvr_selftest_system_hook ^
-    --extra-export edvr_selftest_cull_guard
+    --extra-export edvr_selftest_cull_guard ^
+    --extra-export edvr_selftest_cull_adopt
 if errorlevel 1 ( echo [edvr] ERROR: openvr export generation failed & exit /b 1 )
 
 REM The lazy shim MUST carry unwind info.
