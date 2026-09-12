@@ -22,9 +22,11 @@ StructuredBuffer<Instance> Pool:register(t0);
 StructuredBuffer<Bone> Bones:register(t1);
 cbuffer Camera:register(b0){float4 camera[276];}
 cbuffer Emitter:register(b1){float4 emitter[13];}
+cbuffer LightCamera:register(b2){float4 lightCamera[14];}
 RWStructuredBuffer<Instance> Fixed:register(u0);
 RWStructuredBuffer<float4> Anchor:register(u1);
 RWStructuredBuffer<float4> EmitterFixed:register(u2);
+RWByteAddressBuffer LightFixed:register(u3);
 groupshared float distances[64];
 groupshared uint indices[64],partners;
 float3 position(Instance r){return asfloat(r.row[1].xyz);}
@@ -104,6 +106,24 @@ bool root(uint i,uint nb) {
         float4 r=emitter[i];if(valid && i>=9 && i<12)r.w+=Anchor[0][i-9];
         EmitterFixed[i]=r;
     }
+}
+// 05:21:41: the separate point light adds the upper pink fleck. Its
+// placement is scaled about the OLD arms origin, so translating that
+// origin requires the full mesh delta, even though its radius/projection
+// use world units. Preserve the packed light payload and radius exactly.
+[numthreads(64,1,1)]void applyLights(uint id:SV_DispatchThreadID) {
+    uint bytes;LightFixed.GetDimensions(bytes);if(id>=bytes/32)return;
+    float4 p=asfloat(LightFixed.Load4(id*32));
+    float3 eye=float3(lightCamera[6].w,lightCamera[7].w,lightCamera[8].w);
+    float3 d=p.xyz-Anchor[1].xyz;
+    bool valid=Anchor[0].w>0 && all(isfinite(p)) && all(isfinite(eye)) &&
+        all(abs(eye-camera[275].xyz)<1e-5) &&
+        abs(lightCamera[12].w-.025)<1e-7 &&
+        all(abs(float3(dot(lightCamera[2].xyz,lightCamera[2].xyz),dot(lightCamera[3].xyz,lightCamera[3].xyz),dot(lightCamera[4].xyz,lightCamera[4].xyz))-1)<.001) &&
+        all(abs(float3(dot(lightCamera[2].xyz,lightCamera[3].xyz),dot(lightCamera[2].xyz,lightCamera[4].xyz),dot(lightCamera[3].xyz,lightCamera[4].xyz)))<.001) &&
+        dot(cross(lightCamera[2].xyz,lightCamera[3].xyz),lightCamera[4].xyz)>.999 &&
+        dot(d,d)<1 && p.w>0 && p.w<=.1;
+    if(valid)LightFixed.Store3(id*32,asuint(p.xyz+Anchor[0].xyz));
 }
 )HLSL";
 }

@@ -434,3 +434,82 @@ UI, 213 holo-motion, 32,899 screen-motion and 524 weapon checks. The
 capture fixture verifies the new writer/parser and exact HDR crop bytes.
 No rendering fix for the remaining flicker is claimed from these tests;
 the additional draw-time evidence still requires a flight.
+
+## Flight 05:19: point-light fleck and stationary night vision
+
+Verified v0.15.1-37-g20aeb79, build 6AA5346C. Capture 052141 has 19
+complete source frames and 114 complete effect snapshots, with ten
+before/after HDR images and no declines. The second 0357BBB2DEE43C1F
+point-light batch (PS 81812EF97FB4A361, snapshot 62, 201 instances) adds
+the thin upper pink highlight: 10,534 changed pixels in the saved crop.
+The 9AEC particle draw adds the separate interior glow.
+
+Ruled out: spotlights, the first 512-point-light batch and E904 streaks
+cause the captured upper fleck; each changes zero pixels in this crop.
+Ruled out: scaling the light's root correction by the projection ratio.
+The light uses world near 0.025 while the weapon uses 0.0675, but its
+position is scaled about the original arms origin, not the camera.
+Undoing that scale about the arms leaves its emitter-local offset stable
+within 0.75 mm across all 19 frames. Scaling about the camera instead
+produces a 34 mm jump. The required root translation is the full mesh
+translation; range and colour must remain unchanged.
+
+Each frame contains exactly one small light in the attachment volume,
+with radius 0.025925925 m. The next closest light is over 13 m away. Its
+batch index changes, so neither index nor colour identifies it. Apply
+the existing validated arms correction to small local lights in a
+private instance stream, gated by the verified shader pair and matching
+light/mesh camera. Preserve world lights, all non-position fields and
+the original buffer. This remains part of fix.weapon_stability.
+
+Capture 052339 shows night vision at 2862x2826 input and 4404x4348
+output. The user confirms blur even with head and ship stationary. The
+only additional pixel-shader hash relative to the earlier cockpit census
+is F786D34B5E118D5E with VS FCF7BD2896751D96, draw DC0 #525. It samples
+scene depth and normals, including configurable pixel-block quantization
+and an unconditionally quantized centre-normal tap. It does not sample
+scene colour. Its actual PS b2 is not in this capture; do not assume the
+configured block size or change the effect from shader disassembly
+alone. Check source/output crops and coverage next, then capture the
+missing constants and pass contribution if needed.
+
+Evidence: build/review_motion/sep12/flight0519/. Environment remains
+SteamVR/OpenVR; headset model is not established by the log. Weapon
+correction runs before AA and does not change runtime reprojection.
+
+Original 0357 VS stream-output replay passes for both point-light
+batches in all 19 frames (2,849,237 checks). The independent expected
+stream translates only the identified weapon light. Every other light
+and every radius/packed payload byte stays unchanged. Shader outputs
+match exactly. The 823-check production regression covers
+projection/camera mismatch, freshness, byte ranges, state restoration,
+the live toggle and allocation reuse. The bounded private buffer grows
+to capacity and does not shrink between the alternating 512/201-light
+batches.
+
+Ruled out: the UI mask or fixed DLSS bias spreads onto the night-vision
+terrain. The sampled terrain ROI is zero in UI, Bias and UiEdits. The
+captured camera dimensions are also exactly 2862x2826 with matching
+reciprocals. The user has not yet compared night vision with AA Off.
+
+Add the exact night-vision shader pair to drawstate capture. For this
+pair, slot 1 captures PS b1 instead of unused VS b1; slot 3 remains PS
+b2. Save its before/after HDR contribution in a central native
+1024-square terrain crop during the first watched frame, within the
+existing 64 MiB effect budget. The completion log reports zero matches
+distinctly from complete constants/images. The GPU fixture and reader
+check original PS bindings, crop coordinates, exact packed pixels,
+later-frame limits and shader exports. These are diagnostic copies
+during an armed dump; night-vision rendering itself has not changed.
+
+Next flight: verify crouching with weapon stability enabled; capture
+night vision with DLSS and AA Off from the same stationary cockpit view.
+The comparison and actual night-vision constants distinguish effect
+sampling from temporal reconstruction without tuning sharpness blindly.
+
+The full SDK build and NVIDIA DLL smoke test pass. The capture fixture
+caught the parser's old lower-right-only validation; it now accepts the
+exact night-vision pair and its central crop while retaining bounds and
+format checks. The complete fixture, Python gates, 20,924 UI checks, 213
+hologram checks, 32,905 screen-motion checks and 823 weapon checks pass
+on the final source.

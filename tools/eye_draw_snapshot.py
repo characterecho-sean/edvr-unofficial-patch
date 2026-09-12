@@ -2,6 +2,8 @@
 """Read drawstate_HHMMSS.bin from an eye run (eye_draw_snapshot.h).
 
 Each draw preserves VS b0/b1/b2 and PS b2 at the draw, before buffer reuse.
+For night vision (FCF7BD2896751D96/F786D34B5E118D5E), buffer 1 holds
+PS b1 instead of the unused VS b1: its actual screen/camera constants.
 Version 2 preserves draw start/base and bounded HUD/sprite VB0/VB1/IB
 payloads. Version 3 copies around the draw's base/start and records each
 capture_offset separately from its binding offset, for the first three
@@ -17,6 +19,8 @@ vertex and instance streams can be decoded without guessing their packing.
 Version 6 appends before/after source-effect colour crops, keyed to the
 exact draw. These are native pixels from the lower right (up to 1024 square),
 not whole images. Original target size, crop origin and HDR format are kept.
+Night-vision crops use the same records with a central terrain crop;
+always use the saved origin rather than assuming a corner.
 
 On-foot source records use ordinal UINT32_MAX. Their DSV is copied when
 the screen composite runs, alongside its source colour; depth surfaces
@@ -141,9 +145,12 @@ def read(path):
             bpp = {10: 8, 26: 4, 28: 4, 29: 4}.get(e['format'], 0)
             expected = e['width'] * e['height'] * bpp
             total += expected
-            if (e['draw'] >= nd or draws[e['draw']]['ordinal'] != 0xfffffffd or e['after'] > 1 or
+            night = e['draw'] < nd and (draws[e['draw']]['vs'], draws[e['draw']]['ps']) == (0xFCF7BD2896751D96, 0xF786D34B5E118D5E)
+            origin = ((e['x'],e['y']) == ((e['source_width']-e['width'])//2,(e['source_height']-e['height'])//3) if night else
+                      (e['x']+e['width'],e['y']+e['height']) == (e['source_width'],e['source_height']))
+            if (e['draw'] >= nd or (not night and draws[e['draw']]['ordinal'] != 0xfffffffd) or e['after'] > 1 or
                     not 0 < e['width'] <= 1024 or not 0 < e['height'] <= 1024 or
-                    e['x'] + e['width'] != e['source_width'] or e['y'] + e['height'] != e['source_height'] or
+                    not origin or e['x']+e['width']>e['source_width'] or e['y']+e['height']>e['source_height'] or
                     not bpp or total > 64*1024*1024 or e['size'] not in (0, expected)):
                 raise ValueError('Invalid effect image descriptor')
             e['data'] = take(e['size'])
@@ -362,6 +369,15 @@ def main():
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
             expected = (15<<6) | ((14<<6)<<11) | ((13<<5)<<22) if i == 0 else ((15<<5)<<22)
             assert all(v[0] == expected for v in struct.iter_unpack('<I',e['data'])), 'Effect crop timing or HDR copy differs'
+        night = read(str(a.path)+'.night')
+        assert night['version'] == 6 and night['failures'] == 0 and len(night['draws']) == 2
+        assert len(night['effect_images']) == 2 and night['effect_image_declined'] == 0
+        d = night['draws'][0]
+        assert d['vs'] == 0xFCF7BD2896751D96 and d['ps'] == 0xF786D34B5E118D5E
+        assert len(d['buffers'][1]['data']) == 192 and d['buffers'][1]['data'] == d['buffers'][3]['data'], 'Night-vision PS camera/settings were not copied at the draw'
+        for i,e in enumerate(night['effect_images']):
+            assert (e['draw'],e['after'],e['x'],e['y'],e['width'],e['height'],e['format']) == (0,i,1,1,1024,1024,26)
+            assert e['data'] == crops['effect_images'][i]['data'], 'Night-vision before/after HDR pixels differ'
         print('GPU draw snapshot fixture passed')
         return
     print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],

@@ -136,6 +136,16 @@ int wmain(int argc, wchar_t** argv) {
     cropSnap.effectImageBytes=edvr::EyeDrawSnapshot::kEffectImageBudget;
     cropSnap.captureSourceMesh(ctx.Get(),400,0x359BF8FF5CFAA4C3ull,0,'X',6,1,0,0,0);cropSnap.captureEffectEnd(ctx.Get());
     check(cropSnap.effectImageDeclined==1,"effect image budget decline visible without unmatched end capture");
+    edvr::EyeDrawSnapshot night;
+    ctx->PSSetConstantBuffers(1,1,&b);
+    ctx->ClearRenderTargetView(cropRt.Get(),cropBefore);
+    night.capture(ctx.Get(),500,17,edvr::EyeDrawSnapshot::kNight,edvr::EyeDrawSnapshot::kNightPs,'X',240,1,0);
+    ctx->ClearRenderTargetView(cropRt.Get(),cropAfter);night.captureEffectEnd(ctx.Get());
+    check(night.draws.size()==1 && night.effectImages.size()==2,"stereo night-vision pass captures constants and contribution");
+    check(night.draws[0].source[1]==reinterpret_cast<uint64_t>(b) && night.draws[0].copied[1]==192,"night-vision captures actual PS b1, not unused VS b1");
+    check(night.effectImages[0].x==1 && night.effectImages[0].y==1 && night.effectImages[1].x==1 && night.effectImages[1].y==1,"night-vision crop is centred and identical before/after");
+    night.capture(ctx.Get(),501,17,edvr::EyeDrawSnapshot::kNight,edvr::EyeDrawSnapshot::kNightPs,'X',240,1,0);night.captureEffectEnd(ctx.Get());
+    check(night.draws.size()==2 && night.effectImages.size()==2,"later night-vision frames retain constants without more image copies");
     ctx->OMSetRenderTargets(1,&r,nullptr);
     ID3D11Buffer* noBuffer=nullptr;UINT zero=0;ctx->IASetVertexBuffers(1,1,&noBuffer,&zero,&zero);ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_R16_UINT,0);
     edvr::EyeDrawSnapshot vscreenSnap;
@@ -218,17 +228,19 @@ int wmain(int argc, wchar_t** argv) {
     check(vscreenSnap.failures==0,"on-foot capture completed without missing copies");
     check(effects.write(ctx.Get(),(std::wstring(argv[1])+L".effects").c_str()) && effects.failures==0,"effect snapshot writes complete GPU copies");
     check(cropSnap.write(ctx.Get(),(std::wstring(argv[1])+L".crops").c_str()) && cropSnap.failures==0,"effect colour crop write");
+    check(night.write(ctx.Get(),(std::wstring(argv[1])+L".night").c_str()) && night.failures==0,"night-vision draw-time data writes without missing copies");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHud, shaderBytes, sizeof(shaderBytes));
-    for(uint64_t hash:{edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,edvr::EyeDrawSnapshot::kScene})
+    for(uint64_t hash:{edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,edvr::EyeDrawSnapshot::kScene,edvr::EyeDrawSnapshot::kNight,edvr::EyeDrawSnapshot::kNightPs})
         edvr::EyeDrawSnapshot::rememberShader(hash,shaderBytes,sizeof(shaderBytes));
     std::wstring directory = argv[1]; directory.resize(directory.find_last_of(L"\\/"));
     check(gui.write(ctx.Get(),(std::wstring(argv[1])+L".gui").c_str(),directory.c_str()),"GUI source snapshot write");
     check(gui.failures==0 && gui.missingLayouts==0 && gui.declined==0,"GUI source payloads and layout complete");
     check(snap.writeShaders(directory.c_str()) == 0, "retained shader write");
     check(vscreenSnap.writeShaders(directory.c_str())==0,"on-foot vertex and pixel shader writes");
+    check(night.writeShaders(directory.c_str())==0,"night-vision vertex and pixel shader writes");
     const std::wstring shaderPath = directory + L"\\vs_81216C77F90DEDD6.dxbc";
     FILE* shader = nullptr; check(_wfopen_s(&shader, shaderPath.c_str(), L"rb") == 0, "shader file");
     char saved[sizeof(shaderBytes)] = {};

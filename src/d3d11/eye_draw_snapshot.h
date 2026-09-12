@@ -32,6 +32,7 @@ public:
     static constexpr uint64_t kPanel=0xA888D51024D9798Eull,kScreen=0x4EF6DDB075A927FAull;
     static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
     static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
+    static constexpr uint64_t kNight=0xFCF7BD2896751D96ull,kNightPs=0xF786D34B5E118D5Eull;
     // 20:02:56 crouching rifle: these source passes use independent
     // billboard/flare vertices, not the weapon's t33 instance records.
     // Capture their placement; do not infer attachment from proximity.
@@ -88,6 +89,7 @@ public:
         case kPanel:
         case kScreen:
         case kVscreen:
+        case kNight: // 05:23:39 stationary night-vision terrain blur
         case 0xACE405F428C17EF6ull: // matching 2304/104448-index depth/colour draws
         case 0x72BDD292154158ADull:
         case 0x19F70CE80DA3242Bull: // sphere draw using cb0[9..11], cb1[270..273]
@@ -105,7 +107,7 @@ public:
         uint64_t vs = 0, ps = 0, target = 0;
         uint32_t frame = 0, ordinal = 0, kind = 0, count = 0, instances = 0, startInstance = 0;
         uint32_t width = 0, height = 0, texture = UINT32_MAX;
-        uint64_t source[4] = {}; // VS b0,b1,b2; PS b2
+        uint64_t source[4] = {}; // VS b0,b1,b2; PS b2 (night vision: PS b1 replaces unused VS b1)
         uint32_t whole[4] = {}, copied[4] = {};
         Buffer stage[4];
         uint32_t start=0;int32_t base=0;
@@ -153,7 +155,7 @@ public:
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && hash!=kVscreenPs) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && hash!=kVscreenPs && hash!=kNightPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -166,11 +168,12 @@ public:
         uint32_t missing = 0;
         std::map<uint64_t, bool> seen;
         for (const Draw& d : draws) {
-            if(d.vs==kVscreen && seen.emplace(kVscreenPs,true).second) {
-                const auto ps=shaders.find(kVscreenPs);
+            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:0);
+            if(pixel && seen.emplace(pixel,true).second) {
+                const auto ps=shaders.find(pixel);
                 if(ps==shaders.end())++missing;
                 else {
-                    wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\ps_%016llX.dxbc",directory,static_cast<unsigned long long>(kVscreenPs));
+                    wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\ps_%016llX.dxbc",directory,static_cast<unsigned long long>(pixel));
                     FILE* f=nullptr;
                     if(_wfopen_s(&f,path,L"wb") || !f)++missing;
                     else {bool ok=fwrite(ps->second.data(),1,ps->second.size(),f)==ps->second.size();if(fclose(f)!=0 || !ok)++missing;}
@@ -271,6 +274,10 @@ public:
         ID3D11Buffer* buffers[4] = {};
         ctx->VSGetConstantBuffers(0, 3, buffers);
         ctx->PSGetConstantBuffers(2, 1, buffers + 3);
+        if(vs==kNight && ps==kNightPs) {
+            if(buffers[1])buffers[1]->Release();buffers[1]=nullptr;
+            ctx->PSGetConstantBuffers(1,1,buffers+1);
+        }
         for (int i = 0; i < 4; ++i) {
             Buffer src; src.Attach(buffers[i]);
             if (!src) continue;
@@ -383,7 +390,8 @@ public:
             vertexDraws+=copied?1u:0u;
         }
         draws.push_back(std::move(d));
-        if(effect && effectImage(vs) && frame==firstFrame && rt) {
+        const bool night=vs==kNight && ps==kNightPs;
+        if(((effect && effectImage(vs)) || night) && frame==firstFrame && rt) {
             Microsoft::WRL::ComPtr<ID3D11Resource> res;rt->GetResource(&res);Texture tex;
             D3D11_RENDER_TARGET_VIEW_DESC rd{};rt->GetDesc(&rd);
             if(rd.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D && rd.Texture2D.MipSlice==0 && SUCCEEDED(res.As(&tex)))
@@ -464,6 +472,11 @@ private:
         // lies. Store the crop origin; never pass this off as a whole image.
         e.width=td.Width<1024?td.Width:1024;e.height=td.Height<1024?td.Height:1024;
         e.x=td.Width-e.width;e.y=td.Height-e.height;e.bytes=e.width*e.height*bpp;
+        // Night vision is a stereo scene pass. Its terrain is near the
+        // centre of the view; keep the rifle's lower-right crop unchanged.
+        if(draw<draws.size() && draws[draw].vs==kNight) {
+            e.x=(td.Width-e.width)/2;e.y=(td.Height-e.height)/3;
+        }
         if(!bpp || !e.bytes || td.SampleDesc.Count!=1 || td.ArraySize!=1 ||
            effectImages.size()>=32 || e.bytes>kEffectImageBudget-effectImageBytes) {
             ++effectImageDeclined;return UINT32_MAX;

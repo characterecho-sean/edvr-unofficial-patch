@@ -19,6 +19,10 @@ struct State {
     Ptr<ID3D11ComputeShader> emitterShader;
     Ptr<ID3D11Buffer> emitterOutput,emitterCb;
     Ptr<ID3D11UnorderedAccessView> emitterUav;
+    Ptr<ID3D11ComputeShader> lightShader;
+    Ptr<ID3D11Buffer> lightVertices;
+    Ptr<ID3D11UnorderedAccessView> lightUav;
+    unsigned lightBytes=0;
 } g;
 bool family(uint64_t vs) {
     return vs==0xF516BF0201303B87ull || vs==0x8B589D25B2A0ADDCull ||
@@ -106,6 +110,44 @@ bool particleDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,
     for(auto* p:cbs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
     ctx->VSSetConstantBuffers(0,1,g.emitterCb.GetAddressOf());draw(ctx,count,instances,start,base,startInstance);ctx->VSSetConstantBuffers(0,1,model.GetAddressOf());return true;
 }
+bool lightDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,unsigned start,int base,unsigned startInstance) {
+    if(bindingShaderHash(BindSlot::Ps)!=0x81812EF97FB4A361ull || count!=14 || start || base ||
+       g.sourceFrame!=g.frame || !g.poolView || !g.bonesView || !g.camera)return false;
+    Ptr<ID3D11Buffer> vertices,lightCamera;UINT stride=0,offset=0;
+    ctx->IAGetVertexBuffers(1,1,&vertices,&stride,&offset);ctx->VSGetConstantBuffers(2,1,&lightCamera);
+    if(!vertices || !lightCamera || stride!=32 || offset%4)return false;
+    D3D11_BUFFER_DESC vd{},cd{};vertices->GetDesc(&vd);lightCamera->GetDesc(&cd);
+    const uint64_t begin=uint64_t(offset)+uint64_t(startInstance)*32,bytes=uint64_t(instances)*32;
+    if(cd.ByteWidth<14*16 || instances>4096 || begin+bytes>vd.ByteWidth)return false;
+    if(!generate(ctx,g.poolView.Get(),g.bonesView.Get(),g.pool.Get(),g.bones.Get(),g.camera.Get(),g.bytes))return false;
+    if(!g.lightShader)g.lightShader.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"applyLights","weapon lights",nullptr,"weapon stability"));
+    if(!g.lightShader)return false;
+    if(g.lightBytes<bytes) {
+        g.lightVertices.Reset();g.lightUav.Reset();g.lightBytes=0;
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        // Batches alternate 512 and roughly 200 lights. Grow capacity,
+        // never allocate again just because the next batch is smaller.
+        UINT capacity=64*32;while(capacity<bytes)capacity*=2;
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=capacity;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER|D3D11_BIND_UNORDERED_ACCESS;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=DXGI_FORMAT_R32_TYPELESS;ud.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;ud.Buffer.NumElements=capacity/4;ud.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+        if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.lightVertices)) || FAILED(dev->CreateUnorderedAccessView(g.lightVertices.Get(),&ud,&g.lightUav)))return false;
+        g.lightBytes=capacity;
+    }
+    D3D11_BOX box{UINT(begin),0,0,UINT(begin+bytes),1,1};ctx->CopySubresourceRegion(g.lightVertices.Get(),0,0,0,0,vertices.Get(),0,&box);
+    Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->CSGetShader(&saved,classes,&nc);
+    ID3D11Buffer* cbs[3]{};ctx->CSGetConstantBuffers(0,3,cbs);
+    ID3D11UnorderedAccessView* uavs[3]{};ctx->CSGetUnorderedAccessViews(1,3,uavs);
+    ID3D11Buffer* inputs[3]={g.camera.Get(),cbs[1],lightCamera.Get()};ID3D11UnorderedAccessView* outputs[3]={g.anchorUav.Get(),uavs[1],g.lightUav.Get()};
+    ctx->CSSetConstantBuffers(0,3,inputs);ctx->CSSetUnorderedAccessViews(1,3,outputs,nullptr);
+    ctx->CSSetShader(g.lightShader.Get(),nullptr,0);ctx->Dispatch((instances+63)/64,1,1);
+    ID3D11UnorderedAccessView* nulls[3]{};ctx->CSSetUnorderedAccessViews(1,3,nulls,nullptr);
+    ctx->CSSetConstantBuffers(0,3,cbs);ctx->CSSetUnorderedAccessViews(1,3,uavs,nullptr);ctx->CSSetShader(saved.Get(),classes,nc);
+    for(auto* p:cbs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
+    // Nonzero starts are declined at the draw gate, preserving all draw
+    // arguments and SV_InstanceID while using a zero-origin private stream.
+    UINT zero=0;ctx->IASetVertexBuffers(1,1,g.lightVertices.GetAddressOf(),&stride,&zero);
+    draw(ctx,count,instances,start,base,startInstance);ctx->IASetVertexBuffers(1,1,vertices.GetAddressOf(),&stride,&offset);return true;
+}
 }
 void weaponStabilityConfigure(Config& cfg) {
     const bool enabled=cfg.getBool("fix.weapon_stability",true);
@@ -131,11 +173,13 @@ bool weaponStabilityDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned
     if(!g_enabled)return false;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs);
     const bool particle=vs==0x9AEC596A2B036EA6ull;
-    if(!g.seen || g.failed || g.frame-g.lastScreen>2 || (!family(vs) && !particle) || !ctx || !draw || !instances || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
+    const bool light=vs==0x0357BBB2DEE43C1Full;
+    if(!g.seen || g.failed || g.frame-g.lastScreen>2 || (!family(vs) && !particle && !light) || !ctx || !draw || !instances || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
     ResourceInfo rt;if(!bindingResolve(bindingGet(BindSlot::Rtv0),&rt) || !rt.isTexture2D || rt.a!=w || rt.b!=h)return false;
     D3D11_VIEWPORT vp{};UINT nv=0;ctx->RSGetViewports(&nv,nullptr);if(nv!=1)return false;ctx->RSGetViewports(&nv,&vp);
     if(nv!=1 || vp.TopLeftX!=0 || vp.TopLeftY!=0 || vp.Width!=w || vp.Height!=h)return false;
     if(particle)return particleDraw(ctx,draw,count,instances,start,base,startInstance);
+    if(light)return !startInstance && lightDraw(ctx,draw,count,instances,start,base,startInstance);
     Ptr<ID3D11ShaderResourceView> pv,bv;ctx->VSGetShaderResources(33,1,&pv);ctx->VSGetShaderResources(38,1,&bv);if(!pv || !bv)return false;
     Ptr<ID3D11Buffer> pool,bones,camera;Ptr<ID3D11Resource> pr,br;pv->GetResource(&pr);bv->GetResource(&br);
     if(FAILED(pr.As(&pool)) || FAILED(br.As(&bones)))return false;
