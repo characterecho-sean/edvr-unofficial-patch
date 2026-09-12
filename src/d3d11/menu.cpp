@@ -580,7 +580,10 @@ struct Writer {
     std::vector<WriteJob>   queue;
     std::vector<WriteDone>  done;
 };
-Writer g_writer;
+// Like the panel worker, this may still be joinable when Windows terminates
+// the other threads before DLL detach. Do not register a thread destructor
+// with the CRT; stopWriter remains the normal explicit join path.
+Writer& g_writer = *new Writer;
 
 void writerMain() {
     for (;;) {

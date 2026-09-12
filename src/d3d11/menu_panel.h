@@ -160,6 +160,9 @@ struct MenuGeometry {
 
 // Hand the raster a new content (copied; the worker wakes). Frame thread.
 void menuPanelSubmit(const MenuContent& c);
+#ifdef EDVR_MENU_TEST
+bool menuPanelWorkerReadyForTest();
+#endif
 
 // Once per frame: upload a finished raster, create the texture as needed.
 void menuPanelTick(ID3D11Device* dev);

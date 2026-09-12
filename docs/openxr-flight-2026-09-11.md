@@ -182,3 +182,36 @@ from performance qualification: the logs contain long-frame diagnostics, and
 telemetry overhead still needs a matched enabled/disabled comparison. The
 missing-overlap gate is now satisfied; no further flight is needed solely to
 test the capture-bank correction.
+
+## Later crash-record correction
+
+Windows Application Error records and saved crash dumps show that the repeat
+Frontier run ended with `0xc0000409`, fast-fail reason 7, at 20:08:44. The
+faulting DLL timestamp `6AA4A9B2` matches the verified `2a56da3` capture. A
+Steam run on `39b2eac` (`6AA4BBA5`) failed through the equivalent path at
+20:52:46. These records were checked after Sean reported crashes.
+
+Ruled out: a clean exit for the repeat capture, because its matching Windows
+crash record reports an abort after the final log lines. The bounded ordering
+and visual/tracking findings above still apply; shutdown qualification does
+not.
+
+The Frontier dump's `d3d11.dll+0x13bf4b` return address follows a call to
+`terminate` in the menu panel worker's static destructor. Its instruction
+sequence matches `menu_panel.obj`'s named `dynamic atexit destructor for g_w`,
+including the test of the `std::thread` ID at worker offset `0xa0`. Windows has
+already terminated other threads before process detach, but the static thread
+object remains joinable and its destructor aborts. The settings writer has the
+same lifetime hazard if it has been started.
+
+The correction gives both worker states process-lifetime storage while
+preserving their normal explicit shutdown/join paths. No join or mutex access
+is added to process detach. The menu test now checks actual worker startup
+followed by CRT exit in an isolated child, and explicit shutdown/restart in a
+second child. Both child cases and the full build passed in
+`build/menu-worker-exit-fix.log`; installation and a normal game exit still
+need to be verified.
+
+Separately, the new, unintegrated GPU desk harnesses reported test failures,
+including an access violation. Their execution was stopped; none of those
+adapter/shared-clock drafts was installed into either game directory.

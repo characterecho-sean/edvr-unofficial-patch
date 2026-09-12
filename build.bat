@@ -551,7 +551,7 @@ REM headset.
 if not exist "%OBJ%\menutest" mkdir "%OBJ%\menutest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
-    /Fo"%OBJ%\menutest"\ /Fe"%BUILD%\menu_test.exe" ^
+    /DEDVR_MENU_TEST /Fo"%OBJ%\menutest"\ /Fe"%BUILD%\menu_test.exe" ^
     "tools\menu_test\menu_test.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\menu_keys.cpp" ^

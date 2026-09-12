@@ -832,7 +832,12 @@ struct Worker {
     int                     livePopupScrollMax = 0;
     double                  lastMs = 0.0;
 };
-Worker g_w;
+// The OS ends the worker before DLL process-detach. A static Worker would
+// still destroy its joinable std::thread in the CRT's later atexit pass and
+// call terminate (confirmed in the 2026-09-11 Frontier/Steam crash dumps).
+// Keep process-lifetime storage, as the logger does. Explicit shutdown still
+// joins on the normal stop path; process exit must neither join nor destruct.
+Worker& g_w = *new Worker;
 
 void workerMain() {
     for (;;) {
@@ -1518,6 +1523,13 @@ void menuPanelSubmit(const MenuContent& c) {
     g_w.hasPending = true;
     g_w.cv.notify_one();
 }
+
+#ifdef EDVR_MENU_TEST
+bool menuPanelWorkerReadyForTest() {
+    std::lock_guard<std::mutex> lock(g_w.m);
+    return g_w.hasReady && !g_w.hasPending;
+}
+#endif
 
 void menuPanelTick(ID3D11Device* dev) {
     if (!dev) return;

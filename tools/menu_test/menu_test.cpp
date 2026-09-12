@@ -1321,7 +1321,49 @@ void testFooterTwoLines() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    if (argc == 2 && (strcmp(argv[1], "--worker-exit-child") == 0 ||
+                      strcmp(argv[1], "--worker-stop-child") == 0)) {
+        MenuContent content{};
+        content.widthPx = content.cardPx = 256;
+        content.capPx = 20;
+        content.lineCount = 1;
+        strcpy_s(content.lines[0].left, "Exit regression");
+        menuPanelSubmit(content);
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        while (!menuPanelWorkerReadyForTest() && GetTickCount64() < deadline) Sleep(1);
+        if (!menuPanelWorkerReadyForTest()) return 2;
+        if (strcmp(argv[1], "--worker-stop-child") == 0) {
+            menuPanelShutdown();
+            menuPanelSubmit(content); // Re-start after a normal explicit stop.
+            menuPanelShutdown();
+        }
+        // Intentionally omit shutdown in the exit case. Returning through the
+        // actual CRT catches a joinable static thread destructor; _Exit would
+        // bypass that destructor and make the regression test meaningless.
+        return 0;
+    }
+    wchar_t executable[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+    check(length > 0 && length < MAX_PATH, "worker exit: locate self");
+    for (const wchar_t* mode : {L"--worker-exit-child", L"--worker-stop-child"}) {
+        std::wstring command = L"\"" + std::wstring(executable) + L"\" " + mode;
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const bool launched = CreateProcessW(executable, &command[0], nullptr, nullptr, FALSE,
+                                             CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) != FALSE;
+        check(launched, "worker exit: launch isolated child");
+        if (!launched) continue;
+        const DWORD wait = WaitForSingleObject(process.hProcess, 10000);
+        DWORD result = ~0u;
+        if (wait == WAIT_OBJECT_0) GetExitCodeProcess(process.hProcess, &result);
+        else { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && result == 0, "worker exit/explicit stop: no abort or hang");
+    }
     printf("menu_test: the settings menu's pure parts\n");
     testFilterState();
     testFilterData();
