@@ -82,7 +82,7 @@ writes, in the three newest VR logs across the two installs (Frontier
 | Compositor re-requests per session | 2 to 3, each a few seconds before the eye textures change size ("ONE EYE ... CHANGED") |
 | Methods across the four requested interfaces | 84 in Valve's 0.9.20 header: System 44, Compositor 29, Chaperone 8, ExtendedDisplay 3. Hook coverage is not a census of what the game calls |
 | System calls per frame | `GetRecommendedRenderTargetSize`, `GetProjectionMatrix`, `GetProjectionRaw`, `GetEyeToHeadTransform`, each about 12 times a frame (~1080/s at 90 Hz: `system_hook.cpp`) |
-| Compositor calls per frame | `WaitGetPoses` once, `Submit` twice; `SetSkyboxOverride` once at startup with a 1x1 texture (OpenComposite's log, `early_session.cpp`) |
+| Compositor calls per frame | `WaitGetPoses` once, `Submit` twice. The earlier OpenComposite skybox log described a 1x1 texture's dimensions; the later [semantic flight](openxr-semantic-flight-2026-09-12.md) recorded three successful `SetSkyboxOverride` calls with six textures each. `early_session.cpp` itself submits a single 1x1 left-eye handover texture; it does not call `SetSkyboxOverride`. |
 | Projection planes asked for | 0.025..50000 for the scene and 0.1..1000 for something else (`system_hook.cpp`) |
 | Tracking space | seated (the launch centre's reset reached it) |
 | Eye-to-head rotation | dropped by the game (docs/canted-projection.md) |

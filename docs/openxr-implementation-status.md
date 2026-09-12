@@ -109,8 +109,13 @@ explicit owner thread. A separate System caller dispatches live pose/reset
 requests and invokes exported Shutdown; cached geometry remains directly
 readable. The full build passed, including 62 service and 28 native checks
 covering queue cancellation, cleanup order, concurrent stop, restart and idle
-pumping. A fresh native thread-ownership flight remains pending. Production
-game-device ownership and Frontier integration are still separate work.
+pumping. The `141ea14` PiOpenXR run passed distinct caller/owner threads, 1805
+event pumps, 1800 valid live System queries, both resets, 1800 stereo pairs and
+cleanup through System-thread Shutdown. The user reported that it looked good.
+SteamVR and Frontier were absent at preflight; the subsequently observed
+processes started after the diagnostic exited, with their launch cause
+unconfirmed. Production game-device ownership and Frontier integration remain
+separate work.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact

@@ -111,10 +111,10 @@ OpenVR DLL, repeating the owner/native checks alongside the existing rendering
 and Python regressions and the 252-key config contract. Exact source, harness,
 loader and manifest hashes are retained in
 `build/openxr-owner-validation.json`; the build log is
-`build/openxr-owner-build.log`. The fresh headset gate remains pending. No
-earlier executable's headset result qualifies this change.
+`build/openxr-owner-build.log`. The matching native result follows below. No
+earlier executable's headset result was reused to qualify this change.
 
-## Next native gate and limits
+## Native gate, result and limits
 
 Run a fresh 20-second PiOpenXR test with Frontier and SteamVR closed and the
 user ready in the Pimax headset. Match the new executable and all source,
@@ -130,12 +130,41 @@ Compositor waits still equal render-loop frames plus the separately counted
 startup frames; moving resets before the render loop changes old absolute frame
 counts. Use the relationships, not a previous run's hardcoded totals.
 
-The user must confirm placement in both eyes, world-up, stable tracking during
-head movement, normal color/clarity and normal closure. This diagnostic still
-uses one native session generation and its own D3D11 device. In-process native
-restart, runtime-origin changes and focus/loss scenarios remain separate
-qualification. The event pump does not invent additional game frames while the
-renderer is idle; persistent loading/skybox rendering needs its own policy.
-Full legacy exports, required skybox/fade/event behavior, the paired feature
-handshake, production graphics-state preservation and native Frontier launch
-remain open.
+The `141ea14` diagnostic passed its 20-second PiOpenXR run, and the user
+confirmed that it looked good. Executable, all 70 source inputs, loader and
+manifest matched the full-build record. Pimax OpenXR 0.1.0 reported D3D11.1,
+5424 x 5356 per eye and sRGB swapchains. The child exited 0 after 20.407
+seconds without the watchdog firing.
+
+Init, System and render/owner IDs were distinct (39052, 28988 and 15476).
+Startup geometry was ready on sequence 1 before any Submit. Both System-thread
+resets passed their position/yaw bounds, invalidated caches and produced one
+reset event each. Geometry was republished on sequence 2 before stereo.
+
+The service recorded 1805 event pumps and 1801 live System queries, of which
+1800 returned valid poses. The invalid query is not assigned a cause by these
+counters. There were 1803 compositor waits (one startup plus 1802 render-loop
+frames), 1802 cache comparisons, 1803 valid gameplay poses, 3600 Submit calls
+and private eye copies, and 1800 stereo pairs/handoffs. Two render-loop frames
+were zero-layer. All 1801 sampled views/head poses were valid. Exported
+Shutdown ran on the System thread; the owner joined, interfaces retired, the
+token advanced to 2, and resources cleaned exactly once with normal session
+stop. No natural runtime-origin change occurred.
+
+Frontier and SteamVR were absent at preflight. Later process observations found
+SteamVR processes created 7.272 to 11.913 seconds after the diagnostic exited,
+and EliteDangerous64 created 30.031 seconds afterward. The user did not state
+what initiated those later launches, so they are not attributed to either the
+user or the diagnostic. Do not describe SteamVR as absent in the post-test
+observation. These timestamps and the explicit PiOpenXR receipt are retained
+under `build/openxr-native-20260912-173306`, with counters and visual
+confirmation in the validation record.
+
+This completes the standalone owner-thread visual and normal-lifecycle gate.
+The diagnostic still uses one native session generation and its own D3D11
+device. In-process native restart, runtime-origin changes and focus/loss
+scenarios remain separate qualification. The event pump does not invent
+additional game frames while the renderer is idle; persistent loading/skybox
+rendering needs its own policy. Full legacy exports, required skybox/fade/event
+behavior, the paired feature handshake, production graphics-state preservation
+and native Frontier launch remain open.
