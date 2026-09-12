@@ -27,6 +27,7 @@
 #include "cb_peek.h"
 #include "panel_curve.h"
 #include "screen_motion.h"
+#include "weapon_stability.h"
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
@@ -2617,6 +2618,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     }
     forgetBindings(s);
     foveationOnClearState();
+    weaponStabilityResourceWritten(nullptr);
     s->realClearState(self);
 }
 
@@ -2635,6 +2637,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                         "they are neither counted nor corrected.",
                         kSlotExecuteCommandList, restoreContextState ? 1 : 0);
     }
+    weaponStabilityResourceWritten(nullptr);
     s->realExecuteCommandList(self, list, restoreContextState);
     // After the call, and only when the context was not restored: with
     // RestoreContextState TRUE the bindings we recorded are put back, so
@@ -2807,6 +2810,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->realUnmap(self, res, sub);
         return;
     }
+    weaponStabilityResourceWritten(res);
     // The census CB watch reads the write BEFORE the real Unmap, exactly as
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
@@ -3114,6 +3118,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
+    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -3193,6 +3198,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -3211,6 +3217,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
+    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
                        nullptr, 0, box != nullptr,
@@ -3415,10 +3422,17 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    // Observe before forwardWithVerdict: curved-screen substitution can
+    // consume the composite without calling this lambda.
+    if (self == g_state->ownerCtx) weaponStabilityObserveScreen();
     forwardWithVerdict(self, v, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                          baseVertex, startInstance);
+        const bool attached = self == g_state->ownerCtx && !g_state->rtv0Eye &&
+            weaponStabilityDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,
+                                startIndex,baseVertex,startInstance,
+                                g_state->panelW?g_state->panelW:1920,g_state->panelH?g_state->panelH:1080);
+        if (!attached) g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                                        baseVertex, startInstance);
         if (clock.on) clock.realCall(r0);
         if(self==g_state->ownerCtx) {
             screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
@@ -3939,6 +3953,7 @@ void vScreenRefreshConfig() {
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
+    weaponStabilityConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -4062,7 +4077,8 @@ void vScreenFrameBoundary() {
         wakePulseReport();
         uiDepthFrameBoundary(g_state->ownerCtx);
         screenMotionFrameBoundary();
-        celestialMotionFrameBoundary();
+        weaponStabilityFrameBoundary(g_state->ownerCtx);
+        celestialMotionFrameBoundary(g_state->ownerCtx);
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -4972,6 +4988,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
+    weaponStabilityConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -5204,6 +5221,7 @@ void shutdownVScreenFixes() {
     holoShutdown();
     uiDepthShutdown();
     screenMotionShutdown();
+    weaponStabilityShutdown();
     celestialMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();

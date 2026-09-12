@@ -30,6 +30,24 @@ public:
     static constexpr uint64_t kPanel=0xA888D51024D9798Eull,kScreen=0x4EF6DDB075A927FAull;
     static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
     static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
+    // Source mesh families in the 17:09:53 on-foot capture. These include
+    // scenery: proximity/weapon identity must be proved from their records.
+    static bool sourceMesh(uint64_t vs) {
+        switch(vs) {
+        case 0xF516BF0201303B87ull:case 0x7B0DC42D383F694Cull:
+        case 0x8B589D25B2A0ADDCull:case 0xEB5234DB6ADB491Dull:
+        case 0xDE545DC8EE4FBB87ull:case 0x889A5279E68F0672ull:
+        case kScene:case 0x154FB5A453F3D2E9ull:
+        case 0x8106B439CD518CFCull:case 0x39CC20727A27FD17ull:
+        case 0xA4A19FAF8D08E1D6ull:case 0x114AF608F86D9ED8ull:
+        // Complete the weapon/tool material evidence, including optics and
+        // additional surfaces drawn separately from the opaque mesh.
+        case 0xAACFDCF2FB9AD809ull:case 0x34CCFAAB1EAD90BEull:
+        case 0x174E8D76363BE337ull:case 0x025B4B9FF54622EDull:
+        case 0x7F9B650EC1A1E570ull:return true;
+        default:return false;
+        }
+    }
     static bool watches(uint64_t vs) {
         switch (vs) {
         case kHolo:
@@ -61,7 +79,15 @@ public:
         uint32_t start=0;int32_t base=0;
         struct Stream {uint32_t offset=0,stride=0,whole=0,copied=0,captureOffset=0;Buffer stage;};
         Stream streams[3]; // VB0 instance IDs, VB1 packed vertices, index buffer
+        uint32_t mesh[3]={UINT32_MAX,UINT32_MAX,UINT32_MAX}; // t33, t38, VB0
     };
+    struct MeshBuffer {
+        Buffer source,stage;
+        uint32_t frame=0,firstDraw=0,bytes=0,stride=0;
+    };
+    std::vector<MeshBuffer> meshBuffers;
+    uint32_t meshBytes=0,meshDeclined=0,meshDraws=0;
+    static constexpr uint32_t kMeshBudget=256*1024*1024;
     struct Surface {
         Texture source, stage;
         uint32_t frame = 0, width = 0, height = 0, format = 0, bytes = 0;
@@ -78,7 +104,7 @@ public:
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if ((!watches(hash) && hash!=kScene && hash!=kVscreenPs) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && !sourceMesh(hash) && hash!=kVscreenPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -119,7 +145,32 @@ public:
     void reset() {
         draws.clear(); surfaces.clear(); dropped = failures = textureBytes = 0;
         firstFrame=vertexBytes=vertexDraws=vertexDeclined=0;
+        meshBuffers.clear();meshBytes=meshDeclined=meshDraws=0;
         sourceDepth.Reset();sourceDepthFormat=DXGI_FORMAT_UNKNOWN;sourceFrame=0;
+    }
+
+    uint32_t captureMeshBuffer(ID3D11DeviceContext* ctx,ID3D11Device* dev,
+                               ID3D11Buffer* src,uint32_t frame,uint32_t stride) {
+        if(!src)return UINT32_MAX;
+        for(uint32_t i=0;i<meshBuffers.size();++i)
+            if(meshBuffers[i].frame==frame && meshBuffers[i].source.Get()==src)return i;
+        D3D11_BUFFER_DESC bd{};src->GetDesc(&bd);
+        // Full palette, not the older ledger's first MiB: the weapon may
+        // address bones beyond that prefix. Record the first draw that saw
+        // each resource this frame; deduplication is explicitly visible.
+        if(!bd.ByteWidth || bd.ByteWidth>16*1024*1024 || bd.ByteWidth>kMeshBudget-meshBytes){++meshDeclined;return UINT32_MAX;}
+        MeshBuffer b;b.source=src;b.frame=frame;b.firstDraw=uint32_t(draws.size());b.bytes=bd.ByteWidth;b.stride=stride;
+        bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        if(FAILED(dev->CreateBuffer(&bd,nullptr,&b.stage))){++failures;return UINT32_MAX;}
+        ctx->CopyResource(b.stage.Get(),src);meshBytes+=b.bytes;
+        meshBuffers.push_back(std::move(b));return uint32_t(meshBuffers.size()-1);
+    }
+
+    void captureSourceMesh(ID3D11DeviceContext* ctx,uint32_t frame,uint64_t vs,uint64_t ps,
+                           char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
+        if(!sourceMesh(vs))return;
+        // Reserved ordinal distinct from the source camera and eye ledger.
+        capture(ctx,frame,UINT32_MAX-1,vs,ps,kind,count,instances,startInstance,start,base,true);
     }
 
     // First world/terrain draw per source frame, not every offscreen draw.
@@ -143,7 +194,7 @@ public:
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
                  uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false) {
-        if (!ctx || (!watches(vs) && !(source && vs==kScene))) return;
+        if (!ctx || (!watches(vs) && !(source && sourceMesh(vs)))) return;
         if (draws.size() >= kMaxDraws) { ++dropped; return; }
         Draw d;
         d.frame = frame; d.ordinal = ordinal; d.vs = vs; d.ps = ps;
@@ -180,6 +231,23 @@ public:
             ctx->CopySubresourceRegion(d.stage[i].Get(), 0, 0, 0, 0, src.Get(), 0, &box);
             d.copied[i] = bd.ByteWidth;
         }
+        const bool mesh=source && ordinal==UINT32_MAX-1 && sourceMesh(vs);
+        if(mesh) {
+            ++meshDraws;
+            for(unsigned i=0;i<2;++i) {
+                Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;ctx->VSGetShaderResources(i?38:33,1,&srv);
+                if(!srv)continue;
+                D3D11_SHADER_RESOURCE_VIEW_DESC sd{};srv->GetDesc(&sd);
+                Microsoft::WRL::ComPtr<ID3D11Resource> res;srv->GetResource(&res);Buffer b;
+                if(sd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER || sd.Buffer.FirstElement!=0 || FAILED(res.As(&b))){++meshDeclined;continue;}
+                D3D11_BUFFER_DESC bd{};b->GetDesc(&bd);
+                if(bd.StructureByteStride!=(i?48u:336u)){++meshDeclined;continue;}
+                d.mesh[i]=captureMeshBuffer(ctx,dev.Get(),b.Get(),frame,bd.StructureByteStride);
+            }
+            Buffer ids;UINT stride=0,offset=0;ctx->IAGetVertexBuffers(0,1,&ids,&stride,&offset);
+            if(stride==8 && offset==0)d.mesh[2]=captureMeshBuffer(ctx,dev.Get(),ids.Get(),frame,stride);
+            else ++meshDeclined;
+        }
         if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen)
             d.texture=captureSurface(ctx,dev.Get(),frame,vs==kHolo?2:vs==kPanel?1:0,vs==kVscreen);
         if(vs==kVscreen && sourceFrame==frame && sourceDepth && d.texture!=UINT32_MAX) {
@@ -191,7 +259,7 @@ public:
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) {
+        if(((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) || (mesh && frame==firstFrame)) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             bool copied=false;
@@ -234,7 +302,7 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(3); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        u32(4); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,
@@ -259,10 +327,16 @@ public:
             }
             u32(d.start);u32(static_cast<uint32_t>(d.base));
             for(auto& s:d.streams){u32(s.offset);u32(s.stride);u32(s.whole);u32(s.captureOffset);payload(s.stage.Get(),s.copied,0,0);}
+            for(auto id:d.mesh)u32(id);
         }
         for (Surface& s : surfaces) {
             u32(s.frame); u32(s.width); u32(s.height); u32(s.format);
             payload(s.stage.Get(), s.bytes, s.height ? s.bytes / s.height : 0, s.height);
+        }
+        u32(uint32_t(meshBuffers.size()));u32(meshDeclined);
+        for(auto& b:meshBuffers) {
+            u32(b.frame);u32(b.firstDraw);u32(b.bytes);u32(b.stride);
+            payload(b.stage.Get(),b.bytes,0,0);
         }
         u32(failures);
         ok = !ferror(f) && ok;

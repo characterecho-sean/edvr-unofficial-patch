@@ -6,6 +6,9 @@ Version 2 preserves draw start/base and bounded HUD/sprite VB0/VB1/IB
 payloads. Version 3 copies around the draw's base/start and records each
 capture_offset separately from its binding offset, for the first three
 watched frames. Earlier captures remain readable.
+Version 4 adds source mesh records (ordinal UINT32_MAX-1), first-frame
+geometry, and references to frame-local t33/t38/VB0 copies. Each buffer's
+first_draw states when it was copied; later references are not new copies.
 
 On-foot source records use ordinal UINT32_MAX. Their DSV is copied when
 the screen composite runs, alongside its source colour; depth surfaces
@@ -40,7 +43,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -69,6 +72,7 @@ def read(path):
                 if vertex_bytes > 32*1024*1024:
                     raise ValueError('Vertex payload budget exceeded')
                 d['streams'].append(dict(offset=offset, stride=stride, whole=whole, capture_offset=capture_offset, data=take(size)))
+        d['mesh'] = list(unpack('<3I')) if version >= 4 else [0xffffffff]*3
         draws.append(d)
     total = 0
     for _ in range(ns):
@@ -82,10 +86,33 @@ def read(path):
             raise ValueError('Invalid surface payload')
         s['data'] = take(s['size'])
         surfaces.append(s)
+    mesh_buffers, mesh_declined = [], 0
+    if version >= 4:
+        nb, mesh_declined = unpack('<2I')
+        if nb > nd*3:
+            raise ValueError('Invalid source buffer count')
+        total = 0
+        for _ in range(nb):
+            b = dict(zip(('frame', 'first_draw', 'whole', 'stride', 'size'), unpack('<5I')))
+            total += b['whole']
+            if not 0 < b['whole'] <= 16*1024*1024 or total > 256*1024*1024 or b['size'] not in (0,b['whole']) or b['first_draw'] >= nd or b['stride'] not in (8,48,336):
+                raise ValueError('Invalid source buffer descriptor')
+            b['data'] = take(b['size'])
+            mesh_buffers.append(b)
+        for i,d in enumerate(draws):
+            for role,ref in enumerate(d['mesh']):
+                if ref == 0xffffffff:
+                    continue
+                if ref >= nb:
+                    raise ValueError('Invalid source buffer reference')
+                b = mesh_buffers[ref]
+                if b['frame'] != d['frame'] or b['first_draw'] > i or b['stride'] != (336,48,8)[role]:
+                    raise ValueError('Source buffer belongs to a different frame, role, or later draw')
     failures, = unpack('<I')
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
-    return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces)
+    return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
+                mesh_buffers=mesh_buffers, mesh_declined=mesh_declined)
 
 
 def export_surfaces(capture, directory, dry_run=False):
@@ -143,8 +170,28 @@ def self_test():
         p.write_bytes(head + struct.pack('<I', 0))
         c = read(p)
         assert c['draws'] == [] and c['surfaces'] == []
+        h4 = b'EDVRDRW1' + struct.pack('<4I',4,1,0,0)
+        draw = struct.pack('<3Q9I',1,2,3,7,0xfffffffe,ord('X'),6,1,0,8,8,0xffffffff)
+        draw += struct.pack('<QII',0,0,0)*4 + struct.pack('<Ii',0,0) + struct.pack('<5I',0,0,0,0,0)*3
+        refs = struct.pack('<3I',0,0xffffffff,0xffffffff)
+        table = struct.pack('<2I',1,0)
+        blob = struct.pack('<5I',7,0,336,336,336) + bytes(336) + struct.pack('<I',0)
+        good = h4+draw+refs+table+blob
+        p.write_bytes(good)
+        assert len(read(p)['mesh_buffers'][0]['data']) == 336
+        malformed_mesh = [good[:-1], h4+draw+struct.pack('<3I',1,0xffffffff,0xffffffff)+table+blob]
+        for frame,first,whole,stride,size in ((8,0,336,336,336),(7,1,336,336,336),(7,0,336,48,336),(7,0,336,336,335),(7,0,17*1024*1024,336,0)):
+            malformed_mesh.append(h4+draw+refs+table+struct.pack('<5I',frame,first,whole,stride,size)+bytes(336)+struct.pack('<I',0))
+        for bad in malformed_mesh:
+            p.write_bytes(bad)
+            try:
+                read(p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Invalid source buffer accepted')
         for bad in (b'', head, head+b'\0'*5, head.replace(b'EDVRDRW1', b'EDVRBAD1'),
-                    b'EDVRDRW1'+struct.pack('<4I', 4, 0, 0, 0),
+                    b'EDVRDRW1'+struct.pack('<4I', 5, 0, 0, 0),
                     b'EDVRDRW1'+struct.pack('<4I', 1, 4097, 0, 0)):
             p.write_bytes(bad)
             try:
@@ -176,6 +223,15 @@ def main():
     c = read(a.path)
     if a.verify_fixture:
         verify_fixture(c)
+        mesh = read(str(a.path)+'.mesh')
+        assert mesh['failures'] == mesh['mesh_declined'] == 0 and len(mesh['draws']) == 4 and len(mesh['mesh_buffers']) == 6
+        for i,d in enumerate(mesh['draws']):
+            assert d['ordinal'] == 0xfffffffe and d['mesh'] == [i//2*3+j for j in range(3)]
+            for role,ref in enumerate(d['mesh']):
+                b = mesh['mesh_buffers'][ref]
+                assert b['first_draw'] == i//2*2 and b['frame'] == 300+i//2
+                assert b['data'] == bytes([21+role*10+i//2])*b['whole'], 'Source buffer copied after reuse or truncated'
+        assert mesh['mesh_buffers'][1]['whole'] > 1024*1024, 'High bone indices lost'
         v = read(str(a.path)+'.vscreen')
         assert len(v['draws']) == 3 and len(v['surfaces']) == 2 and v['failures'] == 0
         assert v['draws'][0]['ordinal'] == 0xffffffff and v['draws'][0]['texture'] == 0xffffffff
@@ -185,6 +241,7 @@ def main():
         print('GPU draw snapshot fixture passed')
         return
     print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],
+                          source_buffers=len(c['mesh_buffers']), source_bytes=sum(b['size'] for b in c['mesh_buffers']), source_declined=c['mesh_declined'],
                           vertex_draws=sum(any(s['data'] for s in d['streams']) for d in c['draws']),
                           vertex_bytes=sum(len(s['data']) for d in c['draws'] for s in d['streams']),
                           failures=c['failures'], shaders=Counter(f"{d['vs']:016X}" for d in c['draws'])), indent=2))
