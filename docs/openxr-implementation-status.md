@@ -67,6 +67,48 @@ startup Present budget ended before the first pose wait, so the initial VR
 capture bank was added. This flight supports the published-device candidate for
 that run, but does not qualify an overlapping graphics/VR frame bracket.
 
+The repeat Frontier flight on `2a56da3` passed the overlap check: both DLLs
+selected their VR banks on the first pose wait, and all 32 captured stereo
+pairs followed wait, left submit, right submit, Present on one thread. All
+sampled commands used one immediate context, and all 16 sampled eye textures
+again matched the published device. There is measured work after Submit and
+even after Present; the approved render-to-submit span must exclude and name
+that later work. This supports a guarded single-context prototype for the
+observed configuration. It does not establish complete command coverage,
+whole-session ownership, telemetry overhead or compatibility on other runtimes.
+Sean reported normal visuals and tracking on the repeat flight.
+
+The desk prototype in `src/common/gpu_span_state.h` separates the query-state
+policy from the D3D11 adapter. Its contract is one outer scope, six timestamp
+markers (outer start/end and two eye intervals), eight reusable slots,
+immutable device/immediate-context/thread ownership, and explicit
+frame-associated valid/invalid outcomes. Pending results retain their resources
+until ready, failed or expired by elapsed time. Tests must derive results from
+markers actually issued, rather than returning a canned valid sample when a
+marker is missing. The D3D11 adapter must preserve `S_FALSE` as pending and use
+`D3D11_ASYNC_GETDATA_DONOTFLUSH`; timestamp ticks are integers, and a disjoint
+counter cannot produce a valid duration. See Microsoft's [GetData
+contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-getdata)
+and [query
+definitions](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_query).
+This state prototype alone is not an implemented or qualified GPU measurement;
+real D3D11 workloads, shared door-query ownership, game-path placement and
+Monitor integration remain separate gates.
+
+The first state-policy draft failed review because it omitted the outer end
+timestamp, could close an unfinished eye pair, lost resource ownership on some
+retirement paths and checked sequence freshness only against undrained slots.
+Its fake driver supplied valid-looking timestamps independently of issued
+commands. The retained version uses an explicit active eye, a persistent
+sequence watermark, integer timestamp differences, bounded per-frame result
+records, and terminal shutdown after uncertain query closure. Its fake records
+each marker and checks live scopes and resource ownership. Desk tests cover
+both eye orders, malformed and incomplete pairs, every timestamp failure,
+creation/begin/end/poll failures, partial readiness, disjoint/invalid values,
+resource reuse, ring pressure, elapsed-time expiry and owner rejection. No
+shipping proxy calls this prototype yet, and no new flight is requested for it
+until the real D3D11 adapter and integration are qualified.
+
 The first ABI test draft used a hand-built raw vtable and crashed on a matrix
 return, causing a Windows error dialog. That fixture was removed. The retained
 tests use concrete C++ implementations and set Windows error mode to suppress
@@ -82,7 +124,7 @@ Before treating Phase 0 as complete, still collect and review:
 2. Real startup and flight order/context/device evidence, including texture
    reuse, both eyes, mirror work and deferred command-list execution. A missing
    line is not proof of absence. The first published device matched the sampled
-   textures in the first Frontier flight; other configurations and complete
+   textures in both Frontier flights; other configurations and complete
    lifecycle ownership remain unverified.
 3. Installed SteamVR, VDXR and Pimax runtime probe reports, then a separate
    session harness for actual formats, startup geometry, refresh rate, gaze,

@@ -105,7 +105,80 @@ graphics initialization succeeds on retry and a disabled graphics census never
 acknowledges or produces graphics samples. CPU budget tests cover separate
 events, saturation, repeated transition requests and concurrent claims.
 
-A new Frontier launch is still required to collect the missing overlap. The
-first minute through the menu and cockpit should be sufficient for this bounded
-startup window; a longer flight does not extend the sample budgets. No new GPU
-timing instrument or OpenXR backend is enabled by this follow-up.
+The repeat launch below supplies the missing overlap. No new GPU timing
+instrument or OpenXR backend is enabled by this follow-up.
+
+## Repeat flight: build 2a56da3, 20:05 local
+
+Both logs were retrieved with `tools/edvr_log.py --target frontier`, separately
+for each tag, and passed `--expect-build 2a56da3`. Their version is
+`v0.15.1-21-g2a56da3`: graphics `edvr_gfx_20260911_200520.log`, linked build
+`6AA4A9B2`, and VR `edvr_vr_20260911_200539.log`, linked build `6AA4A9B9`. The
+recorded window ends around 20:08:43. Sean confirmed that this run looked and
+tracked normally. No explicit clean-exit log acknowledgement or named
+headset/connection report is available here.
+
+The capture correction passed its flight check. The OpenVR phase begins at QPC
+`2432533427344`, the graphics phase at `2432533427631`, and the bridge
+acknowledges on attempt one, all at 20:05:42.077. Startup Present samples
+remain in their own bank; fresh Present samples overlap the VR waits and
+submissions.
+
+| VR-phase event | Samples | First QPC | Last QPC |
+|---|---:|---:|---:|
+| WaitEnter | 64 | 2432533427686 | 2432550325365 |
+| WaitExit | 64 | 2432533428003 | 2432550426170 |
+| SubmitEnter | 64 | 2432534128832 | 2432546879335 |
+| SubmitExit | 64 | 2432534566408 | 2432546879779 |
+| PresentEnter | 64 | 2432534941199 | 2432550439796 |
+| PresentExit | 64 | 2432534943306 | 2432550441050 |
+
+QPC sorting gives the same complete sequence in all 32 captured stereo pairs:
+WaitEnter, WaitExit, left SubmitEnter/Exit, right SubmitEnter/Exit, then
+PresentEnter/Exit, before the next WaitEnter. Each of those intervals contains
+one Present and both distinct eyes. The remaining wait/Present samples outlast
+the Submit budget; missing Submit lines there are not missing-eye evidence.
+Every sampled graphics call, pose wait and submission uses thread `23688`.
+Every sampled graphics command uses immediate context `000002B77EFAC1C8`;
+Present identifies the owned swapchain `000002B7607F8AF0`.
+
+The first sampled VR graphics command is ClearRtv, QPC `2432533430376`, after
+the first WaitExit and before Submit. The VR phase also records ClearDsv,
+CopyRegion, Copy, DrawInstanced, DrawIndexedInstanced, Dispatch, Update and
+DispatchIndirect, each capped at 16. No deferred execution is observed. Common
+command budgets expire within the first few frames; DispatchIndirect first
+appears later. These per-kind budgets are not a continuous, complete GPU trace.
+
+Ruled out: ending a timer at the second Submit includes every captured command
+before the next pose wait, because the first pair's right SubmitExit is QPC
+`2432534899359`, followed by Copy at `2432534899656` and eight CopyRegion calls
+at `2432534947993` through `2432534948078`. Those CopyRegion calls are even
+after PresentExit (`2432534943306`). Updates are also observed inside later
+Present scopes. The graphics census does not identify which module requested
+each command, so do not attribute these to mirror rendering without further
+evidence.
+
+The approved second-eye endpoint remains valid for an explicitly bounded
+render-to-submit span, which excludes this later work. Moving the endpoint to
+Present alone would still not include every observed command. A prototype must
+state its exact coverage, publish only a CPU frame marker at the pose boundary,
+and issue queries on the observed immediate-context execution path. This is
+evidence for a guarded single-context prototype on this configuration, not a
+guarantee about later frames, other contexts or other runtimes.
+
+The first published device is `000002B77EDFFFE0`, created at 20:05:21.105 on
+thread `23688`, feature level `0xC000`, adapter LUID `00000000:00013F22`. All
+16 resource observations again match it, with both eyes and the same
+`2268x2240` then `2708x2240`, format-27, single-sample descriptors. The ABI
+census again observes 19 distinct methods (13 System, five Compositor, one
+Chaperone), all attributed to the game executable. System callers include
+threads `36728`, `28736` and `23688`; even an eye-to-head query is observed on
+`28736` alongside frame-thread geometry calls. System snapshots must therefore
+be safe for concurrent readers after startup as well.
+
+No logged exception, census fault, sentinel trip, exhausted wrapper cache or
+validation failure was found. Sean's normal visual/tracking report is separate
+from performance qualification: the logs contain long-frame diagnostics, and
+telemetry overhead still needs a matched enabled/disabled comparison. The
+missing-overlap gate is now satisfied; no further flight is needed solely to
+test the capture-bank correction.
