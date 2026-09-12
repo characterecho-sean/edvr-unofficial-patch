@@ -1,5 +1,10 @@
 # GPU query ownership and native desk validation
 
+Current follow-up: [the existing timer
+migration](gpu-timer-migration-2026-09-12.md) links the frequency-only adapter
+into production. The component-only results below describe the earlier
+foundation checkpoint; the outer frame adapter remains inactive.
+
 This work resumes the approved OpenXR GPU instrument after the verified
 Frontier startup and exit fixes. The earlier drafts in the ignored
 `build/rejected-gpu-drafts` directory remain rejected; their executables were

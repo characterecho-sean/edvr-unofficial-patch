@@ -130,5 +130,10 @@ public:
     void retire(uint32_t frame){
         for(auto& e:entries) if(e.source && frame-e.frame>120){allocated-=e.bytes;e={};++totals.evicted;}
     }
+    void reset() noexcept {
+        gpu.reset();
+        for(auto& e:entries) e={};
+        shader.Reset(); failed=false; totals={}; allocated=0;
+    }
 };
 } // namespace edvr

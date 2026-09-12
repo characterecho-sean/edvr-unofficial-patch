@@ -2261,9 +2261,9 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void uiDepthShutdown() {
-    g_uiContent=UiContent{};g_contentNoted=false;
+    g_uiContent.reset();g_contentNoted=false;
     if(g_savedEdits){g_savedEdits->Release();g_savedEdits=nullptr;}g_editsBound=false;
-    for(auto& sample:g_stellarGpu) sample={};
+    for(auto& sample:g_stellarGpu) sample.reset();
     g_stellarCpuActive=-1;
     g_holoDump.Reset(); g_holoDumpCount=0;
     for(auto& motion:g_holoMotion) motion=HoloMotion{};

@@ -296,6 +296,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
@@ -570,6 +571,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /DEDVR_MENU_TEST /Fo"%OBJ%\menutest"\ /Fe"%BUILD%\menu_test.exe" ^
     "tools\menu_test\menu_test.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\openvr\menu_door.cpp" "src\d3d11\shader_swap.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
@@ -712,6 +714,7 @@ cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\uidepthtest\\" /Fe"%OBJ%\uidepthtest\ui_depth_test.exe" ^
     "tools\ui_depth_test\ui_depth_test.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
 "%OBJ%\uidepthtest\ui_depth_test.exe" || (
@@ -750,7 +753,9 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\stellarmotion\\" /Fe"%OBJ%\stellarmotion\stellar_motion_test.exe" ^
     "tools\stellar_motion_test\stellar_motion_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: stellar motion test build failed & exit /b 1 )
 "%OBJ%\stellarmotion\stellar_motion_test.exe" || exit /b 1
 
@@ -760,6 +765,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\terrainmotion\\" /Fe"%OBJ%\terrainmotion\celestial_motion_test.exe" ^
     "tools\celestial_motion_test\celestial_motion_test.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: terrain motion test build failed & exit /b 1 )
 "%OBJ%\terrainmotion\celestial_motion_test.exe" || exit /b 1
@@ -829,6 +835,19 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: LiveCopy GPU query test build failed & exit /b 1 )
 "%OBJ%\gpulivehook\gpu_live_hook_test.exe" --dry-run || exit /b 1
 "%OBJ%\gpulivehook\gpu_live_hook_test.exe" --self-test || exit /b 1
+
+REM Migrated timers must share one disjoint scope, preserve pending readbacks,
+REM survive transient pressure, and issue no context commands during unload.
+if not exist "%OBJ%\gputiming" mkdir "%OBJ%\gputiming"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gputiming\\" ^
+    /Fe"%OBJ%\gputiming\gpu_timing_test.exe" "tools\gpu_timing_test\gpu_timing_test.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: shared GPU timing test build failed & exit /b 1 )
+"%OBJ%\gputiming\gpu_timing_test.exe" --dry-run || exit /b 1
+"%OBJ%\gputiming\gpu_timing_test.exe" --self-test || exit /b 1
 
 REM Drive the actual paired proxies through startup exhaustion and a first
 REM compositor wait, on a hidden WARP swapchain with an inert fake runtime.

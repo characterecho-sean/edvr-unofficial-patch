@@ -12,6 +12,7 @@
 
 #include "../common/log.h"
 #include "perf_monitor.h"   // the feature's creation is an event with a duration
+#include "gpu_timing.h"
 
 #ifdef EDVR_HAVE_NGX
 // NVIDIA's SDK, as shipped: nvsdk_ngx.h declares the D3D11 entry points,
@@ -138,58 +139,40 @@ EyeFeature g_periph[2];
 
 // The GPU-price ring, the resolve's discipline: never awaited.
 struct QuerySlot {
-    ID3D11Query* disjoint = nullptr;
-    ID3D11Query* begin = nullptr;
-    ID3D11Query* end = nullptr;
+    GpuTimer     timer;
     bool         inUse = false;
 };
 constexpr int kQueryRing = 8;
 QuerySlot g_qring[kQueryRing];
 
 void releaseQuerySlot(QuerySlot& q) {
-    if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-    if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-    if (q.end) { q.end->Release(); q.end = nullptr; }
+    q.timer.reset();
     q.inUse = false;
 }
 
 void pollTimingRing(ID3D11DeviceContext* ctx) {
+    if (!gpuTimingOwns(ctx)) return;
     for (QuerySlot& q : g_qring) {
         if (!q.inUse) continue;
-        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
-        if (ctx->GetData(q.disjoint, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) {
-            continue;
-        }
-        UINT64 t0 = 0, t1 = 0;
-        const HRESULT hr0 = ctx->GetData(q.begin, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        const HRESULT hr1 = ctx->GetData(q.end, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        double ms = 0.0;
+        const GpuTimerPoll result = q.timer.poll(ctx, ms);
+        if (result == GpuTimerPoll::Pending) continue;
         q.inUse = false;
-        if (dj.Disjoint || hr0 != S_OK || hr1 != S_OK || dj.Frequency == 0) continue;
-        const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+        if (result != GpuTimerPoll::Ready) continue;
         ++g_timeCount;
         g_timeSum += ms;
         if (ms > g_timeMax) g_timeMax = ms;
     }
 }
 
-int acquireQuerySlot(ID3D11Device* dev) {
+int acquireQuerySlot(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (!ctx || !dev) return -1;
+    if (!gpuTimingAccepts(ctx) && !gpuTimingBind(dev, ctx)) return -1;
     for (int i = 0; i < kQueryRing; ++i) {
         QuerySlot& q = g_qring[i];
         if (q.inUse) continue;
-        if (!q.disjoint) {
-            D3D11_QUERY_DESC qdd{};
-            qdd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
-            D3D11_QUERY_DESC qdt{};
-            qdt.Query = D3D11_QUERY_TIMESTAMP;
-            const bool made = SUCCEEDED(dev->CreateQuery(&qdd, &q.disjoint)) &&
-                              SUCCEEDED(dev->CreateQuery(&qdt, &q.begin)) &&
-                              SUCCEEDED(dev->CreateQuery(&qdt, &q.end));
-            if (!made) {
-                releaseQuerySlot(q);
-                continue;
-            }
-        }
-        return i;
+        if (q.timer.begin(dev, ctx)) { q.inUse = true; return i; }
+        return -1; // Shared clock pressure cannot be fixed by trying another free slot.
     }
     return -1;
 }
@@ -483,18 +466,10 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.InFrameTimeDeltaInMsec = frameMs;
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
-    const int qs = dev ? acquireQuerySlot(dev) : -1;
+    const int qs = dev ? acquireQuerySlot(dev, ctx) : -1;
     if (dev) dev->Release();
-    if (qs >= 0) {
-        ctx->Begin(g_qring[qs].disjoint);
-        ctx->End(g_qring[qs].begin);
-    }
     const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, g_params, &ep);
-    if (qs >= 0) {
-        ctx->End(g_qring[qs].end);
-        ctx->End(g_qring[qs].disjoint);
-        g_qring[qs].inUse = true;
-    }
+    if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
     if (NVSDK_NGX_FAILED(er)) {
         ID3D11Device* failedDevice = nullptr;
         ctx->GetDevice(&failedDevice);
@@ -641,18 +616,10 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
 
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
-    const int qs = dev ? acquireQuerySlot(dev) : -1;
+    const int qs = dev ? acquireQuerySlot(dev, ctx) : -1;
     if (dev) dev->Release();
-    if (qs >= 0) {
-        ctx->Begin(g_qring[qs].disjoint);
-        ctx->End(g_qring[qs].begin);
-    }
     const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, g_params, &ep);
-    if (qs >= 0) {
-        ctx->End(g_qring[qs].end);
-        ctx->End(g_qring[qs].disjoint);
-        g_qring[qs].inUse = true;
-    }
+    if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
     if (NVSDK_NGX_FAILED(er)) {
         snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the %s evaluation failed: %s (0x%08X)", what,
                  ngxResultName(er), static_cast<unsigned>(er));

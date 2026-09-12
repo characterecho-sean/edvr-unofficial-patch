@@ -22,6 +22,7 @@
 #include "graphics_runtime.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
+#include "gpu_timing.h"
 
 namespace edvr {
 namespace {
@@ -116,9 +117,7 @@ constexpr uint32_t kThermalTargetAll = 15;
 
 // The door's GPU bracket: a query ring per eye, the sharpen pass's shape.
 struct QuerySlot {
-    ID3D11Query* disjoint = nullptr;
-    ID3D11Query* begin = nullptr;
-    ID3D11Query* end = nullptr;
+    GpuTimer timer;
     bool         inUse = false;
     bool         begun = false;
 };
@@ -371,41 +370,24 @@ void gb(char* buf, size_t n, uint64_t bytes) {
 
 // The door's query ring, polled at each Begin so nothing is ever awaited.
 void pollDoor(ID3D11DeviceContext* ctx, int eye) {
+    if (!ctx || !gpuTimingOwns(ctx)) return;
     State& s = g_s;
     for (QuerySlot& q : s.doorQ[eye]) {
         if (!q.inUse) continue;
-        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
-        if (ctx->GetData(q.disjoint, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
-        UINT64 t0 = 0, t1 = 0;
-        const HRESULT h0 = ctx->GetData(q.begin, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        const HRESULT h1 = ctx->GetData(q.end, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        double ms=0.0; const auto status=q.timer.poll(ctx,ms);
+        if(status==GpuTimerPoll::Pending) continue;
         q.inUse = false;
-        if (dj.Disjoint || h0 != S_OK || h1 != S_OK || dj.Frequency == 0 || t1 < t0) continue;
-        const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
-        if (ms >= 0.0 && ms < 100.0) {
+        if (status==GpuTimerPoll::Ready && ms >= 0.0 && ms < 100.0) {
             s.doorGpuMs[eye] = static_cast<float>(ms);
             ++s.doorGpuSamples;
         }
     }
 }
 
-int acquireDoorSlot(ID3D11Device* dev, int eye) {
+int acquireDoorSlot(int eye) {
     for (int i = 0; i < kQueryRing; ++i) {
         QuerySlot& q = g_s.doorQ[eye][i];
         if (q.inUse) continue;
-        if (!q.disjoint) {
-            D3D11_QUERY_DESC qd{};
-            qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
-            D3D11_QUERY_DESC qt{};
-            qt.Query = D3D11_QUERY_TIMESTAMP;
-            if (FAILED(dev->CreateQuery(&qd, &q.disjoint)) || FAILED(dev->CreateQuery(&qt, &q.begin)) ||
-                FAILED(dev->CreateQuery(&qt, &q.end))) {
-                if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-                if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-                if (q.end) { q.end->Release(); q.end = nullptr; }
-                return -1;
-            }
-        }
         return i;
     }
     return -1;
@@ -984,11 +966,10 @@ void perfMonitorShutdown() {
     }
     for (int e = 0; e < 2; ++e) {
         for (QuerySlot& q : s.doorQ[e]) {
-            if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-            if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-            if (q.end) { q.end->Release(); q.end = nullptr; }
-            q.inUse = false;
+            q.timer.reset();
+            q.inUse = q.begun = false;
         }
+        s.doorOpen[e] = -1;
     }
     if (s.dropLogged) {
         Log::get().note("monitor: %u dropped or long frames were logged this session (of %u at most).",
@@ -1002,20 +983,27 @@ extern "C" __declspec(dllexport) void edvrDoorGpuBegin(void* tex, int eye) {
     using namespace edvr;
     if (graphicsRuntimeDisabled()) return;
     if (!tex || eye < 0 || eye > 1) return;
-    State& s = g_s;
-    if (s.doorOpen[eye] >= 0) return;   // a pair already open: the End never came; leave it
     guardedBudget(g_doorBudget, [&] {
         ID3D11Device* dev = nullptr;
         ID3D11DeviceContext* ctx = nullptr;
         if (!deviceOf(tex, &dev, &ctx)) return;
+        const bool timingOwner = gpuTimingBind(dev,ctx) && gpuTimingAccepts(ctx);
+        if (!timingOwner) { ctx->Release(); dev->Release(); return; }
+        State& s = g_s;
+        if (s.doorOpen[eye] >= 0) {
+            auto& previous = s.doorQ[eye][s.doorOpen[eye]];
+            double ignored = 0;
+            if (previous.timer.poll(ctx, ignored) == GpuTimerPoll::Pending) {
+                ctx->Release(); dev->Release(); return;
+            }
+            previous.begun = previous.inUse = false;
+            s.doorOpen[eye] = -1;
+        }
         pollDoor(ctx, eye);
-        const int slot = acquireDoorSlot(dev, eye);
+        const int slot = acquireDoorSlot(eye);
         if (slot >= 0) {
             QuerySlot& q = s.doorQ[eye][slot];
-            ctx->Begin(q.disjoint);
-            ctx->End(q.begin);
-            q.begun = true;
-            s.doorOpen[eye] = slot;
+            if(q.timer.begin(dev,ctx)){q.begun = true;s.doorOpen[eye] = slot;}
         }
         ctx->Release();
         dev->Release();
@@ -1025,18 +1013,18 @@ extern "C" __declspec(dllexport) void edvrDoorGpuBegin(void* tex, int eye) {
 extern "C" __declspec(dllexport) void edvrDoorGpuEnd(void* tex, int eye) {
     using namespace edvr;
     if (!tex || eye < 0 || eye > 1) return;
-    State& s = g_s;
-    const int slot = s.doorOpen[eye];
-    if (slot < 0) return;
-    s.doorOpen[eye] = -1;
     guardedBudget(g_doorBudget, [&] {
         ID3D11Device* dev = nullptr;
         ID3D11DeviceContext* ctx = nullptr;
         if (!deviceOf(tex, &dev, &ctx)) return;
+        if (!gpuTimingOwns(ctx)) { ctx->Release(); dev->Release(); return; }
+        State& s = g_s;
+        const int slot = s.doorOpen[eye];
+        if (slot < 0) { ctx->Release(); dev->Release(); return; }
+        s.doorOpen[eye] = -1;
         QuerySlot& q = s.doorQ[eye][slot];
         if (q.begun) {
-            ctx->End(q.end);
-            ctx->End(q.disjoint);
+            if(!q.timer.end(ctx)) q.timer.reset(ctx);
             q.begun = false;
             q.inUse = true;
         }

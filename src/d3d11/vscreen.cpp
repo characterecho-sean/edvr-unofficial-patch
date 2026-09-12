@@ -1,5 +1,6 @@
 #include "../common/vr_census.h"
 #include "vscreen.h"
+#include "gpu_timing.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
 #include "vr_runtime.h"
@@ -5217,6 +5218,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     ID3D11DeviceContext* ctx = nullptr;
     device->GetImmediateContext(&ctx);
     if (!ctx) return;
+
+    // The measured owner path supplies the canonical context and actual OS
+    // thread. Timing failure never prevents installing the rendering fixes.
+    gpuTimingBind(device, ctx);
 
     g_state = new State();
     g_state->installMs = stampMs();

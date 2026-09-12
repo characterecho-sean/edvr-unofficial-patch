@@ -198,3 +198,12 @@ on one immediate context and thread. The flight lasted about 3 minutes 15
 seconds and included AA changes and the existing culling diagnostic, so it is
 functional integration evidence rather than a controlled overhead measurement.
 The shared-clock migration and later GPU accuracy/overhead gates remain open.
+
+## Existing timer migration checkpoint
+
+The existing production GPU timers now use the shared frequency service. See
+[the migration review and regression gate](gpu-timer-migration-2026-09-12.md)
+for caller coverage, inactive-producer recovery, explicit cleanup, desk results
+and the next Frontier check. The render-to-submit frame instrument is still
+inactive. This checkpoint must pass its Frontier regression before broader
+measurement is enabled.

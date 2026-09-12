@@ -26,6 +26,7 @@
 #include "screen_motion.h"
 #include "celestial_motion.h"
 #include "shader_swap.h"
+#include "gpu_timing.h"
 #include "temporal_shader_bytecode.h"
 
 namespace edvr {
@@ -514,12 +515,11 @@ void releaseEye(EyeState& e) {
 // is read on a later call, and a call that finds every slot busy runs
 // unmeasured. Measuring must never be able to stall the pass.
 struct Slot {
-    ID3D11Query*  disjoint = nullptr;
-    ID3D11Query*  begin = nullptr;
-    ID3D11Query*  end = nullptr;
+    GpuTimer      timer;
     ID3D11Buffer* staging = nullptr;
     bool          inUse = false;
     bool          timeDone = false;
+    bool          timing = false;
     bool          statsDone = false;
     uint64_t      pixels = 0;
     // The instrument's bookkeeping for this call: which candidates had a
@@ -533,11 +533,9 @@ constexpr int kStatCount = 52;   // 50 used since 2026-09-09 (39-45 the moving s
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
-    if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-    if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-    if (q.end) { q.end->Release(); q.end = nullptr; }
+    q.timer.reset();
     if (q.staging) { q.staging->Release(); q.staging = nullptr; }
-    q.inUse = false;
+    q = Slot{};
 }
 
 uint32_t g_timeCount = 0;
@@ -667,25 +665,14 @@ void maybeLogPrice() {
 }
 
 void pollSlots(ID3D11DeviceContext* ctx) {
+    if (!ctx || !gpuTimingOwns(ctx)) return;
     for (Slot& q : g_slots) {
         if (!q.inUse) continue;
         if (!q.timeDone) {
-            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
-            if (ctx->GetData(q.disjoint, &dj, sizeof(dj),
-                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
-                UINT64 t0 = 0, t1 = 0;
-                const HRESULT hr0 = ctx->GetData(q.begin, &t0, sizeof(t0),
-                                                 D3D11_ASYNC_GETDATA_DONOTFLUSH);
-                const HRESULT hr1 = ctx->GetData(q.end, &t1, sizeof(t1),
-                                                 D3D11_ASYNC_GETDATA_DONOTFLUSH);
-                q.timeDone = true;
-                if (!dj.Disjoint && hr0 == S_OK && hr1 == S_OK && dj.Frequency) {
-                    const double ms = static_cast<double>(t1 - t0) * 1000.0 /
-                                      static_cast<double>(dj.Frequency);
-                    ++g_timeCount;
-                    g_timeSum += ms;
-                    if (ms > g_timeMax) g_timeMax = ms;
-                }
+            if (!q.timing) q.timeDone = true;
+            else { double ms=0.0; const auto status=q.timer.poll(ctx,ms);
+                if(status==GpuTimerPoll::Ready){q.timeDone=true;++g_timeCount;g_timeSum+=ms;if(ms>g_timeMax)g_timeMax=ms;}
+                else if(status==GpuTimerPoll::Invalid) q.timeDone=true;
             }
         }
         if (!q.statsDone) {
@@ -761,19 +748,12 @@ int acquireSlot(ID3D11Device* dev) {
     for (int i = 0; i < kSlots; ++i) {
         Slot& q = g_slots[i];
         if (q.inUse) continue;
-        if (!q.disjoint) {
-            D3D11_QUERY_DESC qdd{};
-            qdd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
-            D3D11_QUERY_DESC qdt{};
-            qdt.Query = D3D11_QUERY_TIMESTAMP;
+        if (!q.staging) {
             D3D11_BUFFER_DESC bd{};
             bd.ByteWidth = kStatCount * 4;
             bd.Usage = D3D11_USAGE_STAGING;
             bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            const bool made = SUCCEEDED(dev->CreateQuery(&qdd, &q.disjoint)) &&
-                              SUCCEEDED(dev->CreateQuery(&qdt, &q.begin)) &&
-                              SUCCEEDED(dev->CreateQuery(&qdt, &q.end)) &&
-                              SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &q.staging));
+            const bool made = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &q.staging));
             if (!made) {
                 releaseSlot(q);
                 continue;
@@ -3275,10 +3255,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // and explicit diagnostics retain all statistics and registration probes.
         const bool diagnostics = g_diagnostics || g_debugMode != 0 || g_eyeRunLeft > 0 || g_eyeRunReady;
         const bool statsWritten = diagnostics || (flags & 2u) == 0 || g_foveaDeg > 0.0f;
-        const int qs = (statsWritten || (g_rowsFrame & 31u) == 0) ? acquireSlot(dev) : -1;
+        const bool timingOwner = gpuTimingBind(dev, ctx) && gpuTimingAccepts(ctx);
+        const int qs = gpuTimingOwns(ctx) && (statsWritten || (g_rowsFrame & 31u) == 0)
+            ? acquireSlot(dev) : -1;
         if (qs >= 0) {
-            ctx->Begin(g_slots[qs].disjoint);
-            ctx->End(g_slots[qs].begin);
+            auto& slot = g_slots[qs];
+            slot.timing = timingOwner && slot.timer.begin(dev, ctx);
+            slot.inUse = true;
+            slot.timeDone = !slot.timing;
+            // Only the later CopyResource makes staging readable. An aborted
+            // pass must not consume a previous frame's staging contents.
+            slot.statsDone = true;
         }
         const UINT zeros[4] = {0, 0, 0, 0};
         if (statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
@@ -4164,11 +4151,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
         if (qs >= 0) {
-            ctx->End(g_slots[qs].end);
-            ctx->End(g_slots[qs].disjoint);
+            if (g_slots[qs].timing && !g_slots[qs].timer.end(ctx)) {
+                g_slots[qs].timer.reset(ctx); g_slots[qs].timing=false;
+            }
             if (statsWritten || (ran && !usedDlaa)) ctx->CopyResource(g_slots[qs].staging, g_stats);
             g_slots[qs].inUse = true;
-            g_slots[qs].timeDone = false;
+            g_slots[qs].timeDone = !g_slots[qs].timing;
             g_slots[qs].statsDone = !(statsWritten || (ran && !usedDlaa));
             g_slots[qs].pixels = static_cast<uint64_t>(w) * h;
             g_slots[qs].hadHistory = useHistory;

@@ -53,6 +53,9 @@ void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, UINT n,
 }
 
 using namespace edvr;
+// Production timer destruction is inert for process exit. Local test owners
+// explicitly reset their content/timers while the WARP device is still alive.
+struct TestUiContent : UiContent { ~TestUiContent() { reset(); } };
 int checks = 0;
 void check(bool ok, const char* label) {
     ++checks;
@@ -112,6 +115,7 @@ int main(int argc, char** argv) {
         created = D3D11CreateDevice(nullptr, driver, nullptr, 0,
             nullptr, 0, D3D11_SDK_VERSION, &dev, &level, &ctx);
     hr(created);
+    check(gpuTimingBind(dev.Get(),ctx.Get()),"bind canonical WARP timer owner");
     ComPtr<ID3D11InfoQueue> info; dev.As(&info);
     // Compile every actual coverage shader, not a test transcription.
     for (DepthShader& entry : g_depthShaders) {
@@ -588,7 +592,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         auto view=[&](ID3D11Texture2D* t){ComPtr<ID3D11ShaderResourceView> v;hr(dev->CreateShaderResourceView(t,nullptr,&v));return v;};
         auto valuesOf=[&](ID3D11ShaderResourceView* v){check(v!=nullptr,"UI edit view available");ComPtr<ID3D11Resource> r;v->GetResource(&r);return read(dev.Get(),ctx.Get(),r.Get());};
         for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM}) {
-            UiContent tracker;auto t=make(13,9,format);auto v=view(t.Get());
+            TestUiContent tracker;auto t=make(13,9,format);auto v=view(t.Get());
             std::vector<unsigned char> bytes(13*9*4,0);
             bytes[4*55]=128;bytes[4*55+3]=124;
             ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
@@ -607,12 +611,28 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             for(float a:changed)check(a==0,"unchanged edits expire after 32 frames");
             bytes[4*55+3]=123;ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
             check(valuesOf(tracker.prepare(ctx.Get(),v.Get(),135))[55]==1,"later change rearms edit history");
-            for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),137)))check(a==0,"skipped surface frame resets history");
+            GpuTimer outer;
+            check(outer.begin(dev.Get(),ctx.Get()),"outer interval surrounds production UI sample");
+            auto* resetFrame=tracker.prepare(ctx.Get(),v.Get(),137,true);
+            check(outer.end(ctx.Get()),"outer interval ends after UI sample");
+            for(float a:valuesOf(resetFrame))check(a==0,"skipped surface frame resets history");
+            double outerMs=0;GpuTimerPoll outerStatus=GpuTimerPoll::Pending;
+            const auto deadline=GetTickCount64()+1500;
+            do {
+                tracker.gpu.poll(ctx.Get());
+                if(outerStatus==GpuTimerPoll::Pending)outerStatus=outer.poll(ctx.Get(),outerMs);
+                if(tracker.gpu.totals.samples && outerStatus!=GpuTimerPoll::Pending)break;
+                Sleep(1);
+            } while(GetTickCount64()<deadline);
+            check(tracker.gpu.totals.samples==1 && !tracker.gpu.totals.invalid && outerStatus==GpuTimerPoll::Ready,
+                  "production UI timer drains under an outer shared interval");
+            check(outerMs>=tracker.gpu.totals.ms,"UI timestamp pair stays inside parent interval");
+            outer.reset(ctx.Get());
             tracker.retire(258);check(tracker.allocated==0,"idle source releases retained textures");
         }
         // Preserve the game's compute bindings, including a live UAV.
         auto t=make(13,9);auto v=view(t.Get());std::vector<unsigned char> bytes(13*9*4,127);
-        ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);UiContent tracker;
+        ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);TestUiContent tracker;
         tracker.prepare(ctx.Get(),v.Get(),1);
         auto sentinelT=make(8,8,DXGI_FORMAT_R8_UNORM,D3D11_BIND_UNORDERED_ACCESS);
         ComPtr<ID3D11UnorderedAccessView> sentinelU;hr(dev->CreateUnorderedAccessView(sentinelT.Get(),nullptr,&sentinelU));
@@ -625,13 +645,13 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         ComPtr<ID3D11UnorderedAccessView> afterU;ctx->CSGetUnorderedAccessViews(0,1,&afterU);check(afterU==sentinelU,"UI edit compute UAV restored");
         for(UINT slot=0;slot<3;++slot){ComPtr<ID3D11ShaderResourceView> after;ctx->CSGetShaderResources(slot,1,&after);check(after==v,"UI edit compute input restored");}
         ctx->ClearState();
-        UiContent bounded;std::vector<ComPtr<ID3D11Texture2D>> textures;std::vector<ComPtr<ID3D11ShaderResourceView>> views;
+        TestUiContent bounded;std::vector<ComPtr<ID3D11Texture2D>> textures;std::vector<ComPtr<ID3D11ShaderResourceView>> views;
         for(unsigned i=0;i<25;++i){textures.push_back(make(4,4));views.push_back(view(textures.back().Get()));
             check((bounded.prepare(ctx.Get(),views.back().Get(),1)!=nullptr)==(i<24),"cache count bounded without evicting active-frame surfaces");}
         check(bounded.prepare(ctx.Get(),views.back().Get(),2)!=nullptr && bounded.totals.evicted==1,"older cache entry can be evicted safely");
         auto atlas=make(4,4,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_SHADER_RESOURCE);auto atlasV=view(atlas.Get());
         check(!bounded.prepare(ctx.Get(),atlasV.Get(),3),"static atlas is not copied each frame");
-        UiContent budget;auto big=make(4096,1536),big2=make(4096,1536);auto bigV=view(big.Get()),bigV2=view(big2.Get());
+        TestUiContent budget;auto big=make(4096,1536),big2=make(4096,1536);auto bigV=view(big.Get()),bigV2=view(big2.Get());
         check(budget.prepare(ctx.Get(),bigV.Get(),1)!=nullptr,"bounded large UI surface supported");
         check(budget.prepare(ctx.Get(),bigV2.Get(),1)==nullptr,"history byte cap enforced independently of entry count");
         check(budget.allocated<=UiContent::kBudget,"allocated UI history fits budget");
@@ -839,5 +859,6 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         }
     }
     ctx->ClearState(); uiDepthShutdown();
+    check(gpuTimingShutdown(ctx.Get()),"explicit shared timer shutdown before WARP release");
     std::printf("PASS: %d checks; production UI coverage isolates smoke, preserves depth/alpha/occlusion/state, and handles menus and frame/eye/format changes.\n",checks);
 }

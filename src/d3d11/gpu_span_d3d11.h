@@ -15,8 +15,8 @@ struct GpuSpanD3D11Ops {
     void (*releaseQuery)(void*, ID3D11Query*) noexcept = nullptr;
 };
 
-// Desk adapter only: integration must share disjoint ownership with every
-// existing timer before this can be used for an outer game-frame bracket.
+// The frequency-only mode backs the shared production timer service. The
+// six-marker frame mode remains a desk adapter; no outer game bracket is active.
 class GpuSpanD3D11Driver final : public GpuSpanDriver {
 public:
     static constexpr unsigned kSlots = GpuSpanState::kSlots;

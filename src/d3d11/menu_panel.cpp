@@ -22,6 +22,7 @@
 #include "../common/timing.h"
 #include "perf_monitor.h"   // the upload is an event for the drop attribution
 #include "shader_swap.h"
+#include "gpu_timing.h"
 
 namespace edvr {
 namespace {
@@ -987,9 +988,7 @@ uint32_t g_draws = 0;
 // and the dispatch, never awaited, averaged and said once after enough of
 // them -- so the overlay's cost is a number in the log, not a belief.
 struct QuerySlot {
-    ID3D11Query* disjoint = nullptr;
-    ID3D11Query* begin = nullptr;
-    ID3D11Query* end = nullptr;
+    GpuTimer     timer;
     bool         inUse = false;
 };
 constexpr int kQueryRing = 8;
@@ -1005,24 +1004,20 @@ FaultBudget g_budget("menuPanel", 8);
 
 void releaseQueries() {
     for (QuerySlot& q : g_qring) {
-        if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-        if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-        if (q.end) { q.end->Release(); q.end = nullptr; }
+        q.timer.reset();
         q.inUse = false;
     }
 }
 
 void pollQueries(ID3D11DeviceContext* ctx) {
+    if (!gpuTimingOwns(ctx)) return;
     for (QuerySlot& q : g_qring) {
         if (!q.inUse) continue;
-        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
-        if (ctx->GetData(q.disjoint, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
-        UINT64 t0 = 0, t1 = 0;
-        const HRESULT h0 = ctx->GetData(q.begin, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        const HRESULT h1 = ctx->GetData(q.end, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        double ms = 0.0;
+        const GpuTimerPoll result = q.timer.poll(ctx, ms);
+        if (result == GpuTimerPoll::Pending) continue;
         q.inUse = false;
-        if (dj.Disjoint || h0 != S_OK || h1 != S_OK || dj.Frequency == 0) continue;
-        const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+        if (result != GpuTimerPoll::Ready) continue;
         ++g_timeCount;
         g_timeSum += ms;
         if (ms > g_timeMax) g_timeMax = ms;
@@ -1037,24 +1032,14 @@ void pollQueries(ID3D11DeviceContext* ctx) {
     }
 }
 
-int acquireQuery(ID3D11Device* dev) {
+int acquireQuery(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (!dev || !ctx) return -1;
+    if (!gpuTimingAccepts(ctx) && !gpuTimingBind(dev, ctx)) return -1;
     for (int i = 0; i < kQueryRing; ++i) {
         QuerySlot& q = g_qring[i];
         if (q.inUse) continue;
-        if (!q.disjoint) {
-            D3D11_QUERY_DESC qd{};
-            qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
-            D3D11_QUERY_DESC qt{};
-            qt.Query = D3D11_QUERY_TIMESTAMP;
-            if (FAILED(dev->CreateQuery(&qd, &q.disjoint)) || FAILED(dev->CreateQuery(&qt, &q.begin)) ||
-                FAILED(dev->CreateQuery(&qt, &q.end))) {
-                if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-                if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-                if (q.end) { q.end->Release(); q.end = nullptr; }
-                return -1;
-            }
-        }
-        return i;
+        if (q.timer.begin(dev, ctx)) { q.inUse = true; return i; }
+        return -1; // Shared clock pressure cannot be fixed by trying another free slot.
     }
     return -1;
 }
@@ -1333,11 +1318,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             return nullptr;
         }
         pollQueries(ctx);
-        const int qs = acquireQuery(dev);
-        if (qs >= 0) {
-            ctx->Begin(g_qring[qs].disjoint);
-            ctx->End(g_qring[qs].begin);
-        }
+        const int qs = acquireQuery(dev, ctx);
         D3D11_BOX rb{};
         rb.left = region[0];
         rb.top = region[1];
@@ -1406,11 +1387,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
             ctx->Dispatch((static_cast<UINT>(box[2] - box[0]) + 7) / 8,
                           (static_cast<UINT>(box[3] - box[1]) + 7) / 8, 1);
-            if (qs >= 0) {
-                ctx->End(g_qring[qs].end);
-                ctx->End(g_qring[qs].disjoint);
-                g_qring[qs].inUse = true;
-            }
+            if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
 
             ctx->CSSetShaderResources(0, 2, nullSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
@@ -1441,10 +1418,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             }
         } else {
             if (qs >= 0) {
-                // A query begun and never ended would wedge its slot.
-                ctx->End(g_qring[qs].end);
-                ctx->End(g_qring[qs].disjoint);
-                g_qring[qs].inUse = true;
+                g_qring[qs].timer.end(ctx); // Keep the slot until its invalid sample is consumed.
             }
             failOnce("the parameter buffer could not be written");
         }

@@ -65,6 +65,7 @@ int main(int argc,char** argv) {
     HRESULT made=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&level,&ctx);
     if (made==DXGI_ERROR_SDK_COMPONENT_MISSING) made=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&level,&ctx);
     hr(made); ComPtr<ID3D11InfoQueue> info; dev.As(&info);
+    check(gpuTimingBind(dev.Get(),ctx.Get()),"bind canonical WARP timer owner");
     D3D11_TEXTURE2D_DESC td{}; td.Width=td.Height=8; td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R32_TYPELESS; td.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
     ComPtr<ID3D11Texture2D> scene; ComPtr<ID3D11DepthStencilView> depth;
@@ -271,6 +272,7 @@ int main(int argc,char** argv) {
     }
     compile(full.c_str(),"cs_5_0","main"); compile(full.c_str(),"cs_5_0","mv");
     ctx->ClearState(); celestialMotionShutdown();
+    check(gpuTimingShutdown(ctx.Get()),"explicit shared timer shutdown before WARP release");
     if (info) for (UINT64 i=0;i<info->GetNumStoredMessagesAllowedByRetrievalFilter();++i) {
         SIZE_T n=0; info->GetMessage(i,nullptr,&n); std::vector<char> bytes(n); auto* msg=reinterpret_cast<D3D11_MESSAGE*>(bytes.data()); hr(info->GetMessage(i,msg,&n));
         if (msg->Severity<=D3D11_MESSAGE_SEVERITY_WARNING) std::puts(msg->pDescription);

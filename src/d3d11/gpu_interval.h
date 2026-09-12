@@ -1,5 +1,5 @@
 #pragma once
-#include <d3d11.h>
+#include "gpu_timing.h"
 #include <wrl/client.h>
 #include <cstdint>
 
@@ -10,50 +10,57 @@ namespace edvr {
 // counts distinguish unavailable timestamps from a measured zero cost.
 template<unsigned Capacity> class GpuIntervals {
     struct Slot {
-        Microsoft::WRL::ComPtr<ID3D11Query> disjoint,begin,end;
+        GpuTimer timer;
         uint64_t frame=0;
         bool pending=false;
     } slots_[Capacity];
     int open_=-1;
     uint64_t frame_=0;
-    bool failed_=false;
 public:
     struct Totals { double ms=0; unsigned samples=0,skipped=0,invalid=0; } totals;
     bool begin(ID3D11DeviceContext* ctx) {
-        if(open_>=0 || failed_){++totals.skipped;return false;}
+        if(!ctx)return false;
+        Microsoft::WRL::ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        if(!dev || !gpuTimingBind(dev.Get(),ctx) || !gpuTimingAccepts(ctx))return false;
+        if(open_>=0){++totals.skipped;return false;}
         for(unsigned i=0;i<Capacity;++i) {
             auto& s=slots_[i];if(s.pending)continue;
-            if(!s.disjoint) {
-                Microsoft::WRL::ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);
-                D3D11_QUERY_DESC d{D3D11_QUERY_TIMESTAMP_DISJOINT,0},t{D3D11_QUERY_TIMESTAMP,0};
-                if(FAILED(dev->CreateQuery(&d,&s.disjoint)) || FAILED(dev->CreateQuery(&t,&s.begin)) || FAILED(dev->CreateQuery(&t,&s.end))) {
-                    s={};failed_=true;++totals.invalid;return false;
-                }
-            }
-            ctx->Begin(s.disjoint.Get());ctx->End(s.begin.Get());open_=int(i);return true;
+            // Clock/lease pressure is transient: skipping must not permanently
+            // disable a sampler whose own timestamp ring still has capacity.
+            if(!s.timer.begin(dev.Get(),ctx)){++totals.skipped;return false;}
+            open_=int(i);return true;
         }
         ++totals.skipped;return false;
     }
     void end(ID3D11DeviceContext* ctx) {
-        if(open_<0)return;
-        auto& s=slots_[open_];ctx->End(s.end.Get());ctx->End(s.disjoint.Get());
+        if(!ctx || !gpuTimingAccepts(ctx) || open_<0)return;
+        auto& s=slots_[open_];
+        if(!s.timer.end(ctx)){s.timer.reset(ctx);++totals.invalid;open_=-1;return;}
         s.pending=true;s.frame=frame_;open_=-1;
     }
     void poll(ID3D11DeviceContext* ctx) {
+        if(!ctx || !gpuTimingOwns(ctx))return;
         ++frame_;
+        if(open_>=0) {
+            double ignored=0;
+            if(slots_[open_].timer.poll(ctx,ignored)==GpuTimerPoll::Invalid) {
+                ++totals.invalid;open_=-1;
+            }
+        }
         for(auto& s:slots_) {
             if(!s.pending || frame_-s.frame<4)continue;
-            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT d{};UINT64 a=0,b=0;
-            const auto flags=D3D11_ASYNC_GETDATA_DONOTFLUSH;
-            const HRESULT hd=ctx->GetData(s.disjoint.Get(),&d,sizeof(d),flags);
-            if(hd==S_FALSE)continue;
-            if(FAILED(hd) || d.Disjoint || !d.Frequency){s.pending=false;++totals.invalid;continue;}
-            const HRESULT ha=ctx->GetData(s.begin.Get(),&a,sizeof(a),flags),hb=ctx->GetData(s.end.Get(),&b,sizeof(b),flags);
-            if(ha==S_FALSE || hb==S_FALSE)continue;
-            s.pending=false;
-            if(FAILED(ha)||FAILED(hb)||b<a){++totals.invalid;continue;}
-            totals.ms+=double(b-a)*1000.0/double(d.Frequency);++totals.samples;
+            double ms=0.0; const auto status=s.timer.poll(ctx,ms);
+            if(status==GpuTimerPoll::Pending)continue; s.pending=false;
+            if(status==GpuTimerPoll::Ready){totals.ms+=ms;++totals.samples;} else ++totals.invalid;
         }
+    }
+    void reset(ID3D11DeviceContext* ctx=nullptr) noexcept {
+        // After global shutdown/abandon detaches the registry, use reset()
+        // without a context for Release-only cleanup of the quiescent sampler.
+        if(ctx && !gpuTimingOwns(ctx))return;
+        ID3D11DeviceContext* owner=ctx;
+        for(auto& s:slots_){s.timer.reset(owner);s=Slot{};}
+        open_=-1;frame_=0;totals={};
     }
 };
 }

@@ -1,5 +1,6 @@
 ﻿#include "../common/vr_census.h"
 #include "device_hook.h"
+#include "gpu_timing.h"
 
 #include "shader_sig.h"
 #include "input_gate.h"
@@ -2609,6 +2610,10 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
+    // FreeLibrary teardown can run under the loader lock on another thread.
+    // Invalidate timing first, then let each owner release its queries without
+    // issuing context commands. Normal process exit skips this entire path.
+    gpuTimingAbandon();
     // The keyboard first: a gate left set past the module's life is a
     // keyboard the game never gets back.
     menuShutdown();
