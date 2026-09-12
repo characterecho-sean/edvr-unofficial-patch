@@ -796,6 +796,25 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
 if errorlevel 1 ( echo [edvr] ERROR: GPU span state test build failed & exit /b 1 )
 "%BUILD%\gpu_span_state_test.exe" --self-test || exit /b 1
 
+REM Shared query ownership and the real D3D11 adapter remain desk-only until
+REM every existing timer has migrated. Never load the proxy beside these rigs.
+if not exist "%OBJ%\gpuclock" mkdir "%OBJ%\gpuclock"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\gpuclock\\" /Fe"%OBJ%\gpuclock\gpu_disjoint_clock_test.exe" ^
+    "tools\gpu_disjoint_clock_test\gpu_disjoint_clock_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: shared GPU clock test build failed & exit /b 1 )
+"%OBJ%\gpuclock\gpu_disjoint_clock_test.exe" --dry-run || exit /b 1
+"%OBJ%\gpuclock\gpu_disjoint_clock_test.exe" --self-test || exit /b 1
+
+if not exist "%OBJ%\gpuspand3d11" mkdir "%OBJ%\gpuspand3d11"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\gpuspand3d11\\" /Fe"%OBJ%\gpuspand3d11\gpu_span_d3d11_test.exe" ^
+    "tools\gpu_span_d3d11_test\gpu_span_d3d11_test.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: D3D11 GPU span test build failed & exit /b 1 )
+"%OBJ%\gpuspand3d11\gpu_span_d3d11_test.exe" --dry-run || exit /b 1
+"%OBJ%\gpuspand3d11\gpu_span_d3d11_test.exe" --self-test || exit /b 1
+
 REM Drive the actual paired proxies through startup exhaustion and a first
 REM compositor wait, on a hidden WARP swapchain with an inert fake runtime.
 if not exist "%OBJ%\vrcensusbridge" mkdir "%OBJ%\vrcensusbridge"

@@ -164,8 +164,19 @@ the build. Its verified first Present hook took approximately 23 ms instead of
 18.365 seconds, and Sean confirmed the initial black screen is gone. See [the
 startup investigation](startup-delay-2026-09-12.md). These results clear the
 game startup/exit interruption; they do not qualify the rejected GPU harnesses.
-The next GPU gate remains a fresh reviewed D3D11 adapter and shared
-disjoint-clock ownership with controlled desk workloads before game
-integration.
+The replacement adapter and shared-clock desk results are recorded in the query
+foundation follow-up below. Game integration remains a separate gate.
 
 No configuration key or existing feature has been retired.
+
+## Query foundation follow-up
+
+The reviewed native adapter and shared-disjoint lease policy now have required
+desk-test gates. See [GPU query foundation](gpu-query-foundation-2026-09-12.md)
+for ownership rules, rejected draft findings, real WARP workloads and remaining
+game integration. The existing CPU frame policy still owns frame association;
+these components alone do not publish a game GPU value.
+
+The startup shader fix was separately merged and pushed to main as `ec26970`,
+after a full regression build on current main. The unfinished OpenXR/GPU work
+was not included in that merge.
