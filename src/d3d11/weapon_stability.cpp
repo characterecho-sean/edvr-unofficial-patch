@@ -29,7 +29,12 @@ bool family(uint64_t vs) {
            // uses an already camera-relative placement and must stay outside.
            vs==0xAACFDCF2FB9AD809ull || vs==0x34CCFAAB1EAD90BEull ||
            vs==0x174E8D76363BE337ull || vs==0x025B4B9FF54622EDull ||
-           vs==0x7F9B650EC1A1E570ull;
+           vs==0x7F9B650EC1A1E570ull ||
+           // The small emissive skinned surface in draw 387 of 04:13:00.
+           // Its instance 135 shares the arms' attachment origin. Unlike
+           // the late GUI, its original VS subtracts camera[275] from t33,
+           // so it needs the same correction as the surrounding geometry.
+           vs==0x88DCF1164C640EC3ull;
 }
 bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11ShaderResourceView* bonesView,
               ID3D11Buffer* pool,ID3D11Buffer* bones,ID3D11Buffer* camera,unsigned bytes) {

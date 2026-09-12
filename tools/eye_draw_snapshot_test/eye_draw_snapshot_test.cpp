@@ -50,6 +50,11 @@ int wmain(int argc, wchar_t** argv) {
     ComPtr<ID3D11RenderTargetView> boundRt; ctx->OMGetRenderTargets(1, &boundRt, nullptr);
     check(boundRt.Get() == rtv.Get(), "capture changed render target");
     check(snap.surfaces.size() == 1 && snap.draws.size() == 3, "duplicate source or lost draw");
+    edvr::EyeDrawSnapshot unlitSnap;
+    ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(2,1,&none);ctx->PSSetShaderResources(1,1,&s);
+    unlitSnap.capture(ctx.Get(),102,0,edvr::EyeDrawSnapshot::kHolo,edvr::kHoloUnlitPs,'X',6,1,0);
+    check(unlitSnap.draws.size()==1 && unlitSnap.surfaces.size()==1 && unlitSnap.draws[0].texture==0,"unlit hologram captures t1 with no t2 surface");
+    ctx->PSSetShaderResources(2,1,&s);
     // Exit-profile/menu and direct-screen composites use t1 and t0,
     // respectively. They were previously absent from an otherwise valid
     // eye dump, leaving the profile's actual source resolution unknown.

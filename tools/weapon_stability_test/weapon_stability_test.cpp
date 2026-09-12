@@ -104,11 +104,11 @@ void selfTest(){
     check(h.run() && draws==1 && drawnPool==g.fixedSrv.Get(),"draw reads private corrected pool exactly once");
     // Separate materials on the same attachment must use the very same pool
     // as its opaque mesh, without another dispatch or another correction.
-    for(uint64_t vs:{0xAACFDCF2FB9AD809ull,0x34CCFAAB1EAD90BEull,0x174E8D76363BE337ull,0x025B4B9FF54622EDull,0x7F9B650EC1A1E570ull}) {
+    for(uint64_t vs:{0xAACFDCF2FB9AD809ull,0x34CCFAAB1EAD90BEull,0x174E8D76363BE337ull,0x025B4B9FF54622EDull,0x7F9B650EC1A1E570ull,0x88DCF1164C640EC3ull}) {
         auto* fixed=g.fixed.Get();const unsigned before=draws;testVs=vs;
         check(h.run() && draws==before+1 && drawnPool==g.fixedSrv.Get() && g.fixed.Get()==fixed,"additional material uses shared corrected pool exactly once");
     }
-    for(uint64_t vs:{0xB10B032BDFD46700ull,0xC4B4B334B26E81A9ull,0xA888D51024D9798Eull,0xCFCA8FFC6B058630ull,0x88DCF1164C640EC3ull}) {
+    for(uint64_t vs:{0xB10B032BDFD46700ull,0xC4B4B334B26E81A9ull,0xA888D51024D9798Eull,0xCFCA8FFC6B058630ull}) {
         testVs=vs;const unsigned before=draws;check(!h.run() && draws==before,"camera-relative UI and full-screen passes stay original");
     }
     testVs=0x8B589D25B2A0ADDCull;

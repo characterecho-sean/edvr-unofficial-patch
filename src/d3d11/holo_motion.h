@@ -154,7 +154,7 @@ public:
     // and the normal full-eye viewport. Does not replace the original draw.
     // mode 0: cockpit pool, 1: ring local-to-clip, 2: orbital instance stream,
     // 3: planar sprite pool (local Y=0, original VS forces clip Z=W).
-    bool prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* source,const HoloDraw& args,float metres,unsigned mode=0) {
+    bool prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* source,const HoloDraw& args,float metres,unsigned mode=0,unsigned surfaceSlot=2) {
         const unsigned count=mode==2?args.instances:1;
         if(failed || !source || mode>3 || (mode==3 && args.count!=6) || (mode==2 ? (args.kind!='N' || args.startInstance!=0 || count==0 || count>64) : (args.kind!='X' || args.instances!=1)) || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
         const bool pooled=mode==0 || mode==3;
@@ -175,7 +175,8 @@ public:
         uint64_t at=uint64_t(offsets[stream])+uint64_t(args.startInstance)*strides[stream];
         if(mode!=1 && at+bytes>vd.ByteWidth) return false;
         Ptr<ID3D11ShaderResourceView> pool,surface;
-        if(mode!=2) ctx->PSGetShaderResources(mode==1?3:mode==3?0:2,1,&surface);
+        if(mode==0 && surfaceSlot!=1 && surfaceSlot!=2) return false;
+        if(mode!=2) ctx->PSGetShaderResources(mode==1?3:mode==3?0:surfaceSlot,1,&surface);
         if(pooled) {
             ctx->VSGetShaderResources(33,1,&pool); if(!pool || !surface) return false;
             D3D11_SHADER_RESOURCE_VIEW_DESC pd{}; pool->GetDesc(&pd); if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER) return false;

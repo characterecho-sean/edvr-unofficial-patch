@@ -2,7 +2,7 @@
 
 // Draw-time evidence for an explicitly armed eye run. Celestial draws use
 // cb0[4..7] for clip position, outside the instance pool; dim holo strokes
-// need the original t2 alpha to distinguish them from the panel background.
+// need the original surface alpha to distinguish them from the background.
 // Keep each draw (including both eyes and repeated VS hashes). Buffer
 // addresses identify bindings within a run, never objects across frames.
 #include <d3d11.h>
@@ -14,6 +14,7 @@
 #include <map>
 #include <mutex>
 #include <cstring>
+#include "holo_material.h"
 
 namespace edvr {
 class EyeDrawSnapshot {
@@ -66,7 +67,8 @@ public:
         // additional surfaces drawn separately from the opaque mesh.
         case 0xAACFDCF2FB9AD809ull:case 0x34CCFAAB1EAD90BEull:
         case 0x174E8D76363BE337ull:case 0x025B4B9FF54622EDull:
-        case 0x7F9B650EC1A1E570ull:return true;
+        case 0x7F9B650EC1A1E570ull:
+        case 0x88DCF1164C640EC3ull:return true;
         default:return false;
         }
     }
@@ -283,7 +285,7 @@ public:
             else ++meshDeclined;
         }
         if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen)
-            d.texture=captureSurface(ctx,dev.Get(),frame,vs==kHolo?2:vs==kPanel?1:0,vs==kVscreen);
+            d.texture=captureSurface(ctx,dev.Get(),frame,vs==kHolo?holoSurfaceSlot(ps):vs==kPanel?1:0,vs==kVscreen);
         if(vs==kVscreen && sourceFrame==frame && sourceDepth && d.texture!=UINT32_MAX) {
             D3D11_TEXTURE2D_DESC depth{};sourceDepth->GetDesc(&depth);
             const auto& colour=surfaces[d.texture];

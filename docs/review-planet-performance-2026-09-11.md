@@ -273,3 +273,92 @@ the actual NVIDIA DLL smoke checks for TAA/DLAA/DLSS and motion/jitter.
 The WARP regressions ran without the optional D3D debug layer because it
 is unavailable on this machine; the functional GPU/state assertions
 passed. Neither fix changes settings or claims a further DLSS speedup.
+
+## Flight 04:10, remaining emitter and cockpit UI
+
+Ruled out: the first emitter correction resolves every visible pink
+element. The user still sees a slight pink sprite rise during crouching
+on build 22a3742. The same flight confirms the account-display
+correction, but reports cockpit UI swimming with vertical head motion.
+Capture 041300 is on foot; 041404 and 041409 show the cockpit. Preserve
+the confirmed menu fix while tracing the regression. Performance remains
+an open request; the prior isolated benchmarks are not evidence of a
+user-visible gain.
+
+Confirmed cockpit material omission: log 04:13:47.579 rejects VS
+81216C77F90DEDD6 / PS B4786E0A0B199285 as unsupported. By 04:14:02 there
+are 14.8 such draws per frame. The new captures have only one eligible
+holo record and only two captured UI surfaces. Original bytecode from
+Effects_Win64_SM50.arc shows this material samples TEXCOORD8 from t1/s1;
+the supported A2965EC2931A39C8 variant reads t2/s1. Both have the same
+vertex input signature and surface-alpha/glow calculation. Add a t1
+coverage variant and carry that slot through transform identity,
+content-edit tracking and source capture. The menu overlay-depth fix is
+unrelated and remains intact.
+
+Ruled out: the bright particle correction is simply missing its pixel
+shader variant. The new run still uses 9AEC596A2B036EA6 /
+3789CA2062E196FB. Its emitter remains rigid and all 19 captured
+projection/attachment guards pass. Eighteen complete vertex captures
+replay through the original VS with zero output error; the final VB was
+declined by the existing 32 MiB vertex capture cap. Do not count that
+last frame as a successful vertex replay.
+
+The user identifies the faint fleck above the rifle housing. The bright
+particle polygons project below that location. Ruled out: the second
+EB787F983BC1F5A3 particle batch in the shared vertex buffer is this
+fleck; its first 80 vertices are grey world-smoke particles, hundreds of
+metres from the weapon.
+
+Confirmed missing attachment material: census draw 387 is a single
+triangle with VS 88DCF1164C640EC3 / PS 494506A63091DF8C, using the same
+t33/t38/instance buffers as the arms. Its instance stream entry 579
+selects pool record 135, bone base 2091. The captured position is
+identical to the paired arms' origin (record 133), 49.979 mm from the
+source camera in the first frame. The original VS skins the vertices,
+loads t33 position, subtracts camera[275], and projects through
+cb0[4..7]. The PS samples a 128x128 BC1 texture with emissive scaling.
+Ruled out: this shader is an already camera-relative late GUI pass; its
+original bytecode explicitly subtracts the camera, and its record shares
+the corrected root. Extend the existing attachment family and diagnostic
+capture to it. This corrects a proven relative-placement error;
+identifying every visible fleck with this triangle still needs visual
+confirmation.
+
+Performance prototype: batch all terrain transform work after the 81
+captured patch draws, retaining draw-time GPU copies of each constant
+buffer. On RTX 5090, 4,017,017 covered pixels, original scene depth,
+private coverage and all 81 motion records are identical to the current
+path. Twelve alternating samples after warmup measure 1.132 ms/eye
+median for the current path and 1.080 ms/eye for the batch; ranges
+overlap substantially (1.085-1.792 and 1.046-2.207). This includes the
+game's original terrain geometry. Roughly 0.104 ms stereo in this
+isolated test is not a credible solution to the reported
+multi-millisecond cost, so the prototype remains under build/ and is not
+shipped. The flight's actual NVIDIA evaluation averages 1.85 ms per eye
+over the session at 4536x4480 output, with the whole temporal bracket
+around 2.08 ms/eye. Reducing terrain settings cannot remove that
+reconstruction cost. No quality or INI changes accompany these fixes.
+Source-copy API contract checked against Microsoft Learn's
+ID3D11DeviceContext::CopySubresourceRegion documentation.
+
+Evidence, extracted shaders and isolated prototypes are under
+build/review_motion/sep12/flight0413/.
+
+Validation of the added attachment family uses Elite's original
+88DCF1164C640EC3 bytecode, the 19 captured pools/bone palettes/ cameras,
+and synthetic packed vertices selecting the actual skinned record 135.
+The projection matrix is reconstructed from the captured camera rows;
+this is a transform-equivalence test, not a raster replay of the
+uncaptured triangle. Output displacement agrees with an independent
+projection of the measured root delta within 1e-5, with unchanged UVs.
+The new snapshot family will capture that triangle's actual vertices,
+bindings and draw-time constants on the next dump.
+
+The full NVIDIA SDK build and repository gates pass: 20,924 UI coverage
+checks, 213 holo motion checks, 32,899 screen-motion checks, 524 weapon
+checks, 403 terrain checks, and the snapshot/config/Python gates. The
+original particle replay passes 484,454 checks; the emissive transform
+replay passes 819. NVIDIA TAA/DLAA/DLSS integration smoke passes. The
+optional D3D debug layer remains unavailable on this machine; functional
+GPU output and state restoration are checked explicitly.
