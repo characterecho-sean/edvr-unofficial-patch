@@ -11,6 +11,9 @@ template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 bool enabled=true,configured=false;
 struct State {
     Ptr<ID3D11PixelShader> shader,saved;
+    Ptr<ID3D11BlendState> blend,savedBlend;
+    FLOAT blendFactors[4]{};
+    UINT sampleMask=~0u;
     ID3D11ClassInstance* classes[256]{};
     UINT count=0;
     bool failed=false,engaged=false,noted=false;
@@ -18,7 +21,7 @@ struct State {
 }
 void nightVisionConfigure(Config& cfg){
     bool on=cfg.getBool("fix.night_vision_stability",true);
-    if(!configured || on!=enabled)Log::get().note("night vision stability: %s; depth-geometry outlines, no surface fill, radial pulse. AA-independent, live A/B.",on?"on":"off (original shader)");
+    if(!configured || on!=enabled)Log::get().note("night vision stability: %s; depth-geometry outlines, neutral terrain brightness +25%%, no surface fill, radial pulse. AA-independent, live A/B.",on?"on":"off (original shader)");
     configured=true;enabled=on;
 }
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances){
@@ -47,17 +50,54 @@ void nightVisionBegin(ID3D11DeviceContext* ctx){
     }
     D3D11_VIEWPORT vp{};UINT views=1;ctx->RSGetViewports(&views,&vp);
     if(views!=1 || vp.TopLeftX || vp.TopLeftY || vp.Width!=w || vp.Height!=h)return;
+    // Dual-source blending needs a single target 0. Refuse a changed MRT
+    // or blend contract rather than sending a multiplier into another RT.
+    ID3D11RenderTargetView* targets[8]{};ctx->OMGetRenderTargets(8,targets,nullptr);
+    bool single=targets[0]!=nullptr;
+    for(UINT i=1;i<8;++i)if(targets[i])single=false;
+    bool supported=false;
+    if(single){
+        D3D11_RENDER_TARGET_VIEW_DESC rd{};targets[0]->GetDesc(&rd);
+        Ptr<ID3D11Resource> resource;targets[0]->GetResource(&resource);
+        Ptr<ID3D11Texture2D> target;
+        if(SUCCEEDED(resource.As(&target))){
+            D3D11_TEXTURE2D_DESC td{};target->GetDesc(&td);
+            supported=rd.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D && !rd.Texture2D.MipSlice &&
+                td.Width==w && td.Height==h && td.ArraySize==1 && td.SampleDesc.Count==1 &&
+                (rd.Format==DXGI_FORMAT_R11G11B10_FLOAT || rd.Format==DXGI_FORMAT_R16G16B16A16_FLOAT ||
+                 rd.Format==DXGI_FORMAT_R32G32B32A32_FLOAT);
+        }
+    }
+    for(auto* target:targets)if(target)target->Release();
+    if(!supported)return;
+    Ptr<ID3D11BlendState> original;FLOAT factors[4];UINT mask;
+    ctx->OMGetBlendState(&original,factors,&mask);if(!original)return;
+    D3D11_BLEND_DESC bd{};original->GetDesc(&bd);const auto& rt=bd.RenderTarget[0];
+    if(bd.AlphaToCoverageEnable || !rt.BlendEnable || rt.SrcBlend!=D3D11_BLEND_ONE ||
+       rt.DestBlend!=D3D11_BLEND_INV_SRC_ALPHA || rt.BlendOp!=D3D11_BLEND_OP_ADD ||
+       rt.RenderTargetWriteMask!=7)return;
     if(!state.shader){
         state.shader.Attach(shaderSwapCompilePs(ctx,kNightVisionPs,sizeof(kNightVisionPs)-1,"main","night_vision",nullptr,"night vision stability"));
         if(!state.shader){state.failed=true;return;}
     }
+    if(!state.blend){
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        D3D11_BLEND_DESC replacement{};replacement.RenderTarget[0]=rt;
+        replacement.RenderTarget[0].DestBlend=D3D11_BLEND_SRC1_COLOR;
+        if(FAILED(dev->CreateBlendState(&replacement,&state.blend))){
+            state.failed=true;Log::get().note("night vision stability: blend creation failed; retaining original draw.");return;
+        }
+    }
     state.count=256;ctx->PSGetShader(&state.saved,state.classes,&state.count);
+    state.savedBlend=original;for(UINT i=0;i<4;++i)state.blendFactors[i]=factors[i];state.sampleMask=mask;
+    ctx->OMSetBlendState(state.blend.Get(),factors,mask);
     ctx->PSSetShader(state.shader.Get(),nullptr,0);state.engaged=true;
-    if(!state.noted){state.noted=true;Log::get().note("night vision stability: engaged at %ux%u; geometry contours without surface fill; original PS restored after each matched draw.",w,h);}
+    if(!state.noted){state.noted=true;Log::get().note("night vision stability: engaged at %ux%u; geometry contours and neutral terrain gain 1.25, no surface fill; original PS/blend restored after each matched draw.",w,h);}
 }
 void nightVisionEnd(ID3D11DeviceContext* ctx){
     if(!state.engaged)return;
     ctx->PSSetShader(state.saved.Get(),state.classes,state.count);state.saved.Reset();
+    ctx->OMSetBlendState(state.savedBlend.Get(),state.blendFactors,state.sampleMask);state.savedBlend.Reset();
     for(UINT i=0;i<state.count;++i){state.classes[i]->Release();state.classes[i]=nullptr;}
     state.count=0;state.engaged=false;
 }

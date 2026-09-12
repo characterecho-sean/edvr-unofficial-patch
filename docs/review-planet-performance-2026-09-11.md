@@ -911,3 +911,48 @@ and motion stability remain to be validated in the next flight.
 
 The full build, all regression gates and NVIDIA DLL smoke pass with this
 final no-fill shader and the rendered-weapon-motion correction.
+
+### Flight 09:15: confirmed fixes; brighter exterior terrain
+
+Verified `edvr_gfx_20260912_091550.log`, v0.15.1-44-g73919ba, linked
+15:09:06 UTC. Night vision engages at 2774x2740 and original- vertex
+weapon motion engages on the source screen. The user confirms the weapon
+fix looks good and likes the no-fill night vision, including its cockpit
+exclusion. They request a modest exterior brightness increase and
+clarify that this includes terrain between the outlines.
+
+Lift the contour radiance by 25% without increasing contour opacity or
+width. Also multiply the existing scene colour equally in RGB, up to
+1.25 within the game's mask/range/fade. This is a neutral exposure lift:
+there is no added colour, green fill or normal-map surface shading.
+Retain original alpha attenuation beneath the contours, the original
+depth/stencil state and the pulse. Zero mask, opacity or intensity and
+out-of-range surfaces receive no scene brightness increase. Deliberate
+pixelation and sampled-colour artistic modes retain their prior output.
+
+Dual-source blending performs the scene multiplication in the existing
+draw without copying or sampling the scene colour. The replacement now
+requires a single non-MSAA floating-point target 0, matching eye size,
+and the measured ONE/INV_SRC_ALPHA RGB blend contract. Changed MRT,
+format or blend contracts retain the original game draw. Save/restore
+the original blend state, factors and sample mask alongside the shader;
+leave the original cockpit stencil state and reference bound. Shader or
+blend creation failure retains the original path. The existing live
+Night vision stability toggle still restores the exact game shader and
+blend when Off. No extra pass, full-size surface or readback is added.
+
+Validation: 79609 production GPU checks pass on WARP and NVIDIA. Added
+coverage checks neutral channel scaling and retained texture contrast,
+unchanged cockpit pixels under stencil exclusion, stencil/alpha
+preservation, zero-intensity behaviour, changed MRT/blend refusal and
+blend restoration. The six previous 074418/074420/074423 capture replays
+remain finite and show median terrain green-channel brightness ratios of
+1.239-1.244 after range fade and HDR rounding. These are replay
+comparisons against the accepted no-fill shader, not fresh eye dumps
+from the 09:15 flight. Near cockpit pixels are masked in the diagnostic
+preview because that scratch replay does not include captured stencil;
+the production GPU test exercises the actual stencil exclusion path.
+
+The full build, all regression gates and NVIDIA DLL smoke pass with the
+neutral exterior brightness change. The final brightness preference is
+pending the user's next headset check.

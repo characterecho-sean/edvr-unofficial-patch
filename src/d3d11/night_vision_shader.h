@@ -1,8 +1,8 @@
 #pragma once
 // Night PS F786D34B5E118D5E, transcribed and replayed against captured
 // depth, normals, exposure, mask, geometry and constants. The fixed path
-// outlines depth geometry without shading over the existing surface texture
-// or outlining fine normal maps. It also corrects pulse distance.
+// outlines depth geometry and gently brightens the existing surface texture,
+// without a colour fill or fine normal-map outlines. It corrects pulse distance.
 // EDVR_NIGHT_STOCK is a test-only reference; the live Off setting binds
 // the game's original shader. See review-planet-performance-2026-09-11.md.
 namespace edvr {
@@ -57,7 +57,14 @@ float grid(float2 uv,float4 setting,float fade){
     float2 f=abs(frac(p-.5)-.5)/(abs(ddx_coarse(p))+abs(ddy_coarse(p)));
     return (min(min(f.x,f.y)*setting.w,1)<=.5?1:0)*(fade+setting.x)*setting.y;
 }
+#if EDVR_NIGHT_STOCK
 float4 main(float2 tex:TEXCOORD4,float4 pos:SV_Position):SV_Target{
+#else
+// Target 1 is a dual-source blend factor for the existing target 0 colour.
+// This preserves texture contrast without reading/copying the scene colour.
+struct NightOutput{float4 colour:SV_Target0;float4 scene:SV_Target1;};
+NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
+#endif
     float2 uv=pos.xy*c[332].zw,dx=ddx_coarse(uv),dy=ddy_coarse(uv);
     float mask=Mask.Sample(Linear,uv);clip(mask);
     float d=Depth.SampleGrad(Point,coord(uv),dx,dy);
@@ -143,7 +150,26 @@ float4 main(float2 tex:TEXCOORD4,float4 pos:SV_Position):SV_Target{
         exposure=mode==2?Exposure.Load(int3(1,0,0)).x*.125:mode==1?Exposure.Load(int3(0,0,0)).x*.125:mode==0?c[61].z:1;
         exposure*=exp2(n[1].y);
     }
-    return float4(colour/(worldNormal+.5)*c[1].w*alpha*exposure*c[90].y,saturate(alpha));
+    float3 radiance=colour/(worldNormal+.5)*c[1].w*alpha*exposure*c[90].y;
+#if !EDVR_NIGHT_STOCK
+    // A modest brightness lift for the geometry contours. Keep opacity,
+    // footprint and the game's cockpit stencil intact; do not darken the
+    // underlying terrain by increasing blend alpha or add a surface fill.
+    if(geometry)radiance*=1.25;
+#endif
+#if EDVR_NIGHT_STOCK
+    return float4(radiance,saturate(alpha));
+#else
+    NightOutput o;o.colour=float4(radiance,saturate(alpha));
+    // Neutral exposure lift, not a green fill: multiply all existing colour
+    // channels equally. Retain the original alpha attenuation at contours,
+    // and the game's mask/range/fade and cockpit stencil. The source colour
+    // is already exposed, so the Exposure texture must not be applied again.
+    float amount=geometry && n[6].z>0 && d>0 && d>=n[7].x && d<=n[7].y?
+        saturate(mask*nearFade*fade*n[0].w):0;
+    o.scene=(1-saturate(alpha))*(1+.25*amount);
+    return o;
+#endif
 }
 
 )HLSL";

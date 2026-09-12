@@ -121,6 +121,14 @@ void test(){
     r.ctx->PSSetConstantBuffers(2,1,r.camera.GetAddressOf());nightVisionBegin(r.ctx.Get());
     ComPtr<ID3D11PixelShader> ps;r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==r.stock.Get(),"wrong settings size rejected");nightVisionEnd(r.ctx.Get());r.ctx->PSSetConstantBuffers(2,1,r.settings.GetAddressOf());
     r.bind(2,r.depth);fixed=r.draw(true);stock=r.draw(false);check(fixed==stock,"wrong normal format draws stock");r.bind(2,r.normals);stock=r.draw(false);
+    // The second shader output is a blend factor, not another render
+    // target. A changed MRT/blend contract must retain the original draw.
+    r.ctx->OMSetBlendState(nullptr,nullptr,~0u);nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);
+    check(ps==r.stock,"unknown blend keeps original shader");nightVisionEnd(r.ctx.Get());r.ctx->OMSetBlendState(r.originalBlend.Get(),nullptr,~0u);
+    auto other=r.texture(DXGI_FORMAT_R32G32B32A32_FLOAT,nullptr,64*16,D3D11_BIND_RENDER_TARGET);ComPtr<ID3D11RenderTargetView> otherRT;
+    hr(r.dev->CreateRenderTargetView(other.Get(),nullptr,&otherRT));ID3D11RenderTargetView* mrt[]{r.rt.Get(),otherRT.Get()};
+    r.ctx->OMSetRenderTargets(2,mrt,nullptr);nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);
+    check(ps==r.stock,"MRT pass keeps original shader");nightVisionEnd(r.ctx.Get());r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),nullptr);
     // Nested Begin is harmless, including live disabling before End.
     nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps!=r.stock,"known single target engages");
     nightVisionBegin(r.ctx.Get());testOn=false;nightVisionConfigure(Config::get());nightVisionEnd(r.ctx.Get());
@@ -163,20 +171,37 @@ void geometryTest(){
     for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)plane[y*64+x]=x<32?.025f:50000.f;
     r.ctx->UpdateSubresource(r.depth.Get(),0,nullptr,plane.data(),64*4,0);fixed=r.draw(true);
     for(size_t i=0;i<fixed.size();++i)check(std::isfinite(fixed[i])&&fixed[i]>=0,"extreme near/far silhouette stays finite");
-    // No green fill or tint: texture colours and their bright/dark ratio
-    // must survive exactly between outlines, with no normal-map overlay.
+    // A neutral brightness lift retains hue and texture contrast instead
+    // of flattening it with a colour fill or normal-map overlay.
     r.setDepth(400);r.n[11][0]=0;r.n[8][0]=.012f;r.n[8][1]=1;r.n[8][2]=.742f;
     for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x){size_t i=(y*64+x)*4;float value=x%2?.004f:.001f;
         r.scene[i]=value*.5f;r.scene[i+1]=value;r.scene[i+2]=value*.75f;r.scene[i+3]=.375f;}
     fixed=r.draw(true);
     for(unsigned y=3;y<61;++y)for(unsigned x=3;x<61;++x){size_t i=(y*64+x)*4;
         for(unsigned ch=0;ch<3;++ch)
-            check(fixed[i+ch]==r.scene[i+ch],"existing texture colour is untouched between contours");
+            check(std::fabs(fixed[i+ch]-r.scene[i+ch]*(1+.25f*(1-400.f/1000000)))<1e-7,
+                "surface channels brighten equally, preserving hue and texture");
         check(fixed[i+3]==r.scene[i+3],"target alpha is untouched");}
     check(std::fabs(fixed[(32*64+31)*4+1]/fixed[(32*64+30)*4+1]-4)<1e-5,"texture contrast is retained");
     auto stable=fixed;r.c[277][0]=0;r.c[277][2]=1;r.c[279][0]=-1;r.c[279][2]=0;fixed=r.draw(true);
     check(fixed==stable,"surface appearance is independent of night vision normal-map lighting");
+    // The original draw's stencil exclusion must protect cockpit pixels
+    // from both contour emission and the neutral scene multiplier.
+    std::vector<unsigned> stencil(64*64);for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)stencil[y*64+x]=x>=32?0x01000000u:0;
+    auto stencilTex=r.texture(DXGI_FORMAT_D24_UNORM_S8_UINT,stencil.data(),64*4,D3D11_BIND_DEPTH_STENCIL);
+    ComPtr<ID3D11DepthStencilView> dsv;hr(r.dev->CreateDepthStencilView(stencilTex.Get(),nullptr,&dsv));
+    D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=FALSE;ds.DepthFunc=D3D11_COMPARISON_ALWAYS;
+    ds.StencilEnable=TRUE;ds.StencilReadMask=1;ds.FrontFace.StencilFunc=D3D11_COMPARISON_EQUAL;
+    ds.FrontFace.StencilFailOp=ds.FrontFace.StencilDepthFailOp=ds.FrontFace.StencilPassOp=D3D11_STENCIL_OP_KEEP;ds.BackFace=ds.FrontFace;
+    ComPtr<ID3D11DepthStencilState> stencilState;hr(r.dev->CreateDepthStencilState(&ds,&stencilState));
+    r.ctx->OMSetDepthStencilState(stencilState.Get(),1);r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),dsv.Get());fixed=r.draw(true);
+    for(unsigned y=3;y<61;++y)for(unsigned x=3;x<61;++x)for(unsigned ch=0;ch<4;++ch){size_t i=(y*64+x)*4+ch;
+        check(fixed[i]==(x<32?r.scene[i]:stable[i]),"original stencil excludes cockpit from brightness and outlines");}
+    ComPtr<ID3D11DepthStencilState> savedStencil;UINT savedRef;r.ctx->OMGetDepthStencilState(&savedStencil,&savedRef);
+    check(savedStencil==stencilState && savedRef==1,"original stencil state and reference stay bound");
+    r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),nullptr);r.ctx->OMSetDepthStencilState(nullptr,0);
     r.n[0][3]=0;fixed=r.draw(true);check(fixed==r.scene,"disabled effect leaves original scene intact");r.n[0][3]=1;
+    r.n[6][2]=0;fixed=r.draw(true);check(fixed==r.scene,"zero effect intensity leaves original scene intact");r.n[6][2]=1;
     r.n[7][1]=100;fixed=r.draw(true);check(fixed==r.scene,"surface outside night vision range is untouched");r.n[7][1]=1000000;
     std::vector<float> zero(64*64,0);r.bind(4,r.texture(DXGI_FORMAT_R32_FLOAT,zero.data(),64*4,D3D11_BIND_SHADER_RESOURCE));
     fixed=r.draw(true);check(fixed==r.scene,"zero effect mask leaves original scene intact");
