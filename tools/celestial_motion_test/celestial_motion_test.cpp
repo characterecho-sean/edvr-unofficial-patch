@@ -161,6 +161,22 @@ int main(int argc,char** argv) {
     values=run(); check(values[55]==0,"right eye cannot consume left-eye history");
     celestialMotionFrameBoundary(); values=run(); check(values[55]==1,"right-eye history advances independently");
     scene=oldScene; depth=oldDepth; testScene=scene.Get(); testDepth=depth.Get(); testEye=0;
+    // Exercise the parallel search across lanes and loop strides, including
+    // the final slot. These are complete production keys/records from run().
+    celestialMotionFrameBoundary();celestialMotionFrameBoundary();
+    auto& searchEye=g_eyes[0];auto& previous=searchEye.records[1-searchEye.write];
+    std::vector<float> searchHistory(kRecords*68,0);
+    auto search=[&](std::initializer_list<unsigned> slots,const char* label,bool matched) {
+        std::fill(searchHistory.begin(),searchHistory.end(),0.f);
+        for(unsigned slot:slots)std::memcpy(searchHistory.data()+slot*68,values.data(),kRecordBytes);
+        ctx->UpdateSubresource(previous.buffer.Get(),0,nullptr,searchHistory.data(),0,0);previous.count=kRecords;
+        searchEye.records[searchEye.write].count=0;
+        auto result=run();check((result[55]==1)==matched,label);
+    };
+    for(unsigned slot:{0u,63u,64u,511u})search({slot},"unique history matches across every search stride",true);
+    search({0,511},"duplicate keys across distant lanes decline history",false);
+    search({447,511},"duplicate keys in one lane's different strides decline history",false);
+    search({},"full history with no matching key declines",false);
     g_eyes[0].records[g_eyes[0].write].count=kRecords;
     check(!celestialMotionBegin(ctx.Get(),kTerrainDepth),"draw limit declines safely");
     g_eyes[0].records[g_eyes[0].write].count=0;

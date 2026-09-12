@@ -32,12 +32,15 @@ bool root(uint i,uint nb) {
     if(base==0 || base>=nb || !all(isfinite(p)) || !isfinite(scale) || scale<.5 || scale>2 ||
        dot(p-camera[275].xyz,p-camera[275].xyz)>4)return false;
     Bone b=Bones[base];
-    // First-person arms have a shared eye-relative bind root: identity
-    // orientation and negative eye height. The world-body roots in the
-    // capture do not have this encoding. No fixed record/bone indices.
+    // First-person arms share an eye-height bind root. Its orientation can
+    // rotate during locomotion (18:52 capture), so require a proper rigid
+    // basis rather than identity. The partner below must share this full
+    // bind transform as well as the attachment position/orientation.
     return all(isfinite(b.x)) && all(isfinite(b.y)) && all(isfinite(b.z)) &&
-        all(abs(b.x.xyz-float3(1,0,0))<.001) && all(abs(b.y.xyz-float3(0,1,0))<.001) &&
-        all(abs(b.z.xyz-float3(0,0,1))<.001) && b.y.w<-.5 && b.y.w>-2.5 && abs(b.x.w)<.1 && abs(b.z.w)<.3;
+        all(abs(float3(dot(b.x.xyz,b.x.xyz),dot(b.y.xyz,b.y.xyz),dot(b.z.xyz,b.z.xyz))-1)<.001) &&
+        all(abs(float3(dot(b.x.xyz,b.y.xyz),dot(b.x.xyz,b.z.xyz),dot(b.y.xyz,b.z.xyz)))<.001) &&
+        dot(cross(b.x.xyz,b.y.xyz),b.z.xyz)>.999 &&
+        b.y.w<-.5 && b.y.w>-2.5 && abs(b.x.w)<.1 && abs(b.z.w)<.3;
 }
 [numthreads(64,1,1)]void findAnchor(uint lane:SV_GroupIndex) {
     uint n,stride,nb;Pool.GetDimensions(n,stride);Bones.GetDimensions(nb,stride);
@@ -58,8 +61,10 @@ bool root(uint i,uint nb) {
     index=indices[0];
     if(index!=0xffffffff)for(uint i=lane;i<n;i+=64)if(root(i,nb)) {
         float3 d=position(Pool[i])-position(Pool[index]);
+        Bone a=Bones[Pool[i].row[0].x],b=Bones[Pool[index].row[0].x];
         if(Pool[i].row[0].x!=Pool[index].row[0].x && dot(d,d)<1e-8 &&
-           all(Pool[i].row[0].zw==Pool[index].row[0].zw))InterlockedAdd(partners,1);
+           all(Pool[i].row[0].zw==Pool[index].row[0].zw) &&
+           all(abs(a.x-b.x)<.0001) && all(abs(a.y-b.y)<.0001) && all(abs(a.z-b.z)<.0001))InterlockedAdd(partners,1);
     }
     GroupMemoryBarrierWithGroupSync();
     if(lane==0) {

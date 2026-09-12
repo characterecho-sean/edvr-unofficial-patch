@@ -11,7 +11,7 @@ namespace edvr {
 void celestialMotionConfigure(bool enabled);
 bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs);
 void celestialMotionEnd(ID3D11DeviceContext* ctx);
-void celestialMotionFrameBoundary();
+void celestialMotionFrameBoundary(ID3D11DeviceContext* ctx=nullptr);
 void celestialMotionShutdown();
 // Borrowed views: index, depth, motion records. Null on a missing eye/frame.
 void celestialMotionViews(ID3D11Texture2D* scene, ID3D11ShaderResourceView** views);

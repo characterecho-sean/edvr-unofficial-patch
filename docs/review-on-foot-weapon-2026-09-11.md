@@ -271,3 +271,13 @@ passes 149 checks. The generated menu row is a live Fix toggle, default
 1, in the intended page/group. Full SDK build and the 244-key config
 contract pass. NVIDIA TAA/DLAA/DLSS, foveation and motion-convention
 smoke checks pass.
+
+## Walking root rotation in the 18:52 capture
+
+The user confirms the detached pieces are much better with 7c65d10. The
+remaining walking judder has a reproduced detector failure: a small
+animation rotation makes the identity-root test reject 17 of 19 frames.
+The [planet performance review](review-planet-performance-2026-09-11.md)
+records the rigid-root invariant, paired-bind validation and exact GPU
+replay of the corrected walking frames. It also investigates the
+separate terrain AA cost after entering the cockpit.

@@ -141,6 +141,15 @@ void selfTest(){
     p[90].words[0]=17;stock("out of bounds bone base remains stock");p[90].words[0]=8;
     p[90].words[2]=789;stock("unrelated arm orientation remains stock");p[90].words[2]=123;
     b[8][1][3]=-.2f;stock("world-body bind pose cannot act as first-person root");b[8][1][3]=-1.7f;
+    for(unsigned i:{7u,8u}) {
+        b[i][1][1]=b[i][2][2]=std::cos(.03f);b[i][1][2]=-std::sin(.03f);b[i][2][1]=std::sin(.03f);
+    }
+    upload();h.screen();check(h.run(),"animated rigid arm roots remain eligible");result=h.read(g.fixed.Get());
+    check(std::fabs(getFloat(reinterpret_cast<Instance*>(result.data())[52],4)-(getFloat(p[52],4)+c[275][0]-getFloat(p[12],4)))<1e-5,"walking root rotation does not drop weapon correction");
+    b[8][0][0]=1.1f;stock("scaled root is not a rigid attachment pair");b[8][0][0]=1;
+    b[8][0][0]=-1;stock("reflected root is not a rigid attachment pair");b[8][0][0]=1;
+    b[8][0][3]=.02f;stock("paired attachment origins with different bind transforms are rejected");b[8][0][3]=0;
+    for(unsigned i:{7u,8u}) {b[i][1][1]=b[i][2][2]=1;b[i][1][2]=b[i][2][1]=0;}
     std::swap(p[12],p[202]);std::swap(p[90],p[191]);upload();h.screen();check(h.run(),"record repacking works");result=h.read(g.fixed.Get());
     check(std::fabs(getFloat(reinterpret_cast<Instance*>(result.data())[202],4)-c[275][0])<1e-5,"repacked attachment follows current camera");
     testVs=0xEB5234DB6ADB491Dull;check(!h.run(),"other scenery shader families excluded");testVs=0x8B589D25B2A0ADDCull;

@@ -4078,7 +4078,7 @@ void vScreenFrameBoundary() {
         uiDepthFrameBoundary(g_state->ownerCtx);
         screenMotionFrameBoundary();
         weaponStabilityFrameBoundary(g_state->ownerCtx);
-        celestialMotionFrameBoundary();
+        celestialMotionFrameBoundary(g_state->ownerCtx);
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
