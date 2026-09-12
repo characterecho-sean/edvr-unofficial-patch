@@ -93,8 +93,7 @@ The full absolute-path build passed with Frontier's original OpenVR DLL and the
 reference-change, 166 ownership/event/publication and 476 binding checks,
 alongside the existing compositor, native and rendering regressions. Exact
 source and executable hashes are retained in
-`build/openxr-origin-validation.json` with the build log. The revised native
-gate remains pending.
+`build/openxr-origin-validation.json` with the build log.
 
 The revised native run exercises ResetSeatedZeroPose twice through the
 historical System virtual interface before displaying its scene. Each reset
@@ -106,9 +105,31 @@ not corrections applied to rendered poses. After the second reset, bootstrap
 must republish valid geometry before stereo submissions begin. The existing
 compositor wait/cache/Submit/handoff and shutdown gates remain required.
 
-The native receipt must match the full-build executable and sources. The user
-then checks both eyes, world-up, stable tracking, normal color/clarity and
-normal closure. The preceding compositor flight does not qualify this new
-executable. Game runtime/export ownership, persistent lifecycle pumping,
-required startup compositor functionality, the paired feature handshake and a
-production pass that preserves EDVR's graphics state remain incomplete.
+The `66def0b` diagnostic passed its 20-second PiOpenXR run with its executable,
+sources, loader and runtime manifest matched to that build record. Frontier and
+SteamVR were absent before and after. Pimax OpenXR 0.1.0 reported D3D11.1 and
+two 5424 x 5356 sRGB eye swapchains. The child exited 0 after approximately
+20.38 seconds, without the watchdog firing.
+
+Both resets passed the position/yaw bounds at their own timestamps, advanced
+the compositor origin generation to 2 then 3, invalidated the cache and
+produced exactly one reset event each. Startup geometry became ready on frame 3
+with no preceding stereo submission. The run completed 1801 wait/cache
+comparisons, 1801 valid gameplay poses, 3594 Submit calls and private copies,
+1797 stereo pairs and handoffs, and four zero-layer frames. It recorded 1800
+valid view/head samples, no invalid views, normal session stop and successful
+resource cleanup. The initial gameplay prediction remained one reported display
+period beyond render time.
+
+The user confirmed the triangle in front of them in both eyes, world-up and
+stability during head movement, normal color/clarity and normal closure. This
+completes the standalone application-reset gate. No runtime-origin change
+notification occurred in this run, so the separate natural-origin-change policy
+retains desktop-only qualification. Exact receipts remain under
+`build/openxr-native-20260912-163128`, with counters and confirmation in the
+validation record.
+
+Game runtime/export ownership, persistent lifecycle pumping, required startup
+compositor functionality, the paired feature handshake and a production pass
+that preserves EDVR's graphics state remain incomplete. This run did not
+install or test a native Frontier backend.

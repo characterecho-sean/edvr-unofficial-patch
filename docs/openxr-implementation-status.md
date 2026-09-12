@@ -81,7 +81,10 @@ tracking and historical reset events to the diagnostic. All native pose,
 geometry and layer operations use that selected space, and reset invalidates
 the old caches before the next frame. The full build passed, including 131
 origin, 120 reference-change, 166 ownership/event and 476 binding checks. The
-revised two-reset native gate remains pending. Standing/raw mapping,
+`66def0b` PiOpenXR run passed both resets and reset events, then 1801
+wait/cache checks, 1797 stereo pairs and normal shutdown, with SteamVR absent
+before and after. The user confirmed placement in both eyes, world-up, stable
+tracking, normal color/clarity and normal exit. Standing/raw mapping,
 runtime-origin headset qualification and game ownership remain open.
 
 - The original shipping proxy remains the default. The new startup-only
