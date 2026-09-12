@@ -377,6 +377,60 @@ The complete absolute-path worktree build, all regression/configuration
 gates and the NVIDIA DLL smoke test passed. No live INI change is
 needed.
 
+## Follow-up capture, 16:00 flight
+
+Both installed DLLs report `7c6e9ef`. The user confirms that the tip
+ghosting is gone, with only occasional flickers during forward thrust.
+Captures `160325`, `160342`, `160411` and `160446` show the external
+ship over terrain, using OpenVR and DLSS K at 2774 by 2740 input and
+4268 by 4216 output per eye.
+
+- Ruled out within the captured windows: a missing frame or a DLSS
+  history restart. All four first-eye sequences contain sixteen
+  consecutive frames, with `dlHistory=1` and `jumped=0` throughout.
+- Ruled out in the four saved coverage snapshots: loss of tracking on
+  the main hull. Each has 218 records, 217 rigid and 113 matched, with
+  678,354 to 731,545 eligible visible pixels. Small unmatched parts
+  remain; this does not establish continuous coverage between dumps.
+- No clear broad hull flash appears in the captured sequences. Mean
+  brightness over an eroded main-hull mask varies by less than about
+  1.5/255 in each sequence. That aggregate check cannot exclude a small
+  local patch or an event outside these short windows.
+
+The independent VR log does confirm frame replacement by the transition
+flash detector: its final periodic report counts 84 withheld eye-frames,
+or 42 stereo frames. Individual eye-submit replacements agree with the
+graphics log, including pairs around 16:03:38, 16:03:40, 16:04:13 and
+16:04:33. None falls inside the four captured sixteen-frame intervals.
+The user confirms that this was normal forward flight without any
+low-wake transition, identifying these recurring detections as false
+positives. Frame repetition is a candidate for the occasional visible
+flicker; its timing still needs correlation with a user-marked event.
+
+The detector repeatedly certifies and later relearns separations near
+6,870 and 11,740 world units. Expiry alone cannot explain the 6,872
+certification at frame 12971 followed by a new 6,857 detection at frame
+13930: only 959 frames elapsed, below the 2,000-frame expiry. The log
+also shows the recognised residual increasing from 6,876 to 7,625 over
+120 frames after that certification. `recordResidual` moves an entry's
+mean on every match, while recognised auxiliary cameras do not advance
+the view predictor. A continuously drifting entry could therefore leave
+its original magnitude behind. Eviction from the sixteen-slot table is
+another possibility. These logs lack the table contents and churn
+counters needed to distinguish them; do not increase capacity or relax
+rejection on this evidence alone.
+
+The next discriminating capture is the camera-history key (default
+Pause), pressed immediately after a visible flicker. It writes the
+preceding 1,200 frames, headset poses, withheld-frame attribution and
+learning tables, then repeats two seconds later. An eye dump starts a
+short forward sequence and can miss an event that prompted the keypress.
+Clarify whether the whole view jumps or only a hull surface changes; the
+latter also needs raw-versus-DLSS image evidence at the affected
+surface. No rendering code, live setting or installed DLL changed in
+this review. Analysis artifacts remain under the ignored local
+`build/review_motion/sep12/flight1600/` directory.
+
 ### Earlier diagnostic validation
 
 The GPU snapshot test and Python reader jointly verify three consecutive
