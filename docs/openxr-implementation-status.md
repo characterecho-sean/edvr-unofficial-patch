@@ -34,6 +34,14 @@ and timing qualification remain distinct gates.
 
 ## Implemented evidence tools
 
+The [owned System-interface checkpoint](openxr-system-interface-2026-09-12.md)
+connects the exact 44-method `IVRSystem_012` shape to native geometry and
+runtime metadata, with explicit unavailable policies and a QPC-to-OpenXR
+absolute-pose query. It is exercised in the diagnostic and remains absent from
+shipping discovery. Other owned interfaces, export lifecycle and
+game-thread/feature integration remain pending; the concrete ABI object is not
+full System functionality or a game backend.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;

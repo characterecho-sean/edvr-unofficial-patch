@@ -1,5 +1,10 @@
 # Native OpenXR stereo diagnostic
 
+For the latest owned-interface and clock-conversion changes, see the
+[System-interface checkpoint](openxr-system-interface-2026-09-12.md). Its
+additional absolute-pose and metadata checks need a new native run; earlier
+results below do not cover those changes.
+
 This checkpoint adds a standalone native-session harness. It loads an
 explicitly supplied installed OpenXR loader, selects the runtime through the
 loader's normal rules, creates a D3D11 device on the runtime's required

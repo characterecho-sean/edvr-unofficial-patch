@@ -12,7 +12,9 @@
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/openxr/projection_math.h"
 #include "../../src/openxr/geometry_locator.h"
-#include "../../src/openxr/system_geometry.h"
+#include "../../src/openxr/openvr_system.h"
+#include "../../src/openxr/system_publication.h"
+#include "../../src/openxr/head_locator.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -70,6 +72,8 @@ struct Api {
   PFN_xrEnumerateInstanceExtensionProperties extensions=nullptr;
   PFN_xrCreateInstance createInstance=nullptr; PFN_xrDestroyInstance destroyInstance=nullptr;
   PFN_xrGetInstanceProperties instanceProperties=nullptr; PFN_xrGetSystem getSystem=nullptr;
+  PFN_xrGetSystemProperties systemProperties=nullptr;
+  PFN_xrConvertWin32PerformanceCounterToTimeKHR convertTime=nullptr;
   PFN_xrEnumerateViewConfigurations configurations=nullptr;
   PFN_xrEnumerateViewConfigurationViews viewSizes=nullptr;
   PFN_xrEnumerateEnvironmentBlendModes blends=nullptr;
@@ -90,14 +94,38 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   if(!fn) return result(name,XR_ERROR_FUNCTION_UNSUPPORTED);
   destination=reinterpret_cast<T>(fn); return true;
 }
-class Host {
+bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
+class Host : public SystemSource {
  public:
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
-  GeometryStore geometry; uint64_t geometryGeneration=0;
+  SystemPublication geometry; uint64_t geometryGeneration=0;
+  OpenVRSystem systemInterface{*this};
+  DWORD ownerThread=GetCurrentThreadId();
+  XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
   bool clean=true;
+  SystemRead read() const override {return geometry.read();}
+  bool locateHead(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,vr::TrackedDevicePose_t& out) override {
+    // This diagnostic only exercises callers on its existing frame owner.
+    // The future game backend must marshal/protect lifetime across threads.
+    if(GetCurrentThreadId()!=ownerThread||generation!=geometryGeneration||!read().connected||
+       !state.running()||state.terminal()||origin!=vr::TrackingUniverseSeated)return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,prediction,head,&lastHeadTime,counterNow);
+    if(lastHeadResult!=XR_SUCCESS)return false;
+    vr::TrackedDevicePose_t pose{};pose.bDeviceIsConnected=true;
+    pose.mDeviceToAbsoluteTracking.m[0][0]=pose.mDeviceToAbsoluteTracking.m[1][1]=pose.mDeviceToAbsoluteTracking.m[2][2]=1;
+    constexpr auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    pose.bPoseIsValid=(head.locationFlags&valid)==valid;
+    pose.eTrackingResult=pose.bPoseIsValid?vr::TrackingResult_Running_OK:vr::TrackingResult_Running_OutOfRange;
+    if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}
+    out=pose;return true;
+  }
+  bool resetSeated(uint64_t) override {return false;}
+  bool pollEvent(uint64_t,vr::ETrackingUniverseOrigin,vr::VREvent_t&,vr::TrackedDevicePose_t&) override {return false;}
+  void unsupported(unsigned slot) noexcept override {std::printf("system_unavailable,slot=%u\n",slot);}
   ~Host() {close();}
   bool close() {
     geometry.retire(geometryGeneration);
@@ -120,17 +148,22 @@ class Host {
     std::vector<XrExtensionProperties> extensions;
     if(!result("extensions",enumerate<XrExtensionProperties>([&](uint32_t c,uint32_t*n,XrExtensionProperties*p){
       return api.extensions(nullptr,c,n,p);},extensions,{XR_TYPE_EXTENSION_PROPERTIES}))) return false;
-    bool d3d=false;
-    for(const auto& e:extensions) d3d|=std::strncmp(e.extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+    bool d3d=false,timeConversion=false;
+    for(const auto& e:extensions) {
+      d3d|=std::strncmp(e.extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      timeConversion|=std::strncmp(e.extensionName,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+    }
     if(!d3d) return result("XR_KHR_D3D11_enable",XR_ERROR_EXTENSION_NOT_PRESENT);
+    if(!timeConversion)return result("XR_KHR_win32_convert_performance_counter_time",XR_ERROR_EXTENSION_NOT_PRESENT);
     XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strcpy(ci.applicationInfo.applicationName,"EDVR native stereo diagnostic");
     std::strcpy(ci.applicationInfo.engineName,"EDVR");ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
-    const char* enabled[]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME};ci.enabledExtensionCount=1;ci.enabledExtensionNames=enabled;
+    const char* enabled[]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};ci.enabledExtensionCount=2;ci.enabledExtensionNames=enabled;
     if(!result("xrCreateInstance",api.createInstance(&ci,&instance))) return false;
 #define LOAD(name,field) if(!load(api,instance,name,api.field)) return false
     LOAD("xrDestroyInstance",destroyInstance); LOAD("xrGetInstanceProperties",instanceProperties);
     LOAD("xrGetSystem",getSystem); LOAD("xrEnumerateViewConfigurations",configurations);
+    LOAD("xrGetSystemProperties",systemProperties);LOAD("xrConvertWin32PerformanceCounterToTimeKHR",convertTime);
     LOAD("xrEnumerateViewConfigurationViews",viewSizes); LOAD("xrEnumerateEnvironmentBlendModes",blends);
     LOAD("xrGetD3D11GraphicsRequirementsKHR",requirements);
     LOAD("xrDestroySession",destroySession); LOAD("xrCreateSession",createSession);
@@ -151,6 +184,8 @@ class Host {
     std::printf("runtime,%.*s,%llu\n",XR_MAX_RUNTIME_NAME_SIZE,ip.runtimeName,(unsigned long long)ip.runtimeVersion);
     XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};si.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     if(!result("xrGetSystem",api.getSystem(instance,&si,&system))) return false;
+    XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
+    if(!result("xrGetSystemProperties",api.systemProperties(instance,system,&properties)))return false;
     std::vector<XrViewConfigurationType> configs;
     if(!result("view_configurations",enumerate<XrViewConfigurationType>([&](uint32_t c,uint32_t*n,XrViewConfigurationType*p){
       return api.configurations(instance,system,c,n,p);},configs))) return false;
@@ -174,7 +209,19 @@ class Host {
     const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
     if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
     session=binding.session();local=binding.localSpace();view=binding.viewSpace();
-    geometryGeneration=geometry.beginGeneration();
+    SystemRead metadata{};metadata.connected=true;
+    std::memcpy(metadata.runtimeName,ip.runtimeName,sizeof(metadata.runtimeName));
+    std::memcpy(metadata.systemName,properties.systemName,sizeof(metadata.systemName));
+    // The index is resolved from the validated adapter, not from an HMD EDID.
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))return result("system_adapter_factory",XR_ERROR_RUNTIME_FAILURE);
+    for(UINT n=0;;++n){Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;const HRESULT status=factory->EnumAdapters1(n,&adapter);
+      if(status==DXGI_ERROR_NOT_FOUND)break;if(FAILED(status))return result("system_adapter_enumeration",XR_ERROR_RUNTIME_FAILURE);
+      DXGI_ADAPTER_DESC1 desc{};if(FAILED(adapter->GetDesc1(&desc)))return result("system_adapter_description",XR_ERROR_RUNTIME_FAILURE);
+      if(NativeDevice::matchesLuid(desc.AdapterLuid,req.adapterLuid)){metadata.adapterIndex=int32_t(n);break;}
+    }
+    if(metadata.adapterIndex<0)return result("system_adapter_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    geometryGeneration=geometry.begin(metadata);
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
     if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes))) return false;
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
@@ -254,14 +301,22 @@ int run(const Options& options) {
     if(layerHeader) ++layers; else ++empty;
     if(abortAfterEnd) {std::puts("error,pending_or_external_frame_result");failed=true;break;}
     if(haveLocation) {
-      const bool published=host.geometry.publish(located);
+      const bool published=host.geometry.publish(located,false,false);
       if(published&&!bootstrapComplete) {
-        const SystemGeometry read(host.geometry);uint32_t width=0,height=0;vr::HmdMatrix34_t eye{};vr::HmdMatrix44_t projection{};
-        if(!read.recommendedSize(width,height)||!read.eyeToHead(vr::Eye_Left,eye)||
-           !read.projection(vr::Eye_Left,.025f,50000,vr::API_DirectX,projection)) {failed=true;break;}
+        const auto snapshot=host.read();vr::IVRSystem* system=&host.systemInterface;
+        uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
+        const auto eye=system->GetEyeToHeadTransform(vr::Eye_Left);
+        const auto projection=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000,vr::API_DirectX);
+        vr::TrackedDevicePose_t head{};system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseSeated,0,&head,1);
+        char name[XR_MAX_SYSTEM_NAME_SIZE]{};vr::ETrackedPropertyError propertyError=vr::TrackedProp_Success;
+        const auto nameLength=system->GetStringTrackedDeviceProperty(0,vr::Prop_ModelNumber_String,name,sizeof(name),&propertyError);
+        if(!width||!height||projection.m[3][2]!=-1||host.lastHeadResult!=XR_SUCCESS||
+           !nameLength||propertyError!=vr::TrackedProp_Success){result("system_bootstrap_pose",host.lastHeadResult);failed=true;break;}
+        if(!head.bPoseIsValid)continue; // bounded startup; ordinary invalid tracking may recover
         bootstrapComplete=true;
         std::printf("bootstrap,ready=1,generation=%llu,sequence=%llu,prior_stereo=%llu,size=%ux%u,left_eye_to_head_translation=%.9g/%.9g/%.9g\n",
-          (unsigned long long)read.generation(),(unsigned long long)read.sequence(),(unsigned long long)layers,width,height,eye.m[0][3],eye.m[1][3],eye.m[2][3]);
+          (unsigned long long)snapshot.generation,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)layers,width,height,eye.m[0][3],eye.m[1][3],eye.m[2][3]);
+        std::printf("system_abi,version=IVRSystem_012,absolute_pose_valid=1,prediction_seconds=0,clock=QPC_to_XrTime,model_bytes=%u,adapter=%d\n",nameLength,snapshot.adapterIndex);
       }
     }
   }

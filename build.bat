@@ -910,7 +910,7 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR probe build failed & exit /b 1 )
 REM Reusable OpenXR core policies. These tests inject dispatch and geometry;
 REM no loader/session is opened and the shipping proxies do not use them yet.
 if not exist "%OBJ%\openxr_core" mkdir "%OBJ%\openxr_core"
-for %%T in (session projection geometry) do (
+for %%T in (session projection geometry head) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
         /Fo"%OBJ%\openxr_core\\" /Fe"%BUILD%\openxr_%%T_test.exe" ^
         "tools\openxr_%%T_test\openxr_%%T_test.cpp" /link /INCREMENTAL:NO
@@ -926,7 +926,7 @@ for %%T in (native stereo) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
         /I"third_party\openxr\include" /Fo"%OBJ%\openxr_native\\" ^
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
-        "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" ^
+        "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
         /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
     if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
     "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
@@ -949,6 +949,14 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR binding test build failed & exit /b 
 "%BUILD%\openxr_binding_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --self-test || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --published-proxy "%BUILD%\d3d11.dll" || exit /b 1
+
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_system_test.exe" ^
+    "tools\openxr_system_test\openxr_system_test.cpp" "tools\openxr_system_test\abi_caller.cpp" ^
+    "src\openxr\openvr_system.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: owned OpenVR system test build failed & exit /b 1 )
+"%BUILD%\openxr_system_test.exe" --dry-run || exit /b 1
+"%BUILD%\openxr_system_test.exe" --self-test || exit /b 1
 
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
