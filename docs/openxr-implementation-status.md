@@ -267,3 +267,13 @@ build is now installed and hash-verified in Frontier, with current INI bytes
 preserved. It includes this correction and the current timing work. Use
 `--expect-build f622cd2` for both logs; visual recovery still needs a headset
 check before advancing the OpenXR work.
+
+The next `f622cd2` flight and three paired captures confirm the corrected
+projection, and the user reports that the original head-motion problem appears
+fixed. This is main-menu hangar evidence with the timing instrument active;
+cockpit/on-foot and timing accuracy/overhead checks remain open. A separate
+stationary flicker persists on three thin wing lines. The captured masks and
+history do not identify another fault; the next comparison changes only input
+quality while retaining DLSS preset K. See the [corrected-build result and
+remaining wing-line
+investigation](temporal-projection-probe-2026-09-12.md#corrected-build-capture-result).

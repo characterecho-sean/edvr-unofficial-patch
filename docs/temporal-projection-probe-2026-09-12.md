@@ -104,3 +104,51 @@ The next headset gate repeats the same head movement on the main-menu ship with
 DLSS, then checks cockpit and on-foot rendering. Visual recovery is not yet
 verified. Use `--expect-build f622cd2` for both flight logs, even if a later
 documentation commit is HEAD.
+
+## Corrected-build capture result
+
+The subsequent Frontier flight verified `f622cd2` independently in both logs.
+The user reported that the original motion problem appears fixed and supplied
+three complete paired captures: nearly still, a slow head turn, and a view of
+the ship's wing. All three show the main-menu hangar; they do not qualify the
+cockpit or on-foot view. Insert was restored through `hotkey.dump_eyes`, with
+every other INI byte preserved, and the flight log confirms that binding.
+
+All 96 captured eye evaluations retain DLSS history, with no reset request or
+camera jump. Both eyes now use their true asymmetric projection throughout. An
+independent raw-image fit during the head turn gives residual RMS of 0.0138 /
+0.0020 input pixels on the hull away from menu UI and 0.0039 / 0.0028 on the
+floor, after the recorded camera warp and current-phase jitter. These are new
+scene regions, not a pixel-identical before/after benchmark. The fit still uses
+first-frame depth over the short sequence.
+
+The render-to-submit instrument is active alongside the corrected temporal
+path, with completed samples and no invalid samples in the last retained
+summary. Capture readback creates a large interval during the dump; this run
+does not measure normal overhead or establish matched-frame timing accuracy.
+
+### Remaining wing-line flicker
+
+The user clarified that the three thin wing lines flicker even while still. The
+wing capture has only about 0.002 to 0.026 degrees of head rotation per frame.
+The raw input visibly contains strongly aliased thin lines; DLSS makes them
+smoother but does not fully stabilize their brightness across the saved
+sequence. Input aliasing alone does not prove that reconstruction is correct.
+
+Ruled out for the captured wing region: a repeated history reset, the previous
+projection mismatch, and a nonzero captured UI/reactive/edit mask. Those masks
+are zero over the examined lines. First-frame motion agrees with a CPU
+reconstruction from the corrected captured parameters to within RG16_FLOAT
+precision on nearly all samples. This proves consistency of those inputs, not
+perfect motion on every later pixel. A translation fit on the thin, largely
+parallel lines is poorly constrained along the lines and cannot by itself
+identify a motion bug.
+
+No additional rendering change is justified yet. The next comparison keeps DLSS
+and preset K, temporarily changes Elite's HMD Image Quality from the current
+reduced input to 1.0, waits for the new history to settle, and captures the
+same stationary wing. At 1.0 this project's DLSS selection runs as DLAA. That
+tests sensitivity to input sampling and reconstruction scale; it does not by
+itself distinguish every shader, material or reconstruction cause. Restore the
+prior image quality afterward. Broader cockpit/on-foot validation and the
+original OpenXR timing gates remain open.
