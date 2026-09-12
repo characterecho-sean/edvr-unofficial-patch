@@ -94,5 +94,13 @@ checks, existing ABI and rendering tests, the shared/frame timing suite and the
 config/Python gates. The production change is the projection selection; no
 shader math, AA preset, sharpening setting or live INI was adjusted.
 
-The next headset gate repeats the same head movement on the corrected build,
-then checks cockpit and on-foot rendering. Visual recovery is not yet verified.
+The clean `f622cd2` paired build is installed in Frontier. Both installed DLLs
+match the build by SHA-256, the previous pair was backed up, and the current
+INI bytes are unchanged. The full build passed again with the clean commit
+version. This pair includes the current render-to-submit timing work and the
+projection correction. Exact installation receipts remain local.
+
+The next headset gate repeats the same head movement on the main-menu ship with
+DLSS, then checks cockpit and on-foot rendering. Visual recovery is not yet
+verified. Use `--expect-build f622cd2` for both flight logs, even if a later
+documentation commit is HEAD.

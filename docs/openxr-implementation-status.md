@@ -262,6 +262,8 @@ The captures identified a projection mismatch under the existing raw-only
 culling probe: the game renders through its true matrix while temporal motion
 and jitter use the widened raw frustum. The fix makes temporal consumers follow
 the matrix channel. See the [captured evidence and regression
-gate](temporal-projection-probe-2026-09-12.md). The next paired build includes
-this correction and the current timing work; visual recovery still needs a
-headset check before advancing the OpenXR work.
+gate](temporal-projection-probe-2026-09-12.md). The clean `f622cd2` paired
+build is now installed and hash-verified in Frontier, with current INI bytes
+preserved. It includes this correction and the current timing work. Use
+`--expect-build f622cd2` for both logs; visual recovery still needs a headset
+check before advancing the OpenXR work.

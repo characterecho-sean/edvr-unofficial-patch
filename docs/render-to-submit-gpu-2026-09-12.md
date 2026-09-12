@@ -247,3 +247,11 @@ verified again. Current INI bytes were preserved. Use `--expect-build cc3d882`
 for the next flight and the staged rollback root when verifying the current
 installation. The subsequent headset comparison confirmed that the rollback did
 not recover visual quality.
+
+The capture investigation subsequently established a raw-only culling-probe
+projection mismatch; see the [evidence and
+correction](temporal-projection-probe-2026-09-12.md). The corrected `f622cd2`
+pair, including the current timing work, has replaced the rollback in Frontier.
+Both DLL hashes match the clean build and the current INI bytes are preserved.
+Use `--expect-build f622cd2` for the next flight. Visual recovery remains the
+gate before further OpenXR implementation.
