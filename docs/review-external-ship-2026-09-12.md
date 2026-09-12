@@ -89,6 +89,42 @@ together for a replay.
 
 ## Capture change and next comparison
 
+### Cockpit roll follow-up
+
+The user also reports ship geometry ghosting when rolling from inside
+the cockpit. Include geometry seen from the seat in this investigation;
+a correction limited to the external-camera mode would not cover the
+report.
+
+The existing `120250` cockpit capture begins during a predominantly
+rolling ship turn: 1.49 and 1.64 degrees relative to head rotation in
+its first two frames. Reconstructing the production 3-by-3 nearest-depth
+selection from its saved SceneZ, the 2,666,787 unmarked geometry pixels
+within 10 metres match head-motion prediction to 0.00014 input pixels at
+the median and 0.00157 at the 99th percentile. None differ by more than
+one pixel. Stencil-bit-128 cockpit geometry likewise follows the head
+path, with a median error of 0.00014 pixels.
+
+- Ruled out: the external hull's large world-vector assignment over the
+  nearby geometry in this particular cockpit frame. The captured MV
+  matches the head path.
+- Still unresolved: whether head-only motion registers the actual
+  rendered cockpit/hull during roll. These vector comparisons validate
+  the chosen path, not the geometry's true movement. Draw-time
+  transforms can reveal camera-relative motion absent from the headset
+  delta. Changing specular/reflection shading or a translucent layer can
+  also ghost with otherwise correct geometry vectors.
+
+Build `f1dac91` already captures recognized eye meshes in both cockpit
+and external views; no additional DLL or settings change is needed for
+this follow-up. After restarting with that build, include an eye dump
+while rolling, looking directly at the ghosting geometry so it is in the
+central paired crop. As of this follow-up, the newest flight is still
+the historical `e56cb65` run; there are no new `.eyemesh.bin` captures
+yet. Source code is unchanged by the subsequent documentation commits.
+
+### Additional hull snapshot
+
 An armed eye run now also writes `drawstate_<stamp>.eyemesh.bin`, in the
 existing version-7 format. It records the first three matching eye
 frames for the already recognized mesh shader families, preserving the
