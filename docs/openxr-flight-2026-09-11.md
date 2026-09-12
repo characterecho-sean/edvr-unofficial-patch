@@ -219,6 +219,12 @@ matching crash record for it. This satisfies the requested game-exit check for
 this build and configuration. The earlier Steam crash at 04:14:35 uses a
 different DLL stamp and predates this Frontier run.
 
+The subsequent Frontier run on `58d1566` also exited without a reported crash
+or a matching Windows Application crash record. Both proxy logs passed build
+identity verification. It additionally verified the startup shader fix: see
+[the measured startup result](startup-delay-2026-09-12.md), which records the
+first Present hook dropping from 18.365 seconds to approximately 23 ms.
+
 Separately, the new, unintegrated GPU desk harnesses reported test failures,
 including an access violation. Their execution was stopped; none of those
 adapter/shared-clock drafts was installed into either game directory.

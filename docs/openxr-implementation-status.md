@@ -151,9 +151,21 @@ integration audit also found disjoint clocks in the temporal, sharpening,
 supersample, DLAA, menu and sampled-draw instruments; sharing only the Monitor
 door clock would not resolve the overlap risk.
 
-New GPU work is paused while the reported crash is addressed. The later Windows
-crash-record findings in `openxr-flight-2026-09-11.md` qualify the earlier
-normal-rendering report: the repeat capture passed its bounded ordering gate,
-but its process aborted in a menu-worker exit destructor.
+The game-exit interruption is resolved: the menu-worker lifetime fix in
+`e9802b7` passed its Frontier exit check, and `58d1566` passed a second exit
+check with no matching Windows crash record. The later findings in
+`openxr-flight-2026-09-11.md` still qualify the earlier `2a56da3` run: its
+capture passed the bounded ordering gate, but its process aborted in the
+menu-worker destructor.
+
+The separately reported startup black screen is also resolved on Frontier.
+Build `58d1566` embeds the unchanged temporal shader bytecode compiled during
+the build. Its verified first Present hook took approximately 23 ms instead of
+18.365 seconds, and Sean confirmed the initial black screen is gone. See [the
+startup investigation](startup-delay-2026-09-12.md). These results clear the
+game startup/exit interruption; they do not qualify the rejected GPU harnesses.
+The next GPU gate remains a fresh reviewed D3D11 adapter and shared
+disjoint-clock ownership with controlled desk workloads before game
+integration.
 
 No configuration key or existing feature has been retired.

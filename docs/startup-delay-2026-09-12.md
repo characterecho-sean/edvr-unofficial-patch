@@ -71,12 +71,31 @@ extracted temporal shader declaration is identical. Existing HLSL warnings also
 appear in the pre-change Frontier log; shader arithmetic is unchanged by this
 correction.
 
-## Next Frontier check
+## Frontier verification: 58d1566
 
-After a clean-stamped build and installation through `tools/install_edvr.py`,
-launch Frontier normally, note the delay before the intro, check normal VR
-rendering/tracking, and exit. Retrieve both logs with the installed commit as
-`--expect-build`. Expect three successful `precompiled compute shader` creation
-lines, no runtime HLSL compilation for these variants, and a much shorter first
-Present interval. Driver shader creation and unrelated startup work still take
-time; the post-change duration must be measured in the game.
+The clean build passed in `build/frontier-58d1566.log` and was installed and
+hash-verified through `tools/install_edvr.py`, preserving the Frontier INI. The
+subsequent graphics log `edvr_gfx_20260912_044925.log` (stamp `6AA52D5B`) and
+VR log `edvr_vr_20260912_044927.log` (stamp `6AA52D63`) both passed
+`--expect-build 58d1566` and report `v0.15.1-25-g58d1566`.
+
+| Graphics log event | Timestamp | Creation duration |
+|---|---|---|
+| First PresentEnter | 04:49:25.971 | |
+| Precompiled fast motion shader created | 04:49:25.993 | 0.162 ms |
+| Precompiled diagnostic motion shader created | 04:49:25.993 | 0.242 ms |
+| Precompiled temporal-AA shader created | 04:49:25.994 | 0.405 ms |
+| First PresentExit | 04:49:25.994 | |
+
+The first Present hook fell from 18.365 seconds to approximately 23 ms. All
+three shader creations returned `S_OK`, totaling 0.809 ms, and the warmup
+explicitly reports no runtime HLSL compilation. Smaller unrelated shaders
+retain their existing compile paths. This comparison measures the identified
+startup hook, not the duration of the entire game launch.
+
+Sean reported: "Ran it, did not crash. No more initial black screen". Windows
+Application Error / Windows Error Reporting events (IDs 1000/1001) contained no
+matching crash since 04:49:20 local, just before this launch. The startup
+correction and repeated exit check pass on this Frontier build. This report
+does not establish new headset/runtime compatibility or complete the OpenXR
+transport and GPU-timing qualification.
