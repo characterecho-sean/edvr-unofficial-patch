@@ -11,6 +11,8 @@
 #include "../../src/openxr/session_state.h"
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/openxr/projection_math.h"
+#include "../../src/openxr/geometry_locator.h"
+#include "../../src/openxr/system_geometry.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -57,20 +59,6 @@ template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initia
   }
   return XR_ERROR_SIZE_INSUFFICIENT;
 }
-bool validPose(const XrPosef& p) {
-  const float vals[]={p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w,
-                      p.position.x,p.position.y,p.position.z};
-  for(float v:vals) if(!std::isfinite(v)) return false;
-  const auto& q=p.orientation;
-  const double norm=double(q.x)*q.x+double(q.y)*q.y+double(q.z)*q.z+double(q.w)*q.w;
-  return std::abs(norm-1.0)<0.001; // Reject; never rewrite the runtime's pose.
-}
-bool validViews(const XrView (&v)[2], uint32_t count, XrViewStateFlags flags) {
-  constexpr auto needed=XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
-  if(count!=2 || (flags&needed)!=needed) return false;
-  RawFov raw{}; for(const auto& view:v) if(!validPose(view.pose)||!fovToRaw(view.fov,raw)) return false;
-  return true;
-}
 bool validSize(const XrViewConfigurationView& v) {
   return v.recommendedImageRectWidth && v.recommendedImageRectHeight &&
     v.recommendedImageRectWidth<=v.maxImageRectWidth && v.recommendedImageRectHeight<=v.maxImageRectHeight &&
@@ -106,15 +94,16 @@ class Host {
  public:
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
-  NativeDevice graphics; D3D11Stereo stereo; SessionState state;
+  NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
+  GeometryStore geometry; uint64_t geometryGeneration=0;
   XrViewConfigurationView sizes[2]{};
   bool clean=true;
   ~Host() {close();}
   bool close() {
+    geometry.retire(geometryGeneration);
     clean=result("destroy_swapchains",stereo.shutdown())&&clean;
-    if(view) {clean=result("xrDestroySpace(VIEW)",api.destroySpace(view))&&clean;view=XR_NULL_HANDLE;}
-    if(local) {clean=result("xrDestroySpace(LOCAL)",api.destroySpace(local))&&clean;local=XR_NULL_HANDLE;}
-    if(session) {clean=result("xrDestroySession",api.destroySession(session))&&clean;session=XR_NULL_HANDLE;}
+    clean=result("destroy_binding",binding.shutdown())&&clean;
+    view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
     state.abandonAfterOwnerDestruction();
     graphics.reset();
     if(instance && api.destroyInstance) {clean=result("xrDestroyInstance",api.destroyInstance(instance))&&clean;instance=XR_NULL_HANDLE;}
@@ -182,16 +171,11 @@ class Host {
     const HRESULT hr=graphics.initialize(req.adapterLuid,req.minFeatureLevel);
     if(FAILED(hr)) {std::printf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
     std::printf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
-    XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};binding.device=graphics.device();
-    XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO};sci.next=&binding;sci.systemId=system;
-    if(!result("xrCreateSession",api.createSession(instance,&sci,&session))) return false;
-    std::vector<XrReferenceSpaceType> spaces;
-    if(!result("reference_spaces",enumerate<XrReferenceSpaceType>([&](uint32_t c,uint32_t*n,XrReferenceSpaceType*p){return api.spaces(session,c,n,p);},spaces))) return false;
-    for(auto type:{XR_REFERENCE_SPACE_TYPE_LOCAL,XR_REFERENCE_SPACE_TYPE_VIEW}) {
-      if(std::find(spaces.begin(),spaces.end(),type)==spaces.end()) return result("required_space",XR_ERROR_REFERENCE_SPACE_UNSUPPORTED);
-      XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};info.referenceSpaceType=type;info.poseInReferenceSpace.orientation.w=1;
-      if(!result("xrCreateReferenceSpace",api.createSpace(session,&info,type==XR_REFERENCE_SPACE_TYPE_LOCAL?&local:&view))) return false;
-    }
+    const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
+    if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
+    session=binding.session();local=binding.localSpace();view=binding.viewSpace();
+    geometryGeneration=geometry.beginGeneration();
+    if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
     if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes))) return false;
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
     return result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE));
@@ -205,7 +189,7 @@ int run(const Options& options) {
   Host host; if(!host.open(options)) return 3;
   const ULONGLONG startup=GetTickCount64(); ULONGLONG started=0,exitRequested=0;
   uint64_t frames=0,layers=0,empty=0,valid=0,invalid=0,headValid=0;
-  bool stopped=false, failed=false; Lifecycle previous=Lifecycle::Uninitialized;
+  bool stopped=false, failed=false, bootstrapComplete=false; Lifecycle previous=Lifecycle::Uninitialized;
   while(true) {
     XrResult r=host.state.pollEvents();
     const auto lifecycle=host.state.lifecycle();
@@ -232,34 +216,33 @@ int run(const Options& options) {
     ++frames; XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     const XrCompositionLayerBaseHeader* layerHeader=nullptr;
     bool abortAfterEnd=host.state.terminal();
+    GeometryInput located{};bool haveLocation=false;
     if(!exitRequested && !abortAfterEnd) {
-      XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};locate.viewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-      locate.displayTime=frame.predictedDisplayTime;locate.space=host.local;
-      XrView views[2]={{XR_TYPE_VIEW},{XR_TYPE_VIEW}};XrViewState state{XR_TYPE_VIEW_STATE};uint32_t count=0;
-      r=host.api.locateViews(host.session,&locate,&state,2,&count,views);
+      r=locateGeometry({host.api.locateViews,host.api.locateSpace},host.binding,frame,host.geometryGeneration,host.sizes,located);
       // An external hard failure retires this owner; do not use possibly lost handles to end a frame.
-      if(XR_FAILED(r)) {result("xrLocateViews",r);failed=true;break;}
+      if(XR_FAILED(r)) {result("locateGeometry",r);failed=true;break;}
       abortAfterEnd=r!=XR_SUCCESS;
-      const bool geometry=r==XR_SUCCESS && validViews(views,count,state.viewStateFlags);
+      haveLocation=r==XR_SUCCESS;GeometrySnapshot candidate{};
+      const bool geometry=haveLocation && makeGeometrySnapshot(located,candidate);
       if(geometry) {
         if(!valid) for(unsigned eye=0;eye<2;++eye) {
-          std::printf("initial_eye,%u,flags=%llu,fov=%.9g/%.9g/%.9g/%.9g\n",eye,(unsigned long long)state.viewStateFlags,
-            views[eye].fov.angleLeft,views[eye].fov.angleRight,views[eye].fov.angleUp,views[eye].fov.angleDown);
-          printPose("initial_eye_pose",views[eye].pose);
+          const auto& view=located.views[eye];
+          std::printf("initial_eye,%u,flags=%llu,fov=%.9g/%.9g/%.9g/%.9g\n",eye,(unsigned long long)located.viewFlags,
+            view.fov.angleLeft,view.fov.angleRight,view.fov.angleUp,view.fov.angleDown);
+          printPose("initial_eye_pose",view.pose);
         }
         ++valid;
       } else ++invalid;
-      if(!abortAfterEnd) {
-        XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};r=host.api.locateSpace(host.view,host.local,frame.predictedDisplayTime,&head);
-        if(XR_FAILED(r)) {result("xrLocateSpace",r);failed=true;break;}
-        abortAfterEnd=r!=XR_SUCCESS;
+      if(haveLocation) {
         constexpr auto flags=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
-        if(r==XR_SUCCESS && (head.locationFlags&flags)==flags && validPose(head.pose)) {
-          if(!headValid) {std::printf("initial_head_flags,%llu\n",(unsigned long long)head.locationFlags);printPose("initial_head",head.pose);} ++headValid;
+        if((located.headFlags&flags)==flags && detail::poseValid(located.headPose)) {
+          if(!headValid) {std::printf("initial_head_flags,%llu\n",(unsigned long long)located.headFlags);printPose("initial_head",located.headPose);} ++headValid;
         }
       }
-      if(!abortAfterEnd && geometry && frame.shouldRender) {
-        r=host.stereo.render(views,host.local,layer);
+      // Complete a zero-layer bootstrap frame before the diagnostic renders.
+      // System readers can then consume native geometry before first Submit.
+      if(!abortAfterEnd && bootstrapComplete && geometry && frame.shouldRender) {
+        r=host.stereo.render(located.views,host.local,layer);
         if(XR_FAILED(r)) {result("stereo_render",r);failed=true;break;}
         if(r!=XR_SUCCESS) {result("stereo_render",r);abortAfterEnd=true;}
         else layerHeader=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
@@ -270,12 +253,23 @@ int run(const Options& options) {
     if(!result("xrEndFrame",r)) {failed=true;break;}
     if(layerHeader) ++layers; else ++empty;
     if(abortAfterEnd) {std::puts("error,pending_or_external_frame_result");failed=true;break;}
+    if(haveLocation) {
+      const bool published=host.geometry.publish(located);
+      if(published&&!bootstrapComplete) {
+        const SystemGeometry read(host.geometry);uint32_t width=0,height=0;vr::HmdMatrix34_t eye{};vr::HmdMatrix44_t projection{};
+        if(!read.recommendedSize(width,height)||!read.eyeToHead(vr::Eye_Left,eye)||
+           !read.projection(vr::Eye_Left,.025f,50000,vr::API_DirectX,projection)) {failed=true;break;}
+        bootstrapComplete=true;
+        std::printf("bootstrap,ready=1,generation=%llu,sequence=%llu,prior_stereo=%llu,size=%ux%u,left_eye_to_head_translation=%.9g/%.9g/%.9g\n",
+          (unsigned long long)read.generation(),(unsigned long long)read.sequence(),(unsigned long long)layers,width,height,eye.m[0][3],eye.m[1][3],eye.m[2][3]);
+      }
+    }
   }
   const bool cleanup=host.close();
   std::printf("summary,frames=%llu,stereo=%llu,empty=%llu,valid_views=%llu,invalid_views=%llu,valid_head=%llu,normal_stop=%u,cleanup=%u\n",
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
-  const bool passed=!failed && stopped && cleanup && layers && headValid;
+  const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;
 }
 int selfTest() {
@@ -296,13 +290,6 @@ int selfTest() {
   check(enumerate<uint32_t>([](uint32_t c,uint32_t*n,uint32_t*){*n=c+1;return XR_SUCCESS;},values)==XR_ERROR_RUNTIME_FAILURE&&values.empty(),"invalid written count");
   check(enumerate<uint32_t>([](uint32_t,uint32_t*,uint32_t*){return XR_SESSION_LOSS_PENDING;},values)==XR_SESSION_LOSS_PENDING,"positive result retained");
   check(enumerate<uint32_t>([](uint32_t c,uint32_t*n,uint32_t*){*n=c+1;return c?XR_ERROR_SIZE_INSUFFICIENT:XR_SUCCESS;},values)==XR_ERROR_SIZE_INSUFFICIENT,"retry exhausted");
-  XrView v[2]={{XR_TYPE_VIEW},{XR_TYPE_VIEW}};for(auto& x:v){x.pose.orientation.w=1;x.fov={-.8f,.7f,.9f,-.6f};}
-  const auto flags=XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
-  check(validViews(v,2,flags),"valid asymmetric geometry");
-  check(!validViews(v,1,flags)&&!validViews(v,2,XR_VIEW_STATE_ORIENTATION_VALID_BIT),"invalid count/flags");
-  v[1].pose.orientation.w=2;check(!validViews(v,2,flags),"nonunit quaternion");v[1].pose.orientation.w=1;
-  v[1].pose.position.x=INFINITY;check(!validViews(v,2,flags),"nonfinite pose");v[1].pose.position.x=0;
-  v[1].fov.angleLeft=v[1].fov.angleRight;check(!validViews(v,2,flags),"degenerate FOV");
   XrViewConfigurationView size{XR_TYPE_VIEW_CONFIGURATION_VIEW};size.recommendedImageRectWidth=size.recommendedImageRectHeight=128;
   size.maxImageRectWidth=size.maxImageRectHeight=512;size.maxSwapchainSampleCount=1;
   check(validSize(size),"valid size");size.recommendedImageRectHeight=0;check(!validSize(size),"zero height");

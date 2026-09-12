@@ -9,6 +9,13 @@ subsequent [first PiOpenXR run](openxr-native-pimax-2026-09-12.md) passed the
 native session/submission/shutdown checks and the user saw the diagnostic
 triangle.
 
+The subsequent [binding and geometry
+checkpoint](openxr-binding-geometry-2026-09-12.md) replaces inline session
+ownership with the reusable caller-device binding and requires a completed
+zero-layer bootstrap snapshot before the first diagnostic stereo layer. The
+first headset result below predates that change; the revised path requires its
+own native check.
+
 The Luna drafts were revised during parent review: frame submission,
 inverse-pose projection, swapchain ownership, timeout handling, device
 validation, partial cleanup, and tests required correction or completion. The
@@ -104,10 +111,10 @@ of graceful cancellation.
 
 The harness requests exit from a running session, submits zero layers during
 shutdown, waits for STOPPING and then ends the session. A passing process
-requires at least one successful stereo layer, valid HMD location, normal
-session stop and successful cleanup. A doff/runtime stop can end the diagnostic
-early. These policies do not define what Elite should do on the corresponding
-events.
+requires a published bootstrap snapshot before the first stereo layer, at least
+one successful stereo layer, valid HMD location, normal session stop and
+successful cleanup. A doff/runtime stop can end the diagnostic early. These
+policies do not define what Elite should do on the corresponding events.
 
 ## Desktop evidence and remaining gate
 
