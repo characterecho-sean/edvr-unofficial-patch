@@ -1699,6 +1699,56 @@ int main(int argc, char** argv) {
         settle(m, mx, 200);
     }
 
+    // A certified separation must survive a temporary excursion of its
+    // running mean. The 16:17 Pause capture had four slots, no evictions,
+    // but its ~6868 certified value had walked to 7593, then 8252. The
+    // next occurrence of ~6868 was being charged all three marks again.
+    {
+        shutdownGlitchFrameFix();
+        writeIni(scratch,kIni); Config::get().init(scratch); installGlitchFrameFix();
+        Buffer m; float mx=10000.f;
+        settle(m,mx,2400); // expire the earlier fixtures' observation tables
+        uint32_t training=0;
+        for(unsigned i=0;i<3;++i){training+=oneFrameExcursion(m,mx,6868.f);settle(m,mx,20);}
+        check("returning-separation fixture pays all three certification marks",training==3,std::to_string(training));
+        uint32_t cost=0;
+        for(unsigned i=1;i<=300;++i){
+            if(oneFrameExcursion(m,mx,6868.f+4.6f*i))++cost;
+        }
+        check("certified separation still follows continuous drift",cost==0,std::to_string(cost));
+        settle(m,mx,20);
+        check("the gap between certified start and moving mean is not excused",
+              oneFrameExcursion(m,mx,7550.f),"unobserved intermediate magnitude was trusted");
+        settle(m,mx,20);
+        check("returning certified magnitude survives drift without relearning",
+              !oneFrameExcursion(m,mx,6868.f),"the moving mean erased its certified starting magnitude");
+        for(unsigned i=1;i<=300;++i)oneFrameExcursion(m,mx,6868.f+4.6f*i);
+        for(unsigned i=0;i<1100;++i)oneFrameExcursion(m,mx,8248.f);
+        check("unseen certified start expires despite a refreshed moving mean",
+              oneFrameExcursion(m,mx,6868.f),"drift kept an unseen old magnitude trusted indefinitely");
+    }
+
+    // The bound-camera diagnostic selects the last current write of its
+    // own buffer, not the last or furthest camera written by another pass.
+    {
+        Buffer sceneBuffer,auxBuffer;auxBuffer.res=reinterpret_cast<void*>(0xCAFE);
+        float sampled[3]{};
+        check("unknown mesh shader does not request a scene-camera sample",!glitchFrameWantsSceneDraw(0));
+        check("known hull shader requests a scene-camera sample",glitchFrameWantsSceneDraw(0x66DE2CADB1F4AE6Bull));
+        sceneBuffer.setPos(1000,2000,3000);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        auxBuffer.setPos(90000,80000,70000);glitchFrameObserve(auxBuffer.f,kBytes,auxBuffer.res);
+        const bool marked=glitchFrameMarked();
+        check("bound-camera sample uses the right resource",glitchFrameNoteSceneDraw(sceneBuffer.res,sampled) && sampled[0]==1000 && sampled[2]==3000);
+        check("bound-camera observation cannot change the withhold decision",glitchFrameMarked()==marked);
+        check("later draws do not replace the first eye's sample",!glitchFrameNoteSceneDraw(auxBuffer.res));
+        advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();
+        check("previous-frame writes cannot become a fresh scene sample",!glitchFrameNoteSceneDraw(sceneBuffer.res));
+        sceneBuffer.setPos(1,2,3);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        sceneBuffer.setPos(NAN,0,0);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        check("an invalid new write invalidates an earlier finite sample",!glitchFrameNoteSceneDraw(sceneBuffer.res));
+        sceneBuffer.setPos(0,0,0);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        check("diagnostic preserves an origin at zero",glitchFrameNoteSceneDraw(sceneBuffer.res,sampled) && sampled[0]==0 && sampled[2]==0);
+    }
     clearGlitchFrame();
     shutdownGlitchFrameFix();
 

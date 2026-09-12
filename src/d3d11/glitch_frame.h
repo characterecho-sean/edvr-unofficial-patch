@@ -39,6 +39,12 @@ bool glitchFrameWantsBuffer(uint32_t bytes);
 // was being watched.
 void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
 
+// Read-only cross-check of the camera buffer bound to a recognised opaque
+// eye draw. A fresh same-frame write is required. Saved beside the legacy
+// furthest-camera history; this does not change the withhold decision.
+bool glitchFrameWantsSceneDraw(uint64_t vertexShaderHash);
+bool glitchFrameNoteSceneDraw(const void* resource, float* sampledPosition = nullptr);
+
 // Called once per frame, after Present. eyeDraws is the number of draws that
 // reached the eye textures in the frame just finished -- used to tell a rendered
 // scene from a menu or a loading screen, where the camera legitimately teleports

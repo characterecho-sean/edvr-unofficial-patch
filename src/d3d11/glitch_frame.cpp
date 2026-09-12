@@ -397,6 +397,8 @@ struct RingEntry {
     uint32_t frame;
     uint32_t eyeDraws;
     float    pos[3];
+    float    scenePos[3];
+    bool     sceneValid;
 
     // THE CULL GUARD'S STATE while this frame was drawn, packed as the
     // channel carries it (frame_flag.h), zero when the guard was off.
@@ -560,6 +562,11 @@ struct State {
         uint32_t marks = 0;
         uint64_t lastMarkMs = 0;
         bool     certified = false;
+        // Preserve the evidence that earned certification independently of
+        // the running mean. Forward flight can move that mean away from a
+        // pass separation which returns a few seconds later.
+        float    certifiedResid = 0.0f;
+        uint32_t certifiedSeen = 0;
     };
     Separation seps[kSeparations] = {};
     float      repeatPercent = kDefaultRepeatPercent;
@@ -726,6 +733,12 @@ struct State {
     uint32_t validateMoved = 0;
     uint32_t revalidations = 0;
 
+    struct SceneWrite { const void* resource=nullptr; float pos[3]{}; uint32_t frame=0; bool valid=false; };
+    SceneWrite sceneWrites[16];
+    uint32_t sceneDrawFrame=~0u;
+    float sceneDrawPos[3]{};
+    bool sceneDrawNoted=false;
+
     RingEntry ring[kRingFrames] = {};
     uint64_t  ringHead = 0;
 };
@@ -770,7 +783,11 @@ int findSeparation(float resid) {
     for (uint32_t i = 0; i < kSeparations; ++i) {
         if (s->seps[i].hits == 0) continue;
         if (s->frameNo - s->seps[i].lastSeen > kRunawayWindow) continue;
-        if (fabsf(s->seps[i].resid - resid) <= tol) return static_cast<int>(i);
+        const auto& e = s->seps[i];
+        const bool atStart = e.certified &&
+            s->frameNo - e.certifiedSeen <= kRunawayWindow &&
+            fabsf(e.certifiedResid - resid) <= tol;
+        if (fabsf(e.resid - resid) <= tol || atStart) return static_cast<int>(i);
     }
     return -1;
 }
@@ -839,6 +856,8 @@ void recordSeparationMark(float resid) {
     e.lastMarkMs = stampMs();
     if (!e.certified && e.marks >= kSepMarksToCertify) {
         e.certified = true;
+        e.certifiedResid = e.resid;
+        e.certifiedSeen = s->frameNo;
         Log::get().note(
             "transition flash: a separation of about %.0f world units has cost a "
             "frame %u times within %u seconds, so it is a fixed gap between two "
@@ -885,17 +904,24 @@ void recordResidual(float resid) {
         // wrong trade: it spends the margin against real flashes, which is the
         // only thing standing between this and suppressing the bug it exists to
         // fix.
-        e.resid += (resid - e.resid) * 0.5f;
+        const float tol = resid * (s->repeatPercent * 0.01f);
+        if (e.certified && fabsf(e.certifiedResid - resid) <= tol)
+            e.certifiedSeen = s->frameNo;
+        // A return to the certified starting magnitude is a new drift
+        // segment. Averaging across the gap would invent a magnitude that
+        // matched neither observation. Only the two narrow match windows
+        // are trusted; the interval between them is never excused.
+        if (fabsf(e.resid - resid) <= tol) e.resid += (resid - e.resid) * 0.5f;
+        else e.resid = resid;
         // Once per magnitude, not once per suppressed frame -- there are
         // thousands of those and one of these.
         if (!e.noted && e.hits >= 2) {
             e.noted = true;
             Log::get().note(
                 "transition flash: a jump of about %.0f world units has now "
-                "happened %u times. A repeating magnitude is a fixed separation "
-                "between two of the game's render passes, not a transition -- so "
-                "frames matching it are no longer being withheld. This is the "
-                "detector recognising the scene, not a fault.",
+                "happened %u times. Recognition alone does not excuse a frame; "
+                "certification still requires three withheld frames within "
+                "60 seconds.",
                 static_cast<double>(e.resid), e.hits);
         }
         return;
@@ -1599,6 +1625,16 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     const float* pos = &static_cast<const float*>(data)[s->posOffset];
     // Non-finite values compare false in both directions, so a NaN here would
     // pass every threshold test silently rather than failing one.
+    if (resource) {
+        uint32_t at=0;
+        for(uint32_t i=0;i<16;++i){
+            if(s->sceneWrites[i].resource==resource){at=i;break;}
+            if(!s->sceneWrites[i].resource){at=i;break;}
+            if(s->sceneWrites[i].frame<s->sceneWrites[at].frame)at=i;
+        }
+        auto& w=s->sceneWrites[at];w.resource=resource;w.frame=s->frameNo;w.valid=finite3(pos);
+        for(unsigned a=0;a<3;++a)w.pos[a]=pos[a];
+    }
     if (!finite3(pos)) return;
 
     s->sawBuffer = true;
@@ -1917,6 +1953,33 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 #endif
 }
 
+bool glitchFrameWantsSceneDraw(uint64_t hash) {
+    State* s=g_state;
+    if(!s || !s->observing || s->sceneDrawFrame==s->frameNo)return false;
+    return hash==0xEB5234DB6ADB491Dull || hash==0xDE545DC8EE4FBB87ull ||
+        hash==0x61AE8EB05FDC18DDull || hash==0x66DE2CADB1F4AE6Bull || hash==0xAACFDCF2FB9AD809ull;
+}
+bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
+    State* s=g_state;
+    if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo)return false;
+    for(const auto& w:s->sceneWrites)if(w.resource==resource && w.frame==s->frameNo && w.valid){
+        s->sceneDrawFrame=s->frameNo;
+        for(unsigned a=0;a<3;++a){s->sceneDrawPos[a]=w.pos[a];if(sampledPosition)sampledPosition[a]=w.pos[a];}
+        if(!s->sceneDrawNoted){s->sceneDrawNoted=true;Log::get().note(
+            "transition flash: bound eye-draw camera cross-check is recording "
+            "VS b1's current write, independently of AA; Pause history includes "
+            "scene= beside the detector's furthest-camera pos=. Observation only.");}
+        return true;
+    }
+    return false;
+}
+namespace {
+void recordScenePosition(RingEntry& e,const State* s){
+    // Boundary advances frameNo before recording the frame just completed.
+    e.sceneValid=s->sceneDrawFrame+1==s->frameNo;
+    for(unsigned a=0;a<3;++a)e.scenePos[a]=s->sceneDrawPos[a];
+}
+}
 void glitchFrameBoundary(uint32_t eyeDraws) {
     State* s = g_state;
     if (!s || !s->observing) return;
@@ -1960,6 +2023,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            recordScenePosition(e,s);
             ++s->ringHead;
         }
         s->frameFarMag2 = -1.0f;
@@ -2049,6 +2113,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            recordScenePosition(e,s);
             ++s->ringHead;
         }
         s->frameFarMag2 = -1.0f;
@@ -2348,6 +2413,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+        recordScenePosition(e,s);
         ++s->ringHead;
     }
 
@@ -2526,6 +2592,9 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
         Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f)%s %s",
                         -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2],
                         cull, ringVerdictName(e.verdict));
+        if(e.sceneValid)Log::get().note("    f%u scene=(%+.2f %+.2f %+.2f) [bound VS b1]",
+            e.frame,e.scenePos[0],e.scenePos[1],e.scenePos[2]);
+        else Log::get().note("    f%u scene=unavailable [no fresh recognised eye draw]",e.frame);
     }
     // WAS ANY OF THIS OURS? The question every one of these dumps has been
     // opened to answer, worked out by hand every time.
@@ -2584,6 +2653,11 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
                     static_cast<double>(e.resid), e.hits, e.marks,
                     e.certified ? " CERTIFIED" : "",
                     s->frameNo - e.lastSeen);
+                if (e.certified) Log::get().note(
+                    "    certified start ~%.0f, last seen %u frame(s) ago; "
+                    "separate from the moving mean, expires after %u frames.",
+                    static_cast<double>(e.certifiedResid),
+                    s->frameNo - e.certifiedSeen, kRunawayWindow);
             }
         }
         uint32_t shellsInUse = 0;

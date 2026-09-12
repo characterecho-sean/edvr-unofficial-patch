@@ -431,6 +431,107 @@ surface. No rendering code, live setting or installed DLL changed in
 this review. Analysis artifacts remain under the ignored local
 `build/review_motion/sep12/flight1600/` directory.
 
+## Pause capture, 16:15 flight
+
+The new session again verifies both DLLs as `7c6e9ef`. Pause was pressed
+at 16:17:12.498, followed by the automatic second history. The nearest
+withheld frame was 13435, 1.778 seconds before the press. The VR log
+independently records both eye replacements. Two further false
+detections at 13736/13737 are inside the second history.
+
+- Ruled out: separation-table exhaustion. The first history contains
+  four occupied slots and zero evictions or relearns after eviction; the
+  second has five slots, still with zero evictions.
+- Confirmed destructive drift: the magnitude certified near 6,868 at
+  frame 13435 has become 7,593 in the first saved table and 8,252 in the
+  second. The entry still has three marks and is certified. Its running
+  mean has overwritten the value that earned those marks.
+- Ruled out: simply extrapolate the frozen predictor indefinitely. Its
+  last measured velocity before 13435 includes a shadow-pass change;
+  extrapolating it produces a residual around 14,511 after 300 frames,
+  against about 8,257 from the existing predictor. That is not evidence
+  of the eye camera's motion.
+
+The separation entry now retains its certified starting magnitude
+independently of its moving mean. Both use the existing 2% match window;
+the interval between them is not accepted. The starting magnitude
+expires after 2,000 frames without a matching sighting even if the
+moving mean is still refreshed. Returning to it starts a new drift
+segment rather than averaging across the unobserved gap. Certification
+remains three paid marks inside 60 seconds, and capacity remains sixteen
+entries.
+
+The focused regression earns its own three certification marks, follows
+300 steps of measured-scale drift, then returns to the starting value.
+It fails against the original production source and passes with the
+correction. Separate cases reject an unseen intermediate magnitude and
+an expired starting magnitude. The existing real one/two-frame flash,
+low-wake, burst, rebasing and field-corpus tests still pass.
+
+### Continuous hull flicker after reloading
+
+The additional `161657` eye run has 166 mesh records, 165 rigid, but
+zero matches and zero eligible exact-motion pixels. All sixteen captured
+frames retain DLSS history and have no withheld-frame flag, so this
+continuous surface symptom is separate from the intermittent frame
+replacements. The three draw snapshots show the main hull's pool
+identity and relative camera transform remaining stable. Some smaller
+draws use a separate vertex buffer from the main hull, while sharing its
+index buffer.
+
+The existing resource-write handler clears both eyes and every mesh when
+any watched vertex/index buffer changes. A controlled GPU test
+reproduces loss of the unchanged hull's correspondence when only a
+second part's vertex buffer is written. The old implementation fails
+that test. The capture does not record the actual write that cleared
+live history, so the next dump also reports known geometry writes and
+unknown resets.
+
+Known writes now advance a generation only for that resource; the last
+generation affecting a draw is included in its existing persistent key.
+An edited part rejects old correspondence, while independent hull draws
+keep theirs. Geometry already rasterised into the current eye retains
+its coverage. A shared index-buffer edit rejects all dependent meshes;
+unknown command-list writes and generation wrap still clear everything.
+The cache expires with retained source references, and no new GPU pass,
+readback or per-frame texture copy is introduced.
+
+The GPU regression passes 1,109 checks on WARP, including recovery after
+an unchanged frame, writes after consumption, both eyes, shared index
+buffers, pool pose updates, cache lifetime and generation wrap. Visual
+confirmation after reloading remains necessary.
+
+### Real-transition reliability remains an explicit follow-up
+
+The user wants false positives eliminated and genuine transition flashes
+consistently hidden. Retaining certification fixes destructive
+forgetting; it does not eliminate the initial learning cost or prove
+that every real flash will be caught. Do not describe the broader
+request as solved.
+
+The first eye draw can bind stale constants before the game rewrites its
+scene block, so adopting that draw blindly as the camera is also unsafe.
+A read-only cross-check now records the latest same-frame VS b1 position
+at the first recognised mesh draw into an eye-sized colour target. It
+uses the five known mesh shader families and the existing Map/Unmap
+feed, independently of AA. Pause prints `scene=` alongside the legacy
+`pos=` history, explicitly marking unavailable samples. It does not
+affect withholding. Tests cover resource identity, stale or invalid
+writes, first-eye latching and preserving the original decision.
+
+The discriminating next flight is normal thrust plus a real transition,
+pressing Pause immediately after any flicker/flash. The paired histories
+will establish whether the eye-draw camera stayed continuous when the
+furthest-camera heuristic fired, and which signal changed on a real
+flash. All raw captures and local baseline/revised test logs remain
+under `build/review_motion/sep12/flight1600/`.
+
+The complete absolute-path worktree build and its regression gates pass,
+including the 252-key configuration contract. The NVIDIA DLL smoke test
+passes, and the mesh-history regression also passes all 1,109 checks on
+the hardware adapter. The corresponding build, smoke and hardware logs
+are retained in the same ignored analysis directory.
+
 ### Earlier diagnostic validation
 
 The GPU snapshot test and Python reader jointly verify three consecutive

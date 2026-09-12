@@ -3593,6 +3593,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                         baseVertex, startInstance);
         if (clock.on) clock.realCall(r0);
         if(self==g_state->ownerCtx) {
+            if(g_state->rtv0Eye && perInstance && instances &&
+               glitchFrameWantsSceneDraw(bindingShaderHash(BindSlot::Vs))){
+                ID3D11Buffer* scene=nullptr;self->VSGetConstantBuffers(1,1,&scene);
+                if(scene){glitchFrameNoteSceneDraw(scene);scene->Release();}
+            }
             screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));

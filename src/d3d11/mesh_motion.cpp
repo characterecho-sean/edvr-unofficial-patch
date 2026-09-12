@@ -7,7 +7,8 @@
 #include "gpu_interval.h"
 #include "../common/log.h"
 #include <wrl/client.h>
-#include <unordered_set>
+#include <unordered_map>
+#include <algorithm>
 #include <cstdio>
 namespace edvr { namespace mesh_motion_detail {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
@@ -43,7 +44,9 @@ Ptr<ID3D11DepthStencilState> depthState;
 Ptr<ID3D11BlendState> blendState;
 GpuIntervals<16> drawGpu,matchGpu;
 unsigned frames=0,draws=0;
-std::unordered_set<ID3D11Resource*> watched;
+struct GeometryStamp { unsigned epoch=0,seen=0; };
+std::unordered_map<ID3D11Resource*,GeometryStamp> watched;
+unsigned geometryEpoch=0,geometryWrites=0,unknownWrites=0;
 Ptr<ID3D11Buffer> dump;
 unsigned dumpCount=0;
 struct Settings { UINT info[4],key[16];float dimensions[4]; };
@@ -129,7 +132,13 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     IUnknown* objects[4]={vs.Get(),vb.Get(),ib.Get(),layout.Get()};
     for(unsigned i=0;i<4;++i){uint64_t key=reinterpret_cast<uint64_t>(objects[i]);data.key[2*i]=UINT(key);data.key[2*i+1]=UINT(key>>32);now.sources[now.count][i]=objects[i];}
     data.key[8]=UINT(base);data.key[9]=start;data.key[10]=count;data.key[11]=vertexStride;data.key[12]=offset;data.key[13]=indexOffset;data.key[14]=UINT(format);
-    watched.insert(vb.Get());watched.insert(ib.Get());
+    auto& vertexStamp=watched[vb.Get()];vertexStamp.seen=frames;
+    // Inserting the index entry can rehash the map; retain the value, not
+    // an iterator. Epochs are globally ordered, so max identifies the last
+    // write to either geometry input without widening the GPU record.
+    const unsigned vertexEpoch=vertexStamp.epoch;
+    auto& indexStamp=watched[ib.Get()];indexStamp.seen=frames;
+    data.key[15]=std::max(vertexEpoch,indexStamp.epoch);
     bool timed=(++draws&63u)==0 && drawGpu.begin(ctx);
     ctx->UpdateSubresource(settings.Get(),0,nullptr,&data,0,0);
     D3D11_BOX box{UINT(at),0,0,UINT(at+n*8),1,1};ctx->CopySubresourceRegion(instances.Get(),0,0,0,0,ids.Get(),0,&box);
@@ -169,20 +178,28 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
     if(ctx){drawGpu.poll(ctx);matchGpu.poll(ctx);}
     if(++frames%1800==0){const auto& d=drawGpu.totals;const auto& m=matchGpu.totals;
         Log::get().note("mesh motion GPU: %u coverage reissues/%u frames; sampled draw+capture %.3f us (%u samples), batched match %.3f us/eye (%u samples); no waits/readbacks.",draws,frames,d.samples?d.ms*1000/d.samples:0,d.samples,m.samples?m.ms*1000/m.samples:0,m.samples);}
-    watched.clear();
     for(auto& e:eyes){
         e.write=1-e.write;auto& h=e.history[e.write];for(unsigned i=0;i<h.count;++i)for(auto& p:h.sources[i])p.Reset();h.count=0;e.cleared=e.matched=false;
-        auto& prev=e.history[1-e.write];for(unsigned i=0;i<prev.count;++i)for(unsigned j=1;j<=2;++j)if(prev.sources[i][j])watched.insert(static_cast<ID3D11Resource*>(prev.sources[i][j].Get()));
+        auto& prev=e.history[1-e.write];for(unsigned i=0;i<prev.count;++i)for(unsigned j=1;j<=2;++j)if(prev.sources[i][j])watched[static_cast<ID3D11Resource*>(prev.sources[i][j].Get())].seen=frames;
     }
+    for(auto it=watched.begin();it!=watched.end();)if(it->second.seen!=frames)it=watched.erase(it);else ++it;
 }
 void meshMotionResourceWritten(ID3D11Resource* resource){
     using namespace mesh_motion_detail;if(!enabled || (resource && watched.find(resource)==watched.end()))return;
+    if(resource){
+        ++geometryWrites;
+        if(++geometryEpoch){watched[resource].epoch=geometryEpoch;return;}
+        // Epoch wrap is an unknown generation, so discard conservatively.
+    }else ++unknownWrites;
+    // A known write changes future correspondence only for its dependents.
+    // The old geometry was already rasterised into this eye; its coverage
+    // remains correct. Unknown command-list writes still invalidate all.
     for(auto& e:eyes){for(auto& h:e.history){for(unsigned i=0;i<h.count;++i)for(auto& p:h.sources[i])p.Reset();h.count=0;}e.cleared=e.matched=false;}
     watched.clear();
 }
 void meshMotionShutdown(){
     using namespace mesh_motion_detail;for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();depthState.Reset();blendState.Reset();
-    failed=noted=capped=false;drawGpu={};matchGpu={};frames=draws=0;watched.clear();dump.Reset();dumpCount=0;
+    failed=noted=capped=false;drawGpu={};matchGpu={};frames=draws=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=0;dump.Reset();dumpCount=0;
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene){
     using namespace mesh_motion_detail;dump.Reset();dumpCount=0;
@@ -203,6 +220,7 @@ void meshMotionWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const
         if(f){const UINT header[2]={dumpCount,stride};ok=fwrite("EDVRMSH1",1,8,f)==8 && fwrite(header,sizeof(header),1,f)==1 && fwrite(mapped.pData,stride,dumpCount,f)==dumpCount;fclose(f);}
         ctx->Unmap(dump.Get(),0);
         Log::get().note("mesh motion: eye run %ls matched %u/%u rigid records (%u total); %s. Sampled capture/reissue %.3f us, match %.3f us/eye.",stamp,matched,valid,dumpCount,ok?"written":"WRITE FAILED",drawGpu.totals.samples?drawGpu.totals.ms*1000/drawGpu.totals.samples:0,matchGpu.totals.samples?matchGpu.totals.ms*1000/matchGpu.totals.samples:0);
+        Log::get().note("mesh motion: %u known geometry writes isolated by generation, %u unknown writes reset all history; %zu geometry resources retained.",geometryWrites,unknownWrites,watched.size());
     }else Log::get().note("mesh motion: eye run %ls readback unavailable (0x%08X).",stamp,unsigned(result));
     dump.Reset();dumpCount=0;
 }

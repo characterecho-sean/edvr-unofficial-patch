@@ -130,7 +130,43 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     meshMotionFrameBoundary(ctx.Get());meshMotionFrameBoundary(ctx.Get());a=run();check(a[59]==0,"missing frame cannot reuse stale history");
     reset();pose(1,-.05f,0);pose(1,.05f,1);ids[2]=1;run(0,2);meshMotionFrameBoundary(ctx.Get());a=run(0,2);check(a[59]==0 && a[119]==0,"ambiguous identical instances reject history");
     reset();pose(1,-.4f,0);pose(1,.4f,1);ids[2]=1;run(0,2);meshMotionFrameBoundary(ctx.Get());pose(1,-.38f,0);pose(1,.42f,1);a=run(0,2);check(a[59]==1 && a[119]==1,"separated instances match independently");
-    meshMotionResourceWritten(vb.Get());ID3D11ShaderResourceView* gone[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),gone);check(!gone[0],"vertex edits invalidate coverage and history");
+    meshMotionResourceWritten(nullptr);ID3D11ShaderResourceView* gone[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),gone);check(!gone[0],"unknown writes invalidate coverage and history");
+    // A deforming part must not discard the rigid hull's history. Both
+    // are captured in the same eye and share an index buffer, as in the
+    // reload capture with zero of 165 otherwise-valid records matched.
+    reset();pose(1,0);
+    auto changing=buffer(sizeof(vertices),D3D11_BIND_VERTEX_BUFFER,0,vertices);
+    auto mixed=[&](UINT n){
+        bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+        issue(ctx.Get(),6,n,0,0,0);meshMotionDraw(ctx.Get(),issue,6,n,0,0,0,materialVs);
+        UINT step=40,offset=0;ctx->IASetVertexBuffers(1,1,changing.GetAddressOf(),&step,&offset);
+        issue(ctx.Get(),6,n,0,0,0);meshMotionDraw(ctx.Get(),issue,6,n,0,0,0,materialVs);
+        ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),views);
+        return readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
+    };
+    mixed(1);meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(changing.Get());
+    pose(1,.02f);a=mixed(1);
+    check(a[59]==1 && a[119]==0,"a changed part rejects only its own correspondence, preserving the hull");
+    meshMotionResourceWritten(changing.Get());
+    ID3D11ShaderResourceView* retained[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),retained);
+    check(retained[0] && retained[1],"a later write does not erase geometry already drawn into this eye");
+    meshMotionFrameBoundary(ctx.Get());pose(1,.04f);a=mixed(1);
+    check(a[59]==1 && a[119]==0,"write after consumption still rejects the edited part next frame");
+    meshMotionFrameBoundary(ctx.Get());a=mixed(1);
+    check(a[59]==1 && a[119]==1,"unchanged geometry recovers after one consecutive frame");
+    meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(ib.Get());a=mixed(1);
+    check(a[59]==0 && a[119]==0,"shared index edits reject every dependent mesh");
+    meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(pool.Get());a=mixed(1);
+    check(a[59]==1 && a[119]==1,"pool pose writes retain geometry generations");
+    meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(changing.Get());
+    pose(1,.1f);run(1);pose(1,.02f);a=mixed(1);
+    check(a[59]==1 && a[119]==0,"other-eye rendering does not erase the unchanged eye history");
+    check(watched.size()==3,"geometry generation cache retains only referenced geometry buffers");
+    meshMotionFrameBoundary(ctx.Get());meshMotionFrameBoundary(ctx.Get());
+    check(watched.empty(),"unused geometry generations expire with their source references");
+    a=mixed(1);geometryEpoch=~0u;meshMotionResourceWritten(changing.Get());
+    meshMotionViews(ctx.Get(),scene[0].Get(),gone);
+    check(!gone[0] && watched.empty(),"geometry generation wrap discards history conservatively");
     reset();pose(1,0);run();meshMotionFrameBoundary(ctx.Get());bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx.Get(),6,1,0,0,0);
     for(unsigned i=0;i<513;++i)meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
     check(eyes[0].history[eyes[0].write].count==512,"record cap bounds excess draws");
