@@ -180,8 +180,9 @@ public:
         s.activeEye = -1;
         return GpuSpanReason::Valid;
     }
-    // Eye intervals cover EDVR work. The outer marker follows the second
-    // submit's final work, which can occur after the eye's own interval ended.
+    // Eye intervals cover the measured submit path. The shipping controller
+    // includes runtime Submit plus post-submit copies and labels it accordingly;
+    // it must not advertise those intervals as EDVR-only cost.
     GpuSpanReason finishFrame(uint64_t now, const GpuSpanOwner& owner) noexcept {
         const auto checked = gate(owner);
         if (checked != GpuSpanReason::Valid) return checked;

@@ -1,0 +1,135 @@
+# Render-to-submit GPU checkpoint
+
+This follows the successful `cc3d882` Frontier timer-migration check. It adds
+the local frame measurement to the current OpenVR proxy. It does not add an
+OpenXR renderer or complete Phase 0 qualification.
+
+## What the value means
+
+The start marker precedes the first covered call on the bound immediate context
+after a successful owned pose wait. The end marker follows the second distinct
+accepted eye's entire submit path, including the runtime Submit call and EDVR's
+post-submit shadow copy. Theater, healing and shadow-resubmit paths share the
+same wrapper. Classic withholding, rejected submits, malformed pairs, missing
+eyes and new boundaries cannot produce a valid completed frame.
+
+The two inner intervals are **submit paths including runtime work**. They are
+not EDVR-only GPU cost. Existing EDVR pass/door readings remain unchanged;
+complete accounting of EDVR work across every early path is still separate
+work. Subtracting those existing readings from this span is not a game-only
+cost measurement.
+
+The span measures elapsed GPU-stream time, including bubbles and contention. It
+excludes commands after the final marker and commands issued before the pose
+boundary. The preceding Frontier trace contains both kinds of work. It must not
+be presented as the whole GPU frame or expected to equal SteamVR's scene/total
+timing definitions.
+
+## Placement and ownership
+
+Covered base-context paths are direct/instanced/indirect draws and DrawAuto,
+dispatch/indirect dispatch, RTV/DSV/UAV clears, copies and structure counts,
+updates, resolves, mip generation, ExecuteCommandList, Map/Unmap and query
+Begin/End. ClearState also consumes an armed boundary. EDVR's frame-query
+commands bypass re-entry and the draw census. State-only setters are not a
+universal start boundary. Extended-context upload/copy/clear variants and calls
+that bypass the hooks are not proven coverage; the label deliberately says
+render-to-submit from the first **covered** command.
+
+The four new base-context slots are checked against the installed Windows SDK's
+C vtable. They preserve the existing LiveCopy table contract and the separate
+exposure hooks. The draft incorrectly assigned DrawAuto to slot 16; review
+corrected it to slot 38 before execution. The paired test also verifies that
+slot 16 still forwards PS constant-buffer bindings.
+
+A version-1 paired export carries CPU pose/submit events. It changes no shared
+memory layout. The graphics receiver allocates monotonic sequences across
+compositor rebinds. Pose publication is atomic and issues no GPU commands; the
+actual context pointer, device and calling OS thread gate the query ring. The
+bridge resolves the exact executable-side graphics DLL and holds a module
+reference for each callback, without loading a runtime or retaining a dangling
+function pointer.
+
+Eight frame slots hold six timestamp queries each. A frame owns one shared
+frequency scope; existing pass timers borrow it. A live standalone interval
+causes the frame measurement to skip rather than open an overlapping disjoint
+scope. Queries are polled without flushing or waiting, retain partial ready
+results, and expire after two seconds. An uncertain End permanently stops the
+instrument until owner teardown. Query/COM cleanup is explicit; process exit
+does not run it from destructors.
+
+Source frames use the existing Present counter, captured when rendering starts,
+not a second independently incremented frame counter. Results retain that
+identity and their pose sequence even when they complete later. The Monitor
+uses a locked CPU snapshot, rejects stale/invalid values, and never replaces a
+newer sample with an older one. A late duplicate or foreign-thread event can
+invalidate an already closed pair; affected older pending samples are discarded
+conservatively rather than risk publishing a rejected frame as valid.
+
+## Monitor and configuration
+
+`advanced.app_gpu_timing = on` enables the local queries by default in this
+checkpoint. It is live and independent of `advanced.compositor_timing` and
+`advanced.openvr_census`. Turning it off closes/discards the local ring on its
+verified owner; enabling it waits for a new pose boundary. If every hook-using
+feature was disabled at startup and its hook was never installed, enabling this
+feature requires a restart. Turning queries off retains the small
+boundary-bridge and hook checks; an enabled/disabled comparison does not
+measure that fixed cost.
+
+The Monitor adds a render-to-submit line below the existing 16 tiles, including
+D3D11 source, original frame and result age. Existing SteamVR GPU total, scene,
+compositor, drops/reprojection, graphs and attribution are unchanged. Only the
+small FPS overlay may use a fresh local fallback when compositor GPU timing is
+absent, explicitly labeled `submit gpu`. Invalid/pending/stale results are not
+zero-millisecond measurements.
+
+## Validation
+
+The focused suite passed 599 checks, including command-derived nested frame and
+existing-pass timestamps, both eye orders, preserved source frames, partial
+readiness, all seven allocation positions with failure/null-success variants,
+disjoint/zero-frequency/unexpected GetData results, uncertain closure, ring
+pressure, standalone-scope rejection, wrong thread/context/device, missing and
+duplicate eyes, rejected submit, out-of-order pose waits, and configuration
+disable/re-enable, immediate readout invalidation after failed poses, and
+CPU-only frame publication from a foreign Present thread. Actual WARP
+clear/copy workloads also verify every output pixel outside the measured
+interval. Counts include repeated resource checks, not 599 distinct scenarios.
+
+The paired build passed in `build/render-submit-validation-3.log`, including
+the existing UI, motion, shader-bytecode, native adapter, shared-clock,
+LiveCopy, OpenVR ABI, config and Python gates. Five isolated actual-proxy modes
+pass: ready/delayed/disabled census and local GPU timing on/off. The local
+modes have census and compositor timing disabled, use the two shipping proxies
+with a fake historical compositor and real WARP, verify PS constant-buffer
+bindings, and check every copied pixel. The first valid result in the separate
+paired run was sequence 1 / source frame 1, 0.0113 ms outer and 0.0004 ms per
+submit path, on context `000001DAF9C1F9A8`, thread `15324`. These software
+timings are not performance targets.
+
+The independent-feature test initially found that the compositor install gate
+omitted local timing. The gate now includes it; the graphics hook install gate
+also includes it. Neither census nor another rendering fix is required to start
+the instrument. The final foreign-Present/failed-pose changes additionally
+passed the 599-check focused suite. The final full paired build passed in
+`build/render-submit-final-validation.log`, including all five actual-proxy
+modes and the 599-check suite.
+
+No headset run has yet qualified this new span. WARP results establish command
+ordering and resource correctness, not hardware timing accuracy or overhead.
+
+## Frontier gate
+
+Use Pimax through SteamVR on the Frontier install. Preserve the tuned INI.
+Check prompt intro, cockpit and on-foot rendering/tracking, F8 Monitor close
+and reopen, and normal exit. The new Monitor line should settle to a measured
+value or explicitly explain unavailability. Compare both installed build
+identities in the new logs before interpreting any readings.
+
+Inspect owner/sequence/frame/age and valid/invalid summaries, active LiveCopy
+hooks and existing pass/feature counters. This first run is a functional gate.
+Matched-frame SteamVR correlation and a controlled enabled/disabled overhead
+comparison remain required before treating the local value as qualified. Other
+runtime/headset configurations and complete lifecycle/command coverage remain
+separate Phase 0 gates.

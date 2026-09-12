@@ -34,6 +34,7 @@
 #include "sharpen.h"
 #include "supersample_resolve.h"
 #include "system_hook.h"
+#include "gpu_frame_bridge.h"
 #include "temporal_aa.h"
 
 namespace edvr {
@@ -174,6 +175,7 @@ struct State {
     size_t   submitSlotUsed = 0;
 
     bool     inert = false;        // hook installed but doing nothing
+    std::atomic<uint64_t> gpuFrameSeq{0};
     bool     validated = false;
     uint32_t submitCalls = 0;
     uint32_t eyesSeen = 0;         // bit 0 left, bit 1 right
@@ -1153,7 +1155,8 @@ static bool predictDisplayPose(State* s, vr::HmdMatrix34_t* out,
 static vr::EVRCompositorError forwardSubmit(State* s, void* self, vr::EVREye eye,
                                             const vr::Texture_t* tex,
                                             const vr::VRTextureBounds_t* bounds,
-                                            vr::EVRSubmitFlags flags) {
+                                            vr::EVRSubmitFlags flags, bool& forwarded) {
+    forwarded = true;
     const int32_t f = static_cast<int32_t>(flags);
     const bool plain = tex && (f & (vr::Submit_TextureWithPose | vr::Submit_TextureWithDepth)) == 0;
     if (s->poseHoldMode == 2 && s->poseHolding && plain) {
@@ -1185,10 +1188,10 @@ static vr::EVRCompositorError forwardSubmit(State* s, void* self, vr::EVREye eye
     return s->realSubmit(self, eye, tex, bounds, flags);
 }
 
-vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
+vr::EVRCompositorError submitBody(void* self, vr::EVREye eye,
                                     const vr::Texture_t* texture,
                                     const vr::VRTextureBounds_t* bounds,
-                                    vr::EVRSubmitFlags flags) {
+                                    vr::EVRSubmitFlags flags, bool& forwarded) {
     EDVR_BREADCRUMB_ONCE("vr: hookedSubmit entered");
     State* s = g_state;
     if (!s || !s->realSubmit) return 0;
@@ -1202,9 +1205,10 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // hooks the class, so a second compositor pointer reaches this thunk and
     // withholding ITS frames would be acting on somebody else's submission.
     if (self != s->ownerIface) {
+        forwarded = true;
         return s->realSubmit(self, eye, texture, bounds, flags);
     }
-    if (s->inert) return s->realSubmit(self, eye, texture, bounds, flags);
+    if (s->inert) { forwarded = true; return s->realSubmit(self, eye, texture, bounds, flags); }
 
     noteSubmitResource(s, eye, texture, flags);
 
@@ -1411,7 +1415,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 applySharpen(&sub, &subBounds, &subStorage2);
                 vr::VRTextureBounds_t subStorage3;
                 applyMenu(&sub, &subBounds, &subStorage3);
-                return forwardSubmit(s, self, eye, &sub, subBounds, flags);
+                return forwardSubmit(s, self, eye, &sub, subBounds, flags, forwarded);
             }
         }
     }
@@ -1535,7 +1539,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     applyResolve(&sub, &subBounds, &subStorage);
                     vr::VRTextureBounds_t subStorage2;
                     applySharpen(&sub, &subBounds, &subStorage2);
-                    return forwardSubmit(s, self, eye, &sub, subBounds, flags);
+                    return forwardSubmit(s, self, eye, &sub, subBounds, flags, forwarded);
                 }
             }
         }
@@ -1595,7 +1599,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 "game renders normally from here.",
                 s->submitCalls, static_cast<int>(eye), static_cast<const void*>(texture));
             s->inert = true;
-            return forwardSubmit(s, self, eye, texture, bounds, flags);
+            return forwardSubmit(s, self, eye, texture, bounds, flags, forwarded);
         }
         s->eyesSeen |= (eye == vr::Eye_Left) ? 1u : 2u;
         if (++s->submitCalls >= 8 && s->eyesSeen == 3u) {
@@ -1792,7 +1796,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             vr::VRTextureBounds_t subStorage4;
             applyMenu(&sub, &subBounds, &subStorage4);
             frameTimingDoorEnd(shadow, eyeNo);
-            return forwardSubmit(s, self, eye, &sub, subBounds, flags);
+            return forwardSubmit(s, self, eye, &sub, subBounds, flags, forwarded);
         }
         // The classic withhold: nothing submitted, the compositor reprojects.
         noteEdvrEvent(kEvWithhold);
@@ -1857,7 +1861,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         applyMenu(&fwd, &fwdBounds, &fwdStorage4);
         frameTimingDoorEnd(doorTex, eyeNo);
         const vr::EVRCompositorError result =
-            forwardSubmit(s, self, eye, &fwd, fwdBounds, flags);
+            forwardSubmit(s, self, eye, &fwd, fwdBounds, flags, forwarded);
         // This frame was FORWARDED and accepted, so it becomes the copy a
         // later withhold can hand over. After realSubmit on purpose: the copy
         // is queued on the immediate context behind this frame's rendering,
@@ -1885,6 +1889,42 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
 
 
 
+vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
+                                    const vr::Texture_t* texture,
+                                    const vr::VRTextureBounds_t* bounds,
+                                    vr::EVRSubmitFlags flags) {
+    State* s = g_state;
+    bool forwarded = false; // Per invocation, including reentrant runtime callbacks.
+    if (!s || !s->realSubmit || self != s->ownerIface)
+        return submitBody(self, eye, texture, bounds, flags, forwarded);
+    const uint64_t seq = s->gpuFrameSeq.load(std::memory_order_acquire);
+    void* handle = nullptr;
+    bool eligible = false;
+    if (seq && !s->inert && (eye == vr::Eye_Left || eye == vr::Eye_Right) && texture) {
+        guarded("GPU frame submit texture", [&] {
+            eligible = texture->eType == vr::TextureType_DirectX && texture->handle;
+            if (eligible) handle = texture->handle;
+        });
+    }
+    // Invalid/inert owned calls must poison the pair even when no eye begins.
+    const unsigned eyeNo = eye == vr::Eye_Left ? 0u : 1u;
+    const bool began = eligible && gpuFrameEvent(GpuFrameEvent::SubmitBegin, seq, eyeNo, 0, handle);
+    if (!began) {
+        if (seq) gpuFrameEvent(GpuFrameEvent::Cancel, seq);
+        return submitBody(self, eye, texture, bounds, flags, forwarded);
+    }
+    struct CancelOnExit {
+        uint64_t sequence;
+        bool complete = false;
+        ~CancelOnExit() { if (!complete) gpuFrameEvent(GpuFrameEvent::Cancel, sequence); }
+    } cleanup{seq};
+    const vr::EVRCompositorError result = submitBody(self, eye, texture, bounds, flags, forwarded);
+    const unsigned accepted = forwarded && result == 0 && !s->inert ? 1u : 0u;
+    gpuFrameEvent(GpuFrameEvent::SubmitEnd, seq, eyeNo, accepted);
+    cleanup.complete = true;
+    return result;
+}
+
 vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                           vr::TrackedDevicePose_t* renderPoses,
                                           uint32_t renderCount,
@@ -1904,11 +1944,17 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // the natural frame boundary. How long it blocked crosses to the monitor:
     // with the time blocked in Present, it is what the frame period loses to
     // waiting, and the rest is the render thread's own time.
+    const bool saneCounts = renderCount <= vr::k_unMaxTrackedDeviceCount &&
+                            gameCount <= vr::k_unMaxTrackedDeviceCount;
+    const uint64_t gpuSeq = !s->inert ? gpuFrameEvent(GpuFrameEvent::WaitBegin) : 0;
+    s->gpuFrameSeq.store(gpuSeq, std::memory_order_release);
     LARGE_INTEGER waitT0, waitT1, waitF;
     QueryPerformanceCounter(&waitT0);
     const vr::EVRCompositorError result =
         s->realWaitGetPoses(self, renderPoses, renderCount, gamePoses, gameCount);
     QueryPerformanceCounter(&waitT1);
+    if (gpuSeq) gpuFrameEvent(GpuFrameEvent::WaitEnd, gpuSeq, 0,
+                              result == 0 && saneCounts && !s->inert ? 1u : 0u);
     vrCensusNote(VrCensusEvent::WaitExit, self, result, s->pace_boundaryNo + 1);
     QueryPerformanceFrequency(&waitF);
     if (waitF.QuadPart > 0 && waitT1.QuadPart > waitT0.QuadPart) {
@@ -2466,11 +2512,12 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         !taaMode.empty() && _stricmp(taaMode.c_str(), "off") != 0;
     const bool wantSharpen = cfg.getFloat("fix.render_sharpness", 0.0f) > 0.0f;
     const bool wantCensus = vrCensusEnabled();
+    const bool wantAppGpu = cfg.getBool("advanced.app_gpu_timing", true);
     if (!wantFlash && !wantOffset && !wantResolve && !wantTemporal &&
-        !wantSharpen && !wantCensus) {
+        !wantSharpen && !wantCensus && !wantAppGpu) {
         Log::get().note("compositor passed through unhooked: fix.transition_flash, "
                         "fix.head_offset_gate, experimental.supersample_resolve, "
-                        "fix.temporal_aa, fix.render_sharpness and the VR census are all off, "
+                        "fix.temporal_aa, fix.render_sharpness, local GPU timing and the VR census are all off, "
                         "and those are the only features that need this hook.");
         return iface;
     }
@@ -2481,6 +2528,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
                           : wantTemporal ? "the temporal pass"
                           : wantResolve ? "the supersample resolve"
                           : wantSharpen ? "the render sharpening"
+                          : wantAppGpu ? "local render-to-submit GPU timing"
                                         : "the VR order census";
         Log::get().note("transition flash fix off, but the compositor hook is "
                         "installed anyway for %s -- no eye submits will be "

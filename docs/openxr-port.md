@@ -636,6 +636,7 @@ misleading percentage. Preserve unavailable values when there is no source.
 | `advanced.real_openvr_dll` | Chooses the forwarded DLL | Proxy-only during migration; retire with proxy |
 | `advanced.suppress_interfaces` | Refuses configured interface prefixes before reaching the runtime | Keep proxy behaviour; owned backend has a fixed supported-interface table |
 | `advanced.compositor_timing` | Enables existing compositor timing collection | Define separate measured-source behaviour before changing this switch; never make local queries depend accidentally on a legacy timing decoder |
+| `advanced.app_gpu_timing` | Enables the local render-to-submit instrument independently; source and age appear alongside SteamVR | Reuse the owner/frame policy with validated OpenXR boundary publication |
 | `fix.vr_handover` | `early` submits a 1x1 texture before the game's compositor calls; `stock` does not | Not used by owned session initialization; retire only with proxy |
 | `fix.launch_centre` | `auto` is OpenComposite-only; `on`/`off` explicit | Preserve explicit choice; review new Auto policy before changing behaviour |
 

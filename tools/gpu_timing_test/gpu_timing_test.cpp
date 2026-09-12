@@ -10,6 +10,9 @@
 #include <vector>
 #include <type_traits>
 #include "../../src/d3d11/gpu_timing.h"
+#include "../../src/d3d11/gpu_frame_timing.h"
+#include "../../src/common/gpu_frame_protocol.h"
+extern "C" uint64_t WINAPI edvrGpuFrameEvent(unsigned, unsigned, uint64_t, unsigned, unsigned, void*);
 #include "../../src/d3d11/gpu_interval.h"
 #include "../../src/d3d11/gpu_disjoint_d3d11.h"
 using Microsoft::WRL::ComPtr;
@@ -44,7 +47,8 @@ struct Ops {
     std::vector<Query> queries;
     unsigned allocated=0,released=0,creates=0,commands=0,active=0;
     int failCreate=-1, pendingQuery=-1, failedQuery=-1;
-    bool abandoning=false, failStamp=false;
+    bool abandoning=false, failStamp=false, disjoint=false, pendingAll=false;
+    uint64_t frequency=1000;
     bool nonnullFailure=false,nullSuccess=false,bad=false,scripted=true,failBegin=false,failEnd=false;
     HRESULT failedStatus=E_FAIL;
     uint64_t tick=0;
@@ -75,12 +79,12 @@ struct Ops {
         auto& s=*static_cast<Ops*>(p);++s.commands;auto* x=s.find(q);
         if(!x||!x->issued||x->open||flags!=D3D11_ASYNC_GETDATA_DONOTFLUSH){s.bad=true;return E_FAIL;}
         const int index=static_cast<int>(x-s.queries.data());++x->reads;
-        if(index==s.pendingQuery)return S_FALSE;
+        if(s.pendingAll||index==s.pendingQuery)return S_FALSE;
         if(index==s.failedQuery)return s.failedStatus;
         if(!s.scripted)return c->GetData(q,out,size,flags);
         if(x->kind==D3D11_QUERY_TIMESTAMP_DISJOINT){
             if(size!=sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT)){s.bad=true;return E_FAIL;}
-            *static_cast<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT*>(out)={1000,FALSE};
+            *static_cast<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT*>(out)={s.frequency,s.disjoint ? TRUE : FALSE};
         }else{
             if(size!=sizeof(UINT64)){s.bad=true;return E_FAIL;}
             *static_cast<UINT64*>(out)=x->tick;
@@ -254,7 +258,235 @@ void nativeWork(Device& d){
     check(f.ops.allocated==7,"one native disjoint query plus three timestamp pairs");f.finish();
     std::printf("PASS: native shared timers %.4f ms outer, %.4f ms nested, exact pixels\n",times[0],times[2]);
 }
-void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);nativeWork(device);std::printf("PASS: %u shared GPU timer lifecycle checks\n",checks);}
+void nativeFrameWork(Device& d) {
+    Fixture f(d); f.ops.scripted=false;
+    GpuTimingFrameDriver driver;
+    check(driver.bind(d.dev.Get(), f.ctx()), "native frame driver binds");
+    GpuSpanState policy(driver, driver.currentOwner());
+    GpuSpanState::Results results{};
+    D3D11_TEXTURE2D_DESC desc{}; desc.Width=desc.Height=64; desc.MipLevels=desc.ArraySize=1;
+    desc.SampleDesc.Count=1; desc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> source,copy,staging; ComPtr<ID3D11RenderTargetView> target;
+    hr(d.dev->CreateTexture2D(&desc,nullptr,&source));
+    hr(d.dev->CreateTexture2D(&desc,nullptr,&copy));
+    hr(d.dev->CreateRenderTargetView(source.Get(),nullptr,&target));
+    desc.Usage=D3D11_USAGE_STAGING; desc.BindFlags=0; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    hr(d.dev->CreateTexture2D(&desc,nullptr,&staging));
+    const float color[4]={0.125f,0.375f,0.625f,1.0f};
+    const auto owner=driver.currentOwner();
+    check(policy.beginFrame(201,909,GetTickCount64(),owner)==GpuSpanReason::Valid,"native frame begins");
+    GpuTimer borrower; check(borrower.begin(d.dev.Get(),f.ctx()),"native borrower begins");
+    for(unsigned eye=0;eye<2;++eye) {
+        check(policy.beginEye(eye,GetTickCount64(),owner)==GpuSpanReason::Valid,"native eye begins");
+        for(int i=0;i<32;++i) { d.ctx->ClearRenderTargetView(target.Get(),color); d.ctx->CopyResource(copy.Get(),source.Get()); }
+        check(policy.endEye(eye,GetTickCount64(),owner)==GpuSpanReason::Valid,"native eye ends");
+    }
+    check(borrower.end(f.ctx()),"native borrower ends");
+    check(policy.finishFrame(GetTickCount64(),owner)==GpuSpanReason::Valid,"native frame finishes");
+    d.ctx->CopyResource(staging.Get(),copy.Get()); d.ctx->Flush();
+    D3D11_MAPPED_SUBRESOURCE mapped{}; hr(d.ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped));
+    bool pixels=true;
+    for(UINT y=0;y<desc.Height;++y) { const auto* row=reinterpret_cast<const float*>(static_cast<const char*>(mapped.pData)+y*mapped.RowPitch);
+        for(UINT x=0;x<desc.Width;++x) for(unsigned c=0;c<4;++c) pixels=pixels&&row[x*4+c]==color[c]; }
+    d.ctx->Unmap(staging.Get(),0); check(pixels,"native frame exact pixels");
+    const auto deadline=GetTickCount64()+1500; GpuSpanReason reason=GpuSpanReason::Incomplete;
+    do { if(policy.poll(GetTickCount64(),owner,results)==1) { reason=results[0].reason; break; } Sleep(1); }
+    while(GetTickCount64()<deadline);
+    double borrowerMs=0.0; GpuTimerPoll br;
+    do { br=borrower.poll(f.ctx(),borrowerMs); if(br==GpuTimerPoll::Pending) Sleep(1); }
+    while(br==GpuTimerPoll::Pending&&GetTickCount64()<deadline);
+    check(reason==GpuSpanReason::Valid&&results[0].sourceFrame==909,"native frame result metadata");
+    check(br==GpuTimerPoll::Ready&&borrowerMs>0.0,"native borrower ready");
+    borrower.reset(f.ctx()); policy.shutdown(GetTickCount64(),owner); driver.reset(f.ctx()); f.finish();
+}
+void frameDriverCases(Device& d) {
+    {
+        Fixture f(d); GpuTimingFrameDriver driver;
+        check(driver.bind(d.dev.Get(),f.ctx()),"frame driver binds shared domain");
+        GpuSpanState policy(driver,driver.currentOwner()); GpuSpanState::Results results{};
+        const auto owner=driver.currentOwner();
+        check(policy.beginFrame(101,77,GetTickCount64(),owner)==GpuSpanReason::Valid,"frame driver begins source frame");
+        check(f.begin(0),"existing pair borrows frame scope");
+        for(unsigned eye : {1u,0u}) {
+            check(policy.beginEye(eye,GetTickCount64(),owner)==GpuSpanReason::Valid,"reversed eye starts");
+            check(policy.endEye(eye,GetTickCount64(),owner)==GpuSpanReason::Valid,"reversed eye ends");
+        }
+        check(f.timers[0].end(f.ctx()),"borrower ends before parent");
+        check(f.ops.active==1&&f.ops.allocated==9,"six markers plus borrowed pair use one disjoint");
+        check(policy.finishFrame(GetTickCount64(),owner)==GpuSpanReason::Valid,"frame finishes");
+        f.ops.pendingQuery=5;
+        check(policy.poll(GetTickCount64(),owner,results)==0,"issued right-end timestamp stays pending");
+        const auto read0=f.ops.queries[0].reads,readFreq=f.ops.queries[6].reads;
+        f.ops.pendingQuery=-1;
+        check(policy.poll(GetTickCount64(),owner,results)==1,"partial frame becomes ready");
+        check(f.ops.queries[0].reads==read0&&f.ops.queries[6].reads==readFreq,"ready frame timestamp/frequency cached");
+        const auto& r=results[0];
+        check(r.sequence==101&&r.sourceFrame==77&&r.reason==GpuSpanReason::Valid,"original metadata preserved");
+        check(r.outerMs==7&&r.leftMs==1&&r.rightMs==1,"durations derived from issued command positions");
+        double ms=0;check(f.timers[0].poll(f.ctx(),ms)==GpuTimerPoll::Ready&&ms==5,"borrower independently reads same frequency");
+        const auto calls=f.ops.commands;
+        bool rejected=false;
+        std::thread wrong([&]{GpuSpanRawSample raw{};
+            rejected=driver.currentOwner().thread==GetCurrentThreadId()&&
+                policy.beginFrame(102,78,GetTickCount64(),driver.currentOwner())==GpuSpanReason::WrongOwner&&
+                !driver.create(1)&&!driver.begin(0)&&driver.poll(0,raw)==GpuSpanPoll::Pending;
+            driver.destroy(0);driver.reset(f.ctx());});wrong.join();
+        check(rejected&&f.ops.commands==calls,"actual thread gates policy and driver before mutation");
+        policy.shutdown(GetTickCount64(),owner);driver.reset(f.ctx());f.finish();
+    }
+    for(int allocation=0;allocation<7;++allocation) for(int mode=0;mode<3;++mode) {
+        Fixture f(d); f.ops.failCreate=allocation;f.ops.nonnullFailure=mode==1;f.ops.nullSuccess=mode==2;
+        GpuTimingFrameDriver driver;check(driver.bind(d.dev.Get(),f.ctx()),"allocation case bind");
+        GpuSpanState p(driver,driver.currentOwner());const auto owner=driver.currentOwner();
+        const auto reason=p.beginFrame(1,55,GetTickCount64(),owner);
+        check(reason==GpuSpanReason::CreateFailed||reason==GpuSpanReason::DriverFailure,"partial/null-success allocation rejected");
+        p.shutdown(GetTickCount64(),owner);driver.reset(f.ctx());f.finish();
+    }
+    for(int invalid=0;invalid<4;++invalid) {
+        Fixture f(d);GpuTimingFrameDriver driver;check(driver.bind(d.dev.Get(),f.ctx()),"invalid frame bind");
+        GpuSpanState p(driver,driver.currentOwner());const auto owner=driver.currentOwner();GpuSpanState::Results out{};
+        check(p.beginFrame(1,66,GetTickCount64(),owner)==GpuSpanReason::Valid,"invalid case starts");
+        for(unsigned eye=0;eye<2;++eye) {p.beginEye(eye,GetTickCount64(),owner);p.endEye(eye,GetTickCount64(),owner);}
+        f.ops.disjoint=invalid==0;f.ops.frequency=invalid==1?0:1000;
+        if(invalid==2) {f.ops.failedQuery=4;f.ops.failedStatus=HRESULT(2);}
+        if(invalid==3) f.ops.failEnd=true;
+        const auto reason=p.finishFrame(GetTickCount64(),owner);
+        check(reason==(invalid==3?GpuSpanReason::DriverFailure:GpuSpanReason::Valid),"end status distinct");
+        check(p.poll(GetTickCount64(),owner,out)==1,"invalid frame consumed once");
+        const auto expected=invalid==0?GpuSpanReason::Disjoint:invalid==1?GpuSpanReason::ZeroFrequency:GpuSpanReason::DriverFailure;
+        check(out[0].reason==expected&&out[0].outerMs==0,"disjoint/error is unavailable not a duration");
+        if(invalid==3) {
+            const auto calls=f.ops.commands;
+            check(p.beginFrame(2,67,GetTickCount64(),owner)==GpuSpanReason::Stopped,"uncertain End permanently stops ring");
+            p.shutdown(GetTickCount64(),owner);driver.reset(f.ctx());
+            check(f.ops.commands==calls,"uncertain End never retried at cleanup");
+        } else {p.shutdown(GetTickCount64(),owner);driver.reset(f.ctx());}
+        f.finish();
+    }
+    {
+        Fixture f(d);GpuTimingFrameDriver driver;check(driver.bind(d.dev.Get(),f.ctx()),"pressure bind");
+        GpuSpanState p(driver,driver.currentOwner());const auto owner=driver.currentOwner();GpuSpanState::Results out{};
+        check(f.begin(0),"standalone sample active");
+        check(p.beginFrame(1,1,GetTickCount64(),owner)==GpuSpanReason::DriverFailure,"frame cannot borrow standalone scope");
+        check(f.ops.active==1,"rejected frame left standalone intact");
+        check(f.timers[0].end(f.ctx()),"standalone closes");double ms=0;f.timers[0].poll(f.ctx(),ms);
+        p.poll(GetTickCount64(),owner,out);
+        f.ops.pendingAll=true;
+        for(uint64_t n=2;n<10;++n) {
+            check(p.beginFrame(n,n+100,GetTickCount64(),owner)==GpuSpanReason::Valid,"bounded slot starts");
+            for(unsigned eye=0;eye<2;++eye) {p.beginEye(eye,GetTickCount64(),owner);p.endEye(eye,GetTickCount64(),owner);}
+            p.finishFrame(GetTickCount64(),owner);
+        }
+        check(p.beginFrame(10,110,GetTickCount64(),owner)==GpuSpanReason::RingFull,"unread frame slots never reused");
+        check(p.poll(GetTickCount64(),owner,out)==0,"all pending frames retained");
+        f.ops.pendingAll=false;
+        check(p.poll(GetTickCount64(),owner,out)==8,"all pressure results settle");
+        for(const auto& r:out) check(r.reason==GpuSpanReason::Valid&&r.sourceFrame==r.sequence+100,"pressure results keep identities");
+        p.shutdown(GetTickCount64(),owner);driver.reset(f.ctx());f.finish();
+    }
+    for(bool open:{false,true}) {
+        Fixture f(d);GpuTimingFrameDriver driver;check(driver.bind(d.dev.Get(),f.ctx()),"abandon bind");
+        check(driver.create(0)&&driver.begin(0)&&driver.timestamp(0,0),"abandon sample starts");
+        if(!open) check(driver.end(0),"pending sample closes");
+        const auto calls=f.ops.commands; f.ops.abandoning=true;
+        driver.reset();
+        check(f.ops.commands==calls&&!gpuTimingAccepts(f.ctx()),"no-context reset issues no clock/context command");
+        // Explicit verified owner shutdown remains available to close a scope
+        // abandoned on the owner thread without a context parameter.
+        f.finish();
+    }
+}
+uint64_t event(GpuFrameEvent e,uint64_t seq=0,unsigned eye=0,unsigned flags=0,void* tex=nullptr) {
+    return edvrGpuFrameEvent(kGpuFrameProtocol,static_cast<unsigned>(e),seq,eye,flags,tex);
+}
+uint64_t poses() {
+    const auto seq=event(GpuFrameEvent::WaitBegin);
+    check(seq&&event(GpuFrameEvent::WaitEnd,seq,0,1),"CPU pose mailbox arms sequence");return seq;
+}
+void controllerCases(Device& d,Runtime& runtime) {
+    D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=16;td.MipLevels=td.ArraySize=1;
+    td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.SampleDesc.Count=1;td.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> tex;hr(d.dev->CreateTexture2D(&td,nullptr,&tex));
+    Fixture f(d);check(gpuFrameBind(d.dev.Get(),f.ctx(),true),"controller binds actual shared owner");
+    auto finishEye=[&](uint64_t seq,unsigned eye,bool accepted=true) {
+        check(event(GpuFrameEvent::SubmitBegin,seq,eye,0,tex.Get())==1,"submit path begins");
+        return event(GpuFrameEvent::SubmitEnd,seq,eye,accepted?1:0);
+    };
+    auto completed=[&](uint64_t seq,uint64_t next,GpuSpanReason reason) {
+        gpuFramePresent(f.ctx(),next);const auto snap=gpuFrameSnapshot();
+        check(snap.enabled&&snap.haveResult&&snap.result.sequence==seq&&snap.result.reason==reason,"result identity and validity");
+        if(reason!=GpuSpanReason::Valid) check(snap.result.outerMs==0,"invalid result has no duration");
+        return snap;
+    };
+    gpuFramePresent(f.ctx(),900);
+    auto seq=poses();const auto commands=f.ops.commands;
+    check(!edvrGpuFrameEvent(999,0,0,0,0,nullptr)&&f.ops.commands==commands,"version mismatch issues nothing");
+    check(f.ops.commands==commands,"pose mailbox never issues D3D work");
+    gpuFrameCommand(f.ctx());const auto began=f.ops.commands;
+    for(int n=0;n<30;++n) gpuFrameCommand(f.ctx());
+    check(f.ops.commands==began&&f.ops.active==1,"only first covered command starts frame");
+    check(finishEye(seq,1)&&finishEye(seq,0),"reversed pair accepted");
+    auto snap=completed(seq,901,GpuSpanReason::Valid);
+    check(snap.result.sourceFrame==900&&snap.result.outerMs==5,"result uses original source frame and command interval");
+    gpuFrameCommand(f.ctx());check(f.ops.active==0,"mirror commands never reopen completed frame");
+
+    seq=poses();check(!event(GpuFrameEvent::SubmitBegin,seq,0,0,tex.Get()),"submit without covered command rejected");
+    gpuFrameCommand(f.ctx());completed(seq,902,GpuSpanReason::NoOpenFrame);
+
+    seq=poses();gpuFrameCommand(f.ctx());check(finishEye(seq,0),"missing-eye first submit");
+    completed(seq,903,GpuSpanReason::Incomplete);
+
+    seq=poses();gpuFrameCommand(f.ctx());check(finishEye(seq,0),"duplicate-eye first submit");
+    check(!event(GpuFrameEvent::SubmitBegin,seq,0,0,tex.Get()),"duplicate eye rejected");
+    completed(seq,904,GpuSpanReason::BadPair);
+
+    seq=poses();gpuFrameCommand(f.ctx());check(!finishEye(seq,0,false),"runtime rejected submit invalidates");
+    completed(seq,905,GpuSpanReason::Incomplete);
+
+    seq=poses();gpuFrameCommand(f.ctx());check(finishEye(seq,0)&&finishEye(seq,1),"closed pair before late duplicate");
+    check(!event(GpuFrameEvent::SubmitBegin,seq,1,0,tex.Get()),"duplicate after outer closure rejected");
+    completed(seq,906,GpuSpanReason::NoOpenFrame);
+
+    seq=poses();gpuFrameCommand(f.ctx());const auto calls=f.ops.commands;
+    bool rejected=false;
+    std::thread wrong([&]{gpuFrameCommand(f.ctx());rejected=!event(GpuFrameEvent::SubmitBegin,seq,0,0,tex.Get());});wrong.join();
+    check(rejected&&f.ops.commands==calls,"foreign render thread only invalidates CPU mailbox");
+    completed(seq,907,GpuSpanReason::Incomplete);
+
+    seq=poses();gpuFrameCommand(f.ctx());
+    Device other(runtime);ComPtr<ID3D11Texture2D> foreign;hr(other.dev->CreateTexture2D(&td,nullptr,&foreign));
+    const auto foreignCalls=f.ops.commands;gpuFrameCommand(other.ctx.Get());
+    check(f.ops.commands==foreignCalls,"unrelated context ignored");
+    check(!event(GpuFrameEvent::SubmitBegin,seq,0,0,foreign.Get()),"foreign texture device rejected");
+    completed(seq,908,GpuSpanReason::Incomplete);
+
+    seq=poses();gpuFrameCommand(f.ctx());check(finishEye(seq,0),"incomplete old boundary");
+    const auto next=poses();gpuFrameCommand(f.ctx());
+    check(finishEye(next,0)&&finishEye(next,1),"new pose starts independent frame");
+    completed(next,909,GpuSpanReason::Valid);
+
+    const auto failed=event(GpuFrameEvent::WaitBegin);event(GpuFrameEvent::WaitEnd,failed,0,0);
+    check(gpuFrameSnapshot().result.reason!=GpuSpanReason::Valid,"failed pose wait immediately clears previous valid readout");
+    const auto beforeFailed=f.ops.commands;gpuFrameCommand(f.ctx());
+    check(f.ops.active==0&&f.ops.commands==beforeFailed,"failed pose wait stays disarmed");
+    const auto old=event(GpuFrameEvent::WaitBegin),newer=event(GpuFrameEvent::WaitBegin);
+    check(!event(GpuFrameEvent::WaitEnd,old,0,1)&&event(GpuFrameEvent::WaitEnd,newer,0,1),"out-of-order wait cannot arm stale sequence");
+    gpuFrameCommand(f.ctx());finishEye(newer,0);finishEye(newer,1);completed(newer,910,GpuSpanReason::Valid);
+
+    gpuFrameConfigure(false);const auto disabledCalls=f.ops.commands;
+    seq=poses();gpuFrameCommand(f.ctx());event(GpuFrameEvent::SubmitBegin,seq,0,0,tex.Get());
+    check(!gpuFrameSnapshot().enabled&&f.ops.commands==disabledCalls,"disabled local instrument issues no query commands");
+    gpuFrameConfigure(true);gpuFrameCommand(f.ctx());check(f.ops.active==0,"reenable waits for new pose boundary");
+    seq=poses();gpuFrameCommand(f.ctx());finishEye(seq,0);finishEye(seq,1);completed(seq,911,GpuSpanReason::Valid);
+    seq=poses();gpuFrameCommand(f.ctx());const auto beforePresent=f.ops.commands;
+    std::thread presentThread([&]{gpuFramePresent(f.ctx(),920);});presentThread.join();
+    check(f.ops.commands==beforePresent,"foreign Present only publishes CPU identity and rejection");
+    seq=poses();gpuFrameCommand(f.ctx());finishEye(seq,0);finishEye(seq,1);
+    check(completed(seq,921,GpuSpanReason::Valid).result.sourceFrame==920,"new frame retains published identity after foreign Present");
+    gpuFrameConfigure(false);gpuFramePresent(f.ctx(),922);gpuFrameAbandon();f.finish();
+}
+void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);frameDriverCases(device);controllerCases(device,runtime);nativeWork(device);nativeFrameWork(device);std::printf("PASS: %u shared GPU timer lifecycle checks\n",checks);}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {

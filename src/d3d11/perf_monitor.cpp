@@ -1,4 +1,5 @@
 #include "perf_monitor.h"
+#include "gpu_frame_timing.h"
 
 #include <windows.h>
 
@@ -906,6 +907,24 @@ void perfMonitorLastDropLine(char* buf, size_t bufLen) {
              static_cast<double>(ago) / 1000.0, static_cast<double>(s.lastDropFrameMs), ev);
     buf[bufLen - 1] = 0;
 }
+void perfMonitorLocalGpuLine(char* buf, size_t bufLen) {
+    if (!buf || !bufLen) return;
+    const GpuFrameSnapshot snap = gpuFrameSnapshot();
+    if (!snap.enabled) { snprintf(buf, bufLen, "Render to submit: disabled"); return; }
+    if (!snap.haveResult) { snprintf(buf, bufLen, "Render to submit: pending"); return; }
+    if (snap.result.reason != GpuSpanReason::Valid) {
+        snprintf(buf, bufLen, "Render to submit: unavailable (%s; D3D11)",
+                 gpuFrameReason(snap.result.reason)); return;
+    }
+    const uint64_t elapsed = GetTickCount64() >= snap.capturedAtMs
+                                 ? GetTickCount64() - snap.capturedAtMs : 0;
+    const uint64_t age = snap.result.ageMs + elapsed;
+    if (age > 2000) { snprintf(buf, bufLen, "Render to submit: stale"); return; }
+    snprintf(buf, bufLen, "Render to submit: %.2f ms (D3D11; frame %llu; age %llu ms)",
+             snap.result.outerMs, static_cast<unsigned long long>(snap.result.sourceFrame),
+             static_cast<unsigned long long>(age));
+    buf[bufLen - 1] = 0;
+}
 int perfMonitorGraph(int which, float* out, int max, float* budgetMs) {
     State& s = g_s;
     if (budgetMs) *budgetMs = budgetNow();
@@ -947,11 +966,19 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     if (!ps.count) { snprintf(buf, bufLen, "measuring"); return; }
     const PerfRecentTimes recent = recentTimes();
     const char* cpuLabel = recent.appCount ? "cpu" : "thread";
-    char times[80] = "";
+    char times[120] = "";
     if (recent.gpuCount)
         snprintf(times, sizeof(times), "   gpu %.1f   %s %.1f", recent.gpuMs(), cpuLabel, recent.cpuMs());
-    else
-        snprintf(times, sizeof(times), "   %.1f ms   %s %.1f", ps.avgMs, cpuLabel, recent.cpuMs());
+    else {
+        const GpuFrameSnapshot snap = gpuFrameSnapshot();
+        const uint64_t now = GetTickCount64();
+        const uint64_t age = snap.capturedAtMs && now >= snap.capturedAtMs
+                                 ? snap.result.ageMs + now - snap.capturedAtMs : UINT64_MAX;
+        if (snap.enabled && snap.haveResult && snap.result.reason == GpuSpanReason::Valid && age <= 2000)
+            snprintf(times, sizeof(times), "   submit gpu %.1f   %s %.1f", snap.result.outerMs, cpuLabel, recent.cpuMs());
+        else
+            snprintf(times, sizeof(times), "   %.1f ms   %s %.1f", ps.avgMs, cpuLabel, recent.cpuMs());
+    }
     char drop[40] = "";
     if (dropped) snprintf(drop, sizeof(drop), "   %d dropped", dropped);
     snprintf(buf, bufLen, "%.0f fps%s%s", perfFpsOf(ps.avgMs), times, drop);

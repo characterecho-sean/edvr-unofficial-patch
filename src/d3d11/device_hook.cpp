@@ -1,6 +1,7 @@
 ﻿#include "../common/vr_census.h"
 #include "device_hook.h"
 #include "gpu_timing.h"
+#include "gpu_frame_timing.h"
 
 #include "shader_sig.h"
 #include "input_gate.h"
@@ -894,6 +895,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (qpcFrequency() > 0) {
         perfMonitorNotePresentWait(static_cast<double>(qpcNow() - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
+    }
+    ID3D11DeviceContext* timingContext = nullptr;
+    g_state->device->GetImmediateContext(&timingContext);
+    if (timingContext) {
+        gpuFramePresent(timingContext, g_state->frameCounter + 1);
+        timingContext->Release();
     }
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
@@ -2614,6 +2621,7 @@ void shutdownDeviceHooks() {
     // Invalidate timing first, then let each owner release its queries without
     // issuing context commands. Normal process exit skips this entire path.
     gpuTimingAbandon();
+    gpuFrameAbandon();
     // The keyboard first: a gate left set past the module's life is a
     // keyboard the game never gets back.
     menuShutdown();

@@ -31,6 +31,7 @@ static fs::path exePath() {
 static int child(const char* mode) {
     const bool delayed = std::strcmp(mode, "delayed") == 0;
     const bool disabled = std::strcmp(mode, "disabled") == 0;
+    const bool appGpu = std::strcmp(mode, "app-gpu") == 0 || std::strcmp(mode, "app-gpu-off") == 0;
     const fs::path stage = exePath().parent_path();
     const HMODULE gfx = LoadLibraryW((stage / "d3d11.dll").c_str());
     require(gfx != nullptr, "load graphics proxy");
@@ -82,6 +83,52 @@ static int child(const char* mode) {
         context->ClearRenderTargetView(target, clear);
         require(SUCCEEDED(swap->Present(0, 0)), "hidden Present");
     };
+    if (appGpu) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = 64; td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        ID3D11Texture2D *eye = nullptr, *copy = nullptr, *staging = nullptr;
+        ID3D11RenderTargetView* eyeTarget = nullptr;
+        require(SUCCEEDED(device->CreateTexture2D(&td, nullptr, &eye)), "eye texture");
+        require(SUCCEEDED(device->CreateTexture2D(&td, nullptr, &copy)), "copied eye texture");
+        require(SUCCEEDED(device->CreateRenderTargetView(eye, nullptr, &eyeTarget)), "eye target");
+        td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        require(SUCCEEDED(device->CreateTexture2D(&td, nullptr, &staging)), "readback texture");
+        // Slot 16 must still forward the constant-buffer binding with its exact
+        // arguments. A mistaken DrawAuto slot silently corrupts this state.
+        D3D11_BUFFER_DESC bd{}; bd.ByteWidth = 16; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ID3D11Buffer *cb = nullptr, *observed = nullptr;
+        require(SUCCEEDED(device->CreateBuffer(&bd, nullptr, &cb)), "constant buffer");
+        context->PSSetConstantBuffers(0, 1, &cb);
+        context->PSGetConstantBuffers(0, 1, &observed);
+        require(observed == cb, "PS constant-buffer ABI remains intact");
+        if (observed) observed->Release();
+        const float colour[] = {1, 0, 1, 1};
+        vr::Texture_t submitted{copy, vr::API_DirectX, vr::ColorSpace_Auto};
+        for (unsigned i = 0; i < 24; ++i) {
+            require(compositor->WaitGetPoses(nullptr, 0, nullptr, 0) == 0, "app GPU pose wait");
+            context->ClearRenderTargetView(eyeTarget, colour);
+            context->CopyResource(copy, eye);
+            require(compositor->Submit(vr::Eye_Left, &submitted, nullptr, static_cast<vr::EVRSubmitFlags>(0)) == 0, "app GPU left submit");
+            require(compositor->Submit(vr::Eye_Right, &submitted, nullptr, static_cast<vr::EVRSubmitFlags>(0)) == 0, "app GPU right submit");
+            require(SUCCEEDED(swap->Present(0, 0)), "app GPU Present");
+        }
+        // The test's readback is outside the measured pair, including this
+        // explicit Flush. Production polling remains DONOTFLUSH.
+        context->CopyResource(staging, copy); context->Flush();
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        require(SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)), "map copied pixels");
+        for (unsigned y = 0; y < 64; ++y) {
+            const auto* row = static_cast<const unsigned char*>(mapped.pData) + y * mapped.RowPitch;
+            for (unsigned x = 0; x < 64; ++x)
+                require(row[4*x] == 255 && row[4*x+1] == 0 && row[4*x+2] == 255 && row[4*x+3] == 255,
+                        "paired proxies preserve every copied pixel");
+        }
+        context->Unmap(staging, 0);
+        require(SUCCEEDED(swap->Present(0, 0)), "drain completed frame samples");
+        return 0;
+    }
     for (unsigned i = 0; i < 70; ++i) render(); // Exhaust startup before signalling.
     for (unsigned i = 0; i < 70; ++i) {
         require(compositor->WaitGetPoses(nullptr, 0, nullptr, 0) == 0, "forward pose wait");
@@ -149,8 +196,24 @@ static void verifyLogs(const fs::path& stage, bool delayed, bool disabled) {
         require(linesWith(*log, "VR order census:", "sample=65/") == 0,
                 "frame event budget did not overflow");
 }
+static void verifyAppGpuLogs(const fs::path& stage, bool enabled) {
+    const std::string gfx = readLog(stage, "edvr_gfx_");
+    require(linesWith(gfx, "VR order census:") == 0, "local measurement independent of census");
+    if (enabled) {
+        require(linesWith(gfx, "Render-to-submit GPU: seq ", " valid, outer ", "frame ") > 0,
+                "app GPU timing publishes an actual valid original frame");
+        require(linesWith(gfx, "Render-to-submit GPU: seq ", "context ", "thread ") > 0,
+                "app GPU result carries actual owner identity");
+    } else {
+        require(linesWith(gfx, "Render-to-submit GPU: disabled") == 1,
+                "app GPU timing disabled line is explicit");
+        require(linesWith(gfx, "Render-to-submit GPU: seq ") == 0,
+                "app GPU off has no frame query results");
+    }
+}
 
 static void runCase(const fs::path& build, const char* mode) {
+    const bool appGpuOn = std::strcmp(mode, "app-gpu") == 0;
     const fs::path stage = build / (std::string("census-bridge-") + mode + "-" +
         std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
     require(fs::create_directory(stage), "fresh unique stage");
@@ -163,13 +226,16 @@ static void runCase(const fs::path& build, const char* mode) {
     auto writeIni = [&](const fs::path& path, bool enabled) {
         std::ofstream out(path, std::ios::binary);
         out << "[advanced]\nopenvr_census = " << (enabled ? "on" : "off") <<
+            "\napp_gpu_timing = " << (appGpuOn ? "on" : "off") <<
+            "\ncompositor_timing = off\ncontext_hook_mode = live\npanel_hooks_always = on" <<
             "\n[fix]\ntransition_flash = off\nhead_offset_gate = off\ntemporal_aa = off\n"
             "render_sharpness = 0\n[experimental]\nsupersample_resolve = off\n";
         out.close();
         require(out.good(), "write fixture config");
     };
-    writeIni(stage / "edvr.ini", !disabled);
-    writeIni(stage / "vr" / "edvr.ini", true);
+    const bool appMode = std::strcmp(mode, "app-gpu") == 0 || std::strcmp(mode, "app-gpu-off") == 0;
+    writeIni(stage / "edvr.ini", !disabled && !appMode);
+    writeIni(stage / "vr" / "edvr.ini", !appMode);
     std::wstring command = L"\"" + (stage / "census_child.exe").wstring() + L"\" --child ";
     command.append(mode, mode + std::strlen(mode));
     STARTUPINFOW si{}; si.cb = sizeof(si);
@@ -186,7 +252,10 @@ static void runCase(const fs::path& build, const char* mode) {
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     std::printf("census bridge %s: child=%lu, logs %ls\n", mode, code, stage.c_str());
     require(waited == WAIT_OBJECT_0 && code == 0, "child completed successfully within timeout");
-    verifyLogs(stage, std::strcmp(mode, "delayed") == 0, disabled);
+    if (std::strcmp(mode, "app-gpu") == 0 || std::strcmp(mode, "app-gpu-off") == 0)
+        verifyAppGpuLogs(stage, std::strcmp(mode, "app-gpu") == 0);
+    else
+        verifyLogs(stage, std::strcmp(mode, "delayed") == 0, disabled);
 }
 
 int main(int argc, char** argv) {
@@ -200,11 +269,11 @@ int main(int argc, char** argv) {
             require(fs::is_regular_file(build / file), "required built DLL exists");
         if (argc == 4) {
             require(std::strcmp(argv[3], "--dry-run") == 0, "unknown argument");
-            std::puts("Would stage three isolated children and verify their graphics/VR logs; no files written.");
+            std::puts("Would stage five isolated children and verify their graphics/VR logs; no files written.");
             return 0;
         }
-        for (const char* mode : {"ready", "delayed", "disabled"}) runCase(build, mode);
-        std::puts("PASS: actual paired DLLs preserve startup and VR budgets, retry unready receivers, and report disabled receivers.");
+        for (const char* mode : {"ready", "delayed", "disabled", "app-gpu", "app-gpu-off"}) runCase(build, mode);
+        std::puts("PASS: actual paired DLLs preserve startup and VR budgets, retry unready receivers, report disabled receivers, and measure real paired render-to-submit frames with exact pixels.");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL census bridge: %s\n", error.what());

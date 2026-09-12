@@ -69,6 +69,11 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 // gather.
 void perfMonitorOverlayLine(char* buf, size_t bufLen);
 
+// The local D3D11 render-to-submit diagnostic, kept separate from SteamVR's
+// compositor numbers. The line reports disabled, pending, invalid, or stale
+// state explicitly rather than treating it as a zero.
+void perfMonitorLocalGpuLine(char* buf, size_t bufLen);
+
 // DROP ATTRIBUTION (docs/settings-menu.md, "diagnosing drops caused by the
 // mod"). Every frame's ring entry carries what EDVR did in it -- the events
 // below, ORed in from wherever they happen (both halves: the openvr one

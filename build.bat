@@ -230,7 +230,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrMenuPanel ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
-    --extra-export edvrCensusBeginVr
+    --extra-export edvrCensusBeginVr ^
+    --extra-export edvrGpuFrameEvent
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -296,7 +297,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
-    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
@@ -841,8 +842,8 @@ REM survive transient pressure, and issue no context commands during unload.
 if not exist "%OBJ%\gputiming" mkdir "%OBJ%\gputiming"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gputiming\\" ^
-    /Fe"%OBJ%\gputiming\gpu_timing_test.exe" "tools\gpu_timing_test\gpu_timing_test.cpp" ^
-    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /Fe"%OBJ%\gputiming\gpu_timing_test.exe" "tools\gpu_timing_test\gpu_timing_test.cpp" "tools\gpu_timing_test\context_slots.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: shared GPU timing test build failed & exit /b 1 )

@@ -255,4 +255,165 @@ void GpuTimer::reset(ID3D11DeviceContext* ctx) noexcept {
     state_ = nullptr;
     delete s;
 }
+
+struct GpuTimingFrameDriver::State {
+    enum class Phase { Empty, Idle, Open, Pending, Failed };
+    struct Slot {
+        Phase phase = Phase::Empty;
+        ID3D11Query* stamps[6]{};
+        DisjointClock::Lease lease{};
+        unsigned issued = 0, ready = 0;
+        bool invalid = false;
+        GpuSpanRawSample raw{};
+    } slots[GpuSpanState::kSlots];
+    const std::shared_ptr<Domain> domain;
+    const GpuSpanOwner owner;
+    int open = -1;
+    bool stopped = false;
+    explicit State(std::shared_ptr<Domain> d) : domain(std::move(d)), owner(domain->owner) {}
+    ID3D11DeviceContext* context() const noexcept {
+        return reinterpret_cast<ID3D11DeviceContext*>(owner.context);
+    }
+    void drop(unsigned i) noexcept {
+        for (auto*& q : slots[i].stamps) if (q) {
+            domain->ops.releaseQuery(domain->ops.user, q);
+            q = nullptr;
+        }
+    }
+    void release(Slot& q) noexcept {
+        if (q.lease && !domain->unavailable.load(std::memory_order_acquire))
+            domain->clock.release(q.lease, GetTickCount64());
+        q.lease = {};
+    }
+    ~State() { // Explicit reset only; no context calls.
+        for (unsigned i = 0; i < GpuSpanState::kSlots; ++i) drop(i);
+    }
+};
+
+bool GpuTimingFrameDriver::bind(ID3D11Device* dev, ID3D11DeviceContext* ctx) noexcept {
+    if (state_ && !state_->domain->owns(ctx)) return false;
+    if (!gpuTimingBind(dev, ctx)) return false;
+    auto d = current();
+    if (!d || !d->accepts(ctx) || d->device() != dev) return false;
+    if (state_ && state_->domain != d) reset(ctx);
+    if (!state_) state_ = new (std::nothrow) State(d);
+    return state_ != nullptr;
+}
+GpuSpanOwner GpuTimingFrameDriver::currentOwner() const noexcept {
+    if (!state_) return {};
+    auto owner = state_->owner;
+    owner.thread = GetCurrentThreadId(); // Never return a cached thread as the caller.
+    return owner;
+}
+bool GpuTimingFrameDriver::create(unsigned i) noexcept {
+    auto* s = state_;
+    if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots) return false;
+    auto& q = s->slots[i];
+    if (q.phase != State::Phase::Empty || s->stopped) return false;
+    const D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP, 0};
+    for (auto*& stamp : q.stamps) {
+        if (s->domain->ops.createQuery(s->domain->ops.user, s->domain->device(), &desc, &stamp) != S_OK || !stamp) {
+            s->drop(i);
+            return false;
+        }
+    }
+    q.phase = State::Phase::Idle;
+    return true;
+}
+bool GpuTimingFrameDriver::begin(unsigned i) noexcept {
+    auto* s = state_;
+    if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots) return false;
+    if (s->open >= 0 || s->stopped || s->slots[i].phase != State::Phase::Idle) return false;
+    const auto now = GetTickCount64();
+    s->domain->collectExpired(now);
+    auto& q = s->slots[i];
+    q.raw = {};
+    q.issued = q.ready = 0;
+    q.invalid = false;
+    q.lease = s->domain->clock.startFrame(now);
+    if (!q.lease) return false; // An active standalone scope is never borrowed as a frame.
+    q.phase = State::Phase::Open;
+    s->open = static_cast<int>(i);
+    return true;
+}
+bool GpuTimingFrameDriver::timestamp(unsigned i, unsigned n) noexcept {
+    auto* s = state_;
+    if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots || n >= 6) return false;
+    if (s->open != static_cast<int>(i)) return false;
+    auto& q = s->slots[i];
+    if (!q.stamps[n] || (q.issued & (1u << n))) return false;
+    q.issued |= 1u << n; // A failed callback may still have issued; never retry it.
+    const bool ok = s->domain->ops.end(s->domain->ops.user, s->context(), q.stamps[n]) == S_OK;
+    q.invalid |= !ok;
+    return ok;
+}
+bool GpuTimingFrameDriver::end(unsigned i) noexcept {
+    auto* s = state_;
+    if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots) return false;
+    if (s->open != static_cast<int>(i)) return false;
+    auto& q = s->slots[i];
+    const bool ok = s->domain->clock.finishFrame(q.lease, GetTickCount64());
+    q.phase = ok ? State::Phase::Pending : State::Phase::Failed;
+    s->open = -1; // End failure is uncertain and is never retried.
+    if (!ok) s->stopped = true;
+    return ok;
+}
+GpuSpanPoll GpuTimingFrameDriver::poll(unsigned i, GpuSpanRawSample& out) noexcept {
+    out = {};
+    auto* s = state_;
+    if (!s || !s->domain->owns(s->context())) return GpuSpanPoll::Pending;
+    if (i >= GpuSpanState::kSlots || s->domain->unavailable.load(std::memory_order_acquire))
+        return GpuSpanPoll::Failed;
+    auto& q = s->slots[i];
+    if (q.phase != State::Phase::Pending || q.invalid) return GpuSpanPoll::Failed;
+    const auto result = s->domain->clock.poll(q.lease, GetTickCount64());
+    if (result.status == DisjointStatus::Pending) return GpuSpanPoll::Pending;
+    if (result.status != DisjointStatus::Ready && result.reason != DisjointReason::Disjoint &&
+        result.reason != DisjointReason::ZeroFrequency) {
+        q.phase = State::Phase::Failed;
+        return GpuSpanPoll::Failed;
+    }
+    q.raw.frequency = result.frequency;
+    q.raw.disjoint = result.reason == DisjointReason::Disjoint || result.disjoint;
+    for (unsigned n = 0; n < 6; ++n) {
+        if (!(q.issued & (1u << n)) || (q.ready & (1u << n))) continue;
+        const HRESULT hr = s->domain->ops.getData(s->domain->ops.user, s->context(), q.stamps[n],
+            &q.raw.ticks[n], sizeof(uint64_t), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if (hr == S_FALSE) continue;
+        if (hr != S_OK) { q.phase = State::Phase::Failed; return GpuSpanPoll::Failed; }
+        q.ready |= 1u << n;
+    }
+    if (q.ready != q.issued) return GpuSpanPoll::Pending;
+    q.raw.timestampsReady = true;
+    out = q.raw;
+    s->release(q);
+    q.phase = State::Phase::Idle;
+    return GpuSpanPoll::Ready;
+}
+void GpuTimingFrameDriver::destroy(unsigned i) noexcept {
+    auto* s = state_;
+    if (!s || !s->domain->owns(s->context()) || i >= GpuSpanState::kSlots) return;
+    if (s->open == static_cast<int>(i)) {
+        if (!s->domain->unavailable.load(std::memory_order_acquire)) end(i);
+        s->open = -1;
+    }
+    s->release(s->slots[i]);
+    s->drop(i);
+    s->slots[i] = {};
+}
+void GpuTimingFrameDriver::reset(ID3D11DeviceContext* ctx) noexcept {
+    auto* s = state_;
+    if (!s || (ctx && !s->domain->owns(ctx))) return;
+    if (!ctx) {
+        bool retained = false;
+        for (const auto& q : s->slots) retained |= static_cast<bool>(q.lease);
+        if (retained) stop(s->domain); // No clock calls at all during quiescent unload.
+    } else {
+        if (s->open >= 0 && !s->domain->unavailable.load(std::memory_order_acquire))
+            end(static_cast<unsigned>(s->open));
+        for (auto& q : s->slots) s->release(q);
+    }
+    state_ = nullptr;
+    delete s;
+}
 } // namespace edvr

@@ -924,6 +924,15 @@ void buildMonitor(MenuContent& c) {
     }
     c.tileCount = n;
     c.tileColumns = 4;
+    // The local render-to-submit diagnostic is separate from SteamVR's gauges.
+    {
+        char line[200];
+        perfMonitorLocalGpuLine(line, sizeof(line));
+        MenuLine& l = c.lines[c.lineCount++];
+        strncpy(l.left, line, sizeof(l.left) - 1);
+        l.style = kMenuNote;
+        l.badge = kBadgeNone;
+    }
     // One line under the gauges: the last drop and what EDVR was doing.
     {
         char line[200];

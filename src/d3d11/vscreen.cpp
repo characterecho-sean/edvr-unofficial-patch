@@ -1,6 +1,8 @@
 #include "../common/vr_census.h"
 #include "vscreen.h"
 #include "gpu_timing.h"
+#include "gpu_frame_timing.h"
+#include "../common/d3d11_gpu_command_slots.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
 #include "vr_runtime.h"
@@ -126,6 +128,7 @@ constexpr size_t kSlotPSSetShader           = 9;    // the binding shadow's Ps (
 constexpr size_t kSlotVSSetShader           = 11;   // ...and its Vs
 constexpr size_t kSlotDrawIndexed           = 12;
 constexpr size_t kSlotDraw                  = 13;
+constexpr size_t kSlotDrawAuto              = kGpuSlotDrawAuto;
 constexpr size_t kSlotMap                   = 14;
 constexpr size_t kSlotUnmap                 = 15;
 constexpr size_t kSlotDrawIndexedInstanced  = 20;
@@ -136,6 +139,8 @@ constexpr size_t kSlotOMSetRenderTargets    = 33;
 // meant the binding could change without us seeing it.
 constexpr size_t kSlotOMSetRtvAndUav        = 34;
 constexpr size_t kSlotClearRenderTargetView = 50;
+constexpr size_t kSlotClearUavUint          = kGpuSlotClearUavUint;
+constexpr size_t kSlotClearUavFloat         = kGpuSlotClearUavFloat;
 // The two calls that drop every binding at once without naming any of them.
 //
 // Neither was hooked, so after either one curRtv0/curPsSrv0 still named views
@@ -180,6 +185,7 @@ constexpr size_t kSlotUpdateSubresource     = 48;
 // brackets were the two remaining call classes no census had ever
 // recorded. Record-only, forward always.
 constexpr size_t kSlotClearDepthStencilView = 53;
+constexpr size_t kSlotGenerateMips          = kGpuSlotGenerateMips;
 constexpr size_t kSlotBegin                 = 27;
 constexpr size_t kSlotEnd                   = 28;
 constexpr size_t kSlotResolveSubresource    = 57;
@@ -254,6 +260,7 @@ typedef void(STDMETHODCALLTYPE* PFN_VSSetShader)(ID3D11DeviceContext*, ID3D11Ver
 typedef void(STDMETHODCALLTYPE* PFN_PSSetShader)(ID3D11DeviceContext*, ID3D11PixelShader*,
                                                  ID3D11ClassInstance* const*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_Draw)(ID3D11DeviceContext*, UINT, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_DrawAuto)(ID3D11DeviceContext*);
 typedef void(STDMETHODCALLTYPE* PFN_DrawIndexed)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawInstanced)(ID3D11DeviceContext*, UINT, UINT, UINT,
                                                    UINT);
@@ -267,6 +274,9 @@ typedef void(STDMETHODCALLTYPE* PFN_OMSetRenderTargets)(ID3D11DeviceContext*, UI
                                                         ID3D11DepthStencilView*);
 typedef void(STDMETHODCALLTYPE* PFN_ClearRtv)(ID3D11DeviceContext*,
                                               ID3D11RenderTargetView*, const FLOAT[4]);
+typedef void(STDMETHODCALLTYPE* PFN_ClearUavUint)(ID3D11DeviceContext*, ID3D11UnorderedAccessView*, const UINT[4]);
+typedef void(STDMETHODCALLTYPE* PFN_ClearUavFloat)(ID3D11DeviceContext*, ID3D11UnorderedAccessView*, const FLOAT[4]);
+typedef void(STDMETHODCALLTYPE* PFN_GenerateMips)(ID3D11DeviceContext*, ID3D11ShaderResourceView*);
 typedef void(STDMETHODCALLTYPE* PFN_OMSetRtvAndUav)(
     ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*,
     UINT, UINT, ID3D11UnorderedAccessView* const*, const UINT*);
@@ -336,6 +346,7 @@ struct State {
     };
     MapMemo mapMemo[64];
     PFN_Draw                 realDraw = nullptr;
+    PFN_DrawAuto             realDrawAuto = nullptr;
     PFN_DrawIndexed          realDrawIndexed = nullptr;
     PFN_DrawInstanced        realDrawInstanced = nullptr;
     PFN_DrawIndexedInstanced realDrawIndexedInstanced = nullptr;
@@ -344,6 +355,9 @@ struct State {
     PFN_OMSetRenderTargets   realOMSetRenderTargets = nullptr;
     PFN_OMSetRtvAndUav       realOMSetRtvAndUav = nullptr;
     PFN_ClearRtv             realClearRtv = nullptr;
+    PFN_ClearUavUint          realClearUavUint = nullptr;
+    PFN_ClearUavFloat         realClearUavFloat = nullptr;
+    PFN_GenerateMips          realGenerateMips = nullptr;
     PFN_CopyResource         realCopyResource = nullptr;
     PFN_DrawIndirectArgs     realDrawIndexedInstancedIndirect = nullptr;
     PFN_DrawIndirectArgs     realDrawInstancedIndirect = nullptr;
@@ -2522,6 +2536,7 @@ inline void noteStaleForward(size_t slot, const void* frozen, const char* what) 
 
 void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ClearRtv, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotClearRenderTargetView, reinterpret_cast<const void*>(g_state->realClearRtv),
                      "ClearRenderTargetView");
@@ -2572,6 +2587,23 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
         return;
     }
     s->realClearRtv(self, rtv, c);
+}
+void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
+                                          ID3D11UnorderedAccessView* uav,
+                                          const UINT c[4]) {
+    gpuFrameCommand(self);
+    g_state->realClearUavUint(self, uav, c);
+}
+void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
+                                           ID3D11UnorderedAccessView* uav,
+                                           const FLOAT c[4]) {
+    gpuFrameCommand(self);
+    g_state->realClearUavFloat(self, uav, c);
+}
+void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
+                                          ID3D11ShaderResourceView* srv) {
+    gpuFrameCommand(self);
+    g_state->realGenerateMips(self, srv);
 }
 
 void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT n,
@@ -2729,6 +2761,7 @@ void forgetBindings(State*) { bindingForgetAll(); }
 // and ClearState are neighbours in that table. One line each is what turns "the
 // count looks right" into evidence, on whatever machine the log came from.
 void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
+    gpuFrameCommand(self);
     State* s = g_state;
     if (foreignContext(self)) {
         s->realClearState(self);
@@ -2748,6 +2781,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
 void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                                                 ID3D11CommandList* list,
                                                 BOOL restoreContextState) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ExecuteList, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (foreignContext(self)) {
@@ -2772,6 +2806,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
+    gpuFrameCommand(self);
     State* s = g_state;
     ++s->thunkHits[kHitMap];
     if (foreignContext(self)) {
@@ -2927,7 +2962,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
 }
 
 void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* res,
-                                   UINT sub) {
+                                    UINT sub) {
+    gpuFrameCommand(self);
     State* s = g_state;
     ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
@@ -3249,6 +3285,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
@@ -3266,6 +3303,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
                                       ID3D11DepthStencilView* dsv, UINT flags,
                                       FLOAT depth, UINT8 stencil) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ClearDsv, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotClearDepthStencilView, reinterpret_cast<const void*>(g_state->realClearDsv),
                      "ClearDepthStencilView");
@@ -3285,6 +3323,8 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
 // q= sequence is the finding.
 void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
                                    ID3D11Asynchronous* async) {
+    gpuFrameCommand(self);
+    if (gpuFrameInternal()) { g_state->realBegin(self, async); return; }
     if (drawCensusArmed()) {
         drawCensusQuery('B', async, foreignContext(self));
     }
@@ -3293,6 +3333,8 @@ void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
 
 void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
                                  ID3D11Asynchronous* async) {
+    gpuFrameCommand(self);
+    if (gpuFrameInternal()) { g_state->realEnd(self, async); return; }
     if (drawCensusArmed()) {
         drawCensusQuery('E', async, foreignContext(self));
     }
@@ -3303,6 +3345,7 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
 // and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedIndirect, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
                      "DrawIndexedInstancedIndirect");
@@ -3317,6 +3360,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndirect, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
                      "DrawInstancedIndirect");
@@ -3332,6 +3376,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
                                                 ID3D11Buffer* dst, UINT off,
                                                 ID3D11UnorderedAccessView* src) {
+    gpuFrameCommand(self);
     if (drawCensusArmed()) {
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }
@@ -3341,6 +3386,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::CopyRegion, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
@@ -3363,6 +3409,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Update, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
@@ -3396,6 +3443,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
                                                 ID3D11Resource* dst, UINT dstSub,
                                                 ID3D11Resource* src, UINT srcSub,
                                                 DXGI_FORMAT fmt) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Resolve, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
@@ -3491,6 +3539,7 @@ struct DrawClock {
 };
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Draw, self, static_cast<int>(self->GetType()));
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
@@ -3507,8 +3556,13 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
+void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
+    gpuFrameCommand(self);
+    g_state->realDrawAuto(self);
+}
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexed, self, static_cast<int>(self->GetType()));
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
@@ -3529,6 +3583,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
@@ -3563,6 +3618,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
@@ -4075,6 +4131,7 @@ void vScreenRefreshConfig() {
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
     const int64_t reloadT0 = qpcNow();
     if (!cfg.reloadIfChanged()) return;
+    gpuFrameConfigure(cfg.getBool("advanced.app_gpu_timing", true));
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
     // on the render thread -- is an EDVR event with a duration, for the
     // monitor's drop attribution.
@@ -5211,6 +5268,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // because the frame counter it waits on also lives in here.
     if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
         !headOffsetGateWantsPanel() &&
+        !cfg.getBool("advanced.app_gpu_timing", true) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
         return;
     }
@@ -5222,6 +5280,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // The measured owner path supplies the canonical context and actual OS
     // thread. Timing failure never prevents installing the rendering fixes.
     gpuTimingBind(device, ctx);
+    gpuFrameBind(device, ctx, cfg.getBool("advanced.app_gpu_timing", true));
 
     g_state = new State();
     g_state->installMs = stampMs();
@@ -5353,6 +5412,12 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
 
     s.hook.replace(kSlotClearRenderTargetView, &hookedClearRtv,
                    reinterpret_cast<void**>(&s.realClearRtv));
+    s.hook.replace(kSlotClearUavUint, &hookedClearUavUint,
+                   reinterpret_cast<void**>(&s.realClearUavUint));
+    s.hook.replace(kSlotClearUavFloat, &hookedClearUavFloat,
+                   reinterpret_cast<void**>(&s.realClearUavFloat));
+    s.hook.replace(kSlotGenerateMips, &hookedGenerateMips,
+                   reinterpret_cast<void**>(&s.realGenerateMips));
     s.hook.replace(kSlotOMSetRenderTargets, &hookedOMSetRenderTargets,
                    reinterpret_cast<void**>(&s.realOMSetRenderTargets));
     s.hook.replace(kSlotClearState, &hookedClearState,
@@ -5395,6 +5460,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     s.hook.replace(kSlotMap, &hookedMap, reinterpret_cast<void**>(&s.realMap));
     s.hook.replace(kSlotUnmap, &hookedUnmap, reinterpret_cast<void**>(&s.realUnmap));
     s.hook.replace(kSlotDraw, &hookedDraw, reinterpret_cast<void**>(&s.realDraw));
+    s.hook.replace(kSlotDrawAuto, &hookedDrawAuto, reinterpret_cast<void**>(&s.realDrawAuto));
     s.hook.replace(kSlotDrawIndexed, &hookedDrawIndexed,
                    reinterpret_cast<void**>(&s.realDrawIndexed));
     s.hook.replace(kSlotDrawInstanced, &hookedDrawInstanced,

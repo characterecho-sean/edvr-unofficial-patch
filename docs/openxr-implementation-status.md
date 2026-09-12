@@ -1,8 +1,11 @@
 # OpenXR implementation status
 
 The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
-`8c617dc` before implementation began. This change starts Phase 0; it is not an
-OpenXR backend or a completed Phase 0 qualification.
+`8c617dc` before implementation began. Work remains in Phase 0; it is not an
+OpenXR backend or a completed Phase 0 qualification. The latest checkpoint is
+the [render-to-submit measurement](render-to-submit-gpu-2026-09-12.md),
+following the successful Frontier timer-migration check. Earlier review
+decisions below record the state at those checkpoints.
 
 ## Implemented evidence tools
 
@@ -56,9 +59,10 @@ test target.
 The GPU timing draft failed review: it permitted overlapping outer scopes,
 accepted deferred contexts, recreated queries instead of reusing them, aged
 samples by API-call count and mishandled zero-frequency results. It and its
-insufficient tests were excluded. No new GPU queries or Monitor values are
-enabled by this change. Rebuild the bracket after an ownership/order capture,
-with the single outer scope and failure tests specified in the approved plan.
+insufficient tests were excluded. No new GPU queries or Monitor values were
+enabled at that initial checkpoint. Rebuild the bracket after an
+ownership/order capture, with the single outer scope and failure tests
+specified in the approved plan.
 
 The [first Frontier census flight](openxr-flight-2026-09-11.md), using build
 `070e49d`, observed 19 methods, consistent device identity for all 16 sampled
@@ -106,8 +110,8 @@ each marker and checks live scopes and resource ownership. Desk tests cover
 both eye orders, malformed and incomplete pairs, every timestamp failure,
 creation/begin/end/poll failures, partial readiness, disjoint/invalid values,
 resource reuse, ring pressure, elapsed-time expiry and owner rejection. No
-shipping proxy calls this prototype yet, and no new flight is requested for it
-until the real D3D11 adapter and integration are qualified.
+shipping proxy called this prototype at that checkpoint. Native ownership,
+shared-clock migration and integration were kept as subsequent gates.
 
 The first ABI test draft used a hand-built raw vtable and crashed on a matrix
 return, causing a Windows error dialog. That fixture was removed. The retained
@@ -218,3 +222,16 @@ waits, so it is not a controlled performance comparison. Full evidence and
 limits are recorded in the migration document. The next implementation step is
 the guarded render-to-submit span and frame-associated Monitor output; accuracy
 and overhead remain separate gates.
+
+
+## Render-to-submit checkpoint
+
+The local GPU span now runs through the current paired proxies, with a
+versioned CPU boundary bridge and owner-thread query operations on the shared
+frequency scope. The Monitor adds a separate source/frame/age readout; existing
+SteamVR readings and graphs remain intact. See the [implementation and test
+record](render-to-submit-gpu-2026-09-12.md) for the exact boundary, command
+coverage, review corrections, invalidation behavior and Frontier checklist. The
+two inner intervals include runtime Submit and are labeled submit paths, not
+EDVR-only cost. The next gate is a Frontier functional test; matched-frame
+accuracy, overhead and other runtime/lifecycle checks remain open.

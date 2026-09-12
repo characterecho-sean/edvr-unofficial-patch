@@ -20,6 +20,29 @@ bool gpuTimingShutdown(ID3D11DeviceContext*) noexcept;
 // Process termination must skip this too; no locks/COM work under that path.
 void gpuTimingAbandon() noexcept;
 
+// Six reusable frame markers share the same frequency scope as GpuTimer.
+// Destruction is inert. reset(ctx) is owner-thread cleanup; reset() is strictly
+// Release-only and disables the domain if leases remain. Custom operations
+// and their state/module must outlive every explicit driver reset.
+class GpuTimingFrameDriver final : public GpuSpanDriver {
+    struct State;
+    State* state_ = nullptr;
+public:
+    GpuTimingFrameDriver() noexcept = default;
+    ~GpuTimingFrameDriver() override = default;
+    GpuTimingFrameDriver(const GpuTimingFrameDriver&) = delete;
+    GpuTimingFrameDriver& operator=(const GpuTimingFrameDriver&) = delete;
+    bool bind(ID3D11Device*, ID3D11DeviceContext*) noexcept;
+    GpuSpanOwner currentOwner() const noexcept;
+    bool create(unsigned) noexcept override;
+    bool begin(unsigned) noexcept override;
+    bool timestamp(unsigned, unsigned) noexcept override;
+    bool end(unsigned) noexcept override;
+    GpuSpanPoll poll(unsigned, GpuSpanRawSample&) noexcept override;
+    void destroy(unsigned) noexcept override;
+    void reset(ID3D11DeviceContext* = nullptr) noexcept;
+};
+
 enum class GpuTimerPoll { Pending, Ready, Invalid };
 
 // A reusable timestamp pair that borrows the domain's disjoint interval.
