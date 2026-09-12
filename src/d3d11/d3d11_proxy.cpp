@@ -488,6 +488,12 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDeviceAndSwapChain(
     return hr;
 }
 
+// Versioned CPU-only census handshake. In particular do not call
+// ensureInitialised here: a pose wait must not initialize graphics or a chain.
+extern "C" BOOL WINAPI edvrCensusBeginVr(unsigned protocol) {
+    return protocol == 1 && edvr::vrCensusBeginVr() ? TRUE : FALSE;
+}
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:

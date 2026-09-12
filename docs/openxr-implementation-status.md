@@ -1,8 +1,8 @@
 # OpenXR implementation status
 
 The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
-`8c617dc` before implementation began. This change starts Phase 0; it is not
-an OpenXR backend or a completed Phase 0 qualification.
+`8c617dc` before implementation began. This change starts Phase 0; it is not an
+OpenXR backend or a completed Phase 0 qualification.
 
 ## Implemented evidence tools
 
@@ -12,24 +12,30 @@ an OpenXR backend or a completed Phase 0 qualification.
   aggregate returns are ordinary C++ member calls. The bounded cache preserves
   repeated-getter wrapper identity and passes through when exhausted. Runtime
   targets remain owned by the runtime.
-- The ABI log records the first four calls per method and caller category,
-  with QPC and thread ID. The call site is classified by its containing
-  module: game executable, EDVR, another module, or unknown. Calls EDVR makes
-  directly to saved runtime pointers bypass these wrappers. Other interface
-  versions retain proxy behaviour. This instrumentation does not define the
-  future owned backend's supported-interface policy.
+- The ABI log records the first four calls per method and caller category, with
+  QPC and thread ID. The call site is classified by its containing module: game
+  executable, EDVR, another module, or unknown. Calls EDVR makes directly to
+  saved runtime pointers bypass these wrappers. Other interface versions retain
+  proxy behaviour. This instrumentation does not define the future owned
+  backend's supported-interface policy.
 - CPU order logs record at most 64 observations per wait/submit/Present event
-  kind and 16 per intercepted GPU-command kind. They include actual context
-  pointers, immediate/deferred type, thread IDs and QPC. The two DLLs have
-  independent ordinals; use QPC to compare them. A command entry is a CPU
-  observation, not evidence of GPU completion. Existing unhooked commands are
-  outside this capture.
+  kind and 16 per intercepted GPU-command kind, independently for startup and
+  the initial VR capture. The owned compositor's first pose wait selects the VR
+  bank locally and requests the same switch from the paired graphics DLL. The
+  receiver acknowledges only when its census is enabled; missing, older or
+  uninitialized receivers are retried on at most 64 pose waits, with explicit
+  pending/exhausted diagnostics. Repeated requests cannot refill the budgets.
+  The bridge does not initialize graphics, load a DLL or issue GPU work. The
+  records include phase, actual context pointers, immediate/deferred type,
+  thread IDs and QPC. The two DLLs have independent ordinals; use QPC to
+  compare them. A command entry is a CPU observation, not evidence of GPU
+  completion. Existing unhooked commands are outside this capture.
 - Device creation logs include adapter LUID, feature level and the published
-  first-device identity. Validated eye submissions log texture/device
-  identity, full descriptors, colour space and submit flags before EDVR
-  substitutes a texture. Changes are bounded to 16 lines; unchanged handles
-  are resampled no more often than every six seconds. The initial unvalidated
-  submissions and skybox resources are not covered by this descriptor probe.
+  first-device identity. Validated eye submissions log texture/device identity,
+  full descriptors, colour space and submit flags before EDVR substitutes a
+  texture. Changes are bounded to 16 lines; unchanged handles are resampled no
+  more often than every six seconds. The initial unvalidated submissions and
+  skybox resources are not covered by this descriptor probe.
 - `build\openxr_probe.exe --loader C:\absolute\openxr_loader.dll` loads a
   trusted, explicitly selected loader with restricted dependency search. It
   reports extensions, runtime identity, HMD system limits, stereo view sizes,
@@ -54,6 +60,13 @@ insufficient tests were excluded. No new GPU queries or Monitor values are
 enabled by this change. Rebuild the bracket after an ownership/order capture,
 with the single outer scope and failure tests specified in the approved plan.
 
+The [first Frontier census flight](openxr-flight-2026-09-11.md), using build
+`070e49d`, observed 19 methods, consistent device identity for all 16 sampled
+eye textures, and multi-threaded System calls before compositor startup. The
+startup Present budget ended before the first pose wait, so the initial VR
+capture bank was added. This flight supports the published-device candidate for
+that run, but does not qualify an overlapping graphics/VR frame bracket.
+
 The first ABI test draft used a hand-built raw vtable and crashed on a matrix
 return, causing a Windows error dialog. That fixture was removed. The retained
 tests use concrete C++ implementations and set Windows error mode to suppress
@@ -67,9 +80,10 @@ Before treating Phase 0 as complete, still collect and review:
    current bounded method census establishes calls, not this full semantic
    inventory.
 2. Real startup and flight order/context/device evidence, including texture
-   reuse, both eyes, mirror work and deferred command-list execution. A
-   missing line is not proof of absence. The first published device is still
-   an unverified candidate for the OpenXR graphics binding.
+   reuse, both eyes, mirror work and deferred command-list execution. A missing
+   line is not proof of absence. The first published device matched the sampled
+   textures in the first Frontier flight; other configurations and complete
+   lifecycle ownership remain unverified.
 3. Installed SteamVR, VDXR and Pimax runtime probe reports, then a separate
    session harness for actual formats, startup geometry, refresh rate, gaze,
    tracking and loss/focus behaviour. Extension advertisement alone is not

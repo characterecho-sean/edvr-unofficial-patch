@@ -1,5 +1,6 @@
 #include "../common/vr_census.h"
 #include "compositor_hook.h"
+#include "census_bridge.h"
 
 #include "../common/timing.h"
 #include "head_offset.h"
@@ -1896,6 +1897,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                    gameCount);
     }
 
+    vrCensusStartAtPoseWait();
     vrCensusNote(VrCensusEvent::WaitEnter, self, 0, s->pace_boundaryNo);
 
     // WaitGetPoses blocks until the compositor releases the app, which makes it
@@ -2463,11 +2465,12 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     const bool wantTemporal =
         !taaMode.empty() && _stricmp(taaMode.c_str(), "off") != 0;
     const bool wantSharpen = cfg.getFloat("fix.render_sharpness", 0.0f) > 0.0f;
+    const bool wantCensus = vrCensusEnabled();
     if (!wantFlash && !wantOffset && !wantResolve && !wantTemporal &&
-        !wantSharpen) {
+        !wantSharpen && !wantCensus) {
         Log::get().note("compositor passed through unhooked: fix.transition_flash, "
                         "fix.head_offset_gate, experimental.supersample_resolve, "
-                        "fix.temporal_aa and fix.render_sharpness are all off, "
+                        "fix.temporal_aa, fix.render_sharpness and the VR census are all off, "
                         "and those are the only features that need this hook.");
         return iface;
     }
@@ -2477,7 +2480,8 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         const char* why = wantOffset ? "the head offset and the door passes"
                           : wantTemporal ? "the temporal pass"
                           : wantResolve ? "the supersample resolve"
-                                        : "the render sharpening";
+                          : wantSharpen ? "the render sharpening"
+                                        : "the VR order census";
         Log::get().note("transition flash fix off, but the compositor hook is "
                         "installed anyway for %s -- no eye submits will be "
                         "withheld.",

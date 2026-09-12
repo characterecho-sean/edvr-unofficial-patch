@@ -1,12 +1,13 @@
 #pragma once
 
-// CPU-only, bounded startup evidence. Each DLL has its own ordinal; QPC and
+// CPU-only, bounded startup and initial VR evidence. Each DLL has its own ordinal; QPC and
 // thread IDs relate the two logs. This does not establish context ownership or
 // issue any GPU query. Enable before launch; changing the key requires restart.
 #include <atomic>
 #include <cstdint>
 #include "config.h"
 #include "log.h"
+#include "vr_census_budget.h"
 
 namespace edvr {
 enum class VrCensusEvent : unsigned {
@@ -17,27 +18,39 @@ enum class VrCensusEvent : unsigned {
     Count
 };
 inline std::atomic<bool> g_vrCensusEnabled{false};
-inline std::atomic<uint32_t> g_vrCensusCounts[static_cast<unsigned>(VrCensusEvent::Count)]{};
+inline VrCensusBudget<static_cast<unsigned>(VrCensusEvent::Count)> g_vrCensusBudget;
 inline std::atomic<uint32_t> g_vrCensusOrdinal{0};
 
-inline bool vrCensusEnabled() noexcept { return g_vrCensusEnabled.load(std::memory_order_relaxed); }
+inline bool vrCensusEnabled() noexcept { return g_vrCensusEnabled.load(std::memory_order_acquire); }
 inline void vrCensusConfigure() {
     g_vrCensusEnabled.store(Config::get().getBool("advanced.openvr_census", false));
     if (vrCensusEnabled()) Log::get().note(
         "VR order census enabled: CPU observations only; at most 64 entries per "
-        "frame-event kind and 16 per GPU-command kind. QPC joins gfx/vr logs; "
+        "frame-event kind and 16 per GPU-command kind, separately for startup and VR. QPC joins gfx/vr logs; "
         "ordinals are local to each DLL. Missing observations are not proof of absence.");
+}
+// Called only from normal API entry points, never DllMain. This does not load
+// a DLL, initialize the graphics proxy, touch a device or issue GPU work.
+inline bool vrCensusBeginVr() {
+    if (!vrCensusEnabled()) return false;
+    if (g_vrCensusBudget.beginVr()) {
+        LARGE_INTEGER qpc{};
+        QueryPerformanceCounter(&qpc);
+        Log::get().note("VR order census phase: vr qpc=%lld thread=%lu; independent "
+                        "budgets selected once; startup counts retained.",
+                        qpc.QuadPart, GetCurrentThreadId());
+    }
+    return true; // Acknowledge enabled, including an already-selected VR bank.
 }
 inline void vrCensusNote(VrCensusEvent event, const void* subject = nullptr,
                          int detail = 0, uint32_t frame = 0) {
     if (!vrCensusEnabled()) return;
     const unsigned i = static_cast<unsigned>(event);
     if (i >= static_cast<unsigned>(VrCensusEvent::Count)) return;
-    auto& count = g_vrCensusCounts[i];
     const uint32_t limit = i < static_cast<unsigned>(VrCensusEvent::Draw) ? 64u : 16u;
-    uint32_t n = count.load(std::memory_order_relaxed);
-    do { if (n >= limit) return; }
-    while (!count.compare_exchange_weak(n, n + 1, std::memory_order_relaxed));
+    VrCensusPhase phase{};
+    uint32_t sample = 0;
+    if (!g_vrCensusBudget.take(i, limit, phase, sample)) return;
     static constexpr const char* names[] = {
         "WaitEnter", "WaitExit", "SubmitEnter", "SubmitExit", "PresentEnter", "PresentExit",
         "Draw", "DrawIndexed", "DrawInstanced", "DrawIndexedInstanced",
@@ -48,9 +61,9 @@ inline void vrCensusNote(VrCensusEvent event, const void* subject = nullptr,
     QueryPerformanceCounter(&qpc);
     const auto ordinal = g_vrCensusOrdinal.fetch_add(1, std::memory_order_relaxed) + 1;
     Log::get().note("VR order census: qpc=%lld ordinal=%u thread=%lu event=%s "
-                    "subject=%p detail=%d frame=%u sample=%u/%u",
+                    "subject=%p detail=%d frame=%u phase=%s sample=%u/%u",
                     qpc.QuadPart, ordinal, GetCurrentThreadId(), names[i], subject,
-                    detail, frame, n + 1, limit);
+                    detail, frame, phase == VrCensusPhase::Vr ? "vr" : "startup", sample, limit);
 }
 // For GPU command events, detail is D3D11_DEVICE_CONTEXT_TYPE (0 immediate,
 // 1 deferred); subject is the actual intercepted context, including foreign

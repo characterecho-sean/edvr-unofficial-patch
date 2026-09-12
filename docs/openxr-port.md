@@ -7,6 +7,12 @@ review checked source and vendor documentation, not new headset flights or a
 fresh scan of the installed game. Phase 0 must preserve reproducible evidence
 before an observation becomes a compatibility requirement.*
 
+Implementation and subsequent evidence are tracked in
+[openxr-implementation-status.md](openxr-implementation-status.md). The
+[2026-09-11 Frontier census flight](openxr-flight-2026-09-11.md) adds measured
+device and caller-thread evidence and records the startup capture limitation;
+the original inventory below remains historical.
+
 **Approval boundary:** this revision is for review. After Sean confirms it,
 Luna agents can implement the bounded work packages below, with the parent
 agent reviewing their changes and validation. Flights remain explicit gates; an

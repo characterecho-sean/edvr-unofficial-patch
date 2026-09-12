@@ -214,7 +214,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDlaaCounts ^
     --extra-export edvrMenuPanel ^
     --extra-export edvrDoorGpuBegin ^
-    --extra-export edvrDoorGpuEnd
+    --extra-export edvrDoorGpuEnd ^
+    --extra-export edvrCensusBeginVr
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -764,6 +765,28 @@ python "tools\eye_inputs.py" --self-test || exit /b 1
 python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
 
 echo [edvr] === fakevr.dll + openvr_smoke.exe ===
+if not exist "%OBJ%\vrcensus" mkdir "%OBJ%\vrcensus"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
+    /Fo"%OBJ%\vrcensus\\" /Fe"%BUILD%\vr_census_test.exe" ^
+    "tools\vr_census_test\vr_census_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: VR census budget test build failed & exit /b 1 )
+"%BUILD%\vr_census_test.exe" --self-test || exit /b 1
+
+REM Drive the actual paired proxies through startup exhaustion and a first
+REM compositor wait, on a hidden WARP swapchain with an inert fake runtime.
+if not exist "%OBJ%\vrcensusbridge" mkdir "%OBJ%\vrcensusbridge"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\vrcensusbridge\\" /Fe"%BUILD%\vr_census_fakevr.dll" ^
+    "tools\vr_census_bridge_test\fakevr.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: VR census fake runtime build failed & exit /b 1 )
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\vrcensusbridge\\" /Fe"%BUILD%\vr_census_bridge_test.exe" ^
+    "tools\vr_census_bridge_test\vr_census_bridge_test.cpp" /link /INCREMENTAL:NO user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: VR census bridge test build failed & exit /b 1 )
+if exist "%BUILD%\openvr_api.dll" (
+    "%BUILD%\vr_census_bridge_test.exe" --self-test "%BUILD%" || exit /b 1
+)
+
 if not exist "%OBJ%\openvr_abi" mkdir "%OBJ%\openvr_abi"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openvr_abi\\" /Fe"%BUILD%\openvr_abi_test.exe" ^
