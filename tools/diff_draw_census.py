@@ -62,7 +62,19 @@ BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)'
 DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)'
                      r'(?: vs=(\S+)(?: vh=([0-9A-Fa-f]+))? vb=(\S+) '
-                     r'sd=(\d+) of=(\d+) tp=(\d+))?'
+                     r'sd=(\d+) of=(\d+) tp=(\d+)'
+                     # ia= is the draw call's own arguments -- start index,
+                     # base vertex, start instance -- and ib= the bound index
+                     # buffer (2026-09-08, the per-object motion hunt's
+                     # question 4: does a stable per-draw identity exist).
+                     # Inside the IA group because the DLL prints them as
+                     # part of that tail; both optional, since every log
+                     # before that date has neither and an indirect draw
+                     # has no ia=. Captured (groups 19 and 20, AFTER every
+                     # older index) for tools/draw_identity.py's sake, and
+                     # OUT of the signature: a start index is per-session
+                     # noise across two captures the way a pointer is.
+                     r'(?: ia=(\S+))?(?: ib=(\S+))?)?'
                      r'(?: x=\S+(?:,\S+){3})?(?: ph=[0-9A-Fa-f]+)?'
                      # vt= is VERTEX-shader resource slots 32-39 (2026-09-07,
                      # the per-object motion hunt): the window the instanced
@@ -181,8 +193,12 @@ def parse_dc_lines(lines, source):
                 vh = m.group(14)
                 if vh is not None and set(vh) == {'0'}:
                     vh = None   # unregistered shader: no identity to key on
+                # ...then the draw's arguments and the index buffer, last of
+                # all so every older index still holds; None on the logs and
+                # the indirect draws that carry neither.
                 ia = (m.group(13), m.group(15), int(m.group(16)),
-                      int(m.group(17)), int(m.group(18)), vh)
+                      int(m.group(17)), int(m.group(18)), vh,
+                      m.group(19), m.group(20))
             cur.draws.append((int(m.group(1)), int(m.group(2)), m.group(3),
                               int(m.group(4)), int(m.group(5)), m.group(6),
                               m.group(7), m.group(8),
@@ -436,8 +452,12 @@ def self_test():
               # vt= at all, so both vintages parse and the field stays out of
               # the signature -- if it reached it, this draw would report as
               # CHANGED rather than matching.
+              # ...and ia=/ib= (2026-09-08), the draw's own arguments and
+              # its index buffer, on the same tail: parsed, and out of the
+              # signature -- a start index differs between two sessions
+              # the way a pointer does, and this draw must still match.
               'DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
-              'vs=@7 vb=@8 sd=32 of=0 tp=4 x=@4,-,-,- '
+              'vs=@7 vb=@8 sd=32 of=0 tp=4 ia=1536,-12,0 ib=@13+64 x=@4,-,-,- '
               'ph=00AA11BB22CC33DD vt=-,@11,-,-,-,-,@12,- q=0' % (f, 1),
               # The full modern tail, on a draw that is IDENTICAL in both
               # censuses and carries NO tail in census a: the output-survival
@@ -477,8 +497,11 @@ def self_test():
           # buffer in every log already captured.
           'DC id @11 buf 3010560 res=000001B2C3D80000 stride=336',
           'DC id @12 buf 460800 res=000001B2C3D88000 stride=48',
-          'DC end census=2 draws=13 off=0 copies=6 disp=3 lines=13 '
-          'interned=10 overflow=1 truncated=0']
+          'DC id @13 buf 196608 res=000001B2C3D90000',
+          # unseen= (2026-09-08) is one more additive field on the end
+          # line, between disp= and lines=, which the anchor tolerates.
+          'DC end census=2 draws=13 off=0 copies=6 disp=3 unseen=2 lines=13 '
+          'interned=11 overflow=1 truncated=0']
 
     # Through LINE_RE, exactly as a file would be read: the timestamp-prefix
     # regex is part of what is being tested, and stripping the prefix by hand
@@ -515,6 +538,14 @@ def self_test():
     if sorted(len(v) for v in per.values()) != [2, 2, 2]:
         print('self-test: inline and interned tokens did not merge: %r' %
               {f: len(v) for f, v in per.items()})
+        return 1
+    # The draw arguments and the index buffer reach the tuple's tail on the
+    # line that carries them, and read as None on the census that does not
+    # -- "not recorded", never a zero that could pass for a real start.
+    scene_b = [d for d in censuses[1].draws if d[3] == 5000][0][9]
+    scene_a = [d for d in censuses[0].draws if d[3] == 5000][0][9]
+    if scene_b[6:] != ('1536,-12,0', '@13+64') or scene_a[6:] != (None, None):
+        print('self-test: ia=/ib= parsed wrong: %r / %r' % (scene_b[6:], scene_a[6:]))
         return 1
     print()
     print('self-test: ok')

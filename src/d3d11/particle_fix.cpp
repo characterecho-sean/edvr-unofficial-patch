@@ -15,6 +15,7 @@
 #include <string>
 
 #include "../common/timing.h"
+#include "binding_shadow.h"   // bindingShaderHash: the bound vertex shader's hash, set with the shader
 #include "exposure_fix.h"   // lookupShaderHash
 #include "flare_vs.h"
 #include "particle_vs.h"
@@ -82,7 +83,6 @@ constexpr uint64_t kFlareVs = 0x6041FD2D3D0164E1ull;
 // jump tunnel, not proof it draws nowhere else.
 constexpr uint64_t kWitchspaceStarsVs = 0x9AEC596A2B036EA6ull;
 bool g_hideWitchspaceStars = false;
-
 struct BillboardVariant {
     uint64_t    hash;
     const char* hlsl;
@@ -180,12 +180,27 @@ uint32_t bindOffsetRegs(ID3D11DeviceContext* ctx, UINT slot) {
 // Which billboard variant is this draw, or -1 for none? By shader hash and
 // nothing else: the geyser hunt established that kind, count, stride and
 // every sampler size are shared with the terrain and prop pipelines.
-int billboardVariantFor(ID3D11DeviceContext* ctx) {
+// The bound vertex shader's hash: the binding shadow's, set with the
+// shader (2026-09-09; a VSGetShader per draw was a millisecond a frame
+// here), and the Get only when the shadow has seen no set.
+uint64_t boundVsHashFast(ID3D11DeviceContext* ctx) {
+    if (bindingGet(BindSlot::Vs)) {
+        // A held zero is a shader the registry had not met at its set
+        // (2026-09-09), and the context is asked instead.
+        const uint64_t held = bindingShaderHash(BindSlot::Vs);
+        if (held) return held;
+    }
     ID3D11VertexShader* vs = nullptr;
     ctx->VSGetShader(&vs, nullptr, nullptr);
-    if (!vs) return -1;
+    if (!vs) return 0;
     const uint64_t h = lookupShaderHash(vs);
     vs->Release();
+    return h;
+}
+
+int billboardVariantFor(ID3D11DeviceContext* ctx) {
+    const uint64_t h = boundVsHashFast(ctx);
+    if (!h) return -1;
     for (int i = 0; i < kVariantCount; ++i) {
         if (h == kVariants[i].hash) return i;
     }
@@ -484,11 +499,7 @@ bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (!g_hideWitchspaceStars || !ctx) return false;
     if (kind != 'X' && kind != 'N') return false;
     if (instances == 0 || count < 6) return false;
-    ID3D11VertexShader* vs = nullptr;
-    ctx->VSGetShader(&vs, nullptr, nullptr);
-    if (!vs) return false;
-    const uint64_t h = lookupShaderHash(vs);
-    vs->Release();
+    const uint64_t h = boundVsHashFast(ctx);
     if (h != kWitchspaceStarsVs) return false;
     ++g_starsSkipped;
     const uint64_t now = nowMs();

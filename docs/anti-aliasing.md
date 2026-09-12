@@ -1,5 +1,10 @@
 # Anti-aliasing and the shimmer: a design
 
+**Current defaults (2026-09-10):** TAA/DLSS includes UI/smoke depth and station
+motion automatically. The Performance page exposes **DLSS preset**, default K.
+Supersample filtering is experimental and its resolve defaults off. Earlier
+flight notes below describe the settings available at the time.
+
 *A design document, written before the code, as a companion to
 [performance.md](performance.md). Claims about EDVR cite the source; claims
 about the game, runtimes and SDKs are labelled measured (established in this
@@ -284,7 +289,7 @@ is not in this tree yet and is not invented here — the active mode waits
 on it):
 
 ```
-supersample_resolve = auto   ; off | auto | on. auto engages whenever the
+supersample_resolve = off    ; off (default) | auto | on. auto engages when
                              ; game submits larger than the runtime asked
                              ; for, however that came about, and stays
                              ; quiet otherwise; on is the same and says so
@@ -1112,6 +1117,19 @@ accepted ship delta instead of falling back to the head alone, which
 had been smearing the world on every dropped frame. The registration
 line says how the choice went (bound, another block's, a resync, none)
 and how often the carry ran.
+
+*2026-09-08, a station approach:* continuity is self-reinforcing, and a
+chain that lands on another object's camera -- an auxiliary pass of the
+station's, written every frame and continuous with itself -- never comes
+back on its own, because the bound block's real rows are never within
+three degrees of the wrong chain again ("another's on 1774 frames, the
+bound block's on 0" for 58 seconds, the head-follow score holding the
+world path down the whole time and the station smearing under the ship's
+motion). So while the rows have stopped following the head and the bound
+block wrote this frame, the chooser now takes the bound block's latest
+write over the chain; the score decides when the path comes back, and
+the registration line counts those frames (docs/per-object-motion.md
+has the flight).
 
 **The fourth flight (e2d93db) made the choice work -- the bound block's
 rows on 1,795 of 1,800 frames in space, no drops, no carries -- and the

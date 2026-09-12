@@ -11,6 +11,8 @@
 // before anyone noticed.
 //
 // Usage: smoke.exe [path\to\d3d11.dll]
+// Optional second argument: --recovery-device or --foreign-device. These
+// focused hardware checks require the default log directory beside smoke.exe.
 #include <windows.h>
 
 #include <d3d11.h>
@@ -263,6 +265,8 @@ void resolveRef(int filter, float width, const std::vector<float>& img, int inW,
 
 int main(int argc, char** argv) {
     const char* proxy = argc > 1 ? argv[1] : "build\\d3d11.dll";
+    const bool recoveryCheck = argc > 2 && strcmp(argv[2], "--recovery-device") == 0;
+    const bool foreignCheck = argc > 2 && strcmp(argv[2], "--foreign-device") == 0;
     printf("edvr smoke\nproxy: %s\n\n", proxy);
 
     char full[MAX_PATH];
@@ -280,11 +284,23 @@ int main(int argc, char** argv) {
     // alternates is worse than no gate, because package.bat runs this one.
     {
         char armed[MAX_PATH];
-        strncpy_s(armed, full, _TRUNCATE);
+        // Config's default log directory is beside the executable, even
+        // when the proxy being tested is loaded from another directory.
+        if (!GetModuleFileNameA(nullptr, armed, MAX_PATH)) return fail("executable path");
         if (char* slash = strrchr(armed, '\\')) {
             *slash = '\0';
             strncat_s(armed, "\\edvr_logs\\d3d11_hooks.armed", _TRUNCATE);
             DeleteFileA(armed);
+            if (recoveryCheck) {
+                char dir[MAX_PATH];
+                strcpy_s(dir, armed);
+                *strrchr(dir, '\\') = '\0';
+                CreateDirectoryA(dir, nullptr);
+                HANDLE marker = CreateFileA(armed, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                            FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (marker == INVALID_HANDLE_VALUE) return fail("could not arm recovery fixture");
+                CloseHandle(marker);
+            }
         }
     }
 
@@ -310,6 +326,49 @@ int main(int argc, char** argv) {
     }
     if (FAILED(hr) || !device || !ctx) return fail("could not create a device");
     printf("  ok    device created through the proxy\n");
+
+    if (recoveryCheck || foreignCheck) {
+        ID3D11Device* second = nullptr;
+        ID3D11DeviceContext* secondCtx = nullptr;
+        hr = create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 1,
+                    D3D11_SDK_VERSION, &second, &got, &secondCtx);
+        if (FAILED(hr) || !second || !secondCtx) return fail("second hardware device unavailable");
+        bool pass = true;
+        if (recoveryCheck) {
+            unsigned char a[3] = {}, b[3] = {};
+            pass = clearGreyReadBack(device, ctx, 2048, 2048, a) &&
+                   clearGreyReadBack(second, secondCtx, 2048, 2048, b) &&
+                   a[0] == 32 && a[1] == 32 && a[2] == 32 &&
+                   b[0] == 32 && b[1] == 32 && b[2] == 32;
+            printf("  %s  recovery forwards clears on BOTH devices: %u,%u,%u / %u,%u,%u\n",
+                   pass ? "ok  " : "FAIL", a[0],a[1],a[2],b[0],b[1],b[2]);
+            if (!pass) return fail("recovery guard re-armed on a later device");
+        }
+        typedef void* (*PFN_Taa)(void*,int,const float*,const float*,const float*,float,float,
+                                const float*,const float*,const float*,float,float,float,int,
+                                float,float,unsigned,unsigned,unsigned);
+        auto taa = reinterpret_cast<PFN_Taa>(GetProcAddress(mod, "edvrTemporalAa"));
+        const float colour[4] = {0.25f,0.5f,0.75f,1};
+        const float tan[4] = {-1,1,-1,1}, ident[9] = {1,0,0,0,1,0,0,0,1};
+        ID3D11Texture2D *a = nullptr, *b = nullptr;
+        if (!taa || !makeSolidSrc(device,ctx,64,64,colour,true,&a) ||
+            !makeSolidSrc(second,secondCtx,64,64,colour,true,&b)) return fail("device fixture inputs");
+        auto treat = [&](ID3D11Texture2D* src) {
+            return taa(src,0,nullptr,tan,tan,0,0,ident,nullptr,nullptr,0,0,0,1,0.9f,1,0,0,1);
+        };
+        void* firstOut = treat(a);
+        pass &= recoveryCheck ? firstOut == nullptr : firstOut != nullptr;
+        pass &= treat(b) == nullptr;
+        if (foreignCheck) {
+            pass &= checkResolved(device,ctx,treat(a),"original device remains usable",64,64,
+                                   32,32,64,128,191,2);
+        }
+        pass &= SUCCEEDED(device->GetDeviceRemovedReason()) && SUCCEEDED(second->GetDeviceRemovedReason());
+        a->Release(); b->Release(); secondCtx->Release(); second->Release();
+        ctx->Release(); device->Release();
+        printf("%s: %s\n", recoveryCheck ? "RECOVERY DEVICE" : "FOREIGN DEVICE", pass ? "PASSED" : "FAILED");
+        return pass ? 0 : 1;
+    }
 
     // The black void fix, end to end.
     int rc = 0;

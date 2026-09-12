@@ -53,7 +53,10 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason);
 // content that changes without moving, which no motion vector can
 // describe: a HUD readout counting down registers perfectly and blends
 // with the digit before it (measured 2026-09-08, the flip side of
-// fix.ui_depth). Zero everywhere is the same as not passing one.
+// fix.ui_depth). Zero everywhere is the same as not passing one. The
+// runtime takes ONE such mask, so when the temporal pass's mover mask
+// (tier 1 of docs/per-object-motion.md) is on as well, the pass folds the
+// interface's into it before calling here and hands the union.
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                   ID3D11Texture2D* output, ID3D11Texture2D* reactive,

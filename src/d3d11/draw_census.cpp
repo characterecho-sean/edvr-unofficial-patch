@@ -129,6 +129,14 @@ uint32_t g_clearsThisFrame = 0;  // clears + query marks this frame
 uint32_t g_clears = 0;           // and this census, for the end line
 uint32_t g_dispThisFrame = 0;    // dispatches this frame, for the line index
 uint32_t g_dispatches = 0;       // dispatches this census, for the end line
+// Draws the verdict chain returned on before a census call could see them
+// (drawCensusNoteUnseen): this frame, this census, and by reason -- 0
+// substituted particle billboards, 1 witchspace-star skips, 2 FSS chrome
+// skips. Visible substituted
+// particles now enter the census before replacement instead of this tally.
+uint32_t g_unseenThisFrame = 0;
+uint32_t g_unseen = 0;
+uint32_t g_unseenBy[3] = {}; // particle, witchspace, FSS
 // The startup schedule, read once at the first frame edge -- these are
 // moments in THIS session's startup, and re-reading them later would either
 // re-fire everything already spent or move a deadline the session has passed.
@@ -376,6 +384,13 @@ struct DrawState {
     uint32_t offset = 0;
     uint32_t topology = 0;    // D3D11_PRIMITIVE_TOPOLOGY: 4 is a triangle list,
                               // 5 a strip -- how a quad announces itself
+    // The bound index buffer and its byte offset (2026-09-08): with the
+    // draw's own arguments (DrawArgs) it completes the identity the
+    // per-object motion memo would key on. Recorded whatever the kind --
+    // a non-indexed draw's line shows what happened to be bound, and the
+    // kind letter says whether it was used.
+    void*    ib = nullptr;
+    uint32_t ibOffset = 0;
 };
 
 FaultBudget g_iaBudget("drawCensus.drawState", 5);
@@ -399,8 +414,59 @@ void readDrawState(ID3D11DeviceContext* ctx, DrawState* out) {
         D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
         ctx->IAGetPrimitiveTopology(&topo);
         out->topology = static_cast<uint32_t>(topo);
+
+        // One more Get on recorded draws only, the same bargain the vertex
+        // buffer above makes. The format is not kept: it says how a start
+        // index maps to bytes, not which draw this is.
+        ID3D11Buffer* ib = nullptr;
+        DXGI_FORMAT ifmt = DXGI_FORMAT_UNKNOWN;
+        UINT ioff = 0;
+        ctx->IAGetIndexBuffer(&ib, &ifmt, &ioff);
+        out->ib = ib;
+        out->ibOffset = ioff;
+        if (ib) ib->Release();
         out->ok = true;
     });
+}
+
+// The IA/VS tail, one formatter for the shadow form (recordDraw) and the
+// direct form (drawCensusDrawDirect), which used to spell it twice: the
+// vertex shader's pointer token and content hash, the slot-0 vertex buffer,
+// its stride and offset, the topology -- and since 2026-09-08 the draw's
+// own arguments (ia=start,base,startInstance; absent for an indirect draw,
+// whose arguments live on the GPU, so `args` is null there) and the bound
+// index buffer (ib=@N, with +offset only when the bound offset is nonzero,
+// which is nearly never). draw_census.h's DrawArgs says why these two exist.
+//
+// 256, not the 160 the tail had: every token bindingToken writes is capped
+// at 23 characters by its own buffer, and the worst case is now three of
+// those, sixteen hex digits, six ten-digit numbers and their labels -- 191
+// characters. _snprintf_s with _TRUNCATE loses the END silently, and the
+// end is where q= lives, so the buffer is sized from the caps.
+// Returns the vertex shader's content hash, which the CB watch keys on.
+constexpr size_t kIaTailBytes = 256;
+static uint64_t formatIaTail(char* tail, size_t n, const DrawState& st,
+                             const DrawArgs* args) {
+    const uint64_t vh = lookupShaderHash(st.vs);
+    char vsb[24], vbb[24], ibb[24];
+    char ia[48] = "";
+    if (args) {
+        _snprintf_s(ia, sizeof(ia), _TRUNCATE, " ia=%u,%d,%u", args->start,
+                    args->base, args->startInstance);
+    }
+    char ib[40];
+    const char* ibt = bindingToken(st.ib, Kind::kResource, ibb, sizeof(ibb));
+    if (st.ibOffset) {
+        _snprintf_s(ib, sizeof(ib), _TRUNCATE, " ib=%s+%u", ibt, st.ibOffset);
+    } else {
+        _snprintf_s(ib, sizeof(ib), _TRUNCATE, " ib=%s", ibt);
+    }
+    _snprintf_s(tail, n, _TRUNCATE, " vs=%s vh=%016llX vb=%s sd=%u of=%u tp=%u%s%s",
+                bindingToken(st.vs, Kind::kOpaque, vsb, sizeof(vsb)),
+                static_cast<unsigned long long>(vh),
+                bindingToken(st.vb, Kind::kResource, vbb, sizeof(vbb)),
+                st.stride, st.offset, st.topology, ia, ib);
+    return vh;
 }
 
 // --- the constant-buffer watch ----------------------------------------------
@@ -618,10 +684,20 @@ void dumpInternTable() {
 void finish() {
     dumpInternTable();
     Log::get().note("DC end census=%u draws=%u off=%u copies=%u disp=%u "
-                    "lines=%u interned=%u overflow=%u truncated=%u",
+                    "unseen=%u lines=%u interned=%u overflow=%u truncated=%u",
                     g_censusNo, g_draws, g_offDraws, g_copies, g_dispatches,
-                    g_lines, g_tabCount, g_overflow,
+                    g_unseen, g_lines, g_tabCount, g_overflow,
                     g_draws > g_lines ? g_draws - g_lines : 0);
+    if (g_unseen) {
+        Log::get().note(
+            "DC unseen: %u draws this census returned from the verdict chain "
+            "before either census call could record them -- %u substituted "
+            "particle billboards (fix.particle_billboard = steady), %u "
+            "witchspace-star skips (fix.witchspace_stars = off), %u FSS chrome "
+            "skips. They are in no "
+            "DC line above. Enable the withheld effects for a census of their draws.",
+            g_unseen, g_unseenBy[0], g_unseenBy[1], g_unseenBy[2]);
+    }
 }
 
 }  // namespace
@@ -655,7 +731,8 @@ void drawCensusAutoRequest() {
 // tag and the index; every binding read below is identical, which is the
 // reason an offscreen line can be read with the same eyes as an eye line.
 static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                       uint32_t instances, const char* tag, uint32_t index) {
+                       uint32_t instances, const char* tag, uint32_t index,
+                       const DrawArgs& args) {
     // The shared ordinal advances for every event that ARRIVES, before the
     // line cap -- a capped census keeps truthful q values on whatever lines
     // it does write, instead of renumbering the survivors.
@@ -675,35 +752,22 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
     // The IA/VS tail, present only when the probe answered. Absent means the
     // budget is spent or the read faulted -- never "nothing was bound", which
-    // has its own spelling ("-").
-    // 128, not the 80 this started at. Every token bindingToken writes is
-    // capped at 23 characters by its own buffer, and two of those plus three
-    // ten-digit numbers and their labels is 97 -- so 80 truncated its own
-    // worst case, silently, in exactly the shape a stride of 4294967295 would
-    // have arrived in. Sized from the caps rather than from what buffers
-    // "realistically" hold.
-    char tail[160] = "";
+    // has its own spelling ("-"). Sized from the caps (formatIaTail says),
+    // because 80 once truncated its own worst case silently, in exactly the
+    // shape a stride of 4294967295 would have arrived in.
+    //
+    // The shader's content hash rides beside its pointer token. The pointer
+    // is per-session noise the differ rightly ignores; the HASH is stable
+    // across sessions and is the one key that cannot collide between two
+    // draws running different code -- the geyser hunt (2026-08-23) found
+    // particle plumes and rock meshes sharing the entire size-level
+    // signature, separable by nothing the census recorded. vh=0 means the
+    // shader was created before the hooks went in.
+    char tail[kIaTailBytes] = "";
     DrawState st;
     readDrawState(ctx, &st);
     uint64_t vh = 0;
-    if (st.ok) {
-        // The shader's content hash beside its pointer token. The pointer
-        // is per-session noise the differ rightly ignores; the HASH is
-        // stable across sessions and is the one key that cannot collide
-        // between two draws running different code -- the geyser hunt
-        // (2026-08-23) found particle plumes and rock meshes sharing the
-        // entire size-level signature, separable by nothing the census
-        // recorded. vh=0 means the shader was created before the hooks
-        // went in.
-        vh = lookupShaderHash(st.vs);
-        char vsb[24], vbb[24];
-        _snprintf_s(tail, sizeof(tail), _TRUNCATE,
-                    " vs=%s vh=%016llX vb=%s sd=%u of=%u tp=%u",
-                    bindingToken(st.vs, Kind::kOpaque, vsb, sizeof(vsb)),
-                    static_cast<unsigned long long>(vh),
-                    bindingToken(st.vb, Kind::kResource, vbb, sizeof(vbb)),
-                    st.stride, st.offset, st.topology);
-    }
+    if (st.ok) vh = formatIaTail(tail, sizeof(tail), st, &args);
 
     // PS slots 4-7, read straight off the context the way the IA tail is.
     //
@@ -1009,20 +1073,36 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 }
 
 void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                       uint32_t instances, uint32_t eyeDrawIndex) {
+                       uint32_t instances, uint32_t eyeDrawIndex,
+                       const DrawArgs& args) {
     if (g_framesLeft == 0) return;   // pending counts draws only once started
     ++g_draws;
     ++g_drawsThisFrame;
-    recordDraw(ctx, kind, count, instances, "DC", eyeDrawIndex);
+    recordDraw(ctx, kind, count, instances, "DC", eyeDrawIndex, args);
+}
+
+void drawCensusNoteUnseen(char why) {
+    if (g_framesLeft == 0) return;   // pending is not recording
+    ++g_unseenThisFrame;
+    ++g_unseen;
+    const int k = why == 'p' ? 0 : why == 'w' ? 1 : 2;
+    ++g_unseenBy[k];
+}
+
+void drawCensusEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                         uint32_t instances, bool eye, const DrawArgs& args) {
+    if (g_framesLeft == 0 || !ctx) return;
+    if (eye) drawCensusEyeDraw(ctx, kind, count, instances, g_drawsThisFrame, args);
+    else drawCensusOffDraw(ctx, kind, count, instances, args);
 }
 
 bool drawCensusWantsOffscreen() { return g_offscreen; }
 
 void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                       uint32_t instances) {
+                       uint32_t instances, const DrawArgs& args) {
     if (g_framesLeft == 0 || !g_offscreen) return;
     ++g_offDraws;
-    recordDraw(ctx, kind, count, instances, "DCO", g_offThisFrame++);
+    recordDraw(ctx, kind, count, instances, "DCO", g_offThisFrame++, args);
 }
 
 // The direct-read draw record: every token off the calling context, no
@@ -1035,7 +1115,8 @@ void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 // provenance tails the dispatch line grew.
 void drawCensusDrawDirect(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                           uint32_t instances, bool foreignCtx,
-                          void* indirectArgs, uint32_t indirectOff) {
+                          void* indirectArgs, uint32_t indirectOff,
+                          const DrawArgs& args) {
     if (g_framesLeft == 0 || !ctx) return;
     ++g_draws;
     ++g_drawsThisFrame;
@@ -1077,18 +1158,12 @@ void drawCensusDrawDirect(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     static_cast<unsigned long long>(lookupShaderHash(ps)));
     }
 
-    char tail[160] = "";
+    char tail[kIaTailBytes] = "";
     DrawState dst2;
     readDrawState(ctx, &dst2);
-    if (dst2.ok) {
-        char vsb[24], vbb[24];
-        _snprintf_s(tail, sizeof(tail), _TRUNCATE,
-                    " vs=%s vh=%016llX vb=%s sd=%u of=%u tp=%u",
-                    bindingToken(dst2.vs, Kind::kOpaque, vsb, sizeof(vsb)),
-                    static_cast<unsigned long long>(lookupShaderHash(dst2.vs)),
-                    bindingToken(dst2.vb, Kind::kResource, vbb, sizeof(vbb)),
-                    dst2.stride, dst2.offset, dst2.topology);
-    }
+    // No ia= for an indirect draw: its arguments are in the GPU buffer args=
+    // names, and a zero here would read as a real start index.
+    if (dst2.ok) formatIaTail(tail, sizeof(tail), dst2, indirectArgs ? nullptr : &args);
 
     char prov[64] = "";
     if (indirectArgs) {
@@ -1499,14 +1574,16 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
     g_lastFrameNo = frameNo;
     runCensusSchedule(frameNo);
     if (g_framesLeft > 0) {
-        Log::get().note("DC frame %u draws=%u off=%u copies=%u disp=%u clears=%u",
+        Log::get().note("DC frame %u draws=%u off=%u copies=%u disp=%u clears=%u unseen=%u",
                         g_frameOrdinal, g_drawsThisFrame, g_offThisFrame,
-                        g_copiesThisFrame, g_dispThisFrame, g_clearsThisFrame);
+                        g_copiesThisFrame, g_dispThisFrame, g_clearsThisFrame,
+                        g_unseenThisFrame);
         g_drawsThisFrame = 0;
         g_offThisFrame = 0;
         g_copiesThisFrame = 0;
         g_clearsThisFrame = 0;
         g_dispThisFrame = 0;
+        g_unseenThisFrame = 0;
         g_seq = 0;
         ++g_frameOrdinal;
         if (--g_framesLeft == 0) finish();
@@ -1538,6 +1615,9 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         g_clears = 0;
         g_dispThisFrame = 0;
         g_dispatches = 0;
+        g_unseenThisFrame = 0;
+        g_unseen = 0;
+        for (uint32_t& u : g_unseenBy) u = 0;
         g_seq = 0;
         // The auto arm's rider wins over the ini: a census fired at an
         // offscreen build that recorded no offscreen draws is the exact

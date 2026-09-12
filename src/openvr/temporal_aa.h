@@ -29,6 +29,9 @@ void temporalAaConfigure();
 
 // The mode is on and the pass has not stood down.
 bool temporalAaWanted();
+// Capture the actual submitted image when AA is off. The graphics half
+// does nothing unless the user's eye-dump run is armed.
+void temporalAaCaptureUntreated(vr::EVREye eye,void* handle,const vr::VRTextureBounds_t* bounds);
 
 // The runtime's head pose for the frame about to render, from
 // WaitGetPoses, before any EDVR offset touches it (the offset moves the
@@ -55,8 +58,14 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
 
 // A frame for this eye was withheld (the shadow copy or nothing went
 // out): continuity is broken, and the next treated frame starts the
-// history afresh.
-void temporalAaNoteWithheld(vr::EVREye eye);
+// history afresh -- unless the withhold was a JUMP the flash guard has
+// yet to judge (jumpUnjudged). Then the history waits for the detector's
+// verdict (frame_flag.h, noteJumpVerdict) and restarts only if the camera
+// came back, a glitch: a change of reference frame is no break at all,
+// the withheld frame never having entered the history, and the restart
+// under DLSS was the flicker whenever the ship moved near a station
+// (2026-09-10).
+void temporalAaNoteWithheld(vr::EVREye eye, bool jumpUnjudged);
 
 void temporalAaStandDown(const char* why);
 

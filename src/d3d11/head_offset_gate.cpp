@@ -2,6 +2,7 @@
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"
+#include "vr_runtime.h"
 #include "../common/log.h"
 #include "../common/timing.h"
 
@@ -1186,11 +1187,10 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             if (!glitchConsumerPresent() && !g.gateNoConsumerNoted) {
                 g.gateNoConsumerNoted = true;
                 Log::get().note(
-                    "head offset: ...but openvr_api.dll is NOT INSTALLED (or is "
-                    "a different EDVR version), and that is the half which "
-                    "actually moves the viewpoint. Nothing will happen. Explorer "
-                    "Cam needs BOTH files -- see the openvr folder in the release "
-                    "and its READ-ME-FIRST.txt.");
+                    "head offset: ...but the half which actually moves the "
+                    "viewpoint is not acting, so nothing will happen -- %s.",
+                    vrRuntimeShortWhy());
+                vrRuntimeExplainOnce();
             }
         } else {
             ++g.gateExits;

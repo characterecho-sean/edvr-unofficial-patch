@@ -126,4 +126,11 @@ bool hotkeyWouldFire(int vk, uint32_t mods, uint32_t held);
 // Forget every registered binding. For tests; bindings re-register on setBinding.
 void hotkeyResetBindings();
 
+// The virtual keys every registered binding sits on, at most `max` of them;
+// returns how many were copied. The settings menu asks before adopting one
+// of Elite's panel keys as its own (menu_keys.h, rule R5): a registered
+// binding is polled every frame whether or not the menu is open, so a key
+// shared with one would fire in two places.
+int hotkeyRegisteredKeys(int* vks, int max);
+
 }  // namespace edvr

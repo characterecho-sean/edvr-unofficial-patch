@@ -205,6 +205,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrFssTheater ^
     --extra-export edvrSupersampleResolve ^
     --extra-export edvrTemporalAa ^
+    --extra-export edvrEyeCaptureUntreated ^
+    --extra-export edvrEyeCaptureArm ^
     --extra-export edvrTemporalAaNoteHead ^
     --extra-export edvrSharpen ^
     --extra-export edvrDepthProbeSelftest ^
@@ -276,13 +278,16 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
+    "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
+    "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
+    "src\d3d11\object_probe.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
     "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
@@ -294,7 +299,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_theater.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
-    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" ^
+    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_stability.cpp" ^
     "src\d3d11\shader_sig.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" ^
@@ -311,6 +316,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\supersample_pass.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
+    "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\foveation.cpp" ^
@@ -535,15 +541,19 @@ echo [edvr] === menu_test.exe ===
 REM The settings menu's pure parts (docs\settings-menu.md): the keyboard
 REM gate's filter policies (zeroed state, ups kept and downs dropped, the
 REM summon swallow, the scan-code map), the panel's ray intersection flat
-REM and curved, the door's eye transform against a hand-worked pose, and
-REM the one-value ini write's merge -- each one a place a wrong sign or an
-REM off-by-one would otherwise be found in a headset.
+REM and curved, the door's eye transform against a hand-worked pose, the
+REM one-value ini write's merge, and the key rules (menu_keys.cpp: the
+REM swallow-until-release tracker, which Elite panel keys are adopted and
+REM why not, and a footer measured against the real GDI face) -- each one
+REM a place a wrong sign or an off-by-one would otherwise be found in a
+REM headset.
 if not exist "%OBJ%\menutest" mkdir "%OBJ%\menutest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
     /Fo"%OBJ%\menutest"\ /Fe"%BUILD%\menu_test.exe" ^
     "tools\menu_test\menu_test.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\menu_keys.cpp" ^
     "src\openvr\menu_door.cpp" "src\d3d11\shader_swap.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\hotkey.cpp" ^
@@ -575,12 +585,30 @@ if errorlevel 1 ( echo [edvr] ERROR: config_test build failed & exit /b 1 )
     exit /b 1
 )
 
+echo [edvr] === input_gate_test.exe ===
+REM Actual private DirectInput tables, buffered keys, close/release behavior,
+REM and real A/W factories through the executable's early import hook.
+if not exist "%OBJ%\inputgatetest" mkdir "%OBJ%\inputgatetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\inputgatetest"\ ^
+    /Fe"%BUILD%\input_gate_test.exe" "tools\input_gate_test\input_gate_test.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
+    "src\common\hotkey.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib dinput8.lib
+if errorlevel 1 ( echo [edvr] ERROR: input_gate_test build failed & exit /b 1 )
+"%BUILD%\input_gate_test.exe" || (
+    echo [edvr] ERROR: the menu keyboard gate failed its device or release checks
+    exit /b 1
+)
+
 echo [edvr] === gate_test.exe ===
 if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gatetest"\ /Fe"%BUILD%\gate_test.exe" ^
     "tools\gate_test\gate_test.cpp" ^
-    "src\d3d11\head_offset_gate.cpp" "src\common\config.cpp" ^
+    "src\d3d11\head_offset_gate.cpp" "src\d3d11\vr_runtime.cpp" ^
+    "src\common\config.cpp" ^
     "src\common\log.cpp" "src\common\frame_flag.cpp" ^
     "src\d3d11\camera_view.cpp" "src\common\guard.cpp" ^
     "src\common\proxy.cpp" "src\d3d11\journal_watch.cpp" ^
@@ -600,7 +628,8 @@ if not exist "%OBJ%\glitchtest" mkdir "%OBJ%\glitchtest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\glitchtest"\ ^
     /Fe"%BUILD%\glitch_test.exe" "tools\glitch_test\glitch_test.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\common\config.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" ^
+    "src\common\config.cpp" ^
     "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: glitch_test build failed & exit /b 1 )
@@ -658,6 +687,82 @@ if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
     exit /b 1
 )
 
+echo [edvr] === private UI depth regression ===
+REM Keep the executable away from build\d3d11.dll: these tests use system
+REM D3D11 WARP and include the production coverage pass directly.
+if not exist "%OBJ%\uidepthtest" mkdir "%OBJ%\uidepthtest"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uidepthtest\\" /Fe"%OBJ%\uidepthtest\ui_depth_test.exe" ^
+    "tools\ui_depth_test\ui_depth_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
+"%OBJ%\uidepthtest\ui_depth_test.exe" || (
+    echo [edvr] ERROR: private UI depth regression
+    exit /b 1
+)
+
+echo [edvr] === hologram motion regression ===
+if not exist "%OBJ%\holomotion" mkdir "%OBJ%\holomotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\holomotion\\" /Fe"%OBJ%\holomotion\holo_motion_test.exe" ^
+    "tools\holo_motion_test\holo_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: hologram motion test build failed & exit /b 1 )
+"%OBJ%\holomotion\holo_motion_test.exe" || exit /b 1
+
+if not exist "%OBJ%\screenmotion" mkdir "%OBJ%\screenmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\screenmotion\\" /Fe"%OBJ%\screenmotion\screen_motion_test.exe" ^
+    "tools\screen_motion_test\screen_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
+"%OBJ%\screenmotion\screen_motion_test.exe" --self-test || exit /b 1
+if not exist "%OBJ%\weaponstability" mkdir "%OBJ%\weaponstability"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\weaponstability\\" /Fe"%OBJ%\weaponstability\weapon_stability_test.exe" ^
+    "tools\weapon_stability_test\weapon_stability_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
+"%OBJ%\weaponstability\weapon_stability_test.exe" --self-test || exit /b 1
+python "tools\holo_motion.py" --self-test || exit /b 1
+
+echo [edvr] === stellar motion regression ===
+if not exist "%OBJ%\stellarmotion" mkdir "%OBJ%\stellarmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\stellarmotion\\" /Fe"%OBJ%\stellarmotion\stellar_motion_test.exe" ^
+    "tools\stellar_motion_test\stellar_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: stellar motion test build failed & exit /b 1 )
+"%OBJ%\stellarmotion\stellar_motion_test.exe" || exit /b 1
+
+echo [edvr] === terrain motion regression ===
+if not exist "%OBJ%\terrainmotion" mkdir "%OBJ%\terrainmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\terrainmotion\\" /Fe"%OBJ%\terrainmotion\celestial_motion_test.exe" ^
+    "tools\celestial_motion_test\celestial_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: terrain motion test build failed & exit /b 1 )
+"%OBJ%\terrainmotion\celestial_motion_test.exe" || exit /b 1
+python "tools\terrain_motion.py" --self-test || exit /b 1
+python "tools\terrain_motion.py" "%OBJ%\terrainmotion\eye_fixture_Terrain.bin" --verify-fixture || exit /b 1
+
+echo [edvr] === eye draw snapshot regression ===
+if not exist "%OBJ%\drawsnapshot" mkdir "%OBJ%\drawsnapshot"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\drawsnapshot\\" /Fe"%OBJ%\drawsnapshot\eye_draw_snapshot_test.exe" ^
+    "tools\eye_draw_snapshot_test\eye_draw_snapshot_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: eye draw snapshot test build failed & exit /b 1 )
+"%OBJ%\drawsnapshot\eye_draw_snapshot_test.exe" "%OBJ%\drawsnapshot\fixture.bin" || exit /b 1
+python "tools\eye_draw_snapshot.py" --self-test || exit /b 1
+python "tools\eye_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin" --verify-fixture || exit /b 1
+python "tools\gui_draw_snapshot.py" --self-test || exit /b 1
+python "tools\eye_inputs.py" --self-test || exit /b 1
+python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
+
 echo [edvr] === fakevr.dll + openvr_smoke.exe ===
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
@@ -692,6 +797,37 @@ if exist "%BUILD%\openvr_api.dll" (
     copy /Y "%BUILD%\fakevr.dll" "%BUILD%\vrtest\openvr_api_orig.dll" >nul
     "%BUILD%\openvr_smoke.exe" "%BUILD%\vrtest" || (
         echo [edvr] ERROR: openvr startup test failed or crashed
+        exit /b 1
+    )
+)
+
+echo [edvr] === vr_runtime_test.exe ===
+REM Which VR back end the process is REALLY on, checked against the real DLLs
+REM this build just made. Guards the failure that made the module exist: a
+REM perfect install the game never opened, and eight log lines telling its
+REM owner the file was missing. Skipped when the openvr proxy was not built,
+REM because ours-versus-theirs needs one of ours to point at.
+if not exist "%OBJ%\vrruntimetest" mkdir "%OBJ%\vrruntimetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrruntimetest"\ ^
+    /Fe"%BUILD%\vr_runtime_test.exe" "tools\vr_runtime_test\vr_runtime_test.cpp" ^
+    "src\d3d11\vr_runtime.cpp" "src\common\log.cpp" ^
+    "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr_runtime_test build failed & exit /b 1 )
+if exist "%BUILD%\openvr_api.dll" (
+    if not exist "%BUILD%\vrscratch_ours" mkdir "%BUILD%\vrscratch_ours"
+    if not exist "%BUILD%\vrscratch_foreign" mkdir "%BUILD%\vrscratch_foreign"
+    REM fakevr.dll under the name openvr_api.dll IS what a foreign one looks
+    REM like from here: right name, no edvr_selftest_system_hook export.
+    if not exist "%BUILD%\vrforeign" mkdir "%BUILD%\vrforeign"
+    copy /Y "%BUILD%\fakevr.dll" "%BUILD%\vrforeign\openvr_api.dll" >nul
+    "%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_ours" ours "%BUILD%\openvr_api.dll" || (
+        echo [edvr] ERROR: the VR runtime verdict is wrong for our own openvr_api.dll
+        exit /b 1
+    )
+    "%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_foreign" foreign "%BUILD%\vrforeign\openvr_api.dll" || (
+        echo [edvr] ERROR: the VR runtime verdict is wrong for a foreign openvr_api.dll
         exit /b 1
     )
 )
@@ -741,6 +877,27 @@ python "%ROOT%\tools\stencil_census.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === draw identity self-test ===
+REM The reader that answers "does a stable per-draw identity exist" off the
+REM ia=/ib= columns the DLL prints since 2026-09-08 (docs/per-object-motion.md
+REM Phase 0 question 4). Its numbers decide whether the design's memo can be
+REM built at all, and a key assembled one field short reads as a plausible
+REM percentage. It fails HERE.
+python "%ROOT%\tools\draw_identity.py" --self-test || (
+    echo [edvr] ERROR: the draw identity tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === pool pair self-test ===
+REM The reader of the object probe's raw pair dumps (edvr_logs\pool\*.bin,
+REM since 2026-09-08): the pose decode, the rigid clustering and the header
+REM layout it shares with src\d3d11\object_probe.cpp. A decode one field off
+REM reads as a plausible cloud of motions. It fails HERE.
+python "%ROOT%\tools\pool_pair.py" --self-test || (
+    echo [edvr] ERROR: the pool pair tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === eye-split diff self-test ===
 REM The tool that compares the two eyes of one frame. It registers the
 REM eyes before it compares them, because their projections are off-centre
@@ -750,6 +907,39 @@ REM cost a fix built on tiles that had landed on the Milky Way band. It
 REM fails HERE, not in the next report somebody trusts.
 python "tools\diff_eye_split.py" --self-test || (
     echo [edvr] ERROR: the eye-split diff tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === install self-test ===
+REM The tool that puts a build next to the game. Its --dry-run must write
+REM NOTHING -- not a copy, not a backup, not a directory -- and its backup
+REM naming is one string in one place, which is what keeps the game
+REM directories from filling with .bak files named six different ways. The
+REM test asserts both, against a fake game directory in the temp folder.
+python "tools\install_edvr.py" --self-test || (
+    echo [edvr] ERROR: the install tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === log reader self-test ===
+REM The tool that answers "is this log from the build I just installed"
+REM before anybody reads a counter off it. Its version regex has to match
+REM the line Log::note() really writes, timestamp prefix and all: anchored
+REM without that prefix it matched the synthetic logs in its own test and
+REM nothing whatsoever in the field. Its fixtures now carry the prefix.
+python "tools\edvr_log.py" --self-test || (
+    echo [edvr] ERROR: the log reader failed its own test
+    exit /b 1
+)
+
+echo [edvr] === release-note reflow self-test ===
+REM The tool that reflows release notes and docs. It must leave fenced
+REM code, tables and long URLs exactly as they are, must be idempotent --
+REM otherwise --check can never pass -- and must write UTF-8 with no BOM,
+REM because PowerShell 5.1 reads a BOM-less file as the ANSI codepage and
+REM has turned an em-dash into mojibake on a published comment before.
+python "tools\reflow_notes.py" --self-test || (
+    echo [edvr] ERROR: the reflow tool failed its own test
     exit /b 1
 )
 
@@ -775,11 +965,27 @@ if exist "%BUILD%\nvngx_dlss.dll" (
     echo        above says where it looked^). Not a release build.
 )
 echo.
-echo [edvr] To install: copy build\d3d11.dll and edvr.ini next to
-echo        EliteDangerous64.exe, and build\openvr_api.dll into
-echo        Openvr\win64, replacing the game's file of that name --
-echo        the original must already be renamed openvr_api_orig.dll.
-echo        The two halves do NOT go in the same place. See README.md.
+echo [edvr] To install this build for a test flight:
+echo        python tools\install_edvr.py --target steam --dry-run
+echo        python tools\install_edvr.py --target steam
+echo.
+echo        --target takes steam, frontier or a path; --openvr adds the VR
+echo        half. It refuses while the game is running, keeps one backup
+echo        per commit, and hashes what it copied against what it built --
+echo        an outdated DLL has invalidated a flight before. It leaves
+echo        edvr.ini alone unless --ini asks for it. Copying these by hand
+echo        is what filled both game directories with backups named four
+echo        different ways; CLAUDE.md says why not to.
+echo.
+echo [edvr] Where those files land, because the two halves do NOT go in the
+echo        same place: d3d11.dll and edvr.ini beside EliteDangerous64.exe,
+echo        and openvr_api.dll into Openvr\win64, replacing the game's file
+echo        of that name -- whose original must already be renamed
+echo        openvr_api_orig.dll. See README.md.
+echo.
+echo [edvr] After the flight, before reading a counter off the log --
+echo        whether the log is even this build:
+echo        python tools\edvr_log.py --target steam --expect-build HEAD
 echo.
 echo [edvr] Or hand somebody build\edvr-installer.exe: it carries the two
 echo        DLLs and edvr.ini, finds Steam, Epic and Frontier installs,

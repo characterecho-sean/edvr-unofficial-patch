@@ -664,8 +664,11 @@ def self_test():
     that fails silently."""
     old = ('[12:00:00.000] DC 0 #1 X n=360 i=1 r=@1 d=@2 c=@3 s=@4,-,-,- '
            'vh=A888D51024D9798E ds=02wA st=14 bm=F pr=- q=804')
+    # ...with ia=/ib= (2026-09-08), the draw's own arguments and its index
+    # buffer, on the IA tail: two more pairs to parse past.
     new = ('[12:00:00.000] DC 0 #2 X n=360 i=1 r=@1 d=@2 c=@3 s=@4,-,-,- '
-           'vh=81216C77F90DEDD6 vt=-,@5,-,-,-,-,-,- ds=17wZ st=14 bm=F pr=- '
+           'vs=@6 vh=81216C77F90DEDD6 vb=@7 sd=32 of=0 tp=4 ia=1536,-12,0 '
+           'ib=@8+64 vt=-,@5,-,-,-,-,-,- ds=17wZ st=14 bm=F pr=- '
            'bl=1,5,6,1/2,1,1 sm=FFFFFFFF so=rFF/w18/f7/1,1,3 q=805')
     lines = ['[12:00:00.000] DC begin census=1 frames=1 frame=1', old, new,
              '[12:00:00.000] DC id @1 tex 2818x2784 fmt=87 res=00000000AA00',

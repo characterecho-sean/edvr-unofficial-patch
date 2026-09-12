@@ -34,6 +34,8 @@ namespace edvr {
 HookMode contextHookModeFor(ID3D11DeviceContext* ctx);
 
 void hookDevice(ID3D11Device* device);
+// Sticky for the process, including later devices and submit-side passes.
+bool deviceHookRecoveryDisabled();
 void hookSwapChain(IDXGISwapChain* swapChain);
 void hookFactoryForDevice(ID3D11Device* device);
 // The process is exiting cleanly, so the crash sentinel must not be left
@@ -52,6 +54,11 @@ void deviceHookNoteCleanExit();
 // for the rest of the session and nothing else would say so.
 bool deviceHookAutoBiasSource(float* multiplier, float* bias);
 
+// Current saved HMD Quality for menu labels, independent of mip overrides.
+// Reads the graphics preset at most once a second per menu thread. False
+// means unknown; callers should show a neutral DLSS/DLAA label.
+bool deviceHookHmdQuality(float* multiplier);
+
 // The FSS theater's mode latch: true while the player is (believed to
 // be) in the Full System Scanner -- keyed by their own FSS bindings for
 // frame-exact edges, reconciled against the game's GuiFocus. vscreen's
@@ -62,6 +69,18 @@ bool deviceHookFssModeLatch();
 // or pad, only while the mode latch is open): the arrival window's
 // earliest marker. Consumed on read.
 bool deviceHookTakeFssZoomPress();
+
+// The game's own resource creations since the last take (the monitor takes
+// them once a frame for its long-frame line): counts, and the textures' and
+// buffers' bytes about.
+struct DeviceCreates {
+    uint32_t textures = 0;
+    uint32_t buffers = 0;
+    uint32_t shaders = 0;
+    uint64_t textureBytes = 0;
+    uint64_t bufferBytes = 0;
+};
+DeviceCreates deviceCreatesTake();
 
 void shutdownDeviceHooks();
 

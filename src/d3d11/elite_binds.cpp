@@ -64,6 +64,19 @@ const KeyMap kModMap[] = {
     {"LeftAlt", "ALT"},       {"RightAlt", "ALT"},
 };
 
+// The same six keys as MAIN keys, consulted only under
+// kEliteKeyAllowModifierMain (the settings menu: Sean's UI_Back is
+// Key_LeftControl). Raw virtual-key codes rather than names, because the
+// hotkey parser has no word for a bare left Ctrl -- "CTRL" there is a
+// modifier prefix, and a binding of just "CTRL" is the "no key" error. The
+// left/right distinction is kept: GetAsyncKeyState(VK_LCONTROL) polls one
+// physical key, which is what Elite bound.
+const KeyMap kModMainMap[] = {
+    {"LeftShift", "0xA0"},    {"RightShift", "0xA1"},
+    {"LeftControl", "0xA2"},  {"RightControl", "0xA3"},
+    {"LeftAlt", "0xA4"},      {"RightAlt", "0xA5"},
+};
+
 std::wstring bindingsDir() {
     wchar_t appdata[MAX_PATH] = {};
     const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
@@ -104,6 +117,82 @@ bool attrAfter(const std::string& text, size_t from, size_t span,
     return true;
 }
 
+// One candidate .binds file of the active preset.
+struct Cand {
+    std::wstring name;
+    char utf8[MAX_PATH];
+    FILETIME wt;
+};
+
+// The candidate files of the active preset, NEWEST-FIRST. Shared by every
+// lookup below (camera keyboard, camera gamepad, menu slots) -- this walk
+// was mirrored by hand in two functions with a "a selection-rule fix must
+// land in both" warning, and a third consumer is where a hand mirror
+// drifts. The camera fixtures in openvr_smoke pin its answers across the
+// move.
+//
+// Preset names come from StartPreset.4.start (one per bind context in
+// current builds) or the older StartPreset.start; no preset file means no
+// candidates. A file is a candidate when its name is <preset> plus the
+// version dot, so preset "Custom" does not also claim a preset named
+// "Custom2"; an EMPTY preset file admits every .binds.
+//
+// Newest first because Elite keeps previous-format presets beside the live
+// one -- a Custom.4.1.binds untouched since January 2025 sat beside the
+// maintained Custom.4.2.binds and answered a live rebind with January's
+// keys, because directory order put it first. The file the game maintains
+// is the one it rewrites on every Apply, so recency picks the truth and
+// self-heals across format bumps.
+//
+// Returns false when there is no preset file or the directory cannot be
+// enumerated; true with an empty `out` is a preset naming files that are
+// not there.
+bool collectActiveBindsFiles(const std::wstring& dir, std::vector<Cand>* out) {
+    out->clear();
+    std::string presets;
+    if (!readWholeFile(dir + L"\\StartPreset.4.start", &presets) &&
+        !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
+        return false;
+    }
+    std::vector<std::string> names;
+    {
+        size_t start = 0;
+        while (start < presets.size()) {
+            size_t end = presets.find_first_of("\r\n", start);
+            if (end == std::string::npos) end = presets.size();
+            if (end > start) names.push_back(presets.substr(start, end - start));
+            start = presets.find_first_not_of("\r\n", end);
+            if (start == std::string::npos) break;
+        }
+    }
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        Cand c;
+        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, c.utf8,
+                            sizeof(c.utf8), nullptr, nullptr);
+        bool active = names.empty();
+        for (const std::string& n : names) {
+            if (_strnicmp(c.utf8, n.c_str(), n.size()) == 0 &&
+                c.utf8[n.size()] == '.') {
+                active = true;
+                break;
+            }
+        }
+        if (!active) continue;
+        c.name = fd.cFileName;
+        c.wt = fd.ftLastWriteTime;
+        out->push_back(c);
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    std::sort(out->begin(), out->end(), [](const Cand& a, const Cand& b) {
+        return CompareFileTime(&a.wt, &b.wt) > 0;
+    });
+    return true;
+}
+
 }  // namespace
 
 bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen) {
@@ -129,6 +218,26 @@ bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen) {
     if ((name[0] == 'F' || name[0] == 'f') && name[1] >= '0' && name[1] <= '9') {
         snprintf(out, outLen, "%s", name);
         return true;
+    }
+    return false;
+}
+
+bool eliteBindsTranslateKeyEx(const char* eliteKey, unsigned flags, char* out,
+                              size_t outLen, bool* modifierMain) {
+    if (modifierMain) *modifierMain = false;
+    // The plain answer first, so a caller with the flag gets byte-for-byte
+    // what the camera path gets for every name the camera path can name.
+    if (eliteBindsTranslateKey(eliteKey, out, outLen)) return true;
+    if (!(flags & kEliteKeyAllowModifierMain)) return false;
+    if (!eliteKey || !out || outLen == 0) return false;
+    const char* name = eliteKey;
+    if (strncmp(name, "Key_", 4) == 0) name += 4;
+    for (const KeyMap& m : kModMainMap) {
+        if (_stricmp(name, m.elite) == 0) {
+            snprintf(out, outLen, "%s", m.ours);
+            if (modifierMain) *modifierMain = true;
+            return true;
+        }
     }
     return false;
 }
@@ -199,6 +308,88 @@ bool parseElementIn(const std::string& text, const char* element, char* out,
     return false;
 }
 
+// EVERY slot of one element, for the settings menu. Same closed-tag match
+// and same close-tag bound as parseElementIn; the difference is that nothing
+// returns early on the first translatable slot -- a gamepad Primary and a
+// keyboard Secondary both come back, each saying what it is, so the menu
+// can adopt the one and explain the other.
+//
+// The <Modifier> search is bounded by the NEXT slot's tag (parsePadIn's
+// rule), not by the element's end as parseElementIn's is. parseElementIn
+// is deliberately left as it is: for an element with a bare Primary and a
+// chorded Secondary it answers "SHIFT+W", and that answer is the camera
+// path's, pinned by the smoke fixtures. Here the same element reads as a
+// bare W and a chorded E, which is what the file says.
+//
+// Fills present, count and slot[]; the caller owns filesSeen and file.
+// Returns present. An unbound slot is not a slot: Elite writes
+// Device="{NoDevice}" Key="" for every empty Primary and Secondary
+// (MEASURED 2026-09-11: 430 of them in Sean's Custom.4.2.binds), and
+// counting one as "not keyboard" would have the menu report a key that is
+// on nothing as being on a controller.
+bool parseElementSlotsIn(const std::string& text, const char* element,
+                         unsigned flags, EliteKeySlots* out) {
+    out->present = false;
+    out->count = 0;
+    memset(out->slot, 0, sizeof(out->slot));
+    const size_t el = text.find(std::string("<") + element + ">");
+    out->present = el != std::string::npos;
+    if (el == std::string::npos) return false;
+    size_t end = text.find(std::string("</") + element + ">", el);
+    if (end == std::string::npos) end = el + 600;   // damaged file: old bound
+    for (const char* slot : {"<Primary ", "<Secondary "}) {
+        const size_t s = text.find(slot, el);
+        if (s == std::string::npos || s > end) continue;
+        std::string device, key;
+        if (!attrAfter(text, s, 120, "Device", &device)) continue;
+        if (!attrAfter(text, s, 160, "Key", &key)) continue;
+        if (key.empty() || _stricmp(device.c_str(), "{NoDevice}") == 0) continue;
+        EliteKeySlot& k = out->slot[out->count++];
+        snprintf(k.eliteName, sizeof(k.eliteName), "%s", key.c_str());
+        k.keyboard = _stricmp(device.c_str(), "Keyboard") == 0;
+        // This slot's span: up to the next slot's tag or the element's end.
+        size_t slotEnd = end;
+        for (const char* other : {"<Primary ", "<Secondary "}) {
+            const size_t o = text.find(other, s + 1);
+            if (o != std::string::npos && o < slotEnd) slotEnd = o;
+        }
+        // Keyboard modifiers within the span, prefixed exactly as
+        // parseElementIn builds them. A keyboard modifier this table has no
+        // word for still marks the slot chorded: the menu adopts bare keys
+        // only, and this slot is not one.
+        std::string prefix;
+        size_t m = s;
+        for (int guard = 0; guard < 3; ++guard) {
+            const size_t mod = text.find("<Modifier ", m);
+            if (mod == std::string::npos || mod > slotEnd) break;
+            std::string mdev, mkey;
+            if (attrAfter(text, mod, 120, "Device", &mdev) &&
+                _stricmp(mdev.c_str(), "Keyboard") == 0 &&
+                attrAfter(text, mod, 160, "Key", &mkey)) {
+                k.chorded = true;
+                const char* mn = mkey.c_str();
+                if (strncmp(mn, "Key_", 4) == 0) mn += 4;
+                for (const KeyMap& mm : kModMap) {
+                    if (_stricmp(mn, mm.elite) == 0) {
+                        prefix += mm.ours;
+                        prefix += "+";
+                        break;
+                    }
+                }
+            }
+            m = mod + 10;
+        }
+        if (!k.keyboard) continue;   // eliteName says which pad/mouse key
+        char keyName[32];
+        if (!eliteBindsTranslateKeyEx(key.c_str(), flags, keyName,
+                                      sizeof(keyName), &k.modifierMain)) {
+            continue;   // binding stays empty: keyboard, but unnamed
+        }
+        snprintf(k.binding, sizeof(k.binding), "%s%s", prefix.c_str(), keyName);
+    }
+    return true;
+}
+
 // The GamePad slots of one element: the raw Elite key name, no
 // translation (the xinput watcher owns that table).
 //
@@ -247,60 +438,15 @@ bool parsePadIn(const std::string& text, const char* element, char* out,
     return false;
 }
 
-// The walk MIRRORS eliteBindsLookupDir below -- preset names, newest
-// maintained file wins, first file containing the element answers alone.
-// A selection-rule fix must land in both.
+// The same file selection as eliteBindsLookupDir below (one walk,
+// collectActiveBindsFiles); the first file containing the element answers
+// alone.
 bool eliteBindsLookupPadDir(const wchar_t* dirC, const char* element,
                             char* out, size_t outLen) {
     if (!dirC || !dirC[0] || !element || !out || outLen == 0) return false;
     const std::wstring dir(dirC);
-    std::string presets;
-    if (!readWholeFile(dir + L"\\StartPreset.4.start", &presets) &&
-        !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
-        return false;
-    }
-    std::vector<std::string> names;
-    {
-        size_t start = 0;
-        while (start < presets.size()) {
-            size_t end = presets.find_first_of("\r\n", start);
-            if (end == std::string::npos) end = presets.size();
-            if (end > start) names.push_back(presets.substr(start, end - start));
-            start = presets.find_first_not_of("\r\n", end);
-            if (start == std::string::npos) break;
-        }
-    }
-    struct Cand {
-        std::wstring name;
-        char utf8[MAX_PATH];
-        FILETIME wt;
-    };
     std::vector<Cand> cands;
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) return false;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        Cand c;
-        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, c.utf8,
-                            sizeof(c.utf8), nullptr, nullptr);
-        bool active = names.empty();
-        for (const std::string& n : names) {
-            if (_strnicmp(c.utf8, n.c_str(), n.size()) == 0 &&
-                c.utf8[n.size()] == '.') {
-                active = true;
-                break;
-            }
-        }
-        if (!active) continue;
-        c.name = fd.cFileName;
-        c.wt = fd.ftLastWriteTime;
-        cands.push_back(c);
-    } while (FindNextFileW(find, &fd));
-    FindClose(find);
-    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
-        return CompareFileTime(&a.wt, &b.wt) > 0;
-    });
+    if (!collectActiveBindsFiles(dir, &cands)) return false;
     for (const Cand& c : cands) {
         std::string text;
         if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
@@ -354,63 +500,10 @@ bool eliteBindsLookupDir(const wchar_t* dirC, const char* element, char* out,
     if (!dirC || !dirC[0] || !element || !out || outLen == 0) return false;
     const std::wstring dir(dirC);
 
-    // The active preset names, one per bind context in current builds.
-    std::string presets;
-    if (!readWholeFile(dir + L"\\StartPreset.4.start", &presets) &&
-        !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
-        return false;
-    }
-    std::vector<std::string> names;
-    {
-        size_t start = 0;
-        while (start < presets.size()) {
-            size_t end = presets.find_first_of("\r\n", start);
-            if (end == std::string::npos) end = presets.size();
-            if (end > start) names.push_back(presets.substr(start, end - start));
-            start = presets.find_first_not_of("\r\n", end);
-            if (start == std::string::npos) break;
-        }
-    }
-
-    // Candidate files NEWEST-FIRST. Elite keeps previous-format presets
-    // beside the live one -- a Custom.4.1.binds untouched since January
-    // 2025 sat beside the maintained Custom.4.2.binds and answered a live
-    // rebind with January's keys, because directory order put it first.
-    // The file the game maintains is the one it rewrites on every Apply,
-    // so recency picks the truth and self-heals across format bumps.
-    struct Cand {
-        std::wstring name;
-        char utf8[MAX_PATH];
-        FILETIME wt;
-    };
+    // The active preset's files, newest first (the walk and its reasons
+    // are with collectActiveBindsFiles).
     std::vector<Cand> cands;
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) return false;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        Cand c;
-        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, c.utf8,
-                            sizeof(c.utf8), nullptr, nullptr);
-        // Prefix plus the version dot, so preset "Custom" does not also
-        // claim a preset named "Custom2".
-        bool active = names.empty();
-        for (const std::string& n : names) {
-            if (_strnicmp(c.utf8, n.c_str(), n.size()) == 0 &&
-                c.utf8[n.size()] == '.') {
-                active = true;
-                break;
-            }
-        }
-        if (!active) continue;
-        c.name = fd.cFileName;
-        c.wt = fd.ftLastWriteTime;
-        cands.push_back(c);
-    } while (FindNextFileW(find, &fd));
-    FindClose(find);
-    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
-        return CompareFileTime(&a.wt, &b.wt) > 0;
-    });
+    if (!collectActiveBindsFiles(dir, &cands)) return false;
 
     for (const Cand& c : cands) {
         std::string text;
@@ -458,6 +551,37 @@ bool eliteBindsLookup(const char* element, char* out, size_t outLen,
                       const char* fallbackElement) {
     return eliteBindsLookupDir(bindingsDir().c_str(), element, out, outLen,
                                fallbackElement);
+}
+
+bool eliteBindsLookupSlotsDir(const wchar_t* dirC, const char* element,
+                              unsigned flags, EliteKeySlots* out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!dirC || !dirC[0] || !element) return false;
+    const std::wstring dir(dirC);
+    std::vector<Cand> cands;
+    if (!collectActiveBindsFiles(dir, &cands)) return false;
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        ++out->filesSeen;
+        // The first file that CONTAINS the element answers ALONE, whatever
+        // its slots hold -- the camera lookup's rule, for the same reason:
+        // falling through to an older file would resurrect the stale keys
+        // recency exists to bury. No fallback element: MEASURED 2026-09-11,
+        // none of the ten UI elements has a _Humanoid twin in Sean's file.
+        if (parseElementSlotsIn(text, element, flags, out)) {
+            snprintf(out->file, sizeof(out->file), "%s", c.utf8);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool eliteBindsLookupSlots(const char* element, unsigned flags,
+                           EliteKeySlots* out) {
+    return eliteBindsLookupSlotsDir(bindingsDir().c_str(), element, flags,
+                                    out);
 }
 
 unsigned long long eliteBindsFingerprintDir(const wchar_t* dir) {

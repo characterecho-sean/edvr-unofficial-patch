@@ -1,12 +1,17 @@
 ﻿#include "device_hook.h"
 
 #include "shader_sig.h"
+#include "input_gate.h"
+#include "vr_runtime.h"
 
 #include <windows.h>
 
 #include <dxgi1_2.h>
 
+#include <atomic>
+
 #include "../common/config.h"
+#include "../common/temporal_mode.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
@@ -23,9 +28,12 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
+#include "eye_draw_snapshot.h"
+#include "gui_draw_snapshot.h"
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
+#include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -41,6 +49,7 @@ namespace {
 // CreateTexture1D or CreateTexture3D.
 constexpr size_t kDevCreateTexture2D     = 5;
 constexpr size_t kDevCreateVertexShader  = 12;
+constexpr size_t kDevCreateInputLayout   = 11;
 constexpr size_t kDevCreatePixelShader   = 15;
 constexpr size_t kDevCreateComputeShader = 18;
 // CreateSamplerState, counted against the SDK's ID3D11DeviceVtbl the same
@@ -80,6 +89,7 @@ constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
 
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateShader)(ID3D11Device*, const void*, SIZE_T,
                                                      ID3D11ClassLinkage*, void**);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateLayout)(ID3D11Device*,const D3D11_INPUT_ELEMENT_DESC*,UINT,const void*,SIZE_T,ID3D11InputLayout**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateTexture2D)(
     ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*,
     ID3D11Texture2D**);
@@ -116,6 +126,7 @@ struct State {
 
     PFN_CreateShader realCreateCS = nullptr;
     PFN_CreateShader realCreateVS = nullptr;
+    PFN_CreateLayout realCreateLayout = nullptr;
     PFN_CreateShader realCreatePS = nullptr;
     PFN_CreateTexture2D realCreateTexture2D = nullptr;
     PFN_CreateSamplerState realCreateSamplerState = nullptr;
@@ -171,6 +182,9 @@ struct State {
     // The draw census key (issue 69074 instrumentation). Unbound by default;
     // the census costs nothing until this is both bound and pressed.
     Hotkey censusKey;
+    // The eye dump key: both eyes as the headset receives them, to
+    // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
+    Hotkey eyesKey;
     // The external camera key, and only that one.
     //
     // A keypress is not a heuristic, and it is the whole reason this feature can
@@ -261,6 +275,7 @@ struct State {
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
     bool      sentinelConfirmed = false;
+    bool      recoveryDisabled = false;
 };
 
 // How long the hooks must survive before install is treated as having worked.
@@ -383,6 +398,58 @@ void dumpShaderBlob(const wchar_t* prefix, uint64_t hash, const void* bytecode,
     CloseHandle(h);
 }
 
+// The game's own creations, counted for the monitor's long-frame line
+// (2026-09-08: the hitches on a station approach came with the instance
+// pool's churn -- detail streaming in -- and a 423 ms frame whose render
+// thread was BUSY for 415 of them with EDVR's share at 0.2 ms; whether a
+// busy frame was making textures, buffers and shaders, which is streaming,
+// or something else, is what these say). Atomics: the creates run on the
+// game's streaming threads. Taken and zeroed once a frame.
+std::atomic<uint32_t> g_createTextures{0};
+std::atomic<uint32_t> g_createBuffers{0};
+std::atomic<uint32_t> g_createShaders{0};
+std::atomic<uint64_t> g_createTextureBytes{0};
+std::atomic<uint64_t> g_createBufferBytes{0};
+
+// About: bits per texel by the DXGI enum's contiguous families, and a third
+// again for a mip chain. A count, not an accounting.
+uint32_t formatBits(DXGI_FORMAT f) {
+    const unsigned v = static_cast<unsigned>(f);
+    if (v >= 1 && v <= 4) return 128;
+    if (v >= 5 && v <= 8) return 96;
+    if (v >= 9 && v <= 22) return 64;
+    if (v >= 23 && v <= 47) return 32;
+    if (v >= 48 && v <= 59) return 16;
+    if (v >= 60 && v <= 65) return 8;
+    if (v == 66) return 1;
+    if (v >= 67 && v <= 69) return 32;
+    if (v >= 70 && v <= 72) return 4;    // BC1
+    if (v >= 73 && v <= 78) return 8;    // BC2, BC3
+    if (v >= 79 && v <= 81) return 4;    // BC4
+    if (v >= 82 && v <= 84) return 8;    // BC5
+    if (v >= 85 && v <= 86) return 16;
+    if (v >= 87 && v <= 93) return 32;
+    if (v >= 94 && v <= 99) return 8;    // BC6H, BC7
+    return 32;
+}
+
+uint64_t texture2DBytes(const D3D11_TEXTURE2D_DESC& d) {
+    uint64_t bytes = static_cast<uint64_t>(d.Width) * d.Height * formatBits(d.Format) / 8u;
+    bytes *= d.ArraySize ? d.ArraySize : 1u;
+    if (d.MipLevels != 1) bytes += bytes / 3u;
+    return bytes;
+}
+
+HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPUT_ELEMENT_DESC* elements,UINT count,const void* bytecode,SIZE_T len,ID3D11InputLayout** out) {
+    const HRESULT hr=g_state->realCreateLayout(self,elements,count,bytecode,len,out);
+    if(self==g_state->device && SUCCEEDED(hr) && bytecode && len && out && *out)
+        guardedBudget(g_createBudget,[&]{
+            const uint64_t hash=fnv1a64(bytecode,len);
+            GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
+            EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
+        });
+    return hr;
+}
 HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecode,
                                          SIZE_T len, ID3D11ClassLinkage* linkage,
                                          void** out) {
@@ -390,6 +457,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         return g_state->realCreateVS(self, bytecode, len, linkage, out);
     }
     const HRESULT hr = g_state->realCreateVS(self, bytecode, len, linkage, out);
+    if (SUCCEEDED(hr)) g_createShaders.fetch_add(1, std::memory_order_relaxed);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
@@ -399,6 +467,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // vertices it is handed decides whether the curved screen is possible
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
+        EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
+        GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
     });
     return hr;
@@ -411,10 +481,13 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         return g_state->realCreatePS(self, bytecode, len, linkage, out);
     }
     const HRESULT hr = g_state->realCreatePS(self, bytecode, len, linkage, out);
+    if (SUCCEEDED(hr)) g_createShaders.fetch_add(1, std::memory_order_relaxed);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
+        if(hash==EyeDrawSnapshot::kVscreenPs) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
+        GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
     });
     return hr;
@@ -471,8 +544,13 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
     const HRESULT hr = createTexture2DForwarded(self, desc, init, out);
-    if (FAILED(hr) && self == g_state->device) {
-        noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);
+    if (self == g_state->device) {
+        if (FAILED(hr)) {
+            noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);
+        } else if (desc) {
+            g_createTextures.fetch_add(1, std::memory_order_relaxed);
+            g_createTextureBytes.fetch_add(texture2DBytes(*desc), std::memory_order_relaxed);
+        }
     }
     return hr;
 }
@@ -642,8 +720,16 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
     const HRESULT hr = g_state->realDevCreate[Slot](self, first, second, out);
     // Patching in place hooks the CLASS, so another device sharing the table
     // arrives here too. It gets the same forward; only ours gets the line.
-    if (FAILED(hr) && self == g_state->device) {
-        noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
+    if (self == g_state->device) {
+        if (FAILED(hr)) {
+            noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
+        } else if constexpr (Slot == kDevCreateBuffer) {
+            if (first) {
+                g_createBuffers.fetch_add(1, std::memory_order_relaxed);
+                g_createBufferBytes.fetch_add(static_cast<const D3D11_BUFFER_DESC*>(first)->ByteWidth,
+                                              std::memory_order_relaxed);
+            }
+        }
     }
     return hr;
 }
@@ -659,6 +745,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
         return g_state->realCreateCS(self, bytecode, len, linkage, out);
     }
     const HRESULT hr = g_state->realCreateCS(self, bytecode, len, linkage, out);
+    if (SUCCEEDED(hr)) g_createShaders.fetch_add(1, std::memory_order_relaxed);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
@@ -730,6 +817,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // frame's row says what EDVR's boundary work cost in it.
     const int64_t boundaryT0 = qpcNow();
     guardedBudget(g_frameBudget, [&] {
+        // WHICH VR BACK END THIS ACTUALLY IS, said once near the top of the
+        // log. Inside the budget because it reads the process module list;
+        // rate-limited to once a second by the module itself, and silent from
+        // the moment it has spoken. See vr_runtime.h for the session that made
+        // it necessary -- a perfect install the game never opened, and eight
+        // messages telling its owner the file was missing.
+        vrRuntimeTick();
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.
@@ -812,6 +906,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             quadProbeRequest();
             perfMonitorNoteEvent(kEvCensus);
         }
+        // The eye dump key: the next treated frame's two eyes to disk.
+        if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
         if (g_state->missedCensusNotes < kMissedDumpNotes &&
             g_state->censusKey.takeMissedWhileUnfocused()) {
             ++g_state->missedCensusNotes;
@@ -1263,6 +1359,10 @@ void readoptGameBindings() {
             "hotkey: your Elite bindings files changed, but both camera keys "
             "read the same as before.");
     }
+    // The menu's panel keys follow the same rebind; reached only while
+    // hotkey.read_game_bindings is on (the poll above gates on it), and
+    // it says "same as before" for itself.
+    menuAdoptGameBindings(true, "your Elite bindings changed");
 }
 
 // The Instruments page's rows: the same functions the diagnostic hotkeys
@@ -1275,6 +1375,9 @@ void menuActionCensus(void*) {
 }
 void menuActionResetView(void*) {
     headOffsetGateNewFootSession("the settings menu", /*journalSaysSo=*/false);
+}
+void menuActionDumpEyes(void*) {
+    temporalPassArmEyeDump();
 }
 void menuActionMarker(void*) {
     static uint32_t n = 0;
@@ -1301,6 +1404,9 @@ State& ensureState() {
         menuRegisterAction("Write a marker line to the graphics log",
                            "So a moment you noticed can be found in the log afterwards.",
                            &menuActionMarker, nullptr);
+        menuRegisterAction("Dump both eyes as seen",
+                           "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
+                           &menuActionDumpEyes, nullptr);
         menuConfigure(Config::get());
         // Empty default: the census is chased-bug instrumentation, and an
         // unbound key is how "off" is spelled for a hotkey.
@@ -1328,6 +1434,22 @@ State& ensureState() {
                     "hotkey: dump_draws is set but bound nothing (the line "
                     "above says why), so the draw census cannot be armed this "
                     "session.");
+            }
+        }
+        // The eye dump key: both eyes as the headset receives them, to
+        // edvr_logs\eyes as BMP -- what the player sees, readable off the
+        // desk (asked for 2026-09-09, with a debug view up). The census
+        // key's shape: empty is off, and a bind is said.
+        {
+            const std::string b = Config::get().getString("hotkey.dump_eyes", "");
+            g_state->eyesKey.setBinding(b.c_str());
+            if (g_state->eyesKey.key() != 0) {
+                Log::get().note("hotkey: eye dump key bound: %s (vk 0x%02X, mods 0x%X) -- both eyes to "
+                                "edvr_logs\\eyes as BMP on each press, one hitch each.",
+                                b.c_str(), g_state->eyesKey.key(), g_state->eyesKey.mods());
+            } else if (!b.empty()) {
+                Log::get().note("hotkey: dump_eyes is set but bound nothing, so the eye dump cannot be "
+                                "armed this session (the settings menu's row still can).");
             }
         }
         // The camera keys come from the GAME's own key configuration, and
@@ -1453,6 +1575,12 @@ State& ensureState() {
             }
             g_state->bindsFingerprint = eliteBindsFingerprint();
         }
+        // The settings menu's Elite panel keys, after the camera keys and
+        // OUTSIDE the block above: unconditional, so the disabled case logs
+        // its own "menu keys:" line too, and a session log with none means
+        // this call never ran. menuConfigure has already placed the summon
+        // key and the menu's own keys, which the rules check against.
+        menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();
@@ -1669,9 +1797,14 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
     return s.realCreateSamplerState(self, &d, out);
 }
 
+bool deviceHookRecoveryDisabled() {
+    return g_state && g_state->recoveryDisabled;
+}
+
 void hookDevice(ID3D11Device* device) {
     if (!device) return;
     State& s = ensureState();
+    if (s.recoveryDisabled) return;
     if (s.device) {
         // SAID OUT LOUD, once per extra device (2026-08-24).
         //
@@ -1709,15 +1842,22 @@ void hookDevice(ID3D11Device* device) {
         // future launch -- the same bargain the compositor hook struck, and for
         // the same reason: quitting from the menu before the confirmation looks
         // identical to crashing from in here.
+        // clearTrip clears the in-memory trip as well as its file. Keep
+        // THIS process disabled when OpenComposite creates another device.
+        // Otherwise the capability device owns the warmed shaders while
+        // Submit supplies textures from the game's first device.
+        s.recoveryDisabled = true;
         s.sentinel->clearTrip();
+        inputGateShutdown();
         Log::get().note(
             "SENTINEL TRIPPED: the previous run installed the d3d11 hooks and never "
             "confirmed them, which usually means it crashed -- though a session that "
             "ended in the first few seconds looks the same from here. EVERY fix in "
-            "d3d11.dll is off for THIS session only, and it will try again next "
+            "d3d11.dll is off for THIS session only, on every device, and it will try again next "
             "launch: the black void, the panel distance, the exposure share, the "
             "transition flash detector and Explorer Cam's half of the gate. The game "
-            "renders exactly as it would without EDVR installed.\n"
+            "renders without EDVR's graphics treatments; the EDVR menu is unavailable "
+            "until the next launch. The OpenVR half has its own recovery guard.\n"
             "  If this keeps happening, the hooks really are crashing and the log is "
             "worth reporting. To force them on anyway, set ignore_sentinel = 1 under "
             "[advanced].");
@@ -1752,6 +1892,7 @@ void hookDevice(ID3D11Device* device) {
     }
     s.deviceHook.replace(kDevCreateVertexShader, &hookedCreateVS,
                          reinterpret_cast<void**>(&s.realCreateVS));
+    s.deviceHook.replace(kDevCreateInputLayout,&hookedCreateLayout,reinterpret_cast<void**>(&s.realCreateLayout));
     s.deviceHook.replace(kDevCreatePixelShader, &hookedCreatePS,
                          reinterpret_cast<void**>(&s.realCreatePS));
     s.deviceHook.replace(kDevCreateComputeShader, &hookedCreateCS,
@@ -1775,7 +1916,8 @@ void hookDevice(ID3D11Device* device) {
 #undef EDVR_HOOK_DEV_CREATE
     {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
-        const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", "0");
+        const bool temporal = temporalModeEnabled(sentinelCfg.getString("fix.temporal_aa", "off"));
+        const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", temporal ? "auto" : "0");
         float bias = 0.0f;
         if (_stricmp(biasKey.c_str(), "auto") == 0) {
             float mult = 0.0f, ssaa = 0.0f;
@@ -1883,6 +2025,7 @@ void hookDevice(ID3D11Device* device) {
 void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!swapChain) return;
     State& s = ensureState();
+    if (s.recoveryDisabled) return;
     if (s.swapChain) return;
 
     if (!s.swapChainHook.attach(swapChain) ||
@@ -1903,6 +2046,7 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
 void hookFactoryForDevice(ID3D11Device* device) {
     if (!device) return;
     State& s = ensureState();
+    if (s.recoveryDisabled) return;
     if (s.factoryHook.attached()) return;
 
     IDXGIDevice*  dxgiDevice = nullptr;
@@ -1954,6 +2098,19 @@ bool deviceHookTakeFssZoomPress() {
     return true;
 }
 
+bool deviceHookHmdQuality(float* multiplier) {
+    static thread_local uint64_t nextRead = 0;
+    static thread_local float quality = 0.0f;
+    static thread_local bool valid = false;
+    const uint64_t now = GetTickCount64();
+    if (now >= nextRead) {
+        valid = eliteHmdMultiplier(&quality, nullptr, nullptr, 0);
+        nextRead = now + 1000;
+    }
+    if (multiplier) *multiplier = valid ? quality : 0.0f;
+    return valid;
+}
+
 bool deviceHookAutoBiasSource(float* multiplier, float* bias) {
     State& s = ensureState();
     if (!s.samplerBiasAuto) return false;
@@ -1994,6 +2151,16 @@ void deviceHookNoteCleanExit() {
         g_state->sentinelConfirmed = true;
         g_state->sentinel->confirm();
     }
+}
+
+DeviceCreates deviceCreatesTake() {
+    DeviceCreates c;
+    c.textures = g_createTextures.exchange(0, std::memory_order_relaxed);
+    c.buffers = g_createBuffers.exchange(0, std::memory_order_relaxed);
+    c.shaders = g_createShaders.exchange(0, std::memory_order_relaxed);
+    c.textureBytes = g_createTextureBytes.exchange(0, std::memory_order_relaxed);
+    c.bufferBytes = g_createBufferBytes.exchange(0, std::memory_order_relaxed);
+    return c;
 }
 
 void shutdownDeviceHooks() {

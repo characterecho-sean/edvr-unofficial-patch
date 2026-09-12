@@ -853,7 +853,7 @@ void* resolveInner(void* srcTex, int eye, const float* bounds, uint32_t outW,
 }  // namespace edvr::(anonymous)
 
 void supersamplePassConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("experimental.supersample_resolve", "auto");
+    const std::string mode = cfg.getString("experimental.supersample_resolve", "off");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
     strncpy_s(g_mode, mode.c_str(), _TRUNCATE);
 }

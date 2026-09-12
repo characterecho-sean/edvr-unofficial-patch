@@ -218,6 +218,12 @@ struct Shared {
     volatile LONG     edvrEvents;
     volatile LONG     doorCpuUs;
     volatile LONG     waitCpuUs;
+    // The detector's verdict on the last jump, d3d11 -> openvr: bits 0-1 say
+    // whether the camera came back (1, a glitch) or stayed (2, a change of
+    // reference frame), and the bits above them count the verdicts, so a
+    // reader that remembers the value at a withhold can tell a NEW verdict
+    // from the last jump's. One word, so the two never tear.
+    volatile LONG     jumpVerdict;
 };
 
 // Per PROCESS, not per logon session.
@@ -234,6 +240,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v30 because the detector's verdict on a jump crosses to the openvr half
+// (jumpVerdict), which waits for it before restarting the history.
 // _v29 because the head lock's two angles are packed with a bias that fits
 // the field they are masked into; the old pair would read each other's
 // angles 409.6 degrees out.
@@ -286,7 +294,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v29_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v30_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -473,6 +481,21 @@ void announceGlitchConsumer() {
 bool glitchConsumerPresent() {
     Shared* s = map();
     return s && InterlockedCompareExchange(&s->consumer, 0, 0) != 0;
+}
+
+void noteJumpVerdict(uint32_t verdict) {
+    Shared* s = map();
+    if (!s) return;
+    // The d3d11 half's own count of verdicts, above the verdict's two bits:
+    // the same verdict twice running still reads as new to the openvr half.
+    static uint32_t count = 0;
+    ++count;
+    InterlockedExchange(&s->jumpVerdict, static_cast<LONG>((count << 2) | (verdict & 3u)));
+}
+
+uint32_t jumpVerdictPacked() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->jumpVerdict, 0, 0)) : 0u;
 }
 
 void setExternalCameraOnFoot(bool on) {

@@ -745,8 +745,9 @@ void emitValues(State* s) {
             // symmetric. A Pimax's is (t=-1.2648 b=+1.2648) and a Quest 3's
             // is not (t=-1.4281 b=+0.9657), so on the Quest the panel was
             // built through a projection that did not match the runtime's
-            // and sheared as the head moved. v[2] is top, v[3] is bottom;
-            // both eyes report the same pair.
+            // and sheared as the head moved. Keep the API order here:
+            // v[2] is pfTop (-Y), v[3] is pfBottom (+Y), despite their
+            // historical names. Both eyes report the same pair.
             announceEyeTangentsVertical(fabsf(v[2]), fabsf(v[3]));
         }
         bool moved = !s->lastRawSeen[eye];

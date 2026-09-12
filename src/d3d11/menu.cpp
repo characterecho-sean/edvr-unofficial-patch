@@ -22,7 +22,11 @@
 #include "../common/log.h"
 #include "../common/proxy.h"
 #include "../common/timing.h"
+#include "../common/temporal_mode.h"
+#include "device_hook.h"
+#include "elite_binds.h"
 #include "input_gate.h"
+#include "menu_keys.h"
 #include "menu_panel.h"
 #include "menu_schema.h"
 #include "perf_monitor.h"
@@ -47,9 +51,8 @@ constexpr int kRowDefCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRo
 constexpr int kVisibleRows = 9;
 // The fade, in and out.
 constexpr uint64_t kFadeMs = 150;
-// Hold-to-repeat: the first repeat, then the cadence.
-constexpr uint64_t kRepeatFirstMs = 400;
-constexpr uint64_t kRepeatMs = 83;
+// (Hold-to-repeat's timings and the tracker live in menu_keys.h now, so
+// the test can step them.)
 // The draw the gate follows: a panel whose export has not run within this
 // long is not being seen, and the keyboard goes back to the game.
 constexpr uint64_t kDrawnFreshMs = 250;
@@ -97,12 +100,6 @@ struct RowState {
     std::string snapshot;  // restart rows: the value at launch
     bool        pending = false;
     bool        auditNoted = false;
-};
-
-struct KeyRepeat {
-    int      vk = 0;
-    bool     down = false;
-    uint64_t nextMs = 0;
 };
 
 // The keys a typed value can be built from: the digits (top row and the
@@ -174,6 +171,24 @@ struct State {
 
     KeyRepeat keys[12];
     bool shiftHeld = false;
+
+    // Elite's own panel keys as aliases of the menu's actions (menu_keys.h
+    // holds the rules; docs/settings-menu.md, "Your Elite keys"). The raw
+    // answers are cached so a hotkey.menu change re-resolves without a
+    // file read; one tracker per adopted alias, its vk copied from the
+    // table. The aliases are never Hotkey bindings.
+    EliteKeySlots  aliasSlots[kMenuUiElementCount] = {};
+    MenuAliasTable aliases = {};
+    KeyRepeat      aliasKeys[kMenuAliasMax];
+    // 0 never read, 1 read off, 2 no files, 3 read but nothing adopted,
+    // 4 adopted.
+    uint8_t aliasSource = 0;
+    bool    readGameBindings = true;      // hotkey.read_game_bindings as last configured
+    bool    aliasesLiveShown = false;     // what the last raster's legend assumed; a change marks contentDirty
+    bool    sharedWarnShown = false;      // whether the last raster carried KEYS SHARED WITH THE GAME; same
+    bool    aliasHeldBackNoted = false;   // the held-back line, once per session
+    int     footerLogged = 0;             // the footer's measured widths, at most four per session
+    std::string footerLoggedText;         // ...and the last footer they were logged for
 
     // Typing a value (a number, or a free string): the row being typed
     // into, the buffer, and the caret's blink. Enter opens and commits,
@@ -300,6 +315,12 @@ struct ChoiceItem {
     std::string label;
 };
 
+const char* nvidiaLabel() {
+    float quality = 0.0f;
+    deviceHookHmdQuality(&quality);
+    return temporalNvidiaLabel(quality);
+}
+
 std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
     std::vector<ChoiceItem> out;
     std::string packed(d.choices);
@@ -317,6 +338,9 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             } else {
                 c.value = item;
                 c.label = item;
+            }
+            if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && c.value == "dlss") {
+                c.label = nvidiaLabel();
             }
             out.push_back(c);
         }
@@ -359,6 +383,9 @@ std::string switchWord(const MenuRowDef& d, const std::string& value) {
 }
 
 std::string displayValue(const MenuRowDef& d, const std::string& v) {
+    if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && _stricmp(v.c_str(), "dlaa") == 0) {
+        return "DLAA"; // explicit legacy 1:1 mode, even below HMD Quality 1
+    }
     switch (d.kind) {
         case MenuKind::Toggle:
             return boolOf(v, boolOf(d.shipped, false)) ? "on" : "off";
@@ -645,6 +672,14 @@ void firstSelectable(Page& p) {
 void buildPages() {
     State& s = g_s;
     const int keepPage = s.page;
+    // The page being read keeps its place through a rebuild. The developer
+    // switch sits at the BOTTOM of the Performance page and rebuilds the
+    // pages when flipped; without this the highlight jumped back to the
+    // first row under the hand that had just reached the last one.
+    const char* keepName = s.pages.empty() ? "" : s.pages[s.page].name;
+    const int keepHighlight = s.pages.empty() ? 0 : s.pages[s.page].highlight;
+    const int keepScroll = s.pages.empty() ? 0 : s.pages[s.page].scroll;
+    const size_t keepCount = s.pages.empty() ? 0 : s.pages[s.page].entries.size();
     s.pages.clear();
     {
         Page p;
@@ -703,6 +738,17 @@ void buildPages() {
     }
     s.developerBuilt = s.developer;
     s.page = keepPage < static_cast<int>(s.pages.size()) ? keepPage : 0;
+    // Same page, same rows: put the highlight and the scroll back. A page
+    // whose rows changed (an action registered on Instruments) starts at
+    // its first row as before.
+    {
+        Page& p = s.pages[s.page];
+        if (strcmp(p.name, keepName) == 0 && p.entries.size() == keepCount &&
+            keepHighlight >= 0 && keepHighlight < static_cast<int>(p.entries.size())) {
+            p.highlight = keepHighlight;
+            p.scroll = keepScroll;
+        }
+    }
     s.contentDirty = true;
 }
 
@@ -795,6 +841,39 @@ void buildStatus(MenuContent& c) {
         char line[240];
         inputGateStatusLine(line, sizeof(line));
         statusLine(c, "Keyboard", line);
+    }
+    {
+        // Elite's panel keys the menu answers to, or why it does not. The
+        // gate is never private on THIS page by design, so the held-back
+        // test is the door evidence alone (inputGateGameKeyboardSeen), not
+        // the alias predicate, which would read "held back" here always.
+        const State& s = g_s;
+        char v[64];
+        if (s.aliasSource == 0) {
+            snprintf(v, sizeof(v), "not read yet");
+        } else if (s.aliasSource == 1) {
+            snprintf(v, sizeof(v), "off (read_game_bindings)");
+        } else if (s.aliasSource == 2) {
+            snprintf(v, sizeof(v), "no bindings files found");
+        } else if (s.aliasSource == 3) {
+            snprintf(v, sizeof(v), "none adopted (see log)");
+        } else if (!s.privateWanted || !inputGateGameKeyboardSeen()) {
+            // The page pair follows Tab, so it works in shared mode and on
+            // a rig whose game keyboard has not reached a door; only the
+            // rest is off or held back.
+            bool pageAdopted = false;
+            for (int i = 0; i < s.aliases.count; ++i) {
+                pageAdopted |= menuAliasFollowsTab(s.aliases.alias[i].nav);
+            }
+            if (!s.privateWanted) {
+                snprintf(v, sizeof(v), "%s (keys shared)", pageAdopted ? "page keys only" : "off");
+            } else {
+                snprintf(v, sizeof(v), "%sheld back (see log)", pageAdopted ? "page keys only; rest " : "");
+            }
+        } else {
+            menuAliasStatusValue(s.aliases, v, sizeof(v));
+        }
+        statusLine(c, "Elite keys", v);
     }
     {
         int w = 0, h = 0;
@@ -933,6 +1012,12 @@ void sizeContent(MenuContent& c, float widthDeg, float textDeg, bool withTip = f
     if (c.capPx > 80) c.capPx = 80;
 }
 
+// The footer composer's ruler: the raster's own DrawTextW at the footer's
+// em, which is the content's cap (menu_panel.cpp, Font::Small).
+int measureFooterLine(const char* utf8, void* ctx) {
+    return menuPanelMeasureLine(utf8, static_cast<const MenuContent*>(ctx)->capPx);
+}
+
 void buildContent(MenuContent& c) {
     State& s = g_s;
     memset(&c, 0, sizeof(c));
@@ -987,6 +1072,15 @@ void buildContent(MenuContent& c) {
     }
     Page& p = s.pages[s.page];
     const int pendingN = pendingRestartCount();
+    // Whether Elite's adopted keys ACT on this page right now (menu_keys.h,
+    // the one predicate). The legend, the tooltip and the reminder line
+    // all follow this rather than mere adoption, so the panel never names
+    // a key that would do nothing -- or worse, would reach the ship.
+    const bool gateHolds = inputGateHoldsGameKeyboard();
+    const bool aliasesLive = s.aliases.adopted && menuAliasMayAct(gateHolds, s.editEntry >= 0, p.status);
+    s.aliasesLiveShown = s.aliases.adopted && menuAliasMayAct(gateHolds, false, p.status);
+    const char* navName[kNavCount];
+    for (int i = 0; i < kNavCount; ++i) navName[i] = s.aliases.navName[i];
 
     if (p.monitor) {
         // No hint line: the tiles carry their own captions, and the height
@@ -1031,6 +1125,10 @@ void buildContent(MenuContent& c) {
             const RowState& r = g_rows[e.def];
             const bool editingThis = (s.editEntry == i);
             strncpy(l.left, d.label, sizeof(l.left) - 1);
+            if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0) {
+                const std::string mode = Config::get().getString("fix.temporal_aa", "off");
+                snprintf(l.left, sizeof(l.left), "%s preset", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
+            }
             std::string v = displayValue(d, r.value);
             if (editingThis) {
                 // What has been typed, with a caret. The raster shows a
@@ -1099,6 +1197,13 @@ void buildContent(MenuContent& c) {
                                       : "\nEnter writes it, Escape leaves it alone.";
                 } else if (s.resetArmedEntry == i) {
                     body += "\nPress R again to reset it to the shipped value.";
+                } else if (aliasesLive) {
+                    // The keys the player already uses in the ship, named
+                    // only while they act here.
+                    char act[64];
+                    menuComposeTipAction(navName, !(d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice),
+                                         act, sizeof(act));
+                    body += std::string("\n") + act;
                 } else if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) {
                     body += "\nEnter or Left/Right changes it.";
                 } else {
@@ -1122,19 +1227,55 @@ void buildContent(MenuContent& c) {
         s.tooltipUp = showTip;
     }
 
-    std::string footer =
-        s.editEntry >= 0
-            ? std::string("Type a value   Backspace deletes   Enter writes it   Esc cancels")
-            : std::string("Up/Down pick   Left/Right change   Enter switch or type   Tab page   "
-                          "PgUp/PgDn read on   R twice resets   Esc close");
-    if (pendingN) {
-        char pb[64];
-        snprintf(pb, sizeof(pb), "   %d change%s at next launch", pendingN, pendingN == 1 ? "" : "s");
-        footer += pb;
+    // The footer: a legend line and at most one status line, composed
+    // against the raster's own ruler so what is drawn is what fits.
+    // MEASURED 2026-09-11: the old 115-character legend was 1520 px in a
+    // 770 px line at the default width 30 / text 1.1, cut after about 55
+    // characters, so "Tab page", the pending count and KEYS SHARED WITH
+    // THE GAME had never been visible -- the likeliest root of "how do I
+    // change tabs". The width is the card less the raster's pad either
+    // side (menu_panel.cpp: pad = cap * 8 / 10).
+    {
+        MenuFooterInput in = {};
+        in.editing = s.editEntry >= 0;
+        in.statusPage = p.status;
+        in.pageName = p.name;
+        in.privateWanted = s.privateWanted;
+        // During the fade-out the flag is already clear and the warning
+        // would flash; a closed menu shares nothing it needs to warn of.
+        // The tick sets the gate BEFORE building content, so on the open
+        // tick this reads the gate the menu will have, not the closed
+        // menu's 0 (which composed a false warning on every open).
+        in.gatePrivate = !s.open || inputGatePrivate();
+        // What this raster says about the gate, for the tick to compare
+        // against (menuComposeFooter's rule for the fault line).
+        s.sharedWarnShown = in.privateWanted && !in.statusPage && !in.gatePrivate;
+        in.aliasesLive = aliasesLive;
+        in.adopted = s.aliases.adopted;
+        for (int i = 0; i < kNavCount; ++i) in.navName[i] = navName[i];
+        in.pendingN = pendingN;
+        in.widthPx = c.cardPx - 2 * (c.capPx * 8 / 10);
+        menuComposeFooter(in, &measureFooterLine, &c, c.footer, sizeof(c.footer));
+        // The flight instrument for the measurement above: each line's
+        // width against its line, at most four footers a session, and
+        // never the same footer twice. A line over the width is the
+        // composer's own failure, since it measured with this ruler.
+        if (s.footerLogged < 4 && s.footerLoggedText != c.footer) {
+            s.footerLoggedText = c.footer;
+            ++s.footerLogged;
+            const char* line = c.footer;
+            for (int n = 1; line && *line; ++n) {
+                const char* nl = strchr(line, '\n');
+                char one[160];
+                const size_t len = nl ? static_cast<size_t>(nl - line) : strlen(line);
+                snprintf(one, sizeof(one), "%.*s", static_cast<int>(len), line);
+                const int px = menuPanelMeasureLine(one, c.capPx);
+                Log::get().note("menu panel: footer line %d measures %d px in a %d px line%s.", n, px,
+                                in.widthPx, px > in.widthPx ? " -- ellipsised" : "");
+                line = nl ? nl + 1 : nullptr;
+            }
+        }
     }
-    if (s.open && s.privateWanted && !inputGatePrivate()) footer += "   KEYS SHARED WITH THE GAME";
-    if (!s.privateWanted) footer += "   keys shared (menu.keyboard)";
-    strncpy(c.footer, footer.c_str(), sizeof(c.footer) - 1);
 }
 
 // The toast's and the overlay's angular width.
@@ -1344,25 +1485,28 @@ bool gameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
-// Edge-and-repeat over EDVR's own import of GetAsyncKeyState, which the
-// gate never patches. Returns how many presses this key delivered this tick.
-int pollKey(KeyRepeat& k, uint64_t now, bool focused) {
-    const bool down = focused && (GetAsyncKeyState(k.vk) & 0x8000) != 0;
-    int presses = 0;
-    if (down && !k.down) {
-        presses = 1;
-        k.nextMs = now + kRepeatFirstMs;
-    } else if (down && now >= k.nextMs) {
-        presses = 1;
-        k.nextMs = now + kRepeatMs;
-    }
-    k.down = down;
-    return presses;
+// The raw key, through EDVR's own import of GetAsyncKeyState, which the
+// gate never patches. A vk of 0 is no key.
+bool rawKeyDown(int vk) { return vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0; }
+
+// Edge-and-repeat over the raw key (menu_keys.h, keyRepeatStep). Returns
+// how many presses this key delivered this tick; act=false tracks the key
+// and swallows it until it is released.
+int pollKey(KeyRepeat& k, uint64_t now, bool focused, bool act = true) {
+    return keyRepeatStep(k, focused && rawKeyDown(k.vk), now, act);
 }
 
 enum KeyIndex {
     kUp, kDown, kLeft, kRight, kEnter, kSpace, kTab, kPgUp, kPgDn, kHome, kEnd, kReset
 };
+
+// What each fixed key does, as the one dispatcher sees it (KeyIndex
+// order). Tab is PageNext here and PagePrev with Shift, decided at the
+// poll; the resolver hands the rules this same table, so a panel key that
+// lands on one of these is refused for the reason the table gives.
+constexpr MenuNav kFixedNavs[12] = {kNavUp,       kNavDown,     kNavLeft,   kNavRight,
+                                    kNavSelect,   kNavSelect,   kNavPageNext, kNavReadBack,
+                                    kNavReadOn,   kNavHome,     kNavEnd,    kNavReset};
 
 void initKeys() {
     const int vks[12] = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_SPACE,
@@ -1376,6 +1520,133 @@ void initKeys() {
         g_s.editKeys[i].vk = kEditKeys[i].vk;
         g_s.editKeys[i].down = false;
         g_s.editKeys[i].nextMs = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Elite's panel keys
+
+// Apply the rules (menu_keys.h) to the cached slots: the fixed keys with
+// their navs, Escape, the summon chord and every registered hotkey are
+// what a panel key is checked against. Returns whether the table changed.
+// Each alias tracker takes its vk and is PRIMED FROM THE RAW KEY: a key
+// held through a rebind cannot act on its new meaning until it is pressed
+// afresh. No file is read here, which is what lets a hotkey.menu change
+// re-resolve at once.
+bool resolveAliases() {
+    State& s = g_s;
+    MenuAliasInput in[kMenuUiElementCount];
+    for (int i = 0; i < kMenuUiElementCount; ++i) {
+        const EliteKeySlots& sl = s.aliasSlots[i];
+        MenuAliasInput& e = in[i];
+        e.element = kMenuUiElements[i].element;
+        e.nav = kMenuUiElements[i].nav;
+        e.repeats = kMenuUiElements[i].repeats;
+        e.slots = sl.present ? sl.count : 0;
+        for (int k = 0; k < 2; ++k) {
+            e.binding[k] = sl.slot[k].binding;
+            e.eliteName[k] = sl.slot[k].eliteName;
+            e.keyboard[k] = sl.slot[k].keyboard;
+            e.chorded[k] = sl.slot[k].chorded;
+            e.modifierMain[k] = sl.slot[k].modifierMain;
+        }
+    }
+    MenuFixedKeys fixed = {};
+    for (int i = 0; i < 12; ++i) {
+        fixed.vks[i] = s.keys[i].vk;
+        fixed.navs[i] = kFixedNavs[i];
+    }
+    fixed.count = 12;
+    fixed.escapeVk = VK_ESCAPE;
+    fixed.summonVk = s.summon.key();
+    fixed.summonMods = s.summon.mods();
+    fixed.registeredCount = hotkeyRegisteredKeys(fixed.registered, 16);
+    MenuAliasTable t;
+    menuAliasResolve(in, kMenuUiElementCount, fixed, &t);
+    // The resolver zeroes the whole table, padding included, so the same
+    // slots give a memcmp-equal answer (pinned by menu_test).
+    const bool changed = memcmp(&t, &s.aliases, sizeof(t)) != 0;
+    s.aliases = t;
+    for (int i = 0; i < kMenuAliasMax; ++i) {
+        KeyRepeat& k = s.aliasKeys[i];
+        k.vk = i < t.count ? t.alias[i].vk : 0;
+        keyRepeatPrime(k, rawKeyDown(k.vk));
+    }
+    bool anyFile = false;
+    for (int i = 0; i < kMenuUiElementCount; ++i) anyFile |= s.aliasSlots[i].filesSeen > 0;
+    s.aliasSource = !anyFile ? 2 : !t.adopted ? 3 : 4;
+    s.contentDirty = true;
+    return changed;
+}
+
+// The basename of the file the answers came from, for the log.
+const char* aliasFileName() {
+    const State& s = g_s;
+    for (int i = 0; i < kMenuUiElementCount; ++i) {
+        if (s.aliasSlots[i].present && s.aliasSlots[i].file[0]) return s.aliasSlots[i].file;
+    }
+    return "your bindings files";
+}
+
+// The outcome, one line, after every read of the slots: what was adopted
+// from which file and what was skipped and why, or which of the three
+// ways there was nothing to adopt. `prefix` is the re-read's own opening
+// ("your Elite bindings changed -- "); empty on the first read. A second
+// line follows only for keys this build cannot name, so a log can be
+// acted on. This is the line whose ABSENCE says the code never ran: the
+// call after the camera keys' adoption is unconditional.
+void logAliasOutcome(const char* prefix) {
+    const State& s = g_s;
+    const char* file = aliasFileName();
+    if (s.aliasSource == 2) {
+        Log::get().note("menu keys: %sno bindings files were found under Options\\Bindings, so the "
+                        "menu's own keys only. (A stock control scheme keeps its file in the "
+                        "game's ControlSchemes folder, which this build does not read yet.)",
+                        prefix);
+        return;
+    }
+    // Sized past Log::note's own 1200-byte line, so its "...[truncated]"
+    // marker is the backstop and the skipped list is never the binding
+    // cap: a hand-built file with a pad on every Primary and the cursor
+    // cluster on every Secondary skips 18 items (~770 chars), and a 600-
+    // byte list dropped "Home (read on; ...)" -- the very question the
+    // list exists to answer.
+    char skipped[1200];
+    menuAliasSkippedText(s.aliases, skipped, sizeof(skipped));
+    if (s.aliasSource == 3) {
+        // Nothing adopted: either no panel key is on the keyboard at all,
+        // or every one that is already means something here.
+        bool anyKeyboard = false;
+        for (int i = 0; i < s.aliases.skippedCount; ++i) {
+            anyKeyboard |= s.aliases.skipped[i].reason != kSkipNotKeyboard;
+        }
+        if (!anyKeyboard) {
+            Log::get().note("menu keys: %snone of Elite's panel keys is on a keyboard key in %s "
+                            "(they are on a controller or the mouse); the menu's own keys only.",
+                            prefix, file);
+        } else {
+            Log::get().note("menu keys: %severy keyboard panel key in %s is already one of the "
+                            "menu's own (%s); the menu's own keys only.",
+                            prefix, file, skipped);
+        }
+    } else {
+        char summary[400];
+        menuAliasSummary(s.aliases, summary, sizeof(summary));
+        Log::get().note("menu keys: %sadopted from %s -- %s.%s%s%s Tab, the arrows, Enter and "
+                        "Escape still work.",
+                        prefix, file, summary, skipped[0] ? " Skipped: " : "", skipped,
+                        skipped[0] ? "." : "");
+    }
+    std::string unnamed;
+    for (int i = 0; i < s.aliases.skippedCount; ++i) {
+        const MenuAliasSkipped& k = s.aliases.skipped[i];
+        if (k.reason != kSkipUnnamed) continue;
+        if (!unnamed.empty()) unnamed += ", ";
+        unnamed += std::string(k.element) + " " + k.name;
+    }
+    if (!unnamed.empty()) {
+        Log::get().note("menu keys: keys this build cannot name: %s (please report this line).",
+                        unnamed.c_str());
     }
 }
 
@@ -1404,6 +1675,14 @@ void beginEdit(int entryIndex, int defIndex) {
     s.editDef = defIndex;
     s.editBuf = g_rows[defIndex].value;
     if (s.editBuf.size() > kEditMax) s.editBuf.resize(kEditMax);
+    // Every typing key is seeded from the raw key: one held as the row
+    // opens -- a letter that is also a panel key, or Space, which is also
+    // the fixed select key -- is parked until released, so it cannot land
+    // in the buffer it opened. (Belt and braces over the act=false tracking
+    // outside an edit; it also closes the Space-appended-at-open case that
+    // commitEdit's trim only papered over, since editBufferBad reads the
+    // untrimmed buffer.)
+    for (KeyRepeat& k : s.editKeys) keyRepeatPrime(k, rawKeyDown(k.vk));
     s.editBad = editBufferBad();
     s.contentDirty = true;
 }
@@ -1465,12 +1744,80 @@ bool handleEditKeys(uint64_t now, bool focused) {
     return any;
 }
 
+void closeMenu(const char* why);
+
+// The one dispatcher: every fixed key and every adopted Elite key is a
+// MenuNav, so an alias is structurally an alias of a fixed key's action and
+// there is no second switch to drift from this one. Back is the only nav
+// no fixed key emits (Escape has its own edge in menuTick, because it
+// must first abandon a value being typed); it closes the menu, and the
+// closing key is captured into the gate's release tail, so Backspace or
+// Ctrl reaches the game only after a release and a fresh press.
+void dispatchNav(MenuNav nav, uint64_t now) {
+    State& s = g_s;
+    Page& p = s.pages[s.page];
+    switch (nav) {
+        case kNavUp: moveHighlight(-1); break;
+        case kNavDown: moveHighlight(+1); break;
+        case kNavLeft:
+        case kNavRight:
+            if (!p.status && !p.entries.empty() &&
+                p.entries[p.highlight].kind == EntryKind::Setting) {
+                stepRow(p.entries[p.highlight].def, nav == kNavLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
+            }
+            break;
+        case kNavSelect: activateEntry(); break;
+        case kNavBack: closeMenu("UI_Back"); break;
+        case kNavPageNext: changePage(+1); break;
+        case kNavPagePrev: changePage(-1); break;
+        // PageUp and PageDown read the explanation beside the row when
+        // there is more of it than fits. Tab is what changes the page,
+        // so these only fall back to that when nothing can scroll.
+        case kNavReadBack:
+            if (!scrollTooltip(-3)) changePage(-1);
+            break;
+        case kNavReadOn:
+            if (!scrollTooltip(+3)) changePage(+1);
+            break;
+        case kNavHome:
+            if (!p.status) { p.highlight = 0; moveHighlight(0); if (p.entries.size() && p.entries[0].kind == EntryKind::Heading) moveHighlight(+1); noteHighlightMoved(); s.contentDirty = true; }
+            break;
+        case kNavEnd:
+            if (!p.status && !p.entries.empty()) { p.highlight = static_cast<int>(p.entries.size()) - 1; noteHighlightMoved(); s.contentDirty = true; }
+            break;
+        case kNavReset:
+            if (!p.status && !p.entries.empty() && p.entries[p.highlight].kind == EntryKind::Setting) {
+                if (s.resetArmedEntry == p.highlight && now - s.resetArmedMs < kResetArmMs) {
+                    const MenuRowDef& d = kMenuRows[p.entries[p.highlight].def];
+                    applyChange(p.entries[p.highlight].def, d.shipped);
+                    s.resetArmedEntry = -1;
+                } else {
+                    s.resetArmedEntry = p.highlight;
+                    s.resetArmedMs = now;
+                    s.contentDirty = true;
+                }
+            }
+            break;
+        case kNavCount:
+        default:
+            break;
+    }
+}
+
 void handleKeys(uint64_t now) {
     State& s = g_s;
     const bool focused = gameHasFocus();
     s.shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     bool any = false;
     Page& p = s.pages[s.page];
+    // Elite's adopted keys act only while the gate PROVABLY holds the
+    // game's keyboard, never while typing, never on a status page: there
+    // an adopted key IS a game key, and one press of E would cycle the
+    // ship's panel and the menu's page at once. The fixed keys keep their
+    // documented, shared behaviour on those pages -- and so does the page
+    // pair, which follows Tab. (The predicate itself is evaluated per alias
+    // below, since this tick's fixed keys can change its inputs.)
+    const bool gateHolds = inputGateHoldsGameKeyboard();
     // While a value is being typed the navigation keys are the editor's:
     // Enter commits, the arrows and Tab are held (Escape cancels, from the
     // tick). Everything else goes into the buffer.
@@ -1485,61 +1832,61 @@ void handleKeys(uint64_t now) {
             any = true;
             if (i == kEnter) commitEdit();
         }
+        // The adopted keys are typing keys here (W, A, S, D, Space...):
+        // tracked and swallowed, so one still held when Enter writes the
+        // value is parked until released rather than fired on its menu
+        // meaning.
+        for (int i = 0; i < s.aliases.count; ++i) pollKey(s.aliasKeys[i], now, focused, false);
         if (any) {
             s.lastInputMs = now;
             s.aimParked = true;
         }
         return;
     }
-    // Not typing: the typing keys are still polled, so that holding one
-    // down before an edit begins does not fire the moment it does.
-    for (int i = 0; i < kEditKeyCount; ++i) pollKey(s.editKeys[i], now, false);
+    // Not typing: the typing keys are tracked against their REAL state and
+    // swallowed, so one held down before an edit begins is parked and does
+    // not fire the moment it does. (The old poll passed focused=false,
+    // which forced every tracker to "up" each tick and tracked nothing --
+    // the opposite of what its comment said; beginEdit's prime is the
+    // second guard.)
+    for (int i = 0; i < kEditKeyCount; ++i) pollKey(s.editKeys[i], now, focused, false);
     for (int i = 0; i < 12; ++i) {
         const int n = pollKey(s.keys[i], now, focused);
         if (!n) continue;
         any = true;
-        switch (i) {
-            case kUp: moveHighlight(-1); break;
-            case kDown: moveHighlight(+1); break;
-            case kLeft:
-            case kRight:
-                if (!p.status && !p.entries.empty() &&
-                    p.entries[p.highlight].kind == EntryKind::Setting) {
-                    stepRow(p.entries[p.highlight].def, i == kLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
-                }
-                break;
-            case kEnter:
-            case kSpace: activateEntry(); break;
-            case kTab: changePage(s.shiftHeld ? -1 : +1); break;
-            // PageUp and PageDown read the explanation beside the row when
-            // there is more of it than fits. Tab is what changes the page,
-            // so these only fall back to that when nothing can scroll.
-            case kPgUp:
-                if (!scrollTooltip(-3)) changePage(-1);
-                break;
-            case kPgDn:
-                if (!scrollTooltip(+3)) changePage(+1);
-                break;
-            case kHome:
-                if (!p.status) { p.highlight = 0; moveHighlight(0); if (p.entries.size() && p.entries[0].kind == EntryKind::Heading) moveHighlight(+1); noteHighlightMoved(); s.contentDirty = true; }
-                break;
-            case kEnd:
-                if (!p.status && !p.entries.empty()) { p.highlight = static_cast<int>(p.entries.size()) - 1; noteHighlightMoved(); s.contentDirty = true; }
-                break;
-            case kReset:
-                if (!p.status && !p.entries.empty() && p.entries[p.highlight].kind == EntryKind::Setting) {
-                    if (s.resetArmedEntry == p.highlight && now - s.resetArmedMs < kResetArmMs) {
-                        const MenuRowDef& d = kMenuRows[p.entries[p.highlight].def];
-                        applyChange(p.entries[p.highlight].def, d.shipped);
-                        s.resetArmedEntry = -1;
-                    } else {
-                        s.resetArmedEntry = p.highlight;
-                        s.resetArmedMs = now;
-                        s.contentDirty = true;
-                    }
-                }
-                break;
-        }
+        dispatchNav(i == kTab && s.shiftHeld ? kNavPagePrev : kFixedNavs[i], now);
+    }
+    // Elite's own keys, through the same trackers and the same dispatcher.
+    // A page key is edge-only (menu_keys.h, `repeats`): a repeat tick is
+    // one where the tracker was already down. Swallowed edges are counted
+    // for the held-back line below. The predicate is asked afresh before
+    // EACH alias, not once for the tick: the fixed loop above, or an
+    // earlier alias, can have opened a row for typing (Enter on a Number
+    // row) or moved to a status page (Tab onto Monitor) this very tick,
+    // and a W still held in its repeat train would otherwise fire on the
+    // stale answer -- moving the highlight off the row just opened, so the
+    // next tick's check cancelled the edit, or paging a second time from a
+    // page where aliases are inert. Asked afresh, the held key is parked
+    // until released, the swallow-until-release rule. The page pair is the
+    // exception and follows Tab (menuAliasMayActNav): on Monitor and Status
+    // it acts, and reaches the ship as Tab does there -- asked for after
+    // the first flight, when Q/E did nothing on the very pages a player
+    // wants to leave.
+    bool swallowedEdge = false;
+    for (int i = 0; i < s.aliases.count; ++i) {
+        const MenuAlias& a = s.aliases.alias[i];
+        KeyRepeat& k = s.aliasKeys[i];
+        const bool wasDown = k.down;
+        const bool isDown = focused && rawKeyDown(a.vk);
+        const bool liveNow =
+            menuAliasMayActNav(a.nav, gateHolds, s.editEntry >= 0, s.pages[s.page].status);
+        const int n = keyRepeatStep(k, isDown, now, liveNow);
+        if (!liveNow && isDown && !wasDown && !menuAliasFollowsTab(a.nav)) swallowedEdge = true;
+        if (!n) continue;
+        if (!a.repeats && wasDown) continue;
+        any = true;
+        dispatchNav(a.nav, now);
+        if (!s.open) return;   // Back closed the menu
     }
     if (any) {
         s.lastInputMs = now;
@@ -1547,6 +1894,26 @@ void handleKeys(uint64_t now) {
     }
     if (s.resetArmedEntry >= 0 && now - s.resetArmedMs >= kResetArmMs) {
         s.resetArmedEntry = -1;
+        s.contentDirty = true;
+    }
+    // A rig where the flag is set but the game's keyboard has never been
+    // seen reaching a door ("Tab boosts"): the aliases stay inert there by
+    // design, and the log says so once, on the first swallowed press after
+    // the open's own settling tick. `p` was bound at the top of the tick
+    // and a fixed Tab may have moved the page since: read the page afresh.
+    const bool statusNow = s.pages[s.page].status;
+    if (swallowedEdge && !s.aliasHeldBackNoted && s.open && !statusNow && s.privateWanted &&
+        inputGatePrivate() && !gateHolds && now - s.openedMs > 500) {
+        s.aliasHeldBackNoted = true;
+        Log::get().note("menu keys: your Elite panel keys are held back until the game's keyboard "
+                        "is seen reaching the gate (the 'keyboard gate: the game's captured "
+                        "keyboard is reaching the gate' line); the menu's own keys work meanwhile.");
+    }
+    // The legend follows the live predicate, never mere adoption: one extra
+    // raster on the tick after open, so it never names a dead key.
+    const bool legendLive = s.aliases.adopted && menuAliasMayAct(gateHolds, false, statusNow);
+    if (legendLive != s.aliasesLiveShown) {
+        s.aliasesLiveShown = legendLive;
         s.contentDirty = true;
     }
 }
@@ -1695,6 +2062,17 @@ void openMenu(uint64_t now) {
         return;
     }
     inputGateInstall();
+    // Every tracker is seeded from the raw key: one held as the menu opens
+    // -- W for thrust, Down on the way in -- does nothing until released
+    // and pressed afresh. handleKeys runs only while open, so before this
+    // a Down held through the summon fired once on the first tick and then
+    // repeated; with W/S adopted (held constantly for thrust) the seed is
+    // required, not optional, and it changes the fixed keys the same way.
+    for (KeyRepeat& k : s.keys) keyRepeatPrime(k, rawKeyDown(k.vk));
+    for (KeyRepeat& k : s.editKeys) keyRepeatPrime(k, rawKeyDown(k.vk));
+    for (int i = 0; i < s.aliases.count; ++i) {
+        keyRepeatPrime(s.aliasKeys[i], rawKeyDown(s.aliasKeys[i].vk));
+    }
     if (s.developer != s.developerBuilt) buildPages();
     refreshRowValues();
     s.open = true;
@@ -1729,16 +2107,78 @@ void closeMenu(const char* why) {
 
 // ---------------------------------------------------------------------------
 
+void menuAdoptGameBindings(bool enabled, const char* why) {
+    State& s = g_s;
+    s.readGameBindings = enabled;
+    if (!enabled) {
+        memset(s.aliasSlots, 0, sizeof(s.aliasSlots));
+        memset(&s.aliases, 0, sizeof(s.aliases));
+        for (KeyRepeat& k : s.aliasKeys) {
+            k.vk = 0;
+            keyRepeatPrime(k, false);
+        }
+        s.aliasSource = 1;
+        s.contentDirty = true;
+        Log::get().note("menu keys: not read from Elite (hotkey.read_game_bindings = 0); the "
+                        "menu's own keys only.");
+        return;
+    }
+    for (int i = 0; i < kMenuUiElementCount; ++i) {
+        eliteBindsLookupSlots(kMenuUiElements[i].element, kEliteKeyAllowModifierMain,
+                              &s.aliasSlots[i]);
+    }
+    const bool changed = resolveAliases();
+    if (!why) {
+        logAliasOutcome("");
+    } else if (changed) {
+        char prefix[96];
+        snprintf(prefix, sizeof(prefix), "%s -- ", why);
+        logAliasOutcome(prefix);
+    } else {
+        // Silence here is indistinguishable from the re-read being dead
+        // (the camera keys learned this in the field), so the no-change
+        // case says so.
+        Log::get().note("menu keys: your Elite bindings files changed, but the panel keys read "
+                        "the same as before.");
+    }
+}
+
 void menuConfigure(Config& cfg) {
     State& s = g_s;
     const std::string key = cfg.getString("hotkey.menu", "F8");
-    if (key != s.summonName || !s.configured) {
+    const bool summonChanged = key != s.summonName || !s.configured;
+    if (summonChanged) {
         s.summonName = key;
         s.summon.setBinding(key.c_str());
         if (s.summon.key() == 0 && !key.empty()) {
             Log::get().note("menu: hotkey.menu = \"%s\" bound nothing (the line above says "
                             "why), so the menu cannot be summoned this session.",
                             key.c_str());
+        }
+    }
+    // Elite's panel keys follow the same switch as the camera keys. The
+    // live flip is handled HERE and not by device_hook's fingerprint poll:
+    // if the files did not change while the setting was off, the
+    // fingerprint still matches and that poll never re-reads. A summon key
+    // change re-resolves the cached slots without a file read (R3: a
+    // panel key that is the new menu key, or half of its chord, is dropped;
+    // the old key stays in hotkey.cpp's append-only registry, so a panel
+    // key on it stays refused as an EDVR hotkey until the next launch).
+    {
+        const bool read = cfg.getBool("hotkey.read_game_bindings", true);
+        if (s.configured && s.aliasSource != 0 && read != s.readGameBindings) {
+            if (read) {
+                Log::get().note("menu keys: hotkey.read_game_bindings turned on; reading your "
+                                "Elite panel keys now.");
+            }
+            menuAdoptGameBindings(read, nullptr);
+        } else if (s.configured && summonChanged && s.aliasSource >= 3) {
+            if (resolveAliases()) {
+                char prefix[96];
+                snprintf(prefix, sizeof(prefix), "hotkey.menu changed to %s; re-resolved -- ",
+                         key.c_str());
+                logAliasOutcome(prefix);
+            }
         }
     }
     const std::string kb = cfg.getString("menu.keyboard", "private");
@@ -1910,6 +2350,11 @@ void menuTick(ID3D11Device* dev) {
                 closeMenu("the menu key");
             }
         }
+        if (s.summon.takeMissedWhileUnfocused()) {
+            Log::get().note("menu: %s was received but another application had focus. "
+                            "Focus Elite's desktop window and press it again.",
+                            s.summonName.c_str());
+        }
 
         if (s.open) {
             // Escape, then the navigation keys, then the head. Escape ends
@@ -2032,7 +2477,26 @@ void menuTick(ID3D11Device* dev) {
             s.overlayAlpha = 0.0f;
         }
 
-        // Content, geometry, visibility, the gate.
+        // The gate, then content, geometry, visibility. The gate is decided
+        // BEFORE the content is built: the footer's fault line reads the
+        // gate, and built first it read the closed menu's 0 on the open
+        // tick and composed KEYS SHARED WITH THE GAME for a gate that went
+        // private a few lines later -- at HEAD that sat past the old
+        // single line's clip and was never seen; the two-line footer shows
+        // it. Nothing between here and the old spot read the gate.
+        const bool showingMenu = s.alpha > 0.0f && !s.toastUp;
+        const bool drawnFresh = now - s.lastDrawnMs <= kDrawnFreshMs;
+        inputGateSetPrivate(s.open && showingMenu && drawnFresh && !s.pages[s.page].status);
+        // The fault line follows the gate the way the legend follows the
+        // live predicate: a raster that said one thing while the gate now
+        // says another is re-sent, so the warning appears when the draw
+        // stalls and goes when it resumes, on a rig with nothing adopted
+        // too (the legend's own comparison fires only with aliases).
+        const bool sharedWarn = s.open && s.privateWanted && !s.pages[s.page].status && !inputGatePrivate();
+        if (sharedWarn != s.sharedWarnShown) {
+            s.sharedWarnShown = sharedWarn;
+            s.contentDirty = true;
+        }
         if (s.open || s.alpha > 0.0f) {
             Page& p = s.pages[s.page];
             if (p.status && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
@@ -2046,7 +2510,6 @@ void menuTick(ID3D11Device* dev) {
                 menuPanelSubmit(c);
             }
         }
-        const bool showingMenu = s.alpha > 0.0f && !s.toastUp;
         const bool showingOverlay = !showingMenu && !s.toastUp && s.overlayUp && s.overlayAlpha > 0.0f;
         MenuGeometry g;
         g.dist = s.distance;
@@ -2062,8 +2525,6 @@ void menuTick(ID3D11Device* dev) {
         menuPanelSetGeometry(g);
         setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
         setMenuVisible(g.alpha);
-        const bool drawnFresh = now - s.lastDrawnMs <= kDrawnFreshMs;
-        inputGateSetPrivate(s.open && showingMenu && drawnFresh);
         inputGateTick();
         if (dev) menuPanelTick(dev);
     });

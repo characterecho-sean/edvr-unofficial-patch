@@ -1,6 +1,7 @@
 ﻿#include "vscreen.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
+#include "vr_runtime.h"
 
 #include <windows.h>
 
@@ -25,9 +26,12 @@
 #include "binding_shadow.h"
 #include "cb_peek.h"
 #include "panel_curve.h"
+#include "screen_motion.h"
+#include "weapon_stability.h"
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
+#include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "fss_panel.h"
 #include "fss_probe.h"
 #include "fss_panel_rect.h"
@@ -57,6 +61,7 @@
 #include "wake_pulse.h"
 #include "hud_grain.h"
 #include "ui_depth.h"
+#include "celestial_motion.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -115,6 +120,8 @@ constexpr uint32_t kCensusAutoFireCap = 8;
 // these collide with the exposure fix's slots, so the two hooks coexist.
 constexpr size_t kSlotVSSetConstantBuffers  = 7;
 constexpr size_t kSlotPSSetShaderResources  = 8;
+constexpr size_t kSlotPSSetShader           = 9;    // the binding shadow's Ps (bindingSetShader)
+constexpr size_t kSlotVSSetShader           = 11;   // ...and its Vs
 constexpr size_t kSlotDrawIndexed           = 12;
 constexpr size_t kSlotDraw                  = 13;
 constexpr size_t kSlotMap                   = 14;
@@ -240,6 +247,10 @@ typedef void(STDMETHODCALLTYPE* PFN_SetConstantBuffers)(ID3D11DeviceContext*, UI
                                                         ID3D11Buffer* const*);
 typedef void(STDMETHODCALLTYPE* PFN_SetShaderResources)(ID3D11DeviceContext*, UINT, UINT,
                                                         ID3D11ShaderResourceView* const*);
+typedef void(STDMETHODCALLTYPE* PFN_VSSetShader)(ID3D11DeviceContext*, ID3D11VertexShader*,
+                                                 ID3D11ClassInstance* const*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_PSSetShader)(ID3D11DeviceContext*, ID3D11PixelShader*,
+                                                 ID3D11ClassInstance* const*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_Draw)(ID3D11DeviceContext*, UINT, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawIndexed)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawInstanced)(ID3D11DeviceContext*, UINT, UINT, UINT,
@@ -298,6 +309,30 @@ struct State {
 
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
     PFN_SetShaderResources   realPSSetShaderResources = nullptr;
+    PFN_VSSetShader          realVSSetShader = nullptr;
+    PFN_PSSetShader          realPSSetShader = nullptr;
+    // The shader hash memo the shader hooks fill (shaderHashMemo): the
+    // registry's lock once per new pointer, not once per set.
+    struct ShaderMemo {
+        void*    ptr[32] = {};
+        uint64_t hash[32] = {};
+        uint32_t gen[32] = {};   // the registry's generation at the lookup
+    };
+    ShaderMemo vsMemo, psMemo;
+    // The shadow's audit (bindingAudit): every 1024th draw of the owner's
+    // compared with the context's own answer, and the shader hooks' counts.
+    uint32_t bindAuditSeq = 0;
+    uint64_t auditSampled = 0, auditNull = 0, auditPtr = 0, auditHash = 0;
+    uint64_t auditNoted = 0, auditNoteMs = 0;
+    uint64_t auditLastShadow = 0, auditLastGet = 0;
+    uint64_t vsSets = 0, vsSetsNoHash = 0, psSets = 0, psSetsNoHash = 0;
+    // The Map hook's memo of a resource's kind and size by address (hookedMap
+    // says why), 64 slots direct-mapped.
+    struct MapMemo {
+        void*    res = nullptr;
+        uint32_t byteWidth = 0;
+    };
+    MapMemo mapMemo[64];
     PFN_Draw                 realDraw = nullptr;
     PFN_DrawIndexed          realDrawIndexed = nullptr;
     PFN_DrawInstanced        realDrawInstanced = nullptr;
@@ -1141,6 +1176,13 @@ bool isFlatGrey(const FLOAT c[4]) {
 // default, or the raised size when the resolution fix is on. Nothing else an
 // eye-sized draw samples has exactly those dimensions.
 bool srv0IsPanelSized(State* s, char kind, uint32_t count) {
+    // The composite that reads the panel is a quad -- six indices, the
+    // intro's and the menu backdrop's censuses agree -- so a draw of more
+    // than a few dozen is not it, and asking costs a resolve per draw
+    // (the slot's generation moves with every material: the review of
+    // 2026-09-09 put it at 0.6 ms a frame).
+    (void)kind;
+    if (count > 64) return false;
     void* srv = bindingGet(BindSlot::PsSrv0);
     if (!srv) return false;
 
@@ -1322,10 +1364,70 @@ enum class DrawVerdict {
     kBackdrop
 };
 
+// THE SHADOW'S AUDIT (2026-09-09). The heat haze's skip went silent the
+// flight after the binding shadow replaced its VSGetShader -- 15:13, three
+// minutes beside a ship's drives, not one draw withheld; 14:52, the flight
+// before, 13524 -- and nothing in the log said why, because a shadow that
+// is wrong is a shadow that answers. So every 1024th draw of the owner's
+// asks the context for its vertex shader and compares: a pointer the shadow
+// does not hold is a set the hook never saw; the same pointer with another
+// hash is the memo's or the registry's. Reported at most every thirty
+// seconds and only when they disagreed. A Get and a Release per thousand
+// draws is nothing against the three a draw this replaced.
+void bindingAudit(State* s, ID3D11DeviceContext* ctx) {
+    ID3D11VertexShader* vs = nullptr;
+    ctx->VSGetShader(&vs, nullptr, nullptr);
+    ++s->auditSampled;
+    void* held = bindingGet(BindSlot::Vs);
+    if (!held) {
+        ++s->auditNull;
+    } else if (held != static_cast<void*>(vs)) {
+        ++s->auditPtr;
+        s->auditLastShadow = bindingShaderHash(BindSlot::Vs);
+        s->auditLastGet = vs ? lookupShaderHash(vs) : 0;
+    } else {
+        const uint64_t hs = bindingShaderHash(BindSlot::Vs);
+        const uint64_t hg = lookupShaderHash(vs);
+        if (hs != hg) {
+            ++s->auditHash;
+            s->auditLastShadow = hs;
+            s->auditLastGet = hg;
+        }
+    }
+    if (vs) vs->Release();
+    const uint64_t wrong = s->auditPtr + s->auditHash;
+    if (wrong == s->auditNoted) return;
+    const uint64_t now = nowMs();
+    if (now - s->auditNoteMs < 30000) return;
+    s->auditNoteMs = now;
+    s->auditNoted = wrong;
+    Log::get().note(
+        "binding shadow: the context's vertex shader disagreed with the shadow on %llu of "
+        "%llu sampled draws -- %llu by pointer (a set the hook never saw) and %llu by hash "
+        "(the same shader, another hash: the memo's or the registry's); the shadow last "
+        "held %016llX where the context held %016llX, and %llu samples found the shadow "
+        "empty. %llu vertex and %llu pixel shader sets so far, %llu and %llu of them "
+        "with no hash to give. A consumer reading the shadow -- the billboards, the "
+        "interface's families, the scanner's chrome -- was wrong that often.",
+        static_cast<unsigned long long>(wrong), static_cast<unsigned long long>(s->auditSampled),
+        static_cast<unsigned long long>(s->auditPtr), static_cast<unsigned long long>(s->auditHash),
+        static_cast<unsigned long long>(s->auditLastShadow),
+        static_cast<unsigned long long>(s->auditLastGet),
+        static_cast<unsigned long long>(s->auditNull),
+        static_cast<unsigned long long>(s->vsSets), static_cast<unsigned long long>(s->psSets),
+        static_cast<unsigned long long>(s->vsSetsNoHash),
+        static_cast<unsigned long long>(s->psSetsNoHash));
+}
+
+
 // kind, count and instances describe the draw for the census and the census
-// probe; every other consumer of this function is indifferent to them.
+// probe, and args is the rest of the call's own argument set (start index,
+// base vertex, start instance -- draw_census.h, DrawArgs), passed through
+// rather than stashed because a stash read the wrong draw's numbers once
+// (hookedDraw says); every other consumer of this function is indifferent
+// to them.
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
-                               UINT instances) {
+                               UINT instances, const DrawArgs& args) {
     State* s = g_state;
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
@@ -1346,10 +1448,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         kind == 'X' && count == 6) {
         bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {
-            ID3D11VertexShader* vs = nullptr;
-            self->VSGetShader(&vs, nullptr, nullptr);
-            const uint64_t h = lookupShaderHash(vs);
-            if (vs) vs->Release();
+            const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
             if (h != 0xA888D51024D9798Eull && h != 0xB018D143700AB803ull) {
                 return;
             }
@@ -1411,6 +1510,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                         mask);
                 }
                 ++s->fssChromeSkipped;
+                // A skip above the census calls is a draw the census never
+                // sees; the count says so on its end line.
+                if (drawCensusArmed()) drawCensusNoteUnseen('f');
                 return DrawVerdict::kSkip;
             }
         }
@@ -1424,7 +1526,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // deferred context's bindings, and draws recorded here were the
         // last draw class no census had ever carried.
         if (drawCensusArmed()) {
-            drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0);
+            drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
         }
         return DrawVerdict::kNone;
     }
@@ -1478,12 +1580,15 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
         !uiDepthWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
-        !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
-        !particleWantsDraws() && !backdropWantsDraws() &&
+        !drawCensusArmed() && !objectProbeWantsDraws() && !panelQuadWants() &&
+        !panelCurveWants() && !particleWantsDraws() && !backdropWantsDraws() &&
         !scrimWantsDraws() && !quadProbeWants() && !loaderPanelWants() &&
         !introProbeWants() && !introPanelWants()) {
         return DrawVerdict::kNone;
     }
+
+    // The shadow's audit, one draw in 1024 (bindingAudit says).
+    if ((++s->bindAuditSeq & 1023u) == 0) bindingAudit(s, self);
 
     // The particle probe sits ABOVE the eye-texture gate on purpose. On
     // foot the world -- plumes included -- is drawn into the PANEL, which
@@ -1497,7 +1602,20 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The particle billboards, before the eye gate for the same reason the
     // probe is: on foot they draw into the panel, and a fix that only ran
     // for the stereo view would leave the flat view swimming.
+    //
+    // Visible substituted draws need their own census/ledger entry here,
+    // since the early return bypasses the normal recording below. Effects
+    // withheld entirely are instead counted by drawCensusNoteUnseen.
     if (particleSteady() && particleOnDraw(self, kind, count, instances)) {
+        // This is still a visible draw. Capture the ORIGINAL shader and
+        // resources before particleBegin substitutes its vertex stage;
+        // otherwise the smoke that survives the drive switches is absent
+        // from both instruments used to identify it.
+        if (drawCensusArmed() || objectProbeLedgerActive()) {
+            const bool eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));
+            if (drawCensusArmed()) drawCensusEarlyDraw(self, kind, count, instances, eye, args);
+            if (eye) objectProbeNoteEarlyDraw(self, kind, count, instances, args.startInstance,args.start,args.base);
+        }
         return DrawVerdict::kParticle;
     }
 
@@ -1506,9 +1624,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // same identification -- by shader hash, before the eye gate, since the
     // jump tunnel draws into the panel on foot as well.
     if (witchspaceStarsSkip(self, kind, count, instances)) {
+        if (drawCensusArmed()) drawCensusNoteUnseen('w');
         return DrawVerdict::kSkip;
     }
-
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Cand = -1;
@@ -1570,6 +1688,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
                        bindingGet(BindSlot::Rtv0) == nullptr);
     if (!s->rtv0Eye) {
+        screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);
         // NOT an eye texture -- but it is still a DRAW, and where the draws
         // are going is the entire question when the eye textures are getting
         // almost none. Counted here rather than inside the recogniser,
@@ -1579,6 +1698,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             State::SceneCandidate& c = s->cands[s->rtv0Cand];
             ++c.thisFrame;
             if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
+        }
+        if(objectProbeLedgerActive()) {
+            objectProbeNoteGuiSourceDraw(self,kind,count,instances,args.startInstance,args.start,args.base);
+            ResourceInfo source;
+            if(bindingResolve(bindingGet(BindSlot::Rtv0),&source) && source.isTexture2D &&
+               source.a==(s->panelW?s->panelW:1920) && source.b==(s->panelH?s->panelH:1080))
+                objectProbeNoteSourceDraw(self,kind,count,instances,args.startInstance,args.start,args.base);
         }
         // The census line for a draw that did NOT land in an eye texture,
         // recorded only when advanced.census_offscreen asked for it. Before
@@ -1591,7 +1717,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // could see was being assembled somewhere this function had already
         // returned from.
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
-            drawCensusOffDraw(self, kind, count, instances);
+            drawCensusOffDraw(self, kind, count, instances, args);
         }
         // The interface's surfaces, learned where the GUI renderer draws
         // them (ui_depth.h): one bool while off, one hash while a target is
@@ -1829,7 +1955,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // or a named family drawn straight into the eye, writes its depth. A
     // flag and not a verdict, so it composes with whatever claims the draw
     // below; forwardWithVerdict's scope consumes it.
-    if (uiDepthWantsDraws()) t_uiDepthThisDraw = uiDepthOnEyeDraw(self);
+    if (uiDepthWantsDraws()) t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
+        {kind,count,instances,args.start,args.base,args.startInstance});
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -1870,8 +1997,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // the ones it will run with. Armed is rare and brief; the cost of asking is
     // one call and one bool.
     if (drawCensusArmed()) {
-        drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame);
+        drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
     }
+    // The pool probe (object_probe.h): one bool while off; a few t33 reads a
+    // frame until the pool is known, then one a second.
+    objectProbeOnEyeDraw(self, kind, count, instances, args.startInstance,args.start,args.base);
 
     // The suppression probe, after the census so a census taken while probing
     // still records what the game SUBMITTED. Everything before this point is
@@ -1884,10 +2014,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             // the bound shader costs a VSGetShader per candidate draw and
             // happens only while a probe spec is set.
             if (s->censusSkip[i].vsHash) {
-                ID3D11VertexShader* vs = nullptr;
-                self->VSGetShader(&vs, nullptr, nullptr);
-                const uint64_t h = lookupShaderHash(vs);
-                if (vs) vs->Release();
+                const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
                 if (h != s->censusSkip[i].vsHash) continue;
                 ++s->censusSkipped;
                 return DrawVerdict::kSkip;
@@ -2418,6 +2545,58 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
 
 // Everything is unbound. Forget all of it -- this is the one place where
 // forgetting the pointers is the truth rather than a guess.
+// The shader setters, for the binding shadow's Vs and Ps (binding_shadow.h):
+// the content hash is looked up here, once per new pointer through a small
+// direct-mapped memo, so the draw path reads it without a VSGetShader --
+// which cost a device critical section and a Release per call, three times
+// a draw across the billboard variant, the interface classifier and the
+// scanner's chrome tracker (the review of 2026-09-09: about two
+// milliseconds a frame in a busy scene).
+//
+// Asked again on three grounds, not one (2026-09-09: the flight of 15:13
+// drew the drives' heat haze for three minutes beside a ship while its
+// skip, reading this shadow, withheld nothing; the flight before the
+// shadow, 14:52, withheld 13524): a pointer the slot does not hold; a
+// registration since (the registry's generation moves at every one, and a
+// destroyed shader's address comes back as another shader's, which a memo
+// keyed by address alone answers with the dead one's hash); and a held
+// hash of zero -- a set that beat its registration, or a shader the
+// registry never met -- asked again at every set, because zero is the one
+// answer a consumer cannot tell from "no shader".
+uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
+    if (!shader) return 0;
+    const size_t i = (reinterpret_cast<uintptr_t>(shader) >> 4) & 31;
+    const uint32_t gen = shaderRegistryGeneration();
+    if (m.ptr[i] != shader || m.gen[i] != gen || m.hash[i] == 0) {
+        m.ptr[i] = shader;
+        m.gen[i] = gen;
+        m.hash[i] = lookupShaderHash(shader);
+    }
+    return m.hash[i];
+}
+
+void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* vs,
+                                         ID3D11ClassInstance* const* ci, UINT n) {
+    if (!foreignContext(self)) {
+        const uint64_t h = shaderHashMemo(g_state->vsMemo, vs);
+        bindingSetShader(BindSlot::Vs, vs, h);
+        ++g_state->vsSets;
+        if (vs && !h) ++g_state->vsSetsNoHash;
+    }
+    g_state->realVSSetShader(self, vs, ci, n);
+}
+
+void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* ps,
+                                         ID3D11ClassInstance* const* ci, UINT n) {
+    if (!foreignContext(self)) {
+        const uint64_t h = shaderHashMemo(g_state->psMemo, ps);
+        bindingSetShader(BindSlot::Ps, ps, h);
+        ++g_state->psSets;
+        if (ps && !h) ++g_state->psSetsNoHash;
+    }
+    g_state->realPSSetShader(self, ps, ci, n);
+}
+
 void forgetBindings(State*) { bindingForgetAll(); }
 
 // Both of these say so the first time they run.
@@ -2439,6 +2618,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     }
     forgetBindings(s);
     foveationOnClearState();
+    weaponStabilityResourceWritten(nullptr);
     s->realClearState(self);
 }
 
@@ -2457,6 +2637,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                         "they are neither counted nor corrected.",
                         kSlotExecuteCommandList, restoreContextState ? 1 : 0);
     }
+    weaponStabilityResourceWritten(nullptr);
     s->realExecuteCommandList(self, list, restoreContextState);
     // After the call, and only when the context was not restored: with
     // RestoreContextState TRUE the bindings we recorded are put back, so
@@ -2522,16 +2703,27 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         // one on a texture writes a 44-byte texture description into the
         // 20-byte buffer description below. That is a stack smash, and it
         // brought the whole process down on the first frame.
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            if (glitchFrameWantsBuffer(d.ByteWidth)) {
-                s->camResource = res;
-                s->camData = mapped->pData;
-                s->camBytes = d.ByteWidth;
+        // The kind and size, memoised by address: a Map a draw at three
+        // thousand draws paid the two COM calls each for a detector that
+        // wants one buffer (the review of 2026-09-09: up to 0.4 ms a frame).
+        // A recycled address gives the detector one wrong size for one
+        // observe, which it survives.
+        State::MapMemo& mm = s->mapMemo[(reinterpret_cast<uintptr_t>(res) >> 6) & 63];
+        if (mm.res != res) {
+            mm.res = res;
+            mm.byteWidth = 0;
+            D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+            res->GetType(&dim);
+            if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+                D3D11_BUFFER_DESC d{};
+                static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+                mm.byteWidth = d.ByteWidth;
             }
+        }
+        if (mm.byteWidth && glitchFrameWantsBuffer(mm.byteWidth)) {
+            s->camResource = res;
+            s->camData = mapped->pData;
+            s->camBytes = mm.byteWidth;
         }
     }
     // The peek target, independent of the chain above on purpose: the buffer
@@ -2618,6 +2810,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->realUnmap(self, res, sub);
         return;
     }
+    weaponStabilityResourceWritten(res);
     // The census CB watch reads the write BEFORE the real Unmap, exactly as
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
@@ -2705,20 +2898,15 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         RealDraw&& draw) {
-    // The interface's depth write (ui_depth.h) brackets EVERY path below --
-    // the swallows that draw their own geometry, the sub-draw re-issue, the
-    // skip that draws nothing -- as a scope, so no return can leave the
-    // game's depth state swapped. Consumes the flag the way the skip below
-    // consumes curveThisDraw: its lifetime ends inside the call that set it.
-    // The flag is thread-local, so a deferred-context draw on another
-    // thread can neither steal it nor be treated by it.
+    // Per-draw coverage classification is cleared on every exit, including
+    // skips and fixes that draw their own geometry. The original draw keeps
+    // its depth state; supported coverage is reissued into private depth below.
     struct UiDepthScope {
         ID3D11DeviceContext* ctx;
         bool                 on;
         explicit UiDepthScope(ID3D11DeviceContext* c)
             : ctx(c), on(t_uiDepthThisDraw) {
             t_uiDepthThisDraw = false;
-            if (on) uiDepthBegin(ctx);
         }
         ~UiDepthScope() {
             if (on) uiDepthEnd(ctx);
@@ -2858,7 +3046,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kGlareSteady) sunglareBegin(self);
     if (v == DrawVerdict::kParticle) particleBegin(self);
     if (v == DrawVerdict::kBackdrop) backdropBegin(self);
+    const bool terrainOriginal=self==g_state->ownerCtx &&
+        celestialMotionBeginOriginal(self,bindingShaderHash(BindSlot::Vs));
     draw();
+    if(terrainOriginal)celestialMotionEnd(self);
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
     // drawn through the interface projection is drawn once more, depth
     // only, right after its own draw and inside the scope that owns the
@@ -2880,6 +3071,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (uiDepthScope.on && uiDepthWantsReissue()) {
         if (uiDepthReissueBegin(self)) draw();
         uiDepthReissueEnd(self);
+    }
+    if (!terrainOriginal && self == g_state->ownerCtx &&
+        celestialMotionBegin(self, bindingShaderHash(BindSlot::Vs))) {
+        draw();
+        celestialMotionEnd(self);
     }
     if (v == DrawVerdict::kBackdrop) backdropEnd(self);
     // The splash screen's dim under the loader's dialogs (splash_dim.h):
@@ -2925,6 +3121,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
+    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -2968,8 +3165,8 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
     g_state->realEnd(self, async);
 }
 
-// The GPU-driven draws, record-only: the argument buffer holds the counts,
-// so n=0 i=0 and args= names the buffer instead. Kind 'Z' indexed, 'Y' not.
+// The argument buffer holds the counts, so the census records n=0 i=0
+// and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     if (drawCensusArmed()) {
@@ -3004,6 +3201,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -3022,6 +3220,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
+    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
                        nullptr, 0, box != nullptr,
@@ -3115,6 +3314,12 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
 // vertex's index is offset by. The quad probe reads it (quad_probe.h); it
 // was reading whatever the last INDEXED draw had left there, which for a
 // spec aimed at a 4-vertex draw would have been a silently wrong rectangle.
+//
+// The census's DrawArgs (draw_census.h) are built here and PASSED, never
+// stashed: the stash above is exactly what once read the previous indexed
+// draw's numbers for a non-indexed one, and a census column is worth
+// nothing if it can carry the wrong draw's arguments.
+//
 // The draw hooks' own cost, for the monitor's drop attribution: on a sample
 // frame (one in sixteen, perf_monitor.h) each draw thunk clocks itself and
 // the real call it forwards, and the difference is what EDVR spent in the
@@ -3123,7 +3328,14 @@ struct DrawClock {
     bool    on;
     int64_t t0;
     int64_t real = 0;
+    bool forwarded = false;
     DrawClock() : on(perfMonitorSampleDraws()), t0(on ? qpcNow() : 0) {}
+    void realCall(int64_t start) {
+        // Only the first call forwards the game's draw. Coverage reissues
+        // are EDVR work; subtracting every call hid their CPU/driver cost.
+        if(!forwarded) real += qpcNow()-start;
+        forwarded=true;
+    }
     ~DrawClock() {
         if (on) perfMonitorDrawTicks(qpcNow() - t0, real);
     }
@@ -3133,11 +3345,13 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
-    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
+    DrawArgs args;
+    args.base = static_cast<int32_t>(start);
+    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     forwardWithVerdict(self, v, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDraw(self, count, start);
-        if (clock.on) clock.real += qpcNow() - r0;
+        if (clock.on) clock.realCall(r0);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3145,11 +3359,14 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
-    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
+    DrawArgs args;
+    args.start = startIndex;
+    args.base = baseVertex;
+    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     forwardWithVerdict(self, v, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
-        if (clock.on) clock.real += qpcNow() - r0;
+        if (clock.on) clock.realCall(r0);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3159,7 +3376,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     DrawClock clock;
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
-    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
+    DrawArgs args;
+    args.base = static_cast<int32_t>(startVertex);
+    args.startInstance = startInstance;
+    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
     // The draw's instance window, for the glare telemetry: the trains
     // share one record buffer at different offsets, and which train a
     // draw carries is only knowable from (start, count).
@@ -3176,7 +3396,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                    startInstance);
-        if (clock.on) clock.real += qpcNow() - r0;
+        if (clock.on) clock.realCall(r0);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3200,12 +3420,27 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         g_state->qsBaseVertex = baseVertex;
         g_state->qsStartInstance = startInstance;
     }
-    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
+    DrawArgs args;
+    args.start = startIndex;
+    args.base = baseVertex;
+    args.startInstance = startInstance;
+    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    // Observe before forwardWithVerdict: curved-screen substitution can
+    // consume the composite without calling this lambda.
+    if (self == g_state->ownerCtx) weaponStabilityObserveScreen();
     forwardWithVerdict(self, v, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                          baseVertex, startInstance);
-        if (clock.on) clock.real += qpcNow() - r0;
+        const bool attached = self == g_state->ownerCtx && !g_state->rtv0Eye &&
+            weaponStabilityDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,
+                                startIndex,baseVertex,startInstance,
+                                g_state->panelW?g_state->panelW:1920,g_state->panelH?g_state->panelH:1080);
+        if (!attached) g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                                        baseVertex, startInstance);
+        if (clock.on) clock.realCall(r0);
+        if(self==g_state->ownerCtx) {
+            screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+            screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+        }
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
@@ -3720,6 +3955,8 @@ void vScreenRefreshConfig() {
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
+    screenMotionConfigure(cfg);
+    weaponStabilityConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -3763,6 +4000,7 @@ void vScreenRefreshConfig() {
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
+    objectProbeConfigure(cfg);
     billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -3837,9 +4075,13 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        objectProbeFrameBoundary(g_state->ownerCtx);
         panelUpscaleFrameEnd();
         wakePulseReport();
         uiDepthFrameBoundary(g_state->ownerCtx);
+        screenMotionFrameBoundary();
+        weaponStabilityFrameBoundary(g_state->ownerCtx);
+        celestialMotionFrameBoundary(g_state->ownerCtx);
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -4137,7 +4379,12 @@ void vScreenFrameBoundary() {
         // report, is exactly the kind of lie this notice exists to end.
         const bool perDrawAskers = s->distanceEnabled || s->countForFlashFix ||
                                    headOffsetGateWantsPanel();
+        char adviceBuf[1100];
         const char* advice;
+        // The runtime paragraph goes on its own line AFTER the notice, not
+        // inside it: this notice is already most of the log's 1200-byte line
+        // buffer, and appending 784 more would truncate both mid-word.
+        bool explainRuntime = false;
         if (!perDrawAskers) {
             // Settled BEFORE the ask count is consulted: with every per-draw
             // consumer off, a zero eye-draw peak is structural whatever the
@@ -4161,12 +4408,20 @@ void vScreenFrameBoundary() {
                 "re-patches -- look for VTableHook lines near this one saying "
                 "so. If there are none, report this log.";
         } else if (!s->eyeW) {
-            advice =
-                "If one of those sizes is your eye texture, that is the "
-                "collision -- change fix.vscreen_res_width/height (2880x1620 "
-                "is safe, 1920x1080 is off). If none of them is, install "
-                "openvr_api.dll as well so this side stops guessing at what "
-                "your eye textures are.";
+            // THE LINE THE RIFT S USER READ (2026-09-06). It ended "install
+            // openvr_api.dll as well" -- to a commander whose openvr_api.dll
+            // was installed, correct, and simply never opened, because the
+            // game was on its native Oculus back end. He then spent three
+            // rounds on his install. The advice is now whatever the module
+            // list actually supports; see vr_runtime.h.
+            snprintf(adviceBuf, sizeof(adviceBuf),
+                     "If one of those sizes is your eye texture, that is the collision -- change "
+                     "fix.vscreen_res_width/height (2880x1620 is safe, 1920x1080 is off). If none "
+                     "of them is, this side is guessing at your eye textures because the openvr "
+                     "half has published nothing: %s. The next line says what to do about it.",
+                     vrRuntimeShortWhy());
+            advice = adviceBuf;
+            explainRuntime = true;
         } else {
             advice =
                 "If one of those sizes is your eye texture, that is the "
@@ -4189,6 +4444,7 @@ void vScreenFrameBoundary() {
             static_cast<unsigned long long>(s->panelExclusions),
             s->eyeW ? "has published its size" : "has published nothing",
             advice);
+        if (explainRuntime) vrRuntimeExplainOnce();
     }
 
     // ROLL THE SHAPE CANDIDATES, AND PROMOTE ONE IF THE DRAWS SAY SO.
@@ -4734,6 +4990,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
+    screenMotionConfigure(cfg);
+    weaponStabilityConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -4771,6 +5029,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
+    objectProbeConfigure(cfg);
     billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
@@ -4815,6 +5074,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realOMSetRtvAndUav));
     s.hook.replace(kSlotPSSetShaderResources, &hookedPSSetShaderResources,
                    reinterpret_cast<void**>(&s.realPSSetShaderResources));
+    s.hook.replace(kSlotVSSetShader, &hookedVSSetShader,
+                   reinterpret_cast<void**>(&s.realVSSetShader));
+    s.hook.replace(kSlotPSSetShader, &hookedPSSetShader,
+                   reinterpret_cast<void**>(&s.realPSSetShader));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
     s.hook.replace(kSlotCopyResource, &hookedCopyResource,
@@ -4952,6 +5215,7 @@ void shutdownVScreenFixes() {
     panelQuadShutdown();
     panelCurveShutdown();
     particleShutdown();
+    objectProbeShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
@@ -4959,6 +5223,9 @@ void shutdownVScreenFixes() {
     remlokShutdown();
     holoShutdown();
     uiDepthShutdown();
+    screenMotionShutdown();
+    weaponStabilityShutdown();
+    celestialMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();

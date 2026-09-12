@@ -34,6 +34,34 @@
 
 namespace edvr {
 
+// A scene camera includes both ship and head rotation. Opposing turns can
+// cancel, so a small camera delta does not prove a menu/stale camera.
+// Trust continuous rows from the bound scene block in a populated scene;
+// retain the head-follow detector only for ambiguous auxiliary chains.
+inline int temporalCameraFollowScore(int score, uint32_t sceneDraws, bool boundRows,
+                                     float headDeg, float rowsDeg) {
+    if (sceneDraws >= 50u && boundRows) return 30;
+    if (headDeg > 0.1f) score += rowsDeg < 0.3f * headDeg ? -4 : 1;
+    return score < -30 ? -30 : score > 30 ? 30 : score;
+}
+
+// Elite's scene depth is reversed Z with an infinite far plane. OpenVR's
+// finite clip planes describe the submitted projection, not this depth
+// buffer (14:53 capture: finite fallback displaced station pixels by km).
+// A usable scene row takes precedence; missing or unrelated rows must not
+// silently reintroduce the runtime's far-plane offset.
+inline bool temporalSceneProjection(float rowA, float rowB, float nearZ,
+                                     float* a, float* b) {
+    const bool haveNear = std::isfinite(nearZ) && nearZ > 0.0f;
+    const float rowNear = rowB / (1.0f - rowA);
+    const bool measured = std::isfinite(rowA) && std::isfinite(rowB) &&
+        rowA <= 0.0f && rowB > 0.0f && std::isfinite(rowNear) &&
+        (!haveNear || std::fabs(rowNear - nearZ) <= nearZ * 0.05f);
+    *a = measured ? rowA : 0.0f;
+    *b = measured ? rowB : haveNear ? nearZ : 0.0f;
+    return measured;
+}
+
 // How many frames the jitter sequence runs before repeating. Halton (2,3)
 // over eight frames covers the pixel evenly; longer sequences converge
 // finer detail but take longer to settle after a reset.
@@ -175,6 +203,29 @@ inline float temporalDepthToMetres(float d, float nearZ, float farZ) {
     return nearZ * farZ / den;
 }
 
+// Tier 1 of docs/per-object-motion.md, the mover test for one pixel
+// (2026-09-08). The camera-only reprojection predicts that this pixel's
+// surface sat at view depth zPred last frame (metres; 0 or less = the far
+// plane, or no depth); last frame's depth around the predicted position
+// spans [zMin, zMax] metres over its 3x3, with anyFar true when any of
+// those texels was the far plane. True when the surface is NOT where the
+// camera alone would have put it -- a mover or a disocclusion -- by more
+// than tol, a fraction of depth. The range rather than one texel because
+// the jitter shifts the grid half a pixel between frames and a single
+// compare fires on every silhouette every frame. `thick`: at least six of
+// the nine texels around the pixel have a depth now -- a hull, not a text
+// stroke or a wire. A thin feature reprojects onto depthless texels on
+// every frame the head moves, and "a surface where only sky was" called
+// each one a mover (2026-09-08: the interface's text swam with the mask
+// on); a thin feature gets the range test alone. The shader's moverAt
+// transcribes this; tools/temporal_test pins it.
+inline bool temporalMoverTest(float zPred, float zMin, float zMax, bool anyFar,
+                              float tol, bool thick = true) {
+    if (!(zPred > 0.0f)) return !anyFar;   // sky now: consistent only with sky then
+    if (!(zMax > 0.0f)) return thick;      // a surface now where only sky was: a hull's edge, not a stroke's
+    return zPred < zMin * (1.0f - tol) || zPred > zMax * (1.0f + tol);
+}
+
 // The angle of a rotation, in degrees, from the trace and the skew both:
 // cos = (trace - 1) / 2, sin = |skew| / 2, angle = atan2(sin, cos). An acos
 // of the trace alone cannot resolve below about 0.02 degrees in float (the
@@ -207,6 +258,176 @@ inline void temporalViewDelta(const float prev12[12], const float now12[12],
         temporalTranspose3(mp, tmp);
         temporalMul3(tmp, mn, delta);
     }
+}
+
+// Tier 2 of docs/per-object-motion.md (2026-09-08): a rigid body's own
+// path. The body moved in the world by [Rd | td] -- a point at w now was
+// at Rd w + td last frame, the instance pool's own delta for its largest
+// cluster (object_probe.cpp), in the frame the camera rows share -- and
+// the rows are read as worldFromRows reads them, [R | c] with a
+// view-space point v at R v + c in the world. So a body point at
+// view-space P now was, last frame, at
+//   R_p^T (Rd (R_n P + c_n) + td - c_p) = W P + tv,
+//   W = R_p^T Rd R_n,   tv = R_p^T (Rd c_n + td - c_p),
+// with the same z-flip conjugation the camera path takes into the eye's
+// frame. With Rd = I and td = 0 it IS the camera path, which the test
+// pins; a station's turn is what it adds.
+inline void temporalBodyPath(const float prev34[12], const float now34[12],
+                             const float Rd[9], const float td[3], float W[9],
+                             float tv[3]) {
+    float Rp[9], Rn[9], RpT[9], tmp[9];
+    temporalRot3Of34(prev34, Rp);
+    temporalRot3Of34(now34, Rn);
+    temporalTranspose3(Rp, RpT);
+    temporalMul3(Rd, Rn, tmp);
+    temporalMul3(RpT, tmp, W);
+    const float cN[3] = {now34[3], now34[7], now34[11]};
+    const float cP[3] = {prev34[3], prev34[7], prev34[11]};
+    float rc[3];
+    temporalApply3(Rd, cN, rc);
+    const float dc[3] = {rc[0] + td[0] - cP[0], rc[1] + td[1] - cP[1], rc[2] + td[2] - cP[2]};
+    temporalApply3(RpT, dc, tv);
+    W[2] = -W[2];
+    W[5] = -W[5];
+    W[6] = -W[6];
+    W[7] = -W[7];
+    tv[2] = -tv[2];
+}
+
+// The same path on a frame whose rows are not the view's own -- another
+// camera's, a stale latch, a jump's -- composed with the camera delta the
+// pass carries for that frame (Wc, tvc: the eye-frame delta worldFromRows
+// gives, last frame's when this frame's was dropped) rather than with the
+// rows. R_p^T Rd R_n = (R_p^T Rd R_p)(R_p^T R_n): the body's turn taken
+// into last frame's view by its rows, then the camera's own delta; and
+// tv = B tvc + F R_p^T ((Rd - I) c_p + td), B = F R_p^T Rd R_p F.
+// The previous camera position must share td's coordinate origin. On an
+// origin jump, originStep moves c_p into that origin without adding the
+// jump to the physical camera delta. Rebasing td alone leaves an error of
+// (I - Rd) originStep: about nine metres for a 13 km shift at a station's
+// normal turn per frame. Apply B to tvc as well so ship translation and
+// head rotation compose exactly, including on carried frames.
+// Before this the body stood down on such frames, and a head turn dropped
+// the station to the camera's path for a frame at a time (2026-09-09).
+inline void temporalBodyPathCarried(const float prev34[12], const float Rd[9], const float td[3],
+                                    const float Wc[9], const float tvc[3], float W[9], float tv[3],
+                                    const float* originStep = nullptr) {
+    float Rp[9], RpT[9], tmp[9], conj[9];
+    temporalRot3Of34(prev34, Rp);
+    temporalTranspose3(Rp, RpT);
+    temporalMul3(Rd, Rp, tmp);
+    temporalMul3(RpT, tmp, conj);
+    conj[2] = -conj[2];
+    conj[5] = -conj[5];
+    conj[6] = -conj[6];
+    conj[7] = -conj[7];
+    temporalMul3(conj, Wc, W);
+    float cP[3] = {prev34[3], prev34[7], prev34[11]};
+    if (originStep) for (int i = 0; i < 3; ++i) cP[i] += originStep[i];
+    float rc[3];
+    temporalApply3(Rd, cP, rc);
+    const float dc[3] = {rc[0] - cP[0] + td[0], rc[1] - cP[1] + td[1], rc[2] - cP[2] + td[2]};
+    float t[3];
+    temporalApply3(RpT, dc, t);
+    t[2] = -t[2];
+    float bodyCameraTv[3];
+    temporalApply3(conj, tvc, bodyCameraTv);
+    for (int i = 0; i < 3; ++i) tv[i] = t[i] + bodyCameraTv[i];
+}
+
+// The rotation of an axis-angle vector (Rodrigues): w's direction the axis,
+// its length the angle in radians; row-major, R v rotates v.
+inline void temporalRodrigues(const float w[3], float R[9]) {
+    const float th = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    if (th < 1e-9f) {
+        const float I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        memcpy(R, I, sizeof(I));
+        return;
+    }
+    const float a[3] = {w[0] / th, w[1] / th, w[2] / th};
+    const float s = sinf(th), c = cosf(th), k = 1.0f - c;
+    R[0] = c + a[0] * a[0] * k;        R[1] = a[0] * a[1] * k - a[2] * s; R[2] = a[0] * a[2] * k + a[1] * s;
+    R[3] = a[1] * a[0] * k + a[2] * s; R[4] = c + a[1] * a[1] * k;        R[5] = a[1] * a[2] * k - a[0] * s;
+    R[6] = a[2] * a[0] * k - a[1] * s; R[7] = a[2] * a[1] * k + a[0] * s; R[8] = c + a[2] * a[2] * k;
+}
+
+// The rigid motion that best carries n points now to where they were: the
+// least-squares (w, t) of p_prev - p_now = w x p_now + t, the small-angle
+// form (exact to the angle squared times the distance, millimetres for a
+// station's turn ten kilometres off), about the points' centroid for the
+// conditioning. The instance pool gives every part of a station as a
+// (now, prev) pair; one part's quantised delta is noisy by a quarter of
+// the turn, and the fit over hundreds is not (tier 2's second flight,
+// 2026-09-08). Returns false with fewer than three points or a singular
+// system; rms is the fit's residual in metres.
+inline bool temporalRigidFit(const float* pNow, const float* pPrev, int n, float w[3],
+                             float t[3], float* rms) {
+    if (n < 3) return false;
+    double c0[3] = {0, 0, 0};
+    for (int i = 0; i < n; ++i) {
+        for (int k = 0; k < 3; ++k) c0[k] += pNow[i * 3 + k];
+    }
+    for (double& c : c0) c /= n;
+    double A[6][6] = {};
+    double b[6] = {};
+    for (int i = 0; i < n; ++i) {
+        const double p[3] = {pNow[i * 3] - c0[0], pNow[i * 3 + 1] - c0[1], pNow[i * 3 + 2] - c0[2]};
+        const double d[3] = {pPrev[i * 3] - pNow[i * 3], pPrev[i * 3 + 1] - pNow[i * 3 + 1],
+                             pPrev[i * 3 + 2] - pNow[i * 3 + 2]};
+        // Row r of [-[p]x | I]: w x p = -[p]x w.
+        double M[3][6] = {{0, p[2], -p[1], 1, 0, 0},
+                          {-p[2], 0, p[0], 0, 1, 0},
+                          {p[1], -p[0], 0, 0, 0, 1}};
+        for (int r = 0; r < 3; ++r) {
+            for (int j = 0; j < 6; ++j) {
+                b[j] += M[r][j] * d[r];
+                for (int k = 0; k < 6; ++k) A[j][k] += M[r][j] * M[r][k];
+            }
+        }
+    }
+    // Gaussian elimination with partial pivoting on the 6x6.
+    double x[6] = {};
+    for (int col = 0; col < 6; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < 6; ++r) {
+            if (fabs(A[r][col]) > fabs(A[piv][col])) piv = r;
+        }
+        if (fabs(A[piv][col]) < 1e-12) return false;
+        if (piv != col) {
+            for (int k = 0; k < 6; ++k) { const double tmp = A[col][k]; A[col][k] = A[piv][k]; A[piv][k] = tmp; }
+            const double tb = b[col]; b[col] = b[piv]; b[piv] = tb;
+        }
+        for (int r = col + 1; r < 6; ++r) {
+            const double f = A[r][col] / A[col][col];
+            for (int k = col; k < 6; ++k) A[r][k] -= f * A[col][k];
+            b[r] -= f * b[col];
+        }
+    }
+    for (int r = 5; r >= 0; --r) {
+        double s = b[r];
+        for (int k = r + 1; k < 6; ++k) s -= A[r][k] * x[k];
+        x[r] = s / A[r][r];
+    }
+    // Back from the centroid: t = t' - w x c0.
+    for (int k = 0; k < 3; ++k) w[k] = static_cast<float>(x[k]);
+    const double wc[3] = {x[1] * c0[2] - x[2] * c0[1], x[2] * c0[0] - x[0] * c0[2],
+                          x[0] * c0[1] - x[1] * c0[0]};
+    for (int k = 0; k < 3; ++k) t[k] = static_cast<float>(x[3 + k] - wc[k]);
+    if (rms) {
+        float R[9];
+        temporalRodrigues(w, R);
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) {
+            float q[3];
+            temporalApply3(R, pNow + i * 3, q);
+            for (int k = 0; k < 3; ++k) {
+                const double e = q[k] + t[k] - pPrev[i * 3 + k];
+                sum += e * e;
+            }
+        }
+        *rms = static_cast<float>(sqrt(sum / n));
+    }
+    return true;
 }
 
 // Are these three rows a rotation? Near-unit, near-orthogonal -- the

@@ -292,12 +292,11 @@ void frameTimingBoundary(void* iface, size_t prefix) {
     }
     if (!got) {
         // Refused: the runtime has no timing yet (the first frames), or
-        // this runtime does not implement it (OpenComposite). Give it a few
+        // this runtime does not supply a compatible record. Give it a few
         // seconds of frames before concluding the second.
         if (++s.refusals == 600) {
             standDown("the runtime answered false to GetFrameTiming for 600 frames -- "
-                      "OpenComposite does not implement it, and SteamVR answers within "
-                      "a few frames");
+                      "no compatible compositor timing is available");
         }
         return;
     }
