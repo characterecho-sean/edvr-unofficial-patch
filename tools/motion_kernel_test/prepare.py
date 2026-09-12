@@ -11,8 +11,8 @@ import numpy as np
 
 root=Path(__file__).resolve().parents[2]
 out=root/'build/motion_kernel_test';out.mkdir(parents=True,exist_ok=True)
-source=(root/'src/d3d11/temporal_pass.cpp').read_text()
-part=source[source.index('constexpr char kTemporalCsHlsl'):source.index('constexpr char kFoveaCsHlsl')]
+source=(root/'src/d3d11/temporal_shader_source.h').read_text()
+part=source[source.index('constexpr char kTemporalCsHlsl'):]
 hlsl=''.join(re.findall(r'R"HLSL\((.*?)\)HLSL"',part,re.S))
 reference=hlsl
 first=reference.index('    int2 local =',reference.index('void mv('))

@@ -278,7 +278,7 @@ int main(int argc, char** argv) {
     bind(menu.dsv.Get()); setZ(.96f); coverage(true,false);
     // Run the actual temporal depth accessor on the GPU. Its register
     // declarations and function are read unchanged from production source.
-    std::ifstream source("src/d3d11/temporal_pass.cpp");
+    std::ifstream source("src/d3d11/temporal_shader_source.h");
     std::string temporal((std::istreambuf_iterator<char>(source)), {});
     std::string merge;
     for(const char* start : {"Texture2D<float> Z :", "Texture2D<float> ZS :", "Texture2D<float> ZUI :", "Texture2D<float4> Screen :"}) {

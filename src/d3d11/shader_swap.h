@@ -61,6 +61,12 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,
                                          const SwapMacro* macros,
                                          const char* who);
 
+// Create a shader compiled into the DLL at build time. Same guarded null
+// contract, without invoking the HLSL compiler on the render thread.
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,
+                                      const void* bytecode, size_t bytecodeLen,
+                                      const char* name, const char* who);
+
 ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,
                                        const char* hlsl, size_t hlslLen,
                                        const char* entry, const char* name,
