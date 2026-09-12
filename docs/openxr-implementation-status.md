@@ -237,9 +237,17 @@ EDVR-only cost. The next gate is a Frontier functional test; matched-frame
 accuracy, overhead and other runtime/lifecycle checks remain open.
 
 
-The clean `0ac3095` checkpoint is installed in Frontier, with both DLL hashes
-independently verified and the tuned INI unchanged. The clean full build and
-production WARP smoke passed. The next Pimax/SteamVR flight should exercise the
-new Monitor line, on-foot/cockpit rendering, prompt startup and normal exit. It
-has not yet been flight-tested; use the installed code commit `0ac3095` for log
-identity checks rather than a subsequent documentation-only HEAD.
+The clean `0ac3095` checkpoint passed the full build and production WARP smoke,
+but failed the Pimax/SteamVR visual gate: Sean reported renewed shimmering
+during head movement. Both flight logs and installed DLL hashes match that
+checkpoint. The instrument completed samples, but the cause of the visual
+regression is unresolved. The test fixtures did not exercise production
+temporal rendering with the outer frame scope active.
+
+Frontier was restored to the exact previously normal `cc3d882` DLL pair, with
+both hashes verified and current INI bytes preserved. Use `--expect-build
+cc3d882` for the next flight, which compares the same scene and head movement
+before any speculative rendering fix. The implementation remains on this branch
+and must not advance until this gate is resolved. See the [regression evidence
+and rollback
+record](render-to-submit-gpu-2026-09-12.md#head-movement-regression-and-rollback).

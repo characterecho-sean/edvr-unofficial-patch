@@ -4,6 +4,11 @@ This follows the successful `cc3d882` Frontier timer-migration check. It adds
 the local frame measurement to the current OpenVR proxy. It does not add an
 OpenXR renderer or complete Phase 0 qualification.
 
+The `0ac3095` headset gate failed: renewed shimmering was reported during head
+movement. Frontier was restored to the exact `cc3d882` DLL pair. The cause
+remains unresolved; the timing implementation is not qualified for promotion.
+See the regression record below.
+
 ## What the value means
 
 The start marker precedes the first covered call on the bound immediate context
@@ -116,8 +121,12 @@ passed the 599-check focused suite. The final full paired build passed in
 `build/render-submit-final-validation.log`, including all five actual-proxy
 modes and the 599-check suite.
 
-No headset run has yet qualified this new span. WARP results establish command
-ordering and resource correctness, not hardware timing accuracy or overhead.
+The headset run below did not qualify this span. WARP results establish the
+tested command ordering and resource correctness, not hardware timing accuracy,
+overhead or visual equivalence with production TAA/DLSS. The paired frame test
+had temporal rendering disabled; the separate temporal smoke did not drive
+OpenVR pose boundaries. Neither exercised temporal rendering with the outer
+frame scope active.
 
 ## Frontier gate
 
@@ -158,5 +167,55 @@ The tuned root INI remained byte-identical, SHA-256
 `A32D631834E5C1EEEFAA03367750A7A4211652869EB4976900DC11CF530EC1A9`. There was
 no separate Openvr/win64 INI before or after installation. Previous DLLs were
 retained with suffix `.pre-0ac3095-20260912-082225.bak`. The later
-installation-record commit does not change the installed DLL version; use
-`0ac3095` when verifying the next flight logs.
+installation-record commit does not change that DLL version. The following
+flight used `0ac3095`; the rollback below supersedes this installation.
+
+## Head-movement regression and rollback
+
+Renewed shimmering was reported during head movement after this flight. This is
+a failed visual gate, even though the instrument produced valid samples. Do not
+describe it as a proven motion-vector defect or a proven query side effect yet.
+
+Both graphics and VR logs were independently verified against `0ac3095` with
+the sanctioned log tool. The installer's verification mode also confirmed both
+installed DLLs matched the checkpoint. Detailed flight evidence and the
+rollback receipt are retained locally.
+
+Observed evidence:
+
+- LiveCopy is active. Periodic timing summaries report valid samples and no
+  invalid samples on the expected owner. This refutes owner rejection or an
+  inactive instrument as the explanation for this run; it does not establish
+  visual correctness.
+- DLSS, scene depth, camera rows and motion capture are active. Native TAA
+  statistics cannot validate NVIDIA's history or the submitted motion vectors.
+- Ruled out: a newly appearing projection-order warning, because both this
+  verified run and the earlier normal `cc3d882` run contain it. The warning is
+  an aggregate count, not proof of which projection each rendered eye consumed.
+- Game CreateShaderResourceView failures are also present, with subsequent
+  rendering observed. Their relationship to the reported shimmer is unknown;
+  these are not evidence of failed timing queries.
+
+Read-only review found no branch where timing lease failure or pending results
+skip temporal rendering or motion capture. In `temporal_pass.cpp`, timing and
+statistics completion control diagnostic-slot retirement; in
+`celestial_motion.cpp`, the sampled timer result controls only its matching
+End. The new context hooks forward the existing commands and the four added
+slots match the SDK. This rules out those direct code couplings, not an
+indirect scheduling or driver interaction.
+
+The next discrimination is the same scene and head movement on the restored
+baseline, with current settings preserved. If the shimmer disappears, isolate
+the new instrument with an enabled/disabled comparison of the same newer binary
+before changing motion math. Disappearance with queries disabled would
+implicate the active query path; persistence would leave the bridge/hooks and
+other differences open. If baseline also shimmers, capture the affected
+scene/AA mode and actual camera, jitter and depth inputs rather than assuming
+this checkpoint introduced it. No rendering-code fix has been made on the
+current evidence.
+
+The exact retained baseline backups were hash-checked, staged separately from
+the current build outputs, installed through `tools/install_edvr.py`, and
+verified again. Current INI bytes were preserved. Use `--expect-build cc3d882`
+for the next flight and the staged rollback root when verifying the current
+installation. Baseline visual recovery still needs the headset comparison.
