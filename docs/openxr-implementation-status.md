@@ -13,8 +13,10 @@ projection policies](openxr-core-policy-2026-09-12.md) now exist under desktop
 tests; they are not connected to the shipping proxies. A standalone [native
 session and stereo diagnostic](openxr-native-harness-2026-09-12.md) now binds a
 diagnostic D3D11 device, obtains native geometry and submits a test scene; its
-first real headset run is pending. Earlier review decisions below record the
-state at those checkpoints.
+first [PiOpenXR headset run](openxr-native-pimax-2026-09-12.md) completed 1800
+stereo submissions with valid tracking and normal shutdown, and the user saw
+the triangle. Frontier integration remains pending. Earlier review decisions
+below record the state at those checkpoints.
 
 The original motion regression has recovered on the corrected `f622cd2`
 main-menu capture. The user deferred the remaining stationary wing-line flicker

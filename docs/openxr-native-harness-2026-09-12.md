@@ -4,8 +4,10 @@ This checkpoint adds a standalone native-session harness. It loads an
 explicitly supplied installed OpenXR loader, selects the runtime through the
 loader's normal rules, creates a D3D11 device on the runtime's required
 adapter, obtains native tracking and submits a stereo diagnostic triangle. It
-does not replace Frontier's OpenVR DLL or use Elite's graphics device. Native
-headset results remain pending.
+does not replace Frontier's OpenVR DLL or use Elite's graphics device. The
+subsequent [first PiOpenXR run](openxr-native-pimax-2026-09-12.md) passed the
+native session/submission/shutdown checks and the user saw the diagnostic
+triangle.
 
 The Luna drafts were revised during parent review: frame submission,
 inverse-pose projection, swapchain ownership, timeout handling, device
@@ -128,14 +130,16 @@ failures, positive pending loss, timeout, and cleanup errors. The runner tests
 cover pass, nonzero exit, launch failure, timeout, child-only environment
 changes and a dry run that leaves no output directory.
 
-The native owner/loader path has not yet been exercised against a real runtime
-or a complete fake loader. Its capability/session creation and cleanup paths
-have source review, while the component fixtures cover rendering and lifecycle
-failures. Do not interpret those component tests as proof of complete native
+The native owner/loader path has now passed an ordinary session on PiOpenXR. It
+has not been exercised through a complete fake loader. Its capability/session
+creation and cleanup failure paths have source review, while the component
+fixtures cover rendering and lifecycle failures. Do not interpret those
+component tests or the successful native run as proof of complete native
 initialization failure coverage.
 
-The next gate is the PiOpenXR headset run with its receipt and visual report.
-Even a passing diagnostic will not make Frontier launch without SteamVR: the
-game-facing OpenVR interfaces, Elite-device binding, startup geometry
-cache/thread ownership, stereo image capture, feature integration and broader
-lifecycle/runtime qualification remain work for the backend.
+The first PiOpenXR result and remaining visual/runtime checks are recorded in
+the [native run notes](openxr-native-pimax-2026-09-12.md). A passing diagnostic
+does not make Frontier launch without SteamVR: the game-facing OpenVR
+interfaces, Elite-device binding, startup geometry cache/thread ownership,
+stereo image capture, feature integration and broader lifecycle/runtime
+qualification remain work for the backend.
