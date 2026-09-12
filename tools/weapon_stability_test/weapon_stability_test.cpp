@@ -175,8 +175,43 @@ void capture(const std::filesystem::path& dir){
     auto anchor=h.read(g.anchor.Get());const auto* v=reinterpret_cast<const float*>(anchor.data());
     std::printf("capture %s: offset %.6f %.6f %.6f, roots %.0f, max error %.9f, changed words %u\n",dir.filename().string().c_str(),v[0],v[1],v[2],v[7],maxError,changed);h.clean();
 }
+void emitterTest(){
+    Harness h;std::vector<Instance> p(128);float bones[10][3][4]{},cam[276][4]{},model[13][4]{};
+    cam[270][0]=cam[271][1]=cam[272][3]=1;cam[273][2]=.0675f;
+    for(auto& r:p)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    position(p[12],.04f,.03f,-.02f);p[12].words[0]=7;p[90]=p[12];p[90].words[0]=8;
+    for(unsigned i=0;i<13;++i)for(unsigned j=0;j<4;++j)model[i][j]=float(i*4+j);
+    for(unsigned i=9;i<12;++i){for(unsigned j=0;j<3;++j)model[i][j]=float(i-9==j);model[i][3]=getFloat(p[12],4+i-9);}
+    model[11][3]+=.075f;
+    h.inputs(p.data(),unsigned(p.size()*336),bones,sizeof(bones),cam,sizeof(cam));h.screen();check(h.run(),"emitter test has current-frame mesh anchor");
+    auto input=h.buffer(model,sizeof(model),0,D3D11_BIND_CONSTANT_BUFFER);h.ctx->VSSetConstantBuffers(0,1,input.GetAddressOf());
+    auto sentinel=h.buffer(nullptr,64,16,D3D11_BIND_UNORDERED_ACCESS);ComPtr<ID3D11UnorderedAccessView> sentinelUav;
+    hr(h.dev->CreateUnorderedAccessView(sentinel.Get(),nullptr,&sentinelUav));h.ctx->CSSetUnorderedAccessViews(2,1,sentinelUav.GetAddressOf(),nullptr);
+    h.ctx->CSSetConstantBuffers(1,1,input.GetAddressOf());
+    auto run=[&](bool corrected){
+        testVs=0x9AEC596A2B036EA6ull;testPs=0x3789CA2062E196FBull;
+        h.ctx->UpdateSubresource(input.Get(),0,nullptr,model,0,0);h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
+        check(h.run(),"verified particle draw is forwarded");auto bytes=h.read(g.emitterCb.Get());auto* result=reinterpret_cast<float*>(bytes.data());
+        for(unsigned i=0;i<52;++i){float expected=model[i/4][i%4];if(corrected && i>=39 && i<=47 && i%4==3)expected-=getFloat(p[12],4+(i/4-9));
+            check(std::fabs(result[i]-expected)<1e-6f,"emitter changes only the same attachment translation");}
+        auto original=h.read(input.Get());check(!memcmp(original.data(),model,sizeof(model)),"original emitter CB unmodified");
+        ComPtr<ID3D11Buffer> cb;h.ctx->VSGetConstantBuffers(0,1,&cb);check(cb.Get()==input.Get(),"emitter VS CB restored");
+        cb.Reset();h.ctx->CSGetConstantBuffers(1,1,&cb);check(cb.Get()==input.Get(),"emitter CS CB restored");
+        ComPtr<ID3D11UnorderedAccessView> u;h.ctx->CSGetUnorderedAccessViews(2,1,&u);check(u.Get()==sentinelUav.Get(),"emitter CS UAV restored");
+    };
+    run(true);
+    cam[273][2]=.025f;run(false);cam[273][2]=.0675f;
+    model[9][3]+=10;run(false);model[9][3]-=10;
+    model[9][0]=2;run(false);model[9][0]=1;
+    p[90].words[0]=7;h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,p.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());run(false);
+    testPs=0;check(!h.run(),"other particle materials excluded");testPs=0x3789CA2062E196FBull;
+    weaponStabilityResourceWritten(nullptr);check(!h.run(),"unknown command-list state cannot reuse an emitter anchor");
+    testEnabled=false;weaponStabilityConfigure(Config::get());check(!h.run(),"live weapon-stability off also disables emitter correction");
+    testEnabled=true;weaponStabilityConfigure(Config::get());h.clean();
+}
 int main(int argc,char** argv){
-    if(argc==2 && !strcmp(argv[1],"--self-test"))selfTest();
+    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();}
     else if(argc==3 && !strcmp(argv[1],"--capture"))capture(argv[2]);
     else {std::puts("Usage: weapon_stability_test --self-test | --capture DIR");return 2;}
     std::printf("PASS: weapon stability (%u checks)\n",checks);return 0;

@@ -635,6 +635,7 @@ float g_smokeFloor = 0.08f;
 float g_smokeReactive = 0.0f;
 FloorCb g_floorCbs[4];   // [0] the interface proper, [1] the holo material and the sprite, [2] the flight HUD, [3] the smoke (g_reissueMaskSlot)
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
+ID3D11DepthStencilState* g_overlayDss = nullptr;   // visible interface overlays replace private depth
 bool          g_reissueDssFailedNoted = false;
 
 // THE REACTIVE MASK (ui_depth.h): one per eye at the render size, cleared
@@ -969,21 +970,22 @@ void noteFamily(uint64_t vh, uint64_t ph, const char* how) {
 
 // The re-issue's depth state: the nearer wins, so a ship model in front of
 // the loader's screen keeps its depth; stencil left off.
-ID3D11DepthStencilState* reissueState(ID3D11DeviceContext* ctx) {
-    if (g_reissueDss) return g_reissueDss;
+ID3D11DepthStencilState* reissueState(ID3D11DeviceContext* ctx, bool overlay = false) {
+    auto*& state = overlay ? g_overlayDss : g_reissueDss;
+    if (state) return state;
     if (g_reissueDssFailedNoted) return nullptr;
     D3D11_DEPTH_STENCIL_DESC d{};
     d.DepthEnable = TRUE;
     d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-    d.DepthFunc = g_testAlways ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_GREATER_EQUAL;
+    d.DepthFunc = (g_testAlways || overlay) ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_GREATER_EQUAL;
     d.StencilEnable = FALSE;
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
-    const HRESULT hr = dev->CreateDepthStencilState(&d, &g_reissueDss);
+    const HRESULT hr = dev->CreateDepthStencilState(&d, &state);
     dev->Release();
-    if (FAILED(hr) || !g_reissueDss) {
-        g_reissueDss = nullptr;
+    if (FAILED(hr) || !state) {
+        state = nullptr;
         g_reissueDssFailedNoted = true;
         Log::get().note("ui depth: the depth pass's state could not be made "
                         "(0x%08lX); interface-projection composites stay as the "
@@ -991,7 +993,7 @@ ID3D11DepthStencilState* reissueState(ID3D11DeviceContext* ctx) {
                         static_cast<unsigned long>(hr));
         return nullptr;
     }
-    return g_reissueDss;
+    return state;
 }
 
 DepthShader* compiled(ID3D11DeviceContext* ctx, DepthShader& s) {
@@ -1274,6 +1276,7 @@ void parseHashes(const std::string& spec, uint64_t* out, uint32_t* count,
 }
 
 void releaseStates() {
+    if (g_overlayDss) { g_overlayDss->Release(); g_overlayDss = nullptr; }
     if (g_reissueDss) {
         g_reissueDss->Release();
         g_reissueDss = nullptr;
@@ -1819,7 +1822,19 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // The depth pass writes depth with the nearer-wins test; a
         // mask-only pass over a family whose depth is already written just
         // marks, with the same test and no writes.
-        ID3D11DepthStencilState* dss = depthPass ? reissueState(ctx) : maskDepthState(ctx);
+        // Interface overlays whose original draw disables depth testing are
+        // visible over the cockpit. A nearer-wins reissue leaves unrelated
+        // cockpit depth (and its holo motion) under that visible text. The
+        // 20:51 account capture contains 112 such bright profile pixels.
+        // Only interface-projection overlays inherit this ordering; scene
+        // geometry and depth-tested interfaces retain their visibility test.
+        bool overlay = false;
+        if (depthPass && !sceneProjection) {
+            Microsoft::WRL::ComPtr<ID3D11DepthStencilState> original;
+            UINT ref = 0; ctx->OMGetDepthStencilState(&original, &ref);
+            if (original) { D3D11_DEPTH_STENCIL_DESC desc{}; original->GetDesc(&desc); overlay = !desc.DepthEnable; }
+        }
+        ID3D11DepthStencilState* dss = depthPass ? reissueState(ctx, overlay) : maskDepthState(ctx);
         ID3D11Buffer* cb = floorBuffer(ctx, g_reissueMaskSlot, g_reissueMaskOffset);
         if (!dss || !cb) {
             ++g_wNoTwin;

@@ -154,6 +154,8 @@ int main(int argc, char** argv) {
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     };
     auto coverage = [&](bool menu, bool mark) {
+        ComPtr<ID3D11DepthStencilState> before; UINT beforeRef=0;
+        ctx->OMGetDepthStencilState(&before,&beforeRef);
         g_on = true; g_mode = menu ? Mode::kReissue : Mode::kReissueScene;
         g_reissueShader = &g_depthShaders[2]; g_drawEye = 0; g_reissueMaskSlot = 1;
         g_rebindW = g_rebindH = 8; g_wantRebind = menu; g_rebindEye = 0;
@@ -165,7 +167,7 @@ int main(int argc, char** argv) {
         ComPtr<ID3D11PixelShader> p; ctx->PSGetShader(&p, nullptr, nullptr);
         check(p.Get() == ps.Get(), "pixel shader restored");
         ComPtr<ID3D11DepthStencilState> d; UINT ref = 0; ctx->OMGetDepthStencilState(&d, &ref);
-        check(d.Get() == nonwriting.Get() && ref == 7, "depth state and stencil reference restored");
+        check(d.Get() == before.Get() && ref == beforeRef, "depth state and stencil reference restored");
     };
     auto scene = depth(dev.Get(), DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT);
     testScene = scene.tex.Get();
@@ -208,6 +210,20 @@ int main(int argc, char** argv) {
     values=read(dev.Get(),ctx.Get(),privateRes.Get()); check(std::fabs(values[1]-.24f)<1e-5f,"menu depth encoding preserved");
     D3D11_VIEWPORT vp{}; UINT count=1; ctx->RSGetViewports(&count,&vp); check(vp.MaxDepth==1,"viewport restored");
     ComPtr<ID3D11DepthStencilView> bound; ctx->OMGetRenderTargets(0,nullptr,&bound); check(bound.Get()==menu.dsv.Get(),"menu target restored");
+    // The escape profile draws over nearer cockpit holograms with depth off.
+    ds.DepthEnable=FALSE;
+    ComPtr<ID3D11DepthStencilState> overlay;hr(dev->CreateDepthStencilState(&ds,&overlay));
+    for(bool depthTest:{true,false}) {
+        uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,.8f,0);
+        bind(menu.dsv.Get());setZ(.96f);
+        if(!depthTest)ctx->OMSetDepthStencilState(overlay.Get(),13);
+        coverage(true,true);
+        check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&ui),"overlay publishes depth");ui->GetResource(privateRes.ReleaseAndGetAddressOf());
+        values=read(dev.Get(),ctx.Get(),privateRes.Get());
+        for(int y=0;y<8;++y)for(int x=0;x<8;++x)
+            check(std::fabs(values[y*8+x]-(!depthTest && x<4?.24f:.8f))<1e-5f,"visible menu replaces foreground depth only under its alpha; depth-tested menu stays occluded");
+        for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(std::fabs(v-.8f)<1e-5f,"overlay never changes game depth");
+    }
     // Dim comms icons must keep panel depth instead of falling through to
     // sky motion. Their screen material has no glow; transparent pixels
     // must still leave the private and original depths alone.

@@ -186,3 +186,90 @@ C++/Python effect-capture round trip. NVIDIA smoke passes TAA, DLAA,
 DLSS, foveation and motion/jitter conventions. The original-shader
 replay also confirms all 81 patch histories are valid, not merely equal
 fallback records. Settings and DLSS quality are unchanged.
+
+## Flight 20:48, user sees no material DLSS performance change
+
+Ruled out: the last optimization delivering a noticeable total frametime
+improvement in this flight. The user reports no material change,
+including after reducing terrain quality. Log
+edvr_gfx_20260911_204813.log matches 39b2eac and confirms 1,050,619
+terrain patches captured in their original draws with zero reissues; the
+optimization was active. The terrain bracket averages 15.494 us/patch
+including the original game draw. NVIDIA reconstruction remains
+approximately 1.8 ms/eye. The previous replay saving cannot substitute
+for this in-game feedback.
+
+The steady cockpit intervals are more useful than the session average:
+between 20:51:14 and 20:51:54, the cumulative submission counters imply
+about 2.01 ms/eye, consistent with the roughly 4 ms stereo door GPU
+measurements. The early 201.65 ms maximum includes startup; dump
+readback also produces CPU spikes. Neither is normal reconstruction
+cost. Sampled draw-hook CPU is roughly 0.5 ms in the cockpit. These logs
+do not establish another large, safe performance saving. No further
+terrain or DLSS quality change is included in this follow-up.
+
+### Purple weapon emitter and escape profile, 20:51/20:52 captures
+
+Environment remains SteamVR, RTX 5090, DLSS 310.7 preset K, 2268x2240 to
+4536x4480 per eye; the on-foot source is 5120x2880. The two on-foot v5
+snapshots (`205232`, `205235`) contain all 38 requested effect draws
+with their original layouts and vertex/index streams, without failed
+copies or budget declines.
+
+The purple glow is the local particle draw using VS `9AEC596A2B036EA6`
+and PS `3789CA2062E196FB`. It does not read the corrected instance pool.
+Its CB0 rows 9..11 carry the emitter's camera-relative model transform;
+the original vertex shader uses these to position every particle before
+projection through CB1 rows 270..273. The emitter stays rigidly attached
+to rifle record 40 before the mesh correction: its local offset is about
+(0.00063, 0.00089, 0.07490) metres, varying by under 6 micrometres
+across each capture. After moving only the mesh, relative vertical
+displacement varies by 23.3 mm in the first capture and 14.6 mm in the
+second; the overall attachment correction reaches 53.8 mm. This confirms
+the missing emitter correction, rather than an independent animation or
+DLSS defect.
+
+The existing Weapon stability toggle now also corrects this emitter on
+the GPU. The original vertex/pixel shaders, particle animation, colour,
+atlas, geometry and blend state remain in use. Only CB0 translation is
+substituted for the draw. The path requires a fresh source mesh anchor,
+the verified shader pair, the captured 208-byte model layout, a proper
+rigid emitter within the existing one-metre attachment volume, and the
+first-person projection's 0.0675 m near plane. World particles use the
+0.025 m projection. Other projections remain unchanged; this is a
+deliberately bounded fix for the verified viewmodel path, not a general
+particle attachment classifier. Resource writes refresh the anchor;
+unknown command-list state invalidates it. No synchronous readback is
+added.
+
+Ruled out: the account display's glass appearance is the loading wash.
+The `205155` menu composite samples the replacement 1x1 black wash at
+t0, which collapses that blur term, and its 1781x1001 source contains
+sharp profile text. All 1,571 bright pixels in the sampled profile text
+box have UI coverage, but 112 still carry underlying cockpit hologram
+11's depth. The original menu draw disables depth testing while the
+private AA reissue unconditionally used a nearer-wins test. That
+mismatch lets visible menu pixels inherit a nearer cockpit surface and
+its motion.
+
+Interface-projection draws with depth testing disabled now replace
+private depth under their alpha coverage, matching the visible overlay
+order. Depth-tested interfaces and scene geometry retain the existing
+test. The game depth is still untouched. This addresses the demonstrated
+overlap error; it does not promise to recover detail absent from the
+menu source or establish that every perceived softness is resolved.
+
+Targeted validation: 523 weapon tests and 20,718 UI tests pass,
+including world/far/nonrigid emitter rejection, live toggling,
+fresh-input rules, GPU binding restoration, and opaque/transparent
+overlay ordering over nearer scene depth. All 38 captured particle draws
+replay through Elite's original vertex shader; every output component
+matches the independent attachment correction with zero measured error.
+The original mesh-only path is the negative control. Evidence and replay
+tools are under `build/review_motion/sep11/flight2100/`.
+
+The full production SDK build and all repository gates pass, followed by
+the actual NVIDIA DLL smoke checks for TAA/DLAA/DLSS and motion/jitter.
+The WARP regressions ran without the optional D3D debug layer because it
+is unavailable on this machine; the functional GPU/state assertions
+passed. Neither fix changes settings or claims a further DLSS speedup.

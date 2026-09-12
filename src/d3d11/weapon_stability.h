@@ -21,8 +21,10 @@ struct Bone {float4 x,y,z;};
 StructuredBuffer<Instance> Pool:register(t0);
 StructuredBuffer<Bone> Bones:register(t1);
 cbuffer Camera:register(b0){float4 camera[276];}
+cbuffer Emitter:register(b1){float4 emitter[13];}
 RWStructuredBuffer<Instance> Fixed:register(u0);
 RWStructuredBuffer<float4> Anchor:register(u1);
+RWStructuredBuffer<float4> EmitterFixed:register(u2);
 groupshared float distances[64];
 groupshared uint indices[64],partners;
 float3 position(Instance r){return asfloat(r.row[1].xyz);}
@@ -82,6 +84,26 @@ bool root(uint i,uint nb) {
     if(Anchor[0].w>0 && distance2<1 && (r.row[0].x==0 || distance2<1e-8))
         r.row[1].xyz=asuint(p+Anchor[0].xyz);
     Fixed[id]=r;
+}
+// The captured local particle variant uses the first-person projection
+// (near 0.0675, versus 0.025 for world particles) and a camera-relative
+// emitter transform. The purple rifle emitter is rigidly attached 75 mm
+// from its mesh origin in all 38 captured frames. Its particles do not read
+// t33, so correcting the mesh pool alone separates them during crouching.
+// Deliberately decline other projections and emitters outside the same
+// one-metre attachment volume used by applyAnchor. No colour/atlas rule.
+[numthreads(1,1,1)]void applyEmitter() {
+    float3 origin=float3(emitter[9].w,emitter[10].w,emitter[11].w)+camera[275].xyz;
+    float3 d=origin-Anchor[1].xyz;
+    bool valid=Anchor[0].w>0 && abs(camera[273].z-.0675)<1e-7 &&
+        all(isfinite(origin)) && dot(d,d)<1 &&
+        all(abs(float3(dot(emitter[9].xyz,emitter[9].xyz),dot(emitter[10].xyz,emitter[10].xyz),dot(emitter[11].xyz,emitter[11].xyz))-1)<.001) &&
+        all(abs(float3(dot(emitter[9].xyz,emitter[10].xyz),dot(emitter[9].xyz,emitter[11].xyz),dot(emitter[10].xyz,emitter[11].xyz)))<.001) &&
+        dot(cross(emitter[9].xyz,emitter[10].xyz),emitter[11].xyz)>.999;
+    [unroll]for(uint i=0;i<13;++i) {
+        float4 r=emitter[i];if(valid && i>=9 && i<12)r.w+=Anchor[0][i-9];
+        EmitterFixed[i]=r;
+    }
 }
 )HLSL";
 }
