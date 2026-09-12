@@ -120,10 +120,10 @@ repeated all three new test gates and passed the existing native, compositor,
 binding, rendering and Python regressions plus the 252-key config contract.
 Exact source, harness, export-fixture, loader and manifest hashes are retained
 in `build/openxr-runtime-validation.json`; the full build log is
-`build/openxr-runtime-build.log`. A fresh headset result is still pending;
-earlier native results do not qualify this revised executable.
+`build/openxr-runtime-build.log`. The matching native result follows below;
+earlier native results were not reused to qualify this revised executable.
 
-## Next native gate
+## Native gate and result
 
 Run the reviewed 20-second PiOpenXR diagnostic with Frontier and SteamVR closed
 and the user ready in the Pimax headset. Match executable, source, loader and
@@ -138,9 +138,36 @@ render-loop frames plus startup frames; cached comparisons count render-loop
 frames only. Shutdown must retire the interfaces, advance the token, clean
 resources once and close normally.
 
-The user must still confirm both eyes, placement in front after startup reset,
-world-up, stable tracking during head movement and normal color/clarity. This
-flight will qualify the standalone startup sequence, not a native Frontier
-installation. Persistent lifecycle pumping, game-thread dispatch, required
-skybox/fade/event behavior, the paired feature handshake and a production
-rendering pass that preserves EDVR's graphics state remain open.
+The `d7623ed` diagnostic passed the 20-second PiOpenXR run with executable,
+sources, loader and manifest matched to the full-build record. Frontier and
+SteamVR were absent before and after. Pimax OpenXR 0.1.0 reported D3D11.1, 5424
+x 5356 per eye and sRGB swapchains. The child exited 0 after 20.39 seconds
+without the watchdog firing.
+
+Init completed one zero-layer frame, published geometry on sequence 1 with no
+prior Submit, and exposed all four interfaces. Repeated Init kept token 1 and
+the same Compositor identity. The unknown-interface rejection and second-thread
+cached geometry checks passed before Compositor retrieval. The virtual display
+reported 10848 x 5356.
+
+Both seated resets passed the position/yaw bounds, advanced origin generation
+to 2 then 3, invalidated the caches and produced one event each. Geometry was
+republished on sequence 4 before stereo. The frame checks completed 1801 waits
+(one startup plus 1800 render-loop frames), 1800 cache comparisons, 1801 valid
+gameplay poses, 3592 Submit calls/private eye copies, 1796 stereo pairs and
+handoffs, and four render-loop zero-layer frames. There were 1799 valid
+view/head samples and no invalid views. Shutdown advanced the token to 2,
+retired the interfaces and cleaned resources exactly once with normal session
+stop. No natural runtime-origin change occurred; that policy still has
+desktop-only qualification.
+
+The user confirmed the triangle in front in both eyes, upright and fixed in
+space during head movement, normal color/clarity and normal closure. The
+receipt and output remain under `build/openxr-native-20260912-170532`, with
+parsed counters and visual confirmation in the validation record.
+
+This completes the standalone startup sequence gate. Persistent lifecycle
+pumping, game-thread dispatch, required skybox/fade/event behavior, complete
+legacy exports, the paired feature handshake and a production rendering pass
+that preserves EDVR's graphics state remain open. The run did not install or
+test a native Frontier backend.

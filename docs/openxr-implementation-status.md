@@ -93,10 +93,15 @@ exact ExtendedDisplay/Chaperone shapes. Native Init now caches valid geometry
 before exposing System; a second thread reads that geometry before Compositor
 is requested. Desktop fixtures cover cancellation, cleanup failure, token and
 interface publication, and actual exported calls through a test DLL. The full
-build passed with 73 lifecycle, 234 auxiliary and 35 export checks. A fresh
-native startup flight is the next gate. Complete legacy exports, persistent
-game-thread ownership, required compositor features and Frontier integration
-remain open; the installed Frontier pair stays `f3c205e`.
+build passed with 73 lifecycle, 234 auxiliary and 35 export checks. The
+`d7623ed` PiOpenXR run passed native Init geometry, all four interface getters,
+the second-thread cached query, repeated Init/identity and shutdown retirement.
+It completed both resets, 1801 waits, 1800 cache comparisons, 1796 stereo pairs
+and normal cleanup, with SteamVR absent before and after. The user confirmed
+placement in both eyes, world-up, stable tracking, normal color/clarity and
+normal exit. Complete legacy exports, persistent game-thread ownership,
+required compositor features and Frontier integration remain open; the
+installed Frontier pair stays `f3c205e`.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
