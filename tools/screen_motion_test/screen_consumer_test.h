@@ -2,8 +2,23 @@
 // Reflection locates cbuffer fields so a layout change cannot silently
 // leave this testing different parameters from the shipping shader.
 #include <d3d11shader.h>
+#include "temporal_shader_bytecode.h"
 void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
-    std::ifstream input("src/d3d11/temporal_pass.cpp");
+    // Validate every shipping blob on WARP, including the AA entry point
+    // that the screen-motion fixture below does not dispatch.
+    struct EmbeddedShader { const void* data; size_t size; const char* name; };
+    const EmbeddedShader embedded[] = {
+        {edvr::kTemporalMvFastBytecode, sizeof(edvr::kTemporalMvFastBytecode), "temporal_mv_fast_cs"},
+        {edvr::kTemporalMvBytecode, sizeof(edvr::kTemporalMvBytecode), "temporal_mv_cs"},
+        {edvr::kTemporalAaBytecode, sizeof(edvr::kTemporalAaBytecode), "temporal_aa_cs"}
+    };
+    for (const auto& blob : embedded) {
+        ComPtr<ID3D11ComputeShader> shader;
+        hr(dev->CreateComputeShader(blob.data, blob.size, nullptr, &shader));
+        check(shader.Get() != nullptr, blob.name);
+        std::printf("PASS: embedded %s creates on WARP (%zu bytes)\n", blob.name, blob.size);
+    }
+    std::ifstream input("src/d3d11/temporal_shader_source.h");
     std::string source((std::istreambuf_iterator<char>(input)),{}),hlsl;
     auto cursor=source.find("constexpr char kTemporalCsHlsl[]");
     auto end=source.find(")HLSL\";",cursor);
