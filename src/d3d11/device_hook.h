@@ -16,9 +16,11 @@ namespace edvr {
 
 // Which hook mechanism the context fixes should use, decided from the
 // immediate context's vtable: does the runtime's own code back its methods
-// (CopyVptr, immune to the runtime re-pointing its shared table between
-// variants -- measured 2026-08-18) or does a wrapper like ReShade (InPlace,
-// because swapping a wrapper's object vptr is issue #6)?
+// (LiveCopy, what auto chooses for these: a private table that follows the
+// runtime as it re-points its own shared table between variants, and is
+// immune to a tool writing that shared table -- measured 2026-08-18) or does
+// a wrapper like ReShade (InPlace, because swapping a wrapper's object vptr
+// is issue #6)?
 //
 // Defined in d3d11_proxy.cpp, which owns the system module handle. Returns
 // InPlace when the module or context is unavailable: the mode that never

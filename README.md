@@ -247,7 +247,12 @@ in a frame time; the risk is that a mod wrapping Direct3D objects (ReShade as
 `dxgi.dll`) does not expect its object to be re-pointed, which is why `auto`
 gives those rigs `shared` instead. If `shared` keeps the game alive but the log
 then says EDVR's hooks keep being pushed out of the table, this is the mode
-that is both unbypassable and never out of date.
+that is both unbypassable and never out of date. Each `live` hook forwards
+through a small executable stub page EDVR generates -- mapped
+`PAGE_EXECUTE_READ`, executable but never also writable -- so it can reach the
+runtime's current method for that slot; that generated code is something an
+antivirus heuristic may weigh, and a process that force-enables Control Flow
+Guard could refuse a call through one.
 
 ```ini
 [advanced]

@@ -31,8 +31,10 @@
 //   and, where evidence permits, heals.
 //
 // The pick: a table living inside the REAL implementation module's image
-// (the d3d11.dll we forward to) is the runtime's own -- CopyVptr, immune and
-// wrapper-safe because there is no wrapper. A table living anywhere else is
+// (the d3d11.dll we forward to) is the runtime's own -- the live table is
+// what auto chooses (LiveCopy), wrapper-safe because there is no wrapper and
+// following the runtime as it re-points its own table rather than freezing a
+// snapshot the way CopyVptr did. A table living anywhere else is
 // somebody's proxy class -- InPlace, because re-pointing their object is
 // issue #6. vtableInsideModule() is the probe; the POLICY stays with callers,
 // who know which module implements what they hooked. tools/vtable_test holds
@@ -127,8 +129,10 @@ bool vtableInsideModule(void** vtable, void* moduleBase);
 //
 // THE mechanism probe. It asks whose CODE implements the object's methods,
 // which is the fact that actually decides safety: entries in the runtime's
-// d3d11.dll mean the runtime owns this object and a vptr swap is safe and
-// immune to the runtime re-pointing its own table (2026-08-18); entries in a
+// d3d11.dll mean the runtime owns this object and swapping its vptr breaks no
+// wrapper -- but relocating the vptr is NOT immune to the runtime re-pointing
+// its own table; the live-forwarding table (LiveCopy) is what follows the
+// runtime's re-lay (2026-08-18); entries in a
 // wrapper's module (ReShade) mean swapping the object's vptr breaks the
 // wrapper, which is issue #6. Robust to where the vtable ARRAY happens to
 // live, which vtableInsideModule was not.
