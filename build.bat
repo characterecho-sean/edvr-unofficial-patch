@@ -173,6 +173,21 @@ REM generated from the same sources the late contract check verifies.
 python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 
+echo [edvr] === precompiled temporal shaders ===
+REM Fixed HLSL belongs in the build: compiling it in the first Present delayed
+REM the intro by 18 seconds. Regenerate every build so stale bytecode cannot
+REM survive a source change. The generator tests never initialize a GPU.
+if not exist "%OBJ%\temporalshader" mkdir "%OBJ%\temporalshader"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\temporalshader\\" /Fe"%OBJ%\temporalshader\temporal_shader_build.exe" ^
+    "tools\temporal_shader_build\temporal_shader_build.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: temporal shader compiler build failed & exit /b 1 )
+"%OBJ%\temporalshader\temporal_shader_build.exe" --self-test || exit /b 1
+"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --dry-run || exit /b 1
+"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" || exit /b 1
+
 echo [edvr] === d3d11.dll ===
 REM AMD FSR 1.0 as embeddable HLSL. Generated rather than committed so the
 REM vendored headers stay byte-identical to upstream (src\d3d11\fsr\).
@@ -715,6 +730,7 @@ if errorlevel 1 ( echo [edvr] ERROR: hologram motion test build failed & exit /b
 
 if not exist "%OBJ%\screenmotion" mkdir "%OBJ%\screenmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /I"%GEN%" ^
     /Fo"%OBJ%\screenmotion\\" /Fe"%OBJ%\screenmotion\screen_motion_test.exe" ^
     "tools\screen_motion_test\screen_motion_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1

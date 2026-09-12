@@ -120,7 +120,7 @@ int main(int argc,char** argv) {
     check(views[0] && views[1] && views[2],"complete terrain inputs published");
     // Compile the actual temporal consumer and run it over the private
     // index/depth plus a final scene depth, then test foreground rejection.
-    std::ifstream source("src/d3d11/temporal_pass.cpp"); std::string text((std::istreambuf_iterator<char>(source)),{});
+    std::ifstream source("src/d3d11/temporal_shader_source.h"); std::string text((std::istreambuf_iterator<char>(source)),{});
     const auto begin=text.find("bool terrainPixel("); const auto end=text.find("\n}\n",begin);
     check(begin!=std::string::npos && end!=std::string::npos,"production temporal consumer found");
     std::string hlsl="Texture2D<uint> TI:register(t9);Texture2D<float> TZ:register(t10);struct TerrainRecord{uint4 key[12];float4 q;float4 t;float4 r[3];};StructuredBuffer<TerrainRecord> TR:register(t11);Texture2D<float> Final:register(t0);RWTexture2D<float4> Out:register(u0);static const int4 region=0;static const int2 size=int2(8,8);static const float4 knobs=float4(0,1,.025,0);static const float4 probe=float4(0,0,0,8);static const float4 tanPrev=float4(-1,1,-1,1);bool uiCovered(int2 p){return p.x==0;}float zSceneAt(int2 p){return Final.Load(int3(p,0));}\n";

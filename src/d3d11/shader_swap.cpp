@@ -38,6 +38,7 @@ void blobRelease(void* blob) {
 }
 
 FaultBudget g_budget("shaderSwap.compile", 5);
+FaultBudget g_createBudget("shaderSwap.create", 5);
 
 void compileInner(ID3D11DeviceContext* ctx, const char* hlsl, size_t hlslLen,
                   const char* entry, const char* name,
@@ -184,6 +185,35 @@ void compileInnerCs(ID3D11DeviceContext* ctx, const char* hlsl,
 }
 
 }  // namespace
+
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,
+                                      const void* bytecode, size_t bytecodeLen,
+                                      const char* name, const char* who) {
+    if (!ctx || !bytecode || !bytecodeLen) return nullptr;
+    ID3D11ComputeShader* out = nullptr;
+    const int64_t t0 = qpcNow();
+    HRESULT hr = E_FAIL;
+    guardedBudget(g_createBudget, [&] {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (dev) {
+            hr = dev->CreateComputeShader(bytecode, bytecodeLen, nullptr, &out);
+            dev->Release();
+        }
+    });
+    if (FAILED(hr) && out) {
+        out->Release();
+        out = nullptr;
+    }
+    const int64_t frequency = qpcFrequency();
+    const double ms = frequency > 0
+        ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(frequency)
+        : 0.0;
+    Log::get().note("%s: precompiled compute shader %s %s (0x%08X, %.3f ms).",
+                    who, name, out ? "created" : "creation FAILED; standing down",
+                    static_cast<unsigned>(hr), ms);
+    return out;
+}
 
 // Every compile is an EVENT for the monitor's drop attribution, with its
 // duration: a compile on the render thread is the mod's own classic hitch

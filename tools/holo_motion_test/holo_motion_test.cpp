@@ -103,7 +103,7 @@ int main(int argc,char** argv) {
         std::printf("replayed %u captured %s pairs\n",pairs,mode==3?"sprite":"hologram");
     }
     // Compile the production temporal consumer, including both grid modes.
-    std::ifstream file("src/d3d11/temporal_pass.cpp"); std::string source((std::istreambuf_iterator<char>(file)),{});
+    std::ifstream file("src/d3d11/temporal_shader_source.h"); std::string source((std::istreambuf_iterator<char>(file)),{});
     auto begin=source.find("bool holoPixel("),end=source.find("\n}\n",begin); check(begin!=std::string::npos && end!=std::string::npos,"temporal consumer found");
     std::string hlsl="Texture2D<float2> HC:register(t12);struct HoloRecord{uint4 key[8];float4 clip[3];float4 map[3];float4 meta;};StructuredBuffer<HoloRecord> HR:register(t13);Texture2D<float> Z:register(t0);RWTexture2D<float4> Out:register(u0);cbuffer P:register(b0){float4 holoJitter;float4 probe;}static const int4 region=0;static const int2 size=int2(8,8);static const float4 knobs=float4(0,1,.025,0);bool uiCovered(int2 q){return q.x!=0;}float zSceneAt(int2 q){return Z.Load(int3(q,0));}\n";
     hlsl+=source.substr(begin,end+3-begin);

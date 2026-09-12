@@ -8,7 +8,7 @@
 // frame); the pixel-to-direction mapping and its inverse, on a real
 // headset's lopsided frustum; the rotation deltas from the runtime's pose
 // and from the game's view rows; and the whole reprojection walked by hand
-// against a known head turn. The shader in src/d3d11/temporal_pass.cpp
+// against a known head turn. The shader in src/d3d11/temporal_shader_source.h
 // transcribes the same functions.
 #include <cmath>
 #include <cstdio>

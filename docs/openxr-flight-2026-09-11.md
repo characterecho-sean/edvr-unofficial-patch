@@ -209,8 +209,15 @@ preserving their normal explicit shutdown/join paths. No join or mutex access
 is added to process detach. The menu test now checks actual worker startup
 followed by CRT exit in an isolated child, and explicit shutdown/restart in a
 second child. Both child cases and the full build passed in
-`build/menu-worker-exit-fix.log`; installation and a normal game exit still
-need to be verified.
+`build/menu-worker-exit-fix.log`.
+
+The next Frontier run verifies the correction on `e9802b7`. Both
+`edvr_gfx_20260912_042547.log` and `edvr_vr_20260912_042607.log` passed
+`--expect-build e9802b7`; their linked stamps are `6AA4C1E3` and `6AA4C1EA`.
+Sean reported that this run did not seem to crash, and Windows contains no
+matching crash record for it. This satisfies the requested game-exit check for
+this build and configuration. The earlier Steam crash at 04:14:35 uses a
+different DLL stamp and predates this Frontier run.
 
 Separately, the new, unintegrated GPU desk harnesses reported test failures,
 including an access violation. Their execution was stopped; none of those
