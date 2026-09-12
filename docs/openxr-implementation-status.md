@@ -180,3 +180,12 @@ these components alone do not publish a game GPU value.
 The startup shader fix was separately merged and pushed to main as `ec26970`,
 after a full regression build on current main. The unfinished OpenXR/GPU work
 was not included in that merge.
+
+## Main integration and next Frontier flight
+
+Main including PR #33 is merged at `06636b2`. Both context-hook diagnostics and
+the bounded VR census survived the merge, as did the startup and worker-exit
+fixes. The full paired build passed. The next flight uses Pimax through SteamVR
+and explicitly checks LiveCopy activation, working rendering fixes, startup,
+exit and refreshed ordering evidence; see the [Frontier flight
+checklist](frontier-livecopy-flight-2026-09-12.md). Its results remain pending.

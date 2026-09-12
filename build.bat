@@ -816,6 +816,20 @@ if errorlevel 1 ( echo [edvr] ERROR: D3D11 GPU span test build failed & exit /b 
 "%OBJ%\gpuspand3d11\gpu_span_d3d11_test.exe" --dry-run || exit /b 1
 "%OBJ%\gpuspand3d11\gpu_span_d3d11_test.exe" --self-test || exit /b 1
 
+REM Real WARP query work through the same stacked LiveCopy mechanism used by
+REM exposure and vScreen. This is desk-only; no production GPU timer is enabled.
+if not exist "%OBJ%\gpulivehook" mkdir "%OBJ%\gpulivehook"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gpulivehook\\" ^
+    /Fe"%OBJ%\gpulivehook\gpu_live_hook_test.exe" ^
+    "tools\gpu_live_hook_test\gpu_live_hook_test.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" ^
+    "src\common\config.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: LiveCopy GPU query test build failed & exit /b 1 )
+"%OBJ%\gpulivehook\gpu_live_hook_test.exe" --dry-run || exit /b 1
+"%OBJ%\gpulivehook\gpu_live_hook_test.exe" --self-test || exit /b 1
+
 REM Drive the actual paired proxies through startup exhaustion and a first
 REM compositor wait, on a hidden WARP swapchain with an inert fake runtime.
 if not exist "%OBJ%\vrcensusbridge" mkdir "%OBJ%\vrcensusbridge"

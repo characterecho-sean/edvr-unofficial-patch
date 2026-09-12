@@ -85,11 +85,37 @@ orders passed again, as did all existing project gates. These components are
 compiled into test executables only; no new GPU code has been installed into
 Frontier.
 
+## LiveCopy integration desk check
+
+After main's PR #33 merge, the full build in
+`build/livecopy-query-validation.log` passed the additional
+`gpu_live_hook_test` gate. A WARP immediate context uses two stacked production
+LiveCopy tables, with typed Begin/End hooks at SDK slots 27/28. The test checks
+the complete base interface extent, stable device/context identity, one
+physical disjoint Begin/End, two nested timestamp borrowers and a shared ready
+frequency. All 42 checks passed, including exact texture readback after the
+measured work, owner-thread clock shutdown and reverse hook removal. The 0.0250
+ms nested interval is a WARP test result, not an Elite measurement.
+
+Root review corrected the Luna draft's ownership comparison and callback
+exception handling, strengthened interface coverage and result checks, and
+extended readback from one pixel to the complete texture before running it. The
+test retains System32 D3D11 through COM cleanup, runs in a hidden child with a
+timeout and error-dialog suppression, and performs no module loading or work in
+dry-run mode. It exercises query forwarding through LiveCopy; the existing
+vtable regressions separately test runtime slot changes. The paired-proxy
+census bridge also passed after the merge. None of these tests enables a new
+GPU timer in the game.
+
 ## Remaining integration gate
 
 The outer application bracket must share this clock with all existing timers:
-door, temporal, DLAA, supersample, sharpening, menu, UI-content and stellar
-coverage. Merely replacing the door timer leaves nested disjoint scopes.
+door, temporal, DLAA, supersample, sharpening, menu, UI-content, stellar
+coverage and main's celestial-motion sampler. Merely replacing the door timer
+leaves nested disjoint scopes. The temporal ring retains each slot until both
+timestamp polling and staging-buffer readback finish; a shared-clock migration
+must preserve that dual completion. Sampled draw timers also need explicit
+owner-thread closure before reset, including an interrupted active sample.
 Preserve each existing metric and standalone behavior during that migration.
 Owner-thread shutdown and callback/module lifetime must be established by the
 integration, not assumed from the successful desk test.
