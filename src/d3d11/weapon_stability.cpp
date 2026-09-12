@@ -101,12 +101,15 @@ bool particleDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,
     Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->CSGetShader(&saved,classes,&nc);
     ID3D11Buffer* cbs[2]{};ctx->CSGetConstantBuffers(0,2,cbs);
     ID3D11UnorderedAccessView* uavs[2]{};ctx->CSGetUnorderedAccessViews(1,2,uavs);
+    Ptr<ID3D11ShaderResourceView> poolSrv;ctx->CSGetShaderResources(0,1,&poolSrv);
     ID3D11Buffer* inputs[2]={camera.Get(),model.Get()};ID3D11UnorderedAccessView* outputs[2]={g.anchorUav.Get(),g.emitterUav.Get()};
     ctx->CSSetConstantBuffers(0,2,inputs);ctx->CSSetUnorderedAccessViews(1,2,outputs,nullptr);
+    ctx->CSSetShaderResources(0,1,g.poolView.GetAddressOf());
     ctx->CSSetShader(g.emitterShader.Get(),nullptr,0);ctx->Dispatch(1,1,1);
     ID3D11UnorderedAccessView* nulls[2]{};ctx->CSSetUnorderedAccessViews(1,2,nulls,nullptr);
     ctx->CopyResource(g.emitterCb.Get(),g.emitterOutput.Get());
     ctx->CSSetConstantBuffers(0,2,cbs);ctx->CSSetUnorderedAccessViews(1,2,uavs,nullptr);ctx->CSSetShader(saved.Get(),classes,nc);
+    ctx->CSSetShaderResources(0,1,poolSrv.GetAddressOf());
     for(auto* p:cbs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
     ctx->VSSetConstantBuffers(0,1,g.emitterCb.GetAddressOf());draw(ctx,count,instances,start,base,startInstance);ctx->VSSetConstantBuffers(0,1,model.GetAddressOf());return true;
 }

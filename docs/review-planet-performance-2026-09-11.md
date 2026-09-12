@@ -513,3 +513,130 @@ exact night-vision pair and its central crop while retaining bounds and
 format checks. The complete fixture, Python gates, 20,924 UI checks, 213
 hologram checks, 32,905 screen-motion checks and 823 weapon checks pass
 on the final source.
+
+## Flight 06:01: stationary night vision and aiming effects
+
+Verified 40174ac, build 6AA53E09. The user confirms the pink rifle fleck
+is gone during crouching. Preserve that attachment correction. A
+separate blue-white ball appears briefly while aiming down sights and
+crouching; identify its draw and pose before assuming it is the same
+light.
+
+Ruled out: DLSS alone causes the night-vision blur. The user observes it
+with AA Off and DLSS, stationary, and captured both modes in this run.
+Captures 060524/060543 contain night vision; 060838/060857 contain the
+on-foot aiming/crouching effects. The first pair has complete
+night-vision PS camera/settings and four before/after images per dump.
+
+060838 is a controls-menu capture with the on-foot scene behind it;
+060857 is the actual aiming pose. In all 19 aiming frames, both mesh and
+particle cameras use near 0.025, rather than the hip-fire 0.0675. The
+light radius also changes from 0.025925925 to 0.07. The particle guard
+therefore declines the aiming emitter while the mesh/light correction
+continues, separating their positions by up to 130 mm during crouching.
+
+Ruled out: near 0.025 always means a world particle. In this aiming
+capture, the emitter origin matches rigid weapon record 12 within 2.2
+micrometres across all 19 frames. Its rigid model and the matched part
+stay inside the same validated arms attachment volume. Use this
+draw-time association for the aiming projection instead of broadly
+accepting nearby world particles. Retain the existing hip-fire path.
+
+Night vision's actual settings are identical across the two captures:
+2774x2740 input, PS b2[11]=(40,1,0,0), b2[5].y=1. The optional
+pixelation flag is zero and the Sobel radius is one input pixel. The
+centre-normal sample still rounds its cell size up to two pixels, but
+that alone is not proof of the reported overall blur. The before/after
+HDR copies isolate the green terrain detail to this pass. Its normal and
+depth inputs are needed to replay and discriminate sampling changes.
+
+The user clarified that only the distant green outlines are fuzzy;
+nearby body/cockpit detail looks good, and ground textures are not the
+reported problem. They also found Elite's SMAA enabled. The census
+confirms its three passes after night vision in both captures: 060524
+DC0 #662-664 and #667-669; 060543 DC0 #664-666 and #669-671. These use
+VS 68842760565CC3BA, 03D186CE0EC031E3 and 98E6F9986FDC9A53, with the
+expected edge, area/search and neighbourhood-blend inputs. EDVR AA Off
+does not disable those game passes. It is therefore not an unfiltered
+night-vision reference.
+
+Next comparison: disable Elite's SMAA alone, retaining the same EDVR AA
+mode, HMD quality and stationary view. Clearer distant outlines would
+implicate this extra smoothing pass; unchanged detail would leave the
+night-vision sampling/input resolution as the next investigation. The
+user is testing this. Do not alter the night-vision shader or add a
+sharpening compensation before that comparison.
+
+Ruled out: SMAA is the main cause. The user repeated with SMAA disabled:
+the green distant detail remains very blurry in EDVR AA Off and DLSS;
+Off shimmers/flickers continuously, while DLSS calms it but still
+flickers at points during head movement. Flight 06:26 (same verified
+40174ac) contains capture 062922 while moving the head with DLSS. Its
+censuses contain no SMAA shader trio. The draw-time HDR crop already
+contains the dense green terrain pattern before subsequent
+AA/tonemapping, and all 28 night draws retain the same settings and
+correct input dimensions.
+
+Issue #25 (Night vision "pulse" line linked to headset movement) is
+related at the pass level, not yet established as the same defect. Its
+attached 21:46:34 log is release v0.15.1, linked 2026-09-11 02:14:54
+UTC; do not treat it as evidence of the latest branch's attachment
+changes. Its 21:54:40 census has this exact night VS/PS in both eyes,
+DC0 #438 and #491, at 1638x1554 input. The runtime log identifies
+SteamVR; DLSS settles on preset K at 65% input. Besides the
+normal-gradient detail, PS instructions 393-404 modulate brightness from
+sampled depth and PS b2[1].x, with a narrow pulse shaped by b2[10]. This
+is a separate candidate for the head-linked pulse. The archive has no
+draw-time normal/depth pixels or night-vision constants to prove that
+mechanism.
+
+The pulse lead has a concrete depth producer: #25 DC0 #269/#403 fills
+the exact t1 resources used by its night draws. Our 060524 DC0 #318 uses
+the same PS CB95394B50D737D6 and VS DEF19B035D5EDEDC. The retained pixel
+bytecode disassembles to sample hardware depth, add cb2[0].w, divide
+cb2[0].z by that result, and cap the result. This is linear view depth,
+without a view-ray length factor. The night shader feeds that depth into
+its pulse directly. A fixed terrain point's view depth changes with head
+rotation; this gives a specific explanation to test for the reported
+head-linked band. It does not establish that radial pulse reconstruction
+also fixes the separate fuzzy outlines.
+
+Extend the armed drawstate capture to v7: first-frame PS t0..t4 inputs,
+both original sampler descriptors and the viewport, plus the night
+draw's VB0/index window and input layout. Keep the actual typed SRV
+formats, including R32_FLOAT depth/exposure, R10G10B10A2_UNORM normals
+and raw BC4 blocks for the small mask. Every eye gets a draw-time copy
+even if resources are reused. Native crops retain their origins and
+share the existing 64 MiB image budget; the vertex budget remains 32
+MiB. No normal-play copies and no night-vision rendering changes.
+
+Discriminate with those inputs: compare the original shader replay to
+the recorded HDR contribution, test the unconditional two-pixel centre
+sample separately from the eight normal-gradient taps, and isolate the
+depth/pulse term. A neighbouring input texel is available throughout the
+interior of the native crop; exclude its boundary in replay. Do not
+infer blur from exposure-scaled PNG previews alone.
+
+Validation: the GPU fixture covers both eyes rewriting the same depth,
+normal, exposure and mask resources; its reader verifies the earlier
+pixels survive the rewrites, BC4 block rows are complete, both sampler
+filters/LOD values and viewport survive, and the original vertex/index
+windows and layout are retained. Missing inputs/samplers and budget
+declines are explicit; raw inputs are not exported as colour images. The
+reader retains v1-v6 support and rejects malformed v7 records.
+
+User requirement: any eventual night-vision rendering fix must have a
+live in-game Fixes toggle for A/B comparison. This diagnostic-only
+change does not add a toggle that would have no visible effect. Keep
+that requirement with the eventual fix, including its config contract
+and state restoration. The aiming emitter remains under the existing
+weapon-stability toggle.
+
+The emitter correction now retains the exact rigid-part association when
+aiming. It scans the already available GPU instance pool and adds the
+same arms displacement as the mesh; no readback, additional render pass
+or allocation per frame is introduced. The original particle VS was
+replayed over all 38 frames from the two on-foot captures, with the
+captured draw arguments and original index windows reconstructed from
+their saved offsets. Its corrected outputs match the independently
+translated emitter in every frame. Hip-fire behaviour is retained.

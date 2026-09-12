@@ -21,6 +21,10 @@ exact draw. These are native pixels from the lower right (up to 1024 square),
 not whole images. Original target size, crop origin and HDR format are kept.
 Night-vision crops use the same records with a central terrain crop;
 always use the saved origin rather than assuming a corner.
+Version 7 adds night-vision PS texture inputs as effect phases 2..6 (t0..t4),
+with typed formats and native crop origins. BC4 rows contain 8-byte blocks.
+Each first-frame night draw also preserves its geometry, input layout,
+two sampler descriptors (13 raw uint32 words each) and original viewport.
 
 On-foot source records use ordinal UINT32_MAX. Their DSV is copied when
 the screen composite runs, alongside its source colour; depth surfaces
@@ -55,7 +59,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4, 5, 6) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6, 7) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -142,25 +146,46 @@ def read(path):
         total = 0
         for _ in range(ni):
             e = dict(zip(('draw', 'after', 'x', 'y', 'width', 'height', 'source_width', 'source_height', 'format', 'size'), unpack('<10I')))
-            bpp = {10: 8, 26: 4, 28: 4, 29: 4}.get(e['format'], 0)
-            expected = e['width'] * e['height'] * bpp
-            total += expected
             night = e['draw'] < nd and (draws[e['draw']]['vs'], draws[e['draw']]['ps']) == (0xFCF7BD2896751D96, 0xF786D34B5E118D5E)
-            origin = ((e['x'],e['y']) == ((e['source_width']-e['width'])//2,(e['source_height']-e['height'])//3) if night else
+            inputs = version >= 7 and night and 2 <= e['after'] <= 6
+            bc4 = inputs and e['format'] == 80
+            formats = {10: 8, 26: 4, 28: 4, 29: 4}
+            if inputs:
+                formats.update({24: 4, 41: 4})
+            bpp = formats.get(e['format'], 0)
+            expected = ((e['width']+3)//4)*((e['height']+3)//4)*8 if bc4 else e['width']*e['height']*bpp
+            total += expected
+            x, y = (e['source_width']-e['width'])//2, (e['source_height']-e['height'])//3
+            if bc4:
+                x, y = x & ~3, y & ~3
+            origin = ((e['x'],e['y']) == (x,y) if night else
                       (e['x']+e['width'],e['y']+e['height']) == (e['source_width'],e['source_height']))
-            if (e['draw'] >= nd or (not night and draws[e['draw']]['ordinal'] != 0xfffffffd) or e['after'] > 1 or
+            if (e['draw'] >= nd or (not night and draws[e['draw']]['ordinal'] != 0xfffffffd) or (e['after'] > 1 and not inputs) or
                     not 0 < e['width'] <= 1024 or not 0 < e['height'] <= 1024 or
                     not origin or e['x']+e['width']>e['source_width'] or e['y']+e['height']>e['source_height'] or
-                    not bpp or total > 64*1024*1024 or e['size'] not in (0, expected)):
+                    (not bpp and not bc4) or total > 64*1024*1024 or e['size'] not in (0, expected)):
                 raise ValueError('Invalid effect image descriptor')
             e['data'] = take(e['size'])
             effect_images.append(e)
+    night_sampling = []
+    if version >= 7:
+        count, = unpack('<I')
+        if count > 8:
+            raise ValueError('Invalid night sampling count')
+        for _ in range(count):
+            draw, mask, viewports = unpack('<3I')
+            if (draw >= nd or (draws[draw]['vs'],draws[draw]['ps']) != (0xFCF7BD2896751D96,0xF786D34B5E118D5E) or
+                    mask > 3 or viewports > 16 or any(n['draw'] == draw for n in night_sampling)):
+                raise ValueError('Invalid night sampling descriptor')
+            samplers = [list(unpack('<13I')) for _ in range(2)]
+            viewport = list(unpack('<6f'))
+            night_sampling.append(dict(draw=draw, mask=mask, viewport_count=viewports, samplers=samplers, viewport=viewport))
     failures, = unpack('<I')
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
     return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
                 mesh_buffers=mesh_buffers, mesh_declined=mesh_declined,
-                effect_images=effect_images, effect_image_declined=effect_image_declined)
+                effect_images=effect_images, effect_image_declined=effect_image_declined, night_sampling=night_sampling)
 
 
 def packed_float_channel(value, mantissa_bits):
@@ -177,7 +202,7 @@ def packed_float_channel(value, mantissa_bits):
 def export_effect_images(capture, directory, dry_run=False):
     directory = Path(directory)
     paths = [directory / f"effect_{e['draw']:04d}_{'after' if e['after'] else 'before'}_x{e['x']}_y{e['y']}.png"
-             for e in capture['effect_images'] if e['data']]
+             for e in capture['effect_images'] if e['data'] and e['after'] <= 1]
     if dry_run:
         return paths
     from PIL import Image
@@ -185,7 +210,7 @@ def export_effect_images(capture, directory, dry_run=False):
         directory.mkdir(parents=True, exist_ok=True)
     lut11 = [packed_float_channel(i, 6) for i in range(2048)]
     lut10 = [packed_float_channel(i, 5) for i in range(1024)]
-    for e, path in zip((e for e in capture['effect_images'] if e['data']), paths):
+    for e, path in zip((e for e in capture['effect_images'] if e['data'] and e['after'] <= 1), paths):
         if e['format'] == 26:
             rgba = bytearray()
             for (pixel,) in struct.iter_unpack('<I', e['data']):
@@ -312,6 +337,34 @@ def self_test():
                 pass
             else:
                 raise AssertionError('Invalid effect image accepted')
+        h7 = b'EDVRDRW1' + struct.pack('<4I',7,0,0,0)
+        p.write_bytes(h7 + struct.pack('<6I',0,0,0,0,0,0))
+        assert read(p)['night_sampling'] == []
+        def night_file(phase=6, size=128, mask=0, reference=0, vs=0xFCF7BD2896751D96):
+            d = struct.pack('<3Q9I',vs,0xF786D34B5E118D5E,3,7,17,ord('X'),6,1,0,16,16,0xffffffff)
+            d += struct.pack('<QII',0,0,0)*4 + struct.pack('<Ii',0,0) + struct.pack('<5I',0,0,0,0,0)*3
+            d += struct.pack('<4I',0xffffffff,0xffffffff,0xffffffff,0)
+            header = b'EDVRDRW1'+struct.pack('<4I',7,1,0,0)
+            image = struct.pack('<10I',0,phase,0,0,16,16,16,16,80,size)+bytes(size)
+            sampling = struct.pack('<4I',1,reference,mask,1)+bytes(104)+struct.pack('<6f',0,0,16,16,0,1)
+            return header+d+struct.pack('<4I',0,0,1,0)+image+sampling+struct.pack('<I',0)
+        good_night = night_file()
+        p.write_bytes(good_night)
+        n = read(p)
+        assert n['effect_images'][0]['size'] == 128 and n['night_sampling'][0]['mask'] == 0
+        before = sorted(Path(td).rglob('*'))
+        assert export_effect_images(n, Path(td)/'raw-inputs') == [], 'Raw inputs exported as before/after colour'
+        assert before == sorted(Path(td).rglob('*')), 'Raw input export created a directory'
+        for bad in (good_night[:-1], night_file(phase=1), night_file(phase=7), night_file(size=127),
+                    night_file(mask=4), night_file(reference=1), night_file(vs=1),
+                    h7+struct.pack('<5I',0,0,0,0,9)):
+            p.write_bytes(bad)
+            try:
+                read(p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Invalid night sampling accepted')
         c['effect_images'] = [dict(draw=0, after=1, x=4, y=5, width=1, height=1, format=26, data=bytes(4))]
         before = sorted(Path(td).rglob('*'))
         assert export_effect_images(c, Path(td)/'missing', True)
@@ -342,7 +395,7 @@ def main():
     if a.verify_fixture:
         verify_fixture(c)
         effects = read(str(a.path)+'.effects')
-        assert effects['version'] == 6 and len(effects['draws']) == 5 and effects['failures'] == 0
+        assert effects['version'] == 7 and len(effects['draws']) == 5 and effects['failures'] == 0
         for i,d in enumerate(effects['draws']):
             assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
             assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
@@ -363,28 +416,53 @@ def main():
         assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
         assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
         crops = read(str(a.path)+'.crops')
-        assert crops['version'] == 6 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
+        assert crops['version'] == 7 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
         assert len(crops['effect_images']) == 2
         for i,e in enumerate(crops['effect_images']):
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
             expected = (15<<6) | ((14<<6)<<11) | ((13<<5)<<22) if i == 0 else ((15<<5)<<22)
             assert all(v[0] == expected for v in struct.iter_unpack('<I',e['data'])), 'Effect crop timing or HDR copy differs'
         night = read(str(a.path)+'.night')
-        assert night['version'] == 6 and night['failures'] == 0 and len(night['draws']) == 2
-        assert len(night['effect_images']) == 2 and night['effect_image_declined'] == 0
+        assert night['version'] == 7 and night['failures'] == 0 and len(night['draws']) == 3
+        assert len(night['effect_images']) == 14 and night['effect_image_declined'] == 0
         d = night['draws'][0]
         assert d['vs'] == 0xFCF7BD2896751D96 and d['ps'] == 0xF786D34B5E118D5E
         assert len(d['buffers'][1]['data']) == 192 and d['buffers'][1]['data'] == d['buffers'][3]['data'], 'Night-vision PS camera/settings were not copied at the draw'
-        for i,e in enumerate(night['effect_images']):
-            assert (e['draw'],e['after'],e['x'],e['y'],e['width'],e['height'],e['format']) == (0,i,1,1,1024,1024,26)
-            assert e['data'] == crops['effect_images'][i]['data'], 'Night-vision before/after HDR pixels differ'
+        assert len(night['night_sampling']) == 2
+        for eye in range(2):
+            images = {e['after']:e for e in night['effect_images'] if e['draw'] == eye}
+            assert set(images) == set(range(7)), 'Missing night-vision input or colour boundary'
+            for phase in (0,1):
+                e=images[phase]
+                assert (e['x'],e['y'],e['width'],e['height'],e['format']) == (1,1,1024,1024,26)
+                assert e['data'] == crops['effect_images'][phase]['data'], 'Night-vision before/after HDR pixels differ'
+            for slot, (fmt, w, h) in enumerate(((41,6,1),(41,1024,1024),(24,1024,1024),(28,1,1),(80,16,16))):
+                e=images[2+slot]
+                assert (e['format'],e['width'],e['height']) == (fmt,w,h), 'Typed night input lost'
+                assert (e['x'],e['y']) == ((1,1) if slot in (1,2) else (0,0))
+                size=128 if fmt==80 else w*h*4
+                assert e['data'] == bytes([11+slot*20+eye*3])*size, 'Night input copied after reuse, deduplicated between eyes, or BC4 rows lost'
+            d=night['draws'][eye]
+            assert len(d['layout']) == 1 and d['layout'][0]['format'] == 6
+            assert d['streams'][0]['capture_offset'] == 12 and d['streams'][0]['data'] == bytes([31+eye])*84
+            assert not d['streams'][1]['data'], 'Stale unused night VB1 copied'
+            assert d['streams'][2]['capture_offset'] == 6 and d['streams'][2]['data'] == bytes([31+eye])*12
+            state=night['night_sampling'][eye]
+            assert (state['draw'],state['mask'],state['viewport_count']) == (eye,3,1)
+            assert state['viewport'] == [eye,eye*2,1026-eye*2,1027-eye*2,0,1]
+            for slot, sampler in enumerate(state['samplers']):
+                assert sampler[:4] == ([0,3,3,3] if slot else [21,1,1,1]), 'Original filter/addressing lost'
+                floats=struct.unpack('<13f',struct.pack('<13I',*sampler))
+                assert (floats[4],floats[11],floats[12]) == ((0,0,0) if slot else (.25,-2,3)), 'Sampler LOD values lost'
+        assert len(export_effect_images(night, Path('unused'), True)) == 4, 'Raw night inputs treated as colour'
         print('GPU draw snapshot fixture passed')
         return
     print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],
                           source_buffers=len(c['mesh_buffers']), source_bytes=sum(b['size'] for b in c['mesh_buffers']), source_declined=c['mesh_declined'],
                           vertex_draws=sum(any(s['data'] for s in d['streams']) for d in c['draws']),
                           vertex_bytes=sum(len(s['data']) for d in c['draws'] for s in d['streams']),
-                          effect_images=len(c['effect_images']), effect_image_declined=c['effect_image_declined'],
+                          effect_images=sum(e['after'] <= 1 for e in c['effect_images']), effect_image_declined=c['effect_image_declined'],
+                          night_input_images=sum(e['after'] >= 2 for e in c['effect_images']), night_sampling=len(c['night_sampling']),
                           failures=c['failures'], shaders=Counter(f"{d['vs']:016X}" for d in c['draws'])), indent=2))
     if a.surfaces:
         for path in export_surfaces(c, a.surfaces, a.dry_run):

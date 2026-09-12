@@ -2915,14 +2915,19 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     for(const auto& d:g_drawSnapshot.draws) {sourceCameras+=d.ordinal==UINT32_MAX;screenDraws+=d.vs==EyeDrawSnapshot::kVscreen;}
     for(const auto& t:g_drawSnapshot.surfaces)sourceDepths+=t.format==20 || t.format==40 || t.format==45 || t.format==55;
     if(screenDraws)Log::get().note("object probe: on-foot source capture: %u camera frames, %u screen draws, %u completed depth surfaces; colour/depth copied at first composite, no temporal changes.",sourceCameras,screenDraws,sourceDepths);
-    if(screenDraws)Log::get().note("object probe: source effect snapshots: %u draws, %u with vertex payloads, %u with original input layouts. Drawstate v6 ordinal UINT32_MAX-2; constants and bounded VB0/VB1/IB across the run; shared 32 MiB vertex budget, no normal-play copies or effect changes.",effectDraws,effectVertices,effectLayouts);
-    if(screenDraws)Log::get().note("object probe: effect colour crops: %u images, %u bytes, %u format/range/budget declines; first source frame, before/after each light/beam/streak/particle draw. Native lower-right 1024-square crops, original HDR format and crop origin in drawstate v6; separate 64 MiB cap.",unsigned(g_drawSnapshot.effectImages.size()),g_drawSnapshot.effectImageBytes,g_drawSnapshot.effectImageDeclined);
-    uint32_t nightDraws=0,nightConstants=0,nightImages=0;
+    if(screenDraws)Log::get().note("object probe: source effect snapshots: %u draws, %u with vertex payloads, %u with original input layouts. Drawstate v7 ordinal UINT32_MAX-2; constants and bounded VB0/VB1/IB across the run; shared 32 MiB vertex budget, no normal-play copies or effect changes.",effectDraws,effectVertices,effectLayouts);
+    if(screenDraws)Log::get().note("object probe: effect colour crops: %u images, %u bytes, %u format/range/budget declines; first source frame, before/after each light/beam/streak/particle draw. Native lower-right 1024-square crops, original HDR format and crop origin in drawstate v7; 64 MiB cap shared with night inputs.",unsigned(g_drawSnapshot.effectImages.size()),g_drawSnapshot.effectImageBytes,g_drawSnapshot.effectImageDeclined);
+    uint32_t nightDraws=0,nightConstants=0,nightImages=0,nightInputs=0,nightGeometry=0,nightSamplers=0;
     for(const auto& d:g_drawSnapshot.draws)if(d.vs==EyeDrawSnapshot::kNight && d.ps==EyeDrawSnapshot::kNightPs) {
         ++nightDraws;nightConstants+=d.copied[1]>=333*16 && d.copied[3]>=12*16;
+        nightGeometry+=d.streams[0].copied && d.streams[2].copied && !d.layout.empty();
     }
-    for(const auto& e:g_drawSnapshot.effectImages)if(e.draw<g_drawSnapshot.draws.size() && g_drawSnapshot.draws[e.draw].vs==EyeDrawSnapshot::kNight)++nightImages;
+    for(const auto& e:g_drawSnapshot.effectImages)if(e.draw<g_drawSnapshot.draws.size() && g_drawSnapshot.draws[e.draw].vs==EyeDrawSnapshot::kNight) {
+        if(e.after<=1)++nightImages;else ++nightInputs;
+    }
+    for(const auto& n:g_drawSnapshot.nightSampling)nightSamplers+=n.mask==3 && n.viewportCount==1;
     Log::get().note("object probe: night-vision snapshots: %u draws, %u with PS camera/settings, %u before/after images; drawstate slot 1 is PS b1 for FCF7BD2896751D96/F786D34B5E118D5E, slot 3 is PS b2. First-frame native terrain crops retain HDR and origin; effect image declines %u. No night-vision rendering changes.",nightDraws,nightConstants,nightImages,g_drawSnapshot.effectImageDeclined);
+    Log::get().note("object probe: night-vision sampling: %u input images (PS t0..t4), %u draws with both samplers and one viewport, %u with geometry/layout. Drawstate v7 phases 2..6 retain typed native crops, BC4 blocks and draw-time contents for each eye; sampler masks expose absent states. Shared 64 MiB image and 32 MiB vertex caps; only while a dump is armed.",nightInputs,nightSamplers,nightGeometry);
     if(screenDraws)Log::get().note("object probe: source mesh snapshots: %u draws, %u frame-local buffers, %u bytes, %u range/format/budget declines. Drawstate v4 records original draw cameras, full t33/t38 and VB0 at first use per resource per frame; firstDraw identifies that copy. No render or pacing changes.",g_drawSnapshot.meshDraws,unsigned(g_drawSnapshot.meshBuffers.size()),g_drawSnapshot.meshBytes,g_drawSnapshot.meshDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());

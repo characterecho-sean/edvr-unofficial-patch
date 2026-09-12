@@ -87,22 +87,38 @@ bool root(uint i,uint nb) {
         r.row[1].xyz=asuint(p+Anchor[0].xyz);
     Fixed[id]=r;
 }
-// The captured local particle variant uses the first-person projection
-// (near 0.0675, versus 0.025 for world particles) and a camera-relative
-// emitter transform. The purple rifle emitter is rigidly attached 75 mm
-// from its mesh origin in all 38 captured frames. Its particles do not read
-// t33, so correcting the mesh pool alone separates them during crouching.
-// Deliberately decline other projections and emitters outside the same
-// one-metre attachment volume used by applyAnchor. No colour/atlas rule.
-[numthreads(1,1,1)]void applyEmitter() {
+// The local particle variant has a camera-relative emitter transform.
+// Hip fire uses near 0.0675; aiming uses 0.025, shared by world particles.
+// Its particles do not read t33, so correcting the mesh pool alone
+// separates them during crouching. Require an exact rigid-part match for
+// the aiming projection and retain the same one-metre attachment volume
+// used by applyAnchor. No colour/atlas rule.
+groupshared uint emitterPartMatched;
+[numthreads(64,1,1)]void applyEmitter(uint lane:SV_GroupIndex) {
     float3 origin=float3(emitter[9].w,emitter[10].w,emitter[11].w)+camera[275].xyz;
     float3 d=origin-Anchor[1].xyz;
-    bool valid=Anchor[0].w>0 && abs(camera[273].z-.0675)<1e-7 &&
+    bool valid=Anchor[0].w>0 &&
         all(isfinite(origin)) && dot(d,d)<1 &&
         all(abs(float3(dot(emitter[9].xyz,emitter[9].xyz),dot(emitter[10].xyz,emitter[10].xyz),dot(emitter[11].xyz,emitter[11].xyz))-1)<.001) &&
         all(abs(float3(dot(emitter[9].xyz,emitter[10].xyz),dot(emitter[9].xyz,emitter[11].xyz),dot(emitter[10].xyz,emitter[11].xyz)))<.001) &&
         dot(cross(emitter[9].xyz,emitter[10].xyz),emitter[11].xyz)>.999;
-    [unroll]for(uint i=0;i<13;++i) {
+    // Aiming uses the WORLD near plane (06:08:57), so projection alone
+    // cannot identify attachments. Its emitter coincides with a corrected
+    // rigid weapon-part origin in all 19 frames (within 2.2 micrometres).
+    // Require that match for this projection; proximity alone is not enough.
+    if(lane==0)emitterPartMatched=0;
+    GroupMemoryBarrierWithGroupSync();
+    if(valid && abs(camera[273].z-.025)<1e-7) {
+        uint n,stride;Pool.GetDimensions(n,stride);
+        for(uint i=lane;i<n;i+=64) {
+            Instance part=Pool[i];float3 delta=position(part)-origin;
+            if(part.row[0].x==0 && dot(delta,delta)<1e-8)InterlockedOr(emitterPartMatched,1);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    valid=valid && (abs(camera[273].z-.0675)<1e-7 || emitterPartMatched!=0);
+    if(lane<13) {
+        uint i=lane;
         float4 r=emitter[i];if(valid && i>=9 && i<12)r.w+=Anchor[0][i-9];
         EmitterFixed[i]=r;
     }

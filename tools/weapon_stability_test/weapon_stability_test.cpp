@@ -189,6 +189,7 @@ void emitterTest(){
     auto sentinel=h.buffer(nullptr,64,16,D3D11_BIND_UNORDERED_ACCESS);ComPtr<ID3D11UnorderedAccessView> sentinelUav;
     hr(h.dev->CreateUnorderedAccessView(sentinel.Get(),nullptr,&sentinelUav));h.ctx->CSSetUnorderedAccessViews(2,1,sentinelUav.GetAddressOf(),nullptr);
     h.ctx->CSSetConstantBuffers(1,1,input.GetAddressOf());
+    h.ctx->CSSetShaderResources(0,1,h.bs.GetAddressOf());
     auto run=[&](bool corrected){
         testVs=0x9AEC596A2B036EA6ull;testPs=0x3789CA2062E196FBull;
         h.ctx->UpdateSubresource(input.Get(),0,nullptr,model,0,0);h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
@@ -199,9 +200,16 @@ void emitterTest(){
         ComPtr<ID3D11Buffer> cb;h.ctx->VSGetConstantBuffers(0,1,&cb);check(cb.Get()==input.Get(),"emitter VS CB restored");
         cb.Reset();h.ctx->CSGetConstantBuffers(1,1,&cb);check(cb.Get()==input.Get(),"emitter CS CB restored");
         ComPtr<ID3D11UnorderedAccessView> u;h.ctx->CSGetUnorderedAccessViews(2,1,&u);check(u.Get()==sentinelUav.Get(),"emitter CS UAV restored");
+        ComPtr<ID3D11ShaderResourceView> srv;h.ctx->CSGetShaderResources(0,1,&srv);check(srv.Get()==h.bs.Get(),"emitter restores displaced CS source view");
     };
     run(true);
-    cam[273][2]=.025f;run(false);cam[273][2]=.0675f;
+    cam[273][2]=.025f;run(false);
+    position(p[51],model[9][3],model[10][3],model[11][3]);
+    auto updatePool=[&](){h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,p.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());};
+    updatePool();run(true); // exact rigid-part association survives aiming
+    setFloat(p[51],5,getFloat(p[51],5)+.001f);updatePool();run(false); // merely nearby world effect
+    setFloat(p[51],5,model[10][3]);p[51].words[0]=9;updatePool();run(false); // independently skinned world body
+    p[51].words[0]=0;updatePool();cam[273][2]=.05f;run(false);cam[273][2]=.0675f;
     model[9][3]+=10;run(false);model[9][3]-=10;
     model[9][0]=2;run(false);model[9][0]=1;
     p[90].words[0]=7;h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,p.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());run(false);
