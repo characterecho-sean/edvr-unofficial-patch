@@ -110,3 +110,100 @@ declines. The reader rejects bad frame/role/reference metadata and
 continues to read the original v3 flight. NVIDIA TAA/DLAA/DLSS,
 foveation and motion-convention smoke checks passed. This is a tested
 diagnostic build, not a verified correction to weapon judder.
+
+## Strafing capture at 17:36:28
+
+Steam gfx log `edvr_gfx_20260911_173403.log` matches diagnostic build
+600e7bf. Valve SteamVR, 90 Hz, DLSS preset K, 2268x2240 input /
+4536x4480 output; source 5120x2880. The user's independent AA-Off test
+also reproduced the judder. Drawstate v4 contains 19 source frames, 1387
+source mesh draws, 57 buffer copies, zero failures or declines. The
+first 16 raw eye frames correspond to mesh frames 8068..8083.
+
+Confirmed: camera and first-person attachment origins disagree on the
+raw frames where the weapon jumps. The seven rigid gun pieces use t33
+records 52, 77, 83, 42, 23, 65 and 56, with bone base zero. Their world
+positions advance smoothly. Both skinned arms share a separate origin in
+records 262/263, which also advances smoothly. The source camera origin
+b1[275] doubles its movement and then repeats, while the arms/weapon
+advance each frame. In frame 8072 the arms origin is 41.29 mm ahead of
+the camera along X; frame 8073 repeats the camera, and the discrepancy
+returns to about 0.14 mm. The same pattern appears in frame 8068. Rigid
+gun orientation also changes smoothly.
+
+Ruled out: snapping skeletal animation as the source of the large jumps,
+because the rigid gun pieces have no bone transform and jump with the
+same attachment-origin discrepancy. Ruled out: a different weapon
+camera, because its source-camera rows match the terrain draws in the
+same frame. Ruled out: using b1[282..284].w as the correction, because
+it contains current-minus-previous camera movement, not the attachment
+discrepancy.
+
+The arm roots have identity rotation and approximately (-0.000125,
+-1.712854, -0.089025) bind translation. The full player body has
+different roots and an origin about 1.55 m from the camera. The arm
+record indices change to 260/261 in frame 8078; fixed record or bone
+indices would therefore fail inside this capture alone.
+
+## Correct the source attachment translation
+
+`weapon_stability` applies `cameraOrigin - armsOrigin` to the
+near-camera weapon/arm instance translations in a private GPU pool. The
+original vertex shaders, bones, orientation, scale, materials, draws and
+world camera remain intact. This preserves the game's weapon bob and
+other animation relative to the attachment. It changes neither runtime
+frame submission nor reprojection and does not depend on TAA or DLSS.
+
+Activation requires the actual on-foot screen composite and a
+source-sized offscreen draw. Screen recognition precedes curved-screen
+substitution, which can consume the composite without forwarding the
+original draw. The correction only binds on the four observed weapon/arm
+shader families: F516BF0201303B87, 8B589D25B2A0ADDC, 7B0DC42D383F694C
+and 114AF608F86D9ED8. Other scenery shaders never receive the private
+pool.
+
+The GPU locates two co-located, identically oriented arm records with
+distinct valid bone bases and the observed eye-height bind-root
+encoding. It requires the camera-centred source projection and supported
+full structured-buffer views. Near-camera rigid attachments and skinned
+records at the shared origin get the translation; other records are
+copied unchanged. There are no fixed record indices or temporal
+smoothing rules. Missing or unsupported roots produce stock geometry.
+Other weapons and poses still require field coverage; this classifier is
+based on the captured pistol/arms and must fail closed when that
+encoding is absent.
+
+Two small compute dispatches generate a reusable private 336-byte-stride
+instance pool. The captured pool has 2048 records (688128 bytes); the
+runtime allocation is bounded at 8 MiB. Camera, pool and palette writes
+invalidate reuse even within one frame. Command-list execution also
+invalidates the cache. All touched CS bindings and VS t33 are restored.
+Normal rendering reads no geometry back to the CPU. A 48-byte
+asynchronous status sample reports the matched root and correction, or a
+stock fallback; screen detection is logged separately so an inactive
+source hook is visible.
+
+Independent reconstruction of the first 16 captured frames reduces the
+maximum second difference of gun translation relative to the camera from
+83.975 mm to 3.706 mm. The residual is the original attachment-relative
+animation, not an added filter. Production GPU replay matches the
+expected corrected pool byte for byte across all 19 captured frames,
+including the record repacking. Only the seven visible gun records and
+two arm records change among the supported draws. All five full-body
+records remain stock.
+
+The WARP regression checks the actual production draw path, attachment
+selection, record repacking, same-frame buffer writes, unchanged
+original data, CS/VS restoration, invalid roots/projections, source
+viewport gating, screen expiry and resource release. D3D debug
+validation is clean. Headset validation of the correction is still
+required; the offline replay does not demonstrate final perceived
+smoothness under every runtime.
+
+Full SDK build and all repository gates passed with the correction,
+including the 243-key config contract and existing source-motion tests.
+NVIDIA TAA/DLAA/DLSS, foveation and motion-convention smoke checks
+passed. On the local RTX 5090, an offline timestamp benchmark of the
+captured 2048-record pool measured 0.0211 ms for both compute passes and
+scoped bindings (three batches of 512 updates). This is an isolated
+steady-state GPU cost, not an in-game total frametime measurement.
