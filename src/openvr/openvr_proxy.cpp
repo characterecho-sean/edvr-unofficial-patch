@@ -2,8 +2,8 @@
 //
 // Deployment: rename the game's openvr_api.dll to openvr_api_orig.dll and put
 // this one in its place. Every export is forwarded through generated thunks;
-// only VR_GetGenericInterface is wrapped, because that is where the game is
-// handed the IVRCompositor pointer.
+// VR_GetGenericInterface is wrapped to intercept interfaces. Four lifecycle
+// exports also have typed wrappers for the opt-in startup census.
 //
 // This exists for one reason: the decision not to show a bad frame has to be
 // made where frames are handed to SteamVR, and that is here rather than in
@@ -16,6 +16,8 @@
 #include "../common/vr_census.h"
 
 #include <cstring>  // strncmp, for the interface suppression prefixes
+#include <atomic>
+#include <intrin.h>
 #include <string>
 
 #include "../common/config.h"
@@ -54,6 +56,30 @@ std::wstring* g_moduleDir = nullptr;
 typedef void*(__cdecl* PFN_VR_GetGenericInterface)(const char* interfaceVersion,
                                                    vr::EVRInitError* error);
 PFN_VR_GetGenericInterface g_realGetGenericInterface = nullptr;
+
+// These are the exact Valve 0.9.20 export shapes (openvr_v0_9_20.h).  Keep
+// the enum local: openvr_min.h intentionally does not promise the complete
+// SDK type surface, while enum parameters have the same x64 ABI as int32_t.
+enum EVRApplicationType : int32_t {
+    VRApplication_Other = 0, VRApplication_Scene = 1,
+    VRApplication_Overlay = 2, VRApplication_Background = 3,
+    VRApplication_Utility = 4, VRApplication_VRMonitor = 5,
+};
+typedef uint32_t(__cdecl* PFN_VR_InitInternal)(vr::EVRInitError*, EVRApplicationType);
+typedef void(__cdecl* PFN_VR_ShutdownInternal)();
+typedef bool(__cdecl* PFN_VR_IsInterfaceVersionValid)(const char*);
+typedef uint32_t(__cdecl* PFN_VR_GetInitToken)();
+PFN_VR_InitInternal g_realInitInternal = nullptr;
+PFN_VR_ShutdownInternal g_realShutdownInternal = nullptr;
+PFN_VR_IsInterfaceVersionValid g_realIsInterfaceVersionValid = nullptr;
+PFN_VR_GetInitToken g_realGetInitToken = nullptr;
+
+std::atomic<uint64_t> g_exportCallId{0};
+thread_local bool g_lazyLoading = false;
+thread_local bool g_diagnosticInitializing = false;
+// One reservation covers both sides of a call. Callers have separate budgets
+// so an injected component's polling cannot exhaust the game's evidence.
+std::atomic<uint32_t> g_lifecycleBudget[5][5]{};
 
 edvr::FaultBudget g_interfaceBudget("VR_GetGenericInterface", 3);
 
@@ -115,6 +141,14 @@ BOOL CALLBACK loadOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
 
         g_realGetGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(
             GetProcAddress(g_realModule, "VR_GetGenericInterface"));
+        g_realInitInternal = reinterpret_cast<PFN_VR_InitInternal>(
+            GetProcAddress(g_realModule, "VR_InitInternal"));
+        g_realShutdownInternal = reinterpret_cast<PFN_VR_ShutdownInternal>(
+            GetProcAddress(g_realModule, "VR_ShutdownInternal"));
+        g_realIsInterfaceVersionValid = reinterpret_cast<PFN_VR_IsInterfaceVersionValid>(
+            GetProcAddress(g_realModule, "VR_IsInterfaceVersionValid"));
+        g_realGetInitToken = reinterpret_cast<PFN_VR_GetInitToken>(
+            GetProcAddress(g_realModule, "VR_GetInitToken"));
         // Which runtime this actually is, for fix.launch_centre = auto.
         // Only the handle is handed over here: this runs before the config
         // or the log exist, so the identification and the line about it
@@ -171,11 +205,13 @@ extern "C" void edvr_lazyInit_openvr() {
     // compiler assume extern "C" does not throw: an escape here is a fail-fast
     // process kill at startup, not an unwind.
     s_inProgress = true;
+    g_lazyLoading = true;
     try {
         InitOnceExecuteOnce(&g_loadOnce, loadOnceCallback, nullptr, nullptr);
     } catch (...) {
         edvr::breadcrumb("vr: lazy init threw; exports will return failure");
     }
+    g_lazyLoading = false;
     s_inProgress = false;
 
     _ReadWriteBarrier();
@@ -187,26 +223,37 @@ namespace {
 INIT_ONCE g_initOnce = INIT_ONCE_STATIC_INIT;
 
 BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
-    edvr::Config& cfg = edvr::Config::get();
-    cfg.init(*g_moduleDir);
-    edvr::Log::get().open(cfg.logDir(), L"vr");
-    edvr::Log::get().note("EDVR openvr proxy attached; module dir %S",
-                          g_moduleDir->c_str());
-    edvr::vrCensusConfigure();
-    edvr::configureCallCensus();
-    if (g_missingExports) {
-        edvr::Log::get().note(
-            "WARNING: %zu of %zu openvr exports did not resolve. The real DLL is a "
-            "different build from the one the thunks were generated against; rebuild "
-            "with build.bat against your own openvr_api.dll.",
-            g_missingExports, kExportCount);
+    // A diagnostic failure must not unwind through INIT_ONCE or leave every
+    // subsequent runtime call waiting for initialization which cannot finish.
+    try {
+        edvr::Config& cfg = edvr::Config::get();
+        cfg.init(*g_moduleDir);
+        edvr::Log::get().open(cfg.logDir(), L"vr");
+        edvr::Log::get().note("EDVR openvr proxy attached; module dir %S",
+                              g_moduleDir->c_str());
+        edvr::vrCensusConfigure();
+        edvr::configureCallCensus();
+        if (g_missingExports) {
+            edvr::Log::get().note(
+                "WARNING: %zu of %zu openvr exports did not resolve. The real DLL is a "
+                "different build from the one the thunks were generated against; rebuild "
+                "with build.bat against your own openvr_api.dll.",
+                g_missingExports, kExportCount);
+        }
+    } catch (...) {
+        edvr::breadcrumb("vr: diagnostic initialization failed; forwarding continues");
     }
     return TRUE;
 }
 
-// Called from our wrapped export, never from DllMain.
-void ensureInitialised() {
-    InitOnceExecuteOnce(&g_initOnce, initOnceCallback, nullptr, nullptr);
+// Wrapped exports can be re-entered while loading a chained runtime. Neither
+// loader-lock re-entry nor recursive diagnostic initialization may wait here.
+void ensureInitialised() noexcept {
+    if (!g_moduleDir || g_lazyLoading || g_diagnosticInitializing) return;
+    g_diagnosticInitializing = true;
+    try { InitOnceExecuteOnce(&g_initOnce, initOnceCallback, nullptr, nullptr); }
+    catch (...) { edvr::breadcrumb("vr: diagnostic initialization threw"); }
+    g_diagnosticInitializing = false;
 }
 
 // Is this interface one the ini says to refuse without asking the runtime?
@@ -245,6 +292,92 @@ bool interfaceSuppressed(const char* interfaceVersion) {
         pos = end + 1;
     }
     return false;
+}
+
+unsigned callerCategory(const void* returnAddress) noexcept {
+    HMODULE module = nullptr;
+    if (!returnAddress || !GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCWSTR>(returnAddress), &module)) return 0;
+    if (module == g_selfModule) return 1;
+    if (module == g_realModule) return 2;
+    if (module == GetModuleHandleW(nullptr)) return 3;
+    return 4;
+}
+
+bool boundedInterface(const char* input, char (&out)[64], bool& truncated) noexcept {
+    truncated = false;
+    if (!input) { out[0] = '\0'; return true; }
+    size_t i = 0;
+    __try {
+        for (; i + 1 < sizeof(out) && input[i]; ++i) {
+            const unsigned char c = static_cast<unsigned char>(input[i]);
+            out[i] = (c >= 32 && c < 127) ? static_cast<char>(c) : '?';
+        }
+        truncated = i + 1 == sizeof(out) && input[i] != '\0';
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = '\0'; return false;
+    }
+    out[i] = '\0';
+    return true;
+}
+int readableError(const vr::EVRInitError* error, bool& readable) noexcept {
+    readable = false;
+    if (!error) return 0;
+    int value = 0;
+    __try { value = static_cast<int>(*error); readable = true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return value;
+}
+enum class ExportKind : unsigned { Init, Shutdown, Generic, Valid, Token };
+const char* const kLifecycleNames[] = {"VR_InitInternal", "VR_ShutdownInternal",
+    "VR_GetGenericInterface", "VR_IsInterfaceVersionValid", "VR_GetInitToken"};
+const char* const kCallerNames[] = {"unknown", "proxy", "real-runtime", "game-exe", "other"};
+struct LifecycleCall { uint64_t id = 0; unsigned kind = 0, caller = 0; };
+
+LifecycleCall beginLifecycle(ExportKind kind, const void* caller,
+                             bool resolved, const char* version = nullptr,
+                             int applicationType = -1) noexcept {
+    LifecycleCall call{};
+    try {
+        if (g_lazyLoading || g_diagnosticInitializing || !edvr::vrCensusEnabled() ||
+            !edvr::Log::get().isOpen()) return call;
+        call.kind = static_cast<unsigned>(kind);
+        call.caller = callerCategory(caller);
+        auto& budget = g_lifecycleBudget[call.kind][call.caller];
+        uint32_t n = budget.load(std::memory_order_relaxed);
+        do { if (n >= 64) return call; }
+        while (!budget.compare_exchange_weak(n, n + 1, std::memory_order_relaxed));
+        call.id = g_exportCallId.fetch_add(1, std::memory_order_relaxed) + 1;
+        // Caller-owned data is examined only after an enabled reservation.
+        char requested[64]{};
+        bool truncated = false;
+        const bool readable = boundedInterface(version, requested, truncated);
+        LARGE_INTEGER qpc{}; QueryPerformanceCounter(&qpc);
+        edvr::Log::get().note("VR export census: record=%llu phase=begin name=%s caller=%s "
+            "qpc=%lld thread=%lu resolved=%u application_type=%d interface_present=%u "
+            "interface_readable=%u interface_truncated=%u interface=[%s]",
+            static_cast<unsigned long long>(call.id), kLifecycleNames[call.kind],
+            kCallerNames[call.caller], qpc.QuadPart, GetCurrentThreadId(), unsigned(resolved),
+            applicationType, unsigned(version != nullptr), unsigned(readable), unsigned(truncated), requested);
+    } catch (...) {}
+    return call;
+}
+
+void endLifecycle(const LifecycleCall& call, uint64_t result,
+                  const vr::EVRInitError* error = nullptr, bool suppressed = false) noexcept {
+    if (!call.id) return;
+    try {
+        bool readable = false;
+        const int errorValue = readableError(error, readable);
+        LARGE_INTEGER qpc{}; QueryPerformanceCounter(&qpc);
+        edvr::Log::get().note("VR export census: record=%llu phase=end name=%s caller=%s "
+            "qpc=%lld thread=%lu result=%llu error_present=%u error_readable=%u error=%d suppressed=%u",
+            static_cast<unsigned long long>(call.id), kLifecycleNames[call.kind], kCallerNames[call.caller],
+            qpc.QuadPart, GetCurrentThreadId(), static_cast<unsigned long long>(result),
+            unsigned(error != nullptr), unsigned(readable), errorValue, unsigned(suppressed));
+    } catch (...) {}
 }
 
 // Say which interfaces were refused, once each. A requester that retries in
@@ -291,11 +424,16 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
     // has checked the ready flag on its behalf. It can legitimately be the first
     // export the game calls.
     edvr_lazyInit_openvr();
+    ensureInitialised();
+    const auto call = beginLifecycle(ExportKind::Generic, _ReturnAddress(),
+                                    g_realGetGenericInterface != nullptr, interfaceVersion);
     if (!g_realGetGenericInterface) {
-        if (error) *error = 1;  // VRInitError_Unknown
+        // The original Generic wrapper sets an error; the other unresolved
+        // exports retain their generated zero/no-op stub behaviour.
+        if (error) *error = 1;
+        endLifecycle(call, 0, error);
         return nullptr;
     }
-    ensureInitialised();
 
     // BEFORE the real call, which is the whole point: the runtime we shield
     // against answers a request it does not like with a fatal dialog, so the
@@ -303,6 +441,7 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
     if (interfaceSuppressed(interfaceVersion)) {
         noteSuppressedInterface(interfaceVersion);
         if (error) *error = 105;  // VRInitError_Init_InterfaceNotFound
+        endLifecycle(call, 0, error, true);
         return nullptr;
     }
 
@@ -323,14 +462,58 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
 
 
     void* iface = g_realGetGenericInterface(interfaceVersion, error);
-    if (!iface || !interfaceVersion) return iface;
+    if (!iface || !interfaceVersion) {
+        endLifecycle(call, reinterpret_cast<uintptr_t>(iface), error);
+        return iface;
+    }
 
     void* result = iface;
     edvr::guardedBudget(g_interfaceBudget, [&] {
         result = edvr::interceptInterface(iface, interfaceVersion);
         result = edvr::wrapCensusInterface(result, interfaceVersion);
     });
+    endLifecycle(call, reinterpret_cast<uintptr_t>(result), error);
     return result;
+}
+
+extern "C" uint32_t __cdecl edvr_impl_VR_InitInternal(vr::EVRInitError* error,
+                                                       EVRApplicationType applicationType) {
+    edvr_lazyInit_openvr();
+    ensureInitialised();
+    const auto call = beginLifecycle(ExportKind::Init, _ReturnAddress(),
+        g_realInitInternal != nullptr, nullptr, static_cast<int>(applicationType));
+    const uint32_t token = g_realInitInternal ? g_realInitInternal(error, applicationType) : 0;
+    endLifecycle(call, token, error);
+    return token;
+}
+
+extern "C" void __cdecl edvr_impl_VR_ShutdownInternal() {
+    edvr_lazyInit_openvr();
+    ensureInitialised();
+    const auto call = beginLifecycle(ExportKind::Shutdown, _ReturnAddress(),
+                                    g_realShutdownInternal != nullptr);
+    if (g_realShutdownInternal) g_realShutdownInternal();
+    endLifecycle(call, 0);
+}
+
+extern "C" bool __cdecl edvr_impl_VR_IsInterfaceVersionValid(const char* interfaceVersion) {
+    edvr_lazyInit_openvr();
+    ensureInitialised();
+    const auto call = beginLifecycle(ExportKind::Valid, _ReturnAddress(),
+                                    g_realIsInterfaceVersionValid != nullptr, interfaceVersion);
+    const bool result = g_realIsInterfaceVersionValid && g_realIsInterfaceVersionValid(interfaceVersion);
+    endLifecycle(call, result);
+    return result;
+}
+
+extern "C" uint32_t __cdecl edvr_impl_VR_GetInitToken() {
+    edvr_lazyInit_openvr();
+    ensureInitialised();
+    const auto call = beginLifecycle(ExportKind::Token, _ReturnAddress(),
+                                    g_realGetInitToken != nullptr);
+    const uint32_t token = g_realGetInitToken ? g_realGetInitToken() : 0;
+    endLifecycle(call, token);
+    return token;
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {

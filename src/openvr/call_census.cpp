@@ -11,7 +11,6 @@ using namespace openvr_abi;
 Census g_census;
 ForwardingCache g_cache(&g_census);
 HMODULE g_game = nullptr, g_self = nullptr, g_gfx = nullptr;
-std::atomic<uint32_t> g_counts[kMethodCount][4]{};
 Origin callerOrigin(const void* address) noexcept {
     HMODULE module = nullptr;
     if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -23,22 +22,29 @@ Origin callerOrigin(const void* address) noexcept {
 }
 void observe(const Event& event) noexcept {
     try {
-        size_t index = kMethodCount;
-        for (size_t i = 0; i < kMethodCount; ++i)
-            if (kMethods[i].slot == event.slot && !std::strcmp(kMethods[i].interface_name, event.interface_name)) { index = i; break; }
-        const unsigned origin = static_cast<unsigned>(event.origin);
-        if (index == kMethodCount || origin >= 4) return;
-        auto& count = g_counts[index][origin];
-        uint32_t n = count.load(std::memory_order_relaxed);
-        do { if (n >= 4) return; }
-        while (!count.compare_exchange_weak(n, n + 1, std::memory_order_relaxed));
-        static const char* origins[] = {"unknown", "game-exe", "edvr", "other-module"};
-        LARGE_INTEGER qpc{};
-        QueryPerformanceCounter(&qpc);
-        Log::get().note("VR ABI census: qpc=%lld thread=%lu origin=%s interface=%s slot=%u signature=%s sample=%u/4",
-            qpc.QuadPart, GetCurrentThreadId(), origins[origin], event.interface_name,
-            event.slot, kMethods[index].signature, n + 1);
-    } catch (...) { /* Diagnostics must not change the forwarded method result. */ }
+        const unsigned origin=static_cast<unsigned>(event.origin);
+        if(origin>=4) return;
+        static const char* origins[]={"unknown","game-exe","edvr","other-module"};
+        LARGE_INTEGER qpc{}; QueryPerformanceCounter(&qpc);
+        const auto& e=event.evidence;
+        // The production Census reserves the record before any output reads.
+        // This sink must not apply a second method-wide budget: it would hide
+        // later eyes/properties despite their independent evidence claims.
+        Log::get().note("VR ABI census: record=%u qpc=%lld thread=%lu origin=%s interface=%s slot=%u "
+            "signature=%s flags=0x%X schema=[%s] u_mask=0x%X u=%u,%u,%u,%u,%u,%u,%u,%u "
+            "i_mask=0x%X i=%d,%d,%d,%d f_mask=0x%X f=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g "
+            "u64_valid=%u u64=%llu bytes=%u",
+            event.record,qpc.QuadPart,GetCurrentThreadId(),origins[origin],event.interface_name,event.slot,
+            event.signature,e.flags,e.schema,e.uMask,e.u32[0],e.u32[1],e.u32[2],e.u32[3],e.u32[4],e.u32[5],e.u32[6],e.u32[7],
+            e.iMask,e.i32[0],e.i32[1],e.i32[2],e.i32[3],e.fMask,e.f32[0],e.f32[1],e.f32[2],e.f32[3],e.f32[4],e.f32[5],e.f32[6],e.f32[7],
+            unsigned(e.haveU64),static_cast<unsigned long long>(e.u64),e.bytes);
+        if(e.flags & EvidenceMatrix44)
+            Log::get().note("VR ABI census matrix44: record=%u m=%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g",
+                event.record,e.matrix44[0],e.matrix44[1],e.matrix44[2],e.matrix44[3],e.matrix44[4],e.matrix44[5],e.matrix44[6],e.matrix44[7],e.matrix44[8],e.matrix44[9],e.matrix44[10],e.matrix44[11],e.matrix44[12],e.matrix44[13],e.matrix44[14],e.matrix44[15]);
+        if(e.flags & EvidenceMatrix34)
+            Log::get().note("VR ABI census matrix34: record=%u m=%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g",
+                event.record,e.matrix34[0],e.matrix34[1],e.matrix34[2],e.matrix34[3],e.matrix34[4],e.matrix34[5],e.matrix34[6],e.matrix34[7],e.matrix34[8],e.matrix34[9],e.matrix34[10],e.matrix34[11]);
+    } catch (...) { /* Diagnostics must not change the forwarded result. */ }
 }
 }
 void configureCallCensus() {
@@ -50,7 +56,7 @@ void configureCallCensus() {
     if (g_gfx && !GetProcAddress(g_gfx, "edvrDoorGpuBegin")) g_gfx = nullptr;
     g_census.set_origin_resolver(&callerOrigin);
     g_census.enable(&observe);
-    Log::get().note("VR ABI census enabled: 84 exact v0.9.20 methods, first four calls per method/caller category. "
+    Log::get().note("VR ABI census enabled: 84 exact v0.9.20 methods; up to 16 exact keys per method/caller, four samples per key. Masks identify read fields; property strings are omitted. "
         "Internal direct runtime calls bypass these wrappers. Unsupported versions pass through; no absence claim.");
 }
 void* wrapCensusInterface(void* original, const char* version) {

@@ -152,3 +152,8 @@ tests sensitivity to input sampling and reconstruction scale; it does not by
 itself distinguish every shader, material or reconstruction cause. Restore the
 prior image quality afterward. Broader cockpit/on-foot validation and the
 original OpenXR timing gates remain open.
+
+The user subsequently deferred this wing-line investigation to keep work
+focused on the OpenXR port. The image-quality comparison above is not a pending
+test request or a blocker for port preparation. Keep the projection correction
+and current settings; retain the evidence for a separate follow-up.

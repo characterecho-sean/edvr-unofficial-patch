@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <cstring>
 #include <type_traits>
+#include <thread>
+#include <atomic>
 #include <windows.h>
 #include "../../src/openvr/compat/openvr_v0_9_20.h"
 #include "../../src/openvr/compat/openvr_abi_manifest.h"
@@ -50,6 +52,7 @@ struct ProbeSystem : edvr::openvr_abi::OpenVRSystemForward {
     EVREye seenEye = Eye_Left;
     float nearZ = 0, farZ = 0;
     EGraphicsAPIConvention convention = API_OpenGL;
+    unsigned eventPolls = 0;
     ProbeSystem() noexcept : OpenVRSystemForward(nullptr, nullptr) {}
     HmdMatrix44_t GetProjectionMatrix(EVREye eye, float nearValue, float farValue, EGraphicsAPIConvention api) override {
         seenEye = eye; nearZ = nearValue; farZ = farValue; convention = api;
@@ -66,6 +69,19 @@ struct ProbeSystem : edvr::openvr_abi::OpenVRSystemForward {
     }
     void GetProjectionRaw(EVREye, float* l, float* r, float* t, float* b) override {
         *l = -1.0f; *r = 2.0f; *t = 3.0f; *b = -4.0f;
+    }
+    uint32_t GetStringTrackedDeviceProperty(TrackedDeviceIndex_t, ETrackedDeviceProperty,
+                                             char* value, uint32_t size,
+                                             ETrackedPropertyError* error) override {
+        if (error) *error = size >= 8 ? TrackedProp_Success : TrackedProp_BufferTooSmall;
+        if (size >= 8 && value) std::memcpy(value, "SECRET", 7);
+        return 8; // required bytes, including terminator
+    }
+    bool PollNextEvent(VREvent_t* event, uint32_t size) override {
+        ++eventPolls;
+        if (eventPolls <= 1000) return false;
+        if (event && size >= sizeof(VREvent_t)) { std::memset(event, 0, sizeof(*event)); event->eventType = VREvent_Quit; }
+        return true;
     }
 };
 struct ProbeCompositor : edvr::openvr_abi::OpenVRCompositorForward {
@@ -113,6 +129,55 @@ int main() {
     census.observe(kMethods[0], edvr::openvr_abi::Origin::Game);
     if (g_events != 2) return 9;
 
+    // Semantic claims are exact keyed buckets: repeated samples of one key
+    // cannot hide another property/key, and each key has four samples.
+    edvr::openvr_abi::Census claims;
+    claims.enable(&census_sink);
+    uint32_t record = 0, firstRecord = 0;
+    for (uint32_t key : {0u, 4u, 8u}) {
+        for (unsigned sample=0; sample<4; ++sample) {
+            if (!claims.claim(kMethods[21], edvr::openvr_abi::Origin::Game, key, record)) return 18;
+            if (!record || (firstRecord && record == firstRecord)) return 19;
+            if (!firstRecord) firstRecord = record;
+        }
+        if (claims.claim(kMethods[21], edvr::openvr_abi::Origin::Game, key, record)) return 20;
+    }
+    for (uint32_t key=12; key<64; key+=4)
+        for (unsigned sample=0; sample<4; ++sample)
+            if (!claims.claim(kMethods[21], edvr::openvr_abi::Origin::Game, key, record)) return 21;
+    if (claims.claim(kMethods[21], edvr::openvr_abi::Origin::Game, 64, record)) return 22;
+    claims.disable();
+    if (claims.claim(kMethods[21], edvr::openvr_abi::Origin::Game, 999, record)) return 23;
+
+    // Claims are safe under concurrent callers and still cap one exact key at
+    // four successful claims.
+    edvr::openvr_abi::Census concurrent;
+    concurrent.enable(&census_sink);
+    std::atomic<unsigned> won{0};
+    std::thread workers[8];
+    for (auto& worker : workers) worker = std::thread([&] {
+        uint32_t id = 0;
+        if (concurrent.claim(kMethods[1], edvr::openvr_abi::Origin::Game, 2, id)) ++won;
+    });
+    for (auto& worker : workers) worker.join();
+    if (won != 4) return 24;
+
+    // Exercise the actual capture gate, including a read-fault payload. This
+    // detects accidental payload evaluation before disabled/saturated checks.
+    edvr::openvr_abi::Census guarded;
+    unsigned payloadReads = 0;
+    auto payload = [&](edvr::openvr_abi::Evidence&) { ++payloadReads; };
+    edvr::openvr_abi::capture(&guarded, 0, nullptr, 0, payload);
+    if (payloadReads) return 60;
+    guarded.enable(&census_sink);
+    for (unsigned i=0;i<100;++i) edvr::openvr_abi::capture(&guarded, 0, nullptr, 0, payload);
+    if (payloadReads != 4) return 61;
+    volatile uint32_t* inaccessible = reinterpret_cast<volatile uint32_t*>(1);
+    edvr::openvr_abi::capture(&guarded, 1, nullptr, 0, [&](edvr::openvr_abi::Evidence& e) {
+        e.u(0, *inaccessible);
+    });
+    if (g_last.evidence.flags != edvr::openvr_abi::EvidenceReadFault) return 62;
+
     ProbeSystem probe;
     edvr::openvr_abi::Census forwarding_census;
     forwarding_census.enable(&census_sink);
@@ -123,11 +188,39 @@ int main() {
     if (matrix.m[0][0] != 42.0f || matrix.m[3][3] != 17 || probe.seenEye != Eye_Right ||
         probe.nearZ != 0.1f || probe.farZ != 1000 || probe.convention != API_DirectX) return 10;
     if (g_events != before + 1 || g_last.slot != 1 || g_last.origin != edvr::openvr_abi::Origin::Game) return 14;
+    if (g_last.evidence.u32[0] != Eye_Right || g_last.evidence.f32[0] != 0.1f ||
+        g_last.evidence.matrix44[0] != 42 || g_last.evidence.matrix44[15] != 17) return 63;
+    for (unsigned i=0;i<8;++i) forwarding.GetProjectionMatrix(Eye_Right, 0.1f, 1000.0f, API_DirectX);
+    const unsigned beforeLeft = g_events;
+    forwarding.GetProjectionMatrix(Eye_Left, 0.2f, 500.0f, API_OpenGL);
+    if (g_events != beforeLeft + 1 || g_last.evidence.u32[0] != Eye_Left ||
+        g_last.evidence.u32[1] != API_OpenGL || g_last.evidence.f32[0] != 0.2f) return 64;
     float raw[] = {99, 99, 99, 99, 99, 99};
     forwarding.GetProjectionRaw(Eye_Left, raw + 1, raw + 2, raw + 3, raw + 4);
     if (raw[0] != 99 || raw[1] != -1 || raw[2] != 2 || raw[3] != 3 || raw[4] != -4 || raw[5] != 99) return 11;
     const auto eyeMatrix = forwarding.GetEyeToHeadTransform(Eye_Right);
     if (eyeMatrix.m[0][3] != 0.03f || eyeMatrix.m[2][2] != 1) return 15;
+    char propertyBuffer[12]; std::memset(propertyBuffer, '#', sizeof(propertyBuffer));
+    ETrackedPropertyError propertyError = TrackedProp_Success;
+    if (forwarding.GetStringTrackedDeviceProperty(0, Prop_SerialNumber_String,
+            propertyBuffer, 4, &propertyError) != 8 ||
+        propertyError != TrackedProp_BufferTooSmall || propertyBuffer[0] != '#') return 25;
+    if (forwarding.GetStringTrackedDeviceProperty(0, Prop_ManufacturerName_String,
+            propertyBuffer, sizeof(propertyBuffer), &propertyError) != 8 ||
+        propertyError != TrackedProp_Success || propertyBuffer[7] != '#') return 26;
+    // Empty polls use key 0; the first successful event uses key 1 and is
+    // therefore still available after a long empty run.
+    const unsigned beforePolls = g_events;
+    for (unsigned i=0; i<1000; ++i) {
+        if (forwarding.PollNextEvent(nullptr, static_cast<uint32_t>(sizeof(VREvent_t)))) return 27;
+    }
+    if (g_events != beforePolls + 4) return 28;
+    VREvent_t event{};
+    if (!forwarding.PollNextEvent(&event, sizeof(event)) || event.eventType != VREvent_Quit) return 29;
+    if (g_events != beforePolls + 5 || g_last.evidence.u32[1] != VREvent_Quit ||
+        !(g_last.evidence.flags & edvr::openvr_abi::EvidenceEvent)) return 30;
+    for(unsigned i=0;i<100;++i) forwarding.PollNextEvent(&event, sizeof(event));
+    if (g_events != beforePolls + 8) return 31;
     forwarding_census.disable();
     const unsigned disabledCount = g_events;
     forwarding.GetEyeToHeadTransform(Eye_Left);

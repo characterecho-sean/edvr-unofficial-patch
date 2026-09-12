@@ -365,6 +365,8 @@ REM bumps a refcount; openvr_api_orig.dll is mapped by nothing, so loading it
 REM there runs its DllMain under the loader lock.
 python "tools\gen_exports.py" --source "%OPENVR_SRC%" ^
     --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy ^
+    --wrap VR_InitInternal --wrap VR_ShutdownInternal ^
+    --wrap VR_IsInterfaceVersionValid --wrap VR_GetInitToken ^
     --extra-export edvr_selftest_system_hook ^
     --extra-export edvr_selftest_cull_guard ^
     --extra-export edvr_selftest_cull_adopt ^
@@ -872,6 +874,28 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     "tools\openvr_abi_test\openvr_abi_test.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: OpenVR ABI test build failed & exit /b 1 )
 "%BUILD%\openvr_abi_test.exe" --self-test || exit /b 1
+
+REM Real-proxy lifecycle census tests use separate processes and fake runtimes;
+REM no installed headset/runtime or game files are touched.
+if not exist "%OBJ%\openvr_exports" mkdir "%OBJ%\openvr_exports"
+for %%F in (fakevr missing reentry) do (
+    REM Source names below are mapped explicitly to keep fixture DLL names unique.
+    set "EXPORT_FIXTURE=fakevr"
+    if "%%F"=="missing" set "EXPORT_FIXTURE=fakevr_missing"
+    if "%%F"=="reentry" set "EXPORT_FIXTURE=fakevr_reentry"
+    cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+        /Fo"%OBJ%\openvr_exports\\" /Fe"%BUILD%\export_census_%%F.dll" ^
+        "tools\openvr_export_census_test\!EXPORT_FIXTURE!.cpp" /link /INCREMENTAL:NO
+    if errorlevel 1 ( echo [edvr] ERROR: export census fixture build failed & exit /b 1 )
+)
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\openvr_exports\\" /Fe"%BUILD%\openvr_export_census_test.exe" ^
+    "tools\openvr_export_census_test\openvr_export_census_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: export census test build failed & exit /b 1 )
+if exist "%BUILD%\openvr_api.dll" (
+    "%BUILD%\openvr_export_census_test.exe" --self-test "%BUILD%" --dry-run || exit /b 1
+    "%BUILD%\openvr_export_census_test.exe" --self-test "%BUILD%" || exit /b 1
+)
 
 REM Headset-free OpenXR enumeration contract tests. The probe is standalone;
 REM the shipping proxies do not load OpenXR or create an OpenXR session.

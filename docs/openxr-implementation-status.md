@@ -2,10 +2,18 @@
 
 The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
 `8c617dc` before implementation began. Work remains in Phase 0; it is not an
-OpenXR backend or a completed Phase 0 qualification. The latest checkpoint is
-the [render-to-submit measurement](render-to-submit-gpu-2026-09-12.md),
-following the successful Frontier timer-migration check. Earlier review
-decisions below record the state at those checkpoints.
+OpenXR backend or a completed Phase 0 qualification. The latest checkpoint adds
+a [bounded semantic and export census](openxr-semantic-census-2026-09-12.md)
+and an [installed runtime inventory](openxr-runtime-inventory-2026-09-12.md),
+following the render-to-submit measurement and Frontier timer-migration check.
+Earlier review decisions below record the state at those checkpoints.
+
+The original motion regression has recovered on the corrected `f622cd2`
+main-menu capture. The user deferred the remaining stationary wing-line flicker
+and its image-quality comparison. Resume port preparation with the bounded
+semantic ABI/export census and installed runtime capability inventory; do not
+change rendering quality to investigate the deferred issue. Broad functional
+and timing qualification remain distinct gates.
 
 ## Implemented evidence tools
 
@@ -15,12 +23,17 @@ decisions below record the state at those checkpoints.
   aggregate returns are ordinary C++ member calls. The bounded cache preserves
   repeated-getter wrapper identity and passes through when exhausted. Runtime
   targets remain owned by the runtime.
-- The ABI log records the first four calls per method and caller category, with
-  QPC and thread ID. The call site is classified by its containing module: game
-  executable, EDVR, another module, or unknown. Calls EDVR makes directly to
-  saved runtime pointers bypass these wrappers. Other interface versions retain
-  proxy behaviour. This instrumentation does not define the future owned
-  backend's supported-interface policy.
+- The ABI log records up to four samples for each of 16 exact discriminator
+  keys per method and caller category, with QPC and thread ID. Selected methods
+  include arguments and results; both eyes and distinct properties have
+  independent budgets. Empty event polls have a separate budget from successful
+  events. Five wrapped exports record bounded, paired
+  initialization/interface/shutdown calls. See the semantic census checkpoint
+  for exact coverage and limits. The call site is classified by its containing
+  module: game executable, EDVR, another module, or unknown. Calls EDVR makes
+  directly to saved runtime pointers bypass these wrappers. Other interface
+  versions retain proxy behaviour. This instrumentation does not define the
+  future owned backend's supported-interface policy.
 - CPU order logs record at most 64 observations per wait/submit/Present event
   kind and 16 per intercepted GPU-command kind, independently for startup and
   the initial VR capture. The owned compositor's first pose wait selects the VR
@@ -123,17 +136,19 @@ Before treating Phase 0 as complete, still collect and review:
 1. Exact init/shutdown/re-init and interface-validity export traffic,
    meaningful property/controller/event arguments and returned events, first
    geometry results, skybox descriptors and complete lifecycle behaviour. The
-   current bounded method census establishes calls, not this full semantic
-   inventory.
+   new semantic/export census is ready for capture; its bounded observations
+   cannot establish this full semantic inventory alone.
 2. Real startup and flight order/context/device evidence, including texture
    reuse, both eyes, mirror work and deferred command-list execution. A missing
    line is not proof of absence. The first published device matched the sampled
    textures in both Frontier flights; other configurations and complete
    lifecycle ownership remain unverified.
-3. Installed SteamVR, VDXR and Pimax runtime probe reports, then a separate
-   session harness for actual formats, startup geometry, refresh rate, gaze,
-   tracking and loss/focus behaviour. Extension advertisement alone is not
-   functional support.
+3. The installed runtime reports are now
+   [recorded](openxr-runtime-inventory-2026-09-12.md): PiOpenXR and SteamVR
+   find the Pimax system and matching adapter; VDXR reports no available
+   headset. Still run a separate session harness for actual formats, startup
+   geometry, refresh rate, gaze, tracking and loss/focus behaviour. Extension
+   advertisement alone is not functional support.
 4. A corrected GPU bracket, matched-frame SteamVR correlation and the Monitor
    source/validity changes. The OpenXR backend, transport parity, field
    qualification and retirement proposal follow those gates.
