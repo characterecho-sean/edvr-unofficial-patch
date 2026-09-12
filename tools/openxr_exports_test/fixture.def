@@ -1,0 +1,7 @@
+LIBRARY openxr_export_fixture
+EXPORTS
+    VR_InitInternal=edvr_native_VR_InitInternal
+    VR_ShutdownInternal=edvr_native_VR_ShutdownInternal
+    VR_GetGenericInterface=edvr_native_VR_GetGenericInterface
+    VR_IsInterfaceVersionValid=edvr_native_VR_IsInterfaceVersionValid
+    VR_GetInitToken=edvr_native_VR_GetInitToken

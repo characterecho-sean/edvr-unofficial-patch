@@ -25,12 +25,15 @@
 #include "../../src/openxr/seated_space.h"
 #include "../../src/openxr/reference_changes.h"
 #include "../../src/openxr/reset_events.h"
+#include "../../src/openxr/runtime_exports.h"
+#include "../../src/openxr/openvr_auxiliary.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <thread>
 
 using namespace edvr::openxr;
 extern "C" vr::IVRCompositor* nativeCompositorCaller(vr::IVRCompositor*);
@@ -107,8 +110,11 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
-class Host : public SystemSource, public FrameSink, public CompositorSource {
+class Host : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
+  Options startupOptions;
+  uint64_t starts=0,stops=0,startupFrames=0;
+  OpenVRExtendedDisplay displayInterface{*this};OpenVRChaperone chaperoneInterface{*this};
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
@@ -134,6 +140,56 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
   bool clean=true;
+  AuxiliaryRead readAuxiliary()const override {
+    const auto snapshot=geometry.read();AuxiliaryRead out{};
+    out.generation=snapshot.generation;out.connected=snapshot.connected;
+    if(snapshot.geometryValid)for(unsigned eye=0;eye<2;++eye){out.width[eye]=snapshot.geometry.native.width[eye];out.height[eye]=snapshot.geometry.native.height[eye];}
+    return out;
+  }
+  void auxiliaryUnsupported(unsigned interfaceId,unsigned slot)noexcept override {
+    std::printf("auxiliary_unavailable,interface=%u,slot=%u\n",interfaceId,slot);
+  }
+  vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
+    ++starts;
+    // This diagnostic's frame/device owner is its main thread. Moving that
+    // ownership to a game service/renderer remains a separate integration step.
+    if(GetCurrentThreadId()!=ownerThread||starts!=1)return vr::VRInitError_Init_Internal;
+    if(cancelled.load(std::memory_order_acquire))return vr::VRInitError_Init_ShuttingDown;
+    if(!open(startupOptions))return vr::VRInitError_Init_Internal;
+    const auto began=GetTickCount64();
+    while(!cancelled.load(std::memory_order_acquire)&&GetTickCount64()-began<15000) {
+      auto operation=gate.tryEnter(runtimeGeneration);
+      if(!operation)return vr::VRInitError_Init_Internal;
+      XrResult r=state.pollEvents();
+      if(r!=XR_SUCCESS||state.terminal()||!changes.active())return vr::VRInitError_Init_Internal;
+      if(state.lifecycle()==Lifecycle::Stopping)return vr::VRInitError_Init_ShuttingDown;
+      if(state.lifecycle()==Lifecycle::Ready&&!state.running()) {
+        r=state.startIfReady();if(r!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
+      }
+      if(!state.running()){operation=RuntimeGate::Lease{};Sleep(10);continue;}
+      operation=RuntimeGate::Lease{};
+      CompositorRead initial{};
+      if(waitPoses(compositorGeneration,initial)!=vr::VRCompositorError_None)return vr::VRInitError_Init_Internal;
+      ++startupFrames;
+      if(closeDiagnosticFrame()!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
+      const auto snapshot=read();
+      if(snapshot.geometryValid) {
+        out={&systemInterface,&compositorInterface,&chaperoneInterface,&displayInterface};
+        std::printf("runtime_startup,token=%u,zero_layer_frames=%llu,geometry_sequence=%llu,prior_submits=%llu,geometry_ready=1\n",
+          token,(unsigned long long)startupFrames,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)compositorSubmits);
+        return vr::VRInitError_None;
+      }
+    }
+    std::puts("error,runtime_startup_cancelled_or_deadline");
+    return cancelled.load(std::memory_order_acquire)?vr::VRInitError_Init_ShuttingDown:vr::VRInitError_Init_HmdNotFound;
+  }
+  bool stop()noexcept override {
+    ++stops;
+    if(runtimeGeneration)gate.requestStop(runtimeGeneration);
+    geometry.retire(geometryGeneration);poses.retire(compositorGeneration);resetEvents.retire(geometryGeneration);
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    return close();
+  }
   static void referenceEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
     auto& host=*static_cast<Host*>(context);
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
@@ -306,6 +362,9 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
     captured.shutdown();
     clean=result("destroy_swapchains",stereo.shutdown())&&clean;
     clean=result("destroy_seated_space",seated.shutdown())&&clean;
+    // xrDestroySession is allowed in any state once handle users are excluded.
+    // Normal exit ends a STOPPING session in the loop; failed/cancelled startup
+    // may destroy directly, without an invalid xrEndSession in another state.
     clean=result("destroy_binding",binding.shutdown())&&clean;
     view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
     state.abandonAfterOwnerDestruction();
@@ -424,11 +483,42 @@ bool samePose(const vr::TrackedDevicePose_t& a,const vr::TrackedDevicePose_t& b)
     a.eTrackingResult==b.eTrackingResult&&a.bPoseIsValid==b.bPoseIsValid&&a.bDeviceIsConnected==b.bDeviceIsConnected;
 }
 int run(const Options& options) {
-  Host host; if(!host.open(options)) return 3;
-  vr::IVRCompositor* compositor=nativeCompositorCaller(&host.compositorInterface);
+  // Process-lifetime objects back the exported function pointers. Their
+  // resources are still explicitly retired through Shutdown before return.
+  static Host host;host.startupOptions=options;
+  static RuntimeLifecycle runtime(host);
+  if(!bindRuntimeExports(runtime))return 3;
+  vr::EVRInitError initError=vr::VRInitError_Unknown;
+  const uint32_t initToken=edvr_native_VR_InitInternal(&initError,vr::VRApplication_Scene);
+  if(!initToken||initError!=vr::VRInitError_None){std::printf("error,runtime_init,%d\n",int(initError));return 3;}
+  struct ShutdownOnExit {~ShutdownOnExit(){edvr_native_VR_ShutdownInternal();}} shutdownOnExit;
+  auto* system=static_cast<vr::IVRSystem*>(edvr_native_VR_GetGenericInterface(vr::IVRSystem_Version,&initError));
+  auto* display=static_cast<vr::IVRExtendedDisplay*>(edvr_native_VR_GetGenericInterface(vr::IVRExtendedDisplay_Version,&initError));
+  if(!system||!display||initError!=vr::VRInitError_None)return 3;
+  uint32_t earlyWidth=0,earlyHeight=0;system->GetRecommendedRenderTargetSize(&earlyWidth,&earlyHeight);
+  int32_t windowX=0,windowY=0;uint32_t windowWidth=0,windowHeight=0;
+  display->GetWindowBounds(&windowX,&windowY,&windowWidth,&windowHeight);
+  bool workerRead=false;
+  std::thread reader([&]{uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
+    const auto matrix=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000,vr::API_DirectX);
+    workerRead=width==earlyWidth&&height==earlyHeight&&width&&height&&matrix.m[3][2]==-1;});
+  reader.join();
+  if(!earlyWidth||!earlyHeight||!windowWidth||!windowHeight||!workerRead||host.compositorSubmits)return 3;
+  auto* compositor=static_cast<vr::IVRCompositor*>(edvr_native_VR_GetGenericInterface(vr::IVRCompositor_Version,&initError));
+  auto* chaperone=static_cast<vr::IVRChaperone*>(edvr_native_VR_GetGenericInterface(vr::IVRChaperone_Version,&initError));
+  if(!compositor||!chaperone||initError!=vr::VRInitError_None)return 3;
+  compositor=nativeCompositorCaller(compositor);
+  if(edvr_native_VR_InitInternal(nullptr,vr::VRApplication_Scene)!=initToken||host.starts!=1||
+     edvr_native_VR_GetInitToken()!=initToken||edvr_native_VR_GetGenericInterface(vr::IVRCompositor_Version,nullptr)!=compositor||
+     edvr_native_VR_IsInterfaceVersionValid("IVROverlay_011")||edvr_native_VR_GetGenericInterface("IVROverlay_011",&initError)||
+     initError!=vr::VRInitError_Init_InterfaceNotFound)return 3;
+  for(const char* version:{vr::IVRSystem_Version,vr::IVRExtendedDisplay_Version,vr::IVRCompositor_Version,vr::IVRChaperone_Version})
+    if(!edvr_native_VR_IsInterfaceVersionValid(version))return 3;
+  std::printf("runtime_exports,token=%u,interfaces=4,repeated_init=1,stable_identity=1,overlay_rejected=1,pre_compositor_geometry=1,cross_thread_cached_geometry=1,virtual_window=%ux%u\n",
+    initToken,windowWidth,windowHeight);
   compositor->SetTrackingSpace(vr::TrackingUniverseSeated);
   if(compositor->GetTrackingSpace()!=vr::TrackingUniverseSeated)return 3;
-  const ULONGLONG startup=GetTickCount64(); ULONGLONG started=0,exitRequested=0;
+  const ULONGLONG startup=GetTickCount64(); ULONGLONG started=host.state.running()?startup:0,exitRequested=0;
   uint64_t frames=0,layers=0,empty=0,valid=0,invalid=0,headValid=0,cachedChecks=0;
   bool stopped=false, failed=false, bootstrapComplete=false; Lifecycle previous=Lifecycle::Uninitialized;
   while(true) {
@@ -526,7 +616,7 @@ int run(const Options& options) {
     if(haveLocation) {
       const bool published=host.read().geometryValid;
       if(published&&!bootstrapComplete) {
-        const auto snapshot=host.read();vr::IVRSystem* system=nativeSystemCaller(&host.systemInterface);
+        const auto snapshot=host.read();system=nativeSystemCaller(system);
         uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
         const auto eye=system->GetEyeToHeadTransform(vr::Eye_Left);
         const auto projection=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000,vr::API_DirectX);
@@ -567,7 +657,12 @@ int run(const Options& options) {
       }
     }
   }
-  const bool cleanup=host.close();
+  edvr_native_VR_ShutdownInternal();
+  const bool cleanup=host.clean&&!runtime.running()&&host.runtimeGeneration==0&&host.stops==1;
+  if(edvr_native_VR_GetInitToken()==initToken||edvr_native_VR_GetGenericInterface(vr::IVRSystem_Version,&initError)||
+     initError!=vr::VRInitError_Init_NotInitialized)failed=true;
+  std::printf("runtime_shutdown,token=%u,starts=%llu,stops=%llu,interfaces_retired=%u,startup_frames=%llu\n",
+    edvr_native_VR_GetInitToken(),(unsigned long long)host.starts,(unsigned long long)host.stops,unsigned(!runtime.running()),(unsigned long long)host.startupFrames);
   std::printf("origin_boundary,resets=%llu,reset_events=%llu,reference_changes=%llu\n",
     (unsigned long long)host.recenters,(unsigned long long)host.resetPolls,(unsigned long long)host.referenceChanges);
   std::printf("compositor_boundary,waits=%llu,submits=%llu,handoffs=%llu,cached_checks=%llu,valid_game_poses=%llu\n",
@@ -580,7 +675,7 @@ int run(const Options& options) {
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
   const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&host.recenters==2&&host.resetPolls==2&&
     host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
-    host.compositorWaits==frames&&cachedChecks==frames&&host.compositorHandoffs==layers&&host.validGamePoses;
+    host.compositorWaits==frames+host.startupFrames&&cachedChecks==frames&&host.compositorHandoffs==layers&&host.validGamePoses;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;
 }
 int selfTest() {

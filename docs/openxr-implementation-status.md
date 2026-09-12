@@ -87,6 +87,17 @@ before and after. The user confirmed placement in both eyes, world-up, stable
 tracking, normal color/clarity and normal exit. Standing/raw mapping,
 runtime-origin headset qualification and game ownership remain open.
 
+The [runtime-startup checkpoint](openxr-runtime-startup-2026-09-12.md) adds an
+owned lifecycle coordinator, the five game-imported C entry points and the
+exact ExtendedDisplay/Chaperone shapes. Native Init now caches valid geometry
+before exposing System; a second thread reads that geometry before Compositor
+is requested. Desktop fixtures cover cancellation, cleanup failure, token and
+interface publication, and actual exported calls through a test DLL. The full
+build passed with 73 lifecycle, 234 auxiliary and 35 export checks. A fresh
+native startup flight is the next gate. Complete legacy exports, persistent
+game-thread ownership, required compositor features and Frontier integration
+remain open; the installed Frontier pair stays `f3c205e`.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;
