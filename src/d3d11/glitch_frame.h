@@ -43,13 +43,15 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
 
 // Read-only cross-check of the camera buffer bound to a recognised opaque
 // eye draw. A fresh same-frame write is required. Saved beside the legacy
-// furthest-camera history; this does not change the withhold decision.
+// furthest-camera history and paired with the bound pool below.
 bool glitchFrameWantsSceneDraw(uint64_t vertexShaderHash);
 bool glitchFrameNoteSceneDraw(const void* resource, float* sampledPosition = nullptr);
 
 // The bounded geometry cross-check follows the pool actually bound at that
 // same draw. Writes are read before Unmap; missing/overwritten data stays
-// explicitly unavailable. These functions never change the frame decision.
+// explicitly unavailable. Coherent geometry excuses auxiliary-camera jumps;
+// an unmatched reset into head space marks the frame before Submit. A known
+// verdict is retained through later auxiliary writes and both eye submits.
 void glitchFrameNoteScenePool(const void* resource, uint32_t bytes);
 uint32_t glitchFrameWantsPool(const void* resource);
 void glitchFrameObservePool(const void* resource, const void* data, uint32_t bytes);

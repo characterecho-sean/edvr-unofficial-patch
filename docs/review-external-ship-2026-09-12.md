@@ -663,3 +663,96 @@ GPU snapshot round-trip, weapon/UI/night-vision regressions and 252-key
 configuration contract. The NVIDIA `smoke.exe` run also passed. The
 build and smoke logs are under `build/review_motion/sep12/flight1159/`
 (local ignored artifacts).
+
+## Three Pause captures, 17:34 flight
+
+Both DLLs verify as `5f5350e`, in `edvr_gfx_20260912_173400.log` and
+`edvr_vr_20260912_173403.log`. This is Valve SteamVR, with 2774x2740
+submitted game eyes, 4268x4216 output, DLSS preset K. The user reports
+constant external-camera flickering after loading, settling after
+pitching, then three Pause presses: normal flight with flicker; high
+wake without a flash; high wake with a flash. The eye dump is `173535`,
+showing the ship above a planet in external view. A still image cannot
+establish the cause of every continuous flicker.
+
+The three presses are at 17:35:50.623, 17:36:36.745 and 17:37:34.203.
+Their immediate and automatic follow-up histories contain 4,091 unique
+frames. Every retained frame has a matched fresh pool pair; no frame
+exceeded the four-write cap.
+
+Normal flight contains seven distinct false replacements in the retained
+first pair of histories: 11575/11576, 11804/11805, 12510/12511 and
+12749. All have 128 matched records. Camera-relative error is at most 1
+mm, including the two roughly 5 km origin changes. The first pair
+follows the eye-dump hitch, but its camera and object steps still agree.
+Two more coherent rebase replacements, 15709/15710, precede the clean
+high wake by about 8.5 seconds. Camera-only jump magnitude is
+demonstrably insufficient to decide these frames.
+
+The clean high wake starts at 16450, 246 ms before Pause. Its eye camera
+resets from `(861.68,-4059.08,-906.91)` to `(-0.02,0,-0.02)`. There are
+59 matched objects, with a 4,207 m median camera-relative disagreement.
+The legacy detector marks this frame and the following frame, matching
+the user's clean result.
+
+The flashing high wake starts at 21467, 211 ms before Pause. The eye
+camera resets from `(4.83,-11.66,-4.79)` to `(-0.02,0,-0.01)`. There are
+65 matches, a 13.505 m median disagreement and a 1,580 m 90th-percentile
+disagreement. No auxiliary camera exceeds the old 250-unit world-camera
+floor, so `pos=` is NaN and this first frame is not marked at all.
+Frames 21468/21469 are marked afterward. The Submit code saves each
+forwarded frame as the next replacement source, so missing the first bad
+frame also contaminates the copy used for those two replacements. The
+first-frame miss is directly measured; attributing the visible flash to
+it follows the user's timing and that code path.
+
+Ruled out: the later high-wake miss being a certified separation or
+rebase cooldown suppressing its first frame. That frame never reaches
+the old decision because it carries no camera above the world floor.
+Ruled out: the new pool diagnostic being inactive, stale throughout the
+capture, or exhausting its sampling budget. All three captures have
+fresh matches and zero capped frames.
+
+### Decision from the claimed eye draw
+
+The existing transition-flash toggle now uses a known geometry verdict
+before Submit. At least 32 matched and predicted rigid records across
+three fresh frames are required. A camera/object-relative step and
+prediction residual both within 1 cm identify a coherent scene and
+excuse an auxiliary-camera jump, without learning a separation or
+starting a rebase cooldown. That tolerance allows floating-point
+quantisation; the measured false replacements disagree by at most 1 mm.
+
+A camera collapsing into the one-metre head volume while the median
+object-relative displacement exceeds one metre identifies the missed
+reset, provided the predicted residual also exceeds one metre. Large
+motion away from that volume does not qualify. The same rule identifies
+both high-wake first frames, including the 13.505 m case. Coherent
+rebases into the origin take the first branch and are left alone.
+Unknown or missing evidence retains the legacy decision.
+
+The verdict is established at the first recognised eye draw and survives
+later auxiliary writes before either Submit. It uses the existing
+consecutive and burst budgets, remains off when the fix is off, and does
+not teach genuine eye resets to the separation or drift memories. The
+existing 128-record/four-write bound is unchanged, with no added GPU
+work. This is a bounded population check, not proof of correctness for
+every possible rendered object or runtime. Visual confirmation is still
+needed, including whether it resolves all of the reported external-view
+flickering.
+
+The compiled classifier replay over all 4,091 captured frames excuses
+the nine coherent replacements and identifies exactly frames 16450 and
+21467 as resets, with no additional reset detections. The end-to-end
+detector test covers nomination and freshness, later auxiliary writes,
+missing world cameras, repeated high wakes, missing eye samples, the
+disabled toggle and the consecutive-frame limit. Existing detector
+regressions pass. Analysis, images and replay data remain local under
+`build/review_motion/sep12/flight1735/`.
+
+The full absolute-path worktree build passes all regression gates and
+the 252-key configuration contract. The NVIDIA DLL smoke test passes.
+The paired eye-run crops precede the next recorded replacement, so the
+continuous external-view flicker must still be checked independently;
+the current fix addresses the measured false replacements and the missed
+first high-wake frame.
