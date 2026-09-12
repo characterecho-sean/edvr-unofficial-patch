@@ -54,10 +54,12 @@ The next [eye-capture and frame-ownership
 checkpoint](openxr-frame-boundary-2026-09-12.md) connects Submit-style pairing,
 private per-eye copies and a runtime operation lifetime gate to the standalone
 diagnostic. It adds desktop coverage for copy isolation, bounds/color
-conversion, incomplete frames and shutdown during a blocked wait. The revised
-PiOpenXR visual gate is pending. This is still preparation for the owned
-compositor ABI and game feature integration; no shipping discovery or Frontier
-installation changes are made.
+conversion, incomplete frames and shutdown during a blocked wait. The `57e82ca`
+PiOpenXR run completed 3596 eye captures, 1798 stereo pairs and normal
+shutdown, with SteamVR absent before and after. The user confirmed both eyes,
+stable head tracking, normal color/clarity and normal exit. This is still
+preparation for the owned compositor ABI and game feature integration; no
+shipping discovery or Frontier installation changes are made.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact

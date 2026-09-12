@@ -121,12 +121,25 @@ data remains readable.
 
 ## Native gate and remaining work
 
-The updated 20-second PiOpenXR test is pending. It must retain the existing
-startup System-interface gate, produce matching copied-eye and composed-pair
-counters, show the triangle in both eyes with stable head tracking, and exit
-normally with SteamVR absent. The previous native success applies to the
-earlier direct renderer, not this copied-eye path. Exact executable/source
-hashes and run receipts remain local under `build`.
+The `57e82ca` copied-eye diagnostic passed its 20-second PiOpenXR run with the
+executable, sources, loader and runtime manifest matched to the full-build
+record. SteamVR and Frontier were absent before and after. The runtime reported
+Pimax OpenXR 0.1.0, D3D11.1 and two 5424 x 5356 sRGB eye swapchains. The child
+exited 0 after approximately 20.38 seconds, without the watchdog firing.
+
+It published startup geometry on frame 1 before stereo, passed the existing
+historical System metadata and QPC-to-OpenXR absolute-pose query, then produced
+3596 successful eye captures and 1798 composed stereo pairs with alternating
+eye order. There were 1800 begun frames, two zero-layer frames, 1799 valid
+view/head samples and no invalid view sample. Normal session stop and cleanup
+both succeeded. These counters demonstrate that the new capture/pair/blit path
+ran; they are not a game performance comparison.
+
+The user confirmed the triangle in both eyes, stability during head movement,
+normal color and clarity, and normal visible closure. This supplies the visual
+check for the copied-eye path in addition to the earlier direct-renderer
+result. Exact executable/source hashes and run receipts remain local under
+`build`.
 
 After this gate, the next work is the owned historical compositor facade and
 game-runtime integration, including pose arrays/cache, origin/recenter and
