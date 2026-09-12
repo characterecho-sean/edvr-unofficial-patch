@@ -919,6 +919,27 @@ for %%T in (session projection) do (
     "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
 )
 
+REM Standalone native-session harness and fake-XR/WARP stereo renderer.
+REM The build runs only desktop fixtures; real headset sessions are explicit.
+if not exist "%OBJ%\openxr_native" mkdir "%OBJ%\openxr_native"
+for %%T in (native stereo) do (
+    cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
+        /I"third_party\openxr\include" /Fo"%OBJ%\openxr_native\\" ^
+        /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
+        "src\openxr\d3d11_stereo.cpp" ^
+        /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
+    if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
+    "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
+    "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
+)
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\native_device_test.exe" ^
+    "tools\openxr_native_test\native_device_test.cpp" /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native device test build failed & exit /b 1 )
+"%BUILD%\native_device_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_device_test.exe" --self-test || exit /b 1
+python tools\run_openxr_native.py --self-test || exit /b 1
+
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     /Fo"%OBJ%\fakevr\\" /Fe"%BUILD%\fakevr.dll" ^

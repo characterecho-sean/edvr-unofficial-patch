@@ -8,11 +8,13 @@ and an [installed runtime inventory](openxr-runtime-inventory-2026-09-12.md),
 followed by a successful [Frontier semantic census
 flight](openxr-semantic-flight-2026-09-12.md). It confirms paired init/shutdown
 records, stable interface identity, seated tracking and three projection plane
-pairs. Native OpenXR session creation and game transport remain unimplemented.
-Reusable [session/frame and projection
-policies](openxr-core-policy-2026-09-12.md) now exist under desktop tests; they
-are not connected to the shipping proxies. Earlier review decisions below
-record the state at those checkpoints.
+pairs. Native game transport remains unimplemented. Reusable [session/frame and
+projection policies](openxr-core-policy-2026-09-12.md) now exist under desktop
+tests; they are not connected to the shipping proxies. A standalone [native
+session and stereo diagnostic](openxr-native-harness-2026-09-12.md) now binds a
+diagnostic D3D11 device, obtains native geometry and submits a test scene; its
+first real headset run is pending. Earlier review decisions below record the
+state at those checkpoints.
 
 The original motion regression has recovered on the corrected `f622cd2`
 main-menu capture. The user deferred the remaining stationary wing-line flicker
