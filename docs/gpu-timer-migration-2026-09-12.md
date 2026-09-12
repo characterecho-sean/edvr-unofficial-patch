@@ -106,6 +106,31 @@ clean up their timer owners before releasing WARP.
 
 ## Frontier regression gate
 
+The clean checkpoint `cc3d882` (`v0.15.1-51-gcc3d882`) passed the full paired
+build in `build/frontier-shared-timer-clean-build.log`. Its isolated production
+WARP smoke also passed in `build/shared-timer-clean-smoke.log`; the versioned
+fixture log confirmed a completed shared-clock interval. Both proxies were
+installed and independently verified in Frontier at 07:09 local on 2026-09-12.
+The subsequent documentation commit does not change the installed version.
+
+| Payload | Linked build stamp | SHA-256 |
+| --- | --- | --- |
+| `d3d11.dll` | `6AA54E5C` | `746E30383B0F3EE343EF40F02A94AF7A7971673A92A52C96032FC51B77C45453` |
+| `openvr_api.dll` | `6AA54E64` | `9B4CC00A98D099530998757EFB3BD89BE7958B1780F6257BAFB91DFAE7B14538` |
+
+The INI remained byte-identical, with SHA-256
+`A32D631834E5C1EEEFAA03367750A7A4211652869EB4976900DC11CF530EC1A9`. The
+installer retained both previous proxies as `pre-cc3d882-20260912-070917.bak`
+backups. No game was launched by this work.
+
+This flight's expected build is `cc3d882`, even if branch HEAD has advanced:
+
+```powershell
+python tools/edvr_log.py --target frontier --tag gfx --expect-build cc3d882 --version
+python tools/edvr_log.py --target frontier --tag vr --expect-build cc3d882 --version
+python tools/edvr_log.py --target frontier --tag gfx --expect-build cc3d882 --grep 'GPU timing:|door GPU|GPU price|vScreen totals|unavailable|sentinel|exception'
+```
+
 Install both proxies from the clean checkpoint with `tools/install_edvr.py
 --target frontier --dll --openvr`, then use `--verify-only`. Preserve the live
 INI and record the installed commit and hashes. Steam is not this test's
