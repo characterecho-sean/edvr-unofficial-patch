@@ -443,7 +443,11 @@ uint64_t texture2DBytes(const D3D11_TEXTURE2D_DESC& d) {
 HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPUT_ELEMENT_DESC* elements,UINT count,const void* bytecode,SIZE_T len,ID3D11InputLayout** out) {
     const HRESULT hr=g_state->realCreateLayout(self,elements,count,bytecode,len,out);
     if(self==g_state->device && SUCCEEDED(hr) && bytecode && len && out && *out)
-        guardedBudget(g_createBudget,[&]{GuiDrawSnapshot::rememberLayout(*out,elements,count,fnv1a64(bytecode,len));});
+        guardedBudget(g_createBudget,[&]{
+            const uint64_t hash=fnv1a64(bytecode,len);
+            GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
+            EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
+        });
     return hr;
 }
 HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecode,

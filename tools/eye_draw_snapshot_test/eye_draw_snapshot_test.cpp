@@ -86,6 +86,30 @@ int wmain(int argc, wchar_t** argv) {
         check(captured.streams[1].offset==16&&captured.streams[2].offset==4,"binding offsets remain distinct from capture offsets");
     }
     const uint32_t capturedBytes=snap.vertexBytes;
+    edvr::EyeDrawSnapshot effects;
+    const char* effectCode="float4 main(float2 p:POSITION,float4 b:TEXCOORD):SV_Position{return float4(p,0,1)+b;}";
+    ComPtr<ID3DBlob> effectBlob;hr(D3DCompile(effectCode,strlen(effectCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&effectBlob,nullptr));
+    D3D11_INPUT_ELEMENT_DESC effectElements[2]={{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"TEXCOORD",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,16,D3D11_INPUT_PER_INSTANCE_DATA,1}};
+    ComPtr<ID3D11InputLayout> effectLayout;hr(dev->CreateInputLayout(effectElements,2,effectBlob->GetBufferPointer(),effectBlob->GetBufferSize(),&effectLayout));
+    edvr::EyeDrawSnapshot::rememberLayout(effectLayout.Get(),effectElements,2,0x9AEC596A2B036EA6ull);ctx->IASetInputLayout(effectLayout.Get());
+    for(uint32_t frame:{100u,118u}) {
+        effects.captureSourceMesh(ctx.Get(),frame,0x9AEC596A2B036EA6ull,0,'X',6,1,0,150000,8000);
+        effects.captureSourceMesh(ctx.Get(),frame,0x3D05E7CF11AC9BEEull,0,'N',6,209,0,0,0);
+    }
+    check(effects.draws.size()==4 && effects.vertexDraws==4,"source effects capture vertices throughout eye run");
+    check(effects.draws[0].streams[2].copied && !effects.draws[1].streams[2].copied,"nonindexed effects do not copy a stale bound index buffer");
+    check(effects.meshBuffers.empty(),"source effects do not pretend to use weapon instance/bone pools");
+    for(const auto& d:effects.draws) {
+        check(d.ordinal==UINT32_MAX-2,"source effects have distinct ordinal");
+        check(d.layout.size()==2 && d.layout[1].offset==16 && d.layout[1].classification==1,"source effects retain actual instance layout");
+        check(d.streams[0].captureOffset==d.streams[0].offset && d.streams[1].captureOffset==d.streams[1].offset,"effect binding windows do not assume packed mesh layout");
+    }
+    effects.capture(ctx.Get(),119,0,0x9AEC596A2B036EA6ull,0,'X',6,1,0);
+    check(effects.draws.size()==4,"effect diagnostic restricted to source image");
+    effects.vertexBytes=32*1024*1024;
+    effects.captureSourceMesh(ctx.Get(),119,0x9AEC596A2B036EA6ull,0,'X',6,1,0,0,0);
+    check(effects.vertexDeclined>0 && effects.draws.size()==5,"effect vertex budget declines explicitly but retains constants");
     ID3D11Buffer* noBuffer=nullptr;UINT zero=0;ctx->IASetVertexBuffers(1,1,&noBuffer,&zero,&zero);ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_R16_UINT,0);
     edvr::EyeDrawSnapshot vscreenSnap;
     td.Width=td.Height=8;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
@@ -165,6 +189,7 @@ int wmain(int argc, wchar_t** argv) {
     meshSnap.reset();check(meshSnap.meshBuffers.empty() && !meshSnap.meshBytes,"source reset releases retained buffers");
     check(vscreenSnap.write(ctx.Get(),(std::wstring(argv[1])+L".vscreen").c_str()),"on-foot snapshot write");
     check(vscreenSnap.failures==0,"on-foot capture completed without missing copies");
+    check(effects.write(ctx.Get(),(std::wstring(argv[1])+L".effects").c_str()) && effects.failures==0,"effect snapshot writes complete GPU copies");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));

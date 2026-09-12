@@ -108,3 +108,81 @@ Full SDK build and all repository gates pass, including the unchanged
 244-key configuration contract. NVIDIA smoke passes TAA, DLAA, DLSS,
 foveation and motion/jitter conventions. In-game frametime savings and
 perceived walking smoothness still need a test flight with this build.
+
+## Complete terrain path in the 20:02 cockpit capture
+
+The next Steam flight, `edvr_gfx_20260911_195950.log`, matches 483471c.
+The user confirms lower GPU cost, but a smaller gain than the isolated
+search benchmark. Capture 200203 contains 81 matched patches per eye at
+the same 2268x2240 input and 4536x4480 DLSS output, SteamVR at 90 Hz,
+preset K. Capture 200256 is on foot.
+
+Ruled out: treating the search-only benchmark as the complete in-flight
+terrain saving. The new production interval measures 16.650 to 16.871 us
+per patch, including its search, geometry reissue and restoration. At 81
+patches per eye this is roughly 2.7 ms stereo. Its 3,825 completed
+samples have zero skipped or invalid queries. The temporal bracket
+remains about 2.04 ms/eye, of which NVIDIA reconstruction is about 1.79
+ms/eye. Capture hitches and HMD-idle WaitGetPoses intervals do not
+measure steady gameplay GPU cost.
+
+Confirmed: every terrain depth draw in this cockpit census has VS
+ACE405F428C17EF6 and a null pixel shader. The 81 draws total 6,919,680
+indices, or 2,306,560 triangles per eye. Reissuing them duplicates
+roughly 4.6 million triangles per stereo frame. The original VS samples
+four patch textures and performs the terrain transforms again during
+this reissue.
+
+Record private patch index and raster depth in two colour targets during
+the original null-PS depth draw. Keep the game's DSV, depth/stencil
+state, sample mask, geometry and viewport. This preserves the original
+depth/stencil effects while producing the existing temporal inputs. It
+replaces no game pixel shader and does not export or change SV_Depth.
+Alpha-to-coverage and non-null pixel shaders retain the existing reissue
+fallback; a mixed coverage mode in one eye/frame declines subsequent
+unsupported records. Coverage depth storage is allocated lazily for the
+path used, so the normal single-draw path does not allocate the fallback
+DSV.
+
+The full-path hardware replay uses all 81 captured constant-buffer sets
+and draw counts, the original installed vertex shader, a generated UV
+grid and substitute terrain samples. It includes original terrain
+rendering, production history search, private coverage,
+constant-buffer/state changes and restoration. Both paths produce
+byte-identical complete motion records and index images, plus identical
+coverage and scene depths over 4,017,017 covered pixels. The samples are
+synthetic: this is not a reconstruction of the exact terrain textures or
+a measurement of the next flight.
+
+After four warmup rounds, 12 alternating samples per variant on the RTX
+5090 measure 1.385600 ms/eye with reissues (range 1.348512--1.636608)
+and 1.098432 ms/eye with capture in the original draw
+(1.061216--1.261760). The median saving is 0.574336 ms stereo,
+approximately 21% of this complete terrain bracket. Do not extrapolate
+the earlier search-only gain into another multi-millisecond saving.
+
+The WARP production regression passes 403 checks. Added comparisons
+preserve actual D32S8 depth/stencil and original colour with passing,
+depth-rejected, stencil-rejected and sample-masked fragments. Raster
+depth bias and non-default viewport depth match the original depth
+exactly. Checks also cover published coverage, state restoration,
+mixed-mode refusal, the non-null-PS fallback and AA off. The Windows D3D
+debug-layer component is unavailable in this environment
+(DXGI_ERROR_SDK_COMPONENT_MISSING); the tests run without it, so this
+pass does not claim debug-layer validation.
+
+Artifacts are under `build/review_motion/sep11/planet2000/`:
+`terrain-input.bin`, `fused_bench.cpp`, `bench.log`, the extracted
+original VS and the regression log. Production timing now labels
+original-draw capture separately from reissues. Its bracket includes the
+game's original terrain draw when capture shares that draw, so its
+average cannot be directly subtracted from the preceding build's
+reissue-only bracket. The next flight must verify activation counts and
+perceived/total frametime.
+
+Final full SDK build passes all repository gates, including the 244-key
+configuration contract, 403 terrain checks, 189 weapon checks and the
+C++/Python effect-capture round trip. NVIDIA smoke passes TAA, DLAA,
+DLSS, foveation and motion/jitter conventions. The original-shader
+replay also confirms all 81 patch histories are valid, not merely equal
+fallback records. Settings and DLSS quality are unchanged.

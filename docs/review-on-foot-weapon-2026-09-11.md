@@ -281,3 +281,57 @@ The [planet performance review](review-planet-performance-2026-09-11.md)
 records the rigid-root invariant, paired-bind validation and exact GPU
 replay of the corrected walking frames. It also investigates the
 separate terrain AA cost after entering the cockpit.
+
+## Purple effect during crouching, capture 200256
+
+The user confirms that weapon/tool geometry now looks good with 483471c,
+but a purple gun effect briefly rises out of the weapon while crouching.
+The build-matched 20:02:56 source colour capture visibly contains that
+displaced glow. Its 19 source frames contain 1,330 mesh draws and 57
+full frame-local buffers, with zero failed copies or range/format/budget
+declines.
+
+Ruled out: the walking root detector dropping out in this dump.
+Independent replay accepts all 19 frames, with proper rigid paired roots
+and a maximum correction of 61.46 mm. Every near-camera packed mesh
+material draw in the source census belongs to the already supported set.
+Adding another mesh hash would not address the separate billboard
+placement.
+
+The source census also includes 9AEC596A2B036EA6 (92-byte particle
+vertices, 1,488 indices) and 3D05E7CF11AC9BEE (209 instanced flares).
+Recovered both original vertex shaders from the installed EffectsBinary
+archives and verified their EDVR hashes. They use vertex/instance data
+and model/camera constants, not the weapon's t33 primary translation.
+The 68DDDEF04D9894AF/F7A6E916F14A3B1A pair instead constructs angular
+sky points; it is not evidence of a weapon attachment.
+
+The existing capture does not contain the particle/flare vertex streams.
+The image and draw list identify candidates, but cannot establish
+whether the glow is an attached emitter with mismatched camera timing, a
+camera-relative flare, or intentionally trailing particles. No
+additional offset or broad particle substitution is justified from this
+dump.
+
+Extended explicit source eye dumps to retain both candidate families'
+b0/b1/b2, VB0/VB1/IB binding windows and original input layouts.
+Drawstate version 5 uses ordinal UINT32_MAX-2 for these effects; its
+mesh/source-camera ordinals are unchanged. Effect geometry is retained
+throughout the existing eye-run window under the shared 32 MiB vertex
+budget. Layouts are attached to the relevant input-layout objects at
+creation, with no disk writes until a requested dump. Logs count effect
+draws, vertex payloads and recovered layouts, including zero counts when
+a source screen is present. The parser keeps versions 1--4 readable and
+validates the added layout bounds.
+
+A crouching eye dump with this instrumentation should allow projection
+of the particle centres against the recorded weapon correction across
+frames. The effect itself remains unchanged, as does the working
+weapon/tool correction and runtime reprojection. This issue remains open
+pending that evidence.
+
+GPU replay of all 19 captured crouching pools is byte-identical to the
+independently reconstructed correction. The source-effect capture
+regression verifies late-run geometry, original input-layout metadata,
+bounded copies, unused index-buffer exclusion, source-only gating, and
+C++/Python format agreement.

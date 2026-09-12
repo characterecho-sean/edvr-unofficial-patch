@@ -3046,7 +3046,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kGlareSteady) sunglareBegin(self);
     if (v == DrawVerdict::kParticle) particleBegin(self);
     if (v == DrawVerdict::kBackdrop) backdropBegin(self);
+    const bool terrainOriginal=self==g_state->ownerCtx &&
+        celestialMotionBeginOriginal(self,bindingShaderHash(BindSlot::Vs));
     draw();
+    if(terrainOriginal)celestialMotionEnd(self);
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
     // drawn through the interface projection is drawn once more, depth
     // only, right after its own draw and inside the scope that owns the
@@ -3069,7 +3072,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         if (uiDepthReissueBegin(self)) draw();
         uiDepthReissueEnd(self);
     }
-    if (self == g_state->ownerCtx &&
+    if (!terrainOriginal && self == g_state->ownerCtx &&
         celestialMotionBegin(self, bindingShaderHash(BindSlot::Vs))) {
         draw();
         celestialMotionEnd(self);

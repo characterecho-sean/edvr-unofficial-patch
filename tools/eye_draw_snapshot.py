@@ -9,6 +9,11 @@ watched frames. Earlier captures remain readable.
 Version 4 adds source mesh records (ordinal UINT32_MAX-1), first-frame
 geometry, and references to frame-local t33/t38/VB0 copies. Each buffer's
 first_draw states when it was copied; later references are not new copies.
+Source effect records (ordinal UINT32_MAX-2) retain b0/b1/b2 and the
+bounded VB0/VB1/IB binding windows throughout the run. They have no mesh
+references: billboard/flare placement is independent of the instance pool.
+Version 5 adds each effect draw's original input layout so its separate
+vertex and instance streams can be decoded without guessing their packing.
 
 On-foot source records use ordinal UINT32_MAX. Their DSV is copied when
 the screen composite runs, alongside its source colour; depth surfaces
@@ -43,7 +48,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -73,6 +78,20 @@ def read(path):
                     raise ValueError('Vertex payload budget exceeded')
                 d['streams'].append(dict(offset=offset, stride=stride, whole=whole, capture_offset=capture_offset, data=take(size)))
         d['mesh'] = list(unpack('<3I')) if version >= 4 else [0xffffffff]*3
+        d['layout'] = []
+        if version >= 5:
+            elements, = unpack('<I')
+            if elements > 32:
+                raise ValueError('Invalid input layout size')
+            for _ in range(elements):
+                semantic = take(64)
+                if b'\0' not in semantic:
+                    raise ValueError('Unterminated input semantic')
+                e = dict(zip(('index', 'format', 'slot', 'offset', 'classification', 'step'), unpack('<6I')))
+                e['semantic'] = semantic.split(b'\0', 1)[0].decode('ascii')
+                if e['slot'] >= 32 or e['classification'] > 1:
+                    raise ValueError('Invalid input layout element')
+                d['layout'].append(e)
         draws.append(d)
     total = 0
     for _ in range(ns):
@@ -179,6 +198,19 @@ def self_test():
         good = h4+draw+refs+table+blob
         p.write_bytes(good)
         assert len(read(p)['mesh_buffers'][0]['data']) == 336
+        h5 = b'EDVRDRW1' + struct.pack('<4I',5,1,0,0)
+        layout = b'POSITION'.ljust(64,b'\0')+struct.pack('<6I',0,2,1,16,1,1)
+        v5 = h5+draw+refs+struct.pack('<I',1)+layout+table+blob
+        p.write_bytes(v5)
+        assert read(p)['draws'][0]['layout'] == [dict(semantic='POSITION',index=0,format=2,slot=1,offset=16,classification=1,step=1)]
+        for bad in (v5[:-1],h5+draw+refs+struct.pack('<I',33),h5+draw+refs+struct.pack('<I',1)+b'X'*64+layout[64:]+table+blob):
+            p.write_bytes(bad)
+            try:
+                read(p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Invalid effect layout accepted')
         malformed_mesh = [good[:-1], h4+draw+struct.pack('<3I',1,0xffffffff,0xffffffff)+table+blob]
         for frame,first,whole,stride,size in ((8,0,336,336,336),(7,1,336,336,336),(7,0,336,48,336),(7,0,336,336,335),(7,0,17*1024*1024,336,0)):
             malformed_mesh.append(h4+draw+refs+table+struct.pack('<5I',frame,first,whole,stride,size)+bytes(336)+struct.pack('<I',0))
@@ -223,6 +255,12 @@ def main():
     c = read(a.path)
     if a.verify_fixture:
         verify_fixture(c)
+        effects = read(str(a.path)+'.effects')
+        assert effects['version'] == 5 and len(effects['draws']) == 5 and effects['failures'] == 0
+        for i,d in enumerate(effects['draws']):
+            assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
+            assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
+            assert bool(d['streams'][0]['data']) == (i < 4) and bool(d['streams'][1]['data']) == (i < 4)
         mesh = read(str(a.path)+'.mesh')
         assert mesh['failures'] == mesh['mesh_declined'] == 0 and len(mesh['draws']) == 4 and len(mesh['mesh_buffers']) == 6
         for i,d in enumerate(mesh['draws']):

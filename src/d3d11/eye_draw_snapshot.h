@@ -13,6 +13,7 @@
 #include <utility>
 #include <map>
 #include <mutex>
+#include <cstring>
 
 namespace edvr {
 class EyeDrawSnapshot {
@@ -30,6 +31,27 @@ public:
     static constexpr uint64_t kPanel=0xA888D51024D9798Eull,kScreen=0x4EF6DDB075A927FAull;
     static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
     static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
+    // 20:02:56 crouching rifle: these source passes use independent
+    // billboard/flare vertices, not the weapon's t33 instance records.
+    // Capture their placement; do not infer attachment from proximity.
+    static bool sourceEffect(uint64_t vs) {
+        return vs==0x9AEC596A2B036EA6ull || vs==0x3D05E7CF11AC9BEEull;
+    }
+    struct Layout {char semantic[64]{};uint32_t index=0,format=0,slot=0,offset=0,classification=0,step=0;};
+    static const GUID& effectLayoutKey() {
+        static const GUID key={0x10e33b44,0x1cf4,0x4fa2,{0x82,0x1f,0x63,0x51,0xda,0xeb,0x43,0x99}};return key;
+    }
+    static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t vs) {
+        if(!sourceEffect(vs) || !layout || !e || !n || n>32)return;
+        std::vector<Layout> items(n);
+        for(UINT i=0;i<n;++i) {
+            if(!e[i].SemanticName || strlen(e[i].SemanticName)>=64)return;
+            std::strcpy(items[i].semantic,e[i].SemanticName);items[i].index=e[i].SemanticIndex;
+            items[i].format=e[i].Format;items[i].slot=e[i].InputSlot;items[i].offset=e[i].AlignedByteOffset;
+            items[i].classification=e[i].InputSlotClass;items[i].step=e[i].InstanceDataStepRate;
+        }
+        layout->SetPrivateData(effectLayoutKey(),UINT(items.size()*sizeof(Layout)),items.data());
+    }
     // Source mesh families in the 17:09:53 on-foot capture. These include
     // scenery: proximity/weapon identity must be proved from their records.
     static bool sourceMesh(uint64_t vs) {
@@ -80,6 +102,7 @@ public:
         struct Stream {uint32_t offset=0,stride=0,whole=0,copied=0,captureOffset=0;Buffer stage;};
         Stream streams[3]; // VB0 instance IDs, VB1 packed vertices, index buffer
         uint32_t mesh[3]={UINT32_MAX,UINT32_MAX,UINT32_MAX}; // t33, t38, VB0
+        std::vector<Layout> layout; // version 5, source effects only
     };
     struct MeshBuffer {
         Buffer source,stage;
@@ -104,7 +127,7 @@ public:
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if ((!watches(hash) && !sourceMesh(hash) && hash!=kVscreenPs) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && hash!=kVscreenPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -168,6 +191,10 @@ public:
 
     void captureSourceMesh(ID3D11DeviceContext* ctx,uint32_t frame,uint64_t vs,uint64_t ps,
                            char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
+        if(sourceEffect(vs)) {
+            capture(ctx,frame,UINT32_MAX-2,vs,ps,kind,count,instances,startInstance,start,base,true);
+            return;
+        }
         if(!sourceMesh(vs))return;
         // Reserved ordinal distinct from the source camera and eye ledger.
         capture(ctx,frame,UINT32_MAX-1,vs,ps,kind,count,instances,startInstance,start,base,true);
@@ -194,7 +221,7 @@ public:
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
                  uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false) {
-        if (!ctx || (!watches(vs) && !(source && sourceMesh(vs)))) return;
+        if (!ctx || (!watches(vs) && !(source && (sourceMesh(vs) || sourceEffect(vs))))) return;
         if (draws.size() >= kMaxDraws) { ++dropped; return; }
         Draw d;
         d.frame = frame; d.ordinal = ordinal; d.vs = vs; d.ps = ps;
@@ -232,6 +259,13 @@ public:
             d.copied[i] = bd.ByteWidth;
         }
         const bool mesh=source && ordinal==UINT32_MAX-1 && sourceMesh(vs);
+        const bool effect=source && ordinal==UINT32_MAX-2 && sourceEffect(vs);
+        if(effect) {
+            Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;ctx->IAGetInputLayout(&layout);
+            Layout elements[32];UINT bytes=sizeof(elements);
+            if(layout && SUCCEEDED(layout->GetPrivateData(effectLayoutKey(),&bytes,elements)) && bytes &&
+                bytes<=sizeof(elements) && bytes%sizeof(Layout)==0)d.layout.assign(elements,elements+bytes/sizeof(Layout));
+        }
         if(mesh) {
             ++meshDraws;
             for(unsigned i=0;i<2;++i) {
@@ -259,12 +293,19 @@ public:
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if(((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) || (mesh && frame==firstFrame)) {
+        if(((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) || (mesh && frame==firstFrame) || effect) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             bool copied=false;
             for(int i=0;i<3;++i) {
                 Buffer src;src.Attach(raw[i]);if(!src)continue;
+                if(effect) {
+                    if(i==2 && kind!='X' && kind!='I')continue;
+                    if(i<2 && !d.layout.empty()) {
+                        bool used=false;for(const auto& e:d.layout)used=used || e.slot==uint32_t(i);
+                        if(!used)continue;
+                    }
+                }
                 auto& s=d.streams[i];s.offset=i==2?ibOffset:offsets[i];s.stride=i==2?(fmt==DXGI_FORMAT_R16_UINT?2u:fmt==DXGI_FORMAT_R32_UINT?4u:0u):strides[i];
                 D3D11_BUFFER_DESC bd{};src->GetDesc(&bd);s.whole=bd.ByteWidth;
                 if(s.offset>=s.whole || !s.stride)continue;
@@ -275,7 +316,10 @@ public:
                 const bool indexed=kind=='X'||kind=='I';
                 uint64_t begin=s.offset;
                 if(i==2 && indexed)begin+=uint64_t(start)*s.stride;
-                if(i==(vs==kVscreen?0:1))begin+=uint64_t(base>0?base:0)*s.stride;
+                // Effects use unpacked VB0 vertices / VB1 instances, unlike
+                // packed mesh IDs. Keep the bounded binding windows for both
+                // streams so no guessed input classification drops a sprite.
+                if(!effect && i==(vs==kVscreen?0:1))begin+=uint64_t(base>0?base:0)*s.stride;
                 if(vs==kVscreen && i==1)begin+=uint64_t(startInstance)*s.stride;
                 if(begin>=s.whole){++vertexDeclined;continue;}
                 s.captureOffset=static_cast<uint32_t>(begin);
@@ -302,7 +346,7 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(4); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        u32(5); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,
@@ -328,6 +372,11 @@ public:
             u32(d.start);u32(static_cast<uint32_t>(d.base));
             for(auto& s:d.streams){u32(s.offset);u32(s.stride);u32(s.whole);u32(s.captureOffset);payload(s.stage.Get(),s.copied,0,0);}
             for(auto id:d.mesh)u32(id);
+            u32(uint32_t(d.layout.size()));
+            for(const auto& e:d.layout) {
+                ok=fwrite(e.semantic,1,64,f)==64 && ok;
+                u32(e.index);u32(e.format);u32(e.slot);u32(e.offset);u32(e.classification);u32(e.step);
+            }
         }
         for (Surface& s : surfaces) {
             u32(s.frame); u32(s.width); u32(s.height); u32(s.format);

@@ -10,6 +10,9 @@ namespace edvr {
 // depth agrees with the final scene, never over foreground UI or ships.
 void celestialMotionConfigure(bool enabled);
 bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs);
+// Null-PS terrain prepasses can record coverage in their original draw.
+// True requires End immediately after that draw; false leaves it untouched.
+bool celestialMotionBeginOriginal(ID3D11DeviceContext* ctx, uint64_t vs);
 void celestialMotionEnd(ID3D11DeviceContext* ctx);
 void celestialMotionFrameBoundary(ID3D11DeviceContext* ctx=nullptr);
 void celestialMotionShutdown();
