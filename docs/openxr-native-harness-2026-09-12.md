@@ -13,8 +13,9 @@ The subsequent [binding and geometry
 checkpoint](openxr-binding-geometry-2026-09-12.md) replaces inline session
 ownership with the reusable caller-device binding and requires a completed
 zero-layer bootstrap snapshot before the first diagnostic stereo layer. The
-first headset result below predates that change; the revised path requires its
-own native check.
+first headset result below predates that change. The revised path has also
+passed its own PiOpenXR run, with bootstrap ready on frame 1 before stereo and
+normal shutdown; details are in that checkpoint.
 
 The Luna drafts were revised during parent review: frame submission,
 inverse-pose projection, swapchain ownership, timeout handling, device

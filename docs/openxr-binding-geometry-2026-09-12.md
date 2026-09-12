@@ -113,14 +113,34 @@ no-write dry runs and mandatory `build.bat` gates. The updated native harness
 has its own argument/enumeration tests; its full loader/bootstrap loop is not
 replaced by a fake-loader integration test.
 
-The next native check uses the same PiOpenXR runner with Frontier and SteamVR
-closed. Verify the bootstrap log precedes stereo submissions, then confirm the
-triangle appears in both eyes, remains stationary during slow head motion, and
-exits normally. Do not infer visual tracking quality from valid poses alone.
+The revised diagnostic from `8ff0904` subsequently passed a 20-second PiOpenXR
+run with Frontier and SteamVR absent before and after. Its executable hash
+matches the locally retained full-build validation; the loader and manifest
+hashes match the earlier inventory. Runtime selection applied only to the child
+process. Raw tracking poses and machine paths remain in local receipts under
+`build`.
 
-After that check, the next game integration work is the owned historical OpenVR
-interface layer and coordinated startup/frame ownership, followed by actual
-game texture capture, submission and EDVR feature integration. Paired
-capability checks, recenter/loss behavior and broader runtime qualification
-remain separate work. Passing this diagnostic does not yet allow Frontier to
-launch without SteamVR.
+| Measurement | Observed result |
+| --- | --- |
+| Runtime | Pimax OpenXR, version 0.1.0 |
+| Eye dimensions / format | 5424 x 5356 each; DXGI 29, RGBA8 sRGB |
+| D3D feature level | 11.1 on the requested adapter |
+| Bootstrap | Generation 1, frame sequence 1, prior stereo submissions 0 |
+| Begun / stereo / zero-layer frames | 1800 / 1798 / 2 |
+| Valid complete geometry / invalid samples | 1799 / 0 |
+| Valid separately located HMD samples | 1799 |
+| Normal stop / cleanup | Both succeeded |
+| Process duration / result | Approximately 20.38 seconds; exit 0; no watchdog |
+
+This verifies the revised binding, same-time geometry acquisition and
+publication before diagnostic rendering on the installed PiOpenXR
+configuration. The user confirmed that the triangle appeared in both eyes,
+stayed fixed in space during head movement and closed normally. This passes the
+ordinary startup/stereo/tracking/shutdown check for the revised diagnostic; it
+does not qualify game rendering or the remaining lifecycle cases.
+
+The next game integration work is the owned historical OpenVR interface layer
+and coordinated startup/frame ownership, followed by actual game texture
+capture, submission and EDVR feature integration. Paired capability checks,
+recenter/loss behavior and broader runtime qualification remain separate work.
+Passing this diagnostic does not yet allow Frontier to launch without SteamVR.

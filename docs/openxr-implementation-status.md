@@ -19,9 +19,11 @@ the triangle. The next [device-binding and startup-geometry
 checkpoint](openxr-binding-geometry-2026-09-12.md) adds caller-device session
 ownership, coherent geometry readers and a zero-layer bootstrap in that
 diagnostic. Its desktop fixture also exercises device publication through the
-actual graphics proxy. The revised native bootstrap still needs a PiOpenXR run;
-the first triangle result predates it. Frontier integration remains pending.
-Earlier review decisions below record the state at those checkpoints.
+actual graphics proxy. The revised native bootstrap passed a second PiOpenXR
+run: valid geometry was published on frame 1 before any stereo submission,
+followed by 1798 stereo frames and normal shutdown. The user confirmed both
+eyes, stable head tracking and normal exit. Frontier integration remains
+pending. Earlier review decisions below record the state at those checkpoints.
 
 The original motion regression has recovered on the corrected `f622cd2`
 main-menu capture. The user deferred the remaining stationary wing-line flicker

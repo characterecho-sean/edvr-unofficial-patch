@@ -46,6 +46,13 @@ Explicit visual confirmation of each eye and stability during head movement is
 still pending; API validity and successful submission alone do not establish
 visual tracking quality.
 
+The subsequent [binding/geometry diagnostic
+run](openxr-binding-geometry-2026-09-12.md) on `8ff0904` passed its revised
+bootstrap and native session checks. For that run, the user explicitly
+confirmed the triangle in both eyes, stability during head movement and normal
+exit. This supplies the ordinary visual check on the revised path while
+preserving the limits of the first run above.
+
 ## Remaining boundary
 
 This was a standalone test scene using a diagnostic-owned D3D11 device.
