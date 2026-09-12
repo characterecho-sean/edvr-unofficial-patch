@@ -1,6 +1,6 @@
 # Frontier LiveCopy integration flight
 
-Status: planned, not yet flown. Sean confirmed Pimax through SteamVR for this
+Status: installed, not yet flown. Sean confirmed Pimax through SteamVR for this
 test. Main's PR #33 was merged into `codex/openxr-port` at `06636b2`; the full
 paired build and its regression gates passed. The startup shader bytecode and
 menu-worker exit fixes remain in this branch. No OpenXR transport or new game
@@ -16,14 +16,28 @@ probe setting was found; confirm the resulting mode in the flight log.
 Build from the final clean commit, then install and verify both proxies:
 
 ```powershell
-python tools/install_edvr.py --target frontier --openvr --dry-run
-python tools/install_edvr.py --target frontier --openvr
-python tools/install_edvr.py --target frontier --openvr --verify-only
+python tools/install_edvr.py --target frontier --dll --openvr --dry-run
+python tools/install_edvr.py --target frontier --dll --openvr
+python tools/install_edvr.py --target frontier --dll --openvr --verify-only
 ```
 
 Record that commit as the flight's expected build. Record actual per-eye sizes,
 runtime, GPU and DLSS version from its logs; a headset name alone does not
-establish those values. Keep the existing settings for this run.
+establish those values. Keep the existing settings for this run. Specify both
+payload flags: the preview with `--openvr` alone selected only the VR DLL.
+
+The clean `f08098c` full build passed in
+`build/frontier-livecopy-clean-build.log`. Both DLLs were installed and
+independently verified on 2026-09-12. Their SHA-256 hashes are:
+
+```text
+d3d11.dll      51670D15C481DBEF409617371202A03CE906C0FEAACFDE60EB2AD489BB61C7D9
+openvr_api.dll CDD8A8F6EF454005257135467363BDC3FCC50EE407AC918191E42647091FB41A
+```
+
+The INI hash was identical before and after installation:
+`A32D631834E5C1EEEFAA03367750A7A4211652869EB4976900DC11CF530EC1A9`. The
+subsequent documentation commit does not change this flight's binary version.
 
 ## Flight steps
 
@@ -40,15 +54,15 @@ establish those values. Keep the existing settings for this run.
 ## Evidence to review after the flight
 
 Check the graphics and VR logs separately against the installed commit before
-reading counters. Replace `FLIGHT_COMMIT` with that commit, even if branch HEAD
-has advanced since installation:
+reading counters. This flight's expected build is `f08098c`, even if branch
+HEAD has advanced since installation:
 
 ```powershell
-python tools/edvr_log.py --target frontier --tag gfx --expect-build FLIGHT_COMMIT --version
-python tools/edvr_log.py --target frontier --tag vr --expect-build FLIGHT_COMMIT --version
-python tools/edvr_log.py --target frontier --tag gfx --expect-build FLIGHT_COMMIT --grep 'context hook|exposure fix installed|vScreen fixes installed|vScreen totals|hook|disabled|sentinel|PROBE|exception'
-python tools/edvr_log.py --target frontier --tag gfx --expect-build FLIGHT_COMMIT --grep 'census|first Present|shader|shutdown'
-python tools/edvr_log.py --target frontier --tag vr --expect-build FLIGHT_COMMIT --grep 'census|shutdown'
+python tools/edvr_log.py --target frontier --tag gfx --expect-build f08098c --version
+python tools/edvr_log.py --target frontier --tag vr --expect-build f08098c --version
+python tools/edvr_log.py --target frontier --tag gfx --expect-build f08098c --grep 'context hook|exposure fix installed|vScreen fixes installed|vScreen totals|hook|disabled|sentinel|PROBE|exception'
+python tools/edvr_log.py --target frontier --tag gfx --expect-build f08098c --grep 'census|first Present|shader|shutdown'
+python tools/edvr_log.py --target frontier --tag vr --expect-build f08098c --grep 'census|shutdown'
 ```
 
 PR #33 passes this configuration's flight gate only when the log confirms live
