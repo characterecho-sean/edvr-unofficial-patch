@@ -21,6 +21,10 @@
 #include "../../src/openxr/openvr_compositor.h"
 #include "../../src/openxr/compositor_publication.h"
 #include "../../src/openxr/space_pose.h"
+#include "../../src/openxr/seated_origin.h"
+#include "../../src/openxr/seated_space.h"
+#include "../../src/openxr/reference_changes.h"
+#include "../../src/openxr/reset_events.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -30,6 +34,7 @@
 
 using namespace edvr::openxr;
 extern "C" vr::IVRCompositor* nativeCompositorCaller(vr::IVRCompositor*);
+extern "C" vr::IVRSystem* nativeSystemCaller(vr::IVRSystem*);
 namespace {
 struct Options { std::wstring loader; unsigned seconds=10; bool dry=false, self=false; };
 bool absolute(const std::wstring& s) {
@@ -108,6 +113,12 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
   EyeCapture captured;
+  SeatedSpace seated;ReferenceChanges changes;ResetEvents resetEvents;
+  XrSpace frameSpace=XR_NULL_HANDLE;
+  uint64_t recenters=0,resetPolls=0,referenceChanges=0;
+  XrResult lastResetResult=XR_SUCCESS;
+  XrTime lastResetTime=0;
+  float resetPositionError=0,resetYawError=0;
   FrameBoundary boundary{state,*this};
   RuntimeGate gate; uint64_t runtimeGeneration=0;
   XrView frameViews[2]{};
@@ -123,12 +134,23 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
   bool clean=true;
+  static void referenceEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
+    auto& host=*static_cast<Host*>(context);
+    if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+      const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
+      if(!host.changes.note(event))std::puts("error,reference_change_policy");
+    }
+  }
+  bool invalidateOrigin() {
+    geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
+    return poses.resetOrigin(compositorGeneration);
+  }
   CompositorRead compositorRead() const override {return poses.read();}
   void compositorUnsupported(unsigned slot) noexcept override {std::printf("compositor_unavailable,slot=%u\n",slot);}
   vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
-    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal())
+    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||!seated.space()||!changes.active())
       return vr::VRCompositorError_InvalidTexture;
     ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
     auto fail=[&](XrResult error){lastCompositorResult=error;poses.invalidate(generation);return vr::VRCompositorError_InvalidTexture;};
@@ -137,16 +159,21 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
       return fail(lastCompositorResult);
     const Frame frame=boundary.frame();
     if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
+    uint64_t applied=0;
+    if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return fail(XR_ERROR_TIME_INVALID);}
+    if(applied){referenceChanges+=applied;if(!invalidateOrigin()){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}}
+    frameSpace=seated.space();
     GeometryInput located{};XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
-    auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity);
+    auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity,frameSpace);
     if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return fail(r);}
     TimedHeadPose render{},game{};
     if(!makeHeadPose(located.headPose,located.headFlags,velocity.velocityFlags,velocity.linearVelocity,velocity.angularVelocity,true,render))
       {boundary.clear();return fail(XR_ERROR_POSE_INVALID);}
     render.time=frame.predictedDisplayTime;game.pose=invalidHeadPose(true);
     XrTime gameplayTime=0;
-    if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)) {
-      r=locateHeadAt(api.locateSpace,view,local,gameplayTime,true,game);
+    if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
+       !changes.crosses(frame.predictedDisplayTime,gameplayTime)) {
+      r=locateHeadAt(api.locateSpace,view,frameSpace,gameplayTime,true,game);
       // A runtime may not locate an additional frame ahead. Leave that
       // independent gameplay prediction invalid rather than reusing render.
       if(r!=XR_SUCCESS&&r!=XR_ERROR_TIME_INVALID) {if(!XR_FAILED(r))boundary.clear();return fail(r);}
@@ -164,8 +191,8 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
   bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
-    // Only the already-created LOCAL/seated origin is available in this test.
-    return operation&&generation==compositorGeneration&&origin==vr::TrackingUniverseSeated;
+    // Standing/raw need their own supported runtime spaces and remain absent.
+    return operation&&generation==compositorGeneration&&seated.space()&&origin==vr::TrackingUniverseSeated;
   }
   vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
@@ -208,7 +235,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
     return r;
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
-    const auto r=stereo.renderCaptured(frameViews,local,captured,layer);
+    const auto r=stereo.renderCaptured(frameViews,frameSpace,captured,layer);
     if(r==XR_SUCCESS)++composedPairs;
     return r;
   }
@@ -219,9 +246,9 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=geometryGeneration||!read().connected||
-       !state.running()||state.terminal()||origin!=vr::TrackingUniverseSeated)return false;
+       !state.running()||state.terminal()||!seated.space()||origin!=vr::TrackingUniverseSeated)return false;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,prediction,head,&lastHeadTime,counterNow);
+    lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),prediction,head,&lastHeadTime,counterNow);
     if(lastHeadResult!=XR_SUCCESS)return false;
     vr::TrackedDevicePose_t pose{};pose.bDeviceIsConnected=true;
     pose.mDeviceToAbsoluteTracking.m[0][0]=pose.mDeviceToAbsoluteTracking.m[1][1]=pose.mDeviceToAbsoluteTracking.m[2][2]=1;
@@ -231,8 +258,39 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
     if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}
     out=pose;return true;
   }
-  bool resetSeated(uint64_t) override {return false;}
-  bool pollEvent(uint64_t,vr::ETrackingUniverseOrigin,vr::VREvent_t&,vr::TrackedDevicePose_t&) override {return false;}
+  bool resetSeated(uint64_t generation) override {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=geometryGeneration||!state.running()||state.terminal()||
+       !seated.space()||!changes.active()||!resetEvents.room(generation))return false;
+    // Finish a partial pair before replacing the space referenced by it.
+    lastResetResult=boundary.clear();if(lastResetResult!=XR_SUCCESS)return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow);
+    if(lastResetResult!=XR_SUCCESS)return false;
+    XrPosef origin{};
+    if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    lastResetResult=seated.replace(origin);
+    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(generation);poses.invalidate(compositorGeneration);return false;}
+    if(!invalidateOrigin()){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
+    // Verify and attach an event-time sample, not a later cached render pose.
+    TimedHeadPose atReset{};
+    lastResetResult=locateHeadAt(api.locateSpace,view,seated.space(),lastResetTime,true,atReset);
+    if(lastResetResult!=XR_SUCCESS)return false;
+    if(!atReset.pose.bPoseIsValid){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    const auto& matrix=atReset.pose.mDeviceToAbsoluteTracking.m;
+    resetPositionError=std::sqrt(matrix[0][3]*matrix[0][3]+matrix[1][3]*matrix[1][3]+matrix[2][3]*matrix[2][3]);
+    resetYawError=std::fabs(std::atan2(matrix[0][2],matrix[2][2]));
+    if(!resetEvents.push(generation,poses.read().originGeneration,GetTickCount64(),atReset.pose)){
+      lastResetResult=XR_ERROR_LIMIT_REACHED;return false;
+    }
+    ++recenters;return true;
+  }
+  bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
+    if(generation!=geometryGeneration)return false;
+    const bool found=resetEvents.pop(generation,poses.read().originGeneration,origin,GetTickCount64(),event,pose);
+    if(found)++resetPolls;return found;
+  }
   void unsupported(unsigned slot) noexcept override {std::printf("system_unavailable,slot=%u\n",slot);}
   ~Host() {close();}
   bool close() {
@@ -244,8 +302,10 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
     }
     geometry.retire(geometryGeneration);
     poses.retire(compositorGeneration);
+    resetEvents.retire(geometryGeneration);changes.clear();
     captured.shutdown();
     clean=result("destroy_swapchains",stereo.shutdown())&&clean;
+    clean=result("destroy_seated_space",seated.shutdown())&&clean;
     clean=result("destroy_binding",binding.shutdown())&&clean;
     view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
     state.abandonAfterOwnerDestruction();
@@ -347,6 +407,8 @@ class Host : public SystemSource, public FrameSink, public CompositorSource {
     if(FAILED(captured.initialize(graphics.device())))return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
+    if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
+    state.setUnhandledEventSink(referenceEvent,this);
     runtimeGeneration=gate.beginGeneration();
     compositorGeneration=poses.begin();
     return runtimeGeneration!=0&&compositorGeneration!=0;
@@ -376,7 +438,7 @@ int run(const Options& options) {
     const auto lifecycle=host.state.lifecycle();
     host.poses.focus(host.compositorGeneration,true,host.state.running()&&!host.state.terminal()&&lifecycle==Lifecycle::Focused);
     if(lifecycle!=previous) {std::printf("lifecycle,%d\n",int(lifecycle));previous=lifecycle;}
-    if(XR_FAILED(r)||host.state.terminal()) {result("poll_terminal",r);failed=true;break;}
+    if(XR_FAILED(r)||host.state.terminal()||!host.changes.active()) {result("poll_terminal",r);failed=true;break;}
     if(lifecycle==Lifecycle::Stopping) {
       r=host.state.stop();stopped=result("xrEndSession",r);failed=!stopped;break;
     }
@@ -464,7 +526,7 @@ int run(const Options& options) {
     if(haveLocation) {
       const bool published=host.read().geometryValid;
       if(published&&!bootstrapComplete) {
-        const auto snapshot=host.read();vr::IVRSystem* system=&host.systemInterface;
+        const auto snapshot=host.read();vr::IVRSystem* system=nativeSystemCaller(&host.systemInterface);
         uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
         const auto eye=system->GetEyeToHeadTransform(vr::Eye_Left);
         const auto projection=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000,vr::API_DirectX);
@@ -474,6 +536,26 @@ int run(const Options& options) {
         if(!width||!height||projection.m[3][2]!=-1||host.lastHeadResult!=XR_SUCCESS||
            !nameLength||propertyError!=vr::TrackedProp_Success){result("system_bootstrap_pose",host.lastHeadResult);failed=true;break;}
         if(!head.bPoseIsValid)continue; // bounded startup; ordinary invalid tracking may recover
+        // This explicit diagnostic exercises the user-reset API twice before
+        // displaying its scene. It changes only this application's XR space.
+        if(host.recenters<2) {
+          const auto before=host.recenters;system->ResetSeatedZeroPose();
+          vr::VREvent_t event{};vr::TrackedDevicePose_t atEvent{},stale{};
+          const auto cache=compositor->GetLastPoses(&stale,1,nullptr,0);
+          if(host.recenters!=before+1||host.lastResetResult!=XR_SUCCESS||host.read().geometryValid||
+             cache==vr::VRCompositorError_None||stale.bPoseIsValid||
+             !system->PollNextEventWithPose(vr::TrackingUniverseSeated,&event,sizeof(event),&atEvent)||
+             event.eventType!=vr::VREvent_SeatedZeroPoseReset||event.data.seatedZeroPoseReset.bResetBySystemMenu||
+             !atEvent.bPoseIsValid||host.resetPositionError>.01f||host.resetYawError>.01f||
+             system->PollNextEvent(&event,sizeof(event))) {
+            std::printf("error,seated_reset,result=%d,position_error=%g,yaw_error=%g\n",int(host.lastResetResult),host.resetPositionError,host.resetYawError);
+            failed=true;break;
+          }
+          std::printf("seated_reset,count=%llu,time=%lld,origin_generation=%llu,position_error=%g,yaw_error=%g,event=804,cache_invalidated=1\n",
+            (unsigned long long)host.recenters,(long long)host.lastResetTime,(unsigned long long)host.compositorRead().originGeneration,
+            host.resetPositionError,host.resetYawError);
+          continue;
+        }
         bootstrapComplete=true;
         std::printf("bootstrap,ready=1,generation=%llu,sequence=%llu,prior_stereo=%llu,size=%ux%u,left_eye_to_head_translation=%.9g/%.9g/%.9g\n",
           (unsigned long long)snapshot.generation,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)layers,width,height,eye.m[0][3],eye.m[1][3],eye.m[2][3]);
@@ -486,6 +568,8 @@ int run(const Options& options) {
     }
   }
   const bool cleanup=host.close();
+  std::printf("origin_boundary,resets=%llu,reset_events=%llu,reference_changes=%llu\n",
+    (unsigned long long)host.recenters,(unsigned long long)host.resetPolls,(unsigned long long)host.referenceChanges);
   std::printf("compositor_boundary,waits=%llu,submits=%llu,handoffs=%llu,cached_checks=%llu,valid_game_poses=%llu\n",
     (unsigned long long)host.compositorWaits,(unsigned long long)host.compositorSubmits,(unsigned long long)host.compositorHandoffs,
     (unsigned long long)cachedChecks,(unsigned long long)host.validGamePoses);
@@ -494,7 +578,7 @@ int run(const Options& options) {
   std::printf("summary,frames=%llu,stereo=%llu,empty=%llu,valid_views=%llu,invalid_views=%llu,valid_head=%llu,normal_stop=%u,cleanup=%u\n",
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
-  const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&
+  const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&host.recenters==2&&host.resetPolls==2&&
     host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
     host.compositorWaits==frames&&cachedChecks==frames&&host.compositorHandoffs==layers&&host.validGamePoses;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;

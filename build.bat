@@ -910,7 +910,7 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR probe build failed & exit /b 1 )
 REM Reusable OpenXR core policies. These tests inject dispatch and geometry;
 REM no loader/session is opened and the shipping proxies do not use them yet.
 if not exist "%OBJ%\openxr_core" mkdir "%OBJ%\openxr_core"
-for %%T in (session projection geometry head gate frame pose) do (
+for %%T in (session projection geometry head gate frame pose origin reference space) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
         /Fo"%OBJ%\openxr_core\\" /Fe"%BUILD%\openxr_%%T_test.exe" ^
         "tools\openxr_%%T_test\openxr_%%T_test.cpp" /link /INCREMENTAL:NO

@@ -31,6 +31,11 @@ class CompositorPublication {
     if(state_.originGeneration==(std::numeric_limits<uint64_t>::max)())return false;
     ++state_.originGeneration;state_.origin=origin;clearPoses();return true;
   }
+  bool resetOrigin(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!live(generation)||state_.originGeneration==(std::numeric_limits<uint64_t>::max)())return false;
+    ++state_.originGeneration;clearPoses();return true;
+  }
   void invalidate(uint64_t generation) {
     std::lock_guard<std::mutex> lock(mutex_);if(live(generation))clearPoses();
   }

@@ -4,3 +4,6 @@
 extern "C" __declspec(noinline) vr::IVRCompositor* nativeCompositorCaller(vr::IVRCompositor* object) {
   return object;
 }
+extern "C" __declspec(noinline) vr::IVRSystem* nativeSystemCaller(vr::IVRSystem* object) {
+  return object;
+}

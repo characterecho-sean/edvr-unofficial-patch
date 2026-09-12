@@ -75,6 +75,15 @@ stable head tracking, normal color/clarity and normal exit. Startup
 origins/recenter/events, export lifecycle, required compositor features and
 game integration remain open.
 
+The [seated-origin checkpoint](openxr-seated-origin-2026-09-12.md) adds an
+application-owned recenter space, timestamped runtime-origin discontinuity
+tracking and historical reset events to the diagnostic. All native pose,
+geometry and layer operations use that selected space, and reset invalidates
+the old caches before the next frame. The full build passed, including 131
+origin, 120 reference-change, 166 ownership/event and 476 binding checks. The
+revised two-reset native gate remains pending. Standing/raw mapping,
+runtime-origin headset qualification and game ownership remain open.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;

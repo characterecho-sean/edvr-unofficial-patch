@@ -21,6 +21,10 @@ class SystemPublication {
     state_.focusKnown=focusKnown;state_.focused=focused;
     if(valid)state_.geometry=candidate;else state_.geometry={};return valid;
   }
+  void invalidate(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(active_&&generation==generation_){state_.geometryValid=false;state_.geometry={};}
+  }
   void retire(uint64_t generation) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(generation==generation_){state_={};active_=false;}
