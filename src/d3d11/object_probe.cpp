@@ -571,6 +571,7 @@ struct AuxSlot {
 AuxSlot g_aux[kLedgerAux];
 int     g_auxCount = 0;
 EyeDrawSnapshot g_drawSnapshot;
+EyeDrawSnapshot g_eyeMeshSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
 struct AuxFrame {   // one watched shader's buffers in one frame
     uint64_t vs;
@@ -587,6 +588,7 @@ void releaseCopy(LedgerCopy& c) {
 }
 void ledgerRelease() {
     g_drawSnapshot.reset();
+    g_eyeMeshSnapshot.reset();
     g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
@@ -2635,6 +2637,8 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
         g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
                                d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance,start,base);
     }
+    g_eyeMeshSnapshot.captureEyeMesh(ctx,frame,static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
+                                   d.vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,startInstance,start,base);
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
             // Every big instanced draw first, whatever t33 holds: the pool's own
@@ -2908,6 +2912,17 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
     Log::get().note("object probe: UI/mesh/effect vertex snapshots: %u draws, %u bytes, %u range/budget declines; UI first three watched frames, meshes first source frame, effects throughout run; 256 KiB per stream, 32 MiB total. Draw offsets, bindings and capture ranges are retained.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\drawstate_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
+    const bool eyeMeshOk=g_eyeMeshSnapshot.write(ctx,path);
+    const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
+    Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
+                    "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
+                    "First three matching eye frames; original draw ordinal, cameras, input layout, full t33/t38 and VB0 "
+                    "at first use per frame/target. Geometry first frame, %u vertex bytes, %u vertex declines. "
+                    "Separate 4096-draw/256-MiB pool/32-MiB vertex caps; no rendering changes.",
+                    path,g_eyeMeshSnapshot.meshDraws,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
+                    g_eyeMeshSnapshot.meshDeclined,g_eyeMeshSnapshot.dropped,g_eyeMeshSnapshot.failures,eyeMeshMissing,
+                    eyeMeshOk?"written":"WRITE FAILED",g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
     uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0,effectDraws=0,effectVertices=0,effectLayouts=0;
     for(const auto& d:g_drawSnapshot.draws)if(d.ordinal==UINT32_MAX-2) {
         ++effectDraws;effectVertices+=d.streams[0].copied || d.streams[1].copied;effectLayouts+=!d.layout.empty();

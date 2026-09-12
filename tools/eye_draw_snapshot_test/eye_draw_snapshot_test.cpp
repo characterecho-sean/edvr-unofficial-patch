@@ -259,6 +259,36 @@ int wmain(int argc, wchar_t** argv) {
     check(meshSnap.draws.size()==4 && meshSnap.meshBuffers.size()==6 && !meshSnap.meshDeclined,"source buffer deduplication is per frame");
     ComPtr<ID3D11ShaderResourceView> checkPool;ctx->VSGetShaderResources(33,1,&checkPool);
     check(checkPool.Get()==meshPoolView.Get(),"source capture changed SRV binding");
+    edvr::EyeDrawSnapshot eyeMesh;
+    edvr::EyeDrawSnapshot::rememberLayout(layout.Get(),&element,1,meshVs);
+    ctx->IASetInputLayout(layout.Get());
+    D3D11_TEXTURE2D_DESC eyeDesc{};eyeDesc.Width=eyeDesc.Height=8;
+    eyeDesc.MipLevels=eyeDesc.ArraySize=eyeDesc.SampleDesc.Count=1;
+    eyeDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;eyeDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> otherEye;ComPtr<ID3D11RenderTargetView> otherEyeRtv;
+    hr(dev->CreateTexture2D(&eyeDesc,nullptr,&otherEye));hr(dev->CreateRenderTargetView(otherEye.Get(),nullptr,&otherEyeRtv));
+    eyeMesh.captureEyeMesh(ctx.Get(),699,0,edvr::EyeDrawSnapshot::kHud,0,'X',6,1,0,0,0);
+    check(eyeMesh.draws.empty() && !eyeMesh.firstFrame,"non-mesh does not start eye mesh window");
+    for(unsigned frame=700;frame<703;++frame)for(unsigned eye=0;eye<2;++eye) {
+        ID3D11RenderTargetView* target=eye?otherEyeRtv.Get():rtv.Get();ctx->OMSetRenderTargets(1,&target,nullptr);
+        const uint8_t value=uint8_t(51+(frame-700)*2+eye);
+        std::vector<uint8_t> pool(672,value),bones(48*24000,uint8_t(value+10)),ids(32,uint8_t(value+20));
+        ctx->UpdateSubresource(meshPool.Get(),0,nullptr,pool.data(),0,0);
+        ctx->UpdateSubresource(meshBones.Get(),0,nullptr,bones.data(),0,0);
+        ctx->UpdateSubresource(meshIds.Get(),0,nullptr,ids.data(),0,0);
+        for(unsigned draw=0;draw<2;++draw) {
+            float constants[48];for(float& v:constants)v=float(frame*10+eye*2+draw);
+            ctx->UpdateSubresource(cb.Get(),0,nullptr,constants,0,0);
+            eyeMesh.captureEyeMesh(ctx.Get(),frame,eye*100+draw,meshVs,0,'X',6,1,2+draw,150000,8000);
+        }
+        ctx->OMGetRenderTargets(1,&boundRt,nullptr);check(boundRt.Get()==target,"eye capture preserves target binding");
+    }
+    check(eyeMesh.draws.size()==12 && eyeMesh.meshBuffers.size()==18 && !eyeMesh.meshDeclined,
+          "eye pools deduplicate within a frame and target, never across eyes");
+    for(const auto& d:eyeMesh.draws)check(d.layout.size()==1,"eye mesh input layout retained");
+    const auto eyeBytes=eyeMesh.meshBytes;
+    for(unsigned frame:{699u,703u,720u})eyeMesh.captureEyeMesh(ctx.Get(),frame,1,meshVs,0,'X',6,1,0,0,0);
+    check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
@@ -269,6 +299,8 @@ int wmain(int argc, wchar_t** argv) {
     hr(ready); check(ready == S_OK, "GPU timeout");
     check(snap.write(ctx.Get(), argv[1]), "snapshot write");
     check(meshSnap.write(ctx.Get(),(std::wstring(argv[1])+L".mesh").c_str()),"source mesh snapshot write");
+    check(eyeMesh.write(ctx.Get(),(std::wstring(argv[1])+L".eyemesh").c_str()) && !eyeMesh.failures,"eye mesh snapshot payloads complete");
+    eyeMesh.reset();check(eyeMesh.meshBuffers.empty() && eyeMesh.draws.empty() && !eyeMesh.firstFrame,"eye mesh reset releases its independent budget");
     check(!meshSnap.failures,"source mesh copies complete");
     meshSnap.meshBytes=edvr::EyeDrawSnapshot::kMeshBudget;
     meshSnap.captureSourceMesh(ctx.Get(),302,meshVs,0,'X',6,1,0,0,0);

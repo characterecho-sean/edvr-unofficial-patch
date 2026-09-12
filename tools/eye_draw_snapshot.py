@@ -409,6 +409,23 @@ def main():
                 assert b['first_draw'] == i//2*2 and b['frame'] == 300+i//2
                 assert b['data'] == bytes([21+role*10+i//2])*b['whole'], 'Source buffer copied after reuse or truncated'
         assert mesh['mesh_buffers'][1]['whole'] > 1024*1024, 'High bone indices lost'
+        eye_mesh = read(str(a.path)+'.eyemesh')
+        assert eye_mesh['failures'] == eye_mesh['mesh_declined'] == eye_mesh['dropped'] == 0
+        assert len(eye_mesh['draws']) == 12 and len(eye_mesh['mesh_buffers']) == 18
+        for i, d in enumerate(eye_mesh['draws']):
+            group, draw = divmod(i, 2)
+            frame, eye = divmod(group, 2)
+            assert d['frame'] == 700+frame and d['ordinal'] == eye*100+draw
+            assert len(d['layout']) == 1 and d['layout'][0]['semantic'] == 'POSITION'
+            assert d['start'] == 150000 and d['base'] == 8000 and d['start_instance'] == 2+draw
+            constants = struct.unpack('<48f', d['buffers'][0]['data'])
+            assert all(v == (700+frame)*10+eye*2+draw for v in constants), 'Eye draw camera copied after reuse'
+            assert d['mesh'] == [group*3+j for j in range(3)]
+            for role, ref in enumerate(d['mesh']):
+                b = eye_mesh['mesh_buffers'][ref]
+                assert b['first_draw'] == group*2 and b['frame'] == d['frame']
+                assert b['data'] == bytes([51+group+role*10])*b['whole'], 'Eye pool copy came from the other eye/frame'
+        assert len({d['target'] for d in eye_mesh['draws']}) == 2
         v = read(str(a.path)+'.vscreen')
         assert len(v['draws']) == 3 and len(v['surfaces']) == 2 and v['failures'] == 0
         assert v['draws'][0]['ordinal'] == 0xffffffff and v['draws'][0]['texture'] == 0xffffffff

@@ -52,7 +52,7 @@ public:
         static const GUID key={0x10e33b44,0x1cf4,0x4fa2,{0x82,0x1f,0x63,0x51,0xda,0xeb,0x43,0x99}};return key;
     }
     static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t vs) {
-        if((!sourceEffect(vs) && vs!=kNight) || !layout || !e || !n || n>32)return;
+        if((!sourceEffect(vs) && !sourceMesh(vs) && vs!=kNight) || !layout || !e || !n || n>32)return;
         std::vector<Layout> items(n);
         for(UINT i=0;i<n;++i) {
             if(!e[i].SemanticName || strlen(e[i].SemanticName)>=64)return;
@@ -119,6 +119,7 @@ public:
     struct MeshBuffer {
         Buffer source,stage;
         uint32_t frame=0,firstDraw=0,bytes=0,stride=0;
+        uint64_t scope=0; // separate eye targets may reuse and rewrite a pool
     };
     std::vector<MeshBuffer> meshBuffers;
     uint32_t meshBytes=0,meshDeclined=0,meshDraws=0;
@@ -211,16 +212,16 @@ public:
     }
 
     uint32_t captureMeshBuffer(ID3D11DeviceContext* ctx,ID3D11Device* dev,
-                               ID3D11Buffer* src,uint32_t frame,uint32_t stride) {
+                               ID3D11Buffer* src,uint32_t frame,uint32_t stride,uint64_t scope=0) {
         if(!src)return UINT32_MAX;
         for(uint32_t i=0;i<meshBuffers.size();++i)
-            if(meshBuffers[i].frame==frame && meshBuffers[i].source.Get()==src)return i;
+            if(meshBuffers[i].frame==frame && meshBuffers[i].scope==scope && meshBuffers[i].source.Get()==src)return i;
         D3D11_BUFFER_DESC bd{};src->GetDesc(&bd);
         // Full palette, not the older ledger's first MiB: the weapon may
         // address bones beyond that prefix. Record the first draw that saw
         // each resource this frame; deduplication is explicitly visible.
         if(!bd.ByteWidth || bd.ByteWidth>16*1024*1024 || bd.ByteWidth>kMeshBudget-meshBytes){++meshDeclined;return UINT32_MAX;}
-        MeshBuffer b;b.source=src;b.frame=frame;b.firstDraw=uint32_t(draws.size());b.bytes=bd.ByteWidth;b.stride=stride;
+        MeshBuffer b;b.source=src;b.frame=frame;b.firstDraw=uint32_t(draws.size());b.bytes=bd.ByteWidth;b.stride=stride;b.scope=scope;
         bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&b.stage))){++failures;return UINT32_MAX;}
         ctx->CopyResource(b.stage.Get(),src);meshBytes+=b.bytes;
@@ -237,6 +238,16 @@ public:
         if(!sourceMesh(vs))return;
         // Reserved ordinal distinct from the source camera and eye ledger.
         capture(ctx,frame,UINT32_MAX-1,vs,ps,kind,count,instances,startInstance,start,base,true);
+    }
+
+    // The 12:02:29 exterior hull was absent from the UI/terrain snapshot;
+    // boundary pool copies were not synchronized with its draw camera.
+    // Use a separate snapshot/cap so these mesh draws cannot crowd out UI.
+    // The caller must already have established an eye draw and armed ledger.
+    void captureEyeMesh(ID3D11DeviceContext* ctx,uint32_t frame,uint32_t ordinal,uint64_t vs,uint64_t ps,
+                        char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
+        if(!sourceMesh(vs) || (firstFrame && (frame<firstFrame || frame-firstFrame>=3)))return;
+        capture(ctx,frame,ordinal,vs,ps,kind,count,instances,startInstance,start,base,true,true);
     }
 
     // First world/terrain draw per source frame, not every offscreen draw.
@@ -259,7 +270,7 @@ public:
 
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
-                 uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false) {
+                 uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false,bool eyeMesh=false) {
         if (!ctx || (!watches(vs) && !(source && (sourceMesh(vs) || sourceEffect(vs))))) return;
         if (draws.size() >= kMaxDraws) { ++dropped; return; }
         Draw d;
@@ -301,11 +312,11 @@ public:
             ctx->CopySubresourceRegion(d.stage[i].Get(), 0, 0, 0, 0, src.Get(), 0, &box);
             d.copied[i] = bd.ByteWidth;
         }
-        const bool mesh=source && ordinal==UINT32_MAX-1 && sourceMesh(vs);
+        const bool mesh=source && (eyeMesh || ordinal==UINT32_MAX-1) && sourceMesh(vs);
         const bool effect=source && ordinal==UINT32_MAX-2 && sourceEffect(vs);
         const bool night=vs==kNight && ps==kNightPs;
         const bool unpacked=effect || night;
-        if(unpacked) {
+        if(unpacked || mesh) {
             Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;ctx->IAGetInputLayout(&layout);
             Layout elements[32];UINT bytes=sizeof(elements);
             if(layout && SUCCEEDED(layout->GetPrivateData(effectLayoutKey(),&bytes,elements)) && bytes &&
@@ -321,10 +332,10 @@ public:
                 if(sd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER || sd.Buffer.FirstElement!=0 || FAILED(res.As(&b))){++meshDeclined;continue;}
                 D3D11_BUFFER_DESC bd{};b->GetDesc(&bd);
                 if(bd.StructureByteStride!=(i?48u:336u)){++meshDeclined;continue;}
-                d.mesh[i]=captureMeshBuffer(ctx,dev.Get(),b.Get(),frame,bd.StructureByteStride);
+                d.mesh[i]=captureMeshBuffer(ctx,dev.Get(),b.Get(),frame,bd.StructureByteStride,eyeMesh?d.target:0);
             }
             Buffer ids;UINT stride=0,offset=0;ctx->IAGetVertexBuffers(0,1,&ids,&stride,&offset);
-            if(stride==8 && offset==0)d.mesh[2]=captureMeshBuffer(ctx,dev.Get(),ids.Get(),frame,stride);
+            if(stride==8 && offset==0)d.mesh[2]=captureMeshBuffer(ctx,dev.Get(),ids.Get(),frame,stride,eyeMesh?d.target:0);
             else ++meshDeclined;
         }
         if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen)
