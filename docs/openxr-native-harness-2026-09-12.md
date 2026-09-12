@@ -2,8 +2,9 @@
 
 For the latest owned-interface and clock-conversion changes, see the
 [System-interface checkpoint](openxr-system-interface-2026-09-12.md). Its
-additional absolute-pose and metadata checks need a new native run; earlier
-results below do not cover those changes.
+additional absolute-pose and metadata checks passed a subsequent PiOpenXR run
+on `6be3d8d`; that checkpoint records the result separately from the earlier
+runs below.
 
 This checkpoint adds a standalone native-session harness. It loads an
 explicitly supplied installed OpenXR loader, selects the runtime through the

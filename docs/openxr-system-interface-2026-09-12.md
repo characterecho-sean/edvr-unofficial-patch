@@ -133,9 +133,34 @@ temporal/motion and GPU timing tests, Python self-tests and the 252-key config
 contract. It opened no native runtime. The diagnostic executable and source
 hashes are retained locally with the build log.
 
-The updated diagnostic still needs a PiOpenXR check for clock conversion and
-owned-interface startup. The previous triangle result validates the earlier
-binding/bootstrap, not this path.
+The updated diagnostic from `6be3d8d` subsequently passed its 20-second
+PiOpenXR check. Its executable hash matches the retained full-build validation;
+loader and manifest hashes match the previous inventory. Frontier and SteamVR
+were absent before and after, and the runtime override applied only to the
+child. Raw poses, paths and exact receipts remain local under `build`.
+
+| Measurement | Observed result |
+| --- | --- |
+| Runtime | Pimax OpenXR, version 0.1.0 |
+| Eye dimensions / format | 5424 x 5356 each; DXGI 29, RGBA8 sRGB |
+| Device | D3D 11.1 on the requested adapter; interface adapter index 0 |
+| Geometry bootstrap | Generation 1, sequence 1, zero prior stereo submissions |
+| Owned System startup | `IVRSystem_012`; valid absolute HMD pose with prediction 0 via QPC-to-XrTime conversion |
+| Model label | Runtime-backed string query succeeded; required length 20 bytes including NUL |
+| Begun / stereo / zero-layer frames | 1800 / 1798 / 2 |
+| Valid complete geometry / invalid samples | 1799 / 0 |
+| Valid separately located HMD samples | 1799 |
+| Normal stop / cleanup | Both succeeded |
+| Process duration / result | Approximately 20.34 seconds; exit 0; no watchdog |
+
+This exercises the new owned-interface bootstrap and absolute-pose clock
+conversion on PiOpenXR. The absolute "now" query occurs at startup; the
+ordinary frame loop continues to use its predicted display time.
+Nonzero/historical predictions have desktop coverage, not new headset evidence
+from this run. The user confirmed that the triangle appeared in both eyes,
+remained fixed in space during head movement and closed normally. This passes
+the ordinary visual and shutdown check for this diagnostic; game rendering and
+broader lifecycle qualification remain open.
 
 Next work remains export lifecycle/discovery, coordinated runtime ownership,
 seated/recenter/velocity policy, Compositor/Chaperone/ExtendedDisplay behavior,

@@ -42,6 +42,14 @@ shipping discovery. Other owned interfaces, export lifecycle and
 game-thread/feature integration remain pending; the concrete ABI object is not
 full System functionality or a game backend.
 
+The `6be3d8d` PiOpenXR diagnostic passed the owned System startup gate: native
+geometry was published before stereo, the absolute-pose query used
+QPC-to-OpenXR conversion with zero prediction and returned valid tracking, and
+runtime metadata/adapter queries succeeded. It completed 1798 stereo
+submissions and normal shutdown with SteamVR absent before and after. The user
+confirmed both eyes, stable tracking during head movement and normal exit.
+Frontier integration remains separate.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;
