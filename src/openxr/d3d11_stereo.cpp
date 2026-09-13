@@ -127,8 +127,14 @@ XrResult D3D11Stereo::submitCommands() {
     return FAILED(device_->GetDeviceRemovedReason())?
       XR_ERROR_GRAPHICS_DEVICE_INVALID:XR_ERROR_RUNTIME_FAILURE;
   }
-  immediateContext_->ExecuteCommandList(list.Get(),TRUE);
-  immediateContext_->Flush();
+  if(graphicsBridge_.active()) {
+    if(FAILED(graphicsBridge_.execute(list.Get())))
+      return FAILED(device_->GetDeviceRemovedReason())?
+        XR_ERROR_GRAPHICS_DEVICE_INVALID:XR_ERROR_RUNTIME_FAILURE;
+  } else {
+    immediateContext_->ExecuteCommandList(list.Get(),TRUE);
+    immediateContext_->Flush();
+  }
   return XR_SUCCESS;
 }
 XrResult D3D11Stereo::shutdown() {
@@ -142,12 +148,13 @@ XrResult D3D11Stereo::shutdown() {
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
     eye.swapchain=XR_NULL_HANDLE;eye.width=eye.height=0;
   }
+  graphicsBridge_.reset();
   context_.Reset();immediateContext_.Reset();device_.Reset();session_=XR_NULL_HANDLE;format_=0;dispatch_={};lastResult_=XR_SUCCESS;
   for(auto& view:layerViews_)view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
   return first;
 }
 XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D11Device* device,
-                               const XrViewConfigurationView (&views)[2]) {
+                               const XrViewConfigurationView (&views)[2],HMODULE graphicsProvider) {
   const XrResult closed=shutdown();if(closed!=XR_SUCCESS)return closed;
   if(!session||!device)return XR_ERROR_HANDLE_INVALID;
   if(!d.enumerateSwapchainFormats||!d.createSwapchain||!d.destroySwapchain||!d.enumerateSwapchainImages||
@@ -160,6 +167,8 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
   dispatch_=d;session_=session;device_=device;device_->GetImmediateContext(&immediateContext_);
   auto failed=[&](XrResult r){shutdown();return r;};
   if(!immediateContext_||FAILED(device_->CreateDeferredContext(0,&context_)))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
+  if(graphicsProvider && FAILED(graphicsBridge_.acquire(graphicsProvider,device,immediateContext_.Get())))
+    return failed(XR_ERROR_INITIALIZATION_FAILED);
   std::vector<int64_t> formats;
   XrResult r=enumerate<int64_t>([&](uint32_t c,uint32_t*n,int64_t*p){return d.enumerateSwapchainFormats(session,c,n,p);},formats);
   if(r!=XR_SUCCESS)return failed(r);

@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <array>
 
 using namespace edvr::openxr;
 using Microsoft::WRL::ComPtr;
@@ -96,6 +98,148 @@ uint32_t pixel(ID3D11Texture2D* source, unsigned x, unsigned y) {
     runtime.context->Unmap(staging.Get(), 0);
     return result;
 }
+
+using BridgeCounts = void (*)(uint64_t*, uint64_t*);
+// Fault-inject only the pre-submission GetDevice call. This object must never
+// reach the D3D driver. It models a chained COM implementation reentering and
+// throwing so that the provider's admission/permit cleanup is exercised.
+struct ListProbe final : ID3D11CommandList {
+    GraphicsBridgeClient* client = nullptr;
+    ID3D11CommandList* nested = nullptr;
+    unsigned calls = 0;
+    HRESULT nestedResult = S_OK;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override {
+        if (out) *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    void STDMETHODCALLTYPE GetDevice(ID3D11Device** out) override {
+        ++calls;
+        if (out) *out = nullptr;
+        nestedResult = client->execute(nested);
+        throw 1;
+    }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return E_NOTIMPL; }
+    UINT STDMETHODCALLTYPE GetContextFlags() override { return 0; }
+};
+
+void bridgeContracts(HMODULE proxy, BridgeCounts counts) {
+    auto acquireBridge = reinterpret_cast<EdvrAcquireGraphicsBridge>(
+        GetProcAddress(proxy, "edvrAcquireGraphicsBridge"));
+    check(acquireBridge != nullptr, "paired bridge export exists");
+    if (!acquireBridge) return;
+    const EdvrGraphicsBridgeRequest request{sizeof(request), EDVR_GRAPHICS_BRIDGE_VERSION_1,
+                                            runtime.device.Get(), runtime.context.Get()};
+    auto emptyTable = [] {
+        return EdvrGraphicsBridgeTable{sizeof(EdvrGraphicsBridgeTable), EDVR_GRAPHICS_BRIDGE_VERSION_1};
+    };
+    auto rejected = [&](EdvrGraphicsBridgeRequest invalid) {
+        auto table = emptyTable();
+        check(FAILED(acquireBridge(&invalid, &table)) && !table.size && !table.version &&
+              !table.lease && !table.execute && !table.release, "invalid request clears output");
+    };
+    auto invalid = request; invalid.version = 2; rejected(invalid);
+    invalid = request; invalid.size = sizeof(request) + 8; rejected(invalid);
+    invalid = request; invalid.size = 4; rejected(invalid);
+    invalid = request; invalid.device = nullptr; rejected(invalid);
+    invalid = request; invalid.context = nullptr; rejected(invalid);
+    auto table = emptyTable(); table.version = 2;
+    check(FAILED(acquireBridge(&request, &table)) && !table.lease && !table.execute && !table.release,
+          "unknown output ABI rejected");
+    table = emptyTable();
+    check(acquireBridge(nullptr, &table) == E_INVALIDARG && !table.lease, "null request rejected");
+    check(acquireBridge(&request, nullptr) == E_INVALIDARG, "null output rejected");
+    alignas(EdvrGraphicsBridgeTable) std::array<unsigned char, sizeof(EdvrGraphicsBridgeTable) + 16> bytes;
+    bytes.fill(0xcc);
+    const uint32_t shortSize = 4;
+    std::memcpy(bytes.data(), &shortSize, sizeof(shortSize));
+    check(acquireBridge(&request, reinterpret_cast<EdvrGraphicsBridgeTable*>(bytes.data())) == E_INVALIDARG,
+          "short output table rejected");
+    bool canary = true;
+    for (size_t i = 4; i < bytes.size(); ++i) canary = canary && bytes[i] == 0xcc;
+    check(canary, "short output writes stay inside declared size");
+
+    ComPtr<ID3D11Device> otherDevice;
+    ComPtr<ID3D11DeviceContext> otherContext, deferred, otherDeferred;
+    check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &otherDevice, nullptr, &otherContext)), "independent same-adapter device");
+    check(SUCCEEDED(runtime.device->CreateDeferredContext(0, &deferred)), "private recording context");
+    if (!otherDevice || !deferred) return;
+    invalid = request; invalid.device = otherDevice.Get(); invalid.context = otherContext.Get(); rejected(invalid);
+    invalid = request; invalid.context = otherContext.Get(); rejected(invalid);
+    invalid = request; invalid.context = deferred.Get(); rejected(invalid);
+
+    ComPtr<ID3D11Texture2D> privateTarget;
+    ComPtr<ID3D11RenderTargetView> privateRtv;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = desc.Height = desc.ArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    check(SUCCEEDED(runtime.device->CreateTexture2D(&desc, nullptr, &privateTarget)) &&
+        SUCCEEDED(runtime.device->CreateRenderTargetView(privateTarget.Get(), nullptr, &privateRtv)),
+        "private bridge target");
+    if (!privateRtv) return;
+    const float cyan[]{0, 1, 1, 1};
+    deferred->ClearRenderTargetView(privateRtv.Get(), cyan);
+    ComPtr<ID3D11CommandList> list, otherList;
+    check(SUCCEEDED(deferred->FinishCommandList(FALSE, &list)) && list, "private bridge list");
+    check(SUCCEEDED(otherDevice->CreateDeferredContext(0, &otherDeferred)), "foreign recording context");
+    if (!otherDeferred || !list) return;
+    otherDeferred->ClearState();
+    check(SUCCEEDED(otherDeferred->FinishCommandList(FALSE, &otherList)) && otherList, "foreign device list");
+    if (!otherList) return;
+
+    uint64_t privateBefore = 0, unknownBefore = 0;
+    counts(&privateBefore, &unknownBefore);
+    GraphicsBridgeClient client;
+    check(FAILED(client.acquire(GetModuleHandleW(L"kernel32.dll"), runtime.device.Get(), runtime.context.Get())) &&
+        !client.active(), "missing paired export fails without fallback");
+    check(client.acquire(proxy, runtime.device.Get(), runtime.context.Get()) == S_OK && client.active(),
+          "client acquires exact device/context bridge");
+    if (!client.active()) return;
+    table = emptyTable();
+    check(acquireBridge(&request, &table) == E_PENDING && !table.lease && !table.execute && !table.release,
+          "second lease rejected without replacing owner");
+    HRESULT duplicateThread = S_OK;
+    std::thread duplicate([&] {
+        auto second = emptyTable();
+        duplicateThread = acquireBridge(&request, &second);
+        if (second.lease) second.release(second.lease);
+    });
+    duplicate.join();
+    check(duplicateThread == E_PENDING, "second thread cannot designate another lease owner");
+    check(FAILED(client.execute(nullptr)), "null list rejected");
+    check(FAILED(client.execute(otherList.Get())), "same-adapter foreign list rejected");
+    ListProbe probe; probe.client = &client; probe.nested = list.Get();
+    HRESULT wrongThread = S_OK;
+    std::thread worker([&] { wrongThread = client.execute(&probe); });
+    worker.join();
+    check(wrongThread == E_ACCESSDENIED && probe.calls == 0,
+          "worker submission rejected before any list/device access");
+    check(client.execute(&probe) == E_FAIL && probe.calls == 1 && probe.nestedResult == E_PENDING,
+          "reentrant submission rejected and COM exception contained");
+    uint64_t privateNow = 0, unknownNow = 0;
+    counts(&privateNow, &unknownNow);
+    check(privateNow == privateBefore && unknownNow == unknownBefore, "rejected calls never reach execute hook");
+    check(client.execute(list.Get()) == S_OK, "owner still executes after rejection");
+    counts(&privateNow, &unknownNow);
+    check(privateNow == privateBefore + 1 && unknownNow == unknownBefore, "exact list classified private once");
+    check(pixel(privateTarget.Get(), 0, 0) == 0xffffff00, "private bridge submits actual GPU work");
+    client.reset();
+    check(!client.active() && FAILED(client.execute(list.Get())), "released client cannot submit");
+    // A list's identity is not a permanent tag: replay outside the bridge is
+    // still unknown, even if this exact object was previously permitted.
+    runtime.context->ExecuteCommandList(list.Get(), TRUE);
+    counts(&privateNow, &unknownNow);
+    check(privateNow == privateBefore + 1 && unknownNow == unknownBefore + 1,
+          "private permit cannot escape its call or mark a list permanently");
+    check(client.acquire(proxy, runtime.device.Get(), runtime.context.Get()) == S_OK,
+          "new lease allowed after release");
+    client.reset();
+}
+
 int selfTest(const wchar_t* path) {
     // The actual hook-owning DLL stays loaded until this isolated child exits.
     HMODULE proxy = LoadLibraryExW(path, nullptr,
@@ -106,11 +250,16 @@ int selfTest(const wchar_t* path) {
     using Binding = void* (*)(unsigned, uint32_t*);
     auto binding = reinterpret_cast<Binding>(GetProcAddress(proxy, "edvr_selftest_binding"));
     auto hooks = reinterpret_cast<unsigned (*)()>(GetProcAddress(proxy, "edvr_selftest_hooks"));
-    check(createDevice && binding && hooks, "graphics fixture exports available");
-    if (!createDevice || !binding || !hooks) return 1;
+    auto bridgeCounts = reinterpret_cast<BridgeCounts>(GetProcAddress(proxy, "edvr_selftest_graphics_bridge"));
+    check(createDevice && binding && hooks && bridgeCounts, "graphics fixture exports available");
+    if (!createDevice || !binding || !hooks || !bridgeCounts) return 1;
     check(SUCCEEDED(createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
         D3D11_SDK_VERSION, &runtime.device, nullptr, &runtime.context)), "create exact proxy device/context");
     if (!runtime.device || !runtime.context) return 1;
+    bridgeContracts(proxy, bridgeCounts);
+    if (failures) return 1;
+    uint64_t privateBefore = 0, unknownBefore = 0;
+    bridgeCounts(&privateBefore, &unknownBefore);
 
     ComPtr<ID3D11Texture2D> target, source, depth;
     ComPtr<ID3D11RenderTargetView> rtv;
@@ -174,6 +323,9 @@ int selfTest(const wchar_t* path) {
     for (unsigned i = 0; i < slots; ++i)
         check(binding(i, &generations[i]) == expected[i], "real proxy setter populated shadow");
     auto preserved = [&] {
+        uint64_t privateNow = 0, unknownNow = 0;
+        bridgeCounts(&privateNow, &unknownNow);
+        check(unknownNow == unknownBefore, "renderer private lists do not enter unknown history invalidation");
         for (unsigned i = 0; i < slots; ++i) {
             uint32_t generation = 0;
             check(binding(i, &generation) == expected[i] && generation == generations[i], "actual DLL shadow identity/generation preserved");
@@ -194,7 +346,11 @@ int selfTest(const wchar_t* path) {
         views[i].fov = {-.785398163f, .785398163f, .785398163f, -.785398163f};
     }
     check(renderer.initialize({formats, create, destroy, images, acquire, wait, release},
-        session, runtime.device.Get(), sizes) == XR_SUCCESS, "renderer uses hooked game device");
+        session, runtime.device.Get(), sizes, GetModuleHandleW(L"kernel32.dll")) == XR_ERROR_INITIALIZATION_FAILED &&
+        runtime.creates == 0, "missing bridge fails renderer before XR swapchains");
+    preserved();
+    check(renderer.initialize({formats, create, destroy, images, acquire, wait, release},
+        session, runtime.device.Get(), sizes, proxy) == XR_SUCCESS, "renderer uses paired hooked game device");
     preserved();
     XrCompositionLayerProjection layer{};
     check(renderer.render(views, space, layer) == XR_SUCCESS, "direct render through hooked context"); preserved();
@@ -219,6 +375,35 @@ int selfTest(const wchar_t* path) {
     check((hooks() & 2u) != 0 && (hooks() & 1u) == 0, "actual ExecuteCommandList hook ran without immediate ClearState");
     check(runtime.releases == 6, "all composed eyes released");
     check(renderer.shutdown() == XR_SUCCESS, "renderer shutdown"); preserved();
+    uint64_t privateNow = 0, unknownNow = 0;
+    bridgeCounts(&privateNow, &unknownNow);
+    check(privateNow == privateBefore + 8 && unknownNow == unknownBefore,
+          "all eight renderer lists use private submission, with no history invalidation");
+
+    ComPtr<ID3D11DeviceContext> gameRecorder;
+    ComPtr<ID3D11CommandList> gameList;
+    check(SUCCEEDED(runtime.device->CreateDeferredContext(0, &gameRecorder)), "unknown game recorder");
+    if (!gameRecorder) return 1;
+    const float green[]{0, 1, 0, 1};
+    gameRecorder->ClearRenderTargetView(rtv.Get(), green);
+    check(SUCCEEDED(gameRecorder->FinishCommandList(FALSE, &gameList)) && gameList, "unknown game target write list");
+    if (!gameList) return 1;
+    runtime.context->ExecuteCommandList(gameList.Get(), TRUE);
+    bridgeCounts(&privateNow, &unknownNow);
+    check(unknownNow == unknownBefore + 1 && privateNow == privateBefore + 8,
+          "ordinary game list retains conservative history invalidation");
+    check(pixel(target.Get(), 64, 60) == 0xff00ff00, "ordinary game list actually writes game target");
+    for (unsigned i = 0; i < slots; ++i) {
+        uint32_t generation = 0;
+        check(binding(i, &generation) == expected[i] && generation == generations[i],
+              "unknown restore TRUE preserves bindings while invalidating content history");
+    }
+    runtime.context->ExecuteCommandList(gameList.Get(), FALSE);
+    bridgeCounts(&privateNow, &unknownNow);
+    check(unknownNow == unknownBefore + 2 && privateNow == privateBefore + 8,
+          "restore FALSE remains unknown");
+    for (unsigned i = 0; i < slots; ++i)
+        check(binding(i, nullptr) == nullptr, "restore FALSE clears binding shadow");
     runtime.context->ClearState();
     // Teardown the fixture's own bindings only after checking renderer cleanup.
     std::printf("openxr_proxy_state_test: %u checks, %u failures\n", checks, failures);

@@ -174,6 +174,18 @@ of unknown game command lists, together with explicit immediate-context
 serialization. This remains required before native Frontier integration; no
 installed game files or live settings are changed by this merge.
 
+The subsequent [private graphics bridge](openxr-private-bridge-2026-09-13.md)
+adds a versioned, explicitly selected graphics-provider lease for the staged
+renderer. Its exact private command lists can preserve motion/pool history
+while unknown game lists retain conservative invalidation. The actual-DLL
+fixture checks both branches, all four renderer paths, device/context identity
+and rejected worker/reentrant submissions. The full build passed with 290
+actual-proxy, 10,774 stereo, 80,493 weapon-motion and 1,242 mesh-motion checks;
+the configuration contract remains 254 keys. This is desktop preparation: the
+lease requires existing exclusive context ownership and does not establish
+game-thread scheduling. The native harness still uses its standalone device
+path, and the installed Frontier pair remains `f3c205e`.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;

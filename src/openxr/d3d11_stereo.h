@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 #include "eye_capture.h"
 #include "skybox_capture.h"
+#include "graphics_bridge_client.h"
 #include <vector>
 
 namespace edvr::openxr {
@@ -38,7 +39,10 @@ class D3D11Stereo final {
   D3D11Stereo& operator=(D3D11Stereo&&) = delete;
 
   XrResult initialize(const StereoDispatch&, XrSession, ID3D11Device*,
-                      const XrViewConfigurationView (&)[2]);
+                      const XrViewConfigurationView (&)[2], HMODULE graphicsProvider = nullptr);
+  // An explicit provider requires the paired private-submission capability.
+  // Omission is for a standalone diagnostic device only. Neither mode grants
+  // ownership of a game's context or permits background game-device access.
   XrResult render(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
   XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
@@ -66,6 +70,7 @@ class D3D11Stereo final {
   // serialized ownership is still required because it is not thread safe.
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediateContext_;
+  GraphicsBridgeClient graphicsBridge_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader_;
   Microsoft::WRL::ComPtr<ID3D11InputLayout> layout_;

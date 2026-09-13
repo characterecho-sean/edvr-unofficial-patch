@@ -217,6 +217,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_hooks ^
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvr_selftest_binding ^
+    --extra-export edvrAcquireGraphicsBridge ^
+    --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^
     --extra-export edvrSupersampleResolve ^
@@ -300,6 +302,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
+    "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^

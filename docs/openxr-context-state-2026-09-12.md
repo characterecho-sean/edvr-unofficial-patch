@@ -149,3 +149,10 @@ exports, game feature integration, native startup/flight/exit, device loss and
 focus/lifecycle qualification remain open. These desktop tests do not establish
 vendor extension state preservation, driver overhead, or Frontier
 temporal-rendering parity.
+
+The later [private graphics bridge](openxr-private-bridge-2026-09-13.md)
+implements an explicit paired-module lease and distinguishes the renderer's
+private writes from unknown game lists. Its actual-DLL desktop tests cover that
+distinction after the main merge. Game-thread ownership and native Frontier
+discovery remain open; the earlier headset result above does not qualify the
+bridge.
