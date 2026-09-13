@@ -109,3 +109,71 @@ shader families. NVIDIA graphics smoke passed. The deliberate
 static-edge probe fails against current rendering as described above; it
 is diagnostic evidence, not a passing visual-fix test. No visual fix is
 claimed yet.
+
+## Follow-up: non-landable planet approach
+
+The next Steam flight is verified 857a842 in both DLL logs
+(edvr_gfx_20260913_055421.log). The user reports the blur appears
+limited to non-landable worlds, and did not observe skybox flicker this
+time. That is not evidence that the separate flicker is fixed. Capture
+055834 is inside the station; 055925 is the supercruise Earth-like
+approach.
+
+This capture uses the OpenVR graphics path through SteamVR, with DLSS
+preset K at 2774 x 2740 input and 4268 x 4216 output per eye. The motion
+capture is in the graphics proxy and has no SteamVR compositor
+dependency.
+
+The new snapshot succeeds: both 71DD9863DCFC0986 surface and
+3530A6FD15EDE145 cloud passes retain their first-frame POSITION geometry
+and all 19 frames of draw-time constants, for both eyes. Surface draws
+use 2304 and 9216 indices respectively. Their original vertex shader
+projects cb0[9..11] through cb1[270..273]. The precomposed clip X/Y/W in
+cb0[4], cb0[5] and cb0[7] agrees within 0.000220 input pixels across all
+captured surface vertices. PS 43E5E6EB67AC751B writes colour targets and
+has neither discard nor a depth export.
+
+Correction: retain the opaque planet's affine clip transform using mode
+4 of the existing hologram/ring motion records. Match its surface/mesh
+and draw slice, excluding animated shading constants from identity. LOD
+changes and ambiguous matches decline. Record the original VS's visible
+samples into existing motion coverage with depth EQUAL and zero depth
+writes. No UI mark, private UI depth, distance cutoff or sharpening is
+added. The temporal consumer excludes foreground UI and checks final
+scene depth before using that correspondence. Landable terrain keeps its
+existing patch-motion path. Skybox history rejection is unchanged.
+
+Scope is the captured opaque surface shader pair. Clouds over its
+visible surface inherit that surface motion; independent atmosphere and
+cloud shell motion, and other non-landable surface shader variants, are
+not claimed corrected.
+
+Integration uses the depth probe's eye assignment, not the UI colour
+target table: an opaque deferred target must not consume that table's
+two UI eye slots. The shared 128-record per-eye budget remains bounded;
+no new full-eye motion texture or continuous GPU readback is added.
+Planet coverage uses the normal original-draw wrapper for indexed draws,
+independently of the UI reissue flag. Unsupported or predicated
+pipelines decline before changing draw state.
+
+Focused validation passes: 864 captured pairs through the GPU matcher,
+all matched, maximum error 0.000362 input pixels against the original
+surface VS position calculation. The comparison includes both eyes, both
+captures and 4440 distinct captured vertices. Production coverage tests
+preserve every game colour/depth sample, exclude nearer geometry and
+restore graphics bindings. Mode 4 tests cover material animation,
+first-frame history, LOD changes and UI/foreground exclusion. In-headset
+confirmation of the approach correction is still required.
+
+The initial full build caught incorrect UI-mask coordinates in the new
+consumer. Coverage uses the full scene grid, while UI marks use the eye
+region grid. Mode 4 now subtracts the region origin and excludes both
+text categories. The regression uses a nonzero origin and tests both
+categories against source and embedded motion shaders.
+
+Final validation: absolute-path full build passed, including 55069
+screen motion checks, 21110 UI coverage checks and the existing weapon,
+terrain, night-vision and runtime regressions. NVIDIA hardware smoke
+passed. The standalone hologram consumer fixture also declares the
+UI-mask input now referenced by the shared helper; its existing 213
+checks pass.

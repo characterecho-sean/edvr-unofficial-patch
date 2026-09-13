@@ -3227,6 +3227,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         if (uiDepthReissueBegin(self)) draw();
         uiDepthReissueEnd(self);
     }
+    if(self==g_state->ownerCtx && uiDepthPlanetBegin(self)) {
+        draw();uiDepthPlanetEnd(self);
+    }
     if (!terrainOriginal && self == g_state->ownerCtx &&
         celestialMotionBegin(self, bindingShaderHash(BindSlot::Vs))) {
         draw();

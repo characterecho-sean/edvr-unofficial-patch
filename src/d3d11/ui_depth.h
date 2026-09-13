@@ -65,6 +65,9 @@ bool uiDepthWantsReissue();
 // so issuing the draw anyway would be the game's composite a second time,
 // in full colour, over itself.
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx);
+// Opaque planet motion coverage, separate from UI classification/depth.
+bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx);
+void uiDepthPlanetEnd(ID3D11DeviceContext* ctx);
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
 // Coverage also supports UI history decisions. It is marked at zero fixed

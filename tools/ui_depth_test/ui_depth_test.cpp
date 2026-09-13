@@ -39,8 +39,11 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx, const char* s
     auto code=::compile(source,"cs_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
     if(FAILED(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader)))std::abort();return shader;
 }
-ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext*, const char*, size_t,
-    const char*, const char*, const SwapMacro*, const char*) { std::abort(); }
+ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx, const char* source, size_t,
+    const char*, const char*, const SwapMacro*, const char*) {
+    auto code=::compile(source,"ps_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* shader=nullptr;
+    if(FAILED(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader)))std::abort();return shader;
+}
 float temporalPassDepthAt(float metres) { return 0.025f / metres; }
 bool temporalPassPlanes(float* nearZ, float* farZ) { *nearZ = .025f; *farZ = 10000; return true; }
 bool depthProbeSceneDepthFormat(uint32_t, uint32_t, int, ID3D11Texture2D** tex, uint32_t* fmt) {
@@ -102,6 +105,7 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
     }
     ctx->Unmap(stage.Get(), 0); return values;
 }
+#include "planet_coverage_test.h"
 int main(int argc, char** argv) {
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     D3D_FEATURE_LEVEL level;
@@ -838,6 +842,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             std::puts(m->pDescription); check(false,"D3D debug-layer warning/error");
         }
     }
+    testPlanetCoverage(dev.Get(),ctx.Get());
     ctx->ClearState(); uiDepthShutdown();
     std::printf("PASS: %d checks; production UI coverage isolates smoke, preserves depth/alpha/occlusion/state, and handles menus and frame/eye/format changes.\n",checks);
 }
