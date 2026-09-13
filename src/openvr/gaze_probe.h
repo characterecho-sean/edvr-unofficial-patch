@@ -67,10 +67,16 @@
 // live.
 #pragma once
 
-#include "early_session.h"  // PFN_RealGetGenericInterface
 #include "openvr_min.h"
 
 namespace edvr {
+
+// The REAL VR_GetGenericInterface, passed in rather than looked up because
+// openvr_proxy.cpp owns that pointer and nothing here may reach around it
+// to the export it is itself standing in for. (The typedef lived in the
+// early handover's header until that was removed on 2026-09-13.)
+typedef void* (__cdecl* PFN_RealGetGenericInterface)(const char* version,
+                                                     vr::EVRInitError* error);
 
 // Told the real VR_GetGenericInterface once openvr_proxy.cpp has it.
 // Remembers the pointer only; the request waits for the frame loop.

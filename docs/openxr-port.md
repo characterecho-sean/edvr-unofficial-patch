@@ -40,8 +40,8 @@ The goal stated on 2026-09-01, during the render-scale flights, was to support
 native SteamVR only and drop OpenComposite, because much of EDVR's
 transport-safety machinery exists for OpenComposite-over-VDXR failures: the
 cull guard's two-stage go-live and canonical-size snap, the copy-not-bounds
-crop (`guard_crop.h`), the early handover (`early_session.cpp`), the launch
-centre (`launch_centre.cpp`).
+crop (`guard_crop.h`), the early handover (`early_session.cpp`, since removed
+on 2026-09-13), the launch centre (`launch_centre.cpp`).
 
 This retains the aim of dropping OpenComposite, but changes the proposed
 transport from native SteamVR to OpenXR. That is a deliberate scope change. The
@@ -630,7 +630,7 @@ misleading percentage. Preserve unavailable values when there is no source.
 | `advanced.real_openvr_dll` | Chooses the forwarded DLL | Proxy-only during migration; retire with proxy |
 | `advanced.suppress_interfaces` | Refuses configured interface prefixes before reaching the runtime | Keep proxy behaviour; owned backend has a fixed supported-interface table |
 | `advanced.compositor_timing` | Enables existing compositor timing collection | Define separate measured-source behaviour before changing this switch; never make local queries depend accidentally on a legacy timing decoder |
-| `fix.vr_handover` | `early` submits a 1x1 texture before the game's compositor calls; `stock` does not | Not used by owned session initialization; retire only with proxy |
+| `fix.vr_handover` | `early` submitted a 1x1 texture before the game's compositor calls; `stock` did not | **Removed 2026-09-13** ahead of its replacement (`early_session.cpp` gone with it); the channel's game-device field it introduced stays for the cull guard's presence test |
 | `fix.launch_centre` | `auto` is OpenComposite-only; `on`/`off` explicit | Preserve explicit choice; review new Auto policy before changing behaviour |
 
 The OpenXR loader/SDK and OpenVR declarations must retain their upstream
