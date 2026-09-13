@@ -27,6 +27,7 @@ int wmain(int argc,wchar_t** argv) {
   }
   check(FAILED(NativeDevice::validate(nullptr,LUID{},D3D_FEATURE_LEVEL_10_0)),"null device rejected");
   NativeDevice native;
+  check(native.initialize(LUID{},D3D_FEATURE_LEVEL_10_0,nullptr)==E_INVALIDARG&&!native.device()&&!native.context(),"null device factory rejected");
   check(FAILED(native.initialize(LUID{},D3D_FEATURE_LEVEL_12_1))&&!native.device()&&!native.context(),"failed initialize leaves empty ownership");
   std::printf("native_device_test: %u checks, %u failures\n",checks,fails);return fails?1:0;
 }

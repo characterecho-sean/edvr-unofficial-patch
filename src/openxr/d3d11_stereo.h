@@ -13,6 +13,7 @@
 #include "eye_capture.h"
 #include "skybox_capture.h"
 #include "graphics_bridge_client.h"
+#include "immediate_executor.h"
 #include <vector>
 
 namespace edvr::openxr {
@@ -39,16 +40,28 @@ class D3D11Stereo final {
   D3D11Stereo& operator=(D3D11Stereo&&) = delete;
 
   XrResult initialize(const StereoDispatch&, XrSession, ID3D11Device*,
-                      const XrViewConfigurationView (&)[2], HMODULE graphicsProvider = nullptr);
+                      const XrViewConfigurationView (&)[2], HMODULE graphicsProvider = nullptr,
+                      ImmediateExecutor* immediateExecutor = nullptr);
   // An explicit provider requires the paired private-submission capability.
   // Omission is for a standalone diagnostic device only. Neither mode grants
   // ownership of a game's context or permits background game-device access.
+  // A supplied executor outlives this renderer's shutdown and synchronously
+  // runs immediate-context work at the host's exclusive render boundary.
+  // XR calls and private deferred recording stay on the renderer owner.
   XrResult render(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
   XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&);
+  // Complete submitted GPU work before retiring the render caller. Uses its
+  // immediate-context boundary, without changing pipeline state. Timeout or
+  // unavailable admission leaves resources alive for an explicit retry.
+  XrResult drain();
+  bool needsGpuDrain() const { return gpuPending_; }
+  // Must finish before the host destroys the session/device/executor. A host
+  // using an executor drains on its render caller before closing admission.
+  // Destroying this object with uncompleted GPU work is a contract violation.
   XrResult shutdown();
   int64_t format() const { return format_; }
 
@@ -71,6 +84,9 @@ class D3D11Stereo final {
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediateContext_;
   GraphicsBridgeClient graphicsBridge_;
+  ImmediateExecutor* immediateExecutor_ = nullptr;
+  Microsoft::WRL::ComPtr<ID3D11Query> completion_;
+  bool gpuPending_ = false;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader_;
   Microsoft::WRL::ComPtr<ID3D11InputLayout> layout_;

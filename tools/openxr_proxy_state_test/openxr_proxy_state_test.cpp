@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/d3d11/binding_shadow.h"
+#include "../../src/openxr/render_thread_dispatcher.h"
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <cstring>
@@ -26,18 +27,26 @@ struct Runtime {
     ComPtr<ID3D11Texture2D> images[2];
     unsigned creates = 0, releases = 0;
     bool acquired[2]{}, waited[2]{};
+    DWORD xrThread = 0;
+    uint64_t graphicsCallbacks = 0, graphicsAtRelease = 0;
+    D3D11Stereo* drainSubject = nullptr;
 } runtime;
+void xrOwner() {
+    if (runtime.xrThread) check(GetCurrentThreadId() == runtime.xrThread, "XR swapchain calls stay on owner thread");
+}
 unsigned eyeIndex(XrSwapchain chain) {
     const auto i = reinterpret_cast<uintptr_t>(chain) - 10;
     check(i < 2, "valid fake swapchain");
     return i < 2 ? unsigned(i) : 0;
 }
 XrResult XRAPI_PTR formats(XrSession, uint32_t capacity, uint32_t* count, int64_t* out) {
+    xrOwner();
     *count = 1;
     if (capacity) out[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR create(XrSession, const XrSwapchainCreateInfo* info, XrSwapchain* out) {
+    xrOwner();
     const unsigned eye = runtime.creates++;
     if (eye >= 2) return XR_ERROR_LIMIT_REACHED;
     check(info->width == extent && info->height == extent, "swapchain extent");
@@ -52,28 +61,38 @@ XrResult XRAPI_PTR create(XrSession, const XrSwapchainCreateInfo* info, XrSwapch
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR destroy(XrSwapchain chain) {
+    xrOwner();
+    if (runtime.drainSubject) check(!runtime.drainSubject->needsGpuDrain(), "GPU completion precedes swapchain destruction");
     runtime.images[eyeIndex(chain)].Reset();
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR images(XrSwapchain chain, uint32_t capacity, uint32_t* count,
                          XrSwapchainImageBaseHeader* out) {
+    xrOwner();
     *count = 1;
     if (capacity) reinterpret_cast<XrSwapchainImageD3D11KHR*>(out)->texture = runtime.images[eyeIndex(chain)].Get();
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR acquire(XrSwapchain chain, const XrSwapchainImageAcquireInfo*, uint32_t* index) {
+    xrOwner();
     const unsigned eye = eyeIndex(chain);
     check(!runtime.acquired[eye], "acquire once");
     runtime.acquired[eye] = true; *index = 0;
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR wait(XrSwapchain chain, const XrSwapchainImageWaitInfo*) {
+    xrOwner();
     const unsigned eye = eyeIndex(chain);
     check(runtime.acquired[eye] && !runtime.waited[eye], "wait after acquire");
     runtime.waited[eye] = true;
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR release(XrSwapchain chain, const XrSwapchainImageReleaseInfo*) {
+    xrOwner();
+    if (runtime.xrThread) {
+        check(runtime.graphicsCallbacks > runtime.graphicsAtRelease, "immediate submission finishes before XR image release");
+        runtime.graphicsAtRelease = runtime.graphicsCallbacks;
+    }
     const unsigned eye = eyeIndex(chain);
     check(runtime.waited[eye], "release after wait");
     runtime.waited[eye] = runtime.acquired[eye] = false;
@@ -240,6 +259,135 @@ void bridgeContracts(HMODULE proxy, BridgeCounts counts) {
     client.reset();
 }
 
+void threadedRenderer(HMODULE proxy, BridgeCounts counts) {
+    runtime.creates = runtime.releases = 0;
+    ComPtr<ID3D11Texture2D> target;
+    ComPtr<ID3D11RenderTargetView> targetView;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = desc.Height = extent; desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    check(SUCCEEDED(runtime.device->CreateTexture2D(&desc, nullptr, &target)) &&
+        SUCCEEDED(runtime.device->CreateRenderTargetView(target.Get(), nullptr, &targetView)), "threaded game sentinel target");
+    if (!targetView) return;
+    const float magenta[]{1, 0, 1, 1};
+    runtime.context->ClearRenderTargetView(targetView.Get(), magenta);
+    runtime.context->OMSetRenderTargets(1, targetView.GetAddressOf(), nullptr);
+    using Binding = void* (*)(unsigned, uint32_t*);
+    const auto binding = reinterpret_cast<Binding>(GetProcAddress(proxy, "edvr_selftest_binding"));
+    void* expected[unsigned(edvr::BindSlot::Count)]{};
+    uint32_t generations[unsigned(edvr::BindSlot::Count)]{};
+    for (unsigned i = 0; i < unsigned(edvr::BindSlot::Count); ++i) expected[i] = binding(i, &generations[i]);
+    auto preserved = [&] {
+        for (unsigned i = 0; i < unsigned(edvr::BindSlot::Count); ++i) {
+            uint32_t generation = 0;
+            check(binding(i, &generation) == expected[i] && generation == generations[i], "threaded render preserves actual binding shadow");
+        }
+        check(pixel(target.Get(), 64, 60) == 0xffff00ff, "threaded render preserves game pixels");
+    };
+    OwnerService owner;
+    RenderThreadDispatcher render(owner);
+    check(owner.start() && render.bindCurrentThread(), "threaded renderer owner/caller setup");
+    struct Executor final : ImmediateExecutor {
+        RenderThreadDispatcher& render;
+        explicit Executor(RenderThreadDispatcher& value) : render(value) {}
+        bool invoke(std::function<void()> callback) override {
+            return render.invoke([&] {
+                check(render.isRenderThread() && GetCurrentThreadId() != runtime.xrThread, "actual graphics work runs on render caller");
+                callback(); ++runtime.graphicsCallbacks;
+            });
+        }
+    } executor(render);
+    D3D11Stereo renderer;
+    runtime.drainSubject = &renderer;
+    EyeCapture capture;
+    SkyboxCapture skybox;
+    XrViewConfigurationView sizes[2]{}; XrView views[2]{};
+    for (unsigned i = 0; i < 2; ++i) {
+        sizes[i] = {XR_TYPE_VIEW_CONFIGURATION_VIEW};
+        sizes[i].recommendedImageRectWidth = sizes[i].recommendedImageRectHeight = extent;
+        sizes[i].maxImageRectWidth = sizes[i].maxImageRectHeight = extent;
+        sizes[i].maxSwapchainSampleCount = 1;
+        views[i] = {XR_TYPE_VIEW}; views[i].pose.orientation.w = 1;
+        views[i].fov = {-.785398163f, .785398163f, .785398163f, -.785398163f};
+    }
+    uint64_t privateBefore = 0, unknownBefore = 0;
+    counts(&privateBefore, &unknownBefore);
+    bool initialized = false;
+    check(render.invokeOwner([&] {
+        runtime.xrThread = GetCurrentThreadId();
+        initialized = renderer.initialize({formats, create, destroy, images, acquire, wait, release},
+            session, runtime.device.Get(), sizes, proxy, &executor) == XR_SUCCESS;
+    }) && initialized, "renderer acquires paired bridge on caller while initializing on XR owner");
+    if (initialized) {
+        preserved();
+        XrCompositionLayerProjection layer{};
+        check(render.invokeOwner([&] { check(renderer.render(views, space, layer) == XR_SUCCESS, "threaded direct stereo"); }), "direct boundary");
+        preserved();
+        const uint32_t triangle = pixel(runtime.images[0].Get(), 64, 60);
+        check((triangle >> 24) == 255 && (triangle & 255) > 60 && ((triangle >> 8) & 255) > 60 &&
+            ((triangle >> 16) & 255) > 60 && triangle != 0xffff00ff, "threaded renderer produces actual mixed triangle pixels");
+        check(render.invokeOwner([&] {
+            check(executor.invoke([&] {
+                check(SUCCEEDED(capture.initialize(runtime.device.Get())) && SUCCEEDED(skybox.initialize(runtime.device.Get())), "threaded capture initialize");
+            }), "capture initialization boundary");
+            ID3D11Texture2D* texture = nullptr;
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                check(renderer.drawEye(eye, views[eye], texture) == XR_SUCCESS && texture, "threaded diagnostic source");
+                if (!texture) return;
+                check(executor.invoke([&] {
+                    const vr::Texture_t source{texture, vr::API_DirectX, vr::ColorSpace_Linear};
+                    check(capture.capture(vr::EVREye(eye), &source) == vr::VRCompositorError_None, "copy eye pixels on render caller");
+                }), "eye capture boundary");
+            }
+            check(renderer.renderCaptured(views, space, capture, layer) == XR_SUCCESS, "threaded copied-eye stereo");
+            check(executor.invoke([&] {
+                vr::Texture_t faces[6];
+                for (auto& face : faces) face = {texture, vr::API_DirectX, vr::ColorSpace_Linear};
+                check(skybox.set(faces, 6) == vr::VRCompositorError_None, "copy skybox pixels on render caller");
+            }), "skybox copy boundary");
+            check(renderer.renderSkybox(views, space, skybox, layer) == XR_SUCCESS, "threaded skybox stereo");
+        }), "copied renderer boundary");
+        preserved();
+        check(pixel(runtime.images[0].Get(), 64, 60) != 0xffff00ff, "threaded private output differs from untouched game target");
+        uint64_t privateNow = 0, unknownNow = 0;
+        counts(&privateNow, &unknownNow);
+        check(privateNow == privateBefore + 8 && unknownNow == unknownBefore, "threaded private lists preserve history classification");
+        const auto callbacks = runtime.graphicsCallbacks;
+        check(owner.invoke([&] { check(!executor.invoke([]{}), "idle owner cannot use render caller"); }), "idle owner probe completes");
+        check(runtime.graphicsCallbacks == callbacks, "idle probe performs no graphics work");
+        // A render attempt outside a boundary must fail before any queued list
+        // can escape. A later valid boundary must not replay that failed list.
+        const unsigned released = runtime.releases;
+        check(owner.invoke([&] { check(renderer.render(views, space, layer) == XR_ERROR_RUNTIME_FAILURE, "renderer fails closed without active render caller"); }), "unowned render attempt returns");
+        check(render.invokeOwner([&] { check(renderer.render(views, space, layer) == XR_ERROR_RUNTIME_FAILURE, "failed unowned pass cannot replay later"); }), "sticky failure boundary");
+        check(runtime.graphicsCallbacks == callbacks && runtime.releases == released, "failed pass performs no execution or image release");
+        check(owner.invoke([&] {
+            check(renderer.needsGpuDrain(), "submitted work still needs explicit GPU completion");
+            check(renderer.shutdown() == XR_ERROR_RUNTIME_FAILURE && renderer.needsGpuDrain(), "shutdown without caller retains pending resources");
+            check(runtime.images[0] && runtime.images[1], "failed drain does not destroy swapchain images");
+        }), "unowned shutdown returns without graphics access");
+        check(runtime.graphicsCallbacks == callbacks, "rejected shutdown does not use immediate context");
+        check(render.invokeOwner([&] {
+            check(renderer.drain() == XR_SUCCESS && !renderer.needsGpuDrain(), "real GPU event completes on caller after rejected shutdown");
+        }), "GPU drain boundary");
+        check(runtime.graphicsCallbacks == callbacks + 1, "one synchronous completion callback");
+        preserved();
+    }
+    const auto beforeCleanup = runtime.graphicsCallbacks;
+    check(owner.invoke([&] {
+        skybox.shutdown(); capture.shutdown();
+        check(renderer.shutdown() == XR_SUCCESS, "owner cleanup needs no render callback");
+    }), "threaded cleanup finishes on owner");
+    check(runtime.graphicsCallbacks == beforeCleanup, "cleanup after drain needs no immediate context access");
+    runtime.drainSubject = nullptr;
+    // The deliberately failed pass may retain an acquired fake image until
+    // destruction. Retire fake bookkeeping with those destroyed handles.
+    runtime.acquired[0] = runtime.acquired[1] = runtime.waited[0] = runtime.waited[1] = false;
+    preserved();
+    render.close(); check(owner.stop(), "threaded owner joins");
+    runtime.xrThread = 0;
+}
+
 int selfTest(const wchar_t* path) {
     // The actual hook-owning DLL stays loaded until this isolated child exits.
     HMODULE proxy = LoadLibraryExW(path, nullptr,
@@ -404,6 +552,7 @@ int selfTest(const wchar_t* path) {
           "restore FALSE remains unknown");
     for (unsigned i = 0; i < slots; ++i)
         check(binding(i, nullptr) == nullptr, "restore FALSE clears binding shadow");
+    threadedRenderer(proxy, bridgeCounts);
     runtime.context->ClearState();
     // Teardown the fixture's own bindings only after checking renderer cleanup.
     std::printf("openxr_proxy_state_test: %u checks, %u failures\n", checks, failures);

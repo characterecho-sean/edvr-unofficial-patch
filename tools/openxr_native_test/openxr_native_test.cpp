@@ -30,6 +30,7 @@
 #include "../../src/openxr/runtime_exports.h"
 #include "../../src/openxr/openvr_auxiliary.h"
 #include "../../src/openxr/owner_service.h"
+#include "../../src/openxr/render_thread_dispatcher.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -43,7 +44,7 @@ using namespace edvr::openxr;
 extern "C" vr::IVRCompositor* nativeCompositorCaller(vr::IVRCompositor*);
 extern "C" vr::IVRSystem* nativeSystemCaller(vr::IVRSystem*);
 namespace {
-struct Options { std::wstring loader; unsigned seconds=10; bool dry=false, self=false; };
+struct Options { std::wstring loader, graphicsProxy; unsigned seconds=10; bool dry=false, self=false; };
 bool absolute(const std::wstring& s) {
   return s.size()>3 && ((s[0]>=L'A' && s[0]<=L'Z') || (s[0]>=L'a' && s[0]<=L'z')) &&
          s[1]==L':' && (s[2]==L'\\' || s[2]==L'/');
@@ -54,7 +55,7 @@ bool duration(const std::wstring& s, unsigned& out) {
   if(n<1 || n>60) return false; out=n; return true;
 }
 bool parse(const std::vector<std::wstring>& args, Options& out) {
-  Options o; bool seenLoader=false, seenSeconds=false;
+  Options o; bool seenLoader=false, seenSeconds=false, seenGraphics=false;
   if(args.size()==1 && args[0]==L"--dry-run") {o.dry=true;out=o;return true;}
   if(args.size()==1 && args[0]==L"--self-test") {o.self=true;out=o;return true;}
   for(size_t i=0;i<args.size();++i) {
@@ -62,9 +63,11 @@ bool parse(const std::vector<std::wstring>& args, Options& out) {
       o.loader=args[++i]; seenLoader=true;
     } else if(args[i]==L"--seconds" && !seenSeconds && i+1<args.size()) {
       if(!duration(args[++i],o.seconds)) return false; seenSeconds=true;
+    } else if(args[i]==L"--graphics-proxy" && !seenGraphics && i+1<args.size()) {
+      o.graphicsProxy=args[++i];seenGraphics=true;
     } else return false;
   }
-  if(!absolute(o.loader)) return false; out=o; return true;
+  if(!absolute(o.loader)||(seenGraphics&&!absolute(o.graphicsProxy))) return false; out=o; return true;
 }
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
@@ -114,10 +117,36 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
+class CountedGraphics final : public ImmediateExecutor {
+ public:
+  explicit CountedGraphics(RenderThreadDispatcher& dispatcher):dispatcher_(dispatcher){}
+  bool invoke(std::function<void()> callback) override {
+    bool correct=false;
+    const bool completed=dispatcher_.invoke([&] {
+      correct=dispatcher_.isRenderThread();
+      if(!correct){++wrongThread;return;}
+      ++calls;thread=GetCurrentThreadId();callback();
+    });
+    if(!completed||!correct)++rejected;
+    return completed&&correct;
+  }
+  uint64_t calls=0,wrongThread=0,rejected=0;
+  DWORD thread=0;
+ private:
+  RenderThreadDispatcher& dispatcher_;
+};
 class Host : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
-  explicit Host(OwnerService& owner):service(owner){}
+  Host(OwnerService& owner,RenderThreadDispatcher& dispatcher)
+      :service(owner),renderCaller(dispatcher),graphicsCalls(dispatcher){}
   OwnerService& service;
+  RenderThreadDispatcher& renderCaller;
+  CountedGraphics graphicsCalls;
+  // The hook-owning proxy remains loaded until process exit, as in the WARP
+  // fixture. Unloading a graphics proxy with retained hook contexts is unsafe.
+  HMODULE graphicsProxy=nullptr;
+  using BridgeCounts=void (*)(uint64_t*,uint64_t*);
+  BridgeCounts bridgeCounts=nullptr;
   Options startupOptions;
   uint64_t starts=0,stops=0,startupFrames=0;
   uint64_t eventPumps=0;
@@ -224,13 +253,16 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
       result("service_xrEndSession",r);
       return;
     }
-    // Only the owner advances loading frames. Queued API work has priority,
-    // and an open game frame is never replaced by background work. Loading
-    // predictions are deliberately not published as GetLastPoses results.
-    if(loading.work(state.frameOpen())!=LoadingWork::None&&state.running()&&!service.pending()) {
-      r=loadingStep();
-      if(r!=XR_SUCCESS){serviceFailed=true;result("loading_frame",r);}
-    }
+    // Idle service work is CPU/XR only. A loading projection needs an explicit
+    // render-caller boundary; it cannot borrow the game context between calls.
+  }
+  void loadingBoundary() {
+    if(GetCurrentThreadId()!=ownerThread||serviceStopped||serviceFailed)return;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation){serviceFailed=true;return;}
+    if(loading.work(state.frameOpen())==LoadingWork::None||!state.running())return;
+    const auto r=loadingStep();
+    if(r!=XR_SUCCESS){serviceFailed=true;result("loading_frame",r);}
   }
   XrResult loadingStep() {
     if(GetCurrentThreadId()!=ownerThread||state.frameOpen())return XR_ERROR_CALL_ORDER_INVALID;
@@ -330,7 +362,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
-      return service.invoke([&]{result=submitEye(generation,eye,texture,bounds,flags);})?result:vr::VRCompositorError_InvalidTexture;
+      return renderCaller.invokeOwner([&]{result=submitEye(generation,eye,texture,bounds,flags);})?result:vr::VRCompositorError_InvalidTexture;
     }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
@@ -352,12 +384,13 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   vr::EVRCompositorError setSkybox(uint64_t generation,const vr::Texture_t* textures,uint32_t count) override {
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
-      return service.invoke([&]{result=setSkybox(generation,textures,count);})?result:vr::VRCompositorError_InvalidTexture;
+      return renderCaller.invokeOwner([&]{result=setSkybox(generation,textures,count);})?result:vr::VRCompositorError_InvalidTexture;
     }
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed)
       return vr::VRCompositorError_InvalidTexture;
-    const auto result=skybox.set(textures,count);
+    auto result=vr::VRCompositorError_InvalidTexture;
+    if(!graphicsCalls.invoke([&]{result=skybox.set(textures,count);}))return vr::VRCompositorError_InvalidTexture;
     if(result==vr::VRCompositorError_None){++skyboxSets;loading.overrideSet();}
     return result;
   }
@@ -387,7 +420,8 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   }
   vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
-    const auto r=captured.capture(eye,texture,bounds,flags,copyPixels);
+    auto r=vr::VRCompositorError_InvalidTexture;
+    if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,copyPixels);}))return r;
     if(r==vr::VRCompositorError_None && copyPixels)++copiedEyes;
     return r;
   }
@@ -468,6 +502,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     resetEvents.retire(geometryGeneration);changes.clear();
     loading={};skybox.shutdown();captured.shutdown();
     clean=result("destroy_swapchains",stereo.shutdown())&&clean;
+    if(stereo.needsGpuDrain())return clean=false; // do not invalidate its session/images
     clean=result("destroy_seated_space",seated.shutdown())&&clean;
     // xrDestroySession is allowed in any state once handle users are excluded.
     // Normal exit ends a STOPPING session in the loop; failed/cancelled startup
@@ -549,7 +584,19 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     for(unsigned eye=0;eye<2;++eye) {sizes[eye]=views[eye];std::printf("size,%u,%u,%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight);}
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;
-    const HRESULT hr=graphics.initialize(req.adapterLuid,req.minFeatureLevel);
+    decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice;
+    if(!options.graphicsProxy.empty()) {
+      graphicsProxy=LoadLibraryExW(options.graphicsProxy.c_str(),nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+      if(!graphicsProxy){std::printf("error,graphics_proxy_load,%lu\n",GetLastError());return false;}
+      createDevice=reinterpret_cast<decltype(createDevice)>(GetProcAddress(graphicsProxy,"D3D11CreateDevice"));
+      bridgeCounts=reinterpret_cast<BridgeCounts>(GetProcAddress(graphicsProxy,"edvr_selftest_graphics_bridge"));
+      if(!createDevice||!bridgeCounts||!GetProcAddress(graphicsProxy,"edvrAcquireGraphicsBridge"))
+        return result("graphics_proxy_capability",XR_ERROR_FUNCTION_UNSUPPORTED);
+    }
+    HRESULT hr=E_FAIL;
+    if(!graphicsCalls.invoke([&]{hr=graphics.initialize(req.adapterLuid,req.minFeatureLevel,createDevice);}))
+      return result("device_render_boundary",XR_ERROR_INITIALIZATION_FAILED);
     if(FAILED(hr)) {std::printf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
     std::printf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
     const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
@@ -569,9 +616,10 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     if(metadata.adapterIndex<0)return result("system_adapter_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     geometryGeneration=geometry.begin(metadata);
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
-    if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes))) return false;
-    if(FAILED(captured.initialize(graphics.device())))return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
-    if(FAILED(skybox.initialize(graphics.device())))return result("skybox_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes,graphicsProxy,&graphicsCalls))) return false;
+    bool capturesReady=false;
+    if(!graphicsCalls.invoke([&]{capturesReady=SUCCEEDED(captured.initialize(graphics.device()))&&SUCCEEDED(skybox.initialize(graphics.device()));})||!capturesReady)
+      return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
     if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
@@ -586,21 +634,42 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
 class NativeBackend final:public RuntimeBackend {
  public:
   OwnerService owner;
+  RenderThreadDispatcher render{owner};
   std::unique_ptr<Host> host;
   Options options;
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out)override {
     if(host)return vr::VRInitError_Init_Internal; // native diagnostic: one generation per process
+    if(!render.bindCurrentThread())return vr::VRInitError_Init_Internal;
     if(!owner.start([this]{if(host)host->pumpEvents();}))return vr::VRInitError_Init_Internal;
     auto error=vr::VRInitError_Init_Internal;
-    if(!owner.invoke([&]{
-      host=std::make_unique<Host>(owner);host->startupOptions=options;
+    if(!render.invokeOwner([&]{
+      host=std::make_unique<Host>(owner,render);host->startupOptions=options;
       error=host->start(token,cancelled,out);
     }))return vr::VRInitError_Init_Internal;
     return error;
   }
+  bool prepareStop() {
+    bool drained=false;
+    return render.invokeOwner([&] {
+      const auto r=host?host->stereo.drain():XR_SUCCESS;
+      drained=r==XR_SUCCESS;
+      if(host)host->clean=result("gpu_drain",r)&&host->clean;
+      std::printf("gpu_drain,result=%d,pending=%u\n",int(r),unsigned(host&&host->stereo.needsGpuDrain()));
+    })&&drained;
+  }
   bool stop()noexcept override {
+    // Early exits still have their Init/render caller available. Normal
+    // System-thread Shutdown comes only after that caller explicitly drains.
+    if(render.isRenderThread()&&owner.running())prepareStop();
+    render.close();
     bool cleaned=!host;
     const bool joined=owner.stop([&]{cleaned=host?host->stop():true;});
+    if(joined&&host&&host->stereo.needsGpuDrain()) {
+      // Diagnostic-only last resort: never destroy a live XR session beneath
+      // uncompleted GPU work. Exit this isolated child, without a crash dialog.
+      std::puts("error,gpu_drain_failed_resources_retained_until_process_exit");
+      std::fflush(stdout);std::_Exit(3);
+    }
     return joined&&cleaned;
   }
 };
@@ -694,15 +763,16 @@ int run(const Options& options) {
   while(host.publishedPumps.load(std::memory_order_acquire)<beforePumps+2&&GetTickCount64()<pumpDeadline)Sleep(2);
   if(host.publishedPumps.load(std::memory_order_acquire)<beforePumps+2)return 3;
   if(initThread==systemThread||initThread==host.ownerThread||systemThread==host.ownerThread)return 3;
-  std::printf("runtime_threads,init=%lu,system=%lu,render_owner=%lu,idle_pump=1,system_resets=2\n",
-    (unsigned long)initThread,(unsigned long)systemThread,(unsigned long)host.ownerThread);
+  std::printf("runtime_threads,init=%lu,system=%lu,xr_owner=%lu,graphics_caller=%lu,idle_pump=1,system_resets=2\n",
+    (unsigned long)initThread,(unsigned long)systemThread,(unsigned long)host.ownerThread,(unsigned long)host.graphicsCalls.thread);
   liveQueries.store(true,std::memory_order_release);
   const ULONGLONG startup=GetTickCount64(); ULONGLONG started=startup,exitRequested=0;
-  // A copied six-face loading scene runs with no application Wait/Submit.
+  // Explicit render callbacks advance a copied six-face loading scene with
+  // no application Wait/Submit. The owner never renders from its idle pump.
   // Destroy and overwrite the caller sources before the timed viewing phase.
   Microsoft::WRL::ComPtr<ID3D11Texture2D> skySources[6];vr::Texture_t skyTextures[6]{};
   bool skyCreated=true;
-  if(!backend.owner.invoke([&]{
+  if(!backend.render.invokeOwner([&]{skyCreated=host.graphicsCalls.invoke([&]{
     constexpr unsigned side=256;
     const unsigned colors[6][3]={{35,70,110},{80,35,90},{35,90,65},{95,60,30},{50,65,100},{65,45,35}};
     std::vector<uint32_t> pixels(side*side);
@@ -720,17 +790,32 @@ int run(const Options& options) {
       if(FAILED(host.graphics.device()->CreateTexture2D(&desc,&data,&skySources[face]))){skyCreated=false;break;}
       skyTextures[face]={skySources[face].Get(),vr::API_DirectX,vr::ColorSpace_Auto};
     }
-  })||!skyCreated||compositor->SetSkyboxOverride(skyTextures,6)!=vr::VRCompositorError_None)return 3;
-  if(!backend.owner.invoke([&]{
+  })&&skyCreated;})||!skyCreated||compositor->SetSkyboxOverride(skyTextures,6)!=vr::VRCompositorError_None)return 3;
+  bool overwritten=false;
+  if(!backend.render.invokeOwner([&]{overwritten=host.graphicsCalls.invoke([&]{
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;host.graphics.device()->GetImmediateContext(&context);
     std::vector<uint32_t> black(256*256,0xff000000u);
     for(auto& source:skySources){context->UpdateSubresource(source.Get(),0,nullptr,black.data(),256*4,0);source.Reset();}
-  }))return 3;
+  });})||!overwritten)return 3;
   compositor->ClearLastSubmittedFrame();
   const auto cacheBeforeLoading=host.compositorRead();
+  bool outsideRejected=false,outsideRan=false;
+  uint64_t idleGraphics=0,idleLoading=0;
+  if(!backend.owner.invoke([&]{
+    idleGraphics=host.graphicsCalls.calls;idleLoading=host.loadingFrames;
+    outsideRejected=!host.graphicsCalls.invoke([&]{outsideRan=true;});
+  })||!outsideRejected||outsideRan)return 3;
+  const auto idlePumps=host.publishedPumps.load(std::memory_order_acquire);
+  const auto idleDeadline=GetTickCount64()+1000;
+  while(host.publishedPumps.load(std::memory_order_acquire)<idlePumps+2&&GetTickCount64()<idleDeadline)Sleep(2);
+  bool idleSafe=false;
+  if(!backend.owner.invoke([&]{idleSafe=host.graphicsCalls.calls==idleGraphics&&host.loadingFrames==idleLoading;})||
+     !idleSafe||host.publishedPumps.load(std::memory_order_acquire)<idlePumps+2)return 3;
+  std::puts("render_idle,cpu_pump_continues=1,graphics_unchanged=1,loading_unchanged=1,outside_boundary_rejected=1");
   const auto loadingDeadline=startup+(std::min)(3000ULL,options.seconds*250ULL);
   std::puts("loading_phase,begin=1,six_faces=1,sources_overwritten_and_released=1");
-  while(GetTickCount64()<loadingDeadline)Sleep(10);
+  while(GetTickCount64()<loadingDeadline)
+    if(!backend.render.invokeOwner([&]{host.loadingBoundary();}))return 3;
   bool loadingGate=false;
   if(!backend.owner.invoke([&]{
     const auto after=host.compositorRead();
@@ -867,13 +952,14 @@ int run(const Options& options) {
     }
   } while(false); };
   while(!failed&&!stopped) {
-    if(!backend.owner.invoke(renderStep)){failed=true;break;}
+    if(!backend.render.invokeOwner(renderStep)){failed=true;break;}
   }
+  const bool gpuDrained=backend.prepareStop();
   // Stop the System producer, then issue exported Shutdown from that same
   // caller thread. The runtime owner cancels queued work, cleans and joins.
   DWORD shutdownThread=0;
   const bool systemJoined=systemClient.stop([&]{shutdownThread=GetCurrentThreadId();edvr_native_VR_ShutdownInternal();});
-  const bool cleanup=systemJoined&&shutdownThread==systemThread&&!backend.owner.running()&&host.clean&&!runtime.running()&&host.runtimeGeneration==0&&host.stops==1;
+  const bool cleanup=gpuDrained&&systemJoined&&shutdownThread==systemThread&&!backend.owner.running()&&host.clean&&!runtime.running()&&host.runtimeGeneration==0&&host.stops==1;
   std::printf("runtime_service,event_pumps=%llu,system_queries=%llu,valid_system_queries=%llu,shutdown_on_system=%u,owner_joined=%u\n",
     (unsigned long long)host.eventPumps,(unsigned long long)systemQueries,(unsigned long long)validSystemQueries,
     unsigned(shutdownThread==systemThread),unsigned(systemJoined&&!backend.owner.running()));
@@ -891,10 +977,20 @@ int run(const Options& options) {
   std::printf("skybox_boundary,sets=%llu,clears=%llu,loading_frames=%llu,loading_layers=%llu,loading_empty=%llu,clear_frames=%llu,to_scene=%llu,private_textures_retired=%u\n",
     (unsigned long long)host.skyboxSets,(unsigned long long)host.skyboxClears,(unsigned long long)host.loadingFrames,
     (unsigned long long)host.loadingLayers,(unsigned long long)host.loadingEmpty,(unsigned long long)host.loadingClears,(unsigned long long)host.loadingToScene,unsigned(!host.skybox.ready()));
+  uint64_t privateLists=0,unknownLists=0;
+  if(host.bridgeCounts)host.bridgeCounts(&privateLists,&unknownLists);
+  const uint64_t expectedPrivate=4*layers+2*host.loadingLayers;
+  const bool bridgeGate=!host.graphicsProxy||(privateLists==expectedPrivate&&unknownLists==0);
+  const bool renderGate=host.graphicsCalls.calls>0&&host.graphicsCalls.thread==initThread&&
+    host.graphicsCalls.thread!=host.ownerThread&&host.graphicsCalls.wrongThread==0&&host.graphicsCalls.rejected==1&&idleSafe&&bridgeGate;
+  std::printf("render_boundary,callbacks=%llu,thread=%lu,xr_owner=%lu,wrong_thread=%llu,rejected=%llu,explicit_loading=1,paired_proxy=%u,private_lists=%llu,expected_private=%llu,unknown_lists=%llu,passed=%u\n",
+    (unsigned long long)host.graphicsCalls.calls,(unsigned long)host.graphicsCalls.thread,(unsigned long)host.ownerThread,
+    (unsigned long long)host.graphicsCalls.wrongThread,(unsigned long long)host.graphicsCalls.rejected,unsigned(host.graphicsProxy!=nullptr),
+    (unsigned long long)privateLists,(unsigned long long)expectedPrivate,(unsigned long long)unknownLists,unsigned(renderGate));
   std::printf("summary,frames=%llu,stereo=%llu,empty=%llu,valid_views=%llu,invalid_views=%llu,valid_head=%llu,normal_stop=%u,cleanup=%u\n",
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
-  const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&host.recenters==2&&host.resetPolls==2&&
+  const bool passed=!failed && stopped && cleanup && renderGate && layers && headValid && bootstrapComplete &&host.recenters==2&&host.resetPolls==2&&
     systemQueries&&validSystemQueries&&host.eventPumps>beforePumps&&loadingGate&&host.skyboxSets==1&&host.skyboxClears==1&&
     host.loadingToScene==1&&host.loadingLayers>=2&&host.loadingFrames==host.loadingLayers+host.loadingEmpty&&!host.skybox.ready()&&
     host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
@@ -912,6 +1008,10 @@ int selfTest() {
   check(parse({L"--dry-run"},o)&&o.dry,"dry-run standalone");
   check(!parse({L"--dry-run",L"--loader",L"C:/a.dll"},o),"dry-run cannot hide invalid operational args");
   check(!parse({L"--loader",L"C:/a.dll",L"--loader",L"C:/b.dll"},o),"duplicate rejected");
+  check(parse({L"--loader",L"C:/a.dll",L"--graphics-proxy",L"D:/d3d11.dll"},o)&&o.graphicsProxy==L"D:/d3d11.dll","explicit graphics proxy");
+  check(!parse({L"--loader",L"C:/a.dll",L"--graphics-proxy",L"d3d11.dll"},o),"relative graphics proxy rejected");
+  check(!parse({L"--loader",L"C:/a.dll",L"--graphics-proxy"},o),"missing graphics proxy rejected");
+  check(!parse({L"--loader",L"C:/a.dll",L"--graphics-proxy",L"D:/a.dll",L"--graphics-proxy",L"D:/b.dll"},o),"duplicate graphics proxy rejected");
   std::vector<uint32_t> values;unsigned calls=0;
   auto grow=[&](uint32_t c,uint32_t*n,uint32_t*p){++calls;*n=c?3:1;if(!c)return XR_SUCCESS;if(c<3)return XR_ERROR_SIZE_INSUFFICIENT;p[0]=7;p[1]=8;p[2]=9;return XR_SUCCESS;};
   check(enumerate<uint32_t>(grow,values)==XR_SUCCESS&&calls==3&&values==std::vector<uint32_t>({7,8,9}),"count growth");
@@ -941,7 +1041,7 @@ int selfTest() {
 int wmain(int argc,wchar_t** argv) {
   SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
   std::setvbuf(stdout,nullptr,_IONBF,0);Options options;
-  if(!parse(std::vector<std::wstring>(argv+1,argv+argc),options)) {std::puts("usage: --loader ABSOLUTE_DLL [--seconds 1..60] | --self-test | --dry-run");return 2;}
+  if(!parse(std::vector<std::wstring>(argv+1,argv+argc),options)) {std::puts("usage: --loader ABSOLUTE_DLL [--seconds 1..60] [--graphics-proxy ABSOLUTE_DLL] | --self-test | --dry-run");return 2;}
   if(options.dry) {std::puts("Would create a standalone OpenXR stereo diagnostic; no files, loader, device or runtime used.");return 0;}
   if(options.self) return selfTest();
   try {return run(options);} catch(const std::exception& e) {std::printf("error,exception,%s\n",e.what());return 5;}

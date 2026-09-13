@@ -20,6 +20,7 @@ class OwnerService final {
  public:
   static constexpr std::size_t kQueueCapacity = 16;
   using IdleCallback = std::function<void()>;
+  using CompletionCallback = std::function<void(bool)>;
 
   OwnerService() = default;
   OwnerService(const OwnerService&) = delete;
@@ -64,6 +65,26 @@ class OwnerService final {
     return request->success;
   }
 
+  // Only accepted requests call completion, exactly once, after callback
+  // captures are released. Cancellation reports false; rejection returns false
+  // without calling completion. Completion runs outside service/request locks
+  // and must not wait for this owner's progress.
+  bool submit(std::function<void()> callback, CompletionCallback completion = {}) {
+    if (!callback) return false;
+    std::shared_ptr<Request> request;
+    try { request = std::make_shared<Request>(std::move(callback), std::move(completion)); }
+    catch (...) { return false; }
+    bool accepted = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (running_ && !stopping_ && queue_.size() < kQueueCapacity) {
+        try { queue_.push_back(request); accepted = true; } catch (...) {}
+      }
+    }
+    if (accepted) { cv_.notify_one(); return true; }
+    return false;
+  }
+
   // First stop closes admission and owns the finalizer; later calls cannot
   // replace it. Queued requests are cancelled before finalization. Active
   // work finishes, then the finalizer runs on the owner before the join.
@@ -79,7 +100,7 @@ class OwnerService final {
       // Captures may have destructors. Release them without the service mutex,
       // before reporting cancellation and allowing final resource cleanup.
       lock.unlock();
-      for(auto& request:cancelled){request->callback={};finish(request,false);}
+      for(auto& request:cancelled){request->callback={};complete(request,false);finish(request,false);}
       cancelled.clear();
       lock.lock();cancellationReady_=true;cv_.notify_all();
     }
@@ -106,8 +127,10 @@ class OwnerService final {
 
  private:
   struct Request {
-    explicit Request(std::function<void()> fn) : callback(std::move(fn)) {}
-    std::function<void()> callback; std::mutex mutex; std::condition_variable cv;
+    explicit Request(std::function<void()> fn, CompletionCallback done = {})
+        : callback(std::move(fn)), completion(std::move(done)) {}
+    std::function<void()> callback; CompletionCallback completion;
+    std::mutex mutex; std::condition_variable cv;
     bool done = false, success = false;
   };
 
@@ -115,6 +138,10 @@ class OwnerService final {
   static void finish(const std::shared_ptr<Request>& request, bool success) {
     std::lock_guard<std::mutex> lock(request->mutex);
     request->success = success; request->done = true; request->cv.notify_one();
+  }
+  static void complete(const std::shared_ptr<Request>& request, bool success) {
+    auto completion = std::move(request->completion);
+    if (completion) { try { completion(success); } catch (...) {} }
   }
   void run() {
     { std::lock_guard<std::mutex> lock(mutex_); ownerId_ = std::this_thread::get_id(); }
@@ -141,6 +168,7 @@ class OwnerService final {
       if (request) {
         bool success = true; try { request->callback(); } catch (...) { success = false; }
         request->callback={};
+        complete(request, success);
         finish(request, success);
         auto now = std::chrono::steady_clock::now();
         if (idle_ && now - lastIdle >= std::chrono::milliseconds(5)) {

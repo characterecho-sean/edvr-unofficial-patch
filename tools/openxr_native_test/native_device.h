@@ -25,8 +25,10 @@ class NativeDevice {
     if(!matchesLuid(desc.AdapterLuid,required)||device->GetFeatureLevel()<minimum)return E_FAIL;
     return device->GetDeviceRemovedReason();
   }
-  HRESULT initialize(const LUID& required,D3D_FEATURE_LEVEL minimum) {
-    reset();auto levels=featureLevels(minimum);if(levels.empty())return E_INVALIDARG;
+  HRESULT initialize(const LUID& required,D3D_FEATURE_LEVEL minimum,
+                     decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice) {
+    reset();if(!createDevice)return E_INVALIDARG;
+    auto levels=featureLevels(minimum);if(levels.empty())return E_INVALIDARG;
     Microsoft::WRL::ComPtr<IDXGIFactory1> factory;HRESULT hr=CreateDXGIFactory1(IID_PPV_ARGS(&factory));if(FAILED(hr))return hr;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> selected;
     for(UINT n=0;;++n) {
@@ -38,12 +40,12 @@ class NativeDevice {
     if(!selected)return DXGI_ERROR_NOT_FOUND;
     Microsoft::WRL::ComPtr<ID3D11Device> device;Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL got{};
-    hr=D3D11CreateDevice(selected.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,levels.data(),UINT(levels.size()),D3D11_SDK_VERSION,&device,&got,&context);
+    hr=createDevice(selected.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,levels.data(),UINT(levels.size()),D3D11_SDK_VERSION,&device,&got,&context);
     // Older D3D11 implementations reject the 11.1 enumerator. Retry the same
     // adapter only, without weakening the runtime's minimum feature level.
     if(hr==E_INVALIDARG&&levels.front()==D3D_FEATURE_LEVEL_11_1&&levels.size()>1) {
       device.Reset();context.Reset();
-      hr=D3D11CreateDevice(selected.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,levels.data()+1,UINT(levels.size()-1),D3D11_SDK_VERSION,&device,&got,&context);
+      hr=createDevice(selected.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,levels.data()+1,UINT(levels.size()-1),D3D11_SDK_VERSION,&device,&got,&context);
     }
     if(FAILED(hr))return hr;
     hr=validate(device.Get(),required,minimum);if(FAILED(hr))return hr;

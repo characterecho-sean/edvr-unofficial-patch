@@ -1,5 +1,13 @@
 # OpenXR implementation status
 
+The current [render-caller handoff
+checkpoint](openxr-render-thread-2026-09-13.md) integrates separate XR and
+graphics threads in the diagnostic, explicit loading callbacks, the paired
+graphics proxy and GPU completion before swapchain destruction. The full build
+and desktop integration gates pass; a fresh PiOpenXR gate is pending. Native
+Frontier transport remains unimplemented. The entries below retain the evidence
+and limits of earlier checkpoints.
+
 The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
 `8c617dc` before implementation began. Work remains in Phase 0; it is not an
 OpenXR backend or a completed Phase 0 qualification. The latest checkpoint adds
@@ -185,6 +193,14 @@ the configuration contract remains 254 keys. This is desktop preparation: the
 lease requires existing exclusive context ownership and does not establish
 game-thread scheduling. The native harness still uses its standalone device
 path, and the installed Frontier pair remains `f3c205e`.
+
+The subsequent [render-caller handoff](openxr-render-thread-2026-09-13.md)
+replaces idle graphics work with explicit synchronous render boundaries. It
+adds cancellation/lifetime coordination, paired-proxy native selection and GPU
+completion before owner-side teardown. The 100-check CPU and 504-check
+actual-DLL fixtures cover distinct owner/caller threads and retained resources
+after rejected shutdown. The native harness now supports this boundary; real
+game Init/render ownership and render hooks remain separate integration work.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact

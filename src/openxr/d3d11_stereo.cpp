@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <exception>
 
 namespace edvr::openxr {
 namespace {
@@ -115,7 +116,7 @@ void skyRotation(const XrQuaternionf& q,float (&r)[3][4]) {
 }
 }
 
-D3D11Stereo::~D3D11Stereo(){shutdown();}
+D3D11Stereo::~D3D11Stereo(){shutdown();if(gpuPending_)std::terminate();}
 XrResult D3D11Stereo::submitCommands() {
   ComPtr<ID3D11CommandList> list;
   const HRESULT finished=context_->FinishCommandList(FALSE,&list);
@@ -127,20 +128,63 @@ XrResult D3D11Stereo::submitCommands() {
     return FAILED(device_->GetDeviceRemovedReason())?
       XR_ERROR_GRAPHICS_DEVICE_INVALID:XR_ERROR_RUNTIME_FAILURE;
   }
-  if(graphicsBridge_.active()) {
-    if(FAILED(graphicsBridge_.execute(list.Get())))
-      return FAILED(device_->GetDeviceRemovedReason())?
-        XR_ERROR_GRAPHICS_DEVICE_INVALID:XR_ERROR_RUNTIME_FAILURE;
-  } else {
-    immediateContext_->ExecuteCommandList(list.Get(),TRUE);
+  XrResult result=XR_ERROR_RUNTIME_FAILURE;
+  const auto execute=[&] {
+    // A chained hook can submit and still report failure. Conservatively
+    // require completion once execution is attempted, even on that path.
+    gpuPending_=true;
+    if(graphicsBridge_.active()) {
+      if(FAILED(graphicsBridge_.execute(list.Get()))) {
+        result=FAILED(device_->GetDeviceRemovedReason())?
+          XR_ERROR_GRAPHICS_DEVICE_INVALID:XR_ERROR_RUNTIME_FAILURE;
+        return;
+      }
+    } else {
+      immediateContext_->ExecuteCommandList(list.Get(),TRUE);
+      immediateContext_->Flush();
+    }
+    result=XR_SUCCESS;
+  };
+  if(immediateExecutor_) {
+    if(!immediateExecutor_->invoke(execute))return XR_ERROR_RUNTIME_FAILURE;
+  } else execute();
+  return result;
+}
+XrResult D3D11Stereo::drain() {
+  if(!gpuPending_)return XR_SUCCESS;
+  XrResult result=XR_ERROR_RUNTIME_FAILURE;
+  const auto wait=[&] {
+    if(FAILED(device_->GetDeviceRemovedReason())) {
+      gpuPending_=false;result=XR_ERROR_GRAPHICS_DEVICE_INVALID;return;
+    }
+    immediateContext_->End(completion_.Get());
     immediateContext_->Flush();
-  }
-  return XR_SUCCESS;
+    const auto began=GetTickCount64();
+    for(;;) {
+      BOOL complete=FALSE;
+      const HRESULT r=immediateContext_->GetData(completion_.Get(),&complete,sizeof(complete),D3D11_ASYNC_GETDATA_DONOTFLUSH);
+      if(r==S_OK&&complete){gpuPending_=false;result=XR_SUCCESS;return;}
+      if(FAILED(device_->GetDeviceRemovedReason())) {
+        gpuPending_=false;result=XR_ERROR_GRAPHICS_DEVICE_INVALID;return;
+      }
+      if(FAILED(r)||GetTickCount64()-began>=5000)return;
+      Sleep(1);
+    }
+  };
+  if(immediateExecutor_) {
+    if(!immediateExecutor_->invoke(wait))return XR_ERROR_RUNTIME_FAILURE;
+  } else wait();
+  return result;
 }
 XrResult D3D11Stereo::shutdown() {
-  XrResult first=XR_SUCCESS;ready_=false;
+  ready_=false;
+  // xrDestroySwapchain requires completed GPU execution. Flush alone only
+  // submits it. Failed admission/timeout retains handles and the bridge so a
+  // still-live render caller can retry; never destroy the parent session then.
+  XrResult first=drain();
+  if(gpuPending_)return first;
   // Release any recorded work before destroying its runtime-owned images.
-  // Never clear or flush the caller's immediate context during cleanup.
+  // Never clear the caller's immediate pipeline state during cleanup.
   context_.Reset();
   constants_.Reset();blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();vertices_.Reset();layout_.Reset();pixelShader_.Reset();vertexShader_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();
   for(auto& eye:eyes_){
@@ -149,12 +193,15 @@ XrResult D3D11Stereo::shutdown() {
     eye.swapchain=XR_NULL_HANDLE;eye.width=eye.height=0;
   }
   graphicsBridge_.reset();
+  completion_.Reset();
+  immediateExecutor_=nullptr;
   context_.Reset();immediateContext_.Reset();device_.Reset();session_=XR_NULL_HANDLE;format_=0;dispatch_={};lastResult_=XR_SUCCESS;
   for(auto& view:layerViews_)view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
   return first;
 }
 XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D11Device* device,
-                               const XrViewConfigurationView (&views)[2],HMODULE graphicsProvider) {
+                               const XrViewConfigurationView (&views)[2],HMODULE graphicsProvider,
+                               ImmediateExecutor* immediateExecutor) {
   const XrResult closed=shutdown();if(closed!=XR_SUCCESS)return closed;
   if(!session||!device)return XR_ERROR_HANDLE_INVALID;
   if(!d.enumerateSwapchainFormats||!d.createSwapchain||!d.destroySwapchain||!d.enumerateSwapchainImages||
@@ -165,10 +212,19 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
     v.maxSwapchainSampleCount<1)return XR_ERROR_VALIDATION_FAILURE;
   if(device->GetFeatureLevel()<D3D_FEATURE_LEVEL_11_0)return XR_ERROR_GRAPHICS_DEVICE_INVALID;
   dispatch_=d;session_=session;device_=device;device_->GetImmediateContext(&immediateContext_);
+  immediateExecutor_=immediateExecutor;
   auto failed=[&](XrResult r){shutdown();return r;};
   if(!immediateContext_||FAILED(device_->CreateDeferredContext(0,&context_)))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
-  if(graphicsProvider && FAILED(graphicsBridge_.acquire(graphicsProvider,device,immediateContext_.Get())))
-    return failed(XR_ERROR_INITIALIZATION_FAILED);
+  const D3D11_QUERY_DESC completionDesc{D3D11_QUERY_EVENT,0};
+  if(FAILED(device_->CreateQuery(&completionDesc,&completion_)))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
+  if(graphicsProvider) {
+    HRESULT acquired=E_FAIL;
+    const auto acquire=[&]{acquired=graphicsBridge_.acquire(graphicsProvider,device,immediateContext_.Get());};
+    if(immediateExecutor_) {
+      if(!immediateExecutor_->invoke(acquire))return failed(XR_ERROR_INITIALIZATION_FAILED);
+    } else acquire();
+    if(FAILED(acquired))return failed(XR_ERROR_INITIALIZATION_FAILED);
+  }
   std::vector<int64_t> formats;
   XrResult r=enumerate<int64_t>([&](uint32_t c,uint32_t*n,int64_t*p){return d.enumerateSwapchainFormats(session,c,n,p);},formats);
   if(r!=XR_SUCCESS)return failed(r);

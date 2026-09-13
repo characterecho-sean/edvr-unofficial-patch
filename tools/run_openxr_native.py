@@ -37,6 +37,21 @@ def existing_absolute(value: str) -> Path:
     return path.resolve()
 
 
+def build_command(executable: Path, loader: Path, seconds_value: int,
+                  graphics_proxy: Path | None = None) -> list[str]:
+    command = [str(executable), "--loader", str(loader), "--seconds", str(seconds_value)]
+    if graphics_proxy is not None:
+        command.extend(("--graphics-proxy", str(graphics_proxy)))
+    return command
+
+
+def graphics_proxy_metadata(graphics_proxy: Path | None) -> dict[str, str | None]:
+    return {
+        "graphics_proxy": str(graphics_proxy) if graphics_proxy else None,
+        "graphics_proxy_sha256": digest(graphics_proxy) if graphics_proxy else None,
+    }
+
+
 def active_manifest(override: Path | None) -> Path | None:
     if override:
         return override
@@ -126,6 +141,21 @@ def self_test() -> int:
         check(json.loads((root / "timeout" / "receipt.json").read_text())["timed_out"])
         check(run_child([str(root / "missing.exe")], root / "missing", env, 10, {}) == 1)
         check("launch_error" in json.loads((root / "missing" / "receipt.json").read_text()))
+        proxy = root / "d3d11.dll"
+        proxy.write_bytes(b"proxy fixture")
+        command_with_proxy = build_command(root / "openxr_native_test.exe", root / "openxr_loader.dll", 7, proxy)
+        check(command_with_proxy[-2:] == ["--graphics-proxy", str(proxy)])
+        command_without_proxy = build_command(root / "openxr_native_test.exe", root / "openxr_loader.dll", 7)
+        check("--graphics-proxy" not in command_without_proxy)
+        proxy_metadata = graphics_proxy_metadata(proxy)
+        check(proxy_metadata["graphics_proxy"] == str(proxy))
+        check(proxy_metadata["graphics_proxy_sha256"] == hashlib.sha256(b"proxy fixture").hexdigest())
+        check(graphics_proxy_metadata(None) == {"graphics_proxy": None, "graphics_proxy_sha256": None})
+        try:
+            existing_absolute(str(root / "missing_proxy.dll"))
+            check(False)
+        except ValueError:
+            check(True)
         for invalid in ("0", "61", "-1", "1x", "1.5", ""):
             try:
                 seconds(invalid)
@@ -141,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loader", help="absolute installed OpenXR loader DLL path")
     parser.add_argument("--runtime", help="absolute runtime JSON; child environment only")
+    parser.add_argument("--graphics-proxy", help="absolute existing graphics proxy DLL path")
     parser.add_argument("--seconds", type=seconds, default=10)
     parser.add_argument("--output", type=Path, help="new output directory (never overwrites a capture)")
     parser.add_argument("--dry-run", action="store_true")
@@ -156,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         loader = existing_absolute(args.loader)
         runtime = existing_absolute(args.runtime) if args.runtime else None
+        graphics_proxy = existing_absolute(args.graphics_proxy) if args.graphics_proxy else None
         manifest = active_manifest(runtime)
         executable = existing_absolute(str(ROOT / "build" / "openxr_native_test.exe"))
         output = (args.output or ROOT / "build" / ("openxr-native-" + datetime.now().strftime("%Y%m%d-%H%M%S"))).resolve()
@@ -166,8 +198,9 @@ def main(argv: list[str] | None = None) -> int:
                     "loader": str(loader), "loader_sha256": digest(loader),
                     "runtime_manifest": str(manifest) if manifest else None,
                     "runtime_manifest_sha256": digest(manifest) if manifest else None,
-                    "explicit_runtime_override": bool(runtime), "seconds": args.seconds}
-        command = [str(executable), "--loader", str(loader), "--seconds", str(args.seconds)]
+                    "explicit_runtime_override": bool(runtime), "seconds": args.seconds,
+                    **graphics_proxy_metadata(graphics_proxy)}
+        command = build_command(executable, loader, args.seconds, graphics_proxy)
         return run_child(command, output, environment, args.seconds + 40, metadata, dry_run=args.dry_run)
     except (OSError, ValueError) as error:
         print(f"[edvr] {error}", file=sys.stderr)
