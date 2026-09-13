@@ -1,7 +1,18 @@
 # OpenXR implementation status
 
-The current [native-module checkpoint](openxr-native-module-2026-09-13.md) puts
-the native backend behind a separately loaded DLL exposing Frontier's five
+Main through `0d7251b` was merged and verified as `9f26dd4`. The new [native
+startup checkpoint](openxr-native-bootstrap-2026-09-13.md) adds initialization
+through the application's ordinary Init export using explicit child environment
+paths, plus three typed initialization-error exports. The full build passed,
+including 169 explicit-configuration checks, 175 bootstrap checks, 168
+Present/discovery checks and 46 runner checks. All 477 source, binary,
+environment and build-log hashes are recorded. The bootstrap headset gate
+remains pending. The staged DLL is still outside the installer payload; full
+legacy exports, transport-hook independence and native Frontier integration
+remain open.
+
+The preceding [native-module checkpoint](openxr-native-module-2026-09-13.md)
+puts the native backend behind a separately loaded DLL exposing Frontier's five
 imported OpenVR entry points. An application fixture creates its device before
 Init, discovers the returned interfaces through those exports, renders from
 their poses and matrices, and drives loading and shutdown through real Present

@@ -2,8 +2,10 @@
 #include <windows.h>
 #include <stdint.h>
 
-// Explicit embedding API for the staged DLL. This is not game configuration
-// or a shipping replacement for the full legacy OpenVR export surface.
+// Explicit embedding API for the staged DLL. Alternatively, the first Scene
+// VR_InitInternal reads EDVR_OPENXR_LOADER and EDVR_OPENXR_GRAPHICS from this
+// process environment. Both must be trusted drive-absolute paths. This is not
+// installer configuration or the full legacy OpenVR replacement surface.
 #define EDVR_NATIVE_MODULE_VERSION_1 1u
 enum EdvrNativeModulePhase {
     EDVR_NATIVE_CONFIGURED = 1, EDVR_NATIVE_STARTING = 2,

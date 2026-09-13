@@ -2,6 +2,8 @@
 #include "native_render_binding.h"
 #include "render_shutdown.h"
 #include "native_module.h"
+#include "native_bootstrap.h"
+#include "init_error.h"
 #include <new>
 #include <stdexcept>
 
@@ -203,7 +205,32 @@ extern "C" HRESULT WINAPI edvrGetNativeRuntimeStatus(EdvrNativeRuntimeStatus* st
 extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,vr::EVRApplicationType application) noexcept {
   try {
     if (auto* owner=module.load(std::memory_order_acquire)) return owner->lifecycle.init(error,application);
-    if(error)*error=vr::VRInitError_Init_NotInitialized;
+    // The staged DLL can also be initialized by an unmodified application:
+    // its launcher supplies both trusted paths in this process environment.
+    // No file/registry selection or fallback to another OpenVR backend occurs.
+    if (application!=vr::VRApplication_Scene) {
+      if(error)*error=vr::VRInitError_Init_NotSupportedWithCompositor;return 0;
+    }
+    BootstrapPaths paths;
+    const auto result=readBootstrapPaths(paths);
+    if (result!=BootstrapResult::Ready) {
+      if(error)*error=result==BootstrapResult::Unconfigured?
+          vr::VRInitError_Init_NotInitialized:vr::VRInitError_Init_InstallationCorrupt;
+      return 0;
+    }
+    const EdvrNativeRuntimeConfig config{sizeof(config),EDVR_NATIVE_MODULE_VERSION_1,
+        paths.loader.c_str(),paths.graphics.c_str(),5000,0};
+    const HRESULT configured=edvrConfigureNativeRuntime(&config);
+    // Another Init or explicit configuration may have published the winner.
+    // Use that immutable configuration; never reconfigure a running module.
+    if (configured!=S_OK&&configured!=E_PENDING) {
+      if(error)*error=vr::VRInitError_Init_InstallationCorrupt;return 0;
+    }
+    if (configured==S_OK) {
+      std::puts("module_configuration,source=environment");std::fflush(stdout);
+    }
+    if (auto* owner=module.load(std::memory_order_acquire))return owner->lifecycle.init(error,application);
+    if(error)*error=vr::VRInitError_Init_Internal;
   } catch (...) { if(error)*error=vr::VRInitError_Init_Internal; }
   return 0;
 }
@@ -221,4 +248,16 @@ extern "C" bool __cdecl edvr_module_VR_IsInterfaceVersionValid(const char* versi
 extern "C" uint32_t __cdecl edvr_module_VR_GetInitToken() noexcept {
   try { if(auto* owner=module.load(std::memory_order_acquire))return owner->lifecycle.token(); } catch (...) {}
   return 0;
+}
+
+extern "C" const char* __cdecl edvr_module_VR_GetVRInitErrorAsSymbol(vr::EVRInitError error) noexcept {
+  return initErrorSymbol(error);
+}
+extern "C" const char* __cdecl edvr_module_VR_GetVRInitErrorAsEnglishDescription(vr::EVRInitError error) noexcept {
+  return initErrorDescription(error);
+}
+// Valve's openvr_api_public.cpp declares this legacy export with EVRInitError
+// and implements it as the English-description alias. Not a generic thunk.
+extern "C" const char* __cdecl edvr_module_VR_GetStringForHmdError(vr::EVRInitError error) noexcept {
+  return edvr_module_VR_GetVRInitErrorAsEnglishDescription(error);
 }

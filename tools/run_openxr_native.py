@@ -39,11 +39,13 @@ def existing_absolute(value: str) -> Path:
 
 def build_command(executable: Path, loader: Path, seconds_value: int,
                   graphics_proxy: Path | None = None, present_boundary: bool = False,
-                  runtime_module: Path | None = None) -> list[str]:
+                  runtime_module: Path | None = None, bootstrap: bool = False) -> list[str]:
     if present_boundary and graphics_proxy is None:
         raise ValueError("--present-boundary requires --graphics-proxy")
     if runtime_module is not None and (graphics_proxy is None or not present_boundary):
         raise ValueError("--runtime-module requires --graphics-proxy and --present-boundary")
+    if bootstrap and runtime_module is None:
+        raise ValueError("--bootstrap requires --runtime-module")
     command = [str(executable), "--loader", str(loader), "--seconds", str(seconds_value)]
     if graphics_proxy is not None:
         command.extend(("--graphics-proxy", str(graphics_proxy)))
@@ -51,7 +53,24 @@ def build_command(executable: Path, loader: Path, seconds_value: int,
         command.append("--present-boundary")
     if runtime_module is not None:
         command.extend(("--runtime-module", str(runtime_module)))
+    if bootstrap:
+        command.append("--bootstrap")
     return command
+
+
+def child_environment(inherited: dict[str, str], loader: Path,
+                      graphics_proxy: Path | None, runtime: Path | None,
+                      bootstrap: bool) -> dict[str, str]:
+    if bootstrap and graphics_proxy is None:
+        raise ValueError("bootstrap requires an explicit graphics proxy")
+    names = {"EDVR_OPENXR_LOADER", "EDVR_OPENXR_GRAPHICS"}
+    result = {key: value for key, value in inherited.items() if key.upper() not in names}
+    if runtime:
+        result["XR_RUNTIME_JSON"] = str(runtime)
+    if bootstrap:
+        result["EDVR_OPENXR_LOADER"] = str(loader)
+        result["EDVR_OPENXR_GRAPHICS"] = str(graphics_proxy)
+    return result
 
 
 def graphics_proxy_metadata(graphics_proxy: Path | None) -> dict[str, str | None]:
@@ -185,6 +204,29 @@ def self_test() -> int:
         check(run_child(module_command, root / "dry-module", env, 10,
                         {"runtime_module": str(module), "runtime_module_sha256": digest(module)},
                         dry_run=True) == 0 and not (root / "dry-module").exists())
+        bootstrap_command = build_command(module_executable, root / "loader.dll", 7, proxy, True, module, True)
+        check(bootstrap_command[-1] == "--bootstrap" and "--bootstrap" not in module_command)
+        inherited = {"EDVR_OPENXR_LOADER": "stale", "edvr_openxr_graphics": "stale", "KEEP": "same"}
+        boot_env = child_environment(inherited, root / "loader.dll", proxy, root / "runtime.json", True)
+        check(boot_env == {"KEEP": "same", "XR_RUNTIME_JSON": str(root / "runtime.json"),
+                           "EDVR_OPENXR_LOADER": str(root / "loader.dll"), "EDVR_OPENXR_GRAPHICS": str(proxy)})
+        check(child_environment(inherited, root / "loader.dll", proxy, None, False) == {"KEEP": "same"})
+        check(inherited == {"EDVR_OPENXR_LOADER": "stale", "edvr_openxr_graphics": "stale", "KEEP": "same"})
+        check(run_child(bootstrap_command, root / "dry-bootstrap", boot_env, 10, {}, dry_run=True) == 0)
+        check(not (root / "dry-bootstrap").exists())
+        try:
+            build_command(module_executable, root / "loader.dll", 7, proxy, True, bootstrap=True)
+            check(False)
+        except ValueError:
+            check(True)
+        try:
+            child_environment(inherited, root / "loader.dll", None, None, True)
+            check(False)
+        except ValueError:
+            check(True)
+        bootstrap_reader = [sys.executable, "-c", "import os; print(os.environ['EDVR_OPENXR_LOADER']); print(os.environ['EDVR_OPENXR_GRAPHICS'])"]
+        check(run_child(bootstrap_reader, root / "bootstrap-env", boot_env, 10, {}) == 0)
+        check((root / "bootstrap-env" / "output.log").read_text().splitlines() == [str(root / "loader.dll"), str(proxy)])
         for kwargs in ({"runtime_module": module}, {"graphics_proxy": proxy, "runtime_module": module}):
             try:
                 build_command(root / "test.exe", root / "loader.dll", 7, **kwargs)
@@ -224,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--graphics-proxy", help="absolute existing graphics proxy DLL path")
     parser.add_argument("--present-boundary", action="store_true", help="drive graphics through the real proxy Present hook; requires --graphics-proxy")
     parser.add_argument("--runtime-module", help="absolute existing runtime module DLL; requires graphics proxy and Present boundary")
+    parser.add_argument("--bootstrap", action="store_true", help="initialize the staged DLL from child environment paths without the embedding call")
     parser.add_argument("--seconds", type=seconds, default=10)
     parser.add_argument("--output", type=Path, help="new output directory (never overwrites a capture)")
     parser.add_argument("--dry-run", action="store_true")
@@ -245,21 +288,22 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--present-boundary requires --graphics-proxy")
         if runtime_module is not None and (graphics_proxy is None or not args.present_boundary):
             raise ValueError("--runtime-module requires --graphics-proxy and --present-boundary")
+        if args.bootstrap and runtime_module is None:
+            raise ValueError("--bootstrap requires --runtime-module")
         manifest = active_manifest(runtime)
         executable = diagnostic_executable(runtime_module)
         output = (args.output or ROOT / "build" / ("openxr-native-" + datetime.now().strftime("%Y%m%d-%H%M%S"))).resolve()
-        environment = os.environ.copy()
-        if runtime:
-            environment["XR_RUNTIME_JSON"] = str(runtime)
+        environment = child_environment(dict(os.environ), loader, graphics_proxy, runtime, args.bootstrap)
         metadata = {"executable": str(executable), "executable_sha256": digest(executable),
                     "loader": str(loader), "loader_sha256": digest(loader),
                     "runtime_manifest": str(manifest) if manifest else None,
                     "runtime_manifest_sha256": digest(manifest) if manifest else None,
                     "explicit_runtime_override": bool(runtime), "seconds": args.seconds,
                     "present_boundary": args.present_boundary,
+                    "bootstrap": args.bootstrap,
                     **runtime_module_metadata(runtime_module),
                     **graphics_proxy_metadata(graphics_proxy)}
-        command = build_command(executable, loader, args.seconds, graphics_proxy, args.present_boundary, runtime_module)
+        command = build_command(executable, loader, args.seconds, graphics_proxy, args.present_boundary, runtime_module, args.bootstrap)
         return run_child(command, output, environment, args.seconds + 40, metadata, dry_run=args.dry_run)
     except (OSError, ValueError) as error:
         print(f"[edvr] {error}", file=sys.stderr)

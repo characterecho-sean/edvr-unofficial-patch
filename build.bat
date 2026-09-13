@@ -1088,6 +1088,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module test build failed & exit /b 1 )
 "%BUILD%\openxr_module_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test || exit /b 1
+"%BUILD%\openxr_module_test.exe" --self-test-bootstrap || exit /b 1
 
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^

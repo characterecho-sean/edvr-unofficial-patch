@@ -5,5 +5,8 @@ EXPORTS
     VR_GetGenericInterface=edvr_module_VR_GetGenericInterface
     VR_IsInterfaceVersionValid=edvr_module_VR_IsInterfaceVersionValid
     VR_GetInitToken=edvr_module_VR_GetInitToken
+    VR_GetVRInitErrorAsSymbol=edvr_module_VR_GetVRInitErrorAsSymbol
+    VR_GetVRInitErrorAsEnglishDescription=edvr_module_VR_GetVRInitErrorAsEnglishDescription
+    VR_GetStringForHmdError=edvr_module_VR_GetStringForHmdError
     edvrConfigureNativeRuntime
     edvrGetNativeRuntimeStatus

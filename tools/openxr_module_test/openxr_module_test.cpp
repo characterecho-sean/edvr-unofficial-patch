@@ -1,10 +1,13 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../../src/openxr/native_module.h"
+#include "../../src/openxr/native_bootstrap.h"
 #include "../../src/openvr/compat/openvr_v0_9_20.h"
 #include "../openxr_native_test/present_device.h"
 #include "scene.h"
 #include "viewing_phase.h"
+#include "bootstrap_tests.h"
+#include "init_error_tests.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -13,6 +16,8 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <climits>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -39,6 +44,8 @@ struct Exports {
   using Valid=bool(__cdecl*)(const char*);
   using Token=uint32_t(__cdecl*)();
   Init init=nullptr; Shutdown shutdown=nullptr; Generic generic=nullptr; Valid valid=nullptr; Token token=nullptr;
+  using ErrorText=const char*(__cdecl*)(vr::EVRInitError);
+  ErrorText symbol=nullptr,description=nullptr,legacyDescription=nullptr;
   decltype(&edvrConfigureNativeRuntime) configure=nullptr;
   decltype(&edvrGetNativeRuntimeStatus) getStatus=nullptr;
   bool load(const std::wstring& path) {
@@ -49,9 +56,12 @@ struct Exports {
     generic=reinterpret_cast<Generic>(GetProcAddress(module,"VR_GetGenericInterface"));
     valid=reinterpret_cast<Valid>(GetProcAddress(module,"VR_IsInterfaceVersionValid"));
     token=reinterpret_cast<Token>(GetProcAddress(module,"VR_GetInitToken"));
+    symbol=reinterpret_cast<ErrorText>(GetProcAddress(module,"VR_GetVRInitErrorAsSymbol"));
+    description=reinterpret_cast<ErrorText>(GetProcAddress(module,"VR_GetVRInitErrorAsEnglishDescription"));
+    legacyDescription=reinterpret_cast<ErrorText>(GetProcAddress(module,"VR_GetStringForHmdError"));
     configure=reinterpret_cast<decltype(configure)>(GetProcAddress(module,"edvrConfigureNativeRuntime"));
     getStatus=reinterpret_cast<decltype(getStatus)>(GetProcAddress(module,"edvrGetNativeRuntimeStatus"));
-    return init&&shutdown&&generic&&valid&&token&&configure&&getStatus;
+    return init&&shutdown&&generic&&valid&&token&&configure&&getStatus&&symbol&&description&&legacyDescription;
   }
   EdvrNativeRuntimeStatus status() const {
     EdvrNativeRuntimeStatus out{sizeof(out),EDVR_NATIVE_MODULE_VERSION_1};
@@ -67,12 +77,13 @@ bool absolute(const std::wstring& p) {
   return p.size()>3&&p.find(L'\0')==std::wstring::npos&&
     ((p[0]>=L'A'&&p[0]<=L'Z')||(p[0]>=L'a'&&p[0]<=L'z'))&&p[1]==L':'&&(p[2]==L'\\'||p[2]==L'/');
 }
-struct Options {std::wstring loader,graphics,module;unsigned seconds=10;bool present=false;};
+struct Options {std::wstring loader,graphics,module;unsigned seconds=10;bool present=false,bootstrap=false;};
 bool parse(int argc,wchar_t** argv,Options& options) {
   bool seenSeconds=false;
   for(int i=1;i<argc;++i) {
     const std::wstring flag=argv[i];
     if(flag==L"--present-boundary"&&!options.present){options.present=true;continue;}
+    if(flag==L"--bootstrap"&&!options.bootstrap){options.bootstrap=true;continue;}
     if(i+1==argc)return false;
     const std::wstring value=argv[++i];
     if(flag==L"--loader"&&options.loader.empty())options.loader=value;
@@ -179,15 +190,55 @@ void viewingPhaseTests() {
   check(ViewingPhase(0,0).state()==S::Expired&&ViewingPhase(0,61).state()==S::Expired,"invalid viewing duration rejected");
 }
 
-int selfTest() {
+// Only used inside this isolated desktop test process. Restore inherited values
+// after all workers join; never write user or machine environment settings.
+struct TestEnvironment {
+  const wchar_t* names[2]={L"EDVR_OPENXR_LOADER",L"EDVR_OPENXR_GRAPHICS"};
+  std::wstring saved[2]; bool existed[2]{};
+  TestEnvironment() {
+    for(unsigned i=0;i<2;++i) {
+      SetLastError(ERROR_SUCCESS);const DWORD size=GetEnvironmentVariableW(names[i],nullptr,0);
+      existed[i]=size!=0||GetLastError()==ERROR_SUCCESS;
+      if(size){std::vector<wchar_t> buffer(size);const DWORD n=GetEnvironmentVariableW(names[i],buffer.data(),size);
+        if(n>=size)throw std::runtime_error("test environment changed during capture");saved[i].assign(buffer.data(),n);}
+    }
+    for(const auto* name:names)check(SetEnvironmentVariableW(name,nullptr)!=FALSE,"clear child bootstrap environment");
+  }
+  ~TestEnvironment(){for(unsigned i=0;i<2;++i)SetEnvironmentVariableW(names[i],existed[i]?saved[i].c_str():nullptr);}
+  void set(const wchar_t* loader,const wchar_t* graphics) {
+    check(SetEnvironmentVariableW(names[0],loader)!=FALSE&&SetEnvironmentVariableW(names[1],graphics)!=FALSE,"set child bootstrap environment");
+  }
+};
+
+void exportedErrorTests(const Exports& api) {
+  check(!std::strcmp(api.symbol(vr::VRInitError_None),"VRInitError_None"),"DLL returns exact success symbol");
+  check(!std::strcmp(api.symbol(vr::VRInitError_Init_NotInitialized),"VRInitError_Init_NotInitialized"),"DLL returns exact native failure symbol");
+  for(const auto value:{vr::VRInitError_None,vr::VRInitError_Init_InterfaceNotFound,
+      vr::VRInitError_Init_InstallationCorrupt,static_cast<vr::EVRInitError>(-97)}) {
+    const auto text=api.description(value);
+    check(text&&*text&&text==api.description(value)&&text==api.legacyDescription(value),"DLL error description and legacy alias have stable lifetime");
+  }
+  std::atomic<bool> consistent{true};const auto text=api.symbol(vr::VRInitError_Init_NotInitialized);
+  std::thread reader([&]{for(unsigned i=0;i<100;++i)if(api.symbol(vr::VRInitError_Init_NotInitialized)!=text||
+      std::strcmp(api.symbol(static_cast<vr::EVRInitError>(INT_MAX)),"VRInitError_Unknown"))consistent=false;});
+  reader.join();check(consistent,"DLL error strings are safe across callers");
+}
+
+int selfTest(bool bootstrap=false) {
   Watchdog watchdog;
+  TestEnvironment environment;
   viewingPhaseTests();
+  bootstrap_test::runBootstrapTests(check);
+  runInitErrorTests(check);
   const auto directory=executableDirectory();const auto graphicsPath=(directory/L"d3d11.dll").wstring();
   const auto missingLoader=(directory/L"intentionally-absent-openxr-loader.dll").wstring();
   check(!std::filesystem::exists(missingLoader),"negative loader fixture is absent");
   if(std::filesystem::exists(missingLoader))return 1;
   Exports api;check(api.load((directory/L"edvr_openxr_runtime.dll").wstring()),"load actual native module exports");
-  if(!api.configure)return 1;
+  if(!api.configure||!api.symbol||!api.description||!api.legacyDescription)return 1;
+  exportedErrorTests(api);
+  EdvrNativeRuntimeStatus before{sizeof(before),EDVR_NATIVE_MODULE_VERSION_1};
+  check(api.getStatus(&before)==S_FALSE&&before.phase==0&&before.initAttempts==0&&api.token()==0,"error exports leave module unconfigured");
   vr::EVRInitError error=vr::VRInitError_Unknown;
   check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_NotInitialized,"unconfigured Init fails without a runtime");
   check(api.token()==0&&api.valid(vr::IVRSystem_Version)&&!api.valid("IVROverlay_011"),"exact support table exists before Init");
@@ -198,10 +249,20 @@ int selfTest() {
   invalid=config;invalid.version=2;check(api.configure(&invalid)==E_INVALIDARG,"module config version rejected");
   invalid=config;invalid.loaderPath=L"loader.dll";check(api.configure(&invalid)==E_INVALIDARG,"relative runtime loader rejected");
   invalid=config;invalid.renderWaitMilliseconds=0;check(api.configure(&invalid)==E_INVALIDARG,"zero startup wait rejected");
-  check(api.configure(&config)==S_OK&&api.configure(&config)==E_PENDING,"configure once outside loader lock");
+  if(bootstrap) {
+    environment.set(missingLoader.c_str(),nullptr);
+    check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_InstallationCorrupt,"partial bootstrap paths rejected before configuration");
+    environment.set(L"loader.dll",graphicsPath.c_str());
+    check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_InstallationCorrupt,"relative bootstrap path rejected before configuration");
+    before={sizeof(before),EDVR_NATIVE_MODULE_VERSION_1};
+    check(api.getStatus(&before)==S_FALSE&&api.token()==0,"rejected bootstrap does not publish a module or generation");
+    environment.set(missingLoader.c_str(),graphicsPath.c_str());
+  } else check(api.configure(&config)==S_OK&&api.configure(&config)==E_PENDING,"configure once outside loader lock");
   check(api.init(&error,vr::VRApplication_Overlay)==0&&error==vr::VRInitError_Init_NotSupportedWithCompositor,"unsupported application does not start backend");
   check(api.status().initAttempts==0,"unsupported application creates no generation");
   check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_HmdNotFound,"unloaded graphics provider fails before runtime");
+  check(api.configure(&config)==E_PENDING,"first Init fixes the module configuration");
+  if(bootstrap)environment.set(L"invalid-after-configuration",nullptr);
   check(api.status().cleanup==1&&api.status().ownerThread==0,"absent provider cleanup needs no XR owner");
   HMODULE proxy=LoadLibraryExW(graphicsPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
   check(proxy!=nullptr,"load actual graphics proxy");if(!proxy)return 1;
@@ -228,6 +289,9 @@ int selfTest() {
         "failed native startup joins owner and retires callback for retry");
   }
   check(status.initAttempts==5,"failed generations remain distinct across retries");
+  exportedErrorTests(api);
+  const auto afterErrors=api.status();
+  check(api.token()!=0&&std::memcmp(&status,&afterErrors,sizeof(status))==0,"error strings do not mutate failed-startup status");
   check(GetModuleHandleW(L"intentionally-absent-openxr-loader.dll")==nullptr,"desktop fixture loads no OpenXR runtime");
   sceneTest(device.device(),directory);
   return failures?1:0;
@@ -257,7 +321,13 @@ int nativeRun(const Options& options) {
   if(!proxy)return 3;
   PresentDevice device;if(FAILED(device.initialize(proxy,D3D_DRIVER_TYPE_HARDWARE)))return 3;
   EdvrNativeRuntimeConfig config{sizeof(config),EDVR_NATIVE_MODULE_VERSION_1,options.loader.c_str(),options.graphics.c_str(),5000,0};
-  if(api.configure(&config)!=S_OK)return 3;
+  if(options.bootstrap) {
+    BootstrapPaths paths;
+    if(readBootstrapPaths(paths)!=BootstrapResult::Ready||paths.loader!=options.loader||paths.graphics!=options.graphics){
+      std::puts("error,module_bootstrap_paths_do_not_match_command");return 3;
+    }
+    std::puts("module_configuration,source=bootstrap_requested,embedding_call=0");
+  } else if(api.configure(&config)!=S_OK)return 3;
   ModuleTestScene scene; // Shutdown guard runs before app eye resources retire.
   StopOnExit stop{api,device};
   uint32_t token=0;vr::EVRInitError error{};vr::IVRSystem* system=nullptr;vr::IVRCompositor* compositor=nullptr;
@@ -270,7 +340,7 @@ int nativeRun(const Options& options) {
     check(api.init(&error,vr::VRApplication_Scene)==token&&api.generic(vr::IVRSystem_Version,&error)==system,"repeated exported Init preserves token and interface identity");
     check(!api.generic("IVROverlay_011",&error)&&error==vr::VRInitError_Init_InterfaceNotFound,"unsupported interface rejected across DLL boundary");
   });
-  if(!token||!system||!compositor){std::printf("error,module_init,%d\n",int(error));return 3;}
+  if(!token||!system||!compositor){std::printf("error,module_init,%d,%s,%s\n",int(error),api.symbol(error),api.description(error));return 3;}
   uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
   if(!width||!height)return 3;
   const double scale=(std::min)(1.0,2048.0/(std::max)(width,height));
@@ -349,6 +419,7 @@ int nativeRun(const Options& options) {
 int wmain(int argc,wchar_t** argv) {
   if(argc==2&&!std::wcscmp(argv[1],L"--dry-run")) {std::puts("Would test the separate native DLL exports; no DLL, device, runtime or files created.");return 0;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test")) {const auto result=selfTest();std::printf("openxr_module_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
-  Options options;if(!parse(argc,argv,options)){std::fputs("usage: --self-test|--dry-run|--loader ABS --graphics-proxy ABS --runtime-module ABS --present-boundary [--seconds 1..60]\n",stderr);return 2;}
+  if(argc==2&&!std::wcscmp(argv[1],L"--self-test-bootstrap")) {const auto result=selfTest(true);std::printf("openxr_module_bootstrap_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
+  Options options;if(!parse(argc,argv,options)){std::fputs("usage: --self-test|--self-test-bootstrap|--dry-run|--loader ABS --graphics-proxy ABS --runtime-module ABS --present-boundary [--bootstrap] [--seconds 1..60]\n",stderr);return 2;}
   try{return nativeRun(options);}catch(...){std::puts("error,module_test_exception");return 5;}
 }
