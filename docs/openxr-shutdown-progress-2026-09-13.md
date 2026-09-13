@@ -52,7 +52,7 @@ inside the runtime call. A first or last sample inside the forwarding interval
 is direct evidence of service-point progress during that call. A zero count
 means no service-point observation in the enclosing window. Mixed-thread and
 saturation flags prevent treating an aggregate as one exact render caller's
-unbounded count. No progress result has yet been recorded from Frontier.
+unbounded count. The first Frontier result below records a measured zero.
 
 ## Desktop checks
 
@@ -110,7 +110,65 @@ OpenVR-directory INI was present or created, and the original runtime DLL was
 preserved. The installer kept both preceding DLLs in backups tagged
 `openxr-shutdown-progress-20260913-132432`.
 
-The Frontier flight is pending. Use Pimax through SteamVR, enter the cockpit or
-go on foot, then exit normally. Check startup, tracking and exit as well as
-both DLL hashes and the new shutdown summary. Native game launch remains gated
-on this evidence and the remaining export and launch integration.
+## Frontier result: no shutdown service-point progress
+
+The user reported, "Ran it, seemed normal," on the established Frontier,
+Pimax-through-SteamVR setup. Both installed DLL hashes still matched the
+qualified `e4f4ef9` binaries. `tools/edvr_log.py --expect-build 10eee4c`
+independently verified the precommit version of each new log:
+`edvr_gfx_20260913_132808.log` and `edvr_vr_20260913_132809.log`. Frontier was
+absent from the postflight process snapshot.
+
+The shutdown observer was available and returned a valid measured zero. Call
+10, on System thread 2836, has matching lifecycle begin/end records. Its
+forwarded runtime interval is QPC `3923053192739 .. 3923053711015`; the
+receiver's enclosing observation interval is `3923053192738 .. 3923053711020`.
+The QPC frequency is 10,000,000 Hz, giving 51.8276 ms for forwarding and
+51.8282 ms for observation. The summary records `status=measured reason=none
+token=1 samples=0`, with zero sample timestamps and caller IDs and no
+mixed-thread or saturation flags. There was no successful owned Present
+reaching the native callback service point in this window.
+
+Ruled out: treating the diagnostic's continuously pumped Present loop as a
+proven Frontier shutdown contract, because this available observer recorded
+zero service-point samples during the real forwarded shutdown. This does not
+prove the render thread had exited, that no other graphics work occurred, or
+that Present would remain absent during a longer native shutdown.
+
+The graphics log confirms LiveCopy and precompiled temporal shader warmup. Its
+last render-to-submit report has 8,684 valid samples and zero invalid samples
+on render thread 10208. Those counters support normal instrumentation during
+the run; they do not establish graphics inactivity at teardown.
+
+The source and test-binary hashes still matched the qualification record. Both
+logs, the user's report, parsed QPC evidence and the postflight configuration
+are archived in
+`build/frontier-shutdown-progress-20260913/flight-20260913-132808/`. The
+original OpenVR runtime DLL is unchanged. The INI changed during this run only
+at `fix.intro_video`, from `screen` to `skip`; its postflight SHA256 is
+`9aea022b28529565735ac1ad2403ca4ac9dbcd886ffb0df658969ba7d2bb8f54`. Census
+logging remained enabled. The postflight setting is preserved.
+
+## Consequence for native teardown
+
+`ModuleBackend::stop` in `src/openxr/native_module.cpp` first routes the final
+GPU drain through `RenderRoute::invoke`, which queues it on the bound Present
+caller. It later queues `shutdownAtRenderBoundary`, holding that caller inside
+the callback while the XR owner destroys the session. The first queued request
+can already time out if Present stops. The retained-generation fallback keeps
+uncertain resources alive and blocks reinitialization; it is not successful
+native cleanup.
+
+The next integration work must establish a safe shutdown contract when the
+application stops servicing Present. Absence of callbacks is not proof that the
+game's immediate context is unused. Closing the callback lease alone does not
+exclude later application graphics work. Direct cleanup on the System caller,
+or merely increasing a timeout, does not supply that exclusion and must not
+replace the qualified callback-held path without evidence. The earlier Pimax
+session-destruction hang while Present continued remains relevant.
+
+The immediate design question is whether Frontier's render caller has already
+terminated or is still alive during shutdown, and what explicit graphics
+exclusion is available in the latter case. Native game export/launch
+integration remains open, with teardown no longer treated as qualified by the
+standalone diagnostic's successful exit.

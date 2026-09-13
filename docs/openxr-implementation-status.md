@@ -7,10 +7,16 @@ forwarded shutdown, with QPC bounds and explicit measured/unavailable outcomes.
 Full-build verification passed, including six actual paired-DLL children
 checking positive and zero progress, excluded Presents, unavailable receivers
 and exact forwarding. All 471 source hashes were unchanged during the build.
-Both verified proxies are installed in Frontier with the existing INI and
-original runtime preserved. The next gate is a normal Frontier run and exit
-using Pimax through SteamVR. Native game export/launch integration remains
-open; this checkpoint does not switch the game to OpenXR.
+The `e4f4ef9` Frontier flight looked normal to the user and both installed
+hashes matched. It produced a valid measured zero: no successful owned Present
+reached the native callback service point during the 51.8276 ms forwarded
+shutdown. The game's runtime returned normally. This does not establish
+render-thread termination or general graphics inactivity. The native module's
+final GPU drain and callback-held cleanup still require Present service, so
+teardown needs a safe contract for stopped application rendering before native
+game launch. The original runtime is preserved; the only observed INI change
+during the flight was `fix.intro_video = screen` to `skip`, which is retained.
+Native export/launch integration remains open.
 
 The latest [application System caller
 checkpoint](openxr-system-caller-2026-09-13.md) extends the staged native DLL
