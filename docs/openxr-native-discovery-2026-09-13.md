@@ -92,13 +92,35 @@ native executable SHA256 is
 graphics DLL SHA256 is
 `e1441314521067e197568a080ee07c6fed1b44cc30e8f2cf58c65c21101120b9`.
 
-Native qualification is pending explicit headset readiness. The game and
-SteamVR were running during the final desktop checks. The next 20-second
-PiOpenXR gate must show `paired_startup` with matching device/provider and
-distinct Init/render callers before runtime startup, successful loading and
-stereo counters, and completed callback-held shutdown. The user's visual,
-tracking and normal-closure report remains a separate gate. No Frontier files,
-live configuration or saved runtime selection changed; the Frontier install
-remains `f3c205e`. Shipping OpenVR exports still forward. Complete legacy
-export policy, a game-facing native backend, feature integration, Init/Shutdown
-render-progress evidence and a native Frontier flight remain open.
+The `b8db929` 20-second PiOpenXR headset gate passed after explicit user
+readiness on September 13. The child ran from 15:52:24.604438 to
+15:52:45.397842 UTC, exited 0 in 20.797 seconds, and did not trigger its
+60-second watchdog. Before runtime startup, `paired_startup` confirmed the
+discovered device and provider matched the fixture and identified separate Init
+(24460) and render (22464) callers. The subsequent System (22656) and XR owner
+(17920) callers were also distinct.
+
+Pimax OpenXR 0.1.0 reported 5424 x 5356 pixels per eye. The run completed 269
+loading projections, 1,528 stereo pairs and 3,056 eye copies, with 1,529 valid
+sampled views and zero invalid views. All 6,650 private command lists matched
+the expected total; unknown lists and wrong-thread callbacks were zero. All 19
+shutdown stage occurrences completed successfully, both native PASS markers
+were present, and normal stop/cleanup were reported. Session binding shutdown
+took 15 ms inside the final callback; the callback and its retained graphics
+references retired afterward, without requesting an outer-loop pause.
+
+The user confirmed normal appearance in both eyes, world-fixed grid and
+triangle during head movement, normal color and clarity, and normal closure
+without headlock. No game, SteamVR or native diagnostic process was observed in
+the preflight and postflight snapshots. Transient processes between snapshots
+were not monitored. All 460 source, binary, environment and build-log hashes
+matched before and after the run. Exact binaries, output, receipt, validation
+and qualification are archived locally in
+`build/openxr-native-20260913-095224/`.
+
+This qualifies paired startup discovery and first-callback readiness in the
+standalone PiOpenXR diagnostic. No Frontier files, live configuration or saved
+runtime selection changed; the Frontier install remains `f3c205e`. Shipping
+OpenVR exports still forward. Complete legacy export policy, a game-facing
+native backend, feature integration, Init/Shutdown render-progress evidence and
+a native Frontier flight remain open.

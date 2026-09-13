@@ -6,8 +6,11 @@ validated device and context on the Init caller, then learns the render caller
 from its first real Present callback before starting OpenXR. It replaces
 device/thread handoff from the diagnostic with shared paired-module discovery
 and bounded readiness. The full build passed, including 153 actual-DLL
-Present/discovery checks. Its updated PiOpenXR headset gate is pending
-readiness; shipping OpenVR discovery still forwards and native Frontier
+Present/discovery checks. The `b8db929` PiOpenXR headset gate passed: discovery
+matched the device/provider before runtime startup, 269 loading projections and
+1,528 stereo pairs completed, and session shutdown took 15 ms inside the final
+callback. The user confirmed normal appearance, tracking and closure without
+headlock. Shipping OpenVR discovery still forwards and native Frontier
 integration remains open.
 
 The preceding [shared-host checkpoint](openxr-shared-host-2026-09-13.md)
