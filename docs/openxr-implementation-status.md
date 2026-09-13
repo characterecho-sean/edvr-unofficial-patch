@@ -1,6 +1,18 @@
 # OpenXR implementation status
 
-The latest [graphics transport
+The latest [application System caller
+checkpoint](openxr-system-caller-2026-09-13.md) extends the staged native DLL
+diagnostic to match Frontier's observed caller split: separate Init, persistent
+System and render callers, with shutdown on the System caller. Startup geometry
+and properties are checked before the first application pose wait; tracking and
+event polls run between completed scene pairs while Present continues. Parent
+review corrected callback lifetime and observer checks. The full build passed,
+including 201 explicit-module and 207 bootstrap checks. All 483 source, binary,
+stage, environment and build-log hashes are recorded. The next Pimax gate is
+staged and awaits user readiness; native Frontier startup progress, complete
+legacy exports and game feature integration remain open.
+
+The preceding [graphics transport
 checkpoint](openxr-transport-hooks-2026-09-13.md) removes native discovery's
 dependency on optional vScreen hooks. The deliberate feature-off path now
 installs a minimal ExecuteCommandList hook while retaining the normal rendering

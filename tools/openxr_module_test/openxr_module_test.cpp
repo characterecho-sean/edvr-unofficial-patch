@@ -8,6 +8,9 @@
 #include "viewing_phase.h"
 #include "bootstrap_tests.h"
 #include "init_error_tests.h"
+#include "system_caller.h"
+#include "system_caller_tests.h"
+#include "system_queries.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -108,8 +111,24 @@ void whilePresenting(PresentDevice& device,const std::function<void()>& task) {
 }
 
 struct StopOnExit {
-  Exports& api; PresentDevice& device; bool needed=true;
-  void stop() {if(needed){whilePresenting(device,[&]{api.shutdown();});needed=false;}}
+  Exports& api; PresentDevice& device; edvr::openxr::OwnerService* systemOwner=nullptr;
+  DWORD* shutdownCaller=nullptr; bool needed=true;
+  void stop() {
+    if (!needed) return;
+    if (systemOwner) {
+      const auto shutdown = edvr::openxr::module_test::submitWithPump(
+          *systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+            if (shutdownCaller) *shutdownCaller = GetCurrentThreadId();
+            api.shutdown();
+          });
+      check(shutdown.submitted && shutdown.completed && shutdown.succeeded &&
+            shutdown.pumpSucceeded, "persistent System caller shuts down native module");
+      check(systemOwner->stop(), "persistent System caller joins after shutdown");
+    } else {
+      whilePresenting(device, [&] { api.shutdown(); });
+    }
+    needed=false;
+  }
   ~StopOnExit() {try{stop();}catch(...){std::puts("error,module_cleanup_exception");}}
 };
 
@@ -132,6 +151,28 @@ void sceneTest(ID3D11Device* device,const std::filesystem::path& directory) {
   vr::EVRInitError error{};check(bind()&&init(&error,vr::VRApplication_Scene)!=0,"scene fixture init");
   auto* system=static_cast<vr::IVRSystem*>(generic(vr::IVRSystem_Version,&error));
   check(system!=nullptr,"scene fixture System");if(!system)return;
+  edvr::openxr::OwnerService fixtureOwner;
+  check(fixtureOwner.start(),"scene fixture persistent System owner");
+  module_test::SystemQuerySnapshot fixtureQueries{};
+  module_test::PeriodicSystemSample fixturePeriodic{};
+  const auto fixtureQuery = fixtureOwner.running()
+      ? module_test::submitWithPump(fixtureOwner, [] { return true; }, [&] {
+          fixtureQueries = {};
+          check(module_test::collectSystemQueries(*system, fixtureQueries, false),
+                "scene fixture shared System query validation");
+          fixturePeriodic=module_test::collectPeriodicSystemSample(*system);
+        })
+      : module_test::OwnerTaskResult{};
+  check(fixtureQuery.submitted && fixtureQuery.completed && fixtureQuery.succeeded,
+        "scene fixture System query completion");
+  check(fixtureQueries.width == 640 && fixtureQueries.height == 480 &&
+        fixtureQueries.geometryValid && fixtureQueries.poseQueried &&
+        !fixtureQueries.poseValid,
+        "scene fixture publishes bounded geometry and invalid pose");
+  check(!fixtureQueries.modelPropertyValid && !fixtureQueries.trackingPropertyValid,
+        "scene fixture keeps unsupported empty metadata honest");
+  check(fixturePeriodic.geometryValid && !fixturePeriodic.poseValid && fixturePeriodic.eventQueried,
+        "periodic observer exercises real System ABI with empty event queue");
   ModuleTestScene scene;
   check(scene.initialize(device,0,128)==E_INVALIDARG&&scene.initialize(device,2049,128)==E_INVALIDARG,
         "scene dimensions are bounded");
@@ -157,7 +198,15 @@ void sceneTest(ID3D11Device* device,const std::filesystem::path& directory) {
   }
   pose.mDeviceToAbsoluteTracking.m[0][3]=std::numeric_limits<float>::quiet_NaN();
   check(scene.render(*system,pose)==E_INVALIDARG,"scene rejects nonfinite pose");
-  check(scene.eye(2)==nullptr,"scene eye indexing bounded");shutdown();FreeLibrary(fixture);
+  check(scene.eye(2)==nullptr,"scene eye indexing bounded");
+  if (fixtureOwner.running()) {
+    const auto fixtureShutdown = module_test::submitWithPump(
+        fixtureOwner, [] { return true; }, [&] { shutdown(); });
+    check(fixtureShutdown.submitted && fixtureShutdown.completed && fixtureShutdown.succeeded,
+          "scene fixture shutdown runs on persistent System owner");
+    check(fixtureOwner.stop(), "scene fixture System owner joins");
+  } else shutdown();
+  FreeLibrary(fixture);
 }
 
 void viewingPhaseTests() {
@@ -230,6 +279,7 @@ int selfTest(bool bootstrap=false) {
   viewingPhaseTests();
   bootstrap_test::runBootstrapTests(check);
   runInitErrorTests(check);
+  module_test::runSystemCallerTests(check);
   const auto directory=executableDirectory();const auto graphicsPath=(directory/L"d3d11.dll").wstring();
   const auto missingLoader=(directory/L"intentionally-absent-openxr-loader.dll").wstring();
   check(!std::filesystem::exists(missingLoader),"negative loader fixture is absent");
@@ -329,20 +379,57 @@ int nativeRun(const Options& options) {
     std::puts("module_configuration,source=bootstrap_requested,embedding_call=0");
   } else if(api.configure(&config)!=S_OK)return 3;
   ModuleTestScene scene; // Shutdown guard runs before app eye resources retire.
-  StopOnExit stop{api,device};
-  uint32_t token=0;vr::EVRInitError error{};vr::IVRSystem* system=nullptr;vr::IVRCompositor* compositor=nullptr;
+  edvr::openxr::OwnerService systemOwner;
+  const bool systemOwnerStarted = systemOwner.start();
+  check(systemOwnerStarted, "native persistent System owner starts before Init");
+  if (!systemOwnerStarted) return 3;
+  DWORD initCaller=0, systemCaller=0, renderCaller=GetCurrentThreadId(), shutdownCaller=0;
+  StopOnExit stop{api,device,&systemOwner,&shutdownCaller};
+  uint32_t token=0;vr::EVRInitError error{};vr::IVRSystem* system=nullptr;
+  vr::IVRSystem* initialSystem=nullptr;vr::IVRCompositor* compositor=nullptr;
   whilePresenting(device,[&] {
+    initCaller=GetCurrentThreadId();
     token=api.init(&error,vr::VRApplication_Scene);
     if(!token||error!=vr::VRInitError_None)return;
-    system=static_cast<vr::IVRSystem*>(api.generic(vr::IVRSystem_Version,&error));
+    initialSystem=static_cast<vr::IVRSystem*>(api.generic(vr::IVRSystem_Version,&error));
     compositor=static_cast<vr::IVRCompositor*>(api.generic(vr::IVRCompositor_Version,&error));
-    check(system&&compositor,"owned native interfaces cross DLL boundary");
-    check(api.init(&error,vr::VRApplication_Scene)==token&&api.generic(vr::IVRSystem_Version,&error)==system,"repeated exported Init preserves token and interface identity");
+    check(compositor,"owned native compositor crosses DLL boundary");
+    check(api.init(&error,vr::VRApplication_Scene)==token,"repeated exported Init preserves token");
     check(!api.generic("IVROverlay_011",&error)&&error==vr::VRInitError_Init_InterfaceNotFound,"unsupported interface rejected across DLL boundary");
   });
-  if(!token||!system||!compositor){std::printf("error,module_init,%d,%s,%s\n",int(error),api.symbol(error),api.description(error));return 3;}
-  uint32_t width=0,height=0;system->GetRecommendedRenderTargetSize(&width,&height);
-  if(!width||!height)return 3;
+  if(!token||!compositor){std::printf("error,module_init,%d,%s,%s\n",int(error),api.symbol(error),api.description(error));return 3;}
+  const auto systemIdentity = module_test::submitWithPump(
+      systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+        systemCaller=GetCurrentThreadId();
+        system=static_cast<vr::IVRSystem*>(api.generic(vr::IVRSystem_Version,&error));
+      });
+  check(systemIdentity.submitted && systemIdentity.completed && systemIdentity.succeeded &&
+        systemIdentity.pumpSucceeded && system && system==initialSystem,
+        "native System interface retrieval runs on persistent caller");
+  if(!system){std::printf("error,module_system,%d,%s,%s\n",int(error),api.symbol(error),api.description(error));return 3;}
+  module_test::SystemQuerySnapshot startupQueries{};
+  const auto startup = module_test::submitWithPump(
+      systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+        check(module_test::collectSystemQueries(*system, startupQueries, true),
+              "native startup System geometry and properties");
+      });
+  check(startup.submitted && startup.completed && startup.succeeded && startup.pumpSucceeded &&
+        startupQueries.geometryValid &&
+        startupQueries.poseQueried && startupQueries.modelPropertyValid &&
+        startupQueries.trackingPropertyValid,
+        "native startup System queries complete before application wait");
+  if(!startupQueries.geometryValid)return 3;
+  const uint32_t width=startupQueries.width,height=startupQueries.height;
+  check(initCaller!=systemCaller && systemCaller!=renderCaller,
+        "Init, persistent System, and Present callers are distinct");
+  std::printf("module_callers,init=%lu,system=%lu,render=%lu,startup_geometry=%ux%u,pose_valid=%u\n",
+      static_cast<unsigned long>(initCaller), static_cast<unsigned long>(systemCaller),
+      static_cast<unsigned long>(renderCaller), width, height,
+      unsigned(startupQueries.poseValid));
+  std::printf("module_startup_queries,geometry=1,properties=%u,pose_queried=%u,before_application_wait=1\n",
+      unsigned(startupQueries.modelPropertyValid && startupQueries.trackingPropertyValid),
+      unsigned(startupQueries.poseQueried));
+  std::fflush(stdout);
   const double scale=(std::min)(1.0,2048.0/(std::max)(width,height));
   bool success=SUCCEEDED(scene.initialize(device.device(),uint32_t(width*scale),uint32_t(height*scale)));
   ComPtr<ID3D11Texture2D> sky[6];success=makeSkybox(device.device(),sky)&&success;
@@ -355,7 +442,9 @@ int nativeRun(const Options& options) {
   std::printf("module_phase,name=waiting,elapsed_ms=0,grid_ms=%llu,scene_ms=%llu\n",
       (unsigned long long)viewing.gridBudgetMs(),(unsigned long long)viewing.sceneBudgetMs());
   std::fflush(stdout);
-  uint64_t frames=0,invalid=0,cacheChecks=0;
+  uint64_t frames=0,invalid=0,cacheChecks=0,systemSamples=0,validSystemSamples=0,applicationWaits=0;
+  bool applicationWaitLogged=false;
+  uint64_t nextSystemSample=GetTickCount64();
   while(success) {
     const auto now=GetTickCount64();const bool focused=compositor->CanRenderScene();
     if(!focusLogged||focused!=previousFocus) {
@@ -370,9 +459,15 @@ int nativeRun(const Options& options) {
       if(phase==Phase::Grid) {
         // Recenter after readiness, so putting on the headset cannot leave the
         // scene anchored to the orientation sampled while it was on the desk.
-        system->ResetSeatedZeroPose();vr::VREvent_t reset{};vr::TrackedDevicePose_t pose{};
-        const bool resetValid=system->PollNextEventWithPose(vr::TrackingUniverseSeated,&reset,sizeof(reset),&pose)&&
-            reset.eventType==vr::VREvent_SeatedZeroPoseReset&&pose.bPoseIsValid;
+        bool resetValid=false;
+        const auto recenter = module_test::submitWithPump(
+            systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+              system->ResetSeatedZeroPose();vr::VREvent_t reset{};vr::TrackedDevicePose_t pose{};
+              resetValid=system->PollNextEventWithPose(vr::TrackingUniverseSeated,&reset,sizeof(reset),&pose)&&
+                  reset.eventType==vr::VREvent_SeatedZeroPoseReset&&pose.bPoseIsValid;
+            });
+        check(recenter.submitted&&recenter.completed&&recenter.succeeded&&recenter.pumpSucceeded,
+              "focused startup recenter runs on persistent System caller");
         check(resetValid,"focused startup recenter event");success=success&&resetValid;
         std::printf("module_recenter,valid=%u,elapsed_ms=%llu\n",unsigned(resetValid),(unsigned long long)(GetTickCount64()-began));
       }
@@ -383,9 +478,35 @@ int nativeRun(const Options& options) {
     if(phase==Phase::Expired){std::puts("error,module_viewing_deadline");success=false;break;}
     if(!success)break;
     if(phase!=Phase::Scene){success=SUCCEEDED(device.present());Sleep(1);continue;}
+    // Sample only between completed scene pairs. There is no mid-pair reset
+    // or general asynchronous game-call scheduler in this diagnostic gate.
+    if (focused && frames && GetTickCount64() >= nextSystemSample) {
+      module_test::PeriodicSystemSample sample{};
+      const auto periodic = module_test::submitWithPump(
+          systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+            sample=module_test::collectPeriodicSystemSample(*system);
+          });
+      ++systemSamples;
+      if (periodic.succeeded && sample.geometryValid && sample.poseValid) ++validSystemSamples;
+      check(periodic.submitted&&periodic.completed&&periodic.succeeded&&periodic.pumpSucceeded&&
+            sample.geometryValid&&sample.eventQueried,
+            "periodic System geometry and event query");
+      if (!periodic.succeeded || !periodic.pumpSucceeded || !sample.geometryValid || !sample.poseValid) {
+        ++invalid;
+        success=false;
+        break;
+      }
+      nextSystemSample=GetTickCount64()+250;
+    }
     vr::TrackedDevicePose_t poses[2]{},game[2]{},cached[2]{},cachedGame[2]{};
     const auto waited=compositor->WaitGetPoses(poses,2,game,2);
     if(waited!=vr::VRCompositorError_None){success=false;break;}
+    ++applicationWaits;
+    if (!applicationWaitLogged) {
+      std::printf("module_application_wait,count=1,after_startup_queries=1\n");
+      std::fflush(stdout);
+      applicationWaitLogged=true;
+    }
     if(!focused||!poses[0].bPoseIsValid){if(focused)++invalid;compositor->ClearLastSubmittedFrame();success=SUCCEEDED(device.present());continue;}
     if(compositor->GetLastPoses(cached,2,cachedGame,2)!=vr::VRCompositorError_None||
        !samePose(cached[0],poses[0])||!samePose(cached[1],poses[1])||
@@ -405,13 +526,25 @@ int nativeRun(const Options& options) {
   compositor->ClearLastSubmittedFrame();
   stop.stop();
   const auto status=api.status();
+  const bool callerSummary = initCaller && systemCaller && shutdownCaller &&
+      initCaller != systemCaller && initCaller != renderCaller && systemCaller != renderCaller &&
+      systemCaller == shutdownCaller && status.initThread == initCaller &&
+      status.renderThread == renderCaller && status.shutdownThread == shutdownCaller &&
+      status.ownerThread && status.ownerThread != systemCaller &&
+      status.ownerThread != renderCaller && status.ownerThread != initCaller;
+  check(callerSummary, "native caller summary identifies persistent System and native XR owners");
   success=success&&viewing.state()==Phase::Complete&&!failures&&frames>0&&invalid==0&&status.phase==EDVR_NATIVE_STOPPED&&status.cleanup&&!status.retained&&
-      status.copiedEyes==frames*2&&status.stereoPairs==frames&&status.loadingLayers>0&&!status.wrongThread&&api.token()!=token;
+      status.copiedEyes==frames*2&&status.stereoPairs==frames&&status.loadingLayers>0&&!status.wrongThread&&
+      systemSamples>0&&validSystemSamples>0&&applicationWaits>0&&callerSummary&&api.token()!=token;
   check(!api.generic(vr::IVRSystem_Version,&error)&&error==vr::VRInitError_Init_NotInitialized,"exported interfaces retire after Shutdown");
-  std::printf("module_summary,frames=%llu,cached=%llu,invalid=%llu,copies=%llu,pairs=%llu,loading=%llu,callbacks=%llu,cleanup=%u,retained=%u,init=%u,render=%u,owner=%u,shutdown=%u\n",
+  std::printf("module_summary,frames=%llu,cached=%llu,invalid=%llu,copies=%llu,pairs=%llu,loading=%llu,callbacks=%llu,system_samples=%llu,valid_system_samples=%llu,application_waits=%llu,cleanup=%u,retained=%u,init=%u,system=%lu,render=%u,owner=%u,shutdown=%u,app_shutdown=%lu\n",
       (unsigned long long)frames,(unsigned long long)cacheChecks,(unsigned long long)invalid,
       (unsigned long long)status.copiedEyes,(unsigned long long)status.stereoPairs,(unsigned long long)status.loadingLayers,
-      (unsigned long long)status.renderCallbacks,status.cleanup,status.retained,status.initThread,status.renderThread,status.ownerThread,status.shutdownThread);
+      (unsigned long long)status.renderCallbacks,(unsigned long long)systemSamples,
+      (unsigned long long)validSystemSamples,(unsigned long long)applicationWaits,
+      status.cleanup,status.retained,status.initThread,
+      static_cast<unsigned long>(systemCaller),status.renderThread,status.ownerThread,status.shutdownThread,
+      static_cast<unsigned long>(shutdownCaller));
   std::puts(success&&!failures?"native_module: PASS":"native_module: INCOMPLETE_OR_FAILED");
   return success&&!failures?0:4;
 }
