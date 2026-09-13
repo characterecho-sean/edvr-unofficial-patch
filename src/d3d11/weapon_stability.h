@@ -1,5 +1,6 @@
 #pragma once
 #include "panel_curve.h"
+#include <cstdint>
 struct ID3D11Resource;
 namespace edvr {
 class Config;
@@ -7,7 +8,7 @@ void weaponStabilityConfigure(Config&);
 void weaponStabilityObserveScreen();
 // nullptr invalidates all cached inputs (command-list execution); otherwise
 // only writes to the source instance, bone or camera buffer invalidate them.
-void weaponStabilityResourceWritten(ID3D11Resource*);
+void weaponStabilityResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~uint64_t(0));
 // Source-image first-person attachments. Independent of temporal AA and
 // runtime reprojection; returns true only when it issued the original draw.
 bool weaponStabilityDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
@@ -22,9 +23,11 @@ StructuredBuffer<Instance> Pool:register(t0);
 StructuredBuffer<Bone> Bones:register(t1);
 cbuffer Camera:register(b0){float4 camera[276];}
 cbuffer Emitter:register(b1){float4 emitter[13];}
+cbuffer LightCamera:register(b2){float4 lightCamera[14];}
 RWStructuredBuffer<Instance> Fixed:register(u0);
 RWStructuredBuffer<float4> Anchor:register(u1);
 RWStructuredBuffer<float4> EmitterFixed:register(u2);
+RWByteAddressBuffer LightFixed:register(u3);
 groupshared float distances[64];
 groupshared uint indices[64],partners;
 float3 position(Instance r){return asfloat(r.row[1].xyz);}
@@ -85,25 +88,59 @@ bool root(uint i,uint nb) {
         r.row[1].xyz=asuint(p+Anchor[0].xyz);
     Fixed[id]=r;
 }
-// The captured local particle variant uses the first-person projection
-// (near 0.0675, versus 0.025 for world particles) and a camera-relative
-// emitter transform. The purple rifle emitter is rigidly attached 75 mm
-// from its mesh origin in all 38 captured frames. Its particles do not read
-// t33, so correcting the mesh pool alone separates them during crouching.
-// Deliberately decline other projections and emitters outside the same
-// one-metre attachment volume used by applyAnchor. No colour/atlas rule.
-[numthreads(1,1,1)]void applyEmitter() {
+// The local particle variant has a camera-relative emitter transform.
+// Hip fire uses near 0.0675; aiming uses 0.025, shared by world particles.
+// Its particles do not read t33, so correcting the mesh pool alone
+// separates them during crouching. Require an exact rigid-part match for
+// the aiming projection and retain the same one-metre attachment volume
+// used by applyAnchor. No colour/atlas rule.
+groupshared uint emitterPartMatched;
+[numthreads(64,1,1)]void applyEmitter(uint lane:SV_GroupIndex) {
     float3 origin=float3(emitter[9].w,emitter[10].w,emitter[11].w)+camera[275].xyz;
     float3 d=origin-Anchor[1].xyz;
-    bool valid=Anchor[0].w>0 && abs(camera[273].z-.0675)<1e-7 &&
+    bool valid=Anchor[0].w>0 &&
         all(isfinite(origin)) && dot(d,d)<1 &&
         all(abs(float3(dot(emitter[9].xyz,emitter[9].xyz),dot(emitter[10].xyz,emitter[10].xyz),dot(emitter[11].xyz,emitter[11].xyz))-1)<.001) &&
         all(abs(float3(dot(emitter[9].xyz,emitter[10].xyz),dot(emitter[9].xyz,emitter[11].xyz),dot(emitter[10].xyz,emitter[11].xyz)))<.001) &&
         dot(cross(emitter[9].xyz,emitter[10].xyz),emitter[11].xyz)>.999;
-    [unroll]for(uint i=0;i<13;++i) {
+    // Aiming uses the WORLD near plane (06:08:57), so projection alone
+    // cannot identify attachments. Its emitter coincides with a corrected
+    // rigid weapon-part origin in all 19 frames (within 2.2 micrometres).
+    // Require that match for this projection; proximity alone is not enough.
+    if(lane==0)emitterPartMatched=0;
+    GroupMemoryBarrierWithGroupSync();
+    if(valid && abs(camera[273].z-.025)<1e-7) {
+        uint n,stride;Pool.GetDimensions(n,stride);
+        for(uint i=lane;i<n;i+=64) {
+            Instance part=Pool[i];float3 delta=position(part)-origin;
+            if(part.row[0].x==0 && dot(delta,delta)<1e-8)InterlockedOr(emitterPartMatched,1);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    valid=valid && (abs(camera[273].z-.0675)<1e-7 || emitterPartMatched!=0);
+    if(lane<13) {
+        uint i=lane;
         float4 r=emitter[i];if(valid && i>=9 && i<12)r.w+=Anchor[0][i-9];
         EmitterFixed[i]=r;
     }
+}
+// 05:21:41: the separate point light adds the upper pink fleck. Its
+// placement is scaled about the OLD arms origin, so translating that
+// origin requires the full mesh delta, even though its radius/projection
+// use world units. Preserve the packed light payload and radius exactly.
+[numthreads(64,1,1)]void applyLights(uint id:SV_DispatchThreadID) {
+    uint bytes;LightFixed.GetDimensions(bytes);if(id>=bytes/32)return;
+    float4 p=asfloat(LightFixed.Load4(id*32));
+    float3 eye=float3(lightCamera[6].w,lightCamera[7].w,lightCamera[8].w);
+    float3 d=p.xyz-Anchor[1].xyz;
+    bool valid=Anchor[0].w>0 && all(isfinite(p)) && all(isfinite(eye)) &&
+        all(abs(eye-camera[275].xyz)<1e-5) &&
+        abs(lightCamera[12].w-.025)<1e-7 &&
+        all(abs(float3(dot(lightCamera[2].xyz,lightCamera[2].xyz),dot(lightCamera[3].xyz,lightCamera[3].xyz),dot(lightCamera[4].xyz,lightCamera[4].xyz))-1)<.001) &&
+        all(abs(float3(dot(lightCamera[2].xyz,lightCamera[3].xyz),dot(lightCamera[2].xyz,lightCamera[4].xyz),dot(lightCamera[3].xyz,lightCamera[4].xyz)))<.001) &&
+        dot(cross(lightCamera[2].xyz,lightCamera[3].xyz),lightCamera[4].xyz)>.999 &&
+        dot(d,d)<1 && p.w>0 && p.w<=.1;
+    if(valid)LightFixed.Store3(id*32,asuint(p.xyz+Anchor[0].xyz));
 }
 )HLSL";
 }

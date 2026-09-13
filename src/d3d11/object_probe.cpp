@@ -571,6 +571,7 @@ struct AuxSlot {
 AuxSlot g_aux[kLedgerAux];
 int     g_auxCount = 0;
 EyeDrawSnapshot g_drawSnapshot;
+EyeDrawSnapshot g_eyeMeshSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
 struct AuxFrame {   // one watched shader's buffers in one frame
     uint64_t vs;
@@ -587,6 +588,7 @@ void releaseCopy(LedgerCopy& c) {
 }
 void ledgerRelease() {
     g_drawSnapshot.reset();
+    g_eyeMeshSnapshot.reset();
     g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
@@ -2635,6 +2637,8 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
         g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
                                d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance,start,base);
     }
+    g_eyeMeshSnapshot.captureEyeMesh(ctx,frame,static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
+                                   d.vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,startInstance,start,base);
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
             // Every big instanced draw first, whatever t33 holds: the pool's own
@@ -2908,6 +2912,17 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
     Log::get().note("object probe: UI/mesh/effect vertex snapshots: %u draws, %u bytes, %u range/budget declines; UI first three watched frames, meshes first source frame, effects throughout run; 256 KiB per stream, 32 MiB total. Draw offsets, bindings and capture ranges are retained.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\drawstate_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
+    const bool eyeMeshOk=g_eyeMeshSnapshot.write(ctx,path);
+    const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
+    Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
+                    "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
+                    "First three matching eye frames; original draw ordinal, cameras, input layout, full t33/t38 and VB0 "
+                    "at first use per frame/target. Geometry first frame, %u vertex bytes, %u vertex declines. "
+                    "Separate 4096-draw/256-MiB pool/32-MiB vertex caps; no rendering changes.",
+                    path,g_eyeMeshSnapshot.meshDraws,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
+                    g_eyeMeshSnapshot.meshDeclined,g_eyeMeshSnapshot.dropped,g_eyeMeshSnapshot.failures,eyeMeshMissing,
+                    eyeMeshOk?"written":"WRITE FAILED",g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
     uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0,effectDraws=0,effectVertices=0,effectLayouts=0;
     for(const auto& d:g_drawSnapshot.draws)if(d.ordinal==UINT32_MAX-2) {
         ++effectDraws;effectVertices+=d.streams[0].copied || d.streams[1].copied;effectLayouts+=!d.layout.empty();
@@ -2915,8 +2930,19 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     for(const auto& d:g_drawSnapshot.draws) {sourceCameras+=d.ordinal==UINT32_MAX;screenDraws+=d.vs==EyeDrawSnapshot::kVscreen;}
     for(const auto& t:g_drawSnapshot.surfaces)sourceDepths+=t.format==20 || t.format==40 || t.format==45 || t.format==55;
     if(screenDraws)Log::get().note("object probe: on-foot source capture: %u camera frames, %u screen draws, %u completed depth surfaces; colour/depth copied at first composite, no temporal changes.",sourceCameras,screenDraws,sourceDepths);
-    if(screenDraws)Log::get().note("object probe: source effect snapshots: %u draws, %u with vertex payloads, %u with original input layouts. Drawstate v6 ordinal UINT32_MAX-2; constants and bounded VB0/VB1/IB across the run; shared 32 MiB vertex budget, no normal-play copies or effect changes.",effectDraws,effectVertices,effectLayouts);
-    if(screenDraws)Log::get().note("object probe: effect colour crops: %u images, %u bytes, %u format/range/budget declines; first source frame, before/after each light/beam/streak/particle draw. Native lower-right 1024-square crops, original HDR format and crop origin in drawstate v6; separate 64 MiB cap.",unsigned(g_drawSnapshot.effectImages.size()),g_drawSnapshot.effectImageBytes,g_drawSnapshot.effectImageDeclined);
+    if(screenDraws)Log::get().note("object probe: source effect snapshots: %u draws, %u with vertex payloads, %u with original input layouts. Drawstate v7 ordinal UINT32_MAX-2; constants and bounded VB0/VB1/IB across the run; shared 32 MiB vertex budget, no normal-play copies or effect changes.",effectDraws,effectVertices,effectLayouts);
+    if(screenDraws)Log::get().note("object probe: effect colour crops: %u images, %u bytes, %u format/range/budget declines; first source frame, before/after each light/beam/streak/particle draw. Native lower-right 1024-square crops, original HDR format and crop origin in drawstate v7; 64 MiB cap shared with night inputs.",unsigned(g_drawSnapshot.effectImages.size()),g_drawSnapshot.effectImageBytes,g_drawSnapshot.effectImageDeclined);
+    uint32_t nightDraws=0,nightConstants=0,nightImages=0,nightInputs=0,nightGeometry=0,nightSamplers=0;
+    for(const auto& d:g_drawSnapshot.draws)if(d.vs==EyeDrawSnapshot::kNight && d.ps==EyeDrawSnapshot::kNightPs) {
+        ++nightDraws;nightConstants+=d.copied[1]>=333*16 && d.copied[3]>=12*16;
+        nightGeometry+=d.streams[0].copied && d.streams[2].copied && !d.layout.empty();
+    }
+    for(const auto& e:g_drawSnapshot.effectImages)if(e.draw<g_drawSnapshot.draws.size() && g_drawSnapshot.draws[e.draw].vs==EyeDrawSnapshot::kNight) {
+        if(e.after<=1)++nightImages;else ++nightInputs;
+    }
+    for(const auto& n:g_drawSnapshot.nightSampling)nightSamplers+=n.mask==3 && n.viewportCount==1;
+    Log::get().note("object probe: night-vision snapshots: %u draws, %u with PS camera/settings, %u before/after images; drawstate slot 1 is PS b1 for FCF7BD2896751D96/F786D34B5E118D5E, slot 3 is PS b2. First-frame native terrain crops retain HDR and origin; effect image declines %u. No night-vision rendering changes.",nightDraws,nightConstants,nightImages,g_drawSnapshot.effectImageDeclined);
+    Log::get().note("object probe: night-vision sampling: %u input images (PS t0..t4), %u draws with both samplers and one viewport, %u with geometry/layout. Drawstate v7 phases 2..6 retain typed native crops, BC4 blocks and draw-time contents for each eye; sampler masks expose absent states. Shared 64 MiB image and 32 MiB vertex caps; only while a dump is armed.",nightInputs,nightSamplers,nightGeometry);
     if(screenDraws)Log::get().note("object probe: source mesh snapshots: %u draws, %u frame-local buffers, %u bytes, %u range/format/budget declines. Drawstate v4 records original draw cameras, full t33/t38 and VB0 at first use per resource per frame; firstDraw identifies that copy. No render or pacing changes.",g_drawSnapshot.meshDraws,unsigned(g_drawSnapshot.meshBuffers.size()),g_drawSnapshot.meshBytes,g_drawSnapshot.meshDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());

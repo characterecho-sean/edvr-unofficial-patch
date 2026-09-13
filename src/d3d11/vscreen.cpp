@@ -32,6 +32,7 @@
 #include "panel_curve.h"
 #include "screen_motion.h"
 #include "weapon_stability.h"
+#include "night_vision.h"
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
@@ -66,6 +67,7 @@
 #include "hud_grain.h"
 #include "ui_depth.h"
 #include "celestial_motion.h"
+#include "mesh_motion.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -655,6 +657,9 @@ struct State {
     void*    camResource = nullptr;
     void*    camData = nullptr;
     uint32_t camBytes = 0;
+    void* scenePoolResource = nullptr;
+    void* scenePoolData = nullptr;
+    uint32_t scenePoolBytes = 0;
 
     // A third mapped-buffer shadow, for the constant-buffer peek. Separate
     // from the two above for the reason they are separate from each other:
@@ -1352,6 +1357,7 @@ enum class DrawVerdict {
     // The target direction indicator, reconstructed rather than smeared
     // (target_sharp.h): forwarded through a replacement pixel shader.
     kTargetSharp,
+    kNightVision,
     // A HUD sprite atlas, resampled once and substituted (hud_sprite.h).
     kHudSprite,
     // A cockpit holo panel, reconstructed once a frame (panel_upscale.h).
@@ -2112,6 +2118,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
     }
 
+    if(nightVisionMatches(kind,count,instances))return DrawVerdict::kNightVision;
+
     // The RemLok overlay fix, after the probes so a census taken while it
     // runs still records the draw the game submitted.
     if (remlokWantsDraws()) {
@@ -2774,7 +2782,8 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     }
     forgetBindings(s);
     foveationOnClearState();
-    weaponStabilityResourceWritten(nullptr);
+    // ClearState changes bindings, not resource contents. Retain the
+    // captured weapon vertices and attachment inputs across this call.
     s->realClearState(self);
 }
 
@@ -2796,6 +2805,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                         kSlotExecuteCommandList, restoreContextState ? 1 : 0);
     }
     weaponStabilityResourceWritten(nullptr);
+    glitchFrameInvalidatePool(nullptr);
     s->realExecuteCommandList(self, list, restoreContextState);
     // After the call, and only when the context was not restored: with
     // RestoreContextState TRUE the bindings we recorded are put back, so
@@ -2885,6 +2895,20 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->camBytes = mm.byteWidth;
         }
     }
+    if(SUCCEEDED(hr) && mapped && mapped->pData && sub==0 && res){
+        const uint32_t bytes=glitchFrameWantsPool(res);
+        if(bytes){
+            // A resource address may be recycled. Verify the current mapping's
+            // extent instead of trusting the old nominated byte count.
+            D3D11_RESOURCE_DIMENSION kind{};res->GetType(&kind);
+            if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){
+                D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+                if(d.StructureByteStride==336 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)){
+                    s->scenePoolResource=res;s->scenePoolData=mapped->pData;s->scenePoolBytes=d.ByteWidth;
+                }
+            }
+        }
+    }
     // The peek target, independent of the chain above on purpose: the buffer
     // the sprite family reads may BE the composite's or the camera's, and a
     // peek must not steal either shadow's slot. Pointer compare only; the
@@ -2971,6 +2995,11 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         return;
     }
     weaponStabilityResourceWritten(res);
+    glitchFrameInvalidatePool(res);
+    if(res==s->scenePoolResource && s->scenePoolData){
+        guardedBudget(g_cameraBudget,[&]{glitchFrameObservePool(res,s->scenePoolData,s->scenePoolBytes);});
+        s->scenePoolResource=nullptr;s->scenePoolData=nullptr;s->scenePoolBytes=0;
+    }
     // The census CB watch reads the write BEFORE the real Unmap, exactly as
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
@@ -3201,6 +3230,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpBegin(self);
+    if (v == DrawVerdict::kNightVision) nightVisionBegin(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteBegin(self);
     if (v == DrawVerdict::kPanelUpscale) panelUpscaleBegin(self);
     if (v == DrawVerdict::kHudGrain) hudGrainBegin(self);
@@ -3262,6 +3292,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kPanelUpscale) panelUpscaleEnd(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteEnd(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpEnd(self);
+    if (v == DrawVerdict::kNightVision) nightVisionEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
@@ -3289,7 +3320,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
-    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
+    if (!foreignContext(self)) {weaponStabilityResourceWritten(dst);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -3390,7 +3421,14 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::CopyRegion, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
-    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
+    if (!foreignContext(self)) {
+        // Buffer boxes are byte ranges. Keep the destination offset: a
+        // small upload into the shared IB must not invalidate other meshes.
+        if(box && box->right>=box->left)
+            weaponStabilityResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
+        else weaponStabilityResourceWritten(dst);
+        glitchFrameInvalidatePool(dst);
+    }
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -3413,7 +3451,11 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Update, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
-    if (!foreignContext(self)) weaponStabilityResourceWritten(dst);
+    if (!foreignContext(self)) {
+        if(box && box->right>=box->left)weaponStabilityResourceWritten(dst,box->left,box->right);
+        else weaponStabilityResourceWritten(dst);
+        glitchFrameInvalidatePool(dst);
+    }
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
                        nullptr, 0, box != nullptr,
@@ -3656,8 +3698,31 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                         baseVertex, startInstance);
         if (clock.on) clock.realCall(r0);
         if(self==g_state->ownerCtx) {
+            if(g_state->rtv0Eye && perInstance && instances &&
+               glitchFrameWantsSceneDraw(bindingShaderHash(BindSlot::Vs))){
+                ID3D11Buffer* scene=nullptr;self->VSGetConstantBuffers(1,1,&scene);
+                if(scene){
+                    const bool sampled=glitchFrameNoteSceneDraw(scene);scene->Release();
+                    if(sampled){
+                        ID3D11ShaderResourceView* pool=nullptr;self->VSGetShaderResources(33,1,&pool);
+                        if(pool){
+                            ID3D11Resource* resource=nullptr;pool->GetResource(&resource);pool->Release();
+                            if(resource){
+                                D3D11_RESOURCE_DIMENSION kind{};resource->GetType(&kind);
+                                if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){
+                                    D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(resource)->GetDesc(&d);
+                                    if(d.StructureByteStride==336 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED))
+                                        glitchFrameNoteScenePool(resource,d.ByteWidth);
+                                }
+                                resource->Release();
+                            }
+                        }
+                    }
+                }
+            }
             screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+            meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
@@ -4176,6 +4241,7 @@ void vScreenRefreshConfig() {
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
+    nightVisionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -4351,6 +4417,7 @@ void vScreenFrameBoundary() {
         screenMotionFrameBoundary();
         weaponStabilityFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
+        meshMotionFrameBoundary(g_state->ownerCtx);
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -5311,6 +5378,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
+    nightVisionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
@@ -5638,7 +5706,9 @@ void shutdownVScreenFixes() {
     uiDepthShutdown();
     screenMotionShutdown();
     weaponStabilityShutdown();
+    nightVisionShutdown();
     celestialMotionShutdown();
+    meshMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();

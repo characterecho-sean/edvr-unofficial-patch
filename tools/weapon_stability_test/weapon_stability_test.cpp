@@ -19,6 +19,9 @@ ComPtr<ID3DBlob> compile(const char* s,const char* entry){
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned,unsigned,unsigned,int,unsigned){}
+void weaponMotionResourceWritten(ID3D11Resource*){}
+void meshMotionResourceWritten(ID3D11Resource*,uint64_t,uint64_t){}
 bool testEnabled=true;
 Config& Config::get(){static Config cfg;return cfg;}
 bool Config::getBool(const char* key,bool def) const {
@@ -189,6 +192,7 @@ void emitterTest(){
     auto sentinel=h.buffer(nullptr,64,16,D3D11_BIND_UNORDERED_ACCESS);ComPtr<ID3D11UnorderedAccessView> sentinelUav;
     hr(h.dev->CreateUnorderedAccessView(sentinel.Get(),nullptr,&sentinelUav));h.ctx->CSSetUnorderedAccessViews(2,1,sentinelUav.GetAddressOf(),nullptr);
     h.ctx->CSSetConstantBuffers(1,1,input.GetAddressOf());
+    h.ctx->CSSetShaderResources(0,1,h.bs.GetAddressOf());
     auto run=[&](bool corrected){
         testVs=0x9AEC596A2B036EA6ull;testPs=0x3789CA2062E196FBull;
         h.ctx->UpdateSubresource(input.Get(),0,nullptr,model,0,0);h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
@@ -199,9 +203,16 @@ void emitterTest(){
         ComPtr<ID3D11Buffer> cb;h.ctx->VSGetConstantBuffers(0,1,&cb);check(cb.Get()==input.Get(),"emitter VS CB restored");
         cb.Reset();h.ctx->CSGetConstantBuffers(1,1,&cb);check(cb.Get()==input.Get(),"emitter CS CB restored");
         ComPtr<ID3D11UnorderedAccessView> u;h.ctx->CSGetUnorderedAccessViews(2,1,&u);check(u.Get()==sentinelUav.Get(),"emitter CS UAV restored");
+        ComPtr<ID3D11ShaderResourceView> srv;h.ctx->CSGetShaderResources(0,1,&srv);check(srv.Get()==h.bs.Get(),"emitter restores displaced CS source view");
     };
     run(true);
-    cam[273][2]=.025f;run(false);cam[273][2]=.0675f;
+    cam[273][2]=.025f;run(false);
+    position(p[51],model[9][3],model[10][3],model[11][3]);
+    auto updatePool=[&](){h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,p.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());};
+    updatePool();run(true); // exact rigid-part association survives aiming
+    setFloat(p[51],5,getFloat(p[51],5)+.001f);updatePool();run(false); // merely nearby world effect
+    setFloat(p[51],5,model[10][3]);p[51].words[0]=9;updatePool();run(false); // independently skinned world body
+    p[51].words[0]=0;updatePool();cam[273][2]=.05f;run(false);cam[273][2]=.0675f;
     model[9][3]+=10;run(false);model[9][3]-=10;
     model[9][0]=2;run(false);model[9][0]=1;
     p[90].words[0]=7;h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,p.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());run(false);
@@ -210,8 +221,67 @@ void emitterTest(){
     testEnabled=false;weaponStabilityConfigure(Config::get());check(!h.run(),"live weapon-stability off also disables emitter correction");
     testEnabled=true;weaponStabilityConfigure(Config::get());h.clean();
 }
+ComPtr<ID3D11Buffer> drawnLights;
+void __stdcall drawLights(ID3D11DeviceContext* ctx,unsigned n,unsigned instances,unsigned start,int base,unsigned si) {
+    check(n==14 && instances==5 && !start && !base && !si,"light draw arguments preserved");
+    UINT stride=0,offset=0;drawnLights.Reset();ctx->IAGetVertexBuffers(1,1,&drawnLights,&stride,&offset);
+    check(stride==32 && offset==0,"private light stream has original layout and correct origin");
+}
+void lightTest(){
+    Harness h;std::vector<Instance> p(128);float bones[10][3][4]{},cam[276][4]{},lc[14][4]{};
+    cam[270][0]=cam[271][1]=cam[272][3]=1;cam[273][2]=.0675f;
+    for(auto& r:p)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    position(p[12],.04f,.03f,-.02f);p[12].words[0]=7;p[90]=p[12];p[90].words[0]=8;
+    lc[2][0]=lc[3][1]=lc[4][2]=1;lc[12][3]=.025f;
+    h.inputs(p.data(),unsigned(p.size()*336),bones,sizeof(bones),cam,sizeof(cam));h.screen();check(h.run(),"light test has current-frame mesh anchor");
+    // Original IA stream has a nonzero byte offset; packed payload bytes
+    // must survive even when reinterpreting them as floats would be NaNs.
+    uint32_t raw[4+5*8]{};auto* lights=reinterpret_cast<float*>(raw+4);
+    for(unsigned i=0;i<5;++i){lights[i*8]=.1f;lights[i*8+1]=.2f;lights[i*8+2]=.3f;lights[i*8+3]=.025925925f;
+        for(unsigned j=4;j<8;++j)raw[4+i*8+j]=0xff800000u+i*8+j;}
+    lights[8]=13;lights[2*8+3]=2;lights[3*8+3]=0;lights[4*8+3]=-1;
+    auto vb=h.buffer(raw,sizeof(raw),0,D3D11_BIND_VERTEX_BUFFER),cb=h.buffer(lc,sizeof(lc),0,D3D11_BIND_CONSTANT_BUFFER);
+    UINT stride=32,offset=16;h.ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&offset);h.ctx->VSSetConstantBuffers(2,1,cb.GetAddressOf());
+    ID3D11Buffer* nullCb=nullptr;h.ctx->VSSetConstantBuffers(1,1,&nullCb); // actual point-light draw has no VS b1
+    auto sentinel=h.buffer(nullptr,64,16,D3D11_BIND_UNORDERED_ACCESS);ComPtr<ID3D11UnorderedAccessView> uav;
+    hr(h.dev->CreateUnorderedAccessView(sentinel.Get(),nullptr,&uav));h.ctx->CSSetUnorderedAccessViews(3,1,uav.GetAddressOf(),nullptr);
+    h.ctx->CSSetConstantBuffers(2,1,cb.GetAddressOf());h.ctx->CSSetConstantBuffers(0,1,h.camera.GetAddressOf());
+    auto code=compile("[numthreads(1,1,1)]void main(){}","main");ComPtr<ID3D11ComputeShader> old;
+    hr(h.dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&old));h.ctx->CSSetShader(old.Get(),nullptr,0);
+    auto run=[&](bool corrected){
+        testVs=0x0357BBB2DEE43C1Full;testPs=0x81812EF97FB4A361ull;h.ctx->UpdateSubresource(cb.Get(),0,nullptr,lc,0,0);
+        check(weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"verified point lights forwarded");
+        auto result=h.read(drawnLights.Get());auto* rf=reinterpret_cast<float*>(result.data());
+        for(unsigned i=0;i<5*8;++i){
+            if(corrected && i<3)check(std::fabs(rf[i]-(lights[i]-getFloat(p[12],4+i)))<1e-6,"local light follows full root delta, not projection-scaled delta");
+            else check(!memcmp(result.data()+i*4,raw+4+i,4),"world lights, radii and packed payload stay byte-identical");
+        }
+        auto original=h.read(vb.Get());check(!memcmp(original.data(),raw,sizeof(raw)),"original light stream untouched");
+        ComPtr<ID3D11Buffer> restored;UINT s=0,o=0;h.ctx->IAGetVertexBuffers(1,1,&restored,&s,&o);
+        check(restored.Get()==vb.Get() && s==32 && o==16,"IA binding restored");
+        restored.Reset();h.ctx->VSGetConstantBuffers(1,1,&restored);check(!restored,"unbound VS camera remains unbound");
+        restored.Reset();h.ctx->CSGetConstantBuffers(2,1,&restored);check(restored.Get()==cb.Get(),"light CS camera restored");
+        ComPtr<ID3D11UnorderedAccessView> ru;h.ctx->CSGetUnorderedAccessViews(3,1,&ru);check(ru.Get()==uav.Get(),"light CS UAV restored");
+        ComPtr<ID3D11ComputeShader> cs;h.ctx->CSGetShader(&cs,nullptr,nullptr);check(cs.Get()==old.Get(),"light CS shader restored");
+    };
+    run(true);auto* allocation=g.lightVertices.Get();run(true);check(allocation==g.lightVertices.Get(),"repeated light batches reuse allocation");
+    lc[6][3]=.01f;run(false);lc[6][3]=0;
+    lc[12][3]=.0675f;run(false);lc[12][3]=.025f;
+    lc[2][0]=2;run(false);lc[2][0]=1;
+    testPs=0;check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"unverified point-light material declined");testPs=0x81812EF97FB4A361ull;
+    check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,1,64,48),"unsupported nonzero start-instance retains stock draw");
+    check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,6,0,0,0,64,48),"light window cannot exceed bound buffer");
+    stride=16;h.ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&offset);check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"unknown light layout declined");
+    stride=32;h.ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&offset);
+    weaponStabilityFrameBoundary(h.ctx.Get());check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"previous-frame mesh anchor cannot move lights");
+    h.ctx->VSSetConstantBuffers(1,1,h.camera.GetAddressOf());h.screen();check(h.run(),"fresh mesh restores light eligibility");testVs=0x0357BBB2DEE43C1Full;testPs=0x81812EF97FB4A361ull;
+    weaponStabilityResourceWritten(nullptr);check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"command-list invalidation excludes stale light anchors");
+    testEnabled=false;weaponStabilityConfigure(Config::get());check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"live weapon toggle also bypasses lights");
+    testEnabled=true;weaponStabilityConfigure(Config::get());drawnLights.Reset();h.clean();
+}
 int main(int argc,char** argv){
-    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();}
+    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();}
     else if(argc==3 && !strcmp(argv[1],"--capture"))capture(argv[2]);
     else {std::puts("Usage: weapon_stability_test --self-test | --capture DIR");return 2;}
     std::printf("PASS: weapon stability (%u checks)\n",checks);return 0;

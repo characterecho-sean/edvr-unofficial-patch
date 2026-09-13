@@ -114,5 +114,76 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
             }
         }
     }
+    // The same shipping MV shader must reject background which was hidden
+    // by a hull, without changing UI/screen motion or valid sky history.
+    auto previous=texture(8,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
+    auto ui=texture(16,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
+    ComPtr<ID3D11ShaderResourceView> previousView,uiView;
+    hr(dev->CreateShaderResourceView(previous.Get(),nullptr,&previousView));
+    hr(dev->CreateShaderResourceView(ui.Get(),nullptr,&uiView));
+    std::vector<float> prior(64,0),marks(256,0);
+    auto coverage=texture(16,DXGI_FORMAT_R32G32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
+    ComPtr<ID3D11ShaderResourceView> coverageView,recordView;
+    hr(dev->CreateShaderResourceView(coverage.Get(),nullptr,&coverageView));
+    float record[60]{};reinterpret_cast<UINT*>(record)[15]=1;
+    record[44]=record[49]=record[54]=1;record[46]=.15625f;record[50]=.03125f;
+    record[56]=record[59]=1;record[57]=record[58]=16;
+    D3D11_BUFFER_DESC rb{};rb.ByteWidth=rb.StructureByteStride=sizeof(record);
+    rb.BindFlags=D3D11_BIND_SHADER_RESOURCE;rb.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    D3D11_SUBRESOURCE_DATA init{record,0,0};ComPtr<ID3D11Buffer> rigidRecord;
+    hr(dev->CreateBuffer(&rb,&init,&rigidRecord));hr(dev->CreateShaderResourceView(rigidRecord.Get(),nullptr,&recordView));
+    std::vector<float> coveragePixels(16*16*2,0);
+    coveragePixels[(7*16+6)*2]=1;coveragePixels[(7*16+6)*2+1]=.000025f;
+    ctx->UpdateSubresource(coverage.Get(),0,nullptr,coveragePixels.data(),16*8,0);
+    floats("movers",0,.03f,1,0);
+    floats("dR0",1,0,-.5f,0); // two input pixels horizontally
+    floats("holoJitter",.75f,.25f,1,1);
+    for(int variant=0;variant<3;++variant) {
+        ComPtr<ID3D11ComputeShader> tested=mv;
+        if(variant)hr(dev->CreateComputeShader(embedded[variant-1].data,embedded[variant-1].size,nullptr,&tested));
+        for(int test=0;test<16;++test) {
+            std::fill(z.begin(),z.end(),0.f);std::fill(prior.begin(),prior.end(),0.f);
+            std::fill(pixels.begin(),pixels.end(),0.f);std::fill(marks.begin(),marks.end(),0.f);
+            floats("probe",1,0,1,32);floats("holoJitter",.75f,.25f,1,1);
+            // At (4,4), motion goes to (6,4); prior raw raster is (5.25,3.75).
+            // A hull at (6,4) covers its filter footprint. (7,4) does not.
+            prior[4*8+6]=.025f;
+            if(test==0)prior[4*8+6]=0;
+            if(test==2){prior[4*8+6]=0;prior[4*8+7]=.025f;}
+            if(test==3)floats("holoJitter",.75f,.25f,0,1);
+            if(test==4)floats("holoJitter",.75f,.25f,1,0);
+            // The reactive/UI-kind input is region-sized, unlike scene depth.
+            if(test==5 || test==6)marks[(4*16)+4]=float(test-4)/255.f;
+            if(test==7){unsigned at=(7*16+6)*4;pixels[at]=1.25f;pixels[at+1]=-.25f;pixels[at+2]=.005f;pixels[at+3]=1;}
+            // A distant surface behind the hull is also newly exposed;
+            // a surface at the same depth, or in front, keeps its history.
+            if(test>=8 && test<=10)std::fill(z.begin(),z.end(),test==8?.000025f:test==9?.025f:.05f);
+            if(test==11)floats("dR0",1,0,-4,0); // off-image history
+            if(test==12 || test==13){std::fill(z.begin(),z.end(),.000025f);floats("probe",1,0,1,48);}
+            if(test>=14){std::fill(z.begin(),z.end(),.025f);prior[4*8+6]=.025f*(test==14?1.02f:1.04f);}
+            ctx->UpdateSubresource(scene.Get(),0,nullptr,z.data(),16*4,0);
+            ctx->UpdateSubresource(previous.Get(),0,nullptr,prior.data(),8*4,0);
+            ctx->UpdateSubresource(ui.Get(),0,nullptr,marks.data(),16*4,0);
+            ctx->UpdateSubresource(map.Get(),0,nullptr,pixels.data(),16*16,0);
+            ctx->UpdateSubresource(cb.Get(),0,nullptr,data.data(),0,0);
+            ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+            ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(3,1,previousView.GetAddressOf());
+            ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());ctx->CSSetShaderResources(14,1,ms.GetAddressOf());
+            if(test==12 || test==13){ID3D11ShaderResourceView* exact[2]={coverageView.Get(),recordView.Get()};ctx->CSSetShaderResources(test==12?15:12,2,exact);}
+            ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
+            ID3D11UnorderedAccessView* outputs[3]={mu.Get(),zu.Get(),ku.Get()};ctx->CSSetUnorderedAccessViews(3,3,outputs,nullptr);
+            ctx->CSSetShader(tested.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+            auto m=read(dev,ctx,motion.Get()),depths=read(dev,ctx,depth.Get());unsigned at=4*8+4;
+            const bool rejected=test==1 || test==8 || test==15;
+            float mx=rejected || test==11?16.f:2.f,my=rejected?16.f:0.f;
+            if(std::fabs(m[2*at]-mx)>=1e-5 || std::fabs(m[2*at+1]-my)>=1e-5)
+                std::printf("background case %d variant %d: got %g,%g expected %g,%g\n",test,variant,m[2*at],m[2*at+1],mx,my);
+            check(std::fabs(m[2*at]-mx)<1e-5 && std::fabs(m[2*at+1]-my)<1e-5,
+                  "DLSS background rejection respects depth, jitter, continuity, bounds, UI and screens");
+            check(std::fabs(depths[at]-(test==7?.005f:z[7*16+6]))<1e-6,
+                  "history rejection never changes current DLSS depth");
+            floats("dR0",1,0,-.5f,0);
+        }
+    }
     ctx->ClearState();
 }

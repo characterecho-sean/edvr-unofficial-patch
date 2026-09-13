@@ -144,6 +144,36 @@ were absent before and after. This establishes a rendering-state contract;
 game/owner thread exclusion, compatible paired-device publication and native
 Frontier discovery remain separate integration work.
 
+The following main refresh merges `origin/main` at `6de325e` into the OpenXR
+branch after that passed headset gate. It includes weapon/rigid-mesh motion,
+rendered-scene transition detection and night vision changes. The merge has no
+text conflicts and leaves `src/openxr` and the native harness source unchanged.
+The full merged build passed, including 10,774 OpenXR stereo, 196 actual-proxy
+state, 80,493 weapon-motion and 1,242 mesh-motion checks. The configuration
+contract passes with 254 keys. The complete log is
+`build/openxr-main-6de325e-final-build.log`, with executable/source hashes in
+`build/openxr-main-6de325e-validation.json`. The earlier headset receipt
+remains evidence for `8ff82f2`; it is not a Frontier qualification of these new
+game features. That exact tested executable is archived beside its native
+receipt.
+
+The first merged build exposed a link dependency in the new mesh-motion test:
+this branch's `GpuIntervals` uses the shared timing service. Luna added the
+real `gpu_timing.cpp` and `gpu_span_d3d11.cpp` sources to that test target;
+parent review confirmed the change preserves the timer implementation and all
+other test gates. Its targeted WARP run passed 1,242 checks. The failed build
+log is retained as `build/openxr-main-6de325e-build.log`.
+
+Review identified a concrete dependency for the upcoming graphics bridge:
+`hookedExecuteCommandList` now reaches both weapon and rigid-mesh history
+invalidation through `weaponStabilityResourceWritten(nullptr)`, and invalidates
+the transition detector's observed pools. Binding-pointer restoration alone
+does not preserve those content histories. The paired native compositor must
+identify its own bounded private writes while retaining conservative handling
+of unknown game command lists, together with explicit immediate-context
+serialization. This remains required before native Frontier integration; no
+installed game files or live settings are changed by this merge.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;

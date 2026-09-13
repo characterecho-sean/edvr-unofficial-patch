@@ -18,6 +18,8 @@
 // already filled and writes nothing to it. No game code is modified.
 #pragma once
 
+#include "glitch_scene.h"
+
 namespace edvr {
 // Registered by vscreen at install: the arrival-mono frame count (0 = off)
 // and whether the scanner's chrome drew recently. Unregistered = off.
@@ -38,6 +40,23 @@ bool glitchFrameWantsBuffer(uint32_t bytes);
 // thing worth knowing is whether several buffers of that size exist and which one
 // was being watched.
 void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
+
+// Read-only cross-check of the camera buffer bound to a recognised opaque
+// eye draw. A fresh same-frame write is required. Saved beside the legacy
+// furthest-camera history and paired with the bound pool below.
+bool glitchFrameWantsSceneDraw(uint64_t vertexShaderHash);
+bool glitchFrameNoteSceneDraw(const void* resource, float* sampledPosition = nullptr);
+
+// The bounded geometry cross-check follows the pool actually bound at that
+// same draw. Writes are read before Unmap; missing/overwritten data stays
+// explicitly unavailable. Coherent geometry excuses auxiliary-camera jumps;
+// an unmatched reset into head space marks the frame before Submit. A known
+// verdict is retained through later auxiliary writes and both eye submits.
+void glitchFrameNoteScenePool(const void* resource, uint32_t bytes);
+uint32_t glitchFrameWantsPool(const void* resource);
+void glitchFrameObservePool(const void* resource, const void* data, uint32_t bytes);
+void glitchFrameInvalidatePool(const void* resource);
+GlitchSceneGeometry glitchFrameSceneGeometry();
 
 // Called once per frame, after Present. eyeDraws is the number of draws that
 // reached the eye textures in the frame just finished -- used to tell a rendered

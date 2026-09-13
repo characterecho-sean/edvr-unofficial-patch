@@ -4,6 +4,7 @@
 #include "gpu_frame_timing.h"
 
 #include "shader_sig.h"
+#include "weapon_motion.h"
 #include "input_gate.h"
 #include "vr_runtime.h"
 
@@ -576,6 +577,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // vertices it is handed decides whether the curved screen is possible
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
+        weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);

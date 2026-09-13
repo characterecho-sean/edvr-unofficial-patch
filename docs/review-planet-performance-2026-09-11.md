@@ -434,3 +434,669 @@ UI, 213 holo-motion, 32,899 screen-motion and 524 weapon checks. The
 capture fixture verifies the new writer/parser and exact HDR crop bytes.
 No rendering fix for the remaining flicker is claimed from these tests;
 the additional draw-time evidence still requires a flight.
+
+## Flight 05:19: point-light fleck and stationary night vision
+
+Verified v0.15.1-37-g20aeb79, build 6AA5346C. Capture 052141 has 19
+complete source frames and 114 complete effect snapshots, with ten
+before/after HDR images and no declines. The second 0357BBB2DEE43C1F
+point-light batch (PS 81812EF97FB4A361, snapshot 62, 201 instances) adds
+the thin upper pink highlight: 10,534 changed pixels in the saved crop.
+The 9AEC particle draw adds the separate interior glow.
+
+Ruled out: spotlights, the first 512-point-light batch and E904 streaks
+cause the captured upper fleck; each changes zero pixels in this crop.
+Ruled out: scaling the light's root correction by the projection ratio.
+The light uses world near 0.025 while the weapon uses 0.0675, but its
+position is scaled about the original arms origin, not the camera.
+Undoing that scale about the arms leaves its emitter-local offset stable
+within 0.75 mm across all 19 frames. Scaling about the camera instead
+produces a 34 mm jump. The required root translation is the full mesh
+translation; range and colour must remain unchanged.
+
+Each frame contains exactly one small light in the attachment volume,
+with radius 0.025925925 m. The next closest light is over 13 m away. Its
+batch index changes, so neither index nor colour identifies it. Apply
+the existing validated arms correction to small local lights in a
+private instance stream, gated by the verified shader pair and matching
+light/mesh camera. Preserve world lights, all non-position fields and
+the original buffer. This remains part of fix.weapon_stability.
+
+Capture 052339 shows night vision at 2862x2826 input and 4404x4348
+output. The user confirms blur even with head and ship stationary. The
+only additional pixel-shader hash relative to the earlier cockpit census
+is F786D34B5E118D5E with VS FCF7BD2896751D96, draw DC0 #525. It samples
+scene depth and normals, including configurable pixel-block quantization
+and an unconditionally quantized centre-normal tap. It does not sample
+scene colour. Its actual PS b2 is not in this capture; do not assume the
+configured block size or change the effect from shader disassembly
+alone. Check source/output crops and coverage next, then capture the
+missing constants and pass contribution if needed.
+
+Evidence: build/review_motion/sep12/flight0519/. Environment remains
+SteamVR/OpenVR; headset model is not established by the log. Weapon
+correction runs before AA and does not change runtime reprojection.
+
+Original 0357 VS stream-output replay passes for both point-light
+batches in all 19 frames (2,849,237 checks). The independent expected
+stream translates only the identified weapon light. Every other light
+and every radius/packed payload byte stays unchanged. Shader outputs
+match exactly. The 823-check production regression covers
+projection/camera mismatch, freshness, byte ranges, state restoration,
+the live toggle and allocation reuse. The bounded private buffer grows
+to capacity and does not shrink between the alternating 512/201-light
+batches.
+
+Ruled out: the UI mask or fixed DLSS bias spreads onto the night-vision
+terrain. The sampled terrain ROI is zero in UI, Bias and UiEdits. The
+captured camera dimensions are also exactly 2862x2826 with matching
+reciprocals. The user has not yet compared night vision with AA Off.
+
+Add the exact night-vision shader pair to drawstate capture. For this
+pair, slot 1 captures PS b1 instead of unused VS b1; slot 3 remains PS
+b2. Save its before/after HDR contribution in a central native
+1024-square terrain crop during the first watched frame, within the
+existing 64 MiB effect budget. The completion log reports zero matches
+distinctly from complete constants/images. The GPU fixture and reader
+check original PS bindings, crop coordinates, exact packed pixels,
+later-frame limits and shader exports. These are diagnostic copies
+during an armed dump; night-vision rendering itself has not changed.
+
+Next flight: verify crouching with weapon stability enabled; capture
+night vision with DLSS and AA Off from the same stationary cockpit view.
+The comparison and actual night-vision constants distinguish effect
+sampling from temporal reconstruction without tuning sharpness blindly.
+
+The full SDK build and NVIDIA DLL smoke test pass. The capture fixture
+caught the parser's old lower-right-only validation; it now accepts the
+exact night-vision pair and its central crop while retaining bounds and
+format checks. The complete fixture, Python gates, 20,924 UI checks, 213
+hologram checks, 32,905 screen-motion checks and 823 weapon checks pass
+on the final source.
+
+## Flight 06:01: stationary night vision and aiming effects
+
+Verified 40174ac, build 6AA53E09. The user confirms the pink rifle fleck
+is gone during crouching. Preserve that attachment correction. A
+separate blue-white ball appears briefly while aiming down sights and
+crouching; identify its draw and pose before assuming it is the same
+light.
+
+Ruled out: DLSS alone causes the night-vision blur. The user observes it
+with AA Off and DLSS, stationary, and captured both modes in this run.
+Captures 060524/060543 contain night vision; 060838/060857 contain the
+on-foot aiming/crouching effects. The first pair has complete
+night-vision PS camera/settings and four before/after images per dump.
+
+060838 is a controls-menu capture with the on-foot scene behind it;
+060857 is the actual aiming pose. In all 19 aiming frames, both mesh and
+particle cameras use near 0.025, rather than the hip-fire 0.0675. The
+light radius also changes from 0.025925925 to 0.07. The particle guard
+therefore declines the aiming emitter while the mesh/light correction
+continues, separating their positions by up to 130 mm during crouching.
+
+Ruled out: near 0.025 always means a world particle. In this aiming
+capture, the emitter origin matches rigid weapon record 12 within 2.2
+micrometres across all 19 frames. Its rigid model and the matched part
+stay inside the same validated arms attachment volume. Use this
+draw-time association for the aiming projection instead of broadly
+accepting nearby world particles. Retain the existing hip-fire path.
+
+Night vision's actual settings are identical across the two captures:
+2774x2740 input, PS b2[11]=(40,1,0,0), b2[5].y=1. The optional
+pixelation flag is zero and the Sobel radius is one input pixel. The
+centre-normal sample still rounds its cell size up to two pixels, but
+that alone is not proof of the reported overall blur. The before/after
+HDR copies isolate the green terrain detail to this pass. Its normal and
+depth inputs are needed to replay and discriminate sampling changes.
+
+The user clarified that only the distant green outlines are fuzzy;
+nearby body/cockpit detail looks good, and ground textures are not the
+reported problem. They also found Elite's SMAA enabled. The census
+confirms its three passes after night vision in both captures: 060524
+DC0 #662-664 and #667-669; 060543 DC0 #664-666 and #669-671. These use
+VS 68842760565CC3BA, 03D186CE0EC031E3 and 98E6F9986FDC9A53, with the
+expected edge, area/search and neighbourhood-blend inputs. EDVR AA Off
+does not disable those game passes. It is therefore not an unfiltered
+night-vision reference.
+
+Next comparison: disable Elite's SMAA alone, retaining the same EDVR AA
+mode, HMD quality and stationary view. Clearer distant outlines would
+implicate this extra smoothing pass; unchanged detail would leave the
+night-vision sampling/input resolution as the next investigation. The
+user is testing this. Do not alter the night-vision shader or add a
+sharpening compensation before that comparison.
+
+Ruled out: SMAA is the main cause. The user repeated with SMAA disabled:
+the green distant detail remains very blurry in EDVR AA Off and DLSS;
+Off shimmers/flickers continuously, while DLSS calms it but still
+flickers at points during head movement. Flight 06:26 (same verified
+40174ac) contains capture 062922 while moving the head with DLSS. Its
+censuses contain no SMAA shader trio. The draw-time HDR crop already
+contains the dense green terrain pattern before subsequent
+AA/tonemapping, and all 28 night draws retain the same settings and
+correct input dimensions.
+
+Issue #25 (Night vision "pulse" line linked to headset movement) is
+related at the pass level, not yet established as the same defect. Its
+attached 21:46:34 log is release v0.15.1, linked 2026-09-11 02:14:54
+UTC; do not treat it as evidence of the latest branch's attachment
+changes. Its 21:54:40 census has this exact night VS/PS in both eyes,
+DC0 #438 and #491, at 1638x1554 input. The runtime log identifies
+SteamVR; DLSS settles on preset K at 65% input. Besides the
+normal-gradient detail, PS instructions 393-404 modulate brightness from
+sampled depth and PS b2[1].x, with a narrow pulse shaped by b2[10]. This
+is a separate candidate for the head-linked pulse. The archive has no
+draw-time normal/depth pixels or night-vision constants to prove that
+mechanism.
+
+The pulse lead has a concrete depth producer: #25 DC0 #269/#403 fills
+the exact t1 resources used by its night draws. Our 060524 DC0 #318 uses
+the same PS CB95394B50D737D6 and VS DEF19B035D5EDEDC. The retained pixel
+bytecode disassembles to sample hardware depth, add cb2[0].w, divide
+cb2[0].z by that result, and cap the result. This is linear view depth,
+without a view-ray length factor. The night shader feeds that depth into
+its pulse directly. A fixed terrain point's view depth changes with head
+rotation; this gives a specific explanation to test for the reported
+head-linked band. It does not establish that radial pulse reconstruction
+also fixes the separate fuzzy outlines.
+
+Extend the armed drawstate capture to v7: first-frame PS t0..t4 inputs,
+both original sampler descriptors and the viewport, plus the night
+draw's VB0/index window and input layout. Keep the actual typed SRV
+formats, including R32_FLOAT depth/exposure, R10G10B10A2_UNORM normals
+and raw BC4 blocks for the small mask. Every eye gets a draw-time copy
+even if resources are reused. Native crops retain their origins and
+share the existing 64 MiB image budget; the vertex budget remains 32
+MiB. No normal-play copies and no night-vision rendering changes.
+
+Discriminate with those inputs: compare the original shader replay to
+the recorded HDR contribution, test the unconditional two-pixel centre
+sample separately from the eight normal-gradient taps, and isolate the
+depth/pulse term. A neighbouring input texel is available throughout the
+interior of the native crop; exclude its boundary in replay. Do not
+infer blur from exposure-scaled PNG previews alone.
+
+Validation: the GPU fixture covers both eyes rewriting the same depth,
+normal, exposure and mask resources; its reader verifies the earlier
+pixels survive the rewrites, BC4 block rows are complete, both sampler
+filters/LOD values and viewport survive, and the original vertex/index
+windows and layout are retained. Missing inputs/samplers and budget
+declines are explicit; raw inputs are not exported as colour images. The
+reader retains v1-v6 support and rejects malformed v7 records.
+
+User requirement: any eventual night-vision rendering fix must have a
+live in-game Fixes toggle for A/B comparison. This diagnostic-only
+change does not add a toggle that would have no visible effect. Keep
+that requirement with the eventual fix, including its config contract
+and state restoration. The aiming emitter remains under the existing
+weapon-stability toggle.
+
+The emitter correction now retains the exact rigid-part association when
+aiming. It scans the already available GPU instance pool and adds the
+same arms displacement as the mesh; no readback, additional render pass
+or allocation per frame is introduced. The original particle VS was
+replayed over all 38 frames from the two on-foot captures, with the
+captured draw arguments and original index windows reconstructed from
+their saved offsets. Its corrected outputs match the independently
+translated emitter in every frame. Hip-fire behaviour is retained.
+## Flight 06:56: landed night-vision pulse and remaining ghosting
+
+Verified 0879045, v0.15.1-41-g0879045, in the Steam install. Captures
+065827 and 065830 show head movement with night vision; 065841 catches
+the startup pulse while landed. 065915 shows aiming/crouching on foot.
+The user confirms the detached aiming ball is gone. Remaining ghosting
+has not yet been localized to weapon geometry versus the nearby ammo UI.
+
+Ruled out: the pulse occurs only in flight. The user captured it shortly
+after enabling night vision while landed; PS b2[1].x is 962.975 metres.
+
+Ruled out: missing night-vision inputs or reduced-size depth/normal
+textures explain these captures. All six first-eye draws have all five
+inputs, both samplers, geometry and complete camera/settings constants;
+there are no failed copies. Depth and normals are 2774x2740, matching
+the input eye. The depth/normal sampler is point-clamp with no mip bias.
+
+Replaying the exact original VS/PS on NVIDIA reproduces 93.7-94.9% of
+terrain pixels bit-for-bit; remaining absolute error is 0.58-0.72% of
+the added night-vision signal. WARP differs by about 6%, so it is not a
+pixel-exact substitute for the captured GPU. A readable HLSL
+transcription reproduces the NVIDIA original replay to rounding error.
+The capture comparison is close, not pixel-exact, and does not establish
+a headset improvement by itself.
+
+Two shader defects are independently testable. First, the pulse uses
+linear camera-forward depth, produced by PS CB95394B50D737D6, as though
+it were distance from the viewer. A head rotation changes that quantity
+for a fixed landscape point. Reconstructing the per-pixel ray from the
+actual asymmetric eye projection gives radial distance without changing
+the range fade, pulse timing, exposure or normal-edge filter. Second,
+instructions 290-303 always quantize the centre normal lookup into 2x2
+cells even though b2[11].z disables pixelation on the other 13 lookups.
+The cell centre is also a texel boundary for point sampling. Respecting
+the existing pixelation flag restores the current pixel's normal.
+
+These are the scope of the proposed live Night vision stability toggle.
+They do not establish that every distant fuzzy outline is resolved. The
+scalar normal-gradient filter also varies with view direction, but
+replacing it with a full-vector gradient changes the intended edge
+response and has not been justified as a fix for the reported blur.
+
+Implemented `fix.night_vision_stability = 1`, **Night vision stability**
+in Fixes, live and independent of AA mode. Off binds the original game
+PS. Only the exact measured VS/PS, 240-index single-instance eye draw
+and matching depth/normal/camera resource contract engage. The shader
+adds no texture copies, readbacks, extra draws or history surfaces.
+Compile failure retains the original draw. Other runtime paths are
+unchanged; this is a D3D11 eye-draw correction with no OpenVR compositor
+dependency.
+
+Targeted GPU validation: 32,844 checks cover the pulse under rotated
+asymmetric cameras, native centre sampling, intentional pixelation,
+singular-camera fallback, unknown resource formats, live Off/On,
+deferred-context refusal, compile failure and shader restoration. All
+six NVIDIA capture replays pass: the test-only stock transcription
+matches the original PS replay at 99.9962-99.9984% of terrain pixels;
+signal-relative error is below 0.000014%. Fixed output is finite in all
+six captures. Headset clarity and residual ghosting remain unverified.
+
+### Weapon history motion
+
+The first 065915 motion input assigns the solid gun housing a median
+9.93 input pixels of vertical source motion (10.26 after jitter), while
+paired raw C00/C07/C15 crops show the housing holding its screen
+position. The ammo UI is already classified separately with
+ScreenMotion.w=3. The weapon is w=1 and follows the source camera's
+world reconstruction. This treats camera-attached geometry as stationary
+scenery while the player crouches or walks, introducing false motion.
+
+The source depth texture already provides a reliable discriminator:
+stencil bit 0x10 covers the first-person weapon and arms. The final
+5120x2880 source has values 4 for scenery and 20 for the weapon. An
+overlay of that bit follows the opaque rifle silhouette exactly,
+including the sight housing; it excludes the scenery visible through the
+glass. Confirmed on 065915/060857 aiming captures and
+060838/052141/045429/041300 hip-fire captures, covering 10.1% and 14.8%
+of the source respectively. No colour/depth threshold is needed.
+
+Use that existing stencil plane to retain source UV for first-person
+geometry while continuing to project it through the actual previous
+screen/eye mesh. This preserves temporal AA and runtime reprojection. It
+removes false player-camera motion; it does not manufacture previous
+skinned animation poses. Large weapon animations still rely on temporal
+disocclusion handling. Keep it under the existing Weapon stability
+toggle, and fall back when the source has no stencil plane.
+
+Implemented without another pass or source copy: an optional stencil SRV
+shares the already retained source depth texture, with one stencil
+lookup per screen pixel. The added t11 binding is saved/restored. The
+existing Weapon stability setting controls this with live reload and
+survives inactive-screen resource release. The screen-motion GPU suite
+passes 51,384 checks, including tagged/untagged surfaces at equal depth,
+both eyes, retained previous-screen motion, Off/On, absent stencil,
+replaced source textures and restoration of the original t11 binding.
+
+The final full build and all gates pass, including the unchanged 1,080
+weapon attachment checks. NVIDIA smoke passes. The generated settings
+schema exposes Night vision stability as a live Fixes toggle, grouped
+under Night vision. Next flight: compare that toggle while rotating the
+head through the landed startup pulse, then crouch/aim with Weapon
+stability on to assess residual ghosting. These tests validate code and
+captured inputs; neither visual improvement is claimed headset-verified.
+
+## Flight 07:41: aiming regression and unchanged night vision
+
+Verified v0.15.1-42-g68ed193, linked 13:37:34 UTC. New night captures
+074418/074420/074423 and weapon captures 074545/074557 are from this
+build. The log confirms night vision engaged at 2774x2740 and source
+weapon stencil motion engaged before the weapon captures.
+
+Ruled out: fixed source UV is a sufficient weapon-motion model. It
+removes false walking/crouching camera motion but ghosts during aiming
+and mouse-driven weapon movement. The new user report refutes that
+shortcut; the replacement must measure the rendered geometry's own
+motion, including animation and projection changes.
+
+Ruled out: correcting pulse distance and centre-normal quantization is
+sufficient to fix the reported night-vision fuzziness. Both changes ran
+and the user sees no meaningful improvement. Do not re-propose these as
+the main blur fix or add sharpening over the unresolved source.
+
+### Rendered weapon motion
+
+The replacement captures original post-VS positions while the attachment
+correction's private pool is still bound. It includes the game's own
+skinning, aiming projection and animation. Stream output uses the
+original vertex bytecode's position signature, avoiding a second
+implementation of the packed vertex and bone formats. Point-list capture
+preserves repeated and degenerate indices; the motion raster uses the
+original triangle list. The pixel shader interpolates previous
+homogeneous clip positions with current perspective, producing
+previous-minus-current source pixels. ScreenMotion then composes those
+with the actual prior curved screen and eye transform. It does not
+freeze the weapon in source UV.
+
+The existing Weapon stability toggle controls this, and AA Off allocates
+no temporal weapon resources. The successful
+attachment/pink-fleck/aiming ball corrections are retained. Runtime
+reprojection and presentation timing are unchanged. This path is
+D3D11-side; the observed flight uses OpenVR, preset K, 2774x2740 input
+and 4268x4216 output per eye, with a 5120x2880 on-foot source. No
+headset model or alternate runtime improvement is inferred from these
+captures.
+
+Only supported opaque source draws that write the game's stencil bit
+0x10 and source depth qualify. This bit also occurs on generic meshes;
+it is not a globally unique weapon identifier. Replaying their actual
+geometry handles those too. Geometry identity includes retained vertex/
+index buffers, layout, shader and draw windows, excluding reordered
+instance slots. Ambiguous repeated identities reject the frame's weapon
+history. Missing, changed, oversized and newly visible meshes reject
+history rather than borrowing scenery motion. Index/vertex writes
+invalidate correspondence; bone/camera changes are the motion to track.
+Depth equality restricts the motion raster to visible fragments; saved
+source depth rejects later occlusion at the screen consumer.
+
+The cache is bounded to 64 records, 131072 indices per draw and 32 MiB
+of position buffers. The source motion/depth target costs 112.5 MiB at
+5120x2880, with a 128 MiB cap. A 0.5 MiB sequential index buffer permits
+both passes to use the original draw entry point. All three are released
+when AA/Weapon stability is disabled or the source becomes inactive. No
+per-frame CPU readback or source-colour copy is added. Explicit eye
+dumps include WeaponMotion beside ScreenMotion, so coverage and vectors
+can be checked without another motion-model assumption.
+
+Validation: 57370 production GPU checks pass on WARP and NVIDIA,
+covering aiming translation, asymmetric bone movement, projection
+changes, perspective interpolation, degenerate indices, live Off/On,
+missed frames, duplicate identity, changed indices, size limits and
+state restoration. The screen consumer passes 54278 checks, including
+composition of animated source vectors into both eyes and rejection when
+the new map is absent. The full build, all gates and NVIDIA DLL smoke
+pass.
+
+The original VS stream-output probe executes on 228 mesh/frame records,
+but these dump tables retain each pool/bone resource once per frame,
+before some later viewmodel updates. Their reconstructed positions are
+therefore not reliable ground truth for the visible aiming pose. Do not
+use the initially calculated 100+ pixel changes as actual weapon motion.
+The production capture avoids this limitation by running at the actual
+draw. The new WeaponMotion dump records that result directly.
+
+An initial raw-capture timing replay had no visible coverage and was
+rejected. A corrected cost experiment repositions four complete captured
+meshes in the diagnostic camera, retaining original VS/skinning and
+86592 indices at 5120x2880. With 842133 motion pixels, NVIDIA timings
+are 0.0134 ms without the added pass and 0.2404-0.2465 ms with it; CPU
+submit cost is 0.0004 versus 0.0078-0.0115 ms. This is an isolated RTX
+5090 cost check, not an in-game frametime prediction or a complete gun
+replay.
+
+### Night-vision component isolation
+
+Replaying the shipped shader with all new draw-time inputs matches the
+recorded distant-terrain pixels at 99.9983-99.9991% in the three
+left-eye crops. Resource size constants are exactly 2774x2740 and its
+reciprocal, so a stale sampling size is ruled out. Component-isolation
+replays show the normal-edge filter contributes 95.5-95.7% of the added
+distant green signal, surface orientation about 4%, and the procedural
+grid none in these regions. This identifies the dominant fuzzy pattern
+before DLSS.
+
+The edge detector measures only the camera-Z component of the normal
+gradient. Holding the captured gradient fixed while rotating it between
+the two captured head bases changes its response by a median 38.1% (95th
+percentile 254%). That establishes an orientation-dependent brightness
+mechanism, not a complete explanation of perceived blur. A scratch
+full-vector-gradient replacement removes this directional dependency but
+increases mean response by 76.8% in the tested terrain and leaves the
+dense fuzzy pattern. It is not included in the build.
+
+Ruled out: replacing scalar normal gradients with their raw full-vector
+magnitude is a sufficient clarity fix; the replay mainly brightens the
+same dense pattern. Night-vision rendering remains unchanged this turn.
+The next investigation should address generation/filtering of the
+terrain normal edges, using the captured inputs, rather than requesting
+another identical flight or treating the pulse as the main blur cause.
+
+### Follow-up: geometry contours with no surface fill
+
+The user identified the dense pixelated patch before the mountain ridge
+and requested outlines for actual geometry rather than fine surface
+detail. Replacing the normal-map edge contribution with depth geometry
+removes that dense patch in the same captured inputs while retaining the
+ridge, mound and rock silhouettes. This confirms the dominant noisy
+signal comes from normal-detail amplification. It does not establish why
+the patch's boundary is circular; a specific terrain LOD or material
+transition remains unverified.
+
+Ruled out: an unnormalized inverse-depth Hessian multiplied by centre
+depth, because near/far discontinuities become excessively bright in the
+replay. Normalize by the sum of the nine inverse-depth samples instead.
+This bounds the response and makes it independent of absolute scene
+scale. Inverse forward-depth is affine on a perspective plane; its
+Hessian avoids outlining an ordinary slope. The mixed derivative
+includes diagonal contours. It is a geometric edge detector, not an
+object-category classifier, so real terrain folds can still get lines.
+
+An additive green surface prototype hid texture contrast. A subsequent
+texture-multiplication prototype preserved that contrast, but the user's
+final direction was "No green fill please." Neither surface treatment is
+shipped. The final geometry path adds no constant fill, tint or
+normal-map orientation shading. Between contours, the game's existing
+surface colours and texture remain visible. Unlit ground consequently
+stays dark. The pulse, exposure, mask and range still control the
+geometry contours. Deliberately pixelated and sampled-colour artistic
+modes keep their existing shading path.
+
+This stays under the existing live Night vision stability toggle, with
+the exact original game shader when Off. It changes only the matched
+pixel shader: no blend-state replacement, scene-colour copy, additional
+draw, history surface or CPU readback. Its normal terrain path uses nine
+depth samples for geometry instead of the nine material-normal samples.
+The existing runtime-independent D3D11 eye/resource gates remain.
+
+Validation: 66138 production GPU checks pass on both WARP and NVIDIA.
+They cover flat and sloped planes, material-normal detail rejection,
+physical depth steps, absolute-scale invariance, extreme near/far
+boundaries, exact preservation of surface colour/contrast between lines,
+mask/range/on-off behaviour, radial pulse under rotated asymmetric
+cameras, deliberate pixelation, compile failure and shader/blend state
+preservation. All six NVIDIA replays of 074418/074420/074423 are finite
+and retain geometry silhouettes without the dense normal-map patch.
+Replay comparisons use a shared exposure scale. Near cockpit differences
+are not a full accuracy check because the scratch replay lacks the
+original stencil state; the production draw retains it. Headset clarity
+and motion stability remain to be validated in the next flight.
+
+The full build, all regression gates and NVIDIA DLL smoke pass with this
+final no-fill shader and the rendered-weapon-motion correction.
+
+### Flight 09:15: confirmed fixes; brighter exterior terrain
+
+Verified `edvr_gfx_20260912_091550.log`, v0.15.1-44-g73919ba, linked
+15:09:06 UTC. Night vision engages at 2774x2740 and original- vertex
+weapon motion engages on the source screen. The user confirms the weapon
+fix looks good and likes the no-fill night vision, including its cockpit
+exclusion. They request a modest exterior brightness increase and
+clarify that this includes terrain between the outlines.
+
+Lift the contour radiance by 25% without increasing contour opacity or
+width. Also multiply the existing scene colour equally in RGB, up to
+1.25 within the game's mask/range/fade. This is a neutral exposure lift:
+there is no added colour, green fill or normal-map surface shading.
+Retain original alpha attenuation beneath the contours, the original
+depth/stencil state and the pulse. Zero mask, opacity or intensity and
+out-of-range surfaces receive no scene brightness increase. Deliberate
+pixelation and sampled-colour artistic modes retain their prior output.
+
+Dual-source blending performs the scene multiplication in the existing
+draw without copying or sampling the scene colour. The replacement now
+requires a single non-MSAA floating-point target 0, matching eye size,
+and the measured ONE/INV_SRC_ALPHA RGB blend contract. Changed MRT,
+format or blend contracts retain the original game draw. Save/restore
+the original blend state, factors and sample mask alongside the shader;
+leave the original cockpit stencil state and reference bound. Shader or
+blend creation failure retains the original path. The existing live
+Night vision stability toggle still restores the exact game shader and
+blend when Off. No extra pass, full-size surface or readback is added.
+
+Validation: 79609 production GPU checks pass on WARP and NVIDIA. Added
+coverage checks neutral channel scaling and retained texture contrast,
+unchanged cockpit pixels under stencil exclusion, stencil/alpha
+preservation, zero-intensity behaviour, changed MRT/blend refusal and
+blend restoration. The six previous 074418/074420/074423 capture replays
+remain finite and show median terrain green-channel brightness ratios of
+1.239-1.244 after range fade and HDR rounding. These are replay
+comparisons against the accepted no-fill shader, not fresh eye dumps
+from the 09:15 flight. Near cockpit pixels are masked in the diagnostic
+preview because that scratch replay does not include captured stencil;
+the production GPU test exercises the actual stencil exclusion path.
+
+The full build, all regression gates and NVIDIA DLL smoke pass with the
+neutral exterior brightness change. The final brightness preference is
+pending the user's next headset check.
+
+### Flight 09:33: rapid-motion ghosting and cockpit outlines
+
+Verified v0.15.1-45-ga1d91b1, linked 15:30:24 UTC; latest captures are
+093653 (weapon), 093744 and 093817 (night vision). The user reports
+residual weapon ghosting during rapid mouse/walking motion, a new
+night-vision contour trail while moving the ship, insufficient terrain
+detail in the dark, and green outlines around the cockpit body/chair.
+
+Ruled out: enabling original-vertex weapon history guarantees usable
+motion in the actual flight. The log reports repeated mesh identity and
+the weapon eye inputs contain no WeaponMotion map. Trace why the map is
+rejected before adjusting temporal response.
+
+Ruled out: retaining the original night-vision stencil semantically
+excludes the body/chair. The new images visibly outline them. The prior
+synthetic test verifies preservation of an exclusion mask, not that the
+game uses that mask for these specific cockpit surfaces. Identify their
+actual depth/stencil or draw provenance before suppressing them.
+
+
+The original NV draw reads stencil bit 128 and writes bit 4 (census
+`so=r80/w04/f3/1,1,3`, reference 4). Captured SceneZ stencil bit 16 also
+identifies the body/chair: values 20/21 and 144/148/149. The exterior
+uses 5. Keeping the original stencil therefore misses the body. In
+addition, the geometry kernel samples across cockpit silhouettes,
+creating green lines on adjacent exterior pixels whose motion belongs to
+the background. In 093817 these dashboard-edge trails are visible in T00
+but not the raw C00.
+
+The replacement now classifies bit 16 into one R8 GPU surface and checks
+all depth-filter sample locations before emitting contours or applying
+terrain gain. Excluded pixels use identity blending rather than discard,
+so the original stencil writes still occur. Temporarily unbind the
+original DSV while classifying its stencil, then restore all OM and CS
+state. This avoids sampling a DSV while the game writes stencil. No
+scene-colour copy or CPU readback is introduced. The original shader is
+retained on a changed depth/stencil, format, MRT, blend or context
+contract. A two-entry depth-SRV cache and one R8 output are bounded to
+16 million pixels; the output is reused between eyes.
+
+Increase contour radiance and neutral terrain gain from 1.25 to 2. Keep
+the original contour alpha and multiply existing RGB equally, retaining
+texture and colour instead of adding a flat green fill. The user's
+follow-up names the menu toggle **Realistic nightvision**. Preserve
+`fix.night_vision_stability` for existing configurations and live A/B.
+
+The weapon snapshot repeats the same arm geometry in two render passes:
+draws 32/75 share count 13260, start 6341848 and base 2870464. The
+camera buffer object is also shared; its contents and instance slots
+change. The first-frame pool distinguishes skeleton bases 92 and 740,
+while camera row 273.z gives projection depths 0.0675 and 0.025. The
+original 7B0DC42D383F694C VS writes this constant directly to clip Z.
+Projection alone is insufficient when aiming gives both passes the same
+near plane. Skeleton identity must distinguish those passes too.
+
+Keep up to four occurrences of each geometry key, with independent
+current/previous vertex buffers. Copy just the current four-byte
+instance index and resolve its skeleton allocation and instance flags on
+the GPU. Match prior vertices by this identity and original clip Z,
+independently of draw order. A missing or ambiguous match rejects that
+geometry's history, retaining the motion map for other weapon parts.
+More than four occurrences keeps the conservative whole-frame fallback.
+The existing 64-record / 32 MiB vertex-history limits remain; identity
+metadata adds at most 2 KiB plus one shared 16-byte buffer. Original
+animation, source-depth validation and compositor reprojection remain.
+
+Also stop treating ClearState as an unknown resource write. It resets
+bindings, not captured vertices or attachment data. Command-list
+execution and actual geometry-buffer writes still invalidate history;
+one-time reason logs now distinguish those cases. ClearState is observed
+in this flight, but its per-frame frequency was not recorded, so this is
+a verified API-semantics correction rather than proof that it explains
+every missing-history frame.
+
+Validation: 80493 production weapon checks pass on NVIDIA, including
+rapid animated perspective motion, ClearState/rebind, reordered
+occurrences, missing draws, matching skeletons with equal projections,
+ambiguous history and D3D state restoration. Screen composition passes
+54278 checks. The final night shader passes 83720 NVIDIA checks,
+including exact body/chair exclusion, the adjacent background pixel,
+original stencil writes, texture contrast, artistic modes and live A/B.
+Full captured-stencil replay checks every pixel in both 2774x2740
+inputs: 2394201 and 3912702 cockpit/body pixels are classified exactly.
+The R8 classification dispatch measures 0.069-0.076 ms per eye on NVIDIA
+with the debug layer; this excludes the NV pixel shader and is not a
+flight frametime measurement.
+
+Six saved night-input replays remain finite and produce median exterior
+brightness ratios 1.591-1.596 against the installed 1.25-gain shader.
+These isolate brightness on prior captured exterior crops; they do not
+include current cockpit stencil or prove temporal stability in a
+headset. The four-mesh / 86592-vertex weapon benchmark at 5120x2880
+measures 0.093-0.095 ms with history versus 0.013 ms without, with
+842133 covered pixels. It is an isolated GPU workload, not a forecast of
+game timing. The latest flight uses OpenVR and DLSS preset K at
+2774x2740, upscaled to 4268x4216, and an on-foot source of 5120x2880.
+Headset model is unverified. Visual ghosting reduction and final
+brightness still need a headset check.
+
+The full build, all regression gates and NVIDIA DLL smoke pass. The menu
+and installer schemas both expose Realistic nightvision while retaining
+the existing saved key and default.
+
+
+### Flight 10:22: stale installation; live brightness control
+
+The user reports improved weapon behaviour, remaining green body
+outlines and trails when pitching down, and requests adjustable
+night-vision brightness. Verify-first identifies the installed build as
+a1d91b1 (v0.15.1-45), not the pushed 22a0527 (v0.15.1-46). The previous
+turn could not install because Elite was still running. The sanctioned
+installer's verify-only also confirms both DLL hashes are old. The
+10:22:50 log explicitly engages the old 1.25-gain shader, and still logs
+repeated weapon mesh identity. The user-observed weapon improvement is
+not evidence that the new matching code ran.
+
+Ruled out: this flight disproves the new bit-16 cockpit/body exclusion
+or its edge-footprint correction. Neither was in the running DLL. Retain
+the already-tested correction and install it before further motion
+changes.
+
+Add advanced.night_vision_brightness as a live Advanced menu control
+named Night vision brightness, range 1.0 to 16.0, default 2.0. This
+scales both existing exterior terrain RGB and contour radiance,
+retaining texture, original contour alpha and cockpit/body exclusion. It
+applies only with Realistic nightvision enabled. A value of 1 removes
+the extra brightness lift; 4 gives the user a useful brighter
+comparison. Invalid nonfinite values fall back to 2; other out-of-range
+values clamp. A private 16-byte PS constant buffer updates only on
+creation or a setting change; original slot 3 is restored after each
+draw. No additional rendering pass, surface copy, shader recompilation
+or CPU readback is required for adjustment.
+
+Validation: 214940 NVIDIA GPU checks pass. They cover live brightness
+changes, default compatibility, neutral RGB scaling, retained texture
+contrast and alpha, contour gain, minimum/maximum values, nonfinite
+settings, cockpit exclusion even at maximum brightness, original PS
+constant-buffer restoration and the unchanged original shader with the
+fix off.
+
+Full build, all regression gates and NVIDIA DLL smoke pass. The
+generated menu row is a live Advanced numeric setting with the
+documented bounds.

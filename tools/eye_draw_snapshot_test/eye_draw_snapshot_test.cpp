@@ -136,6 +136,66 @@ int wmain(int argc, wchar_t** argv) {
     cropSnap.effectImageBytes=edvr::EyeDrawSnapshot::kEffectImageBudget;
     cropSnap.captureSourceMesh(ctx.Get(),400,0x359BF8FF5CFAA4C3ull,0,'X',6,1,0,0,0);cropSnap.captureEffectEnd(ctx.Get());
     check(cropSnap.effectImageDeclined==1,"effect image budget decline visible without unmatched end capture");
+    edvr::EyeDrawSnapshot night;
+    ctx->PSSetConstantBuffers(1,1,&b);
+    const char* nightVs="float4 main(float3 p:POSITION):SV_Position{return float4(p,1);}";
+    ComPtr<ID3DBlob> nightBlob;hr(D3DCompile(nightVs,strlen(nightVs),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&nightBlob,nullptr));
+    D3D11_INPUT_ELEMENT_DESC nightElement={"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};
+    ComPtr<ID3D11InputLayout> nightLayout;hr(dev->CreateInputLayout(&nightElement,1,nightBlob->GetBufferPointer(),nightBlob->GetBufferSize(),&nightLayout));
+    edvr::EyeDrawSnapshot::rememberLayout(nightLayout.Get(),&nightElement,1,edvr::EyeDrawSnapshot::kNight);ctx->IASetInputLayout(nightLayout.Get());
+    bd.ByteWidth=96;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;ComPtr<ID3D11Buffer> nightVertices;hr(dev->CreateBuffer(&bd,nullptr,&nightVertices));
+    UINT nightStride=12,nightOffset=12;ctx->IASetVertexBuffers(0,1,nightVertices.GetAddressOf(),&nightStride,&nightOffset);
+    bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_INDEX_BUFFER;ComPtr<ID3D11Buffer> nightIndices;hr(dev->CreateBuffer(&bd,nullptr,&nightIndices));
+    ctx->IASetIndexBuffer(nightIndices.Get(),DXGI_FORMAT_R16_UINT,2);
+    ComPtr<ID3D11Texture2D> nightTexture[5];ComPtr<ID3D11ShaderResourceView> nightView[5];
+    UINT nightRow[5]{},nightRows[5]{};
+    for(UINT slot=0;slot<5;++slot) {
+        D3D11_TEXTURE2D_DESC nt{};nt.Width=slot==0?6:slot==3?1:slot==4?16:1026;
+        nt.Height=slot==0 || slot==3?1:slot==4?16:1027;nt.MipLevels=nt.ArraySize=nt.SampleDesc.Count=1;
+        nt.Format=slot<=1?DXGI_FORMAT_R32_TYPELESS:slot==2?DXGI_FORMAT_R10G10B10A2_TYPELESS:slot==3?DXGI_FORMAT_R8G8B8A8_TYPELESS:DXGI_FORMAT_BC4_UNORM;
+        nt.BindFlags=D3D11_BIND_SHADER_RESOURCE;hr(dev->CreateTexture2D(&nt,nullptr,&nightTexture[slot]));
+        D3D11_SHADER_RESOURCE_VIEW_DESC ns{};ns.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;ns.Texture2D.MipLevels=1;
+        ns.Format=slot<=1?DXGI_FORMAT_R32_FLOAT:slot==2?DXGI_FORMAT_R10G10B10A2_UNORM:slot==3?DXGI_FORMAT_R8G8B8A8_UNORM:DXGI_FORMAT_BC4_UNORM;
+        hr(dev->CreateShaderResourceView(nightTexture[slot].Get(),&ns,&nightView[slot]));ctx->PSSetShaderResources(slot,1,nightView[slot].GetAddressOf());
+        nightRow[slot]=slot==4?32:nt.Width*4;nightRows[slot]=slot==4?4:nt.Height;
+    }
+    ComPtr<ID3D11SamplerState> nightSampler[2];
+    for(UINT slot=0;slot<2;++slot) {
+        D3D11_SAMPLER_DESC ns{};ns.Filter=slot?D3D11_FILTER_MIN_MAG_MIP_POINT:D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        ns.AddressU=ns.AddressV=ns.AddressW=slot?D3D11_TEXTURE_ADDRESS_CLAMP:D3D11_TEXTURE_ADDRESS_WRAP;
+        ns.MipLODBias=slot?0:.25f;ns.MinLOD=slot?0.f:-2.f;ns.MaxLOD=slot?0.f:3.f;ns.MaxAnisotropy=1;ns.ComparisonFunc=D3D11_COMPARISON_ALWAYS;
+        hr(dev->CreateSamplerState(&ns,&nightSampler[slot]));ctx->PSSetSamplers(slot,1,nightSampler[slot].GetAddressOf());
+    }
+    // Both eyes reuse the same inputs. The saved copies must differ, and
+    // later overwrites must affect neither. Also exercise native BC4 rows.
+    for(UINT eye=0;eye<2;++eye) {
+        for(UINT slot=0;slot<5;++slot) {
+            std::vector<uint8_t> data(nightRow[slot]*nightRows[slot],uint8_t(11+20*slot+eye*3));
+            ctx->UpdateSubresource(nightTexture[slot].Get(),0,nullptr,data.data(),nightRow[slot],0);
+        }
+        uint8_t data[96];std::memset(data,31+eye,96);
+        ctx->UpdateSubresource(nightVertices.Get(),0,nullptr,data,0,0);ctx->UpdateSubresource(nightIndices.Get(),0,nullptr,data,0,0);
+        D3D11_VIEWPORT vp{float(eye),float(eye*2),float(1026-eye*2),float(1027-eye*2),0,1};ctx->RSSetViewports(1,&vp);
+        ctx->ClearRenderTargetView(cropRt.Get(),cropBefore);
+        night.capture(ctx.Get(),500,17+eye,edvr::EyeDrawSnapshot::kNight,edvr::EyeDrawSnapshot::kNightPs,'X',6,1,0,2,1);
+        ctx->ClearRenderTargetView(cropRt.Get(),cropAfter);night.captureEffectEnd(ctx.Get());
+        check(night.nightSampling.back().mask==3 && night.nightSampling.back().viewportCount==1,"night samplers and viewport present");
+    }
+    check(night.draws.size()==2 && night.effectImages.size()==14,"stereo night-vision pass captures all draw-time inputs and contribution");
+    check(night.draws[0].source[1]==reinterpret_cast<uint64_t>(b) && night.draws[0].copied[1]==192,"night-vision captures actual PS b1, not unused VS b1");
+    for(UINT slot=0;slot<5;++slot) {
+        std::vector<uint8_t> data(nightRow[slot]*nightRows[slot],199);ctx->UpdateSubresource(nightTexture[slot].Get(),0,nullptr,data.data(),nightRow[slot],0);
+        ComPtr<ID3D11ShaderResourceView> nv;ctx->PSGetShaderResources(slot,1,&nv);check(nv.Get()==nightView[slot].Get(),"night capture preserves PS SRV bindings");
+    }
+    for(UINT slot=0;slot<2;++slot) {ComPtr<ID3D11SamplerState> ns;ctx->PSGetSamplers(slot,1,&ns);check(ns.Get()==nightSampler[slot].Get(),"night capture preserves samplers");}
+    uint8_t nightOverwrite[96]{};ctx->UpdateSubresource(nightVertices.Get(),0,nullptr,nightOverwrite,0,0);ctx->UpdateSubresource(nightIndices.Get(),0,nullptr,nightOverwrite,0,0);
+    night.capture(ctx.Get(),501,17,edvr::EyeDrawSnapshot::kNight,edvr::EyeDrawSnapshot::kNightPs,'X',240,1,0);night.captureEffectEnd(ctx.Get());
+    check(night.draws.size()==3 && night.effectImages.size()==14 && night.nightSampling.size()==2,"later night-vision frames retain constants without more input copies");
+    edvr::EyeDrawSnapshot nightDeclined;nightDeclined.effectImageBytes=edvr::EyeDrawSnapshot::kEffectImageBudget;
+    ID3D11ShaderResourceView* noNightViews[5]{};ctx->PSSetShaderResources(0,5,noNightViews);
+    ID3D11SamplerState* noNightSamplers[2]{};ctx->PSSetSamplers(0,2,noNightSamplers);
+    nightDeclined.capture(ctx.Get(),500,17,edvr::EyeDrawSnapshot::kNight,edvr::EyeDrawSnapshot::kNightPs,'X',6,1,0,2,1);nightDeclined.captureEffectEnd(ctx.Get());
+    check(nightDeclined.effectImageDeclined==6 && nightDeclined.effectImages.empty() && nightDeclined.nightSampling[0].mask==0,"night missing inputs, absent samplers and image budget are explicit");
     ctx->OMSetRenderTargets(1,&r,nullptr);
     ID3D11Buffer* noBuffer=nullptr;UINT zero=0;ctx->IASetVertexBuffers(1,1,&noBuffer,&zero,&zero);ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_R16_UINT,0);
     edvr::EyeDrawSnapshot vscreenSnap;
@@ -199,6 +259,36 @@ int wmain(int argc, wchar_t** argv) {
     check(meshSnap.draws.size()==4 && meshSnap.meshBuffers.size()==6 && !meshSnap.meshDeclined,"source buffer deduplication is per frame");
     ComPtr<ID3D11ShaderResourceView> checkPool;ctx->VSGetShaderResources(33,1,&checkPool);
     check(checkPool.Get()==meshPoolView.Get(),"source capture changed SRV binding");
+    edvr::EyeDrawSnapshot eyeMesh;
+    edvr::EyeDrawSnapshot::rememberLayout(layout.Get(),&element,1,meshVs);
+    ctx->IASetInputLayout(layout.Get());
+    D3D11_TEXTURE2D_DESC eyeDesc{};eyeDesc.Width=eyeDesc.Height=8;
+    eyeDesc.MipLevels=eyeDesc.ArraySize=eyeDesc.SampleDesc.Count=1;
+    eyeDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;eyeDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> otherEye;ComPtr<ID3D11RenderTargetView> otherEyeRtv;
+    hr(dev->CreateTexture2D(&eyeDesc,nullptr,&otherEye));hr(dev->CreateRenderTargetView(otherEye.Get(),nullptr,&otherEyeRtv));
+    eyeMesh.captureEyeMesh(ctx.Get(),699,0,edvr::EyeDrawSnapshot::kHud,0,'X',6,1,0,0,0);
+    check(eyeMesh.draws.empty() && !eyeMesh.firstFrame,"non-mesh does not start eye mesh window");
+    for(unsigned frame=700;frame<703;++frame)for(unsigned eye=0;eye<2;++eye) {
+        ID3D11RenderTargetView* target=eye?otherEyeRtv.Get():rtv.Get();ctx->OMSetRenderTargets(1,&target,nullptr);
+        const uint8_t value=uint8_t(51+(frame-700)*2+eye);
+        std::vector<uint8_t> pool(672,value),bones(48*24000,uint8_t(value+10)),ids(32,uint8_t(value+20));
+        ctx->UpdateSubresource(meshPool.Get(),0,nullptr,pool.data(),0,0);
+        ctx->UpdateSubresource(meshBones.Get(),0,nullptr,bones.data(),0,0);
+        ctx->UpdateSubresource(meshIds.Get(),0,nullptr,ids.data(),0,0);
+        for(unsigned draw=0;draw<2;++draw) {
+            float constants[48];for(float& v:constants)v=float(frame*10+eye*2+draw);
+            ctx->UpdateSubresource(cb.Get(),0,nullptr,constants,0,0);
+            eyeMesh.captureEyeMesh(ctx.Get(),frame,eye*100+draw,meshVs,0,'X',6,1,2+draw,150000,8000);
+        }
+        ctx->OMGetRenderTargets(1,&boundRt,nullptr);check(boundRt.Get()==target,"eye capture preserves target binding");
+    }
+    check(eyeMesh.draws.size()==12 && eyeMesh.meshBuffers.size()==18 && !eyeMesh.meshDeclined,
+          "eye pools deduplicate within a frame and target, never across eyes");
+    for(const auto& d:eyeMesh.draws)check(d.layout.size()==1,"eye mesh input layout retained");
+    const auto eyeBytes=eyeMesh.meshBytes;
+    for(unsigned frame:{699u,703u,720u})eyeMesh.captureEyeMesh(ctx.Get(),frame,1,meshVs,0,'X',6,1,0,0,0);
+    check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
@@ -209,6 +299,8 @@ int wmain(int argc, wchar_t** argv) {
     hr(ready); check(ready == S_OK, "GPU timeout");
     check(snap.write(ctx.Get(), argv[1]), "snapshot write");
     check(meshSnap.write(ctx.Get(),(std::wstring(argv[1])+L".mesh").c_str()),"source mesh snapshot write");
+    check(eyeMesh.write(ctx.Get(),(std::wstring(argv[1])+L".eyemesh").c_str()) && !eyeMesh.failures,"eye mesh snapshot payloads complete");
+    eyeMesh.reset();check(eyeMesh.meshBuffers.empty() && eyeMesh.draws.empty() && !eyeMesh.firstFrame,"eye mesh reset releases its independent budget");
     check(!meshSnap.failures,"source mesh copies complete");
     meshSnap.meshBytes=edvr::EyeDrawSnapshot::kMeshBudget;
     meshSnap.captureSourceMesh(ctx.Get(),302,meshVs,0,'X',6,1,0,0,0);
@@ -218,17 +310,19 @@ int wmain(int argc, wchar_t** argv) {
     check(vscreenSnap.failures==0,"on-foot capture completed without missing copies");
     check(effects.write(ctx.Get(),(std::wstring(argv[1])+L".effects").c_str()) && effects.failures==0,"effect snapshot writes complete GPU copies");
     check(cropSnap.write(ctx.Get(),(std::wstring(argv[1])+L".crops").c_str()) && cropSnap.failures==0,"effect colour crop write");
+    check(night.write(ctx.Get(),(std::wstring(argv[1])+L".night").c_str()) && night.failures==0,"night-vision draw-time data writes without missing copies");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHud, shaderBytes, sizeof(shaderBytes));
-    for(uint64_t hash:{edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,edvr::EyeDrawSnapshot::kScene})
+    for(uint64_t hash:{edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,edvr::EyeDrawSnapshot::kScene,edvr::EyeDrawSnapshot::kNight,edvr::EyeDrawSnapshot::kNightPs})
         edvr::EyeDrawSnapshot::rememberShader(hash,shaderBytes,sizeof(shaderBytes));
     std::wstring directory = argv[1]; directory.resize(directory.find_last_of(L"\\/"));
     check(gui.write(ctx.Get(),(std::wstring(argv[1])+L".gui").c_str(),directory.c_str()),"GUI source snapshot write");
     check(gui.failures==0 && gui.missingLayouts==0 && gui.declined==0,"GUI source payloads and layout complete");
     check(snap.writeShaders(directory.c_str()) == 0, "retained shader write");
     check(vscreenSnap.writeShaders(directory.c_str())==0,"on-foot vertex and pixel shader writes");
+    check(night.writeShaders(directory.c_str())==0,"night-vision vertex and pixel shader writes");
     const std::wstring shaderPath = directory + L"\\vs_81216C77F90DEDD6.dxbc";
     FILE* shader = nullptr; check(_wfopen_s(&shader, shaderPath.c_str(), L"rb") == 0, "shader file");
     char saved[sizeof(shaderBytes)] = {};
@@ -246,5 +340,6 @@ int wmain(int argc, wchar_t** argv) {
     snap.reset(); check(snap.draws.empty() && snap.surfaces.empty() && !snap.dropped, "reset");
     cropSnap.reset();check(cropSnap.effectImages.empty() && !cropSnap.effectImageBytes &&
         !cropSnap.effectImageDeclined && cropSnap.pendingEffectImage==UINT32_MAX,"effect capture reset releases images and pending work");
+    night.reset();check(night.nightSampling.empty() && night.effectImages.empty() && !night.vertexBytes,"night reset releases sampling and geometry");
     std::puts("GPU draw snapshot capture passed");
 }

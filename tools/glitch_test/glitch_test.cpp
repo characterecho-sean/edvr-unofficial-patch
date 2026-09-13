@@ -1699,6 +1699,172 @@ int main(int argc, char** argv) {
         settle(m, mx, 200);
     }
 
+    // A certified separation must survive a temporary excursion of its
+    // running mean. The 16:17 Pause capture had four slots, no evictions,
+    // but its ~6868 certified value had walked to 7593, then 8252. The
+    // next occurrence of ~6868 was being charged all three marks again.
+    {
+        shutdownGlitchFrameFix();
+        writeIni(scratch,kIni); Config::get().init(scratch); installGlitchFrameFix();
+        Buffer m; float mx=10000.f;
+        settle(m,mx,2400); // expire the earlier fixtures' observation tables
+        uint32_t training=0;
+        for(unsigned i=0;i<3;++i){training+=oneFrameExcursion(m,mx,6868.f);settle(m,mx,20);}
+        check("returning-separation fixture pays all three certification marks",training==3,std::to_string(training));
+        uint32_t cost=0;
+        for(unsigned i=1;i<=300;++i){
+            if(oneFrameExcursion(m,mx,6868.f+4.6f*i))++cost;
+        }
+        check("certified separation still follows continuous drift",cost==0,std::to_string(cost));
+        settle(m,mx,20);
+        check("the gap between certified start and moving mean is not excused",
+              oneFrameExcursion(m,mx,7550.f),"unobserved intermediate magnitude was trusted");
+        settle(m,mx,20);
+        check("returning certified magnitude survives drift without relearning",
+              !oneFrameExcursion(m,mx,6868.f),"the moving mean erased its certified starting magnitude");
+        for(unsigned i=1;i<=300;++i)oneFrameExcursion(m,mx,6868.f+4.6f*i);
+        for(unsigned i=0;i<1100;++i)oneFrameExcursion(m,mx,8248.f);
+        check("unseen certified start expires despite a refreshed moving mean",
+              oneFrameExcursion(m,mx,6868.f),"drift kept an unseen old magnitude trusted indefinitely");
+    }
+
+    // The bound-camera diagnostic selects the last current write of its
+    // own buffer, not the last or furthest camera written by another pass.
+    {
+        Buffer sceneBuffer,auxBuffer;auxBuffer.res=reinterpret_cast<void*>(0xCAFE);
+        float sampled[3]{};
+        check("unknown mesh shader does not request a scene-camera sample",!glitchFrameWantsSceneDraw(0));
+        check("known hull shader requests a scene-camera sample",glitchFrameWantsSceneDraw(0x66DE2CADB1F4AE6Bull));
+        sceneBuffer.setPos(1000,2000,3000);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        auxBuffer.setPos(90000,80000,70000);glitchFrameObserve(auxBuffer.f,kBytes,auxBuffer.res);
+        const bool marked=glitchFrameMarked();
+        check("bound-camera sample uses the right resource",glitchFrameNoteSceneDraw(sceneBuffer.res,sampled) && sampled[0]==1000 && sampled[2]==3000);
+        check("bound-camera observation cannot change the withhold decision",glitchFrameMarked()==marked);
+        check("later draws do not replace the first eye's sample",!glitchFrameNoteSceneDraw(auxBuffer.res));
+        advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();
+        check("previous-frame writes cannot become a fresh scene sample",!glitchFrameNoteSceneDraw(sceneBuffer.res));
+        sceneBuffer.setPos(1,2,3);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        sceneBuffer.setPos(NAN,0,0);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        check("an invalid new write invalidates an earlier finite sample",!glitchFrameNoteSceneDraw(sceneBuffer.res));
+        sceneBuffer.setPos(0,0,0);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
+        check("diagnostic preserves an origin at zero",glitchFrameNoteSceneDraw(sceneBuffer.res,sampled) && sampled[0]==0 && sampled[2]==0);
+    }
+    // The geometry observation must distinguish a shared origin change
+    // from a camera displaced relative to its objects. Production observes
+    // the pool before Unmap and claims
+    // the fresh write at the recognised eye draw, before either Submit.
+    {
+        advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();
+        constexpr unsigned count=glitch_scene_detail::kSamples;
+        uint32_t pool[count*84]{};
+        const void* resource=reinterpret_cast<const void*>(0x123456);
+        Buffer scene;
+        auto positions=[&](float offset){
+            for(unsigned i=0;i<count;++i){
+                auto* p=pool+i*84;p[0]=0;p[1]=0x3f800000;p[2]=0x7fff7fff;p[3]=0xffff7fff;p[7]=i+1;
+                float v[3]={1000.f+offset+i*2,200.f+i,300.f};memcpy(p+4,v,sizeof(v));
+            }
+        };
+        auto begin=[&](float camera,bool write=true){
+            if(write)glitchFrameObservePool(resource,pool,sizeof(pool));
+            scene.setPos(camera,0,0);glitchFrameObserve(scene.f,kBytes,scene.res);
+            glitchFrameNoteSceneDraw(scene.res);
+        };
+        auto end=[&](){advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();};
+        positions(0);begin(1000);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("pool observation waits for a write after nomination",glitchFrameSceneGeometry().matched==0);
+        check("pool reads stop after the first claimed eye draw",glitchFrameWantsPool(resource)==0);end();
+        check("only the nominated pool is watched on the next frame",glitchFrameWantsPool(resource)==sizeof(pool) && glitchFrameWantsPool(nullptr)==0);
+        positions(1);begin(1001);glitchFrameNoteScenePool(resource,sizeof(pool));end();
+        positions(2);begin(1002);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("fresh same-frame pool pair is compared",glitchFrameSceneGeometry().matched==count);end();
+        positions(5002);begin(6002);glitchFrameNoteScenePool(resource,sizeof(pool));
+        auto g=glitchFrameSceneGeometry();
+        check("a shared 5 km origin move cancels in camera-relative geometry",g.matched==count && g.predicted==count && g.cameraStep==5000 && g.poolStep==5000 && g.relativeP90<.001f && g.predictionP90<.001f);
+        check("coherent geometry leaves the shared origin move unmarked",!glitchFrameMarked());end();
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));g=glitchFrameSceneGeometry();
+        check("camera-only placement error remains visible after an origin move",g.matched==count && g.relativeP90>13.5f && g.predictionP90>13.5f);end();
+        pool[7]=0x7654321;begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("reused pool slots do not acquire old geometry identity",glitchFrameSceneGeometry().matched==count-1);end();
+        begin(6015.54f,false);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("an old pool write is not a current observation",glitchFrameSceneGeometry().matched==0);end();
+        begin(6015.54f);glitchFrameInvalidatePool(resource);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("an unobserved overwrite invalidates the pending pool sample",glitchFrameSceneGeometry().matched==0);end();
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("missing frame pairs are explicitly unavailable",glitchFrameSceneGeometry().matched==0);end();
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("pool observation recovers after consecutive fresh frames",glitchFrameSceneGeometry().matched==count);end();
+        for(unsigned i=0;i<count;++i)pool[i*84]=1;
+        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("skinned records do not masquerade as rigid geometry",glitchFrameSceneGeometry().matched==0);end();
+        positions(5002);begin(6015.54f);
+        for(unsigned i=0;i<4;++i)glitchFrameObservePool(resource,pool,sizeof(pool));
+        glitchFrameNoteScenePool(resource,sizeof(pool));
+        check("the read budget refuses stale data after too many writes",glitchFrameSceneGeometry().matched==0);end();
+        for(unsigned i=0;i<3;++i){begin(6015.54f,false);end();}
+        check("unbound pool watches expire",glitchFrameWantsPool(resource)==0);
+    }
+
+    // Captured field decisions, including the frame with no world camera.
+    {
+        const float nearOrigin[3]={-.02f,0,-.01f},away[3]={4.83f,-11.66f,-4.79f};
+        GlitchSceneGeometry g{128,128,4998.652f,4998.652f,0,.001f,.001f};
+        check("field normal-flight 5 km rebase is coherent",glitchSceneDecision(g,away)==GlitchSceneDecision::Coherent);
+        g={59,59,4247.484f,1600.022f,4207.028f,4241.066f,4241.066f};
+        check("first clean high wake catches its first reset",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::CameraReset);
+        g={65,65,13.505f,0,13.505f,1580.476f,1580.476f};
+        check("later high wake catches reset below the world-camera floor",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::CameraReset);
+        check("moving objects without a camera reset cannot trip the new detector",glitchSceneDecision(g,away)==GlitchSceneDecision::Unknown);
+        g.matched=31;check("a small population cannot decide a frame",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::Unknown);
+        g.matched=65;g.predicted=0;check("a missing third frame cannot decide a reset",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::Unknown);
+        g={128,128,0,0,0,0,0};const float invalid[3]={NAN,0,0};
+        check("invalid camera cannot excuse a frame",glitchSceneDecision(g,invalid)==GlitchSceneDecision::Unknown);
+    }
+    // Drive writes, claimed draws and Submit-time flags together. A later
+    // auxiliary write must neither restore a false mark nor erase a reset.
+    for(unsigned disabled=0;disabled<2;++disabled){
+        shutdownGlitchFrameFix();
+        writeIni(scratch,disabled?"[fix]\ntransition_flash=0\n":kIni);
+        Config::get().init(scratch);installGlitchFrameFix();
+        Buffer scene,aux;aux.res=reinterpret_cast<const void*>(0x4545);
+        constexpr unsigned count=128;uint32_t pool[count*84]{};
+        const void* resource=reinterpret_cast<const void*>(0x9898);
+        auto begin=[&](float camera,float object,float farCamera,bool claim=true){
+            for(unsigned i=0;i<count;++i){auto* p=pool+i*84;
+                p[1]=0x3f800000;p[2]=0x7fff7fff;p[3]=0xffff7fff;p[7]=i+1;
+                float pos[3]={object+1000.f+i*2,200.f+i,300.f};memcpy(p+4,pos,sizeof(pos));}
+            glitchFrameObservePool(resource,pool,sizeof(pool));
+            scene.setPos(camera,0,0);glitchFrameObserve(scene.f,kBytes,scene.res);
+            aux.setPos(farCamera,0,0);glitchFrameObserve(aux.f,kBytes,aux.res);
+            if(claim){glitchFrameNoteSceneDraw(scene.res);glitchFrameNoteScenePool(resource,sizeof(pool));}
+        };
+        auto end=[&](){advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();};
+        for(unsigned i=0;i<500;++i){begin(1000.f+i,1000.f+i,10000.f+i);end();}
+        begin(6500,6500,30000);
+        check("first coherent rebase is unmarked before Submit",!glitchFrameMarked());
+        aux.setPos(90000,0,0);glitchFrameObserve(aux.f,kBytes,aux.res);
+        check("later shadow camera cannot restore a false mark",!glitchFrameMarked());end();
+        for(unsigned i=0;i<4;++i){begin(13.54f,13.54f,10000);end();}
+        // No auxiliary world camera, precisely the missed field frame.
+        begin(0,13.54f,0);
+        check(disabled?"fix off cannot mark an eye reset":"eye reset marks before Submit without any world camera",glitchFrameMarked()==!disabled);
+        aux.setPos(95000,0,0);glitchFrameObserve(aux.f,kBytes,aux.res);
+        check("later auxiliary candidate preserves the eye reset verdict",glitchFrameMarked()==!disabled);end();
+        begin(13.54f,13.54f,200000);
+        check("the second withheld frame uses the existing consecutive budget",glitchFrameMarked()==!disabled);end();
+        begin(0,13.54f,0);
+        check("an eye reset cannot bypass the consecutive-frame limit",!glitchFrameMarked());end();
+        for(unsigned repeat=0;repeat<3;++repeat){
+            for(unsigned i=0;i<200;++i){begin(13.54f,13.54f,10000.f+i);end();}
+            begin(0,13.54f,0);
+            check("repeated high-wake resets are never learned as harmless separations",glitchFrameMarked()==!disabled);end();
+        }
+        // Freshness is mandatory: omit the draw, so the previous frame's
+        // coherent result cannot override the legacy detector next frame.
+        for(unsigned i=0;i<200;++i){begin(1000.f+i,1000.f+i,10000.f+i);end();}
+        begin(1200,1200,45000,false);
+        check("missing eye sample retains legacy behavior",glitchFrameMarked()==!disabled);end();
+    }
     clearGlitchFrame();
     shutdownGlitchFrameFix();
 

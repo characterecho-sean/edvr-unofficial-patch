@@ -397,6 +397,9 @@ struct RingEntry {
     uint32_t frame;
     uint32_t eyeDraws;
     float    pos[3];
+    float    scenePos[3];
+    bool     sceneValid;
+    GlitchSceneGeometry geometry;
 
     // THE CULL GUARD'S STATE while this frame was drawn, packed as the
     // channel carries it (frame_flag.h), zero when the guard was off.
@@ -437,6 +440,8 @@ enum RingVerdict : uint8_t {
     kVerdictBurst,           // the governor stood the fix down: see kDefaultBurstLimit
     kVerdictWithheldSepWould,// withheld, and the separation memory would have excused it
     kVerdictDrift,           // the drift chain's camera, one step further out (Rule B)
+    kVerdictSceneCoherent,
+    kVerdictSceneReset,
 };
 
 const char* ringVerdictName(uint8_t v) {
@@ -451,6 +456,8 @@ const char* ringVerdictName(uint8_t v) {
         case kVerdictCooldown:    return "let through: still settling";
         case kVerdictConsecutive: return "let through: too many in a row";
         case kVerdictBurst:       return "let through: the burst governor stood down";
+        case kVerdictSceneCoherent:return "let through: coherent eye geometry";
+        case kVerdictSceneReset:  return "WITHHELD -- eye camera reset without matching object rebase";
         default:                  return "";
     }
 }
@@ -560,6 +567,11 @@ struct State {
         uint32_t marks = 0;
         uint64_t lastMarkMs = 0;
         bool     certified = false;
+        // Preserve the evidence that earned certification independently of
+        // the running mean. Forward flight can move that mean away from a
+        // pass separation which returns a few seconds later.
+        float    certifiedResid = 0.0f;
+        uint32_t certifiedSeen = 0;
     };
     Separation seps[kSeparations] = {};
     float      repeatPercent = kDefaultRepeatPercent;
@@ -726,6 +738,24 @@ struct State {
     uint32_t validateMoved = 0;
     uint32_t revalidations = 0;
 
+    struct SceneWrite { const void* resource=nullptr; float pos[3]{}; uint32_t frame=0; bool valid=false; };
+    SceneWrite sceneWrites[16];
+    uint32_t sceneDrawFrame=~0u;
+    float sceneDrawPos[3]{};
+    bool sceneDrawNoted=false;
+    struct ScenePool {
+        const void* resource=nullptr;
+        uint32_t bytes=0,lastBound=0;
+        glitch_scene_detail::Sample write,prev,older;
+    };
+    ScenePool scenePools[4];
+    GlitchSceneGeometry sceneGeometry;
+    uint32_t scenePoolFrame=~0u;
+    bool scenePoolNoted=false;
+    uint32_t scenePoolReadFrame=~0u,scenePoolReads=0,scenePoolCapped=0;
+    uint32_t sceneDecisionFrame=~0u,sceneExcused=0,sceneResets=0;
+    GlitchSceneDecision sceneDecision=GlitchSceneDecision::Unknown;
+
     RingEntry ring[kRingFrames] = {};
     uint64_t  ringHead = 0;
 };
@@ -733,6 +763,13 @@ struct State {
 // Reads of the game's mapped memory happen inside the caller's fault guard in
 // vscreen.cpp, so this file needs no budget of its own.
 State* g_state = nullptr;
+
+uint32_t recentWithholds(const State* s) {
+    uint32_t count=0;
+    for(const uint32_t at:s->withheldAt)
+        if(at && s->frameNo>=at && s->frameNo-at<s->burstWindow)++count;
+    return count;
+}
 
 // The two stand-downs, asked as questions rather than read as counters.
 //
@@ -770,7 +807,11 @@ int findSeparation(float resid) {
     for (uint32_t i = 0; i < kSeparations; ++i) {
         if (s->seps[i].hits == 0) continue;
         if (s->frameNo - s->seps[i].lastSeen > kRunawayWindow) continue;
-        if (fabsf(s->seps[i].resid - resid) <= tol) return static_cast<int>(i);
+        const auto& e = s->seps[i];
+        const bool atStart = e.certified &&
+            s->frameNo - e.certifiedSeen <= kRunawayWindow &&
+            fabsf(e.certifiedResid - resid) <= tol;
+        if (fabsf(e.resid - resid) <= tol || atStart) return static_cast<int>(i);
     }
     return -1;
 }
@@ -839,6 +880,8 @@ void recordSeparationMark(float resid) {
     e.lastMarkMs = stampMs();
     if (!e.certified && e.marks >= kSepMarksToCertify) {
         e.certified = true;
+        e.certifiedResid = e.resid;
+        e.certifiedSeen = s->frameNo;
         Log::get().note(
             "transition flash: a separation of about %.0f world units has cost a "
             "frame %u times within %u seconds, so it is a fixed gap between two "
@@ -885,17 +928,24 @@ void recordResidual(float resid) {
         // wrong trade: it spends the margin against real flashes, which is the
         // only thing standing between this and suppressing the bug it exists to
         // fix.
-        e.resid += (resid - e.resid) * 0.5f;
+        const float tol = resid * (s->repeatPercent * 0.01f);
+        if (e.certified && fabsf(e.certifiedResid - resid) <= tol)
+            e.certifiedSeen = s->frameNo;
+        // A return to the certified starting magnitude is a new drift
+        // segment. Averaging across the gap would invent a magnitude that
+        // matched neither observation. Only the two narrow match windows
+        // are trusted; the interval between them is never excused.
+        if (fabsf(e.resid - resid) <= tol) e.resid += (resid - e.resid) * 0.5f;
+        else e.resid = resid;
         // Once per magnitude, not once per suppressed frame -- there are
         // thousands of those and one of these.
         if (!e.noted && e.hits >= 2) {
             e.noted = true;
             Log::get().note(
                 "transition flash: a jump of about %.0f world units has now "
-                "happened %u times. A repeating magnitude is a fixed separation "
-                "between two of the game's render passes, not a transition -- so "
-                "frames matching it are no longer being withheld. This is the "
-                "detector recognising the scene, not a fault.",
+                "happened %u times. Recognition alone does not excuse a frame; "
+                "certification still requires three withheld frames within "
+                "60 seconds.",
                 static_cast<double>(e.resid), e.hits);
         }
         return;
@@ -1599,6 +1649,16 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     const float* pos = &static_cast<const float*>(data)[s->posOffset];
     // Non-finite values compare false in both directions, so a NaN here would
     // pass every threshold test silently rather than failing one.
+    if (resource) {
+        uint32_t at=0;
+        for(uint32_t i=0;i<16;++i){
+            if(s->sceneWrites[i].resource==resource){at=i;break;}
+            if(!s->sceneWrites[i].resource){at=i;break;}
+            if(s->sceneWrites[i].frame<s->sceneWrites[at].frame)at=i;
+        }
+        auto& w=s->sceneWrites[at];w.resource=resource;w.frame=s->frameNo;w.valid=finite3(pos);
+        for(unsigned a=0;a<3;++a)w.pos[a]=pos[a];
+    }
     if (!finite3(pos)) return;
 
     s->sawBuffer = true;
@@ -1655,6 +1715,10 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // Everything above is observation. Everything below can withhold a frame,
     // so a fix that has stood down -- or was never switched on -- stops here.
     if (!s->enabled || s->disabledForSession) return;
+
+    // The first recognised eye draw has stronger evidence than an auxiliary
+    // pass. Later writes must not reverse its verdict before either Submit.
+    if(s->sceneDecisionFrame==s->frameNo)return;
 
     // Re-decide here, on every new furthest camera, rather than at the frame
     // boundary.
@@ -1821,14 +1885,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // still spend the budget, and then the flash is missed. That is the trade
     // the bound accepts, and the log says when it was taken so the miss is
     // attributable rather than mysterious.
-    uint32_t recentWithholds = 0;
-    for (uint32_t i = 0; i < kBurstHistory; ++i) {
-        const uint32_t at = s->withheldAt[i];
-        if (at != 0 && s->frameNo >= at && s->frameNo - at < s->burstWindow) {
-            ++recentWithholds;
-        }
-    }
-    if (!burstDown(s) && recentWithholds >= s->burstLimit) {
+    const uint32_t recent = recentWithholds(s);
+    if (!burstDown(s) && recent >= s->burstLimit) {
         s->burstStandDownUntilMs = nowMs() + kBurstCooldownMs;
         // Rate-limited, not once-only. It used to say this the first time and
         // stay silent for every later stand-down, so a governor that was down
@@ -1843,7 +1901,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
                 "problem; a single transition costs one or two frames and never "
                 "reaches this. If it keeps happening, something is producing a "
                 "storm of jumps and the camera history will show what.",
-                recentWithholds, s->burstWindow, recentWithholds * 80,
+                recent, s->burstWindow, recent * 80,
                 (unsigned)kBurstCooldownMs);
         }
     }
@@ -1917,10 +1975,113 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 #endif
 }
 
+bool glitchFrameWantsSceneDraw(uint64_t hash) {
+    State* s=g_state;
+    if(!s || !s->observing || s->sceneDrawFrame==s->frameNo)return false;
+    return hash==0xEB5234DB6ADB491Dull || hash==0xDE545DC8EE4FBB87ull ||
+        hash==0x61AE8EB05FDC18DDull || hash==0x66DE2CADB1F4AE6Bull || hash==0xAACFDCF2FB9AD809ull;
+}
+bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
+    State* s=g_state;
+    if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo)return false;
+    for(const auto& w:s->sceneWrites)if(w.resource==resource && w.frame==s->frameNo && w.valid){
+        s->sceneDrawFrame=s->frameNo;
+        for(unsigned a=0;a<3;++a){s->sceneDrawPos[a]=w.pos[a];if(sampledPosition)sampledPosition[a]=w.pos[a];}
+        if(!s->sceneDrawNoted){s->sceneDrawNoted=true;Log::get().note(
+            "transition flash: bound eye-draw camera cross-check is recording "
+            "VS b1's current write, independently of AA; Pause history includes "
+            "scene= beside the detector's furthest-camera pos=.");}
+        return true;
+    }
+    return false;
+}
+namespace {
+void recordScenePosition(RingEntry& e,const State* s){
+    // Boundary advances frameNo before recording the frame just completed.
+    e.sceneValid=s->sceneDrawFrame+1==s->frameNo;
+    for(unsigned a=0;a<3;++a)e.scenePos[a]=s->sceneDrawPos[a];
+    e.geometry=s->scenePoolFrame+1==s->frameNo?s->sceneGeometry:GlitchSceneGeometry{};
+}
+}
+uint32_t glitchFrameWantsPool(const void* resource){
+    State* s=g_state;if(!s || !s->observing || !resource || s->scenePoolFrame==s->frameNo)return 0;
+    for(const auto& p:s->scenePools)if(p.resource==resource && s->frameNo-p.lastBound<=2)return p.bytes;
+    return 0;
+}
+void glitchFrameObservePool(const void* resource,const void* data,uint32_t bytes){
+    State* s=g_state;if(!s || !s->observing || !resource)return;
+    for(auto& p:s->scenePools)if(p.resource==resource){
+        if(s->scenePoolReadFrame!=s->frameNo){s->scenePoolReadFrame=s->frameNo;s->scenePoolReads=0;}
+        if(s->scenePoolFrame==s->frameNo || ++s->scenePoolReads>4){
+            p.write.valid=false;
+            if(s->scenePoolReads==5)++s->scenePoolCapped;
+            return;
+        }
+        if(bytes==p.bytes)glitch_scene_detail::readPool(p.write,data,bytes,s->frameNo);
+        else p.write.valid=false;
+        return;
+    }
+}
+void glitchFrameInvalidatePool(const void* resource){
+    State* s=g_state;if(!s)return;
+    for(auto& p:s->scenePools)if(!resource || p.resource==resource)p.write.valid=false;
+}
+void glitchFrameNoteScenePool(const void* resource,uint32_t bytes){
+    State* s=g_state;
+    if(!s || !s->observing || !resource || !bytes || bytes%glitch_scene_detail::kPoolStride ||
+       s->sceneDrawFrame!=s->frameNo || s->scenePoolFrame==s->frameNo)return;
+    uint32_t at=0;
+    for(uint32_t i=0;i<4;++i){
+        if(s->scenePools[i].resource==resource){at=i;break;}
+        if(!s->scenePools[i].resource){at=i;break;}
+        if(s->scenePools[i].lastBound<s->scenePools[at].lastBound)at=i;
+    }
+    auto& p=s->scenePools[at];
+    if(p.resource!=resource || p.bytes!=bytes){p=State::ScenePool{};p.resource=resource;p.bytes=bytes;}
+    p.lastBound=s->frameNo;s->scenePoolFrame=s->frameNo;s->sceneGeometry={};
+    if(p.write.valid && p.write.frame==s->frameNo){
+        for(unsigned a=0;a<3;++a)p.write.camera[a]=s->sceneDrawPos[a];
+        s->sceneGeometry=glitch_scene_detail::compare(p.write,p.prev,p.older);
+        p.older=p.prev;p.prev=p.write;
+        if(!s->scenePoolNoted){s->scenePoolNoted=true;Log::get().note(
+            "transition flash: bound-pool coherence recording before Submit; "
+            "128 sampled records, at most 4608 bytes read per observed pool write, "
+            "at most four reads before the first claimed draw per frame, "
+            "no GPU copy or readback. Pause reports camera/pool steps and relative "
+            "motion. Fresh coherent geometry can excuse an auxiliary-camera "
+            "jump; an unmatched reset into head space can mark before Submit. "
+            "Missing pairs report matched=0 and retain the legacy decision.");}
+    }
+    if(!s->enabled || s->disabledForSession || !s->validated || s->lastEyeDraws<s->minEyeDraws)return;
+    const auto decision=glitchSceneDecision(s->sceneGeometry,s->sceneDrawPos);
+    if(decision==GlitchSceneDecision::Unknown)return;
+    s->sceneDecision=decision;s->sceneDecisionFrame=s->frameNo;
+    s->suppressedThisFrame=false;s->parkSuppressedThisFrame=false;
+    s->radiusSuppressedThisFrame=false;s->driftSuppressedThisFrame=false;
+    if(decision==GlitchSceneDecision::Coherent){
+        s->verdictThisFrame=s->jumpedThisFrame?kVerdictSceneCoherent:kVerdictQuiet;
+        s->jumpedThisFrame=false;
+        unmarkGlitchFrame();
+    }else{
+        // The old cooldown/park/separation judgments describe auxiliary
+        // cameras. They cannot overrule a measured eye-camera reset. Keep
+        // the real withhold budgets, including when no world camera wrote.
+        const bool budget=!burstDown(s) && recentWithholds(s)<s->burstLimit;
+        const bool mark=budget && s->consecutive<s->maxConsecutive;
+        s->jumpedThisFrame=true;s->lastResid=s->sceneGeometry.relativeMedian;s->lastTrip=1;
+        s->verdictThisFrame=mark?kVerdictSceneReset:(!budget?kVerdictBurst:kVerdictConsecutive);
+        if(mark){markGlitchFrame();noteWorldJump();}else unmarkGlitchFrame();
+    }
+}
+GlitchSceneGeometry glitchFrameSceneGeometry(){
+    State* s=g_state;return s && s->scenePoolFrame==s->frameNo?s->sceneGeometry:GlitchSceneGeometry{};
+}
 void glitchFrameBoundary(uint32_t eyeDraws) {
     State* s = g_state;
     if (!s || !s->observing) return;
 
+    const bool sceneCoherent=s->sceneDecisionFrame==s->frameNo && s->sceneDecision==GlitchSceneDecision::Coherent;
+    const bool sceneReset=s->sceneDecisionFrame==s->frameNo && s->sceneDecision==GlitchSceneDecision::CameraReset;
     ++s->frameNo;
 
     // The cull guard's state for the frame being closed, read once so the
@@ -1952,14 +2113,15 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // because a history is the whole reason to run with it off: nothing withheld
     // means anything seen was somebody else's.
     if (!s->enabled) {
-        if (s->frameFarMag2 >= 0.0f) {
+        if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
             RingEntry& e = s->ring[s->ringHead % kRingFrames];
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
+            recordScenePosition(e,s);
             ++s->ringHead;
         }
         s->frameFarMag2 = -1.0f;
@@ -2041,14 +2203,15 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // flash produced the ten seconds before the fix gave up, minutes
         // earlier, with nothing saying so. That is worse than an empty dump: the
         // frames looked plausible and described a completely different moment.
-        if (s->frameFarMag2 >= 0.0f) {
+        if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
             RingEntry& e = s->ring[s->ringHead % kRingFrames];
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
+            recordScenePosition(e,s);
             ++s->ringHead;
         }
         s->frameFarMag2 = -1.0f;
@@ -2085,8 +2248,13 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // withheld, and a counter that quietly drops it is lying in the same
     // direction as before. It is counted separately instead, below.
     const bool wasWithheld = s->verdictThisFrame == kVerdictWithheld ||
-                             s->verdictThisFrame == kVerdictWithheldSepWould;
-    if (s->verdictThisFrame != kVerdictQuiet && !wasWithheld) {
+                             s->verdictThisFrame == kVerdictWithheldSepWould ||
+                             s->verdictThisFrame == kVerdictSceneReset;
+    if(sceneCoherent || (sceneReset && !wasWithheld)){
+        if(s->verdictThisFrame==kVerdictSceneCoherent)++s->sceneExcused;
+        // No auxiliary-separation learning from a geometry verdict.
+        unmarkGlitchFrame();
+    } else if (s->verdictThisFrame != kVerdictQuiet && !wasWithheld) {
         // Recorded again, not merely counted: refreshing the entry is what stops
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
@@ -2157,20 +2325,30 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // The first of a kind is always withheld -- it cannot be known to repeat
         // until it has. That is the cost of this approach and it is one frame per
         // novel magnitude, against one frame every three that it replaces.
-        recordResidual(s->lastResid);
+        if(!sceneReset)recordResidual(s->lastResid);
         // Rule B's chain is seeded HERE, by the withhold itself -- which is the
         // structural form of "the first mark always marks": nothing can be
         // excused as a continuation until an actual withhold has established
         // what it would be continuing. A later novel withhold re-seeds, because
         // the freshest paid-for magnitude is the chain's base by definition.
-        s->driftHead = s->lastResid;
-        for (uint32_t a = 0; a < 3; ++a) s->driftLanding[a] = s->frameFarPos[a];
-        s->driftFrame = s->frameNo;
+        if(!sceneReset){
+            s->driftHead = s->lastResid;
+            for (uint32_t a = 0; a < 3; ++a) s->driftLanding[a] = s->frameFarPos[a];
+            s->driftFrame = s->frameNo;
+        }
         // AFTER recordResidual, which is what creates the entry. Counting first
         // meant the first occurrence of a magnitude never counted toward its own
         // certification, so the bar was silently four marks rather than three.
-        recordSeparationMark(s->lastResid);
-        if (s->notesLeft > 0) {
+        if(!sceneReset)recordSeparationMark(s->lastResid);
+        if(sceneReset){
+            ++s->sceneResets;
+            if(s->notesLeft){--s->notesLeft;Log::get().note(
+                "transition flash: frame %u eye camera reset to (%+.3f %+.3f %+.3f) "
+                "without a matching object rebase: %u pairs, median error %.3f m. "
+                "Marked before Submit (%u eye-reset frames this session).",
+                s->frameNo,s->sceneDrawPos[0],s->sceneDrawPos[1],s->sceneDrawPos[2],
+                s->sceneGeometry.matched,s->sceneGeometry.relativeMedian,s->sceneResets);}
+        }else if (s->notesLeft > 0) {
             --s->notesLeft;
             const bool acted = glitchConsumerPresent();
             // The SHORT reason, because this line repeats -- forty times in the
@@ -2236,7 +2414,16 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // entry in the view's track either. It is the same reasoning as the
     // world-camera floor -- a camera we have identified as an auxiliary pass is
     // not evidence about where the view is, in any direction.
-    if (s->suppressedThisFrame) {
+    if(sceneCoherent){
+        // This was a real, coherent scene, including legitimate 5 km rebases.
+        // Adopt its track without paying two frames or starting a blind window.
+        if(s->awaitingReturn)noteJumpVerdict(2);
+        s->awaitingReturn=false;s->cooldownUntilMs=0;
+        if(s->frameFarMag2>=0){
+            for(unsigned a=0;a<3;++a){s->camPrev2[a]=s->camPrev[a];s->camPrev[a]=s->frameFarPos[a];}
+            if(s->camPrevValid<2)++s->camPrevValid;
+        }
+    } else if (s->suppressedThisFrame) {
         // Deliberately empty. The track, the return test and the cooldown all
         // carry on from the last camera that WAS the view.
     } else if (s->awaitingReturn && s->markedThisFrame) {
@@ -2340,14 +2527,15 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
 
     // Record the frame, whether or not anything was wrong with it. The value of
     // the history is the frames either side of an event, not the event alone.
-    if (s->frameFarMag2 >= 0.0f) {
+    if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
         RingEntry& e = s->ring[s->ringHead % kRingFrames];
         e.qpc = static_cast<uint64_t>(qpcNow());
         e.frame = s->frameNo;
         e.eyeDraws = eyeDraws;
         e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
-        for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+        for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
+        recordScenePosition(e,s);
         ++s->ringHead;
     }
 
@@ -2526,6 +2714,12 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
         Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f)%s %s",
                         -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2],
                         cull, ringVerdictName(e.verdict));
+        if(e.sceneValid)Log::get().note("    f%u scene=(%+.2f %+.2f %+.2f) [bound VS b1]",
+            e.frame,e.scenePos[0],e.scenePos[1],e.scenePos[2]);
+        else Log::get().note("    f%u scene=unavailable [no fresh recognised eye draw]",e.frame);
+        const auto& g=e.geometry;
+        Log::get().note("    f%u geometry matched=%u predicted=%u cameraStep=%.3f poolStep=%.3f relativeMedian=%.3f relativeP90=%.3f predictionP90=%.3f",
+            e.frame,g.matched,g.predicted,g.cameraStep,g.poolStep,g.relativeMedian,g.relativeP90,g.predictionP90);
     }
     // WAS ANY OF THIS OURS? The question every one of these dumps has been
     // opened to answer, worked out by hand every time.
@@ -2584,6 +2778,11 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
                     static_cast<double>(e.resid), e.hits, e.marks,
                     e.certified ? " CERTIFIED" : "",
                     s->frameNo - e.lastSeen);
+                if (e.certified) Log::get().note(
+                    "    certified start ~%.0f, last seen %u frame(s) ago; "
+                    "separate from the moving mean, expires after %u frames.",
+                    static_cast<double>(e.certifiedResid),
+                    s->frameNo - e.certifiedSeen, kRunawayWindow);
             }
         }
         uint32_t shellsInUse = 0;
@@ -2632,6 +2831,7 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
                 s->shellEvictedCertified);
         }
     }
+    Log::get().note("--- bound-pool coherence: %u auxiliary jumps excused, %u eye-reset frames marked; %u frame(s) exceeded the four-write sampling cap. Unavailable pairs stay matched=0 and retain the legacy decision. ---",s->sceneExcused,s->sceneResets,s->scenePoolCapped);
     Log::get().note("--- end camera history ---");
 }
 
