@@ -1,5 +1,20 @@
 # OpenXR implementation status
 
+The [render-caller lifetime checkpoint](openxr-shutdown-lifetime-2026-09-13.md)
+extends the passive shutdown observer after the measured-zero Frontier flight.
+It retains the original render caller's thread handle and records whole owned
+Present activity at both ends of shutdown, distinguishing exited, live idle and
+live in-Present callers. Failed and TEST Presents count as activity but remain
+excluded from successful callback-service samples. Paired bridge version 2
+rejects old snapshots. The full build passed with all seven paired-DLL
+children, CPU lifetime/activity tests and existing regressions; all 471 source
+hashes were unchanged. Both shipping proxies are installed and hash-verified in
+Frontier with the live INI and original runtime preserved. Native teardown is
+unchanged: these observations do not establish general immediate-context
+quiescence or qualify cleanup from another caller. The next Frontier
+Pimax-through-SteamVR flight will supply that missing lifetime evidence; native
+game export/launch integration remains open.
+
 The [shutdown progress checkpoint](openxr-shutdown-progress-2026-09-13.md) adds
 a separate, passive observation window to the shipping OpenVR census. It counts
 successful owned Presents reaching the native callback service point around

@@ -13,9 +13,11 @@
 #include <vector>
 #include "../../src/openvr/compat/openvr_v0_9_20.h"
 #include "../../src/common/shutdown_census_api.h"
+#include "../../src/common/render_boundary.h"
 
 namespace fs = std::filesystem;
 using Begin = BOOL (WINAPI*)(unsigned);
+constexpr auto kShutdownVersion = edvr::kShutdownCensusVersion;
 using GetGeneric = void* (__cdecl*)(const char*, vr::EVRInitError*);
 using CreateD3D = HRESULT (WINAPI*)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
     const D3D_FEATURE_LEVEL*, UINT, UINT, const DXGI_SWAP_CHAIN_DESC*,
@@ -30,6 +32,13 @@ static fs::path exePath() {
     require(n > 0 && n < MAX_PATH, "executable path");
     return fs::path(path);
 }
+struct HeldPresent { HANDLE entered = nullptr, release = nullptr; };
+static HRESULT WINAPI holdPresent(void* user, ID3D11Device*, ID3D11DeviceContext*) {
+    auto& held = *static_cast<HeldPresent*>(user);
+    require(SetEvent(held.entered) != FALSE, "entered held Present callback");
+    require(WaitForSingleObject(held.release, 10000) == WAIT_OBJECT_0, "release held Present callback");
+    return S_OK;
+}
 
 static int child(const char* mode) {
     const bool delayed = std::strcmp(mode, "delayed") == 0;
@@ -43,7 +52,7 @@ static int child(const char* mode) {
     const auto endShutdown = gfx ? reinterpret_cast<edvr::EndShutdownCensus>(GetProcAddress(gfx, "edvrCensusEndShutdown")) : nullptr;
     if (!absent) {
         require(gfx && ack && beginShutdown && endShutdown, "graphics census exports exist");
-        require(!ack(1) && !ack(2) && !beginShutdown(1), "uninitialized receiver cannot acknowledge");
+        require(!ack(1) && !ack(2) && !beginShutdown(kShutdownVersion), "uninitialized receiver cannot acknowledge");
     }
 
     const HMODULE vrm = LoadLibraryW((stage / "vr" / "openvr_api.dll").c_str());
@@ -99,7 +108,7 @@ static int child(const char* mode) {
     require(SUCCEEDED(create(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
         D3D11_SDK_VERSION, &desc, &swap, &device, nullptr, &context)), "create WARP swapchain");
     require(!ack(2), "initialized receiver rejects unknown protocol");
-    require(!beginShutdown(2), "shutdown receiver rejects unknown protocol");
+    require(!beginShutdown(1), "shutdown receiver rejects previous protocol");
     ID3D11Texture2D* back = nullptr;
     ID3D11RenderTargetView* target = nullptr;
     require(SUCCEEDED(swap->GetBuffer(0, IID_PPV_ARGS(&back))), "get backbuffer");
@@ -165,6 +174,7 @@ static int child(const char* mode) {
     // Otherwise the harness itself could hide a missing production bridge.
     require((ack(1) != FALSE) == !disabled, "receiver enabled/disabled acknowledgement");
     for (unsigned i = 0; i < 70; ++i) render(); // An ACK must never refill budgets.
+    if (std::strcmp(mode, "shutdown-render-only") == 0) return 0;
 
     // Exhausted startup/VR logs must not suppress the independent shutdown
     // window. The fake remains inside the forwarded call until exactly three
@@ -196,8 +206,29 @@ static int child(const char* mode) {
     shutdownWithoutPresent(); // A measured zero must differ from unavailable.
 
     if (!disabled) {
-        const auto token = beginShutdown(1);
-        require(token != 0 && !beginShutdown(1), "busy shutdown window cannot be replaced");
+        // A live caller paused within Present also produces zero service-point
+        // samples after the callback starts. Its whole-Present activity must
+        // distinguish it from a live idle caller or an exited caller.
+        HeldPresent held{CreateEventW(nullptr, TRUE, FALSE, nullptr), CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+        require(held.entered && held.release, "held callback events");
+        const auto acquire = reinterpret_cast<decltype(&edvrAcquireRenderBoundary)>(
+            GetProcAddress(gfx, "edvrAcquireRenderBoundary"));
+        EdvrRenderBoundaryTable lease{sizeof(lease), EDVR_RENDER_BOUNDARY_VERSION_1};
+        const EdvrRenderBoundaryRequest request{sizeof(request), EDVR_RENDER_BOUNDARY_VERSION_1, device, holdPresent, &held};
+        require(acquire && acquire(&request, &lease) == S_OK, "register held callback on the actual proxy");
+        std::thread heldShutdown([&] {
+            require(WaitForSingleObject(held.entered, 10000) == WAIT_OBJECT_0, "render caller is inside Present");
+            shutdown();
+            require(SetEvent(held.release) != FALSE, "shutdown releases fixture callback");
+        });
+        render();
+        heldShutdown.join();
+        require(shutdownCount() == ++expectedShutdowns, "held-Present shutdown forwards exactly once");
+        require(lease.close(lease.lease) == S_OK && lease.release(lease.lease) == S_OK, "held callback retires after Present");
+        CloseHandle(held.entered); CloseHandle(held.release);
+
+        const auto token = beginShutdown(kShutdownVersion);
+        require(token != 0 && !beginShutdown(kShutdownVersion), "busy shutdown window cannot be replaced");
         shutdownWithoutPresent(); // A refused observer must still forward once.
         edvr::ShutdownCensusSnapshot snapshot{};
         auto invalid = snapshot;
@@ -255,11 +286,14 @@ static void verifyShutdownLogs(const fs::path& stage, const char* mode) {
     const bool delayed = std::strcmp(mode, "delayed") == 0;
     const bool absent = std::strcmp(mode, "shutdown-absent") == 0;
     const bool appGpu = std::strcmp(mode, "app-gpu") == 0 || std::strcmp(mode, "app-gpu-off") == 0;
+    const bool exited = std::strcmp(mode, "shutdown-exited") == 0;
     std::vector<std::string> measured;
+    std::vector<std::string> renderSnapshots;
     unsigned unavailable = 0;
     std::istringstream lines(vrlog);
     std::string line;
     while (std::getline(lines, line)) {
+        if (line.find("VR shutdown render census:") != std::string::npos) renderSnapshots.push_back(line);
         if (line.find("VR shutdown Present census:") == std::string::npos) continue;
         require(field(line, "point") == "native_callback_service", "explicit observed service point");
         const auto status = field(line, "status");
@@ -271,10 +305,11 @@ static void verifyShutdownLogs(const fs::path& stage, const char* mode) {
             ++unavailable;
         }
     }
-    const unsigned expectedMeasured = disabled || absent || appGpu ? 0 : 2;
-    const unsigned expectedUnavailable = appGpu ? 0 : disabled || delayed ? 2 : 1;
+    const unsigned expectedMeasured = disabled || absent || appGpu ? 0 : exited ? 1 : 3;
+    const unsigned expectedUnavailable = appGpu || exited ? 0 : disabled || delayed ? 2 : 1;
     require(measured.size() == expectedMeasured && unavailable == expectedUnavailable,
             "exact shutdown observation count including unavailable and disabled paths");
+    require(renderSnapshots.size() == 2 * measured.size(), "only measured windows publish two render snapshots");
     for (unsigned i = 0; i < measured.size(); ++i) {
         const auto number = [&](const char* key) { return std::stoull(field(measured[i], key)); };
         require(number("call") && number("token") && field(measured[i], "reason") == "none",
@@ -282,10 +317,10 @@ static void verifyShutdownLogs(const fs::path& stage, const char* mode) {
         require(number("begin_qpc") <= number("forward_begin_qpc") &&
                 number("forward_begin_qpc") <= number("forward_end_qpc") &&
                 number("forward_end_qpc") <= number("end_qpc"), "observer brackets actual forwarding");
-        require(number("samples") == (i == 0 ? 3u : 0u),
+        require(number("samples") == (i == 0 && !exited ? 3u : 0u),
                 "only successful owned non-TEST boundary Presents count, zero remains measured");
         require(number("mixed_threads") == 0 && number("saturated") == 0, "single render thread with exact count");
-        if (i == 0) {
+        if (i == 0 && !exited) {
             require(number("forward_begin_qpc") <= number("first_qpc") &&
                     number("first_qpc") <= number("last_qpc") &&
                     number("last_qpc") <= number("forward_end_qpc"), "samples occur strictly during fake shutdown");
@@ -307,6 +342,37 @@ static void verifyShutdownLogs(const fs::path& stage, const char* mode) {
             require(!number("first_qpc") && !number("last_qpc") && !number("first_thread") && !number("last_thread"),
                     "zero progress does not manufacture sample timestamps or caller identity");
         }
+        const auto& begin = renderSnapshots[2*i];
+        const auto& end = renderSnapshots[2*i+1];
+        const auto value = [&](const std::string& record, const char* key) { return std::stoull(field(record, key)); };
+        const unsigned active = !exited && i == 2 ? 1 : 0;
+        require(field(begin, "phase") == "begin" && field(end, "phase") == "end" &&
+                field(begin, "call") == field(measured[i], "call") && field(end, "call") == field(begin, "call"),
+                "render snapshots correlate to the same shutdown window");
+        for (const auto* record : {&begin, &end}) {
+            require(field(*record, "owner_state") == (exited ? "exited" : "alive") &&
+                    value(*record, "owner_thread") != 0 && !value(*record, "owner_error") &&
+                    !value(*record, "owner_changed") && !value(*record, "activity_invalid"),
+                    "thread lifetime evidence is explicit and valid");
+            require(value(*record, "active_present") == active &&
+                    value(*record, "entries") - value(*record, "exits") == active,
+                    "whole-Present counts distinguish live idle, live active and exited callers");
+            require(value(*record, "last_enter_qpc") && value(*record, "last_exit_qpc") && value(*record, "last_service_qpc") &&
+                    value(*record, "last_enter_thread") == value(*record, "owner_thread") &&
+                    value(*record, "last_exit_thread") == value(*record, "owner_thread"),
+                    "last activity retains the actual render caller and timestamps");
+        }
+        require(value(begin, "last_enter_qpc") <= number("begin_qpc") &&
+                value(end, "last_enter_qpc") <= number("end_qpc") &&
+                value(end, "last_exit_qpc") <= number("end_qpc") &&
+                value(end, "last_service_qpc") <= number("end_qpc"), "activity snapshots fit observation bounds");
+        require(field(begin, "owner_thread") == field(end, "owner_thread"), "original owner identity is retained");
+        const auto entries = value(end, "entries") - value(begin, "entries");
+        const auto exits = value(end, "exits") - value(begin, "exits");
+        require(entries == (i == 0 && !exited ? 5u : 0u) && entries == exits,
+                "whole-Present counts include failed and TEST owned calls, and exclude foreign calls");
+        if (active) require(value(begin, "last_enter_qpc") > value(begin, "last_exit_qpc"),
+                            "in-progress Present entered after the preceding exit");
     }
 }
 static void verifyLogs(const fs::path& stage, bool delayed, bool disabled) {
@@ -403,7 +469,21 @@ static void runCase(const fs::path& build, const char* mode) {
 int main(int argc, char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     try {
-        if (argc == 3 && std::strcmp(argv[1], "--child") == 0) return child(argv[2]);
+        if (argc == 3 && std::strcmp(argv[1], "--child") == 0) {
+            if (std::strcmp(argv[2], "shutdown-exited") != 0) return child(argv[2]);
+            std::thread renderer([] { require(child("shutdown-render-only") == 0, "render-only fixture completes"); });
+            renderer.join();
+            const auto stage = exePath().parent_path();
+            const auto vrm = GetModuleHandleW((stage / "vr" / "openvr_api.dll").c_str());
+            const auto fake = GetModuleHandleW((stage / "vr" / "openvr_api_orig.dll").c_str());
+            require(vrm && fake, "modules survive the exited render caller");
+            const auto shutdown = reinterpret_cast<void (__cdecl*)()>(GetProcAddress(vrm, "VR_ShutdownInternal"));
+            const auto count = reinterpret_cast<unsigned (WINAPI*)()>(GetProcAddress(fake, "edvrFakeShutdownCount"));
+            require(shutdown && count && count() == 0, "no prior shutdown on exited-caller path");
+            shutdown();
+            require(count() == 1, "shutdown forwards once after render caller exits");
+            return 0;
+        }
         require((argc == 3 || argc == 4) && std::strcmp(argv[1], "--self-test") == 0,
                 "usage: --self-test <build-dir> [--dry-run]");
         const fs::path build = fs::absolute(argv[2]);
@@ -411,11 +491,11 @@ int main(int argc, char** argv) {
             require(fs::is_regular_file(build / file), "required built DLL exists");
         if (argc == 4) {
             require(std::strcmp(argv[3], "--dry-run") == 0, "unknown argument");
-            std::puts("Would stage six isolated children and verify their graphics/VR logs; no files written.");
+            std::puts("Would stage seven isolated children and verify their graphics/VR logs; no files written.");
             return 0;
         }
-        for (const char* mode : {"ready", "delayed", "disabled", "app-gpu", "app-gpu-off", "shutdown-absent"}) runCase(build, mode);
-        std::puts("PASS: actual paired DLLs preserve startup/VR budgets, measure independent shutdown Present progress, report unavailable receivers, forward shutdown once, and preserve render-to-submit pixels.");
+        for (const char* mode : {"ready", "delayed", "disabled", "app-gpu", "app-gpu-off", "shutdown-absent", "shutdown-exited"}) runCase(build, mode);
+        std::puts("PASS: actual paired DLLs distinguish live idle, held-Present and exited render callers, preserve shutdown forwarding and census budgets, and preserve render-to-submit pixels.");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL census bridge: %s\n", error.what());

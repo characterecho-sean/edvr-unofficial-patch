@@ -419,6 +419,16 @@ void shutdown() {
 
 namespace edvr {
 
+const char* shutdownOwnerStateName(ShutdownOwnerState state) noexcept {
+    switch (state) {
+    case ShutdownOwnerState::Alive: return "alive";
+    case ShutdownOwnerState::Exited: return "exited";
+    case ShutdownOwnerState::Unavailable: return "unavailable";
+    case ShutdownOwnerState::Unobserved: return "unobserved";
+    }
+    return "unobserved";
+}
+
 ShutdownCensusSession beginShutdownCensus() noexcept {
     ShutdownCensusSession session{};
     session.reason = "paired_module_unavailable";
@@ -580,6 +590,31 @@ extern "C" void __cdecl edvr_impl_VR_ShutdownInternal() {
                 static_cast<long long>(snapshot.lastQpc), static_cast<unsigned long>(snapshot.firstThread),
                 static_cast<unsigned long>(snapshot.lastThread), static_cast<unsigned long>(snapshot.mixedThreads),
                 static_cast<unsigned long>(snapshot.saturated));
+            const auto logRender = [&](const char* phase, const edvr::ShutdownRenderSnapshot& render) {
+                edvr::Log::get().note(
+                    "VR shutdown render census: call=%llu phase=%s owner_thread=%lu owner_state=%s "
+                    "owner_error=%lu owner_changed=%lu active_present=%llu entries=%llu exits=%llu "
+                    "last_enter_qpc=%lld last_exit_qpc=%lld last_service_qpc=%lld "
+                    "last_enter_thread=%lu last_exit_thread=%lu activity_invalid=%lu",
+                    static_cast<unsigned long long>(call.id), phase,
+                    static_cast<unsigned long>(render.ownerThread),
+                    edvr::shutdownOwnerStateName(render.ownerState),
+                    static_cast<unsigned long>(render.ownerError),
+                    static_cast<unsigned long>(render.ownerChanged),
+                    static_cast<unsigned long long>(render.activePresents),
+                    static_cast<unsigned long long>(render.enteredPresents),
+                    static_cast<unsigned long long>(render.exitedPresents),
+                    static_cast<long long>(render.lastEnterQpc),
+                    static_cast<long long>(render.lastExitQpc),
+                    static_cast<long long>(render.lastServiceQpc),
+                    static_cast<unsigned long>(render.lastEnterThread),
+                    static_cast<unsigned long>(render.lastExitThread),
+                    static_cast<unsigned long>(render.activityInvalid));
+            };
+            if (measured) {
+                logRender("begin", snapshot.renderBegin);
+                logRender("end", snapshot.renderEnd);
+            }
         } catch (...) {
         }
     }

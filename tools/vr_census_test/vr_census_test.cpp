@@ -17,6 +17,7 @@ void require(bool ok, const char* why) {
 }
 
 using Budget = edvr::VrCensusBudget<3>;
+constexpr auto kShutdownVersion = edvr::kShutdownCensusVersion;
 
 void testExhaustionAndTransition() {
     Budget b;
@@ -109,14 +110,16 @@ void testConcurrentTransition() {
 void testShutdownWindows() {
     edvr::ShutdownPresentCensus census;
     edvr::ShutdownCensusSnapshot snapshot{};
-    require(!census.begin(2, true) && !census.begin(1, false), "shutdown begin gates reject");
+    require(!census.begin(1, true) && !census.begin(kShutdownVersion, false), "old shutdown protocol and disabled gate reject");
     require(!census.end(0, &snapshot), "no active shutdown window");
     census.notePresent(); // Outside-window observations must not leak into one.
-    auto token = census.begin(1, true);
-    require(token && !census.begin(1, true), "exactly one active shutdown window");
+    auto token = census.begin(kShutdownVersion, true);
+    require(token && !census.begin(kShutdownVersion, true), "exactly one active shutdown window");
     auto invalid = snapshot;
-    invalid.version = 2;
-    require(!census.end(token, &invalid) && invalid.version == 2, "bad snapshot version left untouched");
+    invalid.version = 1;
+    const auto beforeInvalid = invalid;
+    require(!census.end(token, &invalid) && !std::memcmp(&invalid, &beforeInvalid, sizeof(invalid)),
+            "old snapshot version left entirely untouched");
     invalid = snapshot;
     --invalid.size;
     require(!census.end(token, &invalid) && invalid.size == sizeof(snapshot) - 1,
@@ -128,7 +131,7 @@ void testShutdownWindows() {
             "measured zero window retains honest bounds and empty sample fields");
     for (unsigned i = 1; i < edvr::ShutdownPresentCensus::kMaxWindows; ++i) {
         const auto previous = token;
-        token = census.begin(1, true);
+        token = census.begin(kShutdownVersion, true);
         require(token > previous && !census.end(previous, &snapshot), "fresh token rejects prior generation");
         census.notePresent();
         require(census.end(token, &snapshot) && snapshot.samples == 1 &&
@@ -137,12 +140,12 @@ void testShutdownWindows() {
                 snapshot.lastQpc <= snapshot.endQpc && !snapshot.mixedThreads && !snapshot.saturated,
                 "new shutdown generation resets sample state");
     }
-    require(!census.begin(1, true) && !census.end(token, &snapshot), "64 windows exhaust without token reuse");
+    require(!census.begin(kShutdownVersion, true) && !census.end(token, &snapshot), "64 windows exhaust without token reuse");
 }
 
 void testConcurrentShutdownSamples() {
     edvr::ShutdownPresentCensus census;
-    const auto token = census.begin(1, true);
+    const auto token = census.begin(kShutdownVersion, true);
     require(token != 0, "concurrent shutdown window begins");
     census.notePresent(); // Known first and last caller surround the workers.
     constexpr unsigned kWorkers = 8, kSamples = 1000;
@@ -160,6 +163,68 @@ void testConcurrentShutdownSamples() {
             result.beginQpc <= result.firstQpc && result.firstQpc <= result.lastQpc && result.lastQpc <= result.endQpc,
             "mixed callers detected even when first and last caller match");
 }
+
+void testRenderLifetime() {
+    using State = edvr::ShutdownOwnerState;
+    edvr::ShutdownPresentCensus census;
+    edvr::ShutdownCensusSnapshot result{};
+    auto token = census.begin(kShutdownVersion, true);
+    require(census.end(token, &result) && result.renderBegin.ownerState == State::Unobserved &&
+            result.renderEnd.ownerState == State::Unobserved && !result.renderEnd.ownerThread,
+            "no observed owner is distinct from an exited thread");
+    census.enterPresent();
+    census.noteOwner();
+    token = census.begin(kShutdownVersion, true);
+    census.notePresent();
+    census.leavePresent();
+    require(census.end(token, &result), "active Present window ends");
+    const auto& begin = result.renderBegin;
+    const auto& end = result.renderEnd;
+    require(begin.ownerState == State::Alive && end.ownerState == State::Alive &&
+            begin.ownerThread == GetCurrentThreadId() && end.ownerThread == begin.ownerThread &&
+            !begin.ownerError && !end.ownerChanged, "retained handle identifies the live owner");
+    require(begin.activePresents == 1 && begin.enteredPresents == 1 && !begin.exitedPresents &&
+            !end.activePresents && end.enteredPresents == 1 && end.exitedPresents == 1,
+            "Present entered before Begin is still counted as active");
+    require(begin.lastEnterThread == GetCurrentThreadId() && end.lastExitThread == begin.lastEnterThread &&
+            begin.lastEnterQpc <= result.beginQpc && end.lastServiceQpc >= result.beginQpc &&
+            end.lastServiceQpc <= end.lastExitQpc && end.lastExitQpc <= result.endQpc,
+            "whole-Present times and service time retain their different meanings");
+
+    // A failed or TEST call still represents another owned-Present caller,
+    // even though it never calls noteOwner or reaches the native service point.
+    std::thread other([&] { census.enterPresent(); census.leavePresent(); });
+    other.join();
+    token = census.begin(kShutdownVersion, true);
+    require(census.end(token, &result) && result.renderEnd.ownerChanged &&
+            result.renderEnd.ownerThread == GetCurrentThreadId() && result.renderEnd.ownerState == State::Alive &&
+            !result.renderEnd.activePresents && !result.renderEnd.activityInvalid,
+            "a changed caller never replaces the original retained thread");
+}
+
+void testExitedRenderLifetime() {
+    DWORD before = 0, after = 0;
+    require(GetProcessHandleCount(GetCurrentProcess(), &before) != FALSE, "read process handle count");
+    for (unsigned i = 0; i < 16; ++i) {
+        edvr::ShutdownPresentCensus census;
+        DWORD renderThread = 0;
+        std::thread render([&] {
+            renderThread = GetCurrentThreadId();
+            census.enterPresent(); census.noteOwner(); census.notePresent(); census.leavePresent();
+        });
+        render.join(); // The retained handle must remain valid after the original handle closes.
+        const auto token = census.begin(kShutdownVersion, true);
+        edvr::ShutdownCensusSnapshot result{};
+        require(census.end(token, &result) && result.renderBegin.ownerState == edvr::ShutdownOwnerState::Exited &&
+                result.renderEnd.ownerState == edvr::ShutdownOwnerState::Exited &&
+                result.renderEnd.ownerThread == renderThread && !result.renderEnd.ownerChanged &&
+                !result.renderEnd.ownerError && !result.renderEnd.activePresents &&
+                result.renderEnd.enteredPresents == 1 && result.renderEnd.exitedPresents == 1,
+                "thread termination is observed through the retained real handle");
+    }
+    require(GetProcessHandleCount(GetCurrentProcess(), &after) != FALSE && after == before,
+            "retained thread handles close with their observer");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -171,5 +236,7 @@ int main(int argc, char** argv) {
     testConcurrentTransition();
     testShutdownWindows();
     testConcurrentShutdownSamples();
-    std::puts("PASS: OpenXR census startup/VR budgets and shutdown windows, invalid inputs, and concurrency.");
+    testRenderLifetime();
+    testExitedRenderLifetime();
+    std::puts("PASS: OpenXR census budgets, shutdown windows, retained render-thread lifetime and activity, invalid inputs, and concurrency.");
 }

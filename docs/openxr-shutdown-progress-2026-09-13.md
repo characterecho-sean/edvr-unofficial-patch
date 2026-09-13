@@ -1,5 +1,11 @@
 # Frontier shutdown Present progress
 
+This records the first probe and its Frontier result. The subsequent
+[render-caller lifetime checkpoint](openxr-shutdown-lifetime-2026-09-13.md)
+extends it with retained thread identity and whole-Present activity. That
+enabled observer records activity outside shutdown windows too, superseding the
+first probe's inactive-window optimization described below.
+
 The [application System caller diagnostic](openxr-system-caller-2026-09-13.md)
 passed its Pimax gate. Its render caller deliberately keeps Present running
 until shutdown returns. The [archived Frontier

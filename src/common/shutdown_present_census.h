@@ -15,6 +15,9 @@ public:
     static constexpr std::uint32_t kMaxWindows = 64;
 
     ShutdownPresentCensus() = default;
+    ~ShutdownPresentCensus() {
+        if (ownerHandle_) CloseHandle(ownerHandle_);
+    }
     ShutdownPresentCensus(const ShutdownPresentCensus&) = delete;
     ShutdownPresentCensus& operator=(const ShutdownPresentCensus&) = delete;
 
@@ -40,9 +43,11 @@ public:
         snapshot.size = sizeof(snapshot);
         snapshot.version = kShutdownCensusVersion;
         snapshot.token = token;
+        pollOwnerLocked();
         LARGE_INTEGER qpc{};
         QueryPerformanceCounter(&qpc); // ordered with all state under the lock
         snapshot.beginQpc = qpc.QuadPart;
+        snapshot.renderBegin = render_;
         active_ = snapshot;
         ++acceptedWindows_;
         activeToken_.store(token, std::memory_order_release);
@@ -61,9 +66,11 @@ public:
             ReleaseSRWLockExclusive(&lock_);
             return FALSE;
         }
+        pollOwnerLocked();
         LARGE_INTEGER qpc{};
         QueryPerformanceCounter(&qpc); // ordered with the last sample under lock
         active_.endQpc = qpc.QuadPart;
+        active_.renderEnd = render_;
         *result = active_;
         active_ = {};
         activeToken_.store(0, std::memory_order_release);
@@ -71,18 +78,78 @@ public:
         return TRUE;
     }
 
-    // Fast path for normal Presents outside a window: no QPC or mutex work.
-    void notePresent() noexcept {
-        const std::uint64_t token = activeToken_.load(std::memory_order_acquire);
-        if (!token) return;
+    // Whole-Present activity is cumulative and deliberately includes failed
+    // and TEST Presents. The hook gates these calls on census enablement.
+    void enterPresent() noexcept {
         AcquireSRWLockExclusive(&lock_);
-        if (activeToken_.load(std::memory_order_acquire) != token) {
-            ReleaseSRWLockExclusive(&lock_);
-            return;
-        }
         LARGE_INTEGER qpc{};
         QueryPerformanceCounter(&qpc);
-        recordLocked(qpc.QuadPart, GetCurrentThreadId());
+        const auto max = (std::numeric_limits<std::uint64_t>::max)();
+        if (render_.enteredPresents == max)
+            render_.activityInvalid = 1;
+        else
+            ++render_.enteredPresents;
+        if (render_.activePresents == max)
+            render_.activityInvalid = 1;
+        else
+            ++render_.activePresents;
+        render_.lastEnterQpc = qpc.QuadPart;
+        const DWORD thread = GetCurrentThreadId();
+        render_.lastEnterThread = thread;
+        if (ownerObserved_) markOwnerChangeLocked(thread);
+        ReleaseSRWLockExclusive(&lock_);
+    }
+
+    void leavePresent() noexcept {
+        AcquireSRWLockExclusive(&lock_);
+        LARGE_INTEGER qpc{};
+        QueryPerformanceCounter(&qpc);
+        const auto max = (std::numeric_limits<std::uint64_t>::max)();
+        if (render_.activePresents == 0)
+            render_.activityInvalid = 1;
+        else
+            --render_.activePresents;
+        if (render_.exitedPresents == max)
+            render_.activityInvalid = 1;
+        else
+            ++render_.exitedPresents;
+        render_.lastExitQpc = qpc.QuadPart;
+        render_.lastExitThread = GetCurrentThreadId();
+        ReleaseSRWLockExclusive(&lock_);
+    }
+
+    // Record the first owned Present caller without ever reopening or
+    // replacing its retained thread handle.
+    void noteOwner() noexcept {
+        AcquireSRWLockExclusive(&lock_);
+        const DWORD thread = GetCurrentThreadId();
+        if (!ownerObserved_) {
+            ownerObserved_ = true;
+            render_.ownerThread = thread;
+            HANDLE duplicate = nullptr;
+            if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                                GetCurrentProcess(), &duplicate, SYNCHRONIZE,
+                                FALSE, 0)) {
+                ownerHandle_ = duplicate;
+                pollOwnerLocked();
+            } else {
+                render_.ownerState = ShutdownOwnerState::Unavailable;
+                render_.ownerError = GetLastError();
+            }
+        } else markOwnerChangeLocked(thread);
+        ReleaseSRWLockExclusive(&lock_);
+    }
+
+    // The hook gates this method on census enablement so disabled sessions do
+    // no work. The token and timestamp are linearized under the same lock, so
+    // the sample belongs to whichever window owns this service point.
+    void notePresent() noexcept {
+        AcquireSRWLockExclusive(&lock_);
+        const std::uint64_t token = activeToken_.load(std::memory_order_relaxed);
+        LARGE_INTEGER qpc{};
+        QueryPerformanceCounter(&qpc);
+        render_.lastServiceQpc = qpc.QuadPart;
+        if (token) recordLocked(qpc.QuadPart, GetCurrentThreadId());
         ReleaseSRWLockExclusive(&lock_);
     }
 
@@ -105,9 +172,33 @@ private:
         ++active_.samples;
     }
 
+    void pollOwnerLocked() noexcept {
+        if (!ownerHandle_) return;
+        const DWORD result = WaitForSingleObject(ownerHandle_, 0);
+        if (result == WAIT_TIMEOUT) {
+            render_.ownerState = ShutdownOwnerState::Alive;
+            render_.ownerError = 0;
+        } else if (result == WAIT_OBJECT_0) {
+            render_.ownerState = ShutdownOwnerState::Exited;
+            render_.ownerError = 0;
+        } else {
+            render_.ownerState = ShutdownOwnerState::Unavailable;
+            render_.ownerError = result == WAIT_FAILED ? GetLastError() : result;
+        }
+    }
+
+    void markOwnerChangeLocked(DWORD thread) noexcept {
+        pollOwnerLocked();
+        if (thread != render_.ownerThread || render_.ownerState == ShutdownOwnerState::Exited)
+            render_.ownerChanged = 1;
+    }
+
     SRWLOCK lock_ = SRWLOCK_INIT;
     std::atomic<std::uint64_t> activeToken_{0};
     ShutdownCensusSnapshot active_{};
+    ShutdownRenderSnapshot render_{};
+    HANDLE ownerHandle_ = nullptr;
+    bool ownerObserved_ = false;
     std::uint64_t nextToken_ = 1;
     std::uint32_t acceptedWindows_ = 0;
 };

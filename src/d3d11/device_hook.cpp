@@ -891,6 +891,16 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    struct ShutdownCensusPresentScope final {
+        bool enabled;
+        explicit ShutdownCensusPresentScope(bool enabled_) noexcept : enabled(enabled_) {
+            if (enabled) edvr::shutdownPresentCensus().enterPresent();
+        }
+        ~ShutdownCensusPresentScope() noexcept {
+            if (enabled) edvr::shutdownPresentCensus().leavePresent();
+        }
+    } shutdownCensusPresent(vrCensusEnabled());
+
     // The time blocked in the real Present is the monitor's, with the time
     // blocked in WaitGetPoses: the frame period less the two is the render
     // thread's own busy time.
@@ -902,8 +912,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     }
     // Bind the first successful owned, non-TEST Present thread even before
     // the paired consumer registers. Exclude registration from Present timing.
-    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST)) {
+        if (vrCensusEnabled()) shutdownPresentCensus().noteOwner();
         renderBoundaryNoteOwnedPresent(g_state->device);
+    }
     ID3D11DeviceContext* timingContext = nullptr;
     g_state->device->GetImmediateContext(&timingContext);
     if (timingContext) {
@@ -1440,7 +1452,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST)) {
         // Observe native callback availability, after the real Present and all
         // preceding frame work. This is not the timestamp of realPresent's return.
-        edvr::shutdownPresentCensus().notePresent();
+        if (vrCensusEnabled()) edvr::shutdownPresentCensus().notePresent();
         renderBoundaryPresent(g_state->device);
     }
     return hr;
