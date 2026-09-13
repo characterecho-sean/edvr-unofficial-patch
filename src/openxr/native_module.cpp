@@ -1,6 +1,7 @@
 #include "native_runtime_host.h"
 #include "native_render_binding.h"
 #include "render_shutdown.h"
+#include "render_shutdown_coordinator.h"
 #include "native_module.h"
 #include "native_bootstrap.h"
 #include "init_error.h"
@@ -80,20 +81,22 @@ class ModuleBackend final : public RuntimeBackend {
       update([&](auto& s) { s.shutdownThread=GetCurrentThreadId(); });
       bool cleaned=true, joined=true, atBoundary=false;
       if (generation->owner.running()) {
-        bool drained=false;
-        const bool invoked=generation->route.invoke([&] {
-          if (generation->host) {
-            // Disable idle frame activity before the final GPU fence.
-            generation->host->serviceStopped=true;
-            drained=generation->host->stereo.drain()==XR_SUCCESS;
-          } else drained=true;
-        });
-        if (!invoked||!drained) return retain(*generation,"gpu_drain_or_render_unavailable");
-        const auto stopped=shutdownAtRenderBoundary(generation->binding.work(),
-            generation->render,generation->owner,[&] {
-              cleaned=!generation->host||generation->host->stop();
-            });
-        atBoundary=stopped.entered; joined=stopped.joined;
+        const auto stopped = runRenderShutdown(
+            generation->route, generation->binding.work(), generation->render,
+            generation->owner,
+            [&] {
+              if (generation->host) {
+                // Disable idle frame activity before the final GPU fence.
+                generation->host->serviceStopped=true;
+                return generation->host->stereo.drain()==XR_SUCCESS;
+              }
+              return true;
+            },
+            [&] { return !generation->host||generation->host->stop(); });
+        if (!stopped.drainInvoked || !stopped.drainSucceeded)
+          return retain(*generation,"gpu_drain_or_render_unavailable");
+        atBoundary=stopped.boundary.entered; joined=stopped.boundary.joined;
+        cleaned=stopped.finalizerSucceeded;
         if (!atBoundary||!joined||!cleaned) return retain(*generation,"owner_teardown_incomplete");
       } else if (generation->host) {
         return retain(*generation,"host_without_running_owner");

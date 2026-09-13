@@ -191,12 +191,13 @@ ownership. `PresentQuiescence` requires the application's render loop to
 acknowledge a permanent stop; the Frontier hook cannot manufacture that
 acknowledgement from an empty observation window.
 
-The next desktop case should keep the application render caller alive outside
-Present while a separate System caller requests native shutdown. It must
-exercise the first queued GPU drain as well as final cleanup, and check
-cancellation, retained-resource lifetime and a later resumed Present before
-claiming a safe fallback. The existing CPU `renderShutdownDeadline` test only
-covers the final callback helper. Any cleanup extension still needs an explicit
-guarantee against concurrent or subsequent application context use; a
-thread-state snapshot, a longer timeout or callback closure alone does not
-provide it.
+The subsequent [stopped-Present desktop
+checkpoint](openxr-stopped-present-2026-09-13.md) keeps the application render
+caller alive outside Present while a separate System caller requests the shared
+native shutdown sequence. It covers the first queued drain and final cleanup
+callback, cancellation, retained references and later Present service through
+the actual graphics hook, with controlled operations in place of the OpenXR
+runtime. The earlier CPU `renderShutdownDeadline` test covers only the final
+callback helper. Any cleanup extension still needs an explicit guarantee
+against concurrent or subsequent application context use; a thread-state
+snapshot, a longer timeout or callback closure alone does not provide it.

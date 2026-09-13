@@ -1,5 +1,18 @@
 # OpenXR implementation status
 
+The [stopped-Present desktop checkpoint](openxr-stopped-present-2026-09-13.md)
+shares the native module's existing two-stage shutdown coordinator with a real
+WARP graphics-callback fixture. All eight cases passed with 63 checks:
+unserviced drain, missing final callback, resumed Present, held callback
+lifetime, and drain/finalizer failures. The full build passed, with all 473
+source hashes unchanged. Parent review tightened retained references, capture
+lifetime, queue ordering and owner-join checks. Production cleanup policy and
+deadlines are unchanged; this provides desktop coverage for the ordering
+observed in Frontier, not a new cleanup fallback or an OpenXR runtime result.
+Frontier remains on the verified `2f051db` proxies with its INI and original
+runtime preserved. Native game integration still needs explicit rendering
+exclusion when the live caller stops Present service.
+
 The [render-caller lifetime checkpoint](openxr-shutdown-lifetime-2026-09-13.md)
 extends the passive shutdown observer after the measured-zero Frontier flight.
 It retains the original render caller's thread handle and records whole owned
