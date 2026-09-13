@@ -136,10 +136,13 @@ The [renderer context-preservation
 checkpoint](openxr-context-state-2026-09-12.md) records private per-eye command
 lists and restores the caller's immediate-context state when executing them. It
 also tests the actual graphics proxy's binding shadow. The full build passed
-with 10,774 stereo and 196 actual-proxy state checks. The updated native
-executable awaits its headset gate. This establishes a rendering-state
-contract; game/owner thread exclusion, compatible paired-device publication and
-native Frontier discovery remain separate integration work.
+with 10,774 stereo and 196 actual-proxy state checks. The `8ff82f2` PiOpenXR
+run passed its API/loading/lifecycle checks with 234 loading frames, 1,529
+stereo pairs and normal shutdown. The user confirmed normal grid placement,
+tracking, transition, triangle appearance and closure. Frontier and SteamVR
+were absent before and after. This establishes a rendering-state contract;
+game/owner thread exclusion, compatible paired-device publication and native
+Frontier discovery remain separate integration work.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact

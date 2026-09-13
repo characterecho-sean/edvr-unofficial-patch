@@ -82,12 +82,55 @@ Luna supplied the renderer and initial state tests. Parent review corrected
 recorded-command retirement and cleanup order, resource hazards and API types
 in the test fixtures, an unrelated-validation false positive in the device
 rejection test, and missing failure/predicate/counter coverage. Parent also
-added and ran the actual-DLL shadow fixture. No native headset result is
-claimed for this executable yet.
+added and ran the actual-DLL shadow fixture. The subsequent native run is
+recorded below.
 
-The updated PiOpenXR executable requires a fresh headset readiness gate after
-desktop review and a pushed checkpoint. The previous skybox receipt qualifies
-the earlier executable only.
+The updated executable completed the native run below after fresh headset
+readiness. Sean confirmed that the grid, transition, triangle tracking and
+closure all looked normal. The previous skybox receipt qualifies the earlier
+executable only.
+
+## Native run of `8ff82f2`
+
+After Sean confirmed readiness, preflight verified all 80 recorded source
+hashes, the native executable, the checkpoint and the loader/manifest hashes.
+Frontier and SteamVR were absent. The Python runner selected PiOpenXR only in
+the diagnostic child's environment; no installed DLL, saved runtime or live
+configuration was changed.
+
+`build/openxr-native-20260912-202150` contains the output, receipt and post-run
+process snapshot. The run started at `2026-09-13T02:21:50.794848Z` and ended at
+`02:22:11.198147Z`, after 20.406 seconds, with exit 0 and no watchdog timeout.
+Pimax OpenXR 0.1.0 used D3D11.1, two 5424x5356 eyes and swapchain format 29
+(RGBA sRGB). The executable SHA-256 was
+`9006ffd2f9bcbf3e4dbf139ee28bc667190432e3240d405c48b25878f406a90c`.
+
+The native checks passed:
+
+- Startup published valid geometry on frame 1, after one zero-layer frame and
+  before any scene Submit. Repeated Init retained identity and token 1; the
+  separate caller read cached geometry before Compositor discovery.
+- The loading override produced 234 projection frames with one startup game
+  wait, zero game Submits and unchanged game pose caches. It transitioned once
+  to scene rendering, then cleared and retired its private textures.
+- The main loop completed 1,532 waits, 3,058 copied-eye Submits, 1,529 stereo
+  pairs and 1,531 cache comparisons. All 1,530 reported view/head samples were
+  valid. The summary reported 1,531 main-loop frames and two empty frames;
+  loading frames have separate counters.
+- Both recenter operations and reset events passed. Init, System and render
+  owner ran on distinct threads (30820, 39912 and 2932). The service reported
+  1,810 event pumps and 1,839 valid live System queries out of 1,840; the cause
+  of the one invalid query was not established by these counters.
+- System-thread Shutdown joined the owner, retired interfaces, advanced the
+  token to 2 and reported normal stop and cleanup. The post-run snapshot at
+  `02:22:30.4201578Z` also contained no Frontier or SteamVR processes.
+
+This exercises command-list playback on the native headset renderer. The
+explicit game-state and binding-shadow sentinels remain desktop tests. Sean
+answered "Yes—all looked normal" to the check for grid placement in both eyes,
+upright and fixed tracking during head turns, normal transition, triangle
+appearance/tracking and normal closure. This passes the bounded headset gate;
+it is not a native Frontier flight or a performance comparison.
 
 ## Remaining integration
 
