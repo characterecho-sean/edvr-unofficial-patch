@@ -115,6 +115,19 @@ bool result(const char* operation,XrResult r) {
   if(r==XR_SUCCESS) return true;
   std::printf("result,%s,%d\n",operation,int(r)); return false;
 }
+struct ShutdownTrace {
+  const char* name; bool enabled,ended=false;
+  ShutdownTrace(const char* stage,bool on=true):name(stage),enabled(on) {
+    if(enabled) { std::printf("shutdown_stage,begin=%s,thread=%lu,tick=%llu\n",name,
+      (unsigned long)GetCurrentThreadId(),(unsigned long long)GetTickCount64()); std::fflush(stdout); }
+  }
+  void end(bool ok) {
+    if(enabled&&!ended) { ended=true; std::printf("shutdown_stage,end=%s,ok=%u,thread=%lu,tick=%llu\n",name,
+      unsigned(ok),(unsigned long)GetCurrentThreadId(),(unsigned long long)GetTickCount64()); std::fflush(stdout); }
+  }
+  ~ShutdownTrace() { if(enabled&&!ended) { std::printf("shutdown_stage,abandoned=%s,thread=%lu,tick=%llu\n",name,
+      (unsigned long)GetCurrentThreadId(),(unsigned long long)GetTickCount64()); std::fflush(stdout); } }
+};
 template<class T> bool load(Api& a,XrInstance instance,const char* name,T& destination) {
   PFN_xrVoidFunction fn=nullptr; const XrResult r=a.get(instance,name,&fn);
   if(!result(name,r)) return false;
@@ -532,30 +545,53 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   void unsupported(unsigned slot) noexcept override {std::printf("system_unavailable,slot=%u\n",slot);}
   ~Host() {close();}
   bool close() {
+    const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
+    ShutdownTrace gateStage("host_gate",tracing);
     if(runtimeGeneration) {
       gate.requestStop(runtimeGeneration);
       // The diagnostic joins all operations before destruction. A future
       // multi-thread host must defer its own lifetime too until this succeeds.
-      if(!gate.canDestroy(runtimeGeneration))return false;
+      if(!gate.canDestroy(runtimeGeneration)) { gateStage.end(false); return false; }
     }
+    gateStage.end(true);
     geometry.retire(geometryGeneration);
     poses.retire(compositorGeneration);
     resetEvents.retire(geometryGeneration);changes.clear();
-    loading={};skybox.shutdown();captured.shutdown();
-    clean=result("destroy_swapchains",stereo.shutdown())&&clean;
+    loading={};
+    ShutdownTrace captureStage("host_capture_release",tracing);
+    skybox.shutdown();captured.shutdown();captureStage.end(true);
+    ShutdownTrace stereoStage("host_stereo_shutdown",tracing);
+    const auto stereoResult=stereo.shutdown();
+    clean=result("destroy_swapchains",stereoResult)&&clean;stereoStage.end(stereoResult==XR_SUCCESS);
     if(stereo.needsGpuDrain())return clean=false; // do not invalidate its session/images
-    clean=result("destroy_seated_space",seated.shutdown())&&clean;
+    ShutdownTrace seatedStage("host_seated_shutdown",tracing);
+    const auto seatedResult=seated.shutdown();
+    clean=result("destroy_seated_space",seatedResult)&&clean;seatedStage.end(seatedResult==XR_SUCCESS);
     // xrDestroySession is allowed in any state once handle users are excluded.
     // Normal exit ends a STOPPING session in the loop; failed/cancelled startup
     // may destroy directly, without an invalid xrEndSession in another state.
-    clean=result("destroy_binding",binding.shutdown())&&clean;
+    ShutdownTrace bindingStage("host_binding_shutdown",tracing);
+    const auto bindingResult=binding.shutdown();
+    clean=result("destroy_binding",bindingResult)&&clean;bindingStage.end(bindingResult==XR_SUCCESS);
     view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
     state.abandonAfterOwnerDestruction();
-    graphics.reset();externalDevice=nullptr;
-    if(instance && api.destroyInstance) {clean=result("xrDestroyInstance",api.destroyInstance(instance))&&clean;instance=XR_NULL_HANDLE;}
-    if(api.module) {FreeLibrary(api.module);api.module=nullptr;}
+    ShutdownTrace graphicsStage("host_graphics_reset",tracing);
+    graphics.reset();externalDevice=nullptr;graphicsStage.end(true);
+    ShutdownTrace instanceStage("host_instance_destroy",tracing);
+    XrResult instanceResult=XR_SUCCESS;
+    if(instance && api.destroyInstance) {
+      instanceResult=api.destroyInstance(instance);
+      clean=result("xrDestroyInstance",instanceResult)&&clean;instance=XR_NULL_HANDLE;
+    }
+    instanceStage.end(instanceResult==XR_SUCCESS&&!instance);
+    ShutdownTrace loaderStage("host_loader_free",tracing);
+    BOOL loaderFreed=TRUE;
+    if(api.module) {loaderFreed=FreeLibrary(api.module);api.module=nullptr;}
+    loaderStage.end(loaderFreed!=FALSE);
     if(runtimeGeneration) {
-      clean=gate.finishGeneration(runtimeGeneration)&&clean;
+      ShutdownTrace finishStage("host_gate_finish",tracing);
+      const bool finished=gate.finishGeneration(runtimeGeneration);
+      clean=finished&&clean;finishStage.end(finished);
       runtimeGeneration=0;
     }
     return clean;
@@ -696,20 +732,35 @@ class NativeBackend final:public RuntimeBackend {
   }
   bool prepareStop() {
     bool drained=false;
-    return route.invoke([&] {
+    const bool tracing=owner.running()||host!=nullptr;
+    ShutdownTrace stage("backend_prepare_stop",tracing);
+    const bool invoked=route.invoke([&] {
       const auto r=host?host->stereo.drain():XR_SUCCESS;
       drained=r==XR_SUCCESS;
       if(host)host->clean=result("gpu_drain",r)&&host->clean;
       std::printf("gpu_drain,result=%d,pending=%u\n",int(r),unsigned(host&&host->stereo.needsGpuDrain()));
-    })&&drained;
+      std::fflush(stdout);
+    });
+    stage.end(invoked&&drained); return invoked&&drained;
   }
   bool stop()noexcept override {
     // Early exits still have their Init/render caller available. Normal
     // System-thread Shutdown comes only after that caller explicitly drains.
-    if(owner.running()&&(present||render.isRenderThread()))prepareStop();
+    const bool tracing=owner.running()||host!=nullptr;
+    ShutdownTrace prep("backend_stop_prepare",tracing);
+    if(owner.running()&&(present||render.isRenderThread()))prep.end(prepareStop());
+    else prep.end(true);
+    ShutdownTrace closeStage("backend_render_close",tracing);
     render.close();
+    closeStage.end(true);
     bool cleaned=!host;
-    const bool joined=owner.stop([&]{cleaned=host?host->stop():true;});
+    ShutdownTrace joinStage("backend_owner_join",tracing);
+    const bool joined=owner.stop([&]{
+      ShutdownTrace finalizer("backend_owner_finalizer",tracing);
+      cleaned=host?host->stop():true;
+      finalizer.end(cleaned);
+    });
+    joinStage.end(joined&&cleaned);
     if(joined&&host&&host->stereo.needsGpuDrain()) {
       // Diagnostic-only last resort: never destroy a live XR session beneath
       // uncompleted GPU work. Exit this isolated child, without a crash dialog.
@@ -1004,7 +1055,9 @@ int run(const Options& options,PresentHost* present=nullptr) {
   // Stop the System producer, then issue exported Shutdown from that same
   // caller thread. The runtime owner cancels queued work, cleans and joins.
   DWORD shutdownThread=0;
+  ShutdownTrace systemJoin("controller_system_join");
   const bool systemJoined=systemClient.stop([&]{shutdownThread=GetCurrentThreadId();edvr_native_VR_ShutdownInternal();});
+  systemJoin.end(systemJoined);
   const bool cleanup=gpuDrained&&systemJoined&&shutdownThread==systemThread&&!backend.owner.running()&&host.clean&&!runtime.running()&&host.runtimeGeneration==0&&host.stops==1;
   std::printf("runtime_service,event_pumps=%llu,system_queries=%llu,valid_system_queries=%llu,shutdown_on_system=%u,owner_joined=%u\n",
     (unsigned long long)host.eventPumps,(unsigned long long)systemQueries,(unsigned long long)validSystemQueries,
@@ -1075,9 +1128,14 @@ int runWithPresent(const Options& options) {
     ++presents;
     Sleep(1);
   }
-  controller.join();
+  ShutdownTrace controllerJoin("present_controller_join");
+  controller.join();controllerJoin.end(true);
+  ShutdownTrace callbackClose("present_callback_close");
   const auto closed=client.close();
+  callbackClose.end(closed==S_OK);
+  ShutdownTrace callbackRelease("present_callback_release");
   const auto released=client.release();
+  callbackRelease.end(released==S_OK);
   present.work.close();
   const bool passed=outcome==0&&presenting&&present.correct&&present.callbacks>0&&
     initCaller!=present.thread&&closed==S_OK&&released==S_OK;

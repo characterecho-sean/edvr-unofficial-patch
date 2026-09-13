@@ -4,11 +4,16 @@ The current [Present-hook checkpoint](openxr-present-boundary-2026-09-13.md)
 routes staged OpenXR work through the graphics proxy's real owned-swapchain
 Present callback, with separate Init/render callers and a D3D11 device created
 before VR Init. The full build and desktop gates pass, including 65 actual-DLL
-Present checks and 41 CPU queue checks. Its PiOpenXR headset gate is pending.
-The earlier [render-caller handoff](openxr-render-thread-2026-09-13.md) passed
-its `064fc0d` paired-proxy PiOpenXR run, with normal grid/triangle appearance,
-tracking and closure confirmed by the user. Native Frontier transport remains
-unimplemented. The entries below retain earlier evidence and limits.
+Present checks and 41 CPU queue checks. Its `2734c15` PiOpenXR run reached the
+scene with four distinct callers and successful final GPU drains, then stalled
+during shutdown until the watchdog terminated it. The user saw normal rendering
+until the triangle became headlocked at the end. The gate failed; flushed
+teardown diagnostics now build and pass the desktop suite, with a traced
+headset repeat pending. The earlier [render-caller
+handoff](openxr-render-thread-2026-09-13.md) passed its `064fc0d` paired-proxy
+PiOpenXR run, with normal grid/triangle appearance, tracking and closure
+confirmed by the user. Native Frontier transport remains unimplemented. The
+entries below retain earlier evidence and limits.
 
 The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
 `8c617dc` before implementation began. Work remains in Phase 0; it is not an
