@@ -1000,10 +1000,10 @@ wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
-constexpr int kEyeInputs=13;
+constexpr int kEyeInputs=16;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"MeshCoverage",L"PrevZ"};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"MeshCoverage",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext"};
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
@@ -1333,6 +1333,9 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     }
     // Copy before the depth swap; an absent file means history was invalid.
     if(e.zPrevValid && e.zPrev) { textures[12]=e.zPrev; textures[12]->AddRef(); }
+    if(e.uiHistoryValid && e.uiHistory[e.uiHistoryRead]) {
+        textures[14]=e.uiHistory[e.uiHistoryRead];textures[14]->AddRef();
+    }
     for(int k=0;k<kEyeInputs;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
     for(int k=5;k<kEyeInputs;++k)if(textures[k])textures[k]->Release();
     if(textures[4])textures[4]->Release();
@@ -1346,6 +1349,8 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
         uint32_t bytes=0;
         switch(d.Format) {
         case DXGI_FORMAT_R8_UNORM:bytes=1;break;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:bytes=4;break;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:bytes=8;break;
         case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:bytes=2;break;
         case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R32_TYPELESS:
@@ -3805,6 +3810,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 why);
                         }
                     }
+                    // One requested first-eye capture, after NGX and before
+                    // UI bounds. Separates model artifacts from retained UI
+                    // influence without changing any rendering or bindings.
+                    const bool captureResolve=eye==0 && g_eyeRunLeft>0 && g_eyeRunTaken==0 &&
+                        g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame && !g_eyeInputs[13];
+                    if(usedDlaa && captureResolve)stageEyeRun(ctx,e.dlOut,g_eyeInputs,13);
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
                     if (usedDlaa && uiResolve) {
@@ -3825,6 +3836,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->Dispatch((w+7)/8,(h+7)/8,1);
                         ctx->CSSetShaderResources(0,17,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
                         uiEvidenceWritten=uiResolveWritten=true;
+                        if(captureResolve)stageEyeRun(ctx,e.uiHistory[1-e.uiHistoryRead],g_eyeInputs,15);
                         if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");}
                     } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
                 }

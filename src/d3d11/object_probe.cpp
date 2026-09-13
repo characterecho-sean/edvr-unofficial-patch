@@ -2911,7 +2911,13 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.draws.size()),
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
-    Log::get().note("object probe: UI/mesh/effect vertex snapshots: %u draws, %u bytes, %u range/budget declines; UI first three watched frames, meshes first source frame, effects throughout run; 256 KiB per stream, 32 MiB total. Draw offsets, bindings and capture ranges are retained.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    Log::get().note("object probe: UI/mesh/effect vertex snapshots: %u draws, %u bytes, %u range/budget declines; UI/solar first three watched frames, meshes first source frame, effects throughout run; 256 KiB per stream, 32 MiB total. Draw offsets, bindings and capture ranges are retained.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    uint32_t solarDraws=0,solarConstants=0,solarGeometry=0;
+    for(const auto& d:g_drawSnapshot.draws)if(EyeDrawSnapshot::solarDraw(d.vs)) {
+        ++solarDraws;solarConstants+=d.copied[0]>=128 && d.copied[1]>0;
+        solarGeometry+=d.streams[0].copied>0 && !d.layout.empty();
+    }
+    Log::get().note("object probe: solar snapshots: %u draws, %u with draw-time b0/b1, %u with bounded geometry/layout; VS/PS retained for surface, corona and arcs. Constants throughout run; geometry first three watched frames. No solar rendering changes.",solarDraws,solarConstants,solarGeometry);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\drawstate_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
     const bool eyeMeshOk=g_eyeMeshSnapshot.write(ctx,path);
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());

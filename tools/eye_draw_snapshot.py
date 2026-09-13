@@ -2,6 +2,8 @@
 """Read drawstate_HHMMSS.bin from an eye run (eye_draw_snapshot.h).
 
 Each draw preserves VS b0/b1/b2 and PS b2 at the draw, before buffer reuse.
+Solar surface/corona/arc families also retain their VS/PS bytecode and
+bounded unpacked geometry/layout for the first three watched frames.
 For night vision (FCF7BD2896751D96/F786D34B5E118D5E), buffer 1 holds
 PS b1 instead of the unused VS b1: its actual screen/camera constants.
 Version 2 preserves draw start/base and bounded HUD/sprite VB0/VB1/IB
@@ -439,6 +441,18 @@ def main():
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
             expected = (15<<6) | ((14<<6)<<11) | ((13<<5)<<22) if i == 0 else ((15<<5)<<22)
             assert all(v[0] == expected for v in struct.iter_unpack('<I',e['data'])), 'Effect crop timing or HDR copy differs'
+        solar = read(str(a.path)+'.solar')
+        assert solar['failures'] == solar['dropped'] == 0 and len(solar['draws']) == 28
+        for i, d in enumerate(solar['draws']):
+            family, frame = divmod(i, 4)
+            assert d['frame'] == 1000+frame and d['ordinal'] == family
+            assert len(d['layout']) == 1 and d['layout'][0]['semantic'] == 'POSITION'
+            assert all(v == 300+frame for v in struct.unpack('<48f', d['buffers'][0]['data'])), 'Solar constants copied after draw-time reuse'
+            assert bool(d['streams'][0]['data']) == (frame < 3)
+            for stage, shader in (('vs', d['vs']), ('ps', d['ps'])):
+                if shader:
+                    path = Path(a.path).parent / f'{stage}_{shader:016X}.dxbc'
+                    assert path.read_bytes() == b'solar-bytecode\0', 'Solar shader stage was omitted or substituted'
         night = read(str(a.path)+'.night')
         assert night['version'] == 7 and night['failures'] == 0 and len(night['draws']) == 3
         assert len(night['effect_images']) == 14 and night['effect_image_declined'] == 0

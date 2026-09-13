@@ -39,6 +39,26 @@ public:
     static bool planetSurface(uint64_t vs) {
         return vs==0x71DD9863DCFC0986ull || vs==0x3530A6FD15EDE145ull;
     }
+    // 13:07:14 / 13:10:25: solar surface, corona and arc draws. These are
+    // not the planet shader or the rigid instance pool. Keep their actual
+    // placement and both shaders before extending either motion path.
+    static bool solarDraw(uint64_t vs) {
+        switch(vs) {
+        case 0x0EE43D81E394E70Cull:case 0x4D516EF05C68FFA5ull:
+        case 0xD95905C18B7FAD93ull:case 0x8BD7C37ABCEE7E45ull:
+        case 0xD1281DF454A153ADull:case 0x5E417E9DF2E7F9E6ull:
+        case 0x1F3AD1584D7FA3C8ull:return true;
+        default:return false;
+        }
+    }
+    static bool solarPixel(uint64_t ps) {
+        switch(ps) {
+        case 0x147E748F4CD3AE9Aull:case 0x5BCB6B95BE7C0700ull:
+        case 0x94676B1FD0DF150Full:case 0x97DBC87FCAA429C4ull:
+        case 0xBD801F2FB02522EBull:case 0xBA65C50BBA1ECCBBull:return true;
+        default:return false;
+        }
+    }
     // 20:02:56 crouching rifle: these source passes use independent
     // billboard/flare vertices, not the weapon's t33 instance records.
     // Capture their placement; do not infer attachment from proximity.
@@ -58,7 +78,7 @@ public:
         static const GUID key={0x10e33b44,0x1cf4,0x4fa2,{0x82,0x1f,0x63,0x51,0xda,0xeb,0x43,0x99}};return key;
     }
     static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t vs) {
-        if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && vs!=kNight) || !layout || !e || !n || n>32)return;
+        if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && !solarDraw(vs) && vs!=kNight) || !layout || !e || !n || n>32)return;
         std::vector<Layout> items(n);
         for(UINT i=0;i<n;++i) {
             if(!e[i].SemanticName || strlen(e[i].SemanticName)>=64)return;
@@ -91,6 +111,7 @@ public:
         }
     }
     static bool watches(uint64_t vs) {
+        if(solarDraw(vs))return true;
         switch (vs) {
         case kHolo:
         case kHud:
@@ -174,7 +195,7 @@ public:
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && hash!=kVscreenPs && hash!=kNightPs) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && !solarPixel(hash) && hash!=kVscreenPs && hash!=kNightPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -187,7 +208,7 @@ public:
         uint32_t missing = 0;
         std::map<uint64_t, bool> seen;
         for (const Draw& d : draws) {
-            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:0);
+            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:(solarDraw(d.vs)?d.ps:0));
             if(pixel && seen.emplace(pixel,true).second) {
                 const auto ps=shaders.find(pixel);
                 if(ps==shaders.end())++missing;
@@ -326,8 +347,8 @@ public:
         const bool mesh=source && (eyeMesh || ordinal==UINT32_MAX-1) && sourceMesh(vs);
         const bool effect=source && ordinal==UINT32_MAX-2 && sourceEffect(vs);
         const bool night=vs==kNight && ps==kNightPs;
-        const bool planet=planetSurface(vs);
-        const bool unpacked=effect || night || planet;
+        const bool planet=planetSurface(vs),solar=solarDraw(vs);
+        const bool unpacked=effect || night || planet || solar;
         if(unpacked || mesh) {
             Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;ctx->IAGetInputLayout(&layout);
             Layout elements[32];UINT bytes=sizeof(elements);
@@ -361,7 +382,7 @@ public:
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if(((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) || ((mesh || night || planet) && frame==firstFrame) || effect) {
+        if(((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || ((mesh || night || planet) && frame==firstFrame) || effect) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             bool copied=false;

@@ -168,6 +168,37 @@ int wmain(int argc, wchar_t** argv) {
         check(planets.draws[2].stage[0] && !planets.draws[2].streams[0].copied,"later planet constants survive without repeated vertex copies");
         ctx->IASetInputLayout(nightLayout.Get());
     }
+    {
+        // The sun families are outside the planet/pool paths. Retain both
+        // shader stages, actual unpacked layout, and changing draw constants.
+        const uint64_t vs[]={0x0EE43D81E394E70Cull,0x4D516EF05C68FFA5ull,0xD95905C18B7FAD93ull,
+            0x8BD7C37ABCEE7E45ull,0xD1281DF454A153ADull,0x5E417E9DF2E7F9E6ull,0x1F3AD1584D7FA3C8ull};
+        const uint64_t ps[]={0,0x147E748F4CD3AE9Aull,0x5BCB6B95BE7C0700ull,
+            0x94676B1FD0DF150Full,0x97DBC87FCAA429C4ull,0xBD801F2FB02522EBull,0xBA65C50BBA1ECCBBull};
+        edvr::EyeDrawSnapshot solar;
+        const char bytes[]="solar-bytecode";
+        for(UINT family=0;family<7;++family) {
+            edvr::EyeDrawSnapshot::rememberShader(vs[family],bytes,sizeof(bytes));
+            if(ps[family])edvr::EyeDrawSnapshot::rememberShader(ps[family],bytes,sizeof(bytes));
+            edvr::EyeDrawSnapshot::rememberLayout(nightLayout.Get(),&nightElement,1,vs[family]);
+            for(UINT frame=0;frame<4;++frame) {
+                float values[48];for(float& v:values)v=float(300+frame);
+                ctx->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);
+                solar.capture(ctx.Get(),1000+frame,family,vs[family],ps[family],'X',6,1,0,1,2);
+                const auto& d=solar.draws.back();
+                check(d.layout.size()==1 && d.copied[0]==192,"solar draw constants/layout retained");
+                check((d.streams[0].copied!=0)==(frame<3),"solar geometry limited to three frames");
+                if(frame<3)check(d.streams[0].captureOffset==12 && d.streams[2].captureOffset==4,"solar original vertex/index binding offsets retained");
+            }
+        }
+        float overwritten[48]{};ctx->UpdateSubresource(cb.Get(),0,nullptr,overwritten,0,0);
+        check(solar.draws.size()==28 && solar.vertexDraws==21,"all solar families captured");
+        check(solar.write(ctx.Get(),(std::wstring(argv[1])+L".solar").c_str()) && !solar.failures,"solar draw-time GPU payload write");
+        std::wstring dir=argv[1];dir.resize(dir.find_last_of(L"\\/"));
+        check(solar.writeShaders(dir.c_str())==0,"solar vertex/pixel shader files including null-PS prepass");
+        solar.draws.back().ps=123;
+        check(solar.writeShaders(dir.c_str())==1,"unexpected solar PS reported missing, never silently substituted");
+    }
     ComPtr<ID3D11Texture2D> nightTexture[5];ComPtr<ID3D11ShaderResourceView> nightView[5];
     UINT nightRow[5]{},nightRows[5]{};
     for(UINT slot=0;slot<5;++slot) {
