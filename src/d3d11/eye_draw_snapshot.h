@@ -24,11 +24,16 @@ public:
     static constexpr uint32_t kMaxDraws = 4096;
     static constexpr uint32_t kMaxTextures = 24;
     static constexpr uint32_t kMaxTextureBytes = 16 * 1024 * 1024;
+    // The targeting sprite's source surface is 2613x2286 RGBA8 (22.79 MiB).
+    // Keep this exception tied to the exact original colour pair; other
+    // surfaces retain the normal 16 MiB diagnostic cap.
+    static constexpr uint32_t kSpriteTextureBytes = 32 * 1024 * 1024;
     static constexpr uint32_t kTotalTextureBytes = 64 * 1024 * 1024;
     static constexpr uint32_t kVscreenTextureBytes = 128 * 1024 * 1024;
     static constexpr uint32_t kVscreenTotalBytes = 256 * 1024 * 1024;
     static constexpr uint64_t kHolo = 0x81216C77F90DEDD6ull;
     static constexpr uint64_t kHud = 0xB7790CBFC6554097ull, kSprite=0xE508648660A352B2ull;
+    static constexpr uint64_t kSpritePs=0x63ABD86359B57D01ull;
     static constexpr uint64_t kPanel=0xA888D51024D9798Eull,kScreen=0x4EF6DDB075A927FAull;
     static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
     static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
@@ -371,8 +376,12 @@ public:
             if(stride==8 && offset==0)d.mesh[2]=captureMeshBuffer(ctx,dev.Get(),ids.Get(),frame,stride,eyeMesh?d.target:0);
             else ++meshDeclined;
         }
-        if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen)
-            d.texture=captureSurface(ctx,dev.Get(),frame,vs==kHolo?holoSurfaceSlot(ps):vs==kPanel?1:0,vs==kVscreen);
+        if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen) {
+            const bool spriteSource = vs==kSprite && ps==kSpritePs;
+            d.texture=captureSurface(ctx,dev.Get(),frame,
+                                     vs==kHolo?holoSurfaceSlot(ps):vs==kPanel?1:0,
+                                     vs==kVscreen,spriteSource?kSpriteTextureBytes:0);
+        }
         if(vs==kVscreen && sourceFrame==frame && sourceDepth && d.texture!=UINT32_MAX) {
             D3D11_TEXTURE2D_DESC depth{};sourceDepth->GetDesc(&depth);
             const auto& colour=surfaces[d.texture];
@@ -584,7 +593,8 @@ private:
     static std::map<uint64_t, std::vector<uint8_t>>& shaderBytes() {
         static std::map<uint64_t, std::vector<uint8_t>> s; return s;
     }
-    uint32_t captureSurface(ID3D11DeviceContext* ctx, ID3D11Device* dev, uint32_t frame,UINT slot,bool large=false) {
+    uint32_t captureSurface(ID3D11DeviceContext* ctx, ID3D11Device* dev, uint32_t frame,
+                            UINT slot,bool large=false,uint32_t perTextureCap=0) {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
         ctx->PSGetShaderResources(slot, 1, &srv);
         if (!srv) return UINT32_MAX;
@@ -593,9 +603,11 @@ private:
         if (FAILED(res.As(&tex))) { ++failures; return UINT32_MAX; }
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; srv->GetDesc(&sd);
         if(sd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || sd.Texture2D.MostDetailedMip!=0) {++failures;return UINT32_MAX;}
-        return copySurface(ctx,dev,frame,tex.Get(),sd.Format,large);
+        return copySurface(ctx,dev,frame,tex.Get(),sd.Format,large,perTextureCap);
     }
-    uint32_t copySurface(ID3D11DeviceContext* ctx,ID3D11Device* dev,uint32_t frame,ID3D11Texture2D* tex,DXGI_FORMAT format,bool large) {
+    uint32_t copySurface(ID3D11DeviceContext* ctx,ID3D11Device* dev,uint32_t frame,
+                         ID3D11Texture2D* tex,DXGI_FORMAT format,bool large,
+                         uint32_t perTextureCap=0) {
         for (uint32_t i = 0; i < surfaces.size(); ++i)
             if (surfaces[i].source.Get() == tex) return i;
         D3D11_TEXTURE2D_DESC td{}; tex->GetDesc(&td);
@@ -610,8 +622,9 @@ private:
         default: break;
         }
         const uint64_t bytes = static_cast<uint64_t>(td.Width) * td.Height * bpp;
+        const uint64_t textureCap=perTextureCap?perTextureCap:(large?kVscreenTextureBytes:kMaxTextureBytes);
         if (!bpp || td.SampleDesc.Count != 1 || td.ArraySize != 1 ||
-            bytes > (large?kVscreenTextureBytes:kMaxTextureBytes) ||
+            bytes > textureCap ||
             bytes + textureBytes > (large?kVscreenTotalBytes:kTotalTextureBytes) || surfaces.size() >= kMaxTextures) {
             ++failures; return UINT32_MAX;
         }

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Read drawstate_HHMMSS.bin from an eye run (eye_draw_snapshot.h).
 
+The E508/63ABD targeting sprite source has a bounded 32 MiB per-texture
+capture exception within the unchanged 64 MiB normal texture budget.
+
 Each draw preserves VS b0/b1/b2 and PS b2 at the draw, before buffer reuse.
 Solar surface/corona/arc families also retain their VS/PS bytecode and
 bounded unpacked geometry/layout for the first three watched frames.

@@ -532,3 +532,104 @@ source-screen tests remain in place.
 This establishes and corrects the final-UI contribution captured here.
 Whether any separate pre-resolve halo remains requires the user's next
 headset comparison.
+
+## Targeting text, capture 170644
+
+Ruled out: excluding orbital geometry from text cleanup also resolves
+target-label masks, because the user reproduced the targeting-text case
+on verified 91e4094. Genuine target text remains class 1 and needs its
+own protection against stale digits and letters.
+
+The graphics log edvr_gfx_20260913_170403.log identifies build 6AA7236D,
+linked 22:27:57 UTC. The VR log identifies Valve SteamVR. DLSS uses
+preset K, 2774x2740 input and 4268x4216 output. First temporal frame
+13266 has jitter (-0.375,-0.0555555522); the raw and output crop origins
+are (687,670) and (1056,1030). There are 1,034 draw snapshots and 190
+failed copies. Those failures limit source-draw reconstruction, while
+the saved model output, motion, UI coverage, edit mask and both UI
+history textures permit an independent analysis of the final resolve.
+
+The same-frame DlssBeforeUi and T00 images isolate the final cleanup:
+the former contains overlapping old/current distance digits; the latter
+cleans those digits but adds a dark footprint beside and below the
+reticle. Thus disabling cleanup globally would trade the mask for a
+known text regression. Current colour bounds constrain the entire RGB
+sample, including the corona behind transparent text. Retained influence
+extends that constraint beyond the current glyphs. A difference between
+the model's reconstructed glow and the raw glow can therefore be treated
+as a stale letter even where no letter remains.
+
+Candidate corrections require separate gates. A history-rejection change
+must remove an obsolete glyph in actual preset-K evaluation, including
+moving and changing text, without creating the dark footprint. A
+text-layer solution must retain original alpha, blending, occlusion and
+HDR/postprocessing behaviour; a guessed colour or a full-quad overlay
+does not establish those properties. Merely releasing retained cleanup
+is insufficient unless the model's old text is also removed. No new
+rendering change has passed these gates yet.
+
+The same-frame resource headers all identify frame 13266, eye 0. A CPU
+replay of the shipping resolver reproduces the target ROI with RGB mean
+absolute error 0.000691 byte per channel. Output ownership must be
+floor(outputIndex * inputSize / outputSize), matching the shader's
+integer ceil partitions. Using pixel-centre reconstruction coordinates
+for that ownership was an incorrect earlier scratch implementation.
+Retained-only influence covers 10.26% of this output ROI and decreases
+red by 5.36 bytes on average; current-only influence decreases it by
+2.03 bytes. Actual content edits cover only 0.44% and increase red by
+3.06 bytes. This establishes the retained RGB constraint as the main
+source of the darkening; it does not establish a safe replacement.
+
+The retained mask's transport also has a conservative-growth limit:
+maximizing over floor/ceil history samples can spread support by an
+additional pixel per axis per frame for fractional motion, independently
+of the fractional displacement's size. Zero motion samples one pixel and
+does not cause that expansion. This dump has only one pair of UI history
+resources, so its exact multi-frame growth cannot be replayed from the
+sixteen colour crops alone. Adding an ownership bit would not resolve
+the colour ambiguity: this footprint already originates from genuine
+text, but its departing pixels now contain the background.
+
+The missing source texture has a concrete diagnostic cause. The original
+E508648660A352B2 / 63ABD86359B57D01 draw reads a 2613x2286 RGBA8
+texture, 23,893,272 bytes, exceeding the ordinary 16 MiB snapshot limit.
+All 190 attempts to save that texture are counted as failed copies;
+these are not 190 failures to copy its constant buffers or geometry. Its
+original blend is ONE / INV_SRC_ALPHA into the R11G11B10_FLOAT eye
+target.
+
+The diagnostic correction grants only that exact sprite shader pair a 32
+MiB per-texture allowance and keeps the normal 64 MiB total limit. The
+six existing captured textures plus this missing texture require
+37,579,888 bytes, within that total. Deduplication still copies a source
+once per requested dump. The installed DLSS library reports file version
+310.7.0.0; its reserved transparency-mask parameter is not a supported
+substitute for separating the text from its HDR background.
+
+The diagnostic change permits source RGB/alpha inspection. It does not
+by itself provide an exact replay of the final HDR composite: the saved
+constant buffers include VS b1 and PS b2, while the sprite pixel shader
+also reads PS b1. Their identity must be checked before substituting the
+vertex-stage buffer for the pixel-stage buffer.
+
+An invalid-motion experiment has not passed the replacement gate. The
+first synthetic fixture used the wrong motion sign, and its approximate
+UI simulator had grid/history errors; those numeric comparisons are
+discarded. A separate C00--C15 cropped NGX sensitivity test reuses C00
+depth and motion after the first frame and therefore cannot establish
+production ghost removal or compare exact final image quality. It shows
+that invalidating a rectangle over the label also changes the
+surrounding glow, which is insufficient evidence to replace the current
+resolver. No motion invalidation, text bounds or rendering settings are
+changed by this diagnostic patch.
+
+Validation: the absolute-path full build, all its regression gates and
+the NVIDIA DLL smoke test pass. The snapshot fixture accepts the actual
+2613x2286 typeless source through its UNORM view, deduplicates repeated
+draws, preserves the source binding, accepts two distinct large sources
+and refuses a third at the unchanged total budget. Another pixel shader
+keeps the ordinary per-texture limit; the exact pair still refuses a
+source above 32 MiB. The reader self-test and binary fixture
+verification also pass. The next requested dump is needed to inspect the
+source alpha that this diagnostic correction makes available; the halo
+fix remains open.

@@ -65,6 +65,63 @@ int wmain(int argc, wchar_t** argv) {
     menuSnap.capture(ctx.Get(),102,1,edvr::EyeDrawSnapshot::kScreen,0x85565E9261812E2Full,'X',6,1,0);
     check(menuSnap.draws.size()==2 && menuSnap.surfaces.size()==1,"menu and screen sources captured with deduplication");
     check(menuSnap.draws[0].texture==0 && menuSnap.draws[1].texture==0,"menu and screen use their actual source slots");
+
+    // The targeting sprite's measured 2613x2286 RGBA8 source is 22.79 MiB:
+    // the exact E508/63ABD pair gets the bounded 32 MiB diagnostic exception,
+    // while another PS on the same VS still uses the normal 16 MiB cap.
+    D3D11_TEXTURE2D_DESC spriteDesc{}; spriteDesc.Width=2613; spriteDesc.Height=2286;
+    spriteDesc.MipLevels=spriteDesc.ArraySize=spriteDesc.SampleDesc.Count=1;
+    spriteDesc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS; spriteDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> spriteTexture; hr(dev->CreateTexture2D(&spriteDesc,nullptr,&spriteTexture));
+    D3D11_SHADER_RESOURCE_VIEW_DESC spriteView{}; spriteView.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    spriteView.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D; spriteView.Texture2D.MipLevels=1;
+    ComPtr<ID3D11ShaderResourceView> spriteSrv; hr(dev->CreateShaderResourceView(spriteTexture.Get(),&spriteView,&spriteSrv));
+    ID3D11ShaderResourceView* spriteBinding=spriteSrv.Get(); ctx->PSSetShaderResources(0,1,&spriteBinding);
+    edvr::EyeDrawSnapshot spriteSnap;
+    spriteSnap.capture(ctx.Get(),103,0,edvr::EyeDrawSnapshot::kSprite,
+                       edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);
+    check(spriteSnap.surfaces.size()==1 && spriteSnap.failures==0,
+          "exact E508 sprite source fits diagnostic texture exception");
+    const auto capturedTextureBytes=spriteSnap.textureBytes;
+    spriteSnap.capture(ctx.Get(),103,1,edvr::EyeDrawSnapshot::kSprite,
+                       edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);
+    check(spriteSnap.surfaces.size()==1 && spriteSnap.textureBytes==capturedTextureBytes,
+          "exact E508 sprite source deduplicates repeated binding");
+    ComPtr<ID3D11ShaderResourceView> retainedSrv; ctx->PSGetShaderResources(0,1,&retainedSrv);
+    check(retainedSrv.Get()==spriteSrv.Get(), "exact E508 capture preserves SRV binding");
+    edvr::EyeDrawSnapshot wrongSpritePs;
+    wrongSpritePs.capture(ctx.Get(),103,0,edvr::EyeDrawSnapshot::kSprite,0x1234ull,'X',6,1,0);
+    check(wrongSpritePs.surfaces.empty() && wrongSpritePs.failures==1,
+          "non-E508 sprite retains normal texture cap");
+    edvr::EyeDrawSnapshot totalBudget;
+    ComPtr<ID3D11Texture2D> secondTexture,thirdTexture;
+    ComPtr<ID3D11ShaderResourceView> secondSrv,thirdSrv;
+    hr(dev->CreateTexture2D(&spriteDesc,nullptr,&secondTexture));
+    hr(dev->CreateTexture2D(&spriteDesc,nullptr,&thirdTexture));
+    hr(dev->CreateShaderResourceView(secondTexture.Get(),&spriteView,&secondSrv));
+    hr(dev->CreateShaderResourceView(thirdTexture.Get(),&spriteView,&thirdSrv));
+    ID3D11ShaderResourceView* firstBudgetBinding=spriteSrv.Get(); ctx->PSSetShaderResources(0,1,&firstBudgetBinding);
+    totalBudget.capture(ctx.Get(),103,0,edvr::EyeDrawSnapshot::kSprite,
+                        edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);
+    ID3D11ShaderResourceView* secondBinding=secondSrv.Get(); ctx->PSSetShaderResources(0,1,&secondBinding);
+    totalBudget.capture(ctx.Get(),103,1,edvr::EyeDrawSnapshot::kSprite,
+                        edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);
+    ID3D11ShaderResourceView* thirdBinding=thirdSrv.Get(); ctx->PSSetShaderResources(0,1,&thirdBinding);
+    totalBudget.capture(ctx.Get(),103,2,edvr::EyeDrawSnapshot::kSprite,
+                        edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);
+    check(totalBudget.surfaces.size()==2 && totalBudget.textureBytes==2*capturedTextureBytes,
+          "distinct exact E508 sources fit below total budget");
+    check(totalBudget.draws[2].texture==UINT32_MAX,
+          "third exact E508 source is refused by unchanged total budget");
+    D3D11_TEXTURE2D_DESC oversizeDesc=spriteDesc; oversizeDesc.Width=2900; oversizeDesc.Height=2900;
+    ComPtr<ID3D11Texture2D> oversizeTexture; hr(dev->CreateTexture2D(&oversizeDesc,nullptr,&oversizeTexture));
+    ComPtr<ID3D11ShaderResourceView> oversizeSrv; hr(dev->CreateShaderResourceView(oversizeTexture.Get(),&spriteView,&oversizeSrv));
+    ID3D11ShaderResourceView* oversizeBinding=oversizeSrv.Get(); ctx->PSSetShaderResources(0,1,&oversizeBinding);
+    edvr::EyeDrawSnapshot oversizeSprite;
+    oversizeSprite.capture(ctx.Get(),103,0,edvr::EyeDrawSnapshot::kSprite,
+                            edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);
+    check(oversizeSprite.surfaces.empty() && oversizeSprite.failures==1,
+          "exact E508 sprite still rejects sources above 32 MiB");
     bd.ByteWidth=64;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;ComPtr<ID3D11Buffer> vertices;hr(dev->CreateBuffer(&bd,nullptr,&vertices));
     UINT stride=16,offset=8;ctx->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
     for(UINT i=0;i<2;++i){
