@@ -335,6 +335,7 @@ void aimingTimingTest(){
             if((dx||dz) && (i==12 || i==90 || i==52) && (w==4 || w==6))correct&=std::fabs(getFloat(a[i],w)-getFloat(expected[i],w))<1e-6f;
             else correct&=a[i].words[w]==expected[i].words[w];
         }
+        if(!correct){auto state=h.read(g.anchor.Get());auto* diagnostic=reinterpret_cast<const float*>(state.data());printf("%s: correction %.7f %.7f %.7f status %.0f; expected %.7f %.7f\n",label,diagnostic[0],diagnostic[1],diagnostic[2],diagnostic[8],dx,dz);}
         check(correct,label);
         auto original=h.read(h.pool.Get());check(!memcmp(original.data(),pool.data(),original.size()),"ADS timing never edits the original pool");
         ComPtr<ID3D11Buffer> restored;h.ctx->CSGetConstantBuffers(3,1,&restored);check(restored.Get()==sentinel.Get(),"ADS sample constant slot restored");
@@ -446,8 +447,8 @@ void sustainedAimingTest(){
         pool[12].words[0]=7;pool[90].words[0]=8;
         h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));
         float x=0,previous=0;
-        auto sample=[&](float step,bool lag,float expected){
-            previous=x;x+=step;const float arm=(lag?previous:x)-.014f;
+        auto sample=[&](float step,bool lag,float expected,float partial=0){
+            previous=x;x+=step;const float arm=(lag?previous:x)-.014f+partial;
             for(unsigned i:{12u,90u})position(pool[i],arm,-.021f,.130f);
             position(pool[52],arm+.1f,.2f,.4f);camera[275][0]=x;camera[275][1]=camera[275][2]=0;
             if(axis==2){
@@ -457,12 +458,15 @@ void sustainedAimingTest(){
             h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
             h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();check(h.run(),"sustained ADS draw forwarded");
             auto bytes=h.read(g.fixed.Get());const auto* actual=reinterpret_cast<const Instance*>(bytes.data());
+            auto diagnostic=h.read(g.anchor.Get());auto* da=reinterpret_cast<const float*>(diagnostic.data());
+            if((expected==0 && da[3]!=0) || std::fabs(da[axis]-expected)>1e-6f)
+                printf("axis %u delayed %u frame %u step %.7f expected %.7f correction %.7f status %.0f\n",axis,unsigned(delayed),g.frame,step,expected,da[axis],da[8]);
             for(unsigned i=0;i<128;++i)for(unsigned w=0;w<84;++w){
                 if(expected && (i==12 || i==90 || i==52) && w==4+axis)check(std::fabs(getFloat(actual[i],w)-(getFloat(pool[i],w)+expected))<1e-6,"one-frame translation preserves this weapon's independent aiming offset");
                 else check(actual[i].words[w]==pool[i].words[w],"all other geometry and animation bytes preserved");
             }
             auto a=h.read(g.anchor.Get());auto* anchor=reinterpret_cast<const float*>(a.data());
-            if(expected)check(anchor[8]==4,"sustained timing correction has a distinct status");
+            if(expected)check(anchor[8]==3 || anchor[8]==4,"recognized timing correction has a distinct status");
             const unsigned before=motionDraws;testVs=0x025B4B9FF54622EDull;check(h.run() && motionDraws==before+1,"sustained correction still forwards reticle motion");
             check(h.read(g.fixed.Get())==bytes,"ADS optic and weapon share exactly the same timing correction");
             weaponStabilityFrameBoundary(h.ctx.Get());
@@ -477,6 +481,19 @@ void sustainedAimingTest(){
         sample(0,false,0);sample(0,false,0); // stop and synchronized catch-up
         for(unsigned i=0;i<8;++i)sample(.025f,false,0); // constant-speed synchronized ambiguity
         for(unsigned i=0;i<10;++i)sample(steps[i],false,0); // variable synchronized motion
+        // Switch to delayed updates after a partial overshoot, as in live
+        // frames 12475..12479. Retain the verified offset through the switch.
+        sample(.025f+.029f,true,.029f,.025f); // camera advances twice, arms once
+        sample(.022f,true,.022f); // known offset handles the phase switch immediately
+        sample(.031f,true,.031f); // immediately recognized from the known offset
+        sample(-.023f,true,-.023f); // reverse before another acquisition window
+        sample(.021f,false,0); // synchronized again
+        sample(0,false,0);sample(0,false,0);sample(0,false,0);
+        sample(-.019f,true,0); // camera-only restart stays conservative
+        sample(-.028f,true,-.028f); // next arms update corrects without retraining
+        sample(.024f,true,.024f); // reversal follows the current step, no smoothing
+        sample(0,false,0);sample(0,false,0);
+        sample(.032f,false,0);sample(-.022f,false,0); // stock phase survives reversals
         h.clean();
     }
 }

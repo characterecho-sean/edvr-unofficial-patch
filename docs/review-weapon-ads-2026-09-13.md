@@ -335,3 +335,57 @@ The hardware timing replay also passes all 4,130 checks with the same
 expanded weapon tests, 252-key configuration contract and NVIDIA DLL
 smoke test pass. Live headset confirmation remains necessary, especially
 when entering ADS or changing aim before the phase can be established.
+
+## Reacquisition delay after a live update-phase switch
+
+Steam flight 085121 verifies c820739, linked 14:06:41 UTC. Capture
+085318 includes 128 pre-dump frames, 12429..12556. The run uses OpenVR,
+a 5120x2880 on-foot source image, and preset K at 2774x2740 input to
+4268x4216 output per eye. This change operates on the source attachment
+geometry independently of AA and runtime reprojection.
+
+The trace has 100 sustained corrections, 23 synchronized samples, two
+isolated overshoots and three uncorrected acquisition samples. Camera
+basis remains steady throughout. Frame 12450 repeats the camera while
+the arms catch up; 12451..12474 are synchronized except for the isolated
+12466 overshoot. Frame 12475 advances the camera twice while the arms
+advance once. Frames 12476..12478 then resume the one-frame delay, with
+lateral errors of 26.773, 31.235 and 25.751 mm. Correction resumes in
+12479 after unnecessarily acquiring three more varying-step matches. The
+lag-domain offset throughout this switch is the already verified (0.571,
+9.439, -75.082) mm aiming offset. First and last material samples agree.
+The captured interval contains no actual reversal; direction changes
+therefore need explicit regression controls as well.
+
+Ruled out: basis jitter or an epoch reset caused this captured dropout,
+because both remain stable and the learned aiming offset still matches
+the returning lag phase. Ruled out: correcting sustained lag alone
+removes the catch-up delay, because switching back from synchronized
+updates discarded usable calibration for three frames.
+
+Reuse the verified aiming offset when the current arms match the
+preceding camera in that offset, with steady projection/basis and a
+bounded measured arms step. A known phase switch then applies the
+current camera step immediately. Synchronized geometry remains
+byte-identical. At rest, retain matching calibration without correcting
+a camera-only change; the next measured arms update can validate it
+without starting another acquisition window. Completely unknown offsets
+still require the original evidence. No thresholds, settings, dispatch
+counts, buffer sizes or compositor scheduling change.
+
+The new trace replay reconstructs timing on the complete captured
+attachment pool, rather than claiming pre-dump animated geometry was
+captured. It corrects all three missed frames, alongside the other 97
+expected nonzero corrections after four cold-start acquisition frames.
+All earlier captured and reconstructed controls also pass, totaling
+5,578 full-pool replay checks. Production tests include the partial
+overshoot-to-lag switch, immediate reversals, a stopped restart,
+repeated returns to synchronized movement, and the prior sight, mouse,
+effect, toggle and missing-history guards. A stopped camera-only restart
+remains conservative for its first ambiguous frame; live headset
+verification is still needed.
+
+The full absolute-path build, configuration contract and NVIDIA DLL
+smoke test pass. The expanded production weapon tests and all 5,578
+replay checks pass on both WARP and NVIDIA hardware with the production
+shader compiler flags.

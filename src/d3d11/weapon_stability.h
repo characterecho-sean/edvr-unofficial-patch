@@ -109,7 +109,18 @@ float3 aimingTranslation(float3 p,bool valid,out float status) {
             lagMode=lagMatches?Anchor[lagPrev+1].w:0;
             if(lagMatches && any(abs(dc-dp)>.0001))lagMode=min(lagMode+1,4);
         }
-        if(lagConfidence>=3 && lagMode>=3) {
+        // 08:53 prehistory switches from synchronized updates back to lag
+        // after an isolated overshoot. The aiming offset is already known:
+        // do not spend three more frames rediscovering that same offset.
+        bool knownLag=steady && lc<1 && lp<1 && Anchor[prev+2].w>=3 &&
+            all(abs(lagLocal-Anchor[prev+2].xyz)<.0001);
+        if(knownLag && lp<=.001) {
+            // At a stop, a camera-only change could also be an intentional
+            // aiming adjustment. Retain calibration for the next measured
+            // arms step, but leave this ambiguous frame's geometry alone.
+            learned=Anchor[prev+2].xyz;confidence=3;
+        }
+        if(!synchronized && lp>.001 && ((lagConfidence>=3 && lagMode>=3) || knownLag)) {
             // Translate by this camera step, not by the whole camera/arms
             // offset. The verified aiming offset and original animation stay.
             correction=dc;learned=lagLocal;confidence=3;status=4;lagMode=4;
