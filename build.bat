@@ -232,7 +232,17 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDoorGpuEnd
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
+REM Both halves link "%OBJ%\<half>\*.obj" -- a wildcard -- and every build
+REM compiles every listed source, so an object left behind by a source that
+REM was REMOVED from the list is the only thing in that directory a build did
+REM not just make. It links anyway. Measured 2026-09-13: early_session.cpp
+REM was deleted, its .obj stayed, and the link failed on three symbols it
+REM still referenced -- the lucky case. Had those symbols still existed, the
+REM removed feature would have linked straight back into the DLL with no
+REM line anywhere saying so. Clearing the directory first costs nothing and
+REM makes the object set exactly the source list.
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
+del /q "%OBJ%\d3d11\*.obj" 2>nul
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 
@@ -389,6 +399,7 @@ if errorlevel 1 (
 )
 
 if not exist "%OBJ%\openvr" mkdir "%OBJ%\openvr"
+del /q "%OBJ%\openvr\*.obj" 2>nul
 ml64.exe /nologo /c /Fo"%OBJ%\openvr\thunks.obj" "%GEN%\edvr_thunks_openvr.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for openvr & exit /b 1 )
 
@@ -412,7 +423,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "src\openvr\supersample_resolve.cpp" ^
     "src\openvr\temporal_aa.cpp" ^
     "src\openvr\sharpen.cpp" "src\openvr\menu_door.cpp" "src\openvr\frame_timing.cpp" ^
-    "src\openvr\early_session.cpp" "src\openvr\launch_centre.cpp" ^
+    "src\openvr\launch_centre.cpp" ^
     "src\openvr\gaze_probe.cpp" ^
     "src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )

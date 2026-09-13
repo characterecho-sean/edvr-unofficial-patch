@@ -168,14 +168,14 @@ struct Shared {
     // the bias keep every published value nonzero.
     volatile LONG headForward;
     // gameDev  the game's own ID3D11Device, written by d3d11.dll at device
-    //          creation and read by openvr_api.dll's early handover.
+    //          creation. Read by openvr_api.dll's cull guard as the test for
+    //          a d3d11 half being installed at all.
     //
-    // The one field published before the openvr half has run at all, which
-    // is what makes the early handover possible: OpenComposite rebuilds its
-    // OpenXR session for the application's graphics API on the first
-    // compositor call that carries a texture, and that rebuild costs 2.5 s
-    // on this rig. Doing it ourselves, on the game's device, before the game
-    // asks for the compositor, moves the cost off the intro movie.
+    // The one field published before the openvr half has run at all. It
+    // joined for the early VR handover (removed 2026-09-13), which needed a
+    // texture on the game's device before the game asked for the compositor;
+    // the slot stays, because the channel layout is versioned and a presence
+    // test still reads it.
     //
     // LONG64 rather than LONG: this is a 64-bit pointer, and submitTex above
     // is the precedent.
@@ -264,7 +264,7 @@ struct Shared {
 // _v21 because
 // on an assumption of symmetry that a Quest 3 breaks (frame_flag.h).
 // _v20 because the game's D3D11 device joined, for the early VR handover
-// (early_session.h).
+// (since removed; the cull guard's presence test keeps the field).
 // _v19 because the head pose joined, for the intro movie's world-space
 // panel (intro_panel.h). _v18 because the arrival stamp joined for the
 // window-scoped heal. _v17

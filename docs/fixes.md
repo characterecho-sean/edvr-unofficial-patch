@@ -225,16 +225,6 @@ untouched. Intro only — it retires for the session the moment a rendered scene
 arrives. `fix.loading_dim = screen`.
 *[loading-panel-handoff.md](loading-panel-handoff.md).*
 
-**The launch movie freezing part-way through, on OpenComposite.** OpenComposite
-throws away the session it started with and builds a new one for the game's
-graphics card, about two and a half seconds, and stock that lands inside the
-game's first compositor call — part-way through the movie. `early` pays it
-before the game asks for the compositor at all, so the movie plays from its
-start; the pause is the same length but nothing is drawing yet. Free on SteamVR,
-which has no session to rebuild. Off by default because a crash was reported on
-a third-party rig this project cannot test — if the game crashes during startup,
-put it back to `stock` and please report it. `fix.vr_handover = stock`.
-
 **Your play space in the wrong place, on OpenComposite.** OpenComposite puts the
 seated origin somewhere different each launch — sometimes in front of you,
 sometimes beside you, sometimes behind. `auto` recentres on OpenComposite and

@@ -74,22 +74,23 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
         logDeviceCreation(device, driverType, flags, hr);
         if (!device) return;
         // Published before anything is hooked, and deliberately before the
-        // config is consulted: the openvr half decides whether it wants this,
-        // and it cannot ask for it later -- by the time the game requests an
-        // interface the moment has passed. Publishing an unwanted pointer
-        // costs one store into a mapping we already own. See early_session.h.
+        // config is consulted: the openvr half reads this as its test for a
+        // d3d11 half being present (the cull guard), and it cannot ask for
+        // it later -- by the time the game requests an interface the moment
+        // has passed. Publishing an unwanted pointer costs one store into a
+        // mapping we already own. It was first published for the early VR
+        // handover, removed 2026-09-13; the field and this publication stay
+        // for the presence test.
         //
         // The FIRST device wins. attachToDevice runs again for a second
-        // device (device_hook.cpp says so in as many words), and the early
-        // handover wants the one the game actually renders with, which on
-        // every rig measured is the first.
+        // device (device_hook.cpp says so in as many words), and the one the
+        // game actually renders with is, on every rig measured, the first.
         // AddRef, and never release.
         //
         // This pointer is read by openvr_api.dll from a different call
-        // stack entirely -- the handover creates a texture on it before the
-        // game has asked for a compositor -- so nothing on that path holds
-        // the device alive. Every other consumer of a device pointer in
-        // this DLL runs inside a hook body where the caller provably does.
+        // stack entirely, so nothing on that path holds the device alive.
+        // Every other consumer of a device pointer in this DLL runs inside a
+        // hook body where the caller provably does.
         //
         // Without the reference this is a use-after-free waiting for a game
         // that drops its first device, and the smoke logs show the two
