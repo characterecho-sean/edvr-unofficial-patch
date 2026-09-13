@@ -1,5 +1,20 @@
 # OpenXR implementation status
 
+The [first native Frontier
+flight](openxr-frontier-entry-2026-09-13.md#first-native-frontier-flight)
+rendered normally per the user on the installed `642907b` checkpoint. The
+graphics DLL's build and active hooks match, and Pimax records Elite's native
+OpenXR client, rendering and final disconnect. F8 did not open because the
+native compositor does not yet register EDVR's menu/postprocessing callbacks;
+the old runtime detector also mislabels this native DLL as foreign OpenVR. This
+is successful native game rendering with incomplete EDVR feature integration.
+Internal teardown counters were not captured by the launcher, and one startup
+`XR_ERROR_TIME_INVALID` remains to correlate. The user now authorizes
+direct/destructive Frontier test installs and will launch manually: no scripted
+launcher or automatic restore. Next work is install-local bootstrap, durable
+native diagnostics and integration of existing EDVR compositor callbacks.
+Frontier remains on the verified native pair, with the existing INI retained.
+
 The [native Frontier entry checkpoint](openxr-frontier-entry-2026-09-13.md)
 completes the fourteen historical exports with fixed ordinals and typed
 probe/factory behavior, adds strict separate-device environment bootstrap, and
