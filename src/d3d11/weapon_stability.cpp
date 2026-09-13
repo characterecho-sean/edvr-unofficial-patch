@@ -169,9 +169,9 @@ void weaponStabilityObserveScreen() {
         g.seen=true;g.lastScreen=g.frame;
     }
 }
-void weaponStabilityResourceWritten(ID3D11Resource* resource) {
+void weaponStabilityResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end) {
     weaponMotionResourceWritten(resource);
-    meshMotionResourceWritten(resource);
+    meshMotionResourceWritten(resource,first,end);
     if(!resource)g.sourceFrame=~0u;
     if(!resource || resource==g.pool.Get() || resource==g.bones.Get() || resource==g.camera.Get())g.prepared=~0u;
 }

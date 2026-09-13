@@ -44,9 +44,17 @@ Ptr<ID3D11DepthStencilState> depthState;
 Ptr<ID3D11BlendState> blendState;
 GpuIntervals<16> drawGpu,matchGpu;
 unsigned frames=0,draws=0;
-struct GeometryStamp { unsigned epoch=0,seen=0; };
+struct IndexStamp { unsigned epoch=0,seen=0; };
+struct GeometryStamp {
+    unsigned epoch=0,seen=0;
+    // The game's shared IB also receives transient geometry uploads. Its
+    // draw slices are exact; a write elsewhere must not drop hull history.
+    // Entries expire with the two-frame history, bounding this cache by
+    // the per-eye draw cap. Vertex inputs remain conservative whole buffers.
+    std::unordered_map<uint64_t,IndexStamp> indices;
+};
 std::unordered_map<ID3D11Resource*,GeometryStamp> watched;
-unsigned geometryEpoch=0,geometryWrites=0,unknownWrites=0;
+unsigned geometryEpoch=0,geometryWrites=0,unknownWrites=0,rangeWrites=0,disjointIndices=0;
 Ptr<ID3D11Buffer> dump;
 unsigned dumpCount=0;
 struct Settings { UINT info[4],key[16];float dimensions[4]; };
@@ -119,6 +127,10 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     Ptr<ID3D11Buffer> vb,ids,ib,cb;UINT vertexStride=0,offset=0,idStride=0,idOffset=0,indexOffset=0;DXGI_FORMAT format{};
     ctx->IAGetVertexBuffers(0,1,&ids,&idStride,&idOffset);ctx->IAGetVertexBuffers(1,1,&vb,&vertexStride,&offset);ctx->IAGetIndexBuffer(&ib,&format,&indexOffset);ctx->VSGetConstantBuffers(1,1,&cb);
     if(!vb || !ids || !ib || !cb || idStride!=8 || vertexStride!=40)return;
+    const UINT indexBytes=format==DXGI_FORMAT_R16_UINT?2:format==DXGI_FORMAT_R32_UINT?4:0;
+    const uint64_t indexFirst=uint64_t(indexOffset)+uint64_t(start)*indexBytes;
+    const uint64_t indexEnd=indexFirst+uint64_t(count)*indexBytes;
+    if(!indexBytes || indexEnd>UINT64_C(0xffffffff))return;
     D3D11_BUFFER_DESC idd{},cbd{};ids->GetDesc(&idd);cb->GetDesc(&cbd);uint64_t at=uint64_t(idOffset)+uint64_t(startInstance)*8;
     if(at%4 || at+n*8>idd.ByteWidth || cbd.ByteWidth<276*16)return;
     Ptr<ID3D11ShaderResourceView> pool;ctx->VSGetShaderResources(33,1,&pool);if(!pool)return;
@@ -134,11 +146,11 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     data.key[8]=UINT(base);data.key[9]=start;data.key[10]=count;data.key[11]=vertexStride;data.key[12]=offset;data.key[13]=indexOffset;data.key[14]=UINT(format);
     auto& vertexStamp=watched[vb.Get()];vertexStamp.seen=frames;
     // Inserting the index entry can rehash the map; retain the value, not
-    // an iterator. Epochs are globally ordered, so max identifies the last
-    // write to either geometry input without widening the GPU record.
+    // an iterator. Epochs remain globally ordered for both geometry inputs.
     const unsigned vertexEpoch=vertexStamp.epoch;
     auto& indexStamp=watched[ib.Get()];indexStamp.seen=frames;
-    data.key[15]=std::max(vertexEpoch,indexStamp.epoch);
+    auto& slice=indexStamp.indices.try_emplace((indexFirst<<32)|indexEnd,IndexStamp{indexStamp.epoch,frames}).first->second;
+    slice.seen=frames;data.key[15]=std::max(vertexEpoch,slice.epoch);
     bool timed=(++draws&63u)==0 && drawGpu.begin(ctx);
     ctx->UpdateSubresource(settings.Get(),0,nullptr,&data,0,0);
     D3D11_BOX box{UINT(at),0,0,UINT(at+n*8),1,1};ctx->CopySubresourceRegion(instances.Get(),0,0,0,0,ids.Get(),0,&box);
@@ -182,13 +194,29 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
         e.write=1-e.write;auto& h=e.history[e.write];for(unsigned i=0;i<h.count;++i)for(auto& p:h.sources[i])p.Reset();h.count=0;e.cleared=e.matched=false;
         auto& prev=e.history[1-e.write];for(unsigned i=0;i<prev.count;++i)for(unsigned j=1;j<=2;++j)if(prev.sources[i][j])watched[static_cast<ID3D11Resource*>(prev.sources[i][j].Get())].seen=frames;
     }
-    for(auto it=watched.begin();it!=watched.end();)if(it->second.seen!=frames)it=watched.erase(it);else ++it;
+    for(auto it=watched.begin();it!=watched.end();){
+        if(it->second.seen!=frames){it=watched.erase(it);continue;}
+        auto& indices=it->second.indices;
+        for(auto i=indices.begin();i!=indices.end();)if(frames-i->second.seen>1)i=indices.erase(i);else ++i;
+        ++it;
+    }
 }
-void meshMotionResourceWritten(ID3D11Resource* resource){
+void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end){
     using namespace mesh_motion_detail;if(!enabled || (resource && watched.find(resource)==watched.end()))return;
     if(resource){
+        if(first==end)return; // Empty D3D11 box performs no write.
+        if(first>end){first=0;end=~uint64_t(0);} // Unknown extent fails closed.
         ++geometryWrites;
-        if(++geometryEpoch){watched[resource].epoch=geometryEpoch;return;}
+        if(++geometryEpoch){
+            auto& stamp=watched[resource];stamp.epoch=geometryEpoch;
+            if(first || end!=~uint64_t(0))++rangeWrites;
+            for(auto& entry:stamp.indices){
+                const uint64_t begin=entry.first>>32,finish=UINT(entry.first);
+                if(first<finish && begin<end)entry.second.epoch=geometryEpoch;
+                else ++disjointIndices;
+            }
+            return;
+        }
         // Epoch wrap is an unknown generation, so discard conservatively.
     }else ++unknownWrites;
     // A known write changes future correspondence only for its dependents.
@@ -199,7 +227,7 @@ void meshMotionResourceWritten(ID3D11Resource* resource){
 }
 void meshMotionShutdown(){
     using namespace mesh_motion_detail;for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();depthState.Reset();blendState.Reset();
-    failed=noted=capped=false;drawGpu={};matchGpu={};frames=draws=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=0;dump.Reset();dumpCount=0;
+    failed=noted=capped=false;drawGpu={};matchGpu={};frames=draws=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpCount=0;
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene){
     using namespace mesh_motion_detail;dump.Reset();dumpCount=0;
@@ -221,6 +249,7 @@ void meshMotionWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const
         ctx->Unmap(dump.Get(),0);
         Log::get().note("mesh motion: eye run %ls matched %u/%u rigid records (%u total); %s. Sampled capture/reissue %.3f us, match %.3f us/eye.",stamp,matched,valid,dumpCount,ok?"written":"WRITE FAILED",drawGpu.totals.samples?drawGpu.totals.ms*1000/drawGpu.totals.samples:0,matchGpu.totals.samples?matchGpu.totals.ms*1000/matchGpu.totals.samples:0);
         Log::get().note("mesh motion: %u known geometry writes isolated by generation, %u unknown writes reset all history; %zu geometry resources retained.",geometryWrites,unknownWrites,watched.size());
+        Log::get().note("mesh motion: %u bounded writes preserved %u disjoint index histories; vertex writes remain conservative.",rangeWrites,disjointIndices);
     }else Log::get().note("mesh motion: eye run %ls readback unavailable (0x%08X).",stamp,unsigned(result));
     dump.Reset();dumpCount=0;
 }

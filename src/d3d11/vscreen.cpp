@@ -3366,7 +3366,14 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
-    if (!foreignContext(self)) {weaponStabilityResourceWritten(dst);glitchFrameInvalidatePool(dst);}
+    if (!foreignContext(self)) {
+        // Buffer boxes are byte ranges. Keep the destination offset: a
+        // small upload into the shared IB must not invalidate other meshes.
+        if(box && box->right>=box->left)
+            weaponStabilityResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
+        else weaponStabilityResourceWritten(dst);
+        glitchFrameInvalidatePool(dst);
+    }
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -3387,7 +3394,11 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                UINT rowPitch, UINT depthPitch) {
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
-    if (!foreignContext(self)) {weaponStabilityResourceWritten(dst);glitchFrameInvalidatePool(dst);}
+    if (!foreignContext(self)) {
+        if(box && box->right>=box->left)weaponStabilityResourceWritten(dst,box->left,box->right);
+        else weaponStabilityResourceWritten(dst);
+        glitchFrameInvalidatePool(dst);
+    }
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
                        nullptr, 0, box != nullptr,

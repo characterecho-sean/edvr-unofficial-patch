@@ -1,5 +1,6 @@
 #pragma once
 #include "panel_curve.h"
+#include <cstdint>
 struct ID3D11Resource;
 namespace edvr {
 class Config;
@@ -7,7 +8,7 @@ void weaponStabilityConfigure(Config&);
 void weaponStabilityObserveScreen();
 // nullptr invalidates all cached inputs (command-list execution); otherwise
 // only writes to the source instance, bone or camera buffer invalidate them.
-void weaponStabilityResourceWritten(ID3D11Resource*);
+void weaponStabilityResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~uint64_t(0));
 // Source-image first-person attachments. Independent of temporal AA and
 // runtime reprojection; returns true only when it issued the original draw.
 bool weaponStabilityDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,

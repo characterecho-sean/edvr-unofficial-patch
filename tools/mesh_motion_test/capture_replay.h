@@ -11,7 +11,11 @@ void replayMeshes(ID3D11Device* dev,ID3D11DeviceContext* ctx,const char* path,bo
         ctx->ClearState();meshMotionShutdown();uint64_t hash=0;UINT size[3]{};take(&hash,8);take(size,sizeof(size));
         check(size[0]>0 && size[0]<65536 && size[1]<=262144 && size[2]<=262144 && size[2]%12==0,"bounded replay assets");
         std::vector<char> code(size[0]),vertices(size[1]),indices(size[2]);take(code.data(),code.size());take(vertices.data(),vertices.size());take(indices.data(),indices.size());
-        auto vb=buffer(size[1],D3D11_BIND_VERTEX_BUFFER,vertices.data()),ib=buffer(size[2],D3D11_BIND_INDEX_BUFFER,indices.data());UINT ids[2]{};
+        // Replay the shared-IB upload observed in the 18:00 flight. The
+        // original indices occupy a separate region from the 320-byte
+        // transient upload, and their motion must survive every update.
+        std::vector<char> sharedIndices(indices);sharedIndices.resize(indices.size()+320);
+        auto vb=buffer(size[1],D3D11_BIND_VERTEX_BUFFER,vertices.data()),ib=buffer(UINT(sharedIndices.size()),D3D11_BIND_INDEX_BUFFER,sharedIndices.data());UINT ids[2]{};
         auto instanceBuffer=buffer(8,D3D11_BIND_VERTEX_BUFFER,ids),pool=buffer(336,D3D11_BIND_SHADER_RESOURCE,nullptr,336),sceneCb=buffer(276*16,D3D11_BIND_CONSTANT_BUFFER);
         ComPtr<ID3D11ShaderResourceView> poolView;hr(dev->CreateShaderResourceView(pool.Get(),nullptr,&poolView));
         ComPtr<ID3D11VertexShader> vs;hr(dev->CreateVertexShader(code.data(),code.size(),nullptr,&vs));
@@ -27,6 +31,11 @@ void replayMeshes(ID3D11Device* dev,ID3D11DeviceContext* ctx,const char* path,bo
         std::vector<float> previous;
         for(unsigned frame=0;frame<3;++frame){
             if(frame)meshMotionFrameBoundary(ctx);float sc[276][4];UINT p[84];take(sc,sizeof(sc));take(p,sizeof(p));check(p[0]==0,"replay is a rigid mesh");
+            if(frame){
+                D3D11_BOX upload{size[2],0,0,size[2]+320,1,1};
+                meshMotionResourceWritten(ib.Get(),upload.left,upload.right);
+                ctx->UpdateSubresource(ib.Get(),0,&upload,sharedIndices.data()+size[2],0,0);
+            }
             testEye=0;testScene=scene.Get();testDepth=dsv.Get();ctx->OMSetRenderTargets(0,nullptr,dsv.Get());ctx->OMSetDepthStencilState(ds.Get(),0);ctx->OMSetBlendState(nullptr,nullptr,~0u);ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
             ctx->RSSetState(raster.Get());D3D11_VIEWPORT vp{0,0,float(W),float(H),0,1};ctx->RSSetViewports(1,&vp);ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(nullptr,nullptr,0);ctx->IASetInputLayout(layout.Get());
             ID3D11Buffer* vb2[2]={instanceBuffer.Get(),vb.Get()};UINT strides[2]={8,40},offsets[2]{};ctx->IASetVertexBuffers(0,2,vb2,strides,offsets);ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);

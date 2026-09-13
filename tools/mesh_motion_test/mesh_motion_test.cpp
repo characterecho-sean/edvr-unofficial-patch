@@ -167,6 +167,39 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     a=mixed(1);geometryEpoch=~0u;meshMotionResourceWritten(changing.Get());
     meshMotionViews(ctx.Get(),scene[0].Get(),gone);
     check(!gone[0] && watched.empty(),"geometry generation wrap discards history conservatively");
+    // Two meshes sharing an IB: test exact byte intersections for both
+    // index formats, including a nonzero IA offset and writes at edges.
+    auto originalIb=ib;UINT sharedIndices[128]{};
+    ib=buffer(sizeof(sharedIndices),D3D11_BIND_INDEX_BUFFER,0,sharedIndices);
+    for(UINT bytes:{2u,4u}){
+        reset();pose(1,0);
+        const UINT offset=8,split=offset+6*bytes,finish=offset+12*bytes;
+        auto slices=[&](){
+            bind(0);ctx->IASetIndexBuffer(ib.Get(),bytes==2?DXGI_FORMAT_R16_UINT:DXGI_FORMAT_R32_UINT,offset);
+            ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+            for(UINT start:{0u,6u}){issue(ctx.Get(),6,1,start,0,0);meshMotionDraw(ctx.Get(),issue,6,1,start,0,0,materialVs);}
+            ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),views);
+            return readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
+        };
+        slices();meshMotionFrameBoundary(ctx.Get());
+        meshMotionResourceWritten(ib.Get(),finish,finish+320);a=slices();
+        check(a[59]==1 && a[119]==1,"unrelated transient IB upload preserves both rigid meshes");
+        meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(ib.Get(),0,offset);a=slices();
+        check(a[59]==1 && a[119]==1,"write immediately before the IA offset preserves both slices");
+        meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(ib.Get(),split,finish);a=slices();
+        check(a[59]==1 && a[119]==0,"write to the second index slice rejects only that mesh");
+        meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(ib.Get(),split-1,split+1);a=slices();
+        check(a[59]==0 && a[119]==0,"write crossing the shared boundary rejects both meshes");
+        meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(ib.Get(),split,split);a=slices();
+        check(a[59]==1 && a[119]==1,"empty box preserves correspondence and recovery");
+        meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(ib.Get());a=slices();
+        check(a[59]==0 && a[119]==0,"unknown write extent rejects all slices of its resource");
+        meshMotionFrameBoundary(ctx.Get());meshMotionResourceWritten(vb.Get(),0,1);a=slices();
+        check(a[59]==0 && a[119]==0,"vertex edits remain conservative without an exact vertex range");
+        meshMotionFrameBoundary(ctx.Get());run();meshMotionFrameBoundary(ctx.Get());run();meshMotionFrameBoundary(ctx.Get());
+        check(watched[ib.Get()].indices.size()==1,"unused slices expire even when another slice keeps the IB alive");
+    }
+    ib=originalIb;
     reset();pose(1,0);run();meshMotionFrameBoundary(ctx.Get());bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx.Get(),6,1,0,0,0);
     for(unsigned i=0;i<513;++i)meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
     check(eyes[0].history[eyes[0].write].count==512,"record cap bounds excess draws");

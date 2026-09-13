@@ -756,3 +756,99 @@ The paired eye-run crops precede the next recorded replacement, so the
 continuous external-view flicker must still be checked independently;
 the current fix addresses the measured false replacements and the missed
 first high-wake frame.
+
+## Load-in flicker and clean second high wake, 17:58 flight
+
+The 18:00:44 eye dump and the two Pause captures are from verified
+`3e060a9`: `edvr_gfx_20260912_175839.log` and
+`edvr_vr_20260912_175841.log`. This is Valve SteamVR at 2774x2740 game
+eye size and 4268x4216 output, DLSS preset K. The user sees persistent
+flickering while flying forward in external camera, looking back at the
+ship. Both high wakes looked clean; the second was captured with Pause
+anyway.
+
+The second high wake's first reset is frame 20267, 328 ms before the
+18:02:26.731 Pause. Its claimed eye camera resets by 13.560 m into the
+head volume; 67 matched and predicted records disagree by 13.560 m at
+the median. There is no auxiliary world camera (`pos=nan`). The new
+bound-geometry verdict marks this first frame before Submit, and the
+next frame is also replaced. This supplies the field confirmation for
+the previously missed small-origin high wake.
+
+The first Pause still contains three false replacements, at 13158, 13160
+and 13161, about 4.9 seconds before 18:01:08.758. Their smooth
+camera-relative movement exceeds the existing 1 cm coherence test. This
+remains a separate limitation; this change does not loosen that
+classifier. Crucially, the VR log's first replacement is at
+18:01:03.805, after the 18:00:44 eye sequence. Ruled out: transition
+frame replacement causing the persistent flicker in this eye dump.
+
+### Unrelated uploads into the shared index buffer
+
+The eye's GPU mesh snapshot contains 166 records: 165 are valid rigid
+geometry, but zero matched their previous frame. Every record has
+geometry generation 1344. The end-of-capture summary reports 1,359 known
+geometry writes, zero unknown writes and three retained geometry
+resources. The precise-transform path was dropping out for the entire
+captured hull.
+
+The draw census at 18:00:44.837 records `DCC 0 #18 S`, writing 320 bytes
+from source offset zero into destination `@8` at byte 16,484,576. The ID
+table resolves `@8` to the same 32 MiB index buffer stored in the GPU
+mesh keys, `000001DE741A86E0`. The companion 3,200-byte vertex upload
+goes into `000001DF8451D1E0`, a different vertex buffer from the rigid
+hull's `000001DE741AEC20`.
+
+The captured first-frame draws use index byte ranges between 771,364 and
+14,607,756; none overlaps the upload interval [16,484,576,16,484,896).
+The three-frame draw snapshot retains the same draw arguments for the
+replayed meshes. Only its first frame contains vertex/index stream
+metadata and bytes. Ruled out: this upload actually editing those
+captured hull indices. The old whole-resource generation necessarily
+rejects every dependent hull record when this unrelated upload occurs
+between frames.
+
+Known CopySubresourceRegion and UpdateSubresource boxes now forward the
+exact destination byte interval through the existing write hook. Mesh
+history retains an epoch for each referenced index slice, including
+index format and IA byte offset, and advances only the slices
+intersecting a write. Epochs remain globally ordered so either a vertex
+write or an intersecting index write invalidates the mesh. The shader,
+GPU record format and motion calculation are unchanged.
+
+Unknown extents, CopyResource and Unmap still conservatively reject all
+slices of that resource; unknown command lists reset all history. Vertex
+buffers remain conservative because a draw's index count does not
+establish its vertex extent. Slice entries expire when absent from the
+consecutive-frame history, even if other draws keep the resource alive.
+The existing 512-instance cap per eye also bounds CPU bookkeeping; there
+are no new GPU copies, dispatches or waits. Eye reports now count
+bounded writes and preserved disjoint index histories so an inactive
+hook is distinguishable from a working fix.
+
+### Validation
+
+The production D3D11 regression passes 1,242 WARP checks. New cases
+cover 16-bit and 32-bit indices, nonzero IA offsets, adjacent writes,
+writes intersecting one or both meshes, empty boxes, whole-resource
+writes, conservative vertex invalidation, and unused-slice expiry.
+Existing two-eye, animated-part, generation-wrap, original coverage and
+temporal-consumer checks remain intact.
+
+The local replay uses twelve actual mesh draws and their three captured
+scene/pool states from `drawstate_180044.eyemesh.bin`. It executes
+original game vertex shaders and repeats a disjoint 320-byte IB upload
+before each later frame. All tested records match and every original
+raster depth sample receives coverage. Across 58,122 compared vertices,
+maximum motion error is 0.000306 input pixels on NVIDIA and 0.000295 on
+WARP. These are offline motion and coverage checks, not a claim that
+every visible flicker has been eliminated in the headset. The capture,
+replay fixture, full logs and scripts remain local under
+`build/review_motion/sep12/flight1800/`; no game assets are committed.
+
+The full absolute-path `build.bat` passes all regression gates and the
+252-key configuration contract. The NVIDIA DLL smoke test passes. The
+next flight should repeat forward thrust while looking back at the ship
+and capture an eye sequence if flickering remains; the new index-history
+counters distinguish remaining geometry invalidation from a different
+rendering cause.
