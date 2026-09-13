@@ -205,6 +205,16 @@ REM who does not edit ini files, and nothing else in the build would notice: the
 REM game reads it, the log names it, and the window that is supposed to expose
 REM it simply does not. One annotation line above the key is what this asks for,
 REM and it fails the build until it is there.
+REM
+REM The generator's own test first: a key read in several places takes its
+REM type from the typed read, not from whichever file is walked first. The
+REM menu's getString echo of fix.render_sharpness once typed the window's
+REM Sharpening row as text, and a text row that shows percentages wrote a
+REM typed 20 as 2000% (issue 35). That rule fails here now, not in the window.
+python "tools\gen_settings_schema.py" --self-test || (
+    echo [edvr] ERROR: the settings schema generator failed its own test
+    exit /b 1
+)
 python "tools\gen_settings_schema.py" --root "%ROOT%" --out "%GEN%"
 if errorlevel 1 (
     echo [edvr] ERROR: the settings schema is incomplete ^(see above^)

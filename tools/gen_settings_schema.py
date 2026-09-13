@@ -11,8 +11,12 @@ in edvr.ini says what it does. Writing it down a THIRD time in C++ would create
 another list to forget to update, which is exactly the failure
 tools/check_config_contract.py exists to catch between the other two.
 
-So the schema is generated from those two sources, and the only thing added by
-hand is the part neither of them can know: what to call the setting in a list,
+So the schema is generated from those two sources. A key read in several places
+takes its type from the TYPED read -- getBool, getInt, getFloat -- and a
+getString read of the same key beside one is the raw text for a log line or a
+status echo, never a second opinion; two typed reads that disagree fail the
+build (readers() says why). The only thing added by hand is the part neither
+source can know: what to call the setting in a list,
 and which value is RECOMMENDED (often the shipped default, sometimes not -- a
 0.3 curve with a 0.7 distance is a tested pairing, and neither number is the
 default). That lives in edvr.ini too, on one annotation line above the key:
@@ -64,6 +68,7 @@ until the sentence is written.
 Usage:
   python tools/gen_settings_schema.py --root <repo> --out <gen dir>
   python tools/gen_settings_schema.py --root <repo> --check    (no output written)
+  python tools/gen_settings_schema.py --self-test              (fixtures in %TEMP%)
 """
 
 import argparse
@@ -110,18 +115,54 @@ RULE_RE = re.compile(r'^-{10,}$')
 
 
 def source_files(src):
-    for base, _dirs, names in os.walk(src):
-        for n in names:
+    # Sorted, so that "the first read" below means the same thing on every
+    # filesystem, and in the fixtures --self-test lays out.
+    for base, dirs, names in os.walk(src):
+        dirs.sort()
+        for n in sorted(names):
             if n.endswith(('.cpp', '.h')):
                 yield os.path.join(base, n)
 
 
+# The accessors that say what a value IS. getString makes no such claim --
+# every value in the file is a string -- so a getString read of a key that is
+# also read with one of these is a passthrough: the file's own text wanted for
+# a status line, or kept raw for a "not a value this build can use" report.
+TYPED_READS = ('Bool', 'Int', 'Float')
+
+
 def readers(src):
-    """dotted key -> (kind, default, lo, hi) as the code asks for it."""
-    found = {}
+    """dotted key -> (kind, default, lo, hi, precision) as the code asks for it,
+    plus the keys the code asks for two different ways.
+
+    A key is read in more than one place more often than not, and not always
+    with the same accessor. Only a typed read (getBool, getInt, getFloat and
+    their InRange forms) says what the value is; a getString read beside one
+    is the raw text for a log line or a status echo. So the typed read wins,
+    whichever file is walked first -- and the walk order is what used to
+    decide it. The menu's status page reads fix.render_sharpness with
+    getString to echo the file's own text, from a file that sorts before the
+    pass reading it with getFloat, and that made the window's Sharpening row
+    a text box. A percentage row that is a text box takes "20" as 20 and
+    shows it as 2000%, which is how it reached the field (issue 35).
+
+    Among typed reads of one kind, the one that declares a range wins: an
+    InRange read clamps the value to its bounds, so those are the bounds a
+    box may show. A plain getInt in the first file walked used to hide the
+    getIntInRange in the next -- fix.vscreen_res_width, read plain by the
+    panel patch and bounded 640..8192 by the intro upscaler -- and the window
+    showed bounds only because the annotation repeated them by hand.
+
+    Two typed reads that disagree -- on the kind (getInt in one file, getFloat
+    in another) or on the declared range -- are a real conflict, returned for
+    the caller to fail the build on rather than pick one: the window would be
+    typing into a box the code reads another way.
+    """
+    reads = {}   # key -> [(base, label, default, lo, hi, relpath)] in walk order
     for path in source_files(src):
         with open(path, encoding='utf-8', errors='replace') as f:
             text = f.read()
+        rel = os.path.relpath(path, src)
         for m in READ_RE.finditer(text):
             base, suffix, key, args = m.group(1), m.group(2), m.group(3), m.group(4)
             parts = [a.strip() for a in split_args(args)]
@@ -129,12 +170,27 @@ def readers(src):
             if 'InRange' in suffix and len(parts) >= 3:
                 lo, hi = parts[1], parts[2]
             default = parts[0] if parts else ''
-            kind = {'Bool': 'toggle', 'Int': 'number', 'Float': 'number',
-                    'String': 'text'}[base]
-            precision = 0 if base in ('Bool', 'Int') else 2
-            # First reader wins; a key read in two places reads the same way.
-            found.setdefault(key, (kind, default, lo, hi, precision))
-    return found
+            label = 'get%s%s' % (base, suffix)
+            if lo is not None:
+                label += ' %s..%s' % (lo, hi)
+            reads.setdefault(key, []).append((base, label, default, lo, hi, rel))
+
+    found = {}
+    conflicts = []   # [(key, [(label, relpath), ...])]
+    for key, entries in reads.items():
+        typed = [e for e in entries if e[0] in TYPED_READS]
+        bounded = [e for e in typed if e[3] is not None]
+        if len(set(e[0] for e in typed)) > 1 or len(set((e[3], e[4]) for e in bounded)) > 1:
+            conflicts.append((key, [(e[1], e[5]) for e in entries]))
+            continue
+        # The first bounded read, else the first typed one, else the first
+        # read there is.
+        base, _label, default, lo, hi, _rel = (bounded or typed or entries)[0]
+        kind = {'Bool': 'toggle', 'Int': 'number', 'Float': 'number',
+                'String': 'text'}[base]
+        precision = 0 if base in ('Bool', 'Int') else 2
+        found[key] = (kind, default, lo, hi, precision)
+    return found, conflicts
 
 
 def split_args(text):
@@ -432,18 +488,53 @@ def c_string(text):
     return '"%s"' % out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--root', required=True)
-    ap.add_argument('--out')
-    ap.add_argument('--check', action='store_true')
-    args = ap.parse_args()
-
-    ini_path = os.path.join(args.root, 'edvr.ini')
-    code = readers(os.path.join(args.root, 'src'))
+def run(root, out, check):
+    """Generate into `out` (or only check, when `check` is set or `out` is
+    None). Returns the process exit code."""
+    ini_path = os.path.join(root, 'edvr.ini')
+    code, conflicts = readers(os.path.join(root, 'src'))
     settings = parse_ini(ini_path)
 
     # ---- the enforcement --------------------------------------------------
+    if conflicts:
+        print('gen_settings_schema: ERROR: %d setting(s) are read two different ways.'
+              % len(conflicts))
+        print()
+        print('The accessor the code reads a key with is what shapes its row: a switch,')
+        print('a number box, a text box, and the bounds an InRange read clamps to. Two')
+        print('typed reads that disagree -- on the kind, or on the range -- leave no shape')
+        print('to choose. Read it one way; or with getString where only the raw text is')
+        print('wanted, which makes no claim about the type and never overrides one.')
+        print()
+        for key, entries in conflicts:
+            print('  %s' % key)
+            for label, rel in entries:
+                print('      %s  %s' % (label, rel))
+        return 1
+
+    # A percentage is a number. The window's display multiplies a percent row
+    # by 100 whatever its kind, while its parse hands a text row's typing to
+    # the file verbatim -- so `percent` on a row that is not a number shows
+    # 0.1 as 10% and writes a typed 20 as 20, to be shown as 2000%. That is the
+    # shape the render_sharpness row had while a getString read typed it.
+    fractions = []
+    for s in settings:
+        dotted = '%s.%s' % (s.section, s.key)
+        if not s.percent or dotted not in code:
+            continue
+        if code[dotted][0] != 'number' or s.choices:
+            fractions.append((s, code[dotted][0] if not s.choices else 'choice'))
+    if fractions:
+        print('gen_settings_schema: ERROR: %d setting(s) say `percent` but are not numbers.'
+              % len(fractions))
+        print()
+        print('A percentage is shown as a number and typed as one; a row of any other')
+        print('kind cannot round-trip it. Read the key with getFloat, or drop the token.')
+        print()
+        for s, kind in fractions:
+            print('  edvr.ini:%d  %s.%s  (%s)' % (s.line, s.section, s.key, kind))
+        return 1
+
     stray = [s for s in settings if s.annotated and s.section not in UI_SECTIONS]
     if stray:
         print('gen_settings_schema: ERROR: a ui: line belongs to a [%s] setting.'
@@ -588,7 +679,7 @@ def main():
         for s in devSilent:
             print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
 
-    if args.check or not args.out:
+    if check or not out:
         restarts = len([s for s in exposed if when_it_applies(s) == 'restart'])
         print('gen_settings_schema: %d exposed, %d of them needing a game restart; '
               '%d live in [%s]; menu: %d fix rows on %s, %d developer rows'
@@ -625,8 +716,8 @@ def main():
                 'true' if s.percent else 'false',
                 {None: 0, 'live': 1, 'restart': 2}[applies],
                 tier, c_string(page), c_string(s.group)))
-    os.makedirs(args.out, exist_ok=True)
-    menu_path = os.path.join(args.out, 'menu_schema.inc')
+    os.makedirs(out, exist_ok=True)
+    menu_path = os.path.join(out, 'menu_schema.inc')
     with open(menu_path, 'w', encoding='utf-8', newline='\r\n') as f:
         f.write('// Generated by tools/gen_settings_schema.py from edvr.ini and src/.\n')
         f.write('// Do not edit, and do not commit: the sources are the ini and the code.\n')
@@ -675,8 +766,8 @@ def main():
                 'true' if s.percent else 'false',
                 c_string(s.group)))
 
-    os.makedirs(args.out, exist_ok=True)
-    out_path = os.path.join(args.out, 'settings_schema.inc')
+    os.makedirs(out, exist_ok=True)
+    out_path = os.path.join(out, 'settings_schema.inc')
     with open(out_path, 'w', encoding='utf-8', newline='\r\n') as f:
         f.write('// Generated by tools/gen_settings_schema.py from edvr.ini and src/.\n')
         f.write('// Do not edit, and do not commit: the sources are the ini and the code.\n')
@@ -699,6 +790,147 @@ def main():
         f.write('\n};\n')
     print('gen_settings_schema: wrote %s (%d settings)' % (out_path, len(rows)))
     return 0
+
+
+# ---------------------------------------------------------------------------
+# --self-test
+# ---------------------------------------------------------------------------
+
+def self_test():
+    """The reader rule and the two gates it feeds, against fixtures laid out in
+    the temp folder: the shape of issue 35 in both walk orders, and the two
+    things the rule must refuse. build.bat runs this before the schema is
+    generated, so a rule that drifts fails there and not in the window."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+
+    base = tempfile.mkdtemp(prefix='edvr-gen-schema-')
+    failures = []
+
+    def case(name, ini, sources, expect):
+        """Lay out one root, run the generator over it, and hand back what it
+        wrote (on success) or what it said (on the expected failure)."""
+        root = os.path.join(base, name)
+        src = os.path.join(root, 'src')
+        os.makedirs(src)
+        with open(os.path.join(root, 'edvr.ini'), 'w', encoding='utf-8') as f:
+            f.write(ini)
+        for filename, text in sources.items():
+            with open(os.path.join(src, filename), 'w', encoding='utf-8') as f:
+                f.write(text)
+        out = os.path.join(root, 'gen')
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            code = run(root, out, False)
+        if code != expect:
+            failures.append('%s: exit %d, expected %d\n%s' % (name, code, expect, said.getvalue()))
+            return ''
+        if code != 0:
+            return said.getvalue()
+        wrote = ''
+        for leaf in ('settings_schema.inc', 'menu_schema.inc'):
+            with open(os.path.join(out, leaf), encoding='utf-8') as f:
+                wrote += f.read()
+        return wrote
+
+    def expect_in(name, text, needle):
+        if needle not in text:
+            failures.append('%s: expected %r in the output' % (name, needle))
+
+    def expect_not_in(name, text, needle):
+        if needle in text:
+            failures.append('%s: did not expect %r in the output' % (name, needle))
+
+    # Issue 35's shape: a status page echoing the file's text with getString,
+    # in a file that sorts before the pass reading the value with getFloat.
+    # The row is a number and a percentage either way round.
+    sharpen_ini = ('[fix]\n'
+                   '# Sharpen every outgoing frame, 0 (off) to 1 (strongest). Live.\n'
+                   '# ui: Sharpening | range 0..1 | percent | menu performance\n'
+                   'render_sharpness = 0.0\n')
+    echo = 'const std::string v = Config::get().getString("fix.render_sharpness", "0.0");\n'
+    use = 'float v = cfg.getFloat("fix.render_sharpness", 0.0f);\n'
+    for name, sources in (('echo-first', {'a_menu.cpp': echo, 'b_pass.cpp': use}),
+                          ('use-first', {'a_pass.cpp': use, 'b_menu.cpp': echo})):
+        wrote = case(name, sharpen_ini, sources, 0)
+        expect_in(name, wrote, 'SettingKind::Number, "0.0", "0.0",\n     "0.0", "1.0", 2, "", true, false, true,')
+        expect_not_in(name, wrote, 'SettingKind::Text')
+        expect_in(name, wrote, 'MenuKind::Number')
+        expect_not_in(name, wrote, 'MenuKind::Text')
+
+    # A key the code only ever reads as text is still a text row: the rule
+    # promotes a string read beside a typed one, it does not retype the rest.
+    name = 'text-stays-text'
+    wrote = case(name, '[fix]\n# A name. Live.\n# ui: Name\nname = abc\n',
+                 {'a.cpp': 'const std::string n = cfg.getString("fix.name", "");\n'}, 0)
+    expect_in(name, wrote, 'SettingKind::Text')
+
+    # Two typed reads that disagree are a conflict, named with both files.
+    name = 'typed-conflict'
+    said = case(name, '[fix]\n# A thing. Live.\n# ui: Thing\nthing = 1\n',
+                {'a.cpp': 'int t = cfg.getInt("fix.thing", 1);\n',
+                 'b.cpp': 'float t = cfg.getFloat("fix.thing", 1.0f);\n'}, 1)
+    expect_in(name, said, 'read two different ways')
+    expect_in(name, said, 'fix.thing')
+    expect_in(name, said, 'getInt  a.cpp')
+    expect_in(name, said, 'getFloat  b.cpp')
+
+    # vscreen_res_width's shape: the panel patch reads it plain, the intro
+    # upscaler bounded. The declared range reaches the row whichever file is
+    # walked first, and a whole-number range is written as it was declared.
+    width_ini = ('[fix]\n'
+                 '# The on-foot screen width. Needs a game restart.\n'
+                 '# ui: On-foot screen resolution: width\n'
+                 'vscreen_res_width = 1920\n')
+    plain = 'const uint32_t w = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_width", 0));\n'
+    clamped = 'g_targetW = cfg.getIntInRange("fix.vscreen_res_width", 1920, 640, 8192);\n'
+    for name, sources in (('plain-first', {'a_patch.cpp': plain, 'b_intro.cpp': clamped}),
+                          ('clamped-first', {'a_intro.cpp': clamped, 'b_patch.cpp': plain})):
+        wrote = case(name, width_ini, sources, 0)
+        expect_in(name, wrote, 'SettingKind::Number, "1920", "1920",\n     "640", "8192", 0,')
+
+    # Two declared ranges that disagree are a conflict too, and the message
+    # shows each read's bounds so the reader can see which is which.
+    name = 'range-conflict'
+    said = case(name, '[fix]\n# A thing. Live.\n# ui: Thing\nthing = 1\n',
+                {'a.cpp': 'int t = cfg.getIntInRange("fix.thing", 1, 0, 10);\n',
+                 'b.cpp': 'int t = cfg.getIntInRange("fix.thing", 1, 0, 20);\n'}, 1)
+    expect_in(name, said, 'read two different ways')
+    expect_in(name, said, 'getIntInRange 0..10  a.cpp')
+    expect_in(name, said, 'getIntInRange 0..20  b.cpp')
+
+    # `percent` on a row that is not a number cannot round-trip a typed value.
+    name = 'percent-on-text'
+    said = case(name, '[fix]\n# A word. Live.\n# ui: Word | percent\nword = 0.5\n',
+                {'a.cpp': 'const std::string w = cfg.getString("fix.word", "");\n'}, 1)
+    expect_in(name, said, '`percent` but are not numbers')
+    expect_in(name, said, 'fix.word  (text)')
+
+    shutil.rmtree(base, ignore_errors=True)
+    if failures:
+        print('gen_settings_schema: self-test FAILED')
+        for f in failures:
+            print('  ' + f.replace('\n', '\n    '))
+        return 1
+    print('gen_settings_schema: self-test OK')
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--root')
+    ap.add_argument('--out')
+    ap.add_argument('--check', action='store_true')
+    ap.add_argument('--self-test', action='store_true',
+                    help='check this script against fixtures and exit')
+    args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+    if not args.root:
+        ap.error('--root is required')
+    return run(args.root, args.out, args.check)
 
 
 if __name__ == '__main__':

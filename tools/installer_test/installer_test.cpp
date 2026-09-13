@@ -1363,6 +1363,56 @@ static void testSettings(const std::wstring& root, const std::wstring& scratch) 
         if (row.value.empty() && std::string(row.def->shipped) != "") ++unreadable;
     }
     check(unreadable == 0, "every exposed setting has a value to show");
+
+    // A percentage row round-trips what is typed into it. Sharpening shipped
+    // as a TEXT row for three releases: the schema typed it off the menu's
+    // getString echo of the file rather than the pass's getFloat, and a text
+    // row hands typing to the file verbatim while the display multiplies a
+    // percent row by 100 whatever its kind -- so "10%" was shown, "20" was
+    // typed, 20 was written and "2000%" came back (issue 35). The curve row
+    // beside it, read only as a float, always worked. Both are held to the
+    // same round trip here, against the table the build just generated.
+    int textPercent = 0;
+    for (const SettingRow& row : model.rows()) {
+        if (row.def->percent && row.def->kind != SettingKind::Number) ++textPercent;
+    }
+    check(textPercent == 0, "every percentage row is a number row");
+
+    for (const char* key : {"render_sharpness", "panel_curvature"}) {
+        size_t at = SIZE_MAX;
+        for (size_t i = 0; i < model.rows().size(); ++i) {
+            if (std::string(model.rows()[i].def->key) == key) at = i;
+        }
+        if (at == SIZE_MAX) {
+            fail("find the percentage row to exercise", key);
+            continue;
+        }
+        const SettingRow& row = model.rows()[at];
+        std::string label = std::string(key) + ": ";
+        check(row.def->percent && row.def->kind == SettingKind::Number,
+              (label + "is a number shown as a percentage").c_str());
+        std::string file;
+        check(row.parseTyped(L"20", &file) && file == "0.2",
+              (label + "typing 20 means twenty percent, 0.2 in the file").c_str(), file);
+        check(row.parseTyped(L"20%", &file) && file == "0.2",
+              (label + "and so does typing 20%").c_str(), file);
+        check(row.parseTyped(L"0.2", &file) && file == "0.2",
+              (label + "a fraction typed as the file holds it is left alone").c_str(), file);
+        check(!row.parseTyped(L"lots", &file), (label + "a word is refused").c_str());
+        check(model.set(at, "0.2"), (label + "writing the parsed value succeeds").c_str(),
+              model.lastError());
+        expectEq(toUtf8(model.rows()[at].shown()), "20%",
+                 (label + "and the row shows it as 20%").c_str());
+    }
+
+    // The on-foot width's bounds come from the read that clamps them (the
+    // intro upscaler's getIntInRange), not from whichever file is walked
+    // first; the panel patch reads the same key plain, and used to hide them.
+    for (const SettingRow& row : model.rows()) {
+        if (std::string(row.def->key) != "vscreen_res_width") continue;
+        expectEq(std::string(row.def->lo) + ".." + row.def->hi, "640..8192",
+                 "vscreen_res_width: carries the range the code clamps to");
+    }
 }
 
 // ---------------------------------------------------------------------------

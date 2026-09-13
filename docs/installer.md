@@ -176,6 +176,21 @@ Writing that down a third time in C++ would be a fourth list to forget to
 update — which is the failure `tools/check_config_contract.py` exists to catch
 between the other two.
 
+A key is usually read in more than one place, and not always the same way. The
+*typed* read — `getBool`, `getInt`, `getFloat` — is the one that says what the
+value is; a `getString` read of the same key beside it is the raw text wanted
+for a log line or a status echo, and never overrides it. Among typed reads, one
+that declares a range wins, because it is the read that clamps the value to
+those bounds. Two typed reads that disagree, on the kind or on the range, fail
+the build. The rule used to be "the first file walked wins", and that is how
+the Sharpening row shipped as a text box for three releases: the in-headset
+menu echoes `fix.render_sharpness` with `getString` from a file that sorts
+before the pass reading it with `getFloat`, and a text box that shows
+percentages wrote a typed `20` as `20` and showed it back as `2000%`
+([#35](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/35)).
+The generator's `--self-test` holds that shape, and `build.bat` runs it before
+generating.
+
 What neither source can know is added by hand, on one annotation line above the
 key: what to call the setting in a list, which value is recommended (usually the
 default, sometimes a tested pairing like a 0.3 curve with a 0.7 distance), the
