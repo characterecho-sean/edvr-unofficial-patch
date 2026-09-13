@@ -4,9 +4,10 @@ The current [render-caller handoff
 checkpoint](openxr-render-thread-2026-09-13.md) integrates separate XR and
 graphics threads in the diagnostic, explicit loading callbacks, the paired
 graphics proxy and GPU completion before swapchain destruction. The full build
-and desktop integration gates pass; a fresh PiOpenXR gate is pending. Native
-Frontier transport remains unimplemented. The entries below retain the evidence
-and limits of earlier checkpoints.
+and desktop integration gates pass. The `064fc0d` paired-proxy PiOpenXR run
+also passed, with normal grid/triangle appearance, tracking and closure
+confirmed by the user. Native Frontier transport remains unimplemented. The
+entries below retain the evidence and limits of earlier checkpoints.
 
 The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
 `8c617dc` before implementation began. Work remains in Phase 0; it is not an
@@ -201,6 +202,15 @@ completion before owner-side teardown. The 100-check CPU and 504-check
 actual-DLL fixtures cover distinct owner/caller threads and retained resources
 after rejected shutdown. The native harness now supports this boundary; real
 game Init/render ownership and render hooks remain separate integration work.
+
+The `064fc0d` PiOpenXR run passed 9,719 graphics callbacks on the render
+caller, all 6,654 expected private command lists with zero unknown executions,
+idle graphics exclusion, 269 loading projections, 1,529 stereo pairs and
+completed GPU teardown. The user confirmed both-eye placement, stable tracking,
+normal transition/appearance and closure. Frontier and SteamVR were absent
+before and after. Exact binaries and receipts are archived in
+`build/openxr-native-20260913-064435/`; the installed Frontier pair remains
+`f3c205e`.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact

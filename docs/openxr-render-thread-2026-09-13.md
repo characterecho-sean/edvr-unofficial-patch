@@ -104,12 +104,50 @@ and reviewed the final changes.
 
 The runner accepts `--graphics-proxy` as an absolute existing DLL path and
 records its exact SHA-256 alongside the executable, loader and runtime
-manifest. The next 20-second PiOpenXR gate will require the actual paired
-proxy, verify distinct XR/render threads, zero unknown private-list
-submissions, expected list totals, idle exclusion and completed teardown, in
+manifest. The paired-proxy headset gate below checks distinct XR/render
+threads, private-list totals, idle exclusion and completed teardown, in
 addition to the established grid/triangle, tracking, recenter and lifecycle
-checks. No new native run has been launched. Earlier headset results qualify
-only their archived executables.
+checks.
+
+## PiOpenXR headset result
+
+The `064fc0d` checkpoint passed the 20-second PiOpenXR test on 2026-09-13, from
+12:44:35.810 to 12:44:56.563 UTC. The runner recorded 20.765 seconds, exit 0
+and no watchdog timeout. Pimax OpenXR 0.1.0 used D3D11.1, 5424 x 5356 per eye
+and format 29 (sRGB). All 440 preflight source, build-log, binary and native
+environment hashes matched. Frontier, SteamVR and other native diagnostics were
+absent at launch and after exit.
+
+The receipt and full output are in `build/openxr-native-20260913-064435/`. The
+exact tested executable
+(`636689ced6ff33577d1bc4e67d8dba01e59b3fcfd39a4f1824ad4e12462dc98d`), graphics
+proxy (`727875a9975d93d9337872cee567a56ed0d58ddc1357b068fd6370bcea64b065`) and
+build validation manifest are archived there. This run qualifies those files,
+rather than relying on the pre-commit version stamp.
+
+- Init and graphics caller used thread 40044; the XR owner used 40076 and the
+  System caller used 28080. All 9,719 immediate callbacks ran on the render
+  caller with zero wrong-thread calls. The one rejected request was the
+  deliberate outside-boundary probe.
+- All 6,654 command lists were classified private, exactly `4 * 1529 + 2 *
+  269`, with zero unknown-list executions.
+- Idle event pumps continued without graphics or loading work. The explicit
+  loading phase completed 269 projections, zero game Submits and an unchanged
+  game pose cache, then transitioned once to scene rendering.
+- The scene completed 1,529 stereo pairs, 3,058 eye copies/Submits and 1,531
+  wait/cache comparisons. Both recenter events and geometry-before-Submit
+  startup passed. All 1,530 sampled view/head states were valid. Separate live
+  System queries were valid in 1,800 of 1,802 calls; the two invalid samples do
+  not establish a cause or a tracking regression.
+- GPU drain returned success with no pending execution. System-thread exported
+  Shutdown joined the XR owner, retired the interfaces and released the
+  renderer cleanly. The diagnostic reported `native_stereo: PASS`.
+
+The user confirmed the grid appeared in both eyes, stayed upright and fixed
+during head movement, transitioned normally to the triangle, and that the
+triangle looked/tracked normally and the test closed normally. This completes
+the paired-proxy render-caller headset gate. It does not qualify the real
+game's separate Init and render-thread ownership or its motion-history content.
 
 Complete legacy exports, native shipping discovery, real Frontier
 render-hook/startup/shutdown integration, feature preservation and native game
