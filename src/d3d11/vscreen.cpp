@@ -2783,6 +2783,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (foreignContext(self)) {
         return s->realMap(self, res, sub, type, flags, mapped);
     }
+    meshMotionBeforeMap(res);
     const HRESULT hr = s->realMap(self, res, sub, type, flags, mapped);
     // The census CB watch's half of the tee: while a census runs, it needs
     // the mapped pointer of any buffer it is watching. One bool call when no
@@ -3355,6 +3356,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
                                                 ID3D11Buffer* dst, UINT off,
                                                 ID3D11UnorderedAccessView* src) {
+    if(!foreignContext(self)){weaponStabilityResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }

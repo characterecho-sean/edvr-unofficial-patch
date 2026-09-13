@@ -203,6 +203,65 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     reset();pose(1,0);run();meshMotionFrameBoundary(ctx.Get());bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx.Get(),6,1,0,0,0);
     for(unsigned i=0;i<513;++i)meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
     check(eyes[0].history[eyes[0].write].count==512,"record cap bounds excess draws");
+    check(pending.count==512 && captureBatches==1,"full eye queues a bounded batch after the preceding frame");
+    ID3D11ShaderResourceView* batchViews[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),batchViews);
+    a=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
+    check(!pending.count && captureBatches==2 && a[511*60+56]==1,"one dispatch captures all 512 records including later thread groups");
+    auto queue=[&](UINT first=0,UINT n=1){issue(ctx.Get(),6,n,0,0,first);meshMotionDraw(ctx.Get(),issue,6,n,0,0,first,materialVs);};
+    auto consumeBatch=[&](){meshMotionViews(ctx.Get(),scene[testEye].Get(),batchViews);return readBuffer(dev.Get(),ctx.Get(),eyes[testEye].history[eyes[testEye].write].buffer.Get());};
+    // A write to the same pool must finish earlier captures before the
+    // original bytes are replaced, without an extra GPU readback or wait.
+    reset();pose(1,.1f);bind(0);queue();
+    meshMotionResourceWritten(pool.Get());pose(1,.3f);ctx->UpdateSubresource(pool.Get(),0,nullptr,poolData,0,0);queue();a=consumeBatch();
+    check(captureBatches==2 && std::fabs(a[35]-.1f)<1e-5 && std::fabs(a[95]-.3f)<1e-5,"pool rewrite preserves both draw-time poses");
+    reset();pose(1,.1f);pose(1,.7f,1);bind(0);queue();
+    meshMotionResourceWritten(iv.Get());ids[0]=1;ctx->UpdateSubresource(iv.Get(),0,nullptr,ids,0,0);queue();a=consumeBatch();
+    check(captureBatches==2 && std::fabs(a[35]-.1f)<1e-5 && std::fabs(a[95]-.7f)<1e-5,"instance rewrite refreshes the snapshot after preserving earlier IDs");
+    // Map flushing happens BEFORE the real Map: the shader must never be
+    // queued against an already-mapped scene constant buffer.
+    reset();pose(1,.1f);bind(0);
+    D3D11_BUFFER_DESC dynamicDesc{};dynamicDesc.ByteWidth=sizeof(sceneData);dynamicDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    dynamicDesc.Usage=D3D11_USAGE_DYNAMIC;dynamicDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+    D3D11_SUBRESOURCE_DATA sceneInit{};sceneInit.pSysMem=sceneData;ComPtr<ID3D11Buffer> mappedScene;
+    hr(dev->CreateBuffer(&dynamicDesc,&sceneInit,&mappedScene));ctx->VSSetConstantBuffers(1,1,mappedScene.GetAddressOf());queue();
+    meshMotionBeforeMap(mappedScene.Get());check(!pending.count,"capture submitted before a source becomes mapped");
+    D3D11_MAPPED_SUBRESOURCE mappedSceneData{};hr(ctx->Map(mappedScene.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mappedSceneData));
+    sceneData[275][0]=1;std::memcpy(mappedSceneData.pData,sceneData,sizeof(sceneData));ctx->Unmap(mappedScene.Get(),0);queue();a=consumeBatch();
+    check(std::fabs(a[35]-.1f)<1e-5 && std::fabs(a[95]+.9f)<1e-5,"source Map/Unmap cannot move an earlier draw's camera");
+    // Switching eyes with unchanged sources still separates output batches.
+    reset();pose(1,.2f);bind(0);queue();testEye=1;testScene=scene[1].Get();testDepth=dsv[1].Get();
+    ctx->OMSetRenderTargets(0,nullptr,dsv[1].Get());ctx->ClearDepthStencilView(dsv[1].Get(),D3D11_CLEAR_DEPTH,0,0);queue();
+    check(captureBatches==1 && pending.count==1,"eye switch flushes before the shared ID snapshot is reused");a=consumeBatch();
+    auto firstEye=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
+    check(captureBatches==2 && a[56]==1 && firstEye[56]==1,"both eyes receive their own queued records");
+    // GPU-writable pools cannot rely on CPU write notifications.
+    reset();pose(1,.2f);bind(0);
+    auto gpuPool=buffer(sizeof(poolData),D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,336,poolData);
+    ComPtr<ID3D11ShaderResourceView> gpuPoolView;hr(dev->CreateShaderResourceView(gpuPool.Get(),nullptr,&gpuPoolView));
+    ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());queue();
+    check(!pending.count && captureBatches==1,"UAV-writable pool remains immediate");a=consumeBatch();check(a[56]==1,"GPU-writable pool still captures correct motion inputs");
+    // Very large instance streams preserve bounded per-draw copies, even
+    // for offsets near the end, rather than dropping coverage or allocating
+    // an unbounded snapshot.
+    reset();pose(1,.4f,2);bind(0);
+    std::vector<UINT> largeIds(maxInstanceBytes/4+128);largeIds[largeIds.size()-2]=2;
+    auto largeStream=buffer(UINT(largeIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,largeIds.data());UINT idStep=8,idStart=0;
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);UINT lastId=UINT(largeIds.size()/2-1);queue(lastId);queue(lastId);a=consumeBatch();
+    check(captureBatches==2 && std::fabs(a[35]-.4f)<1e-5 && std::fabs(a[95]-.4f)<1e-5,"oversized streams retain exact IDs through bounded copies");
+    // Deferred capture may run after the app enabled predication. Captures,
+    // uploads and owned timestamps must execute, then restore that state.
+    reset();pose(1,.25f);bind(0);queue();
+    D3D11_QUERY_DESC predicateDesc{D3D11_QUERY_OCCLUSION_PREDICATE,0};ComPtr<ID3D11Predicate> occluded;
+    hr(dev->CreatePredicate(&predicateDesc,&occluded));ctx->Begin(occluded.Get());ctx->End(occluded.Get());
+    ctx->SetPredication(occluded.Get(),FALSE);ctx->CSSetShaderResources(3,1,poolView.GetAddressOf());
+    meshMotionViews(ctx.Get(),scene[0].Get(),batchViews);
+    ComPtr<ID3D11Predicate> restoredPredicate;BOOL restoredValue=TRUE;ctx->GetPredication(&restoredPredicate,&restoredValue);
+    ComPtr<ID3D11ShaderResourceView> restoredInput;ctx->CSGetShaderResources(3,1,&restoredInput);
+    check(restoredPredicate==occluded && !restoredValue && restoredInput==poolView,"deferred compute restores predication and CS input slot 3");
+    ctx->SetPredication(nullptr,FALSE);a=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
+    check(a[56]==1 && std::fabs(a[35]-.25f)<1e-5,"predication cannot suppress the capture upload or dispatch");
+    reset();pose(1,.1f);bind(0);queue();meshMotionResourceWritten(nullptr);
+    check(!pending.count && eyes[0].history[eyes[0].write].count==0,"unknown command-list writes flush then discard pending history");
     // Each material uses the original output register order. In particular
     // the lit multi-UV hull puts SV_POSITION in register 6, not register 4.
     const char* outputs[]={

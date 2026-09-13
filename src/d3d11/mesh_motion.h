@@ -10,6 +10,8 @@ void meshMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigne
 void meshMotionViews(ID3D11DeviceContext*,ID3D11Texture2D* scene,ID3D11ShaderResourceView** views);
 void meshMotionFrameBoundary(ID3D11DeviceContext*);
 void meshMotionShutdown();
+// Submit deferred captures before Map makes a source unavailable to the GPU.
+void meshMotionBeforeMap(ID3D11Resource*);
 // Byte interval [first,end) for a known buffer write; omitted means all.
 void meshMotionResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~uint64_t(0));
 void meshMotionStageDump(ID3D11DeviceContext*,ID3D11Texture2D*);
