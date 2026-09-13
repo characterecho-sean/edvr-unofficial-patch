@@ -6,6 +6,7 @@
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 #include <fstream>
@@ -474,8 +475,13 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
         check(uiDepthReissueBegin(ctx.Get()),"orbital private reissue begins");ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
         ComPtr<ID3D11VertexShader> afterVs;ctx->VSGetShader(&afterVs,nullptr,nullptr);check(afterVs.Get()==vs.Get(),"orbital reissue restores original vertex shader");
         ComPtr<ID3D11Buffer> afterCb;ctx->VSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores VS constants");afterCb.Reset();ctx->PSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores PS constants");
-        ID3D11ShaderResourceView* views[2]{};g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> orbitalCoverage;views[0]->GetResource(&orbitalCoverage);auto indices=read(dev.Get(),ctx.Get(),orbitalCoverage.Get());unsigned counts[3]{};for(float v:indices)if(v>=0&&v<=2)++counts[unsigned(v)];
-        std::printf("orbital indices %u/%u/%u\n",counts[0],counts[1],counts[2]);check(counts[1]>0&&counts[2]>0,"orbital pixels carry their actual instance index");for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==0,"orbital coverage preserves live game depth");
+        ID3D11ShaderResourceView* views[2]{};g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> orbitalCoverage;views[0]->GetResource(&orbitalCoverage);auto indices=read(dev.Get(),ctx.Get(),orbitalCoverage.Get());auto orbitalDepth=read(dev.Get(),ctx.Get(),orbitalCoverage.Get(),1);unsigned counts[3]{};for(float v:indices)if(v>=0&&v<=2)++counts[unsigned(v)];
+        std::printf("orbital indices %u/%u/%u\n",counts[0],counts[1],counts[2]);check(counts[1]>0&&counts[2]>0,"orbital pixels carry their actual instance index");for(size_t i=0;i<indices.size();++i)if(indices[i]>0)check(std::fabs(orbitalDepth[i]-.025f)<1e-6f,"orbital HC preserves exact raster depth");for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==0,"orbital coverage preserves live game depth");
+        // Orbital geometry has its own HC/record motion path.  It must not
+        // enter the ordinary text cleanup mask: the temporal consumer gets
+        // the record and exact coverage depth, while ui_resolve sees zero.
+        for(float v:read(dev.Get(),ctx.Get(),g_mask[0].tex))
+            check(v==0,"orbital coverage does not seed ordinary UI resolve");
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_holoDraw={};
     }
     // Execute the actual adaptive UI helper, including its production t8/u6
@@ -759,7 +765,31 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             mark.assign(w*h,1);resolvedValues=run(false);
             for(float v:resolvedValues)check(v==0,"dark marked panel rejects obsolete bright text after DLSS");
             for(float a:read(dev.Get(),ctx.Get(),next.Get(),3))check(a==1,"visible panel retains UI influence");
-            mark.assign(w*h,0);for(UINT i=0;i<w*h;++i)old[4*i+3]=255;resolvedValues=run(true);
+            mark.assign(w*h,2);resolvedValues=run(false);
+            for(float v:resolvedValues)check(v==0,"attached marked panel rejects obsolete bright text after DLSS");
+            for(float a:read(dev.Get(),ctx.Get(),next.Get(),3))check(a==1,"attached panel retains UI influence");
+            // A text mark seeds carried influence when it disappears.  This
+            // is the control that the orbital zero-mask case must avoid.
+            mark.assign(w*h,1);old.assign(w*h*4,0);motion.assign(w*h*2,0);
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=220;
+            resolvedValues=run(false);auto seeded=read(dev.Get(),ctx.Get(),next.Get(),3);
+            check(std::any_of(seeded.begin(),seeded.end(),[](float a){return a>0;}),"text mark seeds retained UI influence");
+            mark.assign(w*h,0);for(UINT i=0;i<w*h;++i)old[4*i+3]=static_cast<unsigned char>(std::lround(seeded[i]*255.0f));
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=32;
+            resolvedValues=run(true);auto carried=read(dev.Get(),ctx.Get(),next.Get(),3);
+            check(std::any_of(carried.begin(),carried.end(),[](float a){return a>0;}),"departing text influence carries into the next resolve frame");
+            // Mode-2 orbital records may still carry HC/depth and motion,
+            // but their zero UI mask must not seed or enlarge that footprint.
+            mark.assign(w*h,0);old.assign(w*h*4,0);for(size_t i=0;i<motion.size();i+=2){motion[i]=-1.0f;motion[i+1]=.25f;}
+            for(unsigned frame=0;frame<4;++frame) {
+                for(UINT i=0;i<ow*oh;++i)model[4*i]=static_cast<unsigned char>(32+frame*31+(i%17));
+                resolvedValues=run(frame!=0);
+                check(std::fabs(resolvedValues[0]-model[0]/255.f)<1e-6,"mark-zero orbital resolve preserves current trained colour");
+                auto orbitalInfluence=read(dev.Get(),ctx.Get(),next.Get(),3);
+                check(std::none_of(orbitalInfluence.begin(),orbitalInfluence.end(),[](float a){return a>0;}),"mark-zero orbital resolve never grows UI influence");
+                for(UINT i=0;i<w*h;++i)old[4*i+3]=static_cast<unsigned char>(std::lround(orbitalInfluence[i]*255.0f));
+            }
+            std::fill(motion.begin(),motion.end(),0.0f);mark.assign(w*h,0);for(UINT i=0;i<w*h;++i)old[4*i+3]=255;resolvedValues=run(true);
             for(float v:resolvedValues)check(v==0,"erased UI rejects a model trail after raw coverage disappears");
             auto influence=read(dev.Get(),ctx.Get(),next.Get(),3);
             for(UINT y=0;y<h;++y)for(UINT x=0;x<w;++x){

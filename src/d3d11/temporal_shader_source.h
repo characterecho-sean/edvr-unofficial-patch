@@ -423,6 +423,12 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     if(r.key[3].w==5) {
         uint kind=probe.z!=0 ? uint(UM.Load(int3(q-region.xy,0))*255.0+.5)&3u : 0u;
         if(kind!=3u) return false;
+    } else if(r.key[3].w==2) {
+        // Orbital line coverage is validated by its exact record/depth.  It
+        // must not inherit a text mark produced by another UI draw, while
+        // its own RT1 record remains eligible over the sky.
+        uint kind=probe.z!=0 ? uint(UM.Load(int3(q-region.xy,0))*255.0+.5)&3u : 0u;
+        if(kind==1u || kind==2u) return false;
     } else if(r.key[3].w==4) {
         // Planet coverage is scene-sized; UI marks are region-sized. Both
         // text kinds must keep their own motion over the distant surface.

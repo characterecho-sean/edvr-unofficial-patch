@@ -456,3 +456,79 @@ These checks establish the corrected geometry motion and preserved
 visibility. They do not establish that the entire reported orbital halo
 has disappeared in the headset. No background-history rejection, final
 UI cleanup, DLSS preset, sharpening or live configuration was changed.
+
+## Continued orbital halo, capture 160340
+
+Ruled out: correcting the corona's affine geometry motion alone resolves
+the orbital halo, because the user still sees it on verified 4d7307d.
+The graphics log edvr_gfx_20260913_160138.log identifies build 6AA71BFC,
+linked 21:56:12 UTC, and logs accepted mode-5 motion at 16:03:08.280.
+The 160340 capture again contains 844 draw snapshots without declines.
+Input and output remain 2774x2740 and 4268x4216. The first temporal
+frame is 10640; raw crop origin is (687,670), output crop origin
+(1056,1030), and first jitter is (0,-0.166666657).
+
+Candidate causes and discriminating evidence: an unaccepted mode-5
+record would show missing/mismatched HoloCoverage against merged depth;
+orbital synthetic depth affecting DLSS would appear in DlssBeforeUi and
+respond to a controlled depth/motion replay; final UI bounds affecting
+the surrounding corona would appear in T00 minus DlssBeforeUi together
+with retained UiPrevious/UiNext influence. The earlier 142914 ruling
+about its broad glow boundary must not substitute for this comparison.
+
+This capture isolates a final-resolve contribution. In raw-local
+(900,200)-(1040,650), the aligned raw/model/final comparison shows a
+sharp darker wedge beside the intersecting orange orbital lines only
+after UI cleanup. The mean absolute final-minus-model difference is
+0.37668 byte per colour channel, with 19.11% of output pixels differing
+by more than 1.1 bytes in at least one channel. The saved UI mark is a
+thin class-1 line, while UiPrevious contains a much wider retained
+footprint on its sides. No content-edit pixels occur in this region.
+
+Orbital coverage currently returns class 1, the same category that seeds
+the text cleanup's current bounds and 32-frame retained influence. That
+causes a moving geometric line to retain a text-cleanup footprint on the
+corona. The model's smoother glow can then be clamped to the current raw
+colour within that footprint, producing a visible boundary. The intended
+correction is to keep the orbital record and private depth while
+excluding this geometric family from text-cleanup classification.
+Cockpit text, sprites and other UI keep their existing protection.
+
+The new corona path is independently verified in this capture. All
+69,704 pixels of mode-5 record 2 have class 3 and agree with final
+merged Z at the consumer's relative 1e-6 tolerance. After subtracting
+the production eight-phase Halton wrap delta (7/16,-5/9), captured MV
+agrees with its record projection to p95 0.000711 input pixels and
+maximum 0.001226. Matched orbital records 3--6 also agree after
+requiring the same final-depth predicate. Comparing every stored
+coverage sample without that predicate incorrectly includes occluded
+fragments.
+
+The fifth orbital instance, record 7, is unmatched. Its rotation, scale
+and width change in subsequent captured snapshots, unlike the first four
+orbital instances. This is a separate history-identity limitation; it
+does not explain the cleanup wedge beside matched orbital lines.
+
+The correction changes only the orbital coverage classification and its
+corresponding temporal acceptance gate. Orbital coverage writes class 0
+while retaining the same private depth and motion record. Mode 2 accepts
+a matched record at exact merged depth without a text mark, and rejects
+later class-1/2 text. The original colour draw, background-history
+rejection and UI cleanup shader are unchanged. There is no added
+texture, full-screen pass, coverage draw or readback.
+
+Validation: the absolute-path full build and NVIDIA DLL smoke pass. The
+UI suite passes 24,474 checks on WARP and 26,220 on NVIDIA with the
+captured HUD reference shader. The real orbital reissue retains both
+instance IDs and exact HC depth, leaves game depth unchanged, and writes
+no UI classification. Text kinds 1/2 still reject stale glyphs; repeated
+history feedback with orbital classification leaves model colour and an
+empty influence history intact. The screen suite passes 55,253 checks,
+including accepted mode-2 motion with no text mark through both
+regenerated shipping MV variants, text precedence, depth mismatch and
+unmatched-record rejection. Existing corona, foreground-occlusion and
+source-screen tests remain in place.
+
+This establishes and corrects the final-UI contribution captured here.
+Whether any separate pre-resolve halo remains requires the user's next
+headset comparison.
