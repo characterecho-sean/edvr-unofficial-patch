@@ -26,7 +26,7 @@ def read(path):
         values = struct.unpack_from('<28f', data, at + 128)
         key = struct.unpack_from('<32I', data, at)
         records.append(dict(index=i+1, key=key,
-                            family={0: 'cockpit', 1: 'ring', 2: 'orbital', 3: 'sprite'}.get(key[15], 'unknown'),
+                            family={0: 'cockpit', 1: 'ring', 2: 'orbital', 3: 'sprite', 4: 'affine surface', 5: 'affine streak'}.get(key[15], 'unknown'),
                             clip=[values[j:j+4] for j in range(0, 12, 4)],
                             rows=[values[j:j+4] for j in range(12, 24, 4)],
                             eligible=values[24] == 1, matched=values[27] == 1))
@@ -38,10 +38,12 @@ def self_test():
         path = Path(directory)/'holo.bin'
         values = [0.0]*28
         values[15], values[24], values[27] = -.02, 1, 1
-        good = b'EDVRHLO1'+struct.pack('<2I', 1, 240)+bytes(128)+struct.pack('<28f', *values)
+        key = bytearray(128); struct.pack_into('<I', key, 15*4, 5)
+        good = b'EDVRHLO1'+struct.pack('<2I', 1, 240)+bytes(key)+struct.pack('<28f', *values)
         path.write_bytes(good)
         r = read(path)[0]
         assert r['index'] == 1 and r['eligible'] and r['matched']
+        assert r['family'] == 'affine streak'
         assert abs(r['rows'][0][3]+.02) < 1e-8
         for bad in (b'', good[:-1], good+b'\0', good[:12]+struct.pack('<I', 272)+good[16:],
                     good[:8]+struct.pack('<I', 129)+good[12:]):

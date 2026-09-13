@@ -106,6 +106,7 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
     ctx->Unmap(stage.Get(), 0); return values;
 }
 #include "planet_coverage_test.h"
+#include "corona_coverage_test.h"
 int main(int argc, char** argv) {
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     D3D_FEATURE_LEVEL level;
@@ -835,6 +836,8 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     }
     auto msaa=depth(dev.Get(),DXGI_FORMAT_R32_TYPELESS,DXGI_FORMAT_D32_FLOAT,8,4);
     UiDepthLayer declined; check(!declined.acquire(ctx.Get(),msaa.tex.Get()),"MSAA safely declined");
+    testPlanetCoverage(dev.Get(),ctx.Get());
+    testCoronaCoverage(dev.Get(),ctx.Get());
     if(info) for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {
         SIZE_T size=0; info->GetMessage(i,nullptr,&size); std::vector<unsigned char> storage(size);
         auto* m=reinterpret_cast<D3D11_MESSAGE*>(storage.data()); hr(info->GetMessage(i,m,&size));
@@ -842,7 +845,6 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             std::puts(m->pDescription); check(false,"D3D debug-layer warning/error");
         }
     }
-    testPlanetCoverage(dev.Get(),ctx.Get());
     ctx->ClearState(); uiDepthShutdown();
     std::printf("PASS: %d checks; production UI coverage isolates smoke, preserves depth/alpha/occlusion/state, and handles menus and frame/eye/format changes.\n",checks);
 }

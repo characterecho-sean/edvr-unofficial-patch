@@ -321,3 +321,138 @@ and 277 checks with the eight captured solar point pairs.
 
 These tests establish geometry motion and visibility, not a confirmed
 in-headset resolution of the solar smear or the separate coronal mask.
+
+## Orbital halo follow-up, capture 142914
+
+The user describes the orbital artifact as a dark band or halo. Both
+flight DLLs verify against f9787bf: graphics build 6AA7055D and VR build
+6AA70564. This run again uses SteamVR/OpenVR, preset K, 2774x2740 input
+and 4268x4216 output. Solar and orbital motion both log activation. The
+snapshot reports 844 draws, no failed copies and no missing shaders.
+Temporal frame 14380 and snapshot frame 14381 name the same captured
+frame under the existing counter offset; snapshot 14382 is the next
+frame, not the predecessor of the first saved motion image.
+
+The useful glow region is C00-local (900,530)-(1200,860), or input
+(1587,1200)-(1887,1530). The raw crop begins at (687,670); the treated
+crop begins at output (1056,1030). Compare on the output grid using
+input = (output+0.5)*inputSize/outputSize-0.5+jitter, with first-frame
+jitter (-0.25,0.166666687). Native crop coordinates and full-eye
+coordinates are not interchangeable.
+
+Ruled out for this captured boundary: the final UI cleanup introduces
+the broad glow discontinuity. It already appears in DlssBeforeUi. The
+mean absolute RGB difference between that output and T00 in this region
+is 0.00110 in normalized byte colour. The raw-to-model difference is
+larger, 0.00933. The signed difference is mixed: much of the model glow
+is brighter, with narrow darker regions and sharp changes in brightness
+near the private coverage boundary. A threshold selecting only negative
+RGB differences misses much of the visible discontinuity.
+
+The class-3 coverage boundary and invalid-history vectors follow the
+stellar limb and orbital hairline. Spatial coincidence is insufficient
+to blame background-history rejection. A preset-K NVIDIA replay of a
+static 600x400 captured crop, repeated for 32 frames, compares zero
+motion with the captured invalid-vector positions. The final mean
+absolute difference is only 0.01967 byte with merged depth and 0.02143
+byte with original scene depth. Repeating the captured physical vectors
+instead is a deliberate inconsistent-motion stress test: replacing only
+invalid vectors changes the final output by 0.1675 byte on average,
+without reproducing or removing an obvious broad angular mask. A
+separate full-size synthetic gradient/line experiment also produces
+sparse differences rather than a broad halo. These controls do not
+reconstruct the flight's earlier DLSS history. They do not justify
+disabling the protection that fixed the ship-tip trails.
+
+The solar motion consumer is active on the sun itself. All 1,402,275
+solar coverage samples agree with original SceneZ; 1,402,190 also agree
+with merged Z at the consumer's relative tolerance. The remaining 85
+must be rejected when nearer private coverage wins. Far-depth checks
+must use relative error: an absolute tolerance such as 1e-6 would accept
+zero depth as matching these approximately 1e-10 surfaces.
+
+There is a separate, measurable corona motion error. Its original
+5E417E9DF2E7F9E6/BD801F2FB02522EB draw uses POSITION at byte 0 and
+TEXCOORD.xy at byte 36 of a 44-byte vertex. TEXCOORD.y is float 10, not
+float 9. Width comes from VS b2[0].w and b2[1].xy; adjusted local
+position is projected through b0 rows 4, 5 and 7. The original raster
+adds 15.01 to clip Z, while the existing private coverage recovers its
+depth from TEXCOORD1.z. That offset is not physical view depth.
+
+Perspective-correct triangle correspondence gives 21 visible corona
+samples in the affected band after requiring class 3, zero original
+SceneZ and relative agreement within 1e-4 between private Z and B/W.
+Their input positions span (1587.5,1224.9)-(1873.2,1284.9). Comparing
+the next frame's actual draw projection against that frame's generic
+camera projection at the same W, with its jitter removed, gives median
+raw backward motion (-1.2805,0.2430) versus (-1.0174,-0.3643). The
+95th-percentile vector error is 0.6708 input pixels. This is a
+draw-motion error, not proof that correcting it alone resolves the whole
+navigation halo.
+
+The captured 6,776-byte VB and 2,400-byte IB are identical over the
+first three watched frames. The width fields remain
+(287916768,0.083159015,0.34999999); shading fields change. This proves
+stability for these frames, not immutable D3D11 usage or stability of
+every other asset using the same shader. A production motion extension
+must reject geometry writes and width changes, preserve existing solar
+coverage behind transparent fragments, and keep ordinary UI motion.
+
+## Corona motion implementation
+
+Mode 5 follows the exact streak family's original affine clip rows. Its
+history key includes the three width fields, the t1 artwork, draw range,
+and VB/IB write generations. It requires the recorded POSITION and
+TEXCOORD layout at stride 44 and a single indexed instance. Unsupported
+pipeline stages, predication and geometry that can be changed through
+GPU writes retain the existing motion path. This is a shader-family
+contract, not an identification of every streak as a solar asset.
+
+The existing private smoke coverage draw supplies the motion coverage;
+there is no additional raster draw or full-screen pass. A separate
+pixel-shader variant reads the original scene depth through a cached
+view. Only visible core samples replace the HoloCoverage record. Farther
+corona and fringe samples preserve the previous coverage, including the
+sun's record. The legacy smoke shader remains the fallback. The temporal
+consumer requires class 3 and exact agreement with the final merged
+depth, so later foreground depth still rejects the corona record.
+
+HoloCoverage remains R32G32_FLOAT. A reviewed 8x8 independent-MRT test
+passes on WARP and NVIDIA: a float4 shader output carries visibility in
+its fourth component, and source-alpha blending preserves or replaces
+the two stored components exactly. The R8 coverage target remains
+opaque. An earlier failing scratch test put visibility in blue and zero
+in alpha; that result is invalid and is not evidence against RG32
+blending.
+
+The captured fixture contains 21 independent previous/current pairs, 600
+indices per draw, and exactly 366,412 bytes in the existing stellar test
+format. A strict parser verifies payload sizes and end of file. An
+independent double-precision affine inverse applied to its serialized
+float32 clip points differs from the serialized expected projections by
+at most 0.0000241 input pixels at 2774x2740. This is a fixture check;
+the production GPU transform and coverage tests must pass separately.
+
+Validation completed: the absolute-path full build and NVIDIA DLL smoke
+test pass. Stellar motion passes 889 synthetic checks and 1,247 with all
+21 captured corona pairs; the GPU-generated mapping's maximum error is
+0.000047 input pixels. Width-field changes, known and unknown geometry
+writes, empty writes, shading-only changes and the shared record limit
+are covered. The eye-dump reader names mode 5 `affine streak`; an
+accepted draw logs `corona motion: mode-5 affine streak history active`.
+
+The production UI coverage suite passes 22,798 checks on WARP and 24,544
+on NVIDIA with the captured HUD reference shader. Core and nonzero-mask
+fringe cases run through the actual reissue and optional pixel shader.
+They verify exact preservation of earlier sun coverage, replacement by
+visible corona, all four original colour channels, original scene and
+private UI depth, legacy smoke depth/classification, and restoration of
+PS, t2, b12/b13 and output state. The debug queue is checked after both
+solar and corona coverage tests. The screen suite passes 55,173 checks,
+including class/depth/history rejection and the distinct corona vector
+through both shipping MV variants and the source-compiled shader.
+
+These checks establish the corrected geometry motion and preserved
+visibility. They do not establish that the entire reported orbital halo
+has disappeared in the headset. No background-history rejection, final
+UI cleanup, DLSS preset, sharpening or live configuration was changed.

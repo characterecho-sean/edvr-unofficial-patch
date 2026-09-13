@@ -22,6 +22,7 @@
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
+struct ID3D11Resource;
 
 namespace edvr {
 
@@ -107,6 +108,9 @@ bool uiDepthTemporalDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D* scen
 void uiDepthHoloMotion(int eye, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views);
 void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene);
 void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx, const wchar_t* directory, const wchar_t* stamp);
+// Geometry writes invalidate only accepted corona generations; nullptr is an
+// unknown write and invalidates all such generations.
+void uiDepthMotionResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~uint64_t(0));
 
 // The strength the interface proper is marked at (advanced.ui_depth_reactive;
 // 0 = no fixed NVIDIA bias; motion classification and adaptive history remain).

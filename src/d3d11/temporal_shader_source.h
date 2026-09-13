@@ -420,7 +420,10 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     if(index==0 || index>128) return false;
     if(cov.y<=knobs.x || abs(zSceneAt(q)-cov.y)>abs(cov.y)*1e-6) return false;
     HoloRecord r=HR[index-1]; if(r.meta.w!=1) return false;
-    if(r.key[3].w==4) {
+    if(r.key[3].w==5) {
+        uint kind=probe.z!=0 ? uint(UM.Load(int3(q-region.xy,0))*255.0+.5)&3u : 0u;
+        if(kind!=3u) return false;
+    } else if(r.key[3].w==4) {
         // Planet coverage is scene-sized; UI marks are region-sized. Both
         // text kinds must keep their own motion over the distant surface.
         uint kind=probe.z!=0 ? uint(UM.Load(int3(q-region.xy,0))*255.0+.5)&3u : 0u;

@@ -6,7 +6,10 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include <unordered_map>
+#include <algorithm>
 #include "shader_swap.h"
+#include "eye_draw_snapshot.h"
 
 namespace edvr {
 struct HoloDraw {
@@ -37,12 +40,19 @@ float3 turn(float4 q, float3 v) {
     // not move vertices or the primary surface UVs and is not identity.
     [unroll] for(uint k=0;k<4;++k) n.key[k]=mesh[k];
     bool valid=true;
-    if(info.z==1 || info.z==4) {
+    if(info.z==1 || info.z==4 || info.z==5) {
         [unroll] for(uint r=0;r<3;++r) n.clip[r]=model[r==2?7:4+r];
         // Planet material constants shade the sphere; they are not geometry
         // identity. The captured surface's mesh and texture identify it.
         if(info.z==1) [unroll] for(uint k=0;k<4;++k) n.key[4+k]=asuint(material[k]);
-        valid=all(abs(model[6].xyz)<1e-10) && model[6].w>0;
+        if(info.z==5) {
+            n.key[4]=asuint(material[0].w);
+            n.key[5]=asuint(material[1].x);
+            n.key[6]=asuint(material[1].y);
+            valid=all(isfinite(material[0].w)) && all(isfinite(material[1].xy)) &&
+                  material[0].w>0 && material[1].x>0 && material[1].y>0;
+        }
+        valid=valid && all(abs(model[6].xyz)<1e-10) && model[6].w>0;
     } else {
         float3 scale,pos; float4 q;
         if(info.z==2) {
@@ -124,8 +134,12 @@ class HoloMotion {
     History history[2];
     unsigned write=0,w=0,h=0;
     bool cleared=false,failed=false;
+    struct GeometryStamp { unsigned epoch=0,seen=0; };
+    std::unordered_map<ID3D11Resource*,GeometryStamp> geometry;
+    unsigned geometryEpoch=1,unknownEpoch=0,frame=0;
     Ptr<ID3D11Texture2D> scene,coverage;
     Ptr<ID3D11RenderTargetView> rtv;
+    Ptr<ID3D11BlendState> motionBlendState;
     Ptr<ID3D11ShaderResourceView> coverageSrv,instanceSrv;
     Ptr<ID3D11Buffer> draw,instance;
     Ptr<ID3D11ComputeShader> shader;
@@ -137,6 +151,17 @@ class HoloMotion {
         td.Format=DXGI_FORMAT_R32G32_FLOAT; td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
         if(FAILED(dev->CreateTexture2D(&td,nullptr,&coverage)) || FAILED(dev->CreateRenderTargetView(coverage.Get(),nullptr,&rtv)) ||
            FAILED(dev->CreateShaderResourceView(coverage.Get(),nullptr,&coverageSrv))) return false;
+        D3D11_BLEND_DESC blend{}; blend.IndependentBlendEnable=TRUE;
+        blend.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;
+        blend.RenderTarget[1].BlendEnable=TRUE;
+        blend.RenderTarget[1].SrcBlend=D3D11_BLEND_SRC_ALPHA;
+        blend.RenderTarget[1].DestBlend=D3D11_BLEND_INV_SRC_ALPHA;
+        blend.RenderTarget[1].BlendOp=D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[1].SrcBlendAlpha=D3D11_BLEND_ONE;
+        blend.RenderTarget[1].DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;
+        blend.RenderTarget[1].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[1].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        if(FAILED(dev->CreateBlendState(&blend,&motionBlendState))) return false;
         D3D11_BUFFER_DESC bd{}; bd.ByteWidth=kMax*kStride; bd.StructureByteStride=kStride;
         bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; bd.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
         for(auto& e:history) if(FAILED(dev->CreateBuffer(&bd,nullptr,&e.buffer)) || FAILED(dev->CreateShaderResourceView(e.buffer.Get(),nullptr,&e.srv)) ||
@@ -158,9 +183,20 @@ public:
     // 3: planar sprite pool (local Y=0, original VS forces clip Z=W),
     // 4: affine planet/solar local-to-clip, with no material animation key.
     // Mode 4 requires an explicit surface slot: planet t0 or solar art t1.
+    // 5: exact corona streak affine clip rows; one draw, stride-44 layout,
+    // surface slot 1, and CB2 width identity in the history key.
     bool prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* source,const HoloDraw& args,float metres,unsigned mode=0,unsigned surfaceSlot=2) {
         const unsigned count=mode==2?args.instances:1;
-        if(failed || !source || mode>4 || (mode==3 && args.count!=6) || (mode==2 ? (args.kind!='N' || args.startInstance!=0 || count==0 || count>64) : (args.kind!='X' || args.instances!=1)) || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
+        const bool corona=mode==5;
+        if(failed || !source || mode>5 || (mode==3 && args.count!=6) || (mode==2 ? (args.kind!='N' || args.startInstance!=0 || count==0 || count>64) : corona ? (args.kind!='X' || args.startInstance!=0 || args.instances!=1) : (args.kind!='X' || args.instances!=1)) || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
+        if(corona) {
+            Ptr<ID3D11GeometryShader> gs; Ptr<ID3D11HullShader> hs; Ptr<ID3D11DomainShader> ds; ID3D11ClassInstance* ci[256]{}; UINT nc=256;
+            ctx->GSGetShader(&gs,ci,&nc); for(UINT i=0;i<nc;++i) if(ci[i]) ci[i]->Release(); nc=256; ctx->HSGetShader(&hs,ci,&nc); for(UINT i=0;i<nc;++i) if(ci[i]) ci[i]->Release(); nc=256; ctx->DSGetShader(&ds,ci,&nc); for(UINT i=0;i<nc;++i) if(ci[i]) ci[i]->Release();
+            ID3D11Buffer* so[4]{}; ctx->SOGetTargets(4,so); bool stream=false; for(auto* p:so) { if(p) {stream=true;p->Release();} }
+            ID3D11Predicate* pred=nullptr; BOOL predValue=FALSE; ctx->GetPredication(&pred,&predValue); if(pred) pred->Release();
+            ID3D11UnorderedAccessView* uav[8]{}; ctx->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,8,uav); bool writable=false; for(auto* p:uav) { if(p) {writable=true;p->Release();} }
+            if(gs || hs || ds || stream || pred || writable) return false;
+        }
         const bool pooled=mode==0 || mode==3;
         D3D11_TEXTURE2D_DESC td{}; source->GetDesc(&td);
         UINT nvp=1; D3D11_VIEWPORT vp{}; ctx->RSGetViewports(&nvp,&vp);
@@ -173,7 +209,22 @@ public:
         for(int i=0;i<2;++i) vb[i].Attach(rawVb[i]);
         ctx->IAGetIndexBuffer(&ib,&fmt,&ibOffset);
         if(!vb[0] || (pooled && (!vb[1] || !ib || strides[0]!=8 || strides[1]!=40)) ||
-           ((mode==1 || mode==4) && !ib) || (mode==4 && strides[0]!=12) || (mode==2 && (!vb[1] || strides[0]!=16 || strides[1]!=60))) return false;
+           ((mode==1 || mode==4 || corona) && !ib) || (mode==4 && strides[0]!=12) || (mode==2 && (!vb[1] || strides[0]!=16 || strides[1]!=60)) || (corona && strides[0]!=44)) return false;
+        if(corona) {
+            const bool newVb=geometry.find(vb[0].Get())==geometry.end(), newIb=geometry.find(ib.Get())==geometry.end();
+            if(geometry.size() + unsigned(newVb) + unsigned(newIb) > 256) return false;
+            Ptr<ID3D11InputLayout> layout; ctx->IAGetInputLayout(&layout);
+            EyeDrawSnapshot::Layout fields[32]{}; UINT bytes=sizeof(fields);
+            if(!layout || FAILED(layout->GetPrivateData(EyeDrawSnapshot::effectLayoutKey(),&bytes,fields)) || bytes!=2*sizeof(fields[0])) return false;
+            bool pos=false,uv=false;
+            for(unsigned i=0;i<2;++i) {
+                pos=pos || (_stricmp(fields[i].semantic,"POSITION")==0 && fields[i].index==0 && fields[i].slot==0 && fields[i].offset==0 && fields[i].format==DXGI_FORMAT_R32G32B32_FLOAT && fields[i].classification==D3D11_INPUT_PER_VERTEX_DATA);
+                uv=uv || (_stricmp(fields[i].semantic,"TEXCOORD")==0 && fields[i].index==0 && fields[i].slot==0 && fields[i].offset==36 && fields[i].format==DXGI_FORMAT_R32G32_FLOAT && fields[i].classification==D3D11_INPUT_PER_VERTEX_DATA);
+            }
+            if(!pos || !uv) return false;
+            D3D11_BUFFER_DESC vd{}; vb[0]->GetDesc(&vd); D3D11_BUFFER_DESC id{}; ib->GetDesc(&id);
+            if((vd.BindFlags&D3D11_BIND_UNORDERED_ACCESS) || (vd.BindFlags&D3D11_BIND_STREAM_OUTPUT) || (id.BindFlags&D3D11_BIND_UNORDERED_ACCESS) || (id.BindFlags&D3D11_BIND_STREAM_OUTPUT)) return false;
+        }
         unsigned stream=mode==2?1:0,bytes=mode==2?count*60:4;
         D3D11_BUFFER_DESC vd{}; vb[stream]->GetDesc(&vd);
         uint64_t at=uint64_t(offsets[stream])+uint64_t(args.startInstance)*strides[stream];
@@ -181,6 +232,7 @@ public:
         Ptr<ID3D11ShaderResourceView> pool,surface;
         if(mode==0 && surfaceSlot!=1 && surfaceSlot!=2) return false;
         if(mode==4 && surfaceSlot>1) return false;
+        if(corona && surfaceSlot!=1) return false;
         if(mode!=2) ctx->PSGetShaderResources(mode==1?3:mode==3?0:surfaceSlot,1,&surface);
         if(pooled) {
             ctx->VSGetShaderResources(33,1,&pool); if(!pool || !surface) return false;
@@ -189,21 +241,23 @@ public:
             if(FAILED(resource.As(&poolBuffer))) return false;
             D3D11_BUFFER_DESC pbd{}; poolBuffer->GetDesc(&pbd); if(pbd.StructureByteStride!=336) return false;
         }
-        if((mode==1 || mode==4) && !surface) return false;
+        if((mode==1 || mode==4 || corona) && !surface) return false;
         ID3D11Buffer* cb[3]{}; ctx->VSGetConstantBuffers(0,3,cb);
-        bool enough=true; const UINT minimum[3]={mode==2?0u:128u,276*16,(mode==2 || mode==4)?0u:mode==3?32u:64u};
+        bool enough=true; const UINT minimum[3]={mode==2?0u:128u,276*16,(mode==2 || mode==4)?0u:corona?32u:mode==3?32u:64u};
         for(int i=0;i<3;++i) { D3D11_BUFFER_DESC bd{}; if(cb[i]) cb[i]->GetDesc(&bd); enough=enough && bd.ByteWidth>=minimum[i]; }
         if(!enough) { for(auto* p:cb) if(p) p->Release(); return false; }
+        if(corona) { geometry[vb[0].Get()].seen=frame; geometry[ib.Get()].seen=frame; }
         struct Data { UINT info[4],key[16]; float limits[4]; } data{};
         data.info[0]=now.count; data.info[1]=prev.count; data.info[2]=mode; data.info[3]=count;
         IUnknown* objects[3]={surface.Get(),vb[pooled?1:0].Get(),mode==2?nullptr:ib.Get()};
         for(int i=0;i<3;++i) { uint64_t v=reinterpret_cast<uint64_t>(objects[i]); data.key[2*i]=UINT(v); data.key[2*i+1]=UINT(v>>32); now.sources[now.count][i]=objects[i]; }
         data.key[6]=UINT(args.base); data.key[7]=args.start; data.key[8]=mode==2?0:UINT(fmt); data.key[9]=mode==2?0:ibOffset;
         data.key[10]=strides[pooled?1:0]; data.key[11]=offsets[pooled?1:0]; data.key[12]=args.count;
-        data.key[14]=mode==4?surfaceSlot:0; data.key[15]=mode;
+        data.key[14]=(mode==4 || corona)?surfaceSlot:0; data.key[15]=mode;
+        if(corona) data.key[13]=std::max(geometry[vb[0].Get()].epoch,std::max(geometry[ib.Get()].epoch,unknownEpoch));
         data.limits[0]=metres; data.limits[1]=float(w); data.limits[2]=float(h);
         ctx->UpdateSubresource(draw.Get(),0,nullptr,&data,0,0);
-        if(mode!=1 && mode!=4) { D3D11_BOX box{UINT(at),0,0,UINT(at+bytes),1,1}; ctx->CopySubresourceRegion(instance.Get(),0,0,0,0,vb[stream].Get(),0,&box); }
+        if(mode!=1 && mode!=4 && !corona) { D3D11_BOX box{UINT(at),0,0,UINT(at+bytes),1,1}; ctx->CopySubresourceRegion(instance.Get(),0,0,0,0,vb[stream].Get(),0,&box); }
         Ptr<ID3D11ComputeShader> saved; ID3D11ClassInstance* classes[256]{}; UINT nc=256;
         ID3D11Buffer* savedCb[4]{}; ID3D11ShaderResourceView* savedSrv[3]{}; Ptr<ID3D11UnorderedAccessView> savedUav;
         ctx->CSGetShader(&saved,classes,&nc); ctx->CSGetConstantBuffers(0,4,savedCb);
@@ -223,6 +277,25 @@ public:
         return true;
     }
     ID3D11RenderTargetView* target() const { return rtv.Get(); }
+    ID3D11BlendState* motionBlend() const { return motionBlendState.Get(); }
+    // Mode-5 writes are tracked independently of mesh-motion history. The
+    // write hook only touches resources registered by an accepted corona.
+    bool resourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)) {
+        if(first>=end) return true;
+        if(!resource) {
+            if(++geometryEpoch==0) { geometryEpoch=1; unknownEpoch=0; geometry.clear(); for(auto& hist:history){for(unsigned i=0;i<hist.count;++i)for(auto& p:hist.sources[i])p.Reset();hist.count=0;} cleared=false; }
+            unknownEpoch=geometryEpoch; return true;
+        }
+        auto it=geometry.find(resource); if(it==geometry.end()) return false;
+        if(++geometryEpoch==0) { geometryEpoch=1; unknownEpoch=0; geometry.clear(); for(auto& hist:history){for(unsigned i=0;i<hist.count;++i)for(auto& p:hist.sources[i])p.Reset();hist.count=0;} cleared=false; return true; }
+        it->second.epoch=geometryEpoch; return true;
+    }
+    void noteFrame() {
+        ++frame;
+        for(auto it=geometry.begin();it!=geometry.end();) {
+            if(it->second.seen+2<frame) it=geometry.erase(it); else ++it;
+        }
+    }
     ID3D11Buffer* info() const { return draw.Get(); }
     unsigned recordCount() const { return history[write].count; }
     void views(ID3D11Texture2D* source,ID3D11ShaderResourceView** out) const {
@@ -232,7 +305,7 @@ public:
     void frameBoundary() {
         write=1-write; auto& next=history[write];
         for(unsigned i=0;i<next.count;++i) for(auto& p:next.sources[i]) p.Reset();
-        next.count=0; cleared=false;
+        next.count=0; cleared=false; noteFrame();
     }
 };
 } // namespace edvr

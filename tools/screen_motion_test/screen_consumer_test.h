@@ -35,11 +35,16 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
           "bool ok=fetchHistoryT(float2(id.xy),dR0.xyz,dR1.xyz,dR2.xyz,tvUsed.xyz,"
           "false,true,world,motion,depth,depthN,hy);"
           "O[id.xy]=float4(motion,zSceneAt(region.xy+int2(id.xy)),ok?1:0);}";
+    hlsl+="\n[numthreads(8,8,1)]void mode5Test(uint3 id:SV_DispatchThreadID){"
+          "float2 pp;float zp;bool ok=holoPixel(float2(id.xy),jit.xy,pp,zp);"
+          "O[id.xy]=float4(pp,zp,ok?1:0);}";
     auto mvCode=compile(hlsl.c_str(),"cs_5_0","mv");
     auto nativeCode=compile(hlsl.c_str(),"cs_5_0","screenTest");
-    ComPtr<ID3D11ComputeShader> mv,native;
+    auto mode5Code=compile(hlsl.c_str(),"cs_5_0","mode5Test");
+    ComPtr<ID3D11ComputeShader> mv,native,mode5;
     hr(dev->CreateComputeShader(mvCode->GetBufferPointer(),mvCode->GetBufferSize(),nullptr,&mv));
     hr(dev->CreateComputeShader(nativeCode->GetBufferPointer(),nativeCode->GetBufferSize(),nullptr,&native));
+    hr(dev->CreateComputeShader(mode5Code->GetBufferPointer(),mode5Code->GetBufferSize(),nullptr,&mode5));
     ComPtr<ID3D11ShaderReflection> reflection;
     hr(D3DReflect(mvCode->GetBufferPointer(),mvCode->GetBufferSize(),__uuidof(ID3D11ShaderReflection),&reflection));
     auto* parameters=reflection->GetConstantBufferByName("P");
@@ -118,9 +123,13 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     // by a hull, without changing UI/screen motion or valid sky history.
     auto previous=texture(8,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
     auto ui=texture(16,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
-    ComPtr<ID3D11ShaderResourceView> previousView,uiView;
+    auto privateUiDepth=texture(16,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
+    auto smokeDepth=texture(16,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
+    ComPtr<ID3D11ShaderResourceView> previousView,uiView,privateUiDepthView,smokeDepthView;
     hr(dev->CreateShaderResourceView(previous.Get(),nullptr,&previousView));
     hr(dev->CreateShaderResourceView(ui.Get(),nullptr,&uiView));
+    hr(dev->CreateShaderResourceView(privateUiDepth.Get(),nullptr,&privateUiDepthView));
+    hr(dev->CreateShaderResourceView(smokeDepth.Get(),nullptr,&smokeDepthView));
     std::vector<float> prior(64,0),marks(256,0);
     auto coverage=texture(16,DXGI_FORMAT_R32G32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
     ComPtr<ID3D11ShaderResourceView> coverageView,recordView;
@@ -192,6 +201,85 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
                   "history rejection never changes current DLSS depth");
             floats("dR0",1,0,-.5f,0);
         }
+    }
+    // Mode 5 is the corona streak path.  Its R32G32 coverage is accepted
+    // only when the merged depth is exact, the affine record matched, and
+    // the source pixel is the smoke/corona UI kind (3).  Probe holoPixel
+    // directly so UI-kind and depth gates cannot be masked by the ordinary
+    // camera fallback in mv.
+    std::vector<float> privateDepth(16*16,0),smoke(16*16,0);
+    ID3D11ShaderResourceView* coronaInputs[2]={coverageView.Get(),recordView.Get()};
+    auto mode5Probe=[&](int kind,int nearer,int matched) {
+        std::fill(z.begin(),z.end(),.000025f);
+        std::fill(privateDepth.begin(),privateDepth.end(),0.0f);
+        std::fill(smoke.begin(),smoke.end(),0.0f);
+        std::fill(marks.begin(),marks.end(),0.0f);
+        marks[4*16+4]=float(kind)/255.0f;
+        if(nearer==0) z[7*16+6]=.025f;
+        if(nearer==1) privateDepth[7*16+6]=.025f;
+        if(nearer==2) smoke[7*16+6]=.025f;
+        reinterpret_cast<UINT*>(record)[15]=5;
+        for(int i=16;i<28;++i) record[i]=1.0f; // mode-5 width/axis key
+        record[44]=record[49]=record[54]=1.0f;
+        record[46]=.25f;record[50]=.03125f;
+        record[56]=1.0f;record[59]=matched?1.0f:0.0f;
+        // Keep a valid affine clip predecessor available to the corona path.
+        record[32]=1.0f;record[37]=1.0f;record[42]=1.0f;record[43]=1.0f;
+        ctx->UpdateSubresource(scene.Get(),0,nullptr,z.data(),16*4,0);
+        ctx->UpdateSubresource(privateUiDepth.Get(),0,nullptr,privateDepth.data(),16*4,0);
+        ctx->UpdateSubresource(smokeDepth.Get(),0,nullptr,smoke.data(),16*4,0);
+        ctx->UpdateSubresource(ui.Get(),0,nullptr,marks.data(),16*4,0);
+        ctx->UpdateSubresource(rigidRecord.Get(),0,nullptr,record,0,0);
+        floats("jit",.25f,-.375f,0,.5f);floats("probe",1,0,1,16);
+        floats("holoJitter",.75f,.25f,1,1);
+        ctx->UpdateSubresource(cb.Get(),0,nullptr,data.data(),0,0);
+        ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+        ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());
+        ctx->CSSetShaderResources(6,1,smokeDepthView.GetAddressOf());ctx->CSSetShaderResources(7,1,privateUiDepthView.GetAddressOf());
+        ctx->CSSetShaderResources(12,2,coronaInputs);
+        ctx->CSSetUnorderedAccessViews(0,1,ru.GetAddressOf(),nullptr);
+        ctx->CSSetShader(mode5.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+        auto out=read(dev,ctx,result.Get());ctx->ClearState();return out;
+    };
+    auto corona=mode5Probe(3,-1,1);unsigned coronaAt=4*8+4;
+    check(corona[4*coronaAt+3]==1,"mode5 accepts exact merged depth, matched record and UI kind 3");
+    for(int kind=0;kind<3;++kind) {
+        auto out=mode5Probe(kind,-1,1);
+        check(out[4*coronaAt+3]==0,"mode5 rejects UI kinds 0, 1 and 2");
+    }
+    check(mode5Probe(3,-1,0)[4*coronaAt+3]==0,"mode5 rejects an unmatched affine record");
+    for(int nearer=0;nearer<3;++nearer) {
+        auto out=mode5Probe(3,nearer,1);
+        check(out[4*coronaAt+3]==0,"mode5 rejects nearer original, private UI or smoke depth");
+    }
+    // A valid corona record is tracked foreground.  Even when its previous
+    // raster location contains a nearer hull, mv must keep the affine vector
+    // instead of replacing it with background-hidden's size*2 sentinel.
+    std::fill(prior.begin(),prior.end(),.025f);
+    ctx->UpdateSubresource(previous.Get(),0,nullptr,prior.data(),8*4,0);
+    reinterpret_cast<UINT*>(record)[15]=5;record[56]=record[59]=1.0f;
+    ctx->UpdateSubresource(rigidRecord.Get(),0,nullptr,record,0,0);
+    std::fill(marks.begin(),marks.end(),0.0f);marks[4*16+4]=3.0f/255.0f;
+    ctx->UpdateSubresource(ui.Get(),0,nullptr,marks.data(),16*4,0);
+    std::fill(z.begin(),z.end(),.000025f);ctx->UpdateSubresource(scene.Get(),0,nullptr,z.data(),16*4,0);
+    std::fill(privateDepth.begin(),privateDepth.end(),0.0f);ctx->UpdateSubresource(privateUiDepth.Get(),0,nullptr,privateDepth.data(),16*4,0);
+    std::fill(smoke.begin(),smoke.end(),0.0f);ctx->UpdateSubresource(smokeDepth.Get(),0,nullptr,smoke.data(),16*4,0);
+    floats("jit",.25f,-.375f,0,.5f);floats("probe",1,0,1,16);floats("holoJitter",.75f,.25f,1,1);
+    ctx->UpdateSubresource(cb.Get(),0,nullptr,data.data(),0,0);
+    ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+    ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(3,1,previousView.GetAddressOf());
+    ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());ctx->CSSetShaderResources(6,1,smokeDepthView.GetAddressOf());
+    ctx->CSSetShaderResources(7,1,privateUiDepthView.GetAddressOf());
+    ctx->CSSetShaderResources(12,2,coronaInputs);ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
+    ID3D11UnorderedAccessView* coronaOutputs[3]={mu.Get(),zu.Get(),ku.Get()};ctx->CSSetUnorderedAccessViews(3,3,coronaOutputs,nullptr);
+    for(int variant=0;variant<3;++variant) {
+        ComPtr<ID3D11ComputeShader> tested=mv;
+        if(variant)hr(dev->CreateComputeShader(embedded[variant-1].data,embedded[variant-1].size,nullptr,&tested));
+        ctx->CSSetShader(tested.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+        auto coronaMotion=read(dev,ctx,motion.Get()),coronaDepth=read(dev,ctx,depth.Get());
+        check(std::fabs(coronaMotion[2*coronaAt]-2.75f)<1e-5f && std::fabs(coronaMotion[2*coronaAt+1])<1e-5f,
+              "mode5 tracked foreground skips background-hidden rejection with affine motion");
+        check(std::fabs(coronaDepth[coronaAt]-.000025f)<1e-6f,"mode5 rejection preserves current merged depth");
     }
     ctx->ClearState();
 }

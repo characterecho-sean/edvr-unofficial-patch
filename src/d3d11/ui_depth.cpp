@@ -107,6 +107,8 @@ constexpr uint64_t kOrbitalVs=0xC7FA0C0F5DD49180ull, kOrbitalPs=0x6EEF165A350DA3
 constexpr uint64_t kSmokeVs = 0x5E417E9DF2E7F9E6ull;
 constexpr uint64_t kSmokePs = 0xBD801F2FB02522EBull;
 bool g_smokeOn = true;
+Microsoft::WRL::ComPtr<ID3D11PixelShader> g_smokeCoronaShader;
+bool g_smokeCoronaCompileTried=false;
 // A mesh draw whose pixel shader (258B95AC99520C1F) reads nothing and writes
 // nothing; the interface surface in its slot 0 is a leftover binding, and
 // the surface rule took it for a composite on the loading screen
@@ -159,7 +161,10 @@ PlanetCoverage g_planetCoverage;
 bool g_planetPending=false,g_planetSolarPending=false,g_planetNoted=false,g_solarNoted=false;
 HoloDraw g_holoDraw;
 bool g_holoBound=false, g_holoNoted=false;
+bool g_coronaPending=false, g_coronaMotion=false, g_coronaNoted=false;
 ID3D11Buffer* g_savedHoloInfo=nullptr;
+ID3D11ShaderResourceView* g_savedSceneDepth=nullptr;
+bool g_sceneDepthBound=false;
 Microsoft::WRL::ComPtr<ID3D11VertexShader> g_orbitalVs,g_savedOrbitalVs;
 Microsoft::WRL::ComPtr<ID3D11Buffer> g_savedOrbitalInfo;
 ID3D11ClassInstance* g_savedOrbitalClasses[256]{};
@@ -418,6 +423,10 @@ const char kSmokeDepthHlsl[] =
     "SamplerState Smp1 : register(s1);\n"
     "cbuffer CB1 : register(b1) { float4 cb1[211]; };\n"
     "cbuffer CB2 : register(b2) { float4 cb2[3]; };\n"
+    "#ifdef CORONA_MOTION\n"
+    "Texture2D<float> SceneDepth : register(t2);\n"
+    "cbuffer Motion : register(b12) { uint4 motionInfo; };\n"
+    "#endif\n"
     "cbuffer P : register(b13) { float4 floorAndStrength; float4 proj; };\n"
     "struct In {\n"
     "    float3 tc0 : TEXCOORD0;\n"
@@ -426,7 +435,11 @@ const char kSmokeDepthHlsl[] =
     "    float2 tc3 : TEXCOORD3;\n"
     "    float4 pos : SV_Position;\n"
     "};\n"
-    "float4 main(In i, out float oDepth : SV_Depth) : SV_Target {\n"
+    "#ifdef CORONA_MOTION\n"
+    "float4 main(In i, out float oDepth : SV_Depth, out float4 motion : SV_Target1) : SV_Target0 {\n"
+    "#else\n"
+    "float4 main(In i, out float oDepth : SV_Depth) : SV_Target0 {\n"
+    "#endif\n"
     "    float3 d = i.tc2 - i.tc0;\n"
     "    float dd = (dot(d, d) - cb1[126].x * cb1[126].x) * 4.0;\n"
     "    float3 n = normalize(i.tc2);\n"
@@ -468,6 +481,10 @@ const char kSmokeDepthHlsl[] =
     "    // The raster's z when no projection is known.\n"
     "    float own = proj.y != 0.0 ? proj.x + proj.y / max(i.tc1.z, 0.01) : i.pos.z;\n"
     "    oDepth = core ? own : 0.0;\n"
+    "#ifdef CORONA_MOTION\n"
+    "    bool coronaVisible = core && own >= SceneDepth.Load(int3(int2(i.pos.xy),0));\n"
+    "    motion = float4(motionInfo.x+1u, own, 0.0, coronaVisible ? 1.0 : 0.0);\n"
+    "#endif\n"
     "    return (4.0 * q + 3.0) / 255.0; // class 3: smoke, not UI evidence\n"
     "}\n";
 
@@ -686,6 +703,28 @@ struct SmokeDepth {
 SmokeDepth g_smokeDepth[2];
 bool       g_smokeDepthFailedNoted = false;
 bool       g_smokeDepthNoted = false;
+struct SceneDepthRead { ID3D11Texture2D* tex=nullptr; ID3D11ShaderResourceView* srv=nullptr; DXGI_FORMAT fmt=DXGI_FORMAT_UNKNOWN; bool tried=false; };
+SceneDepthRead g_sceneDepthRead[2];
+ID3D11ShaderResourceView* sceneDepthReadView(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene, int eye) {
+    if(!ctx || !scene || eye<0 || eye>1) return nullptr;
+    SceneDepthRead& cached=g_sceneDepthRead[eye];
+    if(cached.tex==scene && cached.tried) return cached.srv;
+    if(cached.srv) cached.srv->Release(); if(cached.tex) cached.tex->Release(); cached={};
+    cached.tex=scene; cached.tex->AddRef(); cached.tried=true;
+    D3D11_TEXTURE2D_DESC td{}; scene->GetDesc(&td); DXGI_FORMAT read=DXGI_FORMAT_UNKNOWN;
+    switch(td.Format) {
+        case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: read=DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+        case DXGI_FORMAT_R24G8_TYPELESS: case DXGI_FORMAT_D24_UNORM_S8_UINT: read=DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+        case DXGI_FORMAT_R32_TYPELESS: case DXGI_FORMAT_D32_FLOAT: read=DXGI_FORMAT_R32_FLOAT; break;
+        default: return nullptr;
+    }
+    if(td.SampleDesc.Count!=1 || td.ArraySize!=1 || td.MipLevels!=1 || !(td.BindFlags&D3D11_BIND_SHADER_RESOURCE)) return nullptr;
+    ID3D11Device* dev=nullptr; ctx->GetDevice(&dev); if(!dev) return nullptr;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format=read; sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels=1;
+    HRESULT hr=dev->CreateShaderResourceView(scene,&sd,&cached.srv); dev->Release();
+    if(FAILED(hr) || !cached.srv) return nullptr;
+    cached.fmt=read; return cached.srv;
+}
 ID3D11BlendState* g_maskBlend = nullptr;     // opaque, red only
 ID3D11DepthStencilState* g_maskDss = nullptr; // test as the game, writes off
 
@@ -759,6 +798,8 @@ DepthShader*             g_reissueShader = nullptr;
 float                    g_reissueMaskOffset = 0.0f;
 int                      g_reissueMaskSlot = 0;   // which cached constant buffer carries it (floorBuffer)
 ID3D11PixelShader*       g_savedPs = nullptr;
+ID3D11ClassInstance* g_savedPsClasses[256]{};
+UINT g_savedPsClassCount=0;
 ID3D11Buffer*            g_savedFloorCb = nullptr;
 ID3D11ShaderResourceView* g_savedHudScene = nullptr;
 ID3D11ShaderResourceView* g_savedEdits = nullptr;
@@ -1580,6 +1621,7 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     g_planetPending=false;g_planetSolarPending=false;
+    g_coronaPending=false;g_coronaMotion=false;
     g_holoDraw=draw;
     g_mode = Mode::kNone;
     g_wantRebind = false;
@@ -1614,6 +1656,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // (a couple of dozen a frame); otherwise the direct list, which is the
     // only test left for the other draws.
     const uint64_t h = boundVsHash(ctx);
+    const bool exactCorona = h==kSmokeVs && boundPsHash(ctx)==kSmokePs;
     // Opaque planets use the same affine-history consumer as the rings,
     // but neither the UI mask nor its private depth-writing path. Learn
     // the eye from scene depth in Begin: inserting the deferred colour
@@ -1638,6 +1681,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     const bool sceneFamily = stellar || h == kHoloPanel || h == kHudSprite ||
                              inList(g_families, g_familyCount, h);
     if (scenePair && sceneFamily) {
+        g_coronaPending=exactCorona;
         g_mode = Mode::kReissueScene;
         const bool wantLine = g_familyLoggedCount < kMaxFamilyLines;
         const bool wantMask = true; // motion classification also needed at zero reactivity and with native TAA
@@ -1857,6 +1901,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     if (!depthPass && !wantMask) return false;
     DepthShader* shader = g_reissueShader;
     const int stellar=shader==&g_depthShaders[6]?0:shader==&g_depthShaders[7]?1:-1;
+    ID3D11ShaderResourceView* coronaDepth=nullptr;
     if(stellar>=0) {
         ++g_stellarCpu[stellar].calls;
         // Include preparation, the extra draw and restoration. No GPU wait.
@@ -1994,6 +2039,24 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
                                 "(the review of 2026-09-10).",
                                 sdp->w, sdp->h, g_drawEye);
             }
+            // Corona shares the historical smoke shader, but its exact
+            // affine streak layout is a separate mode-5 motion source. The
+            // original scene DSV is unbound while the private smoke DSV is
+            // active, so a cached read-only SRV can preserve earlier Holo
+            // coverage without copying the full scene.
+            if (g_coronaPending && scene && mask) {
+                coronaDepth=sceneDepthReadView(ctx,scene,g_drawEye);
+                if (!g_smokeCoronaShader && !g_smokeCoronaCompileTried) {
+                    g_smokeCoronaCompileTried=true;
+                    std::string source="#define CORONA_MOTION 1\n";
+                    source += kSmokeDepthHlsl;
+                    g_smokeCoronaShader.Attach(shaderSwapCompilePs(ctx,source.c_str(),source.size(),"main","ui_depth_corona_ps",nullptr,"ui depth corona"));
+                }
+                if (coronaDepth && g_smokeCoronaShader && g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,5,1)) {
+                    holo=true; g_coronaMotion=true;
+                    if(!g_coronaNoted) { g_coronaNoted=true; Log::get().note("corona motion: mode-5 affine streak history active; exact VS/PS, stride-44 layout, bounded geometry epochs and class-3 visibility."); }
+                }
+            }
         }
         const bool surfaceComposite=shader==&g_depthShaders[0] || shader==&g_depthShaders[2] ||
                                     holoShader(shader) || shader==&g_depthShaders[5];
@@ -2014,7 +2077,8 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // Capture every changed binding before any mutation. The failure
         // path uses the same restoration as a completed coverage draw.
         ctx->OMGetDepthStencilState(&g_reSavedDss, &g_reSavedRef);
-        ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
+        g_savedPsClassCount=256;
+        ctx->PSGetShader(&g_savedPs, g_savedPsClasses, &g_savedPsClassCount);
         ctx->PSGetConstantBuffers(13, 1, &g_savedFloorCb);
         if(holo) ctx->PSGetConstantBuffers(12,1,&g_savedHoloInfo);
         if(orbital) {
@@ -2028,12 +2092,22 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         g_reBlendSaved = mask != nullptr;
         g_reissueOn = true;
         g_rebound = true;
+        if(g_coronaMotion && scene) {
+            if(!coronaDepth) { g_coronaMotion=false; holo=false; }
+            else {
+                g_sceneDepthBound=true;
+                ctx->PSGetShaderResources(2,1,&g_savedSceneDepth);
+            }
+        }
         // The mask as the only colour target when one is wanted, none
         // otherwise; through the original entry so the binding shadow keeps
         // describing the game's bindings.
         ID3D11RenderTargetView* rtv = mask ? mask->rtv : nullptr;
         ID3D11RenderTargetView* rtvs[3]={rtv,holo?g_holoMotion[g_drawEye].target():nullptr,edits?edits->rtv:nullptr};
         vScreenSetRenderTargetsRaw(ctx, edits?3:holo?2:(mask?1:0), mask?rtvs:nullptr, target);
+        if(g_coronaMotion) {
+            ctx->PSSetShaderResources(2,1,&coronaDepth);
+        }
         if(surfaceComposite) {
             g_editsBound=true;ctx->PSSetShaderResources(14,1,&changes);
             if(edits)edits->marked=true;
@@ -2050,7 +2124,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         if (mask) {
             mask->marked = true;
             ++g_wMarked;
-            ID3D11BlendState* bs = maskBlend(ctx);
+            ID3D11BlendState* bs = g_coronaMotion ? g_holoMotion[g_drawEye].motionBlend() : maskBlend(ctx);
             const FLOAT one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
             if (bs) ctx->OMSetBlendState(bs, one, 0xFFFFFFFFu);
             if (!g_maskNotedOnce) {
@@ -2064,7 +2138,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
             }
         }
         ctx->OMSetDepthStencilState(dss, 0);
-        ctx->PSSetShader(shader->shader, nullptr, 0);
+        ctx->PSSetShader(g_coronaMotion ? g_smokeCoronaShader.Get() : shader->shader, nullptr, 0);
         ctx->PSSetConstantBuffers(13, 1, &cb);
         if (depthPass && !sceneProjection) scaleViewportsForUi(ctx);
         if (depthPass) {
@@ -2086,7 +2160,7 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
     if (g_reissueOn) {
         g_reissueOn = false;
         guarded("uiDepth.reissueRestore", [&] {
-            ctx->PSSetShader(g_savedPs, nullptr, 0);
+            ctx->PSSetShader(g_savedPs, g_savedPsClasses, g_savedPsClassCount);
             ctx->PSSetConstantBuffers(13, 1, &g_savedFloorCb);
             if(g_holoBound) ctx->PSSetConstantBuffers(12,1,&g_savedHoloInfo);
             if(g_orbitalBound) {
@@ -2094,6 +2168,7 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
                 ctx->VSSetConstantBuffers(12,1,g_savedOrbitalInfo.GetAddressOf());
             }
             if (g_hudSceneBound) ctx->PSSetShaderResources(2, 1, &g_savedHudScene);
+            if (g_sceneDepthBound) ctx->PSSetShaderResources(2, 1, &g_savedSceneDepth);
             if(g_editsBound) ctx->PSSetShaderResources(14,1,&g_savedEdits);
             ctx->OMSetDepthStencilState(g_reSavedDss, g_reSavedRef);
             if (g_reBlendSaved) {
@@ -2105,6 +2180,10 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
         if (g_savedFloorCb) { g_savedFloorCb->Release(); g_savedFloorCb = nullptr; }
         if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }
         g_holoBound=false;
+        g_coronaMotion=false; g_coronaPending=false;
+        if(g_sceneDepthBound) { if(g_savedSceneDepth) g_savedSceneDepth->Release(); g_savedSceneDepth=nullptr; g_sceneDepthBound=false; }
+        for(UINT i=0;i<g_savedPsClassCount;++i) if(g_savedPsClasses[i]) g_savedPsClasses[i]->Release();
+        g_savedPsClassCount=0;
         if(g_orbitalBound) {
             for(UINT i=0;i<g_savedOrbitalClassCount;++i) g_savedOrbitalClasses[i]->Release();
             g_savedOrbitalClassCount=0;g_savedOrbitalVs.Reset();g_savedOrbitalInfo.Reset();g_orbitalBound=false;
@@ -2197,6 +2276,10 @@ bool uiDepthTemporalDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D* scen
 void uiDepthHoloMotion(int eye, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views) {
     views[0]=views[1]=nullptr;
     if(g_on && !g_stoodDown && eye>=0 && eye<2) g_holoMotion[eye].views(scene,views);
+}
+void uiDepthMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end) {
+    if(!resource && !g_on) return;
+    for(auto& motion:g_holoMotion) motion.resourceWritten(resource,first,end);
 }
 
 void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
@@ -2310,6 +2393,10 @@ void uiDepthShutdown() {
     for(auto& motion:g_holoMotion) motion=HoloMotion{};
     if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }
     g_holoBound=g_holoNoted=false;
+    g_coronaPending=g_coronaMotion=false;g_coronaNoted=false;g_smokeCoronaShader.Reset();g_smokeCoronaCompileTried=false;
+    if(g_savedSceneDepth){g_savedSceneDepth->Release();g_savedSceneDepth=nullptr;}g_sceneDepthBound=false;
+    for(UINT i=0;i<g_savedPsClassCount;++i)if(g_savedPsClasses[i])g_savedPsClasses[i]->Release();g_savedPsClassCount=0;
+    for(auto& cached:g_sceneDepthRead){if(cached.srv)cached.srv->Release();if(cached.tex)cached.tex->Release();cached={};}
     g_orbitalVs.Reset();g_stellarNoted[0]=g_stellarNoted[1]=false;
     if (g_savedFloorCb) { g_savedFloorCb->Release(); g_savedFloorCb = nullptr; }
     if (g_savedPs) {

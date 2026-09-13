@@ -1,6 +1,7 @@
 #include "weapon_stability.h"
 #include "weapon_motion.h"
 #include "mesh_motion.h"
+#include "ui_depth.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include "binding_shadow.h"
@@ -225,6 +226,7 @@ void weaponStabilityObserveScreen() {
 void weaponStabilityResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end) {
     weaponMotionResourceWritten(resource);
     meshMotionResourceWritten(resource,first,end);
+    uiDepthMotionResourceWritten(resource,first,end);
     if(!resource){g.sourceFrame=~0u;++g.sampleEpoch;}
     if(!resource || resource==g.pool.Get() || resource==g.bones.Get() || resource==g.camera.Get())g.prepared=~0u;
 }

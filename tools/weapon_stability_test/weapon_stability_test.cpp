@@ -25,6 +25,7 @@ namespace edvr {
 void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned,unsigned,unsigned,int,unsigned){++motionDraws;}
 void weaponMotionResourceWritten(ID3D11Resource*){}
 void meshMotionResourceWritten(ID3D11Resource*,uint64_t,uint64_t){}
+void uiDepthMotionResourceWritten(ID3D11Resource*,uint64_t,uint64_t){}
 bool testEnabled=true;
 Config& Config::get(){static Config cfg;return cfg;}
 bool Config::getBool(const char* key,bool def) const {

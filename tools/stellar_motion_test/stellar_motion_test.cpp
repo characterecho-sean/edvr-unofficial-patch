@@ -52,7 +52,11 @@ int main(int argc,char** argv){
     compile(kRingCoverage,"ps_5_0");compile(kOrbitalCoverageVs,"vs_5_0");compile(kOrbitalCoveragePs,"ps_5_0");
     float model[32]{},scene[1104]{},material[16]{};unsigned char stream[4096]{};
     auto cb0=buffer(sizeof(model),D3D11_BIND_CONSTANT_BUFFER),cb1=buffer(sizeof(scene),D3D11_BIND_CONSTANT_BUFFER),cb2=buffer(sizeof(material),D3D11_BIND_CONSTANT_BUFFER);
-    auto vb0=buffer(1024,D3D11_BIND_VERTEX_BUFFER),vb1=buffer(sizeof(stream),D3D11_BIND_VERTEX_BUFFER),ib=buffer(128,D3D11_BIND_INDEX_BUFFER);
+    auto vb0=buffer(6776,D3D11_BIND_VERTEX_BUFFER),vb1=buffer(sizeof(stream),D3D11_BIND_VERTEX_BUFFER),ib=buffer(2400,D3D11_BIND_INDEX_BUFFER);
+    auto coronaVs=compile("struct V{float3 p:POSITION;float2 uv:TEXCOORD;};float4 main(V v):SV_Position{return float4(v.p,1);}","vs_5_0");
+    D3D11_INPUT_ELEMENT_DESC coronaElements[2]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},{"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,36,D3D11_INPUT_PER_VERTEX_DATA,0}};
+    ComPtr<ID3D11InputLayout> coronaLayout;hr(dev->CreateInputLayout(coronaElements,2,coronaVs->GetBufferPointer(),coronaVs->GetBufferSize(),&coronaLayout));
+    EyeDrawSnapshot::Layout coronaFields[2]{};std::strcpy(coronaFields[0].semantic,"POSITION");coronaFields[0].format=DXGI_FORMAT_R32G32B32_FLOAT;coronaFields[0].offset=0;coronaFields[0].classification=D3D11_INPUT_PER_VERTEX_DATA;std::strcpy(coronaFields[1].semantic,"TEXCOORD");coronaFields[1].format=DXGI_FORMAT_R32G32_FLOAT;coronaFields[1].offset=36;coronaFields[1].classification=D3D11_INPUT_PER_VERTEX_DATA;hr(coronaLayout->SetPrivateData(EyeDrawSnapshot::effectLayoutKey(),sizeof(coronaFields),coronaFields));
     D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=8;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R32_FLOAT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
     ComPtr<ID3D11Texture2D> source,depthA,depthB,solarA,solarB;ComPtr<ID3D11ShaderResourceView> surface,depthASrv,depthBSrv,solarASrv,solarBSrv;
     hr(dev->CreateTexture2D(&td,nullptr,&source));hr(dev->CreateShaderResourceView(source.Get(),nullptr,&surface));
@@ -61,16 +65,17 @@ int main(int argc,char** argv){
     hr(dev->CreateTexture2D(&td,nullptr,&solarA));hr(dev->CreateShaderResourceView(solarA.Get(),nullptr,&solarASrv));
     hr(dev->CreateTexture2D(&td,nullptr,&solarB));hr(dev->CreateShaderResourceView(solarB.Get(),nullptr,&solarBSrv));
     HoloMotion motion;
-    auto run=[&](unsigned mode,unsigned count,unsigned vertices,unsigned surfaceSlot=2,bool alternateT0=false,bool alternateT1=false){
+    auto run=[&](unsigned mode,unsigned count,unsigned vertices,unsigned surfaceSlot=2,bool alternateT0=false,bool alternateT1=false,bool expect=true){
         ctx->ClearState();ctx->UpdateSubresource(cb0.Get(),0,nullptr,model,0,0);ctx->UpdateSubresource(cb1.Get(),0,nullptr,scene,0,0);ctx->UpdateSubresource(cb2.Get(),0,nullptr,material,0,0);
         ctx->UpdateSubresource(vb1.Get(),0,nullptr,stream,0,0);ID3D11Buffer* cb[3]={mode==2?nullptr:cb0.Get(),cb1.Get(),cb2.Get()};ctx->VSSetConstantBuffers(0,3,cb);
-        ID3D11Buffer* vb[2]={vb0.Get(),vb1.Get()};UINT strides[2]={mode==2?16u:mode==4?12u:40u,60},offsets[2]{};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R16_UINT,0);
+        ID3D11Buffer* vb[2]={vb0.Get(),vb1.Get()};UINT strides[2]={mode==2?16u:mode==4?12u:mode==5?44u:40u,60},offsets[2]{};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R16_UINT,0);if(mode==5)ctx->IASetInputLayout(coronaLayout.Get());
         if(mode==4) {
             ID3D11ShaderResourceView* solarViews[2]={alternateT0?depthBSrv.Get():(surfaceSlot==1?depthASrv.Get():surface.Get()),alternateT1?solarBSrv.Get():solarASrv.Get()};
             ctx->PSSetShaderResources(0,2,solarViews);
-        } else ctx->PSSetShaderResources(3,1,surface.GetAddressOf());
+        } else if(mode==5) ctx->PSSetShaderResources(1,1,solarASrv.GetAddressOf());
+        else ctx->PSSetShaderResources(3,1,surface.GetAddressOf());
         D3D11_VIEWPORT vp{0,0,8,8,0,1};ctx->RSSetViewports(1,&vp);
-        check(motion.prepare(ctx.Get(),source.Get(),{mode==2?'N':'X',vertices,count,0,0,0},10,mode,surfaceSlot),"stellar transform preparation");
+        const bool prepared=motion.prepare(ctx.Get(),source.Get(),{mode==2?'N':'X',vertices,count,0,0,0},10,mode,surfaceSlot);check(prepared==expect,expect?"stellar transform preparation":"stellar budget decline");if(!prepared)return std::vector<float>{};
         ID3D11ShaderResourceView* views[2]{};motion.views(source.Get(),views);check(views[1]!=nullptr,"stellar records exposed");return read(views[1]);
     };
     model[16]=model[21]=model[30]=1;model[27]=.025f;model[31]=1e9f;
@@ -104,17 +109,32 @@ int main(int argc,char** argv){
         std::ifstream input(argv[1],std::ios::binary);input.read(reinterpret_cast<char*>(&pairCount),4);check(pairCount>0&&pairCount<4096,"stellar fixture header");
         for(unsigned pair=0;pair<pairCount;++pair){
             unsigned mode,count,vertices;input.read(reinterpret_cast<char*>(&mode),4);input.read(reinterpret_cast<char*>(&count),4);input.read(reinterpret_cast<char*>(&vertices),4);
-            check((mode==1||mode==2||mode==4)&&count>0&&count<=64,"stellar fixture draw");motion.frameBoundary();motion.frameBoundary();
-            for(int side=0;side<2;++side){input.read(reinterpret_cast<char*>(model),sizeof(model));input.read(reinterpret_cast<char*>(scene),sizeof(scene));input.read(reinterpret_cast<char*>(material),sizeof(material));input.read(reinterpret_cast<char*>(stream),sizeof(stream));check(bool(input),"complete captured state");v=run(mode,count,vertices,mode==4?0:2);if(!side)motion.frameBoundary();}
+            check((mode==1||mode==2||mode==4||(mode==5&&count==1))&&count>0&&count<=64,"stellar fixture draw");motion.frameBoundary();motion.frameBoundary();
+            for(int side=0;side<2;++side){input.read(reinterpret_cast<char*>(model),sizeof(model));input.read(reinterpret_cast<char*>(scene),sizeof(scene));input.read(reinterpret_cast<char*>(material),sizeof(material));input.read(reinterpret_cast<char*>(stream),sizeof(stream));check(bool(input),"complete captured state");v=run(mode,count,vertices,mode==4?0:mode==5?1:2);if(!side)motion.frameBoundary();}
             for(unsigned n=0;n<count;++n){
                 unsigned expectedValid;float point[3],expected[3];input.read(reinterpret_cast<char*>(&expectedValid),4);input.read(reinterpret_cast<char*>(point),12);input.read(reinterpret_cast<char*>(expected),12);check(bool(input),"complete captured expectation");
                 const float* r=v.data()+60*n;check((r[59]==1)==(expectedValid==1),"captured eligibility and identity agree");
                 if(!expectedValid)continue;++accepted;
                 double before[3]{};for(int row=0;row<3;++row){before[row]=r[47+row*4];for(int k=0;k<3;++k)before[row]+=double(r[44+row*4+k])*point[k];}
-                for(int k=0;k<2;++k){float error=float(std::fabs(before[k]/before[2]-double(expected[k])/expected[2])*1134);if(error>maximum)maximum=error;if(error>=.03f)std::printf("pair %u mode %u record %u error %.6f\n",pair,mode,n,error);check(error<.03f,"captured stellar projection within 0.03 input pixels");}
+                const float sx=mode==5?1387.0f:1134.0f,sy=mode==5?1370.0f:1134.0f;
+                for(int k=0;k<2;++k){float error=float(std::fabs(before[k]/before[2]-double(expected[k])/expected[2])*(k?sy:sx));if(error>maximum)maximum=error;if(error>=.03f)std::printf("pair %u mode %u record %u error %.6f\n",pair,mode,n,error);check(error<.03f,"captured stellar projection within 0.03 input pixels");}
             }
         }
     }
+    // Corona mode-5 generation and budget guards. The fixture above proves
+    // the captured affine mapping; these synthetic transitions prove that
+    // width/material and observed geometry writes cannot borrow stale history.
+    std::memset(model,0,sizeof(model));std::memset(scene,0,sizeof(scene));std::memset(material,0,sizeof(material));
+    model[16]=model[21]=model[30]=1;model[27]=.025f;model[31]=1e8f;material[3]=2.8791677f;material[4]=.083159015f;material[5]=.35f;
+    motion=HoloMotion{};v=run(5,1,600,1);motion.frameBoundary();v=run(5,1,600,1);check(v[59]==1,"mode5 stable-width history matches");
+    material[0]=.4f;motion.frameBoundary();v=run(5,1,600,1);check(v[59]==1,"mode5 shading-only material change retains history");
+    material[3]+=.1f;motion.frameBoundary();v=run(5,1,600,1);check(v[59]==0,"mode5 width identity rejects changed width");
+    for(int widthField=4;widthField<=5;++widthField){motion=HoloMotion{};material[3]=2.8791677f;material[4]=.083159015f;material[5]=.35f;run(5,1,600,1);motion.frameBoundary();material[widthField]+=.1f;v=run(5,1,600,1);check(v[59]==0,"mode5 width identity field rejects change");}
+    motion=HoloMotion{};material[3]=2.8791677f;run(5,1,600,1);motion.frameBoundary();motion.resourceWritten(vb0.Get(),0,0);v=run(5,1,600,1);check(v[59]==1,"mode5 empty VB write preserves history");
+    motion=HoloMotion{};run(5,1,600,1);motion.frameBoundary();motion.resourceWritten(vb0.Get());v=run(5,1,600,1);check(v[59]==0,"mode5 VB write invalidates history");
+    motion=HoloMotion{};run(5,1,600,1);motion.frameBoundary();motion.resourceWritten(ib.Get());v=run(5,1,600,1);check(v[59]==0,"mode5 IB write invalidates history");
+    motion=HoloMotion{};run(5,1,600,1);motion.frameBoundary();motion.resourceWritten(nullptr);v=run(5,1,600,1);check(v[59]==0,"mode5 unknown write invalidates history");
+    motion=HoloMotion{};for(unsigned i=0;i<128;++i)run(5,1,600,1);run(5,1,600,1,false,false,false);
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T size=0;messages->GetMessage(i,nullptr,&size);std::vector<char> data(size);auto* m=reinterpret_cast<D3D11_MESSAGE*>(data.data());hr(messages->GetMessage(i,m,&size));if(m->Severity<=D3D11_MESSAGE_SEVERITY_ERROR){std::puts(m->pDescription);check(false,"D3D debug layer");}}
     if(argc>2)verifyOrbitalVertices(dev.Get(),ctx.Get(),argv[2]);
     if(argc>3)verifyRingOpacity(dev.Get(),ctx.Get(),argv[3]);
