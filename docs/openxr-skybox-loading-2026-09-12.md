@@ -84,7 +84,7 @@ priority. Clear/shutdown release retained faces. Fades, grid rendering,
 suspension, unobserved lat-long forms and a policy for arbitrary missed game
 deadlines remain explicit follow-up work.
 
-## Validation and next headset gate
+## Validation and headset gate
 
 Luna implemented the initial capture and renderer. Parent review corrected
 transaction boundaries, shader packing, rotation and UV signs, color decoding,
@@ -107,19 +107,18 @@ checks, 219 compositor checks, 74 skybox capture checks, 5240 stereo checks, 62
 owner-service checks, 28 native self-tests and the 252-key config contract. The
 final log is `build/openxr-skybox-final-build.log`; executable, source, loader
 and manifest hashes are retained in `build/openxr-skybox-validation.json`. The
-fresh native gate remains pending. Earlier native receipts do not qualify the
-changed executable. Clearing during idle loading is currently qualified by
-desktop frame/policy tests; this native scene exercises override retirement
-after its first completed game pair.
+fresh native API and user visual gates passed as recorded below. Earlier native
+receipts did not qualify the changed executable. Clearing during idle loading
+is currently qualified by desktop frame/policy tests; this native scene
+exercises override retirement after its first completed game pair.
 
-For the next 20-second PiOpenXR run, close Frontier and SteamVR and obtain
-fresh readiness with the Pimax worn. The scene begins with roughly three
-seconds of a colored grid surrounding the viewer, then switches to the normal
-triangle. The grid is a diagnostic texture pattern, not an implementation of
-SteamVR's compositor grid. Caller skybox textures are overwritten and released
-before the viewing interval. Both views must stay upright and stable during
-head rotation, the transition must look normal, and the test must close
-normally.
+For this 20-second PiOpenXR gate, close Frontier and SteamVR and obtain fresh
+readiness with the Pimax worn. The scene begins with roughly three seconds of a
+colored grid surrounding the viewer, then switches to the normal triangle. The
+grid is a diagnostic texture pattern, not an implementation of SteamVR's
+compositor grid. Caller skybox textures are overwritten and released before the
+viewing interval. Both views must stay upright and stable during head rotation,
+the transition must look normal, and the test must close normally.
 
 The receipt must show loading projection frames with zero game Submits and an
 unchanged game pose cache, followed by one transition to scene rendering and
@@ -128,3 +127,47 @@ startup frames. Total XR frames additionally include separately counted loading
 frames. Eye copies/Submits remain twice the completed game stereo pairs;
 loading must not inflate those counts. Normal System-thread Shutdown, owner
 join, reset events and resource cleanup must continue to pass.
+
+## Native result and limits
+
+The `612d73e` executable completed the freshly authorized PiOpenXR run on
+2026-09-12. Its executable, all 74 source inputs, loader and runtime manifest
+matched the final-build record. Pimax OpenXR 0.1.0 reported D3D11.1, 5424 x
+5356 per eye and sRGB swapchain format 29. The receipt records exit 0 after
+21.016 seconds, with no watchdog timeout. Frontier and SteamVR were absent at
+preflight and at the post-test process observation.
+
+The owner rendered 223 skybox projection frames while the application made no
+Submit calls. Its only prior compositor wait was the startup geometry frame;
+the game pose cache remained unchanged throughout the loading interval. The
+first accepted scene Submit produced exactly one transition from loading, and
+the override was cleared after the first completed game pair. All private
+skybox textures retired. This run did not exercise the deferred empty frame for
+clearing during idle loading (`clear_frames=0`).
+
+The subsequent scene completed 1531 main-loop frames: 1529 stereo pairs and two
+zero-layer frames. Compositor waits were 1532, including the startup frame;
+cached comparisons were 1531. There were 3058 Submit calls and private eye
+copies, and 1529 handoffs/compositions. Loading did not inflate those game
+counters. All 1530 sampled scene views and head poses were valid.
+
+Init, System and owner thread IDs were distinct (34544, 23068 and 39408). Both
+seated resets invalidated caches and delivered their reset event, with zero
+position error and yaw errors below 0.000001 radians. There were 1815 event
+pumps and 1850 live System queries, of which 1849 returned valid poses; these
+counters do not establish the cause of the one invalid query. Shutdown ran on
+the System thread, joined the owner, retired interfaces, advanced the token to
+2 and cleaned resources once. No natural runtime-origin change was observed.
+
+The user confirmed that the colored grid appeared in both eyes, stayed upright
+and fixed during head turns, transitioned normally to the triangle, and that
+the triangle looked and tracked normally and the test closed normally. This
+completes the standalone loading-to-scene visual and normal-lifecycle gate. It
+is not a frame-timing or native Frontier qualification.
+
+The receipt, output and post-test process observation are under
+`build/openxr-native-20260912-184533`; parsed counters and visual confirmation
+are retained in `build/openxr-skybox-validation.json`. Live game-device
+ownership, graphics-state preservation, complete legacy exports, the paired
+feature handshake and remaining compositor features still need implementation
+and qualification before native Frontier launch.

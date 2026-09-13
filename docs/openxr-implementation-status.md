@@ -124,9 +124,13 @@ game supplies no frames, retire a cleared override with an empty frame, and
 hand control back to scene Submit without replacing the game's cached poses.
 The full build passed, including 5240 stereo, 74 skybox-copy and 150
 frame/loading checks. WARP pixel tests cover face orientation, color
-conversion, source lifetime and swapchain failures. The new native
-loading-to-scene gate remains pending; default grid rendering, fades, lat-long
-forms and live game integration remain open.
+conversion, source lifetime and swapchain failures. The `612d73e` PiOpenXR run
+passed the API/loading/lifecycle checks: 223 loading projection frames with
+unchanged game pose caches, one transition to scene rendering, 1529 game stereo
+pairs and normal cleanup. Frontier and SteamVR were absent before and after.
+The user confirmed the grid in both eyes, stable orientation, normal
+transition, triangle tracking and closure. Default grid rendering, fades,
+lat-long forms and live game integration remain open.
 
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
