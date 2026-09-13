@@ -1,9 +1,11 @@
 #include "../../src/openxr/present_work_queue.h"
+#include "../../src/openxr/present_quiescence.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -11,6 +13,7 @@
 #include <vector>
 
 using edvr::openxr::PresentWorkQueue;
+using edvr::openxr::PresentQuiescence;
 namespace {
 std::atomic<unsigned> checks{0}, failures{0};
 void check(bool value, const char* label) {
@@ -136,10 +139,74 @@ void capacity() {
         "close cancels all sixteen queued requests without callbacks");
 }
 
+void quiescenceStopAndLateAcknowledgement() {
+  std::unique_ptr<PresentQuiescence> gate;
+  Event constructed, releasePresent, acknowledged;
+  std::thread render([&] {
+    gate = std::make_unique<PresentQuiescence>();
+    auto& value = *gate; constructed.signal();
+    check(releasePresent.wait(), "simulated Present returns before acknowledgement");
+    check(value.acknowledge(true), "render acknowledgement accepted after Present");
+    check(!value.acknowledge(true), "repeat acknowledgement rejected");
+    acknowledged.signal();
+  });
+  check(constructed.wait(), "quiescence render object constructed");
+  bool first = false;
+  std::thread waiter([&] { first = gate->requestAndWait(std::chrono::milliseconds(20)); });
+  check(reaches([&] { return gate->stopRequested(); }), "external stop remains requested");
+  waiter.join(); check(!first && !gate->stopped(), "deadline returns false before Present acknowledgement");
+  releasePresent.signal(); check(acknowledged.wait(), "late acknowledgement completed");
+  check(gate->stopRequested() && gate->stopped(), "late acknowledgement permanently stops admission");
+  check(gate->requestAndWait(std::chrono::milliseconds(1)), "repeated waiter observes successful outcome");
+  render.join();
+}
+
+void quiescenceFailureAndWaiters() {
+  std::unique_ptr<PresentQuiescence> gate; Event constructed, requested, release;
+  std::atomic<bool> stopObserved{false};
+  std::thread render([&] {
+    gate=std::make_unique<PresentQuiescence>(); auto& value=*gate; constructed.signal();
+    check(reaches([&] { return value.stopRequested(); }), "render observes permanent stop request");
+    stopObserved = value.stopRequested();
+    requested.signal();
+    check(value.acknowledge(false), "failure acknowledgement accepted");
+    check(!value.stopped(), "failure acknowledgement does not report stopped");
+    release.wait();
+  });
+  check(constructed.wait(), "failure object constructed");
+  bool one=true, two=true;
+  std::thread a([&] { one=gate->requestAndWait(std::chrono::seconds(2)); });
+  check(requested.wait(), "render saw request before failure acknowledgement");
+  std::thread b([&] { two=gate->requestAndWait(std::chrono::seconds(2)); });
+  a.join(); b.join(); release.signal(); render.join();
+  check(!one && !two && stopObserved, "two waiters receive one failure outcome");
+}
+
+void quiescenceWrongThreadAndSelfWait() {
+  std::unique_ptr<PresentQuiescence> gate; Event constructed, release;
+  Event finished;
+  std::thread render([&] {
+    gate=std::make_unique<PresentQuiescence>(); auto& value=*gate;
+    check(!value.acknowledge(true)&&!value.stopped(), "acknowledgement before stop request rejected");
+    constructed.signal(); release.wait();
+    check(!value.requestAndWait(std::chrono::milliseconds(1)), "bound render thread cannot wait");
+    check(value.acknowledge(true), "bound render thread can acknowledge");
+    finished.signal();
+  });
+  check(constructed.wait(), "self-wait object constructed");
+  std::atomic<bool> wrongAck{true}; std::thread foreign([&] { wrongAck=gate->acknowledge(true); }); foreign.join();
+  check(!wrongAck && !gate->stopRequested(), "wrong-thread acknowledgement rejected without requesting stop");
+  check(!gate->requestAndWait(std::chrono::milliseconds(0))&&gate->stopRequested(),
+    "zero deadline requests stop without a premature successful result");
+  release.signal(); check(finished.wait(), "self-wait rejection leaves render thread usable"); render.join();
+}
+
 int selfTest() {
   Watchdog watchdog;
   basicAndOrdering(); exceptionAndCaptureLifetime(); reentrantAndClose();
   cancellationAndActiveClose(); capacity();
+  quiescenceStopAndLateAcknowledgement(); quiescenceWrongThreadAndSelfWait();
+  quiescenceFailureAndWaiters();
   std::printf("openxr_present_queue_test: %u checks, %u failures\n", checks.load(), failures.load());
   return failures ? 1 : 0;
 }

@@ -39,11 +39,14 @@ class PresentDevice final {
     }
     return r;
   }
-  HRESULT present(UINT flags=0) {
+  void pumpMessages() {
     MSG message{};
     while(PeekMessageW(&message,window_,0,0,PM_REMOVE)) {
       TranslateMessage(&message);DispatchMessageW(&message);
     }
+  }
+  HRESULT present(UINT flags=0) {
+    pumpMessages();
     return swapchain_?swapchain_->Present(0,flags):E_UNEXPECTED;
   }
   ID3D11Device* device()const{return device_.Get();}

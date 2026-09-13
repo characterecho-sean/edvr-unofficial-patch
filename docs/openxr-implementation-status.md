@@ -3,13 +3,19 @@
 The current [Present-hook checkpoint](openxr-present-boundary-2026-09-13.md)
 routes staged OpenXR work through the graphics proxy's real owned-swapchain
 Present callback, with separate Init/render callers and a D3D11 device created
-before VR Init. The full build and desktop gates pass, including 65 actual-DLL
-Present checks and 41 CPU queue checks. Its `2734c15` PiOpenXR run reached the
-scene with four distinct callers and successful final GPU drains, then stalled
-during shutdown until the watchdog terminated it. The user saw normal rendering
-until the triangle became headlocked at the end. The gate failed; flushed
-teardown diagnostics now build and pass the desktop suite, with a traced
-headset repeat pending. The earlier [render-caller
+before VR Init. Its `2734c15` PiOpenXR run reached the scene with four distinct
+callers and successful final GPU drains, then stalled during shutdown until the
+watchdog terminated it. The traced `74612d5` repeat also became headlocked at
+the end. A short automated reproduction and local minidump narrowed the stall
+to session destruction overlapping continued Present calls; both callers were
+waiting in the graphics driver. This does not establish an internal driver lock
+cycle. The correction waits for the final Present to return and its callback
+lease to retire before allowing XR-owner teardown, while continuing window
+message delivery. The full build passed, including 80 actual-DLL Present and 63
+CPU queue checks. A five-second automated PiOpenXR probe then passed: the
+callback retired, no further Presents occurred, session destruction completed
+in 63 ms and the child exited normally. The full-length headset appearance,
+tracking and closure check remains pending. The earlier [render-caller
 handoff](openxr-render-thread-2026-09-13.md) passed its `064fc0d` paired-proxy
 PiOpenXR run, with normal grid/triangle appearance, tracking and closure
 confirmed by the user. Native Frontier transport remains unimplemented. The

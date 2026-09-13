@@ -33,6 +33,7 @@
 #include "../../src/openxr/owner_service.h"
 #include "../../src/openxr/render_thread_dispatcher.h"
 #include "../../src/openxr/present_work_queue.h"
+#include "../../src/openxr/present_quiescence.h"
 #include "../../src/openxr/render_boundary_client.h"
 #include <cstdio>
 #include <cstring>
@@ -137,6 +138,7 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
 bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
 struct PresentHost {
   PresentWorkQueue work;
+  PresentQuiescence quiescence;
   ID3D11Device* device=nullptr;
   ID3D11DeviceContext* context=nullptr;
   DWORD thread=GetCurrentThreadId();
@@ -753,6 +755,19 @@ class NativeBackend final:public RuntimeBackend {
     ShutdownTrace closeStage("backend_render_close",tracing);
     render.close();
     closeStage.end(true);
+    if(present) {
+      // Runtime destruction may issue D3D work of its own. Finish the real
+      // Present call and retire its callback before allowing owner teardown.
+      // A flag alone is not completion: the render caller acknowledges only
+      // after returning from Present and releasing its callback lease.
+      ShutdownTrace quiesce("backend_present_quiesce",tracing);
+      const bool stopped=present->quiescence.requestAndWait();
+      quiesce.end(stopped);
+      if(!stopped) {
+        std::puts("error,present_quiesce_failed_resources_retained_until_process_exit");
+        std::fflush(stdout);std::_Exit(3);
+      }
+    }
     bool cleaned=!host;
     ShutdownTrace joinStage("backend_owner_join",tracing);
     const bool joined=owner.stop([&]{
@@ -1120,12 +1135,31 @@ int runWithPresent(const Options& options) {
     catch(...){std::puts("error,present_controller_exception");}
     finished.store(true,std::memory_order_release);
   });
-  uint64_t presents=0;bool presenting=true;
+  uint64_t presents=0,presentsAtQuiesce=0;
+  bool presenting=true,quiescenceHandled=false,callbackRetired=false;
   while(!finished.load(std::memory_order_acquire)) {
-    if(FAILED(device.present())) {
+    if(present.quiescence.stopRequested()) {
+      if(!quiescenceHandled) {
+        ShutdownTrace quiesce("present_quiesce");
+        // This caller is outside Present, so the callback has unwound. Closing
+        // the queue also cancels any rejected/late foreign requests.
+        present.work.close();
+        const auto closed=client.close();
+        const auto released=client.release();
+        callbackRetired=closed==S_OK&&released==S_OK;
+        presentsAtQuiesce=presents;quiescenceHandled=true;
+        const bool acknowledged=present.quiescence.acknowledge(callbackRetired);
+        quiesce.end(acknowledged&&callbackRetired);
+      }
+      // Keep Windows message delivery alive without entering DXGI or touching
+      // the immediate context while the XR owner destroys its session.
+      device.pumpMessages();
+    } else if(FAILED(device.present())) {
       presenting=false;present.work.close();
+      ++presents;
+    } else {
+      ++presents;
     }
-    ++presents;
     Sleep(1);
   }
   ShutdownTrace controllerJoin("present_controller_join");
@@ -1137,11 +1171,14 @@ int runWithPresent(const Options& options) {
   const auto released=client.release();
   callbackRelease.end(released==S_OK);
   present.work.close();
-  const bool passed=outcome==0&&presenting&&present.correct&&present.callbacks>0&&
+  const bool quiesced=quiescenceHandled&&callbackRetired&&present.quiescence.stopped()&&presents==presentsAtQuiesce;
+  const bool passed=outcome==0&&presenting&&present.correct&&present.callbacks>0&&quiesced&&
     initCaller!=present.thread&&closed==S_OK&&released==S_OK;
   std::printf("present_boundary,presents=%llu,callbacks=%llu,render_thread=%lu,init_thread=%lu,device_before_init=1,close=%08lx,release=%08lx,passed=%u\n",
     (unsigned long long)presents,(unsigned long long)present.callbacks,(unsigned long)present.thread,
     (unsigned long)initCaller,(unsigned long)closed,(unsigned long)released,unsigned(passed));
+  std::printf("present_teardown,quiesced=%u,callback_retired=%u,presents_after_quiesce=%llu\n",
+    unsigned(quiesced),unsigned(callbackRetired),(unsigned long long)(quiescenceHandled?presents-presentsAtQuiesce:0));
   std::puts(passed?"native_present: PASS":"native_present: INCOMPLETE_OR_FAILED");
   return passed?0:4;
 }

@@ -8,6 +8,7 @@
 #include "../../src/common/render_boundary.h"
 #include "../../src/openxr/render_boundary_client.h"
 #include "../../src/openxr/present_work_queue.h"
+#include "../../src/openxr/present_quiescence.h"
 #include "../../src/openxr/owner_service.h"
 #include "../../src/openxr/render_thread_dispatcher.h"
 #include "../../src/openxr/graphics_bridge_client.h"
@@ -199,6 +200,68 @@ bool closeOrdering(HMODULE proxy, IDXGISwapChain* chain, ID3D11Device* device, I
   return failures==0;
 }
 
+void quiescentTeardown(HMODULE proxy, PresentDevice& present) {
+  PresentHost host; host.device=present.device();host.context=present.context();
+  host.renderThread=GetCurrentThreadId();check(host.queue.bindCurrentThread(),"quiescence queue bind");
+  PresentQuiescence quiescence;
+  EdvrRenderBoundaryRequest req{sizeof(req),EDVR_RENDER_BOUNDARY_VERSION_1,
+    host.device,&PresentHost::callback,&host};
+  RenderBoundaryClient client;
+  const HRESULT acquired=client.acquire(proxy,req);
+  check(acquired==S_OK,"quiescence callback registration");
+  if(acquired!=S_OK)return;
+  D3D11_TEXTURE2D_DESC desc{};
+  desc.Width=desc.Height=desc.ArraySize=desc.MipLevels=desc.SampleDesc.Count=1;
+  desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+  ComPtr<ID3D11Texture2D> target,staging;ComPtr<ID3D11RenderTargetView> rtv;
+  bool created=SUCCEEDED(host.device->CreateTexture2D(&desc,nullptr,&target))&&
+    SUCCEEDED(host.device->CreateRenderTargetView(target.Get(),nullptr,&rtv));
+  desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+  created=created&&SUCCEEDED(host.device->CreateTexture2D(&desc,nullptr,&staging));
+  check(created,"quiescence teardown GPU resources");
+  if(!created)return;
+  OwnerService owner;const bool started=owner.start();check(started,"quiescence XR owner started");
+  if(!started)return;
+  Event cleanupEntered,releaseCleanup;
+  std::atomic<bool> retired{false},done{false};bool joined=false;
+  std::thread system([&]{
+    const bool stopped=quiescence.requestAndWait();
+    check(stopped,"System caller waits for acknowledged render stop");
+    if(stopped)joined=owner.stop([&]{
+      check(GetCurrentThreadId()!=host.renderThread&&retired&&quiescence.stopped(),
+        "runtime teardown uses XR owner only after callback retirement");
+      // Model a runtime's own immediate-context work during destruction.
+      // The main caller must remain out of Present while this executes.
+      const float green[]{0,1,0,1};host.context->ClearRenderTargetView(rtv.Get(),green);
+      host.context->CopyResource(staging.Get(),target.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      const HRESULT mappedResult=host.context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped);
+      check(SUCCEEDED(mappedResult),"runtime teardown GPU readback completes");
+      if(SUCCEEDED(mappedResult)) {
+        uint32_t pixel{};std::memcpy(&pixel,mapped.pData,sizeof(pixel));
+        check(pixel==0xff00ff00,"runtime teardown GPU result is correct");
+        host.context->Unmap(staging.Get(),0);
+      }
+      cleanupEntered.signal();check(releaseCleanup.wait(),"runtime teardown released after message pumping");
+    });
+    done=true;
+  });
+  check(reaches([&]{return quiescence.stopRequested();}),"System requests stop before teardown");
+  // A request may arrive just after the loop's last admission check. The
+  // owner must still wait for this final Present to return and be acknowledged.
+  check(SUCCEEDED(present.present())&&host.callbacks==1&&!done,
+    "final real Present completes before quiescence acknowledgement");
+  host.queue.close();retired=client.close()==S_OK&&client.release()==S_OK;
+  const bool acknowledged=quiescence.acknowledge(retired);
+  check(retired&&acknowledged,"render caller retires lease and acknowledges stop");
+  check(cleanupEntered.wait(),"XR teardown begins after acknowledgement");
+  for(unsigned i=0;i<8;++i)present.pumpMessages();
+  check(host.callbacks==1&&!done,"message pumping leaves Present stopped throughout teardown");
+  releaseCleanup.signal();system.join();
+  check(joined&&done,"System joins XR teardown without another Present");
+  owner.stop();
+}
+
 int selfTest(const std::wstring& supplied) {
   Watchdog watchdog; wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr,exe,MAX_PATH); std::wstring path=supplied;
   if (path.empty()) { path=exe; const auto slash=path.find_last_of(L"\\/"); path=path.substr(0,slash+1)+L"d3d11.dll"; }
@@ -210,6 +273,7 @@ int selfTest(const std::wstring& supplied) {
   Counts counts{countsFn}; if (counts.fn) counts.fn(&counts.privateBefore,&counts.unknownBefore);
   runActual(proxy,present.swapchain(),present.device(),present.context(),counts);
   closeOrdering(proxy,present.swapchain(),present.device(),present.context());
+  quiescentTeardown(proxy,present);
   return failures?1:0;
 }
 }
