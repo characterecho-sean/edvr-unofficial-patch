@@ -85,8 +85,8 @@ bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
 }
 void nightVisionConfigure(Config& cfg){
     bool on=cfg.getBool("fix.night_vision_stability",true);
-    float gain=cfg.getFloat("advanced.night_vision_brightness",2.0f);
-    if(!std::isfinite(gain))gain=2.0f;
+    float gain=cfg.getFloat("fix.night_vision_brightness",8.0f);
+    if(!std::isfinite(gain))gain=8.0f;
     gain=(std::max)(1.0f,(std::min)(gain,16.0f));
     if(!configured || on!=enabled || gain!=brightness)Log::get().note("night vision stability: %s; depth-geometry outlines, neutral terrain brightness up to %.2fx, cockpit/body exclusion, no surface fill, radial pulse. AA-independent, live A/B.",on?"on":"off (original shader)",gain);
     configured=true;enabled=on;brightness=gain;

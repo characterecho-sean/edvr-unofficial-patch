@@ -23,7 +23,7 @@ float testBrightness=2.0f;
 bool testOn=true,testFail=false;uint64_t testVs=0xFCF7BD2896751D96ull,testPs=0xF786D34B5E118D5Eull;
 Config& Config::get(){static Config c;return c;}
 bool Config::getBool(const char* key,bool def)const{check(!strcmp(key,"fix.night_vision_stability")&&def,"live key defaults on");return testOn;}
-float Config::getFloat(const char* key,float def)const{check(!strcmp(key,"advanced.night_vision_brightness")&&def==2.0f,"brightness key and default");return testBrightness;}
+float Config::getFloat(const char* key,float def)const{check(!strcmp(key,"fix.night_vision_brightness")&&def==8.0f,"brightness key and default");return testBrightness;}
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:testPs;}
 ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro*,const char*){
@@ -239,9 +239,9 @@ void brightnessTest(){
     Rig r;r.n[11][0]=0;r.n[10][1]=0;r.n[5][3]=r.n[7][1]=1000000;
     r.ctx->PSSetConstantBuffers(3,1,r.camera.GetAddressOf());
     for(unsigned i=0;i<64*64;++i){r.scene[i*4]=.002f;r.scene[i*4+1]=i%2?.008f:.004f;r.scene[i*4+2]=.006f;r.scene[i*4+3]=.375f;}
-    for(float value:{1.f,2.f,4.f,16.f,-2.f,100.f,std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity()}){
+    for(float value:{1.f,2.f,4.f,8.f,16.f,-2.f,100.f,std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity()}){
         testBrightness=value;nightVisionConfigure(Config::get());
-        const float gain=std::isfinite(value)?(std::max)(1.f,(std::min)(16.f,value)):2.f;
+        const float gain=std::isfinite(value)?(std::max)(1.f,(std::min)(16.f,value)):8.f;
         auto out=r.draw(true);const float scale=1+(gain-1)*(1-400.f/1000000);
         for(unsigned i=0;i<64*64;++i){
             for(unsigned c=0;c<3;++c)check(std::isfinite(out[i*4+c]) && std::fabs(out[i*4+c]-r.scene[i*4+c]*scale)<1e-6,"live brightness is bounded and preserves texture/hue");
