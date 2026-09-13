@@ -8,9 +8,15 @@ and properties are checked before the first application pose wait; tracking and
 event polls run between completed scene pairs while Present continues. Parent
 review corrected callback lifetime and observer checks. The full build passed,
 including 201 explicit-module and 207 bootstrap checks. All 483 source, binary,
-stage, environment and build-log hashes are recorded. The next Pimax gate is
-staged and awaits user readiness; native Frontier startup progress, complete
-legacy exports and game feature integration remain open.
+stage, environment and build-log hashes matched before and after the `ec3dd92`
+Pimax gate. That run passed with 1,527 stereo pairs, 68 valid periodic System
+samples and complete callback-held cleanup. Shutdown ran on the persistent
+System caller. The user confirmed normal viewing, tracking and closure without
+headlock. Rechecking the archived Frontier semantic trace also proves a
+complete Present during Init; shutdown progress remains unmeasured after its
+bounded census samples expired. The next step measures Frontier's actual
+shutdown window on the existing OpenVR path. Complete legacy exports, opt-in
+native game launch and game feature integration remain open.
 
 The preceding [graphics transport
 checkpoint](openxr-transport-hooks-2026-09-13.md) removes native discovery's

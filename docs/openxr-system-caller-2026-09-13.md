@@ -81,16 +81,39 @@ fixture is `c3a44506677c4b5f899742a7496d705a065f859e8488a8ab683b2508101534e6`,
 and graphics DLL is
 `4d2fde5d72bc7339bba5501836b11a838f977117a025440441ac8ff414ed3d20`.
 
-The next 20-second Pimax bootstrap gate uses the isolated minimal-LiveCopy
-configuration in `build/openxr-system-caller-native-stage-20260913/`. It
-requires fresh user readiness. In addition to normal grid/triangle viewing and
-complete callback-held cleanup, require the startup-query and application-wait
-markers, valid periodic System samples, distinct caller IDs and shutdown on the
-System caller. The scene shaders, focus timing and expected dark-grey triangle
-background are unchanged.
+## Passed Pimax gate
 
-The headset gate remains pending. This diagnostic does not establish whether
-Frontier itself continues Present during native Init and Shutdown, or cover
+The `ec3dd92` 20-second bootstrap run passed on Pimax OpenXR 0.1.0, Crystal
+Super and RTX 5090, with parallel projection enabled and 5424x5356 native
+per-eye geometry. The minimal-LiveCopy stage was
+`build/openxr-system-caller-native-stage-20260913/`; its graphics log confirms
+the minimal transport installation. All 483 recorded hashes matched before and
+after the run. The DLL's precommit stamp is `v0.16.2-65-g27227dd-dirty`; the
+source and binary hashes qualify the tested `ec3dd92` checkpoint.
+
+The child exited 0 after 21.235 seconds. It completed 1,527 stereo pairs, 3,054
+eye copies, 315 loading projections and 68 valid periodic System samples, with
+zero invalid scene poses. Startup geometry, metadata and the seated pose were
+available before the first application wait. Init ran on thread 40872, System
+on 37788, render on 9992 and the XR owner on 38288. Both shutdown records
+identify System thread 37788. All nine shutdown stages completed; session
+binding teardown spanned 15 ms on the coarse tick clock, the owner joined and
+the final callback retired without a retained generation.
+
+The user confirmed the grid and triangle in both eyes, upright and fixed in
+space during head movement, and normal closure without headlock. Focus was
+already true at the first sample; the grid began at 500 ms and the scene at
+3500 ms. Display frequency's explicit unavailable result is expected and does
+not substitute a made-up refresh rate. The scene shaders and dark-grey clear
+are unchanged.
+
+The receipt, exact binaries, stage INI, preflight/postflight snapshots,
+qualification record, graphics log and matching Pimax client/server evidence
+are archived in `build/openxr-native-20260913-125915/`. No excluded process was
+observed before or after; transient processes were not monitored. The runtime
+override affected only the diagnostic child.
+
+This diagnostic does not establish Frontier's own shutdown progress, or cover
 arbitrary concurrent System calls during a partial stereo pair or shutdown.
 Complete legacy export policy, game feature integration and a native Frontier
 flight remain separate work. No game installation or persistent setting is

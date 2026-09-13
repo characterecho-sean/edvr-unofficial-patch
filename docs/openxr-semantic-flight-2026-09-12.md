@@ -42,6 +42,23 @@ and pose queries must be safely available outside the render thread and before
 the first compositor wait. The first recommended-size response precedes that
 wait by approximately 2.62 seconds.
 
+## Present progress during lifecycle calls
+
+A later recheck of the same `f3c205e` logs proves a complete owned-swapchain
+Present inside the Init interval. Init on thread 21040 begins at QPC
+`2944404249491` and returns at `2944404716665`. On render thread 35592,
+PresentEnter is `2944404473733` and PresentExit is `2944404529836`; both
+records identify the owned swapchain with detail 1. These CPU timestamps
+establish progress during this particular OpenVR initialization, not GPU
+completion or the duration of a future OpenXR initialization.
+
+Shutdown on System thread 35880 spans QPC `2946314053449` through
+`2946314573703`. The final bounded PresentExit sample is `2944496037385`,
+sample 64/64 in the VR bank, about three minutes earlier. Shutdown Present
+progress is therefore unmeasured, not absent. The next game-facing census adds
+a separate observation window around forwarded shutdown, counting only
+successful owned Presents reaching the native callback service point.
+
 ## Geometry and tracking
 
 The initial recommended render size is `4268x4216` per eye. Both hidden meshes
