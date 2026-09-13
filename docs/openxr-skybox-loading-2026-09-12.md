@@ -63,6 +63,11 @@ timeout is not permission to draw or release; uncertain operations retire the
 renderer without retries. This still owns the diagnostic context and uses
 `ClearState`; preserving a live game's graphics state remains separate work.
 
+The subsequent [context-preservation
+checkpoint](openxr-context-state-2026-09-12.md) moves this rendering into
+private deferred command lists. The observations and native receipt below
+describe the earlier skybox executable.
+
 ## Loading ownership
 
 An accepted override before the first successful scene Submit activates startup

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <d3dcompiler.h>
 using namespace edvr::openxr;
 using Microsoft::WRL::ComPtr;
 namespace {
@@ -20,6 +21,7 @@ struct Fake {
   unsigned creates=0,destroys=0,formatCalls=0;std::vector<std::string> trace;
   std::string failure;XrResult error=XR_ERROR_RUNTIME_FAILURE;
   bool noFormats=false,wrongDimensions=false,wrongDevice=false,typeless=true,unorm=false,grow=false,badCount=false;
+  ID3D11RenderTargetView* preservedRtv=nullptr;
 };
 Fake* fake=nullptr;
 int index(XrSwapchain chain){const int n=int(reinterpret_cast<uintptr_t>(chain))-10;check(n>=0&&n<2,"swapchain handle");return n<0||n>1?0:n;}
@@ -51,8 +53,9 @@ XrResult XRAPI_PTR create(XrSession s,const XrSwapchainCreateInfo* ci,XrSwapchai
 }
 XrResult XRAPI_PTR destroy(XrSwapchain chain){
   const int eye=index(chain);auto& e=fake->eyes[eye];check(e.alive,"destroy once");++fake->destroys;
-  // No RTV may remain bound on the diagnostic context when a chain is destroyed.
-  ComPtr<ID3D11RenderTargetView> bound;fake->context->OMGetRenderTargets(1,&bound,nullptr);check(!bound,"unbind before destroy");
+  // No runtime RTV may remain bound when a chain is destroyed. A caller-owned
+  // sentinel is allowed in the context preservation fixture.
+  ComPtr<ID3D11RenderTargetView> bound;fake->context->OMGetRenderTargets(1,&bound,nullptr);check(!bound||bound.Get()==fake->preservedRtv,"unbind runtime RTV before destroy");
   e.alive=false;for(auto& image:e.images)image.Reset();return outcome("D",eye);
 }
 XrResult XRAPI_PTR images(XrSwapchain chain,uint32_t cap,uint32_t* count,XrSwapchainImageBaseHeader* output){
@@ -339,6 +342,219 @@ void skyboxSelfTest() {
     if(point[0]=='W')check(f.pixel(point[1]-'0',0,0,0)==0xffff00ff,"skybox timeout target remains untouched");
   }
 }
+
+// The renderer is a diagnostic pass which must borrow the game's immediate
+// context without changing it.  Keep this probe deliberately independent of
+// the renderer's shaders and resources: it catches both missing state restore
+// and accidental writes to a caller-owned target.
+struct DesktopState {
+  ComPtr<ID3D11Texture2D> color, srvTexture; ComPtr<ID3D11RenderTargetView> rtv; ComPtr<ID3D11DepthStencilView> dsv;
+  ComPtr<ID3D11BlendState> blend; ComPtr<ID3D11DepthStencilState> depth;
+  ComPtr<ID3D11RasterizerState> raster; ComPtr<ID3D11InputLayout> layout;
+  ComPtr<ID3D11Buffer> vb,ib,vsCb,psCb,gsCb,hsCb,dsCb,csCb;
+  ComPtr<ID3D11VertexShader> vs; ComPtr<ID3D11PixelShader> ps;
+  ComPtr<ID3D11GeometryShader> gs; ComPtr<ID3D11HullShader> hs; ComPtr<ID3D11DomainShader> ds;
+  ComPtr<ID3D11ComputeShader> cs; ComPtr<ID3D11SamplerState> samplers[2];
+  ComPtr<ID3D11ShaderResourceView> srvs[2]; ComPtr<ID3D11Texture2D> uavTexture; ComPtr<ID3D11UnorderedAccessView> uav;
+  D3D11_VIEWPORT viewport{}; D3D11_RECT scissor{}; UINT stride=0,offset=0;
+  FLOAT blendFactor[4]{.1f,.2f,.3f,.4f};
+  ComPtr<ID3D11Predicate> predicate;
+  ComPtr<ID3D11Buffer> counterBuffer, counterReadback;
+  ComPtr<ID3D11UnorderedAccessView> counterUav;
+};
+ComPtr<ID3DBlob> probeShader(const char* text,const char* entry,const char* model) {
+  ComPtr<ID3DBlob> code,errors; const auto hr=D3DCompile(text,std::strlen(text),"probe",nullptr,nullptr,entry,model,0,0,&code,&errors);
+  if(FAILED(hr)&&errors)std::printf("sentinel %s compile: %s\n",entry,static_cast<const char*>(errors->GetBufferPointer()));
+  check(SUCCEEDED(hr),"sentinel shader compile"); return code;
+}
+void makeDesktopState(Fixture& f,DesktopState& s) {
+  auto* d=f.runtime.device.Get(); auto* c=f.runtime.context.Get();
+  D3D11_TEXTURE2D_DESC td{};td.Width=8;td.Height=8;td.MipLevels=td.ArraySize=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.SampleDesc.Count=1;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+  ComPtr<ID3D11Texture2D> depth; check(SUCCEEDED(d->CreateTexture2D(&td,nullptr,&s.color)),"sentinel color allocation");
+  check(SUCCEEDED(d->CreateRenderTargetView(s.color.Get(),nullptr,&s.rtv)),"sentinel RTV");
+  D3D11_TEXTURE2D_DESC dd=td;dd.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;dd.BindFlags=D3D11_BIND_DEPTH_STENCIL;check(SUCCEEDED(d->CreateTexture2D(&dd,nullptr,&depth)),"sentinel depth allocation");check(SUCCEEDED(d->CreateDepthStencilView(depth.Get(),nullptr,&s.dsv)),"sentinel DSV");
+  D3D11_BLEND_DESC bd{};bd.RenderTarget[0].BlendEnable=TRUE;bd.RenderTarget[0].SrcBlend=D3D11_BLEND_SRC_ALPHA;bd.RenderTarget[0].DestBlend=D3D11_BLEND_INV_SRC_ALPHA;bd.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;bd.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;bd.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;bd.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;check(SUCCEEDED(d->CreateBlendState(&bd,&s.blend)),"sentinel blend state");
+  D3D11_DEPTH_STENCIL_DESC zd{};zd.DepthEnable=TRUE;zd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;zd.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;zd.StencilEnable=TRUE;zd.StencilReadMask=0x5a;zd.StencilWriteMask=0xa5;zd.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};zd.BackFace=zd.FrontFace;check(SUCCEEDED(d->CreateDepthStencilState(&zd,&s.depth)),"sentinel depth state");
+  D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_WIREFRAME;rd.CullMode=D3D11_CULL_NONE;rd.ScissorEnable=TRUE;check(SUCCEEDED(d->CreateRasterizerState(&rd,&s.raster)),"sentinel raster state");
+  D3D11_BUFFER_DESC bdv{};bdv.ByteWidth=64;bdv.Usage=D3D11_USAGE_DEFAULT;bdv.BindFlags=D3D11_BIND_VERTEX_BUFFER|D3D11_BIND_SHADER_RESOURCE;check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.vb)),"sentinel VB");bdv.BindFlags=D3D11_BIND_INDEX_BUFFER;check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.ib)),"sentinel IB");
+  bdv.BindFlags=D3D11_BIND_CONSTANT_BUFFER;check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.vsCb)),"sentinel VS CB");check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.psCb)),"sentinel PS CB");check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.gsCb)),"sentinel GS CB");check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.hsCb)),"sentinel HS CB");check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.dsCb)),"sentinel DS CB");check(SUCCEEDED(d->CreateBuffer(&bdv,nullptr,&s.csCb)),"sentinel CS CB");
+  const char* vsSrc="struct V{float4 p:POSITION;}; struct O{float4 p:SV_Position;}; O vs(V i){O o;o.p=i.p;return o;}";
+  const char* psSrc="float4 ps():SV_Target{return float4(1,0,1,1);}";
+  const char* gsSrc="struct V{float4 p:SV_Position;}; [maxvertexcount(1)] void gs(point V i[1],inout PointStream<V> o){o.Append(i[0]);}";
+  const char* hsSrc="struct V{float4 p:SV_Position;}; struct F{float e[3]:SV_TessFactor;float i:SV_InsideTessFactor;}; F pc(InputPatch<V,3> p,uint pid:SV_PrimitiveID){F f={(float)1,(float)1,(float)1,(float)1};return f;} [domain(\"tri\")] [partitioning(\"integer\")] [outputtopology(\"triangle_cw\")] [outputcontrolpoints(3)] [patchconstantfunc(\"pc\")] V hs(InputPatch<V,3> p,uint i:SV_OutputControlPointID,uint pid:SV_PrimitiveID){return p[i];}";
+  const char* dsSrc="struct V{float4 p:SV_Position;}; [domain(\"tri\")] V ds(float3 c:SV_DomainLocation,const OutputPatch<V,3> p,float e[3]:SV_TessFactor,float i:SV_InsideTessFactor){return p[0];}";
+  const char* csSrc="RWTexture2D<float4> x:register(u7); [numthreads(1,1,1)] void cs(uint3 id:SV_DispatchThreadID){}";
+  auto v=probeShader(vsSrc,"vs","vs_5_0"),p=probeShader(psSrc,"ps","ps_5_0"),g=probeShader(gsSrc,"gs","gs_5_0"),h=probeShader(hsSrc,"hs","hs_5_0"),q=probeShader(dsSrc,"ds","ds_5_0"),k=probeShader(csSrc,"cs","cs_5_0");
+  if(!v||!p||!g||!h||!q||!k){check(false,"all sentinel shaders available");return;}
+  check(SUCCEEDED(d->CreateVertexShader(v->GetBufferPointer(),v->GetBufferSize(),nullptr,&s.vs)),"sentinel VS");check(SUCCEEDED(d->CreatePixelShader(p->GetBufferPointer(),p->GetBufferSize(),nullptr,&s.ps)),"sentinel PS");check(SUCCEEDED(d->CreateGeometryShader(g->GetBufferPointer(),g->GetBufferSize(),nullptr,&s.gs)),"sentinel GS");check(SUCCEEDED(d->CreateHullShader(h->GetBufferPointer(),h->GetBufferSize(),nullptr,&s.hs)),"sentinel HS");check(SUCCEEDED(d->CreateDomainShader(q->GetBufferPointer(),q->GetBufferSize(),nullptr,&s.ds)),"sentinel DS");check(SUCCEEDED(d->CreateComputeShader(k->GetBufferPointer(),k->GetBufferSize(),nullptr,&s.cs)),"sentinel CS");
+  D3D11_SAMPLER_DESC sd{};sd.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;sd.AddressU=sd.AddressV=sd.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;for(auto& x:s.samplers)check(SUCCEEDED(d->CreateSamplerState(&sd,&x)),"sentinel sampler");
+  check(SUCCEEDED(d->CreateTexture2D(&td,nullptr,&s.srvTexture)),"sentinel SRV resource");D3D11_SHADER_RESOURCE_VIEW_DESC sv{};sv.Format=td.Format;sv.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;check(SUCCEEDED(d->CreateShaderResourceView(s.srvTexture.Get(),&sv,&s.srvs[0])),"sentinel SRV");check(SUCCEEDED(d->CreateShaderResourceView(s.srvTexture.Get(),&sv,&s.srvs[1])),"sentinel high SRV");
+  D3D11_TEXTURE2D_DESC ud{};ud.Width=1;ud.Height=1;ud.MipLevels=ud.ArraySize=1;ud.Format=DXGI_FORMAT_R8G8B8A8_UNORM;ud.SampleDesc.Count=1;ud.BindFlags=D3D11_BIND_UNORDERED_ACCESS;check(SUCCEEDED(d->CreateTexture2D(&ud,nullptr,&s.uavTexture)),"sentinel UAV resource");
+  D3D11_UNORDERED_ACCESS_VIEW_DESC uv{};uv.Format=ud.Format;uv.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2D;check(SUCCEEDED(d->CreateUnorderedAccessView(s.uavTexture.Get(),&uv,&s.uav)),"sentinel UAV");
+  D3D11_INPUT_ELEMENT_DESC ie{"POSITION",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};check(SUCCEEDED(d->CreateInputLayout(&ie,1,v->GetBufferPointer(),v->GetBufferSize(),&s.layout)),"sentinel input layout");
+  c->OMSetRenderTargets(1,s.rtv.GetAddressOf(),s.dsv.Get());c->OMSetBlendState(s.blend.Get(),s.blendFactor,0x13579bdf);c->OMSetDepthStencilState(s.depth.Get(),0x37);c->RSSetState(s.raster.Get());s.viewport={1,2,5,4,0,1};c->RSSetViewports(1,&s.viewport);s.scissor={1,1,6,7};c->RSSetScissorRects(1,&s.scissor);c->IASetVertexBuffers(0,1,s.vb.GetAddressOf(),&s.stride,&s.offset);c->IASetIndexBuffer(s.ib.Get(),DXGI_FORMAT_R16_UINT,4);c->IASetInputLayout(s.layout.Get());c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);c->VSSetShader(s.vs.Get(),nullptr,0);c->PSSetShader(s.ps.Get(),nullptr,0);c->GSSetShader(s.gs.Get(),nullptr,0);c->HSSetShader(s.hs.Get(),nullptr,0);c->DSSetShader(s.ds.Get(),nullptr,0);c->CSSetShader(s.cs.Get(),nullptr,0);c->VSSetConstantBuffers(7,1,s.vsCb.GetAddressOf());c->PSSetConstantBuffers(7,1,s.psCb.GetAddressOf());c->GSSetConstantBuffers(7,1,s.gsCb.GetAddressOf());c->HSSetConstantBuffers(7,1,s.hsCb.GetAddressOf());c->DSSetConstantBuffers(7,1,s.dsCb.GetAddressOf());c->CSSetConstantBuffers(7,1,s.csCb.GetAddressOf());c->PSSetShaderResources(7,1,s.srvs[1].GetAddressOf());c->PSSetSamplers(7,1,s.samplers[1].GetAddressOf());c->CSSetUnorderedAccessViews(7,1,s.uav.GetAddressOf(),nullptr);c->SetPredication(nullptr,FALSE);const FLOAT pink[]={1,0,1,1};c->ClearRenderTargetView(s.rtv.Get(),pink);
+}
+void compareDesktopState(Fixture& f,const DesktopState& s,const char* tag) {
+  auto* c=f.runtime.context.Get();ComPtr<ID3D11RenderTargetView> r;ComPtr<ID3D11DepthStencilView> z;c->OMGetRenderTargets(1,&r,&z);check(r.Get()==s.rtv.Get()&&z.Get()==s.dsv.Get(),tag);ComPtr<ID3D11BlendState>b;FLOAT bf[4]{};UINT mask=0;c->OMGetBlendState(&b,bf,&mask);check(b.Get()==s.blend.Get()&&mask==0x13579bdf&&std::memcmp(bf,s.blendFactor,sizeof bf)==0,tag);ComPtr<ID3D11DepthStencilState>ds;UINT sr=0;c->OMGetDepthStencilState(&ds,&sr);check(ds.Get()==s.depth.Get()&&sr==0x37,tag);ComPtr<ID3D11RasterizerState>rs;c->RSGetState(&rs);D3D11_VIEWPORT vp{};UINT n=1;c->RSGetViewports(&n,&vp);D3D11_RECT sc{};n=1;c->RSGetScissorRects(&n,&sc);check(rs.Get()==s.raster.Get()&&!std::memcmp(&vp,&s.viewport,sizeof vp)&&!std::memcmp(&sc,&s.scissor,sizeof sc),tag);UINT st=0,of=0;ID3D11Buffer* vb=nullptr;c->IAGetVertexBuffers(0,1,&vb,&st,&of);check(vb==s.vb.Get()&&st==s.stride&&of==s.offset,tag);if(vb)vb->Release();ComPtr<ID3D11Buffer>ib;c->IAGetIndexBuffer(&ib,nullptr,&of);check(ib.Get()==s.ib.Get()&&of==4,tag);ComPtr<ID3D11InputLayout>il;c->IAGetInputLayout(&il);check(il.Get()==s.layout.Get(),tag);D3D11_PRIMITIVE_TOPOLOGY top{};c->IAGetPrimitiveTopology(&top);check(top==D3D11_PRIMITIVE_TOPOLOGY_LINELIST,tag);ComPtr<ID3D11VertexShader>vs;c->VSGetShader(&vs,nullptr,nullptr);ComPtr<ID3D11PixelShader>ps;c->PSGetShader(&ps,nullptr,nullptr);ComPtr<ID3D11GeometryShader>gs;c->GSGetShader(&gs,nullptr,nullptr);ComPtr<ID3D11HullShader>hs;c->HSGetShader(&hs,nullptr,nullptr);ComPtr<ID3D11DomainShader>dsx;c->DSGetShader(&dsx,nullptr,nullptr);ComPtr<ID3D11ComputeShader>cs;c->CSGetShader(&cs,nullptr,nullptr);check(vs.Get()==s.vs.Get()&&ps.Get()==s.ps.Get()&&gs.Get()==s.gs.Get()&&hs.Get()==s.hs.Get()&&dsx.Get()==s.ds.Get()&&cs.Get()==s.cs.Get(),tag);ComPtr<ID3D11Buffer>cb;c->PSGetConstantBuffers(7,1,&cb);check(cb.Get()==s.psCb.Get(),tag);ComPtr<ID3D11Buffer>vsc;c->VSGetConstantBuffers(7,1,&vsc);ComPtr<ID3D11Buffer>gsc;c->GSGetConstantBuffers(7,1,&gsc);ComPtr<ID3D11Buffer>hsc;c->HSGetConstantBuffers(7,1,&hsc);ComPtr<ID3D11Buffer>dsc;c->DSGetConstantBuffers(7,1,&dsc);ComPtr<ID3D11Buffer>csc;c->CSGetConstantBuffers(7,1,&csc);check(vsc.Get()==s.vsCb.Get()&&gsc.Get()==s.gsCb.Get()&&hsc.Get()==s.hsCb.Get()&&dsc.Get()==s.dsCb.Get()&&csc.Get()==s.csCb.Get(),tag);ComPtr<ID3D11ShaderResourceView>srv;c->PSGetShaderResources(7,1,&srv);check(srv.Get()==s.srvs[1].Get(),tag);ComPtr<ID3D11SamplerState>sm;c->PSGetSamplers(7,1,&sm);check(sm.Get()==s.samplers[1].Get(),tag);ComPtr<ID3D11UnorderedAccessView>u;c->CSGetUnorderedAccessViews(7,1,&u);check(u.Get()==s.uav.Get(),tag);
+}
+uint32_t desktopPixel(Fixture& f,const DesktopState& s) {
+  D3D11_TEXTURE2D_DESC d{};s.color->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> r;check(SUCCEEDED(f.runtime.device->CreateTexture2D(&d,nullptr,&r)),"sentinel readback allocation");f.runtime.context->CopyResource(r.Get(),s.color.Get());D3D11_MAPPED_SUBRESOURCE m{};check(SUCCEEDED(f.runtime.context->Map(r.Get(),0,D3D11_MAP_READ,0,&m)),"sentinel readback map");uint32_t v=0;if(m.pData)std::memcpy(&v,m.pData,4);f.runtime.context->Unmap(r.Get(),0);return v;
+}
+void makeExtendedState(Fixture& f, DesktopState& s) {
+  auto* d=f.runtime.device.Get();
+  auto* c=f.runtime.context.Get();
+#define SET_STAGE(Name) \
+  c->Name##SetShaderResources(127,1,s.srvs[1].GetAddressOf()); \
+  c->Name##SetSamplers(15,1,s.samplers[1].GetAddressOf())
+  SET_STAGE(VS); SET_STAGE(PS); SET_STAGE(GS);
+  SET_STAGE(HS); SET_STAGE(DS); SET_STAGE(CS);
+#undef SET_STAGE
+  D3D11_QUERY_DESC query{D3D11_QUERY_OCCLUSION_PREDICATE,0};
+  check(SUCCEEDED(d->CreatePredicate(&query,&s.predicate)),"sentinel predicate");
+  if(!s.predicate)return;
+  c->Begin(s.predicate.Get());c->End(s.predicate.Get());
+  // The empty occlusion query is false: a private pass must not inherit this
+  // predicate and suppress its own drawing. The caller predicate is restored.
+  c->SetPredication(s.predicate.Get(),TRUE);
+  D3D11_BUFFER_DESC desc{64,D3D11_USAGE_DEFAULT,D3D11_BIND_UNORDERED_ACCESS,0,
+    D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,4};
+  check(SUCCEEDED(d->CreateBuffer(&desc,nullptr,&s.counterBuffer)),"counter buffer");
+  D3D11_UNORDERED_ACCESS_VIEW_DESC uav{};
+  uav.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
+  uav.Buffer.NumElements=16;uav.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_COUNTER;
+  check(SUCCEEDED(d->CreateUnorderedAccessView(s.counterBuffer.Get(),&uav,&s.counterUav)),"counter UAV");
+  const UINT initial=7;
+  c->CSSetUnorderedAccessViews(6,1,s.counterUav.GetAddressOf(),&initial);
+  desc={4,D3D11_USAGE_STAGING,0,D3D11_CPU_ACCESS_READ,0,0};
+  check(SUCCEEDED(d->CreateBuffer(&desc,nullptr,&s.counterReadback)),"counter readback");
+}
+void compareExtendedState(Fixture& f,const DesktopState& s) {
+  auto* c=f.runtime.context.Get();
+#define CHECK_STAGE(Name) { \
+  ComPtr<ID3D11ShaderResourceView> view;ComPtr<ID3D11SamplerState> sampler; \
+  c->Name##GetShaderResources(127,1,&view);c->Name##GetSamplers(15,1,&sampler); \
+  check(view.Get()==s.srvs[1].Get()&&sampler.Get()==s.samplers[1].Get(),#Name " high resource/sampler restored"); }
+  CHECK_STAGE(VS);CHECK_STAGE(PS);CHECK_STAGE(GS);
+  CHECK_STAGE(HS);CHECK_STAGE(DS);CHECK_STAGE(CS);
+#undef CHECK_STAGE
+  ComPtr<ID3D11Predicate> predicate;BOOL value=FALSE;
+  c->GetPredication(&predicate,&value);
+  check(predicate.Get()==s.predicate.Get()&&value==TRUE,"predicate/value restored");
+  ComPtr<ID3D11UnorderedAccessView> uav;
+  c->CSGetUnorderedAccessViews(6,1,&uav);
+  check(uav.Get()==s.counterUav.Get(),"counter UAV restored");
+  // Readback is test-only; do not leave a false caller predicate suppressing
+  // any diagnostic copy on runtimes which predicate that command.
+  c->SetPredication(nullptr,FALSE);
+  c->CopyStructureCount(s.counterReadback.Get(),0,s.counterUav.Get());
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  const HRESULT hr=c->Map(s.counterReadback.Get(),0,D3D11_MAP_READ,0,&mapped);
+  check(SUCCEEDED(hr),"counter readback map");
+  if(SUCCEEDED(hr)) {
+    UINT count=0;std::memcpy(&count,mapped.pData,sizeof(count));
+    check(count==7,"hidden UAV counter unchanged");
+    c->Unmap(s.counterReadback.Get(),0);
+  }
+  c->SetPredication(predicate.Get(),value);
+}
+void desktopStateSelfTest() {
+  {
+    Fixture f;
+    ComPtr<ID3D11Device> single;
+    ComPtr<ID3D11DeviceContext> context;
+    check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,
+      D3D11_CREATE_DEVICE_SINGLETHREADED,nullptr,0,D3D11_SDK_VERSION,
+      &single,nullptr,&context)),"singlethreaded WARP fixture");
+    D3D11Stereo rejected;
+    check(rejected.initialize(dispatch(),session,single.Get(),f.sizes)==XR_ERROR_GRAPHICS_DEVICE_INVALID,
+      "singlethreaded renderer reaches deferred-context rejection");
+    check(f.runtime.trace.empty()&&f.runtime.creates==0&&f.runtime.formatCalls==0,
+      "unsupported device rejected before all XR calls");
+    check(rejected.shutdown()==XR_SUCCESS,"unsupported-device cleanup");
+  }
+  auto verify=[](Fixture& f,const DesktopState& s,const char* tag) {
+    compareDesktopState(f,s,tag);
+    compareExtendedState(f,s);
+    f.runtime.context->SetPredication(nullptr,FALSE);
+    check(desktopPixel(f,s)==0xffff00ff,"caller target pixels unchanged");
+    f.runtime.context->SetPredication(s.predicate.Get(),TRUE);
+  };
+  {
+    Fixture f;
+    check(f.init()==XR_SUCCESS,"desktop state fixture init");
+    EyeCapture captured;
+    check(SUCCEEDED(captured.initialize(f.runtime.device.Get())),"state capture init");
+    auto source=pattern(f,false);
+    vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    check(captured.capture(vr::Eye_Left,&texture)==vr::VRCompositorError_None&&
+      captured.capture(vr::Eye_Right,&texture)==vr::VRCompositorError_None,"state capture pair");
+    SkyboxCapture sky;captureSky(f,sky);
+    DesktopState s;makeDesktopState(f,s);makeExtendedState(f,s);
+    f.runtime.preservedRtv=s.rtv.Get();
+    if(failures)return;
+    verify(f,s,"sentinel setup actually bound");
+    XrCompositionLayerProjection layer{};
+    check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"state direct render");
+    verify(f,s,"direct render preserves immediate state");
+    f.runtime.context->SetPredication(nullptr,FALSE);
+    checkPixel(f.pixel(0,0,64,59));
+    f.runtime.context->SetPredication(s.predicate.Get(),TRUE);
+    ID3D11Texture2D* output=nullptr;
+    check(f.renderer.drawEye(0,f.views[0],output)==XR_SUCCESS&&output,"state drawEye");
+    verify(f,s,"drawEye preserves immediate state");
+    check(f.renderer.renderCaptured(f.views,space,captured,layer)==XR_SUCCESS,"state captured render");
+    verify(f,s,"captured render preserves immediate state");
+    check(f.renderer.renderSkybox(f.views,space,sky,layer)==XR_SUCCESS,"state skybox render");
+    verify(f,s,"skybox render preserves immediate state");
+    check(f.renderer.shutdown()==XR_SUCCESS,"state shutdown");
+    verify(f,s,"shutdown preserves immediate state");
+  }
+  // Every renderer path must preserve state even when a pair fails after the
+  // first eye was executed. Separate fixtures keep uncertain images retired.
+  for(unsigned path=0;path<3;++path) {
+    for(const char* point:{"A0","W0","R0","A1","W1","R1","timeout0","timeout1","invalid"}) {
+      Fixture f;check(f.init()==XR_SUCCESS,"failure state fixture init");
+      EyeCapture captured;
+      check(SUCCEEDED(captured.initialize(f.runtime.device.Get())),"failure capture init");
+      auto source=pattern(f,false);
+      vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+      check(captured.capture(vr::Eye_Left,&texture)==vr::VRCompositorError_None&&
+        captured.capture(vr::Eye_Right,&texture)==vr::VRCompositorError_None,"failure capture pair");
+      SkyboxCapture sky;captureSky(f,sky);
+      DesktopState s;makeDesktopState(f,s);makeExtendedState(f,s);
+      f.runtime.preservedRtv=s.rtv.Get();
+      if(failures)return;
+      verify(f,s,"failure sentinel setup");
+      const bool invalid=!std::strcmp(point,"invalid");
+      const bool timeout=!std::strncmp(point,"timeout",7);
+      XrResult expected=XR_ERROR_RUNTIME_FAILURE;
+      if(invalid) {
+        f.views[1].pose.orientation={0,0,0,0};expected=XR_ERROR_VALIDATION_FAILURE;
+      } else {
+        f.runtime.failure=timeout?(point[7]=='0'?"W0":"W1"):point;
+        f.runtime.error=expected=timeout?XR_TIMEOUT_EXPIRED:XR_ERROR_RUNTIME_FAILURE;
+      }
+      f.runtime.trace.clear();
+      XrCompositionLayerProjection layer{};
+      auto render=[&] {
+        if(path==0)return f.renderer.render(f.views,space,layer);
+        if(path==1)return f.renderer.renderCaptured(f.views,space,captured,layer);
+        return f.renderer.renderSkybox(f.views,space,sky,layer);
+      };
+      check(render()==expected,"state failure result");
+      verify(f,s,"failed pass preserves immediate state");
+      if(invalid)check(f.runtime.trace.empty(),"invalid views never acquire");
+      else {
+        const auto trace=f.runtime.trace;
+        check(!trace.empty()&&trace.back()==f.runtime.failure,"failure stops runtime dispatch");
+        check(render()==expected&&trace==f.runtime.trace,"failed pass cannot replay old work");
+        verify(f,s,"failed retry preserves immediate state");
+      }
+      check(f.renderer.shutdown()==XR_SUCCESS,"failed-pass shutdown");
+      verify(f,s,"failed-pass shutdown preserves immediate state");
+    }
+  }
+}
 int selfTest(){
   for(bool unorm:{false,true}){
     Fixture f;f.runtime.unorm=unorm;f.runtime.grow=true;check(f.init()==XR_SUCCESS,"initialize actual swapchains/RTVs/shaders");
@@ -394,6 +610,7 @@ int selfTest(){
     check(f.renderer.shutdown()==XR_ERROR_RUNTIME_FAILURE&&f.runtime.destroys==2,"cleanup error reported, second chain attempted");}
   capturedSelfTest();
   skyboxSelfTest();
+  desktopStateSelfTest();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
 }

@@ -28,7 +28,7 @@ struct StereoDispatch {
 
 class D3D11Stereo final {
  public:
-  // Diagnostic renderer: owns all immediate-context state. Not a game pass.
+  // Diagnostic renderer: records private command lists. Not a game pass.
   // Borrowed session/dispatch must remain valid until shutdown/destruction.
   D3D11Stereo() = default;
   ~D3D11Stereo();
@@ -61,7 +61,11 @@ class D3D11Stereo final {
   StereoDispatch dispatch_{};
   XrSession session_ = XR_NULL_HANDLE;
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
+  // This deferred context records the complete pass. The immediate context
+  // only executes command lists, preserving caller state; externally
+  // serialized ownership is still required because it is not thread safe.
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediateContext_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader_;
   Microsoft::WRL::ComPtr<ID3D11InputLayout> layout_;
@@ -80,6 +84,8 @@ class D3D11Stereo final {
   int64_t format_ = 0;
   bool ready_ = false;
   XrResult lastResult_ = XR_SUCCESS;
+
+  XrResult submitCommands();
 };
 
 } // namespace edvr::openxr

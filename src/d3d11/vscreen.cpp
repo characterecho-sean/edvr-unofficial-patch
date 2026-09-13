@@ -5588,6 +5588,16 @@ extern "C" unsigned int edvr_selftest_hooks() {
     return bits;
 }
 
+// Read-only build fixture: inspect this DLL's actual shadow after a private
+// compositor command list. The returned pointer is identity only, not retained.
+// As with the binding shadow itself, callers must serialize context access.
+extern "C" void* edvr_selftest_binding(unsigned int slot, uint32_t* generation) {
+    if (slot >= static_cast<unsigned int>(edvr::BindSlot::Count)) return nullptr;
+    const auto binding = static_cast<edvr::BindSlot>(slot);
+    if (generation) *generation = edvr::bindingGeneration(binding);
+    return edvr::bindingGet(binding);
+}
+
 namespace edvr {
 
 void shutdownVScreenFixes() {

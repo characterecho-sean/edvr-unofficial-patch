@@ -216,6 +216,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
     --extra-export edvr_selftest_hooks ^
     --extra-export edvr_selftest_scene_draws ^
+    --extra-export edvr_selftest_binding ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^
     --extra-export edvrSupersampleResolve ^
@@ -967,6 +968,15 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR binding test build failed & exit /b 
 "%BUILD%\openxr_binding_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --self-test || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --published-proxy "%BUILD%\d3d11.dll" || exit /b 1
+
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_proxy_state_test.exe" ^
+    "tools\openxr_proxy_state_test\openxr_proxy_state_test.cpp" ^
+    "src\openxr\d3d11_stereo.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: OpenXR proxy state test build failed & exit /b 1 )
+"%BUILD%\openxr_proxy_state_test.exe" --dry-run || exit /b 1
+"%BUILD%\openxr_proxy_state_test.exe" --self-test || exit /b 1
 
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_system_test.exe" ^
