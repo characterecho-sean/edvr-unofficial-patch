@@ -1,6 +1,16 @@
 # OpenXR implementation status
 
-The current [startup-discovery
+The current [native-module checkpoint](openxr-native-module-2026-09-13.md) puts
+the native backend behind a separately loaded DLL exposing Frontier's five
+imported OpenVR entry points. An application fixture creates its device before
+Init, discovers the returned interfaces through those exports, renders from
+their poses and matrices, and drives loading and shutdown through real Present
+callbacks. The full build passed, including 48 new DLL/scene checks and 168
+Present/discovery checks. Its new PiOpenXR headset gate is pending. The DLL is
+staged outside the installer payload; full legacy export policy, native
+Frontier startup selection and feature integration remain open.
+
+The preceding [startup-discovery
 checkpoint](openxr-native-discovery-2026-09-13.md) obtains the graphics proxy's
 validated device and context on the Init caller, then learns the render caller
 from its first real Present callback before starting OpenXR. It replaces
@@ -54,21 +64,22 @@ confirmed by the user. Native Frontier transport remains unimplemented. The
 entries below retain earlier evidence and limits.
 
 The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
-`8c617dc` before implementation began. Work remains in Phase 0; it is not an
-OpenXR backend or a completed Phase 0 qualification. The latest checkpoint adds
-a [bounded semantic and export census](openxr-semantic-census-2026-09-12.md)
-and an [installed runtime inventory](openxr-runtime-inventory-2026-09-12.md),
-followed by a successful [Frontier semantic census
-flight](openxr-semantic-flight-2026-09-12.md). It confirms paired init/shutdown
-records, stable interface identity, seated tracking and three projection plane
-pairs. Native game transport remains unimplemented. Reusable [session/frame and
-projection policies](openxr-core-policy-2026-09-12.md) now exist under desktop
-tests; they are not connected to the shipping proxies. A standalone [native
-session and stereo diagnostic](openxr-native-harness-2026-09-12.md) now binds a
-diagnostic D3D11 device, obtains native geometry and submits a test scene; its
-first [PiOpenXR headset run](openxr-native-pimax-2026-09-12.md) completed 1800
-stereo submissions with valid tracking and normal shutdown, and the user saw
-the triangle. The next [device-binding and startup-geometry
+`8c617dc` before implementation began. Work remains in Phase 0; native Frontier
+integration and complete Phase 0 qualification remain pending. The earlier
+preparation adds a [bounded semantic and export
+census](openxr-semantic-census-2026-09-12.md) and an [installed runtime
+inventory](openxr-runtime-inventory-2026-09-12.md), followed by a successful
+[Frontier semantic census flight](openxr-semantic-flight-2026-09-12.md). It
+confirms paired init/shutdown records, stable interface identity, seated
+tracking and three projection plane pairs. Native game transport remains
+unimplemented. Reusable [session/frame and projection
+policies](openxr-core-policy-2026-09-12.md) now exist under desktop tests; they
+are not connected to the shipping proxies. A standalone [native session and
+stereo diagnostic](openxr-native-harness-2026-09-12.md) now binds a diagnostic
+D3D11 device, obtains native geometry and submits a test scene; its first
+[PiOpenXR headset run](openxr-native-pimax-2026-09-12.md) completed 1800 stereo
+submissions with valid tracking and normal shutdown, and the user saw the
+triangle. The next [device-binding and startup-geometry
 checkpoint](openxr-binding-geometry-2026-09-12.md) adds caller-device session
 ownership, coherent geometry readers and a zero-layer bootstrap in that
 diagnostic. Its desktop fixture also exercises device publication through the

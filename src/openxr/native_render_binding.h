@@ -21,9 +21,12 @@ class NativeRenderBinding final {
   NativeRenderBinding& operator=(const NativeRenderBinding&) = delete;
   ~NativeRenderBinding() { work_.close(); }
 
-  HRESULT acquire(const std::wstring& trustedAbsolutePath) {
+  // Optional frame work runs on the same callback after queued work. Supply
+  // it before registration; it and its captures remain alive until release.
+  HRESULT acquire(const std::wstring& trustedAbsolutePath, std::function<void()> frameWork = {}) {
     if (attempted_) return E_UNEXPECTED; // a binding owns one queue generation
     attempted_ = true;
+    frameWork_ = std::move(frameWork);
     HRESULT result = graphics_.acquire(trustedAbsolutePath);
     if (result != S_OK) return result;
     const EdvrRenderBoundaryRequest request{sizeof(request), EDVR_RENDER_BOUNDARY_VERSION_1,
@@ -87,14 +90,28 @@ class NativeRenderBinding final {
     }
     self.callbacks_.fetch_add(1, std::memory_order_relaxed);
     self.active_.store(true, std::memory_order_release);
+    struct Inactive {
+      NativeRenderBinding& binding;
+      ~Inactive() { binding.active_.store(false, std::memory_order_release); }
+    } inactive{self};
     self.work_.pump();
-    self.active_.store(false, std::memory_order_release);
+    bool admitted=false;
+    { std::lock_guard<std::mutex> lock(self.mutex_); admitted=!self.failed_; }
+    try { if(admitted&&self.frameWork_)self.frameWork_(); }
+    catch (...) {
+      self.correct_.store(false,std::memory_order_release);
+      self.work_.close();
+      { std::lock_guard<std::mutex> lock(self.mutex_); self.failed_=true; }
+      self.changed_.notify_all();
+      return E_FAIL;
+    }
     return S_OK;
   }
 
   // Destruction order keeps device/provider references alive through boundary
   // release. The boundary client refuses destruction with an active callback.
   NativeGraphicsClient graphics_;
+  std::function<void()> frameWork_;
   PresentWorkQueue work_;
   std::mutex mutex_;
   std::condition_variable changed_;

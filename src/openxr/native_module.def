@@ -1,0 +1,9 @@
+LIBRARY edvr_openxr_runtime
+EXPORTS
+    VR_InitInternal=edvr_module_VR_InitInternal
+    VR_ShutdownInternal=edvr_module_VR_ShutdownInternal
+    VR_GetGenericInterface=edvr_module_VR_GetGenericInterface
+    VR_IsInterfaceVersionValid=edvr_module_VR_IsInterfaceVersionValid
+    VR_GetInitToken=edvr_module_VR_GetInitToken
+    edvrConfigureNativeRuntime
+    edvrGetNativeRuntimeStatus

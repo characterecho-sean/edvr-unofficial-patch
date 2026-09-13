@@ -172,6 +172,55 @@ void nativeRenderBindingContracts(HMODULE proxy, const std::wstring& path,
         "binding releases graphics only after callback unwinds");
 }
 
+void nativeRenderBindingFrameWork(const std::wstring& path,
+                                  PresentDevice& present) {
+  std::atomic<unsigned> frameCalls{0}, queuedCalls{0}; std::atomic<DWORD> frameThread{0};
+  std::atomic<bool> frameOrder{true};
+  NativeRenderBinding binding;
+  Event registered, queueReady;
+  std::thread init([&] {
+    const HRESULT acquired=binding.acquire(path,[&] {
+      const unsigned call=++frameCalls; frameThread.store(GetCurrentThreadId(),std::memory_order_release);
+      if(call==2) frameOrder.store(queuedCalls.load(std::memory_order_acquire)==1 &&
+                                   binding.callbackActive(),std::memory_order_release);
+    });
+    check(acquired==S_OK,"frame work binding acquires on foreign Init caller");
+    registered.signal();
+    if(acquired!=S_OK)return;
+    check(binding.waitForRender(std::chrono::seconds(2)),"frame work binding reaches Present");
+    if(binding.renderThread()) {
+      queueReady.signal();
+      const bool queued=binding.work().invoke([&]{++queuedCalls;});
+      check(queued,"frame work test queues render work");
+    }
+  });
+  check(registered.wait(),"frame work registration completes");
+  check(SUCCEEDED(present.present()),"frame work first Present succeeds");
+  check(queueReady.wait()&&reaches([&]{return binding.work().pending()==1;}),
+        "frame work request waits for next Present");
+  check(SUCCEEDED(present.present()),"frame work second Present succeeds");
+  init.join();
+  check(frameCalls==2&&queuedCalls==1&&frameOrder&&frameThread==GetCurrentThreadId()&&
+        frameThread==binding.renderThread()&&binding.correct(),
+        "frame work runs after queued work on registered render thread");
+  check(binding.close()==S_OK&&binding.release()==S_OK,"frame work binding stops cleanly");
+  check(SUCCEEDED(present.present())&&frameCalls==2,
+        "stopped binding prevents further frame work");
+
+  std::atomic<bool> badRegistered{false}; std::atomic<unsigned> badFrames{0};
+  NativeRenderBinding bad;
+  std::thread badInit([&] {
+    const HRESULT acquired=bad.acquire(path,[&] { ++badFrames; throw 7; });
+    check(acquired==S_OK,"throwing frame work binding acquires"); badRegistered=true;
+    if(acquired==S_OK)bad.waitForRender(std::chrono::seconds(2));
+  });
+  check(reaches([&]{return badRegistered.load(std::memory_order_acquire);}),"throwing frame work registration completes");
+  check(SUCCEEDED(present.present()),"throwing frame work preserves Present result");
+  badInit.join();
+  check(badFrames==1&&!bad.callbackActive()&&!bad.correct(),"throwing frame work closes admission safely");
+  check(bad.close()==S_OK&&bad.release()==S_OK,"throwing frame work lease retires after unwind");
+}
+
 struct PresentHost {
   PresentWorkQueue queue;
   ID3D11Device* device=nullptr; ID3D11DeviceContext* context=nullptr;
@@ -481,6 +530,7 @@ int selfTest(const std::wstring& supplied) {
   nativeGraphicsContracts(proxy,present.device(),present.context());
   nativeClientContracts(proxy,path,present.device(),present.context());
   nativeRenderBindingContracts(proxy,path,present);
+  nativeRenderBindingFrameWork(path,present);
   boundaryContracts(proxy,present.device());
   if (failures) return 1;
   Counts counts{countsFn}; if (counts.fn) counts.fn(&counts.privateBefore,&counts.unknownBefore);
