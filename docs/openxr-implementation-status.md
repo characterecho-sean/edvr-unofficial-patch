@@ -1,5 +1,17 @@
 # OpenXR implementation status
 
+The [shutdown progress checkpoint](openxr-shutdown-progress-2026-09-13.md) adds
+a separate, passive observation window to the shipping OpenVR census. It counts
+successful owned Presents reaching the native callback service point around
+forwarded shutdown, with QPC bounds and explicit measured/unavailable outcomes.
+Full-build verification passed, including six actual paired-DLL children
+checking positive and zero progress, excluded Presents, unavailable receivers
+and exact forwarding. All 471 source hashes were unchanged during the build.
+Both verified proxies are installed in Frontier with the existing INI and
+original runtime preserved. The next gate is a normal Frontier run and exit
+using Pimax through SteamVR. Native game export/launch integration remains
+open; this checkpoint does not switch the game to OpenXR.
+
 The latest [application System caller
 checkpoint](openxr-system-caller-2026-09-13.md) extends the staged native DLL
 diagnostic to match Frontier's observed caller split: separate Init, persistent

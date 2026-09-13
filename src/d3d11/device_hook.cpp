@@ -1,5 +1,6 @@
 ﻿#include "../common/vr_census.h"
 #include "device_hook.h"
+#include "shutdown_census.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
 
@@ -1436,8 +1437,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
                                              static_cast<double>(qpcFrequency()));
     }
-    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST)) {
+        // Observe native callback availability, after the real Present and all
+        // preceding frame work. This is not the timestamp of realPresent's return.
+        edvr::shutdownPresentCensus().notePresent();
         renderBoundaryPresent(g_state->device);
+    }
     return hr;
 }
 

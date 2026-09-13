@@ -25,6 +25,7 @@
 #include "../common/proxy.h"
 #include "device_hook.h"
 #include "input_gate.h"
+#include "shutdown_census.h"
 
 extern "C" {
 extern void* edvr_realProcs_d3d11[];
@@ -377,6 +378,14 @@ void reportLoopOnce() {
 
 namespace edvr {
 
+namespace {
+ShutdownPresentCensus g_shutdownPresentCensus;
+}
+
+ShutdownPresentCensus& shutdownPresentCensus() noexcept {
+    return g_shutdownPresentCensus;
+}
+
 // The mechanism decision, made from the fact that actually settles safety:
 // whose CODE implements this context's methods?
 //
@@ -582,6 +591,16 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDeviceAndSwapChain(
 // ensureInitialised here: a pose wait must not initialize graphics or a chain.
 extern "C" BOOL WINAPI edvrCensusBeginVr(unsigned protocol) {
     return protocol == 1 && edvr::vrCensusBeginVr() ? TRUE : FALSE;
+}
+
+extern "C" std::uint64_t WINAPI edvrCensusBeginShutdown(std::uint32_t version) {
+    const bool enabled = edvr::vrCensusEnabled() && edvr::Log::get().isOpen();
+    return edvr::shutdownPresentCensus().begin(version, enabled);
+}
+
+extern "C" BOOL WINAPI edvrCensusEndShutdown(
+    std::uint64_t token, edvr::ShutdownCensusSnapshot* result) {
+    return edvr::shutdownPresentCensus().end(token, result);
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {

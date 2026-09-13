@@ -16,6 +16,7 @@
 #include "../common/vr_census.h"
 
 #include <cstring>  // strncmp, for the interface suppression prefixes
+#include <cwchar>
 #include <atomic>
 #include <intrin.h>
 #include <string>
@@ -30,6 +31,7 @@
 #include "launch_centre.h"
 #include "openvr_min.h"
 #include "system_hook.h"
+#include "shutdown_census_bridge.h"
 
 extern "C" {
 // Provided by the generated assembly: one slot per thunked export.
@@ -415,6 +417,78 @@ void shutdown() {
 
 }  // namespace
 
+namespace edvr {
+
+ShutdownCensusSession beginShutdownCensus() noexcept {
+    ShutdownCensusSession session{};
+    session.reason = "paired_module_unavailable";
+    try {
+        wchar_t path[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (!length || length >= MAX_PATH) return session;
+        wchar_t* slash = wcsrchr(path, L'\\');
+        const size_t suffixLength = wcslen(L"d3d11.dll");
+        if (!slash || static_cast<size_t>(slash - path) + 1 + suffixLength >= MAX_PATH) {
+            session.reason = "paired_module_path_unavailable";
+            return session;
+        }
+        wcscpy_s(slash + 1, MAX_PATH - static_cast<size_t>(slash + 1 - path), L"d3d11.dll");
+        HMODULE module = nullptr;
+        // Full-path lookup with no UNCHANGED_REFCOUNT keeps the existing
+        // module resident until the paired shutdown window is closed.
+        if (!GetModuleHandleExW(0, path, &module) || !module) return session;
+        session.module = module;
+        auto begin = reinterpret_cast<BeginShutdownCensus>(
+            GetProcAddress(module, "edvrCensusBeginShutdown"));
+        auto end = reinterpret_cast<EndShutdownCensus>(
+            GetProcAddress(module, "edvrCensusEndShutdown"));
+        if (!begin || !end) {
+            session.reason = "export_unavailable";
+            FreeLibrary(module);
+            session.module = nullptr;
+            return session;
+        }
+        const std::uint64_t token = begin(kShutdownCensusVersion);
+        if (!token) {
+            session.reason = "begin_rejected";
+            FreeLibrary(module);
+            session.module = nullptr;
+            return session;
+        }
+        session.token = token;
+        session.end = end;
+        session.reason = nullptr;
+    } catch (...) {
+        if (session.module) FreeLibrary(session.module);
+        session.module = nullptr;
+        session.token = 0;
+        session.reason = "bridge_exception";
+    }
+    return session;
+}
+
+bool endShutdownCensus(ShutdownCensusSession& session,
+                       ShutdownCensusSnapshot& snapshot) noexcept {
+    if (!session.module || !session.token) return false;
+    bool measured = false;
+    try {
+        snapshot = {};
+        snapshot.size = sizeof(snapshot);
+        snapshot.version = kShutdownCensusVersion;
+        measured = session.end(session.token, &snapshot) != FALSE;
+        if (!measured) session.reason = "end_rejected";
+    } catch (...) {
+        session.reason = "bridge_exception";
+    }
+    FreeLibrary(session.module);
+    session.module = nullptr;
+    session.token = 0;
+    session.end = nullptr;
+    return measured;
+}
+
+} // namespace edvr
+
 // Exported as VR_GetGenericInterface by the generated .def. VR_CALLTYPE is
 // __cdecl on Windows.
 extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceVersion,
@@ -475,7 +549,40 @@ extern "C" void __cdecl edvr_impl_VR_ShutdownInternal() {
     ensureInitialised();
     const auto call = beginLifecycle(ExportKind::Shutdown, _ReturnAddress(),
                                     g_realShutdownInternal != nullptr);
+    edvr::ShutdownCensusSession census{};
+    if (call.id && g_realShutdownInternal)
+        census = edvr::beginShutdownCensus();
+    LARGE_INTEGER forwardBegin{};
+    LARGE_INTEGER forwardEnd{};
+    if (call.id && g_realShutdownInternal)
+        QueryPerformanceCounter(&forwardBegin);
     if (g_realShutdownInternal) g_realShutdownInternal();
+    if (call.id && g_realShutdownInternal)
+        QueryPerformanceCounter(&forwardEnd);
+    if (call.id && g_realShutdownInternal) {
+        edvr::ShutdownCensusSnapshot snapshot{};
+        snapshot.size = sizeof(snapshot);
+        snapshot.version = edvr::kShutdownCensusVersion;
+        const bool measured = edvr::endShutdownCensus(census, snapshot);
+        const char* status = measured ? "measured" : "unavailable";
+        const char* reason = measured ? "none" : (census.reason ? census.reason : "end_rejected");
+        try {
+            edvr::Log::get().note(
+                "VR shutdown Present census: point=native_callback_service call=%llu status=%s reason=%s token=%llu "
+                "begin_qpc=%lld end_qpc=%lld forward_begin_qpc=%lld forward_end_qpc=%lld "
+                "samples=%llu first_qpc=%lld last_qpc=%lld first_thread=%lu last_thread=%lu "
+                "mixed_threads=%lu saturated=%lu",
+                static_cast<unsigned long long>(call.id), status, reason,
+                static_cast<unsigned long long>(snapshot.token),
+                static_cast<long long>(snapshot.beginQpc), static_cast<long long>(snapshot.endQpc),
+                static_cast<long long>(forwardBegin.QuadPart), static_cast<long long>(forwardEnd.QuadPart),
+                static_cast<unsigned long long>(snapshot.samples), static_cast<long long>(snapshot.firstQpc),
+                static_cast<long long>(snapshot.lastQpc), static_cast<unsigned long>(snapshot.firstThread),
+                static_cast<unsigned long>(snapshot.lastThread), static_cast<unsigned long>(snapshot.mixedThreads),
+                static_cast<unsigned long>(snapshot.saturated));
+        } catch (...) {
+        }
+    }
     endLifecycle(call, 0);
 }
 

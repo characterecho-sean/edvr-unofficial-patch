@@ -236,6 +236,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
     --extra-export edvrCensusBeginVr ^
+    --extra-export edvrCensusBeginShutdown ^
+    --extra-export edvrCensusEndShutdown ^
     --extra-export edvrGpuFrameEvent
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 

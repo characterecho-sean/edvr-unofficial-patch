@@ -2,6 +2,7 @@
 #include "../../src/openvr/compat/openvr_v0_9_20.h"
 #include <windows.h>
 #include <cstring>
+#include <atomic>
 
 namespace {
 class FakeCompositor final : public vr::IVRCompositor {
@@ -25,12 +26,28 @@ public:
     void ForceInterleavedReprojectionOn(bool) override {} void ForceReconnectProcess() override {} void SuspendRendering(bool) override {}
 };
 FakeCompositor g_compositor;
+std::atomic<HANDLE> g_shutdownEntered{nullptr}, g_shutdownRelease{nullptr};
+std::atomic<unsigned> g_shutdownCalls{0};
+}
+// Private fixture controls. Only this fake runtime exports these, never either
+// shipping proxy. The parent child-process watchdog bounds a broken handshake.
+extern "C" __declspec(dllexport) void WINAPI edvrFakeShutdownConfigure(HANDLE entered, HANDLE release) {
+    g_shutdownEntered.store(entered);
+    g_shutdownRelease.store(release);
+}
+extern "C" __declspec(dllexport) unsigned WINAPI edvrFakeShutdownCount() {
+    return g_shutdownCalls.load();
 }
 extern "C" __declspec(dllexport) void* __cdecl VR_GetGenericInterface(const char* v, vr::EVRInitError* e) {
     if (v && strcmp(v, vr::IVRCompositor_Version) == 0) { if(e)*e=vr::VRInitError_None; return &g_compositor; }
     if(e)*e=vr::VRInitError_Init_InterfaceNotFound; return nullptr;
 }
 extern "C" __declspec(dllexport) uint32_t __cdecl VR_InitInternal(vr::EVRInitError* e, vr::EVRApplicationType) { if(e)*e=vr::VRInitError_None; return 1; }
-extern "C" __declspec(dllexport) void __cdecl VR_ShutdownInternal() {}
+extern "C" __declspec(dllexport) void __cdecl VR_ShutdownInternal() {
+    g_shutdownCalls.fetch_add(1);
+    const HANDLE entered = g_shutdownEntered.load(), release = g_shutdownRelease.load();
+    if (entered && !SetEvent(entered)) ExitProcess(71);
+    if (release && WaitForSingleObject(release, 10000) != WAIT_OBJECT_0) ExitProcess(72);
+}
 extern "C" __declspec(dllexport) bool __cdecl VR_IsInterfaceVersionValid(const char* v) { return v && strcmp(v,vr::IVRCompositor_Version)==0; }
 extern "C" __declspec(dllexport) uint32_t __cdecl VR_GetInitToken() { return 1; }

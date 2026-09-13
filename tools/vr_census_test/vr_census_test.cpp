@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../../src/common/vr_census_budget.h"
+#include "../../src/common/shutdown_present_census.h"
 
 namespace {
 void require(bool ok, const char* why) {
@@ -104,6 +105,61 @@ void testConcurrentTransition() {
     require(unique.size() == kThreads && *unique.begin() == 1 && *unique.rbegin() == kVrLimit,
             "racing VR samples are unique and bounded");
 }
+
+void testShutdownWindows() {
+    edvr::ShutdownPresentCensus census;
+    edvr::ShutdownCensusSnapshot snapshot{};
+    require(!census.begin(2, true) && !census.begin(1, false), "shutdown begin gates reject");
+    require(!census.end(0, &snapshot), "no active shutdown window");
+    census.notePresent(); // Outside-window observations must not leak into one.
+    auto token = census.begin(1, true);
+    require(token && !census.begin(1, true), "exactly one active shutdown window");
+    auto invalid = snapshot;
+    invalid.version = 2;
+    require(!census.end(token, &invalid) && invalid.version == 2, "bad snapshot version left untouched");
+    invalid = snapshot;
+    --invalid.size;
+    require(!census.end(token, &invalid) && invalid.size == sizeof(snapshot) - 1,
+            "bad snapshot size left untouched");
+    require(!census.end(token, nullptr) && !census.end(token + 1, &snapshot), "invalid end cannot steal window");
+    require(census.end(token, &snapshot) && snapshot.token == token && snapshot.samples == 0 &&
+            snapshot.beginQpc > 0 && snapshot.beginQpc <= snapshot.endQpc &&
+            !snapshot.firstQpc && !snapshot.lastQpc && !snapshot.firstThread && !snapshot.lastThread,
+            "measured zero window retains honest bounds and empty sample fields");
+    for (unsigned i = 1; i < edvr::ShutdownPresentCensus::kMaxWindows; ++i) {
+        const auto previous = token;
+        token = census.begin(1, true);
+        require(token > previous && !census.end(previous, &snapshot), "fresh token rejects prior generation");
+        census.notePresent();
+        require(census.end(token, &snapshot) && snapshot.samples == 1 &&
+                snapshot.firstThread == GetCurrentThreadId() && snapshot.firstThread == snapshot.lastThread &&
+                snapshot.beginQpc <= snapshot.firstQpc && snapshot.firstQpc == snapshot.lastQpc &&
+                snapshot.lastQpc <= snapshot.endQpc && !snapshot.mixedThreads && !snapshot.saturated,
+                "new shutdown generation resets sample state");
+    }
+    require(!census.begin(1, true) && !census.end(token, &snapshot), "64 windows exhaust without token reuse");
+}
+
+void testConcurrentShutdownSamples() {
+    edvr::ShutdownPresentCensus census;
+    const auto token = census.begin(1, true);
+    require(token != 0, "concurrent shutdown window begins");
+    census.notePresent(); // Known first and last caller surround the workers.
+    constexpr unsigned kWorkers = 8, kSamples = 1000;
+    std::vector<std::thread> workers;
+    for (unsigned i = 0; i < kWorkers; ++i) workers.emplace_back([&] {
+        for (unsigned j = 0; j < kSamples; ++j) census.notePresent();
+    });
+    for (auto& worker : workers) worker.join();
+    census.notePresent();
+    edvr::ShutdownCensusSnapshot result{};
+    require(census.end(token, &result) && result.samples == kWorkers * kSamples + 2,
+            "concurrent shutdown samples retain exact coherent count");
+    require(result.firstThread == GetCurrentThreadId() && result.lastThread == result.firstThread &&
+            result.mixedThreads == 1 && !result.saturated &&
+            result.beginQpc <= result.firstQpc && result.firstQpc <= result.lastQpc && result.lastQpc <= result.endQpc,
+            "mixed callers detected even when first and last caller match");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -113,5 +169,7 @@ int main(int argc, char** argv) {
     testLimitsAndInvalid();
     testConcurrentSaturation();
     testConcurrentTransition();
-    std::puts("PASS: OpenXR census budget startup/VR banks, invalid inputs, and concurrency.");
+    testShutdownWindows();
+    testConcurrentShutdownSamples();
+    std::puts("PASS: OpenXR census startup/VR budgets and shutdown windows, invalid inputs, and concurrency.");
 }
