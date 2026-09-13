@@ -219,6 +219,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_binding ^
     --extra-export edvrAcquireGraphicsBridge ^
     --extra-export edvrAcquireRenderBoundary ^
+    --extra-export edvrAcquireNativeGraphics ^
     --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^

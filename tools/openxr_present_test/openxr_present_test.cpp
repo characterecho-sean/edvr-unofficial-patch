@@ -13,6 +13,8 @@
 #include "../../src/openxr/owner_service.h"
 #include "../../src/openxr/render_thread_dispatcher.h"
 #include "../../src/openxr/graphics_bridge_client.h"
+#include "../../src/openxr/native_graphics_client.h"
+#include "../../src/openxr/native_render_binding.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -46,6 +48,129 @@ bool reaches(const std::function<bool()>& f) {
   return true;
 }
 struct Counts { using Fn=void (*)(uint64_t*,uint64_t*); Fn fn=nullptr; uint64_t privateBefore{}, unknownBefore{}; };
+
+// Keep this fixture ABI-local so it can validate the exported contract before
+// the client wrapper is exercised by other harnesses.
+constexpr uint32_t kNativeGraphicsVersion = 1;
+struct NativeGraphicsRequest { uint32_t size, version; };
+struct NativeGraphicsTable {
+  uint32_t size, version;
+  ID3D11Device* device;
+  ID3D11DeviceContext* context;
+};
+using AcquireNativeGraphics = HRESULT (WINAPI *)(const NativeGraphicsRequest*, NativeGraphicsTable*);
+static_assert(sizeof(NativeGraphicsRequest)==8&&sizeof(NativeGraphicsTable)==24,"independent native graphics ABI");
+
+bool nativeGraphicsContracts(HMODULE proxy, ID3D11Device* expectedDevice,
+                             ID3D11DeviceContext* expectedContext, bool beforeCreation=false) {
+  auto acquire=reinterpret_cast<AcquireNativeGraphics>(GetProcAddress(proxy,"edvrAcquireNativeGraphics"));
+  check(acquire!=nullptr,"native graphics export exists"); if (!acquire) return false;
+  NativeGraphicsRequest request{sizeof(request),kNativeGraphicsVersion};
+  auto empty=[] { return NativeGraphicsTable{sizeof(NativeGraphicsTable),kNativeGraphicsVersion,nullptr,nullptr}; };
+  auto reject=[&](NativeGraphicsRequest r) {
+    auto table=empty();
+    table.device=reinterpret_cast<ID3D11Device*>(1);
+    table.context=reinterpret_cast<ID3D11DeviceContext*>(1);
+    check(acquire(&r,&table)==E_INVALIDARG&&!table.size&&!table.version&&!table.device&&!table.context,
+          "invalid native graphics request clears poisoned output");
+  };
+  auto r=request; r.size=sizeof(r)+4; reject(r); r=request; r.size=4; reject(r); r=request; r.version=2; reject(r);
+  auto table=empty(); table.version=2; check(acquire(&request,&table)==E_INVALIDARG&&!table.size&&!table.version&&!table.device&&!table.context,"unknown native graphics version rejected");
+  table=empty(); table.size+=8;
+  check(acquire(&request,&table)==E_INVALIDARG&&!table.size&&!table.version&&!table.device&&!table.context,
+        "oversized native graphics table rejected");
+  check(acquire(nullptr,&table)==E_INVALIDARG,"null native graphics request rejected"); check(acquire(&request,nullptr)==E_INVALIDARG,"null native graphics table rejected");
+  alignas(NativeGraphicsTable) unsigned char bytes[sizeof(NativeGraphicsTable)+16]; std::memset(bytes,0xcc,sizeof(bytes));
+  uint32_t shortSize=4; std::memcpy(bytes,&shortSize,4);
+  check(acquire(&request,reinterpret_cast<NativeGraphicsTable*>(bytes))==E_INVALIDARG,"short native graphics table rejected");
+  bool canary=true; for(size_t i=4;i<sizeof(bytes);++i) canary &= bytes[i]==0xcc; check(canary,"short native graphics table canary preserved");
+  if (beforeCreation) { table=empty(); check(acquire(&request,&table)==E_NOINTERFACE&&!table.device&&!table.context,"unpublished native graphics rejected before device creation"); return failures==0; }
+  table=empty(); check(acquire(&request,&table)==S_OK&&table.device&&table.context,"native graphics snapshot succeeds before first Present");
+  if (!table.device||!table.context) return false;
+  check(table.device==expectedDevice&&table.context==expectedContext,"native graphics snapshot has exact device and context");
+  table.device->Release(); table.context->Release();
+  auto second=empty(); check(acquire(&request,&second)==S_OK&&second.device&&second.context,"repeated native graphics snapshot succeeds");
+  if (second.device) second.device->Release(); if (second.context) second.context->Release();
+  std::atomic<bool> foreignOk{false};
+  std::thread foreign([&] { auto foreignTable=empty(); const bool ok=acquire(&request,&foreignTable)==S_OK&&foreignTable.device==expectedDevice&&foreignTable.context==expectedContext; if(foreignTable.device)foreignTable.device->Release(); if(foreignTable.context)foreignTable.context->Release(); foreignOk=ok; });
+  foreign.join(); check(foreignOk,"native graphics snapshot succeeds on foreign Init thread");
+  return failures==0;
+}
+
+void nativeClientContracts(HMODULE proxy, const std::wstring& path,
+                           ID3D11Device* expectedDevice, ID3D11DeviceContext* expectedContext) {
+  NativeGraphicsClient client;
+  for (const auto& bad : {std::wstring(L"d3d11.dll"), std::wstring(L"C:d3d11.dll"),
+                          std::wstring(L"C:\\bad\0name", 11)})
+    check(client.acquire(bad)==E_INVALIDARG&&!client.provider(),"native client rejects non-absolute path");
+  wchar_t systemDir[MAX_PATH]{}; GetSystemDirectoryW(systemDir,MAX_PATH); std::wstring systemPath=systemDir; systemPath+=L"\\kernel32.dll";
+  check(client.acquire(systemPath)!=S_OK&&!client.provider(),"native client rejects system DLL without fallback");
+  check(FAILED(client.acquire(path+L".not-loaded"))&&!client.provider(),"native client rejects unloaded absolute path");
+  const DWORD renderThread=GetCurrentThreadId();
+  std::thread init([&] {
+    check(GetCurrentThreadId()!=renderThread,"native snapshot uses foreign Init caller");
+    check(client.acquire(path)==S_OK&&client.provider()==proxy&&client.device()==expectedDevice&&client.context()==expectedContext,"native client acquires exact published graphics");
+    check(client.acquire(path)==E_PENDING,"native client rejects repeated acquire");
+    client.reset();
+    check(!client.provider()&&!client.device()&&!client.context(),"native client reset releases snapshot");
+    check(client.acquire(path)==S_OK&&client.device()==expectedDevice&&client.context()==expectedContext,"native client reacquires same identity");
+    client.reset();
+  });
+  init.join();
+}
+
+void nativeRenderBindingContracts(HMODULE proxy, const std::wstring& path,
+                                  PresentDevice& present) {
+  NativeRenderBinding early;
+  std::thread absent([&] {
+    check(early.acquire(path)==S_OK,"foreign render binding acquires before Present");
+    check(!early.waitForRender(std::chrono::milliseconds(5))&&early.work().pending()==0&&early.callbacks()==0&&early.renderThread()==0,
+          "missing Present times out without a render caller or queued work");
+    check(early.close()==S_OK&&early.release()==S_OK,"early render binding closes and releases");
+  });
+  absent.join();
+
+  NativeRenderBinding binding;
+  Event registered, allowQueue, entered, releaseCallback;
+  const DWORD renderThread=GetCurrentThreadId();
+  std::atomic<bool> invoked{false}, invokeResult{false}, acquired{false};
+  std::thread init([&] {
+    acquired=binding.acquire(path)==S_OK;
+    check(acquired&&GetCurrentThreadId()!=renderThread,"render binding registration uses foreign Init caller");
+    registered.signal();
+    if(!acquired)return;
+    const bool ready=binding.waitForRender(std::chrono::seconds(2));
+    check(ready&&binding.provider()==proxy&&binding.device()==present.device()&&binding.context()==present.context(),
+          "first callback publishes render readiness with paired device");
+    if(!ready)return;
+    if(!allowQueue.wait())return;
+    invokeResult=binding.work().invoke([&] {
+      invoked=GetCurrentThreadId()==renderThread&&binding.callbackActive();
+      entered.signal();
+      check(releaseCallback.wait(),"binding callback gets release signal");
+    });
+  });
+  check(registered.wait(),"foreign registration completes before first Present");
+  if(acquired) {
+    check(SUCCEEDED(present.present()),"first Present binds discovered render caller");
+    allowQueue.signal();
+    check(reaches([&] { return binding.work().pending()==1; }),"Init queues work after render readiness");
+    std::thread observer([&] {
+      check(entered.wait(),"observer sees active binding callback");
+      check(binding.close()==E_PENDING&&binding.release()==E_PENDING,
+            "active binding retains callback and references during close/release");
+      check(binding.provider()==proxy&&binding.device()==present.device(),"pending release retains graphics snapshot");
+      releaseCallback.signal();
+    });
+    check(SUCCEEDED(present.present()),"next Present executes queued Init work");
+    observer.join();
+  }
+  init.join();
+  check(invokeResult&&invoked&&binding.callbacks()>0&&binding.correct()&&binding.renderThread()==renderThread,
+        "binding executes Init work on observed Present caller");
+  check(binding.release()==S_OK&&!binding.provider()&&!binding.device()&&!binding.context(),
+        "binding releases graphics only after callback unwinds");
+}
 
 struct PresentHost {
   PresentWorkQueue queue;
@@ -347,8 +472,15 @@ int selfTest(const std::wstring& supplied) {
   Watchdog watchdog; wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr,exe,MAX_PATH); std::wstring path=supplied;
   if (path.empty()) { path=exe; const auto slash=path.find_last_of(L"\\/"); path=path.substr(0,slash+1)+L"d3d11.dll"; }
   HMODULE proxy=LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS); check(proxy!=nullptr,"load built graphics proxy"); if (!proxy) return 1;
+  nativeGraphicsContracts(proxy,nullptr,nullptr,true);
+  NativeGraphicsClient preClient;
+  check(preClient.acquire(path)==E_NOINTERFACE&&!preClient.provider(),"native client rejects unavailable graphics before device creation");
+  check(preClient.acquire(L"d3d11.dll")==E_INVALIDARG&&!preClient.provider(),"native client rejects relative path before device creation");
   auto countsFn=reinterpret_cast<Counts::Fn>(GetProcAddress(proxy,"edvr_selftest_graphics_bridge")); check(countsFn!=nullptr,"graphics bridge counter export exists");
   PresentDevice present; check(SUCCEEDED(present.initialize(proxy,D3D_DRIVER_TYPE_WARP)),"initialize real WARP proxy device"); if (!present.swapchain()) return 1;
+  nativeGraphicsContracts(proxy,present.device(),present.context());
+  nativeClientContracts(proxy,path,present.device(),present.context());
+  nativeRenderBindingContracts(proxy,path,present);
   boundaryContracts(proxy,present.device());
   if (failures) return 1;
   Counts counts{countsFn}; if (counts.fn) counts.fn(&counts.privateBefore,&counts.unknownBefore);

@@ -2,6 +2,7 @@
 #include "render_boundary.h"
 
 #include "../common/frame_flag.h"
+#include "../common/native_graphics.h"
 
 #include <atomic>
 #include <cstddef>
@@ -189,6 +190,48 @@ extern "C" HRESULT WINAPI edvrAcquireGraphicsBridge(
     table->lease = lease;
     table->execute = &executeLease;
     table->release = &releaseLease;
+    return S_OK;
+} catch (...) {
+    return E_FAIL;
+}
+
+extern "C" HRESULT WINAPI edvrAcquireNativeGraphics(
+    const EdvrNativeGraphicsRequest* request, EdvrNativeGraphicsTable* table) try {
+    const uint32_t tableSize = table ? table->size : 0;
+    const uint32_t tableVersion = table && tableSize >= sizeof(uint32_t) * 2
+                                      ? table->version : 0;
+    if (table) {
+        if (tableSize >= sizeof(uint32_t)) table->size = 0;
+        if (tableSize >= sizeof(uint32_t) * 2) table->version = 0;
+        if (tableSize >= offsetof(EdvrNativeGraphicsTable, device) + sizeof(table->device))
+            table->device = nullptr;
+        if (tableSize >= sizeof(EdvrNativeGraphicsTable)) table->context = nullptr;
+    }
+    if (!request || !table || request->size != sizeof(EdvrNativeGraphicsRequest) ||
+        request->version != EDVR_NATIVE_GRAPHICS_VERSION_1 ||
+        tableSize != sizeof(EdvrNativeGraphicsTable) ||
+        tableVersion != EDVR_NATIVE_GRAPHICS_VERSION_1) return E_INVALIDARG;
+
+    std::lock_guard<std::mutex> lock(g_ownerMutex);
+    Owner* owner = g_owner;
+    if (!owner || !owner->hookReady.load(std::memory_order_acquire) ||
+        !owner->device || !owner->context) return E_NOINTERFACE;
+    if (!edvr::renderBoundaryValidateOwner(owner->device.Get(), owner->context.Get()))
+        return E_NOINTERFACE;
+    if (!edvr::gameDevice() ||
+        !sameIdentity(static_cast<IUnknown*>(owner->device.Get()),
+                      reinterpret_cast<IUnknown*>(edvr::gameDevice())))
+        return E_ACCESSDENIED;
+    if (owner->device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED)
+        return E_NOINTERFACE;
+    const HRESULT removed = owner->device->GetDeviceRemovedReason();
+    if (FAILED(removed)) return removed;
+    ComPtr<ID3D11Device> resultDevice = owner->device;
+    ComPtr<ID3D11DeviceContext> resultContext = owner->context;
+    table->size = sizeof(EdvrNativeGraphicsTable);
+    table->version = EDVR_NATIVE_GRAPHICS_VERSION_1;
+    table->device = resultDevice.Detach();
+    table->context = resultContext.Detach();
     return S_OK;
 } catch (...) {
     return E_FAIL;

@@ -51,7 +51,12 @@
 #include "present_work_queue.h"
 
 namespace edvr::openxr {
-struct RuntimeOptions { std::wstring loader, graphicsProxy; };
+struct RuntimeOptions {
+  std::wstring loader, graphicsProxy;
+  // Borrowed validated provider from NativeRenderBinding. Its device and
+  // module references remain alive through owner shutdown and callback release.
+  HMODULE graphicsProvider = nullptr;
+};
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
   if(r!=XR_SUCCESS || !n) return r;
@@ -574,9 +579,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;
     decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice;
-    if(!options.graphicsProxy.empty()) {
-      graphicsProxy=LoadLibraryExW(options.graphicsProxy.c_str(),nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if(options.graphicsProvider || !options.graphicsProxy.empty()) {
+      if(options.graphicsProvider && !externalDevice)
+        return result("paired_graphics_device_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+      graphicsProxy=options.graphicsProvider ? options.graphicsProvider :
+        LoadLibraryExW(options.graphicsProxy.c_str(),nullptr,
+          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
       if(!graphicsProxy){std::printf("error,graphics_proxy_load,%lu\n",GetLastError());return false;}
       createDevice=reinterpret_cast<decltype(createDevice)>(GetProcAddress(graphicsProxy,"D3D11CreateDevice"));
       bridgeCounts=reinterpret_cast<BridgeCounts>(GetProcAddress(graphicsProxy,"edvr_selftest_graphics_bridge"));

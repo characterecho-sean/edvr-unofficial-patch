@@ -1,17 +1,28 @@
 # OpenXR implementation status
 
-The current [shared-host checkpoint](openxr-shared-host-2026-09-13.md) extracts
-the tested native runtime from the diagnostic and tests owner teardown while
-the render caller remains inside its final Present callback. This removes the
-diagnostic's dependency on pausing the entire application loop, a requirement
-for later Frontier startup integration. The full build passed, including 101
-actual-DLL Present and 67 CPU queue checks. The `3fcadf7` 20-second PiOpenXR
-headset gate passed with 1,529 stereo pairs, 268 loading projections and
-correct private command-list totals. All shutdown stages completed; session
-binding shutdown took 15 ms inside the active render callback, which retired
-afterward. The user confirmed normal appearance, head tracking and closure
-without headlock. This qualifies the diagnostic's callback-held teardown;
-native shipping export discovery and Frontier integration are still open.
+The current [startup-discovery
+checkpoint](openxr-native-discovery-2026-09-13.md) obtains the graphics proxy's
+validated device and context on the Init caller, then learns the render caller
+from its first real Present callback before starting OpenXR. It replaces
+device/thread handoff from the diagnostic with shared paired-module discovery
+and bounded readiness. The full build passed, including 153 actual-DLL
+Present/discovery checks. Its updated PiOpenXR headset gate is pending
+readiness; shipping OpenVR discovery still forwards and native Frontier
+integration remains open.
+
+The preceding [shared-host checkpoint](openxr-shared-host-2026-09-13.md)
+extracts the tested native runtime from the diagnostic and tests owner teardown
+while the render caller remains inside its final Present callback. This removes
+the diagnostic's dependency on pausing the entire application loop, a
+requirement for later Frontier startup integration. The full build passed,
+including 101 actual-DLL Present and 67 CPU queue checks. The `3fcadf7`
+20-second PiOpenXR headset gate passed with 1,529 stereo pairs, 268 loading
+projections and correct private command-list totals. All shutdown stages
+completed; session binding shutdown took 15 ms inside the active render
+callback, which retired afterward. The user confirmed normal appearance, head
+tracking and closure without headlock. This qualifies the diagnostic's
+callback-held teardown; native shipping export discovery and Frontier
+integration are still open.
 
 The preceding [Present-hook checkpoint](openxr-present-boundary-2026-09-13.md)
 routes staged OpenXR work through the graphics proxy's real owned-swapchain

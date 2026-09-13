@@ -6,7 +6,7 @@
 #include "../../src/openxr/native_runtime_host.h"
 #include "present_device.h"
 #include "../../src/openxr/render_shutdown.h"
-#include "../../src/openxr/render_boundary_client.h"
+#include "../../src/openxr/native_render_binding.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -48,25 +48,8 @@ bool parse(const std::vector<std::wstring>& args, Options& out) {
   if(!absolute(o.loader)||(seenGraphics&&!absolute(o.graphicsProxy))||(o.presentBoundary&&!seenGraphics)) return false; out=o; return true;
 }
 struct PresentHost {
-  PresentWorkQueue work;
-  ID3D11Device* device=nullptr;
-  ID3D11DeviceContext* context=nullptr;
-  DWORD thread=GetCurrentThreadId();
-  uint64_t callbacks=0;
-  bool callbackActive=false,teardownInCallback=false,teardownCompleted=false;
-  bool correct=true;
-  ~PresentHost(){work.close();}
-  static HRESULT WINAPI callback(void* user,ID3D11Device* device,ID3D11DeviceContext* context) {
-    auto& host=*static_cast<PresentHost*>(user);
-    if(GetCurrentThreadId()!=host.thread||device!=host.device||context!=host.context) {
-      host.correct=false;host.work.close();return E_ACCESSDENIED;
-    }
-    ++host.callbacks;
-    host.callbackActive=true;
-    host.work.pump(); // no queued request is ordinary idle Present
-    host.callbackActive=false;
-    return S_OK;
-  }
+  NativeRenderBinding binding;
+  bool teardownInCallback=false,teardownCompleted=false;
 };
 // The facade objects survive explicit Shutdown. Their resources and all
 // thread-bound members are constructed/cleaned on the service thread.
@@ -80,12 +63,12 @@ class NativeBackend final:public RuntimeBackend {
   Options options;
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out)override {
     if(host)return vr::VRInitError_Init_Internal; // native diagnostic: one generation per process
-    route.present=present?&present->work:nullptr;
+    route.present=present?&present->binding.work():nullptr;
     if(!route.bind())return vr::VRInitError_Init_Internal;
     if(!owner.start([this]{if(host)host->pumpEvents();}))return vr::VRInitError_Init_Internal;
     auto error=vr::VRInitError_Init_Internal;
     if(!route.invoke([&]{
-      host=std::make_unique<NativeRuntimeHost>(owner,render,route,present?present->device:nullptr);host->startupOptions=options;
+      host=std::make_unique<NativeRuntimeHost>(owner,render,route,present?present->binding.device():nullptr);host->startupOptions=options;
       error=host->start(token,cancelled,out);
     }))return vr::VRInitError_Init_Internal;
     return error;
@@ -124,10 +107,10 @@ class NativeBackend final:public RuntimeBackend {
       // destruction finishes. Callback user state remains alive throughout;
       // the controller releases its lease only after the callback unwinds.
       bool entered=false;
-      const bool requested=present->work.invoke([&]{
-        present->teardownInCallback=present->callbackActive&&render.isRenderThread();
+      const bool requested=present->binding.work().invoke([&]{
+        present->teardownInCallback=present->binding.callbackActive()&&render.isRenderThread();
         if(!present->teardownInCallback)return;
-        const auto stopped=shutdownAtRenderBoundary(present->work,render,owner,finalizer);
+        const auto stopped=shutdownAtRenderBoundary(present->binding.work(),render,owner,finalizer);
         entered=stopped.entered;joined=stopped.joined;
         present->teardownCompleted=entered&&joined&&cleaned;
       });
@@ -461,7 +444,7 @@ int run(const Options& options,PresentHost* present=nullptr) {
   if(host.bridgeCounts)host.bridgeCounts(&privateLists,&unknownLists);
   const uint64_t expectedPrivate=4*layers+2*host.loadingLayers;
   const bool bridgeGate=!host.graphicsProxy||(privateLists==expectedPrivate&&unknownLists==0);
-  const DWORD graphicsThread=present?present->thread:initThread;
+  const DWORD graphicsThread=present?present->binding.renderThread():initThread;
   const bool callerGate=!present||graphicsThread!=initThread;
   const bool renderGate=callerGate&&host.graphicsCalls.calls>0&&host.graphicsCalls.thread==graphicsThread&&
     host.graphicsCalls.thread!=host.ownerThread&&host.graphicsCalls.wrongThread==0&&host.graphicsCalls.rejected==1&&idleSafe&&bridgeGate;
@@ -487,16 +470,29 @@ int runWithPresent(const Options& options) {
   PresentDevice device;
   const auto created=device.initialize(proxy,D3D_DRIVER_TYPE_HARDWARE);
   if(FAILED(created)){std::printf("error,present_device,%08lx\n",(unsigned long)created);return 3;}
-  PresentHost present;present.device=device.device();present.context=device.context();
-  if(!present.work.bindCurrentThread())return 3;
-  RenderBoundaryClient client;
-  const EdvrRenderBoundaryRequest request{sizeof(request),EDVR_RENDER_BOUNDARY_VERSION_1,
-    device.device(),&PresentHost::callback,&present};
-  if(FAILED(client.acquire(proxy,request))){std::puts("error,present_boundary_acquire");return 3;}
+  PresentHost present;
   std::atomic<bool> finished{false};int outcome=5;DWORD initCaller=0;
   std::thread controller([&] {
     initCaller=GetCurrentThreadId();
-    try { outcome=run(options,&present); }
+    try {
+      const HRESULT acquired=present.binding.acquire(options.graphicsProxy);
+      if(acquired!=S_OK) {
+        std::printf("error,native_graphics_discovery,%08lx\n",(unsigned long)acquired);
+        outcome=3;
+      } else if(!present.binding.waitForRender()) {
+        std::puts("error,native_startup_no_present_before_runtime");
+        outcome=3;
+      } else {
+        // Only this assertion knows the fixture device. Runtime startup uses
+        // the independently acquired provider snapshot and observed callback.
+        const bool same=present.binding.device()==device.device()&&present.binding.context()==device.context();
+        std::printf("paired_startup,discovered=1,init_thread=%lu,render_thread=%lu,device_matches_fixture=%u,provider_matches=%u\n",
+          (unsigned long)initCaller,(unsigned long)present.binding.renderThread(),unsigned(same),unsigned(present.binding.provider()==proxy));
+        Options nativeOptions=options;
+        nativeOptions.graphicsProvider=present.binding.provider();
+        outcome=same&&nativeOptions.graphicsProvider==proxy?run(nativeOptions,&present):3;
+      }
+    }
     catch(const std::exception& e){std::printf("error,present_controller,%s\n",e.what());}
     catch(...){std::puts("error,present_controller_exception");}
     finished.store(true,std::memory_order_release);
@@ -508,7 +504,7 @@ int runWithPresent(const Options& options) {
     // callback holds this caller until XR teardown completes, just as a
     // callback in a game-controlled loop must do.
     if(FAILED(device.present())) {
-      presenting=false;present.work.close();
+      presenting=false;present.binding.work().close();
       ++presents;
     } else {
       ++presents;
@@ -518,18 +514,17 @@ int runWithPresent(const Options& options) {
   ShutdownTrace controllerJoin("present_controller_join");
   controller.join();controllerJoin.end(true);
   ShutdownTrace callbackClose("present_callback_close");
-  const auto closed=client.close();
+  const auto closed=present.binding.close();
   callbackClose.end(closed==S_OK);
   ShutdownTrace callbackRelease("present_callback_release");
-  const auto released=client.release();
+  const auto released=present.binding.release();
   callbackRelease.end(released==S_OK);
-  present.work.close();
-  const bool retired=closed==S_OK&&released==S_OK&&!present.callbackActive;
+  const bool retired=closed==S_OK&&released==S_OK&&!present.binding.callbackActive();
   const bool teardown=present.teardownInCallback&&present.teardownCompleted&&retired;
-  const bool passed=outcome==0&&presenting&&present.correct&&present.callbacks>0&&teardown&&
-    initCaller!=present.thread&&closed==S_OK&&released==S_OK;
+  const bool passed=outcome==0&&presenting&&present.binding.correct()&&present.binding.callbacks()>0&&teardown&&
+    initCaller!=present.binding.renderThread()&&closed==S_OK&&released==S_OK;
   std::printf("present_boundary,presents=%llu,callbacks=%llu,render_thread=%lu,init_thread=%lu,device_before_init=1,close=%08lx,release=%08lx,passed=%u\n",
-    (unsigned long long)presents,(unsigned long long)present.callbacks,(unsigned long)present.thread,
+    (unsigned long long)presents,(unsigned long long)present.binding.callbacks(),(unsigned long)present.binding.renderThread(),
     (unsigned long)initCaller,(unsigned long)closed,(unsigned long)released,unsigned(passed));
   std::printf("present_teardown,in_callback=%u,owner_completed=%u,callback_retired=%u,loop_pause_requested=0\n",
     unsigned(present.teardownInCallback),unsigned(present.teardownCompleted),unsigned(retired));
