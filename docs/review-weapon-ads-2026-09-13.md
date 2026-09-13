@@ -280,3 +280,58 @@ build changes diagnostics, not sight alignment, motion correction or
 reprojection. The next test should hold ADS and strafe continuously for
 at least two seconds before pressing the eye-dump key while still
 moving.
+
+## Sustained one-frame delay captured before the dump
+
+Steam flight 074127 verifies d0c5cf1, linked 13:38:04 UTC. The new
+074439 trace retains all 128 pre-dump frames, 7561..7688, and both
+material samples per frame. Camera and arms move throughout. The current
+camera-to-arms lateral offset varies from -36.420 to -23.212 mm. In
+contrast, the preceding camera minus the current arms is stable at
+(0.571, 9.442, -75.087) mm in camera axes: its per-axis standard
+deviation is below 0.001 mm over all 127 adjacent pairs. The subsequent
+draw snapshot recovers that same original ADS offset after the capture
+stall. This confirms a sustained one-frame translation delay, not just
+isolated camera overshoots or a fixed aiming calibration error.
+
+Ruled out: requiring three same-frame synchronized offsets can acquire
+this movement, because it remains one frame out of phase throughout the
+entire prehistory. Compare the arms' step with the preceding camera step
+and learn the offset in that time domain. Require repeated agreement and
+changing step sizes to distinguish real lag from the ambiguous case of
+constant-speed synchronized motion. Preserve original geometry during
+unrecognized aiming/projection changes and when returning to
+synchronized updates. Do not remove the measured per-weapon ADS offset.
+
+The trace's integer flag bitcasts read as zero even in the hardware
+regression where status 2/3 and confidence 3 prove valid history. Store
+the small flag mask as a numeric float and assert its decoded value; the
+logged positions, status, frame stamps and confidence are unaffected.
+
+The GPU now keeps two additional rows per frame bank: the lag-domain
+offset/confidence and the measured camera step/evidence count. It
+requires three varying-step correspondences before selecting that phase;
+a single camera overshoot during constant-speed synchronized movement
+must still use the earlier isolated correction. Once recognized, it
+translates the attachments by the current camera step and retains the
+lag-domain ADS offset, including each weapon's distinct forward offset.
+It handles steady velocity and reversals after acquisition, then returns
+to untouched geometry when the game's updates synchronize or the view
+changes. No extra dispatches or routine CPU readbacks are added.
+
+The recorded timing replay applies all 124 expected corrections after
+four acquisition frames. This replay transplants the 128 logged camera
+and arms samples into the complete first captured instance/palette pool;
+it does not claim those animated geometry buffers were captured before
+the eye-dump key. Expected translations are independently computed from
+adjacent logged camera positions. Full-pool comparisons pass alongside
+the original mouse, crouch, sight and isolated-overshoot controls (4,130
+checks). Original snapshot frame 7702 also has an isolated 34.043 mm
+overshoot; the prior correction handles it and the next frame catches
+up.
+
+The hardware timing replay also passes all 4,130 checks with the same
+124 sustained corrections. The full absolute-path worktree build,
+expanded weapon tests, 252-key configuration contract and NVIDIA DLL
+smoke test pass. Live headset confirmation remains necessary, especially
+when entering ADS or changing aim before the phase can be established.

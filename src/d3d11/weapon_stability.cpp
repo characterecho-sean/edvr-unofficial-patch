@@ -171,19 +171,19 @@ void traceTick(ID3D11DeviceContext* ctx) {
         D3D11_MAPPED_SUBRESOURCE m{};
         HRESULT result=ctx->Map(g.traceStage.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
         if(SUCCEEDED(result)) {
-            Log::get().note("weapon timing trace: pre-eye-dump history through frame %u; flags valid=1 history=2 synchronized=4 steady=8 bounded-step=16 camera-ahead=32 calibrated=64 short-overshoot=128.",g.traceFrame);
+            Log::get().note("weapon timing trace: pre-eye-dump history through frame %u; flags valid=1 history=2 synchronized=4 steady=8 bounded-step=16 camera-ahead=32 calibrated=64 short-overshoot=128 sustained-lag=256; lag=confidence+4*mode (mode 0..3 counts varying steps, 4 active).",g.traceFrame);
             const auto* data=static_cast<const float*>(m.pData);
             for(unsigned age=kWeaponTraceFrames;age--;) {
                 const unsigned frame=g.traceFrame-age;
                 for(unsigned part=0;part<2;++part) {
                     const float* p=data+((frame%kWeaponTraceFrames)*kWeaponTraceRows+part*8)*4;
                     unsigned stamp=0,epoch=0,flags=0;
-                    std::memcpy(&stamp,p,4);std::memcpy(&epoch,p+1,4);std::memcpy(&flags,p+2,4);
+                    std::memcpy(&stamp,p,4);std::memcpy(&epoch,p+1,4);flags=unsigned(p[2]);
                     if(stamp!=frame || !epoch || p[3]<1)continue;
-                    Log::get().note("weapon timing frame=%u %s epoch=%u flags=%02X calls=%.0f near=%.7f status=%.0f confidence=%.0f/%.0f camera=(%.7f,%.7f,%.7f) arms=(%.7f,%.7f,%.7f) right=(%.7f,%.7f,%.7f;%.7f) up=(%.7f,%.7f,%.7f;%.7f) forward=(%.7f,%.7f,%.7f) learned=(%.7f,%.7f,%.7f) correction=(%.7f,%.7f,%.7f).",
+                    Log::get().note("weapon timing frame=%u %s epoch=%u flags=%03X calls=%.0f near=%.7f status=%.0f confidence=%.0f/%.0f camera=(%.7f,%.7f,%.7f) arms=(%.7f,%.7f,%.7f) right=(%.7f,%.7f,%.7f;%.7f) up=(%.7f,%.7f,%.7f;%.7f) forward=(%.7f,%.7f,%.7f) learned=(%.7f,%.7f,%.7f) correction=(%.7f,%.7f,%.7f) lag=%.0f.",
                         frame,part?"last":"first",epoch,flags,p[3],p[7],p[23],p[11],p[31],
                         p[4],p[5],p[6],p[8],p[9],p[10],p[12],p[13],p[14],p[15],
-                        p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[28],p[29],p[30],p[24],p[25],p[26]);
+                        p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[28],p[29],p[30],p[24],p[25],p[26],p[27]);
                 }
             }
             ctx->Unmap(g.traceStage.Get(),0);g.tracePending=false;
@@ -261,7 +261,7 @@ void weaponStabilityFrameBoundary(ID3D11DeviceContext* ctx) {
         D3D11_MAPPED_SUBRESOURCE m{};HRESULT hr=ctx->Map(g.stage.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
         if(SUCCEEDED(hr)) {
             const auto* p=static_cast<const float*>(m.pData);
-            const char* status=p[8]==3?"ADS timing corrected, aiming offset retained":p[8]==2?"ADS synchronized, game aiming pose retained":p[3]>0?"matched":p[8]>0?"projection preserves game aiming pose":"unavailable (stock)";
+            const char* status=p[8]==4?"ADS one-frame timing corrected, aiming offset retained":p[8]==3?"ADS timing corrected, aiming offset retained":p[8]==2?"ADS synchronized, game aiming pose retained":p[3]>0?"matched":p[8]>0?"projection preserves game aiming pose":"unavailable (stock)";
             Log::get().note("weapon stability: source attachment %s, offset %.6f %.6f %.6f m, %.0f matching roots; %u-byte private pool, projection near %.7f. Original animation and compositor timing retained.",status,p[0],p[1],p[2],p[7],g.bytes,p[9]);
             ctx->Unmap(g.stage.Get(),0);g.pending=false;
         } else if(g.frame-g.pendingFrame>60)g.pending=false;

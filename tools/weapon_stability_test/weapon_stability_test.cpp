@@ -422,7 +422,10 @@ void traceTest(){
         check(first[3]==1,"first sample is not overwritten by later material");
         const float* last=first+32;
         check(last[3]==(frame==139?2:1),"last sample records same-frame regeneration count");
-        if(frame==139)check(first[23]==2 && last[23]==3 && std::fabs(last[24]-.04f)<1e-6,"trace distinguishes synchronized first draw and corrected last draw");
+        if(frame==139){
+            check(first[23]==2 && last[23]==3 && std::fabs(last[24]-.04f)<1e-6,"trace distinguishes synchronized first draw and corrected last draw");
+            check(unsigned(first[2])==223 && unsigned(last[2])==251,"numeric GPU trace flags survive storage and decoding");
+        }
     }
     weaponStabilityArmTrace();check(!g.traceRequested,"pending trace cannot be overwritten by another request");
     testLog.clear();
@@ -434,9 +437,52 @@ void traceTest(){
     testEnabled=false;weaponStabilityConfigure(Config::get());h.screen();weaponStabilityArmTrace();check(!g.traceRequested,"disabled weapon fix does not request readback");
     testEnabled=true;weaponStabilityConfigure(Config::get());h.clean();
 }
+void sustainedAimingTest(){
+    for(unsigned axis:{0u,2u})for(bool delayed:{false,true}){
+        Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+        camera[270][0]=2;camera[271][1]=3;camera[272][3]=1;camera[273][2]=.025f;
+        for(auto& r:pool)position(r,100,100,100);
+        for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+        pool[12].words[0]=7;pool[90].words[0]=8;
+        h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));
+        float x=0,previous=0;
+        auto sample=[&](float step,bool lag,float expected){
+            previous=x;x+=step;const float arm=(lag?previous:x)-.014f;
+            for(unsigned i:{12u,90u})position(pool[i],arm,-.021f,.130f);
+            position(pool[52],arm+.1f,.2f,.4f);camera[275][0]=x;camera[275][1]=camera[275][2]=0;
+            if(axis==2){
+                std::swap(camera[275][0],camera[275][2]);
+                for(auto& r:pool)std::swap(r.words[4],r.words[6]);
+            }
+            h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
+            h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();check(h.run(),"sustained ADS draw forwarded");
+            auto bytes=h.read(g.fixed.Get());const auto* actual=reinterpret_cast<const Instance*>(bytes.data());
+            for(unsigned i=0;i<128;++i)for(unsigned w=0;w<84;++w){
+                if(expected && (i==12 || i==90 || i==52) && w==4+axis)check(std::fabs(getFloat(actual[i],w)-(getFloat(pool[i],w)+expected))<1e-6,"one-frame translation preserves this weapon's independent aiming offset");
+                else check(actual[i].words[w]==pool[i].words[w],"all other geometry and animation bytes preserved");
+            }
+            auto a=h.read(g.anchor.Get());auto* anchor=reinterpret_cast<const float*>(a.data());
+            if(expected)check(anchor[8]==4,"sustained timing correction has a distinct status");
+            const unsigned before=motionDraws;testVs=0x025B4B9FF54622EDull;check(h.run() && motionDraws==before+1,"sustained correction still forwards reticle motion");
+            check(h.read(g.fixed.Get())==bytes,"ADS optic and weapon share exactly the same timing correction");
+            weaponStabilityFrameBoundary(h.ctx.Get());
+        };
+        const float steps[]={.02f,.028f,.022f,.033f,.019f,.025f,.023f,.031f,.018f,.026f};
+        for(unsigned i=0;i<10;++i)sample(steps[i],delayed,delayed && i>=4?steps[i]:0);
+        if(delayed){
+            for(unsigned i=0;i<4;++i)sample(.025f,true,.025f); // recognized lag survives steady velocity
+            sample(-.021f,true,-.021f); // reversal still has measured one-frame correspondence
+            camera[270][0]=3;sample(.019f,true,0); // changed scope cannot reuse this calibration
+        }
+        sample(0,false,0);sample(0,false,0); // stop and synchronized catch-up
+        for(unsigned i=0;i<8;++i)sample(.025f,false,0); // constant-speed synchronized ambiguity
+        for(unsigned i=0;i<10;++i)sample(steps[i],false,0); // variable synchronized motion
+        h.clean();
+    }
+}
 int main(int argc,char** argv){
     if(argc==3 && !strcmp(argv[2],"--hardware")){testDriver=D3D_DRIVER_TYPE_HARDWARE;--argc;}
-    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();aimingTimingTest();traceTest();}
+    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();aimingTimingTest();traceTest();sustainedAimingTest();}
     else if(argc==3 && !strcmp(argv[1],"--capture"))capture(argv[2]);
     else {std::puts("Usage: weapon_stability_test --self-test [--hardware] | --capture DIR");return 2;}
     std::printf("PASS: weapon stability (%u checks)\n",checks);return 0;
