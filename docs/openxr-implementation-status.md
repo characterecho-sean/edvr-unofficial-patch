@@ -14,8 +14,13 @@ lease to retire before allowing XR-owner teardown, while continuing window
 message delivery. The full build passed, including 80 actual-DLL Present and 63
 CPU queue checks. A five-second automated PiOpenXR probe then passed: the
 callback retired, no further Presents occurred, session destruction completed
-in 63 ms and the child exited normally. The full-length headset appearance,
-tracking and closure check remains pending. The earlier [render-caller
+in 63 ms and the child exited normally. The `20cad71` full-length PiOpenXR
+headset test then passed: 1,529 stereo pairs, 268 loading projections, correct
+private command-list totals and completed shutdown. The user confirmed normal
+appearance, head tracking and closure without an end-of-run headlock. Present
+and its callback retired before XR teardown, and binding shutdown completed in
+16 ms. This qualifies the diagnostic's real Present route; native Frontier
+integration remains open. The earlier [render-caller
 handoff](openxr-render-thread-2026-09-13.md) passed its `064fc0d` paired-proxy
 PiOpenXR run, with normal grid/triangle appearance, tracking and closure
 confirmed by the user. Native Frontier transport remains unimplemented. The

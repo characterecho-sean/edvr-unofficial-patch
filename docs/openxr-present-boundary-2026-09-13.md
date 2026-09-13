@@ -271,5 +271,49 @@ thread joins. The final signatures were
 
 This establishes successful native shutdown for the corrected sequence in the
 short probe. It does not qualify headset appearance or head tracking: no user
-visual assessment was requested for that automated run. A fresh full-length
-headset gate remains pending, and native Frontier integration remains open.
+visual assessment was requested for that automated run. The full-length headset
+result follows; native Frontier integration remains open.
+
+## Passed full-length PiOpenXR gate
+
+The `20cad71` 20-second Pimax test passed on 2026-09-13. It ran from
+14:50:28.030 to 14:50:48.766 UTC, exited normally with code 0 after 20.750
+seconds, and did not reach its 60-second watchdog. All 452 preflight hashes
+matched, including the same executable and graphics proxy hashes as the short
+probe above. The exact binaries, receipt, output, validation and qualification
+record are archived in `build/openxr-native-20260913-085028/`.
+
+Pimax OpenXR 0.1.0 used D3D11.1, 5424 x 5356 per eye and format 29. Init 35248,
+Present 37708, XR owner 39968 and System 38556 were distinct. Startup geometry,
+both resets and reset events, and idle graphics exclusion passed. Loading
+produced 268 projection frames with zero game Submits and an unchanged pose
+cache. The scene completed 1,529 stereo pairs and 3,058 eye copies; all 1,530
+observed scene views were valid. The private command-list count matched its
+expected 6,652, with zero unknown lists and zero wrong-thread callbacks.
+
+Both final GPU drains completed. The callback lease retired and Present
+acknowledgement completed before XR-owner finalization. All 21 traced teardown
+stage occurrences ended successfully, including binding shutdown in 16 ms,
+instance destruction, loader release and both thread joins. The final
+`present_teardown` reported `quiesced=1`, `callback_retired=1` and
+`presents_after_quiesce=0`; both native PASS markers and
+`normal_stop=1,cleanup=1` were present.
+
+The user confirmed, "Yes—all looked normal," covering both eyes, the grid and
+triangle staying fixed in space during head movement, normal color and clarity,
+and normal closure without the triangle becoming headlocked at the end. This is
+the first passed full-length native test through the real Present hook after
+the two failed shutdown gates.
+
+The game, SteamVR and other diagnostics were absent before launch. The later
+process snapshot found SteamVR and the Steam game installation running; their
+creation times were 14:51:08.676 UTC or later, after this diagnostic completed.
+No native diagnostic remained. This distinguishes those subsequent processes
+from overlap in the tested run; snapshots do not monitor transient launches
+between observations. No process was stopped, and the Frontier installation,
+live INI and saved runtime selection were unchanged.
+
+The passed gate qualifies this diagnostic's Present, rendering and teardown
+sequence on PiOpenXR. Shipping OpenVR exports still forward. Native Frontier
+startup and game-thread integration, feature behavior and performance remain
+separate work.
