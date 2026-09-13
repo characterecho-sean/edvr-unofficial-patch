@@ -8,9 +8,14 @@ path. The full build passed: 184 checks per shared/private/LiveCopy case and 25
 checks per deliberately unavailable swap/live probe case, alongside the
 existing suites. The new fixture reproduces the missing bridge on the previous
 archived DLL. All 481 source, binary, environment, stage and log hashes are
-recorded. The minimal-hook Pimax test is prepared but remains pending; Frontier
-startup threading, complete legacy exports and game feature integration remain
-open.
+recorded and matched before and after the `3362685` Pimax headset gate. That
+run passed with 1,530 stereo pairs, 313 loading projections and complete
+callback-held cleanup; session binding shutdown spanned 15 ms on the coarse
+tick clock. The graphics log confirms that minimal LiveCopy transport was
+active. The user reported "Looks normal." The next diagnostic adds a persistent
+application System caller and shutdown on that same thread, matching the
+Frontier census. Native Frontier startup progress, complete legacy exports and
+game feature integration remain open.
 
 Main through `0d7251b` was merged and verified as `9f26dd4`. The preceding
 [native startup checkpoint](openxr-native-bootstrap-2026-09-13.md) adds

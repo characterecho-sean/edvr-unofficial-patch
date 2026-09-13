@@ -91,23 +91,42 @@ module is `6da3994b047d67b7201eb3b3b1a21844e453de64ef2ace8d9e1ac5fbf6884242`,
 and the module fixture is
 `d28fd8c84ff37b95074254d73ef6c9e017f227644c644d05fd35eff1ee69dc06`.
 
-## Next native gate
+## Passed native gate
 
-After fresh user readiness, run the existing 20-second bootstrap diagnostic
-with the graphics DLL in `build/openxr-transport-native-stage-20260913-2/`. Its
-isolated INI uses the desktop LiveCopy case's optional-off settings, with
-diagnostic logging enabled. Require the minimal-transport installation marker
-in that stage's graphics log, the expected configuration and startup records,
-valid stereo submission, normal grid/triangle viewing and complete
-callback-held cleanup. The runner's existing child-only runtime override and
-watchdog remain unchanged. This stage does not modify Frontier's files or
+The `3362685` 20-second bootstrap diagnostic passed on Pimax OpenXR 0.1.0,
+Crystal Super and RTX 5090, with parallel projection enabled and native
+5424x5356 per-eye geometry. It used the graphics DLL in
+`build/openxr-transport-native-stage-20260913-2/`; the isolated INI disables
+optional vScreen features and enables diagnostic logging. The graphics log
+confirms forced LiveCopy and `graphics bridge: minimal ExecuteCommandList
+transport installed`. It contains no full-vScreen installation marker.
+
+All 481 hashes matched before and after the run. The graphics log carries the
+precommit stamp `v0.16.2-63-g53f5b48-dirty`; the exact source and binary
+hashes, rather than that stamp alone, qualify the tested `3362685` checkpoint.
+The receipt, binaries, stage INI, validation record, graphics log and Pimax
+evidence are archived in `build/openxr-native-20260913-122450/`.
+
+The child exited 0 after 21.266 seconds without reaching its watchdog. It
+completed 1,530 stereo pairs, 3,060 eye copies and 313 loading projections with
+zero invalid scene poses. All nine shutdown stages completed on the XR owner;
+session binding shutdown spanned 15 ms on the coarse tick clock. The owner
+joined, cleanup succeeded and the final Present callback retired without a
+retained generation. Init, render, XR owner and shutdown had distinct thread
+IDs. The user reported: "Looks normal."
+
+Focus was true at the first sample; the grid began after the 500 ms warmup and
+the scene at 3,516 ms. This run does not add delayed physical-wake or
+focus-loss replay evidence. No Frontier or SteamVR process was observed in the
+before/after snapshots; transient processes were not monitored. The child-only
+runtime override and diagnostic did not change Frontier files or persistent
 settings.
 
 ## Remaining qualification
 
-This checkpoint adds desktop transport coverage. The preceding headset flight
-used the normal vScreen path and does not qualify the new minimal hook on the
-Pimax driver. Complete legacy export policy, Frontier Init/Shutdown
-render-progress evidence, game feature integration and a native Frontier flight
-remain open. No game installation or persistent settings change is part of this
-checkpoint.
+This checkpoint qualifies the minimal LiveCopy route on the Pimax driver;
+shared and private-copy modes have desktop coverage only. Complete legacy
+export policy, Frontier Init/Shutdown render-progress evidence, game feature
+integration and a native Frontier flight remain open. The next diagnostic
+boundary is a persistent application System caller distinct from Init and
+render, with shutdown on that same System caller, matching the Frontier census.
