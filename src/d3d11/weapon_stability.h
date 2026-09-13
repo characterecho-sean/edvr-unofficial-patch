@@ -14,7 +14,12 @@ void weaponStabilityResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t en
 bool weaponStabilityDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                          unsigned start,int base,unsigned startInstance,unsigned width,unsigned height);
 void weaponStabilityFrameBoundary(ID3D11DeviceContext*);
+// Eye capture also retains timing BEFORE its readback hitch. GPU-only
+// rolling history; one nonblocking readback when explicitly requested.
+void weaponStabilityArmTrace();
 void weaponStabilityShutdown();
+
+constexpr unsigned kWeaponTraceBase=19,kWeaponTraceFrames=128,kWeaponTraceRows=16;
 
 constexpr char kWeaponStabilityCs[]=R"HLSL(
 struct Instance {uint4 row[21];};
@@ -69,6 +74,7 @@ float3 aimingTranslation(float3 p,bool valid,out float status) {
         asuint(Anchor[prev+1].w)==sampleEpoch && Anchor[prev+2].w>0 &&
         abs(Anchor[prev+4].w-sx)<1e-5*max(sx,1) &&
         abs(Anchor[prev+5].w-sy)<1e-5*max(sy,1);
+    uint traceFlags=(valid?1u:0u)|(history?2u:0u);
     if(history) {
         float3 dc=camera[275].xyz-Anchor[prev].xyz,dp=p-Anchor[prev+1].xyz;
         armStep=dp;
@@ -84,6 +90,9 @@ float3 aimingTranslation(float3 p,bool valid,out float status) {
         bool synchronized=all(abs(local-Anchor[prev+2].xyz)<.0001);
         bool steady=all(abs(r-Anchor[prev+4].xyz)<1e-5) &&
             all(abs(u-Anchor[prev+5].xyz)<1e-5) && all(abs(f-Anchor[prev+6].xyz)<1e-5);
+        traceFlags|=(synchronized?4u:0u)|(steady?8u:0u)|
+            (lc<1 && lp<1?16u:0u)|(lc>lp+.001?32u:0u)|
+            (Anchor[prev+2].w>=3?64u:0u)|(Anchor[prev+3].w<2?128u:0u);
         if(lc<1 && lp<1 && synchronized) {
             confidence=min(Anchor[prev+2].w+1,3);status=confidence>=3?2:1;
         } else if(lc<1 && length(travel)>.001 && lc>lp+.001 && steady &&
@@ -98,6 +107,20 @@ float3 aimingTranslation(float3 p,bool valid,out float status) {
         }
     }
     if(sampleWrite!=0) {
+        // First and last mesh samples expose same-frame replacement as well
+        // as failed acquisition. These rows never feed the correction.
+        uint first=19+(sampleFrame%128)*16,last=first+8;
+        bool fresh=asuint(Anchor[first].x)!=sampleFrame || asuint(Anchor[first].y)!=sampleEpoch;
+        float calls=fresh?1:Anchor[last].w+1;
+        for(uint copy=0;copy<2;++copy)if(copy!=0 || fresh) {
+            uint dst=copy!=0?last:first;
+            Anchor[dst]=float4(asfloat(sampleFrame),asfloat(sampleEpoch),asfloat(traceFlags),calls);
+            Anchor[dst+1]=float4(camera[275].xyz,camera[273].z);
+            Anchor[dst+2]=float4(p,confidence);
+            Anchor[dst+3]=float4(r,sx);Anchor[dst+4]=float4(u,sy);
+            Anchor[dst+5]=float4(f,status);Anchor[dst+6]=float4(correction,valid?1:0);
+            Anchor[dst+7]=float4(learned,Anchor[prev+2].w);
+        }
         Anchor[now]=float4(camera[275].xyz,asfloat(sampleFrame));
         Anchor[now+1]=float4(p,asfloat(valid?sampleEpoch:0));
         Anchor[now+2]=float4(learned,valid?confidence:0);

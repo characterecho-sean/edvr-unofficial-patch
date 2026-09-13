@@ -27,6 +27,7 @@
 #include "ui_resolve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
+#include "weapon_stability.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
 #include "shader_swap.h"
@@ -5126,6 +5127,7 @@ void temporalPassArmEyeDump() {
     // The key takes a RUN of the left eye (kEyeRun says why): sixteen raw
     // crops and the first treated frame; a run under way is left to finish.
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+    weaponStabilityArmTrace();
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
     _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),

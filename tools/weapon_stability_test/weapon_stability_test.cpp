@@ -7,15 +7,18 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <cstdarg>
 #include <vector>
 #include <fstream>
 #include <filesystem>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0,draws=0,motionDraws=0;ID3D11ShaderResourceView* drawnPool=nullptr;
+D3D_DRIVER_TYPE testDriver=D3D_DRIVER_TYPE_WARP;
+std::vector<std::string> testLog;
 void check(bool b,const char* label){++checks;if(!b){std::printf("FAIL: %s\n",label);std::exit(1);}}
 void hr(HRESULT h){check(SUCCEEDED(h),"D3D operation");}
 ComPtr<ID3DBlob> compile(const char* s,const char* entry){
-    ComPtr<ID3DBlob> c,e;HRESULT h=D3DCompile(s,strlen(s),nullptr,nullptr,nullptr,entry,"cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&c,&e);
+    ComPtr<ID3DBlob> c,e;HRESULT h=D3DCompile(s,strlen(s),nullptr,nullptr,nullptr,entry,"cs_5_0",0,0,&c,&e);
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
@@ -28,7 +31,8 @@ bool Config::getBool(const char* key,bool def) const {
     check(!strcmp(key,"fix.weapon_stability") && def,"weapon stability config key defaults on");return testEnabled;
 }
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
-Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
+Log& Log::get(){static Log l;return l;}Log::~Log()=default;
+void Log::note(const char* format,...){char line[2048];va_list args;va_start(args,format);vsnprintf(line,sizeof(line),format,args);va_end(args);testLog.emplace_back(line);}
 void* bindingGet(BindSlot s){return s==BindSlot::Rtv0?testRtv:nullptr;}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:s==BindSlot::Ps?testPs:0;}
 bool bindingResolve(void* view,ResourceInfo* info){
@@ -56,8 +60,8 @@ struct Harness {
     ComPtr<ID3D11Texture2D> rtTex;ComPtr<ID3D11RenderTargetView> rt;
     ComPtr<ID3D11Buffer> pool,bones,camera;ComPtr<ID3D11ShaderResourceView> ps,bs;
     Harness(){
-        D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
-        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
+        D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,testDriver,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
+        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
         D3D11_TEXTURE2D_DESC td{};td.Width=64;td.Height=48;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_RENDER_TARGET;
         hr(dev->CreateTexture2D(&td,nullptr,&rtTex));hr(dev->CreateRenderTargetView(rtTex.Get(),nullptr,&rt));
         testRtv=rt.Get();ctx->OMSetRenderTargets(1,rt.GetAddressOf(),nullptr);D3D11_VIEWPORT vp{0,0,64,48,0,1};ctx->RSSetViewports(1,&vp);
@@ -386,9 +390,54 @@ void aimingTimingTest(){
     check(ha[3]==1 && std::fabs(ha[0]-offset[0])<1e-6 && std::fabs(ha[1]-offset[1])<1e-6 && std::fabs(ha[2]-offset[2])<1e-6,"hip-fire reentry retains direct attachment correction");
     h.clean();
 }
+void traceTest(){
+    Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+    camera[270][0]=2;camera[271][1]=3;camera[272][3]=1;camera[273][2]=.025f;
+    for(auto& r:pool)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    pool[12].words[0]=7;pool[90].words[0]=8;
+    h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));
+    weaponStabilityArmTrace();check(!g.traceRequested,"inactive eye dump does not request weapon readback");
+    for(unsigned f=0;f<140;++f){
+        for(unsigned i:{12u,90u})position(pool[i],f*.01f,0,0);
+        camera[275][0]=f*.01f+.01f;camera[275][1]=.02f;camera[275][2]=-.075f;
+        h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
+        h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();check(h.run(),"trace ring records ordinary source draw");
+        auto result=h.read(g.fixed.Get());check(!memcmp(result.data(),pool.data(),result.size()),"recording trace leaves synchronized geometry bit-identical");
+        if(f==139){
+            camera[275][0]+=.04f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());check(h.run(),"second camera update recorded");
+            auto anchor=h.read(g.anchor.Get());auto* a=reinterpret_cast<const float*>(anchor.data());
+            check(a[8]==3 && std::fabs(a[0]-.04f)<1e-6,"trace does not alter timing correction");
+            check(!g.traceStage && !g.tracePending,"rolling GPU history has no routine staging/readback");
+            weaponStabilityArmTrace();check(g.traceRequested,"eye dump requests prehistory");
+        }
+        weaponStabilityFrameBoundary(h.ctx.Get());
+    }
+    check(g.tracePending && g.traceFrame==139 && g.traceStage,"eye dump copies bounded history once");
+    auto frozen=h.read(g.traceStage.Get());check(frozen.size()==kWeaponTraceFrames*kWeaponTraceRows*16,"readback bounded to 32 KiB");
+    auto* p=reinterpret_cast<const float*>(frozen.data());
+    for(unsigned frame=12;frame<140;++frame){
+        const float* first=p+(frame%kWeaponTraceFrames)*kWeaponTraceRows*4;
+        unsigned stamp=0;memcpy(&stamp,first,4);check(stamp==frame,"ring retains last 128 actual frames");
+        check(first[3]==1,"first sample is not overwritten by later material");
+        const float* last=first+32;
+        check(last[3]==(frame==139?2:1),"last sample records same-frame regeneration count");
+        if(frame==139)check(first[23]==2 && last[23]==3 && std::fabs(last[24]-.04f)<1e-6,"trace distinguishes synchronized first draw and corrected last draw");
+    }
+    weaponStabilityArmTrace();check(!g.traceRequested,"pending trace cannot be overwritten by another request");
+    testLog.clear();
+    for(unsigned i=0;i<4;++i)weaponStabilityFrameBoundary(h.ctx.Get());
+    check(!g.tracePending,"ready readback drains asynchronously at frame boundary");
+    unsigned records=0;bool complete=false,last=false;
+    for(auto& line:testLog){if(line.find("weapon timing frame=")==0)++records;if(line=="weapon timing trace: complete.")complete=true;if(line.find("frame=139 last")!=std::string::npos && line.find("status=3")!=std::string::npos)last=true;}
+    check(records==256 && complete && last,"logged trace has full prehistory and correction status");
+    testEnabled=false;weaponStabilityConfigure(Config::get());h.screen();weaponStabilityArmTrace();check(!g.traceRequested,"disabled weapon fix does not request readback");
+    testEnabled=true;weaponStabilityConfigure(Config::get());h.clean();
+}
 int main(int argc,char** argv){
-    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();aimingTimingTest();}
+    if(argc==3 && !strcmp(argv[2],"--hardware")){testDriver=D3D_DRIVER_TYPE_HARDWARE;--argc;}
+    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();aimingTimingTest();traceTest();}
     else if(argc==3 && !strcmp(argv[1],"--capture"))capture(argv[2]);
-    else {std::puts("Usage: weapon_stability_test --self-test | --capture DIR");return 2;}
+    else {std::puts("Usage: weapon_stability_test --self-test [--hardware] | --capture DIR");return 2;}
     std::printf("PASS: weapon stability (%u checks)\n",checks);return 0;
 }

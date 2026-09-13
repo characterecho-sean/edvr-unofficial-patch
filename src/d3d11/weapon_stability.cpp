@@ -7,6 +7,7 @@
 #include "shader_swap.h"
 #include "../common/config.h"
 #include "../common/log.h"
+#include <cstring>
 namespace edvr { namespace {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 // Configuration survives release of inactive on-foot GPU resources.
@@ -27,6 +28,9 @@ struct State {
     Ptr<ID3D11Buffer> lightVertices;
     Ptr<ID3D11UnorderedAccessView> lightUav;
     unsigned lightBytes=0;
+    Ptr<ID3D11Buffer> traceStage;
+    bool traceRequested=false,tracePending=false;
+    unsigned traceFrame=0;
 } g;
 bool family(uint64_t vs) {
     return vs==0xF516BF0201303B87ull || vs==0x8B589D25B2A0ADDCull ||
@@ -52,8 +56,9 @@ bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11
         g.find.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"findAnchor","weapon anchor",nullptr,"weapon stability"));
         g.apply.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"applyAnchor","weapon attach",nullptr,"weapon stability"));
         if(!g.find || !g.apply)return false;
-        D3D11_BUFFER_DESC bd{};bd.ByteWidth=19*16;bd.StructureByteStride=16;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
-        float zeros[19*4]{};D3D11_SUBRESOURCE_DATA initial{zeros,0,0};
+        constexpr unsigned rows=kWeaponTraceBase+kWeaponTraceFrames*kWeaponTraceRows;
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=rows*16;bd.StructureByteStride=16;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+        float zeros[rows*4]{};D3D11_SUBRESOURCE_DATA initial{zeros,0,0};
         if(FAILED(dev->CreateBuffer(&bd,&initial,&g.anchor)) || FAILED(dev->CreateUnorderedAccessView(g.anchor.Get(),nullptr,&g.anchorUav)))return false;
         bd.ByteWidth=48;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.stage)))return false;
@@ -160,6 +165,47 @@ bool lightDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,uns
     UINT zero=0;ctx->IASetVertexBuffers(1,1,g.lightVertices.GetAddressOf(),&stride,&zero);
     draw(ctx,count,instances,start,base,startInstance);ctx->IASetVertexBuffers(1,1,vertices.GetAddressOf(),&stride,&offset);return true;
 }
+void traceTick(ID3D11DeviceContext* ctx) {
+    if(!ctx)return;
+    if(g.tracePending && g.frame-g.traceFrame>=3) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        HRESULT result=ctx->Map(g.traceStage.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
+        if(SUCCEEDED(result)) {
+            Log::get().note("weapon timing trace: pre-eye-dump history through frame %u; flags valid=1 history=2 synchronized=4 steady=8 bounded-step=16 camera-ahead=32 calibrated=64 short-overshoot=128.",g.traceFrame);
+            const auto* data=static_cast<const float*>(m.pData);
+            for(unsigned age=kWeaponTraceFrames;age--;) {
+                const unsigned frame=g.traceFrame-age;
+                for(unsigned part=0;part<2;++part) {
+                    const float* p=data+((frame%kWeaponTraceFrames)*kWeaponTraceRows+part*8)*4;
+                    unsigned stamp=0,epoch=0,flags=0;
+                    std::memcpy(&stamp,p,4);std::memcpy(&epoch,p+1,4);std::memcpy(&flags,p+2,4);
+                    if(stamp!=frame || !epoch || p[3]<1)continue;
+                    Log::get().note("weapon timing frame=%u %s epoch=%u flags=%02X calls=%.0f near=%.7f status=%.0f confidence=%.0f/%.0f camera=(%.7f,%.7f,%.7f) arms=(%.7f,%.7f,%.7f) right=(%.7f,%.7f,%.7f;%.7f) up=(%.7f,%.7f,%.7f;%.7f) forward=(%.7f,%.7f,%.7f) learned=(%.7f,%.7f,%.7f) correction=(%.7f,%.7f,%.7f).",
+                        frame,part?"last":"first",epoch,flags,p[3],p[7],p[23],p[11],p[31],
+                        p[4],p[5],p[6],p[8],p[9],p[10],p[12],p[13],p[14],p[15],
+                        p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[28],p[29],p[30],p[24],p[25],p[26]);
+                }
+            }
+            ctx->Unmap(g.traceStage.Get(),0);g.tracePending=false;
+            Log::get().note("weapon timing trace: complete.");
+        } else if(result!=DXGI_ERROR_WAS_STILL_DRAWING || g.frame-g.traceFrame>120) {
+            Log::get().note("weapon timing trace: readback unavailable (0x%08X); did not wait for GPU.",unsigned(result));g.tracePending=false;
+        }
+    }
+    if(!g.traceRequested || g.tracePending || !g.anchor)return;
+    g.traceRequested=false;
+    if(!g.traceStage) {
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=kWeaponTraceFrames*kWeaponTraceRows*16;
+        bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.traceStage))) {
+            Log::get().note("weapon timing trace: staging allocation failed; rendering unchanged.");return;
+        }
+    }
+    D3D11_BOX box{kWeaponTraceBase*16,0,0,(kWeaponTraceBase+kWeaponTraceFrames*kWeaponTraceRows)*16,1,1};
+    ctx->CopySubresourceRegion(g.traceStage.Get(),0,0,0,0,g.anchor.Get(),0,&box);
+    g.traceFrame=g.frame;g.tracePending=true;
+}
 }
 void weaponStabilityConfigure(Config& cfg) {
     const bool enabled=cfg.getBool("fix.weapon_stability",true);
@@ -209,6 +255,7 @@ bool weaponStabilityDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned
     ctx->VSSetShaderResources(33,1,pv.GetAddressOf());return true;
 }
 void weaponStabilityFrameBoundary(ID3D11DeviceContext* ctx) {
+    traceTick(ctx);
     ++g.frame;
     if(g.pending && ctx && g.frame-g.pendingFrame>=3) {
         D3D11_MAPPED_SUBRESOURCE m{};HRESULT hr=ctx->Map(g.stage.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
@@ -220,6 +267,9 @@ void weaponStabilityFrameBoundary(ID3D11DeviceContext* ctx) {
         } else if(g.frame-g.pendingFrame>60)g.pending=false;
     }
     if(g.seen && g.frame-g.lastScreen>120)g=State{};
+}
+void weaponStabilityArmTrace() {
+    if(g_enabled && g.seen && g.frame-g.lastScreen<=2 && !g.tracePending)g.traceRequested=true;
 }
 void weaponStabilityShutdown(){g=State{};}
 }

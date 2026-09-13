@@ -231,3 +231,52 @@ runtime-specific validation. On-foot gating is possible, but it does not
 remove that compatibility issue. The user chose to preserve reprojection
 and finish the targeted ADS correction. No Turbo code is included in
 this change.
+
+## Residual judder on 7472e7c
+
+The user confirms firing still aligns, but ADS strafing and forward
+walking judder. The sanctioned log reader verifies Steam flight 071602
+as v0.16.1-6-g7472e7c, linked 13:08:23 UTC. Runtime and image sizes
+match the preceding run. Captures 071822 (strafing) and 071830 (forward)
+each retain 19 frames and 57 buffers without declines.
+
+The first strafing frame, 7589, has a 30.282 mm lateral offset error;
+the camera repeats in 7590 while the arms catch up. The first forward
+frame, 8252, differs by about 49.175 mm along travel and likewise
+catches up on the following frame. Subsequent captured offsets are
+stable to micrometre precision. Both jumps occur at the capture
+boundary; neither capture contains the history that the live correction
+used before it. These boundary stalls cannot establish the frequency of
+ordinary judder.
+
+Ruled out: 7472e7c completes the ADS fix, because the user still sees
+judder. Ruled out: the existing tests fail only on NVIDIA or under the
+live shader compiler flags, because all 1,962 checks pass on hardware
+with both strict and production compilation. The complete captured mesh
+draw order also retains synchronization through later scenery/material
+draws in an isolated hardware replay. It still corrects the earlier
+20400 overshoot. This does not prove the same history survives live.
+
+Remaining discriminators are the live sample frame/epoch, acquisition
+confidence, source gaps, aim/projection changes, and camera/arm steps
+before a jump. Add bounded GPU prehistory to the eye-dump trigger rather
+than changing sight calibration or relaxing the motion guard without
+that evidence. The trace must preserve rendering and avoid routine CPU
+readbacks, extra dispatches, or waiting for the GPU.
+
+The eye-dump trigger now freezes the preceding 128 GPU frame samples,
+including the first and last material's camera/arms positions, basis,
+projection, learned offset, confidence, correction and guard flags. The
+32 KiB ring lives after the existing anchor data and never feeds the
+correction. Only the explicit eye-dump request creates/copies staging;
+the frame-boundary drain uses DO_NOT_WAIT after three frames. The log
+reports allocation/readback failure distinctly from completed capture.
+
+The expanded production test passes 3,077 checks on WARP and NVIDIA with
+the live compiler flags. It exercises ring wrap, first/last
+preservation, exactly bounded readback, disabled/inactive requests, the
+full logging path, and unchanged corrected/uncorrected geometry. This
+build changes diagnostics, not sight alignment, motion correction or
+reprojection. The next test should hold ADS and strafe continuously for
+at least two seconds before pressing the eye-dump key while still
+moving.
