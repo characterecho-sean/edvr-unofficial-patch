@@ -51,6 +51,13 @@ class NativeDevice {
     hr=validate(device.Get(),required,minimum);if(FAILED(hr))return hr;
     device_=device;context_=context;feature_=got;return S_OK;
   }
+  HRESULT initializeExisting(ID3D11Device* device,const LUID& required,D3D_FEATURE_LEVEL minimum) {
+    // Validate the pre-existing game's device; never replace it on mismatch.
+    reset();const auto r=validate(device,required,minimum);if(FAILED(r))return r;
+    device->GetImmediateContext(&context_);
+    if(!context_)return E_NOINTERFACE;
+    device_=device;feature_=device->GetFeatureLevel();return S_OK;
+  }
   void reset(){context_.Reset();device_.Reset();feature_=D3D_FEATURE_LEVEL_1_0_CORE;}
   ID3D11Device* device()const{return device_.Get();}
   ID3D11DeviceContext* context()const{return context_.Get();}

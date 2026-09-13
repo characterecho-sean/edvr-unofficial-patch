@@ -38,10 +38,14 @@ def existing_absolute(value: str) -> Path:
 
 
 def build_command(executable: Path, loader: Path, seconds_value: int,
-                  graphics_proxy: Path | None = None) -> list[str]:
+                  graphics_proxy: Path | None = None, present_boundary: bool = False) -> list[str]:
+    if present_boundary and graphics_proxy is None:
+        raise ValueError("--present-boundary requires --graphics-proxy")
     command = [str(executable), "--loader", str(loader), "--seconds", str(seconds_value)]
     if graphics_proxy is not None:
         command.extend(("--graphics-proxy", str(graphics_proxy)))
+    if present_boundary:
+        command.append("--present-boundary")
     return command
 
 
@@ -147,6 +151,13 @@ def self_test() -> int:
         check(command_with_proxy[-2:] == ["--graphics-proxy", str(proxy)])
         command_without_proxy = build_command(root / "openxr_native_test.exe", root / "openxr_loader.dll", 7)
         check("--graphics-proxy" not in command_without_proxy)
+        check(build_command(root / "test.exe", root / "loader.dll", 7, proxy, True)[-1] == "--present-boundary")
+        check("--present-boundary" not in command_with_proxy)
+        try:
+            build_command(root / "test.exe", root / "loader.dll", 7, present_boundary=True)
+            check(False)
+        except ValueError:
+            check(True)
         proxy_metadata = graphics_proxy_metadata(proxy)
         check(proxy_metadata["graphics_proxy"] == str(proxy))
         check(proxy_metadata["graphics_proxy_sha256"] == hashlib.sha256(b"proxy fixture").hexdigest())
@@ -172,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--loader", help="absolute installed OpenXR loader DLL path")
     parser.add_argument("--runtime", help="absolute runtime JSON; child environment only")
     parser.add_argument("--graphics-proxy", help="absolute existing graphics proxy DLL path")
+    parser.add_argument("--present-boundary", action="store_true", help="drive graphics through the real proxy Present hook; requires --graphics-proxy")
     parser.add_argument("--seconds", type=seconds, default=10)
     parser.add_argument("--output", type=Path, help="new output directory (never overwrites a capture)")
     parser.add_argument("--dry-run", action="store_true")
@@ -188,6 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         loader = existing_absolute(args.loader)
         runtime = existing_absolute(args.runtime) if args.runtime else None
         graphics_proxy = existing_absolute(args.graphics_proxy) if args.graphics_proxy else None
+        if args.present_boundary and graphics_proxy is None:
+            raise ValueError("--present-boundary requires --graphics-proxy")
         manifest = active_manifest(runtime)
         executable = existing_absolute(str(ROOT / "build" / "openxr_native_test.exe"))
         output = (args.output or ROOT / "build" / ("openxr-native-" + datetime.now().strftime("%Y%m%d-%H%M%S"))).resolve()
@@ -199,8 +213,9 @@ def main(argv: list[str] | None = None) -> int:
                     "runtime_manifest": str(manifest) if manifest else None,
                     "runtime_manifest_sha256": digest(manifest) if manifest else None,
                     "explicit_runtime_override": bool(runtime), "seconds": args.seconds,
+                    "present_boundary": args.present_boundary,
                     **graphics_proxy_metadata(graphics_proxy)}
-        command = build_command(executable, loader, args.seconds, graphics_proxy)
+        command = build_command(executable, loader, args.seconds, graphics_proxy, args.present_boundary)
         return run_child(command, output, environment, args.seconds + 40, metadata, dry_run=args.dry_run)
     except (OSError, ValueError) as error:
         print(f"[edvr] {error}", file=sys.stderr)

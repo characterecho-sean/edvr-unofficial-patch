@@ -14,6 +14,7 @@
 #include <dxgi1_2.h>
 
 #include "graphics_runtime.h"
+#include "render_boundary.h"
 
 #include <atomic>
 
@@ -898,6 +899,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         perfMonitorNotePresentWait(static_cast<double>(qpcNow() - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
     }
+    // Bind the first successful owned, non-TEST Present thread even before
+    // the paired consumer registers. Exclude registration from Present timing.
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+        renderBoundaryNoteOwnedPresent(g_state->device);
     ID3D11DeviceContext* timingContext = nullptr;
     g_state->device->GetImmediateContext(&timingContext);
     if (timingContext) {
@@ -1429,6 +1434,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
                                              static_cast<double>(qpcFrequency()));
     }
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+        renderBoundaryPresent(g_state->device);
     return hr;
 }
 

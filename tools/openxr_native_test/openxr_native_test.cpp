@@ -8,6 +8,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include "native_device.h"
+#include "present_device.h"
 #include "../../src/openxr/session_state.h"
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/openxr/projection_math.h"
@@ -31,6 +32,8 @@
 #include "../../src/openxr/openvr_auxiliary.h"
 #include "../../src/openxr/owner_service.h"
 #include "../../src/openxr/render_thread_dispatcher.h"
+#include "../../src/openxr/present_work_queue.h"
+#include "../../src/openxr/render_boundary_client.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -44,7 +47,7 @@ using namespace edvr::openxr;
 extern "C" vr::IVRCompositor* nativeCompositorCaller(vr::IVRCompositor*);
 extern "C" vr::IVRSystem* nativeSystemCaller(vr::IVRSystem*);
 namespace {
-struct Options { std::wstring loader, graphicsProxy; unsigned seconds=10; bool dry=false, self=false; };
+struct Options { std::wstring loader, graphicsProxy; unsigned seconds=10; bool dry=false, self=false, presentBoundary=false; };
 bool absolute(const std::wstring& s) {
   return s.size()>3 && ((s[0]>=L'A' && s[0]<=L'Z') || (s[0]>=L'a' && s[0]<=L'z')) &&
          s[1]==L':' && (s[2]==L'\\' || s[2]==L'/');
@@ -65,9 +68,11 @@ bool parse(const std::vector<std::wstring>& args, Options& out) {
       if(!duration(args[++i],o.seconds)) return false; seenSeconds=true;
     } else if(args[i]==L"--graphics-proxy" && !seenGraphics && i+1<args.size()) {
       o.graphicsProxy=args[++i];seenGraphics=true;
+    } else if(args[i]==L"--present-boundary" && !o.presentBoundary) {
+      o.presentBoundary=true;
     } else return false;
   }
-  if(!absolute(o.loader)||(seenGraphics&&!absolute(o.graphicsProxy))) return false; out=o; return true;
+  if(!absolute(o.loader)||(seenGraphics&&!absolute(o.graphicsProxy))||(o.presentBoundary&&!seenGraphics)) return false; out=o; return true;
 }
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
@@ -117,6 +122,41 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
+struct PresentHost {
+  PresentWorkQueue work;
+  ID3D11Device* device=nullptr;
+  ID3D11DeviceContext* context=nullptr;
+  DWORD thread=GetCurrentThreadId();
+  uint64_t callbacks=0;
+  bool correct=true;
+  ~PresentHost(){work.close();}
+  static HRESULT WINAPI callback(void* user,ID3D11Device* device,ID3D11DeviceContext* context) {
+    auto& host=*static_cast<PresentHost*>(user);
+    if(GetCurrentThreadId()!=host.thread||device!=host.device||context!=host.context) {
+      host.correct=false;host.work.close();return E_ACCESSDENIED;
+    }
+    ++host.callbacks;
+    host.work.pump(); // no queued request is ordinary idle Present
+    return S_OK;
+  }
+};
+struct RenderRoute {
+  RenderThreadDispatcher& dispatcher;
+  PresentWorkQueue* present=nullptr;
+  bool bind() {
+    bool bound=false;
+    if(present&&!present->isRenderThread())
+      return present->invoke([&]{bound=dispatcher.bindCurrentThread();})&&bound;
+    return dispatcher.bindCurrentThread();
+  }
+  bool invoke(std::function<void()> work) {
+    if(present&&!present->isRenderThread()) {
+      bool completed=false;
+      return present->invoke([&]{completed=dispatcher.invokeOwner(std::move(work));})&&completed;
+    }
+    return dispatcher.invokeOwner(std::move(work));
+  }
+};
 class CountedGraphics final : public ImmediateExecutor {
  public:
   explicit CountedGraphics(RenderThreadDispatcher& dispatcher):dispatcher_(dispatcher){}
@@ -137,11 +177,12 @@ class CountedGraphics final : public ImmediateExecutor {
 };
 class Host : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
-  Host(OwnerService& owner,RenderThreadDispatcher& dispatcher)
-      :service(owner),renderCaller(dispatcher),graphicsCalls(dispatcher){}
+  Host(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
+      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){}
   OwnerService& service;
-  RenderThreadDispatcher& renderCaller;
+  RenderRoute& renderRoute;
   CountedGraphics graphicsCalls;
+  ID3D11Device* externalDevice=nullptr; // host keeps device alive through owner join
   // The hook-owning proxy remains loaded until process exit, as in the WARP
   // fixture. Unloading a graphics proxy with retained hook contexts is unsafe.
   HMODULE graphicsProxy=nullptr;
@@ -362,7 +403,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
-      return renderCaller.invokeOwner([&]{result=submitEye(generation,eye,texture,bounds,flags);})?result:vr::VRCompositorError_InvalidTexture;
+      return renderRoute.invoke([&]{result=submitEye(generation,eye,texture,bounds,flags);})?result:vr::VRCompositorError_InvalidTexture;
     }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
@@ -384,7 +425,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   vr::EVRCompositorError setSkybox(uint64_t generation,const vr::Texture_t* textures,uint32_t count) override {
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
-      return renderCaller.invokeOwner([&]{result=setSkybox(generation,textures,count);})?result:vr::VRCompositorError_InvalidTexture;
+      return renderRoute.invoke([&]{result=setSkybox(generation,textures,count);})?result:vr::VRCompositorError_InvalidTexture;
     }
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed)
@@ -510,7 +551,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     clean=result("destroy_binding",binding.shutdown())&&clean;
     view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
     state.abandonAfterOwnerDestruction();
-    graphics.reset();
+    graphics.reset();externalDevice=nullptr;
     if(instance && api.destroyInstance) {clean=result("xrDestroyInstance",api.destroyInstance(instance))&&clean;instance=XR_NULL_HANDLE;}
     if(api.module) {FreeLibrary(api.module);api.module=nullptr;}
     if(runtimeGeneration) {
@@ -595,7 +636,9 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
         return result("graphics_proxy_capability",XR_ERROR_FUNCTION_UNSUPPORTED);
     }
     HRESULT hr=E_FAIL;
-    if(!graphicsCalls.invoke([&]{hr=graphics.initialize(req.adapterLuid,req.minFeatureLevel,createDevice);}))
+    if(!graphicsCalls.invoke([&]{hr=externalDevice?
+        graphics.initializeExisting(externalDevice,req.adapterLuid,req.minFeatureLevel):
+        graphics.initialize(req.adapterLuid,req.minFeatureLevel,createDevice);}))
       return result("device_render_boundary",XR_ERROR_INITIALIZATION_FAILED);
     if(FAILED(hr)) {std::printf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
     std::printf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
@@ -635,22 +678,25 @@ class NativeBackend final:public RuntimeBackend {
  public:
   OwnerService owner;
   RenderThreadDispatcher render{owner};
+  RenderRoute route{render};
+  PresentHost* present=nullptr;
   std::unique_ptr<Host> host;
   Options options;
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out)override {
     if(host)return vr::VRInitError_Init_Internal; // native diagnostic: one generation per process
-    if(!render.bindCurrentThread())return vr::VRInitError_Init_Internal;
+    route.present=present?&present->work:nullptr;
+    if(!route.bind())return vr::VRInitError_Init_Internal;
     if(!owner.start([this]{if(host)host->pumpEvents();}))return vr::VRInitError_Init_Internal;
     auto error=vr::VRInitError_Init_Internal;
-    if(!render.invokeOwner([&]{
-      host=std::make_unique<Host>(owner,render);host->startupOptions=options;
+    if(!route.invoke([&]{
+      host=std::make_unique<Host>(owner,render,route,present?present->device:nullptr);host->startupOptions=options;
       error=host->start(token,cancelled,out);
     }))return vr::VRInitError_Init_Internal;
     return error;
   }
   bool prepareStop() {
     bool drained=false;
-    return render.invokeOwner([&] {
+    return route.invoke([&] {
       const auto r=host?host->stereo.drain():XR_SUCCESS;
       drained=r==XR_SUCCESS;
       if(host)host->clean=result("gpu_drain",r)&&host->clean;
@@ -660,7 +706,7 @@ class NativeBackend final:public RuntimeBackend {
   bool stop()noexcept override {
     // Early exits still have their Init/render caller available. Normal
     // System-thread Shutdown comes only after that caller explicitly drains.
-    if(render.isRenderThread()&&owner.running())prepareStop();
+    if(owner.running()&&(present||render.isRenderThread()))prepareStop();
     render.close();
     bool cleaned=!host;
     const bool joined=owner.stop([&]{cleaned=host?host->stop():true;});
@@ -686,10 +732,10 @@ bool samePose(const vr::TrackedDevicePose_t& a,const vr::TrackedDevicePose_t& b)
     std::memcmp(&a.vVelocity,&b.vVelocity,sizeof(a.vVelocity))==0&&std::memcmp(&a.vAngularVelocity,&b.vAngularVelocity,sizeof(a.vAngularVelocity))==0&&
     a.eTrackingResult==b.eTrackingResult&&a.bPoseIsValid==b.bPoseIsValid&&a.bDeviceIsConnected==b.bDeviceIsConnected;
 }
-int run(const Options& options) {
+int run(const Options& options,PresentHost* present=nullptr) {
   // Process-lifetime objects back the exported function pointers. Their
   // resources are still explicitly retired through Shutdown before return.
-  static NativeBackend backend;backend.options=options;
+  static NativeBackend backend;backend.options=options;backend.present=present;
   static RuntimeLifecycle runtime(backend);
   if(!bindRuntimeExports(runtime))return 3;
   vr::EVRInitError initError=vr::VRInitError_Unknown;
@@ -772,7 +818,7 @@ int run(const Options& options) {
   // Destroy and overwrite the caller sources before the timed viewing phase.
   Microsoft::WRL::ComPtr<ID3D11Texture2D> skySources[6];vr::Texture_t skyTextures[6]{};
   bool skyCreated=true;
-  if(!backend.render.invokeOwner([&]{skyCreated=host.graphicsCalls.invoke([&]{
+  if(!backend.route.invoke([&]{skyCreated=host.graphicsCalls.invoke([&]{
     constexpr unsigned side=256;
     const unsigned colors[6][3]={{35,70,110},{80,35,90},{35,90,65},{95,60,30},{50,65,100},{65,45,35}};
     std::vector<uint32_t> pixels(side*side);
@@ -792,7 +838,7 @@ int run(const Options& options) {
     }
   })&&skyCreated;})||!skyCreated||compositor->SetSkyboxOverride(skyTextures,6)!=vr::VRCompositorError_None)return 3;
   bool overwritten=false;
-  if(!backend.render.invokeOwner([&]{overwritten=host.graphicsCalls.invoke([&]{
+  if(!backend.route.invoke([&]{overwritten=host.graphicsCalls.invoke([&]{
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;host.graphics.device()->GetImmediateContext(&context);
     std::vector<uint32_t> black(256*256,0xff000000u);
     for(auto& source:skySources){context->UpdateSubresource(source.Get(),0,nullptr,black.data(),256*4,0);source.Reset();}
@@ -815,7 +861,7 @@ int run(const Options& options) {
   const auto loadingDeadline=startup+(std::min)(3000ULL,options.seconds*250ULL);
   std::puts("loading_phase,begin=1,six_faces=1,sources_overwritten_and_released=1");
   while(GetTickCount64()<loadingDeadline)
-    if(!backend.render.invokeOwner([&]{host.loadingBoundary();}))return 3;
+    if(!backend.route.invoke([&]{host.loadingBoundary();}))return 3;
   bool loadingGate=false;
   if(!backend.owner.invoke([&]{
     const auto after=host.compositorRead();
@@ -952,7 +998,7 @@ int run(const Options& options) {
     }
   } while(false); };
   while(!failed&&!stopped) {
-    if(!backend.render.invokeOwner(renderStep)){failed=true;break;}
+    if(!backend.route.invoke(renderStep)){failed=true;break;}
   }
   const bool gpuDrained=backend.prepareStop();
   // Stop the System producer, then issue exported Shutdown from that same
@@ -981,7 +1027,9 @@ int run(const Options& options) {
   if(host.bridgeCounts)host.bridgeCounts(&privateLists,&unknownLists);
   const uint64_t expectedPrivate=4*layers+2*host.loadingLayers;
   const bool bridgeGate=!host.graphicsProxy||(privateLists==expectedPrivate&&unknownLists==0);
-  const bool renderGate=host.graphicsCalls.calls>0&&host.graphicsCalls.thread==initThread&&
+  const DWORD graphicsThread=present?present->thread:initThread;
+  const bool callerGate=!present||graphicsThread!=initThread;
+  const bool renderGate=callerGate&&host.graphicsCalls.calls>0&&host.graphicsCalls.thread==graphicsThread&&
     host.graphicsCalls.thread!=host.ownerThread&&host.graphicsCalls.wrongThread==0&&host.graphicsCalls.rejected==1&&idleSafe&&bridgeGate;
   std::printf("render_boundary,callbacks=%llu,thread=%lu,xr_owner=%lu,wrong_thread=%llu,rejected=%llu,explicit_loading=1,paired_proxy=%u,private_lists=%llu,expected_private=%llu,unknown_lists=%llu,passed=%u\n",
     (unsigned long long)host.graphicsCalls.calls,(unsigned long)host.graphicsCalls.thread,(unsigned long)host.ownerThread,
@@ -996,6 +1044,48 @@ int run(const Options& options) {
     host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
     host.compositorWaits==frames+host.startupFrames&&cachedChecks==frames&&host.compositorHandoffs==layers&&host.validGamePoses;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;
+}
+int runWithPresent(const Options& options) {
+  // Hook owner and callback code are process lifetime; don't unload the proxy.
+  const auto proxy=LoadLibraryExW(options.graphicsProxy.c_str(),nullptr,
+    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  if(!proxy){std::puts("error,present_proxy_load");return 3;}
+  PresentDevice device;
+  const auto created=device.initialize(proxy,D3D_DRIVER_TYPE_HARDWARE);
+  if(FAILED(created)){std::printf("error,present_device,%08lx\n",(unsigned long)created);return 3;}
+  PresentHost present;present.device=device.device();present.context=device.context();
+  if(!present.work.bindCurrentThread())return 3;
+  RenderBoundaryClient client;
+  const EdvrRenderBoundaryRequest request{sizeof(request),EDVR_RENDER_BOUNDARY_VERSION_1,
+    device.device(),&PresentHost::callback,&present};
+  if(FAILED(client.acquire(proxy,request))){std::puts("error,present_boundary_acquire");return 3;}
+  std::atomic<bool> finished{false};int outcome=5;DWORD initCaller=0;
+  std::thread controller([&] {
+    initCaller=GetCurrentThreadId();
+    try { outcome=run(options,&present); }
+    catch(const std::exception& e){std::printf("error,present_controller,%s\n",e.what());}
+    catch(...){std::puts("error,present_controller_exception");}
+    finished.store(true,std::memory_order_release);
+  });
+  uint64_t presents=0;bool presenting=true;
+  while(!finished.load(std::memory_order_acquire)) {
+    if(FAILED(device.present())) {
+      presenting=false;present.work.close();
+    }
+    ++presents;
+    Sleep(1);
+  }
+  controller.join();
+  const auto closed=client.close();
+  const auto released=client.release();
+  present.work.close();
+  const bool passed=outcome==0&&presenting&&present.correct&&present.callbacks>0&&
+    initCaller!=present.thread&&closed==S_OK&&released==S_OK;
+  std::printf("present_boundary,presents=%llu,callbacks=%llu,render_thread=%lu,init_thread=%lu,device_before_init=1,close=%08lx,release=%08lx,passed=%u\n",
+    (unsigned long long)presents,(unsigned long long)present.callbacks,(unsigned long)present.thread,
+    (unsigned long)initCaller,(unsigned long)closed,(unsigned long)released,unsigned(passed));
+  std::puts(passed?"native_present: PASS":"native_present: INCOMPLETE_OR_FAILED");
+  return passed?0:4;
 }
 int selfTest() {
   unsigned checks=0,failures=0;auto check=[&](bool yes,const char* msg){++checks;if(!yes){++failures;std::printf("FAIL: %s\n",msg);}};
@@ -1012,6 +1102,9 @@ int selfTest() {
   check(!parse({L"--loader",L"C:/a.dll",L"--graphics-proxy",L"d3d11.dll"},o),"relative graphics proxy rejected");
   check(!parse({L"--loader",L"C:/a.dll",L"--graphics-proxy"},o),"missing graphics proxy rejected");
   check(!parse({L"--loader",L"C:/a.dll",L"--graphics-proxy",L"D:/a.dll",L"--graphics-proxy",L"D:/b.dll"},o),"duplicate graphics proxy rejected");
+  check(parse({L"--loader",L"C:/a.dll",L"--graphics-proxy",L"D:/d3d11.dll",L"--present-boundary"},o)&&o.presentBoundary,"explicit Present boundary");
+  check(!parse({L"--loader",L"C:/a.dll",L"--present-boundary"},o),"Present boundary requires paired proxy");
+  check(!parse({L"--loader",L"C:/a.dll",L"--graphics-proxy",L"D:/d3d11.dll",L"--present-boundary",L"--present-boundary"},o),"duplicate Present boundary rejected");
   std::vector<uint32_t> values;unsigned calls=0;
   auto grow=[&](uint32_t c,uint32_t*n,uint32_t*p){++calls;*n=c?3:1;if(!c)return XR_SUCCESS;if(c<3)return XR_ERROR_SIZE_INSUFFICIENT;p[0]=7;p[1]=8;p[2]=9;return XR_SUCCESS;};
   check(enumerate<uint32_t>(grow,values)==XR_SUCCESS&&calls==3&&values==std::vector<uint32_t>({7,8,9}),"count growth");
@@ -1041,8 +1134,8 @@ int selfTest() {
 int wmain(int argc,wchar_t** argv) {
   SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
   std::setvbuf(stdout,nullptr,_IONBF,0);Options options;
-  if(!parse(std::vector<std::wstring>(argv+1,argv+argc),options)) {std::puts("usage: --loader ABSOLUTE_DLL [--seconds 1..60] [--graphics-proxy ABSOLUTE_DLL] | --self-test | --dry-run");return 2;}
+  if(!parse(std::vector<std::wstring>(argv+1,argv+argc),options)) {std::puts("usage: --loader ABSOLUTE_DLL [--seconds 1..60] [--graphics-proxy ABSOLUTE_DLL [--present-boundary]] | --self-test | --dry-run");return 2;}
   if(options.dry) {std::puts("Would create a standalone OpenXR stereo diagnostic; no files, loader, device or runtime used.");return 0;}
   if(options.self) return selfTest();
-  try {return run(options);} catch(const std::exception& e) {std::printf("error,exception,%s\n",e.what());return 5;}
+  try {return options.presentBoundary?runWithPresent(options):run(options);} catch(const std::exception& e) {std::printf("error,exception,%s\n",e.what());return 5;}
 }

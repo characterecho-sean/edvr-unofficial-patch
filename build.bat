@@ -218,6 +218,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvr_selftest_binding ^
     --extra-export edvrAcquireGraphicsBridge ^
+    --extra-export edvrAcquireRenderBoundary ^
     --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^
@@ -303,6 +304,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
+    "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
@@ -933,7 +935,7 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR probe build failed & exit /b 1 )
 REM Reusable OpenXR core policies. These tests inject dispatch and geometry;
 REM no loader/session is opened and the shipping proxies do not use them yet.
 if not exist "%OBJ%\openxr_core" mkdir "%OBJ%\openxr_core"
-for %%T in (session projection geometry head gate frame pose origin reference space lifecycle owner render_thread) do (
+for %%T in (session projection geometry head gate frame pose origin reference space lifecycle owner render_thread present_queue) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
         /Fo"%OBJ%\openxr_core\\" /Fe"%BUILD%\openxr_%%T_test.exe" ^
         "tools\openxr_%%T_test\openxr_%%T_test.cpp" /link /INCREMENTAL:NO
@@ -952,7 +954,7 @@ for %%T in (native stereo) do (
         "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
-        /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
+        /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
     if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
     "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
     "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
@@ -999,6 +1001,15 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR proxy state test build failed & exit /b 1 )
 "%BUILD%\openxr_proxy_state_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_proxy_state_test.exe" --self-test || exit /b 1
+
+REM Actual owned-swapchain Present hook, foreign Init caller and private work.
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_present_test.exe" ^
+    "tools\openxr_present_test\openxr_present_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxgi.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: OpenXR Present test build failed & exit /b 1 )
+"%BUILD%\openxr_present_test.exe" --dry-run || exit /b 1
+"%BUILD%\openxr_present_test.exe" --self-test || exit /b 1
 
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_system_test.exe" ^

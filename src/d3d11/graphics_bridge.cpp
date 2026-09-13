@@ -1,4 +1,5 @@
 #include "graphics_bridge.h"
+#include "render_boundary.h"
 
 #include "../common/frame_flag.h"
 
@@ -121,6 +122,9 @@ bool graphicsBridgeRegisterOwner(ID3D11Device* device, ID3D11DeviceContext* cont
     // Mirror that lifetime so discovery cannot return recycled COM addresses.
     owner->hookReady.store(true, std::memory_order_release);
     g_owner = owner;
+    // Present-boundary discovery shares this exact, already-hooked owner.
+    // Its failure must not change the established graphics bridge behavior.
+    (void)renderBoundaryRegisterOwner(device, context);
     return true;
 }
 

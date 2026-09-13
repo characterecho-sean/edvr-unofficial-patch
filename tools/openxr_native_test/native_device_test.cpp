@@ -23,6 +23,11 @@ int wmain(int argc,wchar_t** argv) {
       LUID foreign=desc.AdapterLuid;foreign.LowPart^=1;
       check(FAILED(NativeDevice::validate(device.Get(),foreign,level)),"foreign adapter rejected");
       check(FAILED(NativeDevice::validate(device.Get(),desc.AdapterLuid,D3D_FEATURE_LEVEL_12_1)),"feature minimum rejected");
+      NativeDevice supplied;
+      check(supplied.initializeExisting(device.Get(),desc.AdapterLuid,level)==S_OK&&
+        supplied.device()==device.Get()&&supplied.context()==context.Get(),"existing device and immediate context retained exactly");
+      check(FAILED(supplied.initializeExisting(device.Get(),foreign,level))&&!supplied.device()&&!supplied.context(),"existing mismatched device rejected without replacement");
+      check(FAILED(supplied.initializeExisting(nullptr,desc.AdapterLuid,level))&&!supplied.device(),"null existing device rejected");
     }
   }
   check(FAILED(NativeDevice::validate(nullptr,LUID{},D3D_FEATURE_LEVEL_10_0)),"null device rejected");
