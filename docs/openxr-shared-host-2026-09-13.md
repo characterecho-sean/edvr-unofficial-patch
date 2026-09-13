@@ -90,11 +90,38 @@ mesh-motion checks and 254-key configuration contract also passed. The output
 is `build/openxr-shared-host-build.log`; exact hashes are recorded in
 `build/openxr-shared-host-validation.json`.
 
-Native qualification is pending. The game and SteamVR were running at the
-post-build check, so no native session was launched and no process was stopped.
-The next explicit headset gate must match the new executable/provider hashes
-and require the new teardown signature, startup/loading/scene counters and
-normal closure. No game files, live INI or saved runtime selection have
+The `3fcadf7` 20-second PiOpenXR headset gate passed on September 13 after
+explicit user readiness. The child ran from 15:26:59.171428 to 15:27:19.950254
+UTC, exited 0 in 20.765 seconds and did not trigger its 60-second watchdog. The
+user confirmed that the grid and triangle appeared normally in both eyes,
+stayed fixed in space during head movement, had normal color and clarity, and
+closed without becoming headlocked.
+
+The run completed 268 loading projections, 1,529 stereo pairs and 3,058 eye
+copies. All 1,530 sampled views were valid. The graphics proxy recorded 6,652
+private command lists against 6,652 expected, with zero unknown lists and zero
+wrong-thread callbacks. The runtime logged normal stop and cleanup, both native
+PASS markers and the new `in_callback=1` teardown signature. All 19 shutdown
+stage occurrences completed successfully. Session binding shutdown took 15 ms
+on the XR owner while the render caller remained inside the callback; callback
+close and release completed afterward. No outer-loop pause was requested.
+
+The distinct callers were Init 32924, System 33644, XR owner 9360 and render
+19936. The runtime was Pimax OpenXR 0.1.0 with 5424 x 5356 recommended pixels
+per eye. No game, SteamVR or native diagnostic process was observed in the
+preflight and postflight snapshots; transient processes between those snapshots
+were not monitored. Source, binary, environment and build-log hashes matched
+all 457 recorded entries before and after the run. The executable SHA256 was
+`8ab2d3571c052a722afbb6031979eede57631bf3930838e1ab2baa9784575d38` and the
+graphics DLL SHA256 was
+`91b2ba9c30dc6a621faa399f8e3f4a6fe823add6611ec8db63cfb48f714e3fa0`. Exact
+binaries, output, receipt, validation and qualification are archived locally
+under `build/openxr-native-20260913-092659/`.
+
+This qualifies teardown inside the real Present callback in the standalone
+PiOpenXR diagnostic, including progress without pumping messages on the parked
+render caller. Frontier's window behavior and context ownership still require
+game integration evidence. No game files, live INI or saved runtime selection
 changed; the Frontier install remains `f3c205e`.
 
 The startup audit also identified explicit remaining work: connect native
