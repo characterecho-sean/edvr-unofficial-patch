@@ -11,7 +11,7 @@
 #include <fstream>
 #include <filesystem>
 using Microsoft::WRL::ComPtr;
-unsigned checks=0,draws=0;ID3D11ShaderResourceView* drawnPool=nullptr;
+unsigned checks=0,draws=0,motionDraws=0;ID3D11ShaderResourceView* drawnPool=nullptr;
 void check(bool b,const char* label){++checks;if(!b){std::printf("FAIL: %s\n",label);std::exit(1);}}
 void hr(HRESULT h){check(SUCCEEDED(h),"D3D operation");}
 ComPtr<ID3DBlob> compile(const char* s,const char* entry){
@@ -19,7 +19,7 @@ ComPtr<ID3DBlob> compile(const char* s,const char* entry){
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
-void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned,unsigned,unsigned,int,unsigned){}
+void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned,unsigned,unsigned,int,unsigned){++motionDraws;}
 void weaponMotionResourceWritten(ID3D11Resource*){}
 void meshMotionResourceWritten(ID3D11Resource*,uint64_t,uint64_t){}
 bool testEnabled=true;
@@ -89,7 +89,7 @@ struct Harness {
 void selfTest(){
     Harness h;std::vector<Instance> p(256);float b[16][3][4]{};float c[276][4]{};
     weaponStabilityConfigure(Config::get());
-    c[270][0]=c[271][1]=c[272][3]=1;c[273][2]=.025f;c[275][0]=10;c[275][1]=20;c[275][2]=30;
+    c[270][0]=c[271][1]=c[272][3]=1;c[273][2]=.0675f;c[275][0]=10;c[275][1]=20;c[275][2]=30;
     for(auto& r:p)position(r,100,100,100);
     for(unsigned i:{7u,8u}){b[i][0][0]=b[i][1][1]=b[i][2][2]=1;b[i][1][3]=-1.7f;b[i][2][3]=-.08f;}
     position(p[12],10.04f,20,30);p[12].words[0]=7;p[12].words[2]=123;p[12].words[3]=456;
@@ -209,7 +209,7 @@ void emitterTest(){
     cam[273][2]=.025f;run(false);
     position(p[51],model[9][3],model[10][3],model[11][3]);
     auto updatePool=[&](){h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,p.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());};
-    updatePool();run(true); // exact rigid-part association survives aiming
+    updatePool();run(false); // ADS emitter keeps the same stock pose as its mesh
     setFloat(p[51],5,getFloat(p[51],5)+.001f);updatePool();run(false); // merely nearby world effect
     setFloat(p[51],5,model[10][3]);p[51].words[0]=9;updatePool();run(false); // independently skinned world body
     p[51].words[0]=0;updatePool();cam[273][2]=.05f;run(false);cam[273][2]=.0675f;
@@ -266,6 +266,9 @@ void lightTest(){
         ComPtr<ID3D11ComputeShader> cs;h.ctx->CSGetShader(&cs,nullptr,nullptr);check(cs.Get()==old.Get(),"light CS shader restored");
     };
     run(true);auto* allocation=g.lightVertices.Get();run(true);check(allocation==g.lightVertices.Get(),"repeated light batches reuse allocation");
+    cam[273][2]=.025f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
+    run(false); // ADS must not detach a light by retaining the hip-fire delta.
+    cam[273][2]=.0675f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());run(true);
     lc[6][3]=.01f;run(false);lc[6][3]=0;
     lc[12][3]=.0675f;run(false);lc[12][3]=.025f;
     lc[2][0]=2;run(false);lc[2][0]=1;
@@ -280,8 +283,32 @@ void lightTest(){
     testEnabled=false;weaponStabilityConfigure(Config::get());check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"live weapon toggle also bypasses lights");
     testEnabled=true;weaponStabilityConfigure(Config::get());drawnLights.Reset();h.clean();
 }
+void aimingTest(){
+    Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+    camera[270][0]=camera[271][1]=camera[272][3]=1;camera[273][2]=.0675f;
+    for(auto& r:pool)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    position(pool[12],-.041941643f,-.009459019f,.062137604f);pool[12].words[0]=7;pool[90]=pool[12];pool[90].words[0]=8;
+    position(pool[52],.1f,.2f,.4f);
+    h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));h.screen();
+    check(h.run(),"hip-fire pose starts with correction");auto hip=h.read(g.fixed.Get());check(memcmp(hip.data(),pool.data(),hip.size())!=0,"hip-fire correction is active before aiming");
+    auto updateCamera=[&](){h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());};
+    for(float nearZ:{.025f,.04f,.06f,.075f}){
+        camera[273][2]=nearZ;camera[270][0]=3;camera[271][1]=4;camera[275][0]+=.03f;updateCamera();
+        for(uint64_t vs:{0x8B589D25B2A0ADDCull,0x7B0DC42D383F694Cull,0x025B4B9FF54622EDull,0x7F9B650EC1A1E570ull,0x174E8D76363BE337ull,0x34CCFAAB1EAD90BEull}){
+            testVs=vs;const unsigned beforeMotion=motionDraws,beforeDraw=draws;check(h.run(),"aiming and transition material forwarded");auto actual=h.read(g.fixed.Get());
+            check(!memcmp(actual.data(),pool.data(),actual.size()),"aiming body, arms, reticle and scope retain every original transform bit");
+            check(motionDraws==beforeMotion+1 && draws==beforeDraw+1,"aiming still supplies temporal motion and exactly one original draw");
+        }
+        auto anchor=h.read(g.anchor.Get());const auto* a=reinterpret_cast<const float*>(anchor.data());
+        check(a[3]==0 && a[8]==1 && a[9]==nearZ,"projection fallback is reported distinctly from missing roots");
+    }
+    camera[273][2]=.0675f;updateCamera();testVs=0x8B589D25B2A0ADDCull;check(h.run(),"leaving ADS resumes hip-fire correction");auto actual=h.read(g.fixed.Get());
+    const auto* r=reinterpret_cast<const Instance*>(actual.data());
+    check(std::fabs(getFloat(r[52],4)-(getFloat(pool[52],4)+camera[275][0]-getFloat(pool[12],4)))<1e-6f,"return to hip fire uses fresh attachment rather than stale ADS data");h.clean();
+}
 int main(int argc,char** argv){
-    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();}
+    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();}
     else if(argc==3 && !strcmp(argv[1],"--capture"))capture(argv[2]);
     else {std::puts("Usage: weapon_stability_test --self-test | --capture DIR");return 2;}
     std::printf("PASS: weapon stability (%u checks)\n",checks);return 0;
