@@ -33,6 +33,12 @@ public:
     static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
     static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
     static constexpr uint64_t kNight=0xFCF7BD2896751D96ull,kNightPs=0xF786D34B5E118D5Eull;
+    // 05:10:17 supercruise Earth-like world: opaque surface and cloud layer.
+    // Their affine VS placement is outside the rigid t33 pool. Capture the
+    // actual draw's constants/vertices, never substitute atmosphere matrices.
+    static bool planetSurface(uint64_t vs) {
+        return vs==0x71DD9863DCFC0986ull || vs==0x3530A6FD15EDE145ull;
+    }
     // 20:02:56 crouching rifle: these source passes use independent
     // billboard/flare vertices, not the weapon's t33 instance records.
     // Capture their placement; do not infer attachment from proximity.
@@ -52,7 +58,7 @@ public:
         static const GUID key={0x10e33b44,0x1cf4,0x4fa2,{0x82,0x1f,0x63,0x51,0xda,0xeb,0x43,0x99}};return key;
     }
     static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t vs) {
-        if((!sourceEffect(vs) && !sourceMesh(vs) && vs!=kNight) || !layout || !e || !n || n>32)return;
+        if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && vs!=kNight) || !layout || !e || !n || n>32)return;
         std::vector<Layout> items(n);
         for(UINT i=0;i<n;++i) {
             if(!e[i].SemanticName || strlen(e[i].SemanticName)>=64)return;
@@ -98,6 +104,8 @@ public:
         case 0x19F70CE80DA3242Bull: // sphere draw using cb0[9..11], cb1[270..273]
         case 0x26FC402B1274EE7Bull: // planetary pipeline, including the surface
         case 0x9FFA5D5E79F04873ull:
+        case 0x71DD9863DCFC0986ull:
+        case 0x3530A6FD15EDE145ull:
         case 0xB12F7A618E1BDE98ull:
         case 0x203DF51758AADC4Dull:
         case 0xC7FA0C0F5DD49180ull: // six 8194-vertex instances beside the bodies
@@ -318,7 +326,8 @@ public:
         const bool mesh=source && (eyeMesh || ordinal==UINT32_MAX-1) && sourceMesh(vs);
         const bool effect=source && ordinal==UINT32_MAX-2 && sourceEffect(vs);
         const bool night=vs==kNight && ps==kNightPs;
-        const bool unpacked=effect || night;
+        const bool planet=planetSurface(vs);
+        const bool unpacked=effect || night || planet;
         if(unpacked || mesh) {
             Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;ctx->IAGetInputLayout(&layout);
             Layout elements[32];UINT bytes=sizeof(elements);
@@ -352,7 +361,7 @@ public:
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if(((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) || ((mesh || night) && frame==firstFrame) || effect) {
+        if(((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) || ((mesh || night || planet) && frame==firstFrame) || effect) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             bool copied=false;

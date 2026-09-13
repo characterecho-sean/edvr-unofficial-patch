@@ -10,9 +10,11 @@
 #include <unordered_map>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 namespace edvr { namespace mesh_motion_detail {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 constexpr unsigned maxRecords=512,stride=240;
+constexpr unsigned maxInstanceBytes=1024*1024;
 constexpr uint64_t materialVs=0xEB5234DB6ADB491Dull,faceVs=0xDE545DC8EE4FBB87ull;
 constexpr uint64_t multiUvVs=0x61AE8EB05FDC18DDull,litMultiUvVs=0x66DE2CADB1F4AE6Bull,detailVs=0xAACFDCF2FB9AD809ull;
 enum CoverageKind { Material,Face,MultiUv,LitMultiUv,Detail,CoverageCount };
@@ -38,12 +40,12 @@ struct Eye {
 bool enabled=false,failed=false,noted=false,capped=false;
 Ptr<ID3D11ComputeShader> capture,match;
 Ptr<ID3D11PixelShader> coverageShaders[CoverageCount];
-Ptr<ID3D11Buffer> settings,instances;
-Ptr<ID3D11ShaderResourceView> instanceView;
+Ptr<ID3D11Buffer> settings,instances,captureInputs;
+Ptr<ID3D11ShaderResourceView> instanceView,captureInputView;
 Ptr<ID3D11DepthStencilState> depthState;
 Ptr<ID3D11BlendState> blendState;
-GpuIntervals<16> drawGpu,matchGpu;
-unsigned frames=0,draws=0;
+GpuIntervals<16> drawGpu,matchGpu,captureGpu;
+unsigned frames=0,draws=0,captureBatches=0,capturedInstances=0;
 struct IndexStamp { unsigned epoch=0,seen=0; };
 struct GeometryStamp {
     unsigned epoch=0,seen=0;
@@ -58,20 +60,58 @@ unsigned geometryEpoch=0,geometryWrites=0,unknownWrites=0,rangeWrites=0,disjoint
 Ptr<ID3D11Buffer> dump;
 unsigned dumpCount=0;
 struct Settings { UINT info[4],key[16];float dimensions[4]; };
+struct PendingCapture {
+    Ptr<ID3D11DeviceContext> context;
+    Ptr<ID3D11Buffer> scene;
+    Ptr<ID3D11Buffer> ids;
+    Ptr<ID3D11ShaderResourceView> pool;
+    Ptr<ID3D11Resource> poolResource;
+    Ptr<ID3D11UnorderedAccessView> output;
+    Settings inputs[maxRecords];
+    unsigned count=0;
+    void clear(){count=0;context.Reset();scene.Reset();ids.Reset();pool.Reset();poolResource.Reset();output.Reset();}
+} pending;
 struct ComputeState {
     ID3D11DeviceContext* ctx;
     Ptr<ID3D11ComputeShader> shader;
     ID3D11ClassInstance* classes[256]{};UINT count=256;
-    ID3D11Buffer* cb[4]{};ID3D11ShaderResourceView* srv[3]{};Ptr<ID3D11UnorderedAccessView> uav;
-    explicit ComputeState(ID3D11DeviceContext* c):ctx(c){ctx->CSGetShader(&shader,classes,&count);ctx->CSGetConstantBuffers(0,4,cb);ctx->CSGetShaderResources(0,3,srv);ctx->CSGetUnorderedAccessViews(0,1,&uav);}
+    ID3D11Buffer* cb[4]{};ID3D11ShaderResourceView* srv[4]{};Ptr<ID3D11UnorderedAccessView> uav;
+    Ptr<ID3D11Predicate> predicate;BOOL predicateValue=FALSE;
+    explicit ComputeState(ID3D11DeviceContext* c):ctx(c){ctx->CSGetShader(&shader,classes,&count);ctx->CSGetConstantBuffers(0,4,cb);ctx->CSGetShaderResources(0,4,srv);ctx->CSGetUnorderedAccessViews(0,1,&uav);ctx->GetPredication(&predicate,&predicateValue);ctx->SetPredication(nullptr,FALSE);}
     ~ComputeState(){
-        ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* noUav=nullptr;
-        ctx->CSSetShaderResources(0,3,none);ctx->CSSetUnorderedAccessViews(0,1,&noUav,nullptr);
-        ctx->CSSetShader(shader.Get(),classes,count);ctx->CSSetConstantBuffers(0,4,cb);ctx->CSSetShaderResources(0,3,srv);
+        ID3D11ShaderResourceView* none[4]{};ID3D11UnorderedAccessView* noUav=nullptr;
+        ctx->CSSetShaderResources(0,4,none);ctx->CSSetUnorderedAccessViews(0,1,&noUav,nullptr);
+        ctx->CSSetShader(shader.Get(),classes,count);ctx->CSSetConstantBuffers(0,4,cb);ctx->CSSetShaderResources(0,4,srv);
         UINT keep=~0u;ctx->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),&keep);
+        ctx->SetPredication(predicate.Get(),predicateValue);
         for(auto* p:cb)if(p)p->Release();for(auto* p:srv)if(p)p->Release();for(UINT i=0;i<count;++i)classes[i]->Release();
     }
 };
+bool uploadSettings(ID3D11DeviceContext* ctx,const Settings& data){
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if(FAILED(ctx->Map(settings.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))){
+        failed=true;pending.clear();Log::get().note("mesh motion: settings upload failed; existing motion retained.");return false;
+    }
+    std::memcpy(mapped.pData,&data,sizeof(data));ctx->Unmap(settings.Get(),0);return true;
+}
+void flushCapture(){
+    if(!pending.count)return;
+    auto* ctx=pending.context.Get();
+    {
+        ComputeState saved(ctx);const bool timed=captureGpu.begin(ctx);Settings data{};data.info[2]=pending.count;
+        D3D11_BOX box{0,0,0,UINT(pending.count*sizeof(Settings)),1,1};
+        ctx->UpdateSubresource(captureInputs.Get(),0,&box,pending.inputs,0,0);
+        if(!uploadSettings(ctx,data)){if(timed)captureGpu.end(ctx);return;}
+        ID3D11Buffer* cbs[4]={nullptr,pending.scene.Get(),nullptr,settings.Get()};
+        ID3D11ShaderResourceView* srvs[4]={pending.pool.Get(),instanceView.Get(),nullptr,captureInputView.Get()};
+        ctx->CSSetShader(capture.Get(),nullptr,0);ctx->CSSetConstantBuffers(0,4,cbs);
+        ctx->CSSetShaderResources(0,4,srvs);ctx->CSSetUnorderedAccessViews(0,1,pending.output.GetAddressOf(),nullptr);
+        ctx->Dispatch((pending.count+63)/64,1,1);
+        if(timed)captureGpu.end(ctx);
+    }
+    ++captureBatches;capturedInstances+=pending.count;
+    pending.clear();
+}
 bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev){
     if(capture)return true;
     capture.Attach(shaderSwapCompileCs(ctx,kMeshMotionHlsl,sizeof(kMeshMotionHlsl)-1,"capture","mesh capture",nullptr,"mesh motion"));
@@ -81,11 +121,13 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev){
         coverageShaders[i].Attach(shaderSwapCompilePs(ctx,kMeshCoverageHlsl,sizeof(kMeshCoverageHlsl)-1,entries[i],"mesh coverage",nullptr,"mesh motion"));
         if(!coverageShaders[i])return false;
     }
-    D3D11_BUFFER_DESC b{};b.ByteWidth=sizeof(Settings);b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_BUFFER_DESC b{};b.ByteWidth=sizeof(Settings);b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;b.Usage=D3D11_USAGE_DYNAMIC;b.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     if(FAILED(dev->CreateBuffer(&b,nullptr,&settings)))return false;
-    b.ByteWidth=64*8;b.BindFlags=D3D11_BIND_SHADER_RESOURCE;b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    b={};b.ByteWidth=maxInstanceBytes;b.BindFlags=D3D11_BIND_SHADER_RESOURCE;b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
     D3D11_SHADER_RESOURCE_VIEW_DESC s{};s.Format=DXGI_FORMAT_R32_TYPELESS;s.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;s.BufferEx.NumElements=b.ByteWidth/4;s.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
     if(FAILED(dev->CreateBuffer(&b,nullptr,&instances)) || FAILED(dev->CreateShaderResourceView(instances.Get(),&s,&instanceView)))return false;
+    b.ByteWidth=maxRecords*sizeof(Settings);b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;b.StructureByteStride=sizeof(Settings);
+    if(FAILED(dev->CreateBuffer(&b,nullptr,&captureInputs)) || FAILED(dev->CreateShaderResourceView(captureInputs.Get(),nullptr,&captureInputView)))return false;
     D3D11_DEPTH_STENCIL_DESC d{};d.DepthEnable=TRUE;d.DepthFunc=D3D11_COMPARISON_EQUAL;d.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
     D3D11_BLEND_DESC blend{};blend.RenderTarget[0].RenderTargetWriteMask=3;
     return capture && match && SUCCEEDED(dev->CreateDepthStencilState(&d,&depthState)) && SUCCEEDED(dev->CreateBlendState(&blend,&blendState));
@@ -112,6 +154,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     int eye=-1;for(int i=0;i<2;++i){ID3D11Texture2D* s=nullptr;uint32_t fmt=0;if(depthProbeSceneDepthFormat(td.Width,td.Height,i,&s,&fmt) && s==scene.Get()){eye=i;break;}}
     if(eye<0)return;
     Eye& e=eyes[eye];if(e.matched)return; // no history mutation after this eye is consumed
+    if(e.scene==scene && e.history[e.write].count+n>maxRecords){if(!capped){capped=true;Log::get().note("mesh motion: 512 instances per eye reached; excess geometry retains existing motion.");}return;}
     Ptr<ID3D11DepthStencilState> ds;UINT ref=0;ctx->OMGetDepthStencilState(&ds,&ref);
     D3D11_DEPTH_STENCIL_DESC dd{};if(ds)ds->GetDesc(&dd);else {dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;}
     if(!dd.DepthEnable || dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL)return;
@@ -138,9 +181,23 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER || pd.Buffer.FirstElement || FAILED(pr.As(&pb)))return;
     D3D11_BUFFER_DESC pbd{};pb->GetDesc(&pbd);if(pbd.StructureByteStride!=336 || pd.Buffer.NumElements!=pbd.ByteWidth/336)return;
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);if(!prepare(ctx,dev.Get()) || (e.scene!=scene && !createEye(dev.Get(),scene.Get(),e))){fail();return;}
-    auto& now=e.history[e.write];auto& prev=e.history[1-e.write];if(now.count+n>maxRecords){if(!capped){capped=true;Log::get().note("mesh motion: 512 instances per eye reached; excess geometry retains existing motion.");}return;}
+    auto& now=e.history[e.write];auto& prev=e.history[1-e.write];
+    // Coverage only needs the copied instance IDs. Defer transform capture
+    // until an input changes or the eye is consumed, rather than breaking
+    // the graphics pipeline with one compute dispatch for every mesh.
+    const bool wholeIds=idd.ByteWidth<=maxInstanceBytes;
+    const bool gpuWritable=((pbd.BindFlags|idd.BindFlags)&D3D11_BIND_UNORDERED_ACCESS)!=0;
+    if(pending.count && (pending.context.Get()!=ctx || pending.scene!=cb || pending.ids!=ids || pending.pool!=pool || pending.output!=now.uav || !wholeIds))flushCapture();
+    if(failed)return;
+    if(!pending.count){
+        pending.context=ctx;pending.scene=cb;pending.ids=ids;pending.pool=pool;pending.poolResource=pr;pending.output=now.uav;
+        // Reuse one GPU snapshot for all draws while this stream is unchanged.
+        // Unusually large streams retain bounded per-draw copies instead.
+        D3D11_BOX box{wholeIds?0:UINT(at),0,0,wholeIds?idd.ByteWidth:UINT(at+n*8),1,1};
+        ctx->CopySubresourceRegion(instances.Get(),0,0,0,0,ids.Get(),0,&box);
+    }
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11InputLayout> layout;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->IAGetInputLayout(&layout);
-    Settings data{};data.info[0]=now.count;data.info[1]=prev.count;data.info[2]=n;data.dimensions[0]=float(e.width);data.dimensions[1]=float(e.height);
+    Settings data{};data.info[0]=now.count;data.info[1]=prev.count;data.info[2]=n;data.info[3]=wholeIds?UINT(at):0;data.dimensions[0]=float(e.width);data.dimensions[1]=float(e.height);
     IUnknown* objects[4]={vs.Get(),vb.Get(),ib.Get(),layout.Get()};
     for(unsigned i=0;i<4;++i){uint64_t key=reinterpret_cast<uint64_t>(objects[i]);data.key[2*i]=UINT(key);data.key[2*i+1]=UINT(key>>32);now.sources[now.count][i]=objects[i];}
     data.key[8]=UINT(base);data.key[9]=start;data.key[10]=count;data.key[11]=vertexStride;data.key[12]=offset;data.key[13]=indexOffset;data.key[14]=UINT(format);
@@ -151,34 +208,35 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     auto& indexStamp=watched[ib.Get()];indexStamp.seen=frames;
     auto& slice=indexStamp.indices.try_emplace((indexFirst<<32)|indexEnd,IndexStamp{indexStamp.epoch,frames}).first->second;
     slice.seen=frames;data.key[15]=std::max(vertexEpoch,slice.epoch);
+    for(unsigned i=0;i<n;++i){auto& input=pending.inputs[pending.count++];input=data;input.info[0]=now.count+i;input.info[3]+=i*8;}
     bool timed=(++draws&63u)==0 && drawGpu.begin(ctx);
-    ctx->UpdateSubresource(settings.Get(),0,nullptr,&data,0,0);
-    D3D11_BOX box{UINT(at),0,0,UINT(at+n*8),1,1};ctx->CopySubresourceRegion(instances.Get(),0,0,0,0,ids.Get(),0,&box);
-    {
-        ComputeState saved(ctx);ID3D11Buffer* cbs[4]={nullptr,cb.Get(),nullptr,settings.Get()};ID3D11ShaderResourceView* srvs[3]={pool.Get(),instanceView.Get(),nullptr};
-        ctx->CSSetShader(capture.Get(),nullptr,0);ctx->CSSetConstantBuffers(0,4,cbs);ctx->CSSetShaderResources(0,3,srvs);ctx->CSSetUnorderedAccessViews(0,1,now.uav.GetAddressOf(),nullptr);ctx->Dispatch(1,1,1);
-    }
+    if(!uploadSettings(ctx,data)){if(timed)drawGpu.end(ctx);return;}
     if(!e.cleared){float zero[4]{};ctx->ClearRenderTargetView(e.rtv.Get(),zero);e.cleared=true;}
     ID3D11RenderTargetView* rt[8]{};Ptr<ID3D11DepthStencilView> originalDepth;ctx->OMGetRenderTargets(8,rt,&originalDepth);
     Ptr<ID3D11PixelShader> ps;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->PSGetShader(&ps,classes,&nc);
     Ptr<ID3D11Buffer> psCb;Ptr<ID3D11ShaderResourceView> psSrv;ctx->PSGetConstantBuffers(13,1,&psCb);ctx->PSGetShaderResources(15,1,&psSrv);
     vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),originalDepth.Get());ctx->OMSetDepthStencilState(depthState.Get(),0);ctx->OMSetBlendState(blendState.Get(),nullptr,mask);
-    ctx->PSSetShader(coverageShaders[kind].Get(),nullptr,0);ctx->PSSetConstantBuffers(13,1,settings.GetAddressOf());ctx->PSSetShaderResources(15,1,now.srv.GetAddressOf());
+    ctx->PSSetShader(coverageShaders[kind].Get(),nullptr,0);ctx->PSSetConstantBuffers(13,1,settings.GetAddressOf());ctx->PSSetShaderResources(15,1,instanceView.GetAddressOf());
     issue(ctx,count,n,start,base,startInstance);
     ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(15,1,&none);
     ctx->PSSetShader(ps.Get(),classes,nc);ctx->PSSetConstantBuffers(13,1,psCb.GetAddressOf());ctx->PSSetShaderResources(15,1,psSrv.GetAddressOf());
     vScreenSetRenderTargetsRaw(ctx,8,rt,originalDepth.Get());ctx->OMSetDepthStencilState(ds.Get(),ref);ctx->OMSetBlendState(blend.Get(),factors,mask);
     for(auto* p:rt)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
     now.count+=n;if(timed)drawGpu.end(ctx);
+    // A UAV can change through GPU commands that have no CPU write hook.
+    // Keep those sources immediate; ordinary immutable/read-only inputs batch.
+    if(gpuWritable)flushCapture();
     if(!noted){noted=true;Log::get().note("mesh motion: exact rigid draw transforms at %ux%u, independent of ship-metres split; original VS coverage, 512 instances per eye, batched GPU history matching. Animated/ambiguous geometry retains existing motion.",e.width,e.height);}
 }
 void meshMotionViews(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,ID3D11ShaderResourceView** views){
     using namespace mesh_motion_detail;views[0]=views[1]=nullptr;if(!enabled || failed)return;
     for(auto& e:eyes)if(e.scene.Get()==scene && e.cleared){
+        flushCapture();
+        if(failed)return;
         auto& now=e.history[e.write];auto& prev=e.history[1-e.write];
         if(!e.matched){
-            bool timed=matchGpu.begin(ctx);ComputeState saved(ctx);Settings data{};data.info[1]=prev.count;
-            ctx->UpdateSubresource(settings.Get(),0,nullptr,&data,0,0);
+            ComputeState saved(ctx);bool timed=matchGpu.begin(ctx);Settings data{};data.info[1]=prev.count;
+            if(!uploadSettings(ctx,data)){if(timed)matchGpu.end(ctx);return;}
             ctx->CSSetConstantBuffers(3,1,settings.GetAddressOf());ctx->CSSetShaderResources(2,1,prev.srv.GetAddressOf());ctx->CSSetUnorderedAccessViews(0,1,now.uav.GetAddressOf(),nullptr);ctx->CSSetShader(match.Get(),nullptr,0);ctx->Dispatch(now.count,1,1);
             if(timed)matchGpu.end(ctx);e.matched=true;
         }
@@ -187,9 +245,11 @@ void meshMotionViews(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,ID3D11Shade
 }
 void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
     using namespace mesh_motion_detail;if(!enabled)return;
-    if(ctx){drawGpu.poll(ctx);matchGpu.poll(ctx);}
+    flushCapture();
+    if(ctx){drawGpu.poll(ctx);matchGpu.poll(ctx);captureGpu.poll(ctx);}
     if(++frames%1800==0){const auto& d=drawGpu.totals;const auto& m=matchGpu.totals;
-        Log::get().note("mesh motion GPU: %u coverage reissues/%u frames; sampled draw+capture %.3f us (%u samples), batched match %.3f us/eye (%u samples); no waits/readbacks.",draws,frames,d.samples?d.ms*1000/d.samples:0,d.samples,m.samples?m.ms*1000/m.samples:0,m.samples);}
+        Log::get().note("mesh motion GPU: %u coverage reissues/%u frames; sampled coverage %.3f us (%u samples), batched match %.3f us/eye (%u samples); no waits/readbacks.",draws,frames,d.samples?d.ms*1000/d.samples:0,d.samples,m.samples?m.ms*1000/m.samples:0,m.samples);
+        const auto& c=captureGpu.totals;Log::get().note("mesh motion capture: %u instances in %u batches; %.3f us/batch (%u samples, %u skipped).",capturedInstances,captureBatches,c.samples?c.ms*1000/c.samples:0,c.samples,c.skipped);}
     for(auto& e:eyes){
         e.write=1-e.write;auto& h=e.history[e.write];for(unsigned i=0;i<h.count;++i)for(auto& p:h.sources[i])p.Reset();h.count=0;e.cleared=e.matched=false;
         auto& prev=e.history[1-e.write];for(unsigned i=0;i<prev.count;++i)for(unsigned j=1;j<=2;++j)if(prev.sources[i][j])watched[static_cast<ID3D11Resource*>(prev.sources[i][j].Get())].seen=frames;
@@ -201,8 +261,16 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
         ++it;
     }
 }
+void meshMotionBeforeMap(ID3D11Resource* resource){
+    using namespace mesh_motion_detail;
+    if(pending.count && (!resource || resource==pending.scene.Get() || resource==pending.ids.Get() || resource==pending.poolResource.Get()))flushCapture();
+}
 void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end){
-    using namespace mesh_motion_detail;if(!enabled || (resource && watched.find(resource)==watched.end()))return;
+    using namespace mesh_motion_detail;
+    // Copy/Update hooks call before the write; Map must flush before the
+    // actual Map call, since a mapped resource cannot be used by the GPU.
+    meshMotionBeforeMap(resource);
+    if(!enabled || (resource && watched.find(resource)==watched.end()))return;
     if(resource){
         if(first==end)return; // Empty D3D11 box performs no write.
         if(first>end){first=0;end=~uint64_t(0);} // Unknown extent fails closed.
@@ -226,8 +294,8 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
     watched.clear();
 }
 void meshMotionShutdown(){
-    using namespace mesh_motion_detail;for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();depthState.Reset();blendState.Reset();
-    failed=noted=capped=false;drawGpu={};matchGpu={};frames=draws=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpCount=0;
+    using namespace mesh_motion_detail;pending.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
+    failed=noted=capped=false;drawGpu={};matchGpu={};captureGpu={};frames=draws=captureBatches=capturedInstances=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpCount=0;
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene){
     using namespace mesh_motion_detail;dump.Reset();dumpCount=0;
@@ -247,7 +315,7 @@ void meshMotionWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const
         wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_Mesh.bin",directory,stamp);FILE* f=nullptr;_wfopen_s(&f,path,L"wb");bool ok=false;
         if(f){const UINT header[2]={dumpCount,stride};ok=fwrite("EDVRMSH1",1,8,f)==8 && fwrite(header,sizeof(header),1,f)==1 && fwrite(mapped.pData,stride,dumpCount,f)==dumpCount;fclose(f);}
         ctx->Unmap(dump.Get(),0);
-        Log::get().note("mesh motion: eye run %ls matched %u/%u rigid records (%u total); %s. Sampled capture/reissue %.3f us, match %.3f us/eye.",stamp,matched,valid,dumpCount,ok?"written":"WRITE FAILED",drawGpu.totals.samples?drawGpu.totals.ms*1000/drawGpu.totals.samples:0,matchGpu.totals.samples?matchGpu.totals.ms*1000/matchGpu.totals.samples:0);
+        Log::get().note("mesh motion: eye run %ls matched %u/%u rigid records (%u total); %s. Sampled coverage %.3f us, match %.3f us/eye.",stamp,matched,valid,dumpCount,ok?"written":"WRITE FAILED",drawGpu.totals.samples?drawGpu.totals.ms*1000/drawGpu.totals.samples:0,matchGpu.totals.samples?matchGpu.totals.ms*1000/matchGpu.totals.samples:0);
         Log::get().note("mesh motion: %u known geometry writes isolated by generation, %u unknown writes reset all history; %zu geometry resources retained.",geometryWrites,unknownWrites,watched.size());
         Log::get().note("mesh motion: %u bounded writes preserved %u disjoint index histories; vertex writes remain conservative.",rangeWrites,disjointIndices);
     }else Log::get().note("mesh motion: eye run %ls readback unavailable (0x%08X).",stamp,unsigned(result));

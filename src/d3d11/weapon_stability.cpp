@@ -7,17 +7,20 @@
 #include "shader_swap.h"
 #include "../common/config.h"
 #include "../common/log.h"
+#include <cstring>
 namespace edvr { namespace {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 // Configuration survives release of inactive on-foot GPU resources.
 bool g_enabled=true,g_configured=false;
 struct State {
     unsigned frame=0,lastScreen=0,prepared=~0u,sourceFrame=~0u,bytes=0,pendingFrame=0,nextReport=0;
-    bool seen=false,failed=false,pending=false;
+    bool seen=false,failed=false,pending=false,preparedWrite=false;
+    unsigned sampleEpoch=1;
     Ptr<ID3D11Buffer> pool,bones,camera,fixed,anchor,stage;
     Ptr<ID3D11ShaderResourceView> fixedSrv,poolView,bonesView;
     Ptr<ID3D11UnorderedAccessView> fixedUav,anchorUav;
     Ptr<ID3D11ComputeShader> find,apply;
+    Ptr<ID3D11Buffer> sample;
     Ptr<ID3D11ComputeShader> emitterShader;
     Ptr<ID3D11Buffer> emitterOutput,emitterCb;
     Ptr<ID3D11UnorderedAccessView> emitterUav;
@@ -25,6 +28,9 @@ struct State {
     Ptr<ID3D11Buffer> lightVertices;
     Ptr<ID3D11UnorderedAccessView> lightUav;
     unsigned lightBytes=0;
+    Ptr<ID3D11Buffer> traceStage;
+    bool traceRequested=false,tracePending=false;
+    unsigned traceFrame=0;
 } g;
 bool family(uint64_t vs) {
     return vs==0xF516BF0201303B87ull || vs==0x8B589D25B2A0ADDCull ||
@@ -43,17 +49,21 @@ bool family(uint64_t vs) {
            vs==0x88DCF1164C640EC3ull;
 }
 bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11ShaderResourceView* bonesView,
-              ID3D11Buffer* pool,ID3D11Buffer* bones,ID3D11Buffer* camera,unsigned bytes) {
-    if(g.prepared==g.frame && g.pool.Get()==pool && g.bones.Get()==bones && g.camera.Get()==camera)return true;
+              ID3D11Buffer* pool,ID3D11Buffer* bones,ID3D11Buffer* camera,unsigned bytes,bool writeSample=true) {
+    if(g.prepared==g.frame && g.pool.Get()==pool && g.bones.Get()==bones && g.camera.Get()==camera && (!writeSample || g.preparedWrite))return true;
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
     if(!g.find) {
         g.find.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"findAnchor","weapon anchor",nullptr,"weapon stability"));
         g.apply.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"applyAnchor","weapon attach",nullptr,"weapon stability"));
         if(!g.find || !g.apply)return false;
-        D3D11_BUFFER_DESC bd{};bd.ByteWidth=48;bd.StructureByteStride=16;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
-        if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.anchor)) || FAILED(dev->CreateUnorderedAccessView(g.anchor.Get(),nullptr,&g.anchorUav)))return false;
-        bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        constexpr unsigned rows=kWeaponTraceBase+kWeaponTraceFrames*kWeaponTraceRows;
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=rows*16;bd.StructureByteStride=16;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+        float zeros[rows*4]{};D3D11_SUBRESOURCE_DATA initial{zeros,0,0};
+        if(FAILED(dev->CreateBuffer(&bd,&initial,&g.anchor)) || FAILED(dev->CreateUnorderedAccessView(g.anchor.Get(),nullptr,&g.anchorUav)))return false;
+        bd.ByteWidth=48;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.stage)))return false;
+        bd.ByteWidth=16;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;bd.Usage=D3D11_USAGE_DEFAULT;bd.CPUAccessFlags=0;
+        if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.sample)))return false;
     }
     if(g.bytes!=bytes) {
         g.fixed.Reset();g.fixedSrv.Reset();g.fixedUav.Reset();
@@ -66,18 +76,20 @@ bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11
     Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->CSGetShader(&saved,classes,&nc);
     ID3D11ShaderResourceView* srvs[2]{};ctx->CSGetShaderResources(0,2,srvs);
     ID3D11UnorderedAccessView* uavs[2]{};ctx->CSGetUnorderedAccessViews(0,2,uavs);
-    Ptr<ID3D11Buffer> cb;ctx->CSGetConstantBuffers(0,1,&cb);
+    Ptr<ID3D11Buffer> cb,sample;ctx->CSGetConstantBuffers(0,1,&cb);ctx->CSGetConstantBuffers(3,1,&sample);
+    const unsigned stamp[4]={g.frame,g.sampleEpoch,writeSample?1u:0u,0};ctx->UpdateSubresource(g.sample.Get(),0,nullptr,stamp,0,0);
     ID3D11ShaderResourceView* in[2]={poolView,bonesView};ID3D11UnorderedAccessView* out[2]={g.fixedUav.Get(),g.anchorUav.Get()};
     ctx->CSSetShaderResources(0,2,in);ctx->CSSetConstantBuffers(0,1,&camera);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
+    ctx->CSSetConstantBuffers(3,1,g.sample.GetAddressOf());
     ctx->CSSetShader(g.find.Get(),nullptr,0);ctx->Dispatch(1,1,1);
     ctx->CSSetShader(g.apply.Get(),nullptr,0);ctx->Dispatch((bytes/336+63)/64,1,1);
     ID3D11UnorderedAccessView* nullUav[2]{};ctx->CSSetUnorderedAccessViews(0,2,nullUav,nullptr);
     ID3D11ShaderResourceView* nullSrv[2]{};ctx->CSSetShaderResources(0,2,nullSrv);
-    ctx->CSSetShaderResources(0,2,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->CSSetShader(saved.Get(),classes,nc);
+    ctx->CSSetShaderResources(0,2,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->CSSetConstantBuffers(3,1,sample.GetAddressOf());ctx->CSSetShader(saved.Get(),classes,nc);
     for(auto* p:srvs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
-    if(!g.pending && g.frame>=g.nextReport){ctx->CopyResource(g.stage.Get(),g.anchor.Get());g.pending=true;g.pendingFrame=g.frame;g.nextReport=g.frame+1800;}
+    if(!g.pending && g.frame>=g.nextReport){D3D11_BOX box{0,0,0,48,1,1};ctx->CopySubresourceRegion(g.stage.Get(),0,0,0,0,g.anchor.Get(),0,&box);g.pending=true;g.pendingFrame=g.frame;g.nextReport=g.frame+1800;}
     g.pool=pool;g.bones=bones;g.camera=camera;g.poolView=poolView;g.bonesView=bonesView;
-    g.prepared=g.sourceFrame=g.frame;return true;
+    g.preparedWrite=writeSample;g.prepared=g.sourceFrame=g.frame;return true;
 }
 bool particleDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,unsigned start,int base,unsigned startInstance) {
     // Only the verified local particle PS/VS pair. The shared vertex shader
@@ -89,7 +101,7 @@ bool particleDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,
     if(md.ByteWidth!=13*16 || cd.ByteWidth<276*16)return false;
     // The camera buffer is rewritten between world and viewmodel draws.
     // Refresh the existing GPU anchor with this draw's actual camera rows.
-    if(!generate(ctx,g.poolView.Get(),g.bonesView.Get(),g.pool.Get(),g.bones.Get(),camera.Get(),g.bytes))return false;
+    if(!generate(ctx,g.poolView.Get(),g.bonesView.Get(),g.pool.Get(),g.bones.Get(),camera.Get(),g.bytes,false))return false;
     if(!g.emitterShader)g.emitterShader.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"applyEmitter","weapon emitter",nullptr,"weapon stability"));
     if(!g.emitterShader)return false;
     if(!g.emitterCb) {
@@ -124,7 +136,7 @@ bool lightDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,uns
     D3D11_BUFFER_DESC vd{},cd{};vertices->GetDesc(&vd);lightCamera->GetDesc(&cd);
     const uint64_t begin=uint64_t(offset)+uint64_t(startInstance)*32,bytes=uint64_t(instances)*32;
     if(cd.ByteWidth<14*16 || instances>4096 || begin+bytes>vd.ByteWidth)return false;
-    if(!generate(ctx,g.poolView.Get(),g.bonesView.Get(),g.pool.Get(),g.bones.Get(),g.camera.Get(),g.bytes))return false;
+    if(!generate(ctx,g.poolView.Get(),g.bonesView.Get(),g.pool.Get(),g.bones.Get(),g.camera.Get(),g.bytes,false))return false;
     if(!g.lightShader)g.lightShader.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"applyLights","weapon lights",nullptr,"weapon stability"));
     if(!g.lightShader)return false;
     if(g.lightBytes<bytes) {
@@ -153,6 +165,47 @@ bool lightDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,uns
     UINT zero=0;ctx->IASetVertexBuffers(1,1,g.lightVertices.GetAddressOf(),&stride,&zero);
     draw(ctx,count,instances,start,base,startInstance);ctx->IASetVertexBuffers(1,1,vertices.GetAddressOf(),&stride,&offset);return true;
 }
+void traceTick(ID3D11DeviceContext* ctx) {
+    if(!ctx)return;
+    if(g.tracePending && g.frame-g.traceFrame>=3) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        HRESULT result=ctx->Map(g.traceStage.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
+        if(SUCCEEDED(result)) {
+            Log::get().note("weapon timing trace: pre-eye-dump history through frame %u; flags valid=1 history=2 synchronized=4 steady=8 bounded-step=16 camera-ahead=32 calibrated=64 short-overshoot=128 sustained-lag=256; lag=confidence+4*mode (mode 0..3 counts varying steps, 4 active).",g.traceFrame);
+            const auto* data=static_cast<const float*>(m.pData);
+            for(unsigned age=kWeaponTraceFrames;age--;) {
+                const unsigned frame=g.traceFrame-age;
+                for(unsigned part=0;part<2;++part) {
+                    const float* p=data+((frame%kWeaponTraceFrames)*kWeaponTraceRows+part*8)*4;
+                    unsigned stamp=0,epoch=0,flags=0;
+                    std::memcpy(&stamp,p,4);std::memcpy(&epoch,p+1,4);flags=unsigned(p[2]);
+                    if(stamp!=frame || !epoch || p[3]<1)continue;
+                    Log::get().note("weapon timing frame=%u %s epoch=%u flags=%03X calls=%.0f near=%.7f status=%.0f confidence=%.0f/%.0f camera=(%.7f,%.7f,%.7f) arms=(%.7f,%.7f,%.7f) right=(%.7f,%.7f,%.7f;%.7f) up=(%.7f,%.7f,%.7f;%.7f) forward=(%.7f,%.7f,%.7f) learned=(%.7f,%.7f,%.7f) correction=(%.7f,%.7f,%.7f) lag=%.0f.",
+                        frame,part?"last":"first",epoch,flags,p[3],p[7],p[23],p[11],p[31],
+                        p[4],p[5],p[6],p[8],p[9],p[10],p[12],p[13],p[14],p[15],
+                        p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[28],p[29],p[30],p[24],p[25],p[26],p[27]);
+                }
+            }
+            ctx->Unmap(g.traceStage.Get(),0);g.tracePending=false;
+            Log::get().note("weapon timing trace: complete.");
+        } else if(result!=DXGI_ERROR_WAS_STILL_DRAWING || g.frame-g.traceFrame>120) {
+            Log::get().note("weapon timing trace: readback unavailable (0x%08X); did not wait for GPU.",unsigned(result));g.tracePending=false;
+        }
+    }
+    if(!g.traceRequested || g.tracePending || !g.anchor)return;
+    g.traceRequested=false;
+    if(!g.traceStage) {
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=kWeaponTraceFrames*kWeaponTraceRows*16;
+        bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.traceStage))) {
+            Log::get().note("weapon timing trace: staging allocation failed; rendering unchanged.");return;
+        }
+    }
+    D3D11_BOX box{kWeaponTraceBase*16,0,0,(kWeaponTraceBase+kWeaponTraceFrames*kWeaponTraceRows)*16,1,1};
+    ctx->CopySubresourceRegion(g.traceStage.Get(),0,0,0,0,g.anchor.Get(),0,&box);
+    g.traceFrame=g.frame;g.tracePending=true;
+}
 }
 void weaponStabilityConfigure(Config& cfg) {
     const bool enabled=cfg.getBool("fix.weapon_stability",true);
@@ -160,7 +213,7 @@ void weaponStabilityConfigure(Config& cfg) {
     g_enabled=enabled;g_configured=true;
     // Keep compiled shaders and screen recognition for a live A/B. Never
     // reuse a pre-toggle pool or report a pending sample from the old mode.
-    g.prepared=g.sourceFrame=~0u;g.pending=false;g.nextReport=0;
+    g.prepared=g.sourceFrame=~0u;g.pending=false;g.nextReport=0;++g.sampleEpoch;
     Log::get().note("weapon stability: %s (live; independent of AA and runtime reprojection).",enabled?"on":"off");
 }
 void weaponStabilityObserveScreen() {
@@ -172,7 +225,7 @@ void weaponStabilityObserveScreen() {
 void weaponStabilityResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end) {
     weaponMotionResourceWritten(resource);
     meshMotionResourceWritten(resource,first,end);
-    if(!resource)g.sourceFrame=~0u;
+    if(!resource){g.sourceFrame=~0u;++g.sampleEpoch;}
     if(!resource || resource==g.pool.Get() || resource==g.bones.Get() || resource==g.camera.Get())g.prepared=~0u;
 }
 bool weaponStabilityDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
@@ -202,16 +255,21 @@ bool weaponStabilityDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned
     ctx->VSSetShaderResources(33,1,pv.GetAddressOf());return true;
 }
 void weaponStabilityFrameBoundary(ID3D11DeviceContext* ctx) {
+    traceTick(ctx);
     ++g.frame;
     if(g.pending && ctx && g.frame-g.pendingFrame>=3) {
         D3D11_MAPPED_SUBRESOURCE m{};HRESULT hr=ctx->Map(g.stage.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
         if(SUCCEEDED(hr)) {
             const auto* p=static_cast<const float*>(m.pData);
-            Log::get().note("weapon stability: source attachment %s, offset %.6f %.6f %.6f m, %.0f matching roots; %u-byte private pool. Original animation and compositor timing retained.",p[3]>0?"matched":"unavailable (stock)",p[0],p[1],p[2],p[7],g.bytes);
+            const char* status=p[8]==4?"ADS one-frame timing corrected, aiming offset retained":p[8]==3?"ADS timing corrected, aiming offset retained":p[8]==2?"ADS synchronized, game aiming pose retained":p[3]>0?"matched":p[8]>0?"projection preserves game aiming pose":"unavailable (stock)";
+            Log::get().note("weapon stability: source attachment %s, offset %.6f %.6f %.6f m, %.0f matching roots; %u-byte private pool, projection near %.7f. Original animation and compositor timing retained.",status,p[0],p[1],p[2],p[7],g.bytes,p[9]);
             ctx->Unmap(g.stage.Get(),0);g.pending=false;
         } else if(g.frame-g.pendingFrame>60)g.pending=false;
     }
     if(g.seen && g.frame-g.lastScreen>120)g=State{};
+}
+void weaponStabilityArmTrace() {
+    if(g_enabled && g.seen && g.frame-g.lastScreen<=2 && !g.tracePending)g.traceRequested=true;
 }
 void weaponStabilityShutdown(){g=State{};}
 }

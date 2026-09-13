@@ -37,9 +37,11 @@ float3 turn(float4 q, float3 v) {
     // not move vertices or the primary surface UVs and is not identity.
     [unroll] for(uint k=0;k<4;++k) n.key[k]=mesh[k];
     bool valid=true;
-    if(info.z==1) {
+    if(info.z==1 || info.z==4) {
         [unroll] for(uint r=0;r<3;++r) n.clip[r]=model[r==2?7:4+r];
-        [unroll] for(uint k=0;k<4;++k) n.key[4+k]=asuint(material[k]);
+        // Planet material constants shade the sphere; they are not geometry
+        // identity. The captured surface's mesh and texture identify it.
+        if(info.z==1) [unroll] for(uint k=0;k<4;++k) n.key[4+k]=asuint(material[k]);
         valid=all(abs(model[6].xyz)<1e-10) && model[6].w>0;
     } else {
         float3 scale,pos; float4 q;
@@ -91,7 +93,7 @@ float3 turn(float4 q, float3 v) {
             // Identical ring passes may repeat the same geometry/material.
             // They are interchangeable only when their complete transforms
             // are identical. Cockpit ambiguity remains a hard rejection.
-            bool duplicate=info.z==1 && matches==1;
+            bool duplicate=(info.z==1 || info.z==4) && matches==1;
             [unroll] for(uint row=0;row<3;++row) duplicate=duplicate && all(old.clip[row]==Previous[match].clip[row]);
             if(!duplicate) { ++matches; match=i; }
         }
@@ -153,10 +155,11 @@ public:
     // Called only for the recognized holo VS/PS, one unskinned instance,
     // and the normal full-eye viewport. Does not replace the original draw.
     // mode 0: cockpit pool, 1: ring local-to-clip, 2: orbital instance stream,
-    // 3: planar sprite pool (local Y=0, original VS forces clip Z=W).
+    // 3: planar sprite pool (local Y=0, original VS forces clip Z=W),
+    // 4: opaque planet affine local-to-clip, with no material animation key.
     bool prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* source,const HoloDraw& args,float metres,unsigned mode=0,unsigned surfaceSlot=2) {
         const unsigned count=mode==2?args.instances:1;
-        if(failed || !source || mode>3 || (mode==3 && args.count!=6) || (mode==2 ? (args.kind!='N' || args.startInstance!=0 || count==0 || count>64) : (args.kind!='X' || args.instances!=1)) || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
+        if(failed || !source || mode>4 || (mode==3 && args.count!=6) || (mode==2 ? (args.kind!='N' || args.startInstance!=0 || count==0 || count>64) : (args.kind!='X' || args.instances!=1)) || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
         const bool pooled=mode==0 || mode==3;
         D3D11_TEXTURE2D_DESC td{}; source->GetDesc(&td);
         UINT nvp=1; D3D11_VIEWPORT vp{}; ctx->RSGetViewports(&nvp,&vp);
@@ -169,14 +172,14 @@ public:
         for(int i=0;i<2;++i) vb[i].Attach(rawVb[i]);
         ctx->IAGetIndexBuffer(&ib,&fmt,&ibOffset);
         if(!vb[0] || (pooled && (!vb[1] || !ib || strides[0]!=8 || strides[1]!=40)) ||
-           (mode==1 && !ib) || (mode==2 && (!vb[1] || strides[0]!=16 || strides[1]!=60))) return false;
+           ((mode==1 || mode==4) && !ib) || (mode==4 && strides[0]!=12) || (mode==2 && (!vb[1] || strides[0]!=16 || strides[1]!=60))) return false;
         unsigned stream=mode==2?1:0,bytes=mode==2?count*60:4;
         D3D11_BUFFER_DESC vd{}; vb[stream]->GetDesc(&vd);
         uint64_t at=uint64_t(offsets[stream])+uint64_t(args.startInstance)*strides[stream];
-        if(mode!=1 && at+bytes>vd.ByteWidth) return false;
+        if(mode!=1 && mode!=4 && at+bytes>vd.ByteWidth) return false;
         Ptr<ID3D11ShaderResourceView> pool,surface;
         if(mode==0 && surfaceSlot!=1 && surfaceSlot!=2) return false;
-        if(mode!=2) ctx->PSGetShaderResources(mode==1?3:mode==3?0:surfaceSlot,1,&surface);
+        if(mode!=2) ctx->PSGetShaderResources(mode==1?3:(mode==3 || mode==4)?0:surfaceSlot,1,&surface);
         if(pooled) {
             ctx->VSGetShaderResources(33,1,&pool); if(!pool || !surface) return false;
             D3D11_SHADER_RESOURCE_VIEW_DESC pd{}; pool->GetDesc(&pd); if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER) return false;
@@ -184,9 +187,9 @@ public:
             if(FAILED(resource.As(&poolBuffer))) return false;
             D3D11_BUFFER_DESC pbd{}; poolBuffer->GetDesc(&pbd); if(pbd.StructureByteStride!=336) return false;
         }
-        if(mode==1 && !surface) return false;
+        if((mode==1 || mode==4) && !surface) return false;
         ID3D11Buffer* cb[3]{}; ctx->VSGetConstantBuffers(0,3,cb);
-        bool enough=true; const UINT minimum[3]={mode==2?0u:128u,276*16,mode==2?0u:mode==3?32u:64u};
+        bool enough=true; const UINT minimum[3]={mode==2?0u:128u,276*16,(mode==2 || mode==4)?0u:mode==3?32u:64u};
         for(int i=0;i<3;++i) { D3D11_BUFFER_DESC bd{}; if(cb[i]) cb[i]->GetDesc(&bd); enough=enough && bd.ByteWidth>=minimum[i]; }
         if(!enough) { for(auto* p:cb) if(p) p->Release(); return false; }
         struct Data { UINT info[4],key[16]; float limits[4]; } data{};
@@ -197,7 +200,7 @@ public:
         data.key[10]=strides[pooled?1:0]; data.key[11]=offsets[pooled?1:0]; data.key[12]=args.count; data.key[15]=mode;
         data.limits[0]=metres; data.limits[1]=float(w); data.limits[2]=float(h);
         ctx->UpdateSubresource(draw.Get(),0,nullptr,&data,0,0);
-        if(mode!=1) { D3D11_BOX box{UINT(at),0,0,UINT(at+bytes),1,1}; ctx->CopySubresourceRegion(instance.Get(),0,0,0,0,vb[stream].Get(),0,&box); }
+        if(mode!=1 && mode!=4) { D3D11_BOX box{UINT(at),0,0,UINT(at+bytes),1,1}; ctx->CopySubresourceRegion(instance.Get(),0,0,0,0,vb[stream].Get(),0,&box); }
         Ptr<ID3D11ComputeShader> saved; ID3D11ClassInstance* classes[256]{}; UINT nc=256;
         ID3D11Buffer* savedCb[4]{}; ID3D11ShaderResourceView* savedSrv[3]{}; Ptr<ID3D11UnorderedAccessView> savedUav;
         ctx->CSGetShader(&saved,classes,&nc); ctx->CSGetConstantBuffers(0,4,savedCb);

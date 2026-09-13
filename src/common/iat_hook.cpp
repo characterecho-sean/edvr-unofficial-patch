@@ -34,10 +34,15 @@ bool inImage(DWORD rva, DWORD imageSize) { return rva != 0 && rva < imageSize; }
 
 bool iatHookInstall(const char* module, const char* function, void* replacement,
                     IatPatch* patch) {
+    return iatHookInstallIn(GetModuleHandleW(nullptr), module, function, replacement, patch);
+}
+
+bool iatHookInstallIn(void* image, const char* module, const char* function,
+                     void* replacement, IatPatch* patch) {
     if (!module || !function || !replacement || !patch) return false;
     if (patch->applied) return false;
 
-    const BYTE* base = reinterpret_cast<const BYTE*>(GetModuleHandleW(nullptr));
+    const BYTE* base = static_cast<const BYTE*>(image);
     DWORD imageSize = 0;
     const IMAGE_IMPORT_DESCRIPTOR* desc = importDirectory(base, &imageSize);
     if (!desc) return false;
@@ -67,17 +72,18 @@ bool iatHookInstall(const char* module, const char* function, void* replacement,
             if (current == replacement) return false;   // already ours
             DWORD old = 0;
             if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
-            // An exchange, so a concurrent reader sees the old pointer or the
-            // new one and never a torn value; the original is what the slot
-            // held at that instant, which is what chaining needs.
-            void* was = InterlockedExchangePointer(slot, replacement);
+            // Publish the original before another thread can enter the hook.
+            // If another owner changes the slot meanwhile, leave it alone;
+            // chaining through an original read after publication races the
+            // first call (notably a DirectShow reader's worker thread).
+            patch->slot = slot;
+            patch->original = current;
+            patch->replacement = replacement;
+            const bool installed = InterlockedCompareExchangePointer(slot, replacement, current) == current;
             DWORD ignored = 0;
             VirtualProtect(slot, sizeof(void*), old, &ignored);
-            patch->slot = slot;
-            patch->original = was;
-            patch->replacement = replacement;
-            patch->applied = true;
-            return true;
+            patch->applied = installed;
+            return installed;
         }
     }
     return false;

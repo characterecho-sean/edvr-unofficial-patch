@@ -1,6 +1,7 @@
 #include "ui_depth.h"
 #include "ui_depth_layer.h"
 #include "stellar_coverage.h"
+#include "planet_motion.h"
 #include "gpu_interval.h"
 #include "ui_content.h"
 #include "holo_material.h"
@@ -154,6 +155,8 @@ float    g_uiFar = 1000.0f;
 float    g_alphaFloor = 0.5f;   // advanced.ui_depth_alpha: below it, no depth
 float    g_cockpitMetres = kTemporalShipMetres; // same near-field domain as temporal AA
 HoloMotion g_holoMotion[2];
+PlanetCoverage g_planetCoverage;
+bool g_planetPending=false,g_planetNoted=false;
 HoloDraw g_holoDraw;
 bool g_holoBound=false, g_holoNoted=false;
 ID3D11Buffer* g_savedHoloInfo=nullptr;
@@ -1576,6 +1579,7 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 }
 
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
+    g_planetPending=false;
     g_holoDraw=draw;
     g_mode = Mode::kNone;
     g_wantRebind = false;
@@ -1610,6 +1614,13 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // (a couple of dozen a frame); otherwise the direct list, which is the
     // only test left for the other draws.
     const uint64_t h = boundVsHash(ctx);
+    // Opaque planets use the same affine-history consumer as the rings,
+    // but neither the UI mask nor its private depth-writing path. Learn
+    // the eye from scene depth in Begin: inserting the deferred colour
+    // target into the UI colour-target table would misidentify later UI.
+    if(h==kPlanetSurfaceVs && boundPsHash(ctx)==kPlanetSurfacePs) {
+        g_planetPending=true;return false;
+    }
     const bool stellar=h==kRingVs || h==kOrbitalVs;
     if (!stellar && !composite && !(h && inList(g_families, g_familyCount, h))) return false;
     if (h && inList(g_exclude, g_excludeCount, h)) return false;
@@ -1802,6 +1813,30 @@ void uiDepthEnd(ID3D11DeviceContext*) {
 // one-shot notes, so once one starts failing it fails for every composite
 // after, and the doubling would last the session (the pre-release review
 // of 2026-09-07). splashDimBegin below has taken this shape all along.
+bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx) {
+    const bool pending=g_planetPending;g_planetPending=false;
+    if(!pending || !g_on || g_stoodDown || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE ||
+       boundVsHash(ctx)!=kPlanetSurfaceVs || boundPsHash(ctx)!=kPlanetSurfacePs)return false;
+    auto* dsv=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!dsv)return false;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;dsv->GetResource(&resource);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> scene;
+    if(FAILED(resource.As(&scene)) || !depthProbeIsSceneDepth(scene.Get()))return false;
+    D3D11_TEXTURE2D_DESC td{};scene->GetDesc(&td);int eye=-1;
+    for(int i=0;i<2;++i) {
+        ID3D11Texture2D* candidate=nullptr;uint32_t format=0;
+        if(depthProbeSceneDepthFormat(td.Width,td.Height,i,&candidate,&format) && candidate==scene.Get()){eye=i;break;}
+    }
+    if(eye<0)return false;
+    if(g_eyesSwapped)eye=1-eye;
+    if(!g_planetCoverage.begin(ctx,scene.Get(),g_holoMotion[eye],g_holoDraw))return false;
+    if(!g_planetNoted) {
+        g_planetNoted=true;
+        Log::get().note("planet motion: opaque surface coverage and affine approach motion active; original VS/depth visibility, shared 128-record eye budget, no UI marking or distance cutoff.");
+    }
+    return true;
+}
+void uiDepthPlanetEnd(ID3D11DeviceContext* ctx) { g_planetCoverage.end(ctx); }
+
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_stellarCpuActive=-1;
     g_reissueOn = false;
@@ -2329,6 +2364,7 @@ void uiDepthShutdown() {
     for (uint32_t i = 0; i < kExhausted; ++i) g_exhausted[i] = Exhausted();
     g_familyLoggedCount = 0;
     g_on = false;
+    g_planetPending=g_planetNoted=false;g_planetCoverage=PlanetCoverage{};
 }
 
 }  // namespace edvr

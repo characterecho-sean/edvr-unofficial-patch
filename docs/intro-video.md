@@ -687,3 +687,113 @@ Open: the movie's first three to five seconds, which are not reachable from
 here; early VR init as a way to recover part of them (unbuilt, and it would
 only shorten the gap rather than close it); and the runtime's play space,
 which is where the 180-degree forward gets fixed.
+
+## Not playing it at all: `fix.intro_video = skip` (built 2026-09-13, unflown)
+
+Sean's ask: a fix option that skips the intro video completely, with the
+default left as the movie playing. `skip` is the third value of the existing
+key rather than a key of its own, because it names what the player gets.
+
+**The mechanism** (`src/d3d11/intro_skip.cpp`). The idents are files under
+`Movies\`, opened by path, and the long-standing way to skip them is to
+rename the file so the game cannot find it. The skip does the same thing
+in-process: the executable's own imports of `CreateFileW`, `CreateFileA` and
+the `GetFileAttributes` family (iat_hook.h, the keyboard gate's mechanism)
+are watched, and a path whose last two components are `Movies` and
+`Ident_*` or `intro_temp.webm` is answered `ERROR_FILE_NOT_FOUND`. Nothing on
+disk changes; there is nothing to restore after a crash, a game update or an
+uninstall, and `FrontEnd*.webm` -- the front end's own loops -- pass through.
+The hooks are installed the first time the value is seen (at device creation,
+before the movie's open at one to three seconds) and only then; `screen` and
+`stock` never touch the import table. `skip` parses as `screen` for every
+other slice, so if the refusal does not take, the movie plays on the splash's
+screen as before, and -- the point -- the fill detection stays armed as the
+skip's witness.
+
+**What is not known, and the one flight that decides it.** Two things were
+measured at the desk and two were not:
+
+- *Measured:* the executable names `webmsplit64`, `vp8decoder64` and
+  `dsfVorbisDecoder64` itself and carries `DllGetClassObject`, `Movies/` and
+  `.webm` strings -- it builds the DirectShow graph by hand. `webmsplit64.dll`
+  is a splitter ("WebM Splitter", no source-filter name), so it does not open
+  the file. The executable imports `CreateFileW` and `CreateFileA` from
+  `KERNEL32.dll` (the NUL-delimited import names are in its table; the
+  `GetFileAttributes*` names could not be confirmed by the same scan, so those
+  four hooks report `not imported` if the slot is absent, which is itself a
+  fact).
+- *Not measured:* **which module makes the open** -- the executable through
+  its import table (this hook sees it), its C runtime (it does not), or a
+  DirectShow file source of Windows' own such as quartz's async reader (nor
+  that). And whether the game's missing-file path is a clean skip is the
+  field's word, not this project's measurement.
+
+The log says which of three things happened, once, when the first rendered
+scene arrives:
+
+| line | meaning | next |
+|---|---|---|
+| `intro skip: WORKED -- N refusal(s), the movie never drew, and the first rendered scene arrived X s after the skip armed` | done; X against the ~28 s the movie costs is the win | ship |
+| `intro skip: the movie is DRAWING anyway -- ... NOTHING was refused` | the open went by a route the executable's import table does not carry | a process-wide hook: `code_hook.h` on `KernelBase!CreateFileW`, whose prologue on this machine reads `48 8B C4 48 89 58 08` -- `mov rax,rsp; mov [rax+8],rbx`, seven relocatable bytes -- so the detour would be accepted; `kernel32!CreateFileW` is a `jmp [rip+…]` forwarder the decoder refuses, and hooking KernelBase covers it too |
+| `intro skip: the movie is DRAWING anyway, after N refusal(s)` | told no, got the file anyway (a retry by another route) | the same process-wide hook, or a look at what the retry is |
+| `intro skip: no ident was asked for ... and no movie drew (M other Movies\ open(s) seen)` | neither refused nor drawn; M says whether this table sees the game's movie opens at all | read M before guessing |
+| `intro skip: did not take -- N refusal(s), the movie drew F frame(s)` | refused, drew, scene | as the DRAWING line |
+
+A game hang or crash at launch with `skip` set is the fourth outcome and the
+one that refutes the field's word about the missing-file path; the crash
+sentinel turns the d3d11 half off for the following launch, which removes the
+hook, so a rig cannot be left stuck on it. The next design in that case is a
+redirect rather than a refusal: answer the open with a one-frame WebM of
+EDVR's own, so the game plays a movie that is over at once.
+
+The flight can be a flat launch -- the intro plays without a headset and the
+d3d11 half loads regardless -- with `fix.intro_video = skip` in the ini
+before launch. The number to compare the WORKED line's seconds against is,
+from a `screen` session, the `intro video size: a rendered scene arrived`
+line's timestamp less the log's first line's.
+
+## Flight 09:43: the file reader bypassed the executable hook
+
+Steam log 094305 verifies fbd8284, linked 15:36:15 UTC. Skip armed at
+09:43:05.456, the movie drew at 09:43:09.750, and the first scene
+arrived 28.8 seconds after arming. There were zero refused requests,
+zero other Movies requests, and 902 movie frames. The configured value
+was `skip`.
+
+Ruled out: the option was disabled or the installed build lacked the
+feature, because the matching run explicitly armed its executable
+imports. Ruled out: intercepting only the executable's file imports is
+sufficient, because playback completed without any request reaching
+them.
+
+The installed executable contains CLSID_AsyncReader
+`E436EBB5-524F-11CE-9F53-0020AF0BA770` at file offset `0x56346e8`.
+Windows' implementation is in `quartz.dll`, which imports CreateFileW
+itself. An isolated process loading the actual EliteNeutral ident
+through IFileSourceFilter reproduced the result: the executable import
+hook saw zero calls and Load succeeded. Hooking the reader module's
+import saw three successful opens. Refusing the ident at that import
+made Load return `0x80070002`, file not found, immediately. This is a
+measured reader path, not a guess based only on the video's continued
+playback.
+
+Skip now loads the system copy of quartz before graph setup and patches
+its CreateFileW import as well as the existing executable imports. It
+holds the module reference until shutdown restores the import. Screen
+and Stock remain unchanged, and other movie paths still forward. The
+change does not detour KernelBase or modify files. The shared IAT helper
+now accepts an explicitly owned module; it publishes the original
+function before atomically installing the replacement, so a reader
+thread cannot enter a hook with an uninitialized forward pointer. A
+competing slot change causes the install to stand down.
+
+The new build-gated DirectShow regression uses temporary fixtures and
+the real Windows reader. It proves the executable-only miss, ident and
+alternate-intro refusal, allowed front-end and story videos, live
+disarming/rearming, original-slot restoration, unchanged files and the
+success-report path. The existing predicate/refusal smoke tests remain.
+The next game launch must still confirm the game's missing-file
+handling: look for `DirectShow reader CreateFileW patched`, a refusal
+naming `DirectShow CreateFileW`, and `WORKED` with no movie frames. The
+standalone reader test cannot by itself establish Elite's scene
+transition behavior.

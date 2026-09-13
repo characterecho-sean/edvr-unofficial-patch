@@ -63,23 +63,32 @@ void replayMeshes(ID3D11Device* dev,ID3D11DeviceContext* ctx,const char* path,bo
             }
             previous=std::move(current);
         }
-        if(benchmark && sample==4){
-            // Deliberately repeated hull geometry measures the added pass,
-            // not the game's shading. No claim that this is flight timing.
-            LARGE_INTEGER freq{},begin{},finish{};QueryPerformanceFrequency(&freq);double cpuMs=0;
-            for(unsigned frame=0;frame<100;++frame){
-                meshMotionFrameBoundary(ctx);ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx,count,1,0,0,0);
-                QueryPerformanceCounter(&begin);
-                for(unsigned i=0;i<32;++i)meshMotionDraw(ctx,issue,count,1,0,0,0,hash);
-                ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx,scene.Get(),views);
-                QueryPerformanceCounter(&finish);cpuMs+=double(finish.QuadPart-begin.QuadPart)*1000/freq.QuadPart;
+        if(benchmark && (sample==4 || sample==7)){
+            // Isolated complete-pass timestamps, including coverage and capture.
+            // Deliberately repeated geometry is not a measurement of the game.
+            LARGE_INTEGER freq{},begin{},finish{};QueryPerformanceFrequency(&freq);
+            for(unsigned repeat:{0u,32u,128u,512u,1024u}){
+                D3D11_QUERY_DESC qd{D3D11_QUERY_TIMESTAMP_DISJOINT,0},qt{D3D11_QUERY_TIMESTAMP,0};
+                ComPtr<ID3D11Query> disjoint,qa,qb;hr(dev->CreateQuery(&qd,&disjoint));hr(dev->CreateQuery(&qt,&qa));hr(dev->CreateQuery(&qt,&qb));
+                double cpuMs=0;unsigned beforeDraws=draws,recorded=0;
+                constexpr unsigned benchmarkFrames=24;
+                ctx->Begin(disjoint.Get());ctx->End(qa.Get());
+                for(unsigned frame=0;frame<benchmarkFrames;++frame){
+                    meshMotionFrameBoundary(ctx);ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx,count,1,0,0,0);
+                    QueryPerformanceCounter(&begin);
+                    for(unsigned i=0;i<repeat;++i)meshMotionDraw(ctx,issue,count,1,0,0,0,hash);
+                    ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx,scene.Get(),views);
+                    recorded+=eyes[0].history[eyes[0].write].count;
+                    QueryPerformanceCounter(&finish);cpuMs+=double(finish.QuadPart-begin.QuadPart)*1000/freq.QuadPart;
+                }
+                ctx->End(qb.Get());ctx->End(disjoint.Get());
+                readBuffer(dev,ctx,positions.Get());
+                D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dis{};UINT64 first=0,last=0;
+                hr(ctx->GetData(disjoint.Get(),&dis,sizeof(dis),0));hr(ctx->GetData(qa.Get(),&first,sizeof(first),0));hr(ctx->GetData(qb.Get(),&last,sizeof(last),0));
+                check(!dis.Disjoint && dis.Frequency,"whole pass timestamps available");
+                check(draws-beforeDraws==std::min(repeat,512u)*benchmarkFrames && recorded==std::min(repeat,512u)*benchmarkFrames,"all benchmark draws actually captured");
+                std::printf("FULL PASS %u indices, %u attempts/eye: GPU %.3f ms/eye, CPU %.3f ms/eye, reissues %u, records %u\n",count,repeat,double(last-first)*1000/dis.Frequency/benchmarkFrames,cpuMs/benchmarkFrames,draws-beforeDraws,recorded);
             }
-            // Finish solely in this offline benchmark, then collect queued
-            // timestamps; the production path never performs this readback.
-            readBuffer(dev,ctx,positions.Get());for(int i=0;i<8;++i)meshMotionFrameBoundary(ctx);
-            auto d=drawGpu.totals,m=matchGpu.totals;
-            std::printf("32-draw hull stress: CPU %.3f ms/eye, sampled capture+reissue %.3f us/draw (%u samples), match %.3f us/eye (%u samples)\n",cpuMs/100,d.samples?d.ms*1000/d.samples:0,d.samples,m.samples?m.ms*1000/m.samples:0,m.samples);
-            check(d.samples>0 && m.samples>0,"hardware benchmark timestamps available");
         }
     }
     check(checked>0,"visible original vertices tested");std::printf("original mesh replay: %u vertices, max %.6f input pixel\n",checked,maximum);

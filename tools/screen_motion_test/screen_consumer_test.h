@@ -141,7 +141,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     for(int variant=0;variant<3;++variant) {
         ComPtr<ID3D11ComputeShader> tested=mv;
         if(variant)hr(dev->CreateComputeShader(embedded[variant-1].data,embedded[variant-1].size,nullptr,&tested));
-        for(int test=0;test<16;++test) {
+        for(int test=0;test<20;++test) {
             std::fill(z.begin(),z.end(),0.f);std::fill(prior.begin(),prior.end(),0.f);
             std::fill(pixels.begin(),pixels.end(),0.f);std::fill(marks.begin(),marks.end(),0.f);
             floats("probe",1,0,1,32);floats("holoJitter",.75f,.25f,1,1);
@@ -160,7 +160,14 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
             if(test>=8 && test<=10)std::fill(z.begin(),z.end(),test==8?.000025f:test==9?.025f:.05f);
             if(test==11)floats("dR0",1,0,-4,0); // off-image history
             if(test==12 || test==13){std::fill(z.begin(),z.end(),.000025f);floats("probe",1,0,1,48);}
-            if(test>=14){std::fill(z.begin(),z.end(),.025f);prior[4*8+6]=.025f*(test==14?1.02f:1.04f);}
+            if(test==14 || test==15){std::fill(z.begin(),z.end(),.025f);prior[4*8+6]=.025f*(test==14?1.02f:1.04f);}
+            reinterpret_cast<UINT*>(record)[15]=test>=16?4:1;
+            record[46]=test>=16?.5f:.15625f;
+            if(test>=16) {
+                std::fill(z.begin(),z.end(),test==19?.025f:.000025f);floats("probe",1,0,1,48);
+                if(test==17 || test==18)marks[4*16+4]=float(test-16)/255.f;
+            }
+            ctx->UpdateSubresource(rigidRecord.Get(),0,nullptr,record,0,0);
             ctx->UpdateSubresource(scene.Get(),0,nullptr,z.data(),16*4,0);
             ctx->UpdateSubresource(previous.Get(),0,nullptr,prior.data(),8*4,0);
             ctx->UpdateSubresource(ui.Get(),0,nullptr,marks.data(),16*4,0);
@@ -169,13 +176,14 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
             ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
             ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(3,1,previousView.GetAddressOf());
             ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());ctx->CSSetShaderResources(14,1,ms.GetAddressOf());
-            if(test==12 || test==13){ID3D11ShaderResourceView* exact[2]={coverageView.Get(),recordView.Get()};ctx->CSSetShaderResources(test==12?15:12,2,exact);}
+            if(test==12 || test==13 || test>=16){ID3D11ShaderResourceView* exact[2]={coverageView.Get(),recordView.Get()};ctx->CSSetShaderResources(test==12?15:12,2,exact);}
             ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
             ID3D11UnorderedAccessView* outputs[3]={mu.Get(),zu.Get(),ku.Get()};ctx->CSSetUnorderedAccessViews(3,3,outputs,nullptr);
             ctx->CSSetShader(tested.Get(),nullptr,0);ctx->Dispatch(1,1,1);
             auto m=read(dev,ctx,motion.Get()),depths=read(dev,ctx,depth.Get());unsigned at=4*8+4;
             const bool rejected=test==1 || test==8 || test==15;
             float mx=rejected || test==11?16.f:2.f,my=rejected?16.f:0.f;
+            if(test==16)mx=4.75f;
             if(std::fabs(m[2*at]-mx)>=1e-5 || std::fabs(m[2*at+1]-my)>=1e-5)
                 std::printf("background case %d variant %d: got %g,%g expected %g,%g\n",test,variant,m[2*at],m[2*at+1],mx,my);
             check(std::fabs(m[2*at]-mx)<1e-5 && std::fabs(m[2*at+1]-my)<1e-5,

@@ -1,27 +1,30 @@
 #pragma once
 namespace edvr {
 // Same 240-byte layout as holo records, but with an independent history.
-// Capture is cheap and never searches. One batched dispatch at the eye's
-// temporal pass matches all records in parallel.
+// Capture batches draws sharing unchanged scene/pool inputs. One further
+// dispatch at the eye's temporal pass matches all records in parallel.
 constexpr char kMeshMotionHlsl[]=R"HLSL(
 struct Record { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 struct PoolRecord { uint4 data[21]; };
+struct CaptureInput { uint4 info; uint4 mesh[4]; float4 dimensions; };
 cbuffer Scene:register(b1) { float4 scene[276]; }
 cbuffer Draw:register(b3) { uint4 info; uint4 mesh[4]; float4 dimensions; }
 StructuredBuffer<PoolRecord> Pool:register(t0);
 ByteAddressBuffer Instance:register(t1);
 StructuredBuffer<Record> Previous:register(t2);
+StructuredBuffer<CaptureInput> Inputs:register(t3);
 RWStructuredBuffer<Record> Current:register(u0);
 float3 turn(float4 q,float3 v) {
     return (2*q.w*q.w-1)*v+2*dot(q.xyz,v)*q.xyz+2*q.w*cross(q.xyz,v);
 }
-[numthreads(64,1,1)] void capture(uint lane:SV_GroupIndex) {
+[numthreads(64,1,1)] void capture(uint lane:SV_DispatchThreadID) {
     if(lane>=info.z)return;
+    CaptureInput input=Inputs[lane];uint at=input.info.x;
     Record n=(Record)0;
-    [unroll]for(uint k=0;k<4;++k)n.key[k]=mesh[k];
-    uint index=Instance.Load(lane*8),count,stride;Pool.GetDimensions(count,stride);
+    [unroll]for(uint k=0;k<4;++k)n.key[k]=input.mesh[k];
+    uint index=Instance.Load(input.info.w),count,stride;Pool.GetDimensions(count,stride);
     n.key[7].w=index; // coverage lookup only; excluded from persistent key
-    if(index>=count){Current[info.x+lane]=n;return;}
+    if(index>=count){Current[at]=n;return;}
     PoolRecord p=Pool[index];
     n.key[4]=uint4(p.data[1].w,p.data[20].x,0,0);
     float scale=asfloat(p.data[0].y);
@@ -41,8 +44,8 @@ float3 turn(float4 q,float3 v) {
     bool valid=p.data[0].x==0 && isfinite(scale) && abs(scale)>1e-8 && abs(dot(q,q)-1)<.002 &&
         all(isfinite(pos)) && all(isfinite(n.clip[0])) && all(isfinite(n.clip[1])) && all(isfinite(n.clip[2])) && scene[273].z>0 &&
         scene[270].z==0 && scene[271].z==0 && scene[272].z==0 && scene[273].w==0;
-    n.meta=float4(valid?1:0,dimensions.xy,0);
-    Current[info.x+lane]=n;
+    n.meta=float4(valid?1:0,input.dimensions.xy,0);
+    Current[at]=n;
 }
 groupshared uint counts[64],indices[64];
 [numthreads(64,1,1)] void match(uint3 group:SV_GroupID,uint lane:SV_GroupIndex) {
@@ -84,14 +87,13 @@ groupshared uint counts[64],indices[64];
 }
 )HLSL";
 constexpr char kMeshCoverageHlsl[]=R"HLSL(
-struct Record { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
-StructuredBuffer<Record> Records:register(t15);
+ByteAddressBuffer Instance:register(t15);
 cbuffer Draw:register(b13) { uint4 info; }
 float2 coverage(float4 p,uint id){
     id &= 0x7fffffff;
     [loop]for(uint i=0;i<info.z;++i){
         uint at=info.x+i;
-        if(Records[at].key[7].w==id)return float2(at+1,p.z);
+        if(Instance.Load(info.w+i*8)==id)return float2(at+1,p.z);
     }
     discard;return 0;
 }

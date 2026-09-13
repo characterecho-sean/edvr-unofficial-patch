@@ -12,6 +12,7 @@
 #include <limits>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
+D3D_DRIVER_TYPE testDriver=D3D_DRIVER_TYPE_WARP;
 void check(bool b,const char* why){++checks;if(!b){std::printf("FAIL: %s\n",why);std::exit(1);}}
 void hr(HRESULT h){check(SUCCEEDED(h),"D3D operation");}
 ComPtr<ID3DBlob> compile(const char* s,const char* entry,const char* profile,const D3D_SHADER_MACRO* macros=nullptr){
@@ -20,14 +21,18 @@ ComPtr<ID3DBlob> compile(const char* s,const char* entry,const char* profile,con
 }
 namespace edvr {
 float testBrightness=2.0f;
-bool testOn=true,testFail=false;uint64_t testVs=0xFCF7BD2896751D96ull,testPs=0xF786D34B5E118D5Eull;
+bool testOn=true,testPulse=true,testFail=false;uint64_t testVs=0xFCF7BD2896751D96ull,testPs=0xF786D34B5E118D5Eull;
 Config& Config::get(){static Config c;return c;}
-bool Config::getBool(const char* key,bool def)const{check(!strcmp(key,"fix.night_vision_stability")&&def,"live key defaults on");return testOn;}
-float Config::getFloat(const char* key,float def)const{check(!strcmp(key,"fix.night_vision_brightness")&&def==8.0f,"brightness key and default");return testBrightness;}
+bool Config::getBool(const char* key,bool def)const{
+    if(!strcmp(key,"fix.night_vision_stability")){check(def,"pulse stability defaults on");return testPulse;}
+    check(!strcmp(key,"experimental.night_vision_realistic")&&!def,"experimental appearance defaults off");return testOn;
+}
+float Config::getFloat(const char* key,float def)const{check(!strcmp(key,"experimental.night_vision_brightness")&&def==8.0f,"experimental brightness key and default");return testBrightness;}
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:testPs;}
-ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro*,const char*){
-    if(testFail)return nullptr;auto code=compile(s,entry,"ps_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* p=nullptr;
+ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro* macros,const char*){
+    std::vector<D3D_SHADER_MACRO> defines;if(macros)for(auto* m=macros;m->name;++m)defines.push_back({m->name,m->value});defines.push_back({nullptr,nullptr});
+    if(testFail)return nullptr;auto code=compile(s,entry,"ps_5_0",defines.data());ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* p=nullptr;
     hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&p));return p;
 }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTargetView*const* r,ID3D11DepthStencilView* d){c->OMSetRenderTargets(n,r,d);}
@@ -55,8 +60,8 @@ struct Rig {
     std::vector<float> scene=std::vector<float>(64*64*4,0);
     ComPtr<ID3D11PixelShader> stock;float c[333][4]{},n[12][4]{};
     Rig(){
-        D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
-        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
+        D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,testDriver,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
+        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
         // The grid is disabled in these fixtures, so the unused TEXCOORD
         // can come from the same position without changing the reference.
         auto vsCode=compile("struct O{float4 p:SV_Position;float2 t:TEXCOORD4;};O main(uint id:SV_VertexID){O o;o.p=float4(id==2?3:-1,id==1?3:-1,0,1);o.t=o.p.xy;return o;}","main","vs_5_0");
@@ -109,7 +114,8 @@ struct Rig {
     }
     void clean(){if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T sz=0;queue->GetMessage(i,nullptr,&sz);std::vector<char> b(sz);auto* m=reinterpret_cast<D3D11_MESSAGE*>(b.data());hr(queue->GetMessage(i,m,&sz));if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings");}}}
 };
-void test(){
+void test(bool realistic){
+    testOn=realistic;testPulse=true;
     Rig r;check(nightVisionMatches('X',240,1),"exact night pair accepted");check(!nightVisionMatches('D',240,1)&&!nightVisionMatches('X',6,1)&&!nightVisionMatches('X',240,2),"unrelated draw shapes rejected");
     testPs=0;check(!nightVisionMatches('X',240,1),"unrelated shader rejected");testPs=0xF786D34B5E118D5Eull;
     // The same world point under two camera rotations, placed at pixel
@@ -155,16 +161,17 @@ void test(){
     check(ps==r.stock,"MRT pass keeps original shader");nightVisionEnd(r.ctx.Get());r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),r.dsv.Get());
     // Nested Begin is harmless, including live disabling before End.
     nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps!=r.stock,"known single target engages");
-    nightVisionBegin(r.ctx.Get());testOn=false;nightVisionConfigure(Config::get());nightVisionEnd(r.ctx.Get());
-    ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps==r.stock,"live disabling restores an engaged draw");testOn=true;nightVisionConfigure(Config::get());
+    nightVisionBegin(r.ctx.Get());testOn=false;testPulse=false;nightVisionConfigure(Config::get());nightVisionEnd(r.ctx.Get());
+    ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps==r.stock,"live disabling restores an engaged draw");testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());
     ComPtr<ID3D11DeviceContext> deferred;hr(r.dev->CreateDeferredContext(0,&deferred));nightVisionBegin(deferred.Get());ps.Reset();deferred->PSGetShader(&ps,nullptr,nullptr);check(!ps,"deferred context rejected");
-    testOn=false;nightVisionConfigure(Config::get());check(!nightVisionMatches('X',240,1),"live Off bypasses fix");fixed=r.draw(true);
+    testOn=false;testPulse=false;nightVisionConfigure(Config::get());check(!nightVisionMatches('X',240,1),"both live settings Off bypass replacement");fixed=r.draw(true);
     check(fixed==stock,"live Off draws original pixels");
-    testOn=true;nightVisionConfigure(Config::get());check(nightVisionMatches('X',240,1),"live On reengages");
+    testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());check(nightVisionMatches('X',240,1),"live On reengages");
     nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"compile failure draws stock and stands down");testFail=false;
     r.clean();
 }
 void geometryTest(){
+    testOn=true;testPulse=true;
     Rig r;r.n[10][1]=0;r.n[11][0]=40;r.n[5][3]=r.n[7][1]=1000000;
     // Material normal-map ridges on a perfectly flat depth surface must
     // not acquire geometry outlines or directional normal-map colour.
@@ -259,4 +266,41 @@ void brightnessTest(){
     testOn=false;nightVisionConfigure(Config::get());check(r.draw(true)==r.draw(false),"brightness has no effect with Realistic nightvision off");
     testBrightness=2;testOn=true;nightVisionConfigure(Config::get());r.clean();
 }
-int main(int argc,char** argv){if(argc!=2||strcmp(argv[1],"--self-test")){std::puts("Usage: night_vision_test --self-test");return 2;}test();geometryTest();brightnessTest();std::printf("PASS: night vision (%u checks)\n",checks);}
+void independentTest(){
+    testOn=false;testPulse=true;Rig r;
+    r.n[10][1]=0;r.n[11][0]=40;r.n[9][0]=.218f;r.n[9][1]=.5f;r.n[9][2]=-.5f;
+    std::vector<unsigned> pattern(64*64);for(unsigned i=0;i<64*64;++i){
+        pattern[i]=((i%8<4?750u:512u)<<10)|(512u<<20);
+        for(unsigned ch=0;ch<4;++ch)r.scene[i*4+ch]=float((i+ch)%7)*.001f;
+    }
+    r.ctx->UpdateSubresource(r.normals.Get(),0,nullptr,pattern.data(),64*4,0);
+    // Pulse-only must keep original normal-map outlines, fill, brightness,
+    // body stencil and artistic quantization when the pulse is at its floor.
+    for(bool pixelated:{false,true}){
+        unsigned value=pixelated?1:0;memcpy(&r.n[11][2],&value,4);
+        r.setStencil(std::vector<unsigned>(64*64,16));
+        auto fixed=r.draw(true),stock=r.draw(false);
+        check(fixed==stock,"pulse-only preserves every non-pulse output pixel, including body and normal detail");
+    }
+    check(!state.classify && !state.exterior && !state.control && !state.blend,"pulse-only allocates no experimental mask, compute shader, brightness CB or blend");
+    // A valid stock pass needs no experimental stencil classification.
+    r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),nullptr);r.draw(true);
+    check(state.shader[2] && !state.failed[2],"pulse-only runs without the experimental exterior stencil contract");
+    r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),r.dsv.Get());
+    testOn=true;testPulse=false;nightVisionConfigure(Config::get());r.n[10][1]=.6f;r.n[1][0]=500;
+    auto appearanceOnly=r.draw(true),stock=r.draw(false);
+    check(appearanceOnly==stock,"experimental appearance does not force pulse correction when independently disabled");
+    auto cached=state.shader[2];testOn=false;testPulse=true;nightVisionConfigure(Config::get());r.draw(true);
+    check(state.shader[2]==cached,"live switches reuse the independently compiled pulse shader");
+    // Failure of the optional appearance cannot disable the standard fix.
+    nightVisionShutdown();testOn=true;testFail=true;nightVisionConfigure(Config::get());r.draw(true);
+    check(!nightVisionMatches('X',240,1),"failed experimental variant stands down");
+    testOn=false;testFail=false;nightVisionConfigure(Config::get());r.draw(true);
+    check(nightVisionMatches('X',240,1) && state.shader[2],"standard pulse fix survives a failed experimental variant");
+    r.clean();testOn=true;testPulse=true;
+}
+int main(int argc,char** argv){
+    if(argc==3 && !strcmp(argv[2],"--hardware")){testDriver=D3D_DRIVER_TYPE_HARDWARE;--argc;}
+    if(argc!=2||strcmp(argv[1],"--self-test")){std::puts("Usage: night_vision_test --self-test [--hardware]");return 2;}
+    test(true);test(false);geometryTest();brightnessTest();independentTest();std::printf("PASS: night vision (%u checks)\n",checks);
+}

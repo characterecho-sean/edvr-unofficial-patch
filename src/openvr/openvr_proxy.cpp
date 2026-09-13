@@ -26,7 +26,6 @@
 #include "../common/proxy.h"
 #include "compositor_hook.h"
 #include "call_census.h"
-#include "early_session.h"
 #include "gaze_probe.h"
 #include "launch_centre.h"
 #include "openvr_min.h"
@@ -444,22 +443,6 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
         endLifecycle(call, 0, error, true);
         return nullptr;
     }
-
-    // AFTER the suppression shield, not before it.
-    //
-    // The handover asks the runtime for compositor versions the GAME never
-    // requested -- it walks this build's table until one answers. That is
-    // exactly the traffic interfaceSuppressed exists to keep away from
-    // OpenComposite, which raises a FATAL message box for an interface it
-    // does not implement (see the comment on interfaceSuppressed, and the
-    // measured 2026-08-18 case behind it). Running the handover first
-    // reached around the shield; it only survived because IVRCompositor_014
-    // is answered first and the walk stops there.
-    //
-    // Nothing else moves: this is still inside the game's first
-    // VR_GetGenericInterface, which is what the handover needs.
-    edvr::earlySessionRun(g_realGetGenericInterface);
-
 
     void* iface = g_realGetGenericInterface(interfaceVersion, error);
     if (!iface || !interfaceVersion) {

@@ -104,6 +104,14 @@ draw per eye. `fix.holo_pattern = steady`.
 
 ## Shimmer and sharpness
 
+**The night-vision pulse line moving with your head.** Keep the pulse at
+a stable distance while retaining the game's terrain shading and
+brightness. `fix.night_vision_stability = 1` stays on by default and
+works with AA Off, TAA or DLSS. **Realistic nightvision** is a separate
+experimental appearance, off by default
+(`experimental.night_vision_realistic = 0`), with its brightness control
+under Experimental too. Disabling that appearance keeps pulse stability.
+
 **Supersample filtering.** Experimental and off by default
 (`experimental.supersample_resolve = off`): when enabled, EDVR can filter an
 eye larger than the headset recommendation down to that size, using
@@ -201,7 +209,10 @@ the splash after it covers, so the cut between them just works — resampled fir
 with AMD's FSR so the magnification does not read as pixelation. How sharp it
 can get is your on-foot screen resolution above. The world anchor needs
 `openvr_api.dll`; without it the movie stays head-locked and the log says so.
-`fix.intro_video = screen`. *[intro-video.md](intro-video.md).*
+`skip` does not play it at all: the game's open of the ident file is answered
+"not found", the answer renaming the file gives, so it goes straight to the
+splash and nothing on disk is touched. `fix.intro_video = screen`.
+*[intro-video.md](intro-video.md).*
 
 **The banding behind the intro and the menu.** That backdrop is stored in an old
 compressed format and is very dark, so its gradients come out stepped —
@@ -221,16 +232,6 @@ exactly while a dialog is up. The dialog's own box, border and text are
 untouched. Intro only — it retires for the session the moment a rendered scene
 arrives. `fix.loading_dim = screen`.
 *[loading-panel-handoff.md](loading-panel-handoff.md).*
-
-**The launch movie freezing part-way through, on OpenComposite.** OpenComposite
-throws away the session it started with and builds a new one for the game's
-graphics card, about two and a half seconds, and stock that lands inside the
-game's first compositor call — part-way through the movie. `early` pays it
-before the game asks for the compositor at all, so the movie plays from its
-start; the pause is the same length but nothing is drawing yet. Free on SteamVR,
-which has no session to rebuild. Off by default because a crash was reported on
-a third-party rig this project cannot test — if the game crashes during startup,
-put it back to `stock` and please report it. `fix.vr_handover = stock`.
 
 **Your play space in the wrong place, on OpenComposite.** OpenComposite puts the
 seated origin somewhere different each launch — sometimes in front of you,

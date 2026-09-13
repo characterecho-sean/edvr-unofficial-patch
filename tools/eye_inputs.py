@@ -4,7 +4,10 @@
 EDVRTEX1: 8-byte magic, nine little-endian uint32 values (version, width,
 height, DXGI format, packed row bytes, scene frame, eye, UI-bound, UI-flags),
 then tightly packed rows. MV is RG16_FLOAT in input pixels; Z/SceneZ are
-reverse device depth. UI's low two bits: 1 floating, 2 attached, 3 smoke;
+reverse device depth. PrevZ is the previous input depth used by background
+history rejection (absent when no valid depth history exists). Its header
+names the current evaluation frame, not the older frame that supplied it.
+UI's low two bits: 1 floating, 2 attached, 3 smoke;
 its upper six bits are optional fixed bias. Bias is DLSS's actual R8 mask.
 WeaponMotion is RGBA16_FLOAT at source-screen size: original post-VS
 previous-minus-current motion XY, source depth Z, validity W (1 valid,

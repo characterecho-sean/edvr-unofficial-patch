@@ -7,19 +7,22 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <cstdarg>
 #include <vector>
 #include <fstream>
 #include <filesystem>
 using Microsoft::WRL::ComPtr;
-unsigned checks=0,draws=0;ID3D11ShaderResourceView* drawnPool=nullptr;
+unsigned checks=0,draws=0,motionDraws=0;ID3D11ShaderResourceView* drawnPool=nullptr;
+D3D_DRIVER_TYPE testDriver=D3D_DRIVER_TYPE_WARP;
+std::vector<std::string> testLog;
 void check(bool b,const char* label){++checks;if(!b){std::printf("FAIL: %s\n",label);std::exit(1);}}
 void hr(HRESULT h){check(SUCCEEDED(h),"D3D operation");}
 ComPtr<ID3DBlob> compile(const char* s,const char* entry){
-    ComPtr<ID3DBlob> c,e;HRESULT h=D3DCompile(s,strlen(s),nullptr,nullptr,nullptr,entry,"cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&c,&e);
+    ComPtr<ID3DBlob> c,e;HRESULT h=D3DCompile(s,strlen(s),nullptr,nullptr,nullptr,entry,"cs_5_0",0,0,&c,&e);
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
-void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned,unsigned,unsigned,int,unsigned){}
+void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned,unsigned,unsigned,int,unsigned){++motionDraws;}
 void weaponMotionResourceWritten(ID3D11Resource*){}
 void meshMotionResourceWritten(ID3D11Resource*,uint64_t,uint64_t){}
 bool testEnabled=true;
@@ -28,7 +31,8 @@ bool Config::getBool(const char* key,bool def) const {
     check(!strcmp(key,"fix.weapon_stability") && def,"weapon stability config key defaults on");return testEnabled;
 }
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
-Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
+Log& Log::get(){static Log l;return l;}Log::~Log()=default;
+void Log::note(const char* format,...){char line[2048];va_list args;va_start(args,format);vsnprintf(line,sizeof(line),format,args);va_end(args);testLog.emplace_back(line);}
 void* bindingGet(BindSlot s){return s==BindSlot::Rtv0?testRtv:nullptr;}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:s==BindSlot::Ps?testPs:0;}
 bool bindingResolve(void* view,ResourceInfo* info){
@@ -56,8 +60,8 @@ struct Harness {
     ComPtr<ID3D11Texture2D> rtTex;ComPtr<ID3D11RenderTargetView> rt;
     ComPtr<ID3D11Buffer> pool,bones,camera;ComPtr<ID3D11ShaderResourceView> ps,bs;
     Harness(){
-        D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
-        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
+        D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,testDriver,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
+        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
         D3D11_TEXTURE2D_DESC td{};td.Width=64;td.Height=48;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_RENDER_TARGET;
         hr(dev->CreateTexture2D(&td,nullptr,&rtTex));hr(dev->CreateRenderTargetView(rtTex.Get(),nullptr,&rt));
         testRtv=rt.Get();ctx->OMSetRenderTargets(1,rt.GetAddressOf(),nullptr);D3D11_VIEWPORT vp{0,0,64,48,0,1};ctx->RSSetViewports(1,&vp);
@@ -89,7 +93,7 @@ struct Harness {
 void selfTest(){
     Harness h;std::vector<Instance> p(256);float b[16][3][4]{};float c[276][4]{};
     weaponStabilityConfigure(Config::get());
-    c[270][0]=c[271][1]=c[272][3]=1;c[273][2]=.025f;c[275][0]=10;c[275][1]=20;c[275][2]=30;
+    c[270][0]=c[271][1]=c[272][3]=1;c[273][2]=.0675f;c[275][0]=10;c[275][1]=20;c[275][2]=30;
     for(auto& r:p)position(r,100,100,100);
     for(unsigned i:{7u,8u}){b[i][0][0]=b[i][1][1]=b[i][2][2]=1;b[i][1][3]=-1.7f;b[i][2][3]=-.08f;}
     position(p[12],10.04f,20,30);p[12].words[0]=7;p[12].words[2]=123;p[12].words[3]=456;
@@ -209,7 +213,7 @@ void emitterTest(){
     cam[273][2]=.025f;run(false);
     position(p[51],model[9][3],model[10][3],model[11][3]);
     auto updatePool=[&](){h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,p.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());};
-    updatePool();run(true); // exact rigid-part association survives aiming
+    updatePool();run(false); // ADS emitter keeps the same stock pose as its mesh
     setFloat(p[51],5,getFloat(p[51],5)+.001f);updatePool();run(false); // merely nearby world effect
     setFloat(p[51],5,model[10][3]);p[51].words[0]=9;updatePool();run(false); // independently skinned world body
     p[51].words[0]=0;updatePool();cam[273][2]=.05f;run(false);cam[273][2]=.0675f;
@@ -266,6 +270,9 @@ void lightTest(){
         ComPtr<ID3D11ComputeShader> cs;h.ctx->CSGetShader(&cs,nullptr,nullptr);check(cs.Get()==old.Get(),"light CS shader restored");
     };
     run(true);auto* allocation=g.lightVertices.Get();run(true);check(allocation==g.lightVertices.Get(),"repeated light batches reuse allocation");
+    cam[273][2]=.025f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
+    run(false); // ADS must not detach a light by retaining the hip-fire delta.
+    cam[273][2]=.0675f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());run(true);
     lc[6][3]=.01f;run(false);lc[6][3]=0;
     lc[12][3]=.0675f;run(false);lc[12][3]=.025f;
     lc[2][0]=2;run(false);lc[2][0]=1;
@@ -280,9 +287,220 @@ void lightTest(){
     testEnabled=false;weaponStabilityConfigure(Config::get());check(!weaponStabilityDraw(h.ctx.Get(),drawLights,14,5,0,0,0,64,48),"live weapon toggle also bypasses lights");
     testEnabled=true;weaponStabilityConfigure(Config::get());drawnLights.Reset();h.clean();
 }
+void aimingTest(){
+    Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+    camera[270][0]=camera[271][1]=camera[272][3]=1;camera[273][2]=.0675f;
+    for(auto& r:pool)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    position(pool[12],-.041941643f,-.009459019f,.062137604f);pool[12].words[0]=7;pool[90]=pool[12];pool[90].words[0]=8;
+    position(pool[52],.1f,.2f,.4f);
+    h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));h.screen();
+    check(h.run(),"hip-fire pose starts with correction");auto hip=h.read(g.fixed.Get());check(memcmp(hip.data(),pool.data(),hip.size())!=0,"hip-fire correction is active before aiming");
+    auto updateCamera=[&](){h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());};
+    for(float nearZ:{.025f,.04f,.06f,.075f}){
+        camera[273][2]=nearZ;camera[270][0]=3;camera[271][1]=4;camera[275][0]+=.03f;updateCamera();
+        for(uint64_t vs:{0x8B589D25B2A0ADDCull,0x7B0DC42D383F694Cull,0x025B4B9FF54622EDull,0x7F9B650EC1A1E570ull,0x174E8D76363BE337ull,0x34CCFAAB1EAD90BEull}){
+            testVs=vs;const unsigned beforeMotion=motionDraws,beforeDraw=draws;check(h.run(),"aiming and transition material forwarded");auto actual=h.read(g.fixed.Get());
+            check(!memcmp(actual.data(),pool.data(),actual.size()),"aiming body, arms, reticle and scope retain every original transform bit");
+            check(motionDraws==beforeMotion+1 && draws==beforeDraw+1,"aiming still supplies temporal motion and exactly one original draw");
+        }
+        auto anchor=h.read(g.anchor.Get());const auto* a=reinterpret_cast<const float*>(anchor.data());
+        check(a[3]==0 && a[8]==1 && a[9]==nearZ,"projection fallback is reported distinctly from missing roots");
+    }
+    camera[273][2]=.0675f;updateCamera();testVs=0x8B589D25B2A0ADDCull;check(h.run(),"leaving ADS resumes hip-fire correction");auto actual=h.read(g.fixed.Get());
+    const auto* r=reinterpret_cast<const Instance*>(actual.data());
+    check(std::fabs(getFloat(r[52],4)-(getFloat(pool[52],4)+camera[275][0]-getFloat(pool[12],4)))<1e-6f,"return to hip fire uses fresh attachment rather than stale ADS data");h.clean();
+}
+void aimingTimingTest(){
+    Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+    camera[270][0]=2;camera[271][1]=3;camera[272][3]=1;camera[273][2]=.025f;
+    for(auto& r:pool)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    pool[12].words[0]=7;pool[90].words[0]=8;
+    float offset[3]={.015f,.010f,-.075f};
+    h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));
+    auto sentinel=h.buffer(nullptr,16,0,D3D11_BIND_CONSTANT_BUFFER);h.ctx->CSSetConstantBuffers(3,1,sentinel.GetAddressOf());
+    auto pose=[&](float x,float z,float extraX,float extraZ){
+        for(unsigned i:{12u,90u})position(pool[i],x,0,z);
+        position(pool[52],x+.12f,.2f,z+.4f); // original animated rigid attachment
+        camera[275][0]=x+offset[0]+extraX;camera[275][1]=offset[1];camera[275][2]=z+offset[2]+extraZ;
+        h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
+        h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();
+    };
+    auto verify=[&](float dx,float dz,const char* label){
+        check(h.run(),"ADS timing draw forwarded");auto result=h.read(g.fixed.Get());auto expected=pool;
+        if(dx || dz)for(unsigned i:{12u,90u,52u}){setFloat(expected[i],4,getFloat(expected[i],4)+dx);setFloat(expected[i],6,getFloat(expected[i],6)+dz);}
+        const auto* a=reinterpret_cast<const Instance*>(result.data());
+        bool correct=true;for(unsigned i=0;i<pool.size();++i)for(unsigned w=0;w<84;++w){
+            if((dx||dz) && (i==12 || i==90 || i==52) && (w==4 || w==6))correct&=std::fabs(getFloat(a[i],w)-getFloat(expected[i],w))<1e-6f;
+            else correct&=a[i].words[w]==expected[i].words[w];
+        }
+        if(!correct){auto state=h.read(g.anchor.Get());auto* diagnostic=reinterpret_cast<const float*>(state.data());printf("%s: correction %.7f %.7f %.7f status %.0f; expected %.7f %.7f\n",label,diagnostic[0],diagnostic[1],diagnostic[2],diagnostic[8],dx,dz);}
+        check(correct,label);
+        auto original=h.read(h.pool.Get());check(!memcmp(original.data(),pool.data(),original.size()),"ADS timing never edits the original pool");
+        ComPtr<ID3D11Buffer> restored;h.ctx->CSGetConstantBuffers(3,1,&restored);check(restored.Get()==sentinel.Get(),"ADS sample constant slot restored");
+        const auto before=motionDraws;testVs=0x025B4B9FF54622EDull;check(h.run() && motionDraws==before+1,"reticle shares timing correction and temporal forwarding");
+        auto reticle=h.read(g.fixed.Get());check(reticle==result,"optic and mesh see identical corrected geometry");
+    };
+    auto next=[&](){weaponStabilityFrameBoundary(h.ctx.Get());};
+    pose(0,0,0,0);verify(0,0,"first ADS sample preserves aim");
+    for(unsigned i=0;i<8;++i){pose(0,0,0,0);check(h.run(),"same-frame rewrites forwarded");}
+    auto state=h.read(g.anchor.Get());check(reinterpret_cast<float*>(state.data())[(3+(g.frame&1)*8+2)*4+3]==1,"multiple materials/rewrites cannot manufacture synchronized frames");
+    next();pose(.04f,0,0,0);verify(0,0,"second synchronized sample preserves aim");
+    next();pose(.08f,0,0,0);verify(0,0,"third synchronized sample establishes this sight offset");
+    next();pose(.12f,0,.04f,0);verify(.04f,0,"strafe overshoot removes timing error only, preserving full ADS offset");
+    // Effects use the same anchor even if their own camera write refreshes it.
+    float emitter[13][4]{};for(unsigned i=0;i<3;++i){emitter[9+i][i]=1;emitter[9+i][3]=getFloat(pool[52],4+i)-camera[275][i];}
+    auto model=h.buffer(emitter,sizeof(emitter),0,D3D11_BIND_CONSTANT_BUFFER);h.ctx->VSSetConstantBuffers(0,1,model.GetAddressOf());
+    auto beforeEffect=h.read(g.anchor.Get());
+    testVs=0x9AEC596A2B036EA6ull;testPs=0x3789CA2062E196FBull;weaponStabilityResourceWritten(h.camera.Get());check(h.run(),"ADS emitter with exact part match forwarded");
+    auto er=h.read(g.emitterCb.Get());const auto* ef=reinterpret_cast<const float*>(er.data());check(std::fabs(ef[39]-emitter[9][3]-.04f)<1e-6,"ADS emitter follows timing correction without full aim-offset removal");
+    auto afterEffect=h.read(g.anchor.Get());check(!memcmp(afterEffect.data()+48,beforeEffect.data()+48,beforeEffect.size()-48),"effect passes cannot replace the mesh timing samples");
+    next();pose(.16f,0,0,0);verify(0,0,"camera repeat catches up without an opposite correction");
+    next();pose(.16f,.04f,0,0);verify(0,0,"change from strafing to forward translation keeps original pose");
+    next();pose(.16f,.08f,0,.04f);verify(0,.04f,"forward overshoot retains sight alignment");
+    next();pose(.16f,.12f,0,0);verify(0,0,"forward repeat catches up cleanly");
+    next();pose(.16f,.12f,0,.04f);verify(0,.04f,"camera advance with repeated arms uses verified preceding locomotion");
+    next();pose(.16f,.16f,0,0);verify(0,0,"repeated arms catch up cleanly");
+    next();pose(.16f,.12f,0,0);verify(0,0,"backward movement establishes original pose");
+    next();pose(.16f,.08f,0,-.04f);verify(0,-.04f,"backward overshoot retains the same sight offset");
+    next();pose(.16f,.04f,0,0);verify(0,0,"backward camera repeat catches up");
+    next();pose(.16f,.08f,0,0);verify(0,0,"resume forward walking");
+    next();pose(.16f,.12f,0,0);verify(0,0,"stable forward pose after direction change");
+    next();offset[0]+=.02f;pose(.16f,.12f,0,0);verify(0,0,"intentional stationary aiming offset change stays original");
+    next();pose(.20f,.12f,0,0);verify(0,0,"changed sight calibration needs synchronized samples");
+    next();pose(.24f,.12f,0,0);verify(0,0,"new offset establishes without smoothing");
+    next();camera[270][0]=3;pose(.28f,.12f,.04f,0);verify(0,0,"scope/FOV transition discards calibration");
+    next();pose(.32f,.12f,0,0);verify(0,0,"scope reacquires original pose");
+    next();pose(.36f,.12f,0,0);verify(0,0,"scope second sample");
+    next();pose(.40f,.12f,0,0);verify(0,0,"scope calibrated");
+    next();float angle=.02f;camera[270][0]=3*std::cos(angle);camera[272][0]=-3*std::sin(angle);camera[270][3]=std::sin(angle);camera[272][3]=std::cos(angle);
+    pose(.44f,.12f,.04f,0);verify(0,0,"mouse rotation/recoil is not mistaken for translation overshoot");
+    camera[270][0]=3;camera[272][0]=camera[270][3]=0;camera[272][3]=1;
+    for(unsigned i=0;i<3;++i){next();pose(.48f+.04f*i,.12f,0,0);verify(0,0,"steady aim reacquires after rotation");}
+    next();testEnabled=false;weaponStabilityConfigure(Config::get());testEnabled=true;weaponStabilityConfigure(Config::get());
+    pose(.60f,.12f,.04f,0);verify(0,0,"live toggle discards pre-toggle calibration");
+    for(unsigned i=0;i<3;++i){next();pose(.64f+.04f*i,.12f,0,0);verify(0,0,"calibration after toggle");}
+    next();pool[90].words[0]=7;pose(.76f,.12f,.04f,0);verify(0,0,"missing independent arm root rejects correction");pool[90].words[0]=8;
+    for(unsigned i=0;i<3;++i){next();pose(.80f+.04f*i,.12f,0,0);verify(0,0,"reacquire after missing paired root");}
+    next();weaponStabilityResourceWritten(nullptr);pose(.92f,.12f,.04f,0);verify(0,0,"unknown command-list writes invalidate calibration epoch");
+    for(unsigned i=0;i<3;++i){next();pose(.96f+.04f*i,.12f,0,0);verify(0,0,"reacquire after unknown writes");}
+    next();next();pose(.80f,.12f,.04f,0);verify(0,0,"missing source frame cannot reuse ADS history");
+    next();camera[273][2]=.0675f;pose(.84f,.12f,0,0);
+    check(h.run(),"hip-fire reentry forwarded");auto hip=h.read(g.anchor.Get());const auto* ha=reinterpret_cast<const float*>(hip.data());
+    check(ha[3]==1 && std::fabs(ha[0]-offset[0])<1e-6 && std::fabs(ha[1]-offset[1])<1e-6 && std::fabs(ha[2]-offset[2])<1e-6,"hip-fire reentry retains direct attachment correction");
+    h.clean();
+}
+void traceTest(){
+    Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+    camera[270][0]=2;camera[271][1]=3;camera[272][3]=1;camera[273][2]=.025f;
+    for(auto& r:pool)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    pool[12].words[0]=7;pool[90].words[0]=8;
+    h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));
+    weaponStabilityArmTrace();check(!g.traceRequested,"inactive eye dump does not request weapon readback");
+    for(unsigned f=0;f<140;++f){
+        for(unsigned i:{12u,90u})position(pool[i],f*.01f,0,0);
+        camera[275][0]=f*.01f+.01f;camera[275][1]=.02f;camera[275][2]=-.075f;
+        h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
+        h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();check(h.run(),"trace ring records ordinary source draw");
+        auto result=h.read(g.fixed.Get());check(!memcmp(result.data(),pool.data(),result.size()),"recording trace leaves synchronized geometry bit-identical");
+        if(f==139){
+            camera[275][0]+=.04f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());check(h.run(),"second camera update recorded");
+            auto anchor=h.read(g.anchor.Get());auto* a=reinterpret_cast<const float*>(anchor.data());
+            check(a[8]==3 && std::fabs(a[0]-.04f)<1e-6,"trace does not alter timing correction");
+            check(!g.traceStage && !g.tracePending,"rolling GPU history has no routine staging/readback");
+            weaponStabilityArmTrace();check(g.traceRequested,"eye dump requests prehistory");
+        }
+        weaponStabilityFrameBoundary(h.ctx.Get());
+    }
+    check(g.tracePending && g.traceFrame==139 && g.traceStage,"eye dump copies bounded history once");
+    auto frozen=h.read(g.traceStage.Get());check(frozen.size()==kWeaponTraceFrames*kWeaponTraceRows*16,"readback bounded to 32 KiB");
+    auto* p=reinterpret_cast<const float*>(frozen.data());
+    for(unsigned frame=12;frame<140;++frame){
+        const float* first=p+(frame%kWeaponTraceFrames)*kWeaponTraceRows*4;
+        unsigned stamp=0;memcpy(&stamp,first,4);check(stamp==frame,"ring retains last 128 actual frames");
+        check(first[3]==1,"first sample is not overwritten by later material");
+        const float* last=first+32;
+        check(last[3]==(frame==139?2:1),"last sample records same-frame regeneration count");
+        if(frame==139){
+            check(first[23]==2 && last[23]==3 && std::fabs(last[24]-.04f)<1e-6,"trace distinguishes synchronized first draw and corrected last draw");
+            check(unsigned(first[2])==223 && unsigned(last[2])==251,"numeric GPU trace flags survive storage and decoding");
+        }
+    }
+    weaponStabilityArmTrace();check(!g.traceRequested,"pending trace cannot be overwritten by another request");
+    testLog.clear();
+    for(unsigned i=0;i<4;++i)weaponStabilityFrameBoundary(h.ctx.Get());
+    check(!g.tracePending,"ready readback drains asynchronously at frame boundary");
+    unsigned records=0;bool complete=false,last=false;
+    for(auto& line:testLog){if(line.find("weapon timing frame=")==0)++records;if(line=="weapon timing trace: complete.")complete=true;if(line.find("frame=139 last")!=std::string::npos && line.find("status=3")!=std::string::npos)last=true;}
+    check(records==256 && complete && last,"logged trace has full prehistory and correction status");
+    testEnabled=false;weaponStabilityConfigure(Config::get());h.screen();weaponStabilityArmTrace();check(!g.traceRequested,"disabled weapon fix does not request readback");
+    testEnabled=true;weaponStabilityConfigure(Config::get());h.clean();
+}
+void sustainedAimingTest(){
+    for(unsigned axis:{0u,2u})for(bool delayed:{false,true}){
+        Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+        camera[270][0]=2;camera[271][1]=3;camera[272][3]=1;camera[273][2]=.025f;
+        for(auto& r:pool)position(r,100,100,100);
+        for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+        pool[12].words[0]=7;pool[90].words[0]=8;
+        h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));
+        float x=0,previous=0;
+        auto sample=[&](float step,bool lag,float expected,float partial=0){
+            previous=x;x+=step;const float arm=(lag?previous:x)-.014f+partial;
+            for(unsigned i:{12u,90u})position(pool[i],arm,-.021f,.130f);
+            position(pool[52],arm+.1f,.2f,.4f);camera[275][0]=x;camera[275][1]=camera[275][2]=0;
+            if(axis==2){
+                std::swap(camera[275][0],camera[275][2]);
+                for(auto& r:pool)std::swap(r.words[4],r.words[6]);
+            }
+            h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
+            h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();check(h.run(),"sustained ADS draw forwarded");
+            auto bytes=h.read(g.fixed.Get());const auto* actual=reinterpret_cast<const Instance*>(bytes.data());
+            auto diagnostic=h.read(g.anchor.Get());auto* da=reinterpret_cast<const float*>(diagnostic.data());
+            if((expected==0 && da[3]!=0) || std::fabs(da[axis]-expected)>1e-6f)
+                printf("axis %u delayed %u frame %u step %.7f expected %.7f correction %.7f status %.0f\n",axis,unsigned(delayed),g.frame,step,expected,da[axis],da[8]);
+            for(unsigned i=0;i<128;++i)for(unsigned w=0;w<84;++w){
+                if(expected && (i==12 || i==90 || i==52) && w==4+axis)check(std::fabs(getFloat(actual[i],w)-(getFloat(pool[i],w)+expected))<1e-6,"one-frame translation preserves this weapon's independent aiming offset");
+                else check(actual[i].words[w]==pool[i].words[w],"all other geometry and animation bytes preserved");
+            }
+            auto a=h.read(g.anchor.Get());auto* anchor=reinterpret_cast<const float*>(a.data());
+            if(expected)check(anchor[8]==3 || anchor[8]==4,"recognized timing correction has a distinct status");
+            const unsigned before=motionDraws;testVs=0x025B4B9FF54622EDull;check(h.run() && motionDraws==before+1,"sustained correction still forwards reticle motion");
+            check(h.read(g.fixed.Get())==bytes,"ADS optic and weapon share exactly the same timing correction");
+            weaponStabilityFrameBoundary(h.ctx.Get());
+        };
+        const float steps[]={.02f,.028f,.022f,.033f,.019f,.025f,.023f,.031f,.018f,.026f};
+        for(unsigned i=0;i<10;++i)sample(steps[i],delayed,delayed && i>=4?steps[i]:0);
+        if(delayed){
+            for(unsigned i=0;i<4;++i)sample(.025f,true,.025f); // recognized lag survives steady velocity
+            sample(-.021f,true,-.021f); // reversal still has measured one-frame correspondence
+            camera[270][0]=3;sample(.019f,true,0); // changed scope cannot reuse this calibration
+        }
+        sample(0,false,0);sample(0,false,0); // stop and synchronized catch-up
+        for(unsigned i=0;i<8;++i)sample(.025f,false,0); // constant-speed synchronized ambiguity
+        for(unsigned i=0;i<10;++i)sample(steps[i],false,0); // variable synchronized motion
+        // Switch to delayed updates after a partial overshoot, as in live
+        // frames 12475..12479. Retain the verified offset through the switch.
+        sample(.025f+.029f,true,.029f,.025f); // camera advances twice, arms once
+        sample(.022f,true,.022f); // known offset handles the phase switch immediately
+        sample(.031f,true,.031f); // immediately recognized from the known offset
+        sample(-.023f,true,-.023f); // reverse before another acquisition window
+        sample(.021f,false,0); // synchronized again
+        sample(0,false,0);sample(0,false,0);sample(0,false,0);
+        sample(-.019f,true,0); // camera-only restart stays conservative
+        sample(-.028f,true,-.028f); // next arms update corrects without retraining
+        sample(.024f,true,.024f); // reversal follows the current step, no smoothing
+        sample(0,false,0);sample(0,false,0);
+        sample(.032f,false,0);sample(-.022f,false,0); // stock phase survives reversals
+        h.clean();
+    }
+}
 int main(int argc,char** argv){
-    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();}
+    if(argc==3 && !strcmp(argv[2],"--hardware")){testDriver=D3D_DRIVER_TYPE_HARDWARE;--argc;}
+    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();aimingTimingTest();traceTest();sustainedAimingTest();}
     else if(argc==3 && !strcmp(argv[1],"--capture"))capture(argv[2]);
-    else {std::puts("Usage: weapon_stability_test --self-test | --capture DIR");return 2;}
+    else {std::puts("Usage: weapon_stability_test --self-test [--hardware] | --capture DIR");return 2;}
     std::printf("PASS: weapon stability (%u checks)\n",checks);return 0;
 }

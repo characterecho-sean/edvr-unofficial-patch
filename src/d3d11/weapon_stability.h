@@ -14,7 +14,12 @@ void weaponStabilityResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t en
 bool weaponStabilityDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                          unsigned start,int base,unsigned startInstance,unsigned width,unsigned height);
 void weaponStabilityFrameBoundary(ID3D11DeviceContext*);
+// Eye capture also retains timing BEFORE its readback hitch. GPU-only
+// rolling history; one nonblocking readback when explicitly requested.
+void weaponStabilityArmTrace();
 void weaponStabilityShutdown();
+
+constexpr unsigned kWeaponTraceBase=23,kWeaponTraceFrames=128,kWeaponTraceRows=16;
 
 constexpr char kWeaponStabilityCs[]=R"HLSL(
 struct Instance {uint4 row[21];};
@@ -24,6 +29,7 @@ StructuredBuffer<Bone> Bones:register(t1);
 cbuffer Camera:register(b0){float4 camera[276];}
 cbuffer Emitter:register(b1){float4 emitter[13];}
 cbuffer LightCamera:register(b2){float4 lightCamera[14];}
+cbuffer Sample:register(b3){uint sampleFrame,sampleEpoch,sampleWrite,sampleUnused;}
 RWStructuredBuffer<Instance> Fixed:register(u0);
 RWStructuredBuffer<float4> Anchor:register(u1);
 RWStructuredBuffer<float4> EmitterFixed:register(u2);
@@ -47,13 +53,128 @@ bool root(uint i,uint nb) {
         dot(cross(b.x.xyz,b.y.xyz),b.z.xyz)>.999 &&
         b.y.w<-.5 && b.y.w>-2.5 && abs(b.x.w)<.1 && abs(b.z.w)<.3;
 }
+// Two eight-row samples after the three diagnostic rows. Every draw in
+// a frame reads only the previous frame's bank: material passes and camera
+// rewrites cannot train the ADS offset multiple times in one frame.
+float3 aimingTranslation(float3 p,bool valid,out float status) {
+    status=1;
+    uint now=3+(sampleFrame&1)*8,prev=3+((sampleFrame-1)&1)*8;
+    uint lagNow=19+(sampleFrame&1)*2,lagPrev=19+((sampleFrame-1)&1)*2;
+    float3 r=float3(camera[270].x,camera[271].x,camera[272].x);
+    float3 u=float3(camera[270].y,camera[271].y,camera[272].y);
+    float3 f=float3(camera[270].w,camera[271].w,camera[272].w);
+    float sx=length(r),sy=length(u);r/=max(sx,1e-8);u/=max(sy,1e-8);
+    valid=valid && abs(camera[273].z-.025)<1e-7 && sx>0 && sy>0 &&
+        all(isfinite(r)) && all(isfinite(u)) && all(isfinite(f)) &&
+        abs(dot(f,f)-1)<.001 && abs(dot(r,u))<.001 &&
+        abs(dot(r,f))<.001 && abs(dot(u,f))<.001 && dot(cross(r,u),f)>.999;
+    float3 delta=camera[275].xyz-p;
+    float3 local=float3(dot(delta,r),dot(delta,u),dot(delta,f));
+    float3 learned=local,correction=0,armStep=0;float confidence=1,overshoots=0;
+    float3 lagLocal=local,cameraStep=0;float lagConfidence=0,lagMode=0;
+    bool history=valid && asuint(Anchor[prev].w)==sampleFrame-1 &&
+        asuint(Anchor[prev+1].w)==sampleEpoch && Anchor[prev+2].w>0 &&
+        abs(Anchor[prev+4].w-sx)<1e-5*max(sx,1) &&
+        abs(Anchor[prev+5].w-sy)<1e-5*max(sy,1);
+    uint traceFlags=(valid?1u:0u)|(history?2u:0u);
+    if(history) {
+        float3 dc=camera[275].xyz-Anchor[prev].xyz,dp=p-Anchor[prev+1].xyz;
+        armStep=dp;cameraStep=dc;
+        float lc=length(dc),lp=length(dp);
+        // The first forward capture also contains a camera advance with a
+        // repeated arms origin. Require the previous measured movement for
+        // that case; a stationary aim/camera adjustment is not locomotion.
+        float3 travel=lp>.001?dp:Anchor[prev+3].xyz;
+        float3 residual=delta-(r*Anchor[prev+2].x+u*Anchor[prev+2].y+f*Anchor[prev+2].z);
+        // 0.1 mm is the existing paired-root precision, not a motion filter.
+        // Synchronized samples remain byte-identical to Elite, including bob,
+        // recoil and crouching. A changed offset must establish itself anew.
+        bool synchronized=all(abs(local-Anchor[prev+2].xyz)<.0001);
+        bool steady=all(abs(r-Anchor[prev+4].xyz)<1e-5) &&
+            all(abs(u-Anchor[prev+5].xyz)<1e-5) && all(abs(f-Anchor[prev+6].xyz)<1e-5);
+        traceFlags|=(synchronized?4u:0u)|(steady?8u:0u)|
+            (lc<1 && lp<1?16u:0u)|(lc>lp+.001?32u:0u)|
+            (Anchor[prev+2].w>=3?64u:0u)|(Anchor[prev+3].w<2?128u:0u);
+        // 07:44 prehistory: arms consistently use the PREVIOUS camera
+        // position, with variable frame steps. Same-frame calibration never
+        // settles. Require the measured one-frame correspondence and its
+        // stable ADS offset; constant-speed motion alone is ambiguous.
+        float3 lagDelta=Anchor[prev].xyz-p;
+        lagLocal=float3(dot(lagDelta,r),dot(lagDelta,u),dot(lagDelta,f));
+        if(steady && lc<1 && lp<1 && (lc>.001 || lp>.001)) {
+            bool lagMatches=Anchor[lagPrev].w>0 &&
+                all(abs(lagLocal-Anchor[lagPrev].xyz)<.0001) &&
+                all(abs(dp-Anchor[lagPrev+1].xyz)<.0001);
+            lagConfidence=lagMatches?min(Anchor[lagPrev].w+1,3):1;
+            lagMode=lagMatches?Anchor[lagPrev+1].w:0;
+            if(lagMatches && any(abs(dc-dp)>.0001))lagMode=min(lagMode+1,4);
+        }
+        // 08:53 prehistory switches from synchronized updates back to lag
+        // after an isolated overshoot. The aiming offset is already known:
+        // do not spend three more frames rediscovering that same offset.
+        bool knownLag=steady && lc<1 && lp<1 && Anchor[prev+2].w>=3 &&
+            all(abs(lagLocal-Anchor[prev+2].xyz)<.0001);
+        if(knownLag && lp<=.001) {
+            // At a stop, a camera-only change could also be an intentional
+            // aiming adjustment. Retain calibration for the next measured
+            // arms step, but leave this ambiguous frame's geometry alone.
+            learned=Anchor[prev+2].xyz;confidence=3;
+        }
+        if(!synchronized && lp>.001 && ((lagConfidence>=3 && lagMode>=3) || knownLag)) {
+            // Translate by this camera step, not by the whole camera/arms
+            // offset. The verified aiming offset and original animation stay.
+            correction=dc;learned=lagLocal;confidence=3;status=4;lagMode=4;
+            traceFlags|=256u;
+        } else if(lc<1 && lp<1 && synchronized) {
+            confidence=min(Anchor[prev+2].w+1,3);status=confidence>=3?2:1;
+        } else if(lc<1 && length(travel)>.001 && lc>lp+.001 && steady &&
+            Anchor[prev+2].w>=3 && Anchor[prev+3].w<2 &&
+            dot(dc,travel)>.998*lc*length(travel) && dot(residual,dc)>.998*length(residual)*lc &&
+            length(residual)<=lc+.0001 && all(abs(Anchor[prev+7].xyz+dc-dp-residual)<.0001)) {
+            // The camera advanced ahead of the independently updated arms.
+            // Remove only that extra translation, retaining this weapon's
+            // verified ADS offset. Never substitute a universal sight offset.
+            correction=residual;learned=Anchor[prev+2].xyz;confidence=3;
+            overshoots=Anchor[prev+3].w+1;status=3;
+        }
+    }
+    if(sampleWrite!=0) {
+        // First and last mesh samples expose same-frame replacement as well
+        // as failed acquisition. These rows never feed the correction.
+        uint first=23+(sampleFrame%128)*16,last=first+8;
+        bool fresh=asuint(Anchor[first].x)!=sampleFrame || asuint(Anchor[first].y)!=sampleEpoch;
+        float calls=fresh?1:Anchor[last].w+1;
+        for(uint copy=0;copy<2;++copy)if(copy!=0 || fresh) {
+            uint dst=copy!=0?last:first;
+            Anchor[dst]=float4(asfloat(sampleFrame),asfloat(sampleEpoch),float(traceFlags),calls);
+            Anchor[dst+1]=float4(camera[275].xyz,camera[273].z);
+            Anchor[dst+2]=float4(p,confidence);
+            Anchor[dst+3]=float4(r,sx);Anchor[dst+4]=float4(u,sy);
+            Anchor[dst+5]=float4(f,status);Anchor[dst+6]=float4(correction,lagConfidence+4*lagMode);
+            Anchor[dst+7]=float4(learned,Anchor[prev+2].w);
+        }
+        Anchor[now]=float4(camera[275].xyz,asfloat(sampleFrame));
+        Anchor[now+1]=float4(p,asfloat(valid?sampleEpoch:0));
+        Anchor[now+2]=float4(learned,valid?confidence:0);
+        Anchor[now+3]=float4(armStep,overshoots);
+        Anchor[now+4]=float4(r,sx);Anchor[now+5]=float4(u,sy);Anchor[now+6]=float4(f,0);
+        Anchor[now+7]=float4(correction,0);
+        Anchor[lagNow]=float4(lagLocal,lagConfidence);
+        Anchor[lagNow+1]=float4(cameraStep,lagMode);
+    }
+    return correction;
+}
 [numthreads(64,1,1)]void findAnchor(uint lane:SV_GroupIndex) {
     uint n,stride,nb;Pool.GetDimensions(n,stride);Bones.GetDimensions(nb,stride);
     float best=1e30;uint index=0xffffffff;
     bool projection=camera[273].z>0 && camera[273].z<1 &&
         all(abs(float3(camera[270].z,camera[271].z,camera[272].z))<1e-8) &&
         all(abs(camera[273].xyw)<1e-6) && all(isfinite(camera[275]));
-    if(projection)for(uint i=lane;i<n;i+=64)if(root(i,nb)) {
+    // Hip fire attaches directly. ADS retains its deliberate camera offset
+    // and corrects only a verified translation update disagreement.
+    bool attachmentProjection=projection && abs(camera[273].z-.0675)<1e-7;
+    bool aimingProjection=projection && abs(camera[273].z-.025)<1e-7;
+    if(attachmentProjection || aimingProjection)for(uint i=lane;i<n;i+=64)if(root(i,nb)) {
         float3 d=position(Pool[i])-camera[275].xyz;float dist=dot(d,d);
         if(dist<best){best=dist;index=i;}
     }
@@ -75,8 +196,12 @@ bool root(uint i,uint nb) {
     if(lane==0) {
         bool valid=index!=0xffffffff && partners>=1;
         float3 p=valid?position(Pool[index]):camera[275].xyz;
-        Anchor[0]=float4(valid?camera[275].xyz-p:0,valid?1:0);
-        Anchor[1]=float4(p,valid?partners+1:0);Anchor[2]=0;
+        float status;
+        float3 timing=aimingTranslation(p,valid && aimingProjection,status);
+        bool apply=valid && (attachmentProjection || (aimingProjection && (status==3 || status==4) && any(timing!=0)));
+        Anchor[0]=float4(apply?(attachmentProjection?camera[275].xyz-p:timing):0,apply?1:0);
+        Anchor[1]=float4(p,valid?partners+1:0);
+        Anchor[2]=float4(projection && !attachmentProjection?(aimingProjection?status:1):0,camera[273].z,0,0);
     }
 }
 [numthreads(64,1,1)]void applyAnchor(uint id:SV_DispatchThreadID) {

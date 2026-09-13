@@ -112,6 +112,7 @@ int main(int argc,char** argv) {
     std::ifstream file("src/d3d11/temporal_shader_source.h"); std::string source((std::istreambuf_iterator<char>(file)),{});
     auto begin=source.find("bool holoPixel("),end=source.find("\n}\n",begin); check(begin!=std::string::npos && end!=std::string::npos,"temporal consumer found");
     std::string hlsl="Texture2D<float2> HC:register(t12);struct HoloRecord{uint4 key[8];float4 clip[3];float4 map[3];float4 meta;};StructuredBuffer<HoloRecord> HR:register(t13);Texture2D<float> Z:register(t0);RWTexture2D<float4> Out:register(u0);cbuffer P:register(b0){float4 holoJitter;float4 probe;}static const int4 region=0;static const int2 size=int2(8,8);static const float4 knobs=float4(0,1,.025,0);bool uiCovered(int2 q){return q.x!=0;}float zSceneAt(int2 q){return Z.Load(int3(q,0));}\n";
+    hlsl+="Texture2D<float> UM:register(t4);\n";
     hlsl+=source.substr(begin,end+3-begin);
     hlsl+="[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){float2 pp;float zp;bool ok=holoPixel(id.xy,probe.xy,pp,zp);Out[id.xy]=float4(pp-id.xy,zp,ok?1:0);}";
     auto consumerCode=compile(hlsl.c_str(),"cs_5_0"); ComPtr<ID3D11ComputeShader> consumer;

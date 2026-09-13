@@ -59,8 +59,9 @@ void* submittedTexture(int eye);
 // This one runs the other way round from every other d3d11 -> openvr field:
 // it is published BEFORE the openvr half has been called at all. Measured on
 // the field rig, the device is created 1.20 s before openvr_api.dll is first
-// asked for an interface, which is the whole reason the early handover has
-// anything to work with (early_session.h).
+// asked for an interface. It was published for the early VR handover
+// (removed 2026-09-13); what reads it now is the cull guard, as the test
+// for whether a d3d11 half is installed at all.
 //
 // Null means no d3d11 half, or a device the proxy never saw. Every reader
 // must treat that as "stand down", not as a reason to wait.

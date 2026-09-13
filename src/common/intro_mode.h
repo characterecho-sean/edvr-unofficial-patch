@@ -8,11 +8,14 @@
 // user wants half of any of these, so the surface is now the function
 // (per the fss_eye_sync precedent, src/common/eye_sync.h):
 //
-//   fix.intro_video = screen | stock
+//   fix.intro_video = screen | stock | skip
 //     screen  the movie plays on the splash's own screen -- world-anchored,
 //             splash-sized, FSR-resampled to the vscreen resolution (the
 //             default)
 //     stock   the game's own small head-locked rectangle
+//     skip    the movie is not played at all: the game's open of the ident
+//             file is refused (intro_skip.h). Parses as screen otherwise,
+//             so a movie that plays anyway plays properly.
 //     dev values: head (screen without the world anchor), sharp (screen
 //     with the Catmull-Rom resample instead of FSR). Legacy spellings from
 //     the retired keys parse silently: splash/world/fsr and any numeric
@@ -61,6 +64,7 @@ struct IntroVideoMode {
     bool screen = true;      // splash-sized panel, derived from the rig
     bool worldLock = true;   // anchored to the game's forward
     int  upscale = 2;        // 0 stock | 1 sharp (Catmull-Rom) | 2 fsr
+    bool skip = false;       // the movie is refused to the game (intro_skip.h)
     bool recognised = true;
 };
 
@@ -71,6 +75,14 @@ inline IntroVideoMode introVideoParse(std::string raw) {
         m.screen = false;
         m.worldLock = false;
         m.upscale = 0;
+        return m;
+    }
+    // skip keeps every other slice at the default on purpose: if the refusal
+    // does not take on some rig, what plays is the full screen treatment,
+    // not the stock rectangle -- and the fill detection stays armed, which
+    // is what tells the skip that it failed.
+    if (v == "skip" || v == "none") {
+        m.skip = true;
         return m;
     }
     if (v == "sharp") {

@@ -1011,6 +1011,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // reaction-time capture, the second is the one you read.
         if (g_state->dumpKey.pressed()) {
             dumpCameraRing("the history key");
+            temporalPassDumpHistory("the history key");
             g_state->dumpDueMs = nowMs() + kDumpDelayMs;
         }
         // THE PRESS THAT WENT NOWHERE, said out loud.
@@ -1044,6 +1045,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             g_state->dumpDueMs = 0;
             dumpCameraRing("a key you pressed two seconds ago",
                            (uint32_t)(kDumpDelayMs / 1000));
+            temporalPassDumpHistory("a key you pressed two seconds ago");
         }
         // The draw census key (issue 69074). Same silent-failure shape as the
         // history key, same cure: a diagnostic keypress that another window
@@ -1593,7 +1595,10 @@ void readoptGameBindings() {
 
 // The Instruments page's rows: the same functions the diagnostic hotkeys
 // fire, reachable from a headset with no key bound.
-void menuActionDumpCamera(void*) { dumpCameraRing("the settings menu"); }
+void menuActionDumpCamera(void*) {
+    dumpCameraRing("the settings menu");
+    temporalPassDumpHistory("the settings menu");
+}
 void menuActionCensus(void*) {
     drawCensusRequest();
     quadProbeRequest();

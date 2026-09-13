@@ -239,7 +239,17 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrGpuFrameEvent
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
+REM Both halves link "%OBJ%\<half>\*.obj" -- a wildcard -- and every build
+REM compiles every listed source, so an object left behind by a source that
+REM was REMOVED from the list is the only thing in that directory a build did
+REM not just make. It links anyway. Measured 2026-09-13: early_session.cpp
+REM was deleted, its .obj stayed, and the link failed on three symbols it
+REM still referenced -- the lucky case. Had those symbols still existed, the
+REM removed feature would have linked straight back into the DLL with no
+REM line anywhere saying so. Clearing the directory first costs nothing and
+REM makes the object set exactly the source list.
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
+del /q "%OBJ%\d3d11\*.obj" 2>nul
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 
@@ -338,6 +348,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\quad_probe.cpp" ^
     "src\d3d11\intro_probe.cpp" ^
     "src\d3d11\intro_panel.cpp" ^
+    "src\d3d11\intro_skip.cpp" ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\supersample_pass.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
@@ -401,6 +412,7 @@ if errorlevel 1 (
 )
 
 if not exist "%OBJ%\openvr" mkdir "%OBJ%\openvr"
+del /q "%OBJ%\openvr\*.obj" 2>nul
 ml64.exe /nologo /c /Fo"%OBJ%\openvr\thunks.obj" "%GEN%\edvr_thunks_openvr.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for openvr & exit /b 1 )
 
@@ -424,7 +436,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "src\openvr\supersample_resolve.cpp" ^
     "src\openvr\temporal_aa.cpp" ^
     "src\openvr\sharpen.cpp" "src\openvr\menu_door.cpp" "src\openvr\frame_timing.cpp" ^
-    "src\openvr\early_session.cpp" "src\openvr\launch_centre.cpp" ^
+    "src\openvr\launch_centre.cpp" ^
     "src\openvr\gaze_probe.cpp" ^
     "src\openvr\call_census.cpp" ^
     "src\d3d11\elite_binds.cpp"
@@ -775,6 +787,14 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     "tools\night_vision_test\night_vision_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\nightvision\night_vision_test.exe" --self-test || exit /b 1
+echo [edvr] === DirectShow intro skip regression ===
+if not exist "%OBJ%\introskip" mkdir "%OBJ%\introskip"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\introskip\\" /Fe"%OBJ%\introskip\intro_skip_test.exe" ^
+    "tools\intro_skip_test\intro_skip_test.cpp" "src\common\iat_hook.cpp" ^
+    /link /INCREMENTAL:NO ole32.lib strmiids.lib || exit /b 1
+"%OBJ%\introskip\intro_skip_test.exe" --self-test || exit /b 1
 python "tools\holo_motion.py" --self-test || exit /b 1
 
 echo [edvr] === stellar motion regression ===

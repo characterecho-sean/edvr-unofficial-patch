@@ -147,6 +147,27 @@ int wmain(int argc, wchar_t** argv) {
     UINT nightStride=12,nightOffset=12;ctx->IASetVertexBuffers(0,1,nightVertices.GetAddressOf(),&nightStride,&nightOffset);
     bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_INDEX_BUFFER;ComPtr<ID3D11Buffer> nightIndices;hr(dev->CreateBuffer(&bd,nullptr,&nightIndices));
     ctx->IASetIndexBuffer(nightIndices.Get(),DXGI_FORMAT_R16_UINT,2);
+    {
+        edvr::EyeDrawSnapshot planets;
+        ComPtr<ID3D11InputLayout> planetLayout;
+        hr(dev->CreateInputLayout(&nightElement,1,nightBlob->GetBufferPointer(),nightBlob->GetBufferSize(),&planetLayout));
+        for(uint64_t vs:{0x71DD9863DCFC0986ull,0x3530A6FD15EDE145ull}) {
+            edvr::EyeDrawSnapshot::rememberLayout(planetLayout.Get(),&nightElement,1,vs);
+            ctx->IASetInputLayout(planetLayout.Get());
+            planets.capture(ctx.Get(),900,1,vs,0,'X',6,1,0,1,2);
+        }
+        planets.capture(ctx.Get(),901,1,0x71DD9863DCFC0986ull,0,'X',6,1,0,1,2);
+        check(planets.draws.size()==3 && planets.vertexDraws==2,"planet transforms captured each frame, geometry only first frame");
+        for(unsigned i=0;i<2;++i) {
+            const auto& d=planets.draws[i];
+            check(d.stage[0] && d.copied[0]==192 && d.layout.size()==1,"actual planet constants and input layout retained");
+            check(d.streams[0].captureOffset==12 && d.streams[0].copied==84 && !d.streams[1].copied,
+                  "planet POSITION uses original VB0 binding, no packed-mesh base assumption");
+            check(d.streams[2].captureOffset==4 && d.streams[2].copied==12,"planet index window follows draw start");
+        }
+        check(planets.draws[2].stage[0] && !planets.draws[2].streams[0].copied,"later planet constants survive without repeated vertex copies");
+        ctx->IASetInputLayout(nightLayout.Get());
+    }
     ComPtr<ID3D11Texture2D> nightTexture[5];ComPtr<ID3D11ShaderResourceView> nightView[5];
     UINT nightRow[5]{},nightRows[5]{};
     for(UINT slot=0;slot<5;++slot) {

@@ -50,8 +50,7 @@ the patch is never loaded and everything in it is inert.
   underneath, so as far as Elite and EDVR are concerned it is still the OpenVR
   path. EDVR knows OpenComposite when it is there — it identifies the runtime
   beneath it by its exports, says which in the `vr` log, and has settings that
-  exist only for it (`launch_centre`, `vr_handover`,
-  `advanced.suppress_interfaces`).
+  exist only for it (`launch_centre`, `advanced.suppress_interfaces`).
 
 Field-verified on a Quest 3 over Virtual Desktop and a Pimax Crystal Super over
 PiOpenXR, both through OpenComposite. Real SteamVR is supported and less
