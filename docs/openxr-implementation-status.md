@@ -1,5 +1,20 @@
 # OpenXR implementation status
 
+The [native Frontier entry checkpoint](openxr-frontier-entry-2026-09-13.md)
+completes the fourteen historical exports with fixed ordinals and typed
+probe/factory behavior, adds strict separate-device environment bootstrap, and
+provides reversible paired installation plus a fresh-launch preflight. Parent
+review corrected stale presence, executable parsing, installed graphics
+identity and rollback handling in Luna's implementation. The full build passed
+with all 478 source hashes unchanged: module gates passed 223/229/223/229
+checks, the PE reader passed 22 and the launcher passed 25. The built export
+table and Frontier's five OpenVR delay imports validated. Both sanctioned
+previews passed and the installed `2f051db` baseline remains hash-verified. The
+next gate is the first native Frontier/PiOpenXR flight with SteamVR and the
+existing EDLaunch closed; the selected native and graphics DLLs are archived
+with a fixed install root. Native installation, actual game rendering/exit and
+full EDVR feature parity remain unqualified.
+
 The [separate-device Pimax
 gate](openxr-owned-capture-2026-09-13.md#pimax-result) passed on `8388961`. All
 488 input hashes matched before and after. The diagnostic rendered 1,531 stereo

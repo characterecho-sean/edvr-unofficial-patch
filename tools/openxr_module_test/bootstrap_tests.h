@@ -21,11 +21,13 @@ struct EnvironmentSpec {
 struct EnvironmentReader {
   EnvironmentSpec loader;
   EnvironmentSpec graphics;
+  EnvironmentSpec separate{true};
 
   DWORD operator()(const wchar_t* name, wchar_t* buffer, DWORD capacity) noexcept {
     EnvironmentSpec* spec = nullptr;
     if (!std::wcscmp(name, L"EDVR_OPENXR_LOADER")) spec = &loader;
     if (!std::wcscmp(name, L"EDVR_OPENXR_GRAPHICS")) spec = &graphics;
+    if (!std::wcscmp(name, L"EDVR_OPENXR_SEPARATE_DEVICE")) spec = &separate;
     if (!spec) {
       SetLastError(ERROR_ENVVAR_NOT_FOUND);
       return 0;
@@ -80,6 +82,48 @@ void runBootstrapTests(Check&& check) {
     check(detail::collectBootstrapPaths(paths, reader) == BootstrapResult::Unconfigured &&
               paths.loader.empty() && paths.graphics.empty(),
           "both bootstrap variables absent are unconfigured");
+  }
+  {
+    EnvironmentReader reader;
+    reader.loader.value = loader; reader.graphics.value = graphics;
+    BootstrapPaths paths;
+    check(detail::collectBootstrapPaths(paths, reader) == BootstrapResult::Ready && !paths.separateDevice,
+          "missing separate-device flag preserves v1 bootstrap");
+  }
+  for (const wchar_t* flag : {L"", L"0", L"2", L"true", L" 1"}) {
+    EnvironmentReader reader;
+    reader.loader.value = loader; reader.graphics.value = graphics;
+    reader.separate.missing = false; reader.separate.value = flag;
+    BootstrapPaths paths{{L"stale-loader"},{L"stale-graphics"},true};
+    check(detail::collectBootstrapPaths(paths, reader) == BootstrapResult::Invalid &&
+          paths.loader.empty() && paths.graphics.empty() && !paths.separateDevice,
+          "invalid separate-device flag clears bootstrap output");
+  }
+  {
+    EnvironmentReader reader;
+    reader.loader.value = loader; reader.graphics.value = graphics; reader.separate.missing = false; reader.separate.value = L"1";
+    BootstrapPaths paths;
+    check(detail::collectBootstrapPaths(paths, reader) == BootstrapResult::Ready && paths.separateDevice,
+          "exact separate-device flag selects v2 bootstrap");
+  }
+  {
+    EnvironmentReader reader;
+    reader.loader.missing = reader.graphics.missing = true;
+    reader.separate.missing = false; reader.separate.value = L"1";
+    BootstrapPaths paths{{L"stale-loader"}, {L"stale-graphics"}, true};
+    check(detail::collectBootstrapPaths(paths, reader) == BootstrapResult::Invalid &&
+          paths.loader.empty() && paths.graphics.empty() && !paths.separateDevice,
+          "separate-device flag without both paths is invalid");
+  }
+  {
+    EnvironmentReader reader;
+    reader.loader.value = loader; reader.graphics.value = graphics;
+    reader.separate.missing = false; reader.separate.value = L"1";
+    reader.separate.failure = EnvironmentSpec::Failure::SecondRead;
+    BootstrapPaths paths;
+    check(detail::collectBootstrapPaths(paths, reader) == BootstrapResult::Invalid &&
+          paths.loader.empty() && paths.graphics.empty() && !paths.separateDevice,
+          "failed separate-device environment read is invalid");
   }
   {
     EnvironmentReader reader;

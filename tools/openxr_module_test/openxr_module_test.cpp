@@ -47,6 +47,12 @@ struct Exports {
   using Valid=bool(__cdecl*)(const char*);
   using Token=uint32_t(__cdecl*)();
   Init init=nullptr; Shutdown shutdown=nullptr; Generic generic=nullptr; Valid valid=nullptr; Token token=nullptr;
+  using BoolProbe=bool(__cdecl*)();
+  using PathProbe=const char*(__cdecl*)();
+  using UnsupportedFactory=void*(__cdecl*)();
+  BoolProbe hmdPresent=nullptr, runtimeInstalled=nullptr;
+  PathProbe runtimePath=nullptr;
+  UnsupportedFactory controlPanel=nullptr, dashboardManager=nullptr, trackedCamera=nullptr;
   using ErrorText=const char*(__cdecl*)(vr::EVRInitError);
   ErrorText symbol=nullptr,description=nullptr,legacyDescription=nullptr;
   decltype(&edvrConfigureNativeRuntime) configure=nullptr;
@@ -59,12 +65,19 @@ struct Exports {
     generic=reinterpret_cast<Generic>(GetProcAddress(module,"VR_GetGenericInterface"));
     valid=reinterpret_cast<Valid>(GetProcAddress(module,"VR_IsInterfaceVersionValid"));
     token=reinterpret_cast<Token>(GetProcAddress(module,"VR_GetInitToken"));
+    hmdPresent=reinterpret_cast<BoolProbe>(GetProcAddress(module,"VR_IsHmdPresent"));
+    runtimeInstalled=reinterpret_cast<BoolProbe>(GetProcAddress(module,"VR_IsRuntimeInstalled"));
+    runtimePath=reinterpret_cast<PathProbe>(GetProcAddress(module,"VR_RuntimePath"));
+    controlPanel=reinterpret_cast<UnsupportedFactory>(GetProcAddress(module,"VRControlPanel"));
+    dashboardManager=reinterpret_cast<UnsupportedFactory>(GetProcAddress(module,"VRDashboardManager"));
+    trackedCamera=reinterpret_cast<UnsupportedFactory>(GetProcAddress(module,"VRTrackedCamera"));
     symbol=reinterpret_cast<ErrorText>(GetProcAddress(module,"VR_GetVRInitErrorAsSymbol"));
     description=reinterpret_cast<ErrorText>(GetProcAddress(module,"VR_GetVRInitErrorAsEnglishDescription"));
     legacyDescription=reinterpret_cast<ErrorText>(GetProcAddress(module,"VR_GetStringForHmdError"));
     configure=reinterpret_cast<decltype(configure)>(GetProcAddress(module,"edvrConfigureNativeRuntime"));
     getStatus=reinterpret_cast<decltype(getStatus)>(GetProcAddress(module,"edvrGetNativeRuntimeStatus"));
-    return init&&shutdown&&generic&&valid&&token&&configure&&getStatus&&symbol&&description&&legacyDescription;
+    return init&&shutdown&&generic&&valid&&token&&hmdPresent&&runtimeInstalled&&runtimePath&&
+      controlPanel&&dashboardManager&&trackedCamera&&configure&&getStatus&&symbol&&description&&legacyDescription;
   }
   EdvrNativeRuntimeStatus status() const {
     EdvrNativeRuntimeStatus out{sizeof(out),EDVR_NATIVE_MODULE_VERSION_1};
@@ -104,7 +117,7 @@ bool parse(int argc,wchar_t** argv,Options& options) {
       if(seconds<1||seconds>60)return false;options.seconds=seconds;seenSeconds=true;
     } else return false;
   }
-  return options.present&&! (options.bootstrap&&options.separate)&&absolute(options.loader)&&absolute(options.graphics)&&absolute(options.module);
+  return options.present&&absolute(options.loader)&&absolute(options.graphics)&&absolute(options.module);
 }
 
 void whilePresenting(PresentDevice& device,const std::function<void()>& task) {
@@ -248,10 +261,10 @@ void viewingPhaseTests() {
 // Only used inside this isolated desktop test process. Restore inherited values
 // after all workers join; never write user or machine environment settings.
 struct TestEnvironment {
-  const wchar_t* names[2]={L"EDVR_OPENXR_LOADER",L"EDVR_OPENXR_GRAPHICS"};
-  std::wstring saved[2]; bool existed[2]{};
+  const wchar_t* names[3]={L"EDVR_OPENXR_LOADER",L"EDVR_OPENXR_GRAPHICS",L"EDVR_OPENXR_SEPARATE_DEVICE"};
+  std::wstring saved[3]; bool existed[3]{};
   TestEnvironment() {
-    for(unsigned i=0;i<2;++i) {
+    for(unsigned i=0;i<3;++i) {
       SetLastError(ERROR_SUCCESS);const DWORD size=GetEnvironmentVariableW(names[i],nullptr,0);
       existed[i]=size!=0||GetLastError()==ERROR_SUCCESS;
       if(size){std::vector<wchar_t> buffer(size);const DWORD n=GetEnvironmentVariableW(names[i],buffer.data(),size);
@@ -259,9 +272,10 @@ struct TestEnvironment {
     }
     for(const auto* name:names)check(SetEnvironmentVariableW(name,nullptr)!=FALSE,"clear child bootstrap environment");
   }
-  ~TestEnvironment(){for(unsigned i=0;i<2;++i)SetEnvironmentVariableW(names[i],existed[i]?saved[i].c_str():nullptr);}
-  void set(const wchar_t* loader,const wchar_t* graphics) {
-    check(SetEnvironmentVariableW(names[0],loader)!=FALSE&&SetEnvironmentVariableW(names[1],graphics)!=FALSE,"set child bootstrap environment");
+  ~TestEnvironment(){for(unsigned i=0;i<3;++i)SetEnvironmentVariableW(names[i],existed[i]?saved[i].c_str():nullptr);}
+  void set(const wchar_t* loader,const wchar_t* graphics,bool separate=false) {
+    check(SetEnvironmentVariableW(names[0],loader)!=FALSE&&SetEnvironmentVariableW(names[1],graphics)!=FALSE&&
+      SetEnvironmentVariableW(names[2],separate?L"1":nullptr)!=FALSE,"set child bootstrap environment");
   }
 };
 
@@ -279,6 +293,22 @@ void exportedErrorTests(const Exports& api) {
   reader.join();check(consistent,"DLL error strings are safe across callers");
 }
 
+void ordinalTests(const Exports& api) {
+  const char* names[]={"VRControlPanel","VRDashboardManager","VRTrackedCamera",
+      "VR_GetGenericInterface","VR_GetInitToken","VR_GetStringForHmdError",
+      "VR_GetVRInitErrorAsEnglishDescription","VR_GetVRInitErrorAsSymbol",
+      "VR_InitInternal","VR_IsHmdPresent","VR_IsInterfaceVersionValid",
+      "VR_IsRuntimeInstalled","VR_RuntimePath","VR_ShutdownInternal",
+      "edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus"};
+  bool same=true;
+  for(unsigned i=0;i<_countof(names);++i) {
+    const auto byName=GetProcAddress(api.module,names[i]);
+    const auto byOrdinal=GetProcAddress(api.module,MAKEINTRESOURCEA(static_cast<WORD>(i+1)));
+    same=same&&byName&&byOrdinal&&byName==byOrdinal;
+  }
+  check(same,"historical and private export ordinals resolve to the named exports");
+}
+
 void parserModeTests(const std::filesystem::path& directory) {
   const std::wstring loader=(directory/L"loader.dll").wstring();
   const std::wstring graphics=(directory/L"d3d11.dll").wstring();
@@ -290,8 +320,8 @@ void parserModeTests(const std::filesystem::path& directory) {
   };
   check(run({L"test",L"--loader",loader.c_str(),L"--graphics-proxy",graphics.c_str(),L"--runtime-module",module.c_str(),L"--present-boundary",L"--separate-device"}),
     "separate-device command mode parses");
-  check(!run({L"test",L"--loader",loader.c_str(),L"--graphics-proxy",graphics.c_str(),L"--runtime-module",module.c_str(),L"--present-boundary",L"--bootstrap",L"--separate-device"}),
-    "bootstrap and separate-device modes cannot combine");
+  check(run({L"test",L"--loader",loader.c_str(),L"--graphics-proxy",graphics.c_str(),L"--runtime-module",module.c_str(),L"--present-boundary",L"--bootstrap",L"--separate-device"}),
+    "bootstrap and separate-device modes parse together");
 }
 
 int selfTest(bool bootstrap=false,bool separate=false) {
@@ -307,7 +337,19 @@ int selfTest(bool bootstrap=false,bool separate=false) {
   check(!std::filesystem::exists(missingLoader),"negative loader fixture is absent");
   if(std::filesystem::exists(missingLoader))return 1;
   Exports api;check(api.load((directory/L"edvr_openxr_runtime.dll").wstring()),"load actual native module exports");
-  if(!api.configure||!api.symbol||!api.description||!api.legacyDescription)return 1;
+  if(!api.configure||!api.symbol||!api.description||!api.legacyDescription||
+     !api.hmdPresent||!api.runtimeInstalled||!api.runtimePath||
+     !api.controlPanel||!api.dashboardManager||!api.trackedCamera)return 1;
+  ordinalTests(api);
+  check(!api.hmdPresent()&&!api.runtimeInstalled()&&!api.runtimePath(),
+        "legacy probes are inert before configuration");
+  check(!api.controlPanel()&&!api.dashboardManager()&&!api.trackedCamera(),
+        "unsupported legacy factories fail closed before configuration");
+  environment.set(graphicsPath.c_str(),graphicsPath.c_str());
+  const auto* bootstrapPath=api.runtimePath();
+  check(api.runtimeInstalled()&&bootstrapPath&&*bootstrapPath&&bootstrapPath==api.runtimePath(),
+        "file-present bootstrap probe reports stable native module directory without configuring");
+  environment.set(nullptr,nullptr);
   exportedErrorTests(api);
   EdvrNativeRuntimeStatus before{sizeof(before),EDVR_NATIVE_MODULE_VERSION_1};
   check(api.getStatus(&before)==S_FALSE&&before.phase==0&&before.initAttempts==0&&api.token()==0,"error exports leave module unconfigured");
@@ -331,7 +373,7 @@ int selfTest(bool bootstrap=false,bool separate=false) {
     check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_InstallationCorrupt,"relative bootstrap path rejected before configuration");
     before={sizeof(before),EDVR_NATIVE_MODULE_VERSION_1};
     check(api.getStatus(&before)==S_FALSE&&api.token()==0,"rejected bootstrap does not publish a module or generation");
-    environment.set(missingLoader.c_str(),graphicsPath.c_str());
+    environment.set(missingLoader.c_str(),graphicsPath.c_str(),separate);
   } else {
     config.version=separate?EDVR_NATIVE_MODULE_VERSION_2:EDVR_NATIVE_MODULE_VERSION_1;
     config.reserved=separate?EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE:0;
@@ -340,6 +382,10 @@ int selfTest(bool bootstrap=false,bool separate=false) {
   check(api.init(&error,vr::VRApplication_Overlay)==0&&error==vr::VRInitError_Init_NotSupportedWithCompositor,"unsupported application does not start backend");
   check(api.status().initAttempts==0,"unsupported application creates no generation");
   check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_HmdNotFound,"unloaded graphics provider fails before runtime");
+  const auto failedProbeStatus=api.status();
+  check(!api.hmdPresent()&&!api.runtimePath()&&!api.controlPanel()&&!api.dashboardManager()&&!api.trackedCamera()&&
+        std::memcmp(&failedProbeStatus,&api.status(),sizeof(failedProbeStatus))==0,
+        "failed Init probes remain unavailable without changing lifecycle status");
   check(api.configure(&config)==E_PENDING,"first Init fixes the module configuration");
   if(bootstrap)environment.set(L"invalid-after-configuration",nullptr);
   check(api.status().cleanup==1&&api.status().ownerThread==0,"absent provider cleanup needs no XR owner");
@@ -404,7 +450,8 @@ int nativeRun(const Options& options) {
       options.loader.c_str(),options.graphics.c_str(),5000,options.separate?EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE:0};
   if(options.bootstrap) {
     BootstrapPaths paths;
-    if(readBootstrapPaths(paths)!=BootstrapResult::Ready||paths.loader!=options.loader||paths.graphics!=options.graphics){
+    if(readBootstrapPaths(paths)!=BootstrapResult::Ready||paths.loader!=options.loader||
+        paths.graphics!=options.graphics||paths.separateDevice!=options.separate){
       std::puts("error,module_bootstrap_paths_do_not_match_command");return 3;
     }
     std::puts("module_configuration,source=bootstrap_requested,embedding_call=0");
@@ -429,6 +476,9 @@ int nativeRun(const Options& options) {
     check(!api.generic("IVROverlay_011",&error)&&error==vr::VRInitError_Init_InterfaceNotFound,"unsupported interface rejected across DLL boundary");
   });
   if(!token||!compositor){std::printf("error,module_init,%d,%s,%s\n",int(error),api.symbol(error),api.description(error));return 3;}
+  check(api.hmdPresent(), "HmdPresent reports the connected published HMD after Init");
+  check(!api.controlPanel()&&!api.dashboardManager()&&!api.trackedCamera(),
+        "unsupported legacy factories fail closed while running");
   const auto systemIdentity = module_test::submitWithPump(
       systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
         systemCaller=GetCurrentThreadId();
@@ -578,6 +628,9 @@ int nativeRun(const Options& options) {
       status.copiedEyes==frames*2&&status.stereoPairs==frames&&status.loadingLayers>0&&!status.wrongThread&&
       systemSamples>0&&validSystemSamples>0&&applicationWaits>0&&callerSummary&&api.token()!=token;
   check(!api.generic(vr::IVRSystem_Version,&error)&&error==vr::VRInitError_Init_NotInitialized,"exported interfaces retire after Shutdown");
+  check(!api.hmdPresent(), "HmdPresent clears after Shutdown");
+  check(!api.controlPanel()&&!api.dashboardManager()&&!api.trackedCamera(),
+        "unsupported legacy factories fail closed after Shutdown");
   std::printf("module_summary,frames=%llu,cached=%llu,invalid=%llu,copies=%llu,pairs=%llu,loading=%llu,callbacks=%llu,system_samples=%llu,valid_system_samples=%llu,application_waits=%llu,cleanup=%u,retained=%u,init=%u,system=%lu,render=%u,owner=%u,shutdown=%u,app_shutdown=%lu\n",
       (unsigned long long)frames,(unsigned long long)cacheChecks,(unsigned long long)invalid,
       (unsigned long long)status.copiedEyes,(unsigned long long)status.stereoPairs,(unsigned long long)status.loadingLayers,
@@ -594,7 +647,8 @@ int wmain(int argc,wchar_t** argv) {
   if(argc==2&&!std::wcscmp(argv[1],L"--dry-run")) {std::puts("Would test the separate native DLL exports; no DLL, device, runtime or files created.");return 0;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test")) {const auto result=selfTest();std::printf("openxr_module_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test-bootstrap")) {const auto result=selfTest(true);std::printf("openxr_module_bootstrap_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
+  if(argc==2&&!std::wcscmp(argv[1],L"--self-test-bootstrap-separate")) {const auto result=selfTest(true,true);std::printf("openxr_module_bootstrap_separate_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test-separate")) {const auto result=selfTest(false,true);std::printf("openxr_module_separate_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
-  Options options;if(!parse(argc,argv,options)){std::fputs("usage: --self-test|--self-test-bootstrap|--self-test-separate|--dry-run|--loader ABS --graphics-proxy ABS --runtime-module ABS --present-boundary [--bootstrap|--separate-device] [--seconds 1..60]\n",stderr);return 2;}
+  Options options;if(!parse(argc,argv,options)){std::fputs("usage: --self-test|--self-test-bootstrap|--self-test-bootstrap-separate|--self-test-separate|--dry-run|--loader ABS --graphics-proxy ABS --runtime-module ABS --present-boundary [--bootstrap] [--separate-device] [--seconds 1..60]\n",stderr);return 2;}
   try{return nativeRun(options);}catch(...){std::puts("error,module_test_exception");return 5;}
 }

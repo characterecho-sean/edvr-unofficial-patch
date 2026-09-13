@@ -1119,6 +1119,10 @@ if errorlevel 1 ( echo [edvr] ERROR: native runtime module test build failed & e
 "%BUILD%\openxr_module_test.exe" --self-test || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test-bootstrap || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test-separate || exit /b 1
+"%BUILD%\openxr_module_test.exe" --self-test-bootstrap-separate || exit /b 1
+python tools\openxr_pe.py --self-test || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 1
+python tools\run_openxr_frontier.py --self-test || exit /b 1
 
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^

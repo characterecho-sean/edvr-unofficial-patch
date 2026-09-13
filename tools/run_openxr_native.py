@@ -49,8 +49,6 @@ def build_command(executable: Path, loader: Path, seconds_value: int,
         raise ValueError("--bootstrap requires --runtime-module")
     if separate_device and (runtime_module is None or graphics_proxy is None or not present_boundary):
         raise ValueError("--separate-device requires --runtime-module, --graphics-proxy and --present-boundary")
-    if separate_device and bootstrap:
-        raise ValueError("--separate-device cannot be combined with --bootstrap")
     command = [str(executable), "--loader", str(loader), "--seconds", str(seconds_value)]
     if graphics_proxy is not None:
         command.extend(("--graphics-proxy", str(graphics_proxy)))
@@ -67,16 +65,20 @@ def build_command(executable: Path, loader: Path, seconds_value: int,
 
 def child_environment(inherited: dict[str, str], loader: Path,
                       graphics_proxy: Path | None, runtime: Path | None,
-                      bootstrap: bool) -> dict[str, str]:
+                      bootstrap: bool, separate_device: bool = False) -> dict[str, str]:
     if bootstrap and graphics_proxy is None:
         raise ValueError("bootstrap requires an explicit graphics proxy")
-    names = {"EDVR_OPENXR_LOADER", "EDVR_OPENXR_GRAPHICS"}
+    names = {"EDVR_OPENXR_LOADER", "EDVR_OPENXR_GRAPHICS", "EDVR_OPENXR_SEPARATE_DEVICE"}
+    if runtime:
+        names.add("XR_RUNTIME_JSON")
     result = {key: value for key, value in inherited.items() if key.upper() not in names}
     if runtime:
         result["XR_RUNTIME_JSON"] = str(runtime)
     if bootstrap:
         result["EDVR_OPENXR_LOADER"] = str(loader)
         result["EDVR_OPENXR_GRAPHICS"] = str(graphics_proxy)
+        if separate_device:
+            result["EDVR_OPENXR_SEPARATE_DEVICE"] = "1"
     return result
 
 
@@ -215,14 +217,11 @@ def self_test() -> int:
         check(bootstrap_command[-1] == "--bootstrap" and "--bootstrap" not in module_command)
         separate_command = build_command(module_executable, root / "loader.dll", 7, proxy, True, module, False, True)
         check(separate_command[-1] == "--separate-device" and "--bootstrap" not in separate_command)
+        bootstrap_separate_command = build_command(module_executable, root / "loader.dll", 7, proxy, True, module, True, True)
+        check(bootstrap_separate_command[-2:] == ["--bootstrap", "--separate-device"])
         check(run_child(separate_command, root / "dry-separate", env, 10,
                         {"separate_device": True}, dry_run=True) == 0 and
               not (root / "dry-separate").exists())
-        try:
-            build_command(module_executable, root / "loader.dll", 7, proxy, True, module, True, True)
-            check(False)
-        except ValueError:
-            check(True)
         for kwargs in ({"separate_device": True}, {"graphics_proxy": proxy, "present_boundary": True, "separate_device": True},
                        {"runtime_module": module, "separate_device": True}):
             try:
@@ -230,12 +229,14 @@ def self_test() -> int:
                 check(False)
             except ValueError:
                 check(True)
-        inherited = {"EDVR_OPENXR_LOADER": "stale", "edvr_openxr_graphics": "stale", "KEEP": "same"}
+        inherited = {"EDVR_OPENXR_LOADER": "stale", "edvr_openxr_graphics": "stale", "xr_runtime_json": "stale", "KEEP": "same"}
         boot_env = child_environment(inherited, root / "loader.dll", proxy, root / "runtime.json", True)
         check(boot_env == {"KEEP": "same", "XR_RUNTIME_JSON": str(root / "runtime.json"),
                            "EDVR_OPENXR_LOADER": str(root / "loader.dll"), "EDVR_OPENXR_GRAPHICS": str(proxy)})
-        check(child_environment(inherited, root / "loader.dll", proxy, None, False) == {"KEEP": "same"})
-        check(inherited == {"EDVR_OPENXR_LOADER": "stale", "edvr_openxr_graphics": "stale", "KEEP": "same"})
+        check(child_environment(inherited, root / "loader.dll", proxy, None, False) == {"xr_runtime_json": "stale", "KEEP": "same"})
+        boot_separate_env = child_environment({**inherited, "edvr_openxr_separate_device": "stale"}, root / "loader.dll", proxy, root / "runtime.json", True, True)
+        check(boot_separate_env["EDVR_OPENXR_SEPARATE_DEVICE"] == "1" and "edvr_openxr_separate_device" not in boot_separate_env)
+        check(inherited == {"EDVR_OPENXR_LOADER": "stale", "edvr_openxr_graphics": "stale", "xr_runtime_json": "stale", "KEEP": "same"})
         check(run_child(bootstrap_command, root / "dry-bootstrap", boot_env, 10, {}, dry_run=True) == 0)
         check(not (root / "dry-bootstrap").exists())
         try:
@@ -317,12 +318,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--bootstrap requires --runtime-module")
         if args.separate_device and (runtime_module is None or graphics_proxy is None or not args.present_boundary):
             raise ValueError("--separate-device requires --runtime-module, --graphics-proxy and --present-boundary")
-        if args.separate_device and args.bootstrap:
-            raise ValueError("--separate-device cannot be combined with --bootstrap")
         manifest = active_manifest(runtime)
         executable = diagnostic_executable(runtime_module)
         output = (args.output or ROOT / "build" / ("openxr-native-" + datetime.now().strftime("%Y%m%d-%H%M%S"))).resolve()
-        environment = child_environment(dict(os.environ), loader, graphics_proxy, runtime, args.bootstrap)
+        environment = child_environment(dict(os.environ), loader, graphics_proxy, runtime, args.bootstrap, args.separate_device)
         metadata = {"executable": str(executable), "executable_sha256": digest(executable),
                     "loader": str(loader), "loader_sha256": digest(loader),
                     "runtime_manifest": str(manifest) if manifest else None,

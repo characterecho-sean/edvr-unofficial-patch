@@ -145,6 +145,8 @@ class ModuleBackend final : public RuntimeBackend {
     std::lock_guard<std::mutex> lock(statusMutex_); return status_;
   }
 
+  bool runtimeInstalled() const noexcept;
+
  private:
   struct Generation {
     OwnerService owner;
@@ -194,6 +196,29 @@ bool copyPath(const wchar_t* input,std::wstring& output) {
       input[1]!=L':'||(input[2]!=L'\\'&&input[2]!=L'/')) return false;
   output.assign(input,length); return true;
 }
+
+bool readableRegularFile(const std::wstring& path) noexcept {
+  const DWORD attributes=GetFileAttributesW(path.c_str());
+  if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_DIRECTORY))return false;
+  const HANDLE handle=CreateFileW(path.c_str(),GENERIC_READ,
+      FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,nullptr);
+  if(handle==INVALID_HANDLE_VALUE)return false;
+  CloseHandle(handle);return true;
+}
+
+bool pathsInstalled(const RuntimeOptions& options) noexcept {
+  return readableRegularFile(options.loader)&&readableRegularFile(options.graphicsProxy);
+}
+
+bool ModuleBackend::runtimeInstalled() const noexcept { return pathsInstalled(options_); }
+
+bool runtimeInstalled() noexcept {
+  if(auto* owner=module.load(std::memory_order_acquire))return owner->backend.runtimeInstalled();
+  BootstrapPaths paths;
+  return readBootstrapPaths(paths)==BootstrapResult::Ready&&
+      readableRegularFile(paths.loader)&&readableRegularFile(paths.graphics);
+}
 }
 
 extern "C" HRESULT WINAPI edvrConfigureNativeRuntime(const EdvrNativeRuntimeConfig* config) try {
@@ -237,8 +262,10 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
           vr::VRInitError_Init_NotInitialized:vr::VRInitError_Init_InstallationCorrupt;
       return 0;
     }
-    const EdvrNativeRuntimeConfig config{sizeof(config),EDVR_NATIVE_MODULE_VERSION_1,
-        paths.loader.c_str(),paths.graphics.c_str(),5000,0};
+    const EdvrNativeRuntimeConfig config{sizeof(config),paths.separateDevice?
+        EDVR_NATIVE_MODULE_VERSION_2:EDVR_NATIVE_MODULE_VERSION_1,
+        paths.loader.c_str(),paths.graphics.c_str(),5000,
+        paths.separateDevice?EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE:0};
     const HRESULT configured=edvrConfigureNativeRuntime(&config);
     // Another Init or explicit configuration may have published the winner.
     // Use that immutable configuration; never reconfigure a running module.
@@ -280,3 +307,54 @@ extern "C" const char* __cdecl edvr_module_VR_GetVRInitErrorAsEnglishDescription
 extern "C" const char* __cdecl edvr_module_VR_GetStringForHmdError(vr::EVRInitError error) noexcept {
   return edvr_module_VR_GetVRInitErrorAsEnglishDescription(error);
 }
+
+extern "C" bool __cdecl edvr_module_VR_IsHmdPresent() noexcept {
+  try {
+    if(auto* owner=module.load(std::memory_order_acquire)) {
+      vr::EVRInitError error=vr::VRInitError_Unknown;
+      auto* system=static_cast<vr::IVRSystem*>(owner->lifecycle.getInterface(vr::IVRSystem_Version,&error));
+      return system&&error==vr::VRInitError_None&&
+        system->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd);
+    }
+  }
+  catch (...) {}
+  return false;
+}
+extern "C" bool __cdecl edvr_module_VR_IsRuntimeInstalled() noexcept {
+  try { return runtimeInstalled(); } catch (...) { return false; }
+}
+extern "C" const char* __cdecl edvr_module_VR_RuntimePath() noexcept {
+  try {
+    if(!runtimeInstalled())return nullptr;
+    static std::mutex mutex;
+    static std::string path;
+    std::lock_guard<std::mutex> lock(mutex);
+    if(!path.empty())return path.c_str();
+    HMODULE current=nullptr;
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|
+          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(&edvr_module_VR_RuntimePath),&current))return nullptr;
+    wchar_t filename[32768]{};
+    const DWORD length=GetModuleFileNameW(current,filename,static_cast<DWORD>(_countof(filename)));
+    if(!length||length>=_countof(filename))return nullptr;
+    wchar_t* slash=wcsrchr(filename,L'\\');
+    wchar_t* other=wcsrchr(filename,L'/');
+    if(other&&(!slash||other>slash))slash=other;
+    if(!slash||slash==filename)return nullptr;
+    if(slash==filename+2&&filename[1]==L':') {
+      slash[1]=L'\0';
+    } else {
+      *slash=L'\0';
+    }
+    const int needed=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,filename,-1,nullptr,0,nullptr,nullptr);
+    if(needed<=1)return nullptr;
+    std::string converted(static_cast<size_t>(needed),'\0');
+    if(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,filename,-1,converted.data(),needed,nullptr,nullptr)!=needed)
+      return nullptr;
+    converted.resize(static_cast<size_t>(needed-1));
+    path=std::move(converted);return path.c_str();
+  } catch (...) { return nullptr; }
+}
+extern "C" void* __cdecl edvr_module_VRControlPanel() noexcept { return nullptr; }
+extern "C" void* __cdecl edvr_module_VRDashboardManager() noexcept { return nullptr; }
+extern "C" void* __cdecl edvr_module_VRTrackedCamera() noexcept { return nullptr; }

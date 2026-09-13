@@ -5,6 +5,9 @@
     python tools/install_edvr.py --target steam
     python tools/install_edvr.py --target frontier --openvr --tag stepped
     python tools/install_edvr.py --target steam --verify-only
+    python tools/install_edvr.py --target frontier --native-openxr --dll \
+        --native-receipt C:\\temp\\edvr-native.json
+    python tools/install_edvr.py --restore-native C:\\temp\\edvr-native.json
 
 This is the sanctioned replacement for the copy-and-hope one-liner. That
 one-liner is why both game directories on this rig carry dozens of backups
@@ -41,9 +44,12 @@ Exit 0 when everything asked for landed and verified, 1 otherwise.
 """
 
 import argparse
+import csv
 import datetime
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,6 +68,498 @@ PAYLOAD = {
     "dlss": ("build/nvngx_dlss.dll", "nvngx_dlss.dll"),
     "ini": ("edvr.ini", "edvr.ini"),
 }
+
+NATIVE_RECEIPT_VERSION = 1
+NATIVE_KIND = "edvr-native-openxr"
+
+
+def native_paths(root, target):
+    """The deliberately separate native package and its paired graphics DLL."""
+    return {
+        "native_source": os.path.join(root, "build", "edvr_openxr_runtime.dll"),
+        "graphics_source": os.path.join(root, "build", "d3d11.dll"),
+        "native_target": os.path.join(target, "Openvr", "win64", "openvr_api.dll"),
+        "graphics_target": os.path.join(target, "d3d11.dll"),
+        "original": os.path.join(target, "Openvr", "win64", "openvr_api_orig.dll"),
+        "ini": os.path.join(target, "edvr.ini"),
+    }
+
+
+def strict_game_running():
+    """Return (known, running); native staging fails closed on probe errors."""
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, timeout=20,
+                             check=False,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW",
+                                                    0x08000000))
+    except (OSError, subprocess.SubprocessError):
+        return False, False
+    if out.returncode != 0 or not (out.stdout or "").strip():
+        return False, False
+    rows = list(csv.reader((out.stdout or "").splitlines()))
+    if not rows:
+        return False, False
+    running = False
+    for row in rows:
+        if len(row) != 5 or not row[0].strip() or not row[3].isdigit():
+            return False, False
+        try:
+            pid = int(row[1].strip())
+        except (TypeError, ValueError):
+            return False, False
+        if pid < 0:
+            return False, False
+        if row[0].strip().lower() == GAME_EXE.lower():
+            running = True
+    return True, running
+
+
+def _hash_or_missing(path):
+    return sha256(path) if os.path.isfile(path) else None
+
+
+def _valid_hash(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9A-Fa-f]{64}", value) is not None
+
+
+def _native_backup_name(dst, tag, stamp):
+    """Choose a native receipt backup without ever overwriting an old one."""
+    base = backup_name(dst, tag, stamp)
+    candidate, suffix = base, 1
+    while os.path.exists(candidate):
+        candidate = "%s.%d" % (base, suffix)
+        suffix += 1
+    return candidate
+
+
+def _native_preflight(root, target, receipt_path):
+    p = native_paths(root, target)
+    errors = []
+    for key in ("native_source", "graphics_source"):
+        if not os.path.isfile(p[key]):
+            errors.append("       missing source %-14s %s" % (key, p[key]))
+    for key in ("native_target", "graphics_target", "original"):
+        if not os.path.isfile(p[key]):
+            errors.append("       missing target %-13s %s" % (key, p[key]))
+    for key in ("native_target", "graphics_target", "original", "ini"):
+        if not _under(p[key], target):
+            errors.append("       target path escapes game directory: %s" % p[key])
+    if receipt_path is not None:
+        if not os.path.isabs(receipt_path):
+            errors.append("       --native-receipt must be an absolute new path")
+        elif os.path.exists(receipt_path):
+            errors.append("       receipt already exists: %s" % receipt_path)
+        elif not os.path.isdir(os.path.dirname(os.path.abspath(receipt_path))):
+            errors.append("       receipt parent does not exist: %s" %
+                          os.path.dirname(os.path.abspath(receipt_path)))
+    if errors:
+        raise SystemExit("[edvr] native preflight failed:\n" + "\n".join(errors))
+    return p
+
+
+def _native_receipt(root, target, paths, backups, before_hashes,
+                    installed_hashes, state):
+    ini_hash = _hash_or_missing(paths["ini"])
+    return {
+        "version": NATIVE_RECEIPT_VERSION,
+        "kind": NATIVE_KIND,
+        "target": os.path.abspath(target),
+        "root": os.path.abspath(root),
+        "state": state,
+        "files": [
+            {"key": "native", "source": os.path.abspath(paths["native_source"]),
+             "target": os.path.abspath(paths["native_target"]),
+             "backup": os.path.abspath(backups["native"]),
+             "before_sha256": before_hashes["native"],
+             "installed_sha256": installed_hashes["native"]},
+            {"key": "graphics", "source": os.path.abspath(paths["graphics_source"]),
+             "target": os.path.abspath(paths["graphics_target"]),
+             "backup": os.path.abspath(backups["graphics"]),
+             "before_sha256": before_hashes["graphics"],
+             "installed_sha256": installed_hashes["graphics"]},
+        ],
+        "original": {"path": os.path.abspath(paths["original"]),
+                      "sha256": sha256(paths["original"])},
+        "ini": {"path": os.path.abspath(paths["ini"]),
+                 "sha256": ini_hash,
+                 "missing": ini_hash is None},
+    }
+
+
+def _write_new_receipt(path, receipt):
+    """Create, never replace, the user-selected receipt path."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            fd = None
+            json.dump(receipt, f, indent=2, sort_keys=True)
+            f.write("\n")
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _reserve_backup(path):
+    """Reserve a new backup path without touching an existing file."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(path, flags, 0o600)
+    os.close(fd)
+
+
+def _replace_receipt(path, receipt):
+    """Atomically update our already-created receipt, without a new path."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temp = tempfile.mkstemp(prefix="edvr-native-receipt-", suffix=".tmp",
+                                dir=directory)
+    os.close(fd)
+    try:
+        with open(temp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(receipt, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.remove(temp)
+
+
+def native_install(root, target, receipt_path, tag, dry_run=False):
+    if re.fullmatch(r"[A-Za-z0-9_-]+", tag) is None:
+        raise SystemExit("[edvr] native backup tag must contain only letters, digits, _ or -")
+    paths = _native_preflight(root, target, receipt_path)
+    original_hash = sha256(paths["original"])
+    before_hashes = {"native": sha256(paths["native_target"]),
+                     "graphics": sha256(paths["graphics_target"])}
+    installed_hashes = {"native": sha256(paths["native_source"]),
+                        "graphics": sha256(paths["graphics_source"])}
+    known, running = strict_game_running()
+    if not dry_run and (not known or running):
+        if not known:
+            print("[edvr] ERROR: could not prove that %s is stopped; native "
+                  "staging fails closed." % GAME_EXE)
+        else:
+            print("[edvr] ERROR: %s is running. Close it before native staging."
+                  % GAME_EXE)
+        return 1
+
+    stamp = datetime.datetime.now()
+    backups = {
+        "native": _native_backup_name(paths["native_target"], tag, stamp),
+        "graphics": _native_backup_name(paths["graphics_target"], tag, stamp),
+    }
+    if backups["graphics"] == backups["native"]:
+        backups["graphics"] += ".graphics"
+    print("[edvr] native target: %s" % target)
+    print("[edvr] native plan%s:" %
+          (" (DRY RUN -- nothing will be written)" if dry_run else ""))
+    for key in ("native", "graphics"):
+        print("       %-8s %s" % (key, paths[key + "_target"]))
+        print("               replace -> %s" % os.path.basename(backups[key]))
+    print("       receipt  %s" % (receipt_path or "(not requested in dry run)"))
+    if dry_run:
+        print("[edvr] dry run: wrote nothing.")
+        return 0
+
+    created_backups = []
+    verified_backups = []
+    active_mutations = []
+    receipt = _native_receipt(root, target, paths, backups, before_hashes,
+                              installed_hashes, "staging")
+    receipt_owned = False
+    try:
+        # Journal the complete transaction before changing either live DLL.
+        _write_new_receipt(receipt_path, receipt)
+        receipt_owned = True
+        for key in ("native", "graphics"):
+            dst = paths[key + "_target"]
+            _reserve_backup(backups[key])
+            created_backups.append((key, backups[key]))
+            shutil.copy2(dst, backups[key])
+            if sha256(backups[key]) != before_hashes[key]:
+                raise ValueError("backup verification failed: %s" % key)
+            verified_backups.append((key, backups[key]))
+        for key in ("native", "graphics"):
+            dst = paths[key + "_target"]
+            src = paths[key + "_source"]
+            # Record the mutation before calling copy2: a failed copy may
+            # have partially overwritten its destination.
+            active_mutations.append((key, dst))
+            shutil.copy2(src, dst)
+            if sha256(dst) != installed_hashes[key]:
+                raise ValueError("installed hash verification failed: %s" % key)
+        if sha256(paths["original"]) != original_hash:
+            raise ValueError("preserved original changed during staging")
+        receipt["state"] = "installed"
+        _replace_receipt(receipt_path, receipt)
+        verify_native_receipt(receipt_path, target)
+    except (OSError, IOError, ValueError) as exc:
+        print("[edvr] ERROR: native staging failed: %s" % exc)
+        # Restore every live file for which a verified backup exists. An
+        # uncertain rollback retains every backup and the journal as recovery
+        # evidence; it must never silently discard the only known originals.
+        rollback_ok = True
+        verified = {key: backup for key, backup in verified_backups}
+        for key, dst in reversed(active_mutations):
+            backup = verified.get(key)
+            if backup is None:
+                rollback_ok = False
+                continue
+            try:
+                shutil.copy2(backup, dst)
+                if sha256(dst) != before_hashes[key]:
+                    raise OSError("rollback hash verification failed: %s" % key)
+            except (OSError, IOError):
+                rollback_ok = False
+        if rollback_ok:
+            try:
+                if receipt_owned and os.path.isfile(receipt_path):
+                    os.remove(receipt_path)
+            except OSError:
+                rollback_ok = False
+        if rollback_ok:
+            for _, backup in created_backups:
+                try:
+                    if os.path.exists(backup):
+                        os.remove(backup)
+                except OSError:
+                    rollback_ok = False
+        if not rollback_ok:
+            receipt["state"] = "rollback_failed"
+            receipt["error"] = str(exc)
+            try:
+                if receipt_owned:
+                    _replace_receipt(receipt_path, receipt)
+            except (OSError, IOError, ValueError):
+                pass
+            print("[edvr] ERROR: rollback is incomplete; retained receipt and "
+                  "backups for recovery.")
+        return 1
+    print("[edvr] native package installed and receipt written: %s" % receipt_path)
+    return 0
+
+
+def _under(path, base):
+    try:
+        return os.path.normcase(os.path.commonpath(
+            [os.path.realpath(path), os.path.realpath(base)])) == \
+            os.path.normcase(os.path.realpath(base))
+    except ValueError:
+        return False
+
+
+def _load_native_receipt(path):
+    if not os.path.isabs(path):
+        raise ValueError("receipt path must be absolute")
+    with open(path, "r", encoding="utf-8") as f:
+        r = json.load(f)
+    if not isinstance(r, dict) or r.get("version") != NATIVE_RECEIPT_VERSION or \
+       r.get("kind") != NATIVE_KIND:
+        raise ValueError("unsupported native receipt")
+    target = r.get("target")
+    files = r.get("files")
+    original = r.get("original")
+    ini = r.get("ini")
+    if not isinstance(files, list) or len(files) != 2 or \
+       not all(isinstance(x, dict) for x in files) or \
+       not all(isinstance(x, dict) for x in (original, ini)):
+        raise ValueError("malformed native receipt")
+    if not isinstance(target, str) or not os.path.isabs(target):
+        raise ValueError("receipt target must be absolute")
+    target = os.path.abspath(target)
+    root = r.get("root")
+    if not isinstance(root, str) or not os.path.isabs(root):
+        raise ValueError("receipt root must be absolute")
+    expected = native_paths(root, target)
+    target_real = os.path.realpath(target)
+    if not os.path.isdir(target) or not target_real:
+        raise ValueError("receipt target is not a directory")
+    for key in ("native_target", "graphics_target", "original", "ini"):
+        if not _under(expected[key], target):
+            raise ValueError("expected path escapes receipt target: %s" % key)
+    for entry in files:
+        for field in ("key", "source", "target", "backup",
+                      "before_sha256", "installed_sha256"):
+            if not isinstance(entry.get(field), str):
+                raise ValueError("native file field is not a string")
+    by_key = {entry["key"]: entry for entry in files}
+    if set(by_key) != {"native", "graphics"}:
+        raise ValueError("receipt must contain native and graphics files")
+    for key in ("native", "graphics"):
+        entry = by_key[key]
+        if entry["source"] != os.path.abspath(expected[key + "_source"]) or \
+           entry["target"] != os.path.abspath(expected[key + "_target"]) or \
+           os.path.realpath(entry["target"]) != \
+           os.path.realpath(expected[key + "_target"]) or \
+           not _under(entry["backup"], target):
+            raise ValueError("unsafe %s file entry" % key)
+        for hkey in ("before_sha256", "installed_sha256"):
+            if not _valid_hash(entry.get(hkey)):
+                raise ValueError("bad %s hash" % key)
+        if not os.path.isabs(entry["backup"]):
+            raise ValueError("backup path must be absolute")
+        backup_name_only = os.path.basename(entry["backup"])
+        live_name = os.path.basename(entry["target"])
+        if os.path.dirname(os.path.realpath(entry["backup"])) != \
+           os.path.dirname(os.path.realpath(entry["target"])) or \
+           re.fullmatch(re.escape(live_name) +
+                        r"\.pre-[^\\/]+-\d{8}-\d{6}\.bak(?:\.\d+)?",
+                        backup_name_only) is None:
+            raise ValueError("backup is not a native sibling backup: %s" % key)
+    if not isinstance(original.get("path"), str) or \
+       not isinstance(original.get("sha256"), str) or \
+       original.get("path") != os.path.abspath(expected["original"]) or \
+       not _valid_hash(original.get("sha256")) or \
+       os.path.realpath(original["path"]) != os.path.realpath(expected["original"]):
+        raise ValueError("bad original record")
+    if not isinstance(ini.get("path"), str) or \
+       ini.get("path") != os.path.abspath(expected["ini"]) or \
+       not isinstance(ini.get("missing"), bool) or \
+       (ini.get("sha256") is not None and not _valid_hash(ini.get("sha256"))) or \
+       os.path.realpath(ini["path"]) != os.path.realpath(expected["ini"]):
+        raise ValueError("bad ini record")
+    if r.get("state") != "installed":
+        raise ValueError("receipt is not in installed state")
+    protected = {os.path.normcase(os.path.realpath(expected[key]))
+                 for key in ("native_target", "graphics_target", "original",
+                              "ini", "native_source", "graphics_source")}
+    backup_reals = set()
+    for key in ("native", "graphics"):
+        backup_real = os.path.normcase(os.path.realpath(by_key[key]["backup"]))
+        if backup_real in protected or backup_real in backup_reals:
+            raise ValueError("backup aliases a protected path")
+        backup_reals.add(backup_real)
+    # Check all recorded evidence without consulting or changing the INI.
+    if sha256(original["path"]) != original["sha256"]:
+        raise ValueError("preserved original changed")
+    for key in ("native", "graphics"):
+        entry = by_key[key]
+        if sha256(entry["backup"]) != entry["before_sha256"]:
+            raise ValueError("backup changed: %s" % key)
+        if sha256(entry["target"]) != entry["installed_sha256"]:
+            raise ValueError("active native file changed: %s" % key)
+    return r
+
+
+def verify_native_receipt(receipt_path, target=None):
+    """Read-only validation for the native launcher and restore tooling.
+
+    Raises ValueError/OSError for malformed, restored, stale, or externally
+    changed files. The INI is intentionally recorded but never required to
+    match: user edits remain outside the native transaction.
+    """
+    receipt = _load_native_receipt(receipt_path)
+    if target is not None and os.path.normcase(os.path.realpath(target)) != \
+       os.path.normcase(os.path.realpath(receipt["target"])):
+        raise ValueError("receipt target mismatch")
+    return receipt
+
+
+def restore_native(receipt_path, dry_run=False):
+    try:
+        receipt = _load_native_receipt(receipt_path)
+        target = receipt["target"]
+        entries = {entry["key"]: entry for entry in receipt["files"]}
+        if dry_run:
+            print("[edvr] native restore plan (DRY RUN): %s" % target)
+            print("[edvr] dry run: wrote nothing.")
+            return 0
+        known, running = strict_game_running()
+        if not known:
+            print("[edvr] ERROR: could not prove that %s is stopped; restore "
+                  "fails closed." % GAME_EXE)
+            return 1
+        if running:
+            print("[edvr] ERROR: %s is running; native restore refused." % GAME_EXE)
+            return 1
+
+        # Save the staged pair so a failure restoring the second file or
+        # updating the receipt can return the directory to the installed
+        # state described by the receipt.
+        temps = {}
+        active_mutations = []
+        rollback_ok = True
+        try:
+            for key in ("native", "graphics"):
+                fd, temp = tempfile.mkstemp(prefix="edvr-native-restore-",
+                                             suffix=".tmp",
+                                             dir=os.path.dirname(entries[key]["target"]))
+                os.close(fd)
+                temps[key] = temp
+                shutil.copy2(entries[key]["target"], temp)
+                if sha256(temp) != entries[key]["installed_sha256"]:
+                    raise ValueError("staged restore copy changed: %s" % key)
+            for key in ("native", "graphics"):
+                active_mutations.append(key)
+                shutil.copy2(entries[key]["backup"], entries[key]["target"])
+            if sha256(entries["native"]["target"]) != entries["native"]["before_sha256"] or \
+               sha256(entries["graphics"]["target"]) != entries["graphics"]["before_sha256"]:
+                raise ValueError("restored hash verification failed")
+        except (OSError, IOError, ValueError) as exc:
+            print("[edvr] ERROR: native restore failed: %s" % exc)
+            for key in reversed(active_mutations):
+                temp = temps[key]
+                try:
+                    shutil.copy2(temp, entries[key]["target"])
+                    if sha256(entries[key]["target"]) != entries[key]["installed_sha256"]:
+                        raise OSError("restore rollback hash failed: %s" % key)
+                except OSError:
+                    rollback_ok = False
+                except (IOError, ValueError):
+                    rollback_ok = False
+            if not rollback_ok:
+                print("[edvr] ERROR: restore rollback is incomplete; retained "
+                      "temporary recovery files.")
+                return 1
+            for temp in temps.values():
+                try:
+                    os.remove(temp)
+                except OSError:
+                    pass
+            return 1
+        receipt["state"] = "restored"
+        receipt["restored_at"] = datetime.datetime.now().isoformat()
+        try:
+            # Replace only the receipt we just validated. If this fails,
+            # revert the DLLs from the temporary staged copies and leave the
+            # installed receipt as the valid recovery record.
+            _replace_receipt(receipt_path, receipt)
+        except (OSError, IOError, ValueError) as exc:
+            for key, temp in temps.items():
+                try:
+                    shutil.copy2(temp, entries[key]["target"])
+                    if sha256(entries[key]["target"]) != entries[key]["installed_sha256"]:
+                        raise OSError("receipt rollback hash failed: %s" % key)
+                except OSError:
+                    rollback_ok = False
+                except (IOError, ValueError):
+                    rollback_ok = False
+            if not rollback_ok:
+                print("[edvr] ERROR: receipt update and rollback both failed; "
+                      "retained receipt and temporary recovery files.")
+            else:
+                for temp in temps.values():
+                    try:
+                        os.remove(temp)
+                    except OSError:
+                        pass
+                print("[edvr] ERROR: receipt update failed; native files were "
+                      "restored to their installed state: %s" % exc)
+            return 1
+        for temp in temps.values():
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
+        print("[edvr] native files restored; receipt marked restored: %s" % receipt_path)
+        return 0
+    except (OSError, IOError, ValueError, json.JSONDecodeError) as exc:
+        print("[edvr] ERROR: native restore refused: %s" % exc)
+        return 1
 
 
 def repo_root():
@@ -262,6 +760,13 @@ def main(argv=None):
                          "repository's -- this discards tuned settings")
     ap.add_argument("--all", action="store_true",
                     help="dll + openvr + dlss (never ini)")
+    ap.add_argument("--native-openxr", action="store_true",
+                    help="stage the experimental native OpenXR DLL and its "
+                         "paired d3d11.dll (requires --dll and a receipt)")
+    ap.add_argument("--native-receipt", default=None,
+                    help="absolute new receipt path for --native-openxr")
+    ap.add_argument("--restore-native", default=None, metavar="RECEIPT",
+                    help="restore both files recorded by a native receipt")
     ap.add_argument("--tag", default=None,
                     help="word for the backup name; defaults to the short "
                          "git hash of this tree")
@@ -279,6 +784,49 @@ def main(argv=None):
 
     if args.self_test:
         return self_test()
+
+    if args.restore_native:
+        if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
+                args.dlss, args.ini, args.all, args.verify_only, args.force,
+                args.no_backup, args.tag)):
+            ap.error("--restore-native cannot be combined with install options")
+        if not os.path.isabs(args.restore_native):
+            ap.error("--restore-native requires an absolute receipt path")
+        return restore_native(args.restore_native, args.dry_run)
+
+    if args.native_receipt and not args.native_openxr:
+        ap.error("--native-receipt requires --native-openxr")
+    if args.native_receipt and not os.path.isabs(args.native_receipt):
+        ap.error("--native-receipt must be an absolute new path")
+    if args.native_openxr:
+        if not args.dll:
+            ap.error("--native-openxr requires --dll; it stages the paired "
+                     "graphics DLL as part of the native package")
+        if any((args.openvr, args.all, args.ini, args.dlss, args.force,
+                args.no_backup)):
+            ap.error("--native-openxr is mutually exclusive with --openvr, "
+                     "--all, --ini, --dlss, --force, and --no-backup")
+        if args.verify_only:
+            if not args.native_receipt:
+                ap.error("native --verify-only requires --native-receipt")
+            try:
+                verified = verify_native_receipt(
+                    args.native_receipt,
+                    resolve_target(args.target))
+            except (OSError, ValueError) as exc:
+                print("[edvr] ERROR: native receipt verification failed: %s" % exc)
+                return 1
+            print("[edvr] native receipt verified: %s (%s)" %
+                  (args.native_receipt, verified["target"]))
+            return 0
+        if not args.dry_run and not args.native_receipt:
+            ap.error("--native-openxr requires --native-receipt for a real install")
+        root = os.path.abspath(args.root) if args.root else repo_root()
+        target = resolve_target(args.target)
+        tag = args.tag or short_hash(root)
+        return native_install(root, target,
+                              args.native_receipt,
+                              tag, args.dry_run)
 
     want = []
     if args.all:
@@ -382,6 +930,7 @@ def self_test():
         root = os.path.join(tmp, "repo")
         os.makedirs(os.path.join(root, "build"))
         for rel, body in (("build/d3d11.dll", b"NEW-DLL"),
+                          ("build/edvr_openxr_runtime.dll", b"NATIVE-NEW"),
                           ("edvr.ini", b"[fix]\n")):
             with open(os.path.join(root, rel.replace("/", os.sep)), "wb") as f:
                 f.write(body)
@@ -391,6 +940,11 @@ def self_test():
             f.write(b"exe")
         with open(os.path.join(game, "d3d11.dll"), "wb") as f:
             f.write(b"OLD-DLL")
+        os.makedirs(os.path.join(game, "Openvr", "win64"))
+        with open(os.path.join(game, "Openvr", "win64", "openvr_api.dll"), "wb") as f:
+            f.write(b"OLD-OPENVR")
+        with open(os.path.join(game, "Openvr", "win64", "openvr_api_orig.dll"), "wb") as f:
+            f.write(b"STOCK-OPENVR")
 
         if sha256(os.path.join(root, "build", "d3d11.dll")) == \
            sha256(os.path.join(game, "d3d11.dll")):
@@ -462,6 +1016,305 @@ def self_test():
                  "--verify-only"]) == 0:
             print("verify-only passed a stale install")
             ok = False
+
+        # Native staging is an explicit paired transaction. Its dry run does
+        # not create the receipt, backup files, or any directories.
+        receipt_path = os.path.join(tmp, "native-receipt.json")
+        native_target = os.path.join(game, "Openvr", "win64", "openvr_api.dll")
+        graphics_target = os.path.join(game, "d3d11.dll")
+        old_native = open(native_target, "rb").read()
+        old_graphics = open(graphics_target, "rb").read()
+        before_native_tree = []
+        for base, dirs, names in os.walk(game):
+            for name in sorted(names):
+                path = os.path.join(base, name)
+                before_native_tree.append((os.path.relpath(path, game),
+                                           open(path, "rb").read()))
+        old_strict_game_running = globals()["strict_game_running"]
+        globals()["strict_game_running"] = lambda: (True, False)
+        try:
+            if main(["--root", root, "--target", game, "--native-openxr",
+                     "--dll", "--dry-run"]) != 0:
+                print("native dry run failed")
+                ok = False
+            after_native_tree = []
+            for base, dirs, names in os.walk(game):
+                for name in sorted(names):
+                    path = os.path.join(base, name)
+                    after_native_tree.append((os.path.relpath(path, game),
+                                              open(path, "rb").read()))
+            if before_native_tree != after_native_tree or os.path.exists(receipt_path):
+                print("native dry run wrote files")
+                ok = False
+
+            # A process probe error is a hard refusal and leaves both files
+            # untouched, even though ordinary installs retain their legacy
+            # fail-open probe for compatibility.
+            globals()["strict_game_running"] = lambda: (False, False)
+            if main(["--root", root, "--target", game, "--native-openxr",
+                     "--dll", "--native-receipt", receipt_path]) == 0:
+                print("native install accepted an unknown process state")
+                ok = False
+            if open(native_target, "rb").read() != old_native or \
+               open(graphics_target, "rb").read() != old_graphics:
+                print("process refusal changed native files")
+                ok = False
+
+            # A failed second copy rolls both destinations back and removes
+            # the transaction's newly-created backup.
+            globals()["strict_game_running"] = lambda: (True, False)
+            real_copy2 = shutil.copy2
+            def fail_native_source(src, dst, *copy_args, **copy_kwargs):
+                if os.path.basename(src) == "edvr_openxr_runtime.dll":
+                    raise OSError("self-test injected copy failure")
+                return real_copy2(src, dst, *copy_args, **copy_kwargs)
+            shutil.copy2 = fail_native_source
+            try:
+                if main(["--root", root, "--target", game, "--native-openxr",
+                         "--dll", "--native-receipt", receipt_path,
+                         "--tag", "rollback"]) == 0:
+                    print("injected native copy failure was accepted")
+                    ok = False
+            finally:
+                shutil.copy2 = real_copy2
+            if os.path.exists(receipt_path) or open(native_target, "rb").read() != old_native or \
+               open(graphics_target, "rb").read() != old_graphics:
+                print("native rollback did not restore the paired files")
+                ok = False
+
+            # Exercise failure after the first live copy as well as before it.
+            def fail_graphics_source(src, dst, *copy_args, **copy_kwargs):
+                if os.path.abspath(src) == os.path.abspath(
+                        os.path.join(root, "build", "d3d11.dll")):
+                    raise OSError("self-test second-copy failure")
+                return real_copy2(src, dst, *copy_args, **copy_kwargs)
+            shutil.copy2 = fail_graphics_source
+            try:
+                if main(["--root", root, "--target", game, "--native-openxr",
+                         "--dll", "--native-receipt", receipt_path,
+                         "--tag", "second-copy"]) == 0:
+                    print("second native copy failure was accepted")
+                    ok = False
+            finally:
+                shutil.copy2 = real_copy2
+            if os.path.exists(receipt_path) or open(native_target, "rb").read() != old_native or \
+               open(graphics_target, "rb").read() != old_graphics:
+                print("second-copy rollback did not restore both files")
+                ok = False
+
+            # A successful copy call that leaves corrupted destination bytes
+            # is rejected by the post-copy hash check and rolled back.
+            def corrupt_native_destination(src, dst, *copy_args, **copy_kwargs):
+                result = real_copy2(src, dst, *copy_args, **copy_kwargs)
+                if os.path.abspath(src) == os.path.abspath(
+                        os.path.join(root, "build", "edvr_openxr_runtime.dll")):
+                    with open(dst, "wb") as f:
+                        f.write(b"CORRUPTED")
+                return result
+            shutil.copy2 = corrupt_native_destination
+            try:
+                if main(["--root", root, "--target", game, "--native-openxr",
+                         "--dll", "--native-receipt", receipt_path,
+                         "--tag", "corrupt-destination"]) == 0:
+                    print("corrupted native destination was accepted")
+                    ok = False
+            finally:
+                shutil.copy2 = real_copy2
+            if os.path.exists(receipt_path) or open(native_target, "rb").read() != old_native or \
+               open(graphics_target, "rb").read() != old_graphics:
+                print("corrupt destination rollback did not restore both files")
+                ok = False
+
+            # A corrupt backup is rejected before either live destination is
+            # entered, and its reserved file is cleaned transactionally.
+            def corrupt_native_backup(src, dst, *copy_args, **copy_kwargs):
+                result = real_copy2(src, dst, *copy_args, **copy_kwargs)
+                if ".pre-corrupt-backup-" in os.path.basename(dst):
+                    with open(dst, "wb") as f:
+                        f.write(b"CORRUPTED-BACKUP")
+                return result
+            shutil.copy2 = corrupt_native_backup
+            try:
+                if main(["--root", root, "--target", game, "--native-openxr",
+                         "--dll", "--native-receipt", receipt_path,
+                         "--tag", "corrupt-backup"]) == 0:
+                    print("corrupted native backup was accepted")
+                    ok = False
+            finally:
+                shutil.copy2 = real_copy2
+            if os.path.exists(receipt_path) or open(native_target, "rb").read() != old_native or \
+               open(graphics_target, "rb").read() != old_graphics:
+                print("corrupt backup changed live files")
+                ok = False
+
+            # A receipt commit failure is also rolled back before any stale
+            # receipt can claim that the pair is installed.
+            real_replace_receipt = _replace_receipt
+            def fail_receipt_commit(path, value):
+                raise OSError("self-test receipt commit failure")
+            globals()["_replace_receipt"] = fail_receipt_commit
+            try:
+                if main(["--root", root, "--target", game, "--native-openxr",
+                         "--dll", "--native-receipt", receipt_path,
+                         "--tag", "receipt-failure"]) == 0:
+                    print("receipt commit failure was accepted")
+                    ok = False
+            finally:
+                globals()["_replace_receipt"] = real_replace_receipt
+            if os.path.exists(receipt_path) or open(native_target, "rb").read() != old_native or \
+               open(graphics_target, "rb").read() != old_graphics:
+                print("receipt failure did not roll back both files")
+                ok = False
+
+            # If rollback itself fails, retain the journal and every backup
+            # as recovery evidence instead of deleting originals.
+            stage_failed = [False]
+            def fail_rollback(src, dst, *copy_args, **copy_kwargs):
+                if os.path.abspath(src) == os.path.abspath(
+                        os.path.join(root, "build", "d3d11.dll")):
+                    stage_failed[0] = True
+                    raise OSError("self-test staged failure")
+                if stage_failed[0] and os.path.abspath(dst) == os.path.abspath(native_target):
+                    raise OSError("self-test rollback failure")
+                return real_copy2(src, dst, *copy_args, **copy_kwargs)
+            shutil.copy2 = fail_rollback
+            try:
+                if main(["--root", root, "--target", game, "--native-openxr",
+                         "--dll", "--native-receipt", receipt_path,
+                         "--tag", "rollback-evidence"]) == 0:
+                    print("rollback failure was accepted")
+                    ok = False
+            finally:
+                shutil.copy2 = real_copy2
+            if not os.path.exists(receipt_path):
+                print("rollback failure discarded its receipt")
+                ok = False
+            else:
+                retained = {}
+                try:
+                    with open(receipt_path, "r", encoding="utf-8") as f:
+                        retained = json.load(f)
+                    if retained.get("state") != "rollback_failed" or \
+                       not all(os.path.isfile(entry["backup"])
+                               for entry in retained["files"]):
+                        print("rollback failure did not retain evidence")
+                        ok = False
+                except (OSError, ValueError, TypeError):
+                    print("rollback failure left an unreadable receipt")
+                    ok = False
+                with open(native_target, "wb") as f:
+                    f.write(old_native)
+                with open(graphics_target, "wb") as f:
+                    f.write(old_graphics)
+                os.remove(receipt_path)
+                for entry in retained.get("files", []):
+                    try:
+                        os.remove(entry["backup"])
+                    except OSError:
+                        pass
+
+            if main(["--root", root, "--target", game, "--native-openxr",
+                     "--dll", "--native-receipt", receipt_path,
+                     "--tag", "native-selftest"]) != 0:
+                print("native install failed")
+                ok = False
+            else:
+                try:
+                    verified = verify_native_receipt(receipt_path, game)
+                    if verified["state"] != "installed" or \
+                       len(verified["files"]) != 2:
+                        print("native receipt validation returned wrong state")
+                        ok = False
+                except (OSError, ValueError) as exc:
+                    print("native receipt did not validate: %s" % exc)
+                    ok = False
+                if main(["--root", root, "--target", game, "--native-openxr",
+                         "--dll", "--native-receipt", receipt_path,
+                         "--verify-only"]) != 0:
+                    print("native paired verify-only failed")
+                    ok = False
+
+                # Receipt validation rejects traversal and a backup aliasing
+                # the INI, without changing the valid installed transaction.
+                with open(receipt_path, "r", encoding="utf-8") as f:
+                    valid_receipt = json.load(f)
+                for label, mutate in (
+                        ("bad-type", lambda r: r.update({"files": "bad"})),
+                        ("bad-backup", lambda r: r["files"][0].update(
+                            {"backup": os.path.join(game, "edvr.ini")})),
+                        ("bad-traversal", lambda r: r.update(
+                            {"target": os.path.join(game, "..", "outside")}))):
+                    bad_path = os.path.join(tmp, "native-%s.json" % label)
+                    bad = json.loads(json.dumps(valid_receipt))
+                    mutate(bad)
+                    with open(bad_path, "w", encoding="utf-8") as f:
+                        json.dump(bad, f)
+                    try:
+                        verify_native_receipt(bad_path, game)
+                        print("malformed receipt accepted: %s" % label)
+                        ok = False
+                    except (OSError, ValueError, TypeError):
+                        pass
+            with open(os.path.join(game, "edvr.ini"), "wb") as f:
+                f.write(b"[user-edit]\nkeep=1\n")
+            with open(graphics_target, "wb") as f:
+                f.write(b"EXTERNAL-CHANGE")
+            if restore_native(receipt_path) == 0:
+                print("stale native restore was accepted")
+                ok = False
+            with open(graphics_target, "wb") as f:
+                f.write(b"NEW-DLL")
+            # A corrupt staged restore copy must never be copied back onto
+            # a live DLL: no live mutation has occurred at this point.
+            real_copy2 = shutil.copy2
+            def corrupt_restore_temp(src, dst, *copy_args, **copy_kwargs):
+                result = real_copy2(src, dst, *copy_args, **copy_kwargs)
+                if os.path.basename(dst).startswith("edvr-native-restore-"):
+                    with open(dst, "wb") as f:
+                        f.write(b"BAD-TEMP")
+                return result
+            shutil.copy2 = corrupt_restore_temp
+            try:
+                if restore_native(receipt_path) == 0:
+                    print("corrupt restore staging accepted")
+                    ok = False
+            finally:
+                shutil.copy2 = real_copy2
+            if open(native_target, "rb").read() != b"NATIVE-NEW" or \
+               open(graphics_target, "rb").read() != b"NEW-DLL":
+                print("corrupt staging changed a live DLL")
+                ok = False
+            real_replace_receipt = _replace_receipt
+            def fail_restore_receipt(path, value):
+                raise OSError("self-test restore receipt failure")
+            globals()["_replace_receipt"] = fail_restore_receipt
+            try:
+                if restore_native(receipt_path) == 0:
+                    print("restore receipt failure was accepted")
+                    ok = False
+            finally:
+                globals()["_replace_receipt"] = real_replace_receipt
+            if open(native_target, "rb").read() != b"NATIVE-NEW" or \
+               open(graphics_target, "rb").read() != b"NEW-DLL":
+                print("restore receipt failure did not preserve installed pair")
+                ok = False
+            if restore_native(receipt_path) != 0:
+                print("native restore failed")
+                ok = False
+            if open(native_target, "rb").read() != old_native or \
+               open(graphics_target, "rb").read() != old_graphics or \
+               open(os.path.join(game, "edvr.ini"), "rb").read() != \
+               b"[user-edit]\nkeep=1\n":
+                print("native restore changed the wrong files")
+                ok = False
+            try:
+                verify_native_receipt(receipt_path, game)
+                print("restored native receipt was accepted as installed")
+                ok = False
+            except (OSError, ValueError):
+                pass
+        finally:
+            globals()["strict_game_running"] = old_strict_game_running
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

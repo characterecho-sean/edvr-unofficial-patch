@@ -11,6 +11,7 @@ namespace edvr::openxr {
 struct BootstrapPaths {
   std::wstring loader;
   std::wstring graphics;
+  bool separateDevice = false;
 };
 
 enum class BootstrapResult { Unconfigured, Ready, Invalid };
@@ -80,23 +81,30 @@ template<class Reader>
 BootstrapResult collectBootstrapPaths(BootstrapPaths& output, Reader& reader) noexcept {
   output.loader.clear();
   output.graphics.clear();
+  output.separateDevice = false;
   std::wstring loader;
   std::wstring graphics;
+  std::wstring separate;
   const auto loaderResult = readBootstrapEnvironment(reader, L"EDVR_OPENXR_LOADER", loader);
   const auto graphicsResult = readBootstrapEnvironment(reader, L"EDVR_OPENXR_GRAPHICS", graphics);
+  const auto separateResult = readBootstrapEnvironment(reader, L"EDVR_OPENXR_SEPARATE_DEVICE", separate);
 
   if (loaderResult == BootstrapEnvironmentResult::Missing &&
-      graphicsResult == BootstrapEnvironmentResult::Missing) {
+      graphicsResult == BootstrapEnvironmentResult::Missing &&
+      separateResult == BootstrapEnvironmentResult::Missing) {
     return BootstrapResult::Unconfigured;
   }
   if (loaderResult != BootstrapEnvironmentResult::Present ||
       graphicsResult != BootstrapEnvironmentResult::Present ||
+      (separateResult == BootstrapEnvironmentResult::Present && separate != L"1") ||
+      separateResult == BootstrapEnvironmentResult::Failed ||
       !bootstrapDriveAbsolute(loader) || !bootstrapDriveAbsolute(graphics)) {
     return BootstrapResult::Invalid;
   }
   try {
     output.loader = std::move(loader);
     output.graphics = std::move(graphics);
+    output.separateDevice = separateResult == BootstrapEnvironmentResult::Present;
   } catch (...) {
     output.loader.clear();
     output.graphics.clear();
