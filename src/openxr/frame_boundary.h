@@ -13,6 +13,9 @@ struct FrameSink {
   virtual vr::EVRCompositorError capture(vr::EVREye, const vr::Texture_t*,
       const vr::VRTextureBounds_t*, vr::EVRSubmitFlags, bool copyPixels) = 0;
   virtual XrResult compose(XrCompositionLayerProjection&) = 0;
+  virtual XrResult composeBackground(XrCompositionLayerProjection&) {
+    return XR_ERROR_FUNCTION_UNSUPPORTED;
+  }
 };
 
 // Submit pairing policy shared by a future IVRCompositor and the native test.
@@ -59,21 +62,36 @@ class FrameBoundary final {
     if (captured != vr::VRCompositorError_None) return captured;
     accepted_[index] = true;
     if (!accepted_[0] || !accepted_[1]) return vr::VRCompositorError_None;
+    return finish(false)==XR_SUCCESS ? vr::VRCompositorError_None : vr::VRCompositorError_InvalidTexture;
+  }
 
+  // Owner-only loading frame. It must have its own wait/begin and cannot
+  // replace a partially submitted game frame. No eye captures or game Submit
+  // counts are manufactured. The caller decides when loading is active.
+  XrResult background() {
+    if (!ownerThread()) return XR_ERROR_CALL_ORDER_INVALID;
+    if (failed_) return lastResult_;
+    if (!session_.frameOpen() || accepted_[0] || accepted_[1]) return XR_ERROR_CALL_ORDER_INVALID;
+    return finish(true);
+  }
+
+ private:
+  XrResult finish(bool background) {
+    const bool pixels = geometryReady_ && frame_.shouldRender && !session_.terminal();
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     if (pixels) {
-      const auto composed = sink_.compose(layer);
+      const auto composed = background ? sink_.composeBackground(layer) : sink_.compose(layer);
       if (composed != XR_SUCCESS) {
         // A hard external XR failure may have invalidated the session. The
         // owner must destroy it; do not dispatch endFrame through lost handles.
         if (!XR_FAILED(composed)) clear();
         failed_ = true; lastResult_ = composed;
-        return vr::VRCompositorError_InvalidTexture;
+        return lastResult_;
       }
       if (layer.type != XR_TYPE_COMPOSITION_LAYER_PROJECTION || layer.next ||
           !layer.space || layer.viewCount != 2 || !layer.views) {
         clear(); failed_ = true; lastResult_ = XR_ERROR_VALIDATION_FAILURE;
-        return vr::VRCompositorError_InvalidTexture;
+        return lastResult_;
       }
     }
     const auto* header = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
@@ -81,9 +99,10 @@ class FrameBoundary final {
     end.layerCount = pixels ? 1u : 0u; end.layers = pixels ? &header : nullptr;
     lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});
     if (lastResult_ != XR_SUCCESS) failed_ = true;
-    return lastResult_ == XR_SUCCESS ? vr::VRCompositorError_None : vr::VRCompositorError_InvalidTexture;
+    return lastResult_;
   }
 
+ public:
   // ClearLastSubmittedFrame and the next wait use the same closure path. A
   // handoff after a complete pair has no work; it cannot end a frame twice.
   XrResult clear() {

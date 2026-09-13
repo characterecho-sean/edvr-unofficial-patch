@@ -11,6 +11,8 @@ using Microsoft::WRL::ComPtr;
 struct Vertex { float position[3], color[4]; };
 struct Constants { float matrix[4][4]; float encodeSRGB=0, pad[3]{}; };
 struct BlitConstants { float bounds[4], clampUV[4]; float encodeSRGB=0, pad[3]{}; };
+struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
+static_assert(sizeof(SkyConstants)==80,"skybox HLSL constant-buffer packing");
 const char* shader=R"(
 cbuffer Constants : register(b0) { row_major float4x4 mvp; float encodeSRGB; float3 pad; };
 struct V { float3 position:POSITION; float4 color:COLOR; };
@@ -26,6 +28,45 @@ struct O { float4 position:SV_POSITION; float2 uv:TEXCOORD; };
 O vs(uint id:SV_VertexID) { O o; float2 p=float2((id<<1)&2,id&2); o.position=float4(p*float2(2,-2)+float2(-1,1),0,1); o.uv=p; return o; }
 float3 srgb(float3 c) { return lerp(12.92*c,1.055*pow(max(c,0),1.0/2.4)-0.055,step(0.0031308,c)); }
 float4 ps(O v):SV_TARGET { float2 uv=clamp(bounds.xy+v.uv*(bounds.zw-bounds.xy),clampUV.xy,clampUV.zw); float4 c=sourceTexture.Sample(linearSampler,uv); return float4(encodeSRGB>0.5?srgb(c.rgb):c.rgb,c.a); }
+)";
+const char* skyboxShader=R"(
+cbuffer C:register(b0) {
+  row_major float3x4 orient;
+  float4 tangents; // left, right, up, down
+  float encode; float3 pad;
+};
+Texture2D f0:register(t0); Texture2D f1:register(t1);
+Texture2D f2:register(t2); Texture2D f3:register(t3);
+Texture2D f4:register(t4); Texture2D f5:register(t5);
+SamplerState s:register(s0);
+struct O { float4 p:SV_POSITION; float2 uv:TEXCOORD; };
+O vs(uint id:SV_VertexID) {
+  O o; float2 q=float2((id<<1)&2,id&2);
+  o.p=float4(q*float2(2,-2)+float2(-1,1),0,1); o.uv=q; return o;
+}
+float3 enc(float3 c) {
+  return lerp(12.92*c,1.055*pow(max(c,0),1.0/2.4)-0.055,step(0.0031308,c));
+}
+float4 ps(O o):SV_TARGET {
+  float3 q=float3(lerp(tangents.x,tangents.y,o.uv.x),lerp(tangents.z,tangents.w,o.uv.y),-1);
+  float3 r=mul(orient,float4(q,0)); float3 a=abs(r); int k;
+  if(a.x>a.y && a.x>a.z) k=r.x>0?3:2;
+  else if(a.y>a.z) k=r.y>0?4:5;
+  else k=r.z>0?1:0;
+  // Front/back/left/right/top/bottom, top-left image coordinates.
+  float2 uv;
+  if(k==0) uv=float2(.5+.5*r.x/(-r.z),.5-.5*r.y/(-r.z));
+  else if(k==1) uv=float2(.5-.5*r.x/r.z,.5-.5*r.y/r.z);
+  else if(k==2) uv=float2(.5-.5*r.z/(-r.x),.5-.5*r.y/(-r.x));
+  else if(k==3) uv=float2(.5+.5*r.z/r.x,.5-.5*r.y/r.x);
+  else if(k==4) uv=float2(.5+.5*r.x/r.y,.5-.5*r.z/r.y);
+  else uv=float2(.5+.5*r.x/(-r.y),.5+.5*r.z/(-r.y));
+  // SRVs decode Gamma/Auto before filtering. Each face clamps at its edge;
+  // this path does not promise seamless cubemap filtering.
+  float4 c=k==0?f0.Sample(s,uv):k==1?f1.Sample(s,uv):k==2?f2.Sample(s,uv):
+           k==3?f3.Sample(s,uv):k==4?f4.Sample(s,uv):f5.Sample(s,uv);
+  return float4(encode>0.5?enc(c.rgb):c.rgb,c.a);
+}
 )";
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear();uint32_t n=0;XrResult r=call(0,&n,nullptr);if(r!=XR_SUCCESS||!n)return r;
@@ -66,13 +107,19 @@ bool sameDevice(ID3D11Device* device,ID3D11Texture2D* texture) {
   ComPtr<IUnknown> a,b;
   return SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&a)))&&SUCCEEDED(owner.As(&b))&&a.Get()==b.Get();
 }
+void skyRotation(const XrQuaternionf& q,float (&r)[3][4]) {
+  const float x=q.x,y=q.y,z=q.z,w=q.w;
+  r[0][0]=1-2*(y*y+z*z);r[0][1]=2*(x*y-z*w);r[0][2]=2*(x*z+y*w);
+  r[1][0]=2*(x*y+z*w);r[1][1]=1-2*(x*x+z*z);r[1][2]=2*(y*z-x*w);
+  r[2][0]=2*(x*z-y*w);r[2][1]=2*(y*z+x*w);r[2][2]=1-2*(x*x+y*y);
+}
 }
 
 D3D11Stereo::~D3D11Stereo(){shutdown();}
 XrResult D3D11Stereo::shutdown() {
   XrResult first=XR_SUCCESS;ready_=false;
   if(context_){context_->ClearState();context_->Flush();}
-  constants_.Reset();blitConstants_.Reset();blitSampler_.Reset();vertices_.Reset();layout_.Reset();pixelShader_.Reset();vertexShader_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();
+  constants_.Reset();blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();vertices_.Reset();layout_.Reset();pixelShader_.Reset();vertexShader_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();
   for(auto& eye:eyes_){
     eye.diagnosticRtv.Reset();eye.diagnosticTexture.Reset();eye.rtvs.clear();eye.images.clear();
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
@@ -152,6 +199,13 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
   if(FAILED(device->CreateBuffer(&bd,nullptr,&blitConstants_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
   if(FAILED(device->CreateSamplerState(&sampler,&blitSampler_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  if(FAILED(D3DCompile(skyboxShader,std::strlen(skyboxShader),"EDVR skybox",nullptr,nullptr,"vs","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&vs,&errors))||
+     FAILED(device->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&skyboxVertexShader_))||
+     FAILED(D3DCompile(skyboxShader,std::strlen(skyboxShader),"EDVR skybox",nullptr,nullptr,"ps","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors))||
+     FAILED(device->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&skyboxPixelShader_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  bd={sizeof(SkyConstants),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER,0,0,0};
+  if(FAILED(device->CreateBuffer(&bd,nullptr,&skyboxConstants_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  if(FAILED(device->CreateSamplerState(&sampler,&skyboxSampler_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
   D3D11_DEPTH_STENCIL_DESC depth{};depth.DepthEnable=FALSE;
   if(FAILED(device->CreateRasterizerState(&raster,&rasterizer_))||FAILED(device->CreateDepthStencilState(&depth,&depth_)))return failed(XR_ERROR_RUNTIME_FAILURE);
@@ -321,6 +375,83 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
   for(unsigned i=0;i<2;++i) {
     auto& v=layerViews_[i];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose=views[i].pose;v.fov=views[i].fov;
     v.subImage={eyes_[i].swapchain,{{0,0},{int32_t(eyes_[i].width),int32_t(eyes_[i].height)}},0};
+  }
+  layer.space=space;layer.viewCount=2;layer.views=layerViews_;return XR_SUCCESS;
+}
+
+XrResult D3D11Stereo::renderSkybox(const XrView (&views)[2], XrSpace space,
+                                   const SkyboxCapture& capture,
+                                   XrCompositionLayerProjection& layer) {
+  layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+  if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
+  if(!space)return XR_ERROR_HANDLE_INVALID;
+  if(!capture.ready())return XR_ERROR_VALIDATION_FAILURE;
+  if(FAILED(device_->GetDeviceRemovedReason()))return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+  ComPtr<ID3D11ShaderResourceView> faces[6];
+  for(unsigned i=0;i<6;++i) {
+    auto* texture=capture.texture(i); if(!texture)return XR_ERROR_VALIDATION_FAILURE;
+    D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);
+    if(!td.Width||!td.Height||td.ArraySize!=1||td.MipLevels!=1||td.SampleDesc.Count!=1||td.SampleDesc.Quality||
+       !(td.BindFlags&D3D11_BIND_SHADER_RESOURCE)||!sameDevice(device_.Get(),texture))return XR_ERROR_VALIDATION_FAILURE;
+    const auto color=capture.colorSpace(i);
+    if(color!=vr::ColorSpace_Auto&&color!=vr::ColorSpace_Gamma&&color!=vr::ColorSpace_Linear)return XR_ERROR_VALIDATION_FAILURE;
+    const bool gamma=color!=vr::ColorSpace_Linear;
+    DXGI_FORMAT f=DXGI_FORMAT_UNKNOWN;
+    if(td.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS)f=gamma?DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:DXGI_FORMAT_R8G8B8A8_UNORM;
+    if(td.Format==DXGI_FORMAT_B8G8R8A8_TYPELESS)f=gamma?DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:DXGI_FORMAT_B8G8R8A8_UNORM;
+    if(f==DXGI_FORMAT_UNKNOWN)return XR_ERROR_VALIDATION_FAILURE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=f;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+    if(FAILED(device_->CreateShaderResourceView(texture,&sd,&faces[i])))return XR_ERROR_RUNTIME_FAILURE;
+  }
+  SkyConstants constants[2]{};
+  for(unsigned eye=0;eye<2;++eye) {
+    vr::HmdMatrix44_t projection{};
+    if(views[eye].type!=XR_TYPE_VIEW||views[eye].next||!poseValid(views[eye].pose)||
+      !projectionMatrix(views[eye].fov,.025f,50000.f,vr::API_DirectX,projection))return XR_ERROR_VALIDATION_FAILURE;
+    skyRotation(views[eye].pose.orientation,constants[eye].orient);
+    constants[eye].tangents[0]=std::tan(views[eye].fov.angleLeft);
+    constants[eye].tangents[1]=std::tan(views[eye].fov.angleRight);
+    constants[eye].tangents[2]=std::tan(views[eye].fov.angleUp);
+    constants[eye].tangents[3]=std::tan(views[eye].fov.angleDown);
+    constants[eye].encode=(format_==DXGI_FORMAT_R8G8B8A8_UNORM||format_==DXGI_FORMAT_B8G8R8A8_UNORM)?1.f:0.f;
+  }
+  auto failed=[&](XrResult r){ready_=false;lastResult_=r;return r;};
+  context_->ClearState();
+  context_->VSSetShader(skyboxVertexShader_.Get(),nullptr,0);
+  context_->PSSetShader(skyboxPixelShader_.Get(),nullptr,0);
+  context_->PSSetSamplers(0,1,skyboxSampler_.GetAddressOf());
+  context_->PSSetConstantBuffers(0,1,skyboxConstants_.GetAddressOf());
+  ID3D11ShaderResourceView* faceRaw[6]{};
+  for(unsigned i=0;i<6;++i)faceRaw[i]=faces[i].Get();
+  context_->IASetInputLayout(nullptr);
+  context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  context_->RSSetState(rasterizer_.Get());
+  context_->OMSetBlendState(nullptr,nullptr,~0u);
+  context_->OMSetDepthStencilState(depth_.Get(),0);
+  for(unsigned eye=0;eye<2;++eye) {
+    auto& e=eyes_[eye];
+    XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};uint32_t index=0;
+    XrResult r=dispatch_.acquireSwapchainImage(e.swapchain,&ai,&index);
+    if(r!=XR_SUCCESS)return failed(r);
+    if(index>=e.rtvs.size())return failed(XR_ERROR_RUNTIME_FAILURE);
+    XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wi.timeout=1000000000LL;
+    r=dispatch_.waitSwapchainImage(e.swapchain,&wi);
+    if(r!=XR_SUCCESS)return failed(r); // timeout does not permit drawing/release
+    auto* rtv=e.rtvs[index].Get();context_->OMSetRenderTargets(1,&rtv,nullptr);
+    D3D11_VIEWPORT viewport{0,0,float(e.width),float(e.height),0,1};context_->RSSetViewports(1,&viewport);
+    context_->PSSetShaderResources(0,6,faceRaw);
+    context_->UpdateSubresource(skyboxConstants_.Get(),0,nullptr,&constants[eye],0,0);
+    context_->Draw(3,0);
+    ID3D11ShaderResourceView* nulls[6]{};context_->PSSetShaderResources(0,6,nulls);
+    context_->OMSetRenderTargets(0,nullptr,nullptr);context_->Flush();
+    if(FAILED(device_->GetDeviceRemovedReason()))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    r=dispatch_.releaseSwapchainImage(e.swapchain,&ri);if(r!=XR_SUCCESS)return failed(r);
+  }
+  for(unsigned i=0;i<2;++i) {
+    auto& view=layerViews_[i];view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    view.pose=views[i].pose;view.fov=views[i].fov;
+    view.subImage={eyes_[i].swapchain,{{0,0},{int32_t(eyes_[i].width),int32_t(eyes_[i].height)}},0};
   }
   layer.space=space;layer.viewCount=2;layer.views=layerViews_;return XR_SUCCESS;
 }

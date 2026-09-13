@@ -154,10 +154,19 @@ bool OpenVRCompositor::GetFrameTiming(vr::Compositor_FrameTiming*, uint32_t) {
 float OpenVRCompositor::GetFrameTimeRemaining() { unsupported(9); return 0.0f; }
 void OpenVRCompositor::FadeToColor(float, float, float, float, float, bool) { unsupported(10); }
 void OpenVRCompositor::FadeGrid(float, bool) { unsupported(11); }
-vr::EVRCompositorError OpenVRCompositor::SetSkyboxOverride(const vr::Texture_t*, uint32_t) {
-  unsupported(12); return kInvalid;
+vr::EVRCompositorError OpenVRCompositor::SetSkyboxOverride(const vr::Texture_t* textures, uint32_t count) {
+  if (!source_ || !textures || count != 6) { unsupported(12); return kInvalid; }
+  const auto read=source_->compositorRead();
+  if (!read.connected || !read.generation) return kInvalid;
+  const auto result=source_->setSkybox(read.generation,textures,count);
+  if (result!=vr::VRCompositorError_None) unsupported(12);
+  return result;
 }
-void OpenVRCompositor::ClearSkyboxOverride() { unsupported(13); }
+void OpenVRCompositor::ClearSkyboxOverride() {
+  if (!source_) { unsupported(13); return; }
+  const auto read=source_->compositorRead();
+  if (!read.connected || !read.generation || !source_->clearSkybox(read.generation)) unsupported(13);
+}
 void OpenVRCompositor::CompositorBringToFront() { unsupported(14); }
 void OpenVRCompositor::CompositorGoToBack() { unsupported(15); }
 void OpenVRCompositor::CompositorQuit() { unsupported(16); }

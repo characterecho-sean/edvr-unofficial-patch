@@ -117,6 +117,17 @@ processes started after the diagnostic exited, with their launch cause
 unconfirmed. Production game-device ownership and Frontier integration remain
 separate work.
 
+The [six-face skybox/loading checkpoint](openxr-skybox-loading-2026-09-12.md)
+adds transactional private face copies and a native-FOV projection renderer to
+the standalone diagnostic. The owner can render a loading override while the
+game supplies no frames, retire a cleared override with an empty frame, and
+hand control back to scene Submit without replacing the game's cached poses.
+The full build passed, including 5240 stereo, 74 skybox-copy and 150
+frame/loading checks. WARP pixel tests cover face orientation, color
+conversion, source lifetime and swapchain failures. The new native
+loading-to-scene gate remains pending; default grid rendering, fades, lat-long
+forms and live game integration remain open.
+
 - The original shipping proxy remains the default. The new startup-only
   `advanced.openvr_census = on` setting enables typed forwarding for the exact
   four historical interfaces. The 84 methods use Valve v0.9.20 declarations;

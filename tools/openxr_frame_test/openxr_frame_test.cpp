@@ -1,6 +1,7 @@
 #include "../../src/openxr/frame_boundary.h"
 #include "../../src/openxr/runtime_gate.h"
 #include "../../src/openxr/system_publication.h"
+#include "../../src/openxr/loading_state.h"
 
 #include <condition_variable>
 #include <atomic>
@@ -29,6 +30,7 @@ struct Fake {
   std::mutex waitMutex;
   std::condition_variable waitCv;
   unsigned waitCalls = 0, beginCalls = 0, endCalls = 0, captureCalls = 0, composeCalls = 0;
+  unsigned backgroundCalls = 0;
   XrTime displayTime = 100;
   bool lastHadLayers = false;
   XrTime lastDisplayTime = 0;
@@ -81,6 +83,9 @@ struct Sink : FrameSink {
     layer.space = reinterpret_cast<XrSpace>(3); layer.viewCount = 2;
     static XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     layer.views = fake.malformedLayer?nullptr:views; return fake.composeResult;
+  }
+  XrResult composeBackground(XrCompositionLayerProjection& layer) override {
+    ++fake.backgroundCalls;const auto r=compose(layer);--fake.composeCalls;return r;
   }
 };
 
@@ -172,6 +177,71 @@ void blockedRuntimeIntegrationTest() {
   check(gate.canDestroy(gateGeneration) && gate.finishGeneration(gateGeneration), "gate finishes after blocked operation");
 }
 
+void loadingTransitions() {
+  Fake fake;SessionState state;check(start(state,fake),"loading transition session");Sink sink(fake);FrameBoundary b(state,sink);LoadingState loading;
+  check(loading.work(false)==LoadingWork::None,"no invented initial loading work");
+  loading.overrideSet();check(loading.work(false)==LoadingWork::Skybox,"first override activates startup loading");
+  check(b.waitAndBegin()==XR_SUCCESS,"startup loading wait");b.setGeometryReady(true);
+  check(b.background()==XR_SUCCESS&&fake.lastHadLayers&&!fake.captureCalls,"startup background is its own frame");
+  loading.overrideCleared();loading.overrideCleared();
+  check(loading.work(false)==LoadingWork::Empty,"repeated clear retains single empty-frame demand");
+  check(b.waitAndBegin()==XR_SUCCESS&&b.clear()==XR_SUCCESS&&!fake.lastHadLayers,"clear removes last projection with zero-layer frame");
+  const auto ends=fake.endCalls;loading.emptyCompleted();
+  check(loading.work(false)==LoadingWork::None&&b.clear()==XR_SUCCESS&&fake.endCalls==ends,"completed clear cannot generate repeated empty frames");
+  loading.overrideSet();check(b.waitAndBegin()==XR_SUCCESS,"game begins while startup skybox available");loading.sceneWaited();b.setGeometryReady(true);
+  check(loading.work(state.frameOpen())==LoadingWork::None,"open game frame blocks idle skybox work");
+  check(b.submit(vr::Eye_Left,nullptr)==vr::VRCompositorError_None&&loading.sceneSubmitted(),"first accepted scene eye leaves loading");
+  check(b.background()==XR_ERROR_CALL_ORDER_INVALID,"partial game pair cannot become loading frame");
+  check(b.submit(vr::Eye_Right,nullptr)==vr::VRCompositorError_None&&!loading.sceneSubmitted()&&fake.lastHadLayers,"scene pair completes without duplicate transition");
+  loading.overrideSet();check(loading.work(false)==LoadingWork::None,"later override replacement does not interrupt scene");
+  loading.sceneCleared();check(loading.work(false)==LoadingWork::Skybox,"explicit scene clear reactivates stored override");
+  loading.overrideCleared();check(loading.work(false)==LoadingWork::Empty,"clear loading override removes stale last image");
+  check(b.waitAndBegin()==XR_SUCCESS,"game takes priority over pending clear");
+  check(loading.work(state.frameOpen())==LoadingWork::None,"pending clear cannot consume game frame");loading.sceneWaited();b.setGeometryReady(true);
+  check(b.submit(vr::Eye_Left,nullptr)==vr::VRCompositorError_None&&b.submit(vr::Eye_Right,nullptr)==vr::VRCompositorError_None,"game completes after pending clear");loading.sceneSubmitted();
+  check(loading.work(false)==LoadingWork::None,"old clear demand cannot blank new scene");
+  loading.sceneCleared();check(loading.work(false)==LoadingWork::Empty,"no-override scene clear requests defined zero layer");
+  loading.overrideSet();check(loading.work(false)==LoadingWork::None,"replacement after scene clears obsolete empty demand");
+  loading.sceneCleared();loading.overrideCleared();loading.overrideSet();
+  check(loading.work(false)==LoadingWork::None,"later replacement remains stored until explicit scene clear");
+  loading={};loading.overrideSet();loading.overrideCleared();loading.overrideSet();
+  check(loading.work(false)==LoadingWork::Skybox,"startup replacement cancels obsolete empty demand");
+  loading={};check(loading.work(false)==LoadingWork::None,"retired loading state has no work");
+}
+void backgroundFrames() {
+  Fake fake;SessionState state;check(start(state,fake),"background session starts");Sink sink(fake);FrameBoundary b(state,sink);
+  check(b.background()==XR_ERROR_CALL_ORDER_INVALID&&!fake.endCalls,"background needs begun frame");
+  for(unsigned variant=0;variant<3;++variant) {
+    fake.shouldRender=variant!=1;check(b.waitAndBegin()==XR_SUCCESS,"background wait begins");b.setGeometryReady(variant!=2);
+    const auto endCount=fake.endCalls,drawCount=fake.backgroundCalls;
+    check(b.background()==XR_SUCCESS&&fake.endCalls==endCount+1&&fake.lastHadLayers==(variant==0)&&
+      fake.backgroundCalls==drawCount+(variant==0?1:0)&&!fake.captureCalls&&!fake.composeCalls,"loading only composes with valid render geometry, without eye copies");
+    check(b.background()==XR_ERROR_CALL_ORDER_INVALID&&b.clear()==XR_SUCCESS&&fake.endCalls==endCount+1,"background end cannot repeat");
+  }
+  fake.shouldRender=true;check(b.waitAndBegin()==XR_SUCCESS,"partial scene begins");b.setGeometryReady(true);
+  check(b.submit(vr::Eye_Left,nullptr)==vr::VRCompositorError_None,"scene first eye accepted");
+  auto endCount=fake.endCalls,drawCount=fake.backgroundCalls;
+  check(b.background()==XR_ERROR_CALL_ORDER_INVALID&&fake.endCalls==endCount&&fake.backgroundCalls==drawCount,"background cannot replace partial scene pair");
+  check(b.submit(vr::Eye_Right,nullptr)==vr::VRCompositorError_None&&fake.composeCalls==1,"scene second eye still completes");
+  check(b.waitAndBegin()==XR_SUCCESS,"owner rejection frame begins");b.setGeometryReady(true);endCount=fake.endCalls;
+  XrResult wrong=XR_SUCCESS;std::thread other([&]{wrong=b.background();});other.join();
+  check(wrong==XR_ERROR_CALL_ORDER_INVALID&&fake.endCalls==endCount&&fake.backgroundCalls==drawCount,"wrong thread cannot consume loading frame");
+  check(b.background()==XR_SUCCESS,"owner retains loading frame after rejection");
+  for(auto error:{XR_TIMEOUT_EXPIRED,XR_SESSION_LOSS_PENDING,XR_ERROR_SESSION_LOST}) {
+    Fake failure;SessionState failed;check(start(failed,failure),"background failure fixture");Sink failingSink(failure);FrameBoundary boundary(failed,failingSink);
+    check(boundary.waitAndBegin()==XR_SUCCESS,"background failure wait");boundary.setGeometryReady(true);failure.composeResult=error;
+    check(boundary.background()==error&&failure.backgroundCalls==1&&!failure.captureCalls&&failure.endCalls==(XR_FAILED(error)?0u:1u)&&!failure.lastHadLayers,"background compose failure closes only known-live frame");
+    const auto trace=failure.trace;
+    check(boundary.background()==error&&boundary.waitAndBegin()==error&&failure.trace==trace,"uncertain loading operation never retried");failed.abandonAfterOwnerDestruction();
+  }
+  for(bool malformed:{false,true}) {
+    Fake failure;SessionState failed;check(start(failed,failure),"background end fixture");Sink failingSink(failure);FrameBoundary boundary(failed,failingSink);
+    check(boundary.waitAndBegin()==XR_SUCCESS,"background end wait");boundary.setGeometryReady(true);
+    failure.malformedLayer=malformed;if(!malformed)failure.endResult=XR_ERROR_RUNTIME_FAILURE;
+    check(boundary.background()!=XR_SUCCESS&&failure.endCalls==1&&(!malformed||!failure.lastHadLayers),"background malformed layer or end failure rejected once");
+    check(boundary.clear()!=XR_SUCCESS&&failure.endCalls==1,"failed loading end never repeats");failed.abandonAfterOwnerDestruction();
+  }
+}
 void boundaryFailures() {
   for(unsigned first=0;first<2;++first) {
     Fake fake;SessionState state;check(start(state,fake),"pair fixture starts");Sink sink(fake);FrameBoundary b(state,sink);
@@ -223,6 +293,6 @@ void boundaryFailures() {
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) { std::puts("Would test injected OpenXR frame boundary; no runtime or files."); return 0; }
   if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); blockedRuntimeIntegrationTest(); boundaryFailures();
+  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();
   std::printf("openxr_frame_test: %u checks, %u failures\n", checks, failures); return failures ? 1 : 0;
 }

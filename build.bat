@@ -926,7 +926,7 @@ for %%T in (native stereo) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
         /I"third_party\openxr\include" /Fo"%OBJ%\openxr_native\\" ^
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
-        "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" ^
+        "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
         /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
@@ -941,6 +941,14 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR capture test build failed & exit /b 1 )
 "%BUILD%\openxr_capture_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_capture_test.exe" --self-test || exit /b 1
+
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_skybox_test.exe" ^
+    "tools\openxr_skybox_test\openxr_skybox_test.cpp" "src\openxr\skybox_capture.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: OpenXR skybox capture test build failed & exit /b 1 )
+"%BUILD%\openxr_skybox_test.exe" --dry-run || exit /b 1
+"%BUILD%\openxr_skybox_test.exe" --self-test || exit /b 1
 
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\native_device_test.exe" ^

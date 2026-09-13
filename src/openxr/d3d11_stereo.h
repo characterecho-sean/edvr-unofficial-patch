@@ -11,6 +11,7 @@
 #include <openxr/openxr_platform.h>
 #include <wrl/client.h>
 #include "eye_capture.h"
+#include "skybox_capture.h"
 #include <vector>
 
 namespace edvr::openxr {
@@ -42,6 +43,8 @@ class D3D11Stereo final {
   XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&);
+  XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
+                        XrCompositionLayerProjection&);
   XrResult shutdown();
   int64_t format() const { return format_; }
 
@@ -70,6 +73,10 @@ class D3D11Stereo final {
   Microsoft::WRL::ComPtr<ID3D11PixelShader> blitPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> blitConstants_;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> blitSampler_;
+  Microsoft::WRL::ComPtr<ID3D11VertexShader> skyboxVertexShader_;
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> skyboxPixelShader_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> skyboxConstants_;
+  Microsoft::WRL::ComPtr<ID3D11SamplerState> skyboxSampler_;
   int64_t format_ = 0;
   bool ready_ = false;
   XrResult lastResult_ = XR_SUCCESS;

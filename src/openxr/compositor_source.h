@@ -30,6 +30,13 @@ class CompositorSource {
   // The source reports false if full historical semantics are unavailable.
   virtual bool clearSubmitted(uint64_t generation)=0;
   virtual bool handoff(uint64_t generation)=0;
+  // This boundary currently accepts only the observed six-face form. The
+  // source copies caller textures before returning and retains the override
+  // until replacement, clear or shutdown. All context use is owner serialized.
+  virtual vr::EVRCompositorError setSkybox(uint64_t,const vr::Texture_t*,uint32_t) {
+    return vr::VRCompositorError_InvalidTexture;
+  }
+  virtual bool clearSkybox(uint64_t) { return false; }
   virtual void compositorUnsupported(unsigned slot) noexcept=0;
 };
 } // namespace edvr::openxr

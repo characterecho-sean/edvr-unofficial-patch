@@ -18,6 +18,8 @@
 #include "../../src/openxr/runtime_gate.h"
 #include "../../src/openxr/frame_boundary.h"
 #include "../../src/openxr/eye_capture.h"
+#include "../../src/openxr/skybox_capture.h"
+#include "../../src/openxr/loading_state.h"
 #include "../../src/openxr/openvr_compositor.h"
 #include "../../src/openxr/compositor_publication.h"
 #include "../../src/openxr/space_pose.h"
@@ -126,6 +128,10 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
   EyeCapture captured;
+  SkyboxCapture skybox;
+  LoadingState loading;
+  uint64_t loadingClears=0;
+  uint64_t skyboxSets=0,skyboxClears=0,loadingFrames=0,loadingLayers=0,loadingEmpty=0,loadingToScene=0;
   SeatedSpace seated;ReferenceChanges changes;ResetEvents resetEvents;
   XrSpace frameSpace=XR_NULL_HANDLE;
   uint64_t recenters=0,resetPolls=0,referenceChanges=0;
@@ -216,7 +222,43 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
       serviceStopped=r==XR_SUCCESS;serviceFailed=!serviceStopped;
       geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
       result("service_xrEndSession",r);
+      return;
     }
+    // Only the owner advances loading frames. Queued API work has priority,
+    // and an open game frame is never replaced by background work. Loading
+    // predictions are deliberately not published as GetLastPoses results.
+    if(loading.work(state.frameOpen())!=LoadingWork::None&&state.running()&&!service.pending()) {
+      r=loadingStep();
+      if(r!=XR_SUCCESS){serviceFailed=true;result("loading_frame",r);}
+    }
+  }
+  XrResult loadingStep() {
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen())return XR_ERROR_CALL_ORDER_INVALID;
+    const auto work=loading.work(false);
+    if(work==LoadingWork::None)return XR_ERROR_CALL_ORDER_INVALID;
+    auto r=boundary.waitAndBegin();
+    if(r!=XR_SUCCESS&&r!=XR_FRAME_DISCARDED&&r!=XR_SESSION_LOSS_PENDING)return r;
+    const auto frame=boundary.frame();
+    if(state.terminal())return boundary.clear();
+    if(work==LoadingWork::Empty) {
+      r=boundary.clear();
+      if(r==XR_SUCCESS){loading.emptyCompleted();++loadingClears;++loadingFrames;++loadingEmpty;}
+      return r;
+    }
+    uint64_t applied=0;
+    if(!changes.advance(frame.predictedDisplayTime,applied))return XR_ERROR_TIME_INVALID;
+    if(applied){referenceChanges+=applied;if(!invalidateOrigin())return XR_ERROR_LIMIT_REACHED;}
+    frameSpace=seated.space();
+    GeometryInput located{};
+    r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
+    if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return r;}
+    GeometrySnapshot snapshot{};
+    const bool valid=makeGeometrySnapshot(located,snapshot);
+    frameViews[0]=located.views[0];frameViews[1]=located.views[1];
+    boundary.setGeometryReady(valid);
+    r=boundary.background();
+    if(r==XR_SUCCESS){++loadingFrames;if(valid&&frame.shouldRender)++loadingLayers;else ++loadingEmpty;}
+    return r;
   }
   static void referenceEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
     auto& host=*static_cast<Host*>(context);
@@ -245,6 +287,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     lastCompositorResult=boundary.waitAndBegin();
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
+    loading.sceneWaited();
     const Frame frame=boundary.frame();
     if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
     uint64_t applied=0;
@@ -294,7 +337,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     if(!operation||generation!=compositorGeneration)return vr::VRCompositorError_InvalidTexture;
     const auto r=boundary.submit(eye,texture,bounds,flags);
     lastCompositorResult=boundary.lastResult();
-    if(r==vr::VRCompositorError_None)++compositorSubmits;
+    if(r==vr::VRCompositorError_None){++compositorSubmits;if(loading.sceneSubmitted())++loadingToScene;}
     return r;
   }
   bool clearSubmitted(uint64_t generation) override {
@@ -302,8 +345,27 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return false;
-    boundary.clear();
-    return false; // pending frame closed, but no historical compositor grid
+    if(boundary.clear()!=XR_SUCCESS)return false;
+    loading.sceneCleared();
+    return loading.visible(); // no default historical grid when no override exists
+  }
+  vr::EVRCompositorError setSkybox(uint64_t generation,const vr::Texture_t* textures,uint32_t count) override {
+    if(!service.isOwner()) {
+      auto result=vr::VRCompositorError_InvalidTexture;
+      return service.invoke([&]{result=setSkybox(generation,textures,count);})?result:vr::VRCompositorError_InvalidTexture;
+    }
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed)
+      return vr::VRCompositorError_InvalidTexture;
+    const auto result=skybox.set(textures,count);
+    if(result==vr::VRCompositorError_None){++skyboxSets;loading.overrideSet();}
+    return result;
+  }
+  bool clearSkybox(uint64_t generation) override {
+    if(!service.isOwner()){bool result=false;return service.invoke([&]{result=clearSkybox(generation);})&&result;}
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||!poses.read().connected)return false;
+    skybox.clear();loading.overrideCleared();++skyboxClears;return true;
   }
   bool handoff(uint64_t generation) override {
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=handoff(generation);})&&result;}
@@ -333,6 +395,9 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     const auto r=stereo.renderCaptured(frameViews,frameSpace,captured,layer);
     if(r==XR_SUCCESS)++composedPairs;
     return r;
+  }
+  XrResult composeBackground(XrCompositionLayerProjection& layer) override {
+    return stereo.renderSkybox(frameViews,frameSpace,skybox,layer);
   }
   SystemRead read() const override {return geometry.read();}
   bool locateHead(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,vr::TrackedDevicePose_t& out) override {
@@ -401,7 +466,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     geometry.retire(geometryGeneration);
     poses.retire(compositorGeneration);
     resetEvents.retire(geometryGeneration);changes.clear();
-    captured.shutdown();
+    loading={};skybox.shutdown();captured.shutdown();
     clean=result("destroy_swapchains",stereo.shutdown())&&clean;
     clean=result("destroy_seated_space",seated.shutdown())&&clean;
     // xrDestroySession is allowed in any state once handle users are excluded.
@@ -506,6 +571,7 @@ class Host : public SystemSource, public FrameSink, public CompositorSource, pub
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
     if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes))) return false;
     if(FAILED(captured.initialize(graphics.device())))return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    if(FAILED(skybox.initialize(graphics.device())))return result("skybox_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
     if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
@@ -632,6 +698,50 @@ int run(const Options& options) {
     (unsigned long)initThread,(unsigned long)systemThread,(unsigned long)host.ownerThread);
   liveQueries.store(true,std::memory_order_release);
   const ULONGLONG startup=GetTickCount64(); ULONGLONG started=startup,exitRequested=0;
+  // A copied six-face loading scene runs with no application Wait/Submit.
+  // Destroy and overwrite the caller sources before the timed viewing phase.
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> skySources[6];vr::Texture_t skyTextures[6]{};
+  bool skyCreated=true;
+  if(!backend.owner.invoke([&]{
+    constexpr unsigned side=256;
+    const unsigned colors[6][3]={{35,70,110},{80,35,90},{35,90,65},{95,60,30},{50,65,100},{65,45,35}};
+    std::vector<uint32_t> pixels(side*side);
+    for(unsigned face=0;face<6;++face) {
+      for(unsigned y=0;y<side;++y)for(unsigned x=0;x<side;++x) {
+        const bool line=x%32<2||y%32<2;
+        const bool mark=x>112&&x<144&&y>64&&y<96;
+        unsigned rgb[3]{};for(unsigned c=0;c<3;++c)rgb[c]=mark?210:line?130:colors[face][c];
+        pixels[y*side+x]=0xff000000u|rgb[0]|(rgb[1]<<8)|(rgb[2]<<16);
+      }
+      D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=side;desc.MipLevels=desc.ArraySize=1;
+      desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;
+      desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+      const D3D11_SUBRESOURCE_DATA data{pixels.data(),side*4,0};
+      if(FAILED(host.graphics.device()->CreateTexture2D(&desc,&data,&skySources[face]))){skyCreated=false;break;}
+      skyTextures[face]={skySources[face].Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    }
+  })||!skyCreated||compositor->SetSkyboxOverride(skyTextures,6)!=vr::VRCompositorError_None)return 3;
+  if(!backend.owner.invoke([&]{
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;host.graphics.device()->GetImmediateContext(&context);
+    std::vector<uint32_t> black(256*256,0xff000000u);
+    for(auto& source:skySources){context->UpdateSubresource(source.Get(),0,nullptr,black.data(),256*4,0);source.Reset();}
+  }))return 3;
+  compositor->ClearLastSubmittedFrame();
+  const auto cacheBeforeLoading=host.compositorRead();
+  const auto loadingDeadline=startup+(std::min)(3000ULL,options.seconds*250ULL);
+  std::puts("loading_phase,begin=1,six_faces=1,sources_overwritten_and_released=1");
+  while(GetTickCount64()<loadingDeadline)Sleep(10);
+  bool loadingGate=false;
+  if(!backend.owner.invoke([&]{
+    const auto after=host.compositorRead();
+    loadingGate=!host.serviceFailed&&!host.serviceStopped&&host.loadingLayers>=2&&host.compositorSubmits==0&&
+      host.compositorWaits==host.startupFrames&&after.sequence==cacheBeforeLoading.sequence&&
+      after.renderTime==cacheBeforeLoading.renderTime&&after.gameTime==cacheBeforeLoading.gameTime&&
+      after.posesAvailable==cacheBeforeLoading.posesAvailable;
+    std::printf("loading_phase,completed_frames=%llu,projection_frames=%llu,game_waits=%llu,game_submits=%llu,cache_unchanged=%u\n",
+      (unsigned long long)host.loadingFrames,(unsigned long long)host.loadingLayers,
+      (unsigned long long)host.compositorWaits,(unsigned long long)host.compositorSubmits,unsigned(loadingGate));
+  })||!loadingGate)return 3;
   uint64_t frames=0,layers=0,empty=0,valid=0,invalid=0,headValid=0,cachedChecks=0;
   bool stopped=false, failed=false, bootstrapComplete=false; Lifecycle previous=Lifecycle::Uninitialized;
   auto renderStep=[&] { do {
@@ -721,6 +831,11 @@ int run(const Options& options) {
         }
         submittedLayer=true;
         compositor->PostPresentHandoff();
+        if(!layers) {
+          if(host.loading.visible()||host.loadingToScene!=1){std::puts("error,loading_to_scene");failed=true;break;}
+          compositor->ClearSkyboxOverride();
+          if(host.skybox.ready()||host.skyboxClears!=1){std::puts("error,skybox_clear");failed=true;break;}
+        }
       }
     }
     r=host.closeDiagnosticFrame();
@@ -773,11 +888,15 @@ int run(const Options& options) {
     (unsigned long long)cachedChecks,(unsigned long long)host.validGamePoses);
   std::printf("frame_boundary,copied_eyes=%llu,composed_pairs=%llu,alternate_order=1,lifetime_gate=1\n",
     (unsigned long long)host.copiedEyes,(unsigned long long)host.composedPairs);
+  std::printf("skybox_boundary,sets=%llu,clears=%llu,loading_frames=%llu,loading_layers=%llu,loading_empty=%llu,clear_frames=%llu,to_scene=%llu,private_textures_retired=%u\n",
+    (unsigned long long)host.skyboxSets,(unsigned long long)host.skyboxClears,(unsigned long long)host.loadingFrames,
+    (unsigned long long)host.loadingLayers,(unsigned long long)host.loadingEmpty,(unsigned long long)host.loadingClears,(unsigned long long)host.loadingToScene,unsigned(!host.skybox.ready()));
   std::printf("summary,frames=%llu,stereo=%llu,empty=%llu,valid_views=%llu,invalid_views=%llu,valid_head=%llu,normal_stop=%u,cleanup=%u\n",
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
   const bool passed=!failed && stopped && cleanup && layers && headValid && bootstrapComplete &&host.recenters==2&&host.resetPolls==2&&
-    systemQueries&&validSystemQueries&&host.eventPumps>beforePumps&&
+    systemQueries&&validSystemQueries&&host.eventPumps>beforePumps&&loadingGate&&host.skyboxSets==1&&host.skyboxClears==1&&
+    host.loadingToScene==1&&host.loadingLayers>=2&&host.loadingFrames==host.loadingLayers+host.loadingEmpty&&!host.skybox.ready()&&
     host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
     host.compositorWaits==frames+host.startupFrames&&cachedChecks==frames&&host.compositorHandoffs==layers&&host.validGamePoses;
   std::puts(passed?"native_stereo: PASS":"native_stereo: INCOMPLETE_OR_FAILED");return passed?0:4;

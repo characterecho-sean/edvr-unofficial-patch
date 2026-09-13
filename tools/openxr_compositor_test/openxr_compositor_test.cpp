@@ -34,6 +34,8 @@ struct Fake : CompositorSource {
   CompositorRead state{};
   std::atomic<unsigned> waits{0};unsigned reads=0,sets=0,submits=0,clears=0,handoffs=0,diagnostics[29]{};
   bool setOk=true,clearOk=true,handoffOk=true,wrongGeneration=false;
+  unsigned skySets=0,skyClears=0,seenSkyCount=0;bool skyClearOk=false;
+  vr::EVRCompositorError skyResult=vr::VRCompositorError_InvalidTexture;
   vr::EVRCompositorError waitResult=vr::VRCompositorError_None,submitResult=vr::VRCompositorError_None;
   uint64_t seenGeneration=0;vr::EVREye seenEye=vr::Eye_Left;const vr::Texture_t* seenTexture=nullptr;
   const vr::VRTextureBounds_t* seenBounds=nullptr;vr::EVRSubmitFlags seenFlags=vr::Submit_Default;
@@ -56,6 +58,10 @@ struct Fake : CompositorSource {
   }
   bool clearSubmitted(uint64_t generation) override {++clears;seenGeneration=generation;return clearOk;}
   bool handoff(uint64_t generation) override {++handoffs;seenGeneration=generation;return handoffOk;}
+  vr::EVRCompositorError setSkybox(uint64_t generation,const vr::Texture_t* textures,uint32_t count) override {
+    ++skySets;seenGeneration=generation;seenTexture=textures;seenSkyCount=count;return skyResult;
+  }
+  bool clearSkybox(uint64_t generation) override {++skyClears;seenGeneration=generation;return skyClearOk;}
   void compositorUnsupported(unsigned slot) noexcept override {if(slot<29)++diagnostics[slot];}
 };
 void buffersAndCache() {
@@ -135,6 +141,27 @@ void methods() {
   for(unsigned slot=8;slot<29;++slot)check(f.diagnostics[slot]==1,"each unsupported historical slot diagnosed once");
   f.state.generation=0;check(c->Submit(vr::Eye_Left,&texture)==vr::VRCompositorError_InvalidTexture&&f.submits==submits,"retired source cannot submit");
 }
+void skyboxAbi() {
+  Fake f;OpenVRCompositor object(&f);auto* c=compositorAbiCaller(&object);
+  vr::Texture_t textures[6]{};f.skyResult=vr::VRCompositorError_None;f.skyClearOk=true;
+  check(c->SetSkyboxOverride(textures,6)==vr::VRCompositorError_None&&f.skySets==1&&
+    f.seenGeneration==7&&f.seenSkyCount==6&&f.seenTexture==textures&&!f.diagnostics[12],"six-face ABI dispatch preserves arguments and success");
+  for(auto error:{vr::VRCompositorError_InvalidTexture,vr::VRCompositorError_TextureIsOnWrongDevice,vr::VRCompositorError_TextureUsesUnsupportedFormat}) {
+    f.skyResult=error;check(c->SetSkyboxOverride(textures,6)==error,"skybox capture error preserved");
+  }
+  const auto sets=f.skySets;
+  for(unsigned count:{0u,1u,2u,5u,7u,0xffffffffu})
+    check(c->SetSkyboxOverride(textures,count)==vr::VRCompositorError_InvalidTexture&&f.skySets==sets,"unimplemented count never reaches source");
+  check(c->SetSkyboxOverride(nullptr,6)==vr::VRCompositorError_InvalidTexture&&f.skySets==sets,"null skybox never reaches source");
+  c->ClearSkyboxOverride();check(f.skyClears==1&&f.seenGeneration==7&&!f.diagnostics[13],"clear dispatch uses generation");
+  f.skyClearOk=false;c->ClearSkyboxOverride();c->ClearSkyboxOverride();check(f.skyClears==3&&f.diagnostics[13]==1,"failed clear diagnosed once");
+  for(bool retired:{false,true}) {
+    if(retired)f.state.generation=0;else f.state.connected=false;
+    check(c->SetSkyboxOverride(textures,6)==vr::VRCompositorError_InvalidTexture&&f.skySets==sets,"disconnected or retired skybox rejected");
+    c->ClearSkyboxOverride();check(f.skyClears==3,"disconnected or retired clear not dispatched");
+  }
+  OpenVRCompositor absent(nullptr);check(absent.SetSkyboxOverride(textures,6)==vr::VRCompositorError_InvalidTexture,"absent skybox source rejected");absent.ClearSkyboxOverride();
+}
 void publication() {
   CompositorPublication p;check(!p.begin(vr::ETrackingUniverseOrigin(42)),"invalid initial origin rejected");const auto gen=p.begin();
   check(gen&&!p.begin(),"publication one live generation");auto candidate=p.read();candidate.sequence=1;candidate.posesAvailable=true;candidate.renderPose=pose(3);candidate.gamePose=pose(4);candidate.renderTime=12;candidate.gameTime=15;
@@ -158,5 +185,5 @@ int main(int argc,char** argv) {
   if(argc!=2)return 2;
   if(!std::strcmp(argv[1],"--dry-run")){std::puts("Would test owned compositor ABI and cache; no files or runtime calls.");return 0;}
   if(std::strcmp(argv[1],"--self-test"))return 2;
-  buffersAndCache();methods();publication();blocked();std::printf("openxr_compositor_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
+  buffersAndCache();methods();skyboxAbi();publication();blocked();std::printf("openxr_compositor_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
