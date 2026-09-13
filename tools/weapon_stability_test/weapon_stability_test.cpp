@@ -307,8 +307,87 @@ void aimingTest(){
     const auto* r=reinterpret_cast<const Instance*>(actual.data());
     check(std::fabs(getFloat(r[52],4)-(getFloat(pool[52],4)+camera[275][0]-getFloat(pool[12],4)))<1e-6f,"return to hip fire uses fresh attachment rather than stale ADS data");h.clean();
 }
+void aimingTimingTest(){
+    Harness h;std::vector<Instance> pool(128);float bones[10][3][4]{},camera[276][4]{};
+    camera[270][0]=2;camera[271][1]=3;camera[272][3]=1;camera[273][2]=.025f;
+    for(auto& r:pool)position(r,100,100,100);
+    for(unsigned i:{7u,8u}){bones[i][0][0]=bones[i][1][1]=bones[i][2][2]=1;bones[i][1][3]=-1.7f;}
+    pool[12].words[0]=7;pool[90].words[0]=8;
+    float offset[3]={.015f,.010f,-.075f};
+    h.inputs(pool.data(),unsigned(pool.size()*336),bones,sizeof(bones),camera,sizeof(camera));
+    auto sentinel=h.buffer(nullptr,16,0,D3D11_BIND_CONSTANT_BUFFER);h.ctx->CSSetConstantBuffers(3,1,sentinel.GetAddressOf());
+    auto pose=[&](float x,float z,float extraX,float extraZ){
+        for(unsigned i:{12u,90u})position(pool[i],x,0,z);
+        position(pool[52],x+.12f,.2f,z+.4f); // original animated rigid attachment
+        camera[275][0]=x+offset[0]+extraX;camera[275][1]=offset[1];camera[275][2]=z+offset[2]+extraZ;
+        h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
+        h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();
+    };
+    auto verify=[&](float dx,float dz,const char* label){
+        check(h.run(),"ADS timing draw forwarded");auto result=h.read(g.fixed.Get());auto expected=pool;
+        if(dx || dz)for(unsigned i:{12u,90u,52u}){setFloat(expected[i],4,getFloat(expected[i],4)+dx);setFloat(expected[i],6,getFloat(expected[i],6)+dz);}
+        const auto* a=reinterpret_cast<const Instance*>(result.data());
+        bool correct=true;for(unsigned i=0;i<pool.size();++i)for(unsigned w=0;w<84;++w){
+            if((dx||dz) && (i==12 || i==90 || i==52) && (w==4 || w==6))correct&=std::fabs(getFloat(a[i],w)-getFloat(expected[i],w))<1e-6f;
+            else correct&=a[i].words[w]==expected[i].words[w];
+        }
+        check(correct,label);
+        auto original=h.read(h.pool.Get());check(!memcmp(original.data(),pool.data(),original.size()),"ADS timing never edits the original pool");
+        ComPtr<ID3D11Buffer> restored;h.ctx->CSGetConstantBuffers(3,1,&restored);check(restored.Get()==sentinel.Get(),"ADS sample constant slot restored");
+        const auto before=motionDraws;testVs=0x025B4B9FF54622EDull;check(h.run() && motionDraws==before+1,"reticle shares timing correction and temporal forwarding");
+        auto reticle=h.read(g.fixed.Get());check(reticle==result,"optic and mesh see identical corrected geometry");
+    };
+    auto next=[&](){weaponStabilityFrameBoundary(h.ctx.Get());};
+    pose(0,0,0,0);verify(0,0,"first ADS sample preserves aim");
+    for(unsigned i=0;i<8;++i){pose(0,0,0,0);check(h.run(),"same-frame rewrites forwarded");}
+    auto state=h.read(g.anchor.Get());check(reinterpret_cast<float*>(state.data())[(3+(g.frame&1)*8+2)*4+3]==1,"multiple materials/rewrites cannot manufacture synchronized frames");
+    next();pose(.04f,0,0,0);verify(0,0,"second synchronized sample preserves aim");
+    next();pose(.08f,0,0,0);verify(0,0,"third synchronized sample establishes this sight offset");
+    next();pose(.12f,0,.04f,0);verify(.04f,0,"strafe overshoot removes timing error only, preserving full ADS offset");
+    // Effects use the same anchor even if their own camera write refreshes it.
+    float emitter[13][4]{};for(unsigned i=0;i<3;++i){emitter[9+i][i]=1;emitter[9+i][3]=getFloat(pool[52],4+i)-camera[275][i];}
+    auto model=h.buffer(emitter,sizeof(emitter),0,D3D11_BIND_CONSTANT_BUFFER);h.ctx->VSSetConstantBuffers(0,1,model.GetAddressOf());
+    auto beforeEffect=h.read(g.anchor.Get());
+    testVs=0x9AEC596A2B036EA6ull;testPs=0x3789CA2062E196FBull;weaponStabilityResourceWritten(h.camera.Get());check(h.run(),"ADS emitter with exact part match forwarded");
+    auto er=h.read(g.emitterCb.Get());const auto* ef=reinterpret_cast<const float*>(er.data());check(std::fabs(ef[39]-emitter[9][3]-.04f)<1e-6,"ADS emitter follows timing correction without full aim-offset removal");
+    auto afterEffect=h.read(g.anchor.Get());check(!memcmp(afterEffect.data()+48,beforeEffect.data()+48,beforeEffect.size()-48),"effect passes cannot replace the mesh timing samples");
+    next();pose(.16f,0,0,0);verify(0,0,"camera repeat catches up without an opposite correction");
+    next();pose(.16f,.04f,0,0);verify(0,0,"change from strafing to forward translation keeps original pose");
+    next();pose(.16f,.08f,0,.04f);verify(0,.04f,"forward overshoot retains sight alignment");
+    next();pose(.16f,.12f,0,0);verify(0,0,"forward repeat catches up cleanly");
+    next();pose(.16f,.12f,0,.04f);verify(0,.04f,"camera advance with repeated arms uses verified preceding locomotion");
+    next();pose(.16f,.16f,0,0);verify(0,0,"repeated arms catch up cleanly");
+    next();pose(.16f,.12f,0,0);verify(0,0,"backward movement establishes original pose");
+    next();pose(.16f,.08f,0,-.04f);verify(0,-.04f,"backward overshoot retains the same sight offset");
+    next();pose(.16f,.04f,0,0);verify(0,0,"backward camera repeat catches up");
+    next();pose(.16f,.08f,0,0);verify(0,0,"resume forward walking");
+    next();pose(.16f,.12f,0,0);verify(0,0,"stable forward pose after direction change");
+    next();offset[0]+=.02f;pose(.16f,.12f,0,0);verify(0,0,"intentional stationary aiming offset change stays original");
+    next();pose(.20f,.12f,0,0);verify(0,0,"changed sight calibration needs synchronized samples");
+    next();pose(.24f,.12f,0,0);verify(0,0,"new offset establishes without smoothing");
+    next();camera[270][0]=3;pose(.28f,.12f,.04f,0);verify(0,0,"scope/FOV transition discards calibration");
+    next();pose(.32f,.12f,0,0);verify(0,0,"scope reacquires original pose");
+    next();pose(.36f,.12f,0,0);verify(0,0,"scope second sample");
+    next();pose(.40f,.12f,0,0);verify(0,0,"scope calibrated");
+    next();float angle=.02f;camera[270][0]=3*std::cos(angle);camera[272][0]=-3*std::sin(angle);camera[270][3]=std::sin(angle);camera[272][3]=std::cos(angle);
+    pose(.44f,.12f,.04f,0);verify(0,0,"mouse rotation/recoil is not mistaken for translation overshoot");
+    camera[270][0]=3;camera[272][0]=camera[270][3]=0;camera[272][3]=1;
+    for(unsigned i=0;i<3;++i){next();pose(.48f+.04f*i,.12f,0,0);verify(0,0,"steady aim reacquires after rotation");}
+    next();testEnabled=false;weaponStabilityConfigure(Config::get());testEnabled=true;weaponStabilityConfigure(Config::get());
+    pose(.60f,.12f,.04f,0);verify(0,0,"live toggle discards pre-toggle calibration");
+    for(unsigned i=0;i<3;++i){next();pose(.64f+.04f*i,.12f,0,0);verify(0,0,"calibration after toggle");}
+    next();pool[90].words[0]=7;pose(.76f,.12f,.04f,0);verify(0,0,"missing independent arm root rejects correction");pool[90].words[0]=8;
+    for(unsigned i=0;i<3;++i){next();pose(.80f+.04f*i,.12f,0,0);verify(0,0,"reacquire after missing paired root");}
+    next();weaponStabilityResourceWritten(nullptr);pose(.92f,.12f,.04f,0);verify(0,0,"unknown command-list writes invalidate calibration epoch");
+    for(unsigned i=0;i<3;++i){next();pose(.96f+.04f*i,.12f,0,0);verify(0,0,"reacquire after unknown writes");}
+    next();next();pose(.80f,.12f,.04f,0);verify(0,0,"missing source frame cannot reuse ADS history");
+    next();camera[273][2]=.0675f;pose(.84f,.12f,0,0);
+    check(h.run(),"hip-fire reentry forwarded");auto hip=h.read(g.anchor.Get());const auto* ha=reinterpret_cast<const float*>(hip.data());
+    check(ha[3]==1 && std::fabs(ha[0]-offset[0])<1e-6 && std::fabs(ha[1]-offset[1])<1e-6 && std::fabs(ha[2]-offset[2])<1e-6,"hip-fire reentry retains direct attachment correction");
+    h.clean();
+}
 int main(int argc,char** argv){
-    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();}
+    if(argc==2 && !strcmp(argv[1],"--self-test")){selfTest();emitterTest();lightTest();aimingTest();aimingTimingTest();}
     else if(argc==3 && !strcmp(argv[1],"--capture"))capture(argv[2]);
     else {std::puts("Usage: weapon_stability_test --self-test | --capture DIR");return 2;}
     std::printf("PASS: weapon stability (%u checks)\n",checks);return 0;

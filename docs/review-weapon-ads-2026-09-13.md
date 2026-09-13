@@ -134,3 +134,100 @@ DLL passes the NVIDIA smoke test, including DLSS motion conventions.
 Local source images, original-shader exports and replay outputs are in
 `build/review_motion/sep13/weapon_ads/`; game assets stay out of source
 control.
+
+## ADS movement after preserving aim
+
+The user confirms e2b8939 fixes pistol ADS alignment, but strafing and
+forward walking now judder during ADS. Steam flight
+`edvr_gfx_20260913_063841.log` verifies `v0.16.1-3-ge2b8939`, linked
+12:34:58 UTC. Captures 064206 and 064215 use the original source pose at
+near 0.025, as the new diagnostic explicitly reports. The run uses
+OpenVR, preset K, 2774x2740 input and 4268x4216 output; source colour is
+5120x2880. Each capture retains 19 source frames and 57 buffers, with no
+buffer declines. The first weapon draw owns each pool copy.
+
+Confirmed: this is still camera/attachment update disagreement. In
+064206 frame 20400, camera translation advances by (41.530, 58.662,
+28.243) mm while the arms advance (16.891, 23.940, 11.501) mm. The
+camera then repeats while the arms catch up. The stable camera-to-arms
+offset is approximately (0.571, 9.439, -75.085) mm in camera axes; its
+right component jumps to -45.174 mm on that frame. In 064215,
+forward-camera offsets jump by 38 and 121 mm before returning to the
+same aiming offset. The first capture contains another normal-play jump
+after the initial capture stall; do not attribute the initial stalls
+themselves to normal performance.
+
+Ruled out: re-enabling the original ADS translation, because it would
+remove the verified intentional aiming offset again. A separate earlier
+aiming/crouching capture, 060857, has a substantially different offset
+(about +130 mm forward); no fixed pistol calibration can cover both. The
+Off/On controls 062231/062257 also contain small intentional pose
+changes during mouse movement, so simply holding every observed offset
+constant is not a valid correction.
+
+The correction learns an offset after three consecutive synchronized ADS
+samples. It corrects translation overshoots only while camera
+orientation/projection remain unchanged and camera/attachment motion
+agree in direction. A repeated arms origin requires preceding measured
+locomotion. The error must equal the disagreement between their steps,
+including any preceding correction; at most two consecutive overshoots
+are corrected. Unrecognized changes, projection transitions, missing
+history and discontinuities retain the game pose and reacquire
+synchronization. This is deliberately conservative during changing aim.
+
+Two eight-row GPU samples extend the anchor from 48 to 304 bytes. Each
+draw reads only the preceding frame's sample, preventing multiple
+materials or same-frame buffer rewrites from training the offset twice.
+Effects can refresh their correction but cannot write timing samples.
+Unknown command-list writes and live toggles invalidate a sample epoch.
+The existing two compute dispatches and 48-byte asynchronous diagnostic
+readback remain; the frame/epoch input is one 16-byte constant buffer.
+No CPU geometry readback, weapon-specific calibration, image smoothing,
+new settings, or compositor/reprojection changes are involved.
+
+The expanded WARP test passes 1,962 checks, including forward/backward
+and strafing overshoots, camera/arms repeats, sight/FOV and mouse
+changes, scope reacquisition, same-frame rewrites, effect attachment,
+source gaps, missing paired roots, live toggles, command-list
+invalidation, and state restoration. The captured sequence replay passes
+with clean D3D debug validation. All 76 frames in
+060418/060857/062231/062257 remain byte-identical, including the earlier
+mouse and crouching controls.
+
+Starting without prior history, the replay corrects the normal-play
+20400 jump by (24.638, 34.722, 16.742) mm after establishing the offset
+from earlier synchronized frames. The forward capture begins on its bad
+frames and cannot supply their missing prehistory. Separate explicit
+warm-state tests prepend three synthetic synchronized samples using the
+capture's measured offset and motion. Those correct both forward jumps,
+and the initial strafing jump, against independently computed expected
+pools. These prefix samples are not represented as captured frames. A
+fresh ADS entry may therefore briefly retain stock judder until
+synchronization is established; live headset confirmation is still
+required.
+
+The full absolute-path worktree build and NVIDIA smoke test pass. The
+newer main-branch planet-motion changes are retained for the combined
+test build; the weapon changes do not alter those paths.
+
+## Turbo mode comparison
+
+The user suggested an on-foot equivalent of OpenXR Toolkit Turbo mode.
+The upstream [frame
+implementation](https://github.com/mbucchia/OpenXR-Toolkit/blob/main/XR_APILAYER_MBUCCHIA_toolkit/layer.cpp)
+starts the next `xrWaitFrame` asynchronously after submission, returns
+an estimated display time without waiting when necessary, and
+synchronizes again before `xrEndFrame`. It allows one frame of
+pipelining and defers the real `xrBeginFrame`. Changing that scheduling
+could avoid the observed update disagreement, but this is an inference,
+not a verified Elite result from these dumps.
+
+The upstream [menu
+code](https://github.com/mbucchia/OpenXR-Toolkit/blob/main/XR_APILAYER_MBUCCHIA_toolkit/menu.cpp)
+warns that Turbo can prevent motion reprojection, Oculus ASW, or SteamVR
+motion smoothing. EDVR currently forwards OpenVR `WaitGetPoses` and
+`Submit`; an equivalent needs a separate scheduling implementation and
+runtime-specific validation. On-foot gating is possible, but it does not
+remove that compatibility issue. The user chose to preserve reprojection
+and finish the targeted ADS correction. No Turbo code is included in
+this change.
