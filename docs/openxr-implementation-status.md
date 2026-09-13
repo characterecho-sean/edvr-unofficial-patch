@@ -11,9 +11,16 @@ children, CPU lifetime/activity tests and existing regressions; all 471 source
 hashes were unchanged. Both shipping proxies are installed and hash-verified in
 Frontier with the live INI and original runtime preserved. Native teardown is
 unchanged: these observations do not establish general immediate-context
-quiescence or qualify cleanup from another caller. The next Frontier
-Pimax-through-SteamVR flight will supply that missing lifetime evidence; native
-game export/launch integration remains open.
+quiescence or qualify cleanup from another caller. The `2f051db` Frontier
+flight verified the live caller outside Present case: original render thread
+19820 remained alive at both shutdown snapshots, with no active Present and
+unchanged balanced counts of 5,785. There were zero service-point samples
+during the 51.4957 ms forwarded shutdown; the last Present had exited 0.3060 ms
+before it began. Runtime shutdown returned and the game process was absent
+afterward; visual/exit confirmation is pending. This rules out an
+already-exited render caller or a held owned Present in that window. Native
+game export/launch integration still needs a shutdown contract that can handle
+a live caller after Present service stops.
 
 The [shutdown progress checkpoint](openxr-shutdown-progress-2026-09-13.md) adds
 a separate, passive observation window to the shipping OpenVR census. It counts

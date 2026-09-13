@@ -122,8 +122,8 @@ The live INI is byte-unchanged at
 `9aea022b28529565735ac1ad2403ca4ac9dbcd886ffb0df658969ba7d2bb8f54`, retaining
 `fix.intro_video = skip` and enabled census logging. The VR-subdirectory INI
 remains absent and the original OpenVR runtime is unchanged. The archive
-includes the preflight configuration snapshot and install receipt. The Frontier
-flight is pending.
+includes the preflight configuration snapshot and install receipt. The
+completed Frontier flight is recorded below.
 
 Use the established Frontier installation with Pimax through SteamVR. Run a
 short normal session and exit normally; no standalone grid/triangle test is
@@ -132,9 +132,71 @@ version before interpreting shutdown. Record the user's visual/exit result, the
 paired measured summary and begin/end render records, installed hashes and any
 configuration changes.
 
+## Frontier result
+
+The user reported "Ran it" for the `2f051db` installation. Visual/tracking and
+crash-free exit confirmation was requested separately and is pending; it is not
+inferred from that report. Both installed DLL hashes still match the qualified
+binaries. `tools/edvr_log.py --expect-build 00df52c` independently verified
+`edvr_gfx_20260913_140138.log` and `edvr_vr_20260913_140139.log` against the
+precommit build. The postflight process snapshot contains no
+`EliteDangerous64.exe`.
+
+Call 10 on System thread 35024 has matching `VR_ShutdownInternal` begin/end
+records. The forwarded interval is QPC `3942454444706 .. 3942454959663`,
+enclosed by observation interval `3942454444705 .. 3942454959677`. At
+10,000,000 Hz these are 51.4957 ms and 51.4972 ms. The observer reports
+`status=measured reason=none samples=0`, with zero sample timestamps/thread IDs
+and clear mixed-thread/saturation flags.
+
+Both render snapshots identify the original caller as thread 19820,
+`owner_state=alive`, with zero owner error, owner change and invalid activity.
+Both have `active_present=0` and identical `entries=5785 exits=5785`. The last
+Present entered at QPC 3942454440958, reached the callback service point at
+3942454441645 and exited at 3942454441646, just 0.3060 ms before forwarding
+shutdown. No owned hooked Present was active at either endpoint, and none
+entered or exited during the observation window.
+
+Ruled out: the original observed render caller having already terminated, or an
+owned hooked Present being in progress, during this measured forwarded shutdown
+window. The retained handle was alive at both snapshots and the valid activity
+counts remained balanced and unchanged. This is the live caller outside Present
+case. It does not establish what that caller was doing outside the hook,
+whether another thread used the immediate context, or whether a longer native
+shutdown would receive another Present.
+
+The final graphics timing report has 2,537 valid render-to-submit samples and
+zero invalid samples on thread 19820; those session counters do not establish
+graphics inactivity at shutdown. The live INI is byte-unchanged, the
+VR-subdirectory INI remains absent and the original OpenVR runtime is
+preserved. All 471 source hashes and the qualified binary hashes still match.
+Byte-exact paired logs, parsed QPC/activity evidence, the postflight INI and
+process snapshot are archived in
+`build/frontier-shutdown-lifetime-20260913/flight-20260913-140138/`.
+
+## Consequence for native teardown
+
 Native teardown still first queues a GPU drain and then a callback-held cleanup
 request on the Present caller. Zero progress can prevent either request from
 being serviced. The new observations will guide a safe contract for stopped
 application rendering; they do not authorize direct cleanup on the System
 caller or replace the previously qualified callback-held path. Native Frontier
 export/launch integration remains open.
+
+The current paired APIs do not supply the missing exclusion:
+`src/common/render_boundary.h` explicitly requires the host to serialize
+context use, and closing its lease only prevents new callbacks.
+`NativeGraphicsClient` publishes references without granting exclusive context
+ownership. `PresentQuiescence` requires the application's render loop to
+acknowledge a permanent stop; the Frontier hook cannot manufacture that
+acknowledgement from an empty observation window.
+
+The next desktop case should keep the application render caller alive outside
+Present while a separate System caller requests native shutdown. It must
+exercise the first queued GPU drain as well as final cleanup, and check
+cancellation, retained-resource lifetime and a later resumed Present before
+claiming a safe fallback. The existing CPU `renderShutdownDeadline` test only
+covers the final callback helper. Any cleanup extension still needs an explicit
+guarantee against concurrent or subsequent application context use; a
+thread-state snapshot, a longer timeout or callback closure alone does not
+provide it.
