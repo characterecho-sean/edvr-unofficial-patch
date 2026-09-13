@@ -12,10 +12,14 @@ seconds after launch, after the grid interval had expired. The revised test
 waits for sustained runtime focus before timing and recentering, replays an
 interrupted grid and pauses scene timing during focus loss. The full build
 passed, including 66 DLL/scene/timing checks and 168 Present/discovery checks.
-The revised visual gate remains pending; runtime focus alone does not prove
-physical display wake. The DLL is staged outside the installer payload; full
-legacy export policy, native Frontier startup selection and feature integration
-remain open.
+The `7ec4f85` focused native DLL gate passed with 314 loading projections,
+1,530 stereo pairs and session binding shutdown in 16 ms inside the final
+callback. The user confirmed the grid and triangle in both eyes, normal
+appearance and tracking, and closure without headlock. Focus was already true
+at the first sample, so delayed physical wake and focus-loss replay remain
+desktop-tested only; runtime focus alone does not prove physical display wake.
+The DLL is staged outside the installer payload; full legacy export policy,
+native Frontier startup selection and feature integration remain open.
 
 The preceding [startup-discovery
 checkpoint](openxr-native-discovery-2026-09-13.md) obtains the graphics proxy's

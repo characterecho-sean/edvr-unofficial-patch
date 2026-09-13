@@ -6,7 +6,9 @@ backend behind a separately loaded DLL and exercises it from an application
 that uses the historical OpenVR ABI. The full desktop build passed. Its first
 native DLL headset gate failed visual inspection despite passing counters: the
 user saw a grey void without the loading grid, followed by a triangle at the
-end.
+end. After correcting the fixture's viewing timer, the `7ec4f85` focused native
+DLL run passed: the user confirmed the grid and triangle in both eyes, normal
+tracking, color and clarity, and clean closure without headlock.
 
 ## Module boundary
 
@@ -112,7 +114,7 @@ application executable is
 graphics proxy is
 `a07edbf940d97f440c8fa3fdbc950c9beed6cd0e97ad8dcd04e183a022f2152f`.
 
-## First native run and unresolved visual failure
+## First native run and visual failure
 
 The `0424065` native DLL run on September 13 used Pimax OpenXR 0.1.0 and the
 recorded binaries. The child ran from 16:31:38.417116 to 16:31:59.788671 UTC,
@@ -169,8 +171,8 @@ watchdog remains an additional bound. Phase and focus transitions, recenter
 success and first stereo pair now carry elapsed timestamps. This prevents
 logical readiness delays from silently consuming the observation period;
 runtime focus is not independent proof that the headset display is physically
-awake. The next flight must correlate these timestamps with the Pimax server
-log if the display remains late.
+awake. Any recurrence of late display output requires correlating these
+timestamps with the Pimax server log.
 
 Luna supplied the initial timing helper. Parent review corrected paused-time
 accounting, zero-timestamp handling, short-duration budgets and explicit
@@ -189,18 +191,41 @@ application executable SHA256 is
 is `a819088fad5911474bd7121401d2aa2c429dfc5b49a9c158f655b046184d6213`, and
 graphics proxy is
 `cf688cb6ff5f1205c574c67dc1e4ff6ca922bc6a42919a340985077f018d21c7`. The
-failed-run archive retains the preceding exact binaries and evidence. No new
-native flight has run for this correction.
+failed-run archive retains the preceding exact binaries and evidence.
 
-## Next gate and remaining integration
+## Passed focused native DLL run
 
-The next gate is a 20-second native Pimax run through the new DLL: grid in both
-eyes, upright and world-fixed during head movement, transition to the triangle,
-correct color and clarity, then normal closure without an end-of-run headlock.
-Require fresh user readiness and no game, SteamVR or other native diagnostic in
-preflight. Verify the exact recorded inputs and binaries before and after the
-run, and inspect the module summary and shutdown stages before recording
-success.
+The `7ec4f85` repeat on September 13 used Pimax OpenXR 0.1.0, a Pimax Crystal
+Super and an RTX 5090, with runtime eye targets of 5424 by 5356 pixels. The
+child ran from 16:58:27.629930 to 16:58:48.854748 UTC, exited 0 in 21.219
+seconds and did not trigger its 60-second watchdog. Runtime focus was true at
+the first sample. The grid and checked recenter began at 500 ms, the triangle
+at 3,500 ms, and viewing completed at 20,500 ms. The matching Pimax server
+excerpt showed normal delivery near 90 FPS throughout viewing, without a
+standby transition.
+
+The module reported 314 loading projections, 1,530 stereo pairs, 3,060 eye
+copies, 1,530 matching pose-cache checks, 1,850 callbacks and zero invalid
+render poses. All nine host shutdown stages completed successfully. Session
+binding shutdown took 16 ms inside the final callback; owner join, callback
+retirement and cleanup completed, with no retained generation. Init, render, XR
+owner and Shutdown used distinct callers.
+
+All 469 recorded hashes matched before and after the run. Neither process
+snapshot contained an excluded game, SteamVR or native diagnostic process;
+these snapshots do not monitor transient processes. Exact binaries, the
+receipt, output, snapshots, validation, qualification and matching Pimax logs
+are archived locally in `build/openxr-native-20260913-105827/`.
+
+The user answered "Yes—all looked normal" to the full visual check: grid
+followed by triangle in both eyes, upright and fixed in space during head
+movement, normal color and clarity, and normal closure without headlock. This
+passes the focused native DLL startup, viewing, submission and callback-held
+cleanup gate. Focus was already true at startup, so delayed physical wake and
+focus-loss replay remain desktop-tested only; this run does not establish their
+behavior on hardware.
+
+## Remaining integration
 
 This DLL is deliberately not named `openvr_api.dll` and is absent from
 installer payload selection. It is not the complete 14-name legacy export
