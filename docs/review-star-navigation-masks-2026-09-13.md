@@ -15,6 +15,24 @@ headset details. Do not attribute the reporter's configuration or build
 from the preceding local hangar flight. The code reviewed is d3e3faf;
 the subsequently fetched main changes are outside these rendering paths.
 
+Follow-up from the user: the reporter confirms that the mask disappears
+with EDVR AA Off. Whether the enabled mode is DLSS, native TAA or both
+is not yet confirmed. This result was relayed in the working thread; the
+public issue still has no additional comments or capture attachments.
+
+Ruled out: AA-independent stellar-glow masking alone explains the
+reported defect, because the reporter's AA-Off comparison removes it.
+The existence of the captured alpha-masking shader below is therefore
+not sufficient reason to change the star-glare implementation.
+
+AA Off disables both temporal reconstruction and its private UI
+coverage: `uiDepthConfigure` sets `g_on = g_keyOn && g_passOn`.
+Consequently this comparison still permits either a reconstruction
+artifact or an earlier AA-enabled draw/state interaction. It does not
+establish a DLSS-model fault or a post-DLSS-resolve fault. Native TAA
+has no post-DLSS resolve; a confirmed native-TAA reproduction would
+exclude that specific pass.
+
 ## Candidates and distinguishing evidence
 
 1. Game/UI compositing or stellar-glow masking before temporal AA. A
@@ -77,14 +95,15 @@ Fresh builds of the current production-code regressions pass:
 - Stellar motion: 94 synthetic checks. This invocation has no captured
   orbital replay pairs; it does not reproduce the issue screenshot.
 
-No production rendering change is justified yet. The smallest useful
-test is the same view with the navigation graphic over the glow, first
-with the current AA setting and then EDVR AA Off. Capture paired eyes
-and the corresponding log/settings. If the mask remains with AA Off,
-compare Sun glare Stock in the same view. These live controls need no
-new diagnostic build or manual INI edits. Keep navigation graphics
-visible during the comparisons so removing the marker is not mistaken
-for repairing its compositing.
+No production rendering change is justified yet. The AA-Off comparison
+is complete. The next useful evidence is an AA-enabled paired eye dump
+with the mask visible and the corresponding log/settings. If its raw
+crop is clean, inspect the temporal UI/depth/motion inputs and final
+reconstruction. If the raw crop already has the mask, inspect AA-enabled
+draws and their restoration before the later glow/compositing passes. No
+new diagnostic build or manual INI edits are needed for that split. Keep
+navigation graphics visible during capture so removing the marker is not
+mistaken for repairing its compositing.
 
 The existing paired capture's raw/treated crops and UI/depth inputs can
 separate these branches. Broad off-centre regions may lie outside the
