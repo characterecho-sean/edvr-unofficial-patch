@@ -65,6 +65,7 @@
 #include "celestial_motion.h"
 #include "mesh_motion.h"
 #include "intro_panel.h"
+#include "intro_skip.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
@@ -1763,6 +1764,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
                 info.isTexture2D) {
                 introPanelNoteFill(info.a, info.b);
+                // And the skip's witness: with fix.intro_video = skip this
+                // fill is the movie playing despite the refusal.
+                introSkipNoteMovieDrew();
             }
         }
         // The menu backdrop (backdrop_fix.h), in the OFFSCREEN branch because
@@ -4168,6 +4172,7 @@ void vScreenRefreshConfig() {
     splashDimConfigure(cfg);
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
+    introSkipConfigure(cfg);
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
@@ -4370,6 +4375,9 @@ void vScreenFrameBoundary() {
         if (g_state->eyeDrawsLastFrame >= kSceneEyeDraws) announceSceneArrived();
         introPanelTick(g_state->ownerCtx,
                        g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
+        // The same boundary closes the skip's verdict: refused, drawn, or
+        // neither, said once when the scene arrives.
+        introSkipTick(g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
         // The scene flag retires the loader fix when the intro ends: the
         // same boundary the draw hook gates on, read at the frame edge.
         loaderPanelTick(g_state->ownerCtx,
@@ -5299,6 +5307,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     splashDimConfigure(cfg);
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
+    introSkipConfigure(cfg);
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
@@ -5643,6 +5652,7 @@ void shutdownVScreenFixes() {
     // menu -- freed nothing at all.
     introPanelShutdown();
     introUpscaleShutdown();
+    introSkipShutdown();
     supersamplePassShutdown();
     temporalPassShutdown();
     depthProbeShutdown();

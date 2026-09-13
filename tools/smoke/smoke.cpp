@@ -841,6 +841,32 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The intro skip's desk half (intro_skip.h): the path predicate against
+    // the shapes the game could hand it, and the refusal through the hook
+    // bodies. A wrong predicate would not crash a flight, it would waste
+    // one: the log would say "no ident was asked for" and mean nothing.
+    {
+        typedef unsigned (*PFN_IntroSkip)();
+        PFN_IntroSkip introSkip =
+            reinterpret_cast<PFN_IntroSkip>(GetProcAddress(mod, "edvrIntroSkipSelftest"));
+        if (!introSkip) {
+            printf("  FAIL  edvrIntroSkipSelftest is not exported\n");
+            rc = 1;
+        } else {
+            const unsigned bits = introSkip();
+            if (bits == 3u) {
+                printf("  ok    intro skip: idents under Movies\\ are told apart from the "
+                       "front end's loops and from everything else, in either separator "
+                       "and case; an armed hook answers 'file not found' and a disarmed "
+                       "one refuses nothing\n");
+            } else {
+                printf("  FAIL  intro skip self-test returned %u (want 3: 1 predicate, 2 "
+                       "refusal)\n", bits);
+                rc = 1;
+            }
+        }
+    }
+
     // The depth probe's read path (depth_probe.h): a depth texture of the
     // game's own family, cleared through its depth view, read back through
     // a shader view and through a copy. The fourth flight read zeros from

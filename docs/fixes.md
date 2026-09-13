@@ -201,7 +201,10 @@ the splash after it covers, so the cut between them just works — resampled fir
 with AMD's FSR so the magnification does not read as pixelation. How sharp it
 can get is your on-foot screen resolution above. The world anchor needs
 `openvr_api.dll`; without it the movie stays head-locked and the log says so.
-`fix.intro_video = screen`. *[intro-video.md](intro-video.md).*
+`skip` does not play it at all: the game's open of the ident file is answered
+"not found", the answer renaming the file gives, so it goes straight to the
+splash and nothing on disk is touched. `fix.intro_video = screen`.
+*[intro-video.md](intro-video.md).*
 
 **The banding behind the intro and the menu.** That backdrop is stored in an old
 compressed format and is very dark, so its gradients come out stepped —

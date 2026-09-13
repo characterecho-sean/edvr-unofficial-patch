@@ -328,6 +328,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\quad_probe.cpp" ^
     "src\d3d11\intro_probe.cpp" ^
     "src\d3d11\intro_panel.cpp" ^
+    "src\d3d11\intro_skip.cpp" ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\supersample_pass.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
