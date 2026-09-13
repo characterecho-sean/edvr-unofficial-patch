@@ -247,7 +247,11 @@ void introSkipConfigure(Config& cfg) {
 
 void introSkipNoteMovieDrew() {
     g_movieDrew.fetch_add(1, std::memory_order_relaxed);
-    if (!g_armed.load(std::memory_order_relaxed) || g_drewSaid) return;
+    // Once the scene has arrived the verdict is in, and a movie-shaped fill
+    // after it is not the ident: the front end's own loops (FrontEnd*.webm)
+    // ride the same composite, and the 10:09 flight of 2026-09-13 printed
+    // "DRAWING anyway" 0.6 s after WORKED on exactly that. Counted, not said.
+    if (!g_armed.load(std::memory_order_relaxed) || g_drewSaid || g_verdictSaid) return;
     g_drewSaid = true;
     const uint32_t refused = g_refused.load(std::memory_order_relaxed);
     if (refused == 0) {
