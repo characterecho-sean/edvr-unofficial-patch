@@ -122,6 +122,9 @@ int main(int argc, char** argv) {
     expectStr("fix.temporal_aa_model", "k", "DLSS preset ships as K on the Performance page");
     expectStr("experimental.supersample_resolve", "off", "experimental supersample resolve ships off");
     expectStr("experimental.supersample_filter", "calm", "supersample kernel lives under experimental");
+    expectBool("fix.night_vision_stability", true, "night vision pulse stability remains a standard enabled fix");
+    expectBool("experimental.night_vision_realistic", false, "Realistic nightvision ships disabled under Experimental");
+    expectFloat("experimental.night_vision_brightness", 8.0f, "night vision appearance brightness lives under Experimental");
     expectStr("fix.ui_depth", "<unset>", "UI depth is bundled with temporal AA");
     expectStr("fix.temporal_aa_objects", "<unset>", "station motion is bundled with temporal AA");
     expectStr("fix.temporal_aa_smoke", "<unset>", "smoke depth is bundled with temporal AA");

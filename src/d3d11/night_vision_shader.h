@@ -3,8 +3,9 @@
 // depth, normals, exposure, mask, geometry and constants. The fixed path
 // outlines depth geometry and gently brightens the existing surface texture,
 // without a colour fill or fine normal-map outlines. It corrects pulse distance.
-// EDVR_NIGHT_STOCK is a test-only reference; the live Off setting binds
-// the game's original shader. See review-planet-performance-2026-09-11.md.
+// Pulse stability and the experimental appearance compile independently.
+// EDVR_NIGHT_STOCK disables both for the test-only original reference.
+// Both live settings Off binds the game's original shader.
 namespace edvr {
 // A compact classification surface avoids simultaneous stencil sampling
 // and writing on the original DSV. No scene copy or CPU readback.
@@ -30,6 +31,12 @@ SamplerState Linear:register(s0);
 SamplerState Point:register(s1);
 #ifndef EDVR_NIGHT_STOCK
 #define EDVR_NIGHT_STOCK 0
+#endif
+#ifndef EDVR_NIGHT_REALISTIC
+#define EDVR_NIGHT_REALISTIC (!EDVR_NIGHT_STOCK)
+#endif
+#ifndef EDVR_NIGHT_PULSE_STABLE
+#define EDVR_NIGHT_PULSE_STABLE (!EDVR_NIGHT_STOCK)
 #endif
 float2 quantize(float2 uv){
     float cell=max(floor(n[5].y),1);if(frac(cell*.5)>0)cell+=1;
@@ -84,7 +91,7 @@ float grid(float2 uv,float4 setting,float fade){
     float2 f=abs(frac(p-.5)-.5)/(abs(ddx_coarse(p))+abs(ddy_coarse(p)));
     return (min(min(f.x,f.y)*setting.w,1)<=.5?1:0)*(fade+setting.x)*setting.y;
 }
-#if EDVR_NIGHT_STOCK
+#if !EDVR_NIGHT_REALISTIC
 float4 main(float2 tex:TEXCOORD4,float4 pos:SV_Position):SV_Target{
 #else
 // Target 1 is a dual-source blend factor for the existing target 0 colour.
@@ -102,7 +109,7 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
     float range=n[5].z-n[5].w;
     float fade=saturate((d-n[5].w)/range);
     float nearFade=n[5].x>0?saturate((d-n[7].x)/n[5].x):1;
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_REALISTIC
     // Preserve deliberately pixelated or sampled-colour artistic modes.
     // The measured terrain night-vision pass uses neither of these flags.
     bool geometry=!asuint(n[11].z) && !asuint(n[10].w);
@@ -113,7 +120,7 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
 #endif
     float edge=0,orientation=0;float3 worldNormal=.5;
     if(d>=n[7].x && d<=n[7].y){
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_REALISTIC
         if(geometry)edge=outside>0?geometryEdge(uv,dx,dy):0;
         else {
 #endif
@@ -124,11 +131,11 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
         float3 gx=(tr+br-tl-bl)*.09375+(mr-ml)*.3125;
         float3 gy=(bl+br-tl-tr)*.09375+(bm-tm)*.3125;
         edge=length(float2(gx.z,gy.z));
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_REALISTIC
         }
 #endif
         edge*=fade*fade*n[11].x;
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_REALISTIC
         if(!geometry){
         float3 local=normalAt(coord(uv),dx,dy);
 #else
@@ -137,13 +144,13 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
         worldNormal=local.x*c[277].xyz+local.y*c[278].xyz+local.z*c[279].xyz;
         orientation=fade*pow(abs(worldNormal.z+n[9].z),n[9].y)*n[9].x;
         worldNormal=worldNormal*.5+.5;
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_REALISTIC
         }
 #endif
     }
     float lattice=saturate(grid(tex-.5,n[2],fade)+grid(tex-.5,n[3],fade)+grid(tex-.5,n[4],fade));
     if(d<n[7].x)lattice=0;
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_REALISTIC
     // Leave the original scene visible between contours. No constant green
     // fill, colour tint or normal-map orientation shading in geometry mode.
     float intensity=(lattice+(geometry?edge:fade*.01+edge+orientation))*mask*n[6].z*nearFade;
@@ -156,7 +163,7 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
         alpha=saturate((d-n[6].x)/(n[6].y-n[6].x))*sampled.a*intensity;
     }else{
         float pulseFade=fade;
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_PULSE_STABLE
         float3 a=float3(c[270].x,c[271].x,c[272].x),b=float3(c[270].y,c[271].y,c[272].y),f=float3(c[270].w,c[271].w,c[272].w);
         float3 ca=cross(b,f),cb=cross(f,a),cc=cross(a,b);
         float det=dot(a,ca);
@@ -182,13 +189,13 @@ NightOutput main(float2 tex:TEXCOORD4,float4 pos:SV_Position){
         exposure*=exp2(n[1].y);
     }
     float3 radiance=colour/(worldNormal+.5)*c[1].w*alpha*exposure*c[90].y;
-#if !EDVR_NIGHT_STOCK
+#if EDVR_NIGHT_REALISTIC
     // Lift contour radiance without thickening its footprint. Keep opacity,
     // footprint and the original stencil writes intact; do not darken the
     // underlying terrain by increasing blend alpha or add a surface fill.
     if(geometry)radiance*=edvrNight.x;
 #endif
-#if EDVR_NIGHT_STOCK
+#if !EDVR_NIGHT_REALISTIC
     return float4(radiance,saturate(alpha));
 #else
     NightOutput o;o.colour=float4(radiance,saturate(alpha));

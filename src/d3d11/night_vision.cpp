@@ -11,10 +11,11 @@
 #include "../common/log.h"
 namespace edvr { namespace {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
-bool enabled=true,configured=false;
-float brightness=2.0f;
+bool enabled=false,pulseEnabled=true,configured=false;
+float brightness=8.0f;
+unsigned variant(){return (enabled?1u:0u)|(pulseEnabled?2u:0u);}
 struct State {
-    Ptr<ID3D11PixelShader> shader,saved;
+    Ptr<ID3D11PixelShader> shader[4],saved;
     Ptr<ID3D11Buffer> control,savedControl;
     float uploadedBrightness=-1;
     Ptr<ID3D11ComputeShader> classify;
@@ -28,7 +29,7 @@ struct State {
     UINT sampleMask=~0u;
     ID3D11ClassInstance* classes[256]{};
     UINT count=0;
-    bool failed=false,engaged=false,noted=false;
+    bool failed[4]{},noted[4]{},engaged=false,realisticDraw=false;
 } state;
 bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
     Ptr<ID3D11DepthStencilState> stencil;UINT reference;ctx->OMGetDepthStencilState(&stencil,&reference);if(!stencil)return false;
@@ -57,7 +58,7 @@ bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
         cached->resource=resource;
     }
     if(!state.classify)state.classify.Attach(shaderSwapCompileCs(ctx,kNightExteriorCs,sizeof(kNightExteriorCs)-1,"main","night exterior",nullptr,"night vision exterior"));
-    if(!state.classify){state.failed=true;return false;}
+    if(!state.classify){state.failed[variant()]=true;return false;}
     if(!state.exterior || state.width!=w || state.height!=h){
         state.exterior.Reset();state.exteriorView.Reset();state.exteriorUav.Reset();state.width=state.height=0;
         D3D11_TEXTURE2D_DESC out{};out.Width=w;out.Height=h;out.MipLevels=out.ArraySize=out.SampleDesc.Count=1;
@@ -84,20 +85,23 @@ bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
 }
 }
 void nightVisionConfigure(Config& cfg){
-    bool on=cfg.getBool("fix.night_vision_stability",true);
-    float gain=cfg.getFloat("fix.night_vision_brightness",8.0f);
+    bool pulse=cfg.getBool("fix.night_vision_stability",true);
+    bool on=cfg.getBool("experimental.night_vision_realistic",false);
+    float gain=cfg.getFloat("experimental.night_vision_brightness",8.0f);
     if(!std::isfinite(gain))gain=8.0f;
     gain=(std::max)(1.0f,(std::min)(gain,16.0f));
-    if(!configured || on!=enabled || gain!=brightness)Log::get().note("night vision stability: %s; depth-geometry outlines, neutral terrain brightness up to %.2fx, cockpit/body exclusion, no surface fill, radial pulse. AA-independent, live A/B.",on?"on":"off (original shader)",gain);
-    configured=true;enabled=on;brightness=gain;
+    if(!configured || on!=enabled || pulse!=pulseEnabled || gain!=brightness)
+        Log::get().note("night vision: pulse stability %s; experimental Realistic nightvision %s, exterior brightness %.2fx (realistic only). AA-independent, live A/B.",pulse?"on":"off",on?"on":"off (original appearance)",gain);
+    configured=true;enabled=on;pulseEnabled=pulse;brightness=gain;
 }
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances){
-    return enabled && !state.failed && kind=='X' && count==240 && instances==1 &&
+    return variant()!=0 && !state.failed[variant()] && kind=='X' && count==240 && instances==1 &&
         bindingShaderHash(BindSlot::Vs)==0xFCF7BD2896751D96ull &&
         bindingShaderHash(BindSlot::Ps)==0xF786D34B5E118D5Eull;
 }
 void nightVisionBegin(ID3D11DeviceContext* ctx){
-    if(!ctx || !enabled || state.failed || state.engaged || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+    const unsigned mode=variant();
+    if(!ctx || !mode || state.failed[mode] || state.engaged || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     // No readbacks or scene copies. Reject a
     // changed resource contract before compiling/binding the replacement.
     Ptr<ID3D11Buffer> camera,settings;ctx->PSGetConstantBuffers(1,1,&camera);ctx->PSGetConstantBuffers(2,1,&settings);
@@ -143,46 +147,53 @@ void nightVisionBegin(ID3D11DeviceContext* ctx){
     if(bd.AlphaToCoverageEnable || !rt.BlendEnable || rt.SrcBlend!=D3D11_BLEND_ONE ||
        rt.DestBlend!=D3D11_BLEND_INV_SRC_ALPHA || rt.BlendOp!=D3D11_BLEND_OP_ADD ||
        rt.RenderTargetWriteMask!=7)return;
-    if(!state.shader){
-        state.shader.Attach(shaderSwapCompilePs(ctx,kNightVisionPs,sizeof(kNightVisionPs)-1,"main","night_vision",nullptr,"night vision stability"));
-        if(!state.shader){state.failed=true;return;}
+    if(!state.shader[mode]){
+        const SwapMacro macros[]={{"EDVR_NIGHT_REALISTIC",enabled?"1":"0"},{"EDVR_NIGHT_PULSE_STABLE",pulseEnabled?"1":"0"},{nullptr,nullptr}};
+        state.shader[mode].Attach(shaderSwapCompilePs(ctx,kNightVisionPs,sizeof(kNightVisionPs)-1,"main","night_vision",macros,"night vision"));
+        if(!state.shader[mode]){state.failed[mode]=true;return;}
     }
-    if(!state.blend){
-        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
-        D3D11_BLEND_DESC replacement{};replacement.RenderTarget[0]=rt;
-        replacement.RenderTarget[0].DestBlend=D3D11_BLEND_SRC1_COLOR;
-        if(FAILED(dev->CreateBlendState(&replacement,&state.blend))){
-            state.failed=true;Log::get().note("night vision stability: blend creation failed; retaining original draw.");return;
+    // Pulse-only retains the game's blend and stencil. It needs none of
+    // the experimental mask, compute dispatch, brightness CB or extra SRV.
+    if(enabled){
+        if(!state.blend){
+            Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+            D3D11_BLEND_DESC replacement{};replacement.RenderTarget[0]=rt;
+            replacement.RenderTarget[0].DestBlend=D3D11_BLEND_SRC1_COLOR;
+            if(FAILED(dev->CreateBlendState(&replacement,&state.blend))){
+                state.failed[mode]=true;Log::get().note("night vision stability: blend creation failed; retaining original draw.");return;
+            }
         }
-    }
-    if(!exteriorMask(ctx,w,h))return;
-    if(!state.control){
-        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
-        D3D11_BUFFER_DESC controlDesc{};controlDesc.ByteWidth=16;controlDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
-        if(FAILED(dev->CreateBuffer(&controlDesc,nullptr,&state.control))){
-            state.failed=true;Log::get().note("night vision stability: control buffer creation failed; retaining original draw.");return;
+        if(!exteriorMask(ctx,w,h))return;
+        if(!state.control){
+            Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+            D3D11_BUFFER_DESC controlDesc{};controlDesc.ByteWidth=16;controlDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            if(FAILED(dev->CreateBuffer(&controlDesc,nullptr,&state.control))){
+                state.failed[mode]=true;Log::get().note("night vision stability: control buffer creation failed; retaining original draw.");return;
+            }
         }
+        // Upload only on creation or a live setting change. Keep the game's
+        // constants intact; this private slot is restored after the draw.
+        if(state.uploadedBrightness!=brightness){
+            const float value[4]={brightness,0,0,0};ctx->UpdateSubresource(state.control.Get(),0,nullptr,value,0,0);
+            state.uploadedBrightness=brightness;
+        }
+        ctx->PSGetConstantBuffers(3,1,&state.savedControl);ctx->PSSetConstantBuffers(3,1,state.control.GetAddressOf());
+        ctx->PSGetShaderResources(5,1,&state.savedExterior);ctx->PSSetShaderResources(5,1,state.exteriorView.GetAddressOf());
+        state.savedBlend=original;for(UINT i=0;i<4;++i)state.blendFactors[i]=factors[i];state.sampleMask=mask;
+        ctx->OMSetBlendState(state.blend.Get(),factors,mask);
     }
-    // Upload only on creation or a live setting change. Keep the game's
-    // constants intact; this private slot is restored after the draw.
-    if(state.uploadedBrightness!=brightness){
-        const float value[4]={brightness,0,0,0};ctx->UpdateSubresource(state.control.Get(),0,nullptr,value,0,0);
-        state.uploadedBrightness=brightness;
-    }
-    ctx->PSGetConstantBuffers(3,1,&state.savedControl);ctx->PSSetConstantBuffers(3,1,state.control.GetAddressOf());
-    ctx->PSGetShaderResources(5,1,&state.savedExterior);ctx->PSSetShaderResources(5,1,state.exteriorView.GetAddressOf());
     state.count=256;ctx->PSGetShader(&state.saved,state.classes,&state.count);
-    state.savedBlend=original;for(UINT i=0;i<4;++i)state.blendFactors[i]=factors[i];state.sampleMask=mask;
-    ctx->OMSetBlendState(state.blend.Get(),factors,mask);
-    ctx->PSSetShader(state.shader.Get(),nullptr,0);state.engaged=true;
-    if(!state.noted){state.noted=true;Log::get().note("night vision stability: engaged at %ux%u; geometry contours and neutral terrain gain %.2f, cockpit/body and contour-footprint exclusion, R8 GPU mask; original PS/blend restored after each matched draw.",w,h,brightness);}
+    ctx->PSSetShader(state.shader[mode].Get(),nullptr,0);state.engaged=true;state.realisticDraw=enabled;
+    if(!state.noted[mode]){state.noted[mode]=true;Log::get().note("night vision: engaged at %ux%u; pulse stability %s, appearance %s; original state restored after each matched draw.",w,h,pulseEnabled?"on":"off",enabled?"experimental realistic":"stock (no exterior-mask dispatch)");}
 }
 void nightVisionEnd(ID3D11DeviceContext* ctx){
     if(!state.engaged)return;
-    ctx->PSSetConstantBuffers(3,1,state.savedControl.GetAddressOf());state.savedControl.Reset();
-    ctx->PSSetShaderResources(5,1,state.savedExterior.GetAddressOf());state.savedExterior.Reset();
+    if(state.realisticDraw){
+        ctx->PSSetConstantBuffers(3,1,state.savedControl.GetAddressOf());state.savedControl.Reset();
+        ctx->PSSetShaderResources(5,1,state.savedExterior.GetAddressOf());state.savedExterior.Reset();
+        ctx->OMSetBlendState(state.savedBlend.Get(),state.blendFactors,state.sampleMask);state.savedBlend.Reset();
+    }
     ctx->PSSetShader(state.saved.Get(),state.classes,state.count);state.saved.Reset();
-    ctx->OMSetBlendState(state.savedBlend.Get(),state.blendFactors,state.sampleMask);state.savedBlend.Reset();
     for(UINT i=0;i<state.count;++i){state.classes[i]->Release();state.classes[i]=nullptr;}
     state.count=0;state.engaged=false;
 }

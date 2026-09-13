@@ -104,6 +104,14 @@ draw per eye. `fix.holo_pattern = steady`.
 
 ## Shimmer and sharpness
 
+**The night-vision pulse line moving with your head.** Keep the pulse at
+a stable distance while retaining the game's terrain shading and
+brightness. `fix.night_vision_stability = 1` stays on by default and
+works with AA Off, TAA or DLSS. **Realistic nightvision** is a separate
+experimental appearance, off by default
+(`experimental.night_vision_realistic = 0`), with its brightness control
+under Experimental too. Disabling that appearance keeps pulse stability.
+
 **Supersample filtering.** Experimental and off by default
 (`experimental.supersample_resolve = off`): when enabled, EDVR can filter an
 eye larger than the headset recommendation down to that size, using
