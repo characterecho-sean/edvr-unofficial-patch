@@ -1,10 +1,12 @@
 #include "temporal_pass.h"
+#include "temporal_history.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <utility>   // std::swap, for the depth carry's pointer swap
 #include <vector>    // the eye dump's row buffer
+#include <mutex>
 
 #include <windows.h>
 
@@ -997,10 +999,10 @@ wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
-constexpr int kEyeInputs=12;
+constexpr int kEyeInputs=13;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"MeshCoverage"};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"MeshCoverage",L"PrevZ"};
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
@@ -1274,6 +1276,20 @@ bool stageEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D
 }
 
 uint32_t g_rowsFrame = 0; // scene boundary counter, shared by captures and row selection
+TemporalHistory<> g_temporalHistory;
+std::mutex g_temporalHistoryMutex;
+struct TemporalHistoryScope {
+    TemporalHistoryEntry entry{};
+    TemporalHistoryScope(int eye, unsigned flags, float jx, float jy) {
+        LARGE_INTEGER q{}; QueryPerformanceCounter(&q);
+        entry.qpc=q.QuadPart;entry.frame=g_rowsFrame;entry.eye=eye;
+        entry.flags=flags;entry.jitterX=jx;entry.jitterY=jy;
+    }
+    ~TemporalHistoryScope() {
+        std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);
+        g_temporalHistory.record(entry);
+    }
+};
 
 // Preserve the actual first-frame inputs before the next eye overwrites them.
 void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
@@ -1314,6 +1330,8 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
             if(res) { res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[7])); res->Release(); }
         }
     }
+    // Copy before the depth swap; an absent file means history was invalid.
+    if(e.zPrevValid && e.zPrev) { textures[12]=e.zPrev; textures[12]->AddRef(); }
     for(int k=0;k<kEyeInputs;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
     for(int k=5;k<kEyeInputs;++k)if(textures[k])textures[k]->Release();
     if(textures[4])textures[4]->Release();
@@ -2075,6 +2093,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* headTransSwapped, float nearZ, float farZ,
                     float headDeg, int motion, float blend, float clampSigma,
                     unsigned outW, unsigned outH, unsigned flags) {
+    TemporalHistoryScope history(eye,flags,jxNow,jyNow);
+    auto& trace=history.entry;
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(
         __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
@@ -2111,6 +2131,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     }
     const uint32_t w = ok ? region[2] - region[0] : 0;
     const uint32_t h = ok ? region[3] - region[1] : 0;
+    trace.width=w;trace.height=h;
 
     int fmtIndex = -1;
     DXGI_FORMAT viewFmt = DXGI_FORMAT_UNKNOWN;
@@ -2386,6 +2407,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     if (ok) {
         EyeState& e = *eptr;
         if (e.w != w || e.h != h || e.outFmt != sd.Format || e.histFmt != g_histFmt) {
+            trace.events |= 2u;
             releaseOwned(e);
             e.w = w; e.h = h; e.outFmt = sd.Format; e.histFmt = g_histFmt;
         }
@@ -2397,10 +2419,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     if (ok) {
         EyeState& e = *eptr;
         if(e.screenHistory!=(screenSrv!=nullptr)) {
+            trace.events |= 4u;
             e.haveHistory=e.dlHaveHistory=e.zPrevValid=false;
             e.screenHistory=screenSrv!=nullptr;
         }
         if (flags & 1u) {
+            trace.events |= 1u;
             e.haveHistory = false;
             e.dlHaveHistory = false;
             // ...and the depth carry: a withheld frame broke the pose
@@ -3255,6 +3279,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
+        trace.inputs=(haveDepth?1u:0u) | (e.zPrevValid?2u:0u) |
+            (haveDelta?4u:0u) | (p.tvCam[3]!=0?8u:0u) | (p.tvSt[3]!=0?16u:0u) |
+            (terrainSrvs[0]?32u:0u) | (holoSrvs[0]?64u:0u) | (meshSrvs[0]?128u:0u) |
+            (screenSrv?256u:0u) | (p.holoJitter[2]!=0?512u:0u) |
+            (e.haveHistory?1024u:0u) | (e.dlHaveHistory?2048u:0u) |
+            (g_bodyRowsOk?4096u:0u) | (jumpedNow?8192u:0u) | (g_curRowsBound?16384u:0u);
+        memcpy(trace.worldTranslation,p.tvCam,12);memcpy(trace.bodyTranslation,p.tvSt,12);
+
         ID3D11ComputeShader* savedCs = nullptr;
         ID3D11ShaderResourceView* savedSrv[17] = {};
         ID3D11UnorderedAccessView* savedUav[7] = {};
@@ -3672,6 +3704,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // rebuilt textures, or a frame the pass's own history ran in
                     // between -- never every frame (the review's F1, 2026-09-04).
                     const bool resetHist = (flags & 1u) != 0 || !e.dlHaveHistory;
+                    trace.events |= 8u | (resetHist?16u:0u);
                     if (resetHist) {
                         ++g_dlResets;
                         if (flags & 1u) {
@@ -3697,6 +3730,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     e.dlLastQpc = qNow.QuadPart;
                     if (debugPaint) {
+                        trace.events |= 32u;
                         // The motion, depth and mover views: the mv entry
                         // painted into the output; NVIDIA is skipped and
                         // starts afresh after.
@@ -4240,6 +4274,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         if (ran && usedDlaa) {
+            trace.output=2;trace.outputWidth=e.dlOutW;trace.outputHeight=e.dlOutH;
             // The trained pass's frame goes out; the pass's own history is
             // marked broken so a switch back starts afresh.
             e.haveHistory = false;
@@ -4266,6 +4301,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     e.dlOutH);
             }
         } else if (ran) {
+            trace.output=foveaComposited?3u:1u;trace.outputWidth=w;trace.outputHeight=h;
             if (ownRan) {
                 e.histRead = writeIdx;
                 e.haveHistory = true;
@@ -4331,10 +4367,39 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     if (ctx) ctx->Release();
     if (dev) dev->Release();
     src->Release();
+    if(!result) { trace.output=0;trace.outputWidth=trace.outputHeight=0; }
     return result;
 }
 
 }  // namespace
+
+void temporalPassDumpHistory(const char* trigger) {
+    std::vector<TemporalHistoryEntry> entries;
+    {
+        std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);
+        entries.reserve(g_temporalHistory.size());
+        for(uint32_t i=0;i<g_temporalHistory.size();++i)entries.push_back(g_temporalHistory.oldest(i));
+    }
+    LARGE_INTEGER now{},freq{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&freq);
+    Log::get().note("--- temporal submission history: %zu eye calls, rows-frame now=%u, %s. "
+        "Times are relative to this dump. Missing frames mean no temporal call; output=0 refused, "
+        "1 native, 2 NVIDIA, 3 native/NVIDIA fovea. flags are the OpenVR request. "
+        "events hex: 1 requested reset,2 size/format change,4 source-screen change,8 NVIDIA attempt,"
+        "10 NVIDIA reset,20 diagnostic paint. inputs hex: 1 depth,2 previous depth,4 delta,8 world,"
+        "10 body,20 terrain,40 holo,80 mesh,100 source-screen,200 consecutive,400 native history,"
+        "800 NVIDIA history,1000 camera rows,2000 origin step,4000 bound rows. CPU only. ---",
+        entries.size(),g_rowsFrame,trigger?trigger:"diagnostic request");
+    if(entries.empty())Log::get().note("TEMP no temporal submissions recorded; this is not evidence that AA ran successfully.");
+    for(const auto& e:entries) {
+        const double ago=freq.QuadPart?double(int64_t(e.qpc)-now.QuadPart)*1000.0/double(freq.QuadPart):0;
+        Log::get().note("TEMP %+.1fms f%u eye=%u flags=%X events=%X inputs=%X out=%u size=%ux%u->%ux%u "
+            "jitter=(%+.5f,%+.5f) world=(%+.7g,%+.7g,%+.7g) body=(%+.7g,%+.7g,%+.7g)",
+            ago,e.frame,e.eye,e.flags,e.events,e.inputs,e.output,e.width,e.height,e.outputWidth,e.outputHeight,
+            double(e.jitterX),double(e.jitterY),double(e.worldTranslation[0]),double(e.worldTranslation[1]),
+            double(e.worldTranslation[2]),double(e.bodyTranslation[0]),double(e.bodyTranslation[1]),double(e.bodyTranslation[2]));
+    }
+    Log::get().note("--- end temporal submission history ---");
+}
 
 void temporalPassConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
@@ -4998,6 +5063,7 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
 }
 
 void temporalPassShutdown() {
+    { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     dlaaShutdown();
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }

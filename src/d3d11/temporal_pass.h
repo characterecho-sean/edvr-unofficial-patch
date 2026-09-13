@@ -35,6 +35,10 @@
 // stands the pass down for the session with one line.
 #pragma once
 
+// Bounded CPU history of actual temporal submissions, written on Pause
+// alongside the camera history. Empty/stale history is reported explicitly.
+namespace edvr { void temporalPassDumpHistory(const char* trigger); }
+
 #include <cstddef>
 #include <cstdint>
 

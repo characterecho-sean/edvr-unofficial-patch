@@ -16,6 +16,7 @@
 
 #include "../../src/common/temporal_math.h"
 #include "../../src/common/temporal_mode.h"
+#include "../../src/d3d11/temporal_history.h"
 
 namespace {
 
@@ -538,6 +539,22 @@ int main() {
         const float fa=.025f/(.025f-50000.0f),fb=.025f*50000.0f/(50000.0f-.025f);
         check(edvr::temporalSceneProjection(fa,fb,.025f,&a,&b),"explicit measured finite row is respected");
         checkNear(a,fa,0,"measured finite offset retained");
+    }
+    {
+        edvr::TemporalHistory<3> history;
+        check(history.size()==0,"temporal history starts explicitly empty");
+        edvr::TemporalHistoryEntry entry{};
+        for(uint32_t frame=1;frame<=5;++frame) {
+            entry.frame=frame;entry.flags=frame==4?33u:2u;entry.output=frame==5?0u:2u;
+            entry.events=frame==4?17u:8u;history.record(entry);
+        }
+        check(history.size()==3 && history.oldest(0).frame==3 && history.oldest(2).frame==5,
+              "bounded temporal history retains chronological entries after wrap");
+        check(history.oldest(1).flags==33 && history.oldest(1).events==17 && history.oldest(2).output==0,
+              "reset requests and failed output survive alongside successful calls");
+        history.clear();check(history.size()==0,"cleared temporal history cannot report stale success");
+        entry.frame=9;history.record(entry);
+        check(history.size()==1 && history.oldest(0).frame==9,"history restarts at its first new entry");
     }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);
