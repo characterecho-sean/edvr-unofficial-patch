@@ -109,3 +109,37 @@ final triangle becoming headlocked. A successful runtime gate would qualify
 this shutdown design on Pimax/PiOpenXR before completing native legacy exports
 and opt-in Frontier launch. Full-resolution transfer overhead and game-feature
 behavior still require an in-game flight.
+
+## Pimax result
+
+The `8388961` test at 15:48:39 on September 13 passed. All 488 recorded source,
+binary, environment, stage and build-log hashes matched before and after the
+run. Frontier, SteamVR and other native diagnostics were absent at both process
+snapshots. The child used the explicit separate-device configuration with
+PiOpenXR, Pimax Crystal Super, RTX 5090, parallel projection enabled and 5424 x
+5356 pixels per eye. The graphics log matches the archived precommit build and
+confirms the minimal LiveCopy transport.
+
+The run rendered 1,531 stereo pairs from 3,062 copied eyes, displayed 315
+loading projections, and returned 68 valid periodic System samples. The user
+confirmed normal both-eye grid and triangle rendering, upright world tracking
+during head movement, normal color and clarity, and normal closure without
+final headlock.
+
+System caller 22124 shut down XR owner 17588 while render caller 33156 remained
+alive in the fixture's CPU wait. The application Present count was 1,917 both
+before and after shutdown. All ten teardown stages completed on the XR owner,
+with callback retirement, `cleanup=1`, `retained=0` and no final render
+boundary. The owned GPU drain spanned 328 ms and session-binding destruction 16
+ms on the coarse tick clock. The Pimax server records the diagnostic's final
+disconnect at 15:49:00.828; the child exited normally with no timeout. Startup
+also made a brief preliminary connection, so the final disconnect is
+distinguished by its time, not merely its presence in the log.
+
+The archive is `build/openxr-native-20260913-154839/`, including runtime and
+graphics logs, matched input binaries, pre/postflight receipts and
+`qualification.json`. This qualifies the separate-device design for normal
+stopped-Present teardown on this Pimax setup. It does not establish arbitrary
+concurrent game calls, error recovery, game-feature compatibility or the
+transfer cost in Elite. The next step is completing native legacy exports and
+an opt-in Frontier launch using the qualified ownership mode.

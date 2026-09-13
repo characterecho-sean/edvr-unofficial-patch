@@ -1,5 +1,16 @@
 # OpenXR implementation status
 
+The [separate-device Pimax
+gate](openxr-owned-capture-2026-09-13.md#pimax-result) passed on `8388961`. All
+488 input hashes matched before and after. The diagnostic rendered 1,531 stereo
+pairs and 315 loading projections; the user confirmed normal viewing, tracking
+and closure without headlock. System-caller shutdown completed all ten teardown
+stages on the XR owner after the application stopped Present: its count stayed
+at 1,917, callbacks retired and no resources were retained. Pimax recorded the
+final client disconnect, and the child exited normally. The next implementation
+step is completing native legacy exports and opt-in Frontier launch with this
+ownership mode. No native Frontier installation or flight has occurred.
+
 The [separate-device capture integration](openxr-owned-capture-2026-09-13.md)
 connects eye and six-face loading captures to an explicitly configured XR-owned
 device. Luna implemented capture and fixture changes; parent review tightened
