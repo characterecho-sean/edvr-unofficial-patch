@@ -29,6 +29,8 @@ std::atomic<bool> g_armed{false};
 bool     g_installTried = false;
 bool     g_installed = false;
 IatPatch g_createW, g_createA, g_attrW, g_attrA, g_attrExW, g_attrExA;
+IatPatch g_readerCreateW;
+HMODULE g_reader = nullptr;
 
 std::atomic<uint32_t> g_refused{0};          // ident opens and attribute reads refused
 std::atomic<uint32_t> g_otherMovieOpens{0};  // Movies\ paths that were not idents, forwarded
@@ -123,6 +125,17 @@ HANDLE WINAPI hookCreateFileA(LPCSTR name, DWORD access, DWORD share, LPSECURITY
                                                                  disposition, flags, templateFile);
 }
 
+HANDLE WINAPI hookReaderCreateFileW(LPCWSTR name, DWORD access, DWORD share,
+                                    LPSECURITY_ATTRIBUTES sa, DWORD disposition,
+                                    DWORD flags, HANDLE templateFile) {
+    if (refuse(name, "DirectShow CreateFileW")) {
+        SetLastError(ERROR_FILE_NOT_FOUND);
+        return INVALID_HANDLE_VALUE;
+    }
+    return reinterpret_cast<PFN_CreateFileW>(g_readerCreateW.original)(
+        name, access, share, sa, disposition, flags, templateFile);
+}
+
 DWORD WINAPI hookGetFileAttributesW(LPCWSTR name) {
     if (refuse(name, "GetFileAttributesW")) {
         SetLastError(ERROR_FILE_NOT_FOUND);
@@ -173,28 +186,40 @@ void install() {
                    reinterpret_cast<void*>(&hookGetFileAttributesExW), &g_attrExW);
     iatHookInstall("kernel32.dll", "GetFileAttributesExA",
                    reinterpret_cast<void*>(&hookGetFileAttributesExA), &g_attrExA);
-    g_installed = g_createW.applied || g_createA.applied;
+    // 09:43 flight: zero executable requests, 902 movie frames. Elite names
+    // CLSID_AsyncReader, whose Windows implementation opens through quartz's
+    // own IAT (reproduced with IFileSourceFilter::Load on the actual ident).
+    // Load the system reader now so its slot is patched before graph setup;
+    // keep our module reference until the hook has been removed.
+    g_reader = LoadLibraryExW(L"quartz.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (g_reader) iatHookInstallIn(g_reader, "kernel32.dll", "CreateFileW",
+        reinterpret_cast<void*>(&hookReaderCreateFileW), &g_readerCreateW);
+    if (!g_readerCreateW.applied) Log::get().note(
+        "intro skip: DirectShow reader hook unavailable (%s). Only executable imports "
+        "are covered; the movie may still play.", g_reader ? "CreateFileW not imported" : "system quartz.dll not loaded");
+    g_installed = g_createW.applied || g_createA.applied || g_readerCreateW.applied;
     if (!g_installed) {
         Log::get().note(
-            "intro skip: NOT installed -- the executable imports neither CreateFileW nor "
-            "CreateFileA from kernel32.dll under that name, so there is no slot to watch. "
+            "intro skip: NOT installed -- no executable or DirectShow file-open "
+            "import could be patched. "
             "The movie will play as fix.intro_video = screen.");
         return;
     }
     char mod[64] = "?";
-    iatHookEntryModule(g_createW.applied ? g_createW.original : g_createA.original, mod,
+    iatHookEntryModule(g_readerCreateW.applied ? g_readerCreateW.original :
+                       g_createW.applied ? g_createW.original : g_createA.original, mod,
                        sizeof(mod));
     Log::get().note(
         "intro skip: ARMED -- fix.intro_video = skip. The executable's imports: CreateFileW "
         "%s, CreateFileA %s, GetFileAttributesW %s, GetFileAttributesA %s, "
-        "GetFileAttributesExW %s, GetFileAttributesExA %s (the first pointed into %s before "
-        "the patch). An open of Movies\\Ident_*.webm or intro_temp.webm by the game is "
+        "GetFileAttributesExW %s, GetFileAttributesExA %s; DirectShow reader CreateFileW %s "
+        "(original entry in %s). An open of Movies\\Ident_*.webm or intro_temp.webm is "
         "answered 'file not found' -- the answer a renamed file gives it, so the game's own "
         "missing-movie path runs -- and nothing on disk is touched. Decided at launch. "
-        "EDVR's own modules import these through their own tables and are unaffected. "
+        "Only the executable and system reader import tables are patched. "
         "The verdict prints when the first rendered scene arrives (docs\\intro-video.md).",
         state(g_createW), state(g_createA), state(g_attrW), state(g_attrA), state(g_attrExW),
-        state(g_attrExA), mod);
+        state(g_attrExA), state(g_readerCreateW), mod);
 }
 
 }  // namespace
@@ -228,12 +253,9 @@ void introSkipNoteMovieDrew() {
     if (refused == 0) {
         Log::get().note(
             "intro skip: the movie is DRAWING anyway -- its planes reached the composite and "
-            "NOTHING was refused, so the game opened the ident by a route the executable's "
-            "import table does not carry (its C runtime, or a DirectShow file source of "
-            "Windows' own) and this hook never saw it. %u other Movies\\ open(s) did come "
-            "through the table. The next step is a process-wide hook on "
-            "KernelBase!CreateFileW (code_hook.h; docs\\intro-video.md). Please report this "
-            "log.",
+            "NOTHING was refused through the executable or DirectShow reader imports. "
+            "The file may have opened before arming or through another reader. "
+            "%u other Movies\\ open(s) reached these hooks. Please report this log.",
             g_otherMovieOpens.load(std::memory_order_relaxed));
         return;
     }
@@ -260,7 +282,7 @@ void introSkipTick(bool sceneFrame) {
     }
     if (!refused && !drew) {
         Log::get().note(
-            "intro skip: no ident was asked for through the executable's import table and no "
+            "intro skip: no ident was asked for through the executable or DirectShow reader and no "
             "movie drew (%u other Movies\\ open(s) seen; the scene arrived at %.1f s). Either "
             "the game skipped it by itself this launch, or it opened and played it by a route "
             "neither this hook nor the fill detection covers. Please report this log.",
@@ -274,6 +296,8 @@ void introSkipTick(bool sceneFrame) {
 
 void introSkipShutdown() {
     g_armed.store(false, std::memory_order_release);
+    iatHookUninstall(&g_readerCreateW);
+    if (g_reader) { FreeLibrary(g_reader); g_reader = nullptr; }
     iatHookUninstall(&g_attrExA);
     iatHookUninstall(&g_attrExW);
     iatHookUninstall(&g_attrA);

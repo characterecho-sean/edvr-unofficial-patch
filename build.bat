@@ -771,6 +771,14 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     "tools\night_vision_test\night_vision_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\nightvision\night_vision_test.exe" --self-test || exit /b 1
+echo [edvr] === DirectShow intro skip regression ===
+if not exist "%OBJ%\introskip" mkdir "%OBJ%\introskip"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\introskip\\" /Fe"%OBJ%\introskip\intro_skip_test.exe" ^
+    "tools\intro_skip_test\intro_skip_test.cpp" "src\common\iat_hook.cpp" ^
+    /link /INCREMENTAL:NO ole32.lib strmiids.lib || exit /b 1
+"%OBJ%\introskip\intro_skip_test.exe" --self-test || exit /b 1
 python "tools\holo_motion.py" --self-test || exit /b 1
 
 echo [edvr] === stellar motion regression ===

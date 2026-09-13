@@ -751,3 +751,49 @@ d3d11 half loads regardless -- with `fix.intro_video = skip` in the ini
 before launch. The number to compare the WORKED line's seconds against is,
 from a `screen` session, the `intro video size: a rendered scene arrived`
 line's timestamp less the log's first line's.
+
+## Flight 09:43: the file reader bypassed the executable hook
+
+Steam log 094305 verifies fbd8284, linked 15:36:15 UTC. Skip armed at
+09:43:05.456, the movie drew at 09:43:09.750, and the first scene
+arrived 28.8 seconds after arming. There were zero refused requests,
+zero other Movies requests, and 902 movie frames. The configured value
+was `skip`.
+
+Ruled out: the option was disabled or the installed build lacked the
+feature, because the matching run explicitly armed its executable
+imports. Ruled out: intercepting only the executable's file imports is
+sufficient, because playback completed without any request reaching
+them.
+
+The installed executable contains CLSID_AsyncReader
+`E436EBB5-524F-11CE-9F53-0020AF0BA770` at file offset `0x56346e8`.
+Windows' implementation is in `quartz.dll`, which imports CreateFileW
+itself. An isolated process loading the actual EliteNeutral ident
+through IFileSourceFilter reproduced the result: the executable import
+hook saw zero calls and Load succeeded. Hooking the reader module's
+import saw three successful opens. Refusing the ident at that import
+made Load return `0x80070002`, file not found, immediately. This is a
+measured reader path, not a guess based only on the video's continued
+playback.
+
+Skip now loads the system copy of quartz before graph setup and patches
+its CreateFileW import as well as the existing executable imports. It
+holds the module reference until shutdown restores the import. Screen
+and Stock remain unchanged, and other movie paths still forward. The
+change does not detour KernelBase or modify files. The shared IAT helper
+now accepts an explicitly owned module; it publishes the original
+function before atomically installing the replacement, so a reader
+thread cannot enter a hook with an uninitialized forward pointer. A
+competing slot change causes the install to stand down.
+
+The new build-gated DirectShow regression uses temporary fixtures and
+the real Windows reader. It proves the executable-only miss, ident and
+alternate-intro refusal, allowed front-end and story videos, live
+disarming/rearming, original-slot restoration, unchanged files and the
+success-report path. The existing predicate/refusal smoke tests remain.
+The next game launch must still confirm the game's missing-file
+handling: look for `DirectShow reader CreateFileW patched`, a refusal
+naming `DirectShow CreateFileW`, and `WORKED` with no movie frames. The
+standalone reader test cannot by itself establish Elite's scene
+transition behavior.

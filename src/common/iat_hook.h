@@ -44,6 +44,12 @@ struct IatPatch {
 bool iatHookInstall(const char* module, const char* function, void* replacement,
                     IatPatch* patch);
 
+// The same pointer-only patch in a specific loaded module, whose lifetime
+// the caller must retain through uninstall. Used for DirectShow's reader:
+// its file open does not pass through the executable's import table.
+bool iatHookInstallIn(void* image, const char* module, const char* function,
+                     void* replacement, IatPatch* patch);
+
 // Put the original back, but ONLY where the slot still holds our
 // replacement. Safe on a patch that was never applied.
 void iatHookUninstall(IatPatch* patch);
