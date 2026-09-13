@@ -4,6 +4,7 @@
 #include "../../src/openvr/compat/openvr_v0_9_20.h"
 #include "../openxr_native_test/present_device.h"
 #include "scene.h"
+#include "viewing_phase.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -148,8 +149,39 @@ void sceneTest(ID3D11Device* device,const std::filesystem::path& directory) {
   check(scene.eye(2)==nullptr,"scene eye indexing bounded");shutdown();FreeLibrary(fixture);
 }
 
+void viewingPhaseTests() {
+  using S=ViewingPhase::State;
+  ViewingPhase late(0,20);
+  check(late.tick(0,false)==S::Warmup&&late.tick(11000,false)==S::Warmup,"standby time does not spend viewing budget");
+  check(late.tick(11500,true)==S::Warmup&&late.tick(11999,true)==S::Warmup,"focus must settle before grid budget");
+  check(late.tick(12000,true)==S::Grid&&late.phaseElapsedMs()==0,"grid starts after focused warmup");
+  check(late.tick(14999,true)==S::Grid&&late.tick(15000,true)==S::Scene,"late wake retains full three-second grid");
+  check(late.tick(31999,true)==S::Scene&&late.tick(32000,true)==S::Complete,"late wake retains seventeen-second scene");
+  check(late.tick(60000,false)==S::Complete,"completed viewing remains complete");
+  ViewingPhase reset(0,20);reset.tick(0,true);reset.tick(500,true);
+  check(reset.tick(1500,false)==S::Warmup&&reset.phaseElapsedMs()==0,"grid focus loss restarts readiness");
+  check(reset.tick(2000,true)==S::Warmup&&reset.tick(2500,true)==S::Grid,"focus recovery repeats warmup");
+  check(reset.tick(5499,true)==S::Grid&&reset.tick(5500,true)==S::Scene,"interrupted grid is replayed for full interval");
+  ViewingPhase pause(0,20);pause.tick(0,true);pause.tick(500,true);pause.tick(3500,true);pause.tick(4500,true);
+  check(pause.tick(14500,false)==S::Scene&&pause.phaseElapsedMs()==1000,"unfocused scene interval is not credited");
+  check(pause.tick(25000,true)==S::Scene&&pause.phaseElapsedMs()==1000,"focus recovery does not charge paused time");
+  check(pause.tick(40999,true)==S::Scene&&pause.tick(41000,true)==S::Complete,"scene resumes its remaining viewing budget");
+  ViewingPhase absent(0,20);
+  check(absent.tick(29999,false)==S::Warmup&&absent.tick(30000,false)==S::Expired,"absent focus expires startup as failure");
+  ViewingPhase hard(0,20);hard.tick(0,true);hard.tick(500,true);hard.tick(3500,true);
+  check(hard.tick(49999,false)==S::Scene&&hard.tick(50000,false)==S::Expired,"focus loss cannot extend fixed hard deadline");
+  ViewingPhase shortRun(0,1);
+  check(shortRun.gridBudgetMs()==250&&shortRun.sceneBudgetMs()==750,"short diagnostic retains both viewing phases");
+  check(shortRun.tick(0,true)==S::Warmup&&shortRun.tick(500,true)==S::Grid&&
+        shortRun.tick(750,true)==S::Scene&&shortRun.tick(1500,true)==S::Complete,"zero epoch and short run boundaries");
+  ViewingPhase backwards(1000,20);
+  check(backwards.tick(999,true)==S::Expired,"clock reversal cannot credit viewing time");
+  check(ViewingPhase(0,0).state()==S::Expired&&ViewingPhase(0,61).state()==S::Expired,"invalid viewing duration rejected");
+}
+
 int selfTest() {
   Watchdog watchdog;
+  viewingPhaseTests();
   const auto directory=executableDirectory();const auto graphicsPath=(directory/L"d3d11.dll").wstring();
   const auto missingLoader=(directory/L"intentionally-absent-openxr-loader.dll").wstring();
   check(!std::filesystem::exists(missingLoader),"negative loader fixture is absent");
@@ -243,20 +275,48 @@ int nativeRun(const Options& options) {
   if(!width||!height)return 3;
   const double scale=(std::min)(1.0,2048.0/(std::max)(width,height));
   bool success=SUCCEEDED(scene.initialize(device.device(),uint32_t(width*scale),uint32_t(height*scale)));
-  system->ResetSeatedZeroPose();
   ComPtr<ID3D11Texture2D> sky[6];success=makeSkybox(device.device(),sky)&&success;
   vr::Texture_t skyTextures[6]{};for(unsigned i=0;i<6;++i)skyTextures[i]={sky[i].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
   success=success&&compositor->SetSkyboxOverride(skyTextures,6)==vr::VRCompositorError_None;
   for(auto& texture:sky)texture.Reset(); // owned DLL capture must survive source release
-  const auto began=GetTickCount64();const auto loadingUntil=began+(std::min)(3000u,options.seconds*250u);
-  while(success&&GetTickCount64()<loadingUntil){success=SUCCEEDED(device.present());Sleep(1);}
-  compositor->ClearSkyboxOverride();
+  const auto began=GetTickCount64();ViewingPhase viewing(began,options.seconds);
+  using Phase=ViewingPhase::State;Phase previousPhase=Phase::Warmup;
+  bool previousFocus=false,focusLogged=false;
+  std::printf("module_phase,name=waiting,elapsed_ms=0,grid_ms=%llu,scene_ms=%llu\n",
+      (unsigned long long)viewing.gridBudgetMs(),(unsigned long long)viewing.sceneBudgetMs());
+  std::fflush(stdout);
   uint64_t frames=0,invalid=0,cacheChecks=0;
-  while(success&&GetTickCount64()-began<options.seconds*1000ULL) {
+  while(success) {
+    const auto now=GetTickCount64();const bool focused=compositor->CanRenderScene();
+    if(!focusLogged||focused!=previousFocus) {
+      std::printf("module_focus,focused=%u,elapsed_ms=%llu\n",unsigned(focused),(unsigned long long)(now-began));
+      std::fflush(stdout);focusLogged=true;previousFocus=focused;
+    }
+    const auto phase=viewing.tick(now,focused);
+    if(phase!=previousPhase) {
+      const char* name=phase==Phase::Grid?"grid":phase==Phase::Scene?"scene":phase==Phase::Complete?"complete":phase==Phase::Expired?"expired":"waiting";
+      std::printf("module_phase,name=%s,elapsed_ms=%llu,focused=%u\n",name,(unsigned long long)(now-began),unsigned(focused));
+      std::fflush(stdout);
+      if(phase==Phase::Grid) {
+        // Recenter after readiness, so putting on the headset cannot leave the
+        // scene anchored to the orientation sampled while it was on the desk.
+        system->ResetSeatedZeroPose();vr::VREvent_t reset{};vr::TrackedDevicePose_t pose{};
+        const bool resetValid=system->PollNextEventWithPose(vr::TrackingUniverseSeated,&reset,sizeof(reset),&pose)&&
+            reset.eventType==vr::VREvent_SeatedZeroPoseReset&&pose.bPoseIsValid;
+        check(resetValid,"focused startup recenter event");success=success&&resetValid;
+        std::printf("module_recenter,valid=%u,elapsed_ms=%llu\n",unsigned(resetValid),(unsigned long long)(GetTickCount64()-began));
+      }
+      if(phase==Phase::Scene)compositor->ClearSkyboxOverride();
+      previousPhase=phase;
+    }
+    if(phase==Phase::Complete)break;
+    if(phase==Phase::Expired){std::puts("error,module_viewing_deadline");success=false;break;}
+    if(!success)break;
+    if(phase!=Phase::Scene){success=SUCCEEDED(device.present());Sleep(1);continue;}
     vr::TrackedDevicePose_t poses[2]{},game[2]{},cached[2]{},cachedGame[2]{};
     const auto waited=compositor->WaitGetPoses(poses,2,game,2);
     if(waited!=vr::VRCompositorError_None){success=false;break;}
-    if(!poses[0].bPoseIsValid){++invalid;compositor->ClearLastSubmittedFrame();success=SUCCEEDED(device.present());continue;}
+    if(!focused||!poses[0].bPoseIsValid){if(focused)++invalid;compositor->ClearLastSubmittedFrame();success=SUCCEEDED(device.present());continue;}
     if(compositor->GetLastPoses(cached,2,cachedGame,2)!=vr::VRCompositorError_None||
        !samePose(cached[0],poses[0])||!samePose(cached[1],poses[1])||
        !samePose(cachedGame[0],game[0])||!samePose(cachedGame[1],game[1])){success=false;break;}
@@ -269,12 +329,13 @@ int nativeRun(const Options& options) {
     }
     if(!success)break;
     compositor->PostPresentHandoff();++frames;
+    if(frames==1){std::printf("module_scene,first_pair=1,elapsed_ms=%llu\n",(unsigned long long)(GetTickCount64()-began));std::fflush(stdout);}
     success=SUCCEEDED(device.present());
   }
   compositor->ClearLastSubmittedFrame();
   stop.stop();
   const auto status=api.status();
-  success=success&&!failures&&frames>0&&invalid==0&&status.phase==EDVR_NATIVE_STOPPED&&status.cleanup&&!status.retained&&
+  success=success&&viewing.state()==Phase::Complete&&!failures&&frames>0&&invalid==0&&status.phase==EDVR_NATIVE_STOPPED&&status.cleanup&&!status.retained&&
       status.copiedEyes==frames*2&&status.stereoPairs==frames&&status.loadingLayers>0&&!status.wrongThread&&api.token()!=token;
   check(!api.generic(vr::IVRSystem_Version,&error)&&error==vr::VRInitError_Init_NotInitialized,"exported interfaces retire after Shutdown");
   std::printf("module_summary,frames=%llu,cached=%llu,invalid=%llu,copies=%llu,pairs=%llu,loading=%llu,callbacks=%llu,cleanup=%u,retained=%u,init=%u,render=%u,owner=%u,shutdown=%u\n",

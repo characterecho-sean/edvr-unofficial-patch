@@ -3,8 +3,10 @@
 The [startup-discovery checkpoint](openxr-native-discovery-2026-09-13.md)
 passed its `b8db929` PiOpenXR headset gate. This checkpoint moves the native
 backend behind a separately loaded DLL and exercises it from an application
-that uses the historical OpenVR ABI. The full desktop build passed; this new
-DLL route has not yet passed its headset gate.
+that uses the historical OpenVR ABI. The full desktop build passed. Its first
+native DLL headset gate failed visual inspection despite passing counters: the
+user saw a grey void without the loading grid, followed by a triangle at the
+end.
 
 ## Module boundary
 
@@ -109,6 +111,86 @@ application executable is
 `4345845c2f8a3a158ae2e768e995b1675cc77578f465c8f5b56254580271359b`, and the
 graphics proxy is
 `a07edbf940d97f440c8fa3fdbc950c9beed6cd0e97ad8dcd04e183a022f2152f`.
+
+## First native run and unresolved visual failure
+
+The `0424065` native DLL run on September 13 used Pimax OpenXR 0.1.0 and the
+recorded binaries. The child ran from 16:31:38.417116 to 16:31:59.788671 UTC,
+exited 0 in 21.375 seconds, and did not trigger its 60-second watchdog. It
+reported 39 loading projections, 1,041 stereo pairs, 2,082 eye copies, 1,041
+matching pose-cache checks and zero invalid render poses. All nine logged host
+shutdown stages completed successfully; owner join, final callback entry,
+callback retirement and cleanup were reported. No excluded game, SteamVR or
+native diagnostic process appeared in either process snapshot, and all 468
+recorded hashes matched before and after.
+
+The user reported: "No grid, just a grey void. A triangle appeared at the end".
+This fails the visual gate; `native_module: PASS` establishes only the
+implemented technical checks. Exact binaries, the receipt, output, process
+snapshots and failed qualification are archived locally in
+`build/openxr-native-20260913-103138/`.
+
+Ruled out: absence of any loading/stereo work, because 39 loading projections
+and 1,041 composed pairs were recorded. Ruled out: a stale test binary or
+different runtime manifest, because all recorded hashes matched. The log does
+not establish the actual submitted pixel contents, their delivery time in the
+headset, or visibility/focus throughout the run. Those remain separate
+hypotheses; no transport or image-quality correction is justified by these
+counters alone.
+
+Pimax's matching runtime-server log supplies a timing discriminator absent from
+the application summary. The test was active by 10:31:39.326 local time, but
+the server stayed near 12.857 FPS with stale frames through 10:31:48.193. It
+logged `standby mode leave` at 10:31:48.516, screen-on at 10:31:48.874, normal
+90 FPS rendering by 10:31:51.226 and user-eye detection at 10:31:51.302. The
+three-second grid timer had already expired. The preceding successful
+diagnostic's matching log showed normal 90 FPS delivery. These excerpts and
+both native client logs are preserved in the failed-run archive. This supports
+premature viewing-phase expiry during headset wake as the leading explanation;
+it does not independently prove the pixel contents or clear the failed visual
+gate.
+
+## Viewing readiness correction
+
+The revised application fixture spends its viewing budget only while
+`CanRenderScene()` reports runtime focus. It continues loading Present calls
+while waiting, requires 500 ms of continuous focus before beginning the grid
+interval, and recenters at that transition with a checked reset event. Losing
+focus during the grid restarts readiness and replays the full grid interval.
+Losing focus during the triangle pauses the scene budget while continuing frame
+progress with empty submissions. A 20-second request retains three seconds of
+grid and seventeen seconds of scene viewing.
+
+The CPU clock handles a zero starting timestamp, short runs, interrupted
+readiness, delayed wake and resumed scene viewing. It fails distinctly on a
+30-second startup deadline, clock reversal or the fixed overall viewing
+deadline of requested duration plus 30 seconds. The runner's existing child
+watchdog remains an additional bound. Phase and focus transitions, recenter
+success and first stereo pair now carry elapsed timestamps. This prevents
+logical readiness delays from silently consuming the observation period;
+runtime focus is not independent proof that the headset display is physically
+awake. The next flight must correlate these timestamps with the Pimax server
+log if the display remains late.
+
+Luna supplied the initial timing helper. Parent review corrected paused-time
+accounting, zero-timestamp handling, short-duration budgets and explicit
+timeout failure, integrated the loop and added 18 deterministic timing checks.
+The full absolute-path build passed with exit 0 and 66 module checks, including
+the original 48 ABI/scene checks. All 168 Present/discovery, 67 queue, 100
+render-dispatcher, 504 proxy-state, 10,774 stereo, 35 native desktop, 15
+device, 36 runner, 80,493 weapon-motion and 1,242 mesh-motion checks passed, as
+did the 254-key configuration contract.
+
+The new build log is `build/openxr-native-focus-build.log`.
+`build/openxr-native-focus-validation.json` records 455 source inputs, 11
+binaries, two environment files and the build log: 469 hashes. The revised
+application executable SHA256 is
+`3659cd5319e8d897bd4f0930c01ef7f14f9376820093ce5ac90ec69b7225c238`, runtime DLL
+is `a819088fad5911474bd7121401d2aa2c429dfc5b49a9c158f655b046184d6213`, and
+graphics proxy is
+`cf688cb6ff5f1205c574c67dc1e4ff6ca922bc6a42919a340985077f018d21c7`. The
+failed-run archive retains the preceding exact binaries and evidence. No new
+native flight has run for this correction.
 
 ## Next gate and remaining integration
 

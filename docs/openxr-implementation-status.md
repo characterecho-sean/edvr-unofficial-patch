@@ -5,10 +5,17 @@ the native backend behind a separately loaded DLL exposing Frontier's five
 imported OpenVR entry points. An application fixture creates its device before
 Init, discovers the returned interfaces through those exports, renders from
 their poses and matrices, and drives loading and shutdown through real Present
-callbacks. The full build passed, including 48 new DLL/scene checks and 168
-Present/discovery checks. Its new PiOpenXR headset gate is pending. The DLL is
-staged outside the installer payload; full legacy export policy, native
-Frontier startup selection and feature integration remain open.
+callbacks. Its first PiOpenXR DLL run reported successful counters and cleanup,
+but failed visual inspection: the user saw a grey void without the grid, then a
+triangle at the end. Pimax's log shows the headset left standby about ten
+seconds after launch, after the grid interval had expired. The revised test
+waits for sustained runtime focus before timing and recentering, replays an
+interrupted grid and pauses scene timing during focus loss. The full build
+passed, including 66 DLL/scene/timing checks and 168 Present/discovery checks.
+The revised visual gate remains pending; runtime focus alone does not prove
+physical display wake. The DLL is staged outside the installer payload; full
+legacy export policy, native Frontier startup selection and feature integration
+remain open.
 
 The preceding [startup-discovery
 checkpoint](openxr-native-discovery-2026-09-13.md) obtains the graphics proxy's
