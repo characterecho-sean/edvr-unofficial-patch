@@ -53,7 +53,14 @@ bool root(uint i,uint nb) {
     bool projection=camera[273].z>0 && camera[273].z<1 &&
         all(abs(float3(camera[270].z,camera[271].z,camera[272].z))<1e-8) &&
         all(abs(camera[273].xyw)<1e-6) && all(isfinite(camera[275]));
-    if(projection)for(uint i=lane;i<n;i+=64)if(root(i,nb)) {
+    // The measured hip-fire pass uses the separate 0.0675 viewmodel
+    // projection. ADS uses 0.025 and deliberately offsets its camera
+    // from the arms (06:22 On/Off captures). Removing that offset moves
+    // the sights away from the game's aim. Preserve the complete stock
+    // pose for aiming, transitions and unverified projections; the
+    // original-vertex temporal motion pass remains active independently.
+    bool attachmentProjection=projection && abs(camera[273].z-.0675)<1e-7;
+    if(attachmentProjection)for(uint i=lane;i<n;i+=64)if(root(i,nb)) {
         float3 d=position(Pool[i])-camera[275].xyz;float dist=dot(d,d);
         if(dist<best){best=dist;index=i;}
     }
@@ -76,7 +83,8 @@ bool root(uint i,uint nb) {
         bool valid=index!=0xffffffff && partners>=1;
         float3 p=valid?position(Pool[index]):camera[275].xyz;
         Anchor[0]=float4(valid?camera[275].xyz-p:0,valid?1:0);
-        Anchor[1]=float4(p,valid?partners+1:0);Anchor[2]=0;
+        Anchor[1]=float4(p,valid?partners+1:0);
+        Anchor[2]=float4(projection && !attachmentProjection?1:0,camera[273].z,0,0);
     }
 }
 [numthreads(64,1,1)]void applyAnchor(uint id:SV_DispatchThreadID) {

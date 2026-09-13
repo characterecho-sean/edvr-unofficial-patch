@@ -207,7 +207,7 @@ void weaponStabilityFrameBoundary(ID3D11DeviceContext* ctx) {
         D3D11_MAPPED_SUBRESOURCE m{};HRESULT hr=ctx->Map(g.stage.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
         if(SUCCEEDED(hr)) {
             const auto* p=static_cast<const float*>(m.pData);
-            Log::get().note("weapon stability: source attachment %s, offset %.6f %.6f %.6f m, %.0f matching roots; %u-byte private pool. Original animation and compositor timing retained.",p[3]>0?"matched":"unavailable (stock)",p[0],p[1],p[2],p[7],g.bytes);
+            Log::get().note("weapon stability: source attachment %s, offset %.6f %.6f %.6f m, %.0f matching roots; %u-byte private pool, projection near %.7f. Original animation and compositor timing retained.",p[3]>0?"matched":p[8]>0?"projection preserves game aiming pose":"unavailable (stock)",p[0],p[1],p[2],p[7],g.bytes,p[9]);
             ctx->Unmap(g.stage.Get(),0);g.pending=false;
         } else if(g.frame-g.pendingFrame>60)g.pending=false;
     }
