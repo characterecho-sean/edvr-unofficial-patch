@@ -2,7 +2,9 @@
 #include "render_boundary.h"
 
 #include "../common/frame_flag.h"
+#include "../common/log.h"
 #include "../common/native_graphics.h"
+#include "../common/vtable_hook.h"
 
 #include <atomic>
 #include <cstddef>
@@ -13,6 +15,9 @@
 namespace {
 
 using Microsoft::WRL::ComPtr;
+constexpr size_t kSlotExecuteCommandList = 58;
+using PFN_ExecuteCommandList = void (STDMETHODCALLTYPE *)(ID3D11DeviceContext *,
+                                                           ID3D11CommandList *, BOOL);
 
 struct Owner {
     ComPtr<ID3D11Device> device;
@@ -21,10 +26,21 @@ struct Owner {
     std::atomic<bool> leaseLive{false};
 };
 
+struct Transport {
+    edvr::VTableHook hook;
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    PFN_ExecuteCommandList realExecuteCommandList = nullptr;
+    std::atomic<bool> active{false};
+};
+
 std::mutex g_ownerMutex;
 Owner* g_owner = nullptr;
 std::atomic<uint64_t> g_privateExecutions{0};
 std::atomic<uint64_t> g_unknownExecutions{0};
+std::mutex g_transportMutex;
+std::atomic<Transport*> g_transport{nullptr};
+bool g_transportAttempted = false;
 
 struct Lease {
     Owner* owner;
@@ -47,6 +63,34 @@ struct ExecutionScope {
         lease->executing.clear(std::memory_order_release);
     }
 };
+
+void STDMETHODCALLTYPE hookedTransportExecuteCommandList(ID3D11DeviceContext* self,
+                                                          ID3D11CommandList* list,
+                                                          BOOL restoreContextState) {
+    Transport* transport = g_transport.load(std::memory_order_acquire);
+    if (!transport || !transport->realExecuteCommandList) return;
+
+    // InPlace mode shares the context table with every context of that type.
+    // Only the exact immediate context that was admitted as the owner may
+    // consume a private permit or affect bridge diagnostics.
+    const bool ownerContext = transport->active.load(std::memory_order_acquire) &&
+                              self == transport->context.Get();
+    if (ownerContext) {
+        if (!edvr::graphicsBridgeConsumePermit(self, list, restoreContextState))
+            edvr::graphicsBridgeNoteUnknownExecution();
+    }
+    // The transport is deliberately pass-through: one original call, once,
+    // after the owner-context bookkeeping above.
+    transport->realExecuteCommandList(self, list, restoreContextState);
+}
+
+void noteTransport(const char* result) noexcept {
+    try {
+        edvr::Log::get().note("graphics bridge: minimal ExecuteCommandList transport %s",
+                              result);
+    } catch (...) {
+    }
+}
 
 bool identity(IUnknown* object, ComPtr<IUnknown>& result) {
     result.Reset();
@@ -127,6 +171,90 @@ bool graphicsBridgeRegisterOwner(ID3D11Device* device, ID3D11DeviceContext* cont
     // Its failure must not change the established graphics bridge behavior.
     (void)renderBoundaryRegisterOwner(device, context);
     return true;
+}
+
+bool graphicsBridgeInstallTransport(ID3D11Device* device, HookMode mode) {
+    std::lock_guard<std::mutex> lock(g_transportMutex);
+    if (g_transportAttempted) return false;
+    g_transportAttempted = true;
+    if (!device) {
+        noteTransport("unavailable (no device)");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> ownerLock(g_ownerMutex);
+        if (g_owner) {
+            noteTransport("unavailable (graphics owner already registered)");
+            return false;
+        }
+    }
+
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+    if (!context) {
+        noteTransport("unavailable (no immediate context)");
+        return false;
+    }
+
+    Transport* transport = new (std::nothrow) Transport();
+    if (!transport) {
+        context->Release();
+        noteTransport("unavailable (allocation failed)");
+        return false;
+    }
+    transport->device = device;
+    transport->context = context;
+    const bool usable = transport->hook.attach(context) &&
+                        transport->hook.executablePrefix() > kSlotExecuteCommandList;
+    if (!usable || !transport->hook.setMode(mode) ||
+        !transport->hook.replace(kSlotExecuteCommandList,
+                                 &hookedTransportExecuteCommandList,
+                                 reinterpret_cast<void**>(&transport->realExecuteCommandList)) ||
+        !transport->realExecuteCommandList) {
+        transport->hook.uninstall();
+        context->Release();
+        noteTransport("unavailable (context vtable unusable)");
+        return false;
+    }
+
+    transport->active.store(true, std::memory_order_release);
+    // replace() has captured the exact forward before an InPlace commit can
+    // expose the thunk. Publish the immutable state before that commit so a
+    // concurrent game call can never observe an installed thunk without it.
+    g_transport.store(transport, std::memory_order_release);
+    if (!transport->hook.commit()) {
+        transport->active.store(false, std::memory_order_release);
+        transport->hook.uninstall();
+        context->Release();
+        noteTransport("unavailable (vtable commit failed)");
+        return false;
+    }
+    if (!graphicsBridgeRegisterOwner(device, context)) {
+        transport->active.store(false, std::memory_order_release);
+        transport->hook.uninstall();
+        context->Release();
+        noteTransport("unavailable (owner registration failed)");
+        return false;
+    }
+    context->Release();
+    noteTransport("installed");
+    return true;
+}
+
+void graphicsBridgeUninstallTransport() {
+    std::lock_guard<std::mutex> lock(g_transportMutex);
+    Transport* transport = g_transport.load(std::memory_order_acquire);
+    if (!transport) return;
+    {
+        std::lock_guard<std::mutex> ownerLock(g_ownerMutex);
+        if (g_owner && g_owner->device.Get() == transport->device.Get() &&
+            g_owner->context.Get() == transport->context.Get()) {
+            // Native acquisition must stop before the thunk is removed.
+            g_owner->hookReady.store(false, std::memory_order_release);
+        }
+    }
+    transport->active.store(false, std::memory_order_release);
+    transport->hook.uninstall();
 }
 
 bool graphicsBridgeConsumePermit(ID3D11DeviceContext* context,

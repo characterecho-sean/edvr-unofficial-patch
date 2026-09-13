@@ -1031,6 +1031,9 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR Present test build failed & exit /b 1 )
 "%BUILD%\openxr_present_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_present_test.exe" --self-test || exit /b 1
+python "tools\test_openxr_transport.py" --self-test || exit /b 1
+python "tools\test_openxr_transport.py" --dry-run || exit /b 1
+python "tools\test_openxr_transport.py" || exit /b 1
 
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_system_test.exe" ^

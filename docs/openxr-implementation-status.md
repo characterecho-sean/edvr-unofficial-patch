@@ -1,19 +1,31 @@
 # OpenXR implementation status
 
-Main through `0d7251b` was merged and verified as `9f26dd4`. The new [native
-startup checkpoint](openxr-native-bootstrap-2026-09-13.md) adds initialization
-through the application's ordinary Init export using explicit child environment
-paths, plus three typed initialization-error exports. The full build passed,
-including 169 explicit-configuration checks, 175 bootstrap checks, 168
-Present/discovery checks and 46 runner checks. All 477 source, binary,
-environment and build-log hashes matched before and after the `eee7a1c`
+The latest [graphics transport
+checkpoint](openxr-transport-hooks-2026-09-13.md) removes native discovery's
+dependency on optional vScreen hooks. The deliberate feature-off path now
+installs a minimal ExecuteCommandList hook while retaining the normal rendering
+path. The full build passed: 184 checks per shared/private/LiveCopy case and 25
+checks per deliberately unavailable swap/live probe case, alongside the
+existing suites. The new fixture reproduces the missing bridge on the previous
+archived DLL. All 481 source, binary, environment, stage and log hashes are
+recorded. The minimal-hook Pimax test is prepared but remains pending; Frontier
+startup threading, complete legacy exports and game feature integration remain
+open.
+
+Main through `0d7251b` was merged and verified as `9f26dd4`. The preceding
+[native startup checkpoint](openxr-native-bootstrap-2026-09-13.md) adds
+initialization through the application's ordinary Init export using explicit
+child environment paths, plus three typed initialization-error exports. The
+full build passed, including 169 explicit-configuration checks, 175 bootstrap
+checks, 168 Present/discovery checks and 46 runner checks. All 477 source,
+binary, environment and build-log hashes matched before and after the `eee7a1c`
 bootstrap headset gate. It passed with 1529 stereo pairs, 314 loading
 projections and complete callback-held cleanup. The user confirmed normal
 grid/triangle tracking and closure without headlock, then noted a dark-grey
 background; the fixture's RGB `(0.03, 0.03, 0.03)` clear is unchanged from the
 previous flight and explains the expected shade. The staged DLL is still
-outside the installer payload; full legacy exports, transport-hook independence
-and native Frontier integration remain open.
+outside the installer payload; full legacy exports and native Frontier
+integration remain open.
 
 The preceding [native-module checkpoint](openxr-native-module-2026-09-13.md)
 puts the native backend behind a separately loaded DLL exposing Frontier's five

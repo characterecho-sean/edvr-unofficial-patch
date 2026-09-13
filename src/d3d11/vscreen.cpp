@@ -906,6 +906,8 @@ struct State {
 };
 
 State* g_state = nullptr;
+bool g_vScreenInstallAttempted = false;
+bool g_transportSelected = false;
 
 // One budget per thing that can fail, not one for the file.
 //
@@ -5332,7 +5334,7 @@ void vScreenFrameBoundary() {
 }
 
 void installVScreenFixes(ID3D11Device* device, HookMode mode) {
-    if (!device || g_state) return;
+    if (!device || g_state || g_transportSelected) return;
 
     Config& cfg = Config::get();
     headOffsetGateConfigure();
@@ -5355,8 +5357,20 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         !headOffsetGateWantsPanel() &&
         !cfg.getBool("advanced.app_gpu_timing", true) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
+        // The optional fixes are deliberately dormant, but native discovery
+        // still needs the exact immediate-context transport. It has its own
+        // one-shot install and does not create State, configure a fix, or bind
+        // GPU timing. A failed vScreen install never reaches this branch, so
+        // it cannot acquire a second ExecuteCommandList hook.
+        if (!g_vScreenInstallAttempted) {
+            g_transportSelected = true;
+            (void)graphicsBridgeInstallTransport(device, mode);
+        }
         return;
     }
+    // Preserve the existing retry path after a failed optional-hook install,
+    // while forbidding a later switch to a second transport implementation.
+    g_vScreenInstallAttempted = true;
 
     ID3D11DeviceContext* ctx = nullptr;
     device->GetImmediateContext(&ctx);
@@ -5694,6 +5708,7 @@ extern "C" void* edvr_selftest_binding(unsigned int slot, uint32_t* generation) 
 namespace edvr {
 
 void shutdownVScreenFixes() {
+    graphicsBridgeUninstallTransport();
     if (!g_state) return;
 
     // Disarm the write watch before anything else. Leaving a page of somebody

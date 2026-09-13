@@ -517,7 +517,68 @@ void callbackTeardown(HMODULE proxy, PresentDevice& present) {
   owner.stop();
 }
 
-int selfTest(const std::wstring& supplied) {
+enum class HookExpectation { Features, TransportOnly, Unavailable };
+
+void transportContracts(HMODULE proxy, PresentDevice& present, bool available) {
+  const auto hooks=reinterpret_cast<unsigned(__cdecl*)()>(GetProcAddress(proxy,"edvr_selftest_hooks"));
+  const auto counts=reinterpret_cast<Counts::Fn>(GetProcAddress(proxy,"edvr_selftest_graphics_bridge"));
+  check(hooks&&counts,"transport fixture observation exports exist");
+  if (!hooks||!counts) return;
+  auto* device=present.device(); auto* context=present.context();
+  ComPtr<ID3D11DeviceContext> deferred; ComPtr<ID3D11CommandList> list;
+  check(SUCCEEDED(device->CreateDeferredContext(0,&deferred)),"transport fixture deferred context");
+  if (!deferred) return;
+  deferred->ClearState();
+  check(SUCCEEDED(deferred->FinishCommandList(FALSE,&list)),"transport fixture recorded list");
+  if (!list) return;
+  context->ClearState();
+  uint64_t privateBefore{},unknownBefore{},privateAfter{},unknownAfter{};
+  counts(&privateBefore,&unknownBefore);
+  context->ExecuteCommandList(list.Get(),TRUE);
+  context->ExecuteCommandList(list.Get(),FALSE);
+  counts(&privateAfter,&unknownAfter);
+  check(privateAfter==privateBefore&&unknownAfter==unknownBefore+(available?2:0),
+        "unpermitted lists never become private, with either restore flag");
+  check(hooks()==0,"vScreen ClearState and ExecuteCommandList hooks remain absent");
+
+  GraphicsBridgeClient bridge;
+  const HRESULT acquired=bridge.acquire(proxy,device,context);
+  check(acquired==(available?S_OK:E_NOINTERFACE),"transport bridge availability matches requested mode");
+  if (!available||acquired!=S_OK) return;
+  std::atomic<HRESULT> foreign{S_OK};
+  std::thread wrongThread([&]{foreign=bridge.execute(list.Get());}); wrongThread.join();
+  check(foreign==E_ACCESSDENIED,"transport bridge rejects execution on a foreign thread");
+  check(bridge.execute(list.Get())==S_OK,"minimal transport consumes private permit");
+  counts(&privateAfter,&unknownAfter);
+  check(privateAfter==privateBefore+1&&unknownAfter==unknownBefore+2,
+        "minimal transport accounts for exactly one private execution");
+  context->ExecuteCommandList(list.Get(),TRUE);
+  counts(&privateAfter,&unknownAfter);
+  check(privateAfter==privateBefore+1&&unknownAfter==unknownBefore+3,
+        "private permit is not reusable by a subsequent game call");
+
+  // A shared-table hook can see another context on the same adapter. It must
+  // forward that call without admitting it as the registered owner's work.
+  ComPtr<ID3D11Device> otherDevice; ComPtr<ID3D11DeviceContext> otherContext,otherDeferred;
+  ComPtr<ID3D11CommandList> otherList;
+  check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,
+      D3D11_SDK_VERSION,&otherDevice,nullptr,&otherContext)),"transport foreign device");
+  if (otherDevice&&SUCCEEDED(otherDevice->CreateDeferredContext(0,&otherDeferred))) {
+    otherDeferred->ClearState();
+    check(SUCCEEDED(otherDeferred->FinishCommandList(FALSE,&otherList)),"transport foreign list");
+    if (otherList) {
+      check(bridge.execute(otherList.Get())==E_INVALIDARG,"transport rejects same-adapter foreign list");
+      otherContext->ExecuteCommandList(otherList.Get(),TRUE);
+      counts(&privateAfter,&unknownAfter);
+      check(privateAfter==privateBefore+1&&unknownAfter==unknownBefore+3,
+            "foreign context does not change registered-owner counters");
+    }
+  } else check(false,"transport foreign deferred context");
+  bridge.reset();
+  check(hooks()==0,"transport testing did not activate optional vScreen hooks");
+}
+
+int selfTest(const std::wstring& supplied, HookExpectation expectation=HookExpectation::Features) {
   Watchdog watchdog; wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr,exe,MAX_PATH); std::wstring path=supplied;
   if (path.empty()) { path=exe; const auto slash=path.find_last_of(L"\\/"); path=path.substr(0,slash+1)+L"d3d11.dll"; }
   HMODULE proxy=LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS); check(proxy!=nullptr,"load built graphics proxy"); if (!proxy) return 1;
@@ -527,6 +588,19 @@ int selfTest(const std::wstring& supplied) {
   check(preClient.acquire(L"d3d11.dll")==E_INVALIDARG&&!preClient.provider(),"native client rejects relative path before device creation");
   auto countsFn=reinterpret_cast<Counts::Fn>(GetProcAddress(proxy,"edvr_selftest_graphics_bridge")); check(countsFn!=nullptr,"graphics bridge counter export exists");
   PresentDevice present; check(SUCCEEDED(present.initialize(proxy,D3D_DRIVER_TYPE_WARP)),"initialize real WARP proxy device"); if (!present.swapchain()) return 1;
+  if (expectation!=HookExpectation::Features) {
+    transportContracts(proxy,present,expectation==HookExpectation::TransportOnly);
+    if (failures) return 1;
+  }
+  if (expectation==HookExpectation::Unavailable) {
+    NativeGraphicsClient missing;
+    check(missing.acquire(path)==E_NOINTERFACE&&!missing.provider(),"deliberate context probe leaves native discovery unavailable");
+    EdvrRenderBoundaryRequest request{sizeof(request),EDVR_RENDER_BOUNDARY_VERSION_1,present.device(),&failingCallback,nullptr};
+    RenderBoundaryClient boundary;
+    check(boundary.acquire(proxy,request)==E_NOINTERFACE&&!boundary.active(),"deliberate context probe leaves callback registration unavailable");
+    check(SUCCEEDED(present.present()),"ordinary Present works with transport deliberately unavailable");
+    return failures?1:0;
+  }
   nativeGraphicsContracts(proxy,present.device(),present.context());
   nativeClientContracts(proxy,path,present.device(),present.context());
   nativeRenderBindingContracts(proxy,path,present);
@@ -538,6 +612,11 @@ int selfTest(const std::wstring& supplied) {
   closeOrdering(proxy,present.swapchain(),present.device(),present.context());
   quiescentTeardown(proxy,present);
   callbackTeardown(proxy,present);
+  if (expectation==HookExpectation::TransportOnly) {
+    const auto hooks=reinterpret_cast<unsigned(__cdecl*)()>(GetProcAddress(proxy,"edvr_selftest_hooks"));
+    check(hooks&&hooks()==0,"full Present and cleanup suite left optional vScreen hooks absent");
+    if (!failures) std::puts("transport_only: PASS (real WARP graphics, no OpenXR runtime)");
+  }
   return failures?1:0;
 }
 }
@@ -545,5 +624,10 @@ int wmain(int argc, wchar_t** argv) {
   if (argc==2 && !std::wcscmp(argv[1],L"--dry-run")) { std::puts("Would test the actual WARP Present render-boundary hook; no windows, device, threads or writes created."); return 0; }
   if (argc==2 && !std::wcscmp(argv[1],L"--self-test")) { const int r=selfTest(L""); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load()); return r; }
   if (argc==3 && !std::wcscmp(argv[1],L"--graphics-proxy") && absolute(argv[2])) { const int r=selfTest(argv[2]); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load()); return r; }
-  std::fputs("usage: openxr_present_test --dry-run|--self-test|--graphics-proxy ABSOLUTE_DLL\n",stderr); return 2;
+  if (argc==4 && !std::wcscmp(argv[1],L"--graphics-proxy") && absolute(argv[2]) &&
+      (!std::wcscmp(argv[3],L"--transport-only")||!std::wcscmp(argv[3],L"--unavailable"))) {
+    const auto mode=!std::wcscmp(argv[3],L"--transport-only")?HookExpectation::TransportOnly:HookExpectation::Unavailable;
+    const int r=selfTest(argv[2],mode); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load());return r;
+  }
+  std::fputs("usage: openxr_present_test --dry-run|--self-test|--graphics-proxy ABSOLUTE_DLL [--transport-only|--unavailable]\n",stderr); return 2;
 }
