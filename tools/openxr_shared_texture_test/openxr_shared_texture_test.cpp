@@ -1,5 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#include "../../src/openxr/eye_capture.h"
+#include "../../src/openxr/skybox_capture.h"
 #include "../../src/openxr/shared_texture_transfer.h"
 #include "../../src/openxr/immediate_executor.h"
 #include "../../src/openxr/owner_service.h"
@@ -26,20 +28,23 @@ class ProducerExecutor final : public ImmediateExecutor {
  public:
   bool start(){return owner_.start();}
   bool invoke(std::function<void()> fn) override {
-    calls_.fetch_add(1,std::memory_order_relaxed);
+    const unsigned call = calls_.fetch_add(1,std::memory_order_relaxed) + 1;
     if(!accepting_.load(std::memory_order_acquire))return false;
+    if(rejectAt_.load(std::memory_order_acquire)==call)return false;
     const bool ran=owner_.invoke([this,fn=std::move(fn)]() mutable { thread_.store(GetCurrentThreadId(),std::memory_order_release);fn(); });
     return ran&&!failAfterRunning;
   }
   bool failAfterRunning=false; // Set only while no invocation is active.
   void refuse(){accepting_.store(false,std::memory_order_release);}
-  void resume(){accepting_.store(true,std::memory_order_release);}
+  void resume(){rejectAt_.store(0,std::memory_order_release);accepting_.store(true,std::memory_order_release);}
+  void refuseAt(unsigned call){rejectAt_.store(call,std::memory_order_release);accepting_.store(true,std::memory_order_release);}
   unsigned calls()const{return calls_.load(std::memory_order_acquire);}
   DWORD thread()const{return thread_.load(std::memory_order_acquire);}
   bool stop(){return owner_.stop();}
  private:
   OwnerService owner_;
   std::atomic<bool> accepting_{true};
+  std::atomic<unsigned> rejectAt_{0};
   std::atomic<unsigned> calls_{0};
   std::atomic<DWORD> thread_{0};
 };
@@ -175,12 +180,156 @@ void invalidInputs(Fixture& f){
   check(f.executor.calls()==initialCalls,"invalid inputs request no producer callbacks");
 }
 
+void captureIntegration(Fixture& f) {
+  EyeCapture sameEye;
+  const unsigned beforeSameEye=f.executor.calls();
+  check(sameEye.initializeShared(f.producer.Get(),f.producer.Get(),&f.executor)!=S_OK&&
+        f.executor.calls()==beforeSameEye,
+    "eye shared initialization rejects same device");
+  EyeCapture eyes;
+  check(eyes.initializeShared(f.producer.Get(),f.consumer.Get(),&f.executor)==S_OK,
+    "eye shared initialization");
+  ComPtr<ID3D11Texture2D> leftSource,rightSource,noRenderSource;
+  check(sourceTexture(f,DXGI_FORMAT_R8G8B8A8_UNORM,W,H,211,leftSource),
+    "left shared source created");
+  check(sourceTexture(f,DXGI_FORMAT_B8G8R8A8_UNORM,W,H,212,rightSource),
+    "right shared source created");
+  check(sourceTexture(f,DXGI_FORMAT_R8G8B8A8_UNORM,W,H,213,noRenderSource),
+    "no-render shared source created");
+  const vr::Texture_t left{leftSource.Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
+  const vr::Texture_t right{rightSource.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
+  const vr::Texture_t noRender{noRenderSource.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
+  const vr::VRTextureBounds_t flipped{1.f,1.f,0.f,0.f};
+  check(eyes.capture(vr::Eye_Left,&left,&flipped)==vr::VRCompositorError_None,
+    "shared left capture");
+  check(eyes.capture(vr::Eye_Right,&right)==vr::VRCompositorError_None,
+    "shared right capture");
+  ComPtr<ID3D11Texture2D> leftSnapshot=eyes.texture(vr::Eye_Left);
+  ComPtr<ID3D11Texture2D> rightSnapshot=eyes.texture(vr::Eye_Right);
+  check(leftSnapshot&&rightSnapshot&&leftSnapshot.Get()!=rightSnapshot.Get(),
+    "shared eyes have independent private outputs");
+  check(eyes.colorSpace(vr::Eye_Left)==vr::ColorSpace_Gamma&&
+        eyes.colorSpace(vr::Eye_Right)==vr::ColorSpace_Linear&&
+        eyes.bounds(vr::Eye_Left).uMin==1.f&&eyes.bounds(vr::Eye_Left).uMax==0.f,
+    "shared eye metadata and flipped bounds");
+  check(readback(f,leftSnapshot.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,W,H,pattern(DXGI_FORMAT_R8G8B8A8_UNORM,W,H,211))&&
+        readback(f,rightSnapshot.Get(),DXGI_FORMAT_B8G8R8A8_UNORM,W,H,pattern(DXGI_FORMAT_B8G8R8A8_UNORM,W,H,212)),
+    "shared eye pixels preserve both sources");
+  const unsigned beforeNoRender=f.executor.calls();
+  check(eyes.capture(vr::Eye_Left,&noRender,nullptr,vr::Submit_Default,false)==vr::VRCompositorError_None&&
+        eyes.texture(vr::Eye_Left)==leftSnapshot.Get()&&eyes.colorSpace(vr::Eye_Left)==vr::ColorSpace_Gamma&&
+        f.executor.calls()==beforeNoRender,
+    "shared no-render validates without changing prior eye");
+
+  ComPtr<ID3D11Texture2D> foreign;
+  D3D11_TEXTURE2D_DESC foreignDesc{};foreignDesc.Width=W;foreignDesc.Height=H;foreignDesc.MipLevels=1;
+  foreignDesc.ArraySize=1;foreignDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;foreignDesc.SampleDesc.Count=1;
+  foreignDesc.Usage=D3D11_USAGE_DEFAULT;foreignDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+  check(f.consumer->CreateTexture2D(&foreignDesc,nullptr,&foreign)==S_OK,
+    "shared wrong-device source created");
+  const vr::Texture_t wrong{foreign.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+  const unsigned beforeWrong=f.executor.calls();
+  check(eyes.capture(vr::Eye_Left,&wrong)==vr::VRCompositorError_TextureIsOnWrongDevice&&
+        eyes.texture(vr::Eye_Left)==leftSnapshot.Get()&&f.executor.calls()==beforeWrong,
+    "shared wrong-device eye rejected without mutation");
+  eyes.reset();
+  check(!eyes.texture(vr::Eye_Left)&&!eyes.texture(vr::Eye_Right),
+    "shared eye reset clears published outputs");
+  check(eyes.capture(vr::Eye_Left,&left)==vr::VRCompositorError_None&&eyes.texture(vr::Eye_Left),
+    "shared eye slot reusable after reset");
+  f.executor.refuse();const unsigned beforeEyeShutdown=f.executor.calls();
+  check(eyes.shutdownShared(5000)==S_OK&&f.executor.calls()==beforeEyeShutdown,
+    "shared eye shutdown is consumer-only after producer refusal");
+  f.executor.resume();eyes.shutdown();
+
+  SkyboxCapture skybox;
+  SkyboxCapture sameSkybox;
+  const unsigned beforeSameSkybox=f.executor.calls();
+  check(sameSkybox.initializeShared(f.producer.Get(),f.producer.Get(),&f.executor)!=S_OK&&
+        f.executor.calls()==beforeSameSkybox,
+    "skybox shared initialization rejects same device");
+  check(skybox.initializeShared(f.producer.Get(),f.consumer.Get(),&f.executor)==S_OK,
+    "skybox shared initialization");
+  ComPtr<ID3D11Texture2D> first[6],second[6],third[6];
+  std::vector<unsigned char> firstPixels[6],secondPixels[6],thirdPixels[6];
+  vr::Texture_t firstInputs[6]{},secondInputs[6]{},thirdInputs[6]{};
+  bool sourcesReady=true;
+  for(unsigned face=0;face<6;++face) {
+    firstPixels[face]=pattern(kFormats[face],W,H,300+face);
+    secondPixels[face]=pattern(kFormats[face],W,H,400+face);
+    thirdPixels[face]=pattern(kFormats[face],W,H,500+face);
+    sourcesReady=sourceTexture(f,kFormats[face],W,H,300+face,first[face])&&sourcesReady;
+    sourcesReady=sourceTexture(f,kFormats[face],W,H,400+face,second[face])&&sourcesReady;
+    sourcesReady=sourceTexture(f,kFormats[face],W,H,500+face,third[face])&&sourcesReady;
+    firstInputs[face]={first[face].Get(),vr::API_DirectX,face&1?vr::ColorSpace_Linear:vr::ColorSpace_Gamma};
+    secondInputs[face]={second[face].Get(),vr::API_DirectX,face&1?vr::ColorSpace_Gamma:vr::ColorSpace_Linear};
+    thirdInputs[face]={third[face].Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+  }
+  check(sourcesReady,"skybox shared source sets created");
+  if(!sourcesReady) {
+    check(skybox.shutdownShared(5000)==S_OK,"skybox shared cleanup after source failure");
+    skybox.shutdown();
+    return;
+  }
+  check(skybox.set(firstInputs,6)==vr::VRCompositorError_None&&skybox.ready(),
+    "skybox first six-face set publishes");
+  ID3D11Texture2D* firstPointers[6]{};
+  for(unsigned face=0;face<6;++face) {
+    firstPointers[face]=skybox.texture(face);
+    check(firstPointers[face]&&skybox.colorSpace(face)==firstInputs[face].eColorSpace&&
+          readback(f,firstPointers[face],kFormats[face],W,H,firstPixels[face]),
+      "skybox first set metadata and pixels");
+  }
+  // The first two faces of the inactive bank complete; reject the first
+  // producer callback of face two (initialize/create/copy = seven attempts).
+  const unsigned middleAttempt=f.executor.calls()+7;
+  f.executor.refuseAt(middleAttempt);
+  check(skybox.set(secondInputs,6)==vr::VRCompositorError_InvalidTexture,
+    "skybox middle-face executor refusal rejects transaction");
+  f.executor.resume();
+  bool preserved=true;
+  for(unsigned face=0;face<6;++face)
+    preserved=preserved&&skybox.texture(face)==firstPointers[face]&&
+      skybox.colorSpace(face)==firstInputs[face].eColorSpace&&
+      readback(f,skybox.texture(face),kFormats[face],W,H,firstPixels[face]);
+  check(preserved,"skybox failed set preserves entire committed bank");
+  check(skybox.set(secondInputs,6)==vr::VRCompositorError_None&&skybox.ready(),
+    "skybox successful retry commits all six faces");
+  for(unsigned face=0;face<6;++face)
+    check(skybox.colorSpace(face)==secondInputs[face].eColorSpace&&
+          readback(f,skybox.texture(face),kFormats[face],W,H,secondPixels[face]),
+      "skybox retry metadata and pixels");
+
+  // The third set returns to bank zero, exercising the reusable transfer
+  // resources created by the first set rather than allocating a third bank.
+  check(skybox.set(thirdInputs,6)==vr::VRCompositorError_None,"skybox reusable bank set");
+  for(unsigned face=0;face<6;++face)
+    check(skybox.texture(face)==firstPointers[face]&&
+          skybox.colorSpace(face)==vr::ColorSpace_Auto&&
+          readback(f,skybox.texture(face),kFormats[face],W,H,thirdPixels[face]),
+      "skybox bank reuse updates pixels and metadata");
+
+  vr::Texture_t wrongInputs[6]{};
+  for(unsigned face=0;face<6;++face) wrongInputs[face]=thirdInputs[face];
+  wrongInputs[3].handle=foreign.Get();
+  const unsigned beforeSkyWrong=f.executor.calls();
+  check(skybox.set(wrongInputs,6)==vr::VRCompositorError_TextureIsOnWrongDevice&&
+        skybox.texture(0)==firstPointers[0]&&f.executor.calls()==beforeSkyWrong,
+    "skybox wrong-device face rejected before transaction");
+  skybox.clear();check(!skybox.ready()&&!skybox.texture(0),"shared skybox clear invalidates publication");
+  f.executor.refuse();const unsigned beforeSkyShutdown=f.executor.calls();
+  check(skybox.shutdownShared(5000)==S_OK&&f.executor.calls()==beforeSkyShutdown,
+    "shared skybox shutdown is consumer-only after producer refusal");
+  f.executor.resume();skybox.shutdown();
+}
+
 int run(bool hardware){
   Fixture f;if(!makeFixture(f,hardware)){check(false,"create two same-adapter devices and initialize");return 1;}
   LUID a{},b{};check(luid(f.producer.Get(),a)&&luid(f.consumer.Get(),b)&&std::memcmp(&a,&b,sizeof(a))==0,"devices share adapter LUID");
   printAdapter(f.producer.Get(),"producer");printAdapter(f.consumer.Get(),"consumer");
   std::printf("shared_texture consumer_thread=%lu\n",static_cast<unsigned long>(GetCurrentThreadId()));
   invalidInputs(f);
+  captureIntegration(f);
   {
     ComPtr<ID3D11Device> singleProducer,singleConsumer;ComPtr<ID3D11DeviceContext> singleProducerContext,singleConsumerContext;
     check(createDevice(nullptr,singleProducer,singleProducerContext,D3D11_CREATE_DEVICE_SINGLETHREADED)&&

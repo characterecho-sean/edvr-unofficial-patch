@@ -80,7 +80,20 @@ class ModuleBackend final : public RuntimeBackend {
       generation->loadingAdmitted.store(false,std::memory_order_release);
       update([&](auto& s) { s.shutdownThread=GetCurrentThreadId(); });
       bool cleaned=true, joined=true, atBoundary=false;
-      if (generation->owner.running()) {
+      if (options_.separateDevice&&generation->owner.running()) {
+        // Exclude new producer requests. Active work retires synchronously;
+        // the owner finalizer needs only its separate device/context. Neither
+        // another Present nor ownership of the game context is required.
+        generation->render.close();
+        generation->binding.close();
+        joined=generation->owner.stop([&] {
+          if(generation->host) {
+            generation->host->serviceStopped=true;
+            cleaned=generation->host->stop();
+          }
+        });
+        if(!joined||!cleaned)return retain(*generation,"owned_device_teardown_incomplete");
+      } else if (generation->owner.running()) {
         const auto stopped = runRenderShutdown(
             generation->route, generation->binding.work(), generation->render,
             generation->owner,
@@ -184,9 +197,12 @@ bool copyPath(const wchar_t* input,std::wstring& output) {
 }
 
 extern "C" HRESULT WINAPI edvrConfigureNativeRuntime(const EdvrNativeRuntimeConfig* config) try {
-  if (!config||config->size!=sizeof(*config)||config->version!=EDVR_NATIVE_MODULE_VERSION_1||
-      config->reserved||!config->renderWaitMilliseconds||config->renderWaitMilliseconds>5000) return E_INVALIDARG;
+  if (!config||config->size!=sizeof(*config)||
+      !((config->version==EDVR_NATIVE_MODULE_VERSION_1&&config->reserved==0)||
+        (config->version==EDVR_NATIVE_MODULE_VERSION_2&&config->reserved==EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE))||
+      !config->renderWaitMilliseconds||config->renderWaitMilliseconds>5000) return E_INVALIDARG;
   RuntimeOptions options;
+  options.separateDevice=config->version==EDVR_NATIVE_MODULE_VERSION_2;
   if (!copyPath(config->loaderPath,options.loader)||!copyPath(config->graphicsProxyPath,options.graphicsProxy)) return E_INVALIDARG;
   std::lock_guard<std::mutex> lock(configureMutex);
   if (module.load(std::memory_order_acquire)) return E_PENDING;

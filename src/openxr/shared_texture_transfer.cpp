@@ -162,7 +162,10 @@ struct SharedTextureTransfer::Impl final {
     D3D11_TEXTURE2D_DESC sharedDescription = sourceDescription;
     sharedDescription.Format = choice.shared;
     sharedDescription.Usage = D3D11_USAGE_DEFAULT;
-    sharedDescription.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    // These resources are copy destinations, never render targets. Keeping
+    // the RTV flag off also excludes the producer allocation from the game's
+    // FSS/surface-size hooks, which otherwise rewrite matching RT dimensions.
+    sharedDescription.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     sharedDescription.CPUAccessFlags = 0;
     sharedDescription.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
         D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;

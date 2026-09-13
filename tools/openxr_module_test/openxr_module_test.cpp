@@ -72,6 +72,11 @@ struct Exports {
   }
   // Configured module and hook-owning graphics provider are process lifetime.
 };
+std::atomic<uint64_t>* g_presentCount=nullptr;
+HRESULT countedPresent(PresentDevice& device) {
+  if(g_presentCount)g_presentCount->fetch_add(1,std::memory_order_relaxed);
+  return device.present();
+}
 std::filesystem::path executableDirectory() {
   wchar_t path[32768]{};const auto n=GetModuleFileNameW(nullptr,path,32768);
   return n&&n<32768?std::filesystem::path(path).parent_path():std::filesystem::path{};
@@ -80,13 +85,14 @@ bool absolute(const std::wstring& p) {
   return p.size()>3&&p.find(L'\0')==std::wstring::npos&&
     ((p[0]>=L'A'&&p[0]<=L'Z')||(p[0]>=L'a'&&p[0]<=L'z'))&&p[1]==L':'&&(p[2]==L'\\'||p[2]==L'/');
 }
-struct Options {std::wstring loader,graphics,module;unsigned seconds=10;bool present=false,bootstrap=false;};
+struct Options {std::wstring loader,graphics,module;unsigned seconds=10;bool present=false,bootstrap=false,separate=false;};
 bool parse(int argc,wchar_t** argv,Options& options) {
   bool seenSeconds=false;
   for(int i=1;i<argc;++i) {
     const std::wstring flag=argv[i];
     if(flag==L"--present-boundary"&&!options.present){options.present=true;continue;}
     if(flag==L"--bootstrap"&&!options.bootstrap){options.bootstrap=true;continue;}
+    if(flag==L"--separate-device"&&!options.separate){options.separate=true;continue;}
     if(i+1==argc)return false;
     const std::wstring value=argv[++i];
     if(flag==L"--loader"&&options.loader.empty())options.loader=value;
@@ -98,26 +104,26 @@ bool parse(int argc,wchar_t** argv,Options& options) {
       if(seconds<1||seconds>60)return false;options.seconds=seconds;seenSeconds=true;
     } else return false;
   }
-  return options.present&&absolute(options.loader)&&absolute(options.graphics)&&absolute(options.module);
+  return options.present&&! (options.bootstrap&&options.separate)&&absolute(options.loader)&&absolute(options.graphics)&&absolute(options.module);
 }
 
 void whilePresenting(PresentDevice& device,const std::function<void()>& task) {
   std::atomic<bool> finished{false};
   std::thread caller([&] {try{task();}catch(...){check(false,"foreign caller exception");}finished=true;});
   bool presented=true;
-  while(!finished.load(std::memory_order_acquire)) {presented=SUCCEEDED(device.present())&&presented;Sleep(1);}
+  while(!finished.load(std::memory_order_acquire)) {presented=SUCCEEDED(countedPresent(device))&&presented;Sleep(1);}
   caller.join();
   check(presented,"Present progress");
 }
 
 struct StopOnExit {
   Exports& api; PresentDevice& device; edvr::openxr::OwnerService* systemOwner=nullptr;
-  DWORD* shutdownCaller=nullptr; bool needed=true;
+  DWORD* shutdownCaller=nullptr; bool allowPresentPump=true, needed=true;
   void stop() {
     if (!needed) return;
     if (systemOwner) {
       const auto shutdown = edvr::openxr::module_test::submitWithPump(
-          *systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+          *systemOwner, [&] { return !allowPresentPump || SUCCEEDED(countedPresent(device)); }, [&] {
             if (shutdownCaller) *shutdownCaller = GetCurrentThreadId();
             api.shutdown();
           });
@@ -273,7 +279,22 @@ void exportedErrorTests(const Exports& api) {
   reader.join();check(consistent,"DLL error strings are safe across callers");
 }
 
-int selfTest(bool bootstrap=false) {
+void parserModeTests(const std::filesystem::path& directory) {
+  const std::wstring loader=(directory/L"loader.dll").wstring();
+  const std::wstring graphics=(directory/L"d3d11.dll").wstring();
+  const std::wstring module=(directory/L"module.dll").wstring();
+  auto run=[&](std::initializer_list<const wchar_t*> args) {
+    std::vector<std::wstring> values;for(const auto* value:args)values.emplace_back(value);
+    std::vector<wchar_t*> pointers;for(auto& value:values)pointers.push_back(value.data());
+    Options parsed{};return parse(static_cast<int>(pointers.size()),pointers.data(),parsed);
+  };
+  check(run({L"test",L"--loader",loader.c_str(),L"--graphics-proxy",graphics.c_str(),L"--runtime-module",module.c_str(),L"--present-boundary",L"--separate-device"}),
+    "separate-device command mode parses");
+  check(!run({L"test",L"--loader",loader.c_str(),L"--graphics-proxy",graphics.c_str(),L"--runtime-module",module.c_str(),L"--present-boundary",L"--bootstrap",L"--separate-device"}),
+    "bootstrap and separate-device modes cannot combine");
+}
+
+int selfTest(bool bootstrap=false,bool separate=false) {
   Watchdog watchdog;
   TestEnvironment environment;
   viewingPhaseTests();
@@ -281,6 +302,7 @@ int selfTest(bool bootstrap=false) {
   runInitErrorTests(check);
   module_test::runSystemCallerTests(check);
   const auto directory=executableDirectory();const auto graphicsPath=(directory/L"d3d11.dll").wstring();
+  parserModeTests(directory);
   const auto missingLoader=(directory/L"intentionally-absent-openxr-loader.dll").wstring();
   check(!std::filesystem::exists(missingLoader),"negative loader fixture is absent");
   if(std::filesystem::exists(missingLoader))return 1;
@@ -296,7 +318,10 @@ int selfTest(bool bootstrap=false) {
   api.shutdown();
   EdvrNativeRuntimeConfig config{sizeof(config),EDVR_NATIVE_MODULE_VERSION_1,missingLoader.c_str(),graphicsPath.c_str(),100,0};
   auto invalid=config;invalid.size=4;check(api.configure(&invalid)==E_INVALIDARG,"short module config rejected");
-  invalid=config;invalid.version=2;check(api.configure(&invalid)==E_INVALIDARG,"module config version rejected");
+  invalid=config;invalid.version=99;check(api.configure(&invalid)==E_INVALIDARG,"unknown module config version rejected");
+  invalid=config;invalid.reserved=EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE;check(api.configure(&invalid)==E_INVALIDARG,"v1 separate-device flag rejected");
+  invalid=config;invalid.version=EDVR_NATIVE_MODULE_VERSION_2;invalid.reserved=2;check(api.configure(&invalid)==E_INVALIDARG,"v2 unknown graphics flag rejected");
+  invalid=config;invalid.version=EDVR_NATIVE_MODULE_VERSION_2;check(api.configure(&invalid)==E_INVALIDARG,"v2 requires explicit separate-device flag");
   invalid=config;invalid.loaderPath=L"loader.dll";check(api.configure(&invalid)==E_INVALIDARG,"relative runtime loader rejected");
   invalid=config;invalid.renderWaitMilliseconds=0;check(api.configure(&invalid)==E_INVALIDARG,"zero startup wait rejected");
   if(bootstrap) {
@@ -307,7 +332,11 @@ int selfTest(bool bootstrap=false) {
     before={sizeof(before),EDVR_NATIVE_MODULE_VERSION_1};
     check(api.getStatus(&before)==S_FALSE&&api.token()==0,"rejected bootstrap does not publish a module or generation");
     environment.set(missingLoader.c_str(),graphicsPath.c_str());
-  } else check(api.configure(&config)==S_OK&&api.configure(&config)==E_PENDING,"configure once outside loader lock");
+  } else {
+    config.version=separate?EDVR_NATIVE_MODULE_VERSION_2:EDVR_NATIVE_MODULE_VERSION_1;
+    config.reserved=separate?EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE:0;
+    check(api.configure(&config)==S_OK&&api.configure(&config)==E_PENDING,"configure once outside loader lock");
+  }
   check(api.init(&error,vr::VRApplication_Overlay)==0&&error==vr::VRInitError_Init_NotSupportedWithCompositor,"unsupported application does not start backend");
   check(api.status().initAttempts==0,"unsupported application creates no generation");
   check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_HmdNotFound,"unloaded graphics provider fails before runtime");
@@ -370,7 +399,9 @@ int nativeRun(const Options& options) {
   HMODULE proxy=LoadLibraryExW(options.graphics.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
   if(!proxy)return 3;
   PresentDevice device;if(FAILED(device.initialize(proxy,D3D_DRIVER_TYPE_HARDWARE)))return 3;
-  EdvrNativeRuntimeConfig config{sizeof(config),EDVR_NATIVE_MODULE_VERSION_1,options.loader.c_str(),options.graphics.c_str(),5000,0};
+  std::atomic<uint64_t> presentCount{0};g_presentCount=&presentCount;
+  EdvrNativeRuntimeConfig config{sizeof(config),options.separate?EDVR_NATIVE_MODULE_VERSION_2:EDVR_NATIVE_MODULE_VERSION_1,
+      options.loader.c_str(),options.graphics.c_str(),5000,options.separate?EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE:0};
   if(options.bootstrap) {
     BootstrapPaths paths;
     if(readBootstrapPaths(paths)!=BootstrapResult::Ready||paths.loader!=options.loader||paths.graphics!=options.graphics){
@@ -384,7 +415,7 @@ int nativeRun(const Options& options) {
   check(systemOwnerStarted, "native persistent System owner starts before Init");
   if (!systemOwnerStarted) return 3;
   DWORD initCaller=0, systemCaller=0, renderCaller=GetCurrentThreadId(), shutdownCaller=0;
-  StopOnExit stop{api,device,&systemOwner,&shutdownCaller};
+  StopOnExit stop{api,device,&systemOwner,&shutdownCaller,!options.separate,true};
   uint32_t token=0;vr::EVRInitError error{};vr::IVRSystem* system=nullptr;
   vr::IVRSystem* initialSystem=nullptr;vr::IVRCompositor* compositor=nullptr;
   whilePresenting(device,[&] {
@@ -461,7 +492,7 @@ int nativeRun(const Options& options) {
         // scene anchored to the orientation sampled while it was on the desk.
         bool resetValid=false;
         const auto recenter = module_test::submitWithPump(
-            systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+            systemOwner, [&] { return SUCCEEDED(countedPresent(device)); }, [&] {
               system->ResetSeatedZeroPose();vr::VREvent_t reset{};vr::TrackedDevicePose_t pose{};
               resetValid=system->PollNextEventWithPose(vr::TrackingUniverseSeated,&reset,sizeof(reset),&pose)&&
                   reset.eventType==vr::VREvent_SeatedZeroPoseReset&&pose.bPoseIsValid;
@@ -477,13 +508,13 @@ int nativeRun(const Options& options) {
     if(phase==Phase::Complete)break;
     if(phase==Phase::Expired){std::puts("error,module_viewing_deadline");success=false;break;}
     if(!success)break;
-    if(phase!=Phase::Scene){success=SUCCEEDED(device.present());Sleep(1);continue;}
+    if(phase!=Phase::Scene){success=SUCCEEDED(countedPresent(device));Sleep(1);continue;}
     // Sample only between completed scene pairs. There is no mid-pair reset
     // or general asynchronous game-call scheduler in this diagnostic gate.
     if (focused && frames && GetTickCount64() >= nextSystemSample) {
       module_test::PeriodicSystemSample sample{};
       const auto periodic = module_test::submitWithPump(
-          systemOwner, [&] { return SUCCEEDED(device.present()); }, [&] {
+          systemOwner, [&] { return SUCCEEDED(countedPresent(device)); }, [&] {
             sample=module_test::collectPeriodicSystemSample(*system);
           });
       ++systemSamples;
@@ -507,7 +538,7 @@ int nativeRun(const Options& options) {
       std::fflush(stdout);
       applicationWaitLogged=true;
     }
-    if(!focused||!poses[0].bPoseIsValid){if(focused)++invalid;compositor->ClearLastSubmittedFrame();success=SUCCEEDED(device.present());continue;}
+    if(!focused||!poses[0].bPoseIsValid){if(focused)++invalid;compositor->ClearLastSubmittedFrame();success=SUCCEEDED(countedPresent(device));continue;}
     if(compositor->GetLastPoses(cached,2,cachedGame,2)!=vr::VRCompositorError_None||
        !samePose(cached[0],poses[0])||!samePose(cached[1],poses[1])||
        !samePose(cachedGame[0],game[0])||!samePose(cachedGame[1],game[1])){success=false;break;}
@@ -521,11 +552,21 @@ int nativeRun(const Options& options) {
     if(!success)break;
     compositor->PostPresentHandoff();++frames;
     if(frames==1){std::printf("module_scene,first_pair=1,elapsed_ms=%llu\n",(unsigned long long)(GetTickCount64()-began));std::fflush(stdout);}
-    success=SUCCEEDED(device.present());
+    success=SUCCEEDED(countedPresent(device));
   }
   compositor->ClearLastSubmittedFrame();
+  const auto presentsBeforeShutdown=presentCount.load(std::memory_order_acquire);
   stop.stop();
   const auto status=api.status();
+  if(options.separate) {
+    std::printf("module_owned_shutdown,presents_before=%llu,presents_after=%llu,cleanup=%u,retained=%u\n",
+      (unsigned long long)presentsBeforeShutdown,(unsigned long long)presentCount.load(std::memory_order_acquire),
+      status.cleanup,status.retained);
+    check(presentCount.load(std::memory_order_acquire)==presentsBeforeShutdown,
+      "separate-device shutdown uses CPU-only System wait without Present service");
+    check(status.phase==EDVR_NATIVE_STOPPED&&status.cleanup&&!status.retained&&status.renderCallbacks>0,
+      "separate-device shutdown cleans dedicated native resources and retires callback");
+  }
   const bool callerSummary = initCaller && systemCaller && shutdownCaller &&
       initCaller != systemCaller && initCaller != renderCaller && systemCaller != renderCaller &&
       systemCaller == shutdownCaller && status.initThread == initCaller &&
@@ -553,6 +594,7 @@ int wmain(int argc,wchar_t** argv) {
   if(argc==2&&!std::wcscmp(argv[1],L"--dry-run")) {std::puts("Would test the separate native DLL exports; no DLL, device, runtime or files created.");return 0;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test")) {const auto result=selfTest();std::printf("openxr_module_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test-bootstrap")) {const auto result=selfTest(true);std::printf("openxr_module_bootstrap_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
-  Options options;if(!parse(argc,argv,options)){std::fputs("usage: --self-test|--self-test-bootstrap|--dry-run|--loader ABS --graphics-proxy ABS --runtime-module ABS --present-boundary [--bootstrap] [--seconds 1..60]\n",stderr);return 2;}
+  if(argc==2&&!std::wcscmp(argv[1],L"--self-test-separate")) {const auto result=selfTest(false,true);std::printf("openxr_module_separate_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
+  Options options;if(!parse(argc,argv,options)){std::fputs("usage: --self-test|--self-test-bootstrap|--self-test-separate|--dry-run|--loader ABS --graphics-proxy ABS --runtime-module ABS --present-boundary [--bootstrap|--separate-device] [--seconds 1..60]\n",stderr);return 2;}
   try{return nativeRun(options);}catch(...){std::puts("error,module_test_exception");return 5;}
 }

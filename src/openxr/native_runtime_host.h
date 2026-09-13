@@ -53,6 +53,7 @@
 namespace edvr::openxr {
 struct RuntimeOptions {
   std::wstring loader, graphicsProxy;
+  bool separateDevice=false; // Explicit staged-module V2 qualification mode.
   // Borrowed validated provider from NativeRenderBinding. Its device and
   // module references remain alive through owner shutdown and callback release.
   HMODULE graphicsProvider = nullptr;
@@ -153,6 +154,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
   bool clean=true;
+  bool separateGraphics()const{return startupOptions.separateDevice;}
   AuxiliaryRead readAuxiliary()const override {
     const auto snapshot=geometry.read();AuxiliaryRead out{};
     out.generation=snapshot.generation;out.connected=snapshot.connected;
@@ -361,7 +363,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed)
       return vr::VRCompositorError_InvalidTexture;
     auto result=vr::VRCompositorError_InvalidTexture;
-    if(!graphicsCalls.invoke([&]{result=skybox.set(textures,count);}))return vr::VRCompositorError_InvalidTexture;
+    if(separateGraphics())result=skybox.set(textures,count);
+    else if(!graphicsCalls.invoke([&]{result=skybox.set(textures,count);}))return vr::VRCompositorError_InvalidTexture;
     if(result==vr::VRCompositorError_None){++skyboxSets;loading.overrideSet();}
     return result;
   }
@@ -392,7 +395,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
     auto r=vr::VRCompositorError_InvalidTexture;
-    if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,copyPixels);}))return r;
+    if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,copyPixels);
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,copyPixels);}))return r;
     if(r==vr::VRCompositorError_None && copyPixels)++copiedEyes;
     return r;
   }
@@ -475,6 +479,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poses.retire(compositorGeneration);
     resetEvents.retire(geometryGeneration);changes.clear();
     loading={};
+    if(separateGraphics()) {
+      // Rendering may still reference capture outputs. Drain the XR context
+      // first, then retire each shared handoff without a producer callback.
+      ShutdownTrace drainStage("host_owned_graphics_drain",tracing);
+      const auto drained=stereo.drain();drainStage.end(drained==XR_SUCCESS);
+      if(drained!=XR_SUCCESS)return clean=false;
+      const HRESULT eyesRetired=captured.shutdownShared();
+      const HRESULT skyRetired=skybox.shutdownShared();
+      if(eyesRetired!=S_OK||skyRetired!=S_OK){
+        std::printf("shared_capture_retained,eyes=%08lx,skybox=%08lx\n",(unsigned long)eyesRetired,(unsigned long)skyRetired);
+        return clean=false;
+      }
+    }
     ShutdownTrace captureStage("host_capture_release",tracing);
     skybox.shutdown();captured.shutdown();captureStage.end(true);
     ShutdownTrace stereoStage("host_stereo_shutdown",tracing);
@@ -592,7 +609,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return result("graphics_proxy_capability",XR_ERROR_FUNCTION_UNSUPPORTED);
     }
     HRESULT hr=E_FAIL;
-    if(!graphicsCalls.invoke([&]{hr=externalDevice?
+    if(separateGraphics()) {
+      if(!externalDevice||!graphicsCalls.invoke([&]{hr=NativeDevice::validate(externalDevice,req.adapterLuid,req.minFeatureLevel);})||FAILED(hr))
+        return result("producer_device_validation",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+      hr=graphics.initializeSeparate(req.adapterLuid,req.minFeatureLevel);
+    } else if(!graphicsCalls.invoke([&]{hr=externalDevice?
         graphics.initializeExisting(externalDevice,req.adapterLuid,req.minFeatureLevel):
         graphics.initialize(req.adapterLuid,req.minFeatureLevel,createDevice);}))
       return result("device_render_boundary",XR_ERROR_INITIALIZATION_FAILED);
@@ -615,10 +636,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(metadata.adapterIndex<0)return result("system_adapter_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     geometryGeneration=geometry.begin(metadata);
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
-    if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes,graphicsProxy,&graphicsCalls))) return false;
+    if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes,
+        separateGraphics()?nullptr:graphicsProxy,separateGraphics()?nullptr:&graphicsCalls))) return false;
     bool capturesReady=false;
-    if(!graphicsCalls.invoke([&]{capturesReady=SUCCEEDED(captured.initialize(graphics.device()))&&SUCCEEDED(skybox.initialize(graphics.device()));})||!capturesReady)
+    if(separateGraphics()) {
+      capturesReady=captured.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK&&
+          skybox.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK;
+    } else if(!graphicsCalls.invoke([&]{capturesReady=SUCCEEDED(captured.initialize(graphics.device()))&&SUCCEEDED(skybox.initialize(graphics.device()));}))
+      return result("capture_render_boundary",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    if(!capturesReady)
       return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    std::printf("graphics_ownership,mode=%s,producer_thread=%lu,xr_thread=%lu,distinct_devices=%u\n",
+        separateGraphics()?"separate":"borrowed",(unsigned long)graphicsCalls.thread,
+        (unsigned long)ownerThread,unsigned(externalDevice&&externalDevice!=graphics.device()));
     std::printf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
     if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;

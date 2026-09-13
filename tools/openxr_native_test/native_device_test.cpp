@@ -1,10 +1,53 @@
 #include "native_device.h"
 #include <cstdio>
+#include <cstring>
 #include <string>
 using edvr::openxr::NativeDevice;
+using Microsoft::WRL::ComPtr;
+
+static bool identity(IUnknown* first,IUnknown* second) {
+  ComPtr<IUnknown> a,b;
+  return first&&second&&first->QueryInterface(IID_PPV_ARGS(&a))==S_OK&&
+    second->QueryInterface(IID_PPV_ARGS(&b))==S_OK&&a.Get()==b.Get();
+}
+
+int hardwareTest() {
+  unsigned fails=0,checks=0;auto check=[&](bool value,const char* name){++checks;if(!value){++fails;std::printf("FAIL: %s\n",name);}};
+  ComPtr<IDXGIFactory1> factory;check(CreateDXGIFactory1(IID_PPV_ARGS(&factory))==S_OK,"DXGI factory");
+  ComPtr<IDXGIAdapter1> adapter;DXGI_ADAPTER_DESC1 description{};
+  if(factory)for(UINT i=0;;++i){ComPtr<IDXGIAdapter1> candidate;if(factory->EnumAdapters1(i,&candidate)!=S_OK)break;
+    DXGI_ADAPTER_DESC1 d{};if(candidate->GetDesc1(&d)==S_OK&&!(d.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)){adapter=candidate;description=d;break;}}
+  check(bool(adapter),"hardware adapter available");if(!adapter)return 1;
+  D3D_FEATURE_LEVEL level{};ComPtr<ID3D11Device> initial;ComPtr<ID3D11DeviceContext> initialContext;
+  check(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
+      &initial,&level,&initialContext)==S_OK&&initial&&initialContext,"initial hardware device");
+  if(!initial)return 1;
+  DXGI_ADAPTER_DESC actual{};ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> actualAdapter;
+  check(initial.As(&dxgi)==S_OK&&dxgi->GetAdapter(&actualAdapter)==S_OK&&actualAdapter->GetDesc(&actual)==S_OK,"initial hardware identity");
+  NativeDevice separate;check(separate.initializeSeparate(actual.AdapterLuid,level)==S_OK,"separate hardware device initialization");
+  check(separate.device()&&separate.context()&&!identity(separate.device(),initial.Get())&&
+        !identity(separate.context(),initialContext.Get()),"separate device and context are distinct COM identities");
+  ComPtr<IDXGIDevice> separateDxgi;ComPtr<IDXGIAdapter> separateAdapter;DXGI_ADAPTER_DESC separateDesc{};
+  const bool separateIdentity=separate.device()&&separate.device()->QueryInterface(IID_PPV_ARGS(&separateDxgi))==S_OK&&
+    separateDxgi->GetAdapter(&separateAdapter)==S_OK&&separateAdapter->GetDesc(&separateDesc)==S_OK&&
+    NativeDevice::matchesLuid(separateDesc.AdapterLuid,actual.AdapterLuid)&&separate.featureLevel()>=level&&
+    !(separate.device()->GetCreationFlags()&D3D11_CREATE_DEVICE_SINGLETHREADED);
+  check(separateIdentity,"separate device matches adapter and feature level without SINGLETHREADED");
+  check(separate.initializeSeparate(actual.AdapterLuid,level)==S_OK&&separate.device()&&separate.context(),"repeated separate initialization succeeds");
+  NativeDevice invalidMinimum;check(invalidMinimum.initializeSeparate(actual.AdapterLuid,D3D_FEATURE_LEVEL_12_1)!=S_OK&&
+      !invalidMinimum.device()&&!invalidMinimum.context(),"unsupported separate feature minimum leaves empty ownership");
+  LUID missing{0xffffffffu,-1};NativeDevice missingDevice;
+  check(missingDevice.initializeSeparate(missing,level)!=S_OK&&!missingDevice.device()&&!missingDevice.context(),"missing adapter LUID leaves empty ownership");
+  separate.reset();separate.reset();check(!separate.device()&&!separate.context(),"separate reset is idempotent");
+  std::printf("native_device_hardware_test: %u checks, %u failures adapter=%ls luid=%08lx:%08lx\n",checks,fails,
+      description.Description,static_cast<unsigned long>(actual.AdapterLuid.HighPart),static_cast<unsigned long>(actual.AdapterLuid.LowPart));
+  return fails?1:0;
+}
+
 int wmain(int argc,wchar_t** argv) {
   if(argc!=2)return 2;std::wstring arg=argv[1];
   if(arg==L"--dry-run"){std::puts("native_device_test: dry-run (no WARP device)");return 0;}
+  if(arg==L"--hardware")return hardwareTest();
   if(arg!=L"--self-test")return 2;
   unsigned fails=0,checks=0;auto check=[&](bool value,const char* name){++checks;if(!value){++fails;std::printf("FAIL: %s\n",name);}};
   const auto a=NativeDevice::featureLevels(D3D_FEATURE_LEVEL_11_0);
@@ -34,5 +77,9 @@ int wmain(int argc,wchar_t** argv) {
   NativeDevice native;
   check(native.initialize(LUID{},D3D_FEATURE_LEVEL_10_0,nullptr)==E_INVALIDARG&&!native.device()&&!native.context(),"null device factory rejected");
   check(FAILED(native.initialize(LUID{},D3D_FEATURE_LEVEL_12_1))&&!native.device()&&!native.context(),"failed initialize leaves empty ownership");
+  check(native.initializeSeparate(LUID{},D3D_FEATURE_LEVEL_12_1)==E_INVALIDARG&&
+      !native.device()&&!native.context(),"separate unsupported minimum releases module reference");
+  check(native.initializeSeparate(LUID{0xffffffffu,-1},D3D_FEATURE_LEVEL_10_0)==DXGI_ERROR_NOT_FOUND&&
+      !native.device()&&!native.context(),"separate missing adapter fails without fallback");
   std::printf("native_device_test: %u checks, %u failures\n",checks,fails);return fails?1:0;
 }

@@ -39,13 +39,18 @@ def existing_absolute(value: str) -> Path:
 
 def build_command(executable: Path, loader: Path, seconds_value: int,
                   graphics_proxy: Path | None = None, present_boundary: bool = False,
-                  runtime_module: Path | None = None, bootstrap: bool = False) -> list[str]:
+                  runtime_module: Path | None = None, bootstrap: bool = False,
+                  separate_device: bool = False) -> list[str]:
     if present_boundary and graphics_proxy is None:
         raise ValueError("--present-boundary requires --graphics-proxy")
     if runtime_module is not None and (graphics_proxy is None or not present_boundary):
         raise ValueError("--runtime-module requires --graphics-proxy and --present-boundary")
     if bootstrap and runtime_module is None:
         raise ValueError("--bootstrap requires --runtime-module")
+    if separate_device and (runtime_module is None or graphics_proxy is None or not present_boundary):
+        raise ValueError("--separate-device requires --runtime-module, --graphics-proxy and --present-boundary")
+    if separate_device and bootstrap:
+        raise ValueError("--separate-device cannot be combined with --bootstrap")
     command = [str(executable), "--loader", str(loader), "--seconds", str(seconds_value)]
     if graphics_proxy is not None:
         command.extend(("--graphics-proxy", str(graphics_proxy)))
@@ -55,6 +60,8 @@ def build_command(executable: Path, loader: Path, seconds_value: int,
         command.extend(("--runtime-module", str(runtime_module)))
     if bootstrap:
         command.append("--bootstrap")
+    if separate_device:
+        command.append("--separate-device")
     return command
 
 
@@ -206,6 +213,23 @@ def self_test() -> int:
                         dry_run=True) == 0 and not (root / "dry-module").exists())
         bootstrap_command = build_command(module_executable, root / "loader.dll", 7, proxy, True, module, True)
         check(bootstrap_command[-1] == "--bootstrap" and "--bootstrap" not in module_command)
+        separate_command = build_command(module_executable, root / "loader.dll", 7, proxy, True, module, False, True)
+        check(separate_command[-1] == "--separate-device" and "--bootstrap" not in separate_command)
+        check(run_child(separate_command, root / "dry-separate", env, 10,
+                        {"separate_device": True}, dry_run=True) == 0 and
+              not (root / "dry-separate").exists())
+        try:
+            build_command(module_executable, root / "loader.dll", 7, proxy, True, module, True, True)
+            check(False)
+        except ValueError:
+            check(True)
+        for kwargs in ({"separate_device": True}, {"graphics_proxy": proxy, "present_boundary": True, "separate_device": True},
+                       {"runtime_module": module, "separate_device": True}):
+            try:
+                build_command(root / "test.exe", root / "loader.dll", 7, **kwargs)
+                check(False)
+            except ValueError:
+                check(True)
         inherited = {"EDVR_OPENXR_LOADER": "stale", "edvr_openxr_graphics": "stale", "KEEP": "same"}
         boot_env = child_environment(inherited, root / "loader.dll", proxy, root / "runtime.json", True)
         check(boot_env == {"KEEP": "same", "XR_RUNTIME_JSON": str(root / "runtime.json"),
@@ -267,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--present-boundary", action="store_true", help="drive graphics through the real proxy Present hook; requires --graphics-proxy")
     parser.add_argument("--runtime-module", help="absolute existing runtime module DLL; requires graphics proxy and Present boundary")
     parser.add_argument("--bootstrap", action="store_true", help="initialize the staged DLL from child environment paths without the embedding call")
+    parser.add_argument("--separate-device", action="store_true", help="request a v2 native module with a dedicated graphics device")
     parser.add_argument("--seconds", type=seconds, default=10)
     parser.add_argument("--output", type=Path, help="new output directory (never overwrites a capture)")
     parser.add_argument("--dry-run", action="store_true")
@@ -290,6 +315,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--runtime-module requires --graphics-proxy and --present-boundary")
         if args.bootstrap and runtime_module is None:
             raise ValueError("--bootstrap requires --runtime-module")
+        if args.separate_device and (runtime_module is None or graphics_proxy is None or not args.present_boundary):
+            raise ValueError("--separate-device requires --runtime-module, --graphics-proxy and --present-boundary")
+        if args.separate_device and args.bootstrap:
+            raise ValueError("--separate-device cannot be combined with --bootstrap")
         manifest = active_manifest(runtime)
         executable = diagnostic_executable(runtime_module)
         output = (args.output or ROOT / "build" / ("openxr-native-" + datetime.now().strftime("%Y%m%d-%H%M%S"))).resolve()
@@ -301,9 +330,10 @@ def main(argv: list[str] | None = None) -> int:
                     "explicit_runtime_override": bool(runtime), "seconds": args.seconds,
                     "present_boundary": args.present_boundary,
                     "bootstrap": args.bootstrap,
+                    "separate_device": args.separate_device,
                     **runtime_module_metadata(runtime_module),
                     **graphics_proxy_metadata(graphics_proxy)}
-        command = build_command(executable, loader, args.seconds, graphics_proxy, args.present_boundary, runtime_module, args.bootstrap)
+        command = build_command(executable, loader, args.seconds, graphics_proxy, args.present_boundary, runtime_module, args.bootstrap, args.separate_device)
         return run_child(command, output, environment, args.seconds + 40, metadata, dry_run=args.dry_run)
     except (OSError, ValueError) as error:
         print(f"[edvr] {error}", file=sys.stderr)

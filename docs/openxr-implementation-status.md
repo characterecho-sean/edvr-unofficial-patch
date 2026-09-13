@@ -1,5 +1,21 @@
 # OpenXR implementation status
 
+The [separate-device capture integration](openxr-owned-capture-2026-09-13.md)
+connects eye and six-face loading captures to an explicitly configured XR-owned
+device. Luna implemented capture and fixture changes; parent review tightened
+startup validation, publication, module ownership and allocation flags. The
+extended transfer fixture passed 261 checks on both WARP and RTX 5090,
+including preserving the old skybox after a middle-face refusal and retiring
+capture without new producer callbacks. The hardware factory fixture passed all
+11 checks for a distinct device/context on the requested adapter. The staged
+module and runner now offer `--separate-device`; its native diagnostic stops
+application Present before System-caller shutdown and requires complete
+unretained cleanup. The full build passed with all 476 source hashes unchanged,
+including 206 explicit-module, 212 bootstrap and 206 separate-mode
+failed-startup checks. The final binaries repeated the successful RTX 5090
+checks. The next gate is actual PiOpenXR rendering and teardown in that mode.
+Native game launch remains pending; Frontier is unchanged.
+
 The [separate-device transfer checkpoint](openxr-shared-device-2026-09-13.md)
 implements the image handoff needed for a future XR-owned D3D11 device. Luna
 implemented the transfer and fixture; parent review corrected ownership,

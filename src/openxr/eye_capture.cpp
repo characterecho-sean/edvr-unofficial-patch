@@ -1,5 +1,9 @@
 #include "eye_capture.h"
+#include "shared_texture_transfer.h"
 #include <cmath>
+#include <exception>
+#include <new>
+#include <thread>
 #include <utility>
 
 namespace edvr::openxr {
@@ -45,9 +49,14 @@ bool validBounds(const vr::VRTextureBounds_t& b) {
 
 }
 
-EyeCapture::~EyeCapture() { shutdown(); }
+EyeCapture::EyeCapture() = default;
+EyeCapture::~EyeCapture() {
+  if (sharedInitialized_) std::terminate();
+  shutdown();
+}
 
 HRESULT EyeCapture::initialize(ID3D11Device* device) {
+  if (sharedInitialized_) return E_PENDING;
   shutdown();
   if (!device) return E_INVALIDARG;
   if (FAILED(device->GetDeviceRemovedReason())) return DXGI_ERROR_DEVICE_REMOVED;
@@ -56,6 +65,33 @@ HRESULT EyeCapture::initialize(ID3D11Device* device) {
   if (!context_) { shutdown(); return E_FAIL; }
   initialized_ = true;
   return S_OK;
+}
+
+HRESULT EyeCapture::initializeShared(ID3D11Device* producer, ID3D11Device* consumer,
+                                     ImmediateExecutor* producerExecutor) {
+  if (sharedInitialized_) return E_PENDING;
+  if (initialized_) shutdown();
+  if (!producer || !consumer || !producerExecutor) return E_INVALIDARG;
+  try {
+    // Validate ownership and the producer executor before publishing shared
+    // mode. Pixel resources remain lazy until the first accepted texture.
+    auto first = std::make_unique<SharedTextureTransfer>();
+    const HRESULT validated = first->initialize(producer, consumer, producerExecutor);
+    if (validated != S_OK) return validated;
+    sharedTransfers_[0] = std::move(first);
+    sharedProducer_ = producer;
+    sharedConsumer_ = consumer;
+    sharedExecutor_ = producerExecutor;
+    sharedOwner_ = std::this_thread::get_id();
+    sharedInitialized_ = true;
+    return S_OK;
+  } catch (...) {
+    sharedProducer_.Reset();
+    sharedConsumer_.Reset();
+    sharedExecutor_ = nullptr;
+    sharedOwner_ = {};
+    return E_OUTOFMEMORY;
+  }
 }
 
 void EyeCapture::reset() {
@@ -68,15 +104,100 @@ void EyeCapture::reset() {
 }
 
 void EyeCapture::shutdown() {
+  if (sharedInitialized_) std::terminate();
   reset();
   context_.Reset();
   device_.Reset();
   initialized_ = false;
 }
 
+HRESULT EyeCapture::shutdownShared(DWORD timeoutMs) {
+  if (!sharedInitialized_) return S_OK;
+  if (sharedOwner_ != std::this_thread::get_id()) return E_ACCESSDENIED;
+  if (timeoutMs == INFINITE) return E_INVALIDARG;
+  HRESULT result = S_OK;
+  for (auto& transfer : sharedTransfers_) {
+    if (!transfer) continue;
+    const HRESULT current = transfer->shutdown(timeoutMs);
+    if (current != S_OK && result == S_OK) result = current;
+  }
+  if (result != S_OK) return result;
+  reset();
+  for (auto& transfer : sharedTransfers_) transfer.reset();
+  sharedProducer_.Reset();
+  sharedConsumer_.Reset();
+  sharedExecutor_ = nullptr;
+  sharedOwner_ = {};
+  sharedInitialized_ = false;
+  return S_OK;
+}
+
+vr::EVRCompositorError EyeCapture::captureShared(
+    vr::EVREye eye, const vr::Texture_t* texture,
+    const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags,
+    bool copyPixels) {
+  if (!sharedInitialized_ || sharedOwner_ != std::this_thread::get_id() ||
+      !sharedProducer_ || !sharedConsumer_ || !sharedExecutor_)
+    return vr::VRCompositorError_InvalidTexture;
+  if (!validEye(eye) || !texture || !texture->handle || flags != vr::Submit_Default ||
+      texture->eType != vr::API_DirectX ||
+      texture->eColorSpace < vr::ColorSpace_Auto ||
+      texture->eColorSpace > vr::ColorSpace_Linear)
+    return validEye(eye) ? vr::VRCompositorError_InvalidTexture
+                         : vr::VRCompositorError_IndexOutOfRange;
+  const vr::VRTextureBounds_t b = bounds ? *bounds :
+      vr::VRTextureBounds_t{0.f, 0.f, 1.f, 1.f};
+  if (!validBounds(b)) return vr::VRCompositorError_InvalidTexture;
+  if (FAILED(sharedProducer_->GetDeviceRemovedReason()))
+    return vr::VRCompositorError_InvalidTexture;
+  ComPtr<ID3D11Texture2D> source;
+  if (FAILED(static_cast<IUnknown*>(texture->handle)->QueryInterface(
+          IID_PPV_ARGS(&source))))
+    return vr::VRCompositorError_InvalidTexture;
+  if (!sameDevice(sharedProducer_.Get(), source.Get()))
+    return vr::VRCompositorError_TextureIsOnWrongDevice;
+  D3D11_TEXTURE2D_DESC desc{};
+  source->GetDesc(&desc);
+  if (!desc.Width || !desc.Height || desc.ArraySize != 1 || desc.MipLevels != 1 ||
+      desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality != 0 ||
+      desc.Usage != D3D11_USAGE_DEFAULT || desc.CPUAccessFlags != 0)
+    return vr::VRCompositorError_InvalidTexture;
+  if (!supportedFormat(desc.Format))
+    return vr::VRCompositorError_TextureUsesUnsupportedFormat;
+  if (!copyPixels) return vr::VRCompositorError_None;
+
+  const unsigned index = eyeIndex(eye);
+  try {
+    if (!sharedTransfers_[index])
+      sharedTransfers_[index] = std::make_unique<SharedTextureTransfer>();
+    auto& transfer = sharedTransfers_[index];
+    if (!transfer->ready() && !transfer->pending() && !transfer->faulted()) {
+      const HRESULT initialized = transfer->initialize(
+          sharedProducer_.Get(), sharedConsumer_.Get(), sharedExecutor_);
+      if (initialized != S_OK) return vr::VRCompositorError_InvalidTexture;
+    }
+    if (transfer->pending()) {
+      ID3D11Texture2D* previous = nullptr;
+      if (transfer->receive(previous) != S_OK)
+        return vr::VRCompositorError_InvalidTexture;
+    }
+    ID3D11Texture2D* output = nullptr;
+    const HRESULT copied = transfer->copy(source.Get(), output);
+    if (copied != S_OK || !output) return vr::VRCompositorError_InvalidTexture;
+    eyes_[index].copy = output;
+    eyes_[index].bounds = b;
+    eyes_[index].colorSpace = texture->eColorSpace;
+    eyes_[index].captured = true;
+    return vr::VRCompositorError_None;
+  } catch (...) {
+    return vr::VRCompositorError_InvalidTexture;
+  }
+}
+
 vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* texture,
                                             const vr::VRTextureBounds_t* bounds,
                                             vr::EVRSubmitFlags flags, bool copyPixels) {
+  if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels);
   if (!initialized_ || !device_ || !context_) return vr::VRCompositorError_InvalidTexture;
   if (!validEye(eye) || !texture || !texture->handle || flags != vr::Submit_Default ||
       texture->eType != vr::API_DirectX || texture->eColorSpace < vr::ColorSpace_Auto ||

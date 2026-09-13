@@ -1,14 +1,18 @@
 #pragma once
 
 #include <d3d11.h>
+#include <memory>
+#include <thread>
 #include <wrl/client.h>
 #include "../openvr/compat/openvr_v0_9_20.h"
+
+namespace edvr::openxr { class ImmediateExecutor; class SharedTextureTransfer; }
 
 namespace edvr::openxr {
 
 class EyeCapture final {
  public:
-  EyeCapture() = default;
+  EyeCapture();
   ~EyeCapture();
   EyeCapture(const EyeCapture&) = delete;
   EyeCapture& operator=(const EyeCapture&) = delete;
@@ -16,6 +20,12 @@ class EyeCapture final {
   // The device is retained, as is its immediate context. The caller owns
   // context serialization and keeps the device usable until shutdown.
   HRESULT initialize(ID3D11Device* device);
+  // Shared mode constructs each transfer on this consumer/XR owner thread.
+  // The producer context is used only through producerExecutor. Call
+  // shutdownShared successfully before normal shutdown or destruction.
+  HRESULT initializeShared(ID3D11Device* producer, ID3D11Device* consumer,
+                           ImmediateExecutor* producerExecutor);
+  HRESULT shutdownShared(DWORD timeoutMs = 5000);
   void reset();
   void shutdown();
 
@@ -33,6 +43,9 @@ class EyeCapture final {
   vr::EColorSpace colorSpace(vr::EVREye eye) const;
 
  private:
+  vr::EVRCompositorError captureShared(vr::EVREye eye, const vr::Texture_t* texture,
+                                       const vr::VRTextureBounds_t* bounds,
+                                       vr::EVRSubmitFlags flags, bool copyPixels);
   struct Eye {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
     vr::VRTextureBounds_t bounds{0.f, 0.f, 1.f, 1.f};
@@ -41,6 +54,12 @@ class EyeCapture final {
   } eyes_[2];
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
+  Microsoft::WRL::ComPtr<ID3D11Device> sharedProducer_;
+  Microsoft::WRL::ComPtr<ID3D11Device> sharedConsumer_;
+  std::unique_ptr<SharedTextureTransfer> sharedTransfers_[2];
+  std::thread::id sharedOwner_{};
+  ImmediateExecutor* sharedExecutor_ = nullptr;
+  bool sharedInitialized_ = false;
   bool initialized_ = false;
 };
 

@@ -4,11 +4,13 @@
 #include <dxgi.h>
 #include <wrl/client.h>
 #include <vector>
+#include <string>
 
 namespace edvr::openxr {
 class NativeDevice {
  public:
   NativeDevice()=default;
+  ~NativeDevice(){reset();}
   NativeDevice(const NativeDevice&)=delete;
   NativeDevice& operator=(const NativeDevice&)=delete;
   static bool matchesLuid(const LUID& a,const LUID& b) {return a.LowPart==b.LowPart&&a.HighPart==b.HighPart;}
@@ -58,7 +60,31 @@ class NativeDevice {
     if(!context_)return E_NOINTERFACE;
     device_=device;feature_=device->GetFeatureLevel();return S_OK;
   }
-  void reset(){context_.Reset();device_.Reset();feature_=D3D_FEATURE_LEVEL_1_0_CORE;}
+  // Bypass the application's proxy export when creating the XR-owned device.
+  // Keep this explicit System32 module reference through device/context release.
+  HRESULT initializeSeparate(const LUID& required,D3D_FEATURE_LEVEL minimum) {
+    wchar_t directory[MAX_PATH]{};
+    const UINT length=GetSystemDirectoryW(directory,MAX_PATH);
+    if(!length||length>=MAX_PATH)return E_FAIL;
+    const std::wstring path=std::wstring(directory,length)+L"\\d3d11.dll";
+    struct ModuleReference {
+      HMODULE value=nullptr;
+      ~ModuleReference(){if(value)FreeLibrary(value);}
+    } module{LoadLibraryExW(path.c_str(),nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)};
+    if(!module.value)return HRESULT_FROM_WIN32(GetLastError());
+    wchar_t loaded[MAX_PATH]{};
+    const DWORD actual=GetModuleFileNameW(module.value,loaded,MAX_PATH);
+    if(!actual||actual>=MAX_PATH||_wcsicmp(loaded,path.c_str())){
+      return E_ACCESSDENIED;
+    }
+    const auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module.value,"D3D11CreateDevice"));
+    const HRESULT result=initialize(required,minimum,create);
+    if(FAILED(result))return result;
+    systemModule_=module.value;module.value=nullptr;return S_OK;
+  }
+  void reset(){context_.Reset();device_.Reset();feature_=D3D_FEATURE_LEVEL_1_0_CORE;
+    if(systemModule_){FreeLibrary(systemModule_);systemModule_=nullptr;}}
   ID3D11Device* device()const{return device_.Get();}
   ID3D11DeviceContext* context()const{return context_.Get();}
   D3D_FEATURE_LEVEL featureLevel()const{return feature_;}
@@ -66,5 +92,6 @@ class NativeDevice {
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
   D3D_FEATURE_LEVEL feature_=D3D_FEATURE_LEVEL_1_0_CORE;
+  HMODULE systemModule_=nullptr;
 };
 }

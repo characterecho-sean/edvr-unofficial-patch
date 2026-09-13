@@ -7,6 +7,8 @@
 // process environment. Both must be trusted drive-absolute paths. This is not
 // installer configuration or the full legacy OpenVR replacement surface.
 #define EDVR_NATIVE_MODULE_VERSION_1 1u
+#define EDVR_NATIVE_MODULE_VERSION_2 2u
+#define EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE 1u
 enum EdvrNativeModulePhase {
     EDVR_NATIVE_CONFIGURED = 1, EDVR_NATIVE_STARTING = 2,
     EDVR_NATIVE_RUNNING = 3, EDVR_NATIVE_STOPPED = 4, EDVR_NATIVE_RETAINED = 5
@@ -16,7 +18,7 @@ struct EdvrNativeRuntimeConfig {
     const wchar_t* loaderPath;
     const wchar_t* graphicsProxyPath;
     uint32_t renderWaitMilliseconds; // 1..5000; native diagnostic uses 5000
-    uint32_t reserved;
+    uint32_t reserved; // V1: zero. V2: EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE.
 };
 struct EdvrNativeRuntimeStatus {
     uint32_t size, version;
