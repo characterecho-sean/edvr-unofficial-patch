@@ -9,6 +9,7 @@
 #include "../../src/openxr/render_boundary_client.h"
 #include "../../src/openxr/present_work_queue.h"
 #include "../../src/openxr/present_quiescence.h"
+#include "../../src/openxr/render_shutdown.h"
 #include "../../src/openxr/owner_service.h"
 #include "../../src/openxr/render_thread_dispatcher.h"
 #include "../../src/openxr/graphics_bridge_client.h"
@@ -50,19 +51,23 @@ struct PresentHost {
   PresentWorkQueue queue;
   ID3D11Device* device=nullptr; ID3D11DeviceContext* context=nullptr;
   DWORD renderThread{}; std::atomic<unsigned> callbacks{0}; std::atomic<bool> correct{true};
+  std::atomic<bool> callbackActive{false};
+  std::atomic<bool> presentReturned{true};
   std::atomic<bool> blockCallback{false}; Event entered, release;
   ~PresentHost() { queue.close(); }
   static HRESULT WINAPI callback(void* p, ID3D11Device* device, ID3D11DeviceContext* context) {
     auto& h=*static_cast<PresentHost*>(p);
     if (GetCurrentThreadId()!=h.renderThread || device!=h.device || context!=h.context) { h.correct=false; h.queue.close(); return E_ACCESSDENIED; }
     ++h.callbacks;
+    h.callbackActive.store(true,std::memory_order_release);
     h.entered.signal();
     if (h.blockCallback.load(std::memory_order_acquire)) {
       const bool released=h.release.wait();
       check(released,"active callback receives release signal");
-      if (!released) return E_ABORT;
+      if (!released) { h.callbackActive.store(false,std::memory_order_release); return E_ABORT; }
     }
     h.queue.pump();
+    h.callbackActive.store(false,std::memory_order_release);
     return S_OK;
   }
 };
@@ -262,6 +267,82 @@ void quiescentTeardown(HMODULE proxy, PresentDevice& present) {
   owner.stop();
 }
 
+// The game cannot be assumed to stop presenting after System-thread Shutdown.
+// Marshal the final owner stop through the one real Present callback instead:
+// the callback keeps the render caller inside hookedPresent while the owner
+// destroys its resources, then the System caller retires the lease.
+void callbackTeardown(HMODULE proxy, PresentDevice& present) {
+  PresentHost host; host.device=present.device(); host.context=present.context();
+  host.renderThread=GetCurrentThreadId(); host.presentReturned=false;
+  check(host.queue.bindCurrentThread(),"callback teardown queue bind");
+  EdvrRenderBoundaryRequest req{sizeof(req),EDVR_RENDER_BOUNDARY_VERSION_1,
+    host.device,&PresentHost::callback,&host};
+  RenderBoundaryClient client;
+  const HRESULT acquired=client.acquire(proxy,req);
+  check(acquired==S_OK,"callback teardown registration");
+  if(acquired!=S_OK)return;
+
+  D3D11_TEXTURE2D_DESC desc{}; desc.Width=desc.Height=desc.ArraySize=desc.MipLevels=desc.SampleDesc.Count=1;
+  desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM; desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+  ComPtr<ID3D11Texture2D> target,staging; ComPtr<ID3D11RenderTargetView> rtv;
+  bool made=SUCCEEDED(host.device->CreateTexture2D(&desc,nullptr,&target))&&
+    SUCCEEDED(host.device->CreateRenderTargetView(target.Get(),nullptr,&rtv));
+  desc.BindFlags=0; desc.Usage=D3D11_USAGE_STAGING; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+  made=made&&SUCCEEDED(host.device->CreateTexture2D(&desc,nullptr,&staging));
+  check(made,"callback teardown GPU resources");
+  if(!made){client.close();client.release();return;}
+
+  OwnerService owner; RenderThreadDispatcher render(owner);
+  const bool ready=owner.start()&&render.bindCurrentThread();
+  check(ready,"callback teardown owner setup");
+  if(!ready){owner.stop();return;}
+  Event cleanupEntered, cleanupReleased, systemDone;
+  std::atomic<bool> cleanupOk{false}; std::atomic<bool> systemResult{false};
+  std::thread system([&]{
+    const auto stopped=shutdownAtRenderBoundary(host.queue,render,owner,[&]{
+        // The callback is still active and the outer Present has not returned.
+        check(owner.isOwner()&&GetCurrentThreadId()!=host.renderThread&&
+              host.callbackActive.load(std::memory_order_acquire)&&
+              !host.presentReturned.load(std::memory_order_acquire),
+              "owner finalizer runs while Present callback is active");
+        const float green[]={0,1,0,1}; host.context->ClearRenderTargetView(rtv.Get(),green);
+        host.context->CopyResource(staging.Get(),target.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        const HRESULT hr=host.context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped);
+        check(SUCCEEDED(hr),"callback teardown GPU readback completes");
+        if(SUCCEEDED(hr)){uint32_t pixel{};std::memcpy(&pixel,mapped.pData,4);
+          check(pixel==0xff00ff00,"callback teardown GPU result is correct");
+          host.context->Unmap(staging.Get(),0); cleanupOk=true;}
+        cleanupEntered.signal();
+        check(cleanupReleased.wait(),"callback teardown release signal");
+    });
+    systemResult=stopped.joined;
+    check(stopped.entered,"System caller queues owner stop through Present"); systemDone.signal();
+  });
+  check(reaches([&]{return host.queue.pending()==1;}),"owner stop waits for real Present");
+  std::thread leaseObserver([&]{
+    check(host.entered.wait(),"lease observer sees active callback");
+    check(client.close()==E_PENDING,"close reports callback active during owner stop");
+    check(client.release()==E_PENDING,"release reports callback active during owner stop");
+    check(cleanupEntered.wait(),"lease observer sees owner cleanup");
+    check(host.callbackActive.load(std::memory_order_acquire)&&
+          !host.presentReturned.load(std::memory_order_acquire),
+          "Present remains inside callback during owner cleanup");
+    cleanupReleased.signal();
+  });
+  check(SUCCEEDED(present.present()),"callback teardown Present succeeds");
+  host.presentReturned.store(true,std::memory_order_release);
+  leaseObserver.join();
+  check(cleanupEntered.wait(),"owner cleanup was reached before Present returned");
+  check(systemDone.wait(),"System caller returns after callback marshalled cleanup");
+  system.join();
+  check(client.close()==S_OK&&client.release()==S_OK,"lease retires after callback unwind");
+  check(cleanupOk&&systemResult,"callback teardown completed owner cleanup");
+  check(host.callbacks==1&&host.correct,"callback teardown used the owned Present context");
+  host.queue.close();
+  owner.stop();
+}
+
 int selfTest(const std::wstring& supplied) {
   Watchdog watchdog; wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr,exe,MAX_PATH); std::wstring path=supplied;
   if (path.empty()) { path=exe; const auto slash=path.find_last_of(L"\\/"); path=path.substr(0,slash+1)+L"d3d11.dll"; }
@@ -274,6 +355,7 @@ int selfTest(const std::wstring& supplied) {
   runActual(proxy,present.swapchain(),present.device(),present.context(),counts);
   closeOrdering(proxy,present.swapchain(),present.device(),present.context());
   quiescentTeardown(proxy,present);
+  callbackTeardown(proxy,present);
   return failures?1:0;
 }
 }

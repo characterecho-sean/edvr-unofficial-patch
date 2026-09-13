@@ -1,5 +1,14 @@
 # OpenXR implementation status
 
+The next [shared-host checkpoint](openxr-shared-host-2026-09-13.md) extracts
+the tested native runtime from the diagnostic and tests owner teardown while
+the render caller remains inside its final Present callback. This removes the
+diagnostic's dependency on pausing the entire application loop, a requirement
+for later Frontier startup integration. The full build passed, including 101
+actual-DLL Present and 67 CPU queue checks. Native qualification is pending;
+the passed result below remains evidence for `20cad71`. Native shipping export
+discovery and Frontier integration are still open.
+
 The current [Present-hook checkpoint](openxr-present-boundary-2026-09-13.md)
 routes staged OpenXR work through the graphics proxy's real owned-swapchain
 Present callback, with separate Init/render callers and a D3D11 device created

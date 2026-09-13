@@ -1,5 +1,6 @@
 #include "../../src/openxr/present_work_queue.h"
 #include "../../src/openxr/present_quiescence.h"
+#include "../../src/openxr/render_shutdown.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -201,12 +202,33 @@ void quiescenceWrongThreadAndSelfWait() {
   release.signal(); check(finished.wait(), "self-wait rejection leaves render thread usable"); render.join();
 }
 
+void renderShutdownDeadline() {
+  using namespace edvr::openxr;
+  PresentWorkQueue queue; OwnerService owner; RenderThreadDispatcher render(owner);
+  const bool ready=queue.bindCurrentThread()&&render.bindCurrentThread()&&owner.start();
+  check(ready,"render shutdown deadline setup");
+  if(!ready){queue.close();owner.stop();return;}
+  bool finalized=false;RenderShutdownResult stopped;
+  std::thread system([&]{stopped=shutdownAtRenderBoundary(queue,render,owner,
+    [&]{finalized=true;},std::chrono::milliseconds(1));});
+  system.join();
+  check(!stopped.entered&&!stopped.joined&&!finalized&&owner.running()&&queue.pending()==0,
+    "missing Present cancels shutdown before owner or resources retire");
+  check(render.invokeOwner([]{}),"missing Present does not silently close render dispatcher");
+  // Shutdown on the already-bound render caller must not wait for itself.
+  stopped=shutdownAtRenderBoundary(queue,render,owner,[&]{finalized=owner.isOwner();});
+  check(stopped.entered&&stopped.joined&&finalized&&!owner.running(),
+    "render caller joins owner directly without waiting for another Present");
+  queue.close();
+}
+
 int selfTest() {
   Watchdog watchdog;
   basicAndOrdering(); exceptionAndCaptureLifetime(); reentrantAndClose();
   cancellationAndActiveClose(); capacity();
   quiescenceStopAndLateAcknowledgement(); quiescenceWrongThreadAndSelfWait();
   quiescenceFailureAndWaiters();
+  renderShutdownDeadline();
   std::printf("openxr_present_queue_test: %u checks, %u failures\n", checks.load(), failures.load());
   return failures ? 1 : 0;
 }
