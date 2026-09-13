@@ -6,10 +6,14 @@ through the application's ordinary Init export using explicit child environment
 paths, plus three typed initialization-error exports. The full build passed,
 including 169 explicit-configuration checks, 175 bootstrap checks, 168
 Present/discovery checks and 46 runner checks. All 477 source, binary,
-environment and build-log hashes are recorded. The bootstrap headset gate
-remains pending. The staged DLL is still outside the installer payload; full
-legacy exports, transport-hook independence and native Frontier integration
-remain open.
+environment and build-log hashes matched before and after the `eee7a1c`
+bootstrap headset gate. It passed with 1529 stereo pairs, 314 loading
+projections and complete callback-held cleanup. The user confirmed normal
+grid/triangle tracking and closure without headlock, then noted a dark-grey
+background; the fixture's RGB `(0.03, 0.03, 0.03)` clear is unchanged from the
+previous flight and explains the expected shade. The staged DLL is still
+outside the installer payload; full legacy exports, transport-hook independence
+and native Frontier integration remain open.
 
 The preceding [native-module checkpoint](openxr-native-module-2026-09-13.md)
 puts the native backend behind a separately loaded DLL exposing Frontier's five

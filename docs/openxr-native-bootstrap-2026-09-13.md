@@ -105,25 +105,62 @@ The native DLL SHA256 is
 application fixture is
 `dc9e8aff1e2fd593b4f3be44e7ae0d5cb0017012b059c1cc71ff8cf4da4f4229`, and the
 graphics proxy is
-`fdbce5cf3b248665555f78f4cf6c761d1451c8edaa108b81d8ab8c21111d7e30`. The native
-bootstrap headset gate remains pending.
+`fdbce5cf3b248665555f78f4cf6c761d1451c8edaa108b81d8ab8c21111d7e30`.
 
-## Next native gate
+## Passed native bootstrap run
 
-Run the existing 20-second Pimax DLL diagnostic with `--bootstrap` after fresh
-user readiness. The runner puts the exact hashed loader and graphics paths in
-the child environment, records `bootstrap: true`, and adds the corresponding
-executable option. The harness verifies those paths match its command and skips
-the embedding call. Require both
-`module_configuration,source=bootstrap_requested,embedding_call=0` and
-`module_configuration,source=environment` before successful startup, followed
-by normal grid/triangle viewing and complete cleanup.
+The `eee7a1c` bootstrap gate passed after user readiness on 2026-09-13. The
+runner used `--bootstrap`, supplied the exact hashed loader and graphics paths
+in the child environment, and recorded `bootstrap: true`. The application
+verified those paths and skipped the embedding configuration call. The process
+ran from 17:29:42.043 to 17:30:03.278 UTC, exited 0 after 21.235 seconds, and
+did not trigger its 60-second watchdog. All 477 recorded hashes matched before
+and after the run. No game, SteamVR or diagnostic process was observed in the
+preflight or postflight snapshots; these snapshots do not monitor transient
+processes.
+
+Both configuration markers are present. The DLL's flushed
+`module_configuration,source=environment` precedes runtime startup. The
+fixture's `module_configuration,source=bootstrap_requested,embedding_call=0`
+appears later in the captured file because its output is buffered by a separate
+CRT, although its source call precedes Init. Its file position is not evidence
+of cross-module execution order.
+
+Pimax OpenXR 0.1.0 used the Crystal Super with parallel projection enabled, the
+RTX 5090 and 5424 by 5356 pixels per eye. Startup published valid geometry
+before any stereo submission. Focus was true at the first sample; the grid and
+recenter began at 500 ms, the scene at 3500 ms and viewing completed at 20500
+ms. The run completed 1529 stereo pairs, 3058 eye copies, 314 loading
+projections and 1849 callbacks, with zero invalid pose samples. The matching
+Pimax logs identify this process, show about 90 FPS during viewing and record
+its normal disconnection.
+
+Init, rendering, OpenXR ownership and shutdown used four distinct callers. All
+nine shutdown stages completed while the final Present callback remained held;
+the owner joined, cleanup succeeded, the callback retired and no generation was
+retained. Session-binding begin/end share one `GetTickCount64` sample. Their
+zero tick delta does not measure zero elapsed time.
+
+The user confirmed the grid followed by the triangle in both eyes, upright and
+fixed in space during head movement, normal color and clarity, and normal
+closure without headlock. They then noted that the triangle's background looked
+dark grey rather than completely black. This is expected from the fixture's
+explicit RGB `(0.03, 0.03, 0.03)` clear in `tools/openxr_module_test/scene.h`.
+That header matches the preceding `7ec4f85` flight, so this checkpoint did not
+change the clear color; why the earlier background appeared black is not
+established.
+
+The receipt, console output, preflight/postflight records, Pimax log excerpts,
+qualification record, validation hashes and exact tested binaries are archived
+in `build/openxr-native-20260913-112941/`. Focus was already true at the first
+sample, so delayed physical wake and focus-loss replay remain desktop-tested
+only.
 
 The earlier [7ec4f85 headset
 result](openxr-native-module-2026-09-13.md#passed-focused-native-dll-run)
-qualifies explicit configuration on its archived binaries; it does not qualify
-this new path or the merged graphics build. A successful bootstrap diagnostic
-will still leave complete legacy exports, independent transport-hook
-availability, Frontier Init/Shutdown render-progress evidence, feature
-integration and a native Frontier flight open. The Frontier installation
-remains `f3c205e`.
+qualifies explicit configuration on its archived binaries. This new run
+qualifies bootstrap startup on the merged graphics build, but leaves complete
+legacy exports, independent transport-hook availability, Frontier Init/Shutdown
+render-progress evidence, feature integration and a native Frontier flight
+open. No live installation changed at this checkpoint; the last recorded
+Frontier build is `f3c205e`.
