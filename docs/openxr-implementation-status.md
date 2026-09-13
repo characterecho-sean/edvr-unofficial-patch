@@ -1,5 +1,20 @@
 # OpenXR implementation status
 
+The [separate-device transfer checkpoint](openxr-shared-device-2026-09-13.md)
+implements the image handoff needed for a future XR-owned D3D11 device. Luna
+implemented the transfer and fixture; parent review corrected ownership,
+cancellation and retirement behavior. All 216 checks passed on WARP and on the
+RTX 5090, including byte preservation across six formats, reuse/resize and
+consumer-only retirement after producer callback admission closes. A
+hardware-only resize drain failure was isolated to completion-query polling;
+permitting driver flushing resolved it with the same deadline. The full build
+passed with all 476 source hashes unchanged. This primitive is not wired into
+the native host yet, so session cleanup still uses the existing callback-held
+path. Next is integrating both eye and loading captures with a separately owned
+XR device, followed by actual runtime teardown with application Present
+stopped. No Frontier installation or headset test was performed for this
+checkpoint.
+
 The [stopped-Present desktop checkpoint](openxr-stopped-present-2026-09-13.md)
 shares the native module's existing two-stage shutdown coordinator with a real
 WARP graphics-callback fixture. All eight cases passed with 63 checks:
@@ -10,8 +25,9 @@ lifetime, queue ordering and owner-join checks. Production cleanup policy and
 deadlines are unchanged; this provides desktop coverage for the ordering
 observed in Frontier, not a new cleanup fallback or an OpenXR runtime result.
 Frontier remains on the verified `2f051db` proxies with its INI and original
-runtime preserved. Native game integration still needs explicit rendering
-exclusion when the live caller stops Present service.
+runtime preserved. Native game integration still needs different graphics
+ownership or explicit rendering exclusion when the live caller stops Present
+service.
 
 The [render-caller lifetime checkpoint](openxr-shutdown-lifetime-2026-09-13.md)
 extends the passive shutdown observer after the measured-zero Frontier flight.

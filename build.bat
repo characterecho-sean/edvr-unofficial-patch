@@ -1046,6 +1046,16 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR stopped-Present shutdown test build 
 "%BUILD%\openxr_shutdown_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_shutdown_test.exe" --self-test || exit /b 1
 
+REM Cross-device texture handoff and consumer-only retirement after producer stop.
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_shared_texture_test.exe" ^
+    "tools\openxr_shared_texture_test\openxr_shared_texture_test.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & exit /b 1 )
+"%BUILD%\openxr_shared_texture_test.exe" --dry-run || exit /b 1
+"%BUILD%\openxr_shared_texture_test.exe" --self-test || exit /b 1
+
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_system_test.exe" ^
     "tools\openxr_system_test\openxr_system_test.cpp" "tools\openxr_system_test\abi_caller.cpp" ^
