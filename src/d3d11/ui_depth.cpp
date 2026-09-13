@@ -156,7 +156,7 @@ float    g_alphaFloor = 0.5f;   // advanced.ui_depth_alpha: below it, no depth
 float    g_cockpitMetres = kTemporalShipMetres; // same near-field domain as temporal AA
 HoloMotion g_holoMotion[2];
 PlanetCoverage g_planetCoverage;
-bool g_planetPending=false,g_planetNoted=false;
+bool g_planetPending=false,g_planetSolarPending=false,g_planetNoted=false,g_solarNoted=false;
 HoloDraw g_holoDraw;
 bool g_holoBound=false, g_holoNoted=false;
 ID3D11Buffer* g_savedHoloInfo=nullptr;
@@ -1579,7 +1579,7 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 }
 
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
-    g_planetPending=false;
+    g_planetPending=false;g_planetSolarPending=false;
     g_holoDraw=draw;
     g_mode = Mode::kNone;
     g_wantRebind = false;
@@ -1618,8 +1618,11 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // but neither the UI mask nor its private depth-writing path. Learn
     // the eye from scene depth in Begin: inserting the deferred colour
     // target into the UI colour-target table would misidentify later UI.
-    if(h==kPlanetSurfaceVs && boundPsHash(ctx)==kPlanetSurfacePs) {
-        g_planetPending=true;return false;
+    if(h==kPlanetSurfaceVs || h==kSolarSurfaceVs) {
+        const uint64_t ps=boundPsHash(ctx);
+        if((h==kPlanetSurfaceVs && ps==kPlanetSurfacePs) || (h==kSolarSurfaceVs && ps==kSolarSurfacePs)) {
+            g_planetPending=true;g_planetSolarPending=h==kSolarSurfaceVs;return false;
+        }
     }
     const bool stellar=h==kRingVs || h==kOrbitalVs;
     if (!stellar && !composite && !(h && inList(g_families, g_familyCount, h))) return false;
@@ -1814,9 +1817,10 @@ void uiDepthEnd(ID3D11DeviceContext*) {
 // after, and the doubling would last the session (the pre-release review
 // of 2026-09-07). splashDimBegin below has taken this shape all along.
 bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx) {
-    const bool pending=g_planetPending;g_planetPending=false;
+    const bool pending=g_planetPending,solar=g_planetSolarPending;g_planetPending=false;g_planetSolarPending=false;
     if(!pending || !g_on || g_stoodDown || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE ||
-       boundVsHash(ctx)!=kPlanetSurfaceVs || boundPsHash(ctx)!=kPlanetSurfacePs)return false;
+       (solar ? (boundVsHash(ctx)!=kSolarSurfaceVs || boundPsHash(ctx)!=kSolarSurfacePs) :
+                (boundVsHash(ctx)!=kPlanetSurfaceVs || boundPsHash(ctx)!=kPlanetSurfacePs)))return false;
     auto* dsv=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!dsv)return false;
     Microsoft::WRL::ComPtr<ID3D11Resource> resource;dsv->GetResource(&resource);
     Microsoft::WRL::ComPtr<ID3D11Texture2D> scene;
@@ -1828,8 +1832,10 @@ bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx) {
     }
     if(eye<0)return false;
     if(g_eyesSwapped)eye=1-eye;
-    if(!g_planetCoverage.begin(ctx,scene.Get(),g_holoMotion[eye],g_holoDraw))return false;
-    if(!g_planetNoted) {
+    if(!g_planetCoverage.begin(ctx,scene.Get(),g_holoMotion[eye],g_holoDraw,solar))return false;
+    if(solar) {
+        if(!g_solarNoted) { g_solarNoted=true; Log::get().note("solar motion: exact surface coverage and affine approach motion active; stable art surface identity, original depth visibility, no UI marking or distance cutoff."); }
+    } else if(!g_planetNoted) {
         g_planetNoted=true;
         Log::get().note("planet motion: opaque surface coverage and affine approach motion active; original VS/depth visibility, shared 128-record eye budget, no UI marking or distance cutoff.");
     }
@@ -2364,7 +2370,7 @@ void uiDepthShutdown() {
     for (uint32_t i = 0; i < kExhausted; ++i) g_exhausted[i] = Exhausted();
     g_familyLoggedCount = 0;
     g_on = false;
-    g_planetPending=g_planetNoted=false;g_planetCoverage=PlanetCoverage{};
+    g_planetPending=g_planetSolarPending=g_planetNoted=g_solarNoted=false;g_planetCoverage=PlanetCoverage{};
 }
 
 }  // namespace edvr

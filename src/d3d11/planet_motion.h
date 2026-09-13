@@ -4,10 +4,14 @@
 
 namespace edvr {
 constexpr uint64_t kPlanetSurfaceVs=0x71DD9863DCFC0986ull,kPlanetSurfacePs=0x43E5E6EB67AC751Bull;
+constexpr uint64_t kSolarSurfaceVs=0x4D516EF05C68FFA5ull,kSolarSurfacePs=0x147E748F4CD3AE9Aull;
 // Original VS and raster state, original visible depth, no game colour/depth
-// writes. The captured PS has no discard/depth export; EQUAL therefore limits
-// coverage to the sphere's visible samples. Later cockpit/UI depth still wins
-// in the temporal consumer. No distance cutoff or readback is involved.
+// writes. The planet PS has no discard/depth export. The solar colour PS
+// discards against linear scene depth, but its prepass writes (B-.001)/W;
+// only surviving colour samples write B/W. EQUAL at the original colour
+// depth therefore inherits that visibility without resampling its t0.
+// Later cockpit/UI depth still wins in the temporal consumer. No distance
+// cutoff or readback is involved. The caller verifies the exact VS/PS pair.
 constexpr char kPlanetCoverageHlsl[]=R"HLSL(
 cbuffer Motion:register(b12){uint4 info;}
 float2 main(float4 p:SV_Position):SV_Target{return float2(info.x+1,p.z);}
@@ -28,7 +32,7 @@ class PlanetCoverage {
     float factors[4]{};
     bool active=false;
 public:
-    bool begin(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,HoloMotion& motion,const HoloDraw& draw) {
+    bool begin(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,HoloMotion& motion,const HoloDraw& draw,bool solar=false) {
         if(active || !ctx || !scene || draw.kind!='X' || draw.instances!=1 || !draw.count || draw.count%3)return false;
         Ptr<ID3D11Predicate> predicate;BOOL value=FALSE;ctx->GetPredication(&predicate,&value);if(predicate)return false;
         Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> ds;
@@ -42,7 +46,7 @@ public:
         D3D11_DEPTH_STENCIL_DESC dd{};if(depth)depth->GetDesc(&dd);else{dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;}
         if(!dd.DepthEnable || dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL)return false;
         Ptr<ID3D11BlendState> blend;ctx->OMGetBlendState(&blend,nullptr,nullptr);
-        D3D11_BLEND_DESC bd{};if(blend)blend->GetDesc(&bd);if(bd.RenderTarget[0].BlendEnable)return false;
+        D3D11_BLEND_DESC bd{};if(blend)blend->GetDesc(&bd);if(bd.RenderTarget[0].BlendEnable && !solar)return false;
         if(!shader) {
             Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
             shader.Attach(shaderSwapCompilePs(ctx,kPlanetCoverageHlsl,sizeof(kPlanetCoverageHlsl)-1,"main","planet coverage",nullptr,"planet motion"));
@@ -50,7 +54,7 @@ public:
             D3D11_BLEND_DESC b{};b.RenderTarget[0].RenderTargetWriteMask=3;
             if(!shader || FAILED(dev->CreateDepthStencilState(&d,&equal)) || FAILED(dev->CreateBlendState(&b,&write))){shader.Reset();equal.Reset();write.Reset();return false;}
         }
-        if(!motion.prepare(ctx,scene,draw,1,4))return false;
+        if(!motion.prepare(ctx,scene,draw,1,4,solar?1:0))return false;
         ctx->OMGetRenderTargets(8,targets,&savedDepth);ctx->OMGetDepthStencilState(&savedDs,&reference);
         ctx->OMGetBlendState(&savedBlend,factors,&sampleMask);classCount=256;
         ctx->PSGetShader(&savedPs,classes,&classCount);ctx->PSGetConstantBuffers(12,1,&savedInfo);

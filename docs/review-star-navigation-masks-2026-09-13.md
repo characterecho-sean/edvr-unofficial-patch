@@ -210,3 +210,114 @@ draw-time constants after source-buffer reuse, both shader-stage files,
 and explicit reporting for an unexpected missing pixel shader. The
 typed-image reader tests the added RGBA formats without changing gamma.
 These are diagnostic integrity checks, not a replay of the visual fault.
+
+## Solar transform comparison, capture 134146
+
+The next flight verifies diagnostic build 7f6582b (graphics build
+6AA6FA5C, VR build 6AA6FA64). The capture uses SteamVR/OpenVR, preset K,
+2774x2740 input and 4268x4216 output at 90 Hz. The HMD model and DLSS
+DLL version have not been established from this evidence. Required solar
+colour b0 transforms and both shader stages are present. The snapshot
+reports 38 aggregate failures; this count is not evidence that the
+required solar transforms are missing, nor proof of a particular failed
+optional capture.
+
+Snapshot frame 15037 corresponds to motion CSV frame 15036/C00, and
+15038 to 15037/C01. Projecting the same local positions through the
+colour draw's consecutive b0 rows 4, 5 and 7 gives a different motion
+from the generic camera transform. Row 6 is `[0, 0, 0, 0.02500000037]`,
+agreeing with the temporal projection B. The comparison adds the
+current-minus-previous jitter to raw projected displacement before
+comparing unjittered motion. A relative SceneZ gate rejects back faces
+and nearer cockpit surfaces; an absolute tolerance would be invalid at
+these depths, around 2e-10.
+
+The raw crop starts at input pixel (687,670), with size 1400x1400.
+Whole-eye vertices outside that crop are not examples of raw texture
+registration. Projected motion establishes the geometric correction; it
+does not by itself measure the sun's animated material shading.
+
+At a 0.5% relative depth gate, 1,725 visible candidate vertices differ
+from generic camera motion by a median 1.58 input pixels and a 95th
+percentile 4.07 pixels. Within the actual raw crop, excluding UI mask
+kinds 1/2, 1,175 candidates give 1.36 and 3.14 pixels respectively.
+Tightening the depth gate to 0.1% still gives a whole-eye median 1.84
+pixels. The discrepancy is not created by a loose far-depth gate.
+
+The existing GPU affine-record builder reproduces eight captured point
+projections across the first frame pair to below 0.00006 input pixels.
+These fixture inputs are current clip X/Y/W with expected previous clip
+X/Y/W, not local XYZ or clip X/Y/Z. The test validates the GPU transform
+calculation; it is not a DLSS visual replay.
+
+A local image check provides independent support. The textured patch at
+C00 crop (480,80), size 280x280, gives 34 depth-consistent vertices.
+Their median raw draw displacement is (1.146,0.973) pixels, while raw
+camera prediction is (-0.369,-1.054). After removing broad illumination
+with a Gaussian high-pass, bilinear normalized correlation is 0.96684 at
+the draw prediction and 0.75493 at the camera prediction. The best
+quarter-pixel search gives (1.25,1.25), correlation 0.97239. Local
+transform variation and animated solar shading prevent a claim of exact
+subpixel texture registration, but the comparison favors the draw
+transform. Raw draw displacement already includes jitter; only the
+unjittered camera prediction needs the jitter difference removed.
+
+The solar colour PS's sole discard samples a full-eye linear depth
+resolve at t0 and rejects samples closer than the solar fragment's clip
+W. That resource is a per-eye R32 texture, not an opacity artwork. The
+stable solar artwork is t1, shared by the two eyes in the census. The
+final alpha comes from scene b1[126].z. The colour pass blends and
+writes depth, with no PS depth export.
+
+The depth prepass uses the same local-to-clip rows but subtracts 0.001
+from clip Z. Therefore the original colour draw writes B/W while
+discarded samples retain (B-0.001)/W. Exact EQUAL coverage at the colour
+depth can distinguish them without retaining or resampling the linear
+depth texture. Reissuing the shifted prepass would not provide the same
+visibility. Any blended-surface extension must remain restricted to the
+captured solar colour VS/PS pair; this is not a general exception for
+transparent objects.
+
+The new view does not show an unambiguous broad coronal loop and angular
+mask comparable to 131025. Comparing DlssBeforeUi with treated colour
+shows sparse UI cleanup differences, not evidence that this flight
+isolates the original mask. Ruled out as a justified change from this
+capture: adjusting UI cleanup or globally relaxing history rejection
+based on broad luma-edge correlations. The earlier angular mask and the
+reporter's navigation mask remain separate unresolved observations.
+
+## Solar surface correction
+
+The exact solar colour pair now shares affine motion mode 4 with opaque
+planets. Its history identity uses solar artwork at t1; planets keep t0.
+Changing the solar depth resolve cannot break identity, while changing
+the artwork or mesh rejects history. Animated material constants remain
+outside geometry identity. The blend exception applies only after the
+caller verifies the solar VS/PS pair. Coverage reuses the original
+colour VS and exact EQUAL scene depth, without game colour or depth
+writes. The existing temporal consumer preserves text motion and rejects
+coverage hidden by later cockpit/private depth.
+
+This adds one coverage reissue and one affine-record dispatch for each
+eligible solar surface draw, using the existing 128-record eye budget.
+There is no new full-screen pass or normal-flight CPU readback. Shader
+identity lookup is restricted to the two candidate vertex families. AA
+Off disables this path through the existing temporal-pass gate. The
+first accepted solar draw logs `solar motion: exact surface coverage and
+affine approach motion active`; an absent line means acceptance has not
+been demonstrated. The unchanged eye-run coverage and record files can
+verify per-pixel use in the next flight.
+
+Validation: the absolute-path full build, all its regression gates and
+NVIDIA DLL smoke pass. The UI coverage suite passes 21,421 checks on
+WARP and 23,167 on NVIDIA with the captured flight-HUD reference shader.
+The added solar case checks every pixel across shifted-prepass-only,
+alpha-colour-surviving and nearer-cockpit zones at clip W=1e8. It also
+checks exact preservation of all scene colour channels and depth,
+coverage depth, and restoration of shader/constants/targets/depth/blend
+state. The opaque planet regression remains in place. Stellar motion
+passes 140 synthetic checks, including independent t0/t1 identity tests,
+and 277 checks with the eight captured solar point pairs.
+
+These tests establish geometry motion and visibility, not a confirmed
+in-headset resolution of the solar smear or the separate coronal mask.

@@ -156,7 +156,8 @@ public:
     // and the normal full-eye viewport. Does not replace the original draw.
     // mode 0: cockpit pool, 1: ring local-to-clip, 2: orbital instance stream,
     // 3: planar sprite pool (local Y=0, original VS forces clip Z=W),
-    // 4: opaque planet affine local-to-clip, with no material animation key.
+    // 4: affine planet/solar local-to-clip, with no material animation key.
+    // Mode 4 requires an explicit surface slot: planet t0 or solar art t1.
     bool prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* source,const HoloDraw& args,float metres,unsigned mode=0,unsigned surfaceSlot=2) {
         const unsigned count=mode==2?args.instances:1;
         if(failed || !source || mode>4 || (mode==3 && args.count!=6) || (mode==2 ? (args.kind!='N' || args.startInstance!=0 || count==0 || count>64) : (args.kind!='X' || args.instances!=1)) || metres<=0 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
@@ -179,7 +180,8 @@ public:
         if(mode!=1 && mode!=4 && at+bytes>vd.ByteWidth) return false;
         Ptr<ID3D11ShaderResourceView> pool,surface;
         if(mode==0 && surfaceSlot!=1 && surfaceSlot!=2) return false;
-        if(mode!=2) ctx->PSGetShaderResources(mode==1?3:(mode==3 || mode==4)?0:surfaceSlot,1,&surface);
+        if(mode==4 && surfaceSlot>1) return false;
+        if(mode!=2) ctx->PSGetShaderResources(mode==1?3:mode==3?0:surfaceSlot,1,&surface);
         if(pooled) {
             ctx->VSGetShaderResources(33,1,&pool); if(!pool || !surface) return false;
             D3D11_SHADER_RESOURCE_VIEW_DESC pd{}; pool->GetDesc(&pd); if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER) return false;
@@ -197,7 +199,8 @@ public:
         IUnknown* objects[3]={surface.Get(),vb[pooled?1:0].Get(),mode==2?nullptr:ib.Get()};
         for(int i=0;i<3;++i) { uint64_t v=reinterpret_cast<uint64_t>(objects[i]); data.key[2*i]=UINT(v); data.key[2*i+1]=UINT(v>>32); now.sources[now.count][i]=objects[i]; }
         data.key[6]=UINT(args.base); data.key[7]=args.start; data.key[8]=mode==2?0:UINT(fmt); data.key[9]=mode==2?0:ibOffset;
-        data.key[10]=strides[pooled?1:0]; data.key[11]=offsets[pooled?1:0]; data.key[12]=args.count; data.key[15]=mode;
+        data.key[10]=strides[pooled?1:0]; data.key[11]=offsets[pooled?1:0]; data.key[12]=args.count;
+        data.key[14]=mode==4?surfaceSlot:0; data.key[15]=mode;
         data.limits[0]=metres; data.limits[1]=float(w); data.limits[2]=float(h);
         ctx->UpdateSubresource(draw.Get(),0,nullptr,&data,0,0);
         if(mode!=1 && mode!=4) { D3D11_BOX box{UINT(at),0,0,UINT(at+bytes),1,1}; ctx->CopySubresourceRegion(instance.Get(),0,0,0,0,vb[stream].Get(),0,&box); }

@@ -54,14 +54,23 @@ int main(int argc,char** argv){
     auto cb0=buffer(sizeof(model),D3D11_BIND_CONSTANT_BUFFER),cb1=buffer(sizeof(scene),D3D11_BIND_CONSTANT_BUFFER),cb2=buffer(sizeof(material),D3D11_BIND_CONSTANT_BUFFER);
     auto vb0=buffer(1024,D3D11_BIND_VERTEX_BUFFER),vb1=buffer(sizeof(stream),D3D11_BIND_VERTEX_BUFFER),ib=buffer(128,D3D11_BIND_INDEX_BUFFER);
     D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=8;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R32_FLOAT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-    ComPtr<ID3D11Texture2D> source;ComPtr<ID3D11ShaderResourceView> surface;hr(dev->CreateTexture2D(&td,nullptr,&source));hr(dev->CreateShaderResourceView(source.Get(),nullptr,&surface));
+    ComPtr<ID3D11Texture2D> source,depthA,depthB,solarA,solarB;ComPtr<ID3D11ShaderResourceView> surface,depthASrv,depthBSrv,solarASrv,solarBSrv;
+    hr(dev->CreateTexture2D(&td,nullptr,&source));hr(dev->CreateShaderResourceView(source.Get(),nullptr,&surface));
+    hr(dev->CreateTexture2D(&td,nullptr,&depthA));hr(dev->CreateShaderResourceView(depthA.Get(),nullptr,&depthASrv));
+    hr(dev->CreateTexture2D(&td,nullptr,&depthB));hr(dev->CreateShaderResourceView(depthB.Get(),nullptr,&depthBSrv));
+    hr(dev->CreateTexture2D(&td,nullptr,&solarA));hr(dev->CreateShaderResourceView(solarA.Get(),nullptr,&solarASrv));
+    hr(dev->CreateTexture2D(&td,nullptr,&solarB));hr(dev->CreateShaderResourceView(solarB.Get(),nullptr,&solarBSrv));
     HoloMotion motion;
-    auto run=[&](unsigned mode,unsigned count,unsigned vertices){
+    auto run=[&](unsigned mode,unsigned count,unsigned vertices,unsigned surfaceSlot=2,bool alternateT0=false,bool alternateT1=false){
         ctx->ClearState();ctx->UpdateSubresource(cb0.Get(),0,nullptr,model,0,0);ctx->UpdateSubresource(cb1.Get(),0,nullptr,scene,0,0);ctx->UpdateSubresource(cb2.Get(),0,nullptr,material,0,0);
         ctx->UpdateSubresource(vb1.Get(),0,nullptr,stream,0,0);ID3D11Buffer* cb[3]={mode==2?nullptr:cb0.Get(),cb1.Get(),cb2.Get()};ctx->VSSetConstantBuffers(0,3,cb);
         ID3D11Buffer* vb[2]={vb0.Get(),vb1.Get()};UINT strides[2]={mode==2?16u:mode==4?12u:40u,60},offsets[2]{};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R16_UINT,0);
-        ctx->PSSetShaderResources(mode==4?0:3,1,surface.GetAddressOf());D3D11_VIEWPORT vp{0,0,8,8,0,1};ctx->RSSetViewports(1,&vp);
-        check(motion.prepare(ctx.Get(),source.Get(),{mode==2?'N':'X',vertices,count,0,0,0},10,mode),"stellar transform preparation");
+        if(mode==4) {
+            ID3D11ShaderResourceView* solarViews[2]={alternateT0?depthBSrv.Get():(surfaceSlot==1?depthASrv.Get():surface.Get()),alternateT1?solarBSrv.Get():solarASrv.Get()};
+            ctx->PSSetShaderResources(0,2,solarViews);
+        } else ctx->PSSetShaderResources(3,1,surface.GetAddressOf());
+        D3D11_VIEWPORT vp{0,0,8,8,0,1};ctx->RSSetViewports(1,&vp);
+        check(motion.prepare(ctx.Get(),source.Get(),{mode==2?'N':'X',vertices,count,0,0,0},10,mode,surfaceSlot),"stellar transform preparation");
         ID3D11ShaderResourceView* views[2]{};motion.views(source.Get(),views);check(views[1]!=nullptr,"stellar records exposed");return read(views[1]);
     };
     model[16]=model[21]=model[30]=1;model[27]=.025f;model[31]=1e9f;
@@ -70,10 +79,18 @@ int main(int argc,char** argv){
     motion.frameBoundary();run(1,1,6);run(1,1,6);motion.frameBoundary();v=run(1,1,6);check(v[59]==1,"identical repeated ring passes share one physical predecessor");
     motion.frameBoundary();material[0]=1;v=run(1,1,6);check(v[59]==0,"different ring material cannot borrow old identity");
     motion=HoloMotion{};model[31]=1e8f;
-    v=run(4,1,6);check(v[56]==1 && v[59]==0,"planet starts with valid geometry and no invented predecessor");
+    v=run(4,1,6,0);check(v[56]==1 && v[59]==0,"planet starts with valid geometry and no invented predecessor");
     motion.frameBoundary();model[31]-=50000;material[0]=99;material[1]=123;
-    v=run(4,1,6);check(v[59]==1 && std::fabs(v[55]-50000)<1,"planet approach survives shading-only material animation");
-    motion.frameBoundary();v=run(4,1,12);check(v[59]==0,"planet LOD change cannot reuse a different mesh draw");
+    v=run(4,1,6,0);check(v[59]==1 && std::fabs(v[55]-50000)<1,"planet approach survives shading-only material animation");
+    motion.frameBoundary();v=run(4,1,12,0);check(v[59]==0,"planet LOD change cannot reuse a different mesh draw");
+    motion.frameBoundary();v=run(4,1,12,0,false,true);check(v[59]==1,"planet history ignores changes outside its t0 surface");
+    motion.frameBoundary();v=run(4,1,12,0,true,true);check(v[59]==0,"planet history rejects a changed t0 surface");
+    motion=HoloMotion{};model[31]=1e8f;
+    v=run(4,1,6,1);check(v[56]==1 && v[59]==0,"solar starts with valid geometry and no invented predecessor");
+    motion.frameBoundary();model[31]-=50000;
+    v=run(4,1,6,1);check(v[59]==1,"solar history uses the stable t1 art surface");
+    motion.frameBoundary();v=run(4,1,6,1,true);check(v[59]==1,"solar history ignores per-eye t0 changes");
+    motion.frameBoundary();v=run(4,1,6,1,false,true);check(v[59]==0,"solar history rejects a changed t1 art surface");
     motion=HoloMotion{};scene[270*4]=scene[271*4+1]=scene[272*4+3]=1;scene[273*4+2]=.025f;
     float* instances=reinterpret_cast<float*>(stream);
     for(int i=0;i<2;++i){float* p=instances+i*15;p[2]=1e9f;p[3]=2;p[7]=1;p[8]=p[9]=float(i+1)*1e8f;p[10]=1;}
@@ -88,7 +105,7 @@ int main(int argc,char** argv){
         for(unsigned pair=0;pair<pairCount;++pair){
             unsigned mode,count,vertices;input.read(reinterpret_cast<char*>(&mode),4);input.read(reinterpret_cast<char*>(&count),4);input.read(reinterpret_cast<char*>(&vertices),4);
             check((mode==1||mode==2||mode==4)&&count>0&&count<=64,"stellar fixture draw");motion.frameBoundary();motion.frameBoundary();
-            for(int side=0;side<2;++side){input.read(reinterpret_cast<char*>(model),sizeof(model));input.read(reinterpret_cast<char*>(scene),sizeof(scene));input.read(reinterpret_cast<char*>(material),sizeof(material));input.read(reinterpret_cast<char*>(stream),sizeof(stream));check(bool(input),"complete captured state");v=run(mode,count,vertices);if(!side)motion.frameBoundary();}
+            for(int side=0;side<2;++side){input.read(reinterpret_cast<char*>(model),sizeof(model));input.read(reinterpret_cast<char*>(scene),sizeof(scene));input.read(reinterpret_cast<char*>(material),sizeof(material));input.read(reinterpret_cast<char*>(stream),sizeof(stream));check(bool(input),"complete captured state");v=run(mode,count,vertices,mode==4?0:2);if(!side)motion.frameBoundary();}
             for(unsigned n=0;n<count;++n){
                 unsigned expectedValid;float point[3],expected[3];input.read(reinterpret_cast<char*>(&expectedValid),4);input.read(reinterpret_cast<char*>(point),12);input.read(reinterpret_cast<char*>(expected),12);check(bool(input),"complete captured expectation");
                 const float* r=v.data()+60*n;check((r[59]==1)==(expectedValid==1),"captured eligibility and identity agree");
