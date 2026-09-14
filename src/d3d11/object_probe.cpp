@@ -2636,8 +2636,9 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     d.instances = instances;
     d.startInstance = startInstance;
     d.kind = static_cast<uint8_t>(kind);
-    if(d.vs==EyeTonemapSnapshot::kVs && frame==g_ledgerFrame0)
-        g_tonemapSnapshot.capture(ctx,frame,static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
+    if(d.vs==EyeTonemapSnapshot::kVs)
+        g_tonemapSnapshot.captureRequested(ctx,g_ledgerFrame0,g_ledgerLastFrame,frame,
+                                 static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
                                  d.vs,bindingShaderHash(BindSlot::Ps),kind,count,static_cast<uint32_t>(base),instances,startInstance);
     if (EyeDrawSnapshot::watches(d.vs)) {
         g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
@@ -2913,7 +2914,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     wchar_t tonePath[MAX_PATH];
     _snwprintf_s(tonePath,MAX_PATH,_TRUNCATE,L"%s\\tonemap_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool toneOk=g_tonemapSnapshot.write(ctx,tonePath,dir.c_str());
-    Log::get().note("object probe: tone-map snapshots %ls: %u draws, %u reserved bytes, %u declines, %u failed copies/shaders; %s. First requested frame, at most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
+    Log::get().note("object probe: tone-map snapshots %ls: %u draws, actual first matching frame %u, %u reserved bytes, %u declines, %u failed copies/shaders; %s. At most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.firstFrame(),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
     const uint32_t missingShaders = g_drawSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye draw snapshots %ls: %u draws, %u holo surfaces, %u capped draws, "
                     "%u failed copies, %u missing shader files; %s. VS b0/b1/b2 and PS b2 are captured at each watched draw; "

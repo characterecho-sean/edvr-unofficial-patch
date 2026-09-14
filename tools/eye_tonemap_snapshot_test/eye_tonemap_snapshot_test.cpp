@@ -22,6 +22,7 @@ int wmain(int argc,wchar_t** argv){
  // HDR input and separate typeless output. Both exceed the crop so origin is (2,3).
  D3D11_TEXTURE2D_DESC hd{};hd.Width=1404;hd.Height=1406;hd.MipLevels=hd.ArraySize=1;hd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;hd.SampleDesc.Count=1;hd.BindFlags=D3D11_BIND_SHADER_RESOURCE;std::vector<unsigned char> hv(size_t(hd.Width)*hd.Height*4,0x41);D3D11_SUBRESOURCE_DATA hi{hv.data(),hd.Width*4,hd.Width*hd.Height*4};ComPtr<ID3D11Texture2D>hdr;hr(d->CreateTexture2D(&hd,&hi,&hdr),"hdr");auto hs=srv2(d.Get(),hdr.Get(),DXGI_FORMAT_R8G8B8A8_UNORM);
  D3D11_TEXTURE2D_DESC od=hd;od.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;od.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D>output;hr(d->CreateTexture2D(&od,nullptr,&output),"output");D3D11_RENDER_TARGET_VIEW_DESC rv{};rv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;rv.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;ComPtr<ID3D11RenderTargetView>rt;hr(d->CreateRenderTargetView(output.Get(),&rv,&rt),"output rtv");
+ D3D11_TEXTURE2D_DESC badDesc{};badDesc.Width=4;badDesc.Height=4;badDesc.MipLevels=badDesc.ArraySize=1;badDesc.Format=DXGI_FORMAT_BC1_UNORM;badDesc.SampleDesc.Count=1;badDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D>badTexture;hr(d->CreateTexture2D(&badDesc,nullptr,&badTexture),"unsupported texture");auto badSrv=srv2(d.Get(),badTexture.Get(),DXGI_FORMAT_BC1_UNORM);
  // Real POSITION/TEXCOORD layout, 20-byte vertices, bound offset 20 and draw start 2.
  D3D11_INPUT_ELEMENT_DESC ie[]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},{"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0}};ComPtr<ID3D11InputLayout>layout;
  const char* vsrc="struct V{float3 p:POSITION;float2 t:TEXCOORD;}; float4 main(V v):SV_Position{return float4(v.p,1);}";
@@ -47,6 +48,53 @@ int wmain(int argc,wchar_t** argv){
  ComPtr<ID3D11InputLayout> ilAfter;ComPtr<ID3D11VertexShader> vsAfter;ComPtr<ID3D11PixelShader> psAfter;ComPtr<ID3D11Buffer> cbAfter;ComPtr<ID3D11ShaderResourceView> exAfter,lutAfter,hdrAfter;ComPtr<ID3D11SamplerState> sa0After,sa1After,sa2After;ComPtr<ID3D11BlendState> blendAfter;ComPtr<ID3D11DepthStencilState> depthAfter;ComPtr<ID3D11RasterizerState> rastAfter;UINT stencilAfter=0,maskAfter=0;FLOAT factorsAfter[4]{};D3D11_VIEWPORT vpAfter{};D3D11_RECT scAfter{};c->IAGetInputLayout(&ilAfter);c->VSGetShader(&vsAfter,nullptr,nullptr);c->PSGetShader(&psAfter,nullptr,nullptr);c->PSGetConstantBuffers(2,1,&cbAfter);c->VSGetShaderResources(0,1,&exAfter);c->PSGetShaderResources(0,1,&lutAfter);c->PSGetShaderResources(1,1,&hdrAfter);c->VSGetSamplers(0,1,&sa0After);c->PSGetSamplers(0,1,&sa1After);c->PSGetSamplers(1,1,&sa2After);c->OMGetBlendState(&blendAfter,factorsAfter,&maskAfter);c->OMGetDepthStencilState(&depthAfter,&stencilAfter);c->RSGetState(&rastAfter);UINT nvp2=1,nsc2=1;c->RSGetViewports(&nvp2,&vpAfter);c->RSGetScissorRects(&nsc2,&scAfter);check(ilAfter.Get()==ilBefore.Get()&&vsAfter.Get()==vsBefore.Get()&&psAfter.Get()==psBefore.Get()&&cbAfter.Get()==cbBefore.Get()&&exAfter.Get()==exBefore.Get()&&lutAfter.Get()==lutBefore.Get()&&hdrAfter.Get()==hdrBefore.Get(),"shader/resource state changed");check(sa0After.Get()==sa0Before.Get()&&sa1After.Get()==sa1Before.Get()&&sa2After.Get()==sa2Before.Get()&&blendAfter.Get()==blendBefore.Get()&&depthAfter.Get()==depthBefore.Get()&&rastAfter.Get()==rastBefore.Get(),"sampler/state pointers changed");check(stencilAfter==stencilBefore&&maskAfter==maskBefore&&memcmp(factorsAfter,factorsBefore,sizeof(factorsBefore))==0&&memcmp(&vpAfter,&vpBefore,sizeof(vpBefore))==0&&memcmp(&scAfter,&scBefore,sizeof(scBefore))==0,"state values changed");
  // A second eye in the same frame is accepted; a third and a later frame decline.
  uint32_t declinesBefore=snap.declined;snap.capture(c.Get(),43,99,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);check(snap.count()==1&&snap.declined==declinesBefore,"first-frame guard");snap.capture(c.Get(),42,1,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);snap.end(c.Get());snap.capture(c.Get(),42,2,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);check(snap.count()==2,"draw cap");waitGpu(d.Get(),c.Get());check(snap.write(c.Get(),argv[1]),"write");
+ c->UpdateSubresource(exposure.Get(),0,nullptr,ev.data(),16,64);
+ c->UpdateSubresource(lut.Get(),0,nullptr,lv.data(),16,64);
+ c->UpdateSubresource(hdr.Get(),0,nullptr,hv.data(),hd.Width*4,hd.Width*hd.Height*4);
+ c->UpdateSubresource(cb.Get(),0,nullptr,cv.data(),0,0);
+ c->UpdateSubresource(vb.Get(),0,nullptr,vv.data(),0,0);
+ waitGpu(d.Get(),c.Get());
+ c->ClearRenderTargetView(rt.Get(),clearA);
+ edvr::EyeTonemapSnapshot boundary;
+ boundary.captureRequested(c.Get(),41,60,40,0,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);
+ check(boundary.count()==0,"before-range guard");
+ boundary.captureRequested(c.Get(),41,60,61,0,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);
+ check(boundary.count()==0,"after-range guard");
+ boundary.captureRequested(c.Get(),41,60,42,0,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);
+ waitGpu(d.Get(),c.Get());
+ c->UpdateSubresource(exposure.Get(),0,nullptr,ev2.data(),16,64);
+ c->UpdateSubresource(lut.Get(),0,nullptr,lv2.data(),16,64);
+ c->UpdateSubresource(hdr.Get(),0,nullptr,hv2.data(),hd.Width*4,hd.Width*hd.Height*4);
+ c->UpdateSubresource(cb.Get(),0,nullptr,cv2.data(),0,0);
+ c->UpdateSubresource(vb.Get(),0,nullptr,vv2.data(),0,0);
+ boundary.end(c.Get());
+ boundary.captureRequested(c.Get(),41,60,42,1,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);
+ waitGpu(d.Get(),c.Get());
+ c->ClearRenderTargetView(rt.Get(),clearB);
+ boundary.end(c.Get());
+ check(boundary.count()==2,"same-frame eyes");
+ waitGpu(d.Get(),c.Get());
+ wchar_t boundaryPath[MAX_PATH];
+ _snwprintf_s(boundaryPath,MAX_PATH,_TRUNCATE,L"%s.boundary",argv[1]);
+ check(boundary.write(c.Get(),boundaryPath),"boundary write");
+ edvr::EyeTonemapSnapshot unsupported;
+ ID3D11ShaderResourceView* noExposure=nullptr;
+ c->VSSetShaderResources(0,1,&noExposure);
+ ID3D11ShaderResourceView* wrongLut=ex.Get();
+ c->PSSetShaderResources(0,1,&wrongLut);
+ ID3D11ShaderResourceView* badHdr=badSrv.Get();
+ c->PSSetShaderResources(1,1,&badHdr);
+ unsupported.captureRequested(c.Get(),41,60,42,0,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);
+ waitGpu(d.Get(),c.Get());
+ unsupported.end(c.Get());
+ waitGpu(d.Get(),c.Get());
+ wchar_t unsupportedPath[MAX_PATH];
+ _snwprintf_s(unsupportedPath,MAX_PATH,_TRUNCATE,L"%s.unsupported",argv[1]);
+ check(unsupported.write(c.Get(),unsupportedPath),"unsupported write");
+ ID3D11ShaderResourceView* restoreExposure=ex.Get();
+ c->VSSetShaderResources(0,1,&restoreExposure);
+ c->PSSetShaderResources(0,1,&ps[0]);
+ c->PSSetShaderResources(1,1,&ps[1]);
  // Pending output is explicitly recorded as a zero payload and failure.
  edvr::EyeTonemapSnapshot pending;pending.capture(c.Get(),55,0,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);waitGpu(d.Get(),c.Get());wchar_t pendingPath[MAX_PATH];_snwprintf_s(pendingPath,MAX_PATH,_TRUNCATE,L"%s.pending",argv[1]);check(pending.write(c.Get(),pendingPath),"pending write");check(pending.failures>0,"pending failure");std::puts("GPU tonemap snapshot fixture passed");return 0;
 }

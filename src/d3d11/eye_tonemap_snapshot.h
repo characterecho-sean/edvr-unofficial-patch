@@ -1,7 +1,8 @@
 #pragma once
 // Draw-local evidence for the game's HDR -> display-colour conversion.
-// No draws, binding changes, flushes or blocking readbacks. The caller arms
-// only the first requested eye frame; end() copies the original output once.
+// No draws, binding changes, flushes or blocking readbacks. The caller bounds
+// an armed ledger interval; the first matching draw frame is retained and
+// end() copies each accepted output once.
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cstdint>
@@ -35,6 +36,20 @@ class EyeTonemapSnapshot {
         for(size_t i=0;i<sizeof(T)/4;++i) { uint32_t v;std::memcpy(&v,reinterpret_cast<const char*>(&t)+i*4,4);if(i)s<<',';s<<v; }
         s<<']';return s.str();
     }
+    static std::string resourceEvidence(ID3D11Resource* resource) {
+        if(!resource)return {};
+        std::ostringstream s;
+        s<<",\"resource\":"<<reinterpret_cast<uint64_t>(resource);
+        Ptr<ID3D11Texture2D> t2;Ptr<ID3D11Texture3D> t3;
+        if(SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(&t2)))) {
+            D3D11_TEXTURE2D_DESC d{};t2->GetDesc(&d);
+            s<<",\"resource_desc\":"<<words(d);
+        } else if(SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(&t3)))) {
+            D3D11_TEXTURE3D_DESC d{};t3->GetDesc(&d);
+            s<<",\"resource_desc\":"<<words(d);
+        }
+        return s.str();
+    }
     static uint32_t pixelBytes(DXGI_FORMAT f) {
         switch(f) {
         case DXGI_FORMAT_R32G32B32A32_FLOAT:return 16;
@@ -49,24 +64,32 @@ class EyeTonemapSnapshot {
     }
     bool texture(ID3D11DeviceContext* c,ID3D11Device* dev,ID3D11Resource* src,
                  DXGI_FORMAT viewFormat,const std::string& view,bool volume,bool crop,bool defer,Blob& b) {
-        if(!src)return false;
+        if(!src) { b.meta="{\"type\":"+std::to_string(volume?3:2)+",\"reason\":\"unsupported_resource\"}";return false; }
         Ptr<ID3D11Texture2D> t2;Ptr<ID3D11Texture3D> t3;
         D3D11_TEXTURE2D_DESC d2{};D3D11_TEXTURE3D_DESC d3{};
         uint32_t w=0,h=0,z=1,mips=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+        auto reject=[&](const char* why) {
+            std::ostringstream q;
+            q<<"{\"type\":"<<(volume?3:2)<<resourceEvidence(src)
+             <<",\"format\":"<<format<<",\"view_format\":"<<viewFormat
+             <<",\"view\":"<<view<<",\"reason\":\""<<why<<"\"}";
+            b.meta=q.str();return false;
+        };
         if(volume) {
-            if(FAILED(src->QueryInterface(IID_PPV_ARGS(&t3))))return false;
+            if(FAILED(src->QueryInterface(IID_PPV_ARGS(&t3))))return reject("unsupported_resource");
             t3->GetDesc(&d3);w=d3.Width;h=d3.Height;z=d3.Depth;mips=d3.MipLevels;format=d3.Format;
         } else {
-            if(FAILED(src->QueryInterface(IID_PPV_ARGS(&t2))))return false;
+            if(FAILED(src->QueryInterface(IID_PPV_ARGS(&t2))))return reject("unsupported_resource");
             t2->GetDesc(&d2);w=d2.Width;h=d2.Height;mips=d2.MipLevels;format=d2.Format;
-            if(d2.ArraySize!=1 || d2.SampleDesc.Count!=1 || (d2.BindFlags&D3D11_BIND_DEPTH_STENCIL))return false;
+            if(d2.ArraySize!=1 || d2.SampleDesc.Count!=1 || (d2.BindFlags&D3D11_BIND_DEPTH_STENCIL))return reject("unsupported_shape");
         }
         const uint32_t stride=pixelBytes(format);
-        if(!stride || pixelBytes(viewFormat)!=stride || !w || !h || !z || mips!=1)return false;
+        if(!stride || pixelBytes(viewFormat)!=stride || !w || !h || !z || mips!=1)return reject("unsupported_format_or_mip");
         const uint32_t cw=crop && w>kCrop?kCrop:w,ch=crop && h>kCrop?kCrop:h;
         const uint64_t n=uint64_t(cw)*ch*z*stride;
         uint32_t& reserved=crop?imageBytes_:smallBytes_;const uint32_t cap=crop?kImageBudget:kSmallBudget;
-        if(!n || n>cap-reserved)return false;
+        if(!n)return reject("unsupported_extent");
+        if(n>cap-reserved)return reject("budget");
         b.x=(w-cw)/2;b.y=(h-ch)/2;b.width=cw;b.height=ch;
         b.bytes=static_cast<uint32_t>(n);b.row=cw*stride;b.rows=ch;b.slices=z;
         HRESULT hr=E_FAIL;
@@ -78,7 +101,7 @@ class EyeTonemapSnapshot {
             d2.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d2.SampleDesc.Quality=0;
             Ptr<ID3D11Texture2D> stage;hr=dev->CreateTexture2D(&d2,nullptr,&stage);b.stage=stage;
         }
-        if(FAILED(hr)) { ++failures;return false; }
+        if(FAILED(hr)) { ++failures;return reject("allocation"); }
         std::ostringstream m;m<<"{\"type\":"<<(volume?3:2)<<",\"resource\":"<<reinterpret_cast<uint64_t>(src)
             <<",\"format\":"<<format<<",\"view_format\":"<<viewFormat<<",\"view\":"<<view
             <<",\"source\":["<<w<<','<<h<<','<<z<<"],\"origin\":["<<b.x<<','<<b.y<<",0],\"size\":["
@@ -89,11 +112,13 @@ class EyeTonemapSnapshot {
         return true;
     }
     bool srv(ID3D11DeviceContext* c,ID3D11Device* dev,ID3D11ShaderResourceView* v,bool volume,bool crop,Blob& b) {
-        if(!v)return false;
+        if(!v) { b.meta = std::string("{\"type\":") + (volume?"3":"2") + ",\"reason\":\"absent\"}"; return false; }
         D3D11_SHADER_RESOURCE_VIEW_DESC vd{};v->GetDesc(&vd);Ptr<ID3D11Resource> r;v->GetResource(&r);
+        std::ostringstream rejected;rejected<<"{\"type\":"<<(volume?3:2)<<resourceEvidence(r.Get())<<",\"view\":"<<words(vd)<<",\"reason\":\"";
         if(volume) {
-            if(vd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE3D || vd.Texture3D.MostDetailedMip || vd.Texture3D.MipLevels!=1)return false;
-        } else if(vd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || vd.Texture2D.MostDetailedMip || vd.Texture2D.MipLevels!=1)return false;
+            if(vd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE3D || vd.Texture3D.MostDetailedMip || vd.Texture3D.MipLevels!=1) { rejected<<"unsupported_view_or_mip\"}";b.meta=rejected.str();return false; }
+        } else if(vd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || vd.Texture2D.MostDetailedMip || vd.Texture2D.MipLevels!=1) { rejected<<"unsupported_view_or_mip\"}";b.meta=rejected.str();return false; }
+        if(!r) { rejected<<"missing_resource\"}";b.meta=rejected.str();return false; }
         return texture(c,dev,r.Get(),vd.Format,words(vd),volume,crop,false,b);
     }
     bool buffer(ID3D11DeviceContext* c,ID3D11Device* dev,ID3D11Buffer* src,uint32_t off,uint32_t n,Blob& b) {
@@ -110,6 +135,7 @@ class EyeTonemapSnapshot {
 public:
     static constexpr uint64_t kVs=0x2D78DC3FD2C0C543ull,kPs=0x99C21CEB7A699821ull;
     uint32_t declined=0,failures=0,bytes=0;
+    uint32_t firstFrame() const { return firstFrame_; }
     uint32_t count() const { return static_cast<uint32_t>(draws_.size()); }
     void reset() { draws_.clear();firstFrame_=imageBytes_=smallBytes_=declined=failures=bytes=0;pending_=UINT32_MAX; }
     static void rememberShader(uint64_t hash,const void* data,size_t n) {
@@ -127,6 +153,16 @@ public:
             a[i].slot=e[i].InputSlot;a[i].offset=e[i].AlignedByteOffset;a[i].classification=e[i].InputSlotClass;a[i].step=e[i].InstanceDataStepRate;
         }
         l->SetPrivateData(layoutKey(),n*sizeof(Layout),a);
+    }
+    // The ledger's first frame is the frame at which arming was requested;
+    // the first matching draw can legally arrive one or more draw-boundary
+    // ticks later. Keep that scheduling policy here, while capture() retains
+    // the actual first matching frame and two-draw invariant.
+    void captureRequested(ID3D11DeviceContext* c,uint32_t ledgerFirst,uint32_t ledgerLast,uint32_t actualFrame,
+                          uint32_t ordinal,uint64_t vs,uint64_t ps,char kind,uint32_t n,uint32_t startVertex,
+                          uint32_t instances=1,uint32_t startInstance=0) {
+        if(actualFrame<ledgerFirst || actualFrame>ledgerLast) { ++declined; return; }
+        capture(c,actualFrame,ordinal,vs,ps,kind,n,startVertex,instances,startInstance);
     }
     void capture(ID3D11DeviceContext* c,uint32_t frame,uint32_t ordinal,uint64_t vs,uint64_t ps,
                  char kind,uint32_t n,uint32_t startVertex,uint32_t instances=1,uint32_t startInstance=0) {

@@ -27,6 +27,25 @@ def words(value, count, nullable=False):
     return (nullable and value is None) or (isinstance(value, list) and len(value) == count and all(uint(x) for x in value))
 
 
+def refusal(m, role):
+    """Validate evidence about an unsupported input; it has no pixel payload."""
+    require(role < 4 and m.get('type') == (3 if role == 1 else 2), 'Invalid refused texture role')
+    require(m.get('reason') in {'absent', 'missing_resource', 'unsupported_resource',
+                               'unsupported_view_or_mip', 'unsupported_shape',
+                               'unsupported_format_or_mip', 'unsupported_extent',
+                               'budget', 'allocation'}, 'Invalid refusal reason')
+    require('bytes' not in m, 'Refused texture declares valid pixels')
+    if 'resource' in m:
+        require(uint(m['resource'], 0xffffffffffffffff) and m['resource'] != 0, 'Invalid refused resource identity')
+    if 'view' in m:
+        require(words(m['view'], 5 if role == 3 else 6), 'Invalid refused view descriptor')
+    for key in ('format', 'view_format'):
+        if key in m:
+            require(uint(m[key]), 'Invalid refused format')
+    if 'resource_desc' in m:
+        require(words(m['resource_desc'], 11) or words(m['resource_desc'], 9), 'Invalid refused resource descriptor')
+
+
 def read(path):
     path = Path(path)
     require(path.stat().st_size <= IMAGE_CAP + SMALL_CAP + 1024**2, 'Snapshot exceeds file cap')
@@ -76,7 +95,11 @@ def read(path):
         blobs = []
         for role in range(6):
             m = metadata()
-            if m:
+            if 'reason' in m:
+                refusal(m, role)
+                require(not d['complete_inputs'], 'Refused input marked complete')
+                n = 0
+            elif m:
                 require(uint(m.get('resource'), 0xffffffffffffffff) and m['resource'] != 0, 'Missing resource identity')
                 n = m.get('bytes')
                 require(uint(n) and n > 0, 'Invalid declared payload size')
@@ -161,10 +184,38 @@ def verify_fixture(path):
     require(len(pending['draws']) == 1 and pending['failures'] == 1, 'Pending-output failure not isolated')
     p = pending['draws'][0]['blobs']
     require(not p[3]['data'] and p[3]['meta']['bytes'] == 4*pixels and all(p[i]['data'] == updated[i] for i in (0, 1, 2, 4, 5)), 'Pending output confused with a valid black image')
+    boundary = read(str(path) + '.boundary')
+    require(len(boundary['draws']) == 2 and boundary['failures'] == 0 and boundary['declined'] == 2, 'Delayed first-frame capture failed')
+    for draw, payload in zip(boundary['draws'], (expected, updated)):
+        require(draw['frame'] == 42 and draw['complete_inputs'], 'Delayed capture has wrong actual frame')
+        require([b['data'] for b in draw['blobs']] == payload, 'Delayed stereo capture lost draw-local payloads')
+    unsupported = read(str(path) + '.unsupported')
+    require(len(unsupported['draws']) == 1 and unsupported['failures'] == 3 and unsupported['declined'] == 1, 'Unsupported inputs not isolated')
+    draw = unsupported['draws'][0]
+    require(not draw['complete_inputs'], 'Unsupported capture claims completeness')
+    blobs = draw['blobs']
+    require([b['meta'].get('reason') for b in blobs[:3]] == ['absent', 'unsupported_view_or_mip', 'unsupported_format_or_mip'], 'Failure reasons missing')
+    require(not any(b['data'] for b in blobs[:3]), 'Refused input confused with valid pixels')
+    require(all(blobs[i]['data'] == updated[i] for i in (3, 4, 5)), 'Unsupported input corrupted independent valid data')
+    require(blobs[1]['meta']['resource_desc'][:5] == [4, 4, 1, 1, 41], 'Wrong-dimension LUT descriptor lost')
+    require(blobs[2]['meta']['resource_desc'][:5] == [4, 4, 1, 1, 71] and blobs[2]['meta']['view'][0] == 71, 'Unsupported BC1 descriptor lost')
     return x
 
 
 def self_test():
+    refusal({'type': 2, 'reason': 'absent'}, 0)
+    refusal({'type': 3, 'reason': 'unsupported_view_or_mip', 'view': [28, 4, 0, 1, 0, 0]}, 1)
+    for m, role in (({'type': 2, 'reason': 'unknown'}, 0),
+                    ({'type': 2, 'reason': 'absent', 'bytes': 4}, 0),
+                    ({'type': 3, 'reason': 'absent'}, 0),
+                    ({'type': 2, 'reason': 'absent'}, 4),
+                    ({'type': 2, 'reason': 'budget', 'resource_desc': [1]}, 0)):
+        try:
+            refusal(m, role)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Malformed refusal accepted')
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / 'tone.bin'
         good = b'EDVRTON1' + struct.pack('<6I', 1, 0, 0, 0, 0, 0)

@@ -1005,3 +1005,79 @@ now waits at that earlier write as well. Production still uses
 nonblocking readbacks. The repeated full run passed, including 386
 hologram-motion checks, 25,084 UI checks and the config contract. No
 in-game claim is made for the remaining target smear.
+
+## Native targeting captures and delayed ledger boundary: 051720/051740
+
+The next flight verifies v0.16.2-13-g0b60cde in
+edvr_gfx_20260914_051509.log, graphics build 6AA7D613 linked 11:10:11
+UTC. Its paired VR log is 051515, the same revision using Valve SteamVR.
+Gameplay uses preset K, 2644x2610 input and 4068x4016 output. Capture
+051720 starts at temporal frame 16251 with jitter (0.125,0.277777791);
+051740 starts at 17903 with jitter (0,-0.166666657). The draw ledgers
+and C00 crops begin one frame later, at 16252 and 17904 respectively.
+These frame namespaces must not be silently equated.
+
+All ten sprite pairs in 051720 and all four in 051740 retained their
+native R11G11B10F before/after crops, original depth/stencil, PS b1,
+atlas and structured buffers, with zero reported failures. The label
+draws are ordinals 176/243 for UNIDENTIFIED SIGNAL SOURCE and 198/264
+for BINET'S FOLLY. The native before/after comparison places the visible
+change at the text and its reticle; it does not show the broad dark
+plume around departed text. Inspection PNGs use a simple display curve
+only; quantitative comparisons decode the native unsigned 11/11/10-bit
+floating-point values.
+
+The post-DLSS resolver remains a measured contributor. In full-output
+ROI (2180,1990)-(2540,2300), capture 051720 has 19,909 retained-only
+pixels outside current expanded UI coverage. Of these, 15,869 change by
+more than one byte between DlssBeforeUi and T00, with mean signed RGB
+change (-3.3751,-0.4483,-0.1776) bytes. Capture 051740 has 8,487
+retained-only pixels, 7,369 changed, and mean change
+(-4.7050,-0.9934,-0.3766). Every change over one byte belongs to the
+resolver's active footprint. Both audits use their own CSV jitter,
+unjittered previous-alpha grid and bilinear transported age. These
+measurements isolate added darkening; they do not prove that NGX itself
+contributes nothing.
+
+Ruled out: the absent tone-map records indicate that the game skipped
+tone mapping. The census contains the expected shader pair in the first
+rendered capture frame, but the root capture hook required that frame to
+equal the earlier logical ledger arm frame. Both files consequently
+contained zero draws and zero declines. This was an integration bug in
+the diagnostic build, not evidence about the rendering artifact.
+
+The hook now accepts matching tone-map draws throughout the armed ledger
+interval. The snapshot still retains only its first actual matching
+frame and at most two draws; its log reports that actual frame. The WARP
+fixture exercises an arm interval beginning at 41 followed by two draws
+at 42, serializes both, and verifies their complete and distinct
+payloads. Requests outside the interval are rejected. Unsupported input
+metadata retains a reason and available native resource/view
+descriptors, with zero payload and incomplete status. Tests cover
+missing exposure, a 2D resource bound as the LUT, and an unsupported BC1
+HDR input while checking that the independent output and buffers remain
+valid.
+
+This correction changes diagnostics only. A faithful replay through the
+game's colour conversion still requires a successful exposure/LUT/tone
+capture; another UI colour clamp or motion threshold is not justified by
+the current evidence.
+
+An offline WARP replay now reproduces the BINET'S FOLLY draw using the
+original shaders, atlas, buffers and recorded state. It changes 5,389
+packed HDR pixels versus 5,385 in the captured draw. It is not
+byte-exact: 1,362 packed words differ from the captured after image,
+within crop-relative bounds (869,759)-(1022,835), with maximum native
+channel error 0.25. Whole-crop mean error is 2.447738e-6, dominated by
+unchanged background, and must not be used as a claim of exact text
+reproduction. Earlier no-op runs were invalid: they uploaded
+depth/stencil incorrectly and decoded the HDR exponent with unsigned
+subtraction. The corrected run initializes the full R32G8X24 depth
+resource legally, preserves the captured crop, and explicitly fails
+validation if no pixels change. This is useful replay progress, not
+validation of a new in-game UI path.
+
+Validation: the corrected capture passed the full absolute-path build,
+including byte-exact delayed-frame and unsupported-input fixtures, and
+the NVIDIA smoke test with live NGX evaluations. The orbital-line and
+temporal rendering paths are unchanged.
