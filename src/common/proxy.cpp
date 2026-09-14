@@ -5,6 +5,7 @@
 
 #include "config.h"  // executableDirectory
 #include "log.h"
+#include "crash_context.h"
 
 namespace edvr {
 namespace {
@@ -322,7 +323,14 @@ LONG WINAPI edvrCrashFilter(EXCEPTION_POINTERS* info) {
     line[n] = 0;
     breadcrumb(line);
 
-    // The second line, and the one that is actually diagnostic. See
+    // The detailed helper has a separate stack frame, preserving the early
+    // stack-overflow bypass above. The legacy scan remains useful when
+    // unwind metadata is unavailable.
+    crash_context::report(info, [](const char* detail, void*) noexcept {
+        breadcrumb(detail);
+    });
+
+    // The original raw stack scan provides additional caller evidence. See
     // appendStackModules: the address above names Elite's own die-stub for
     // every abort, terminate and purecall it has, so it cannot tell two
     // unrelated bugs apart and the stack can.

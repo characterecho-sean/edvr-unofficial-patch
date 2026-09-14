@@ -731,6 +731,15 @@ if errorlevel 1 ( echo [edvr] ERROR: native device GPU test build failed & exit 
 "%BUILD%\native_device_gpu_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_device_gpu_test.exe" --self-test || exit /b 1
 
+echo [edvr] === crash_context_test.exe ===
+if not exist "%OBJ%\crashcontext" mkdir "%OBJ%\crashcontext"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%ROOT%" /Fo"%OBJ%\crashcontext\crash_context_test.obj" ^
+    /Fe"%BUILD%\crash_context_test.exe" "tools\crash_context_test\crash_context_test.cpp" ^
+    /link /OUT:"%BUILD%\crash_context_test.exe" /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: crash_context_test build failed & exit /b 1 )
+"%BUILD%\crash_context_test.exe" --self-test || exit /b 1
+
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout
 REM depends on two parser properties -- repeated section headers, last value
