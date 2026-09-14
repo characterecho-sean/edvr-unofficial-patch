@@ -10,7 +10,7 @@ import tempfile
 
 VS, PS = 0x2D78DC3FD2C0C543, 0x99C21CEB7A699821
 IMAGE_CAP, SMALL_CAP = 48 * 1024**2, 8 * 1024**2
-BPP = {2: 16, 10: 8, 16: 8, 26: 4, 27: 4, 28: 4, 29: 4,
+BPP = {2: 16, 10: 8, 16: 8, 26: 4, 27: 4, 28: 4, 29: 4, 39: 4,
        41: 4, 34: 4, 35: 4, 54: 2, 56: 2, 49: 2, 61: 1}
 
 
@@ -106,6 +106,7 @@ def read(path):
                 if role < 4:
                     require(m.get('type') == (3 if role == 1 else 2), 'Texture dimension does not match role')
                     require(m.get('format') in BPP and BPP.get(m.get('view_format')) == BPP[m['format']], 'Unsupported format')
+                    require(m['format'] != 39 or m['view_format'] == 41, 'Unsupported R32 typeless view')
                     require(words(m.get('view'), 5 if role == 3 else 6), 'Invalid resource view descriptor')
                     src, origin, size = m.get('source'), m.get('origin'), m.get('size')
                     require(words(src, 3) and words(origin, 3) and words(size, 3) and all(0 < x <= 16384 for x in src + size), 'Invalid texture dimensions')
@@ -199,6 +200,13 @@ def verify_fixture(path):
     require(all(blobs[i]['data'] == updated[i] for i in (3, 4, 5)), 'Unsupported input corrupted independent valid data')
     require(blobs[1]['meta']['resource_desc'][:5] == [4, 4, 1, 1, 41], 'Wrong-dimension LUT descriptor lost')
     require(blobs[2]['meta']['resource_desc'][:5] == [4, 4, 1, 1, 71] and blobs[2]['meta']['view'][0] == 71, 'Unsupported BC1 descriptor lost')
+    typeless = read(str(path) + '.typeless')
+    require(len(typeless['draws']) == 1 and typeless['failures'] == typeless['declined'] == 0, 'Typeless exposure capture failed')
+    draw = typeless['draws'][0]
+    exposure = draw['blobs'][0]
+    require(draw['complete_inputs'] and exposure['data'] == struct.pack('<6f', *range(31, 37)), 'Typeless exposure bytes overwritten or reinterpreted')
+    require(exposure['meta']['format'] == 39 and exposure['meta']['view_format'] == 41 and exposure['meta']['size'] == [6, 1, 1], 'Typeless exposure descriptor lost')
+    require(all(draw['blobs'][i]['data'] == updated[i] for i in range(1, 6)), 'Typeless exposure corrupted independent inputs')
     return x
 
 

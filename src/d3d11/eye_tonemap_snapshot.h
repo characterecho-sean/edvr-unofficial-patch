@@ -83,7 +83,10 @@ class EyeTonemapSnapshot {
             t2->GetDesc(&d2);w=d2.Width;h=d2.Height;mips=d2.MipLevels;format=d2.Format;
             if(d2.ArraySize!=1 || d2.SampleDesc.Count!=1 || (d2.BindFlags&D3D11_BIND_DEPTH_STENCIL))return reject("unsupported_shape");
         }
-        const uint32_t stride=pixelBytes(format);
+        uint32_t stride=pixelBytes(format);
+        // The game exposes the scalar exposure as R32_TYPELESS storage with
+        // an R32_FLOAT SRV. Permit only this measured storage/view pair.
+        if(format==DXGI_FORMAT_R32_TYPELESS && viewFormat==DXGI_FORMAT_R32_FLOAT)stride=4;
         if(!stride || pixelBytes(viewFormat)!=stride || !w || !h || !z || mips!=1)return reject("unsupported_format_or_mip");
         const uint32_t cw=crop && w>kCrop?kCrop:w,ch=crop && h>kCrop?kCrop:h;
         const uint64_t n=uint64_t(cw)*ch*z*stride;

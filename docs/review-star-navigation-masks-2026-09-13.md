@@ -1081,3 +1081,90 @@ Validation: the corrected capture passed the full absolute-path build,
 including byte-exact delayed-frame and unsupported-input fixtures, and
 the NVIDIA smoke test with live NGX evaluations. The orbital-line and
 temporal rendering paths are unchanged.
+
+## Tone boundary and target separation: 054856/054906
+
+The next flight verifies v0.16.2-14-ga4e2f9b in graphics log
+edvr_gfx_20260914_054634.log, build 6AA7DD5C, linked 11:41:16 UTC. The
+paired VR log is 054636, build 6AA7DD63, linked 11:41:23 UTC, with the
+same version using Valve SteamVR. Gameplay uses preset K, 2644x2610
+input and 4068x4016 output. Capture 054856 has logical temporal frame
+16776 and first rendered frame 16777, with jitter (-0.25,0.166666687).
+Capture 054906 has logical frame 17573 and first rendered frame 17574,
+with jitter (0.375,0.055555582).
+
+The delayed-frame correction works: both tone files contain two eye
+draws, at ordinals 286/288 and 304/306 respectively. Their first-eye
+converted RGB crops are byte-exact matches to C00, the raw DLSS input:
+all 1,960,000 pixels match in each capture. This establishes the final
+colour boundary for these views. The game's HDR scene, including target
+sprites and later panels, is tone-mapped before EDVR runs NGX and then
+kUiResolve.
+
+Each tone draw retains its LUT, native HDR, converted output, constants,
+vertex data and shaders. The only missing input is the exposure texture:
+6x1 R32_TYPELESS storage (format 39), read through an R32_FLOAT SRV
+(format 41), with SRV/RTV/UAV bind flags and no depth binding. Both
+files correctly report two declines and two failures. The previous
+whitelist accepted R32_FLOAT storage but omitted this storage/view pair.
+The capture now accepts only that additional pair; other R32_TYPELESS
+views remain rejected. A dedicated fixture retains exposure values 31
+through 36 even after the original texture changes to 71 through 76,
+while verifying the five independent payloads and the existing typed
+path.
+
+Ruled out: the exposure shader input can be ignored. The original vertex
+shader samples it and passes the scalar into the pixel shader's gain
+calculation. As an offline hypothesis, the retained CB2[2].y values
+345.0128479 and 252.795929 reproduce the captured tone conversion very
+closely without fitting: full-crop RGB mean absolute errors are 0.0356
+and 0.0297 byte units, with a maximum of two bytes in either capture.
+The candidate is inferred from the constants; its equality to the
+missing exposure texel is not established. The WARP replay uses the
+original DXBC, linear LUT sampling and point HDR/exposure sampling. Its
+Draw(3,0) with no DSV is equivalent for this shader to the captured
+single-instance draw, but is not a complete shipping-state validation.
+No Windows D3D debug-layer validation is claimed.
+
+The resolver still changes the departing text footprint. In 054906,
+full-output ROI (2180,1990)-(2540,2300) contains 10,026 retained-only
+pixels outside current expanded UI. Of those, 7,129 change by more than
+one byte, with mean RGB change (-2.3659,-0.5248,-0.3147) across all
+retained-only pixels. In 054856 the label is lower: corrected ROI
+(2200,2200)-(2610,2470) contains 5,208 retained-only pixels, 2,280
+changed, and mean change (+1.2187,+0.0200,0). It would be incorrect to
+claim both views show retained-only darkening. All changes over one byte
+are inside the resolver's active footprint. These calculations use each
+capture's actual jitter and the shader's exact influence ownership.
+
+Ruled out: restoring the first target's before image at tone mapping is
+a general background reconstruction. In 054856, BINET'S FOLLY is drawn
+at ordinals 184/247, then later work darkens every changed label pixel
+before tone mapping. A stale before image would erase that later panel
+compositing. In 054906, UNIDENTIFIED SIGNAL SOURCE at ordinals 198/264
+has no subsequent changes on its label pixels, so this narrower capture
+supports an exact counterfactual source image.
+
+For the first eye of 054906, all 7,361 packed words changed by the first
+label draw match the final HDR tone input. Later captured sprites leave
+all those words untouched. Replacing only those words with their
+before-draw values removes the label while preserving the remaining
+final HDR image exactly. Paired WARP tone replays of this original and
+clean input differ on 7,259 pixels, with zero changes outside the source
+footprint and unchanged alpha. Both sides use the same inferred
+exposure, so the paired difference does not introduce the replay's small
+rounding discrepancy over unrelated background. This proves a useful
+local colour decomposition for this capture. It does not yet validate
+DLSS history, output-resolution text quality, arbitrary later draw order
+or the cost of a production implementation.
+
+The remaining visual work is separating current target text from the
+world history while preserving later blending and visibility. The
+orbital correction and production UI resolver are unchanged by the
+capture-format correction.
+
+Validation: the full absolute-path build passes, including the typeless
+exposure fixture, parser checks and config contract. The completed-build
+NVIDIA smoke test passes with live NGX evaluations and motion/jitter
+convention checks. The counterfactual remains an offline experiment; the
+production change only completes diagnostic exposure capture.

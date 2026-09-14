@@ -17,6 +17,7 @@ int wmain(int argc,wchar_t** argv){
  ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>c;hr(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,nullptr,&c),"WARP");
  // Exposure: distinct scalar rows.
  D3D11_TEXTURE2D_DESC ed{};ed.Width=4;ed.Height=4;ed.MipLevels=ed.ArraySize=1;ed.Format=DXGI_FORMAT_R32_FLOAT;ed.SampleDesc.Count=1;ed.BindFlags=D3D11_BIND_SHADER_RESOURCE;std::vector<float> ev(16);for(unsigned i=0;i<16;++i)ev[i]=10.f+float(i);D3D11_SUBRESOURCE_DATA ei{ev.data(),16,sizeof(float)*16};ComPtr<ID3D11Texture2D> exposure;hr(d->CreateTexture2D(&ed,&ei,&exposure),"exposure");auto ex=srv2(d.Get(),exposure.Get(),DXGI_FORMAT_R32_FLOAT);
+ D3D11_TEXTURE2D_DESC ted{};ted.Width=6;ted.Height=1;ted.MipLevels=ted.ArraySize=1;ted.Format=DXGI_FORMAT_R32_TYPELESS;ted.SampleDesc.Count=1;ted.BindFlags=D3D11_BIND_SHADER_RESOURCE;std::vector<float> tv={31.f,32.f,33.f,34.f,35.f,36.f};D3D11_SUBRESOURCE_DATA ti{tv.data(),24,24};ComPtr<ID3D11Texture2D>typelessExposure;hr(d->CreateTexture2D(&ted,&ti,&typelessExposure),"typeless exposure");auto tex=srv2(d.Get(),typelessExposure.Get(),DXGI_FORMAT_R32_FLOAT);
  // LUT: four RGBA8 slices with independently identifiable values.
  D3D11_TEXTURE3D_DESC ld{};ld.Width=4;ld.Height=4;ld.Depth=4;ld.MipLevels=1;ld.Format=DXGI_FORMAT_R8G8B8A8_UNORM;ld.BindFlags=D3D11_BIND_SHADER_RESOURCE;std::vector<unsigned char> lv(4*4*4*4);for(unsigned z=0;z<4;++z)for(unsigned y=0;y<4;++y)for(unsigned x=0;x<4;++x){auto p=&lv[((z*4+y)*4+x)*4];p[0]=(unsigned char)(0x10+z);p[1]=(unsigned char)(0x20+y);p[2]=(unsigned char)(0x30+x);p[3]=0xE0;}D3D11_SUBRESOURCE_DATA li{lv.data(),16,64};ComPtr<ID3D11Texture3D>lut;hr(d->CreateTexture3D(&ld,&li,&lut),"lut");D3D11_SHADER_RESOURCE_VIEW_DESC lvd{};lvd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;lvd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE3D;lvd.Texture3D.MipLevels=1;ComPtr<ID3D11ShaderResourceView>ls;hr(d->CreateShaderResourceView(lut.Get(),&lvd,&ls),"lut srv");
  // HDR input and separate typeless output. Both exceed the crop so origin is (2,3).
@@ -77,7 +78,14 @@ int wmain(int argc,wchar_t** argv){
  wchar_t boundaryPath[MAX_PATH];
  _snwprintf_s(boundaryPath,MAX_PATH,_TRUNCATE,L"%s.boundary",argv[1]);
  check(boundary.write(c.Get(),boundaryPath),"boundary write");
- edvr::EyeTonemapSnapshot unsupported;
+  edvr::EyeTonemapSnapshot typeless;
+  ID3D11ShaderResourceView* typelessView=tex.Get(); c->VSSetShaderResources(0,1,&typelessView);
+  typeless.captureRequested(c.Get(),41,60,42,0,edvr::EyeTonemapSnapshot::kVs,edvr::EyeTonemapSnapshot::kPs,'N',3,2);
+  waitGpu(d.Get(),c.Get());
+  std::vector<float> tv2={71.f,72.f,73.f,74.f,75.f,76.f}; c->UpdateSubresource(typelessExposure.Get(),0,nullptr,tv2.data(),24,24);
+  typeless.end(c.Get()); waitGpu(d.Get(),c.Get());
+  wchar_t typelessPath[MAX_PATH]; _snwprintf_s(typelessPath,MAX_PATH,_TRUNCATE,L"%s.typeless",argv[1]); check(typeless.write(c.Get(),typelessPath),"typeless write");
+  edvr::EyeTonemapSnapshot unsupported;
  ID3D11ShaderResourceView* noExposure=nullptr;
  c->VSSetShaderResources(0,1,&noExposure);
  ID3D11ShaderResourceView* wrongLut=ex.Get();
