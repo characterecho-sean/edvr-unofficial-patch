@@ -141,6 +141,7 @@ bool takeWorldJump();
 // second file and had none withheld at all -- which is exactly the kind of
 // counter that gets believed and wastes a day.
 void announceGlitchConsumer();
+void retireGlitchConsumer();
 bool glitchConsumerPresent();
 
 // The detector's verdict on the last jump, d3d11 -> openvr. A jump is withheld

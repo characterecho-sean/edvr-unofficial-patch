@@ -10,6 +10,7 @@
 #include <vector>
 #include "../../src/common/native_temporal.h"
 #include "../../src/common/config.h"
+#include "../../src/common/frame_flag.h"
 #include "../../src/d3d11/temporal_pass.h"
 #include "../../src/openxr/native_temporal_client.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
@@ -130,6 +131,24 @@ void run(){
   for(unsigned e=0;e<2;++e){g.views[e].pose.orientation.w=1;g.views[e].pose.position.x=e?.03f:-.03f;g.views[e].fov={-.8f,.7f,.7f,-.6f};g.width[e]=480;g.height[e]=360;}
   float shifts[2][2]{};check(client.begin(g,1,shifts)==S_OK,"client converts located geometry");client.noteProjection(1,0,.025f,50000);
   ComPtr<ID3D11Texture2D> out;vr::VRTextureBounds_t box{};check(client.treat(1,0,source.Get(),nullptr,out,box)==S_OK&&out.Get()==source.Get(),"client retains provider result");check(client.close()==S_OK&&client.close()==S_FALSE,"client close");
+  auto omitted=acquire(d,17);f=frame(17,1);begin(omitted,f);
+  check(treat(omitted,1,0,source.Get())==S_OK,"omission baseline");
+  f=frame(17,2);begin(omitted,f);const auto count=calls.size();
+  check(omitted.skipEye(omitted.context,2,0,1,edvr::jumpVerdictPacked())==S_OK&&calls.size()==count,"withheld pixels never enter history");
+  check(omitted.skipEye(omitted.context,2,0,1,0)==E_INVALIDARG&&treat(omitted,2,0,source.Get())==E_INVALIDARG,"omitted eye cannot be consumed twice");
+  edvr::noteJumpVerdict(2);f=frame(17,3);f.head[3]=.2f;begin(omitted,f);
+  check(treat(omitted,3,0,source.Get())==S_OK&&!(calls.back().flags&1)&&closeFloat(calls.back().translation[0],.2f),"stayed verdict preserves real previous pose across omitted frame");
+  f=frame(17,4);begin(omitted,f);omitted.skipEye(omitted.context,4,0,1,edvr::jumpVerdictPacked());
+  edvr::noteJumpVerdict(1);f=frame(17,5);begin(omitted,f);
+  check(treat(omitted,5,0,source.Get())==S_OK&&(calls.back().flags&1),"returned verdict resets history");
+  f=frame(17,6);begin(omitted,f);omitted.skipEye(omitted.context,6,0,0,0);
+  f=frame(17,7);begin(omitted,f);check(treat(omitted,7,0,source.Get())==S_OK&&(calls.back().flags&1),"healed/explicit hold resets history");
+  f=frame(17,8);begin(omitted,f);omitted.skipEye(omitted.context,8,0,1,edvr::jumpVerdictPacked());
+  for(unsigned seq=9;seq<=12;++seq) {
+    f=frame(17,seq);begin(omitted,f);check(treat(omitted,seq,0,source.Get())==S_OK,"deferred verdict frame");
+    check(bool(calls.back().flags&1)==(seq==12),"unknown verdict resets on fourth treat only");
+  }
+  omitted.close(omitted.context);
 }
 int wmain(int argc,wchar_t** argv){SetErrorMode(3);if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_temporal_test: dry-run (no device or files)");return 0;}
   if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{run();}catch(const std::exception& e){std::printf("FAIL: %s\n",e.what());if(!failures)++failures;}

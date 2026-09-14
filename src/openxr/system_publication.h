@@ -51,6 +51,16 @@ class SystemPublication {
   SystemRead read() const {
     std::lock_guard<std::mutex> lock(mutex_);return state_;
   }
+  void recommend(const uint32_t (&width)[2], const uint32_t (&height)[2]) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_) return;
+    for (unsigned eye=0; eye<2; ++eye) {
+      if (!width[eye] || !height[eye] || width[eye]>16384 || height[eye]>16384) return;
+    }
+    for (unsigned eye=0; eye<2; ++eye) {
+      state_.recommendedWidth[eye]=width[eye];state_.recommendedHeight[eye]=height[eye];
+    }
+  }
  private:
   mutable std::mutex mutex_;
   SystemRead state_{};

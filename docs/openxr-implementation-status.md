@@ -1,5 +1,17 @@
 # OpenXR implementation status
 
+The [supported feature batch and consolidated
+retest](openxr-feature-parity-2026-09-14.md) connects physical pose
+publication, Explorer Cam, terrain cull guard, completed stereo replay for
+transition suppression, and FSS arrival healing to the native backend. The user
+is away and requested continued implementation without a headset gate after
+each feature. The full build passed with 526 unchanged source hashes and the
+paired DLLs are installed and hash-verified in Frontier. Details are tracked in
+that checkpoint; all new visual behavior, including the preceding
+startup-centering change, awaits one combined headset retest. Experimental
+features and performance comparisons remain deferred. The legacy Oculus
+startup-selection investigation remains separate and unresolved.
+
 The user has deferred performance comparisons and prioritized metrics, then
 features. The [native monitor-history
 checkpoint](openxr-metrics-parity-2026-09-14.md) adds consistent short
@@ -19,11 +31,12 @@ the missing native startup reset. At the user's request, native OpenXR always
 launches centered on a trustworthy tracked pose, with no toggle; legacy OpenVR
 retains its settings. The full build passed with 514 unchanged source hashes,
 24 policy checks and 60 native host checks. The new pair is installed and
-hash-verified in Frontier; the startup-facing headset check is next. Detailed
-qualification is recorded in that checkpoint. The user has excluded features
-listed under `[experimental]` from this parity work: supersample resolve, FSS
-theater and gaze foveation are deferred. This scope change does not remove
-existing settings or alter temporal AA already implemented.
+hash-verified in Frontier; the startup-facing headset check is included in the
+combined retest above. Detailed qualification is recorded in that checkpoint.
+The user has excluded features listed under `[experimental]` from this parity
+work: supersample resolve, FSS theater and gaze foveation are deferred. This
+scope change does not remove existing settings or alter temporal AA already
+implemented.
 
 The [VDXR startup investigation](openxr-vdxr-startup-2026-09-14.md) confirms
 that Windows runtime selection reached VirtualDesktopXR successfully. Elite
@@ -73,7 +86,8 @@ both-eye treatment, current-frame projection-query coverage and native
 teardown. The user reports working DLSS. Performance and quality parity still
 need a controlled comparison: the first comparison used unsupported native
 monitor fields and different render resolutions. Native measurement integration
-is tracked above. Other submission effects remain pending.
+is tracked above. Later supported submission effects are implemented in the
+feature batch above; their visual qualification remains pending.
 
 The native menu checkpoint has completed its first manual Frontier flight.
 Local startup, menu submission in both eyes and internal native teardown are

@@ -179,11 +179,24 @@ ID3D11Texture2D*           g_out = nullptr;
 ID3D11UnorderedAccessView* g_outUav = nullptr;
 uint32_t g_outW = 0, g_outH = 0;
 ID3D11Buffer* g_cb = nullptr;
+ID3D11Device* g_device = nullptr;
+DXGI_FORMAT g_outFormat = DXGI_FORMAT_UNKNOWN;
 uint64_t g_healed = 0;
 bool     g_engagedNoted = false;
 bool     g_failNoted = false;
 
 FaultBudget g_budget("fssHeal", 8);
+
+void releaseResources() {
+    if(g_cs){g_cs->Release();g_cs=nullptr;}
+    if(g_mirrorCs){g_mirrorCs->Release();g_mirrorCs=nullptr;}
+    if(g_outUav){g_outUav->Release();g_outUav=nullptr;}
+    if(g_out){g_out->Release();g_out=nullptr;}
+    if(g_cb){g_cb->Release();g_cb=nullptr;}
+    if(g_device){g_device->Release();g_device=nullptr;}
+    g_outW=g_outH=0;g_outFormat=DXGI_FORMAT_UNKNOWN;
+    g_csTried=g_mirrorTried=false;g_engagedNoted=g_failNoted=false;
+}
 
 void failOnce(const char* what) {
     if (!g_failNoted) {
@@ -216,6 +229,13 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
         rt->Release();
         return nullptr;
     }
+    ID3D11Device* rightDevice=nullptr;rt->GetDevice(&rightDevice);
+    const bool compatible=rightDevice==dev&&ld.Width==rd.Width&&ld.Height==rd.Height&&
+        ld.ArraySize==1&&rd.ArraySize==1&&ld.MipLevels==1&&rd.MipLevels==1&&
+        ld.SampleDesc.Count==1&&rd.SampleDesc.Count==1;
+    if(rightDevice)rightDevice->Release();
+    if(!compatible){dev->Release();lt->Release();rt->Release();return nullptr;}
+    if(g_device!=dev){releaseResources();g_device=dev;g_device->AddRef();}
     ID3D11DeviceContext* ctx = nullptr;
     dev->GetImmediateContext(&ctx);
     if (!ctx) {
@@ -228,7 +248,7 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
     const DXGI_FORMAT typed = healTypedOf(ld.Format);
     bool ok = true;
 
-    if (!g_out || g_outW != ld.Width || g_outH != ld.Height) {
+    if (!g_out || !g_outUav || g_outW != ld.Width || g_outH != ld.Height || g_outFormat != typed) {
         if (g_outUav) { g_outUav->Release(); g_outUav = nullptr; }
         if (g_out) { g_out->Release(); g_out = nullptr; }
         D3D11_TEXTURE2D_DESC od = ld;
@@ -246,6 +266,7 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
                           "store unsupported for the submitted format?)");
         g_outW = ld.Width;
         g_outH = ld.Height;
+        g_outFormat = typed;
     }
     if (ok && !g_cb) {
         D3D11_BUFFER_DESC bd{};
@@ -378,6 +399,7 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
 }
 
 }  // namespace
+void fssHealRelease() { releaseResources(); }
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) void* edvrFssHealLeft(void* leftTex,

@@ -537,6 +537,7 @@ int runWithPresent(const Options& options) {
 int selfTest() {
   unsigned checks=0,failures=0;auto check=[&](bool yes,const char* msg){++checks;if(!yes){++failures;std::printf("FAIL: %s\n",msg);}};
   edvr::openxr::test::runLaunchCentreCases(check);
+  edvr::openxr::test::runFeatureHostCases(check);
   Options o;
   check(parse({L"--loader",L"C:\\runtime\\loader.dll"},o)&&o.seconds==10,"default duration");
   check(parse({L"--seconds",L"60",L"--loader",L"D:/a.dll"},o)&&o.seconds==60,"bounded duration");

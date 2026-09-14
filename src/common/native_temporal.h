@@ -36,6 +36,9 @@ typedef HRESULT(WINAPI *EdvrNativeTemporalNoteProjection)(void*, uint64_t, uint3
 typedef HRESULT(WINAPI *EdvrNativeTemporalTreat)(void*, uint64_t, uint32_t, ID3D11Texture2D*, const float*, ID3D11Texture2D**, float*);
 typedef HRESULT(WINAPI *EdvrNativeTemporalInvalidate)(void*);
 typedef HRESULT(WINAPI *EdvrNativeTemporalClose)(void*);
+// Consume an intentionally omitted eye without feeding bad pixels to history.
+// Jump-only omissions wait for the detector's verdict; other causes reset it.
+typedef HRESULT(WINAPI *EdvrNativeTemporalSkip)(void*, uint64_t, uint32_t, uint32_t, uint32_t);
 struct EdvrNativeTemporalTable {
   uint32_t size, version;
   void* context;
@@ -44,5 +47,6 @@ struct EdvrNativeTemporalTable {
   EdvrNativeTemporalTreat treatEye;
   EdvrNativeTemporalInvalidate invalidate;
   EdvrNativeTemporalClose close;
+  EdvrNativeTemporalSkip skipEye;
 };
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest*, EdvrNativeTemporalTable*);

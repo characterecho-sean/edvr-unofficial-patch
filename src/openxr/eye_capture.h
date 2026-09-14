@@ -28,6 +28,10 @@ class EyeCapture final {
   HRESULT shutdownShared(DWORD timeoutMs = 5000);
   void reset();
   void shutdown();
+  // Exchange complete capture buffers after successful frame submission. No
+  // pixels are copied: the other pair remains immutable while this one is
+  // reused for the next frame. Both captures must have identical ownership.
+  bool exchangeBuffers(EyeCapture& other);
 
   vr::EVRCompositorError capture(vr::EVREye eye, const vr::Texture_t* texture,
                                  const vr::VRTextureBounds_t* bounds = nullptr,

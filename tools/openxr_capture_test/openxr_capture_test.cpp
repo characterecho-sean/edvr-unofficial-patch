@@ -112,6 +112,18 @@ void run() {
   cap.reset();check(!cap.texture(vr::Eye_Left)&&!cap.texture(vr::Eye_Right),"reset invalidates both eyes");
   cap.shutdown();check(cap.capture(vr::Eye_Left,&texture)==vr::VRCompositorError_InvalidTexture,"shutdown refuses capture");
   check(SUCCEEDED(cap.initialize(d.device.Get()))&&!cap.texture(vr::Eye_Left),"reinitialize starts empty");
+  EyeCapture previous,badOwner;check(SUCCEEDED(previous.initialize(d.device.Get())),"previous pair initialized");
+  badOwner.initialize(foreign.device.Get());
+  d.fill(source.Get(),firstColor);cap.capture(vr::Eye_Left,&texture);
+  d.fill(source.Get(),secondColor);cap.capture(vr::Eye_Right,&linear);
+  check(!cap.exchangeBuffers(badOwner)&&!cap.exchangeBuffers(cap),"exchange refuses different ownership and self");
+  check(cap.exchangeBuffers(previous)&&!cap.texture(vr::Eye_Left),"complete pair exchanged without extra pixel copy");
+  check(d.pixels(previous.texture(vr::Eye_Left),firstColor)&&d.pixels(previous.texture(vr::Eye_Right),secondColor)&&
+    previous.colorSpace(vr::Eye_Right)==vr::ColorSpace_Linear,"stereo pixels and color metadata move together");
+  d.fill(source.Get(),0xFF000000);cap.capture(vr::Eye_Left,&texture);
+  check(d.pixels(previous.texture(vr::Eye_Left),firstColor)&&d.pixels(previous.texture(vr::Eye_Right),secondColor),"next incomplete capture and mutable game texture cannot corrupt saved pair");
+  cap.capture(vr::Eye_Right,&texture);
+  check(cap.exchangeBuffers(previous)&&d.pixels(previous.texture(vr::Eye_Left),0xFF000000)&&d.pixels(cap.texture(vr::Eye_Right),secondColor),"second completed pair rotates both buffers");
 }
 }
 int main(int argc,char** argv) {

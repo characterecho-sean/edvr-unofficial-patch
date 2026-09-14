@@ -27,6 +27,10 @@
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
 #include "native_sharpen_client.h"
+#include "native_frame_client.h"
+#include "native_fss_client.h"
+#include "native_cull_guard.h"
+#include "native_feature_pose.h"
 #include "native_timing_client.h"
 #include "device_gpu_timing.h"
 #include "render_route.h"
@@ -138,6 +142,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
   EyeCapture captured;
+  EyeCapture previousPair;
+  bool previousPairValid=false,frameWithheld=false,frameDecisionReady=false;
+  XrView previousViews[2]{};
+  XrSpace previousSpace=XR_NULL_HANDLE;
+  uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
+  NativeFrameClient features;
+  NativeFssClient fss;
+  NativeCullGuard cullGuard;
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_1};
+  EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
+  bool featureFrameKnown=false;
+  uint64_t offsetFrames=0,fssHealedEyes[2]{},featureChanges=0;
   NativeMenuClient menu;
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
@@ -353,6 +369,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool invalidateOrigin(const char* reason="reference_change") {
     menu.invalidate(); // CPU only, including callers without a producer boundary.
     invalidateEyeTreatments();
+    features.invalidate();previousPairValid=false;
     timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
     if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
@@ -375,6 +392,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     timingResetFrame(timingSequence);
     if(temporalFrameEyes!=3)invalidateEyeTreatments(); // prior incomplete pair never reached the runtime
     temporalFrameEyes=0;std::memset(frameTangentShift,0,sizeof(frameTangentShift));
+    frameWithheld=false;frameDecisionReady=false;
     ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
     auto fail=[&](XrResult error){timingInvalidate();lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();invalidateEyeTreatments();
       geometry.invalidate(geometryGeneration);
@@ -408,12 +426,61 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(game.pose.bPoseIsValid)++validGamePoses;
     GeometrySnapshot temporalGeometry{};
     const bool locatedValid=makeGeometrySnapshot(located,temporalGeometry);
+    auto gameGeometry=located;
+    if(features.acquired()) {
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_1};
+      if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
+        boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
+      }
+      const bool offsetChanged=featureFrameKnown &&
+        (next.offsetEnabled!=featureFrame.offsetEnabled ||
+         (next.offsetEnabled && (next.offsetGamePoses!=featureFrame.offsetGamePoses || next.yawRadians!=featureFrame.yawRadians ||
+           std::memcmp(next.headOffset,featureFrame.headOffset,sizeof(next.headOffset)))));
+      if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
+      featureFrame=next;featureFrameKnown=true;
+      if(offsetChanged){invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;}
+      if(featureFrame.offsetEnabled) {
+        applyNativeHeadOffset(render.pose,featureFrame.headOffset,featureFrame.yawRadians);
+        if(featureFrame.offsetGamePoses)applyNativeHeadOffset(game.pose,featureFrame.headOffset,featureFrame.yawRadians);
+        ++offsetFrames;
+      }
+      if(locatedValid) {
+        NativeCullSettings settings{};settings.mode=static_cast<NativeCullMode>(featureFrame.cullMode);
+        settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;
+        settings.verticalFraction=featureFrame.cullVerticalFraction;settings.signatureCount=featureFrame.cullSignatureCount;
+        for(unsigned i=0;i<(std::min)(settings.signatureCount,8u);++i)
+          settings.signatures[i]={featureFrame.cullSignatures[i][0],featureFrame.cullSignatures[i][1]};
+        NativeCullFrustum frusta[2]{};NativeCullDimensions dimensions[2]{};
+        for(unsigned e=0;e<2;++e) {
+          const auto& raw=temporalGeometry.raw[e];frusta[e]={raw.left,raw.right,raw.top,raw.bottom};
+          dimensions[e]={located.width[e],located.height[e]};
+        }
+        cullGuard.beginFrame(settings,frusta,dimensions,featureFrame.sceneReady!=0,poses.read().originGeneration);
+        if(cullGuard.changed()) {
+          invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;
+          nativeTracePrintf("native_cull,stage=%u,factors=%.5f/%.5f,recommended=%ux%u\n",unsigned(cullGuard.stage()),
+            cullGuard.factorWidth(),cullGuard.factorHeight(),cullGuard.recommended(0).width,cullGuard.recommended(0).height);
+        }
+        const auto stage=cullGuard.stage();
+        features.cull(stage==NativeCullStage::Live?2u:stage==NativeCullStage::Adopting?1u:0u,
+            cullGuard.factorWidth(),cullGuard.factorHeight());
+        for(unsigned e=0;e<2;++e) {
+          const auto raw=cullGuard.gameFrustum(e);const auto dims=cullGuard.recommended(e);
+          gameGeometry.views[e].fov={std::atan(raw.left),std::atan(raw.right),std::atan(raw.up),std::atan(raw.down)};
+          gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
+        }
+        geometry.recommend(gameGeometry.width,gameGeometry.height);
+      }
+    }
     if(temporal.acquired()&&locatedValid&&frame.shouldRender) {
-      const auto begun=temporal.begin(located,poses.read().originGeneration,frameTangentShift);
+      const auto begun=temporal.begin(gameGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking);
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
       ++temporalFrames;
     } else invalidateEyeTreatments();
-    const bool geometryValid=geometry.publish(located,false,false,frameTangentShift);
+    if(fss.acquired()&&locatedValid&&frame.shouldRender && fss.begin(gameGeometry,poses.read().originGeneration)!=S_OK) {
+      boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
+    }
+    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift);
     boundary.setGeometryReady(geometryValid);
     frameGeometry=located;frameGeometryAvailable=true;
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
@@ -486,7 +553,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return false;
     if(boundary.clear()!=XR_SUCCESS)return false;
-    invalidateEyeTreatments();timingInvalidate();temporalFrameEyes=0;
+    invalidateEyeTreatments();timingInvalidate();temporalFrameEyes=0;previousPairValid=false;
     loading.sceneCleared();
     return loading.visible(); // no default historical grid when no override exists
   }
@@ -540,14 +607,46 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     vr::VRTextureBounds_t temporalBounds{};
     vr::VRTextureBounds_t treatedBounds{};
     const auto sequence=boundary.frame().sequence;
-    if(temporal.acquired()) {
+    if(features.acquired()&&!frameDecisionReady) {
+      if(features.latch(sequence,featureDecision)!=S_OK)return vr::VRCompositorError_InvalidTexture;
+      frameDecisionReady=true;frameWithheld=featureDecision.withhold!=0;
+      if(frameWithheld){fss.invalidate();++withheldPairs;}
+    }
+    // Dimensions refer to Elite's submitted ROI, before AA upscales it or a
+    // guard crop changes it. Adoption is evaluated only at the next wait.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource;
+    if(FAILED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&submittedSource))))
+      return vr::VRCompositorError_InvalidTexture;
+    D3D11_TEXTURE2D_DESC submittedDesc{};submittedSource->GetDesc(&submittedDesc);
+    const auto submittedWidth=uint32_t(std::lround(submittedDesc.Width*(bounds?std::fabs(bounds->uMax-bounds->uMin):1.f)));
+    const auto submittedHeight=uint32_t(std::lround(submittedDesc.Height*(bounds?std::fabs(bounds->vMax-bounds->vMin):1.f)));
+    cullGuard.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);
+    if(frameWithheld) {
+      if(FAILED(temporal.skip(sequence,unsigned(eye),featureDecision.jumpOnly!=0,featureDecision.verdict)))
+        return vr::VRCompositorError_InvalidTexture;
+      temporalFrameEyes|=1u<<unsigned(eye);
+      return vr::VRCompositorError_None;
+    }
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> healed;
+    if(fss.acquired()) {
+      HRESULT treatment=E_FAIL;
+      if(!graphicsCalls.invoke([&]{
+        if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource.Get()))timingGpuBegun[unsigned(eye)]=true;
+        treatment=fss.treat(sequence,unsigned(eye),submittedSource.Get(),bounds,healed);
+      })||FAILED(treatment)) {invalidateEyeTreatments();timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
+      if(healed) {
+        ++fssHealedEyes[unsigned(eye)];
+        if(FAILED(temporal.skip(sequence,unsigned(eye),false,0)))return vr::VRCompositorError_InvalidTexture;
+      }
+    }
+    if(temporal.acquired()&&!healed) {
       HRESULT treatment=E_FAIL;
       LARGE_INTEGER began{},ended{}; const auto clock=QueryPerformanceCounter(&began);
       const bool dispatched=graphicsCalls.invoke([&] {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
         const auto queried=static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source));
         if(FAILED(queried)){treatment=queried;return;}
-        if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,source.Get())) timingGpuBegun[unsigned(eye)]=true;
+        if(timingFrameActive && !timingGpuBegun[unsigned(eye)] && timing.gpuEye(timingSequence,unsigned(eye),true,false,source.Get())) timingGpuBegun[unsigned(eye)]=true;
         treatment=temporal.treat(sequence,unsigned(eye),source.Get(),bounds,temporalOutput,temporalBounds);
       });
       const auto clockEnd=QueryPerformanceCounter(&ended);
@@ -574,8 +673,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
     }
     const vr::Texture_t temporalTexture{temporalOutput.Get(),vr::API_DirectX,texture->eColorSpace};
-    const auto* sharpenSource=temporalOutput?&temporalTexture:texture;
-    const auto* sharpenBounds=temporalOutput?&temporalBounds:bounds;
+    const vr::Texture_t healedTexture{healed.Get(),vr::API_DirectX,texture->eColorSpace};
+    const vr::VRTextureBounds_t fullBounds{0,0,1,1};
+    const auto* sharpenSource=temporalOutput?&temporalTexture:healed?&healedTexture:texture;
+    const auto* sharpenBounds=temporalOutput?&temporalBounds:healed?&fullBounds:bounds;
+    vr::VRTextureBounds_t croppedBounds{};
+    if(cullGuard.stage()==NativeCullStage::Live) {
+      const auto crop=cullGuard.cropBounds(unsigned(eye));
+      croppedBounds=nativeCropBounds(sharpenBounds,crop.left,crop.top,crop.right,crop.bottom);
+      sharpenBounds=&croppedBounds;
+    }
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sharpenOutput;
     vr::VRTextureBounds_t sharpenedBounds{};
     if(sharpen.acquired()) {
@@ -643,12 +750,26 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
     LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
-    const auto r=stereo.renderCaptured(frameViews,frameSpace,captured,layer,
-      timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr);
+    auto* observer=timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr;
+    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer);
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
     if(composeClock&&composeClockEnd) timingFrame.composeMs=elapsedMs(composeBegan,composeEnded);
     if(r==XR_SUCCESS)++composedPairs;
     return r;
+  }
+  bool sceneLayerAvailable() const override {
+    return !frameWithheld || (featureFrame.resubmitEnabled && previousPairValid && previousSpace==frameSpace &&
+      previousReference==poses.read().originGeneration);
+  }
+  void sceneFinished(bool pixels,XrResult result) override {
+    if(result!=XR_SUCCESS){previousPairValid=false;return;}
+    if(frameWithheld) {if(pixels)++replayedPairs;else ++emptyWithholds;return;}
+    if(!pixels||!featureFrame.resubmitEnabled)return;
+    if(captured.exchangeBuffers(previousPair)) {
+      previousViews[0]=frameViews[0];previousViews[1]=frameViews[1];previousSpace=frameSpace;
+      previousReference=poses.read().originGeneration;previousPairValid=true;
+    } else previousPairValid=false;
   }
   XrResult composeBackground(XrCompositionLayerProjection& layer) override {
     return stereo.renderSkybox(frameViews,frameSpace,skybox,layer);
@@ -761,7 +882,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
   ~NativeRuntimeHost() {close();}
-  void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); }
+  void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); }
   bool close() {
     const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
     const auto menuClosed=menu.close(); // no producer admission or GPU work required
@@ -772,6 +893,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
+    if(FAILED(fss.close())||FAILED(features.close()))return clean=false;
+    if(tracing)nativeTracePrintf("native_features_summary,offset_frames=%llu,changes=%llu,fss_healed=%llu/%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
+      (unsigned long long)offsetFrames,(unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
+      (unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(cullGuard.stage()));
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
@@ -800,14 +925,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto drained=stereo.drain();drainStage.end(drained==XR_SUCCESS);
       if(drained!=XR_SUCCESS)return clean=false;
       const HRESULT eyesRetired=captured.shutdownShared();
+      const HRESULT previousRetired=previousPair.shutdownShared();
       const HRESULT skyRetired=skybox.shutdownShared();
-      if(eyesRetired!=S_OK||skyRetired!=S_OK){
+      if(eyesRetired!=S_OK||skyRetired!=S_OK||previousRetired!=S_OK){
         nativeTracePrintf("shared_capture_retained,eyes=%08lx,skybox=%08lx\n",(unsigned long)eyesRetired,(unsigned long)skyRetired);
         return clean=false;
       }
     }
     ShutdownTrace captureStage("host_capture_release",tracing);
-    skybox.shutdown();captured.shutdown();captureStage.end(true);
+    skybox.shutdown();captured.shutdown();previousPair.shutdown();captureStage.end(true);
     ShutdownTrace stereoStage("host_stereo_shutdown",tracing);
     const auto stereoResult=stereo.shutdown();
     clean=result("destroy_swapchains",stereoResult)&&clean;stereoStage.end(stereoResult==XR_SUCCESS);
@@ -956,8 +1082,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     bool capturesReady=false;
     if(separateGraphics()) {
       capturesReady=captured.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK&&
+          previousPair.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK&&
           skybox.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK;
-    } else if(!graphicsCalls.invoke([&]{capturesReady=SUCCEEDED(captured.initialize(graphics.device()))&&SUCCEEDED(skybox.initialize(graphics.device()));}))
+    } else if(!graphicsCalls.invoke([&]{capturesReady=SUCCEEDED(captured.initialize(graphics.device()))&&SUCCEEDED(previousPair.initialize(graphics.device()))&&SUCCEEDED(skybox.initialize(graphics.device()));}))
       return result("capture_render_boundary",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     if(!capturesReady)
       return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
@@ -986,6 +1113,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         nativeTracePrintf("native_sharpen,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
       }
       nativeTracePuts("native_sharpen,provider_acquired=1,order=after_temporal_before_menu");
+      acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=features.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_features,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=fss.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_fss,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      nativeTracePuts("native_features,provider_acquired=1,physical_pose_before_render=1,stereo_transition_replay=1");
       acquired=E_FAIL;
       const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);});
       if(!timingAdmission) acquired=E_FAIL;

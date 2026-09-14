@@ -236,6 +236,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeMenu ^
     --extra-export edvrAcquireNativeTemporal ^
     --extra-export edvrAcquireNativeSharpen ^
+    --extra-export edvrAcquireNativeFrame ^
+    --extra-export edvrAcquireNativeFss ^
     --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
@@ -321,6 +323,8 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
+    "src\d3d11\native_frame.cpp" ^
+    "src\d3d11\native_fss.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
@@ -638,6 +642,43 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: native menu test build failed & exit /b 1 )
 "%BUILD%\native_menu_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_menu_test.exe" --self-test || exit /b 1
+
+echo [edvr] === native_frame_test.exe ===
+if not exist "%OBJ%\native_features" mkdir "%OBJ%\native_features"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\native_features\\" /Fe"%BUILD%\native_frame_test.exe" ^
+    "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
+    "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & exit /b 1 )
+"%BUILD%\native_frame_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_frame_test.exe" --self-test || exit /b 1
+echo [edvr] === native_fss_test.exe ===
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\native_features\\" /Fe"%BUILD%\native_fss_test.exe" ^
+    "tools\native_fss_test\native_fss_test.cpp" "src\d3d11\native_fss.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native FSS provider test build failed & exit /b 1 )
+"%BUILD%\native_fss_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_fss_test.exe" --self-test || exit /b 1
+echo [edvr] === native_fss_gpu_test.exe ===
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_features\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
+    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\d3d11\fss_heal.cpp" ^
+    "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit /b 1 )
+"%BUILD%\native_fss_gpu_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_fss_gpu_test.exe" --self-test || exit /b 1
+echo [edvr] === native_cull_test.exe ===
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_features\\" /Fe"%BUILD%\native_cull_test.exe" ^
+    "tools\native_cull_test\native_cull_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: native cull policy test build failed & exit /b 1 )
+"%BUILD%\native_cull_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_cull_test.exe" --self-test || exit /b 1
 
 echo [edvr] === native_temporal_test.exe ===
 if not exist "%OBJ%\native_temporal" mkdir "%OBJ%\native_temporal"

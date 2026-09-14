@@ -45,6 +45,10 @@ struct State {
   uint32_t frameCounter = 0;
   bool treated[2]{};
   History history[2];
+  uint64_t continuity[2]{};
+  bool verdictPending[2]{};
+  uint32_t verdictSeen[2]{}, verdictWaits[2]{};
+  uint64_t skipped=0, spared=0, returned=0, unjudged=0;
   float nearZ[2]{}, farZ[2]{};
   uint64_t projectionSequence[2]{};
   bool projectionKnown[2]{};
@@ -104,7 +108,10 @@ Settings readConfig() {
   else if(_stricmp(sign.c_str(),"flip_both")==0)s.signX=s.signY=-1;
   s.lag=c.getFloat("advanced.temporal_aa_jitter_lag",0)>=.5f; return s;
 }
-void reset(State& s) { for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false; }
+void reset(State& s) {
+  for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false;
+  for(unsigned e=0;e<2;++e){s.continuity[e]=0;s.verdictPending[e]=false;s.verdictWaits[e]=0;}
+}
 bool sameHistorySettings(const Settings& a,const Settings& b) {
   return a.on==b.on&&a.dlaa==b.dlaa&&a.upscale==b.upscale&&a.jitter==b.jitter&&
       a.motion==b.motion&&a.signX==b.signX&&a.signY==b.signY&&a.lag==b.lag;
@@ -190,7 +197,18 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   }
   unsigned outW=0,outH=0;
   if(s->currentSettings.upscale&&w*50<s->recW*49&&h*50<s->recH*49){outW=s->recW;outH=s->recH;}
-  const bool resetHistory=!s->history[eye].valid||s->history[eye].reference!=s->reference||s->history[eye].sequence+1!=seq||
+  if(s->verdictPending[eye]) {
+    const uint32_t verdict=edvr::jumpVerdictPacked();
+    if(verdict!=s->verdictSeen[eye] || ++s->verdictWaits[eye]>=4) {
+      s->verdictPending[eye]=false;
+      if(verdict!=s->verdictSeen[eye] && (verdict&3u)==2u) ++s->spared;
+      else {
+        s->history[eye]={};
+        if(verdict!=s->verdictSeen[eye] && (verdict&3u)==1u) ++s->returned; else ++s->unjudged;
+      }
+    }
+  }
+  const bool resetHistory=!s->history[eye].valid||s->history[eye].reference!=s->reference||s->continuity[eye]+1!=seq||
       s->history[eye].width!=w||s->history[eye].height!=h||s->history[eye].format!=d.Format||
       s->history[eye].outputWidth!=outW||s->history[eye].outputHeight!=outH;
   float delta[9]={1,0,0,0,1,0,0,0,1},trans[3]={},transOther[3]={}; const float* pd=nullptr;const float* pt=nullptr;const float* pto=nullptr;
@@ -218,16 +236,30 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native temporal: engaged mode=%s, input=%ux%u, output=%ux%u, sequence=%llu; producer filtering before menu and shared capture.",mode(s->currentSettings),w,h,outW?outW:w,outH?outH:h,(unsigned long long)seq);}
   outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
   auto& hst=s->history[eye];hst.valid=true;hst.sequence=seq;hst.reference=s->reference;
+  s->continuity[eye]=seq;
+  if(resetHistory)s->verdictPending[eye]=false;
   std::memcpy(hst.head,s->head,sizeof(hst.head));std::memcpy(hst.eye,s->eyes[eye],sizeof(hst.eye));
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
   hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;return S_OK;
 }
 HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
+  std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
+  if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
+  if(!jumpOnly||s->continuity[eye]+1!=seq) {
+    s->history[eye]={};s->verdictPending[eye]=false;
+  } else if(!s->verdictPending[eye]) {
+    s->verdictPending[eye]=true;s->verdictSeen[eye]=verdict;s->verdictWaits[eye]=0;
+  }
+  s->continuity[eye]=seq;s->treated[eye]=true;++s->skipped;return S_OK;
+}
 HRESULT WINAPI close(void* p){
   std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;
   edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u.",
       (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,(unsigned long long)s->projectionReads,
       (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown));
+  edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
+      (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
   reset(*s);s->active=false;s->begun=false;s->device=nullptr;if(current==s)current=nullptr;return S_OK;
 }
 }
@@ -236,5 +268,5 @@ extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequ
   if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_TEMPORAL_VERSION_1)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};
   if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||!r->gameDevice||!r->generation)return E_INVALIDARG;
   std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.pendingSettings=readConfig();s.currentSettings=s.pendingSettings;s.active=true;current=&s;
-  t->context=&s;t->beginFrame=begin;t->noteProjection=noteProjection;t->treatEye=treat;t->invalidate=invalidate;t->close=close;return S_OK;
+  t->context=&s;t->beginFrame=begin;t->noteProjection=noteProjection;t->treatEye=treat;t->invalidate=invalidate;t->close=close;t->skipEye=skipEye;return S_OK;
 }

@@ -478,6 +478,11 @@ void announceGlitchConsumer() {
     if (s) InterlockedExchange(&s->consumer, 1);
 }
 
+void retireGlitchConsumer() {
+    Shared* s = map();
+    if (s) InterlockedExchange(&s->consumer, 0);
+}
+
 bool glitchConsumerPresent() {
     Shared* s = map();
     return s && InterlockedCompareExchange(&s->consumer, 0, 0) != 0;

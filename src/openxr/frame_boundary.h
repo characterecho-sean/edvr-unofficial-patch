@@ -13,6 +13,10 @@ struct FrameSink {
   virtual vr::EVRCompositorError capture(vr::EVREye, const vr::Texture_t*,
       const vr::VRTextureBounds_t*, vr::EVRSubmitFlags, bool copyPixels) = 0;
   virtual XrResult compose(XrCompositionLayerProjection&) = 0;
+  // A withheld first frame may have no safe stereo image to replay. Keep
+  // frame pacing with zero layers until a complete good pair is available.
+  virtual bool sceneLayerAvailable() const { return true; }
+  virtual void sceneFinished(bool, XrResult) {}
   virtual XrResult composeBackground(XrCompositionLayerProjection&) {
     return XR_ERROR_FUNCTION_UNSUPPORTED;
   }
@@ -77,7 +81,8 @@ class FrameBoundary final {
 
  private:
   XrResult finish(bool background) {
-    const bool pixels = geometryReady_ && frame_.shouldRender && !session_.terminal();
+    const bool pixels = geometryReady_ && frame_.shouldRender && !session_.terminal() &&
+        (background || sink_.sceneLayerAvailable());
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     if (pixels) {
       const auto composed = background ? sink_.composeBackground(layer) : sink_.compose(layer);
@@ -98,6 +103,7 @@ class FrameBoundary final {
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
     end.layerCount = pixels ? 1u : 0u; end.layers = pixels ? &header : nullptr;
     lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});
+    if (!background) sink_.sceneFinished(pixels, lastResult_);
     if (lastResult_ != XR_SUCCESS) failed_ = true;
     return lastResult_;
   }

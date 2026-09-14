@@ -25,13 +25,15 @@ class NativeTemporalClient final {
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
     if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_TEMPORAL_VERSION_1 ||
         !candidate.context || !owned(provider, candidate.beginFrame) || !owned(provider, candidate.noteProjection) ||
-        !owned(provider, candidate.treatEye) || !owned(provider, candidate.invalidate) || !owned(provider, candidate.close))
+        !owned(provider, candidate.treatEye) || !owned(provider, candidate.invalidate) || !owned(provider, candidate.close) ||
+        !owned(provider, candidate.skipEye))
       return E_NOINTERFACE;
     table_ = candidate; generation_ = generation;
     return S_OK;
   }
   bool acquired() const { std::lock_guard<std::mutex> lock(mutex_); return table_.context != nullptr; }
-  HRESULT begin(const GeometryInput& geometry, uint64_t referenceGeneration, float (&shift)[2][2]) {
+  HRESULT begin(const GeometryInput& geometry, uint64_t referenceGeneration, float (&shift)[2][2],
+      const vr::HmdMatrix34_t* renderedHead = nullptr) {
     std::memset(shift, 0, sizeof(shift));
     GeometrySnapshot snapshot{};
     if (!makeGeometrySnapshot(geometry, snapshot) || !referenceGeneration) { invalidate(); return E_INVALIDARG; }
@@ -40,6 +42,7 @@ class NativeTemporalClient final {
     EdvrNativeTemporalFrame frame{sizeof(frame), EDVR_NATIVE_TEMPORAL_VERSION_1};
     frame.generation = generation_; frame.referenceGeneration = referenceGeneration; frame.sequence = geometry.sequence;
     std::memcpy(frame.head, snapshot.headToLocal.m, sizeof(frame.head));
+    if (renderedHead) std::memcpy(frame.head, renderedHead->m, sizeof(frame.head));
     for (unsigned eye = 0; eye < 2; ++eye) {
       std::memcpy(frame.eyeToHead[eye], snapshot.eyeToHead[eye].m, sizeof(frame.eyeToHead[eye]));
       const auto& raw = snapshot.raw[eye];
@@ -80,6 +83,10 @@ class NativeTemporalClient final {
   HRESULT invalidate() {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context ? table_.invalidate(table_.context) : S_FALSE;
+  }
+  HRESULT skip(uint64_t sequence, unsigned eye, bool jumpOnly, uint32_t verdict) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return table_.context ? table_.skipEye(table_.context, sequence, eye, jumpOnly ? 1u : 0u, verdict) : S_FALSE;
   }
   HRESULT close() {
     std::lock_guard<std::mutex> lock(mutex_);

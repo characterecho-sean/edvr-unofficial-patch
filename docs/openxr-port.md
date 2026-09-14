@@ -22,10 +22,12 @@ resolve, FSS theater and gaze foveation are deferred; the broader inventory and
 original implementation sequence below remain historical. Existing settings and
 the temporal behavior already implemented are preserved.
 
-**Approval boundary:** this revision is for review. After Sean confirms it,
-Luna agents can implement the bounded work packages below, with the parent
-agent reviewing their changes and validation. Flights remain explicit gates; an
-implementation or passing desk test is not a flight result.
+**Approval boundary:** Sean approved implementation by Luna agents with parent
+review. On 2026-09-14 he requested that supported parity work continue while he
+is away, with desktop checks and one consolidated headset retest afterward.
+Individual headset checks no longer gate each implementation step. Passing
+desktop tests does not establish a successful flight; record those results
+separately.
 
 ## The ask
 

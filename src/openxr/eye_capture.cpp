@@ -104,6 +104,21 @@ void EyeCapture::reset() {
   }
 }
 
+bool EyeCapture::exchangeBuffers(EyeCapture& other) {
+  if (this == &other || initialized_ != other.initialized_ ||
+      sharedInitialized_ != other.sharedInitialized_) return false;
+  if (sharedInitialized_) {
+    if (sharedOwner_ != std::this_thread::get_id() || sharedOwner_ != other.sharedOwner_ ||
+        sharedProducer_ != other.sharedProducer_ || sharedConsumer_ != other.sharedConsumer_ ||
+        sharedExecutor_ != other.sharedExecutor_) return false;
+  } else if (!initialized_ || device_ != other.device_) return false;
+  for (unsigned eye = 0; eye < 2; ++eye) {
+    std::swap(eyes_[eye], other.eyes_[eye]);
+    std::swap(sharedTransfers_[eye], other.sharedTransfers_[eye]);
+  }
+  return true;
+}
+
 void EyeCapture::shutdown() {
   if (sharedInitialized_) std::terminate();
   reset();

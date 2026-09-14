@@ -242,6 +242,19 @@ void captureIntegration(Fixture& f) {
   check(eyes.capture(vr::Eye_Left,&wrong)==vr::VRCompositorError_TextureIsOnWrongDevice&&
         eyes.texture(vr::Eye_Left)==leftSnapshot.Get()&&f.executor.calls()==beforeWrong,
     "shared wrong-device eye rejected without mutation");
+  EyeCapture previous;
+  check(previous.initializeShared(f.producer.Get(),f.consumer.Get(),&f.executor)==S_OK,"shared previous pair initialized");
+  const unsigned beforeExchange=f.executor.calls();
+  check(eyes.exchangeBuffers(previous)&&f.executor.calls()==beforeExchange&&
+    previous.texture(vr::Eye_Left)==leftSnapshot.Get()&&previous.texture(vr::Eye_Right)==rightSnapshot.Get(),
+    "shared stereo buffers exchange without producer calls or copies");
+  check(eyes.capture(vr::Eye_Left,&noRender)==vr::VRCompositorError_None&&
+    readback(f,previous.texture(vr::Eye_Left),DXGI_FORMAT_R8G8B8A8_UNORM,W,H,pattern(DXGI_FORMAT_R8G8B8A8_UNORM,W,H,211))&&
+    readback(f,previous.texture(vr::Eye_Right),DXGI_FORMAT_B8G8R8A8_UNORM,W,H,pattern(DXGI_FORMAT_B8G8R8A8_UNORM,W,H,212)),
+    "next partial shared transfer cannot overwrite either saved eye");
+  check(previous.bounds(vr::Eye_Left).uMin==1.f&&previous.colorSpace(vr::Eye_Right)==vr::ColorSpace_Linear,
+    "shared replay preserves flipped bounds and color interpretation");
+  check(previous.shutdownShared()==S_OK,"shared previous pair retires independently");previous.shutdown();
   eyes.reset();
   check(!eyes.texture(vr::Eye_Left)&&!eyes.texture(vr::Eye_Right),
     "shared eye reset clears published outputs");

@@ -73,6 +73,7 @@ Fake* Fake::current = nullptr;
 
 struct Sink : FrameSink {
   Fake& fake; std::vector<vr::EVREye> eyes; std::vector<bool> copies;
+  bool available=true,finishedPixels=false;unsigned finished=0;XrResult finishedResult=XR_SUCCESS;
   explicit Sink(Fake& f) : fake(f) {}
   vr::EVRCompositorError capture(vr::EVREye eye, const vr::Texture_t*, const vr::VRTextureBounds_t*,
       vr::EVRSubmitFlags, bool copyPixels) override {
@@ -87,6 +88,8 @@ struct Sink : FrameSink {
   XrResult composeBackground(XrCompositionLayerProjection& layer) override {
     ++fake.backgroundCalls;const auto r=compose(layer);--fake.composeCalls;return r;
   }
+  bool sceneLayerAvailable() const override {return available;}
+  void sceneFinished(bool pixels,XrResult result) override {++finished;finishedPixels=pixels;finishedResult=result;}
 };
 
 bool start(SessionState& session, Fake& fake) {
@@ -153,6 +156,18 @@ void frameBoundaryTest() {
     check(boundary.clear() == XR_ERROR_CALL_ORDER_INVALID, "wrong thread clear rejected");
     check(boundary.submit(vr::Eye_Left, &texture) == vr::VRCompositorError_InvalidTexture, "wrong thread submit rejected"); });
   wrong.join(); check(beforeWrong == fake.waitCalls + fake.captureCalls + fake.endCalls, "wrong thread makes no XR or sink calls");
+  fake.shouldRender=true;sink.available=false;
+  check(boundary.waitAndBegin()==XR_SUCCESS,"withheld frame begins");boundary.setGeometryReady(true);
+  const auto finishedBefore=sink.finished,composedBefore=fake.composeCalls;
+  boundary.submit(vr::Eye_Right,&texture);
+  check(sink.finished==finishedBefore,"partial pair cannot commit transition shadow");
+  check(boundary.submit(vr::Eye_Left,&texture)==vr::VRCompositorError_None &&
+    sink.finished==finishedBefore+1&&!sink.finishedPixels&&!fake.lastHadLayers&&fake.composeCalls==composedBefore,
+    "withheld frame without previous image closes zero-layer frame without calling compositor");
+  sink.available=true;boundary.waitAndBegin();boundary.setGeometryReady(true);
+  fake.endResult=XR_ERROR_RUNTIME_FAILURE;boundary.submit(vr::Eye_Left,&texture);
+  check(boundary.submit(vr::Eye_Right,&texture)==vr::VRCompositorError_InvalidTexture&&
+    sink.finishedResult==XR_ERROR_RUNTIME_FAILURE,"failed endFrame reports failure to shadow commit policy");
 }
 
 void blockedRuntimeIntegrationTest() {
