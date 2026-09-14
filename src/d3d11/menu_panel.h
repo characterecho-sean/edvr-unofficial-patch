@@ -30,12 +30,17 @@
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
 
 namespace edvr {
 
 // GPU ray tangents: physical left/right/up/down magnitudes. The shared
 // vertical pair uses OpenVR's historical pfTop/pfBottom names instead.
 void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]);
+void menuPanelSetNativeFrustum(const float tans[4]);
+void menuPanelClearNativeFrustum();
+void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bounds,
+                               const float xf[12]);
 
 enum MenuLineStyle : uint8_t {
     kMenuRow = 0,       // label left, value right

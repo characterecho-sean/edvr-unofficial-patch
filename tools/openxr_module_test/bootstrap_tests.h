@@ -1,11 +1,22 @@
 #pragma once
 
 #include "../../src/openxr/native_bootstrap.h"
+#include "../../src/openxr/native_local_config.h"
 
 #include <cwchar>
 #include <string>
 
 namespace edvr::openxr::bootstrap_test {
+
+inline std::wstring localFixturePath() {
+  wchar_t directory[MAX_PATH]{};GetTempPathW(_countof(directory),directory);
+  wchar_t path[MAX_PATH]{};GetTempFileNameW(directory,L"edv",0,path);DeleteFileW(path);return path;
+}
+inline bool writeLocalFixture(const std::wstring& path,const std::string& bytes) {
+  HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+  if(file==INVALID_HANDLE_VALUE)return false;DWORD written=0;const bool ok=bytes.empty()||WriteFile(file,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr)!=FALSE;
+  CloseHandle(file);return ok&&written==bytes.size();
+}
 
 struct EnvironmentSpec {
   enum class Shape { Normal, ShortFirst, Resize, Oversized };
@@ -73,6 +84,59 @@ template<class Check>
 void runBootstrapTests(Check&& check) {
   const std::wstring loader = L"C:\\Program Files\\EDVR\\openxr_loader.dll";
   const std::wstring graphics = L"d:/EDVR/d3d11.dll";
+
+  const std::wstring localPath=localFixturePath();
+  const std::string valid="[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n";
+  {
+    LocalConfig config;check(writeLocalFixture(localPath,valid)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&
+      config.loader==L"C:\\loader.dll"&&config.graphics==L"D:\\d3d11.dll"&&config.runtime==L"E:\\runtime.json"&&config.separateDevice,
+      "valid local OpenXR config parses strictly");
+  }
+  for(const std::string& malformed:{
+      "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\n",
+      "[openxr]\nversion=1\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n",
+      "[openxr]\nversion=1\nloader=relative.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n",
+      "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=0\n",
+      "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\nunknown=x\n"}) {
+    LocalConfig config{{L"stale"},{L"stale"},{L"stale"},true};check(writeLocalFixture(localPath,malformed)&&readLocalConfig(localPath,config)==LocalConfigResult::Invalid&&
+      config.loader.empty()&&config.graphics.empty()&&config.runtime.empty()&&!config.separateDevice,
+      "malformed local OpenXR config fails closed");
+  }
+  {
+    std::string invalid="[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n";
+    invalid[0]=char(0xc3);invalid[1]=char(0x28);LocalConfig config;
+    check(writeLocalFixture(localPath,invalid)&&readLocalConfig(localPath,config)==LocalConfigResult::Invalid,
+      "invalid UTF-8 local config fails closed");
+  }
+  {
+    const std::string equalPath="[openxr]\nversion=1\nloader=C:\\u=loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n";
+    LocalConfig config;check(writeLocalFixture(localPath,equalPath)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&
+      config.loader==L"C:\\u=loader.dll", "local config preserves equals in path values");
+  }
+  {
+    std::string oversized(65537,'x');LocalConfig config{{L"stale"},{L"stale"},{L"stale"},true};
+    check(writeLocalFixture(localPath,oversized)&&readLocalConfig(localPath,config)==LocalConfigResult::Invalid&&
+      config.loader.empty()&&config.graphics.empty()&&config.runtime.empty()&&!config.separateDevice,
+      "oversized local config fails closed with empty output");
+  }
+  {
+    const std::wstring runtimePath=localPath+L".runtime";check(writeLocalFixture(runtimePath,"runtime"),"create manifest guard fixture");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr);ScopedRuntimeManifest guard;
+    check(guard.apply(runtimePath),"local runtime manifest override applies");
+    wchar_t value[32768]{};const DWORD n=GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value));
+    check(n==runtimePath.size()&&!std::wstring(value,n).compare(runtimePath),"manifest override is visible in process only");
+    guard.restore();SetLastError(ERROR_SUCCESS);GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value));
+    check(GetLastError()==ERROR_ENVVAR_NOT_FOUND,"manifest override restores absent inherited value");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON",L"relative.json");ScopedRuntimeManifest invalid;
+    check(!invalid.apply(runtimePath),"invalid inherited runtime manifest is rejected");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON",runtimePath.c_str());ScopedRuntimeManifest changed;
+    check(changed.apply(runtimePath),"manifest override accepts inherited readable value");
+    const std::wstring other=runtimePath+L".other";writeLocalFixture(other,"other");SetEnvironmentVariableW(L"XR_RUNTIME_JSON",other.c_str());changed.restore();
+    check(GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value))==other.size()&&!std::wstring(value,other.size()).compare(other),
+      "manifest restore does not clobber an external environment change");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr);DeleteFileW(runtimePath.c_str());DeleteFileW(other.c_str());
+  }
+  DeleteFileW(localPath.c_str());
 
   {
     EnvironmentReader reader;

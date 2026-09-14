@@ -422,6 +422,44 @@ int selfTest(bool bootstrap=false,bool separate=false) {
   return failures?1:0;
 }
 
+int localConfigTest() {
+  Watchdog watchdog;TestEnvironment environment;
+  const auto source=executableDirectory()/L"edvr_openxr_runtime.dll";
+  wchar_t tempRoot[MAX_PATH]{},tempName[MAX_PATH]{};GetTempPathW(_countof(tempRoot),tempRoot);
+  if(!GetTempFileNameW(tempRoot,L"edv",0,tempName))return 1;
+  DeleteFileW(tempName);CreateDirectoryW(tempName,nullptr);const std::wstring directory=tempName;
+  const std::wstring copy=directory+L"\\edvr_openxr_runtime.dll",config=directory+L"\\edvr_openxr.ini";
+  const auto graphics=(executableDirectory()/L"d3d11.dll").wstring();
+  check(CopyFileW(source.c_str(),copy.c_str(),TRUE)!=FALSE,"copy native module for local bootstrap test");
+  const std::string text="[openxr]\nversion=1\nloader="+std::string(graphics.begin(),graphics.end())+
+      "\ngraphics="+std::string(graphics.begin(),graphics.end())+"\nruntime="+std::string(graphics.begin(),graphics.end())+
+      "\nseparate_device=1\n";
+  check(bootstrap_test::writeLocalFixture(config,text),"write local bootstrap config");
+  wchar_t prior[32768]{};SetLastError(ERROR_SUCCESS);const DWORD priorLength=GetEnvironmentVariableW(L"XR_RUNTIME_JSON",prior,_countof(prior));
+  const DWORD priorError=GetLastError();SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr);
+  Exports api;check(api.load(copy),"load copied native module for local bootstrap");
+  if(api.module) {
+    environment.set(L"relative-loader.dll",graphics.c_str());
+    check(!api.runtimeInstalled(),"invalid environment blocks local config fallback");
+    vr::EVRInitError blocked{};check(api.init(&blocked,vr::VRApplication_Scene)==0&&blocked==vr::VRInitError_Init_InstallationCorrupt&&api.token()==0,
+      "invalid environment fails closed without configuring local bootstrap");
+    environment.set(nullptr,nullptr);
+    const auto before=api.status();const auto* path=api.runtimePath();
+    check(api.runtimeInstalled()&&path&&*path&&api.status().phase==before.phase&&api.token()==0,
+      "local config discovery reports installation without configuring module");
+    vr::EVRInitError error{};check(api.init(&error,vr::VRApplication_Scene)==0&&error==vr::VRInitError_Init_HmdNotFound,
+      "local config initializes then fails at bounded graphics/runtime startup");
+    check(api.status().phase==EDVR_NATIVE_STOPPED&&api.status().cleanup&&!api.hmdPresent(),
+      "local config failed startup cleans lifecycle and reports no HMD");
+    api.shutdown();
+  }
+  wchar_t after[32768]{};SetLastError(ERROR_SUCCESS);const DWORD afterLength=GetEnvironmentVariableW(L"XR_RUNTIME_JSON",after,_countof(after));
+  check(afterLength==0&&GetLastError()==ERROR_ENVVAR_NOT_FOUND,
+      "local manifest override restores inherited process environment after failed Init");
+  if(priorError==ERROR_SUCCESS)SetEnvironmentVariableW(L"XR_RUNTIME_JSON",prior);else SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr);
+  DeleteFileW(config.c_str());DeleteFileW(copy.c_str());RemoveDirectoryW(directory.c_str());return failures?1:0;
+}
+
 bool makeSkybox(ID3D11Device* device,ComPtr<ID3D11Texture2D> (&textures)[6]) {
   constexpr unsigned side=256;std::vector<uint32_t> pixels(side*side);
   const unsigned colors[6][3]={{70,20,20},{20,70,20},{20,20,70},{70,70,20},{70,20,70},{20,70,70}};
@@ -649,6 +687,8 @@ int wmain(int argc,wchar_t** argv) {
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test-bootstrap")) {const auto result=selfTest(true);std::printf("openxr_module_bootstrap_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test-bootstrap-separate")) {const auto result=selfTest(true,true);std::printf("openxr_module_bootstrap_separate_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
   if(argc==2&&!std::wcscmp(argv[1],L"--self-test-separate")) {const auto result=selfTest(false,true);std::printf("openxr_module_separate_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
+  if(argc==2&&!std::wcscmp(argv[1],L"--self-test-local")) {const auto result=localConfigTest();std::printf("openxr_module_local_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
+  if(argc==2&&!std::wcscmp(argv[1],L"--self-test-local-separate")) {const auto result=localConfigTest();std::printf("openxr_module_local_separate_test: %u checks, %u failures (no OpenXR runtime)\n",checks.load(),failures.load());return result;}
   Options options;if(!parse(argc,argv,options)){std::fputs("usage: --self-test|--self-test-bootstrap|--self-test-bootstrap-separate|--self-test-separate|--dry-run|--loader ABS --graphics-proxy ABS --runtime-module ABS --present-boundary [--bootstrap] [--separate-device] [--seconds 1..60]\n",stderr);return 2;}
   try{return nativeRun(options);}catch(...){std::puts("error,module_test_exception");return 5;}
 }

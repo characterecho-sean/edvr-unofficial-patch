@@ -28,6 +28,8 @@
 #include "input_gate.h"
 #include "menu_keys.h"
 #include "menu_panel.h"
+#include "native_menu.h"
+#include "vr_runtime.h"
 #include "menu_schema.h"
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
@@ -796,7 +798,8 @@ void buildStatus(MenuContent& c) {
     statusLine(c, "Runtime",
                rk == 1 ? "SteamVR (Valve's own)"
                : rk == 2 ? "OpenComposite"
-               : glitchConsumerPresent() ? "not identified" : "no openvr half hooked");
+               : (glitchConsumerPresent() ? "not identified" : nativeMenuAvailable() ? "native OpenXR (experimental)" : "no compositor consumer"));
+    if (nativeMenuAvailable()) statusLine(c, "Native effects", "Submission effects pending");
     uint32_t ew = 0, eh = 0;
     float outer = 0.0f, inner = 0.0f;
     if (eyeTextureSize(&ew, &eh) && eyeTangents(&outer, &inner)) {
@@ -2054,13 +2057,14 @@ void latchAnchor(float yawDeg, float pitchDeg) {
 
 void openMenu(uint64_t now) {
     State& s = g_s;
-    if (!glitchConsumerPresent()) {
+    if (!glitchConsumerPresent() && !nativeMenuAvailable()) {
         if (!s.noConsumerNoted) {
             s.noConsumerNoted = true;
-            Log::get().note("menu: the menu key was pressed, but no openvr_api.dll half has "
+            Log::get().note("menu: the menu key was pressed, but no compositor consumer has "
                             "hooked the compositor, so there is no door to draw the panel "
                             "at. The menu stays closed and the keyboard stays the game's. "
-                            "Install the second file (README) to use it.");
+                            "See the runtime diagnosis in this log.");
+            vrRuntimeExplainOnce();
         }
         return;
     }
@@ -2334,6 +2338,13 @@ void menuTick(ID3D11Device* dev) {
     State& s = g_s;
     if (!s.configured) return;
     guardedBudget(g_budget, [&] {
+        static uint64_t lastNativeRevision = 0;
+        const uint64_t nativeRevision = nativeMenuRevision();
+        if (nativeRevision != lastNativeRevision) {
+            lastNativeRevision = nativeRevision;
+            closeMenu("native tracking origin or availability changed");
+            s.alpha = 0.0f;
+        }
         const uint64_t now = nowMs();
         const uint64_t dt = s.lastTickMs ? now - s.lastTickMs : 0;
         s.lastTickMs = now;
@@ -2534,6 +2545,10 @@ void menuTick(ID3D11Device* dev) {
         g.halfW = panelHalfW(widthDeg, menuBranch && tooltipsOn());
         g.shift = panelShift(g.halfW, menuBranch && tooltipsOn());
         g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
+        if (!glitchConsumerPresent() && !nativeMenuAvailable()) {
+            g.alpha = 0.0f;
+            inputGateSetPrivate(false);
+        }
         menuPanelSetGeometry(g);
         setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
         setMenuVisible(g.alpha);

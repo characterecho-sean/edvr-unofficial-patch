@@ -233,6 +233,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDlaaAvailable ^
     --extra-export edvrDlaaCounts ^
     --extra-export edvrMenuPanel ^
+    --extra-export edvrAcquireNativeMenu ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
     --extra-export edvrCensusBeginVr ^
@@ -314,6 +315,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
+    "src\d3d11\native_menu.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
@@ -611,6 +613,25 @@ if errorlevel 1 ( echo [edvr] ERROR: menu_test build failed & exit /b 1 )
     echo [edvr] ERROR: the settings menu's arithmetic or gate policy is wrong
     exit /b 1
 )
+
+echo [edvr] === native_menu_test.exe ===
+if not exist "%OBJ%\native_menu" mkdir "%OBJ%\native_menu"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_MENU_TEST /I"%GEN%" /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\native_menu\\" /Fe"%BUILD%\native_menu_test.exe" ^
+    "tools\native_menu_test\native_menu_test.cpp" "src\d3d11\native_menu.cpp" ^
+    "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
+    "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib gdi32.lib version.lib d3d11.lib dxgi.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: native menu test build failed & exit /b 1 )
+"%BUILD%\native_menu_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_menu_test.exe" --self-test || exit /b 1
 
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout
@@ -1098,11 +1119,12 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR export test build failed & exit /b 1
 "%BUILD%\openxr_exports_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_exports_test.exe" --self-test || exit /b 1
 
-REM Separate staged native runtime DLL; never installed as openvr_api.dll.
+REM Separate native runtime DLL; installed only through the explicit native route.
 REM Its application fixture calls the game-imported ABI without linking the host.
 if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     /I"third_party\openxr\include" /Fo"%OBJ%\openxr_module\\" ^
+    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
@@ -1120,6 +1142,7 @@ if errorlevel 1 ( echo [edvr] ERROR: native runtime module test build failed & e
 "%BUILD%\openxr_module_test.exe" --self-test-bootstrap || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test-separate || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test-bootstrap-separate || exit /b 1
+"%BUILD%\openxr_module_test.exe" --self-test-local || exit /b 1
 python tools\openxr_pe.py --self-test || exit /b 1
 python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1

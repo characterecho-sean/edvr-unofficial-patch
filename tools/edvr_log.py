@@ -53,6 +53,9 @@ LOG_RE = re.compile(r"^edvr_(?P<tag>[a-z0-9]+)_(?P<stamp>\d{8}_\d{6})\.log$",
 # with the word "version" in it cannot be mistaken for the version note.
 VERSION_RE = re.compile(r"^(?:\[[\d:.]+\]\s*)?version\s+(?P<ver>\S+)"
                         r"(?:\s+\(build\s+(?P<stamp>[0-9A-Fa-f]+)\))?")
+NATIVE_VERSION_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} UTC "
+    r"pid=\d+ tid=\d+ module_init,version=(?P<ver>[^,\s]+),durable_log=1$")
 
 
 def repo_root():
@@ -135,6 +138,9 @@ def version_line(text):
         m = VERSION_RE.search(line)
         if m:
             return line.strip(), m.group("ver"), m.group("stamp")
+        m = NATIVE_VERSION_RE.match(line)
+        if m:
+            return line.strip(), m.group("ver"), None
     return None, None, None
 
 
@@ -366,6 +372,22 @@ def self_test():
     if ver3 is not None:
         print("version_line matched prose: %r" % ver3)
         ok = False
+
+    native = ("2026-09-13 14:01:42.659 UTC pid=1234 tid=5678 "
+              "module_init,version=v0.16.2-77-gab80a6c-dirty,durable_log=1")
+    native2 = native.replace("14:01:42.659", "14:01:43.001")
+    _, nver, nstamp = version_line("noise version=v0.0.0\n" + native + "\n" + native2 + "\n")
+    if nver != "v0.16.2-77-gab80a6c-dirty" or nstamp is not None:
+        print("native version_line -> %r %r" % (nver, nstamp)); ok = False
+    for label in ("v0.16.2", "ab80a6c", "ab80a6c-dirty"):
+        if version_line(native.replace("v0.16.2-77-gab80a6c-dirty", label))[1] != label:
+            print("native version label rejected: %r" % label); ok = False
+    for bad in ("native module_init,version=v0.16.2-77-gab80a6c,durable_log=1",
+                native.replace("durable_log=1", "durable_log=0"),
+                native.replace("UTC", "LOCAL"),
+                "[14:01:42.659] module_init,version=v0.16.2-77-gab80a6c,durable_log=1"):
+        if version_line(bad)[1] is not None:
+            print("native false positive: %r" % bad); ok = False
 
     # Matching has to tolerate the suffixes `git describe` adds, and must
     # still refuse a genuinely different commit -- the whole point.

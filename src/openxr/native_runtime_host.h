@@ -23,6 +23,7 @@
 #include <atomic>
 #include <memory>
 #include "native_device.h"
+#include "native_menu_client.h"
 #include "render_route.h"
 #include "shutdown_trace.h"
 #include "session_state.h"
@@ -97,7 +98,7 @@ struct Api {
 };
 inline bool result(const char* operation,XrResult r) {
   if(r==XR_SUCCESS) return true;
-  std::printf("result,%s,%d\n",operation,int(r)); return false;
+  nativeTracePrintf("result,%s,%d\n",operation,int(r)); return false;
 }
 template<class T> bool load(Api& a,XrInstance instance,const char* name,T& destination) {
   PFN_xrVoidFunction fn=nullptr; const XrResult r=a.get(instance,name,&fn);
@@ -129,6 +130,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
   EyeCapture captured;
+  NativeMenuClient menu;
+  uint64_t menuEyes[2]{}, menuFailures=0, menuPosePublications=0;
   SkyboxCapture skybox;
   LoadingState loading;
   uint64_t loadingClears=0;
@@ -150,6 +153,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   GeometryInput frameGeometry{};bool frameGeometryAvailable=false;
   XrResult lastCompositorResult=XR_SUCCESS;
   uint64_t compositorWaits=0,compositorSubmits=0,compositorHandoffs=0,validGamePoses=0;
+  uint64_t poseFailures=0;
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
@@ -162,7 +166,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return out;
   }
   void auxiliaryUnsupported(unsigned interfaceId,unsigned slot)noexcept override {
-    std::printf("auxiliary_unavailable,interface=%u,slot=%u\n",interfaceId,slot);
+    nativeTracePrintf("auxiliary_unavailable,interface=%u,slot=%u\n",interfaceId,slot);
   }
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
     ++starts;
@@ -190,12 +194,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto snapshot=read();
       if(snapshot.geometryValid) {
         out={&systemInterface,&compositorInterface,&chaperoneInterface,&displayInterface};
-        std::printf("runtime_startup,token=%u,zero_layer_frames=%llu,geometry_sequence=%llu,prior_submits=%llu,geometry_ready=1\n",
+        nativeTracePrintf("runtime_startup,token=%u,zero_layer_frames=%llu,geometry_sequence=%llu,prior_submits=%llu,geometry_ready=1\n",
           token,(unsigned long long)startupFrames,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)compositorSubmits);
         return vr::VRInitError_None;
       }
     }
-    std::puts("error,runtime_startup_cancelled_or_deadline");
+    nativeTracePuts("error,runtime_startup_cancelled_or_deadline");
     return cancelled.load(std::memory_order_acquire)?vr::VRInitError_Init_ShuttingDown:vr::VRInitError_Init_HmdNotFound;
   }
   bool stop()noexcept override {
@@ -216,6 +220,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poses.focus(compositorGeneration,true,state.running()&&!state.terminal()&&lifecycle==Lifecycle::Focused);
     if(XR_FAILED(r)||state.terminal()||!changes.active()) {
       serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+      menu.invalidate();
       result("service_poll_terminal",r);return;
     }
     if(lifecycle==Lifecycle::Stopping) {
@@ -269,15 +274,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto& host=*static_cast<NativeRuntimeHost*>(context);
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
       const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
-      if(!host.changes.note(event))std::puts("error,reference_change_policy");
+      if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
     }
   }
   bool invalidateOrigin() {
+    menu.invalidate(); // CPU only, including callers without a producer boundary.
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
     return poses.resetOrigin(compositorGeneration);
   }
   CompositorRead compositorRead() const override {return poses.read();}
-  void compositorUnsupported(unsigned slot) noexcept override {std::printf("compositor_unavailable,slot=%u\n",slot);}
+  void compositorUnsupported(unsigned slot) noexcept override {nativeTracePrintf("compositor_unavailable,slot=%u\n",slot);}
   vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
@@ -288,7 +294,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||!seated.space()||!changes.active())
       return vr::VRCompositorError_InvalidTexture;
     ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
-    auto fail=[&](XrResult error){lastCompositorResult=error;poses.invalidate(generation);return vr::VRCompositorError_InvalidTexture;};
+    auto fail=[&](XrResult error){lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();
+      if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
+      return vr::VRCompositorError_InvalidTexture;};
     lastCompositorResult=boundary.waitAndBegin();
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
@@ -395,8 +403,39 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
     auto r=vr::VRCompositorError_InvalidTexture;
-    if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,copyPixels);
-    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,copyPixels);}))return r;
+    // Validate the game submission before any menu GPU work or capture mutation.
+    if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,false);
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,false);}))return r;
+    if(r!=vr::VRCompositorError_None)return r;
+    if(!copyPixels){menu.invalidate();return r;}
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> treated;
+    vr::VRTextureBounds_t treatedBounds{};
+    if(menu.acquired()) {
+      HRESULT treatment=E_FAIL;
+      const bool dispatched=graphicsCalls.invoke([&] {
+        if(!frameGeometryAvailable||menu.publish(frameGeometry,poses.read().originGeneration)!=S_OK)return;
+        ++menuPosePublications;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+        const auto queried=static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source));
+        if(FAILED(queried)){treatment=queried;return;}
+        treatment=menu.treat(unsigned(eye),source.Get(),bounds,treated,treatedBounds);
+      });
+      if(!dispatched||FAILED(treatment)) {
+        menu.invalidate();
+        if(menuFailures++<8)nativeTracePrintf("native_menu,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
+        return vr::VRCompositorError_InvalidTexture;
+      }
+    }
+    const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
+    const auto* selected=treated?&processed:texture;
+    const auto* region=treated?&treatedBounds:bounds;
+    // Menu output is AddRef'd and remains stable until this synchronous private
+    // capture completes. Shared capture runs on the XR owner and schedules its
+    // own producer copy; it must never be nested in the menu callback.
+    if(separateGraphics())r=captured.capture(eye,selected,region,flags,true);
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);}))return vr::VRCompositorError_InvalidTexture;
+    if(r==vr::VRCompositorError_None&&treated&&menuEyes[unsigned(eye)]++==0)
+      nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
     if(r==vr::VRCompositorError_None && copyPixels)++copiedEyes;
     return r;
   }
@@ -463,10 +502,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const bool found=resetEvents.pop(generation,poses.read().originGeneration,origin,GetTickCount64(),event,pose);
     if(found)++resetPolls;return found;
   }
-  void unsupported(unsigned slot) noexcept override {std::printf("system_unavailable,slot=%u\n",slot);}
+  void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
   ~NativeRuntimeHost() {close();}
   bool close() {
     const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
+    const auto menuClosed=menu.close(); // no producer admission or GPU work required
+    if(FAILED(menuClosed))return clean=false;
+    if(tracing)nativeTracePrintf("native_summary,waits=%llu,submits=%llu,pairs=%llu,copied_eyes=%llu,loading_layers=%llu,menu_left=%llu,menu_right=%llu,menu_failures=%llu,menu_poses=%llu,pose_failures=%llu,graphics_wrong_thread=%llu\n",
+      (unsigned long long)compositorWaits,(unsigned long long)compositorSubmits,(unsigned long long)composedPairs,
+      (unsigned long long)copiedEyes,(unsigned long long)loadingLayers,(unsigned long long)menuEyes[0],
+      (unsigned long long)menuEyes[1],(unsigned long long)menuFailures,(unsigned long long)menuPosePublications,
+      (unsigned long long)poseFailures,(unsigned long long)graphicsCalls.wrongThread);
     ShutdownTrace gateStage("host_gate",tracing);
     if(runtimeGeneration) {
       gate.requestStop(runtimeGeneration);
@@ -488,7 +534,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const HRESULT eyesRetired=captured.shutdownShared();
       const HRESULT skyRetired=skybox.shutdownShared();
       if(eyesRetired!=S_OK||skyRetired!=S_OK){
-        std::printf("shared_capture_retained,eyes=%08lx,skybox=%08lx\n",(unsigned long)eyesRetired,(unsigned long)skyRetired);
+        nativeTracePrintf("shared_capture_retained,eyes=%08lx,skybox=%08lx\n",(unsigned long)eyesRetired,(unsigned long)skyRetired);
         return clean=false;
       }
     }
@@ -532,7 +578,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   bool open(const RuntimeOptions& options) {
     api.module=LoadLibraryExW(options.loader.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if(!api.module) {std::printf("error,LoadLibraryExW,%lu\n",GetLastError());return false;}
+    if(!api.module) {nativeTracePrintf("error,LoadLibraryExW,%lu\n",GetLastError());return false;}
     api.get=reinterpret_cast<PFN_xrGetInstanceProcAddr>(GetProcAddress(api.module,"xrGetInstanceProcAddr"));
     if(!api.get) return result("xrGetInstanceProcAddr",XR_ERROR_FUNCTION_UNSUPPORTED);
     if(!load(api,XR_NULL_HANDLE,"xrEnumerateInstanceExtensionProperties",api.extensions)||
@@ -573,7 +619,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
 #undef LOAD
     XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
     if(!result("xrGetInstanceProperties",api.instanceProperties(instance,&ip))) return false;
-    std::printf("runtime,%.*s,%llu\n",XR_MAX_RUNTIME_NAME_SIZE,ip.runtimeName,(unsigned long long)ip.runtimeVersion);
+    nativeTracePrintf("runtime,%.*s,%llu\n",XR_MAX_RUNTIME_NAME_SIZE,ip.runtimeName,(unsigned long long)ip.runtimeVersion);
     XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};si.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     if(!result("xrGetSystem",api.getSystem(instance,&si,&system))) return false;
     XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
@@ -592,7 +638,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!result("view_sizes",enumerate<XrViewConfigurationView>([&](uint32_t c,uint32_t*n,XrViewConfigurationView*p){
       return api.viewSizes(instance,system,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,c,n,p);},views,{XR_TYPE_VIEW_CONFIGURATION_VIEW}))) return false;
     if(views.size()!=2 || !validSize(views[0]) || !validSize(views[1])) return result("stereo_sizes",XR_ERROR_VALIDATION_FAILURE);
-    for(unsigned eye=0;eye<2;++eye) {sizes[eye]=views[eye];std::printf("size,%u,%u,%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight);}
+    for(unsigned eye=0;eye<2;++eye) {sizes[eye]=views[eye];nativeTracePrintf("size,%u,%u,%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight);}
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;
     decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice;
@@ -602,7 +648,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       graphicsProxy=options.graphicsProvider ? options.graphicsProvider :
         LoadLibraryExW(options.graphicsProxy.c_str(),nullptr,
           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-      if(!graphicsProxy){std::printf("error,graphics_proxy_load,%lu\n",GetLastError());return false;}
+      if(!graphicsProxy){nativeTracePrintf("error,graphics_proxy_load,%lu\n",GetLastError());return false;}
       createDevice=reinterpret_cast<decltype(createDevice)>(GetProcAddress(graphicsProxy,"D3D11CreateDevice"));
       bridgeCounts=reinterpret_cast<BridgeCounts>(GetProcAddress(graphicsProxy,"edvr_selftest_graphics_bridge"));
       if(!createDevice||!bridgeCounts||!GetProcAddress(graphicsProxy,"edvrAcquireGraphicsBridge"))
@@ -617,8 +663,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         graphics.initializeExisting(externalDevice,req.adapterLuid,req.minFeatureLevel):
         graphics.initialize(req.adapterLuid,req.minFeatureLevel,createDevice);}))
       return result("device_render_boundary",XR_ERROR_INITIALIZATION_FAILED);
-    if(FAILED(hr)) {std::printf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
-    std::printf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
+    if(FAILED(hr)) {nativeTracePrintf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
+    nativeTracePrintf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
     const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
     if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
     session=binding.session();local=binding.localSpace();view=binding.viewSpace();
@@ -646,15 +692,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return result("capture_render_boundary",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     if(!capturesReady)
       return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
-    std::printf("graphics_ownership,mode=%s,producer_thread=%lu,xr_thread=%lu,distinct_devices=%u\n",
+    nativeTracePrintf("graphics_ownership,mode=%s,producer_thread=%lu,xr_thread=%lu,distinct_devices=%u\n",
         separateGraphics()?"separate":"borrowed",(unsigned long)graphicsCalls.thread,
         (unsigned long)ownerThread,unsigned(externalDevice&&externalDevice!=graphics.device()));
-    std::printf("swapchain_format,%lld\n",(long long)stereo.format());
+    nativeTracePrintf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
     if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
     state.setUnhandledEventSink(referenceEvent,this);
     runtimeGeneration=gate.beginGeneration();
     compositorGeneration=poses.begin();
+    if(runtimeGeneration&&compositorGeneration&&options.graphicsProvider&&externalDevice) {
+      HRESULT acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=menu.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_menu,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      nativeTracePuts("native_menu,provider_acquired=1,submission_effects=0");
+    }
     return runtimeGeneration!=0&&compositorGeneration!=0;
   }
 };

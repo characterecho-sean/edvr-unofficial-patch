@@ -26,6 +26,8 @@
 
 namespace edvr {
 namespace {
+thread_local bool g_nativeFrustum = false;
+thread_local float g_nativeTans[4] = {};
 
 // ---------------------------------------------------------------------------
 // The raster
@@ -892,6 +894,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float4 src = S.Load(int3(region.x + id.x, region.y + id.y, 0));
     float u = (id.x + 0.5) / outSize.x;
     float v = (id.y + 0.5) / outSize.y;
+    if (misc.z > 0.5) u = 1.0 - u;
     if (flipV) v = 1.0 - v;
     float tx = lerp(-tans.x, tans.y, u);
     float ty = lerp(tans.z, -tans.w, v);
@@ -1049,7 +1052,7 @@ int acquireQuery(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // is inside it) projected through the eye's frustum. False when the panel
 // is behind the eye or entirely outside it: nothing to draw here.
 bool panelBox(const float* xf, const float* tans, float dist, float curve, float halfW, float halfH,
-              float shift, uint32_t regionW, uint32_t regionH, bool flipV, int32_t box[4]) {
+              float shift, uint32_t regionW, uint32_t regionH, bool flipV, bool flipU, int32_t box[4]) {
     float minU = 1e9f, maxU = -1e9f, minV = 1e9f, maxV = -1e9f;
     const float lt = tans[0], rt = tans[1], top = tans[2], bot = tans[3];
     for (int i = 0; i <= 8; ++i) {
@@ -1075,7 +1078,8 @@ bool panelBox(const float* xf, const float* tans, float dist, float curve, float
             const float vz = xf[2] * q[0] + xf[5] * q[1] + xf[8] * q[2];
             if (vz > -1e-3f) return false;   // at or behind the eye: draw the whole region instead
             const float tx = vx / -vz, ty = vy / -vz;
-            const float u = (tx + lt) / (lt + rt);
+            float u = (tx + lt) / (lt + rt);
+            if (flipU) u = 1.0f - u;
             float v = (top - ty) / (top + bot);
             if (flipV) v = 1.0f - v;
             if (u < minU) minU = u;
@@ -1309,7 +1313,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // give the culling box and the shader different panels for a frame.
         const float aspect = g_panelAspect.load();
         const float halfH = g.halfW * aspect;
-        if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, g.shift, regionW, regionH, flipV,
+        if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, g.shift, regionW, regionH, flipV, g_nativeFrustum && flipU,
                      box) &&
             (box[2] <= box[0] || box[3] <= box[1])) {
             if (ctx) ctx->Release();
@@ -1356,6 +1360,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         p.geom[3] = halfH;
         p.misc[0] = g.alpha;
         p.misc[1] = g.shift;
+        p.misc[2] = g_nativeFrustum && flipU ? 1.0f : 0.0f;
         D3D11_MAPPED_SUBRESOURCE m{};
         bool ran = false;
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) && m.pData) {
@@ -1434,6 +1439,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
 // ---------------------------------------------------------------------------
 
 void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]) {
+    if (g_nativeFrustum) { memcpy(tans, g_nativeTans, sizeof(g_nativeTans)); return; }
     float outer = 1.0f, inner = 1.0f;
     eyeTangents(&outer, &inner);
     float rawTop = 0.0f, rawBottom = 0.0f;
@@ -1450,6 +1456,15 @@ void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]) {
     // a symmetric headset conceals the error entirely.
     tans[2] = rawBottom;
     tans[3] = rawTop;
+}
+
+void menuPanelSetNativeFrustum(const float tans[4]) { if (tans) { memcpy(g_nativeTans,tans,sizeof(g_nativeTans)); g_nativeFrustum=true; } }
+void menuPanelClearNativeFrustum() { g_nativeFrustum=false; }
+void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bounds, const float xf[12]) {
+    if (graphicsRuntimeDisabled() || !src || !xf || eye < 0 || eye > 1) return nullptr;
+    void* out = nullptr;
+    guardedBudget(g_budget, [&] { out = compositeInner(src, eye, bounds, xf); });
+    return out;
 }
 
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve, float halfW,

@@ -740,6 +740,65 @@ def do_verify(plan):
     return ok
 
 
+def _native_direct_plan(root, target, loader, runtime):
+    if not os.path.isabs(loader) or not os.path.isfile(loader): raise ValueError("native loader must be an existing absolute file")
+    if not os.path.isabs(runtime) or not os.path.isfile(runtime): raise ValueError("native runtime must be an existing absolute file")
+    loader = os.path.abspath(loader); runtime = os.path.abspath(runtime)
+    paths = native_paths(root, target)
+    for key in ("native_source", "graphics_source", "original", "native_target", "graphics_target"):
+        if not os.path.isfile(paths[key]): raise ValueError("missing native path: %s" % paths[key])
+    game = os.path.join(target, GAME_EXE)
+    if not os.path.isfile(game): raise ValueError("missing game executable: %s" % game)
+    try:
+        with open(runtime, "r", encoding="utf-8") as stream:
+            data = json.load(stream)
+        lib = data["runtime"]["library_path"]
+        if not isinstance(lib, str): raise ValueError
+        lib = os.path.abspath(os.path.join(os.path.dirname(runtime), lib)) if not os.path.isabs(lib) else lib
+        if not os.path.isfile(lib): raise ValueError("missing runtime library: %s" % lib)
+        from openxr_pe import validate_frontier_imports
+        validate_frontier_imports(game, paths["native_source"])
+    except (KeyError, TypeError, ValueError, OSError) as exc: raise ValueError("native direct preflight failed: %s" % exc)
+    config = "[openxr]\nversion=1\nloader=%s\ngraphics=%s\nruntime=%s\nseparate_device=1\n" % (loader, paths["graphics_target"], runtime)
+    return paths, config.encode("utf-8"), lib
+
+def native_direct(root, target, loader, runtime, dry_run=False):
+    paths, config, lib = _native_direct_plan(root, target, loader, runtime)
+    known, running = strict_game_running()
+    if not known or running:
+        if not dry_run: print("[edvr] ERROR: direct native route requires a proven stopped game")
+        elif not known: print("[edvr] direct native dry run: process state unavailable")
+        if not dry_run: return 1
+    print("[edvr] direct native plan%s" % (" (DRY RUN)" if dry_run else ""))
+    config_path = os.path.join(target, "Openvr", "win64", "edvr_openxr.ini")
+    print("       %s -> %s" % (paths["native_source"], paths["native_target"]))
+    print("       %s -> %s" % (paths["graphics_source"], paths["graphics_target"]))
+    print("       local startup config -> %s" % config_path)
+    print("       runtime library: %s" % lib)
+    if dry_run: return 0
+    shutil.copy2(paths["native_source"], paths["native_target"])
+    shutil.copy2(paths["graphics_source"], paths["graphics_target"])
+    with open(config_path, "wb") as f: f.write(config)
+    expected = {paths["native_target"]: paths["native_source"], paths["graphics_target"]: paths["graphics_source"]}
+    for p in (paths["native_target"], paths["graphics_target"]):
+        if sha256(p) != sha256(expected[p]): print("[edvr] ERROR: post-copy hash mismatch: %s" % p); return 1
+        print("       %s %s" % (p, sha256(p)))
+    with open(config_path, "rb") as stream:
+        if stream.read() != config:
+            print("[edvr] ERROR: post-copy config mismatch")
+            return 1
+    print("       %s %s" % (config_path, sha256(config_path)))
+    return 0
+
+def native_direct_verify(root, target, loader, runtime):
+    paths, config, _ = _native_direct_plan(root, target, loader, runtime)
+    config_path = os.path.join(target, "Openvr", "win64", "edvr_openxr.ini")
+    if not os.path.isfile(config_path): print("[edvr] direct native config mismatch"); return 1
+    with open(config_path, "rb") as f: current_config = f.read()
+    if current_config != config: print("[edvr] direct native config mismatch"); return 1
+    if sha256(paths["native_target"]) != sha256(paths["native_source"]) or sha256(paths["graphics_target"]) != sha256(paths["graphics_source"]): return 1
+    print("[edvr] direct native pair and config verified"); return 0
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Install a built EDVR into a game directory, verified.")
@@ -762,9 +821,12 @@ def main(argv=None):
                     help="dll + openvr + dlss (never ini)")
     ap.add_argument("--native-openxr", action="store_true",
                     help="stage the experimental native OpenXR DLL and its "
-                         "paired d3d11.dll (requires --dll and a receipt)")
+                         "paired d3d11.dll (requires --dll, plus a receipt "
+                         "or explicit --no-backup local configuration)")
     ap.add_argument("--native-receipt", default=None,
                     help="absolute new receipt path for --native-openxr")
+    ap.add_argument("--native-loader", default=None)
+    ap.add_argument("--native-runtime", default=None)
     ap.add_argument("--restore-native", default=None, metavar="RECEIPT",
                     help="restore both files recorded by a native receipt")
     ap.add_argument("--tag", default=None,
@@ -785,6 +847,9 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    if (args.native_loader or args.native_runtime) and not args.native_openxr:
+        ap.error("--native-loader/--native-runtime require --native-openxr")
+
     if args.restore_native:
         if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
                 args.dlss, args.ini, args.all, args.verify_only, args.force,
@@ -802,10 +867,25 @@ def main(argv=None):
         if not args.dll:
             ap.error("--native-openxr requires --dll; it stages the paired "
                      "graphics DLL as part of the native package")
-        if any((args.openvr, args.all, args.ini, args.dlss, args.force,
-                args.no_backup)):
+        direct = args.no_backup
+        if (args.native_loader or args.native_runtime) and not direct:
+            ap.error("--native-loader/--native-runtime require --no-backup direct mode")
+        if any((args.openvr, args.all, args.ini, args.dlss, args.force)):
             ap.error("--native-openxr is mutually exclusive with --openvr, "
-                     "--all, --ini, --dlss, --force, and --no-backup")
+                     "--all, --ini, --dlss, and --force")
+        if direct:
+            if not args.native_loader or not args.native_runtime:
+                ap.error("direct native route requires --native-loader and --native-runtime")
+            if args.native_receipt:
+                ap.error("--native-receipt is incompatible with direct native route")
+            root = os.path.abspath(args.root) if args.root else repo_root()
+            target = resolve_target(args.target)
+            try:
+                if args.verify_only: return native_direct_verify(root, target, args.native_loader, args.native_runtime)
+                return native_direct(root, target, args.native_loader, args.native_runtime, args.dry_run)
+            except (OSError, ValueError) as exc:
+                print("[edvr] ERROR: direct native operation failed: %s" % exc)
+                return 1
         if args.verify_only:
             if not args.native_receipt:
                 ap.error("native --verify-only requires --native-receipt")
@@ -914,6 +994,66 @@ def main(argv=None):
 
 def self_test():
     ok = True
+
+    # Direct native route: use a complete temporary pair and replace the
+    # contract validator/process probe so this remains a CPU-only test.
+    direct_tmp = tempfile.mkdtemp(prefix="edvr_direct_test_")
+    try:
+        droot = os.path.join(direct_tmp, "repo"); dgame = os.path.join(direct_tmp, "game")
+        os.makedirs(os.path.join(droot, "build")); os.makedirs(os.path.join(dgame, "Openvr", "win64"))
+        for rel, data in (("build/edvr_openxr_runtime.dll", b"NATIVE"), ("build/d3d11.dll", b"GRAPHICS")):
+            with open(os.path.join(droot, rel.replace("/", os.sep)), "wb") as f: f.write(data)
+        for rel, data in ((GAME_EXE, b"GAME"), ("d3d11.dll", b"OLDG"),
+                          ("Openvr/win64/openvr_api.dll", b"OLDN"),
+                          ("Openvr/win64/openvr_api_orig.dll", b"ORIGINAL"),
+                          ("edvr.ini", b"[user]\nkeep=1\n")):
+            p=os.path.join(dgame,rel.replace("/",os.sep)); os.makedirs(os.path.dirname(p),exist_ok=True)
+            with open(p,"wb") as f:f.write(data)
+        loader=os.path.join(direct_tmp,"loader.dll"); lib=os.path.join(direct_tmp,"runtime.dll"); manifest=os.path.join(direct_tmp,"runtime.json")
+        for p in (loader,lib):
+            with open(p,"wb") as f:f.write(b"X")
+        with open(manifest,"w",encoding="utf-8") as f: json.dump({"runtime":{"library_path":"runtime.dll"}},f)
+        import openxr_pe as _pe
+        old_validate=_pe.validate_frontier_imports; old_probe=globals()["strict_game_running"]
+        calls=[0]
+        def fake_validate(game,native): calls[0]+=1
+        _pe.validate_frontier_imports=fake_validate
+        globals()["strict_game_running"]=lambda:(True,False)
+        before_ini=open(os.path.join(dgame,"edvr.ini"),"rb").read(); before_orig=open(os.path.join(dgame,"Openvr","win64","openvr_api_orig.dll"),"rb").read()
+        if native_direct(droot,dgame,loader,manifest,False)!=0 or calls[0]!=1: ok=False
+        paths=native_paths(droot,dgame)
+        if native_direct_verify(droot,dgame,loader,manifest)!=0: ok=False
+        with open(paths["graphics_target"],"wb") as f:f.write(b"STALE")
+        if native_direct_verify(droot,dgame,loader,manifest)==0: ok=False
+        with open(paths["graphics_target"],"wb") as f:f.write(b"GRAPHICS")
+        with open(os.path.join(dgame,"Openvr","win64","edvr_openxr.ini"),"wb") as f:f.write(b"stale")
+        if native_direct_verify(droot,dgame,loader,manifest)==0: ok=False
+        try: native_direct(droot,dgame,"relative-loader",manifest,True); ok=False
+        except ValueError: pass
+        os.remove(lib)
+        try: native_direct(droot,dgame,loader,manifest,True); ok=False
+        except ValueError: pass
+        with open(lib,"wb") as f:f.write(b"X")
+        # Dry run is write-free even when the game probe is unknown/busy.
+        def direct_snapshot():
+            return {os.path.relpath(os.path.join(dp,n),direct_tmp):sha256(os.path.join(dp,n))
+                    for dp,dn,fn in os.walk(direct_tmp) for n in fn}
+        before=direct_snapshot()
+        globals()["strict_game_running"]=lambda:(False,False)
+        if native_direct(droot,dgame,loader,os.path.join(direct_tmp,"runtime.json"),True)!=0: ok=False
+        after=direct_snapshot()
+        if before!=after: ok=False
+        for state in ((True,True), (False,False)):
+            globals()["strict_game_running"]=lambda:state
+            if native_direct(droot,dgame,loader,manifest,False)==0: ok=False
+            if direct_snapshot()!=before: ok=False
+        if open(os.path.join(dgame,"edvr.ini"),"rb").read()!=before_ini or open(os.path.join(dgame,"Openvr","win64","openvr_api_orig.dll"),"rb").read()!=before_orig: ok=False
+        try: main(["--native-openxr","--dll","--no-backup","--native-loader",loader,"--native-runtime",manifest,"--openvr"]); ok=False
+        except SystemExit: pass
+        os.remove(lib) if os.path.exists(lib) else None
+        _pe.validate_frontier_imports=old_validate; globals()["strict_game_running"]=old_probe
+    finally:
+        shutil.rmtree(direct_tmp, ignore_errors=True)
 
     # The backup scheme is one string in one place; if it drifts, the
     # litter comes back.
