@@ -755,8 +755,51 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 const bool owned=(qx==2&&qy==2)||(qx==8&&qy==6);
                 check(owned?resolvedValues[y*ow+x]==0:std::fabs(resolvedValues[y*ow+x]-model[4*(y*ow+x)]/255.f)<1e-6,"transported UI trail is clipped while unrelated world output stays identical");
             }
+            // A fractional reprojection must attenuate transported support.
+            // With the old four-tap max, even a .001-pixel vector selected a
+            // full-alpha neighbour, making stale colour grow one input cell
+            // per frame.  Use a stale model over a black raw frame so that
+            // this is observable as a false dark pixel, then feed Next back
+            // into Previous for the following cells and directions.
+            if(ow==w&&oh==h) {
+                struct TinyTransport {float dx,dy;UINT firstX,firstY,farX,farY;};
+                const TinyTransport tiny[]={
+                    {.001f,0,4,4,3,4},{-.001f,0,8,4,9,4},
+                    {0,.001f,6,2,6,1},{0,-.001f,6,6,6,7},
+                    {.001f,.001f,4,2,3,1},{-.001f,-.001f,8,6,9,7}};
+                for(const auto& t:tiny) {
+                    colour.assign(w*h*4,0);old.assign(w*h*4,0);mark.assign(w*h,0);motion.assign(w*h*2,0);
+                    for(UINT i=0;i<ow*oh;++i)model[4*i]=220;
+                    mark[4*w+6]=1;
+                    run(false);auto tinySeed=read(dev.Get(),ctx.Get(),next.Get(),3);
+                    mark.assign(w*h,0);for(UINT i=0;i<w*h;++i)old[4*i+3]=static_cast<unsigned char>(std::lround(tinySeed[i]*255.0f));
+                    for(UINT i=0;i<w*h;++i){motion[2*i]=t.dx;motion[2*i+1]=t.dy;}
+                    for(unsigned frame=0;frame<3;++frame) {
+                        resolvedValues=run(true);auto tinyInfluence=read(dev.Get(),ctx.Get(),next.Get(),3);
+                        const UINT first=t.firstY*w+t.firstX,farCell=t.farY*w+t.farX;
+                        check(tinyInfluence[first]==0,"fractional transport leaves the first off-glyph cell unowned");
+                        // The current dispatch may still protect this cell before
+                        // its fractional age reaches zero; only the next-frame
+                        // influence is the transport contract here.
+                        if(frame==2) {
+                            check(tinyInfluence[farCell]==0,"tiny motion does not grow a one-cell-per-frame history halo");
+                            check(std::fabs(resolvedValues[farCell]-220/255.f)<1e-6,"tiny-motion halo does not darken a farther background cell");
+                        }
+                        for(UINT i=0;i<w*h;++i)old[4*i+3]=static_cast<unsigned char>(std::lround(tinyInfluence[i]*255.0f));
+                    }
+                }
+                // A half-pixel vector keeps only half of the departed support;
+                // the exact integer path below remains a full transported cell.
+                colour.assign(w*h*4,0);old.assign(w*h*4,0);mark.assign(w*h,0);motion.assign(w*h*2,0);for(UINT i=0;i<w*h;++i)motion[2*i]=.5f;
+                mark[4*w+6]=1;run(false);auto halfSeed=read(dev.Get(),ctx.Get(),next.Get(),3);
+                mark.assign(w*h,0);for(UINT i=0;i<w*h;++i)old[4*i+3]=static_cast<unsigned char>(std::lround(halfSeed[i]*255.0f));
+                resolvedValues=run(true);auto halfInfluence=read(dev.Get(),ctx.Get(),next.Get(),3);
+                check(halfInfluence[4*w+4]>.4f&&halfInfluence[4*w+4]<.55f,"bilinear fractional history retains partial age");
+                check(resolvedValues[4*w+4]==0,"partial history still protects the stale glyph footprint");
+            }
             // Invalid/off-screen motion cannot smear border UI inward.
-            motion[2*(6*w+8)]=-1000;resolvedValues=run(true);
+            old.assign(w*h*4,0);motion.assign(w*h*2,0);mark.assign(w*h,0);
+            old[4*(2*w+2)+3]=255;motion[2*(6*w+8)]=-1000;motion[2*(6*w+8)+1]=-4;resolvedValues=run(true);
             for(UINT y=0;y<oh;++y)for(UINT x=0;x<ow;++x)
                 if(x*w/ow==8&&y*h/oh==6)check(std::fabs(resolvedValues[y*ow+x]-model[4*(y*ow+x)]/255.f)<1e-6,"off-screen transported history is rejected");
             old.assign(w*h*4,0);motion.assign(w*h*2,0);

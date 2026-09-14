@@ -633,3 +633,93 @@ source above 32 MiB. The reader self-test and binary fixture
 verification also pass. The next requested dump is needed to inspect the
 source alpha that this diagnostic correction makes available; the halo
 fix remains open.
+
+## Targeting source captured, 175452 and 175515
+
+The next flight, edvr_gfx_20260913_175245.log, identifies
+v0.16.2-8-g79f6934, build 6AA73372, linked 23:36:18 UTC. Both requested
+captures now contain seven surfaces, zero failed copies, zero missing
+shaders and no capped draws. There are 1,034 and 1,036 draw snapshots,
+respectively, including 190 instances of the exact targeting sprite
+shader pair in each capture.
+
+Ruled out: an alpha backing across the targeting sprite's empty quad,
+because all nonzero source alpha within the sampled UV rectangle lies
+inside the label and reticle bounds. The exact draw's VS b2 constants
+and packed vertices select source pixels (1741,435)-(2178,871). Within
+that rectangle, the nonzero alpha bounds are (1930,603)-(2119,684).
+There are 8,903 and 8,893 nonzero-alpha samples. The first label reads
+2.06Ls and the second 1.68Ls. Low-alpha antialiasing samples include
+some zero RGB, but there is no full-quad alpha noise. These are coloured
+RGBA sources; an alpha-only preview is not the original source colour.
+
+The captures use 2774x2740 input and 4268x4216 output. Their first
+temporal frames are 8292 and 10307, with jitter (0.125,0.277777791) and
+(-0.375,-0.0555555522). All same-frame resource headers agree. An exact
+CPU replay of the existing final UI shader reproduces T00 with mean
+absolute RGB errors of 0.001261 and 0.001821 byte per channel. The
+predicted next-history alpha agrees within R8 quantization.
+
+In the target ROI, retained-only influence outside current expanded UI
+coverage occupies 6.44% of the first output crop and 17.53% of the
+second. These pixels lose an average 3.185 and 4.155 red-channel bytes
+relative to the captured DLSS output. Inactive background is unchanged
+exactly. Content-edit pixels are sparse, 0.80% and 1.17%, and their mean
+red changes are positive. Thus the larger dark footprint tracks the
+retained whole-RGB clamp, not the source's empty quad or the sparse
+changing-digit replacement.
+
+This still does not justify turning off stale-text cleanup. The second
+capture's model output reads the old 1.69Ls while the current source and
+final image read 1.68Ls. A replacement must preserve that correction.
+The two captures contain only the first frame's motion and history
+resources; the later colour crops cannot establish exact multi-frame
+history transport. Scratch transport results require explicit storage
+quantization and meaningful on-screen movement controls before being
+used as evidence for a rendering change.
+
+The local motion supports testing fractional transport specifically. In
+raw ROI (1447,1390)-(1727,1570), excluding the current 3x3-expanded UI
+marks, 2,484 of 2,540 retained input cells in 175452 have valid motion;
+their median vector is (-0.08032,-0.43286) input pixels. In 175515,
+7,988 of 8,029 retained cells have valid motion, with median
+(0.36572,-0.30640). Jitter rounds to zero in both cases, as in the
+shipping resolver's coverage lookup. The current maximum over four
+history taps assigns a full neighbour's remaining lifetime even when its
+interpolation weight is tiny. Repeated feedback can therefore move the
+cleanup boundary faster than these recorded fractional vectors.
+
+The correction samples the transported remaining influence bilinearly,
+then takes the maximum against the unchanged stationary sample. It keeps
+the current coverage, fresh content-edit reconstruction,
+finite/in-bounds motion gate and 32-frame upper bound. The same four
+history taps and existing textures are used; no draw, full-screen pass
+or resource is added. Exact integer motion still selects the same
+previous cell.
+
+This is deliberately narrower than a separate UI layer. Interpolating
+the influence attenuates partially covered transported cells, so their
+effective retention can be shorter than that of a full stationary seed.
+It does not make the already blended corona and text independently
+reconstructable. A remaining halo close to genuine current or departing
+glyphs would require further evidence; removing recursive max expansion
+does not establish that every visible halo has been eliminated.
+
+The new regression seeds a localized text mark, removes it, and feeds
+the GPU-written R8 history back for three frames under tiny positive and
+negative axial/diagonal motion. The model deliberately differs from the
+raw background, exposing false darkening outside the text footprint.
+Running the same test against the original HEAD shader fails at the
+first off-glyph retained cell, confirming the test detects the old
+transport bug. A separate half-pixel check retains protection for a
+partially transported stale glyph. Existing six-pixel/four-pixel motion,
+invalid off-screen motion, changed digits, output ownership and alpha
+checks remain in the suite.
+
+Validation: the absolute-path full build and NVIDIA DLL smoke test pass.
+The UI suite passes 24,662 checks on WARP and 26,408 on NVIDIA with the
+captured HUD pixel shader reference. The new test fails against the
+original shader at the expected off-glyph influence assertion. These
+checks establish the transport correction and preserve the existing
+fast-motion, edited-text, alpha and output-ownership controls; the next
+headset comparison is still needed to judge the complete visible halo.

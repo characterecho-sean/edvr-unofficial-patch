@@ -35,15 +35,21 @@ float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2
     // DLSS can transport an old glyph along the newly exposed world's
     // vector, outside both its current and stationary previous footprint.
     // Follow that same vector through the unjittered influence history.
-    // A max over the bilinear footprint retains subpixel coverage without
-    // spreading it to unrelated neighbours. Off-screen history is invalid.
+    // A max over the four bilinear taps gives every fractional neighbour
+    // full influence, so a tiny motion can grow a one-pixel halo every frame.
+    // Interpolate the transported age, then retain the stationary sample as
+    // a separate candidate. Off-screen history is invalid.
     if(!here && remaining<1){
         float2 before=float2(q)+Motion.Load(int3(clamp(r,0,size-1),0));
         if(all(isfinite(before)) && all(before>=0) && all(before<=float2(size-1))){
             int2 corner=int2(floor(before));
-            int2 step=int2(ceil(before))-corner;
-            [unroll] for(int y=0;y<2;++y)[unroll] for(int x=0;x<2;++x)
-                remaining=max(remaining,Previous.Load(int3(corner+int2(x,y)*step,0)).a);
+            int2 upper=int2(ceil(before));
+            float2 f=saturate(before-float2(corner));
+            float lower=lerp(Previous.Load(int3(corner,0)).a,
+                             Previous.Load(int3(int2(upper.x,corner.y),0)).a,f.x);
+            float upperRow=lerp(Previous.Load(int3(int2(corner.x,upper.y),0)).a,
+                                Previous.Load(int3(upper,0)).a,f.x);
+            remaining=max(remaining,lerp(lower,upperRow,f.y));
         }
     }
     bool active=here||edited||remaining>0;
