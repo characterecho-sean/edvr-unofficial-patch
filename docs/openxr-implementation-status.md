@@ -7,8 +7,13 @@ used crash-sentinel recovery. A desktop regression reproduces an unsafe
 dependency between recommended render dimensions and transient pose validity.
 The correction preserves validated session dimensions across geometry
 invalidation, including extended-display queries, and adds bounded startup
-traces. Full-build and manual VDXR qualification are recorded in that
-investigation.
+traces. The full build passed, and the matching Quest 3/VDXR flight now works.
+Its trace captures size queries immediately after a startup recenter
+invalidates geometry, with the recommendations preserved. The run completed
+4,184 stereo pairs, produced valid CPU and GPU timing samples, and finished all
+native shutdown stages without retained resources. Detailed qualification is
+recorded in that investigation; matched-resolution performance and quality
+remain pending.
 
 The [XR-device timing and system-runtime
 checkpoint](openxr-device-timing-2026-09-14.md) adds separate consumer-copy and
@@ -17,8 +22,8 @@ active OpenXR runtime by default, while explicit diagnostic manifests remain
 supported. The full build passed with 501 source hashes unchanged, including 83
 provider checks, 102 producer GPU checks and 101 new device GPU checks. The new
 pair and configuration were installed and hash-verified in Frontier. The first
-VDXR flight selected the expected runtime but failed during game startup, as
-recorded above; device timing qualification remains pending. The [legacy Oculus
+VDXR flight selected the expected runtime but failed during game startup; the
+corrected flight above qualifies the timing data path. The [legacy Oculus
 selection investigation](openxr-oculus-selection-2026-09-14.md) is recorded
 separately; no LibOVR suppression is implemented yet.
 

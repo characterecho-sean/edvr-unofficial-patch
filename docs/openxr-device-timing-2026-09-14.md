@@ -7,9 +7,10 @@ Windows' active OpenXR runtime. The new pair is installed and hash-verified in
 Frontier. Its first matching VDXR flight selected the expected runtime and
 completed native startup, then Elite requested a zero-sized depth texture and
 aborted. The [startup investigation and
-correction](openxr-vdxr-startup-2026-09-14.md) record that failure; device
-timing still needs a successful manual flight. Desktop validation is recorded
-below.
+correction](openxr-vdxr-startup-2026-09-14.md) record that failure and the
+successful retry. The corrected VDXR flight confirms both-eye rendering, valid
+CPU and GPU timing samples and complete native teardown. Desktop validation is
+recorded below.
 
 ## Measurement contract
 
@@ -89,11 +90,11 @@ also pass. The new paired DLLs and system-runtime configuration are installed
 and verified through the sanctioned installer. Existing game settings and the
 original OpenVR DLL are preserved.
 
-After the startup correction, the next game flight should use Windows' selected
-OpenXR runtime, keep the main-menu scene steady for about 30 seconds, inspect
-`SUBMIT WALL`, `RENDER GPU` and `XR COPY/COMPOSE` in F8, then exit normally. A
-matching log must show the expected runtime, valid current-session device GPU
-samples, both-eye submission and complete shutdown. Timing overhead,
+The corrected VDXR flight used Windows' selected runtime and rendered 4,184
+stereo pairs with DLSS, from 1996x2121 inputs to 3072x3264 per eye. The
+matching logs contain valid CPU wall, producer GPU and XR-device GPU samples
+and complete native shutdown. The user confirms Virtual Desktop works. F8's
+visual presentation was not separately confirmed in this run. Timing overhead,
 matched-resolution performance/quality and broader feature parity remain
 separate gates.
 
