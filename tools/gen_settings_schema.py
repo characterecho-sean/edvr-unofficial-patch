@@ -237,6 +237,10 @@ class Setting(object):
         self.devAnnotated = False
         self.devChoices = []
         self.devHidden = False
+        # Migration metadata from the annotation lines the installer's merge
+        # reads (iniedit.cpp movedKeys / retiredDefaults): kept off the prose.
+        self.movedFrom = []
+        self.retiredDefaults = []
 
 
 def parse_ini(path):
@@ -253,6 +257,7 @@ def parse_ini(path):
     annotation = None
     devAnnotation = None
     movedFrom = []      # (old dotted, old default) lines since the last key
+    retiredDefaults = []  # retired-default: values since the last key
 
     for index, raw in enumerate(lines):
         line = raw.strip()
@@ -261,6 +266,7 @@ def parse_ini(path):
             annotation = None
             devAnnotation = None
             movedFrom = []
+            retiredDefaults = []
             continue
         if line.startswith('['):
             close = line.find(']')
@@ -270,6 +276,7 @@ def parse_ini(path):
             prose = []
             annotation = None
             devAnnotation = None
+            retiredDefaults = []
             continue
 
         commented = line[0] in '#;'
@@ -305,6 +312,14 @@ def parse_ini(path):
                     movedFrom.append((dm.group(1), dm.group(2).strip()))
                 else:
                     movedFrom.append((spec, ''))
+            elif body.lower().startswith('retired-default:'):
+                # The other migration annotation: a default this key used to
+                # ship and no longer does, read by the installer's merge
+                # (iniedit.cpp retiredDefaults(), case-insensitively, as here).
+                # Left in the prose it reached the rows: a block ending in one
+                # carried it in its detail, and fps_overlay_pitch's block, which
+                # is ONLY this line, had it as its whole hint and detail.
+                retiredDefaults.append(body[len('retired-default:'):].strip())
             else:
                 prose.append(body)
             continue
@@ -326,6 +341,8 @@ def parse_ini(path):
         s.group = group
         s.movedFrom = list(movedFrom)
         movedFrom = []
+        s.retiredDefaults = list(retiredDefaults)
+        retiredDefaults = []
         s.line = index + 1
         if annotation is not None:
             s.annotated = True
@@ -907,6 +924,35 @@ def self_test():
                 {'a.cpp': 'const std::string w = cfg.getString("fix.word", "");\n'}, 1)
     expect_in(name, said, '`percent` but are not numbers')
     expect_in(name, said, 'fix.word  (text)')
+
+    # `# retired-default: X` is the installer merge's annotation, not prose.
+    # Both shapes the tree has: a block that ends in one (camera_index_track),
+    # and a key whose block is ONLY the line (fps_overlay_pitch), which must
+    # inherit the shared block above the previous key rather than show the
+    # annotation as its hint and its detail.
+    name = 'retired-default-not-prose'
+    wrote = case(name,
+                 '[fix]\n'
+                 '# Where the readout sits, in degrees. Both are live.\n'
+                 '# ui: Readout across | range -60..60 | menu performance\n'
+                 'readout_yaw = 0\n'
+                 '# retired-default: -16\n'
+                 '# ui: Readout up | range -45..45 | menu performance\n'
+                 'readout_pitch = 20\n'
+                 '\n'
+                 '# Scale the thing. Needs a game restart.\n'
+                 '# retired-default: 1.0\n'
+                 '# ui: Scale\n'
+                 'scale = 2.0\n',
+                 {'a.cpp': 'int y = cfg.getInt("fix.readout_yaw", 0);\n'
+                           'int p = cfg.getInt("fix.readout_pitch", 20);\n'
+                           'float s = cfg.getFloat("fix.scale", 2.0f);\n'}, 0)
+    expect_not_in(name, wrote, 'retired-default')
+    expect_in(name, wrote, '"Scale", "Scale the thing.", "Scale the thing. Needs a game restart.",')
+    expect_in(name, wrote, '"readout_pitch", "Readout up", "Where the readout sits, in degrees.", '
+                           '"Where the readout sits, in degrees. Both are live.",')
+    expect_in(name, wrote, '"readout_pitch", "Readout up", "Where the readout sits, in degrees.",\n'
+                           '     "Where the readout sits, in degrees. Both are live.",')
 
     shutil.rmtree(base, ignore_errors=True)
     if failures:
