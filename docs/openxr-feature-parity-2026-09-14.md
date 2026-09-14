@@ -134,6 +134,6 @@ normal both- projection guard and bounds crop. Their diagnostic behavior is not
 qualified by this batch. Broad performance/image quality comparison remains
 deferred. Forcing Elite's legacy Oculus probe into OpenXR is a separate
 startup-selection problem, tracked in the [LibOVR
-investigation](openxr-oculus-selection-2026-09-14.md). Its caller/fallback
-evidence is still required before a targeted interception can be enabled
-safely.
+investigation](openxr-oculus-selection-2026-09-14.md). Static analysis now
+establishes the loader call and fallback loop; early native-package activation
+and a controlled launch still need qualification before suppression is enabled.

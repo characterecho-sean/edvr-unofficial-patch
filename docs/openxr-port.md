@@ -197,9 +197,13 @@ shared hook machinery as part of retiring the VR hooks. Old comments about the
   Explorer Cam, theater/heal, loading panels, menu anchoring and transition
   withholding all depend on the current pose/projection/submit contract.
   Removing OpenComposite alone does not establish correctness for any of them.
-- **Oculus-native Elite remains outside scope.** It does not load this DLL. The
-  replacement also does not promise general OpenVR compatibility, controller
-  support, overlay support, other graphics APIs or quad-view stereo.
+- **Elite's Oculus preference requires a separate entry fix.** Its legacy
+  Oculus path does not load this DLL. Routing that path through EDVR is now
+  part of the port; the [LibOVR selection
+  investigation](openxr-oculus-selection-2026-09-14.md) tracks the confirmed
+  fallback and pending interception work. The replacement does not promise
+  general OpenVR compatibility, controller support, overlay support, other
+  graphics APIs or quad-view stereo.
 - **Migration and distribution need work.** The current build generates exports
   from the game's DLL; the installer backs up and chains an existing runtime. A
   standalone backend needs its own reproducible export definitions, loader

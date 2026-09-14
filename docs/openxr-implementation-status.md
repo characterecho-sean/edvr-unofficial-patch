@@ -9,8 +9,11 @@ each feature. The full build passed with 526 unchanged source hashes and the
 paired DLLs are installed and hash-verified in Frontier. Details are tracked in
 that checkpoint; all new visual behavior, including the preceding
 startup-centering change, awaits one combined headset retest. Experimental
-features and performance comparisons remain deferred. The legacy Oculus
-startup-selection investigation remains separate and unresolved.
+features and performance comparisons remain deferred. The [legacy Oculus
+startup-selection investigation](openxr-oculus-selection-2026-09-14.md) now
+statically confirms Elite's LibOVR-first selection loop and fallback to OpenVR
+when LibOVR fails to load. Native-package activation and launch qualification
+remain pending; no suppression is implemented or installed.
 
 The user has deferred performance comparisons and prioritized metrics, then
 features. The [native monitor-history
