@@ -10,9 +10,10 @@ namespace edvr::installer {
 namespace {
 
 struct Undo {
-    enum class Kind { RemoveDir, DeleteFile, MoveBack } kind;
+    enum class Kind { RemoveDir, DeleteFile, MoveBack, RestoreFile } kind;
     std::wstring a;  // the file to delete / the directory to remove / the moved-to path
     std::wstring b;  // MoveBack: where it came from
+    std::string sha;
 };
 
 std::string errorText(DWORD err) {
@@ -108,6 +109,29 @@ bool ensureDirTree(const std::wstring& path, std::vector<Undo>* undo) {
     return GetLastError() == ERROR_ALREADY_EXISTS && dirExists(path);
 }
 
+bool snapshotFile(const std::wstring& source, const std::wstring& backupDir,
+                 unsigned serial, std::wstring* snapshot, DWORD* err) {
+    if (!fileExists(source)) return true;
+    std::wstring dir=backupDir;
+    if (dir.empty()) {
+        const size_t slash=source.find_last_of(L"\\/");
+        dir=slash==std::wstring::npos?L".":source.substr(0,slash);
+    }
+    if (!ensureDirTree(dir, nullptr)) { *err=GetLastError(); return false; }
+    (void)serial;
+    wchar_t temporary[MAX_PATH]{};
+    if (!GetTempFileNameW(dir.c_str(), L"evr", 0, temporary)) { *err=GetLastError(); return false; }
+    *snapshot=temporary;
+    if (!CopyFileW(source.c_str(),snapshot->c_str(),FALSE)) {
+        *err=GetLastError(); DeleteFileW(snapshot->c_str()); return false;
+    }
+    const auto expected=sha256File(source);
+    if (expected.empty() || sha256File(*snapshot)!=expected) {
+        *err=ERROR_CRC; DeleteFileW(snapshot->c_str()); return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 bool canWriteInto(const std::wstring& dir) {
@@ -158,8 +182,16 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
 
     std::vector<Undo> undo;
     DWORD err = 0;
-    bool overwrote = false;   // a file was replaced, which no undo can reverse
+    bool overwrote = false;
     std::wstring failedAt;
+    unsigned snapshotSerial = 0;
+    auto protectTarget = [&](const std::wstring& target) {
+        if (!fileExists(target)) return true;
+        std::wstring snapshot;
+        if (!snapshotFile(target, plan.backupDir, ++snapshotSerial, &snapshot, &err)) return false;
+        undo.push_back({Undo::Kind::RestoreFile, snapshot, target, sha256File(snapshot)});
+        return true;
+    };
 
     bool failed = false;
     auto fail = [&](const std::wstring& what, DWORD code) {
@@ -187,6 +219,7 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                     break;  // an optional source that is not there is not an error
                 }
                 clearReadOnly(step.to);
+                if (!protectTarget(step.to)) { fail(step.to, err); break; }
                 if (!CopyFileW(step.from.c_str(), step.to.c_str(), FALSE)) {
                     fail(step.to, GetLastError());
                 } else {
@@ -206,10 +239,13 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 }
                 clearReadOnly(step.from);
                 clearReadOnly(step.to);
+                if (!protectTarget(step.to)) { fail(step.to, err); break; }
+                const auto before=sha256File(step.from);
+                if(before.empty()) {fail(step.from,ERROR_CRC);break;}
                 if (!MoveFileExW(step.from.c_str(), step.to.c_str(), MOVEFILE_REPLACE_EXISTING)) {
                     fail(step.from, GetLastError());
                 } else {
-                    undo.push_back({Undo::Kind::MoveBack, step.to, step.from});
+                    undo.push_back({Undo::Kind::MoveBack, step.to, step.from, before});
                     result.done.push_back("renamed " + toUtf8(leafOf(step.from)) + " -> " +
                                           toUtf8(leafOf(step.to)));
                 }
@@ -224,13 +260,13 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 }
                 const bool existed = fileExists(step.to);
                 clearReadOnly(step.to);
+                if (existed && !protectTarget(step.to)) { fail(step.to, err); break; }
                 if (!writeWholeFile(step.to, data, size, &err)) {
                     fail(step.to, err);
                 } else {
                     if (!existed)
                         undo.push_back({Undo::Kind::DeleteFile, step.to, std::wstring()});
-                    else
-                        overwrote = true;  // no undo for this: the old bytes are gone
+                    else overwrote = true;
                     result.done.push_back("wrote " + toUtf8(leafOf(step.to)));
                 }
                 break;
@@ -238,13 +274,13 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
             case Action::WriteText: {
                 const bool existed = fileExists(step.to);
                 clearReadOnly(step.to);
+                if (existed && !protectTarget(step.to)) { fail(step.to, err); break; }
                 if (!writeWholeFile(step.to, step.text.data(), step.text.size(), &err)) {
                     fail(step.to, err);
                 } else {
                     if (!existed)
                         undo.push_back({Undo::Kind::DeleteFile, step.to, std::wstring()});
-                    else
-                        overwrote = true;
+                    else overwrote = true;
                     result.done.push_back("wrote " + toUtf8(leafOf(step.to)));
                 }
                 break;
@@ -252,11 +288,11 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
             case Action::Delete: {
                 if (!fileExists(step.from)) break;
                 clearReadOnly(step.from);
+                if (!protectTarget(step.from)) { fail(step.from, err); break; }
                 if (!DeleteFileW(step.from.c_str())) {
                     fail(step.from, GetLastError());
                 } else {
-                    // No undo: the plan copies anything worth keeping into the
-                    // backup folder before removing it.
+                    // The snapshot also makes interrupted uninstall reversible.
                     result.done.push_back("removed " + toUtf8(leafOf(step.from)));
                 }
                 break;
@@ -266,6 +302,8 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
     }
 
     if (!failed) {
+        for (const auto& item : undo)
+            if (item.kind == Undo::Kind::RestoreFile) DeleteFileW(item.a.c_str());
         result.ok = true;
         return result;
     }
@@ -277,6 +315,8 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
     // Walk it back. Anything that cannot be undone is left alone rather than
     // retried: the backup folder is the safety net, and a rollback that fights
     // the filesystem is how a bad situation becomes an unexplainable one.
+    bool rollbackOk = true;
+    std::vector<std::wstring> retainedMoves;
     for (auto it = undo.rbegin(); it != undo.rend(); ++it) {
         switch (it->kind) {
             case Undo::Kind::RemoveDir:
@@ -284,19 +324,30 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 break;
             case Undo::Kind::DeleteFile:
                 clearReadOnly(it->a);
-                DeleteFileW(it->a.c_str());
+                if (fileExists(it->a) && !DeleteFileW(it->a.c_str())) rollbackOk = false;
                 break;
             case Undo::Kind::MoveBack:
                 clearReadOnly(it->a);
-                MoveFileExW(it->a.c_str(), it->b.c_str(), MOVEFILE_REPLACE_EXISTING);
+                if (!MoveFileExW(it->a.c_str(), it->b.c_str(), MOVEFILE_REPLACE_EXISTING) ||
+                    sha256File(it->b)!=it->sha) {
+                    rollbackOk = false;
+                    retainedMoves.push_back(it->a);
+                }
                 break;
+            case Undo::Kind::RestoreFile: {
+                bool retained=false;
+                for(const auto& path:retainedMoves) if(path==it->b) retained=true;
+                if(retained) {rollbackOk=false;break;}
+                clearReadOnly(it->b);
+                if (!CopyFileW(it->a.c_str(), it->b.c_str(), FALSE) || sha256File(it->b)!=it->sha)
+                    rollbackOk = false;
+                else DeleteFileW(it->a.c_str());
+                break;
+            }
         }
     }
-    // Whether "put back" is the truth depends on what the run had already
-    // done: a rename can be reversed, a file that was written over cannot.
-    // Claiming a full restore when a DLL was replaced is worse than saying
-    // nothing, because it stops somebody looking in edvr_backup\.
-    result.rolledBack = true;
+    if(!rollbackOk) result.error += " Recovery is incomplete; retained snapshots and backups must be kept.";
+    result.rolledBack = rollbackOk;
     result.overwrote = overwrote;
     return result;
 }

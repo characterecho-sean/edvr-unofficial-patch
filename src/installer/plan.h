@@ -35,6 +35,11 @@ struct PayloadInfo {
     std::string openvrSha;
     bool        haveNgx = false;   // NVIDIA's DLSS runtime, nvngx_dlss.dll
     std::string ngxSha;
+    bool        nativePairValid = false;
+    bool        haveOpenxrLoader = false;
+    std::string openxrLoaderSha;
+    bool        haveOpenxrLicense = false;
+    std::string openxrLicenseSha;
     std::string iniText;  // the shipped default edvr.ini
 };
 
@@ -51,6 +56,9 @@ struct Survey {
     bool gameRunningElsewhere = false;  // from another install: this folder is free
 
     DllInfo              d3d11;       // <game>\d3d11.dll
+    DllInfo              openxrLoader; // <game>\Openvr\win64\openxr_loader.dll
+    DllInfo              nativeConfig; // edvr_openxr.ini
+    DllInfo              openxrLicense; // Khronos notice
     std::vector<DllInfo> otherD3d11;  // d3d11_*.dll beside it: chain targets, ours or theirs
     bool                 iniPresent = false;
     std::string iniText;      // the user's edvr.ini
@@ -78,6 +86,7 @@ struct Survey {
     std::vector<std::wstring> openvrOrigInBackups;
 
     InstallState state;
+    bool eliteProfileValid = false;
 };
 
 Survey surveyTarget(const GameInstall& game);

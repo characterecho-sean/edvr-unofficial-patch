@@ -97,7 +97,9 @@ std::wstring relativeOpenvr(const std::wstring& gameDir, const std::wstring& ope
 Survey surveyTarget(const GameInstall& game) {
     Survey s;
     s.game = game;
+    s.eliteProfileValid = qualifiedEliteExecutable(joinPath(game.dir, L"EliteDangerous64.exe"));
     if (s.game.openvrDir.empty()) s.game.openvrDir = findOpenvrDir(game.dir);
+    if (s.game.openvrDir.empty()) s.game.openvrDir = joinPath(game.dir, L"Openvr\\win64");
 
     // Asked about THIS folder, not about the executable's name: the other
     // install on the machine can be in a jump while this one is patched.
@@ -119,7 +121,18 @@ Survey surveyTarget(const GameInstall& game) {
     s.nvidiaAdapter = nvidiaAdapterPresent(&s.nvidiaAdapterName);
 
     if (!s.game.openvrDir.empty()) {
-        s.haveOpenvrDir = true;
+        s.haveOpenvrDir = dirExists(s.game.openvrDir);
+        s.openxrLoader = probeDll(joinPath(s.game.openvrDir, L"openxr_loader.dll"));
+        auto surveyText = [&](const wchar_t* name) {
+            DllInfo info; info.path=joinPath(s.game.openvrDir,name);
+            if(fileExists(info.path)) {
+                info.sha256=sha256File(info.path);
+                info.kind=info.sha256.empty()?DllKind::Unreadable:DllKind::Foreign;
+            }
+            return info;
+        };
+        s.nativeConfig=surveyText(L"edvr_openxr.ini");
+        s.openxrLicense=surveyText(L"OPENXR-LOADER-LICENSE.txt");
         s.openvrCurrent = probeDll(joinPath(s.game.openvrDir, kOpenvr));
 
         // What the original was renamed to. openvr_api_orig.dll is what the
@@ -177,11 +190,23 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             "file the game has open, and a half-replaced install is worse than none.");
         return plan;
     }
-    if (!p.haveD3d11 && !p.haveOpenvr) {
+    if (!p.haveD3d11 || !p.haveOpenvr || !p.haveOpenxrLoader || !p.haveOpenxrLicense ||
+        !p.nativePairValid || p.iniText.empty()) {
         plan.blocked = true;
-        plan.problems.push_back("This installer carries no EDVR files. Nothing to install.");
+        plan.problems.push_back("The native OpenXR package is incomplete or invalid. Nothing will be installed.");
         return plan;
     }
+    if (!s.eliteProfileValid) {
+        plan.blocked=true;
+        plan.problems.push_back("This Elite executable is not supported by this OpenXR build. Install an EDVR build supporting this game revision.");
+        return plan;
+    }
+    for (const DllInfo* item : {&s.d3d11,&s.openvrCurrent,&s.openxrLoader,&s.nativeConfig,&s.openxrLicense}) {
+        if(item->kind==DllKind::Unreadable) {
+            plan.blocked=true;plan.problems.push_back("A native OpenXR destination cannot be read. Nothing will be installed.");return plan;
+        }
+    }
+    const std::wstring nativeDir=s.game.openvrDir.empty()?joinPath(s.game.dir,L"Openvr\\win64"):s.game.openvrDir;
     if (s.gameRunningElsewhere) plan.notes.push_back(kRunningElsewhere);
 
     std::vector<Step> body;
@@ -193,7 +218,8 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     next.present = true;
     next.edvrVersion = p.version;
     next.installedUtc = o.nowUtc;
-    next.openvrDir = relativeOpenvr(s.game.dir, s.game.openvrDir);
+    next.openvrDir = relativeOpenvr(s.game.dir, nativeDir);
+    next.nativeInstalled=true;
 
     // The chain is DECIDED by this run, not inherited from the record. The
     // record says what was true last time, and whether it is still true is the
@@ -447,153 +473,62 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             "is left where it is.");
     }
 
-    // ------------------------------------------------------------------
-    // openvr_api.dll -- the transition flash fix and Explorer Cam. This one
-    // REPLACES a file the game owns, so the original has to survive the swap.
-    // ------------------------------------------------------------------
-    if (p.haveOpenvr) {
-        if (!s.haveOpenvrDir) {
-            plan.problems.push_back(
-                "Could not find the game's own openvr_api.dll (looked in Openvr\\win64, Openvr, "
-                "and the game folder). The transition flash fix and Explorer Cam need it and were "
-                "not installed; every other fix is unaffected.");
-        } else {
-            const std::wstring dir = s.game.openvrDir;
-            const std::wstring dst = joinPath(dir, kOpenvr);
-            // The name this folder uses for the original, which is the default
-            // unless a hand install chose another and said so in edvr.ini.
-            std::wstring origName = safeSiblingName(s.openvrOrigName, kOpenvr);
-            if (origName.empty()) origName = kOpenvrOrig;
-            const std::wstring origPath = joinPath(dir, origName);
-            const DllInfo& cur = s.openvrCurrent;
-            const DllInfo& orig = s.openvrOrig;
-
-            const bool curIsOurs = cur.kind == DllKind::Edvr;
-            const bool curIsRuntime = cur.kind == DllKind::OpenVrRuntime;
-            const bool origIsRuntime = orig.kind == DllKind::OpenVrRuntime;
-
-            if (cur.kind == DllKind::Unreadable || orig.kind == DllKind::Unreadable) {
-                plan.problems.push_back(
-                    "The openvr_api.dll files in " + say(dir) +
-                    " cannot be read -- something has them open. That half was not installed.");
-            } else if (curIsRuntime) {
-                // The game's own runtime is in place: either a first install,
-                // or the game put its file back over ours (a game update, or a
-                // file verification in the launcher).
-                if (origIsRuntime) {
-                    backup(origPath, "the previously renamed original, now superseded");
-                    plan.notes.push_back(
-                        "The game has restored its own openvr_api.dll since the last install. The "
-                        "current one is kept as the original and EDVR is reinstalled in front of "
-                        "it.");
+    // The game-facing OpenVR ABI is always provided by native OpenXR. The
+    // original DLL is retained for uninstall, never loaded by this backend.
+    const std::wstring runtime=joinPath(nativeDir,kOpenvr);
+    std::wstring originalName=safeSiblingName(s.openvrOrigName,kOpenvr);
+    if(originalName.empty())originalName=kOpenvrOrig;
+    const std::wstring original=joinPath(nativeDir,originalName);
+    const DllInfo& current=s.openvrCurrent;
+    const DllInfo& saved=s.openvrOrig;
+    next.openvrOrigName=originalName;
+    next.openvrOrigSha=saved.kind==DllKind::OpenVrRuntime?saved.sha256:std::string();
+    if(current.kind==DllKind::Edvr && current.sha256==p.openvrSha && !o.repair) {
+        plan.notes.push_back("Native OpenXR runtime is already this build -- left alone.");
+    } else {
+        if(current.kind!=DllKind::Absent) {
+            backup(runtime,"the previous VR library, for recovery");
+            body.back().required=true;body.back().expectSha=current.sha256;
+            if(current.kind==DllKind::OpenVrRuntime &&
+               (saved.kind==DllKind::Absent || (saved.kind==DllKind::OpenVrRuntime && saved.sha256!=current.sha256))) {
+                if(saved.kind==DllKind::OpenVrRuntime) {
+                    backup(original,"the superseded original runtime");
+                    body.back().required=true;body.back().expectSha=saved.sha256;
+                    plan.notes.push_back("The game updated its VR library; keeping the newer original for uninstall.");
                 }
-                if (!cur.is64) {
-                    plan.problems.push_back(
-                        "The openvr_api.dll being renamed aside is 32-bit, which the 64-bit game "
-                        "cannot have been loading. Check what put it there before starting the "
-                        "game.");
-                }
-                backup(dst, "the game's own openvr_api.dll, before it is renamed");
-                rename(dst, origPath, "keeps the game's original as " + say(origName),
-                       cur.sha256);
-                writePayload("openvr", dst, "installs EDVR's openvr_api.dll");
-                next.openvrOrigSha = cur.sha256;
-                next.openvrOrigName = origName;
-                next.openvrInstalled = true;
-                next.openvrSha = p.openvrSha;
-                if (!origIsRuntime) {
-                    plan.notes.push_back(
-                        "Installing openvr_api.dll in " + say(dir) +
-                        ": the game's own copy is renamed openvr_api_orig.dll and EDVR passes "
-                        "every call through to it.");
-                }
-                if (modNameOf(cur) == L"OpenComposite") {
-                    plan.notes.push_back(
-                        "That original is OpenComposite, not SteamVR. EDVR chains through it "
-                        "normally; if it raises a dialog about an interface it does not "
-                        "implement, advanced.suppress_interfaces in edvr.ini is the setting for "
-                        "that.");
-                }
-            } else if (curIsOurs && origIsRuntime) {
-                if (cur.sha256 == p.openvrSha && !o.repair) {
-                    plan.notes.push_back("openvr_api.dll is already this build -- left alone.");
-                } else {
-                    backup(dst, "the EDVR openvr_api.dll being replaced");
-                    writePayload("openvr", dst,
-                                 o.repair ? "reinstalls EDVR's openvr_api.dll"
-                                          : "updates EDVR's openvr_api.dll");
-                    plan.notes.push_back(o.repair
-                                             ? "Reinstalling openvr_api.dll (transition flash fix, "
-                                               "Explorer Cam)."
-                                             : "Updating openvr_api.dll (transition flash fix, "
-                                               "Explorer Cam).");
-                }
-                next.openvrOrigSha = orig.sha256;
-                next.openvrOrigName = origName;
-                next.openvrInstalled = true;
-                next.openvrSha = p.openvrSha;
-            } else if (curIsOurs) {
-                // Ours is installed and the original is NOT there. EDVR has
-                // nothing to forward to, so VR does not start at all -- the
-                // failure the README warns about in bold.
-                if (!s.openvrOrigInBackups.empty()) {
-                    copyInto(s.openvrOrigInBackups.front(), origPath,
-                             "restores the game's original runtime from an EDVR backup");
-                    backup(dst, "the EDVR openvr_api.dll being replaced");
-                    writePayload("openvr", dst, "reinstalls EDVR's openvr_api.dll");
-                    // Name the backup by its folder -- the timestamp is the
-                    // only thing that tells one from another.
-                    const std::wstring backupFile = s.openvrOrigInBackups.front();
-                    const std::wstring stamp =
-                        leafOf(backupFile.substr(0, backupFile.find_last_of(L"\\/")));
-                    plan.notes.push_back(
-                        "The game's original openvr_api.dll was missing, which stops VR from "
-                        "starting at all. It has been restored from the backup this installer made "
-                        "at " + say(stamp) + ", and EDVR reinstalled in front of it.");
-                    next.openvrOrigName = origName;
-                    next.openvrInstalled = true;
-                    next.openvrSha = p.openvrSha;
-                } else {
-                    plan.problems.push_back(
-                        "EDVR's openvr_api.dll is installed in " + say(dir) +
-                        " but the game's original (openvr_api_orig.dll) is not there, and no "
-                        "backup of it was found. VR cannot start: EDVR has nothing to pass calls "
-                        "through to. Use your launcher to verify or repair the game files -- that "
-                        "restores openvr_api.dll -- then run this installer again. Nothing in that "
-                        "folder was changed.");
-                }
-            } else if (cur.kind == DllKind::Absent && origIsRuntime) {
-                writePayload("openvr", dst, "reinstalls EDVR's openvr_api.dll");
-                plan.notes.push_back(
-                    "openvr_api.dll had gone missing while the game's original was still safely "
-                    "renamed. Reinstalled.");
-                next.openvrOrigSha = orig.sha256;
-                next.openvrOrigName = origName;
-                next.openvrInstalled = true;
-                next.openvrSha = p.openvrSha;
-            } else if (cur.kind == DllKind::Absent) {
-                plan.problems.push_back(
-                    "There is no openvr_api.dll in " + say(dir) +
-                    " at all, and no renamed original. Verify the game files in your launcher "
-                    "before installing the VR half.");
-            } else {
-                plan.problems.push_back(
-                    "The openvr_api.dll in " + say(dir) +
-                    " is not an OpenVR runtime and not EDVR's -- it was left alone rather than "
-                    "renamed. Send the log or ask on Discord before going further.");
+                rename(runtime,original,"preserves the original runtime for uninstall",current.sha256);
+                next.openvrOrigSha=current.sha256;
             }
         }
+        writePayload("openvr",runtime,"installs native OpenXR using the Windows-selected runtime");
+        plan.notes.push_back("Installing native OpenXR. The original VR library is not used at runtime.");
     }
-
-    if (!p.haveOpenvr) {
-        // Not a choice the user made -- a build made without the game's own
-        // openvr_api.dll to generate an export table from. package.bat refuses
-        // to ship one, so this can only be a developer build, and it says so
-        // rather than quietly installing half a patch.
-        plan.problems.push_back(
-            "This installer was built without EDVR's openvr_api.dll, so the transition flash fix "
-            "and Explorer Cam are not in it. That is a development build; a release always carries "
-            "both files.");
+    next.openvrInstalled=true;next.openvrSha=p.openvrSha;
+    next.nativeGraphicsSha=p.d3d11Sha;next.nativeRuntimeSha=p.openvrSha;
+    next.nativeOriginalName=next.openvrOrigName;next.nativeOriginalSha=next.openvrOrigSha;
+    auto nativeAsset=[&](const DllInfo& current,const wchar_t* name,const char* item,const std::string& wanted) {
+        const auto destination=joinPath(nativeDir,name);
+        if(current.kind!=DllKind::Absent && current.sha256==wanted && !o.repair)return;
+        if(current.kind!=DllKind::Absent) {
+            backup(destination,"the previous native OpenXR file");
+            body.back().required=true;body.back().expectSha=current.sha256;
+        }
+        writePayload(item,destination,"installs the bundled OpenXR dependency");
+    };
+    nativeAsset(s.openxrLoader,L"openxr_loader.dll","openxr_loader",p.openxrLoaderSha);
+    nativeAsset(s.openxrLicense,L"OPENXR-LOADER-LICENSE.txt","openxr_license",p.openxrLicenseSha);
+    next.openxrLoaderSha=p.openxrLoaderSha;next.openxrLicenseSha=p.openxrLicenseSha;
+    const std::string config="[openxr]\r\nversion=1\r\nloader="+
+        toUtf8(joinPath(nativeDir,L"openxr_loader.dll"))+"\r\ngraphics="+
+        toUtf8(joinPath(s.game.dir,kD3d11))+"\r\nruntime=system\r\nseparate_device=1\r\n";
+    next.nativeConfigSha=sha256Bytes(config.data(),config.size());
+    if(s.nativeConfig.sha256!=next.nativeConfigSha || o.repair) {
+        const auto destination=joinPath(nativeDir,L"edvr_openxr.ini");
+        if(s.nativeConfig.kind!=DllKind::Absent) {
+            backup(destination,"the previous OpenXR startup configuration");
+            body.back().required=true;body.back().expectSha=s.nativeConfig.sha256;
+        }
+        writeText(config,destination,"selects the Windows OpenXR runtime");changed=true;
     }
 
     // ------------------------------------------------------------------
@@ -664,6 +599,8 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             mk.why = "keeps a copy of everything replaced";
             plan.steps.push_back(mk);
         }
+        Step nativeFolder;nativeFolder.action=Action::MakeDir;nativeFolder.to=nativeDir;
+        nativeFolder.why="holds the native OpenXR runtime and loader";plan.steps.push_back(nativeFolder);
         plan.steps.insert(plan.steps.end(), body.begin(), body.end());
 
         Step mkState;
@@ -694,6 +631,10 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
 
 Plan planUninstall(const Survey& s, const Options& o) {
     Plan plan;
+    if((s.state.nativeInstalled || s.openvrCurrent.nativeRuntimeExports) && s.openvrCurrent.kind==DllKind::Edvr &&
+       s.openvrOrig.kind!=DllKind::OpenVrRuntime && s.openvrOrigInBackups.empty()) {
+        plan.blocked=true;plan.problems.push_back("The original VR library is missing. Repair the game files before uninstalling; the native pair was left intact.");return plan;
+    }
     plan.backupDir =
         joinPath(backupRootPath(s.game.dir), o.backupStamp.empty() ? L"backup" : o.backupStamp);
 
@@ -831,6 +772,20 @@ Plan planUninstall(const Survey& s, const Options& o) {
         } else {
             plan.notes.push_back("No EDVR openvr_api.dll to remove.");
         }
+    }
+
+    if(s.state.nativeInstalled) {
+        auto retire=[&](const DllInfo& info,const std::string& owned) {
+            if(info.kind==DllKind::Absent)return;
+            if(owned.empty() || info.sha256!=owned) {
+                plan.notes.push_back("Keeping a changed OpenXR file: "+say(leafOf(info.path)));return;
+            }
+            backup(info.path,"the native OpenXR file being removed");
+            remove(info.path,"removes EDVR's OpenXR dependency",info.sha256);
+        };
+        retire(s.openxrLoader,s.state.openxrLoaderSha);
+        retire(s.openxrLicense,s.state.openxrLicenseSha);
+        retire(s.nativeConfig,s.state.nativeConfigSha);
     }
 
     // ---- NVIDIA's DLSS runtime ----------------------------------------

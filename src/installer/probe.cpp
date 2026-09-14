@@ -3,6 +3,7 @@
 #include <bcrypt.h>
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <cwctype>
 #include <vector>
@@ -30,6 +31,11 @@ struct PeFacts {
     bool hasEdvr        = false;
     bool hasVrInit      = false;
     bool hasD3d11Create = false;
+    bool hasXrGetInstanceProcAddr = false;
+    bool hasNativeConfigure = false;
+    bool nativeMarkerValid = false;
+    bool nativeGraphicsProviders = false;
+    bool nativeRuntimeExports = false;
 };
 
 bool rvaToOffset(const IMAGE_SECTION_HEADER* sections, unsigned count, DWORD rva, DWORD fileSize,
@@ -37,9 +43,10 @@ bool rvaToOffset(const IMAGE_SECTION_HEADER* sections, unsigned count, DWORD rva
     for (unsigned i = 0; i < count; ++i) {
         const IMAGE_SECTION_HEADER& s = sections[i];
         const DWORD vsize = s.Misc.VirtualSize ? s.Misc.VirtualSize : s.SizeOfRawData;
-        if (rva >= s.VirtualAddress && rva < s.VirtualAddress + vsize) {
+        if (rva >= s.VirtualAddress && rva - s.VirtualAddress < vsize) {
             const DWORD delta = rva - s.VirtualAddress;
             if (delta >= s.SizeOfRawData) return false;  // inside the section, absent from the file
+            if (s.PointerToRawData >= fileSize || delta >= fileSize - s.PointerToRawData) return false;
             const DWORD off = s.PointerToRawData + delta;
             if (off >= fileSize) return false;
             *out = off;
@@ -64,7 +71,7 @@ void parsePe(const unsigned char* base, DWORD size, PeFacts* facts) {
         if (nt->Signature != IMAGE_NT_SIGNATURE) return;
 
         const WORD magic = nt->OptionalHeader.Magic;
-        const bool is64 = (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+        const bool is64 = (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64);
         if (!is64 && magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) return;
 
         IMAGE_DATA_DIRECTORY exportDir{};
@@ -104,19 +111,68 @@ void parsePe(const unsigned char* base, DWORD size, PeFacts* facts) {
         if (namesOff + nameCount * sizeof(DWORD) > size) return;
         const DWORD* nameRvas = reinterpret_cast<const DWORD*>(base + namesOff);
 
-        for (DWORD i = 0; i < nameCount; ++i) {
-            DWORD off = 0;
-            if (!rvaToOffset(sections, sectionCount, nameRvas[i], size, &off)) continue;
-            const char* name = reinterpret_cast<const char*>(base + off);
-            const DWORD room = size - off;  // the name may run to the end of the mapping
-            if (room > 5 && memcmp(name, "edvr_", 5) == 0) facts->hasEdvr = true;
-            if (room > 7 && memcmp(name, "edvrFss", 7) == 0) facts->hasEdvr = true;
-            if (room > 15 && memcmp(name, "VR_InitInternal", 15) == 0) facts->hasVrInit = true;
-            if (room > 22 && memcmp(name, "VR_GetGenericInterface", 22) == 0)
-                facts->hasVrInit = true;
-            if (room > 17 && memcmp(name, "D3D11CreateDevice", 17) == 0)
-                facts->hasD3d11Create = true;
+        DWORD functionsOff=0, ordinalsOff=0;
+        const DWORD functionCount=exp->NumberOfFunctions;
+        if (!functionCount || functionCount>65536 || nameCount>functionCount ||
+            !rvaToOffset(sections,sectionCount,exp->AddressOfFunctions,size,&functionsOff) ||
+            !rvaToOffset(sections,sectionCount,exp->AddressOfNameOrdinals,size,&ordinalsOff) ||
+            functionCount>(size-functionsOff)/sizeof(DWORD) ||
+            nameCount>(size-ordinalsOff)/sizeof(WORD)) return;
+        const DWORD* functions=reinterpret_cast<const DWORD*>(base+functionsOff);
+        const WORD* ordinals=reinterpret_cast<const WORD*>(base+ordinalsOff);
+        const char* providers[]={
+            "D3D11CreateDevice","D3D11CreateDeviceAndSwapChain",
+            "edvrAcquireNativeGraphics","edvrAcquireNativeMenu","edvrAcquireNativeTemporal",
+            "edvrAcquireNativeSharpen","edvrAcquireNativeFrame","edvrAcquireNativeFss",
+            "edvrAcquireNativeTiming","edvrAcquireGraphicsBridge","edvrAcquireRenderBoundary",
+            "edvrQueryNativeRenderSettings","edvrPublishNativeRenderSizing","edvrQueryNativeRenderSizing"};
+        const char* runtimeNames[]={
+            "VRControlPanel","VRDashboardManager","VRTrackedCamera","VR_GetGenericInterface",
+            "VR_GetInitToken","VR_GetStringForHmdError","VR_GetVRInitErrorAsEnglishDescription",
+            "VR_GetVRInitErrorAsSymbol","VR_InitInternal","VR_IsHmdPresent",
+            "VR_IsInterfaceVersionValid","VR_IsRuntimeInstalled","VR_RuntimePath",
+            "VR_ShutdownInternal","edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus"};
+        bool providerFound[_countof(providers)]{},runtimeFound[_countof(runtimeNames)]{};
+        for (DWORD i=0;i<nameCount;++i) {
+            DWORD off=0;
+            if(!rvaToOffset(sections,sectionCount,nameRvas[i],size,&off)) return;
+            const char* name=reinterpret_cast<const char*>(base+off);
+            if(!memchr(name,0,size-off) || ordinals[i]>=functionCount) return;
+            const DWORD rva=functions[ordinals[i]];
+            DWORD functionOff=0;
+            if (!rvaToOffset(sections,sectionCount,rva,size,&functionOff) ||
+                (rva>=exportDir.VirtualAddress && rva-exportDir.VirtualAddress<exportDir.Size)) return;
+            const IMAGE_SECTION_HEADER* section=nullptr;
+            for(unsigned j=0;j<sectionCount;++j) {
+                const auto& sh=sections[j];
+                if(rva>=sh.VirtualAddress && rva-sh.VirtualAddress<sh.SizeOfRawData) {section=&sh;break;}
+            }
+            if(!section) return;
+            const bool executable=(section->Characteristics&IMAGE_SCN_MEM_EXECUTE)!=0;
+            if(strncmp(name,"edvr",4)==0) facts->hasEdvr=true;
+            if(strcmp(name,"VR_InitInternal")==0 || strcmp(name,"VR_GetGenericInterface")==0)
+                facts->hasVrInit=true;
+            if(strcmp(name,"D3D11CreateDevice")==0) facts->hasD3d11Create=true;
+            if(strcmp(name,"xrGetInstanceProcAddr")==0 && executable) facts->hasXrGetInstanceProcAddr=true;
+            if(strcmp(name,"edvrConfigureNativeRuntime")==0 && executable) facts->hasNativeConfigure=true;
+            for(unsigned j=0;j<_countof(providers);++j)
+                if(strcmp(name,providers[j])==0 && executable) providerFound[j]=true;
+            for(unsigned j=0;j<_countof(runtimeNames);++j)
+                if(strcmp(name,runtimeNames[j])==0 && executable && ordinals[i]==j) runtimeFound[j]=true;
+            if(strcmp(name,"edvrNativeStartupRouting")==0) {
+                const DWORD delta=rva-section->VirtualAddress;
+                if(size-functionOff>=16 && section->SizeOfRawData-delta>=16 &&
+                   (section->Characteristics&IMAGE_SCN_MEM_READ) &&
+                   !(section->Characteristics&(IMAGE_SCN_MEM_WRITE|IMAGE_SCN_MEM_EXECUTE))) {
+                    DWORD values[4];memcpy(values,base+functionOff,sizeof(values));
+                    facts->nativeMarkerValid=values[0]==16&&values[1]==1&&values[2]==1&&values[3]==0;
+                }
+            }
         }
+        facts->nativeGraphicsProviders=true;
+        for(bool found:providerFound) if(!found) facts->nativeGraphicsProviders=false;
+        facts->nativeRuntimeExports=exp->Base==1 && functionCount==_countof(runtimeNames) && nameCount==functionCount;
+        for(bool found:runtimeFound) if(!found) facts->nativeRuntimeExports=false;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // A file that faults while being read is a file we know nothing about,
         // which is exactly what an unparsed PeFacts says.
@@ -275,6 +331,11 @@ DllInfo probeDll(const std::wstring& path) {
     info.hasEdvrExports = facts.hasEdvr;
     info.hasVrInit = facts.hasVrInit;
     info.hasD3d11Create = facts.hasD3d11Create;
+    info.hasXrGetInstanceProcAddr = facts.hasXrGetInstanceProcAddr;
+    info.hasNativeConfigure = facts.hasNativeConfigure;
+    info.nativeMarkerValid = facts.nativeMarkerValid;
+    info.nativeGraphicsProviders = facts.nativeGraphicsProviders;
+    info.nativeRuntimeExports = facts.nativeRuntimeExports;
 
     // Ours first, and unconditionally. An EDVR proxy exports everything the DLL
     // it stands in for exports, so testing for VR_InitInternal or
@@ -296,6 +357,38 @@ DllInfo probeDll(const std::wstring& path) {
     info.fileVersion = versionString(path, L"FileVersion");
     info.sha256 = sha256File(path);
     return info;
+}
+
+bool validateNativeGraphics(const DllInfo& info) {
+    return info.kind == DllKind::Edvr && info.is64 && info.nativeMarkerValid && info.nativeGraphicsProviders;
+}
+
+bool validateNativeRuntime(const DllInfo& info) {
+    return info.kind == DllKind::Edvr && info.is64 && info.hasEdvrExports &&
+           info.nativeRuntimeExports;
+}
+
+bool validateOpenxrLoader(const DllInfo& info) {
+    return info.is64 && info.hasXrGetInstanceProcAddr && info.kind != DllKind::Unreadable &&
+           info.kind != DllKind::Absent;
+}
+
+bool qualifiedEliteExecutable(const std::wstring& path) {
+    // Pinned profile digest from tools/elite_oculus.py. Hashing is read-only
+    // and avoids executing an untrusted game image during installation.
+    return sha256File(path) == "e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988";
+}
+
+bool validateNativePayloadBytes(const void* data, size_t size, NativeImageKind kind) {
+    if (!data || size == 0 || size > (64u << 20) || size > 0xffffffffu) return false;
+    PeFacts facts;
+    parsePe(static_cast<const unsigned char*>(data), static_cast<DWORD>(size), &facts);
+    if (!facts.parsed || !facts.is64 || (!facts.hasEdvr && kind != NativeImageKind::Loader)) return false;
+    if (kind == NativeImageKind::Graphics)
+        return facts.nativeMarkerValid && facts.nativeGraphicsProviders;
+    if (kind == NativeImageKind::Runtime)
+        return facts.nativeRuntimeExports;
+    return facts.hasXrGetInstanceProcAddr;
 }
 
 std::wstring modNameOf(const DllInfo& info) {

@@ -69,11 +69,19 @@ InstallState parseState(const std::string& text) {
     s.ngxInstalled = !s.ngxSha.empty();
 
     s.iniSha = get("ini", "sha256");
+    s.nativeGraphicsSha = get("native", "graphics_sha256");
+    s.nativeRuntimeSha = get("native", "runtime_sha256");
+    s.openxrLoaderSha = get("native", "loader_sha256");
+    s.openxrLicenseSha = get("native", "license_sha256");
+    s.nativeConfigSha = get("native", "config_sha256");
+    s.nativeOriginalName = fromUtf8(get("native", "original_name"));
+    s.nativeOriginalSha = get("native", "original_sha256");
+    s.nativeInstalled = !s.nativeRuntimeSha.empty() || !s.nativeGraphicsSha.empty();
 
     // A record with no version is not a record; it is a file that happens to
     // parse. Everything downstream keys off `present`, so it has to mean
     // "written by this installer", not "the parse did not fail".
-    s.present = !s.edvrVersion.empty() || s.d3d11Installed || s.openvrInstalled;
+    s.present = !s.edvrVersion.empty() || s.d3d11Installed || s.openvrInstalled || s.nativeInstalled;
     return s;
 }
 
@@ -108,6 +116,14 @@ std::string serializeState(const InstallState& state) {
 
     out += "\r\n[ini]\r\n";
     out += "sha256 = " + state.iniSha + "\r\n";
+    out += "\r\n[native]\r\n";
+    out += "graphics_sha256 = " + state.nativeGraphicsSha + "\r\n";
+    out += "runtime_sha256 = " + state.nativeRuntimeSha + "\r\n";
+    out += "loader_sha256 = " + state.openxrLoaderSha + "\r\n";
+    out += "license_sha256 = " + state.openxrLicenseSha + "\r\n";
+    out += "config_sha256 = " + state.nativeConfigSha + "\r\n";
+    out += "original_name = " + toUtf8(state.nativeOriginalName) + "\r\n";
+    out += "original_sha256 = " + state.nativeOriginalSha + "\r\n";
     return out;
 }
 

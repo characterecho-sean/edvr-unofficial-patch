@@ -4,18 +4,14 @@ REM ===========================================================================
 REM  EDVR build
 REM
 REM  Produces:
-REM    build\d3d11.dll        the fixes themselves
-REM    build\openvr_api.dll   optional; only needed for the transition flash fix
+REM    build\d3d11.dll        native OpenXR graphics and fixes
+REM    build\openvr_api.dll   native OpenXR compatibility ABI for Elite
+REM    build\openxr_loader.dll   pinned Khronos loader; Windows selects runtime
 REM
-REM  The openvr proxy needs the game's own openvr_api.dll to generate a matching
-REM  export table, since -- unlike d3d11.dll -- it is not a Windows component and
-REM  there is no system copy to read. It is looked for in the usual install
-REM  location, or pass --openvr <path>. Without it the d3d11 proxy still builds
-REM  and every other fix still works.
-REM
-REM  Needs Visual Studio 2022 with the C++ workload, and Python (used only to
-REM  generate export thunks, so each proxy exports exactly what the original
-REM  does).
+REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
+REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
+REM  --openvr supplies an original runtime only for legacy ABI regression tests;
+REM  it is never a dependency of the native release or installed runtime.
 REM
 REM  Usage:  build.bat [--openvr <path-to-openvr_api.dll>] [--clean]
 REM ===========================================================================
@@ -126,6 +122,14 @@ pushd "%ROOT%"
 if not exist "%BUILD%" mkdir "%BUILD%"
 if not exist "%GEN%" mkdir "%GEN%"
 if not exist "%OBJ%" mkdir "%OBJ%"
+
+REM Dependency cache survives --clean. Never discover a loader in SteamVR.
+python tools\fetch_openxr_loader.py --verify || exit /b 1
+copy /y "%ROOT%\third_party\openxr\loader\openxr_loader.dll" "%BUILD%\openxr_loader.dll" >nul || exit /b 1
+copy /y "%ROOT%\third_party\openxr\loader\OPENXR-LOADER-LICENSE.txt" "%BUILD%\OPENXR-LOADER-LICENSE.txt" >nul || exit /b 1
+python tools\fetch_openxr_loader.py --self-test || exit /b 1
+python tools\gen_installer_rc.py --self-test || exit /b 1
+python tools\package_native.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
@@ -394,11 +398,12 @@ link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
+copy /y "%BUILD%\d3d11.dll" "%BUILD%\legacy_d3d11_fixture.dll" >nul || exit /b 1
 
 REM The migration build owns automatic LibOVR routing at process attach.
 REM Reuse the exact graphics objects, replacing only the immutable startup
 REM capability in the proxy entry object. Keep the older proxy as a separate
-REM qualification/rollback artifact until native release acceptance.
+REM regression fixture only; the completed build's standard outputs are native.
 echo [edvr] === edvr_openxr_graphics.dll ===
 if not exist "%OBJ%\native_graphics" mkdir "%OBJ%\native_graphics"
 cl.exe %CFLAGS% %NGXFLAGS% /DEDVR_NATIVE_OPENXR_BUILD=1 ^
@@ -494,90 +499,11 @@ goto openvr_done
 :no_openvr
 echo [edvr] SKIPPED: no openvr_api.dll to generate exports from.
 echo        Looked for the game's copy, and reference\openvr_api.dll.
-echo        Pass --openvr ^<path^> to build it. Everything except the
-echo        transition flash fix works without it.
+echo        Pass --openvr ^<path^> to build the legacy ABI test fixture.
+echo        The native release does not require that fixture.
 :openvr_done
 
 echo.
-echo [edvr] === edvr-installer.exe ===
-REM One executable carrying d3d11.dll, edvr.ini and -- when this build has it --
-REM openvr_api.dll, as resources.
-REM
-REM Built AFTER both DLLs, because it embeds whatever they are at this moment.
-REM A build that skipped the openvr half above produces an installer that says
-REM so in its window rather than one that fails to link: the .rc is generated,
-REM and the missing file is simply not named in it.
-REM
-REM /MANIFEST:NO is not optional. link.exe embeds a manifest of its own by
-REM default, and our .rc already puts one at resource 1 -- two RT_MANIFEST
-REM resources in one image, which Windows refuses to start at all: "the
-REM side-by-side configuration is incorrect", before a line of our code runs.
-REM It links and packages perfectly happily.
-if not exist "%OBJ%\installer" mkdir "%OBJ%\installer"
-python "tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
-    --out "%GEN%" --version "%EDVR_VER%"
-if errorlevel 1 ( echo [edvr] ERROR: installer resource generation failed & exit /b 1 )
-
-REM The settings window's contents were generated above, before the d3d11
-REM compile, since the in-headset menu shares the schema.
-
-rc.exe /nologo /fo "%OBJ%\installer\payload.res" "%GEN%\payload.rc"
-if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the installer resources & exit /b 1 )
-
-set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
-    "src\installer\ui.cpp" "src\installer\settings.cpp" ^
-    "src\installer\settings_view.cpp" "src\installer\logbundle.cpp" ^
-    "src\installer\app.cpp" "src\installer\plan.cpp" ^
-    "src\installer\apply.cpp" "src\installer\detect.cpp" ^
-    "src\installer\probe.cpp" "src\common\iniedit.cpp" ^
-    "src\installer\state.cpp" "src\installer\mirror.cpp" ^
-    "src\installer\payload.cpp"
-set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
-    shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
-
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
-    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
-    /Fo"%OBJ%\installer"\ /Fe"%BUILD%\edvr-installer.exe" ^
-    %INSTALLER_SRC% "%OBJ%\installer\payload.res" ^
-    /link /INCREMENTAL:NO /SUBSYSTEM:WINDOWS /MANIFEST:NO %INSTALLER_LIBS%
-if errorlevel 1 ( echo [edvr] ERROR: installer build failed & exit /b 1 )
-echo [edvr] built %BUILD%\edvr-installer.exe
-
-REM Does it START? Not a formality: a manifest Windows cannot parse, a missing
-REM import, the wrong subsystem -- each of these produces an executable that
-REM links without a murmur and dies before main(), with a dialog the build never
-REM sees. --help reads nothing and writes nothing.
-"%BUILD%\edvr-installer.exe" --help >nul || (
-    echo [edvr] ERROR: the installer will not run. If Windows called it a
-    echo        side-by-side configuration problem, the manifest is the suspect.
-    exit /b 1
-)
-
-echo [edvr] === installer_test.exe ===
-REM The planner over folders that are hard to arrange on a real machine: EDHM
-REM already in the d3d11.dll slot, another mod's installer having overwritten
-REM ours, a game update that put the stock openvr_api.dll back, an original
-REM runtime lost to a double rename -- and the edvr.ini merge, which is the one
-REM piece whose failure silently discards settings somebody tuned in a headset.
-if not exist "%OBJ%\insttest" mkdir "%OBJ%\insttest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
-    /Fo"%OBJ%\insttest"\ /Fe"%BUILD%\installer_test.exe" ^
-    "tools\installer_test\installer_test.cpp" ^
-    "src\installer\plan.cpp" "src\installer\apply.cpp" ^
-    "src\installer\detect.cpp" "src\installer\probe.cpp" ^
-    "src\common\iniedit.cpp" "src\installer\state.cpp" ^
-    "src\installer\mirror.cpp" ^
-    "src\installer\settings.cpp" "src\installer\logbundle.cpp" ^
-    /link /INCREMENTAL:NO %INSTALLER_LIBS%
-if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
-"%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (
-    echo [edvr] ERROR: the installer failed its own tests
-    exit /b 1
-)
-
-
 REM Gated with `||`, not `if errorlevel 1`.
 REM
 REM `if errorlevel N` means "exit code >= N", and a process killed by an access
@@ -1320,7 +1246,7 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR export test build failed & exit /b 1
 "%BUILD%\openxr_exports_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_exports_test.exe" --self-test || exit /b 1
 
-REM Separate native runtime DLL; installed only through the explicit native route.
+REM Native runtime DLL: the only supported release and installation backend.
 REM Its application fixture calls the game-imported ABI without linking the host.
 if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
@@ -1348,6 +1274,79 @@ if errorlevel 1 ( echo [edvr] ERROR: native runtime module test build failed & e
 python tools\openxr_pe.py --self-test || exit /b 1
 python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 1
 python tools\openxr_pe.py --graphics "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
+
+echo [edvr] === edvr-installer.exe ===
+REM The complete native pair, Khronos loader, notices and settings are embedded.
+REM /MANIFEST:NO is not optional. link.exe embeds a manifest of its own by
+REM default, and our .rc already puts one at resource 1 -- two RT_MANIFEST
+REM resources in one image, which Windows refuses to start at all: "the
+REM side-by-side configuration is incorrect", before a line of our code runs.
+REM It links and packages perfectly happily.
+if not exist "%OBJ%\installer" mkdir "%OBJ%\installer"
+python "tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
+    --out "%GEN%" --version "%EDVR_VER%"
+if errorlevel 1 ( echo [edvr] ERROR: installer resource generation failed & exit /b 1 )
+
+REM The settings window's contents were generated above, before the d3d11
+REM compile, since the in-headset menu shares the schema.
+
+rc.exe /nologo /fo "%OBJ%\installer\payload.res" "%GEN%\payload.rc"
+if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the installer resources & exit /b 1 )
+
+set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
+    "src\installer\ui.cpp" "src\installer\settings.cpp" ^
+    "src\installer\settings_view.cpp" "src\installer\logbundle.cpp" ^
+    "src\installer\app.cpp" "src\installer\plan.cpp" ^
+    "src\installer\apply.cpp" "src\installer\detect.cpp" ^
+    "src\installer\probe.cpp" "src\common\iniedit.cpp" ^
+    "src\installer\state.cpp" "src\installer\mirror.cpp" ^
+    "src\installer\payload.cpp"
+set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
+    shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
+
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\installer"\ /Fe"%BUILD%\edvr-installer.exe" ^
+    %INSTALLER_SRC% "%OBJ%\installer\payload.res" ^
+    /link /INCREMENTAL:NO /SUBSYSTEM:WINDOWS /MANIFEST:NO %INSTALLER_LIBS%
+if errorlevel 1 ( echo [edvr] ERROR: installer build failed & exit /b 1 )
+echo [edvr] built %BUILD%\edvr-installer.exe
+
+REM Does it START? Not a formality: a manifest Windows cannot parse, a missing
+REM import, the wrong subsystem -- each of these produces an executable that
+REM links without a murmur and dies before main(), with a dialog the build never
+REM sees. --help reads nothing and writes nothing.
+"%BUILD%\edvr-installer.exe" --help >nul || (
+    echo [edvr] ERROR: the installer will not run. If Windows called it a
+    echo        side-by-side configuration problem, the manifest is the suspect.
+    exit /b 1
+)
+
+echo [edvr] === installer_test.exe ===
+REM The planner over folders that are hard to arrange on a real machine: EDHM
+REM already in the d3d11.dll slot, another mod's installer having overwritten
+REM ours, a game update that put the stock openvr_api.dll back, an original
+REM runtime lost to a double rename -- and the edvr.ini merge, which is the one
+REM piece whose failure silently discards settings somebody tuned in a headset.
+if not exist "%OBJ%\insttest" mkdir "%OBJ%\insttest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /Fo"%OBJ%\insttest"\ /Fe"%BUILD%\installer_test.exe" ^
+    "tools\installer_test\installer_test.cpp" ^
+    "src\installer\plan.cpp" "src\installer\apply.cpp" ^
+    "src\installer\detect.cpp" "src\installer\probe.cpp" ^
+    "src\common\iniedit.cpp" "src\installer\state.cpp" ^
+    "src\installer\mirror.cpp" ^
+    "src\installer\settings.cpp" "src\installer\logbundle.cpp" ^
+    /link /INCREMENTAL:NO %INSTALLER_LIBS%
+if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
+"%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (
+    echo [edvr] ERROR: the installer failed its own tests
+    exit /b 1
+)
+
+
 python tools\elite_oculus.py --self-test || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1
 
@@ -1552,6 +1551,12 @@ if errorlevel 1 (
     )
 )
 
+
+REM All legacy regression tests above have finished. Standard outputs are native.
+copy /y "%BUILD%\edvr_openxr_graphics.dll" "%BUILD%\d3d11.dll" >nul || exit /b 1
+copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
 echo.
 REM The one line a release engineer has to see, after thousands of compiler
 REM lines: whether the installer just built carries NVIDIA's runtime.
@@ -1563,32 +1568,15 @@ if exist "%BUILD%\nvngx_dlss.dll" (
     echo        above says where it looked^). Not a release build.
 )
 echo.
-echo [edvr] To install this build for a test flight:
-echo        python tools\install_edvr.py --target steam --dry-run
-echo        python tools\install_edvr.py --target steam
+echo [edvr] Native OpenXR build and all gates passed.
+echo [edvr] Install both native DLLs and the bundled loader for a test flight:
+echo        python tools\install_edvr.py --target frontier --dry-run
+echo        python tools\install_edvr.py --target frontier
+echo        --target takes steam, frontier or a path. Settings are preserved
+echo        unless --ini is specified. Windows selects the OpenXR runtime.
 echo.
-echo        --target takes steam, frontier or a path; --openvr adds the VR
-echo        half. It refuses while the game is running, keeps one backup
-echo        per commit, and hashes what it copied against what it built --
-echo        an outdated DLL has invalidated a flight before. It leaves
-echo        edvr.ini alone unless --ini asks for it. Copying these by hand
-echo        is what filled both game directories with backups named four
-echo        different ways; CLAUDE.md says why not to.
-echo.
-echo [edvr] Where those files land, because the two halves do NOT go in the
-echo        same place: d3d11.dll and edvr.ini beside EliteDangerous64.exe,
-echo        and openvr_api.dll into Openvr\win64, replacing the game's file
-echo        of that name -- whose original must already be renamed
-echo        openvr_api_orig.dll. See README.md.
-echo.
-echo [edvr] After the flight, before reading a counter off the log --
-echo        whether the log is even this build:
-echo        python tools\edvr_log.py --target steam --expect-build HEAD
-echo.
-echo [edvr] Or hand somebody build\edvr-installer.exe: it carries the two
-echo        DLLs and edvr.ini, finds Steam, Epic and Frontier installs,
-echo        keeps their edvr.ini settings and repairs a clobbered install.
-echo.
-echo [edvr] To check the build without the game:
-echo        build\smoke.exe build\d3d11.dll
+echo [edvr] The self-contained build\edvr-installer.exe installs the same pair,
+echo        preserves graphics-mod chaining, and supports repair and uninstall.
+echo [edvr] After the flight:
+echo        python tools\edvr_log.py --target frontier --expect-build HEAD
 exit /b 0

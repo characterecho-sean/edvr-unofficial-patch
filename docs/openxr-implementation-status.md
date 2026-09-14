@@ -2,10 +2,17 @@
 
 The release goal is native OpenXR for every EDVR user, including those Elite
 currently routes through LibOVR. Windows selects the OpenXR runtime. Automatic
-bypass of Elite's Oculus preference and installer migration from all existing
-backend paths are required; separate legacy artifacts serve qualification and
-explicit rollback only. Native OpenXR is the destination standard release, not
-a permanent opt-in backend.
+bypass of Elite's Oculus preference and installer migration from existing
+backend paths are required. Standard artifacts now use native OpenXR; legacy
+proxies are regression fixtures only. Deliberate file recovery remains
+available through uninstall and receipts.
+
+The [native-only migration](openxr-native-only-2026-09-14.md) removes the old
+default deployment branch, requires a complete native pair, bundles the pinned
+Khronos loader and checks the installer resources against the release DLLs.
+Existing graphics-mod chains and user settings are preserved. Native startup
+errors do not switch to LibOVR or legacy OpenVR. See the checkpoint for build
+evidence, installation hashes and the next flight checklist.
 
 The [Air Link menu and exit retest](openxr-airlink-menu-exit-2026-09-14.md)
 passed on the pair reviewed in `5b9dc99`. The native backend now preserves

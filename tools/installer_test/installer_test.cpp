@@ -28,6 +28,8 @@
 #include "../../src/installer/plan.h"
 #include "../../src/installer/probe.h"
 #include "../../src/installer/logbundle.h"
+#include "native_contract_cases.h"
+#include "native_apply_cases.h"
 #include "../../src/installer/mirror.h"
 #include "../../src/installer/settings.h"
 
@@ -151,6 +153,11 @@ static PayloadInfo testPayload(const std::string& iniText) {
     p.d3d11Sha = "aaaa-new-d3d11";
     p.haveOpenvr = true;
     p.openvrSha = "bbbb-new-openvr";
+    p.nativePairValid = true;
+    p.haveOpenxrLoader = true;
+    p.openxrLoaderSha = "cccc-loader";
+    p.haveOpenxrLicense = true;
+    p.openxrLicenseSha = "dddd-license";
     p.iniText = iniText;
     return p;
 }
@@ -163,6 +170,7 @@ static Survey baseSurvey(const std::wstring& gameDir) {
     s.game.product = L"elite-dangerous-odyssey-64";
     s.game.odyssey = true;
     s.haveOpenvrDir = true;
+    s.eliteProfileValid = true;
     s.gameRunningHere = false;
     s.d3d11 = fakeDll(DllKind::Absent, joinPath(gameDir, L"d3d11.dll"), "");
     s.openvrCurrent =
@@ -603,6 +611,10 @@ static void testPlanner() {
         s.state.present = true;
         s.state.d3d11Installed = true;
         s.state.d3d11Sha = payload.d3d11Sha;
+        s.openxrLoader=fakeDll(DllKind::Foreign,joinPath(s.game.openvrDir,L"openxr_loader.dll"),payload.openxrLoaderSha);
+        s.openxrLicense=fakeDll(DllKind::Foreign,joinPath(s.game.openvrDir,L"OPENXR-LOADER-LICENSE.txt"),payload.openxrLicenseSha);
+        const auto first=planInstall(s,options,payload);
+        s.nativeConfig=fakeDll(DllKind::Foreign,joinPath(s.game.openvrDir,L"edvr_openxr.ini"),first.nextState.nativeConfigSha);
         const Plan plan = planInstall(s, options, payload);
         check(plan.nothingToDo, "an install that would change nothing says so");
         check(plan.steps.empty(), "and does nothing");
@@ -671,7 +683,7 @@ static void testPlanner() {
               "the current runtime becomes the original");
         check(hasStep(plan, Action::Backup, L"openvr_api_orig.dll", L"openvr_api_orig.dll"),
               "and the superseded one is kept in the backup folder");
-        check(notesMention(plan, "restored its own"), "the report explains it");
+        check(notesMention(plan, "newer original"), "the report explains it");
     }
 
     {   // The worst case: ours is installed and the game's original is gone.
@@ -681,9 +693,10 @@ static void testPlanner() {
         s.openvrOrig = fakeDll(DllKind::Absent,
                                joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "");
         const Plan plan = planInstall(s, options, payload);
-        check(!hasStep(plan, Action::WritePayload, nullptr, L"openvr_api.dll"),
-              "nothing is written over a broken VR install");
-        check(notesMention(plan, "verify"), "the report says how to fix it");
+        check(!plan.blocked && hasStep(plan, Action::WritePayload, nullptr, L"openvr_api.dll"),
+              "native update proceeds without an original runtime dependency");
+        check(!hasStep(plan,Action::Rename,L"openvr_api.dll",L"openvr_api_orig.dll"),
+              "an old EDVR DLL is never preserved as a stock original");
     }
 
     {   // The same, with one of our own backups to hand.
@@ -695,20 +708,23 @@ static void testPlanner() {
         s.openvrOrigInBackups.push_back(
             joinPath(dir, L"edvr_backup\\20260101-000000\\openvr_api.dll"));
         const Plan plan = planInstall(s, options, payload);
-        check(hasStep(plan, Action::Backup, L"openvr_api.dll", L"openvr_api_orig.dll"),
-              "the original is restored from the backup");
+        check(!hasStep(plan, Action::Backup, L"openvr_api.dll", L"openvr_api_orig.dll"),
+              "native startup does not copy a legacy runtime back into use");
         check(hasStep(plan, Action::WritePayload, nullptr, L"openvr_api.dll"),
               "and EDVR is reinstalled in front of it");
     }
 
-    {   // No Openvr folder at all: the other half still installs.
+    {   // No Openvr folder: create it and install the complete native package.
         Survey s = baseSurvey(dir);
         s.haveOpenvrDir = false;
         s.game.openvrDir.clear();
+        s.openvrCurrent=DllInfo{};
         const Plan plan = planInstall(s, options, payload);
         check(hasStep(plan, Action::WritePayload, nullptr, L"d3d11.dll"),
-              "the fixes install without the VR half");
-        check(!plan.problems.empty(), "and the missing half is reported");
+              "graphics installs in a fresh folder");
+        check(hasStep(plan,Action::WritePayload,nullptr,L"openvr_api.dll") &&
+              hasStep(plan,Action::WritePayload,nullptr,L"openxr_loader.dll"),
+              "the native runtime and loader always accompany graphics");
     }
 
 
@@ -827,9 +843,7 @@ static void testPlanner() {
         const Plan plan = planInstall(s, options, halfBuild);
         check(!hasStep(plan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
               "a build without the VR half does not touch the game's runtime");
-        check(hasStep(plan, Action::WritePayload, nullptr, L"d3d11.dll"),
-              "the fixes still install");
-        check(notesMention(plan, "development build"), "and the report says the build is partial");
+        check(plan.blocked && plan.steps.empty(), "a partial package cannot change any files");
     }
 
     {   // Uninstall, with a chained mod and the original runtime in place.
@@ -866,6 +880,40 @@ static void testPlanner() {
     }
 }
 
+static void testNativePlanner() {
+    printf("\nnative planner\n");
+    const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
+    Options o = testOptions();
+    PayloadInfo p; p.version="native-test"; p.iniText="[fix]\r\nblack_void = 1\r\n";
+    p.nativePairValid=true; p.haveD3d11=true; p.haveOpenvr=true; p.haveOpenxrLoader=true; p.d3d11Sha="graphics";
+    p.openvrSha="runtime"; p.openxrLoaderSha="loader";
+    p.haveOpenxrLicense=true; p.openxrLicenseSha="license";
+    Survey s=baseSurvey(dir); s.openxrLoader=fakeDll(DllKind::Absent,joinPath(s.game.openvrDir,L"openxr_loader.dll"),"");
+    s.eliteProfileValid=true;
+    Plan fresh=planInstall(s,o,p);
+    check(!fresh.blocked,"complete native payload plans");
+    check(hasStep(fresh,Action::WritePayload,nullptr,L"d3d11.dll"),"native graphics is installed beside Elite");
+    check(hasStep(fresh,Action::WritePayload,nullptr,L"openvr_api.dll"),"native runtime is installed in Openvr");
+    check(hasStep(fresh,Action::WritePayload,nullptr,L"openxr_loader.dll"),"bundled Khronos loader is installed");
+    check(hasStep(fresh,Action::WriteText,nullptr,L"edvr_openxr.ini"),"native startup config is written");
+    bool systemConfig=false; for(const Step& st:fresh.steps) if(st.action==Action::WriteText && leafOf(st.to)==L"edvr_openxr.ini") systemConfig=st.text.find("runtime=system")!=std::string::npos;
+    check(systemConfig,"config selects the system runtime");
+    PayloadInfo half=p; half.nativePairValid=false;
+    check(planInstall(s,o,half).blocked,"missing one native payload rejects the whole plan");
+    s.openvrCurrent=fakeDll(DllKind::Foreign,joinPath(s.game.openvrDir,L"openvr_api.dll"),"old-opencomposite",L"OpenComposite");
+    Plan upgrade=planInstall(s,o,p);
+    check(!upgrade.blocked && hasStep(upgrade,Action::Backup,L"openvr_api.dll",L"openvr_api.dll"),"upgrade preserves a stock or OpenComposite runtime");
+    s.state.nativeInstalled=true; s.state.nativeRuntimeSha=p.openvrSha; s.state.nativeOriginalSha="old-opencomposite";
+    s.openxrLoader=fakeDll(DllKind::Edvr,joinPath(s.game.openvrDir,L"openxr_loader.dll"),p.openxrLoaderSha);
+    s.state.openxrLoaderSha=p.openxrLoaderSha; s.state.openxrLicenseSha=p.openxrLicenseSha;
+    s.openvrCurrent=fakeDll(DllKind::Edvr,joinPath(s.game.openvrDir,L"openvr_api.dll"),p.openvrSha);
+    s.openvrOrig=fakeDll(DllKind::OpenVrRuntime,joinPath(s.game.openvrDir,L"openvr_api_orig.dll"),"old-opencomposite");
+    s.d3d11=fakeDll(DllKind::Edvr,joinPath(dir,L"d3d11.dll"),p.d3d11Sha);
+    Plan out=planUninstall(s,o);
+    check(hasStep(out,Action::Delete,L"openxr_loader.dll",nullptr),"uninstall removes the bundled loader");
+    check(hasStep(out,Action::Rename,L"openvr_api_orig.dll",L"openvr_api.dll"),"uninstall restores the original runtime");
+}
+
 // ---------------------------------------------------------------------------
 // apply, for real, in a scratch folder
 // ---------------------------------------------------------------------------
@@ -874,6 +922,8 @@ static PayloadProvider provider(bool failOpenvr) {
     return [failOpenvr](const std::string& item, const void** data, size_t* size) {
         static const char kD3d11[] = "TEST-D3D11-PAYLOAD";
         static const char kOpenvr[] = "TEST-OPENVR-PAYLOAD";
+        static const char kLoader[] = "TEST-OPENXR-LOADER";
+        static const char kLicense[] = "Khronos OpenXR Loader license";
         if (item == "d3d11") {
             *data = kD3d11;
             *size = sizeof(kD3d11) - 1;
@@ -884,6 +934,8 @@ static PayloadProvider provider(bool failOpenvr) {
             *size = sizeof(kOpenvr) - 1;
             return true;
         }
+        if (item == "openxr_loader") { *data=kLoader; *size=sizeof(kLoader)-1; return true; }
+        if (item == "openxr_license") { *data=kLicense; *size=sizeof(kLicense)-1; return true; }
         return false;
     };
 }
@@ -1061,6 +1113,11 @@ static void testApply(const std::wstring& scratch) {
         newer.iniText = newerIni;
 
         Survey again = surveyTarget(s.game);
+        again.eliteProfileValid=true;
+        again.d3d11.kind=DllKind::Edvr;
+        again.openvrCurrent.kind=DllKind::Edvr;
+        again.openvrOrig.kind=DllKind::OpenVrRuntime;
+        again.openxrLoader.kind=DllKind::Foreign;
         // The build machine may well have Elite running -- it did the day this
         // was written. It cannot be running from this scratch folder, so the
         // survey reads it as somebody else's and plans anyway; both flags are
@@ -1498,15 +1555,21 @@ static void testState() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     const std::wstring root = argc > 1 ? argv[1] : L".";
     const std::wstring scratch = argc > 2 ? argv[2] : joinPath(root, L"build\\insttest_scratch");
     makeTree(scratch);
+    edvr::installer::test::nativeContractCases([](bool ok, const char* what) { check(ok, what); });
+    edvr::installer::test::nativeBuiltContractCases([](bool ok,const char* what){check(ok,what);},root);
+    edvr::installer::native_apply_cases::run([](bool ok, const char* what) { check(ok, what); }, joinPath(scratch, L"native_apply"));
 
     printf("installer_test: root %ls\n", root.c_str());
 
     testMerge();
     testShippedIni(root);
     testPlanner();
+    testNativePlanner();
     testApply(scratch);
     testMirror(scratch);
     testProbe(scratch);

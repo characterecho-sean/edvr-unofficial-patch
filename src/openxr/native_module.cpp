@@ -223,6 +223,27 @@ bool ModuleBackend::runtimeInstalled() const noexcept { return pathsInstalled(op
 
 std::wstring localConfigPath() noexcept;
 
+// The packaged module lives in Openvr\\win64.  When the installer has not
+// supplied an explicit bootstrap or local manifest, derive the paired native
+// files from that fixed layout and validate both before publishing config.
+bool packagedDefaultPaths(BootstrapPaths& paths) noexcept {
+  const std::wstring configPath=localConfigPath();
+  if(configPath.empty())return false;
+  const size_t slash=configPath.find_last_of(L"\\/");
+  if(slash==std::wstring::npos)return false;
+  const std::wstring moduleDir=configPath.substr(0,slash);
+  const size_t parentSlash=moduleDir.find_last_of(L"\\/");
+  if(parentSlash==std::wstring::npos)return false;
+  const std::wstring openvrDir=moduleDir.substr(0,parentSlash);
+  const size_t gameSlash=openvrDir.find_last_of(L"\\/");
+  if(gameSlash==std::wstring::npos)return false;
+  paths.loader=moduleDir+L"\\openxr_loader.dll";
+  paths.graphics=openvrDir.substr(0,gameSlash)+L"\\d3d11.dll";
+  paths.separateDevice=true;
+  return localConfigAbsolute(paths.loader)&&localConfigAbsolute(paths.graphics)&&
+      readableRegularFile(paths.loader)&&readableRegularFile(paths.graphics);
+}
+
 bool runtimeInstalled() noexcept {
   if(auto* owner=module.load(std::memory_order_acquire))return owner->backend.runtimeInstalled();
   BootstrapPaths paths;
@@ -231,9 +252,12 @@ bool runtimeInstalled() noexcept {
     return readableRegularFile(paths.loader)&&readableRegularFile(paths.graphics);
   if(bootstrap!=BootstrapResult::Unconfigured)return false;
   LocalConfig local;
-  return readLocalConfig(localConfigPath(),local)==LocalConfigResult::Ready&&
-      readableRegularFile(local.loader)&&readableRegularFile(local.graphics)&&
+  const auto localResult=readLocalConfig(localConfigPath(),local);
+  if(localResult==LocalConfigResult::Ready)
+    return readableRegularFile(local.loader)&&readableRegularFile(local.graphics)&&
       (localConfigUsesSystemRuntime(local.runtime)||readableRegularFile(local.runtime));
+  BootstrapPaths defaults;
+  return localResult==LocalConfigResult::Absent&&packagedDefaultPaths(defaults);
 }
 
 HRESULT configureModule(RuntimeOptions options,uint32_t wait,std::wstring manifest={}) {
@@ -307,7 +331,20 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
         if(configured==S_OK){nativeTracePuts("module_configuration,source=local");std::fflush(stdout);}
         if(auto* owner=module.load(std::memory_order_acquire))return owner->lifecycle.init(error,application);
       }
-      if(localResult==LocalConfigResult::Invalid||(localResult==LocalConfigResult::Ready)) {
+      if(localResult==LocalConfigResult::Absent) {
+        if(packagedDefaultPaths(paths)) {
+          RuntimeOptions options;options.loader=paths.loader;options.graphicsProxy=paths.graphics;
+          options.separateDevice=true;localManifest=L"system";
+          const auto configured=configureModule(std::move(options),5000,localManifest);
+          if(configured==S_OK||configured==E_PENDING) {
+            nativeTracePuts("module_configuration,source=packaged-default");std::fflush(stdout);
+            if(auto* owner=module.load(std::memory_order_acquire))return owner->lifecycle.init(error,application);
+          }
+        }
+        nativeTracePuts("module_configuration,source=packaged-default,invalid=1");
+        if(error)*error=vr::VRInitError_Init_InstallationCorrupt;return 0;
+      }
+      if(localResult==LocalConfigResult::Invalid||localResult==LocalConfigResult::Ready) {
         nativeTracePuts("module_configuration,source=local,invalid=1");
         if(error)*error=vr::VRInitError_Init_InstallationCorrupt;return 0;
       }

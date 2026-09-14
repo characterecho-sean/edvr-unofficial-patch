@@ -25,6 +25,11 @@ struct OculusProfileMatch;
 // rather than a user setting.
 void oculusRouteInstallEarly(bool nativeBuild);
 
+// Process-attach gate for the native graphics build.  It is true for
+// non-Elite fixtures and for a validated Elite profile; an identified Elite
+// process is refused when the audited IAT hook cannot be installed.
+bool oculusRouteProcessAttachAllowed() noexcept;
+
 // Called after log initialisation and outside the loader lock.  Emits only a
 // bounded number of changed counter snapshots; querying status itself is
 // side-effect free.
@@ -91,6 +96,7 @@ using OculusRouteLoadLibraryW = HMODULE(WINAPI*)(LPCWSTR);
 
 void oculusRouteTestReset();
 void oculusRouteTestSetProfile(void** slot, uintptr_t callerReturnRva, bool known);
+void oculusRouteTestSetEliteProcess(bool elite);
 using OculusRouteTestAfterCas = void(*)();
 void oculusRouteTestSetAfterCas(OculusRouteTestAfterCas callback);
 using OculusRouteTestBeforeCas = void(*)();

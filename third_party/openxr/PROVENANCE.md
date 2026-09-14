@@ -9,12 +9,26 @@ release 1.1.46. The headers are fetched from the upstream release tag:
   `include/openxr/openxr_platform_defines.h`
 * License: `LICENSE` (Apache License 2.0, as distributed by Khronos)
 
-The probe does not link or redistribute the OpenXR loader. It loads a caller
-selected `openxr_loader.dll` by an absolute path, with restricted dependency
-search flags, and checks that `xrGetInstanceProcAddr` is exported before
-calling it. A loader found on a machine is evidence of a loader being
-available; it is not evidence that a particular runtime or headset is
-installed.
+The native release bundles the official Khronos Windows x64 loader from
+[OpenXR.Loader.1.1.46.nupkg](https://github.com/KhronosGroup/OpenXR-SDK/releases/download/release-1.1.46/OpenXR.Loader.1.1.46.nupkg).
+`tools/fetch_openxr_loader.py` verifies the archive and exact DLL member,
+`native/x64/release/bin/openxr_loader.dll`. It places the dependency under
+`third_party/openxr/loader` (ignored by Git). The build verifies the cached
+bytes offline before copying them into `build` and embedding them in the
+installer. No installed SteamVR or vendor loader is used for release packaging.
+
+Verified on 2026-09-14:
+
+| File | SHA-256 |
+|---|---|
+| NuGet package | `bbbf8e0a63d7241c9186c7d52692c843151256fa9928a3e607fe1223fae0bce8` |
+| Windows x64 release DLL | `a231a20944153cfda9551af135a3e58519f77007f28afc76d3c5d23763be8bde` |
+| `LOADER-NOTICES.txt` | `b57895e08b22074931f17605841dda431bd8e3c06ee7962f6a9371a5ff68431c` |
+
+The notice includes Khronos/contributor copyright notices, Apache 2.0 terms,
+and the JsonCpp license from the official release source archive. It ships as
+`OPENXR-LOADER-LICENSE.txt` beside the loader. The loader selects Windows'
+active OpenXR runtime. Bundling it does not install a headset runtime.
 
 Verified against the tag on 2026-09-11 (SHA-256 of upstream bytes):
 

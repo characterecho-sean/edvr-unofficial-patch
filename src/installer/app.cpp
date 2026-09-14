@@ -329,11 +329,8 @@ int runConsole(const AppArgs& args) {
     for (const std::string& line : result.done) writeOut("  " + line + "\r\n");
     if (!result.ok) {
         writeOut("\r\n" + result.error + "\r\n");
-        if (result.rolledBack && !result.overwrote) {
+        if (result.rolledBack) {
             writeOut("Everything this run had changed was put back.\r\n");
-        } else if (result.rolledBack) {
-            writeOut("What could be undone was undone; files already replaced are in "
-                     "edvr_backup.\r\n");
         }
         return 1;
     }

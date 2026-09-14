@@ -1,89 +1,30 @@
-EDVR - the transition flash fix (optional)
-==========================================
+EDVR - native OpenXR package
+================================
 
-This folder holds openvr_api.dll and this note.
-
-It stops the single-frame flash you sometimes get when you jump, drop out of
-supercruise, or close the galaxy map -- where the world cuts to somewhere else
-for one frame and straight back.
-
-You do not need it for any of the other fixes. If you skip this folder
-entirely, everything else in EDVR still works.
-
-
-WHY IT INSTALLS DIFFERENTLY
----------------------------
-
-d3d11.dll is a file you ADD next to the game. This one REPLACES a file the game
-already ships. So it takes one extra step: you rename Elite's copy first, and
-EDVR loads it and passes everything through to it.
-
-Nothing is deleted. Undoing it is renaming one file back.
-
+This folder contains the native OpenXR runtime facade, the Khronos loader,
+and the license notice. They are installed together in Openvr\win64.
 
 INSTALL
 -------
 
 1. Close Elite Dangerous.
-
-2. Find the folder that ALREADY CONTAINS the game's own openvr_api.dll.
-
-   Start from the Openvr folder next to EliteDangerous64.exe. On some installs
-   the file sits directly in Openvr\, on others in Openvr\win64\. Whichever one
-   holds it is the right folder -- go by where the file is, not by the path,
-   because it differs between Frontier-launcher, Steam and Epic installs.
-
-3. RENAME the openvr_api.dll already there to:
-
-       openvr_api_orig.dll
-
-   Do not delete it. EDVR needs it -- it does the actual work.
-
-   TWO features need this file: the transition flash fix and Explorer Cam.
-   Without it they do nothing -- the other fixes are unaffected.
-
-   EDVR watches two calls in it. One is the frame submission, where it can
-   withhold a single bad frame from the headset (the transition flash fix).
-   The other is the call that reports where your head is: EDVR adds your
-   offset to that answer while you are in the external camera, so the game
-   moves its own camera. That one needs your external-camera key, which EDVR
-   reads from your own Elite key bindings -- there is nothing to set for it,
-   as long as the camera is on a keyboard key.
-
-4. Copy the openvr_api.dll from THIS folder into that folder.
-
+2. In the game's Openvr\win64 folder, rename the game's existing
+   openvr_api.dll to openvr_api_orig.dll. Preserve that file for uninstall.
+   If an original already exists, use the installer for the upgrade.
+3. Copy openvr_api.dll, openxr_loader.dll, and OPENXR-LOADER-LICENSE.txt from
+   this folder into Openvr\win64.
+4. Copy d3d11.dll to the folder containing EliteDangerous64.exe. Keep the
+   existing EDHM d3d11.dll chain intact if EDHM is installed.
+   Keep your edvr.ini, or copy the supplied one for a fresh installation.
 5. Start the game.
 
+The bundled loader uses the OpenXR runtime selected in Windows. SteamVR is an
+allowed selected runtime; the SteamVR application is not a separate package
+requirement. No vendor runtime DLL is substituted by this package.
 
-CHECK IT WORKED
----------------
+UNINSTALL
+---------
 
-Look in edvr_logs\ next to the game. There will be a second log file with "vr"
-in the name. It should say:
-
-    compositor hook installed on IVRCompositor_014
-
-If it says the compositor version is not one this build knows, the fix is off
-and the game is running normally -- please report the version string it prints.
-
-
-IF SOMETHING GOES WRONG
------------------------
-
-Delete the openvr_api.dll you copied in, and rename openvr_api_orig.dll back to
-openvr_api.dll. That is a complete uninstall.
-
-If the game will not start at all, do that first, then send the log.
-
-EDVR refuses to install this hook a second time if a previous run crashed while
-it was active -- it leaves a marker file and checks for it on startup. So a
-crash here does not repeat on the next launch.
-
-
-IF YOU STILL SEE A FLASH
-------------------------
-
-Press Pause right after it happens, then quit and send edvr_logs\. That writes
-the last ten seconds of viewpoint history to the log, which shows whether the
-frame was spotted and let through or never spotted at all. Without it a report
-is only "I saw a flash", which is not something anyone can act on.
+Close Elite, remove EDVR's d3d11.dll, openvr_api.dll, openxr_loader.dll and
+the license notice, then rename openvr_api_orig.dll back to openvr_api.dll.
+Keep the original file untouched until the uninstall is complete.

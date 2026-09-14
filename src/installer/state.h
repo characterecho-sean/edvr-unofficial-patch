@@ -45,6 +45,15 @@ struct InstallState {
 
     std::string iniSha;       // the edvr.ini we wrote; a differing file is user edits
     bool        hasBaseIni = false;
+
+    bool nativeInstalled = false;
+    std::string nativeGraphicsSha;
+    std::string nativeRuntimeSha;
+    std::string openxrLoaderSha;
+    std::string openxrLicenseSha;
+    std::string nativeConfigSha;
+    std::wstring nativeOriginalName;
+    std::string nativeOriginalSha;
 };
 
 std::wstring stateDirPath(const std::wstring& gameDir);

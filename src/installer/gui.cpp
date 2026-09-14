@@ -785,13 +785,8 @@ void runAction(AppArgs::Act action) {
         }
     } else {
         text += "\r\n" + result.error + "\r\n";
-        if (result.rolledBack && !result.overwrote) {
+        if (result.rolledBack) {
             text += "Everything this run had changed was put back, so the folder is as it was.\r\n";
-        } else if (result.rolledBack) {
-            text += "What could be undone was undone -- anything renamed is back under its own "
-                    "name. One or more files had already been replaced by then, and replaced "
-                    "bytes cannot be un-replaced: the copies taken before the run are in "
-                    "edvr_backup\\.\r\n";
         }
     }
     setReport(text);

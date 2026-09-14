@@ -636,6 +636,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             // Native routing is a build capability, available before Elite's
             // first VR probe. No configuration or logging under loader lock.
             edvr::oculusRouteInstallEarly(EDVR_NATIVE_OPENXR_BUILD != 0);
+            if (EDVR_NATIVE_OPENXR_BUILD != 0 && !edvr::oculusRouteProcessAttachAllowed())
+                return FALSE;
             loaderPhase();
             edvr::inputGateInstallEarly();
             break;

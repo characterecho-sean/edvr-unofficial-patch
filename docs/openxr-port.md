@@ -7,6 +7,12 @@ review checked source and vendor documentation, not new headset flights or a
 fresh scan of the installed game. Phase 0 must preserve reproducible evidence
 before an observation becomes a compatibility requirement.*
 
+The [native-only migration checkpoint](openxr-native-only-2026-09-14.md)
+implements the current release policy: complete native packages using the
+bundled Khronos loader and Windows runtime selection, with no legacy backend
+fallback. Historical proxies remain regression fixtures; explicit uninstall and
+file recovery are preserved.
+
 Implementation and subsequent evidence are tracked in
 [openxr-implementation-status.md](openxr-implementation-status.md). The
 [2026-09-11 Frontier census flight](openxr-flight-2026-09-11.md) adds measured

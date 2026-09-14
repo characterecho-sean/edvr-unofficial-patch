@@ -78,12 +78,15 @@ int main(int argc, char** argv) {
           "legacy capability is a no-op and does not touch the IAT");
 
     edvr::oculusRouteTestReset();
+    edvr::oculusRouteTestSetEliteProcess(true);
     edvr::oculusRouteInstallEarly(true);
     auto unknown = edvr::oculusRouteStatusSnapshot();
     check(unknown.nativeBuild == 1 && unknown.profileKnown == 0 &&
               unknown.installed == 0 && unknown.installFailures == 1 &&
               unknown.profileFailureStage == 2,
           "unknown profile refuses installation without touching an IAT");
+    check(!edvr::oculusRouteProcessAttachAllowed(),
+          "identified Elite profile failure refuses process attach");
 
     g_reportSinkCalls.store(0, std::memory_order_relaxed);
     edvr::oculusRouteTestSetReportSink(reportSink);

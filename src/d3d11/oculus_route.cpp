@@ -78,6 +78,8 @@ std::atomic<uint32_t> g_reportedInstalled{0};
 std::atomic<uint32_t> g_reportInitialized{0};
 std::atomic<uint32_t> g_criticalRejectionReported{0};
 std::atomic<uint32_t> g_reporting{0};
+std::atomic<uint32_t> g_eliteProcess{0};
+std::atomic<uint32_t> g_startupFailure{0};
 
 // These two values are written before publishing g_installed and are only
 // read for a status snapshot or after the slot has been restored.  The atomics
@@ -96,6 +98,8 @@ void saturatingIncrement(std::atomic<T>& value) {
 }
 
 #if defined(EDVR_OCULUS_ROUTE_TEST)
+std::atomic<uint32_t> g_testEliteProcessConfigured{0};
+std::atomic<uint32_t> g_testEliteProcess{0};
 std::atomic<void**> g_testProfileSlot{nullptr};
 std::atomic<uintptr_t> g_testProfileCaller{0};
 std::atomic<uint32_t> g_testProfileKnown{0};
@@ -126,6 +130,23 @@ bool validateProfile(void* executable, OculusProfileMatch* match) {
 void setDecision(uint32_t decision, DWORD error = ERROR_SUCCESS) {
     g_lastError.store(static_cast<uint32_t>(error), std::memory_order_relaxed);
     g_lastDecision.store(decision, std::memory_order_relaxed);
+}
+
+bool isEliteProcess() noexcept {
+    wchar_t path[32768]{};
+    const DWORD n=GetModuleFileNameW(nullptr,path,_countof(path));
+    if(!n||n>=_countof(path))return false;
+    const wchar_t* leaf=path;
+    for(DWORD i=0;i<n;++i)if(path[i]==L'\\'||path[i]==L'/')leaf=path+i+1;
+    constexpr wchar_t name[]=L"EliteDangerous64.exe";
+    for(size_t i=0;name[i];++i) {
+        wchar_t a=leaf[i],b=name[i];
+        if(!a)return false;
+        if(a>=L'a'&&a<=L'z')a=static_cast<wchar_t>(a-L'a'+L'A');
+        if(b>=L'a'&&b<=L'z')b=static_cast<wchar_t>(b-L'a'+L'A');
+        if(a!=b)return false;
+    }
+    return leaf[_countof(name)-1]==L'\0';
 }
 
 // Reads at most 1024 UTF-16 code units under SEH.  A caller can hand the
@@ -304,6 +325,12 @@ HMODULE WINAPI oculusRouteLoadLibraryW(LPCWSTR path) {
 
 void oculusRouteInstallEarly(bool nativeBuild) {
     saturatingIncrement(g_installAttempts);
+    if (nativeBuild) {
+#if defined(EDVR_OCULUS_ROUTE_TEST)
+        if (!g_testEliteProcessConfigured.load(std::memory_order_acquire))
+#endif
+            g_eliteProcess.store(isEliteProcess() ? 1u : 0u, std::memory_order_release);
+    }
     if (g_installing.exchange(1, std::memory_order_acq_rel)) return;
     const auto releaseInstall = [] { g_installing.store(0, std::memory_order_release); };
     uint32_t expected = 0;
@@ -332,6 +359,10 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     g_profileFailureStage.store(match.failureStage, std::memory_order_release);
     if (!known || !match.loadLibrarySlot || !match.callerReturnRva) {
         saturatingIncrement(g_installFailures);
+        if(g_eliteProcess.load(std::memory_order_acquire)) {
+            g_startupFailure.store(1,std::memory_order_release);
+            OutputDebugStringA("EDVR native startup refused: Elite Oculus profile/IAT hook unavailable\n");
+        }
         setDecision(kDecisionInstallFailure);
         releaseInstall();
         return;
@@ -340,6 +371,10 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     void* current = *match.loadLibrarySlot;
     if (!current || current == reinterpret_cast<void*>(&oculusRouteLoadLibraryW)) {
         saturatingIncrement(g_installFailures);
+        if(g_eliteProcess.load(std::memory_order_acquire)) {
+            g_startupFailure.store(1,std::memory_order_release);
+            OutputDebugStringA("EDVR native startup refused: Elite Oculus IAT target unavailable\n");
+        }
         setDecision(kDecisionInstallFailure);
         releaseInstall();
         return;
@@ -361,6 +396,10 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     DWORD oldProtect = 0;
     if (!VirtualProtect(match.loadLibrarySlot, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
         saturatingIncrement(g_installFailures);
+        if(g_eliteProcess.load(std::memory_order_acquire)) {
+            g_startupFailure.store(1,std::memory_order_release);
+            OutputDebugStringA("EDVR native startup refused: Elite Oculus IAT protection failed\n");
+        }
         g_routingReady.store(0, std::memory_order_release);
         setDecision(kDecisionInstallFailure);
         releaseInstall();
@@ -380,6 +419,10 @@ void oculusRouteInstallEarly(bool nativeBuild) {
         g_routingReady.store(0, std::memory_order_release);
         saturatingIncrement(g_publicationRaces);
         saturatingIncrement(g_installFailures);
+        if(g_eliteProcess.load(std::memory_order_acquire)) {
+            g_startupFailure.store(1,std::memory_order_release);
+            OutputDebugStringA("EDVR native startup refused: Elite Oculus IAT publication raced\n");
+        }
         setDecision(kDecisionInstallFailure);
         releaseInstall();
         return;
@@ -394,6 +437,11 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     g_installed.store(1, std::memory_order_release);
     setDecision(kDecisionNone);
     releaseInstall();
+}
+
+bool oculusRouteProcessAttachAllowed() noexcept {
+    return !g_eliteProcess.load(std::memory_order_acquire)||
+           !g_startupFailure.load(std::memory_order_acquire);
 }
 
 void oculusRouteUninstallEarly() {
@@ -573,7 +621,11 @@ void oculusRouteTestReset() {
     g_criticalRejectionReported.store(0, std::memory_order_relaxed);
     g_reporting.store(0, std::memory_order_relaxed);
     g_lastCallerReturnRva.store(0, std::memory_order_relaxed);
+    g_eliteProcess.store(0, std::memory_order_relaxed);
+    g_startupFailure.store(0, std::memory_order_relaxed);
 #if defined(EDVR_OCULUS_ROUTE_TEST)
+    g_testEliteProcessConfigured.store(0, std::memory_order_relaxed);
+    g_testEliteProcess.store(0, std::memory_order_relaxed);
     g_testProfileSlot.store(nullptr, std::memory_order_relaxed);
     g_testProfileCaller.store(0, std::memory_order_relaxed);
     g_testProfileKnown.store(0, std::memory_order_relaxed);
@@ -589,6 +641,12 @@ void oculusRouteTestSetProfile(void** slot, uintptr_t callerReturnRva, bool know
     g_testProfileCaller.store(callerReturnRva, std::memory_order_release);
     g_testProfileKnown.store(known ? 1u : 0u, std::memory_order_release);
     g_testProfileConfigured.store(1, std::memory_order_release);
+}
+
+void oculusRouteTestSetEliteProcess(bool elite) {
+    g_testEliteProcess.store(elite ? 1u : 0u, std::memory_order_release);
+    g_testEliteProcessConfigured.store(1, std::memory_order_release);
+    g_eliteProcess.store(elite ? 1u : 0u, std::memory_order_release);
 }
 
 void oculusRouteTestSetAfterCas(OculusRouteTestAfterCas callback) {

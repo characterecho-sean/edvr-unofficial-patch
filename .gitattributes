@@ -14,3 +14,6 @@
 *.cso binary
 *.rdc binary
 *.edvrlog binary
+
+# The loader notice is hashed byte-for-byte by the dependency fetcher.
+third_party/openxr/LOADER-NOTICES.txt text eol=lf

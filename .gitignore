@@ -16,3 +16,6 @@ build - Copy/
 # default is one copy per machine under %LOCALAPPDATA%\EDVR\ngx-sdk). Its licence
 # keeps it out of the tree: not stand-alone, not under an open source licence.
 third_party/ngx/
+
+# Pinned Khronos loader binary, fetched by tools/fetch_openxr_loader.py.
+third_party/openxr/loader/
