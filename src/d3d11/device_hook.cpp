@@ -33,6 +33,7 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
+#include "eye_tonemap_snapshot.h"
 #include "gui_draw_snapshot.h"
 #include "quad_probe.h"
 #include "exposure_fix.h"
@@ -554,6 +555,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPU
             const uint64_t hash=fnv1a64(bytecode,len);
             GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
             EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
+            EyeTonemapSnapshot::rememberLayout(*out,elements,count,hash);
         });
     return hr;
 }
@@ -576,6 +578,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
+        EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
     });
@@ -594,7 +597,8 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
-        if(hash==EyeDrawSnapshot::kVscreenPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
+        if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
+        EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
     });

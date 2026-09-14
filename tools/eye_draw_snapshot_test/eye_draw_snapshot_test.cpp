@@ -10,6 +10,17 @@ void check(bool ok, const char* why) {
     if (!ok) { std::printf("FAIL: %s\n", why); std::exit(1); }
 }
 void hr(HRESULT v) { check(SUCCEEDED(v), "D3D operation"); }
+void wait_gpu(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
+    check(ctx && dev, "GPU wait inputs");
+    D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
+    ComPtr<ID3D11Query> query; hr(dev->CreateQuery(&qd, &query));
+    ctx->End(query.Get()); ctx->Flush();
+    const ULONGLONG deadline = GetTickCount64() + 10000;
+    HRESULT ready = S_FALSE;
+    while (ready == S_FALSE && GetTickCount64() < deadline)
+        ready = ctx->GetData(query.Get(), nullptr, 0, 0);
+    hr(ready); check(ready == S_OK, "GPU timeout");
+}
 int wmain(int argc, wchar_t** argv) {
     check(argc == 2, "output path required");
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
@@ -89,6 +100,42 @@ int wmain(int argc, wchar_t** argv) {
           "exact E508 sprite source deduplicates repeated binding");
     ComPtr<ID3D11ShaderResourceView> retainedSrv; ctx->PSGetShaderResources(0,1,&retainedSrv);
     check(retainedSrv.Get()==spriteSrv.Get(), "exact E508 capture preserves SRV binding");
+    D3D11_TEXTURE2D_DESC spriteTargetDesc{};spriteTargetDesc.Width=spriteTargetDesc.Height=1504;spriteTargetDesc.MipLevels=spriteTargetDesc.ArraySize=spriteTargetDesc.SampleDesc.Count=1;spriteTargetDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;spriteTargetDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> spriteTarget;ComPtr<ID3D11RenderTargetView> spriteTargetRtv;hr(dev->CreateTexture2D(&spriteTargetDesc,nullptr,&spriteTarget));hr(dev->CreateRenderTargetView(spriteTarget.Get(),nullptr,&spriteTargetRtv));
+    D3D11_TEXTURE2D_DESC spriteDepthDesc{}; spriteDepthDesc.Width=spriteDepthDesc.Height=1504;
+    spriteDepthDesc.MipLevels=spriteDepthDesc.ArraySize=spriteDepthDesc.SampleDesc.Count=1;
+    spriteDepthDesc.Format=DXGI_FORMAT_R24G8_TYPELESS; spriteDepthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+    ComPtr<ID3D11Texture2D> spriteDepth;ComPtr<ID3D11DepthStencilView> spriteDsv;
+    hr(dev->CreateTexture2D(&spriteDepthDesc,nullptr,&spriteDepth));
+    D3D11_DEPTH_STENCIL_VIEW_DESC spriteDsvDesc{};spriteDsvDesc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;spriteDsvDesc.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+    hr(dev->CreateDepthStencilView(spriteDepth.Get(),&spriteDsvDesc,&spriteDsv));
+    const char* spriteVsCode="float4 main(float4 p:POSITION):SV_Position{return p;}";
+    ComPtr<ID3DBlob> spriteVsBlob;hr(D3DCompile(spriteVsCode,strlen(spriteVsCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&spriteVsBlob,nullptr));
+    D3D11_INPUT_ELEMENT_DESC spriteElement{"POSITION",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};
+    ComPtr<ID3D11InputLayout> spriteLayout;hr(dev->CreateInputLayout(&spriteElement,1,spriteVsBlob->GetBufferPointer(),spriteVsBlob->GetBufferSize(),&spriteLayout));
+    edvr::EyeDrawSnapshot::rememberLayout(spriteLayout.Get(),&spriteElement,1,edvr::EyeDrawSnapshot::kSprite);ctx->IASetInputLayout(spriteLayout.Get());
+    D3D11_BUFFER_DESC structured{};structured.Usage=D3D11_USAGE_DEFAULT;structured.BindFlags=D3D11_BIND_SHADER_RESOURCE;structured.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    structured.ByteWidth=672;structured.StructureByteStride=336;ComPtr<ID3D11Buffer> spriteT33;ComPtr<ID3D11ShaderResourceView> spriteT33Srv;hr(dev->CreateBuffer(&structured,nullptr,&spriteT33));hr(dev->CreateShaderResourceView(spriteT33.Get(),nullptr,&spriteT33Srv));
+    structured.ByteWidth=96;structured.StructureByteStride=48;ComPtr<ID3D11Buffer> spriteT38;ComPtr<ID3D11ShaderResourceView> spriteT38Srv;hr(dev->CreateBuffer(&structured,nullptr,&spriteT38));hr(dev->CreateShaderResourceView(spriteT38.Get(),nullptr,&spriteT38Srv));
+    uint8_t spriteT33Bytes[672];uint8_t spriteT38Bytes[96];std::memset(spriteT33Bytes,0x31,sizeof(spriteT33Bytes));std::memset(spriteT38Bytes,0x42,sizeof(spriteT38Bytes));
+    ctx->UpdateSubresource(spriteT33.Get(),0,nullptr,spriteT33Bytes,0,0);ctx->UpdateSubresource(spriteT38.Get(),0,nullptr,spriteT38Bytes,0,0);
+    ID3D11ShaderResourceView* spriteT33Binding=spriteT33Srv.Get();ID3D11ShaderResourceView* spriteT38Binding=spriteT38Srv.Get();ctx->VSSetShaderResources(33,1,&spriteT33Binding);ctx->VSSetShaderResources(38,1,&spriteT38Binding);
+    ID3D11RenderTargetView* spriteTargetBinding=spriteTargetRtv.Get();ctx->OMSetRenderTargets(1,&spriteTargetBinding,spriteDsv.Get());ctx->PSSetConstantBuffers(1,1,&b);
+    float spriteCb[48];for(float& v:spriteCb)v=31.f;ctx->UpdateSubresource(cb.Get(),0,nullptr,spriteCb,0,0);
+    const FLOAT spriteBefore[4]={.1f,.2f,.3f,1.f};ctx->ClearRenderTargetView(spriteTargetRtv.Get(),spriteBefore);ctx->ClearDepthStencilView(spriteDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.25f,1);
+    spriteSnap.capture(ctx.Get(),103,2,edvr::EyeDrawSnapshot::kSprite,edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);
+    const FLOAT spriteAfter[4]={.7f,.2f,.1f,1.f};ctx->ClearRenderTargetView(spriteTargetRtv.Get(),spriteAfter);
+    spriteSnap.captureEffectEnd(ctx.Get());
+    std::memset(spriteT33Bytes,0x73,sizeof(spriteT33Bytes));std::memset(spriteT38Bytes,0x84,sizeof(spriteT38Bytes));ctx->UpdateSubresource(spriteT33.Get(),0,nullptr,spriteT33Bytes,0,0);ctx->UpdateSubresource(spriteT38.Get(),0,nullptr,spriteT38Bytes,0,0);
+    float spriteCbAfter[48];for(float& v:spriteCbAfter)v=97.f;ctx->UpdateSubresource(cb.Get(),0,nullptr,spriteCbAfter,0,0);const FLOAT spriteLater[4]={.9f,.8f,.7f,1.f};ctx->ClearRenderTargetView(spriteTargetRtv.Get(),spriteLater);ctx->ClearDepthStencilView(spriteDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.75f,7);
+    check(spriteSnap.spriteDiagnostics.size()==1 && spriteSnap.spriteDiagnostics[0].draw==2 && spriteSnap.spriteDiagnostics[0].layout.size()==1,
+          "exact sprite boundary reserves one paired first-frame record");
+    check(spriteSnap.spriteDiagnostics[0].width==1400 && spriteSnap.spriteDiagnostics[0].height==1400 && spriteSnap.spriteDiagnostics[0].beforeBytes==1400*1400*4 && spriteSnap.spriteDiagnostics[0].depthBytes==1400*1400*4 &&
+          (spriteSnap.spriteDiagnostics[0].mesh[0]!=UINT32_MAX && spriteSnap.spriteDiagnostics[0].mesh[1]!=UINT32_MAX) &&
+          (spriteSnap.spriteDiagnostics[0].stateMask&(1u<<3)),"sprite boundary retains RT, DSV, layout and structured-buffer metadata");
+    edvr::EyeDrawSnapshot spriteCap;
+    for(UINT i=0;i<11;++i){spriteCap.capture(ctx.Get(),200,i,edvr::EyeDrawSnapshot::kSprite,edvr::EyeDrawSnapshot::kSpritePs,'X',6,1,0);spriteCap.captureEffectEnd(ctx.Get());}
+    check(spriteCap.spriteDiagnostics.size()==10 && spriteCap.spriteImageDeclined>=1,"sprite pair budget declines beyond first-frame cap");
     edvr::EyeDrawSnapshot wrongSpritePs;
     wrongSpritePs.capture(ctx.Get(),103,0,edvr::EyeDrawSnapshot::kSprite,0x1234ull,'X',6,1,0);
     check(wrongSpritePs.surfaces.empty() && wrongSpritePs.failures==1,
@@ -248,8 +295,9 @@ int wmain(int argc, wchar_t** argv) {
                 if(frame<3)check(d.streams[0].captureOffset==12 && d.streams[2].captureOffset==4,"solar original vertex/index binding offsets retained");
             }
         }
-        float overwritten[48]{};ctx->UpdateSubresource(cb.Get(),0,nullptr,overwritten,0,0);
+        float solarOverwritten[48]{};ctx->UpdateSubresource(cb.Get(),0,nullptr,solarOverwritten,0,0);
         check(solar.draws.size()==28 && solar.vertexDraws==21,"all solar families captured");
+        wait_gpu(ctx.Get(),dev.Get());
         check(solar.write(ctx.Get(),(std::wstring(argv[1])+L".solar").c_str()) && !solar.failures,"solar draw-time GPU payload write");
         std::wstring dir=argv[1];dir.resize(dir.find_last_of(L"\\/"));
         check(solar.writeShaders(dir.c_str())==0,"solar vertex/pixel shader files including null-PS prepass");
@@ -400,12 +448,7 @@ int wmain(int argc, wchar_t** argv) {
     check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
-    D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
-    hr(dev->CreateQuery(&qd, &query)); ctx->End(query.Get()); ctx->Flush();
-    const ULONGLONG deadline = GetTickCount64()+10000;
-    HRESULT ready;
-    while ((ready = ctx->GetData(query.Get(), nullptr, 0, 0)) == S_FALSE && GetTickCount64()<deadline) Sleep(1);
-    hr(ready); check(ready == S_OK, "GPU timeout");
+    wait_gpu(ctx.Get(),dev.Get());
     check(snap.write(ctx.Get(), argv[1]), "snapshot write");
     check(meshSnap.write(ctx.Get(),(std::wstring(argv[1])+L".mesh").c_str()),"source mesh snapshot write");
     check(eyeMesh.write(ctx.Get(),(std::wstring(argv[1])+L".eyemesh").c_str()) && !eyeMesh.failures,"eye mesh snapshot payloads complete");
@@ -418,6 +461,7 @@ int wmain(int argc, wchar_t** argv) {
     check(vscreenSnap.write(ctx.Get(),(std::wstring(argv[1])+L".vscreen").c_str()),"on-foot snapshot write");
     check(vscreenSnap.failures==0,"on-foot capture completed without missing copies");
     check(effects.write(ctx.Get(),(std::wstring(argv[1])+L".effects").c_str()) && effects.failures==0,"effect snapshot writes complete GPU copies");
+    check(spriteSnap.write(ctx.Get(),(std::wstring(argv[1])+L".sprite").c_str()),"sprite boundary diagnostic writes complete");
     check(cropSnap.write(ctx.Get(),(std::wstring(argv[1])+L".crops").c_str()) && cropSnap.failures==0,"effect colour crop write");
     check(night.write(ctx.Get(),(std::wstring(argv[1])+L".night").c_str()) && night.failures==0,"night-vision draw-time data writes without missing copies");
     check(snap.failures == 0, "missing copies");

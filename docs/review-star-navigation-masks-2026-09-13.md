@@ -904,3 +904,104 @@ caught in review. The final WARP replay fixes these; the original CPU
 comparison and its crops remain explicitly invalidated. The unresolved
 work is obtaining a UI/background decomposition with correct blending
 and draw order, rather than changing another colour-clamp threshold.
+
+## Improved orbital lines, remaining text plume: 041432 and 041439
+
+The user reports improved orbital lines on 2427d96, with a remaining
+black smear around targeting text over the corona. Graphics flight
+edvr_gfx_20260914_041241.log verifies v0.16.2-11-g2427d96, build
+6AA76692, linked 03:14:26 UTC. The paired VR flight verifies the same
+code revision and identifies Valve SteamVR. HEAD 50e3023 only added
+investigation notes after that installation. This flight uses preset K
+with 2644x2610 input and 4068x4016 output. Captures 041432 and 041439
+begin at temporal frames 12104 and 12680, both with jitter
+(0.125,0.2777778). Their raw crops begin at (622,605); their 2155-square
+output crops begin at (956,930).
+
+Ruled out: the target plume is generated entirely inside NGX, because
+the new before/after comparison shows the UI resolver adding the dark
+plume around UNIDENTIFIED SIGNAL SOURCE. In the full-output ROI
+(2050,1750)-(2500,2150), 14,934 pixels change by more than one byte in
+at least one channel. Of those, 7,391 lie outside current 3x3-expanded
+UI coverage but inside retained influence. The 10,573 retained-only
+pixels have mean RGB change (-2.9225,-0.1292,-0.0223) bytes. Every
+changed pixel belongs to the resolver's active footprint. This audit
+uses the actual disjoint output ownership formula, the unjittered
+previous-alpha grid and bilinear transported age; mapping previous alpha
+through the jittered raw grid gives different, approximate counts.
+
+The private sprite depth must not be called equal to scene depth using a
+generic floating-point tolerance. In this view it differs from zero sky
+by roughly 3.7e-11, which is meaningful to the reversed-depth test.
+Explicit background-history rejection remains a separate possible
+contributor before DLSS. It cannot explain away the measured colour
+change introduced after DLSS. A motion magnitude above two pixels is
+also not an invalid-vector test; the explicit half-float sentinel is
+(5288,5220) for this input size.
+
+The rendering boundary is now traced through the actual census
+identities. In 041432, sprite targets @163 and @505 are HDR resources
+000001F265F9CAA0 and 000001F265F9DB20. The tone-map draws at ordinals
+307 and 309 read those same resources through PS t1 views @1338 and
+@1365. Their vertex shader is 2D78DC3FD2C0C543 and pixel shader is
+99C21CEB7A699821. The outputs are RGBA8 through UNORM views. EDVR runs
+DLSS later, on the submitted RGBA8 image, and applies kUiResolve after
+NGX. The earlier scratch architecture claim that EDVR runs HDR DLSS
+before the game's tone mapping was incorrect.
+
+Disassembly identifies the missing replay inputs precisely. The sprite
+pixel shader reads PS b1 as well as the already captured PS b2 and
+source texture. Its original vertex shader reads structured t33/t38
+buffers. The tone-map pixel shader reads PS b2, a three-dimensional
+colour-grading LUT at t0, and the HDR eye at t1, with samplers s0/s1.
+Its vertex shader samples the exposure texture at VS t0 through s0.
+These inputs, their draw-time state, and native before/after colour are
+needed to reproduce the compositing and colour conversion without
+guessing a tone curve. Source alpha alone does not recover the
+background beneath the text.
+
+The next build adds evidence only. It does not change kUiResolve,
+motion, depth ownership, or the confirmed orbital-line fix. Drawstate v8
+attaches each sprite diagnostic to its existing real draw ordinal,
+retains draw-local PS b1 and t33/t38, the input layout and complete
+sampler/blend/depth/raster state, and takes paired central 1400-square
+HDR crops. Original depth/stencil is copied before the draw. D3D11
+requires whole-subresource copies from depth-stencil resources, so a
+bounded, unbound intermediate receives the full depth resource before
+cropping. This follows the [Microsoft CopySubresourceRegion
+contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-copysubresourceregion).
+Colour and depth crops each have a 160 MiB budget and at most ten pairs;
+the reusable full-depth intermediate has a 128 MiB cap. Palette copies
+share the existing 256 MiB structured-buffer cap. Work happens only for
+the first frame of an explicitly requested dump.
+
+A separate EDVRTON1 snapshot captures the exact tone-map shader pair at
+up to two draws in that same requested frame. Exposure and the full 3D
+colour LUT are copied at draw time, along with PS b2 and the actual VB0
+window. HDR input and original output use central crops. The output copy
+is armed before the draw and consumed exactly once afterward, even if
+bindings have been restored. The format includes resource and view
+identities, all relevant state, layout, draw arguments, crop origins and
+the original shader bytecode. Texture payload budgets are 48 MiB for
+HDR/output and 8 MiB for exposure/LUT; CB/VB copies are each bounded to
+8192 bytes. Unsupported shapes are explicitly declined. Readbacks use
+DO_NOT_WAIT after the ledger window: missing or pending copies produce
+zero-length payloads and failure counts, never valid black images. The
+parser is paired with the producer in build.bat.
+
+The WARP fixtures exercise genuine crops larger than 1400 pixels,
+distinct LUT slices, separate input/output resources and typed views
+over typeless storage. They overwrite the original inputs after capture
+and overwrite the output after the end hook, checking retained bytes,
+original state and first-frame/two-draw limits. These tests establish
+capture fidelity, not a visual fix. The next flight must place moving
+target text against the corona inside the central crop; that evidence
+will support a faithful UI/background compositing replay.
+
+Validation: the full absolute-path build and NVIDIA smoke test passed.
+Both snapshot fixtures and readers run in build.bat. The first full run
+exposed an older solar fixture writing before its GPU fence; the test
+now waits at that earlier write as well. Production still uses
+nonblocking readbacks. The repeated full run passed, including 386
+hologram-motion checks, 25,084 UI checks and the config contract. No
+in-game claim is made for the remaining target smear.

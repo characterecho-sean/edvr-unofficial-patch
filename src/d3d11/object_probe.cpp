@@ -25,6 +25,7 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
+#include "eye_tonemap_snapshot.h"
 #include "gui_draw_snapshot.h"
 
 namespace edvr {
@@ -571,6 +572,7 @@ struct AuxSlot {
 AuxSlot g_aux[kLedgerAux];
 int     g_auxCount = 0;
 EyeDrawSnapshot g_drawSnapshot;
+EyeTonemapSnapshot g_tonemapSnapshot;
 EyeDrawSnapshot g_eyeMeshSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
 struct AuxFrame {   // one watched shader's buffers in one frame
@@ -588,6 +590,7 @@ void releaseCopy(LedgerCopy& c) {
 }
 void ledgerRelease() {
     g_drawSnapshot.reset();
+    g_tonemapSnapshot.reset();
     g_eyeMeshSnapshot.reset();
     g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
@@ -2633,6 +2636,9 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     d.instances = instances;
     d.startInstance = startInstance;
     d.kind = static_cast<uint8_t>(kind);
+    if(d.vs==EyeTonemapSnapshot::kVs && frame==g_ledgerFrame0)
+        g_tonemapSnapshot.capture(ctx,frame,static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
+                                 d.vs,bindingShaderHash(BindSlot::Ps),kind,count,static_cast<uint32_t>(base),instances,startInstance);
     if (EyeDrawSnapshot::watches(d.vs)) {
         g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
                                d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance,start,base);
@@ -2904,6 +2910,10 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     }
     _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\drawstate_%s.bin", dir.c_str(), g_ledgerStamp);
     const bool snapshotOk = g_drawSnapshot.write(ctx, path);
+    wchar_t tonePath[MAX_PATH];
+    _snwprintf_s(tonePath,MAX_PATH,_TRUNCATE,L"%s\\tonemap_%s.bin",dir.c_str(),g_ledgerStamp);
+    const bool toneOk=g_tonemapSnapshot.write(ctx,tonePath,dir.c_str());
+    Log::get().note("object probe: tone-map snapshots %ls: %u draws, %u reserved bytes, %u declines, %u failed copies/shaders; %s. First requested frame, at most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
     const uint32_t missingShaders = g_drawSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye draw snapshots %ls: %u draws, %u holo surfaces, %u capped draws, "
                     "%u failed copies, %u missing shader files; %s. VS b0/b1/b2 and PS b2 are captured at each watched draw; "
@@ -2949,6 +2959,15 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     for(const auto& n:g_drawSnapshot.nightSampling)nightSamplers+=n.mask==3 && n.viewportCount==1;
     Log::get().note("object probe: night-vision snapshots: %u draws, %u with PS camera/settings, %u before/after images; drawstate slot 1 is PS b1 for FCF7BD2896751D96/F786D34B5E118D5E, slot 3 is PS b2. First-frame native terrain crops retain HDR and origin; effect image declines %u. No night-vision rendering changes.",nightDraws,nightConstants,nightImages,g_drawSnapshot.effectImageDeclined);
     Log::get().note("object probe: night-vision sampling: %u input images (PS t0..t4), %u draws with both samplers and one viewport, %u with geometry/layout. Drawstate v7 phases 2..6 retain typed native crops, BC4 blocks and draw-time contents for each eye; sampler masks expose absent states. Shared 64 MiB image and 32 MiB vertex caps; only while a dump is armed.",nightInputs,nightSamplers,nightGeometry);
+    uint32_t spritePairs=0,spriteConstants=0,spriteLayouts=0,spriteDepth=0,spriteMeshes=0;
+    for(const auto& d:g_drawSnapshot.spriteDiagnostics) {
+        spritePairs+=d.before && d.after && !d.postPending ? 1u : 0u;
+        spriteConstants+=d.psB1 && d.psB1Bytes>=91*16 ? 1u : 0u;
+        spriteLayouts+=!d.layout.empty() ? 1u : 0u;
+        spriteDepth+=d.depthImage ? 1u : 0u;
+        spriteMeshes+=d.mesh[0]!=UINT32_MAX && d.mesh[1]!=UINT32_MAX ? 1u : 0u;
+    }
+    Log::get().note("object probe: target colour snapshots: %u exact sprite draws, %u completed before/after pairs, %u with PS b1, %u with input layout, %u with depth/stencil, %u with t33/t38; %u reserved colour bytes, %u depth bytes, %u declines. First requested frame only; native central crops and original draw state in drawstate v8. Pair counts describe GPU copies; the snapshot failure count above includes unavailable readbacks. No target rendering changes.",unsigned(g_drawSnapshot.spriteDiagnostics.size()),spritePairs,spriteConstants,spriteLayouts,spriteDepth,spriteMeshes,g_drawSnapshot.spriteImageBytes,g_drawSnapshot.spriteDepthBytes,g_drawSnapshot.spriteImageDeclined);
     if(screenDraws)Log::get().note("object probe: source mesh snapshots: %u draws, %u frame-local buffers, %u bytes, %u range/format/budget declines. Drawstate v4 records original draw cameras, full t33/t38 and VB0 at first use per resource per frame; firstDraw identifies that copy. No render or pacing changes.",g_drawSnapshot.meshDraws,unsigned(g_drawSnapshot.meshBuffers.size()),g_drawSnapshot.meshBytes,g_drawSnapshot.meshDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
@@ -3135,6 +3154,7 @@ void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count
 void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
     if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureEffectEnd(ctx);
+    g_tonemapSnapshot.end(ctx);
 }
 
 void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,

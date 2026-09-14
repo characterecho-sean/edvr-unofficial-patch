@@ -828,6 +828,18 @@ python "tools\gui_draw_snapshot.py" --self-test || exit /b 1
 python "tools\eye_inputs.py" --self-test || exit /b 1
 python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
 
+echo [edvr] === eye tone-map snapshot regression ===
+if not exist "%OBJ%\tonemapsnapshot" mkdir "%OBJ%\tonemapsnapshot"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\tonemapsnapshot\\" /Fe"%OBJ%\tonemapsnapshot\eye_tonemap_snapshot_test.exe" ^
+    "tools\eye_tonemap_snapshot_test\eye_tonemap_snapshot_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: tone-map snapshot test build failed & exit /b 1 )
+"%OBJ%\tonemapsnapshot\eye_tonemap_snapshot_test.exe" "%OBJ%\tonemapsnapshot\fixture.bin" || exit /b 1
+python "tools\eye_tonemap_snapshot.py" --self-test || exit /b 1
+python "tools\eye_tonemap_snapshot.py" "%OBJ%\tonemapsnapshot\fixture.bin" --verify-fixture || exit /b 1
+
 echo [edvr] === fakevr.dll + openvr_smoke.exe ===
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^

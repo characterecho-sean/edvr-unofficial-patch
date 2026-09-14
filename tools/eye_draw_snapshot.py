@@ -38,6 +38,10 @@ The explicit on-foot dump permits 128 MiB per surface / 256 MiB total.
 Frames/ordinals join draws_HHMMSS.bin, whose crop map joins the eye images.
 Holo t2 surfaces are copied once per resource; their alpha is diagnostic,
 not a per-frame history. No resource address is a persistent object ID.
+Version 8 adds bounded paired before/after central crops for exact
+E508/63ABD sprite draws, plus live PS b1, t0 SRV, sampler, blend,
+depth/stencil, raster, viewport/scissor, RT and input-layout descriptors.
+The sprite image budget is separate from ordinary effect images.
 """
 import argparse
 from collections import Counter
@@ -64,7 +68,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4, 5, 6, 7) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -185,12 +189,127 @@ def read(path):
             samplers = [list(unpack('<13I')) for _ in range(2)]
             viewport = list(unpack('<6f'))
             night_sampling.append(dict(draw=draw, mask=mask, viewport_count=viewports, samplers=samplers, viewport=viewport))
+    sprite_diagnostics, sprite_declined = [], 0
+    if version >= 8:
+        count, sprite_declined = unpack('<2I')
+        if count > 10:
+            raise ValueError('Invalid sprite diagnostic count')
+        sprite_color_bytes = sprite_depth_bytes = 0
+        def blob(max_size, exact=None):
+            n, = unpack('<I')
+            if n > max_size or (exact is not None and n != exact):
+                raise ValueError('Invalid sprite descriptor blob')
+            return take(n)
+        for _ in range(count):
+            vals = unpack('<8I')
+            (frame, draw, x, y, width, height, source_width, source_height) = vals
+            vals = unpack('<8I')
+            (rt_format, srv_format, srv_mip, srv_levels, srv_width, srv_height,
+             srv_array, srv_mip_count) = vals
+            if draw >= nd or not width or not height or width > 1400 or height > 1400 or not source_width or not source_height:
+                raise ValueError('Invalid sprite crop')
+            if x + width > source_width or y + height > source_height:
+                raise ValueError('Sprite crop outside source')
+            if (source_width > 16384 or source_height > 16384 or rt_format not in (10, 26, 27, 28, 29) or
+                    draws[draw]['frame'] != frame or (draws[draw]['vs'], draws[draw]['ps']) != (0xE508648660A352B2, 0x63ABD86359B57D01) or
+                    any(s['draw'] == draw for s in sprite_diagnostics)):
+                raise ValueError('Invalid sprite draw association or format')
+            ps_b1, srv_id, rt_id, depth_id, ps_b1_whole = unpack('<4QI')
+            depth_format, depth_resource_format = unpack('<2I')
+            if depth_resource_format not in (19, 20, 39, 40, 44, 45, 53, 55):
+                raise ValueError('Invalid sprite depth format')
+            if rt_id != draws[draw]['target']:
+                raise ValueError('Invalid sprite target identity')
+            mesh_refs = list(unpack('<2I'))
+            for role, ref in enumerate(mesh_refs):
+                if ref != 0xffffffff:
+                    if ref >= len(mesh_buffers) or mesh_buffers[ref]['frame'] != frame or mesh_buffers[ref]['first_draw'] != draw or mesh_buffers[ref]['stride'] != (336, 48)[role]:
+                        raise ValueError('Invalid sprite structured-buffer reference')
+            blend_factor = list(unpack('<4I'))
+            sample_mask, stencil_ref, depth_format_again, raster_fill, raster_cull, state_mask = unpack('<6I')
+            topology, dsv_flags = unpack('<2I')
+            if depth_format_again != depth_format or state_mask > 127 or dsv_flags > 3:
+                raise ValueError('Invalid sprite state')
+            scissor_count, = unpack('<I')
+            if scissor_count > 16:
+                raise ValueError('Invalid sprite scissor count')
+            scissors = [list(unpack('<4i')) for _ in range(scissor_count)]
+            viewport_count, = unpack('<I')
+            if viewport_count > 16:
+                raise ValueError('Invalid sprite viewport count')
+            viewports = []
+            for _ in range(viewport_count):
+                viewports.append(list(struct.unpack('<6f', blob(24, 24))))
+            sampler = blob(52, 52)
+            blend = blob(264, 264)
+            depth = blob(52, 52)
+            raster = blob(40, 40)
+            elements, = unpack('<I')
+            if elements > 32:
+                raise ValueError('Invalid sprite input layout size')
+            layout = []
+            for _ in range(elements):
+                semantic = blob(64, 64)
+                if b'\0' not in semantic:
+                    raise ValueError('Unterminated sprite input semantic')
+                index, fmt, slot, offset, classification, step = unpack('<6I')
+                if slot >= 32 or classification > 1:
+                    raise ValueError('Invalid sprite input layout element')
+                layout.append(dict(semantic=semantic.split(b'\0', 1)[0].decode('ascii'),
+                                   index=index, format=fmt, slot=slot, offset=offset,
+                                   classification=classification, step=step))
+            before_expected = width * height * (8 if rt_format == 10 else 4)
+            before_declared, = unpack('<I')
+            if before_declared != before_expected:
+                raise ValueError('Invalid sprite before size')
+            before_size, = unpack('<I')
+            if before_size not in (0, before_expected):
+                raise ValueError('Invalid sprite before payload')
+            before_data = take(before_size)
+            after_expected = before_expected
+            after_declared, = unpack('<I')
+            if after_declared != after_expected:
+                raise ValueError('Invalid sprite after size')
+            after_size, = unpack('<I')
+            if after_size not in (0, after_expected):
+                raise ValueError('Invalid sprite after payload')
+            after_data = take(after_size)
+            depth_expected = width * height * (8 if depth_resource_format in (19, 20) else 2 if depth_resource_format in (53, 55) else 4)
+            sprite_color_bytes += before_expected * 2
+            sprite_depth_bytes += depth_expected
+            if max(sprite_color_bytes, sprite_depth_bytes) > 160 * 1024 * 1024:
+                raise ValueError('Sprite payload budget exceeded')
+            depth_declared, = unpack('<I')
+            if depth_declared != depth_expected:
+                raise ValueError('Invalid sprite depth size')
+            depth_size, = unpack('<I')
+            if depth_size not in (0, depth_expected):
+                raise ValueError('Invalid sprite depth payload')
+            depth_data = take(depth_size)
+            ps_b1_size, = unpack('<I')
+            if ps_b1_size > min(ps_b1_whole, 8192) or ps_b1_size % 16:
+                raise ValueError('Invalid sprite PS b1 payload')
+            ps_b1_data = take(ps_b1_size)
+            sprite_diagnostics.append(dict(frame=frame, draw=draw, x=x, y=y, width=width,
+                height=height, source_width=source_width, source_height=source_height,
+                rt_format=rt_format, srv_format=srv_format, srv_mip=srv_mip,
+                srv_levels=srv_levels, srv_width=srv_width, srv_height=srv_height,
+                srv_array=srv_array, srv_mip_count=srv_mip_count, ps_b1=ps_b1,
+                srv_id=srv_id, rt_id=rt_id, depth_id=depth_id, ps_b1_whole=ps_b1_whole,
+                mesh=mesh_refs,
+                depth_format=depth_format, depth_resource_format=depth_resource_format,
+                blend_factor=blend_factor, sample_mask=sample_mask, stencil_ref=stencil_ref,
+                raster_fill=raster_fill, raster_cull=raster_cull, state_mask=state_mask, topology=topology, dsv_flags=dsv_flags,
+                scissors=scissors, viewports=viewports, sampler=sampler, blend=blend,
+                depth_desc=depth, raster=raster, layout=layout,
+                before=before_data, after=after_data, depth=depth_data, ps_b1_data=ps_b1_data))
     failures, = unpack('<I')
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
     return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
                 mesh_buffers=mesh_buffers, mesh_declined=mesh_declined,
-                effect_images=effect_images, effect_image_declined=effect_image_declined, night_sampling=night_sampling)
+                effect_images=effect_images, effect_image_declined=effect_image_declined, night_sampling=night_sampling,
+                sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined)
 
 
 def packed_float_channel(value, mantissa_bits):
@@ -277,6 +396,25 @@ def verify_fixture(capture):
             assert s['data'] == bytes((k+i*37) & 255 for k in range(start, start+length)), 'Shared-buffer draw window lost or overwritten'
 
 
+def verify_sprite_fixture(capture):
+    assert capture['version'] == 8 and capture['failures'] == 0
+    assert len(capture['sprite_diagnostics']) == 1 and capture['sprite_declined'] >= 2
+    d = capture['sprite_diagnostics'][0]
+    assert d['draw'] == 2 and (d['width'], d['height']) == (1400, 1400)
+    assert len(d['before']) == len(d['after']) == 1400 * 1400 * 4
+    assert d['before'] != d['after'], 'before/after paired crop did not retain distinct pixels'
+    assert d['before'] == bytes([0x1a, 0x33, 0x4c, 0xff]) * (1400 * 1400)
+    assert d['after'] == bytes([0xb2, 0x33, 0x1a, 0xff]) * (1400 * 1400)
+    assert len(d['depth']) == 1400 * 1400 * 4
+    assert d['depth'] == bytes([0x00, 0x00, 0x40, 0x01]) * (1400 * 1400)
+    assert d['state_mask'] & (1 << 3) and d['state_mask'] & (1 << 6)
+    assert d['layout'][0]['semantic'] == 'POSITION'
+    assert d['mesh'][0] != 0xffffffff and d['mesh'][1] != 0xffffffff
+    assert capture['mesh_buffers'][d['mesh'][0]]['data'] == bytes([0x31]) * 672
+    assert capture['mesh_buffers'][d['mesh'][1]]['data'] == bytes([0x42]) * 96
+    assert d['ps_b1_data'] == struct.pack('<f', 31.0) * 48
+
+
 def self_test():
     head = b'EDVRDRW1' + struct.pack('<4I', 1, 0, 0, 0)
     with tempfile.TemporaryDirectory() as td:
@@ -345,6 +483,16 @@ def self_test():
         h7 = b'EDVRDRW1' + struct.pack('<4I',7,0,0,0)
         p.write_bytes(h7 + struct.pack('<6I',0,0,0,0,0,0))
         assert read(p)['night_sampling'] == []
+        h8 = b'EDVRDRW1' + struct.pack('<4I',8,0,0,0)
+        p.write_bytes(h8 + struct.pack('<2I',0,0) + struct.pack('<2I',0,0) + struct.pack('<I',0) + struct.pack('<2I',0,0) + struct.pack('<I',0))
+        assert read(p)['sprite_diagnostics'] == []
+        p.write_bytes(h8 + struct.pack('<2I',0,0) + struct.pack('<2I',0,0) + struct.pack('<I',0) + struct.pack('<2I',11,0) + struct.pack('<I',0))
+        try:
+            read(p)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid sprite diagnostic count accepted')
         def night_file(phase=6, size=128, mask=0, reference=0, vs=0xFCF7BD2896751D96):
             d = struct.pack('<3Q9I',vs,0xF786D34B5E118D5E,3,7,17,ord('X'),6,1,0,16,16,0xffffffff)
             d += struct.pack('<QII',0,0,0)*4 + struct.pack('<Ii',0,0) + struct.pack('<5I',0,0,0,0,0)*3
@@ -399,8 +547,11 @@ def main():
     c = read(a.path)
     if a.verify_fixture:
         verify_fixture(c)
+        sprite_path = Path(str(a.path) + '.sprite')
+        assert sprite_path.exists(), 'sprite diagnostic fixture is required'
+        verify_sprite_fixture(read(sprite_path))
         effects = read(str(a.path)+'.effects')
-        assert effects['version'] == 7 and len(effects['draws']) == 5 and effects['failures'] == 0
+        assert effects['version'] == 8 and len(effects['draws']) == 5 and effects['failures'] == 0
         for i,d in enumerate(effects['draws']):
             assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
             assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
@@ -438,7 +589,7 @@ def main():
         assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
         assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
         crops = read(str(a.path)+'.crops')
-        assert crops['version'] == 7 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
+        assert crops['version'] == 8 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
         assert len(crops['effect_images']) == 2
         for i,e in enumerate(crops['effect_images']):
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
@@ -457,7 +608,7 @@ def main():
                     path = Path(a.path).parent / f'{stage}_{shader:016X}.dxbc'
                     assert path.read_bytes() == b'solar-bytecode\0', 'Solar shader stage was omitted or substituted'
         night = read(str(a.path)+'.night')
-        assert night['version'] == 7 and night['failures'] == 0 and len(night['draws']) == 3
+        assert night['version'] == 8 and night['failures'] == 0 and len(night['draws']) == 3
         assert len(night['effect_images']) == 14 and night['effect_image_declined'] == 0
         d = night['draws'][0]
         assert d['vs'] == 0xFCF7BD2896751D96 and d['ps'] == 0xF786D34B5E118D5E
