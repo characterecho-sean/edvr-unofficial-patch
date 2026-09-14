@@ -55,5 +55,7 @@ The full build passed with all 501 source hashes unchanged, including 150
 System checks, 41 native-host checks, 234 auxiliary API checks and 63 shutdown
 checks. Timing, shared transfer, stereo and module gates also pass. The
 diagnostic pair is stamped `v0.16.2-84-ga8a0e57-dirty`; exact source hashes and
-binaries remain in the local qualification archive. Its manual VDXR startup and
-timing result remain pending.
+binaries remain in the local qualification archive. The corrected pair is
+installed and hash-verified in Frontier through the sanctioned installer, with
+`runtime=system`, existing game settings and the original OpenVR DLL preserved.
+Its manual VDXR startup and timing result remain pending.
