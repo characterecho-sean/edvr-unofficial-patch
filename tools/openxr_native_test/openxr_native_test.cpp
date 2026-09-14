@@ -156,8 +156,9 @@ bool samePose(const vr::TrackedDevicePose_t& a,const vr::TrackedDevicePose_t& b)
 struct HostLifecycleFake {
   std::deque<XrSessionState> events;
   XrResult endResult=XR_SUCCESS;
-  unsigned beginCalls=0,endCalls=0;
-  bool running=false,frameOpen=false;
+  XrResult frameEndResult=XR_SUCCESS;
+  unsigned beginCalls=0,endCalls=0,waitCalls=0,frameEndCalls=0;
+  bool running=false,frameOpen=false,shouldRender=false;
   XrTime nextTime=100;
 };
 HostLifecycleFake* hostLifecycleFake=nullptr;
@@ -182,7 +183,8 @@ XrResult XRAPI_PTR hostEndSession(XrSession session) {
 XrResult XRAPI_PTR hostWaitFrame(XrSession session,const XrFrameWaitInfo* info,XrFrameState* state) {
   if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2)||!info||!state||!hostLifecycleFake->running||hostLifecycleFake->frameOpen)
     return XR_ERROR_CALL_ORDER_INVALID;
-  state->predictedDisplayTime=hostLifecycleFake->nextTime++;state->predictedDisplayPeriod=1;state->shouldRender=XR_FALSE;return XR_SUCCESS;
+  ++hostLifecycleFake->waitCalls;state->predictedDisplayTime=hostLifecycleFake->nextTime++;state->predictedDisplayPeriod=1;
+  state->shouldRender=hostLifecycleFake->shouldRender?XR_TRUE:XR_FALSE;return XR_SUCCESS;
 }
 XrResult XRAPI_PTR hostBeginFrame(XrSession session,const XrFrameBeginInfo* info) {
   if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2)||!info||hostLifecycleFake->frameOpen||!hostLifecycleFake->running)
@@ -191,7 +193,7 @@ XrResult XRAPI_PTR hostBeginFrame(XrSession session,const XrFrameBeginInfo* info
 }
 XrResult XRAPI_PTR hostEndFrame(XrSession session,const XrFrameEndInfo* info) {
   if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2)||!info||!hostLifecycleFake->frameOpen)return XR_ERROR_CALL_ORDER_INVALID;
-  hostLifecycleFake->frameOpen=false;return XR_SUCCESS;
+  ++hostLifecycleFake->frameEndCalls;hostLifecycleFake->frameOpen=false;return hostLifecycleFake->frameEndResult;
 }
 Dispatch hostDispatch() {return {hostPollEvent,hostBeginSession,hostEndSession,hostWaitFrame,hostBeginFrame,hostEndFrame};}
 void hostStateEvent(HostLifecycleFake& fake,XrSessionState state) {fake.events.push_back(state);}
@@ -225,6 +227,17 @@ void hostFixtureCleanup(std::unique_ptr<NativeRuntimeHost>& host) {
   host->state.abandonAfterOwnerDestruction();host->session=XR_NULL_HANDLE;host->instance=XR_NULL_HANDLE;
   host->view=host->local=XR_NULL_HANDLE;host->runtimeGeneration=0;host.reset();
 }
+// Host-level failure injection for boundary publication tests. The fake sink
+// accepts eye submissions without a graphics device and returns an injected
+// composition result, so no loader, headset, or D3D runtime is needed.
+struct HostFailureRuntimeHost final : NativeRuntimeHost {
+  using NativeRuntimeHost::NativeRuntimeHost;
+  vr::EVRCompositorError injectedCapture=vr::VRCompositorError_None;
+  XrResult injectedCompose=XR_SUCCESS;
+  vr::EVRCompositorError capture(vr::EVREye,const vr::Texture_t*,const vr::VRTextureBounds_t*,
+      vr::EVRSubmitFlags,bool) override {return injectedCapture;}
+  XrResult compose(XrCompositionLayerProjection&) override {return injectedCompose;}
+};
 int run(const Options& options,PresentHost* present=nullptr) {
   // Process-lifetime objects back the exported function pointers. Their
   // resources are still explicitly retired through Shutdown before return.
@@ -809,6 +822,112 @@ int selfTest() {
         "failed endSession is not retried");
     }),"inert failed-stop dispatch runs");
     owner.invoke([&]{hostFixtureCleanup(host);});owner.stop();hostLifecycleFake=nullptr;
+  }
+  // Irreversible composition failures retire the boundary and must publish
+  // the same invalidation and one-shot quit as a terminal session event.
+  // The fake sink injects both the positive timeout result and a negative XR
+  // failure without opening a runtime or creating graphics resources.
+  for(const XrResult injected:{XR_TIMEOUT_EXPIRED,XR_ERROR_RUNTIME_FAILURE}) {
+    OwnerService owner;RenderThreadDispatcher dispatcher(owner);RenderRoute route{dispatcher};
+    std::unique_ptr<HostFailureRuntimeHost> host;HostLifecycleFake fake;fake.shouldRender=true;hostLifecycleFake=&fake;
+    check(owner.start(),"inert boundary-failure owner starts");
+    check(owner.invoke([&]{
+      host=std::make_unique<HostFailureRuntimeHost>(owner,dispatcher,route);
+      const bool setup=hostFixtureSetup(*host)&&hostStartSession(*host,fake);check(setup,"inert boundary-failure fixture setup");
+      if(!setup)return;
+      host->poses.focus(host->compositorGeneration,true,true);
+      host->injectedCompose=injected;
+      check(host->boundary.waitAndBegin()==XR_SUCCESS,"injected boundary frame begins");host->boundary.setGeometryReady(true);
+      check(host->submitEye(host->compositorGeneration,vr::Eye_Left,nullptr,nullptr,vr::Submit_Default)==vr::VRCompositorError_None,
+        "injected boundary first eye accepted");
+      const auto waits=fake.waitCalls;const auto pumps=host->eventPumps;
+      check(host->submitEye(host->compositorGeneration,vr::Eye_Right,nullptr,nullptr,vr::Submit_Default)==vr::VRCompositorError_InvalidTexture&&
+        host->serviceFailed&&host->quitEventPending&&host->boundary.failed()&&!host->poses.read().canRender,
+        injected==XR_TIMEOUT_EXPIRED?"positive timeout retires host and queues quit":"negative composition retires host and queues quit");
+      host->pumpEvents();
+      CompositorRead poses{};
+      check(host->eventPumps==pumps&&host->waitPoses(host->compositorGeneration,poses)==vr::VRCompositorError_InvalidTexture&&
+        fake.waitCalls==waits&&!host->poses.read().canRender,"failed host admits no later XR work");
+      vr::VREvent_t event{};vr::TrackedDevicePose_t pose{};
+      check(host->systemInterface.PollNextEventWithPose(vr::TrackingUniverseSeated,&event,sizeof(event),&pose)&&
+        event.eventType==vr::VREvent_Quit,"composition failure delivers quit");
+      check(!host->systemInterface.PollNextEvent(&event,sizeof(event))&&!host->quitEventPending,"composition quit is one-shot");
+      host->pumpEvents();check(!host->quitEventPending,"repeated failed pump cannot requeue quit");
+    }),"inert boundary-failure dispatch runs");
+    owner.invoke([&]{host->state.abandonAfterOwnerDestruction();host->session=XR_NULL_HANDLE;host->instance=XR_NULL_HANDLE;
+      host->runtimeGeneration=0;host.reset();});owner.stop();hostLifecycleFake=nullptr;
+  }
+  // Loading failures use the same fatal publication path. An empty loading
+  // frame keeps this injection independent of graphics and view-location APIs.
+  {
+    OwnerService owner;RenderThreadDispatcher dispatcher(owner);RenderRoute route{dispatcher};
+    std::unique_ptr<HostFailureRuntimeHost> host;HostLifecycleFake fake;fake.frameEndResult=XR_ERROR_RUNTIME_FAILURE;hostLifecycleFake=&fake;
+    check(owner.start(),"inert loading-failure owner starts");
+    check(owner.invoke([&]{
+      host=std::make_unique<HostFailureRuntimeHost>(owner,dispatcher,route);
+      const bool setup=hostFixtureSetup(*host)&&hostStartSession(*host,fake);check(setup,"inert loading-failure fixture setup");
+      if(!setup)return;
+      host->poses.focus(host->compositorGeneration,true,true);host->loading.overrideSet();host->loading.overrideCleared();
+      host->loadingBoundary();const auto waits=fake.waitCalls;const auto frameEnds=fake.frameEndCalls;const auto pumps=host->eventPumps;
+      check(host->serviceFailed&&host->quitEventPending&&host->boundary.failed()&&!host->poses.read().canRender&&frameEnds==1,
+        "loading end failure retires host and queues quit");
+      host->loadingBoundary();host->pumpEvents();CompositorRead poses{};
+      check(fake.waitCalls==waits&&fake.frameEndCalls==frameEnds&&host->eventPumps==pumps&&
+        host->waitPoses(host->compositorGeneration,poses)==vr::VRCompositorError_InvalidTexture,
+        "loading failure admits no later work");
+      vr::VREvent_t event{};vr::TrackedDevicePose_t pose{};
+      check(host->systemInterface.PollNextEventWithPose(vr::TrackingUniverseSeated,&event,sizeof(event),&pose)&&event.eventType==vr::VREvent_Quit&&
+        !host->systemInterface.PollNextEvent(&event,sizeof(event))&&!host->quitEventPending,"loading quit is one-shot");
+    }),"inert loading-failure dispatch runs");
+    owner.invoke([&]{host->state.abandonAfterOwnerDestruction();host->session=XR_NULL_HANDLE;host->instance=XR_NULL_HANDLE;
+      host->runtimeGeneration=0;host.reset();});owner.stop();hostLifecycleFake=nullptr;
+  }
+  // A loading-step failure before boundary completion is still fatal at the
+  // host layer. Leave the boundary latch clear to verify that the host does
+  // not rely on composition/end failure as its only fatal signal.
+  {
+    OwnerService owner;RenderThreadDispatcher dispatcher(owner);RenderRoute route{dispatcher};
+    std::unique_ptr<HostFailureRuntimeHost> host;HostLifecycleFake fake;hostLifecycleFake=&fake;
+    check(owner.start(),"inert loading-step owner starts");
+    check(owner.invoke([&]{
+      host=std::make_unique<HostFailureRuntimeHost>(owner,dispatcher,route);
+      const bool setup=hostFixtureSetup(*host)&&hostStartSession(*host,fake);check(setup,"inert loading-step fixture setup");
+      if(!setup)return;
+      check(host->geometry.publish(hostGeometry(host->geometryGeneration,1),true,true),"seed loading-step geometry publication");
+      auto seeded=host->poses.read();seeded.sequence=1;seeded.posesAvailable=true;seeded.renderPose=invalidHeadPose(true);seeded.renderPose.bPoseIsValid=true;
+      check(host->poses.publish(seeded),"seed loading-step pose publication");
+      host->poses.focus(host->compositorGeneration,true,true);host->loading.overrideSet();
+      host->loadingBoundary();const auto waits=fake.waitCalls;const auto pumps=host->eventPumps;
+      check(host->serviceFailed&&host->quitEventPending&&!host->boundary.failed()&&!host->geometry.read().geometryValid&&
+        !host->poses.read().posesAvailable&&!host->poses.read().canRender&&
+        fake.frameEndCalls==0,"loading-step failure publishes fatal state without boundary latch");
+      host->loadingBoundary();host->pumpEvents();CompositorRead poses{};
+      check(fake.waitCalls==waits&&host->eventPumps==pumps&&host->waitPoses(host->compositorGeneration,poses)==vr::VRCompositorError_InvalidTexture,
+        "loading-step failure admits no later work");
+      vr::VREvent_t event{};vr::TrackedDevicePose_t pose{};
+      check(host->systemInterface.PollNextEventWithPose(vr::TrackingUniverseSeated,&event,sizeof(event),&pose)&&event.eventType==vr::VREvent_Quit&&
+        !host->systemInterface.PollNextEvent(&event,sizeof(event))&&!host->quitEventPending,"loading-step quit is one-shot");
+    }),"inert loading-step dispatch runs");
+    owner.invoke([&]{host->state.abandonAfterOwnerDestruction();host->session=XR_NULL_HANDLE;host->instance=XR_NULL_HANDLE;
+      host->runtimeGeneration=0;host.reset();});owner.stop();hostLifecycleFake=nullptr;
+  }
+  // A rejected valid eye is an application input error, not a runtime failure.
+  {
+    OwnerService owner;RenderThreadDispatcher dispatcher(owner);RenderRoute route{dispatcher};
+    std::unique_ptr<HostFailureRuntimeHost> host;HostLifecycleFake fake;fake.shouldRender=true;hostLifecycleFake=&fake;
+    check(owner.start(),"inert submit-rejection owner starts");
+    check(owner.invoke([&]{
+      host=std::make_unique<HostFailureRuntimeHost>(owner,dispatcher,route);
+      const bool setup=hostFixtureSetup(*host)&&hostStartSession(*host,fake);check(setup,"inert submit-rejection fixture setup");
+      if(!setup)return;
+      host->injectedCapture=vr::VRCompositorError_TextureIsOnWrongDevice;
+      check(host->boundary.waitAndBegin()==XR_SUCCESS,"rejected submit frame begins");host->boundary.setGeometryReady(true);
+      check(host->submitEye(host->compositorGeneration,vr::Eye_Left,nullptr,nullptr,vr::Submit_Default)==vr::VRCompositorError_TextureIsOnWrongDevice&&
+        !host->serviceFailed&&!host->quitEventPending&&!host->boundary.failed()&&host->boundary.clear()==XR_SUCCESS,
+        "ordinary rejected eye does not quit host");
+    }),"inert submit-rejection dispatch runs");
+    owner.invoke([&]{host->state.abandonAfterOwnerDestruction();host->session=XR_NULL_HANDLE;host->instance=XR_NULL_HANDLE;
+      host->runtimeGeneration=0;host.reset();});owner.stop();hostLifecycleFake=nullptr;
   }
   // Exercise the real native adapter's worker construction and partial-start
   // cleanup without ever opening a loader or contacting an installed runtime.

@@ -1568,6 +1568,7 @@ if exist "%BUILD%\nvngx_dlss.dll" (
     echo        above says where it looked^). Not a release build.
 )
 echo.
+python tools\package_native.py --check-installer || exit /b 1
 echo [edvr] Native OpenXR build and all gates passed.
 echo [edvr] Install both native DLLs and the bundled loader for a test flight:
 echo        python tools\install_edvr.py --target frontier --dry-run

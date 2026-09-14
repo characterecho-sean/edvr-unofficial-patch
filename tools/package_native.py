@@ -34,14 +34,16 @@ def _files(root, no_dlss):
               (build / "edvr-installer.exe", "edvr-installer.exe"),
               (root / "release" / "README.txt", "README.txt"),
               (root / "release" / "OPENVR.txt", "openvr/READ-ME-FIRST.txt")]
-    if not no_dlss:
+    # Historical --no-dlss permits builds made without the SDK. It cannot
+    # remove a runtime already embedded in the installer we distribute.
+    if not no_dlss or (build / "nvngx_dlss.dll").is_file():
         result.append((build / "nvngx_dlss.dll", "nvngx_dlss.dll"))
         result.append((build / "NVIDIA-DLSS-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt"))
     result.extend([(root / "edvr.ini", "edvr.ini"), (root / "LICENSE", "LICENSE.txt")])
     return result
 
 
-def _embedded_resource(executable, resource_id):
+def _embedded_resource(executable, resource_id, required=True):
     """Read RCDATA with Windows datafile flags; never execute the installer."""
     if os.name != "nt":
         raise ValueError("installer resource validation requires Windows")
@@ -65,7 +67,14 @@ def _embedded_resource(executable, resource_id):
         raise OSError(ctypes.get_last_error(), "LoadLibraryExW failed")
     try:
         resource = kernel.FindResourceW(handle, resource_id, 10)
-        if not resource: raise ValueError("installer resource %d is missing" % resource_id)
+        if not resource:
+            error = ctypes.get_last_error()
+            # Mandatory RCDATA is checked first; only an absent named resource
+            # is an expected result when probing the optional DLSS payload.
+            if not required and error == 1814:  # ERROR_RESOURCE_NAME_NOT_FOUND
+                return None
+            raise ValueError("installer resource %d is missing (Windows error %d)" %
+                             (resource_id, error))
         size = kernel.SizeofResource(handle, resource); loaded = kernel.LoadResource(handle, resource)
         pointer = kernel.LockResource(loaded)
         if not size or not pointer: raise ValueError("installer resource %d is empty" % resource_id)
@@ -82,8 +91,15 @@ def _validate_installer_resources(executable, files):
         actual = _embedded_resource(executable, resource_id)
         if hashlib.sha256(actual).digest() != hashlib.sha256(by_name[name].read_bytes()).digest():
             raise ValueError("installer resource %d differs from %s" % (resource_id, name))
-    if "nvngx_dlss.dll" in by_name and _embedded_resource(executable, 104) != by_name["nvngx_dlss.dll"].read_bytes():
-        raise ValueError("installer resource 104 differs from nvngx_dlss.dll")
+    embedded_dlss = _embedded_resource(executable, 104, required=False)
+    if "nvngx_dlss.dll" in by_name:
+        if embedded_dlss != by_name["nvngx_dlss.dll"].read_bytes():
+            raise ValueError("installer resource 104 differs from nvngx_dlss.dll")
+        notice = by_name.get("NVIDIA-DLSS-LICENSE.txt")
+        if notice is None or not notice.read_bytes().strip():
+            raise ValueError("the embedded DLSS runtime requires its NVIDIA license notice")
+    elif embedded_dlss is not None:
+        raise ValueError("installer embeds DLSS but its matching DLL and notice are missing from the package")
 
 
 def package(root, version, no_dlss=False, dry_run=False):
@@ -152,10 +168,16 @@ def self_test():
         old_verify = None
         import fetch_openxr_loader
         old_verify = fetch_openxr_loader.verify
-        old_resources = globals()['_validate_installer_resources']
+        old_resource = globals()['_embedded_resource']
+        resources = {101: b"payload", 102: b"payload", 103: b"payload",
+                     105: b"payload", 106: b"notice"}
+        def fake_resource(executable, resource_id, required=True):
+            if required and resource_id not in resources:
+                raise ValueError("missing fixture resource")
+            return resources.get(resource_id)
         openxr_pe.native_exports = lambda path: None; openxr_pe.native_graphics_exports = lambda path: None
         fetch_openxr_loader.verify = lambda path: None
-        globals()['_validate_installer_resources'] = lambda executable, files: None
+        globals()['_embedded_resource'] = fake_resource
         try:
             assert package(root, "1.2.3", no_dlss=True, dry_run=True) == 0
             assert not (root / "dist").exists()
@@ -175,20 +197,71 @@ def self_test():
                 assert names == {"d3d11.dll", "openvr/openvr_api.dll", "openvr/openxr_loader.dll",
                                  "openvr/OPENXR-LOADER-LICENSE.txt", "edvr-installer.exe",
                                  "README.txt", "openvr/READ-ME-FIRST.txt", "edvr.ini", "LICENSE.txt"}
+            (root / "build" / "edvr_openxr_runtime.dll").write_bytes(b"payload")
+            dlss = root / "build" / "nvngx_dlss.dll"
+            notice = root / "build" / "NVIDIA-DLSS-LICENSE.txt"
+            resources[104] = b"embedded-dlss"
+            try:
+                package(root, "1.2.4", no_dlss=True)
+                raise AssertionError("embedded runtime accepted without its loose payload")
+            except ValueError:
+                pass
+            assert not (root / "dist" / ".edvr-stage-1.2.4").exists()
+            dlss.write_bytes(resources[104])
+            try:
+                package(root, "1.2.4", no_dlss=True)
+                raise AssertionError("embedded runtime accepted without its notice")
+            except ValueError:
+                pass
+            notice.write_bytes(b"NVIDIA runtime notice")
+            assert package(root, "1.2.4", no_dlss=True) == 0
+            with zipfile.ZipFile(root / "dist" / "edvr-1.2.4.zip") as archive:
+                assert archive.read("nvngx_dlss.dll") == resources[104]
+                assert archive.read("NVIDIA-DLSS-LICENSE.txt") == notice.read_bytes()
+            for bad in (None, b"different-installer-runtime"):
+                resources[104] = bad
+                try:
+                    package(root, "1.2.5", no_dlss=True)
+                    raise AssertionError("mismatched embedded runtime accepted")
+                except ValueError:
+                    pass
+            resources[104] = dlss.read_bytes()
+            notice.write_bytes(b" \n")
+            try:
+                package(root, "1.2.5", no_dlss=True)
+                raise AssertionError("empty DLSS notice accepted")
+            except ValueError:
+                pass
         finally:
             openxr_pe.native_exports, openxr_pe.native_graphics_exports = old_native, old_graphics
             fetch_openxr_loader.verify = old_verify
-            globals()['_validate_installer_resources'] = old_resources
+            globals()['_embedded_resource'] = old_resource
     print("package_native: self-test passed"); return 0
+
+
+def check_installer(root):
+    """Run after linking, so stale outputs cannot fail the early self-test."""
+    root = root.resolve()
+    executable = root / "build" / "edvr-installer.exe"
+    _validate_installer_resources(executable, _files(root, True))
+    if _embedded_resource(executable, 65535, required=False) is not None:
+        raise ValueError("unexpected resource 65535 in the native installer")
+    print("package_native: actual installer resources match the release files")
+    return 0
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", nargs="?"); parser.add_argument("--root", type=Path, default=ROOT)
-    parser.add_argument("--no-dlss", action="store_true"); parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-dlss", action="store_true",
+                        help="allow a build without DLSS; retain the DLL and notice when embedded")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--check-installer", action="store_true",
+                        help="verify the built installer's actual resources without executing it")
     args = parser.parse_args(argv)
     if args.self_test: return self_test()
+    if args.check_installer: return check_installer(args.root)
     return package(args.root, args.version, args.no_dlss, args.dry_run)
 
 

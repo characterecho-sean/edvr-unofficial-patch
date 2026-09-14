@@ -123,6 +123,10 @@ class FrameBoundary final {
     return XR_SUCCESS;
   }
   XrResult lastResult() const { return lastResult_; }
+  // A failed boundary has consumed an uncertain XR operation or observed an
+  // irreversible composition/end failure. Callers must retire their native
+  // publications before admitting another frame.
+  bool failed() const { return failed_; }
   bool ownerThread() const { return std::this_thread::get_id() == thread_; }
 
  private:

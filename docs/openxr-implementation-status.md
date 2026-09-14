@@ -1,5 +1,12 @@
 # OpenXR implementation status
 
+The [branch review corrections](openxr-review-fixes-2026-09-14.md) notify Elite
+when native frame or loading work fails permanently, accept GUI startup-config
+line endings in CLI verification, and keep optional DLSS packaging consistent
+with the embedded installer. Astra and parent review are complete; the full
+build and new regressions passed. This checkpoint adds no headset
+qualification.
+
 The release goal is native OpenXR for every EDVR user, including those Elite
 currently routes through LibOVR. Windows selects the OpenXR runtime. Automatic
 bypass of Elite's Oculus preference and installer migration from existing

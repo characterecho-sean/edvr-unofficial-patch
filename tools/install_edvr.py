@@ -896,6 +896,14 @@ def _standard_native_paths(root, target):
             "game": os.path.join(target, GAME_EXE)}
 
 
+def _equivalent_startup_config(actual, expected):
+    """Accept the same startup config with LF or CRLF line endings only."""
+    if actual == expected:
+        return True
+    normalized = actual.replace(b"\r\n", b"\n")
+    return b"\r" not in normalized and normalized == expected
+
+
 def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                             include_dlss=False, include_ini=False):
     """Stage the complete native pair, bundled loader, and local config."""
@@ -930,7 +938,8 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             dst = p[key + "_target"]
             if not os.path.isfile(dst) or sha256(dst) != sha256(p[key]):
                 print("[edvr] native verify mismatch: %s" % dst); ok = False
-        if not os.path.isfile(p["config"]) or open(p["config"], "rb").read() != config_bytes:
+        if (not os.path.isfile(p["config"]) or
+                not _equivalent_startup_config(open(p["config"], "rb").read(), config_bytes)):
             print("[edvr] native verify mismatch: %s" % p["config"]); ok = False
         if include_dlss:
             dlss = os.path.join(root, "build", "nvngx_dlss.dll")
@@ -1199,9 +1208,39 @@ def self_test():
             sp = _standard_native_paths(sroot, sgame)
             if any(sha256(sp[k + "_target"]) != sha256(sp[k]) for k in ("runtime", "graphics", "loader", "notice")):
                 print("standard native payload mismatch"); ok = False
-            if open(sp["config"], "rb").read() != ("[openxr]\nversion=1\nloader=%s\ngraphics=%s\nruntime=system\nseparate_device=1\n" %
-                    (os.path.abspath(sp["loader_target"]), os.path.abspath(sp["graphics_target"]))).encode("utf-8"):
+            expected_standard_config = ("[openxr]\nversion=1\nloader=%s\ngraphics=%s\nruntime=system\nseparate_device=1\n" %
+                    (os.path.abspath(sp["loader_target"]), os.path.abspath(sp["graphics_target"]))).encode("utf-8")
+            if open(sp["config"], "rb").read() != expected_standard_config:
                 print("standard config mismatch"); ok = False
+            # The GUI installer serializes this same config with CRLF. CLI
+            # verification must accept that equivalent text without writing.
+            gui_config = expected_standard_config.replace(b"\n", b"\r\n")
+            Path(sp["config"]).write_bytes(gui_config)
+            before_verify = sorted(
+                (os.path.relpath(os.path.join(b, n), sgame),
+                 Path(b, n).read_bytes(),
+                 os.stat(os.path.join(b, n)).st_mtime_ns)
+                for b, _, ns in os.walk(sgame) for n in ns)
+            if main(["--root", sroot, "--target", sgame, "--all", "--verify-only"]) != 0:
+                print("GUI CRLF config failed standard verify-only")
+                ok = False
+            after_verify = sorted(
+                (os.path.relpath(os.path.join(b, n), sgame),
+                 Path(b, n).read_bytes(),
+                 os.stat(os.path.join(b, n)).st_mtime_ns)
+                for b, _, ns in os.walk(sgame) for n in ns)
+            if before_verify != after_verify:
+                print("standard verify-only wrote files")
+                ok = False
+            # A real config change remains an error even when its line endings
+            # match the GUI serialization.
+            Path(sp["config"]).write_bytes(gui_config.replace(b"runtime=system", b"runtime=changed"))
+            if main(["--root", sroot, "--target", sgame, "--all", "--verify-only"]) == 0:
+                print("divergent GUI config accepted by standard verify-only")
+                ok = False
+            # Receipt recovery continues to compare the installed config's
+            # exact bytes, so restore the CLI serialization for that path.
+            Path(sp["config"]).write_bytes(expected_standard_config)
             if open(os.path.join(sgame, "edvr.ini"), "rb").read() != b"[user]\nkeep=1\n":
                 print("standard install changed user INI"); ok = False
             if not os.path.isfile(os.path.join(sgame, "nvngx_dlss.dll")): print("--all omitted DLSS"); ok = False

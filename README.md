@@ -665,8 +665,10 @@ fetches one pinned commit of NVIDIA's public SDK repository into
 the script. `EDVR_NGX_SDK` points the build at a copy somewhere else.
 
 The installer resource generation requires the native pair and bundled loader;
-it does not offer a legacy OpenVR-only package. The optional DLSS component can
-be omitted deliberately with `package.bat --no-dlss`.
+it does not offer a legacy OpenVR-only package. `package.bat <version>
+--no-dlss` allows packaging a build made without the DLSS SDK. When the build
+contains DLSS, the archive retains its matching DLL and NVIDIA license notice
+alongside the installer that embeds it.
 
 ## Antivirus
 

@@ -369,7 +369,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void pumpEvents() {
     if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceFailed)return;
     auto operation=gate.tryEnter(runtimeGeneration);
-    if(!operation){serviceFailed=true;return;}
+    if(!operation){publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"service_operation");return;}
     ++eventPumps;
     XrResult r=state.pollEvents();
     publishedPumps.store(eventPumps,std::memory_order_release);
@@ -377,31 +377,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     traceLifecycle(lifecycle);
     poses.focus(compositorGeneration,true,state.running()&&!state.terminal()&&lifecycle==Lifecycle::Focused);
     if(XR_FAILED(r)||state.terminal()||!changes.active()) {
-      serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
-      menu.invalidate();
-      invalidateEyeTreatments();
-      timingInvalidate();
       // A retired reference-change policy is also a fatal service state: the
       // game must observe the same quit path instead of rendering forever on
       // invalidated publications.
-      queueQuitEvent(r);
-      result("service_poll_terminal",r);return;
+      publishFatalFailure(r,"service_poll_terminal");
+      return;
     }
     if(lifecycle==Lifecycle::Ready&&!state.running()) {
       // Ended sessions may receive READY again. Keep publication generations
       // and provider tables alive, but clear cached poses/history and advance
       // the frame sequence above every sequence already admitted this session.
       if(!prepareSessionRestart()) {
-        serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
-        menu.invalidate();invalidateEyeTreatments();timingInvalidate();queueQuitEvent(XR_ERROR_LIMIT_REACHED);
-        result("service_session_rebind",XR_ERROR_LIMIT_REACHED);return;
+        publishFatalFailure(XR_ERROR_LIMIT_REACHED,"service_session_rebind");return;
       }
       r=state.startIfReady();
       if(XR_FAILED(r)||state.terminal()) {
-        serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
-        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
-        if(XR_FAILED(r)||state.terminal())queueQuitEvent(r);
-        result("service_session_restart",r);return;
+        publishFatalFailure(r,"service_session_restart");return;
       }
       serviceStopped=false;
       nativeTracePrintf("service_session_restart,generation=%llu\n",(unsigned long long)compositorGeneration);
@@ -410,10 +401,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(lifecycle==Lifecycle::Stopping&&state.running()) {
       r=boundary.clear();
       if(r==XR_SUCCESS)r=state.stop();
-      serviceStopped=r==XR_SUCCESS;serviceFailed=!serviceStopped;
-      geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
-      menu.invalidate();invalidateEyeTreatments();timingInvalidate();
-      if(XR_FAILED(r)||state.terminal())queueQuitEvent(r);
+      serviceStopped=r==XR_SUCCESS;
+      if(XR_FAILED(r)||state.terminal())publishFatalFailure(r,"service_xrEndSession");
+      else {
+        geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+      }
       result("service_xrEndSession",r);
       return;
     }
@@ -423,10 +416,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void loadingBoundary() {
     if(GetCurrentThreadId()!=ownerThread||serviceStopped||serviceFailed)return;
     auto operation=gate.tryEnter(runtimeGeneration);
-    if(!operation){serviceFailed=true;return;}
+    if(!operation){publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"loading_operation");return;}
     if(loading.work(state.frameOpen())==LoadingWork::None||!state.running())return;
     const auto r=loadingStep();
-    if(r!=XR_SUCCESS){serviceFailed=true;result("loading_frame",r);}
+    if(r!=XR_SUCCESS)publishFatalFailure(boundary.failed()?boundary.lastResult():r,"loading_frame");
   }
   XrResult loadingStep() {
     if(GetCurrentThreadId()!=ownerThread||state.frameOpen())return XR_ERROR_CALL_ORDER_INVALID;
@@ -512,7 +505,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
-    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||!seated.space()||!changes.active())
+    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed||!seated.space()||!changes.active())
       return vr::VRCompositorError_InvalidTexture;
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
@@ -523,6 +516,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
     auto fail=[&](XrResult error){timingInvalidate();lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();invalidateEyeTreatments();
       geometry.invalidate(geometryGeneration);
+      if(boundary.failed())publishFatalFailure(boundary.lastResult(),"pose_boundary");
       if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
       return vr::VRCompositorError_InvalidTexture;};
     lastCompositorResult=boundary.waitAndBegin();
@@ -644,7 +638,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
-    if(!operation||generation!=compositorGeneration)return vr::VRCompositorError_InvalidTexture;
+    if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return vr::VRCompositorError_InvalidTexture;
     if(eye!=vr::Eye_Left&&eye!=vr::Eye_Right) {
       timingInvalidate();invalidateEyeTreatments();
       const auto rejected=boundary.submit(eye,texture,bounds,flags);
@@ -655,6 +649,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto submitClockEnd=QueryPerformanceCounter(&submitEnd);
     if(submitClock&&submitClockEnd) timingFrame.submitMs[unsigned(eye)]=elapsedMs(submitBegin,submitEnd);
     lastCompositorResult=boundary.lastResult();
+    if(boundary.failed()) {
+      publishFatalFailure(boundary.lastResult(),"submit_boundary");
+      return vr::VRCompositorError_InvalidTexture;
+    }
     if(r!=vr::VRCompositorError_None)invalidateEyeTreatments();
     if(r==vr::VRCompositorError_None&&timingGpuBegun[unsigned(eye)]) {
       const bool markerDispatched=graphicsCalls.invoke([&]{
@@ -679,8 +677,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=clearSubmitted(generation);})&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
-    if(!operation||generation!=compositorGeneration)return false;
-    if(boundary.clear()!=XR_SUCCESS)return false;
+    if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return false;
+    const auto cleared=boundary.clear();
+    if(cleared!=XR_SUCCESS) {
+      if(boundary.failed())publishFatalFailure(boundary.lastResult(),"clear_boundary");
+      return false;
+    }
     invalidateEyeTreatments();timingInvalidate();temporalFrameEyes=0;previousPairValid=false;
     loading.sceneCleared();
     return loading.visible(); // no default historical grid when no override exists
@@ -1017,6 +1019,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
   ~NativeRuntimeHost() {close();}
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); }
+  void publishFatalFailure(XrResult error,const char* operation) noexcept {
+    if(serviceFailed)return;
+    serviceFailed=true;
+    serviceStopped=false;
+    if(runtimeGeneration)gate.requestStop(runtimeGeneration);
+    geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+    poses.focus(compositorGeneration,true,false);
+    frameGeometryAvailable=false;frameGeometry={};previousPairValid=false;
+    menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+    queueQuitEvent(error);
+    result(operation,error);
+  }
   void traceLifecycle(Lifecycle lifecycle) noexcept {
     if(lifecycle==tracedLifecycle)return;
     nativeTracePrintf("service_lifecycle,from=%u,to=%u,running=%u,terminal=%u\n",
