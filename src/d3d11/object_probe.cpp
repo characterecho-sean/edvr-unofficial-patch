@@ -26,6 +26,7 @@
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
 #include "eye_tonemap_snapshot.h"
+#include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
 
 namespace edvr {
@@ -573,6 +574,17 @@ AuxSlot g_aux[kLedgerAux];
 int     g_auxCount = 0;
 EyeDrawSnapshot g_drawSnapshot;
 EyeTonemapSnapshot g_tonemapSnapshot;
+EyePanelSnapshot g_panelSnapshot;
+// The ledger records the submitted draw. Delay the panel's copies until
+// the native draw runs, after texture/constant substitutions have begun.
+struct PanelCaptureArgs {
+    ID3D11DeviceContext* ctx = nullptr;
+    uint32_t frame = 0, ordinal = 0, count = 0, instances = 0;
+    uint32_t startInstance = 0, start = 0;
+    int32_t base = 0;
+    char kind = 0;
+} g_panelCaptureArgs;
+uint32_t g_panelSkipped = 0;
 EyeDrawSnapshot g_eyeMeshSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
 struct AuxFrame {   // one watched shader's buffers in one frame
@@ -591,6 +603,9 @@ void releaseCopy(LedgerCopy& c) {
 void ledgerRelease() {
     g_drawSnapshot.reset();
     g_tonemapSnapshot.reset();
+    g_panelSnapshot.reset();
+    g_panelCaptureArgs = {};
+    g_panelSkipped = 0;
     g_eyeMeshSnapshot.reset();
     g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
@@ -2636,6 +2651,15 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     d.instances = instances;
     d.startInstance = startInstance;
     d.kind = static_cast<uint8_t>(kind);
+    if (g_panelCaptureArgs.ctx) {
+        ++g_panelSkipped;
+        g_panelCaptureArgs = {};
+    }
+    if (d.vs == EyePanelSnapshot::kVs && bindingShaderHash(BindSlot::Ps) == EyePanelSnapshot::kPs) {
+        g_panelCaptureArgs = {ctx, frame,
+            static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
+            count, instances, startInstance, start, base, kind};
+    }
     if(d.vs==EyeTonemapSnapshot::kVs)
         g_tonemapSnapshot.captureRequested(ctx,g_ledgerFrame0,g_ledgerLastFrame,frame,
                                  static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
@@ -2914,6 +2938,15 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     wchar_t tonePath[MAX_PATH];
     _snwprintf_s(tonePath,MAX_PATH,_TRUNCATE,L"%s\\tonemap_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool toneOk=g_tonemapSnapshot.write(ctx,tonePath,dir.c_str());
+    wchar_t panelPath[MAX_PATH];
+    _snwprintf_s(panelPath,MAX_PATH,_TRUNCATE,L"%s\\panels_%s.bin",dir.c_str(),g_ledgerStamp);
+    const bool panelOk=g_panelSnapshot.write(ctx,panelPath);
+    Log::get().note("object probe: panel snapshots %ls: %u draws, actual first matching frame %u, target %llX, %llu reserved bytes, %u declines, %u readback/capture failures, %u other-eye draws, %u skipped/replaced candidates; %s. First matching eye/frame only, 16 draws, 768 MiB payload cap; actual native draw inputs and before/after HDR/depth retained. No rendering changes.",
+        panelPath,g_panelSnapshot.count(),g_panelSnapshot.firstFrame(),
+        static_cast<unsigned long long>(g_panelSnapshot.target()),
+        static_cast<unsigned long long>(g_panelSnapshot.bytes),g_panelSnapshot.declined,
+        g_panelSnapshot.failures,g_panelSnapshot.ignoredOtherEye,g_panelSkipped,
+        panelOk?"written":"WRITE FAILED");
     Log::get().note("object probe: tone-map snapshots %ls: %u draws, actual first matching frame %u, %u reserved bytes, %u declines, %u failed copies/shaders; %s. At most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.firstFrame(),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
     const uint32_t missingShaders = g_drawSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye draw snapshots %ls: %u draws, %u holo surfaces, %u capped draws, "
@@ -3153,9 +3186,29 @@ void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count
 }
 
 void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
+    // An early-return verdict swallowed the original draw. It has no valid
+    // native before/after pair; do not carry its arguments into another draw.
+    if (g_panelCaptureArgs.ctx == ctx) {
+        ++g_panelSkipped;
+        g_panelCaptureArgs = {};
+    }
     if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureEffectEnd(ctx);
     g_tonemapSnapshot.end(ctx);
+}
+
+void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx) {
+    if (!g_ledgerOn || !ctx || g_panelCaptureArgs.ctx != ctx) return;
+    const PanelCaptureArgs args = g_panelCaptureArgs;
+    g_panelCaptureArgs = {};
+    if (args.frame != g_frame+1) {++g_panelSkipped;return;}
+    g_panelSnapshot.captureRequested(ctx,g_ledgerFrame0,g_ledgerLastFrame,
+        args.frame,args.ordinal,EyePanelSnapshot::kVs,EyePanelSnapshot::kPs,
+        args.kind,args.count,args.instances,args.startInstance,args.start,args.base);
+}
+
+void objectProbePanelDrawEnd(ID3D11DeviceContext* ctx) {
+    if (g_ledgerOn && ctx) g_panelSnapshot.end(ctx);
 }
 
 void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,

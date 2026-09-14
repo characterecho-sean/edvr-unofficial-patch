@@ -1229,3 +1229,60 @@ Code revision ab74d7d was fast-forwarded to main and pushed, rebuilt
 there, NVIDIA-smoke-tested, installed to Steam and separately verified
 for both DLLs. The installed version is v0.16.2-15-gab74d7d. Subsequent
 investigation-only documentation does not change that installed code.
+
+The next capture adds panels_<stamp>.bin (EDVRPNL1) for the later
+81216C77F90DEDD6/A2965EC2931A39C8 panel family. It retains up to 16
+draws from the first matching HDR target and actual matching frame
+within the armed interval. The 054856 census contains 12 candidates per
+eye, so this bounds one eye without truncating that observed sequence.
+Other eyes/frames and skipped/replaced draws have separate counters.
+This is diagnostic instrumentation; target and orbital rendering are
+unchanged.
+
+The ledger supplies the original draw arguments and ordinal. Panel
+snapshots begin after the existing texture/constant substitutions and
+end immediately after the actual draw, before private depth/motion
+reissues. Consequently they retain the inputs actually used on screen,
+including an upscaled panel texture when that feature is active. Shader
+object identity is checked at this boundary. Swallowed native draws are
+counted as skipped instead of receiving a misleading before/after pair.
+
+Each draw retains central 1400-square native HDR before/after images,
+pre-draw depth/stencil, the complete mip chains of PS t0/t1/t2, all five
+required constant buffers, complete structured buffers at VS t33/t38,
+their exact SRV views, bounded geometry, shader bytes, layout and render
+state. Texture storage/view pairs include the observed 9/11, 70/71 and
+27/28 formats. Mapped padding is omitted while BC1 sub-block mip rows
+remain intact. The 32-MiB native index buffer is captured only over the
+submitted index window. Vertex windows are capped at 256 KiB per slot;
+the reader validates every referenced element, including signed base
+vertices, binding offsets and per-instance step rates, before calling
+the geometry replayable.
+
+Retained GPU payloads are capped at 768 MiB, with a separate reusable
+128-MiB ceiling for the full depth scratch. Depth is copied whole to an
+unbound default texture before cropping, as required by D3D11. Source
+textures are capped at 64 MiB each, structured buffers at 32 MiB and
+constant buffers at 8192 bytes. All copies are confined to explicitly
+armed eye dumps. There are no new normal-play GPU passes, binding
+changes, flushes or draw-time readbacks. Deferred maps use DO_NOT_WAIT;
+unavailable data is empty and explicitly incomplete, never valid black.
+
+The production writer is exercised by a WARP fixture with an actual
+indexed, instanced draw. The strict reader verifies the retained source
+bytes after every buffer, all texture mips, depth/stencil and the target
+are overwritten. This covers typeless textures, nonzero SRV mip/element
+ranges, geometry binding offsets, a changed target binding at End, and
+idempotent End. Separate files demonstrate missing PS b1, missing End
+and an interior index outside the retained vertex window. The latter has
+complete input bytes but deliberately fails geometry verification. The
+fixture also checks frame/eye selection and the 16-draw cap. These
+checks validate capture integrity, not a full replay of the game's panel
+shader or a finished target-text compositor. A fresh overlap capture is
+still needed after installing this instrument.
+
+Validation: the full absolute-path worktree build passes, including the
+production panel writer/reader gate and the config contract. The
+completed-build NVIDIA smoke test also passes with live NGX evaluations
+and motion/jitter convention checks. No D3D debug-layer validation is
+claimed; that SDK component is unavailable on this machine.

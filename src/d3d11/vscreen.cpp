@@ -3207,7 +3207,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBackdrop) backdropBegin(self);
     const bool terrainOriginal=self==g_state->ownerCtx &&
         celestialMotionBeginOriginal(self,bindingShaderHash(BindSlot::Vs));
+    if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     draw();
+    if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
     if(terrainOriginal)celestialMotionEnd(self);
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
     // drawn through the interface projection is drawn once more, depth

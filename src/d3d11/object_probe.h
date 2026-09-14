@@ -63,6 +63,10 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 // shader in an active ledger, without probing its unrelated instance pool.
 bool objectProbeLedgerActive();
 void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx);
+// Around only the native draw, after Begin substitutions and before private
+// depth/motion reissues. Inactive outside an explicitly armed eye capture.
+void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx);
+void objectProbePanelDrawEnd(ID3D11DeviceContext* ctx);
 void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
                               uint32_t startInstance,uint32_t start,int32_t base);
 void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
