@@ -559,6 +559,38 @@ int selfTest() {
   XrViewConfigurationView size{XR_TYPE_VIEW_CONFIGURATION_VIEW};size.recommendedImageRectWidth=size.recommendedImageRectHeight=128;
   size.maxImageRectWidth=size.maxImageRectHeight=512;size.maxSwapchainSampleCount=1;
   check(validSize(size),"valid size");size.recommendedImageRectHeight=0;check(!validSize(size),"zero height");
+  // Session display dimensions survive transient geometry invalidation. This
+  // inert host opens no loader, device, session, or XR operation.
+  {
+    OwnerService inertOwner; RenderThreadDispatcher inertDispatcher(inertOwner);
+    RenderRoute inertRoute{inertDispatcher};
+    NativeRuntimeHost inertHost(inertOwner,inertDispatcher,inertRoute);
+    SystemRead metadata{}; metadata.connected=true;
+    metadata.recommendedWidth[0]=3072; metadata.recommendedWidth[1]=3072;
+    metadata.recommendedHeight[0]=3264; metadata.recommendedHeight[1]=3264;
+    const auto generation=inertHost.geometry.begin(metadata);
+    check(generation!=0,"inert host begins display metadata generation");
+    uint32_t width=0,height=0; inertHost.systemInterface.GetRecommendedRenderTargetSize(&width,&height);
+    check(width==3072&&height==3264,"native system returns metadata dimensions before pose");
+    auto aux=inertHost.readAuxiliary();
+    check(aux.width[0]==3072&&aux.width[1]==3072&&aux.height[0]==3264&&aux.height[1]==3264,
+      "native auxiliary returns metadata dimensions before pose");
+    inertHost.geometry.invalidate(generation);
+    width=height=0; inertHost.systemInterface.GetRecommendedRenderTargetSize(&width,&height);
+    aux=inertHost.readAuxiliary();
+    check(width==3072&&height==3264&&aux.width[0]==3072&&aux.height[0]==3264,
+      "native dimensions survive geometry invalidation");
+    int32_t x=0,y=0;uint32_t windowWidth=0,windowHeight=0;
+    inertHost.displayInterface.GetWindowBounds(&x,&y,&windowWidth,&windowHeight);
+    uint32_t eyeX=0,eyeY=0,eyeWidth=0,eyeHeight=0;
+    inertHost.displayInterface.GetEyeOutputViewport(vr::Eye_Right,&eyeX,&eyeY,&eyeWidth,&eyeHeight);
+    check(windowWidth==6144&&windowHeight==3264&&eyeX==3072&&eyeWidth==3072&&eyeHeight==3264,
+      "native extended display preserves dimensions after invalidation");
+    inertHost.geometry.retire(generation);
+    width=height=0; inertHost.systemInterface.GetRecommendedRenderTargetSize(&width,&height);
+    aux=inertHost.readAuxiliary();
+    check(width==0&&height==0&&!aux.width[0]&&!aux.height[0],"native retirement clears display dimensions");
+  }
   // Exercise the real native adapter's worker construction and partial-start
   // cleanup without ever opening a loader or contacting an installed runtime.
   NativeBackend backend;std::atomic<bool> cancelled{true};RuntimeInterfaces interfaces{};

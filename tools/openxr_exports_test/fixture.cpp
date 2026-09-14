@@ -19,6 +19,8 @@ class Fixture final:public RuntimeBackend,public SystemSource,public CompositorS
   SystemRead read()const override {
     SystemRead out{};out.generation=generation.load();out.connected=out.generation!=0;
     if(out.connected) {
+      out.recommendedWidth[0]=out.recommendedWidth[1]=640;
+      out.recommendedHeight[0]=out.recommendedHeight[1]=480;
       GeometryInput input{};input.generation=out.generation;input.sequence=1;
       input.headPose.orientation.w=1;input.headFlags=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
       input.viewFlags=XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;

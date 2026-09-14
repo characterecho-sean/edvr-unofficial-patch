@@ -4,8 +4,12 @@ This extends the [producer timing
 checkpoint](openxr-native-timing-2026-09-13.md) with separate measurements of
 EDVR work on the XR device. It also makes the direct test install follow
 Windows' active OpenXR runtime. The new pair is installed and hash-verified in
-Frontier. It still needs a matching manual flight; desktop validation is
-recorded below.
+Frontier. Its first matching VDXR flight selected the expected runtime and
+completed native startup, then Elite requested a zero-sized depth texture and
+aborted. The [startup investigation and
+correction](openxr-vdxr-startup-2026-09-14.md) record that failure; device
+timing still needs a successful manual flight. Desktop validation is recorded
+below.
 
 ## Measurement contract
 
@@ -85,12 +89,13 @@ also pass. The new paired DLLs and system-runtime configuration are installed
 and verified through the sanctioned installer. Existing game settings and the
 original OpenVR DLL are preserved.
 
-The first new game flight should use Windows' selected OpenXR runtime, keep the
-main-menu scene steady for about 30 seconds, inspect `SUBMIT WALL`, `RENDER
-GPU` and `XR COPY/COMPOSE` in F8, then exit normally. A matching log must show
-the expected runtime, valid current-session device GPU samples, both-eye
-submission and complete shutdown. Timing overhead, matched-resolution
-performance/quality and broader feature parity remain separate gates.
+After the startup correction, the next game flight should use Windows' selected
+OpenXR runtime, keep the main-menu scene steady for about 30 seconds, inspect
+`SUBMIT WALL`, `RENDER GPU` and `XR COPY/COMPOSE` in F8, then exit normally. A
+matching log must show the expected runtime, valid current-session device GPU
+samples, both-eye submission and complete shutdown. Timing overhead,
+matched-resolution performance/quality and broader feature parity remain
+separate gates.
 
 ## Remaining port work
 

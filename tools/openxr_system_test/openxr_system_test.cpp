@@ -58,6 +58,8 @@ struct FakeSource final : SystemSource {
     auto in = geometry();
     check(edvr::openxr::makeGeometrySnapshot(in, original), "make fake geometry snapshot");
     state.generation = in.generation; state.connected = true; state.geometryValid = true;
+    state.recommendedWidth[0] = in.width[0]; state.recommendedWidth[1] = in.width[1];
+    state.recommendedHeight[0] = in.height[0]; state.recommendedHeight[1] = in.height[1];
     state.focusKnown = true; state.focused = true; state.geometry = original;
     state.adapterIndex = 7;
     std::strcpy(state.runtimeName, "fake-openxr-runtime");
@@ -145,27 +147,47 @@ void boundaryTests(vr::IVRSystem* system,FakeSource& source) {
 void publicationTest() {
   edvr::openxr::SystemPublication publication;
   SystemRead metadata{}; metadata.connected = true; metadata.adapterIndex = 42;
+  metadata.recommendedWidth[0]=640; metadata.recommendedWidth[1]=672;
+  metadata.recommendedHeight[0]=480; metadata.recommendedHeight[1]=496;
   const uint64_t generation = publication.begin(metadata);
   check(generation != 0 && publication.begin(metadata) == 0, "publication cannot begin twice");
+  FakeSource source;source.state=publication.read();edvr::openxr::OpenVRSystem system(source);
+  uint32_t width=0,height=0;system.GetRecommendedRenderTargetSize(&width,&height);
+  check(width==672&&height==496&&!source.state.geometryValid,"size API uses session recommendations before first located geometry");
   auto valid = geometry(generation, 1);
   check(publication.publish(valid, true, true), "publication accepts first valid frame");
   auto read = publication.read(); check(read.connected && read.geometryValid && read.generation == generation, "publication read has connected geometry");
+  check(read.recommendedWidth[0]==640&&read.recommendedWidth[1]==672&&
+        read.recommendedHeight[0]==480&&read.recommendedHeight[1]==496,
+        "publication stores session display dimensions before geometry");
   check(!publication.publish(geometry(generation, 1), true, true), "publication rejects stale sequence");
   const float shifts[2][2]={{.125f,-.25f},{-.375f,.5f}};
   check(publication.publish(geometry(generation, 2), true, true, shifts), "publication accepts finite tangent shifts");
   read=publication.read(); check(read.tangentShift[0][0]==.125f&&read.tangentShift[0][1]==-.25f&&
       read.tangentShift[1][0]==-.375f&&read.tangentShift[1][1]==.5f, "publication stores per-eye shifts");
   const float badShifts[2][2]={{NAN,0},{0,0}};
+  publication.invalidate(generation);source.state=publication.read();
+  width=height=0;system.GetRecommendedRenderTargetSize(&width,&height);
+  check(width==672&&height==496&&!source.state.geometryValid,"explicit origin invalidation preserves size API");
+  const auto cleared=system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(allZero(&cleared,sizeof(cleared)),"origin invalidation still rejects cached projection");
   check(!publication.publish(geometry(generation, 3), true, true, badShifts), "publication rejects non-finite shifts");
   read=publication.read(); check(read.geometry.native.sequence==0&&!read.geometryValid&&
       read.tangentShift[0][0]==0, "invalid shifts retire visible publication");
+  check(read.recommendedWidth[0]==640&&read.recommendedWidth[1]==672&&
+        read.recommendedHeight[0]==480&&read.recommendedHeight[1]==496,
+        "invalid geometry preserves session display dimensions");
   check(!publication.publish(geometry(generation, 3), true, true), "invalid shift sequence cannot be replayed");
   auto invalid = geometry(generation, 2); invalid.headFlags = 0;
   invalid.sequence=4; check(!publication.publish(invalid, true, false), "publication rejects invalid tracking");
   read = publication.read(); check(read.connected && !read.geometryValid && read.focusKnown && !read.focused, "invalid tracking clears geometry but keeps HMD connected");
+  check(read.recommendedWidth[0]==640&&read.recommendedWidth[1]==672&&
+        read.recommendedHeight[0]==480&&read.recommendedHeight[1]==496,
+        "invalid tracking preserves session display dimensions");
   check(read.tangentShift[0][0]==0&&read.tangentShift[0][1]==0&&read.tangentShift[1][0]==0&&read.tangentShift[1][1]==0, "invalid tracking clears shifts");
   check(!publication.publish(geometry(generation - 1, 3), true, true), "publication rejects stale generation");
-  publication.retire(generation); check(!publication.read().connected, "retired publication disconnected");
+  publication.retire(generation); read=publication.read(); check(!read.connected && !read.recommendedWidth[0] && !read.recommendedWidth[1] &&
+      !read.recommendedHeight[0] && !read.recommendedHeight[1], "retired publication clears display dimensions");
   metadata.tangentShift[0][0]=9;metadata.tangentShift[1][1]=-9;
   const auto fresh=publication.begin(metadata);check(fresh>generation,"new generation increases");
   read=publication.read();check(read.tangentShift[0][0]==0&&read.tangentShift[1][1]==0,"new generation clears shifts");
@@ -196,6 +218,12 @@ int selfTest() {
   uint32_t width = 0xdeadbeef, height = 0xcafebabe;
   system->GetRecommendedRenderTargetSize(&width, &height);
   check(width == 1128 && height == 786, "recommended size returns both eye maxima");
+  source.state.geometryValid=false; source.state.geometry={};
+  width=height=0; system->GetRecommendedRenderTargetSize(&width,&height);
+  check(width==1128&&height==786, "recommended size survives invalid live geometry");
+  const auto invalidProjection=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(allZero(&invalidProjection,sizeof(invalidProjection)), "projection remains invalid while geometry is unavailable");
+  source.state.geometry=source.original; source.state.geometryValid=true;
   vr::HmdMatrix44_t dx = system->GetProjectionMatrix(vr::Eye_Left, .025f, 50000.f, vr::API_DirectX);
   vr::HmdMatrix44_t gl = system->GetProjectionMatrix(vr::Eye_Right, .1f, 1000.f, vr::API_OpenGL);
   check(std::isfinite(dx.m[0][0]) && std::isfinite(gl.m[3][2]) && near(dx.m[3][2], -1), "by-value projection returns both conventions");

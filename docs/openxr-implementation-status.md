@@ -1,15 +1,26 @@
 # OpenXR implementation status
 
+The [VDXR startup investigation](openxr-vdxr-startup-2026-09-14.md) confirms
+that Windows runtime selection reached VirtualDesktopXR successfully. Elite
+then requested a zero-sized depth texture and aborted; the following attempt
+used crash-sentinel recovery. A desktop regression reproduces an unsafe
+dependency between recommended render dimensions and transient pose validity.
+The correction preserves validated session dimensions across geometry
+invalidation, including extended-display queries, and adds bounded startup
+traces. Full-build and manual VDXR qualification are recorded in that
+investigation.
+
 The [XR-device timing and system-runtime
 checkpoint](openxr-device-timing-2026-09-14.md) adds separate consumer-copy and
 composition GPU measurements to F8. Direct native installs now follow Windows'
 active OpenXR runtime by default, while explicit diagnostic manifests remain
 supported. The full build passed with 501 source hashes unchanged, including 83
 provider checks, 102 producer GPU checks and 101 new device GPU checks. The new
-pair and configuration are installed and hash-verified in Frontier; its manual
-flight remains pending. The [legacy Oculus selection
-investigation](openxr-oculus-selection-2026-09-14.md) is recorded separately;
-no LibOVR suppression is implemented yet.
+pair and configuration were installed and hash-verified in Frontier. The first
+VDXR flight selected the expected runtime but failed during game startup, as
+recorded above; device timing qualification remains pending. The [legacy Oculus
+selection investigation](openxr-oculus-selection-2026-09-14.md) is recorded
+separately; no LibOVR suppression is implemented yet.
 
 The [native timing checkpoint](openxr-native-timing-2026-09-13.md) now measures
 CPU wall phases and connects native waits/submits to the existing producer GPU

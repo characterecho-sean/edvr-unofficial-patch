@@ -8,6 +8,9 @@ namespace edvr::openxr {
 struct SystemRead {
   uint64_t generation=0;
   bool connected=false, geometryValid=false, focusKnown=false, focused=false;
+  // Session-stable view configuration recommendations. These remain available
+  // while tracking/pose geometry is temporarily invalid.
+  uint32_t recommendedWidth[2]{}, recommendedHeight[2]{};
   GeometrySnapshot geometry{};
   int32_t adapterIndex=-1;
   char runtimeName[XR_MAX_RUNTIME_NAME_SIZE]{};
@@ -38,6 +41,11 @@ class SystemSource {
   // Successful projection queries may be observed by a temporal consumer.
   virtual void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept {
     (void)sequence;(void)eye;(void)nearZ;(void)farZ;
+  }
+  // Bounded diagnostic hook for game-facing geometry queries. Implementations
+  // must not dispatch XR/graphics work or wait for a frame.
+  virtual void noteGeometryQuery(unsigned slot,const SystemRead& snapshot) noexcept {
+    (void)slot;(void)snapshot;
   }
   virtual void unsupported(unsigned slot) noexcept=0;
 };

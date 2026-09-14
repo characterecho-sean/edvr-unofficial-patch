@@ -123,11 +123,16 @@ void OpenVRSystem::unavailable(unsigned slot) noexcept {
 }
 void OpenVRSystem::GetRecommendedRenderTargetSize(uint32_t* w,uint32_t* h) {
   const auto s=source_.read();uint32_t width=0,height=0;
-  if(geometryValid(s)){width=(std::max)(s.geometry.native.width[0],s.geometry.native.width[1]);height=(std::max)(s.geometry.native.height[0],s.geometry.native.height[1]);}
+  source_.noteGeometryQuery(0,s);
+  if(live(s)) {
+    width=(std::max)(s.recommendedWidth[0],s.recommendedWidth[1]);
+    height=(std::max)(s.recommendedHeight[0],s.recommendedHeight[1]);
+  }
   if(w)*w=width;if(h)*h=height;
 }
 HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,EGraphicsAPIConvention api) {
   const auto s=source_.read();HmdMatrix44_t out{};
+  source_.noteGeometryQuery(1,s);
   const unsigned eye=unsigned(e);
   if(geometryValid(s)&&eyeValid(e)) {
     RawFov raw{};
@@ -140,6 +145,7 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
 }
 void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b) {
   const auto s=source_.read();RawFov out{};
+  source_.noteGeometryQuery(2,s);
   const unsigned eye=unsigned(e);
   if(geometryValid(s)&&eyeValid(e))
     shiftedRawFov(s.geometry.raw[eye],s.tangentShift[eye][0],
@@ -148,7 +154,8 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
 }
 DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { unavailable(3);return {}; }
 HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {
-  const auto s=source_.read();return geometryValid(s)&&eyeValid(e)?s.geometry.eyeToHead[unsigned(e)]:HmdMatrix34_t{};
+  const auto s=source_.read();source_.noteGeometryQuery(4,s);
+  return geometryValid(s)&&eyeValid(e)?s.geometry.eyeToHead[unsigned(e)]:HmdMatrix34_t{};
 }
 bool OpenVRSystem::GetTimeSinceLastVsync(float* seconds,uint64_t* frame) {
   if(seconds)*seconds=0;if(frame)*frame=0;unavailable(5);return false;

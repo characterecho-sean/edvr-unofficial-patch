@@ -173,14 +173,25 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
+  mutable std::atomic<unsigned> geometryQueryNotes[6][2]{};
+  unsigned originInvalidationNotes=0;
   bool clean=true;
   bool separateGraphics()const{return startupOptions.separateDevice;}
   AuxiliaryRead readAuxiliary()const override {
     const auto snapshot=geometry.read();AuxiliaryRead out{};
     out.generation=snapshot.generation;out.connected=snapshot.connected;
-    if(snapshot.geometryValid)for(unsigned eye=0;eye<2;++eye){out.width[eye]=snapshot.geometry.native.width[eye];out.height[eye]=snapshot.geometry.native.height[eye];}
+    for(unsigned eye=0;eye<2;++eye){out.width[eye]=snapshot.recommendedWidth[eye];out.height[eye]=snapshot.recommendedHeight[eye];}
+    traceGeometryQuery(5,snapshot);
     return out;
   }
+  void traceGeometryQuery(unsigned slot,const SystemRead& snapshot) const noexcept {
+    if(slot>=6||geometryQueryNotes[slot][snapshot.geometryValid?1:0].fetch_add(1,std::memory_order_relaxed)>=4)return;
+    nativeTracePrintf("system_geometry_query,slot=%u,generation=%llu,connected=%u,geometry_valid=%u,sequence=%llu,recommended=%ux%u/%ux%u\n",
+      slot,(unsigned long long)snapshot.generation,unsigned(snapshot.connected),unsigned(snapshot.geometryValid),
+      (unsigned long long)snapshot.geometry.native.sequence,snapshot.recommendedWidth[0],snapshot.recommendedHeight[0],
+      snapshot.recommendedWidth[1],snapshot.recommendedHeight[1]);
+  }
+  void noteGeometryQuery(unsigned slot,const SystemRead& snapshot) noexcept override {traceGeometryQuery(slot,snapshot);}
   void auxiliaryUnsupported(unsigned interfaceId,unsigned slot)noexcept override {
     nativeTracePrintf("auxiliary_unavailable,interface=%u,slot=%u\n",interfaceId,slot);
   }
@@ -325,11 +336,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     for(double& value:timingFrame.transferMs)value=missing;
     timingFrame.composeMs=missing;
   }
-  bool invalidateOrigin() {
+  bool invalidateOrigin(const char* reason="reference_change") {
     menu.invalidate(); // CPU only, including callers without a producer boundary.
     temporal.invalidate();
     timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
+    if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
+      reason,(unsigned long long)geometryGeneration,(unsigned long long)recenters,(unsigned long long)referenceChanges);
     return poses.resetOrigin(compositorGeneration);
   }
   CompositorRead compositorRead() const override {return poses.read();}
@@ -641,7 +654,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
     lastResetResult=seated.replace(origin);
     if(lastResetResult!=XR_SUCCESS){geometry.invalidate(generation);poses.invalidate(compositorGeneration);return false;}
-    if(!invalidateOrigin()){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
+    if(!invalidateOrigin("seated_reset")){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
     lastResetResult=locateHeadAt(api.locateSpace,view,seated.space(),lastResetTime,true,atReset);
@@ -835,6 +848,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
     session=binding.session();local=binding.localSpace();view=binding.viewSpace();
     SystemRead metadata{};metadata.connected=true;
+    for(unsigned eye=0;eye<2;++eye){metadata.recommendedWidth[eye]=sizes[eye].recommendedImageRectWidth;metadata.recommendedHeight[eye]=sizes[eye].recommendedImageRectHeight;}
     std::memcpy(metadata.runtimeName,ip.runtimeName,sizeof(metadata.runtimeName));
     std::memcpy(metadata.systemName,properties.systemName,sizeof(metadata.systemName));
     // The index is resolved from the validated adapter, not from an HMD EDID.
