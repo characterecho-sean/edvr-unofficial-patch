@@ -40,6 +40,7 @@ def _files(root, no_dlss):
         result.append((build / "nvngx_dlss.dll", "nvngx_dlss.dll"))
         result.append((build / "NVIDIA-DLSS-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt"))
     result.extend([(root / "edvr.ini", "edvr.ini"), (root / "LICENSE", "LICENSE.txt")])
+    result.append((root / "third_party" / "dxbc_hash" / "LICENSE.TXT", "DXBC-HASH-LICENSE.txt"))
     return result
 
 
@@ -196,7 +197,7 @@ def self_test():
                 names = set(archive.namelist())
                 assert names == {"d3d11.dll", "openvr/openvr_api.dll", "openvr/openxr_loader.dll",
                                  "openvr/OPENXR-LOADER-LICENSE.txt", "edvr-installer.exe",
-                                 "README.txt", "openvr/READ-ME-FIRST.txt", "edvr.ini", "LICENSE.txt"}
+                                 "README.txt", "openvr/READ-ME-FIRST.txt", "edvr.ini", "LICENSE.txt", "DXBC-HASH-LICENSE.txt"}
             (root / "build" / "edvr_openxr_runtime.dll").write_bytes(b"payload")
             dlss = root / "build" / "nvngx_dlss.dll"
             notice = root / "build" / "NVIDIA-DLSS-LICENSE.txt"

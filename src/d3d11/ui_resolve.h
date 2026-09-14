@@ -13,6 +13,8 @@ Texture2D<float4> Previous:register(t3);
 Texture2D<float2> Motion:register(t4);
 Texture2D<float> Edits:register(t5);
 Texture2D<float4> Screen:register(t6);
+Texture2D<float4> FullCurrent:register(t7);
+Texture2D<float> UiInfluence:register(t8);
 RWTexture2D<float4> Output:register(u0);
 RWTexture2D<float4> Next:register(u1);
 cbuffer P:register(b0){int4 region;int2 size;int2 texSize;float4 tanNow;float4 tanPrev;float4 jit;}
@@ -81,6 +83,26 @@ float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2
                     fresh+=Raw.Load(int3(clamp(corner+int2(x-1,y-1),0,size-1),0)).rgb*wx[x]*wy[y];
                 v.rgb=clamp(fresh,lo,hi);
             }
+        }
+        uint fullW,fullH;FullCurrent.GetDimensions(fullW,fullH);
+        if(fullW>0) {
+            // This target never entered NGX. Restore only its current-frame
+            // contribution, using matching clean/full tone-map samples. The
+            // signed influence is not clamped: the game can export alpha >1.
+            // Bilinear weights keep the current footprint compact and avoid
+            // a cubic kernel adding dark lobes outside thin glyphs.
+            float2 at=(float2(ox,oy)+.5)*float2(size)/float2(extent)-.5+jit.xy;
+            int2 corner=int2(floor(at));float2 f=frac(at);
+            float3 full=0,clean=0;float a=0;bool affected=false;
+            [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x){
+                int2 p=clamp(corner+int2(x,y),0,size-1);
+                float weight=(x?f.x:1-f.x)*(y?f.y:1-f.y);
+                float3 c=Raw.Load(int3(p,0)).rgb,original=FullCurrent.Load(int3(p,0)).rgb;
+                float influence=UiInfluence.Load(int3(p,0));
+                affected=affected||any(c!=original)||influence!=0;
+                full+=original*weight;clean+=c*weight;a+=influence*weight;
+            }
+            if(affected)v.rgb=full+(v.rgb-clean)*(1-a);
         }
         Output[uint2(ox,oy)]=v;
     }

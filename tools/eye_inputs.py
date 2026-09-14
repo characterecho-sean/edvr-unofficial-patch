@@ -20,6 +20,10 @@ ScreenMotion is RGBA16_FLOAT: previous-minus-current raster motion XY,
 source reversed Z, validity (0 outside, 1 valid, 2 source disocclusion,
 3 source UI requiring current reconstruction).
 UI-flags bit 32 means this map was supplied to temporal reconstruction.
+UI-flags bit 64 means target UI was separated before DLSS. In that case
+DlssColour is the world-only tone-mapped input, UiInfluence is its signed
+R32 target influence, and UiDepth is the clean private depth. HoloCoverage
+and UiEdits contain the clean maps actually consumed by reconstruction.
 """
 from pathlib import Path
 import json
