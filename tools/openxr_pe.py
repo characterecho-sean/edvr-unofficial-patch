@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Read-only, bounded PE32+ checks for the experimental Frontier native route.
 
-Only static imports are inspected; runtime GetProcAddress calls need separate
-call-site evidence. No DLL or game code is loaded by this tool.
+Static imports, exports, and the native graphics startup marker are inspected;
+runtime GetProcAddress calls need separate call-site evidence. No DLL or game
+code is loaded by this tool.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -18,6 +20,23 @@ EXPECTED = dict(enumerate((
     'edvrConfigureNativeRuntime', 'edvrGetNativeRuntimeStatus'), 1))
 GAME = {'VR_InitInternal', 'VR_ShutdownInternal', 'VR_GetGenericInterface',
         'VR_IsInterfaceVersionValid', 'VR_GetInitToken'}
+
+# These are the ABI entry points consumed by the native OpenXR module from
+# the game-facing graphics proxy.  A native graphics image may export other
+# D3D11 and diagnostic names too; this is the required provider subset.
+GRAPHICS_PROVIDER_EXPORTS = frozenset({
+    'D3D11CreateDevice', 'D3D11CreateDeviceAndSwapChain',
+    'edvrAcquireNativeGraphics', 'edvrAcquireNativeMenu',
+    'edvrAcquireNativeTemporal', 'edvrAcquireNativeSharpen',
+    'edvrAcquireNativeFrame', 'edvrAcquireNativeFss',
+    'edvrAcquireNativeTiming',
+    'edvrAcquireGraphicsBridge', 'edvrAcquireRenderBoundary',
+})
+NATIVE_STARTUP_ROUTING_EXPORT = 'edvrNativeStartupRouting'
+NATIVE_STARTUP_ROUTING = (16, 1, 1, 0)
+IMAGE_SCN_MEM_EXECUTE = 0x20000000
+IMAGE_SCN_MEM_READ = 0x40000000
+IMAGE_SCN_MEM_WRITE = 0x80000000
 
 
 class PEError(ValueError):
@@ -65,20 +84,33 @@ class Image:
             span = max(virtual_size, raw_size)
             if raw + raw_size > len(data) or rva + span > 0x100000000:
                 raise PEError('section exceeds file or RVA space')
-            for previous, previous_span, _, _ in self.sections:
+            characteristics = integer(data, off + 36, 4)
+            for previous, previous_span, _, _, _ in self.sections:
                 if span and previous_span and rva < previous + previous_span and previous < rva + span:
                     raise PEError('overlapping virtual sections')
-            self.sections.append((rva, span, raw, raw_size))
+            self.sections.append((rva, span, raw, raw_size, characteristics))
 
     def mapping(self, rva, size=1):
         if rva <= 0 or size <= 0 or rva + size > 0x100000000:
             raise PEError('invalid RVA range')
-        for start, span, raw, raw_size in self.sections:
+        for start, span, raw, raw_size, _ in self.sections:
             if start <= rva and rva + size <= start + span:
                 delta = rva - start
                 if delta + size > raw_size:
                     raise PEError('RVA enters zero-fill region')
                 return raw + delta, raw_size - delta
+        raise PEError('RVA outside a section')
+
+    def section(self, rva, size=1):
+        """Return the section containing an entire RVA range."""
+        if rva <= 0 or size <= 0 or rva + size > 0x100000000:
+            raise PEError('invalid RVA range')
+        for start, span, raw, raw_size, characteristics in self.sections:
+            if start <= rva and rva + size <= start + span:
+                delta = rva - start
+                if delta + size > raw_size:
+                    raise PEError('RVA enters zero-fill region')
+                return start, span, raw, raw_size, characteristics
         raise PEError('RVA outside a section')
 
     def number(self, rva, size):
@@ -105,15 +137,17 @@ class Image:
         return rva, size
 
 
-def _native_exports(im):
+def _exports(im):
     rva, size = im.directory(0)
     if not rva or size < 40:
         raise PEError('missing export directory')
     base = im.number(rva + 16, 4)
     functions = im.number(rva + 20, 4)
     names = im.number(rva + 24, 4)
-    if base != 1 or functions != len(EXPECTED) or names != functions:
-        raise PEError('export count/base mismatch')
+    if not functions or functions > 65536 or names > functions:
+        raise PEError('invalid export count')
+    if base > 0xffff:
+        raise PEError('invalid export base')
     eat = im.number(rva + 28, 4)
     name_table = im.number(rva + 32, 4)
     ordinals = im.number(rva + 36, 4)
@@ -123,21 +157,77 @@ def _native_exports(im):
     result = {}
     for i in range(names):
         ordinal = base + im.number(ordinals + i * 2, 2)
-        if ordinal not in EXPECTED or ordinal in result:
+        if ordinal < base or ordinal >= base + functions or ordinal in result:
             raise PEError('invalid or aliased export ordinal')
         name = im.string(im.number(name_table + i * 4, 4))
         function = im.number(eat + (ordinal - base) * 4, 4)
         if rva <= function < rva + size:
             raise PEError('forwarded export: ' + name)
         im.mapping(function)
+        if name in result.values():
+            raise PEError('duplicate export name: ' + name)
         result[ordinal] = name
-    if result != EXPECTED:
+    return result, {name: im.number(eat + (ordinal - base) * 4, 4)
+                    for ordinal, name in result.items()}
+
+
+def _native_exports(im):
+    result, _ = _exports(im)
+    export_rva = im.directory(0)[0]
+    if im.number(export_rva + 16, 4) != 1 or \
+       im.number(export_rva + 20, 4) != len(EXPECTED) or \
+       im.number(export_rva + 24, 4) != len(EXPECTED) or result != EXPECTED:
         raise PEError('export name/ordinal contract mismatch: ' + repr(result))
     return result
 
 
 def native_exports(path):
     return _native_exports(Image(Path(path).read_bytes()))
+
+
+def native_graphics_exports(path):
+    """Validate the immutable native startup marker and provider exports.
+
+    This only parses bytes from the PE image.  It never loads or executes the
+    DLL, which is essential because this check runs before the first install
+    mutation.
+    """
+    im = Image(Path(path).read_bytes())
+    names, addresses = _exports(im)
+    exported = set(names.values())
+    missing = GRAPHICS_PROVIDER_EXPORTS - exported
+    if missing:
+        raise PEError('native graphics provider exports missing: ' +
+                      ', '.join(sorted(missing)))
+    for name in GRAPHICS_PROVIDER_EXPORTS:
+        section = im.section(addresses[name])
+        if not (section[4] & IMAGE_SCN_MEM_EXECUTE):
+            raise PEError('native graphics provider export is not executable: ' + name)
+    if NATIVE_STARTUP_ROUTING_EXPORT not in addresses:
+        raise PEError('native graphics startup-routing marker is missing')
+    marker = addresses[NATIVE_STARTUP_ROUTING_EXPORT]
+    section = im.section(marker, 16)
+    characteristics = section[4]
+    if not (characteristics & IMAGE_SCN_MEM_READ) or \
+       characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE):
+        raise PEError('native startup-routing marker is not read-only data')
+    off, _ = im.mapping(marker, 16)
+    values = tuple(int.from_bytes(im.data[off + i:off + i + 4], 'little')
+                   for i in range(0, 16, 4))
+    if values != NATIVE_STARTUP_ROUTING:
+        raise PEError('native startup-routing marker contract mismatch: ' +
+                      repr(values))
+    return {'exports': names, 'marker': {'rva': marker, 'fields': values}}
+
+
+def validate_native_pair(game_path, native_path, graphics_path):
+    """Validate both static halves of an automatic native package."""
+    validate_frontier_imports(game_path, native_path)
+    return native_graphics_exports(graphics_path)
+
+
+# Descriptive alias for callers that only need to inspect the graphics half.
+validate_native_graphics = native_graphics_exports
 
 
 def _game_imports(im):
@@ -220,8 +310,9 @@ def self_test():
         else:
             check(False)
 
-    def fixture(delay=False, fallback=False):
+    def fixture(delay=False, fallback=False, export_names=None):
         d = bytearray(0x4200)
+        export_names = tuple(export_names or EXPECTED.values())
 
         def put(off, value, size=4):
             d[off:off + size] = value.to_bytes(size, 'little')
@@ -240,26 +331,34 @@ def self_test():
         put(60, 0x80)
         d[0x80:0x84] = b'PE\0\0'
         put(0x84, 0x8664, 2)
-        put(0x86, 1, 2)
+        put(0x86, 2, 2)
         put(0x94, 240, 2)
         put(0x98, 0x20b, 2)
         put(0x98 + 108, 16)
         section = 0x98 + 240
-        for pos, value in ((8, 0x4000), (12, 0x1000), (16, 0x4000), (20, 0x200)):
+        for pos, value in ((8, 0x2000), (12, 0x1000), (16, 0x2000), (20, 0x200)):
             put(section + pos, value)
+        put(section + 36, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE | 0x20)
+        data_section = section + 40
+        for pos, value in ((8, 0x2000), (12, 0x3000), (16, 0x2000), (20, 0x2200)):
+            put(data_section + pos, value)
+        put(data_section + 36, IMAGE_SCN_MEM_READ | 0x40)
         dirs = 0x98 + 112
         put(dirs, 0x1000)
         put(dirs + 4, 0x600)
-        for pos, value in ((16, 1), (20, 16), (24, 16), (28, 0x1040),
+        for pos, value in ((16, 1), (20, len(export_names)), (24, len(export_names)), (28, 0x1040),
                            (32, 0x1080), (36, 0x10c0)):
             rv(0x1000 + pos, value)
         next_name = 0x1100
-        for i, name in enumerate(EXPECTED.values()):
-            rv(0x1040 + i * 4, 0x4000 + i)
+        for i, name in enumerate(export_names):
+            rv(0x1040 + i * 4, 0x3000 if name == NATIVE_STARTUP_ROUTING_EXPORT else 0x1800 + i)
             rv(0x1080 + i * 4, next_name)
             rv(0x10c0 + i * 2, i, 2)
             string(next_name, name)
             next_name += len(name) + 1
+        if NATIVE_STARTUP_ROUTING_EXPORT in export_names:
+            for i, value in enumerate(NATIVE_STARTUP_ROUTING):
+                rv(0x3000 + i * 4, value)
         kind = 13 if delay else 1
         width = 32 if delay else 20
         put(dirs + 8 * kind, 0x2000)
@@ -286,6 +385,36 @@ def self_test():
         check(_native_exports(Image(d)) == EXPECTED)
         rows = _validate_rows(_game_imports(Image(d)))
         check(len(rows) == 5 and all(r['kind'] == ('delay' if delay else 'import') for r in rows))
+    graphics_names = tuple(sorted(GRAPHICS_PROVIDER_EXPORTS)) + (NATIVE_STARTUP_ROUTING_EXPORT,)
+    d, put, rv = fixture(export_names=graphics_names)
+    # Exercise the same in-memory decoder used for files without loading a
+    # DLL.  Writing a tiny temporary image keeps the public path API covered.
+    import tempfile
+    fd, graphics_path = tempfile.mkstemp(suffix='.dll')
+    os.close(fd)
+    try:
+        Path(graphics_path).write_bytes(d)
+        check(native_graphics_exports(graphics_path)['marker']['fields'] == NATIVE_STARTUP_ROUTING)
+    finally:
+        os.remove(graphics_path)
+    for bad in (
+            lambda p, r: r(0x3000, 2),
+            lambda p, r: r(0x3008, 0),
+            lambda p, r: r(0x1040, 0x3000),
+            lambda p, r: r(0x1040 + (len(graphics_names) - 1) * 4, 0x3100),
+            lambda p, r: p(0x98 + 240 + 40 + 36, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE),
+            lambda p, r: p(0x98 + 240 + 40 + 36, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE),
+            lambda p, r: r(0x1080, 0x4fff),
+    ):
+        data, put, rv = fixture(export_names=graphics_names)
+        bad(put, rv)
+        fd, bad_path = tempfile.mkstemp(suffix='.dll')
+        os.close(fd)
+        try:
+            Path(bad_path).write_bytes(data)
+            refused(lambda: native_graphics_exports(bad_path))
+        finally:
+            os.remove(bad_path)
     # Mutations isolate boundaries and the exact export/import contract.
     mutations = (
         (lambda p, r: p(0x84, 0x14c, 2), lambda im: im),
@@ -319,16 +448,24 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--game')
     ap.add_argument('--native')
+    ap.add_argument('--graphics',
+                    help='native graphics proxy to inspect without loading it')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args(argv)
     if args.self_test:
         return self_test()
-    if not args.native:
-        ap.error('--native is required; --game additionally checks Frontier imports')
+    if not args.native and not args.graphics:
+        ap.error('--native or --graphics is required')
+    if args.game and not args.native:
+        ap.error('--game requires --native')
     try:
-        result = {'exports': native_exports(args.native)}
+        result = {}
+        if args.native:
+            result['exports'] = native_exports(args.native)
         if args.game:
             result['imports'] = validate_frontier_imports(args.game, args.native)
+        if args.graphics:
+            result['graphics'] = native_graphics_exports(args.graphics)
         print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, PEError) as exc:

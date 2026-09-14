@@ -16,11 +16,18 @@ each feature. The full build passed with 526 unchanged source hashes and the
 paired DLLs are installed and hash-verified in Frontier. Details are tracked in
 that checkpoint; all new visual behavior, including the preceding
 startup-centering change, awaits one combined headset retest. Experimental
-features and performance comparisons remain deferred. The [legacy Oculus
-startup-selection investigation](openxr-oculus-selection-2026-09-14.md) now
-statically confirms Elite's LibOVR-first selection loop and fallback to OpenVR
-when LibOVR fails to load. Early automatic activation and launch qualification
-remain pending; no suppression is implemented or installed.
+features and performance comparisons remain deferred.
+
+The [legacy Oculus startup route](openxr-oculus-selection-2026-09-14.md) now
+implements automatic refusal of Elite's audited LibOVR probe before normal
+graphics initialization. The native graphics artifact carries an immutable
+capability; its installer validates the matching DLL pair and exact supported
+executable before writing. The wrapper checks both the caller and DLL basename,
+preserves unrelated loads, and records its decisions in `edvr_logs`. Windows
+continues to select the OpenXR runtime. This implements the entry-path fix;
+live Meta/Oculus fallback, the cross-runtime regression matrix and release
+installer migration remain qualification work. Desktop and installed-build
+evidence is recorded in that checkpoint.
 
 The user has deferred performance comparisons and prioritized metrics, then
 features. The [native monitor-history

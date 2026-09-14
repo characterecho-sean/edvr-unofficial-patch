@@ -91,13 +91,14 @@ early interception point. Normal graphics initialization runs at the first D3D
 export call; its ordering relative to the Oculus probe still requires a launch
 trace.
 
-Early activation is the remaining design issue. Today's development installer
-uses the same graphics binary for legacy and native installs; the native
-package is identified by `Openvr/win64/edvr_openxr.ini`, read by the native
-module after reaching OpenVR. That arrangement must not become a permanent
-per-user opt-in gate. The native release must make the graphics component's
-startup-routing responsibility explicit and ensure the matching native facade
-is installed.
+The native graphics build now carries an immutable startup capability. The
+development installer selects `build/edvr_openxr_graphics.dll` and installs it
+as `d3d11.dll`, paired with `edvr_openxr_runtime.dll` as the game-facing
+`Openvr/win64/openvr_api.dll`. The local OpenXR configuration is still read
+later by the native module; early routing does not depend on reading that file.
+`build/d3d11.dll` remains a separate qualification/rollback artifact without
+the routing capability. This does not introduce a permanent user choice between
+shipping backends.
 
 Do not move configuration parsing, proxy-chain loading or normal logging into
 `DllMain` to obtain that identity. The existing early configuration reader also
@@ -105,55 +106,50 @@ allocates and performs file I/O, so it is not a suitable primitive for a strict
 loader-lock-safe hook.
 
 The existing [runtime detector](../src/d3d11/vr_runtime.cpp) recognizes loaded
-`LibOVRRT` modules; it does not suppress them. The current executable contract
-check in [openxr_pe.py](../tools/openxr_pe.py) validates OpenVR imports and
-cannot establish the dynamic LibOVR decision. No LibOVR suppression, global
-runtime modification or Oculus library replacement has been implemented in this
-checkpoint.
+`LibOVRRT` modules; suppression is separately owned by the [startup
+route](../src/d3d11/oculus_route.cpp). Runtime module presence alone cannot
+establish which entry path Elite used.
 
-## Proposed implementation and next evidence gate
+## Implemented routing and qualification
 
-Prefer an executable-only `LoadLibraryW` IAT wrapper over a process-wide loader
-detour or edits to Elite's code. Suppression must require a validated Elite SDK
-call site and an exact LibOVR runtime filename. Every qualified native release
-must enable this routing automatically, with the installer guaranteeing the
-paired native facade. Unrecognized callers must forward unchanged. Unknown
-executable revisions must not receive an unvalidated patch; report the
-compatibility gap and do not qualify a silent return to LibOVR as successful
-migration. Do not ship the local offsets as an unconditional patch.
+The native graphics DLL installs an executable-only `LoadLibraryW` IAT wrapper
+at process attach, before ordinary graphics initialization. It refuses only
+calls from the audited SDK return RVA `0x4e70bc` with the exact
+case-insensitive basename `LibOVRRT64_1.dll`. This covers both search attempts
+through the same SDK call site. Other names and callers continue through the
+previous IAT target with its result and last-error semantics preserved.
 
-The next implementation should first record the relevant loader calls without
-changing their result. Install only the minimal IAT exchange during process
-attach. Record bounded caller/path/result data in fixed storage, preserve
-last-error and original-target semantics, and flush through normal logging
-outside loader lock. The drain must also collect probes that occur after the
-first graphics initialization. Report hook installation, missing calls and
-buffer overflow explicitly so silence cannot be mistaken for success. The
-wrapper must tolerate concurrent calls and must not recursively initialize
-EDVR.
+The [mapped executable profile](../src/common/elite_oculus_profile.h) validates
+PE identity, imports, the IAT slot, relative calls, relocated virtual-table
+entries and eleven complete code-block fingerprints before exchanging the slot.
+The [installer profile](../tools/elite_oculus.py) additionally requires the
+exact executable SHA-256. Unknown revisions are rejected before install; if the
+game changes afterward, startup leaves its IAT alone and reports an unsupported
+profile. That condition is a compatibility gap, not successful migration. New
+game revisions require a newly audited profile.
 
-Use that trace to establish whether normal graphics initialization precedes the
-LibOVR probe. The implementation must activate early enough for the observed
-order, without depending on a user-selected backend setting. An immutable
-native graphics build capability available in memory at process attach can
-identify its responsibility without file I/O; the development installer and
-rollback tests must distinguish that paired build from the prior proxy. This is
-a rollout distinction, not a plan to maintain two shipping backends. Reading an
-adjacent marker in `DllMain` or assuming the first loader call is outside
-loader lock is not an acceptable shortcut.
+The immutable `edvrNativeStartupRouting` data export distinguishes the native
+graphics artifact without loading it. [Static pair
+validation](../tools/openxr_pe.py) requires the marker's exact ABI and
+read-only, non-executable placement, plus the native graphics provider exports.
+Both direct and receipt-based installs check the pair and executable before
+writing. Older receipts remain usable for explicit rollback.
 
-Once early activation is established, test a refusal of only Elite's own LibOVR
-probe. All other calls must forward unchanged, including matching filenames
-requested by runtime modules. Exercise both shim search attempts; refusing only
-the first still permits discovery through the fallback path.
+Startup and the wrapper use fixed atomic storage with no configuration reads,
+logging, allocation, waits or runtime loading. Original-target and routing
+identity publication precede the IAT exchange, so a concurrent first probe is
+filtered immediately. Installation and removal preserve another hook owner's
+slot. Normal log initialization, owned Present calls and shutdown drain bounded
+changed observations into the existing graphics log under `edvr_logs`.
 
-If interception is necessary, scope it to Elite's own legacy LibOVR probe and
-verify fallback into EDVR's OpenVR facade. A blanket process-wide ban on
-`LibOVRRT` is unsafe as a design assumption: the selected Meta OpenXR runtime
-could itself depend on legacy runtime components. A loader hook would need
-caller filtering, reentrancy and loader-lock analysis, and launch evidence that
-OpenVR initialization follows refusal. Do not rename or remove system Oculus
-libraries.
+The `oculus route:` line reports capability, profile recognition, installation,
+calls before/after log readiness, the qualified caller RVA, rejected/forwarded
+counts and failures. An initial line appears even when no probe was seen. The
+first actual rejection remains reportable after ordinary snapshot exhaustion.
+The CPU-only `edvrQueryOculusRouting` export permits startup inspection without
+initializing graphics. A refused probe followed by native `VR_InitInternal` and
+the selected runtime is the required live evidence; desktop tests alone cannot
+establish successful migration.
 
 Qualification must cover:
 
@@ -175,5 +171,64 @@ Qualification must cover:
 
 Windows' selected runtime must actually support the connected headset; forcing
 the entry path alone cannot establish compatibility for every older Oculus
-device. No game launch, suppression implementation, installed DLL change or
-runtime-setting change was performed for this static investigation.
+device. The static investigation did not launch the game. Implementation
+qualification is recorded below; runtime settings and system Oculus libraries
+are not modified by this route.
+
+## Desktop and Frontier checkpoint
+
+The full absolute-path `build.bat` run passed with all 534 source hashes
+unchanged. It includes the existing ABI, lifecycle, transport, feature and
+configuration gates plus 20 loader-route assertions, 17 standalone mapped
+profile checks, 15 Python profile checks and 30 PE checks. Actual graphics DLL
+startup inspection passed 17 checks for each of the native and baseline
+artifacts. Installer self-tests cover mismatched pairs and unknown profiles
+before writes, zero-write dry runs and compatibility with older receipts.
+
+The actual Frontier executable passed the exact file validator and 43 offline
+mapped-image checks. Those checks accept two distinct relocated allocations,
+reject changes to every audited code block and all three virtual-table
+pointers, reject changed PE identity and a partial import terminator, and
+confirm the restored image passes again. No game code or imports are executed
+by this fixture. Its optional command is `build/elite_oculus_test.exe --game
+<absolute EliteDangerous64.exe path>`.
+
+The new native graphics artifact also passed actual output checks for TAA and
+DLSS (169 each, 18 treated eyes per mode), plus sharpening on/off (58/22).
+These verify provider engagement and output, not headset image quality or
+comparative performance.
+
+Frontier is installed and hash-verified with `v0.16.2-93-g6f99b03-dirty`:
+
+- Native runtime SHA-256:
+  `98111f0c45ba256dab7175c6ed6edc3429e9c2325b4445fdcc7b85e086a6dd64`.
+- Native graphics SHA-256:
+  `02c7abb28f6f38f20245f1686f18d4f55fbb2756eb927e60134a37cd9facf563`.
+- Local startup configuration SHA-256:
+  `3da530c6e9c7e82b99a9f10caf0f6ea8b467719b36837aa4e2cbb37bd924f7b2`.
+- Windows runtime discovery remains `runtime=system`; `edvr.ini` and
+  `openvr_api_orig.dll` hashes are unchanged.
+
+The ignored `build/openxr-libovr-routing-20260914/qualification.json` records
+the source and artifact hashes, build log, install preview and verification.
+The earlier [supported feature retest](openxr-feature-parity-2026-09-14.md)
+remains pending and can be combined with this flight. The user launches
+Frontier manually; no launcher automation, game launch or runtime-setting
+change was performed for this checkpoint.
+
+For the next flight, use a Meta/Oculus headset with its compatible
+Windows-selected OpenXR runtime while the legacy SDK is available. Confirm that
+VR and F8 appear, startup faces the splash screen, head tracking and recenter
+work, and exit is normal. The graphics log must show `native=1 profile=1
+installed=1` and a refused Elite probe; the native log must then identify
+successful initialization and the selected OpenXR runtime. `rejected=0` does
+not prove the bypass worked. Check these through `tools/edvr_log.py --target
+frontier --expect-build 6f99b03`; the archived DLL hashes distinguish this
+build from another dirty build at the same commit.
+
+Then cover Quest/VDXR, Pimax/PiOpenXR and SteamVR OpenXR as available,
+combining normal gameplay and the feature checklist. Live fallback and headset
+behavior are still unqualified. Promoting the native pair into the release
+installer, upgrading all prior backend arrangements and release-wide rollback
+remain subsequent migration work; the current release installer still carries
+the previous transport.

@@ -135,6 +135,9 @@ qualified by this batch. Broad performance/image quality comparison remains
 deferred. Migrating everyone to native OpenXR also requires bypassing Elite's
 legacy Oculus preference automatically and upgrading all prior backend
 installations. The startup-selection implementation is tracked in the [LibOVR
-investigation](openxr-oculus-selection-2026-09-14.md). Static analysis now
-establishes the loader call and fallback loop; early automatic activation and a
-controlled launch still need qualification before suppression is enabled.
+investigation](openxr-oculus-selection-2026-09-14.md). The native graphics
+variant now enables the audited early route automatically. The newer routing
+checkpoint supersedes this batch's installed DLL hashes and includes these
+feature changes; the combined retest above remains pending. A controlled
+Meta/Oculus launch must still establish refusal followed by native OpenXR
+initialization and normal gameplay.

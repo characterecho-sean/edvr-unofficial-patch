@@ -244,6 +244,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrCensusBeginVr ^
     --extra-export edvrCensusBeginShutdown ^
     --extra-export edvrCensusEndShutdown ^
+    --extra-export "edvrNativeStartupRouting DATA" ^
+    --extra-export edvrQueryOculusRouting ^
     --extra-export edvrGpuFrameEvent
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
@@ -318,6 +320,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
+    "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" ^
     "src\d3d11\native_menu.cpp" ^
@@ -387,6 +390,26 @@ link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
+
+REM The migration build owns automatic LibOVR routing at process attach.
+REM Reuse the exact graphics objects, replacing only the immutable startup
+REM capability in the proxy entry object. Keep the older proxy as a separate
+REM qualification/rollback artifact until native release acceptance.
+echo [edvr] === edvr_openxr_graphics.dll ===
+if not exist "%OBJ%\native_graphics" mkdir "%OBJ%\native_graphics"
+cl.exe %CFLAGS% %NGXFLAGS% /DEDVR_NATIVE_OPENXR_BUILD=1 ^
+    /Fo"%OBJ%\native_graphics\d3d11_proxy.obj" "src\d3d11\d3d11_proxy.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: native graphics entry compile failed & exit /b 1 )
+type nul > "%OBJ%\native_graphics\objects.rsp"
+for %%O in ("%OBJ%\d3d11\*.obj") do (
+    if /I not "%%~nxO"=="d3d11_proxy.obj" echo "%%~fO">> "%OBJ%\native_graphics\objects.rsp"
+)
+link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
+    /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\edvr_openxr_graphics.dll" ^
+    "%OBJ%\native_graphics\d3d11_proxy.obj" @"%OBJ%\native_graphics\objects.rsp" ^
+    kernel32.lib user32.lib gdi32.lib version.lib %NGXLIB%
+if errorlevel 1 ( echo [edvr] ERROR: native graphics link failed & exit /b 1 )
+echo [edvr] built %BUILD%\edvr_openxr_graphics.dll
 
 echo.
 echo [edvr] === openvr_api.dll ===
@@ -1175,6 +1198,37 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR binding test build failed & exit /b 
 "%BUILD%\openxr_binding_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --self-test || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --published-proxy "%BUILD%\d3d11.dll" || exit /b 1
+"%BUILD%\openxr_binding_test.exe" --published-proxy "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
+
+REM Inspect actual startup behavior without creating a headset runtime. The
+REM fixture is intentionally not Elite: both variants must leave its IAT alone.
+if not exist "%OBJ%\native_startup" mkdir "%OBJ%\native_startup"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\native_startup\\" /Fe"%BUILD%\native_startup_test.exe" ^
+    "tools\native_startup_test\native_startup_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: native startup test build failed & exit /b 1 )
+"%BUILD%\native_startup_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_startup_test.exe" --self-test "%BUILD%\d3d11.dll" legacy || exit /b 1
+"%BUILD%\native_startup_test.exe" --self-test "%BUILD%\edvr_openxr_graphics.dll" native || exit /b 1
+
+REM Qualify the early loader route without running Elite or a headset runtime.
+if not exist "%OBJ%\oculus_route" mkdir "%OBJ%\oculus_route"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_OCULUS_ROUTE_TEST=1 ^
+    /Fo"%OBJ%\oculus_route\\" /Fe"%BUILD%\oculus_route_test.exe" ^
+    "tools\oculus_route_test\oculus_route_test.cpp" "src\d3d11\oculus_route.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: Oculus route test build failed & exit /b 1 )
+"%BUILD%\oculus_route_test.exe" --dry-run || exit /b 1
+"%BUILD%\oculus_route_test.exe" --self-test || exit /b 1
+if not exist "%OBJ%\elite_oculus" mkdir "%OBJ%\elite_oculus"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\elite_oculus\\" /Fe"%BUILD%\elite_oculus_test.exe" ^
+    "tools\elite_oculus_test\elite_oculus_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: Elite Oculus profile test build failed & exit /b 1 )
+"%BUILD%\elite_oculus_test.exe" --dry-run || exit /b 1
+"%BUILD%\elite_oculus_test.exe" --self-test || exit /b 1
 
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_proxy_state_test.exe" ^
@@ -1289,6 +1343,8 @@ if errorlevel 1 ( echo [edvr] ERROR: native runtime module test build failed & e
 "%BUILD%\openxr_module_test.exe" --self-test-local || exit /b 1
 python tools\openxr_pe.py --self-test || exit /b 1
 python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
+python tools\elite_oculus.py --self-test || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1
 
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"

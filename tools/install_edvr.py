@@ -71,13 +71,16 @@ PAYLOAD = {
 
 NATIVE_RECEIPT_VERSION = 1
 NATIVE_KIND = "edvr-native-openxr"
+LEGACY_GRAPHICS_SOURCE = "build/d3d11.dll"
 
 
 def native_paths(root, target):
     """The deliberately separate native package and its paired graphics DLL."""
     return {
         "native_source": os.path.join(root, "build", "edvr_openxr_runtime.dll"),
-        "graphics_source": os.path.join(root, "build", "d3d11.dll"),
+        # Native startup routing is compiled into a distinct graphics image.
+        # The legacy d3d11.dll remains the qualification/rollback artifact.
+        "graphics_source": os.path.join(root, "build", "edvr_openxr_graphics.dll"),
         "native_target": os.path.join(target, "Openvr", "win64", "openvr_api.dll"),
         "graphics_target": os.path.join(target, "d3d11.dll"),
         "original": os.path.join(target, "Openvr", "win64", "openvr_api_orig.dll"),
@@ -142,6 +145,9 @@ def _native_preflight(root, target, receipt_path):
     for key in ("native_target", "graphics_target", "original"):
         if not os.path.isfile(p[key]):
             errors.append("       missing target %-13s %s" % (key, p[key]))
+    game = os.path.join(target, GAME_EXE)
+    if not os.path.isfile(game):
+        errors.append("       missing target executable %s" % game)
     for key in ("native_target", "graphics_target", "original", "ini"):
         if not _under(p[key], target):
             errors.append("       target path escapes game directory: %s" % p[key])
@@ -155,7 +161,25 @@ def _native_preflight(root, target, receipt_path):
                           os.path.dirname(os.path.abspath(receipt_path)))
     if errors:
         raise SystemExit("[edvr] native preflight failed:\n" + "\n".join(errors))
+    try:
+        import openxr_pe
+        openxr_pe.validate_native_pair(game, p["native_source"],
+                                       p["graphics_source"])
+        if validate_elite_game(game) is False:
+            raise ValueError("Elite executable profile is not supported")
+    except (OSError, ValueError) as exc:
+        raise SystemExit("[edvr] native preflight failed:\n"
+                         "       %s" % exc)
     return p
+
+
+def validate_elite_game(path):
+    """Validate the executable profile before a native pair can be staged."""
+    try:
+        from elite_oculus import validate_elite_oculus
+    except ImportError as exc:
+        raise ValueError("Elite executable profile validator unavailable: %s" % exc)
+    return validate_elite_oculus(path)
 
 
 def _native_receipt(root, target, paths, backups, before_hashes,
@@ -391,7 +415,14 @@ def _load_native_receipt(path):
         raise ValueError("receipt must contain native and graphics files")
     for key in ("native", "graphics"):
         entry = by_key[key]
-        if entry["source"] != os.path.abspath(expected[key + "_source"]) or \
+        allowed_sources = {os.path.abspath(expected[key + "_source"])}
+        # Receipts written before the native graphics split recorded the
+        # qualification d3d11.dll.  Keep those receipts usable for deliberate
+        # restore, while all new staging uses edvr_openxr_graphics.dll.
+        if key == "graphics":
+            allowed_sources.add(os.path.abspath(
+                os.path.join(root, LEGACY_GRAPHICS_SOURCE)))
+        if entry["source"] not in allowed_sources or \
            entry["target"] != os.path.abspath(expected[key + "_target"]) or \
            os.path.realpath(entry["target"]) != \
            os.path.realpath(expected[key + "_target"]) or \
@@ -427,6 +458,8 @@ def _load_native_receipt(path):
     protected = {os.path.normcase(os.path.realpath(expected[key]))
                  for key in ("native_target", "graphics_target", "original",
                               "ini", "native_source", "graphics_source")}
+    protected.add(os.path.normcase(os.path.realpath(
+        os.path.join(root, LEGACY_GRAPHICS_SOURCE))))
     backup_reals = set()
     for key in ("native", "graphics"):
         backup_real = os.path.normcase(os.path.realpath(by_key[key]["backup"]))
@@ -762,8 +795,10 @@ def _native_direct_plan(root, target, loader, runtime):
             if not os.path.isfile(lib): raise ValueError("missing runtime library: %s" % lib)
         except (KeyError, TypeError, ValueError, OSError) as exc: raise ValueError("native direct preflight failed: %s" % exc)
     # The game's import contract is independent of runtime selection.
-    from openxr_pe import validate_frontier_imports
-    validate_frontier_imports(game, paths["native_source"])
+    from openxr_pe import validate_native_pair
+    validate_native_pair(game, paths["native_source"], paths["graphics_source"])
+    if validate_elite_game(game) is False:
+        raise ValueError("Elite executable profile is not supported")
     config = "[openxr]\nversion=1\nloader=%s\ngraphics=%s\nruntime=%s\nseparate_device=1\n" % (loader, paths["graphics_target"], runtime)
     return paths, config.encode("utf-8"), lib
 
@@ -825,8 +860,8 @@ def main(argv=None):
     ap.add_argument("--all", action="store_true",
                     help="dll + openvr + dlss (never ini)")
     ap.add_argument("--native-openxr", action="store_true",
-                    help="stage the experimental native OpenXR DLL and its "
-                         "paired d3d11.dll (requires --dll, plus a receipt "
+                     help="stage the experimental native OpenXR DLL and its "
+                         "paired native graphics DLL as d3d11.dll (requires --dll, plus a receipt "
                          "or explicit --no-backup local configuration)")
     ap.add_argument("--native-receipt", default=None,
                     help="absolute new receipt path for --native-openxr")
@@ -1006,7 +1041,7 @@ def self_test():
     try:
         droot = os.path.join(direct_tmp, "repo"); dgame = os.path.join(direct_tmp, "game")
         os.makedirs(os.path.join(droot, "build")); os.makedirs(os.path.join(dgame, "Openvr", "win64"))
-        for rel, data in (("build/edvr_openxr_runtime.dll", b"NATIVE"), ("build/d3d11.dll", b"GRAPHICS")):
+        for rel, data in (("build/edvr_openxr_runtime.dll", b"NATIVE"), ("build/edvr_openxr_graphics.dll", b"GRAPHICS")):
             with open(os.path.join(droot, rel.replace("/", os.sep)), "wb") as f: f.write(data)
         for rel, data in ((GAME_EXE, b"GAME"), ("d3d11.dll", b"OLDG"),
                           ("Openvr/win64/openvr_api.dll", b"OLDN"),
@@ -1019,10 +1054,11 @@ def self_test():
             with open(p,"wb") as f:f.write(b"X")
         with open(manifest,"w",encoding="utf-8") as f: json.dump({"runtime":{"library_path":"runtime.dll"}},f)
         import openxr_pe as _pe
-        old_validate=_pe.validate_frontier_imports; old_probe=globals()["strict_game_running"]
+        old_validate=_pe.validate_native_pair; old_profile=globals()["validate_elite_game"]; old_probe=globals()["strict_game_running"]
         calls=[0]
-        def fake_validate(game,native): calls[0]+=1
-        _pe.validate_frontier_imports=fake_validate
+        def fake_validate(game,native,graphics): calls[0]+=1
+        _pe.validate_native_pair=fake_validate
+        globals()["validate_elite_game"] = lambda game: None
         globals()["strict_game_running"]=lambda:(True,False)
         before_ini=open(os.path.join(dgame,"edvr.ini"),"rb").read(); before_orig=open(os.path.join(dgame,"Openvr","win64","openvr_api_orig.dll"),"rb").read()
         if native_direct(droot,dgame,loader,manifest,False)!=0 or calls[0]!=1: ok=False
@@ -1048,6 +1084,38 @@ def self_test():
             return {os.path.relpath(os.path.join(dp,n),direct_tmp):sha256(os.path.join(dp,n))
                     for dp,dn,fn in os.walk(direct_tmp) for n in fn}
         before=direct_snapshot()
+        # Direct native mode shares the same static pair and profile gates;
+        # both ordinary and dry-run requests must fail before any write.
+        saved_direct_pair = _pe.validate_native_pair
+        def reject_direct_pair(game, native, graphics):
+            raise ValueError("mismatched native graphics")
+        _pe.validate_native_pair = reject_direct_pair
+        for dry in (False, True):
+            try:
+                native_direct(droot, dgame, loader, manifest, dry)
+                print("direct native mismatch was accepted")
+                ok=False
+            except ValueError:
+                pass
+            if direct_snapshot() != before:
+                print("direct native mismatch changed files")
+                ok=False
+        _pe.validate_native_pair = saved_direct_pair
+        saved_direct_profile = globals()["validate_elite_game"]
+        def reject_direct_profile(path):
+            raise ValueError("unknown Elite executable revision")
+        globals()["validate_elite_game"] = reject_direct_profile
+        for dry in (False, True):
+            try:
+                native_direct(droot, dgame, loader, manifest, dry)
+                print("direct native unknown executable was accepted")
+                ok=False
+            except ValueError:
+                pass
+            if direct_snapshot() != before:
+                print("direct native unknown executable changed files")
+                ok=False
+        globals()["validate_elite_game"] = saved_direct_profile
         if main(["--root",droot,"--target",dgame,"--native-openxr","--dll","--no-backup","--native-loader",loader,"--dry-run"])!=0: ok=False
         if direct_snapshot()!=before: ok=False
         globals()["strict_game_running"]=lambda:(False,False)
@@ -1062,7 +1130,7 @@ def self_test():
         try: main(["--native-openxr","--dll","--no-backup","--native-loader",loader,"--native-runtime",manifest,"--openvr"]); ok=False
         except SystemExit: pass
         os.remove(lib) if os.path.exists(lib) else None
-        _pe.validate_frontier_imports=old_validate; globals()["strict_game_running"]=old_probe
+        _pe.validate_native_pair=old_validate; globals()["validate_elite_game"]=old_profile; globals()["strict_game_running"]=old_probe
     finally:
         shutil.rmtree(direct_tmp, ignore_errors=True)
 
@@ -1081,6 +1149,7 @@ def self_test():
         root = os.path.join(tmp, "repo")
         os.makedirs(os.path.join(root, "build"))
         for rel, body in (("build/d3d11.dll", b"NEW-DLL"),
+                          ("build/edvr_openxr_graphics.dll", b"NATIVE-GRAPHICS"),
                           ("build/edvr_openxr_runtime.dll", b"NATIVE-NEW"),
                           ("edvr.ini", b"[fix]\n")):
             with open(os.path.join(root, rel.replace("/", os.sep)), "wb") as f:
@@ -1182,6 +1251,11 @@ def self_test():
                 before_native_tree.append((os.path.relpath(path, game),
                                            open(path, "rb").read()))
         old_strict_game_running = globals()["strict_game_running"]
+        import openxr_pe as _native_pe
+        old_pair_validate = _native_pe.validate_native_pair
+        old_profile_validate = globals()["validate_elite_game"]
+        _native_pe.validate_native_pair = lambda game, native, graphics: None
+        globals()["validate_elite_game"] = lambda game: None
         globals()["strict_game_running"] = lambda: (True, False)
         try:
             if main(["--root", root, "--target", game, "--native-openxr",
@@ -1196,6 +1270,60 @@ def self_test():
                                               open(path, "rb").read()))
             if before_native_tree != after_native_tree or os.path.exists(receipt_path):
                 print("native dry run wrote files")
+                ok = False
+
+            # A static pair mismatch is rejected before the receipt, backups,
+            # or either live DLL can be touched.
+            before_mismatch = list(before_native_tree)
+            saved_pair_validate = _native_pe.validate_native_pair
+            def reject_pair(game, native, graphics):
+                raise ValueError("mismatched native graphics")
+            _native_pe.validate_native_pair = reject_pair
+            try:
+                try:
+                    main(["--root", root, "--target", game, "--native-openxr",
+                          "--dll", "--native-receipt", receipt_path])
+                    print("native mismatch was accepted")
+                    ok = False
+                except SystemExit:
+                    pass
+            finally:
+                _native_pe.validate_native_pair = saved_pair_validate
+            after_mismatch = []
+            for base, dirs, names in os.walk(game):
+                for name in sorted(names):
+                    path = os.path.join(base, name)
+                    after_mismatch.append((os.path.relpath(path, game),
+                                           open(path, "rb").read()))
+            if before_mismatch != after_mismatch or os.path.exists(receipt_path):
+                print("native mismatch changed files")
+                ok = False
+
+            # An unrecognized executable profile is equally a preflight
+            # refusal, so migration cannot claim success while Elite would
+            # still choose LibOVR.
+            old_profile_gate = globals()["validate_elite_game"]
+            def reject_profile(path):
+                raise ValueError("unknown Elite executable revision")
+            globals()["validate_elite_game"] = reject_profile
+            try:
+                try:
+                    main(["--root", root, "--target", game, "--native-openxr",
+                          "--dll", "--native-receipt", receipt_path])
+                    print("unknown executable was accepted")
+                    ok = False
+                except SystemExit:
+                    pass
+            finally:
+                globals()["validate_elite_game"] = old_profile_gate
+            after_unknown = []
+            for base, dirs, names in os.walk(game):
+                for name in sorted(names):
+                    path = os.path.join(base, name)
+                    after_unknown.append((os.path.relpath(path, game),
+                                          open(path, "rb").read()))
+            if before_mismatch != after_unknown or os.path.exists(receipt_path):
+                print("unknown executable changed files")
                 ok = False
 
             # A process probe error is a hard refusal and leaves both files
@@ -1236,7 +1364,7 @@ def self_test():
             # Exercise failure after the first live copy as well as before it.
             def fail_graphics_source(src, dst, *copy_args, **copy_kwargs):
                 if os.path.abspath(src) == os.path.abspath(
-                        os.path.join(root, "build", "d3d11.dll")):
+                        os.path.join(root, "build", "edvr_openxr_graphics.dll")):
                     raise OSError("self-test second-copy failure")
                 return real_copy2(src, dst, *copy_args, **copy_kwargs)
             shutil.copy2 = fail_graphics_source
@@ -1322,7 +1450,7 @@ def self_test():
             stage_failed = [False]
             def fail_rollback(src, dst, *copy_args, **copy_kwargs):
                 if os.path.abspath(src) == os.path.abspath(
-                        os.path.join(root, "build", "d3d11.dll")):
+                        os.path.join(root, "build", "edvr_openxr_graphics.dll")):
                     stage_failed[0] = True
                     raise OSError("self-test staged failure")
                 if stage_failed[0] and os.path.abspath(dst) == os.path.abspath(native_target):
@@ -1414,7 +1542,7 @@ def self_test():
                 print("stale native restore was accepted")
                 ok = False
             with open(graphics_target, "wb") as f:
-                f.write(b"NEW-DLL")
+                f.write(b"NATIVE-GRAPHICS")
             # A corrupt staged restore copy must never be copied back onto
             # a live DLL: no live mutation has occurred at this point.
             real_copy2 = shutil.copy2
@@ -1432,7 +1560,7 @@ def self_test():
             finally:
                 shutil.copy2 = real_copy2
             if open(native_target, "rb").read() != b"NATIVE-NEW" or \
-               open(graphics_target, "rb").read() != b"NEW-DLL":
+               open(graphics_target, "rb").read() != b"NATIVE-GRAPHICS":
                 print("corrupt staging changed a live DLL")
                 ok = False
             real_replace_receipt = _replace_receipt
@@ -1446,9 +1574,19 @@ def self_test():
             finally:
                 globals()["_replace_receipt"] = real_replace_receipt
             if open(native_target, "rb").read() != b"NATIVE-NEW" or \
-               open(graphics_target, "rb").read() != b"NEW-DLL":
+               open(graphics_target, "rb").read() != b"NATIVE-GRAPHICS":
                 print("restore receipt failure did not preserve installed pair")
                 ok = False
+            # Receipts from before the graphics split named build/d3d11.dll;
+            # restore must continue to accept that source identity.
+            with open(receipt_path, "r", encoding="utf-8") as stream:
+                legacy_receipt = json.load(stream)
+            for entry in legacy_receipt["files"]:
+                if entry["key"] == "graphics":
+                    entry["source"] = os.path.abspath(
+                        os.path.join(root, LEGACY_GRAPHICS_SOURCE))
+            with open(receipt_path, "w", encoding="utf-8") as stream:
+                json.dump(legacy_receipt, stream)
             if restore_native(receipt_path) != 0:
                 print("native restore failed")
                 ok = False
@@ -1466,6 +1604,14 @@ def self_test():
                 pass
         finally:
             globals()["strict_game_running"] = old_strict_game_running
+            _native_pe.validate_native_pair = old_pair_validate
+            globals()["validate_elite_game"] = old_profile_validate
+            if _native_pe.validate_native_pair is not old_pair_validate:
+                print("native pair validator was not restored")
+                ok = False
+            if globals()["validate_elite_game"] is not old_profile_validate:
+                print("Elite profile validator was not restored")
+                ok = False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

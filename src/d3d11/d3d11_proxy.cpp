@@ -22,10 +22,20 @@
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/native_startup.h"
 #include "../common/proxy.h"
 #include "device_hook.h"
 #include "input_gate.h"
+#include "oculus_route.h"
 #include "shutdown_census.h"
+
+#ifndef EDVR_NATIVE_OPENXR_BUILD
+#define EDVR_NATIVE_OPENXR_BUILD 0
+#endif
+
+extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
+    sizeof(EdvrNativeStartupRouting), EDVR_NATIVE_STARTUP_VERSION_1,
+    EDVR_NATIVE_OPENXR_BUILD ? EDVR_NATIVE_STARTUP_ROUTE_OCULUS : 0u, 0u};
 
 extern "C" {
 extern void* edvr_realProcs_d3d11[];
@@ -267,6 +277,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().open(cfg.logDir(), L"gfx");
     edvr::Log::get().note("edvr d3d11 proxy attached; module dir %S",
                           g_moduleDir->c_str());
+    edvr::oculusRouteReport();
 
     const std::string build = edvr::gameBuildVersion();
     // The builds named here come from the list itself, never a literal. A
@@ -328,6 +339,7 @@ void ensureInitialised() {
 }
 
 void shutdown() {
+    edvr::oculusRouteReport();
     // Per-site fault totals, so "logged once" does not mean "counted once".
     edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();
@@ -603,16 +615,33 @@ extern "C" BOOL WINAPI edvrCensusEndShutdown(
     return edvr::shutdownPresentCensus().end(token, result);
 }
 
+// CPU-only diagnostic query. It must not trigger normal initialization: the
+// first relevant loader call can precede the first D3D export.
+extern "C" BOOL WINAPI edvrQueryOculusRouting(uint32_t version, uint32_t size,
+                                            void* output) {
+    if (version != 1 || size != sizeof(edvr::OculusRouteStatus) || !output) return FALSE;
+    __try {
+        *static_cast<edvr::OculusRouteStatus*>(output) = edvr::oculusRouteStatusSnapshot();
+        return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+}
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
             g_selfModule = module;
             DisableThreadLibraryCalls(module);
+            // Native routing is a build capability, available before Elite's
+            // first VR probe. No configuration or logging under loader lock.
+            edvr::oculusRouteInstallEarly(EDVR_NATIVE_OPENXR_BUILD != 0);
             loaderPhase();
             edvr::inputGateInstallEarly();
             break;
 
         case DLL_PROCESS_DETACH:
+            edvr::oculusRouteUninstallEarly();
             // reserved != NULL means process termination: other threads are
             // already dead and may have been holding our spinlock or the heap
             // lock. Do the minimum and leak the rest.

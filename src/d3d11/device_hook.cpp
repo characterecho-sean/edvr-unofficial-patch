@@ -7,6 +7,7 @@
 #include "shader_sig.h"
 #include "weapon_motion.h"
 #include "input_gate.h"
+#include "oculus_route.h"
 #include "vr_runtime.h"
 
 #include <windows.h>
@@ -891,6 +892,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    // The Oculus probe may follow initial device creation. Drain changed
+    // routing observations from ordinary execution, never from the loader.
+    oculusRouteReport();
     struct ShutdownCensusPresentScope final {
         bool enabled;
         explicit ShutdownCensusPresentScope(bool enabled_) noexcept : enabled(enabled_) {
