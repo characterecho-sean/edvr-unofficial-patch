@@ -235,6 +235,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrMenuPanel ^
     --extra-export edvrAcquireNativeMenu ^
     --extra-export edvrAcquireNativeTemporal ^
+    --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
@@ -319,6 +320,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" ^
+    "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
@@ -655,6 +657,34 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native temporal GPU test build failed & exit /b 1 )
 "%BUILD%\native_temporal_gpu_test.exe" --dry-run || exit /b 1
+
+echo [edvr] === native_sharpen_test.exe ===
+if not exist "%OBJ%\native_sharpen" mkdir "%OBJ%\native_sharpen"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\native_sharpen\\" /Fe"%BUILD%\native_sharpen_test.exe" ^
+    "tools\native_sharpen_test\native_sharpen_test.cpp" "src\d3d11\native_sharpen.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native sharpen contract test build failed & exit /b 1 )
+"%BUILD%\native_sharpen_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_sharpen_test.exe" --self-test || exit /b 1
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\native_sharpen\\" /Fe"%BUILD%\native_sharpen_gpu_test.exe" ^
+    "tools\native_sharpen_test\native_sharpen_gpu_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native sharpen GPU test build failed & exit /b 1 )
+"%BUILD%\native_sharpen_gpu_test.exe" --dry-run || exit /b 1
+
+echo [edvr] === openxr_trace_test.exe ===
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\native_sharpen\\" /Fe"%BUILD%\openxr_trace_test.exe" ^
+    "tools\openxr_trace_test\openxr_trace_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: native trace test build failed & exit /b 1 )
+"%BUILD%\openxr_trace_test.exe" --dry-run || exit /b 1
+"%BUILD%\openxr_trace_test.exe" --self-test || exit /b 1
 
 echo [edvr] === native_timing_test.exe ===
 if not exist "%OBJ%\native_timing" mkdir "%OBJ%\native_timing"

@@ -1137,12 +1137,16 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     if (nativeMenuActive()) {
         const NativeTimingSnapshot timing = nativeTimingSnapshot();
         const GpuFrameSnapshot gpu = gpuFrameSnapshot();
-        const auto render = s.nativeHistory.producer(GetTickCount64(), 200);
+        const uint64_t now = GetTickCount64();
+        const auto render = s.nativeHistory.producer(now, 200);
+        const auto submit = s.nativeHistory.submit(now, 200);
         const bool haveGpu = nativeGpuReady(timing, gpu) && render.count;
-        if (haveGpu)
-            snprintf(buf, bufLen, "%.0f fps   period %.1f ms   producer %.1f ms (200ms mean)", perfFpsOf(ps.avgMs), ps.avgMs, render.meanMs);
-        else
-            snprintf(buf, bufLen, "%.0f fps   period %.1f ms   producer span unavailable", perfFpsOf(ps.avgMs), ps.avgMs);
+        const bool haveCpu = nativeCpuReady(timing) && submit.count;
+        char gpuValue[24] = "--", cpuValue[24] = "--";
+        if (haveGpu) snprintf(gpuValue, sizeof(gpuValue), "%.1f", render.meanMs);
+        if (haveCpu) snprintf(cpuValue, sizeof(cpuValue), "%.1f", submit.meanMs);
+        snprintf(buf, bufLen, "%.0f fps   gpu %s ms   cpu %s ms",
+            perfFpsOf(ps.avgMs), gpuValue, cpuValue);
         return;
     }
     const char* cpuLabel = recent.appCount ? "cpu" : "thread";

@@ -1,4 +1,5 @@
 #include "sharpen_pass.h"
+#include "../common/native_sharpen.h"
 #include "graphics_runtime.h"
 
 #include <cmath>
@@ -666,7 +667,7 @@ void sharpenPassTick(ID3D11DeviceContext* ctx) {
     }
     // The other half's absence, said from this side (the resolve's note,
     // for the same reason).
-    if (!g_noHookNoted && !glitchConsumerPresent() &&
+    if (!g_noHookNoted && !glitchConsumerPresent() && !nativeSharpenActive() &&
         elapsedMs(g_firstTickMs, kNoHookNoteMs)) {
         g_noHookNoted = true;
         Log::get().note(

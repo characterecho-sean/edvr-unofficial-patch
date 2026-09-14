@@ -5,8 +5,18 @@ features. The [native monitor-history
 checkpoint](openxr-metrics-parity-2026-09-14.md) adds consistent short
 averages, independent timing graphs, and a clearly labelled predicted-period
 reference. Runtime compositor statistics retain explicit unavailable states.
-The next manual gate checks the presentation before continuing
-submission-feature migration.
+The matching Pimax presentation flight passed with 5,430 stereo pairs,
+independent nonempty timing histories and complete native teardown. The [native
+sharpening and logging checkpoint](openxr-native-sharpen-2026-09-14.md)
+restores `fix.render_sharpness`, moves native traces to `edvr_logs` beside the
+game, and restores the floating monitor's CPU readout with the requested
+compact `gpu`/`cpu` labels. The full build passed with 511 unchanged source
+hashes, and both real-shader configurations passed. The paired DLLs are
+installed and hash-verified in Frontier; manual verification is next. The user
+has excluded features listed under `[experimental]` from this parity work:
+supersample resolve, FSS theater and gaze foveation are deferred. This scope
+change does not remove existing settings or alter temporal AA already
+implemented.
 
 The [VDXR startup investigation](openxr-vdxr-startup-2026-09-14.md) confirms
 that Windows runtime selection reached VirtualDesktopXR successfully. Elite

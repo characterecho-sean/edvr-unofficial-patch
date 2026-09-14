@@ -26,6 +26,7 @@
 #include "native_device.h"
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
+#include "native_sharpen_client.h"
 #include "native_timing_client.h"
 #include "device_gpu_timing.h"
 #include "render_route.h"
@@ -136,6 +137,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EyeCapture captured;
   NativeMenuClient menu;
   NativeTemporalClient temporal;
+  NativeSharpenClient sharpen;
   NativeTimingClient timing;
   DeviceGpuTiming deviceTiming;
   bool deviceTimingReady=false;
@@ -147,6 +149,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   float frameTangentShift[2][2]{};
   unsigned temporalFrameEyes=0;
   uint64_t temporalEyes[2]{},temporalFrames=0,temporalFailures=0;
+  uint64_t sharpenEyes[2]{},sharpenFailures=0;
   uint64_t menuEyes[2]{}, menuFailures=0, menuPosePublications=0;
   SkyboxCapture skybox;
   LoadingState loading;
@@ -248,7 +251,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(XR_FAILED(r)||state.terminal()||!changes.active()) {
       serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
       menu.invalidate();
-      temporal.invalidate();
+      invalidateEyeTreatments();
       timingInvalidate();
       result("service_poll_terminal",r);return;
     }
@@ -257,7 +260,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(r==XR_SUCCESS)r=state.stop();
       serviceStopped=r==XR_SUCCESS;serviceFailed=!serviceStopped;
       geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
-      menu.invalidate();temporal.invalidate();timingInvalidate();
+      menu.invalidate();invalidateEyeTreatments();timingInvalidate();
       result("service_xrEndSession",r);
       return;
     }
@@ -338,7 +341,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   bool invalidateOrigin(const char* reason="reference_change") {
     menu.invalidate(); // CPU only, including callers without a producer boundary.
-    temporal.invalidate();
+    invalidateEyeTreatments();
     timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
     if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
@@ -359,10 +362,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
     timingResetFrame(timingSequence);
-    if(temporalFrameEyes!=3)temporal.invalidate(); // prior incomplete pair never reached the runtime
+    if(temporalFrameEyes!=3)invalidateEyeTreatments(); // prior incomplete pair never reached the runtime
     temporalFrameEyes=0;std::memset(frameTangentShift,0,sizeof(frameTangentShift));
     ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
-    auto fail=[&](XrResult error){timingInvalidate();lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();temporal.invalidate();
+    auto fail=[&](XrResult error){timingInvalidate();lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();invalidateEyeTreatments();
       geometry.invalidate(geometryGeneration);
       if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
       return vr::VRCompositorError_InvalidTexture;};
@@ -398,7 +401,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto begun=temporal.begin(located,poses.read().originGeneration,frameTangentShift);
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
       ++temporalFrames;
-    } else temporal.invalidate();
+    } else invalidateEyeTreatments();
     const bool geometryValid=geometry.publish(located,false,false,frameTangentShift);
     boundary.setGeometryReady(geometryValid);
     frameGeometry=located;frameGeometryAvailable=true;
@@ -437,7 +440,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return vr::VRCompositorError_InvalidTexture;
     if(eye!=vr::Eye_Left&&eye!=vr::Eye_Right) {
-      timingInvalidate();temporal.invalidate();
+      timingInvalidate();invalidateEyeTreatments();
       const auto rejected=boundary.submit(eye,texture,bounds,flags);
       lastCompositorResult=boundary.lastResult();return rejected;
     }
@@ -446,7 +449,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto submitClockEnd=QueryPerformanceCounter(&submitEnd);
     if(submitClock&&submitClockEnd) timingFrame.submitMs[unsigned(eye)]=elapsedMs(submitBegin,submitEnd);
     lastCompositorResult=boundary.lastResult();
-    if(r!=vr::VRCompositorError_None)temporal.invalidate();
+    if(r!=vr::VRCompositorError_None)invalidateEyeTreatments();
     if(r==vr::VRCompositorError_None&&timingGpuBegun[unsigned(eye)]) {
       const bool markerDispatched=graphicsCalls.invoke([&]{
         Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
@@ -472,7 +475,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return false;
     if(boundary.clear()!=XR_SUCCESS)return false;
-    temporal.invalidate();timingInvalidate();temporalFrameEyes=0;
+    invalidateEyeTreatments();timingInvalidate();temporalFrameEyes=0;
     loading.sceneCleared();
     return loading.visible(); // no default historical grid when no override exists
   }
@@ -521,7 +524,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,false);
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,false);})) { timingInvalidate(); return r; }
     if(r!=vr::VRCompositorError_None)return r;
-    if(!copyPixels){menu.invalidate();temporal.invalidate();timingInvalidate();return r;}
+    if(!copyPixels){menu.invalidate();invalidateEyeTreatments();timingInvalidate();return r;}
     Microsoft::WRL::ComPtr<ID3D11Texture2D> temporalOutput,treated;
     vr::VRTextureBounds_t temporalBounds{};
     vr::VRTextureBounds_t treatedBounds{};
@@ -539,7 +542,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto clockEnd=QueryPerformanceCounter(&ended);
       if(clock&&clockEnd) timingFrame.temporalMs[unsigned(eye)]=elapsedMs(began,ended);
       if(!dispatched||FAILED(treatment)) {
-        temporal.invalidate();timingInvalidate();
+        invalidateEyeTreatments();timingInvalidate();
         if(temporalFailures++<8)nativeTracePrintf("native_temporal,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
         return vr::VRCompositorError_InvalidTexture;
       }
@@ -560,8 +563,31 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
     }
     const vr::Texture_t temporalTexture{temporalOutput.Get(),vr::API_DirectX,texture->eColorSpace};
-    const auto* menuSource=temporalOutput?&temporalTexture:texture;
-    const auto* menuBounds=temporalOutput?&temporalBounds:bounds;
+    const auto* sharpenSource=temporalOutput?&temporalTexture:texture;
+    const auto* sharpenBounds=temporalOutput?&temporalBounds:bounds;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sharpenOutput;
+    vr::VRTextureBounds_t sharpenedBounds{};
+    if(sharpen.acquired()) {
+      HRESULT treatment=E_FAIL;
+      const bool dispatched=graphicsCalls.invoke([&] {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+        const auto queried=static_cast<IUnknown*>(sharpenSource->handle)->QueryInterface(IID_PPV_ARGS(&source));
+        if(FAILED(queried)){treatment=queried;return;}
+        treatment=sharpen.treat(sequence,unsigned(eye),source.Get(),sharpenBounds,sharpenOutput,sharpenedBounds);
+      });
+      if(!dispatched||FAILED(treatment)) {
+        invalidateEyeTreatments();timingInvalidate();
+        if(sharpenFailures++<8)nativeTracePrintf("native_sharpen,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
+        return vr::VRCompositorError_InvalidTexture;
+      }
+      if(sharpenOutput&&sharpenEyes[unsigned(eye)]++==0)
+        nativeTracePrintf("native_sharpen,first_treated_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
+    }
+    // Keep the actual temporal projection regardless of a later spatial pass.
+    // Menu text is composited after sharpening, as in the OpenVR submission.
+    const vr::Texture_t sharpenedTexture{sharpenOutput.Get(),vr::API_DirectX,texture->eColorSpace};
+    const auto* menuSource=sharpenOutput?&sharpenedTexture:sharpenSource;
+    const auto* menuBounds=sharpenOutput?&sharpenedBounds:sharpenBounds;
     if(menu.acquired()) {
       HRESULT treatment=E_FAIL;
       LARGE_INTEGER menuBegan{},menuEnded{}; const auto menuClock=QueryPerformanceCounter(&menuBegan);
@@ -578,7 +604,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto menuClockEnd=QueryPerformanceCounter(&menuEnded);
       if(menuClock&&menuClockEnd) timingFrame.menuMs[unsigned(eye)]=elapsedMs(menuBegan,menuEnded);
       if(!dispatched||FAILED(treatment)) {
-        menu.invalidate();temporal.invalidate();timingInvalidate();
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
         if(menuFailures++<8)nativeTracePrintf("native_menu,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
         return vr::VRCompositorError_InvalidTexture;
       }
@@ -601,7 +627,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(r==vr::VRCompositorError_None&&treated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
     if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
-    else { temporal.invalidate(); timingInvalidate(); }
+    else { invalidateEyeTreatments(); timingInvalidate(); }
     return r;
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
@@ -676,6 +702,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
   ~NativeRuntimeHost() {close();}
+  void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); }
   bool close() {
     const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
     const auto menuClosed=menu.close(); // no producer admission or GPU work required
@@ -685,6 +712,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto timingClosed=timing.close();
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
     if(FAILED(temporal.close()))return clean=false;
+    if(FAILED(sharpen.close()))return clean=false;
+    if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
+      (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)temporalFrames,(unsigned long long)temporalEyes[0],(unsigned long long)temporalEyes[1],(unsigned long long)temporalFailures);
     if(tracing)nativeTracePrintf("native_summary,waits=%llu,submits=%llu,pairs=%llu,copied_eyes=%llu,loading_layers=%llu,menu_left=%llu,menu_right=%llu,menu_failures=%llu,menu_poses=%llu,pose_failures=%llu,graphics_wrong_thread=%llu\n",
@@ -891,7 +921,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(!graphicsCalls.invoke([&]{acquired=temporal.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
         nativeTracePrintf("native_temporal,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
       }
-      nativeTracePuts("native_temporal,provider_acquired=1,other_submission_effects=0");
+      nativeTracePuts("native_temporal,provider_acquired=1");
+      acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=sharpen.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_sharpen,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      nativeTracePuts("native_sharpen,provider_acquired=1,order=after_temporal_before_menu");
       acquired=E_FAIL;
       const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);});
       if(!timingAdmission) acquired=E_FAIL;

@@ -127,7 +127,11 @@ inline void collectorCases(ID3D11Device* d,ID3D11DeviceContext* c) {
         check(t.poll(out,8)==1&&out[0].sequence==9&&out[0].status==EdvrNativeGpuIncomplete&&o.creates==allocations,"ring pressure bounded and reported");
         o.pending=false;t.beginFrame(10,true);phases(t,c);t.acceptFrame(10);
         check(t.poll(out,8)==1&&out[0].status==EdvrNativeGpuValid,"ring exhaustion recovers");
-        t.beginFrame(11,true);phases(t,c);t.acceptFrame(11);Sleep(2010);
+        t.beginFrame(11,true);phases(t,c);t.acceptFrame(11);
+        // Cross the collector's actual clock deadline. A nominal sleep alone
+        // can leave GetTickCount64 at the inclusive 2000 ms freshness limit.
+        const auto staleAfter=GetTickCount64()+2001;
+        while(GetTickCount64()<=staleAfter)Sleep(1);
         check(t.poll(out,8)==1&&out[0].status==EdvrNativeGpuStale,"old completion retains age and becomes stale");
     }
 }

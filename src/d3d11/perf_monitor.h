@@ -70,6 +70,8 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 // and frames dropped in the last ten seconds. Without app timing the CPU
 // fallback is labelled "thread". Needs nothing the slow samplers
 // gather.
+// Native gpu/cpu labels show independent 200ms means of producer GPU and
+// submit wall. Submit includes blocking/rendezvous, not exclusive CPU execution.
 void perfMonitorOverlayLine(char* buf, size_t bufLen);
 
 // The local D3D11 render-to-submit diagnostic, kept separate from SteamVR's

@@ -66,20 +66,29 @@ hash-verified in Frontier with game settings and the original OpenVR DLL
 preserved. The diagnostic build is `v0.16.2-87-g09b003a-dirty`; exact sources,
 binaries and qualification records remain in the local archive. Windows
 selected PiOpenXR at installation, while the install continues to use
-`runtime=system`. The manual presentation gate remains pending.
+`runtime=system`. The manual presentation gate has now passed.
 
-For the next manual Frontier flight, use the selected native OpenXR runtime and
-open F8's Monitor page after rendering settles. Confirm that the two labelled
-graphs update, Submit wall and Render GPU show averages, XR copy/compose shows
-separate values, and XR period is labelled as a prediction. If using the small
-FPS overlay, its producer average should follow the same trend. Confirm normal
-viewing and exit; the matching logs must contain nonzero sample counts for
-available sources and complete native teardown.
+The matching Pimax flight completed 5,430 stereo pairs at 4068 x 4016 per eye,
+with no temporal, pose or producer-thread failures. Fourteen bounded history
+records include nonzero sample counts for Submit wall, producer GPU, XR copy
+and XR compose, and an 11.111 ms predicted period. All ten native shutdown
+stages completed, the owner joined, and no resources were retained. The user
+reported "Looks good, proceed"; this qualifies the presentation gate without
+claiming performance parity. The matching logs and result are archived locally
+under `build/openxr-native-metrics-20260914/flight-metrics-success-055737/`.
 
-After this presentation gate, proceed with the remaining submission features:
-terrain overscan/cropping, supersample resolve and sharpening, withholding,
-Explorer Cam, theater/heal and gaze foveation, with pose/projection/history
-checks at each stage. The legacy Oculus-selection investigation remains
-separate: Windows runtime selection alone does not suppress Elite's LibOVR
-entry path. Matched-resolution performance testing remains deferred by the
-user.
+The later floating-monitor report identified a presentation omission: its
+native branch showed only the producer span and omitted CPU submit wall. The
+[next checkpoint](openxr-native-sharpen-2026-09-14.md) restores both averages
+with the user's requested `gpu` and `cpu` labels. This does not change the
+qualified measurement sources or claim a full application CPU duration.
+
+The user subsequently excluded features listed under `[experimental]` from
+parity work. Continue with render sharpening, terrain overscan/cropping,
+transition withholding, Explorer Cam and the supported FSS eye-sync treatment,
+with pose/projection/history checks at each stage. Supersample resolve, FSS
+theater and gaze foveation are outside the current scope; existing settings and
+implemented temporal behavior remain unchanged. The legacy Oculus-selection
+investigation remains separate: Windows runtime selection alone does not
+suppress Elite's LibOVR entry path. Matched-resolution performance testing
+remains deferred by the user.

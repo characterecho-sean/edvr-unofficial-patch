@@ -800,7 +800,7 @@ void buildStatus(MenuContent& c) {
                : rk == 1 ? "SteamVR (Valve's own)"
                : rk == 2 ? "OpenComposite"
                : (glitchConsumerPresent() ? "not identified" : "no compositor consumer"));
-    if (nativeMenuActive()) statusLine(c, "Native effects", "Menu and temporal connected; other effects pending");
+    if (nativeMenuActive()) statusLine(c, "Native effects", "Menu, temporal and sharpening connected; other effects pending");
     uint32_t ew = 0, eh = 0;
     float outer = 0.0f, inner = 0.0f;
     if (eyeTextureSize(&ew, &eh) && eyeTangents(&outer, &inner)) {

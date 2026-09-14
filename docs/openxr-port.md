@@ -13,6 +13,15 @@ Implementation and subsequent evidence are tracked in
 device and caller-thread evidence and records the startup capture limitation;
 the original inventory below remains historical.
 
+**Current scope (2026-09-14):** the user has deferred performance comparisons
+and excluded features listed under `[experimental]` from parity work. The
+native metric-presentation flight has passed. Continue with supported
+submission features, including `fix.render_sharpness`, `fix.cull_guard`,
+`fix.transition_flash`, Explorer Cam and `fix.fss_eye_sync`. Supersample
+resolve, FSS theater and gaze foveation are deferred; the broader inventory and
+original implementation sequence below remain historical. Existing settings and
+the temporal behavior already implemented are preserved.
+
 **Approval boundary:** this revision is for review. After Sean confirms it,
 Luna agents can implement the bounded work packages below, with the parent
 agent reviewing their changes and validation. Flights remain explicit gates; an

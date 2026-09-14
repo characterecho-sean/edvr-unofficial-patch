@@ -17,25 +17,41 @@ namespace edvr::openxr {
 class NativeTrace final {
  public:
   static NativeTrace& get() { static auto* trace = new NativeTrace; return *trace; }
+  static bool makeLogPathForExecutable(const wchar_t* executablePath,
+                                       const SYSTEMTIME& time, DWORD pid,
+                                       std::wstring& out) {
+    out.clear();
+    if (!executablePath || !*executablePath || !pid) return false;
+    const std::wstring path(executablePath);
+    const auto slash = path.find_last_of(L"\\/");
+    const bool driveAbsolute = path.size() >= 3 && path[1] == L':' &&
+        (path[2] == L'\\' || path[2] == L'/');
+    const bool uncAbsolute = path.size() >= 3 && path[0] == L'\\' && path[1] == L'\\';
+    if (slash == std::wstring::npos || slash + 1 >= path.size() ||
+        (!driveAbsolute && !uncAbsolute)) return false;
+    wchar_t leaf[128]{};
+    if (swprintf_s(leaf, L"edvr_openxr_%04u%02u%02u_%02u%02u%02u_%03u_%lu.log",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond,
+        time.wMilliseconds, pid) < 0) return false;
+    out = path.substr(0, slash + 1) + L"edvr_logs\\" + leaf;
+    return true;
+  }
   bool begin(const void* moduleAddress) {
+    (void)moduleAddress; // retained for the module-init call contract
     std::lock_guard<std::mutex> lock(mutex_);
     if (attempted_) return file_ != INVALID_HANDLE_VALUE;
     attempted_ = true;
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(moduleAddress), &module)) return false;
     wchar_t path[32768]{};
-    const DWORD n = GetModuleFileNameW(module, path, _countof(path));
+    const DWORD n = GetModuleFileNameW(nullptr, path, _countof(path));
     if (!n || n >= _countof(path)) return false;
-    const auto slash = std::wstring(path).find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return false;
-    SYSTEMTIME time{}; GetSystemTime(&time);
-    wchar_t leaf[128]{};
-    swprintf_s(leaf, L"edvr_openxr_%04u%02u%02u_%02u%02u%02u_%03u_%lu.log",
-        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond,
-        time.wMilliseconds, GetCurrentProcessId());
-    const auto destination = std::wstring(path, slash + 1) + leaf;
+    // The filename is used by the installer to group this log with the
+    // legacy local-time filenames. Body lines remain explicitly UTC.
+    SYSTEMTIME time{}; GetLocalTime(&time);
+    std::wstring destination;
+    if (!makeLogPathForExecutable(path, time, GetCurrentProcessId(), destination)) return false;
+    const auto directory = destination.substr(0, destination.find_last_of(L"\\/"));
+    if (!CreateDirectoryW(directory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+      return false;
     file_ = CreateFileW(destination.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE,
         nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     return file_ != INVALID_HANDLE_VALUE;
