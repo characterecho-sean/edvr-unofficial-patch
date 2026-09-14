@@ -16,16 +16,18 @@ body:
     id: which-fix
     attributes:
       label: Which fix
-      description: The groups here are the ones in the installer's Settings tab, so pick whichever you were changing.
+      description: The groups here are the ones in the installer's Settings tab and the in-headset menu's Fixes page, so pick whichever you were changing.
       options:
         - When the eyes disagree (eye brightness, FSS scanner, scanned body)
-        - The on-foot screen (black surround, resolution, distance, curve)
-        - The intro (movie, background picture, loading dimming, VR handover, centring)
+        - Night vision (the pulse's distance; the experimental look and its brightness)
+        - The on-foot screen (weapon stability, black surround, resolution, distance, curve)
+        - The intro (movie on the screen or skipped, background picture, loading dimming, centring)
         - Jumps, stars and smoke (transition flash, sun glare, plumes, hyperspace starfield)
         - The helmet and the loading screen (RemLok lines, loading hologram)
         - The terrain fix (gaps at the edges of view)
         - Explorer Cam (on-foot stereo depth, high-wake marker)
-        - Anti-aliasing (temporal AA, sharpening, supersample filter)
+        - Anti-aliasing (temporal AA, DLAA/DLSS and its preset, sharpening)
+        - The in-headset settings menu (F8, its keys, the Monitor and Status pages)
         - Something else, or I am not sure
     validations:
       required: true
@@ -73,7 +75,7 @@ body:
     id: headset
     attributes:
       label: Headset and runtime
-      description: Which headset, and what it runs through — SteamVR, Oculus, Oasis, WMR, Virtual Desktop.
+      description: Which headset, and what it runs through — SteamVR, OpenComposite (Virtual Desktop's VDXR, PiOpenXR), Oculus, Oasis, WMR. A Quest over Link is a different path from a Quest over Steam Link, so say which.
       placeholder: HP Reverb G2 via the Oasis driver
     validations:
       required: true
