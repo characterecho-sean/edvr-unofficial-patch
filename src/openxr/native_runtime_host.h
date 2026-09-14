@@ -60,6 +60,7 @@
 #include "owner_service.h"
 #include "render_thread_dispatcher.h"
 #include "present_work_queue.h"
+#include "../common/native_render_settings.h"
 
 namespace edvr::openxr {
 struct RuntimeOptions {
@@ -117,6 +118,10 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 inline bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
+inline uint64_t nextRenderSizingGeneration() {
+  static std::atomic<uint64_t> generation{0};
+  return generation.fetch_add(1,std::memory_order_relaxed)+1;
+}
 class NativeRuntimeHost : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
   NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
@@ -195,10 +200,92 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   XrViewConfigurationView sizes[2]{};
+  float requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+  float effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+  bool renderSettingsCaptured=false;
+  uint64_t renderSizingGeneration=0;
+  EdvrNativeRenderViewBounds renderBounds[2]{};
   mutable std::atomic<unsigned> geometryQueryNotes[6][2]{};
   unsigned originInvalidationNotes=0;
   bool clean=true;
   bool separateGraphics()const{return startupOptions.separateDevice;}
+  bool captureRenderSettings() {
+    if(renderSettingsCaptured) return true;
+    renderSizingGeneration=nextRenderSizingGeneration();
+    if(!renderSizingGeneration) return result("render_sizing_generation",XR_ERROR_LIMIT_REACHED);
+    requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+    effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+    renderSettingsCaptured=false;
+    // The headset-free/native host diagnostic has no paired graphics
+    // provider, so its recommendation remains the runtime's 100% size.
+    if(!graphicsProxy) {
+      renderSettingsCaptured=true;
+      nativeTracePrintf("openxr_render_scale,provider=0,requested=1.000000\n");
+      return true;
+    }
+    const auto query=reinterpret_cast<EdvrQueryNativeRenderSettings>(
+        GetProcAddress(graphicsProxy,"edvrQueryNativeRenderSettings"));
+    if(!query) return result("native_render_settings_export",XR_ERROR_FUNCTION_UNSUPPORTED);
+    EdvrNativeRenderSettings settings{sizeof(settings),EDVR_NATIVE_RENDER_SETTINGS_VERSION_1,0,0};
+    BOOL answered=FALSE;
+    if(!graphicsCalls.invoke([&]{
+         answered=query(EDVR_NATIVE_RENDER_SETTINGS_VERSION_1,sizeof(settings),&settings);
+       }) || !answered || settings.size!=sizeof(settings) ||
+       settings.version!=EDVR_NATIVE_RENDER_SETTINGS_VERSION_1 || settings.reserved!=0 ||
+       !std::isfinite(settings.openxrRenderScale))
+      return result("native_render_settings_query",XR_ERROR_VALIDATION_FAILURE);
+    requestedRenderScale=settings.openxrRenderScale;
+    effectiveRenderScale=edvr::native_render::clampScale(requestedRenderScale);
+    renderSettingsCaptured=true;
+    nativeTracePrintf("openxr_render_scale,provider=1,requested=%.6f\n",requestedRenderScale);
+    return true;
+  }
+  void applyRenderScale() {
+    effectiveRenderScale=edvr::native_render::effectiveScale(
+        requestedRenderScale,renderBounds,2);
+    for(unsigned eye=0;eye<2;++eye) {
+      const unsigned originalWidth=renderBounds[eye].originalWidth;
+      const unsigned originalHeight=renderBounds[eye].originalHeight;
+      const uint32_t maxWidth=renderBounds[eye].maxWidth;
+      const uint32_t maxHeight=renderBounds[eye].maxHeight;
+      sizes[eye].recommendedImageRectWidth=edvr::native_render::scaledDimension(
+          originalWidth,maxWidth,effectiveRenderScale);
+      sizes[eye].recommendedImageRectHeight=edvr::native_render::scaledDimension(
+          originalHeight,maxHeight,effectiveRenderScale);
+      nativeTracePrintf("openxr_render_size,eye=%u,original=%ux%u,scaled=%ux%u,requested=%.6f,effective=%.6f\n",
+          eye,originalWidth,originalHeight,sizes[eye].recommendedImageRectWidth,
+          sizes[eye].recommendedImageRectHeight,requestedRenderScale,effectiveRenderScale);
+    }
+  }
+  bool publishRenderSizing(bool valid) {
+    if(!graphicsProxy) return true;
+    const auto publish=reinterpret_cast<EdvrPublishNativeRenderSizing>(
+        GetProcAddress(graphicsProxy,"edvrPublishNativeRenderSizing"));
+    if(!publish) return !valid;
+    EdvrNativeRenderSizing sizing{sizeof(sizing),EDVR_NATIVE_RENDER_SIZING_VERSION_1,renderSizingGeneration};
+    if(valid) {
+      for(unsigned eye=0;eye<2;++eye) {
+        sizing.eyes[eye]=renderBounds[eye];
+        sizing.activeWidth[eye]=sizes[eye].recommendedImageRectWidth;
+        sizing.activeHeight[eye]=sizes[eye].recommendedImageRectHeight;
+      }
+      sizing.requestedScale=requestedRenderScale;
+      sizing.effectiveScale=effectiveRenderScale;
+      sizing.valid=1;
+    }
+    // Snapshot publication is thread-safe and CPU-only. Shutdown needs no
+    // producer callback or Config access, even after graphics admission ends.
+    if(!valid) return publish(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(sizing),&sizing)!=FALSE;
+    BOOL published=FALSE;
+    const bool dispatched=graphicsCalls.invoke([&]{
+      published=publish(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(sizing),&sizing);
+    });
+    if(!dispatched || !published) {
+      if(valid) nativeTracePrintf("openxr_render_sizing,published=0\n");
+      return false;
+    }
+    return true;
+  }
   AuxiliaryRead readAuxiliary()const override {
     const auto snapshot=geometry.read();AuxiliaryRead out{};
     out.generation=snapshot.generation;out.connected=snapshot.connected;
@@ -885,6 +972,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); }
   bool close() {
     const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
+    if(renderSettingsCaptured) {
+      publishRenderSizing(false);
+      renderSettingsCaptured=false;
+    }
     const auto menuClosed=menu.close(); // no producer admission or GPU work required
     if(FAILED(menuClosed))return clean=false;
     timingInvalidate();
@@ -1032,7 +1123,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!result("view_sizes",enumerate<XrViewConfigurationView>([&](uint32_t c,uint32_t*n,XrViewConfigurationView*p){
       return api.viewSizes(instance,system,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,c,n,p);},views,{XR_TYPE_VIEW_CONFIGURATION_VIEW}))) return false;
     if(views.size()!=2 || !validSize(views[0]) || !validSize(views[1])) return result("stereo_sizes",XR_ERROR_VALIDATION_FAILURE);
-    for(unsigned eye=0;eye<2;++eye) {sizes[eye]=views[eye];nativeTracePrintf("size,%u,%u,%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight);}
+    for(unsigned eye=0;eye<2;++eye) {
+      sizes[eye]=views[eye];
+      renderBounds[eye]={sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight,
+          (std::min)(uint32_t(sizes[eye].maxImageRectWidth),uint32_t(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)),
+          (std::min)(uint32_t(sizes[eye].maxImageRectHeight),uint32_t(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION))};
+      nativeTracePrintf("size,%u,%u,%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight);
+    }
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;
     decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice;
@@ -1045,7 +1142,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(!graphicsProxy){nativeTracePrintf("error,graphics_proxy_load,%lu\n",GetLastError());return false;}
       createDevice=reinterpret_cast<decltype(createDevice)>(GetProcAddress(graphicsProxy,"D3D11CreateDevice"));
       bridgeCounts=reinterpret_cast<BridgeCounts>(GetProcAddress(graphicsProxy,"edvr_selftest_graphics_bridge"));
-      if(!createDevice||!bridgeCounts||!GetProcAddress(graphicsProxy,"edvrAcquireGraphicsBridge"))
+      if(!createDevice||!bridgeCounts||!GetProcAddress(graphicsProxy,"edvrAcquireGraphicsBridge")||
+         !GetProcAddress(graphicsProxy,"edvrQueryNativeRenderSettings")||
+         !GetProcAddress(graphicsProxy,"edvrPublishNativeRenderSizing"))
         return result("graphics_proxy_capability",XR_ERROR_FUNCTION_UNSUPPORTED);
     }
     HRESULT hr=E_FAIL;
@@ -1059,6 +1158,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return result("device_render_boundary",XR_ERROR_INITIALIZATION_FAILED);
     if(FAILED(hr)) {nativeTracePrintf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
     nativeTracePrintf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
+    if(!captureRenderSettings()) return false;
+    applyRenderScale();
+    if(!validSize(sizes[0]) || !validSize(sizes[1]))
+      return result("scaled_stereo_sizes",XR_ERROR_VALIDATION_FAILURE);
+    if(!publishRenderSizing(true)) return result("native_render_sizing_publish",XR_ERROR_RUNTIME_FAILURE);
     const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
     if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
     session=binding.session();local=binding.localSpace();view=binding.viewSpace();

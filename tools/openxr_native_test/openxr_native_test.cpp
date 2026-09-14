@@ -564,6 +564,44 @@ int selfTest() {
   XrViewConfigurationView size{XR_TYPE_VIEW_CONFIGURATION_VIEW};size.recommendedImageRectWidth=size.recommendedImageRectHeight=128;
   size.maxImageRectWidth=size.maxImageRectHeight=512;size.maxSwapchainSampleCount=1;
   check(validSize(size),"valid size");size.recommendedImageRectHeight=0;check(!validSize(size),"zero height");
+  // Exercise the host's actual startup sizing path, including repeated
+  // calculations from the original recommendation rather than compounding
+  // a previously scaled value. No loader, device or XR session is opened.
+  {
+    OwnerService sizingOwner; RenderThreadDispatcher sizingDispatcher(sizingOwner);
+    RenderRoute sizingRoute{sizingDispatcher};
+    NativeRuntimeHost host(sizingOwner,sizingDispatcher,sizingRoute);
+    check(host.captureRenderSettings() && host.requestedRenderScale==1.f,
+      "unpaired diagnostic defaults to the runtime recommendation");
+    const auto sizingGeneration=host.renderSizingGeneration;
+    NativeRuntimeHost secondHost(sizingOwner,sizingDispatcher,sizingRoute);
+    check(host.captureRenderSettings() && host.renderSizingGeneration==sizingGeneration &&
+      secondHost.captureRenderSettings() && secondHost.renderSizingGeneration>sizingGeneration,
+      "settings capture is stable and successive hosts use distinct sizing generations");
+    for(unsigned eye=0;eye<2;++eye) {
+      host.sizes[eye]={XR_TYPE_VIEW_CONFIGURATION_VIEW};
+      host.sizes[eye].maxImageRectWidth=host.sizes[eye].maxImageRectHeight=2000;
+      host.sizes[eye].maxSwapchainSampleCount=1;
+    }
+    host.renderBounds[0]={1001,777,2000,2000};
+    host.renderBounds[1]={999,801,2000,2000};
+    host.applyRenderScale();
+    check(host.sizes[0].recommendedImageRectWidth==1001 && host.sizes[1].recommendedImageRectHeight==801,
+      "100 percent preserves the host's odd runtime recommendations");
+    host.requestedRenderScale=host.effectiveRenderScale=.5f;
+    host.applyRenderScale();
+    check(host.sizes[0].recommendedImageRectWidth==501 && host.sizes[0].recommendedImageRectHeight==389 &&
+      host.sizes[1].recommendedImageRectWidth==500 && host.sizes[1].recommendedImageRectHeight==401 &&
+      validSize(host.sizes[0]) && validSize(host.sizes[1]),
+      "50 percent produces valid per-eye swapchain sizes with stable rounding");
+    host.requestedRenderScale=host.effectiveRenderScale=2.f;
+    host.renderBounds[1].maxHeight=host.sizes[1].maxImageRectHeight=1200;
+    host.applyRenderScale();
+    check(host.sizes[0].recommendedImageRectWidth==1500 && host.sizes[0].recommendedImageRectHeight==1164 &&
+      host.sizes[1].recommendedImageRectWidth==1497 && host.sizes[1].recommendedImageRectHeight==1200 &&
+      host.effectiveRenderScale>1.49f && host.effectiveRenderScale<1.50f,
+      "the tighter eye height caps the common scale without distorting either eye");
+  }
   // Session display dimensions survive transient geometry invalidation. This
   // inert host opens no loader, device, session, or XR operation.
   {

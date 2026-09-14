@@ -177,9 +177,37 @@ are not modified by this route.
 
 ## Desktop and Frontier checkpoint
 
-The full absolute-path `build.bat` run passed with all 534 source hashes
-unchanged. It includes the existing ABI, lifecycle, transport, feature and
-configuration gates plus 20 loader-route assertions, 17 standalone mapped
+Air Link retest on 2026-09-14 failed: the correctly installed
+`v0.16.2-93-g6f99b03-dirty` graphics log at 09:26:03 reports `native=1
+profile=0 installed=0 calls=0 failures=1`. The session subsequently reports
+LibOVR loaded with no OpenVR module. No new native OpenXR log exists. Ruled
+out: stale installation or a refused probe failing to advance the selector,
+because the pair/config hashes match and the wrapper never armed. The offline
+mapping fixture is insufficient evidence for live profile recognition; Windows'
+mapped image metadata must also be exercised.
+
+The rejection was reproduced without running the game. The file's preferred
+`ImageBase` is `0x140000000`, but Windows maps this executable with its header
+and relocated virtual tables referring to the randomized base. The old header
+check required the file value even for a live mapping. A `SEC_IMAGE_NO_EXECUTE`
+view remapped at its encoded base reproduces that state: the header, allocation
+and virtual-table pointers agree at `0x7ff75ce30000` on this boot, while the
+old constant comparison necessarily fails.
+
+The mapped validator now accepts either the audited file's preferred base or
+the actual mapped allocation base. Unrelated encoded bases still fail; all
+revision, import, code-block and virtual-table proofs remain required. The file
+validator continues to require the exact SHA-256 and preferred file base. The
+regression includes both manually relocated memory and the guarded convenience
+API applied to a real non-executable Windows image mapping. This corrects the
+profile-recognition defect; an Air Link retry must still verify that the armed
+route reaches native OpenXR.
+
+### Original implementation qualification (before the failed Air Link flight)
+
+The original full absolute-path `build.bat` run passed with all 534 source
+hashes unchanged. It includes the existing ABI, lifecycle, transport, feature
+and configuration gates plus 20 loader-route assertions, 17 standalone mapped
 profile checks, 15 Python profile checks and 30 PE checks. Actual graphics DLL
 startup inspection passed 17 checks for each of the native and baseline
 artifacts. Installer self-tests cover mismatched pairs and unknown profiles
@@ -198,7 +226,8 @@ DLSS (169 each, 18 treated eyes per mode), plus sharpening on/off (58/22).
 These verify provider engagement and output, not headset image quality or
 comparative performance.
 
-Frontier is installed and hash-verified with `v0.16.2-93-g6f99b03-dirty`:
+That checkpoint installed and hash-verified `v0.16.2-93-g6f99b03-dirty` in
+Frontier:
 
 - Native runtime SHA-256:
   `98111f0c45ba256dab7175c6ed6edc3429e9c2325b4445fdcc7b85e086a6dd64`.
@@ -216,15 +245,33 @@ remains pending and can be combined with this flight. The user launches
 Frontier manually; no launcher automation, game launch or runtime-setting
 change was performed for this checkpoint.
 
-For the next flight, use a Meta/Oculus headset with its compatible
-Windows-selected OpenXR runtime while the legacy SDK is available. Confirm that
-VR and F8 appear, startup faces the splash screen, head tracking and recenter
-work, and exit is normal. The graphics log must show `native=1 profile=1
-installed=1` and a refused Elite probe; the native log must then identify
-successful initialization and the selected OpenXR runtime. `rejected=0` does
-not prove the bypass worked. Check these through `tools/edvr_log.py --target
-frontier --expect-build 6f99b03`; the archived DLL hashes distinguish this
-build from another dirty build at the same commit.
+### Corrected Air Link checkpoint
+
+The corrected pair is installed and hash-verified as
+`v0.16.2-94-g663b49d-dirty`. Its full build passes with 537 source hashes
+unchanged, 21 standalone profile checks, 47 checks against the actual Frontier
+executable in manually relocated memory, and three checks against a Windows
+`SEC_IMAGE_NO_EXECUTE` mapping. The mapped allocation, encoded header base and
+virtual tables agree at `0x7ff75ce30000`. Both actual graphics variants pass 18
+startup checks, including failure-stage reporting for unrelated executables.
+Actual TAA/DLSS/sharpening checks also pass.
+
+The [resolution checkpoint](openxr-resolution-2026-09-14.md) records the
+installed runtime, graphics and startup-config hashes. The matching archive is
+`build/openxr-airlink-resolution-20260914/qualification.json`; settings and the
+original OpenVR DLL were preserved, and runtime selection remains `system`.
+These checks validate profile recognition without executing game code;
+successful Air Link routing still requires the next flight.
+
+For the corrected build's next flight, use a Meta/Oculus headset with its
+compatible Windows-selected OpenXR runtime while the legacy SDK is available.
+Confirm that VR and F8 appear, startup faces the splash screen, head tracking
+and recenter work, and exit is normal. The graphics log must show `native=1
+profile=1 profile_failure=0 installed=1` and a refused Elite probe; the native
+log must then identify successful initialization and the selected OpenXR
+runtime. `rejected=0` does not prove the bypass worked. Check these through
+`tools/edvr_log.py --target frontier --expect-build 663b49d`; the archived DLL
+hashes distinguish this build from another dirty build at the same commit.
 
 Then cover Quest/VDXR, Pimax/PiOpenXR and SteamVR OpenXR as available,
 combining normal gameplay and the feature checklist. Live fallback and headset

@@ -31,6 +31,7 @@ constexpr uint32_t kMaxReportSnapshots = 32;
 std::atomic<uint32_t> g_nativeBuild{0};
 std::atomic<uint32_t> g_capabilitySet{0};
 std::atomic<uint32_t> g_profileKnown{0};
+std::atomic<uint32_t> g_profileFailureStage{0};
 std::atomic<uint32_t> g_slotValidated{0};
 std::atomic<uint32_t> g_callerValidated{0};
 std::atomic<uint32_t> g_installed{0};
@@ -98,6 +99,7 @@ void saturatingIncrement(std::atomic<T>& value) {
 std::atomic<void**> g_testProfileSlot{nullptr};
 std::atomic<uintptr_t> g_testProfileCaller{0};
 std::atomic<uint32_t> g_testProfileKnown{0};
+std::atomic<uint32_t> g_testProfileConfigured{0};
 std::atomic<OculusRouteTestAfterCas> g_testAfterCas{nullptr};
 std::atomic<OculusRouteTestBeforeCas> g_testBeforeCas{nullptr};
 std::atomic<OculusRouteTestReportSink> g_testReportSink{nullptr};
@@ -105,10 +107,17 @@ std::atomic<OculusRouteTestReportSink> g_testReportSink{nullptr};
 
 bool validateProfile(void* executable, OculusProfileMatch* match) {
 #if defined(EDVR_OCULUS_ROUTE_TEST)
-    if (g_testProfileKnown.load(std::memory_order_acquire)) {
+    if (g_testProfileConfigured.load(std::memory_order_acquire)) {
         match->loadLibrarySlot = g_testProfileSlot.load(std::memory_order_acquire);
         match->callerReturnRva = g_testProfileCaller.load(std::memory_order_acquire);
-        return match->loadLibrarySlot != nullptr && match->callerReturnRva != 0;
+        match->failureStage = static_cast<uint32_t>(
+            OculusProfileFailureStage::Header);
+        if (g_testProfileKnown.load(std::memory_order_acquire)) {
+            const bool valid = match->loadLibrarySlot != nullptr && match->callerReturnRva != 0;
+            if (valid) match->failureStage = static_cast<uint32_t>(OculusProfileFailureStage::None);
+            return valid;
+        }
+        return false;
     }
 #endif
     return eliteOculusProfileValidate(executable, match);
@@ -320,6 +329,7 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     OculusProfileMatch match{};
     const bool known = validateProfile(GetModuleHandleW(nullptr), &match);
     g_profileKnown.store(known ? 1u : 0u, std::memory_order_release);
+    g_profileFailureStage.store(match.failureStage, std::memory_order_release);
     if (!known || !match.loadLibrarySlot || !match.callerReturnRva) {
         saturatingIncrement(g_installFailures);
         setDecision(kDecisionInstallFailure);
@@ -405,6 +415,7 @@ OculusRouteStatus oculusRouteStatusSnapshot() {
     s.version = kStatusVersion;
     s.nativeBuild = g_nativeBuild.load(std::memory_order_acquire);
     s.profileKnown = g_profileKnown.load(std::memory_order_acquire);
+    s.profileFailureStage = g_profileFailureStage.load(std::memory_order_acquire);
     s.slotValidated = g_slotValidated.load(std::memory_order_acquire);
     s.callerValidated = g_callerValidated.load(std::memory_order_acquire);
     s.installed = g_installed.load(std::memory_order_acquire);
@@ -500,8 +511,9 @@ void oculusRouteReport() {
     } else
 #endif
     {
-        Log::get().note("oculus route: native=%u profile=%u installed=%u calls=%u before_report=%u after_report=%u expected_caller_rva=0x%llX last_caller_rva=0x%llX exact=%u rejected=%u forwarded=%u unknown_caller=%u malformed=%u near=%u failures=%u publication_races=%u no_original=%u decision=%u error=%u report_limit=%u",
-                        s.nativeBuild, s.profileKnown, s.installed, s.calls,
+        Log::get().note("oculus route: native=%u profile=%u profile_failure=%u installed=%u calls=%u before_report=%u after_report=%u expected_caller_rva=0x%llX last_caller_rva=0x%llX exact=%u rejected=%u forwarded=%u unknown_caller=%u malformed=%u near=%u failures=%u publication_races=%u no_original=%u decision=%u error=%u report_limit=%u",
+                        s.nativeBuild, s.profileKnown, s.profileFailureStage,
+                        s.installed, s.calls,
                         s.callsBeforeReportReady, s.callsAfterReportReady,
                         static_cast<unsigned long long>(s.callerReturnRva),
                         static_cast<unsigned long long>(s.lastCallerReturnRva),
@@ -519,6 +531,7 @@ void oculusRouteTestReset() {
     g_nativeBuild.store(0, std::memory_order_relaxed);
     g_capabilitySet.store(0, std::memory_order_relaxed);
     g_profileKnown.store(0, std::memory_order_relaxed);
+    g_profileFailureStage.store(0, std::memory_order_relaxed);
     g_slotValidated.store(0, std::memory_order_relaxed);
     g_callerValidated.store(0, std::memory_order_relaxed);
     g_installed.store(0, std::memory_order_relaxed);
@@ -564,6 +577,7 @@ void oculusRouteTestReset() {
     g_testProfileSlot.store(nullptr, std::memory_order_relaxed);
     g_testProfileCaller.store(0, std::memory_order_relaxed);
     g_testProfileKnown.store(0, std::memory_order_relaxed);
+    g_testProfileConfigured.store(0, std::memory_order_relaxed);
     g_testAfterCas.store(nullptr, std::memory_order_relaxed);
     g_testBeforeCas.store(nullptr, std::memory_order_relaxed);
     g_testReportSink.store(nullptr, std::memory_order_relaxed);
@@ -574,6 +588,7 @@ void oculusRouteTestSetProfile(void** slot, uintptr_t callerReturnRva, bool know
     g_testProfileSlot.store(slot, std::memory_order_release);
     g_testProfileCaller.store(callerReturnRva, std::memory_order_release);
     g_testProfileKnown.store(known ? 1u : 0u, std::memory_order_release);
+    g_testProfileConfigured.store(1, std::memory_order_release);
 }
 
 void oculusRouteTestSetAfterCas(OculusRouteTestAfterCas callback) {

@@ -246,6 +246,9 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrCensusEndShutdown ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
+    --extra-export edvrQueryNativeRenderSettings ^
+    --extra-export edvrPublishNativeRenderSizing ^
+    --extra-export edvrQueryNativeRenderSizing ^
     --extra-export edvrGpuFrameEvent
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
@@ -329,6 +332,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
     "src\d3d11\native_timing.cpp" ^
+    "src\d3d11\native_render_settings.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
@@ -1346,6 +1350,17 @@ python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 
 python tools\openxr_pe.py --graphics "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
 python tools\elite_oculus.py --self-test || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1
+
+REM Pure render-resolution policy: one bounded factor is applied to both
+REM dimensions and the tightest runtime/D3D maximum is shared by both eyes.
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\native_render_settings_test.exe" ^
+    "tools\native_render_settings_test\native_render_settings_test.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & exit /b 1 )
+"%BUILD%\native_render_settings_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_render_settings_test.exe" --self-test || exit /b 1
 
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^

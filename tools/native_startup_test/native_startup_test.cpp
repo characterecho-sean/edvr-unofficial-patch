@@ -55,6 +55,8 @@ int wmain(int argc, wchar_t** argv) {
           "unrelated executable is never patched or classified as migrated");
     check(status.installFailures == (native ? 1u : 0u),
           "unsupported profile and disabled baseline remain distinguishable");
+    check(status.profileFailureStage == (native ? 2u : 0u),
+          "actual DLL distinguishes unsupported PE headers from disabled routing");
     check(status.reportReady == 0, "CPU query never initializes the log or graphics");
     edvr::OculusRouteStatus sentinel{};
     std::memset(&sentinel, 0x5a, sizeof(sentinel));

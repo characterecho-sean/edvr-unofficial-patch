@@ -178,6 +178,8 @@ void selfTest() {
   edvr::OculusProfileMatch out{reinterpret_cast<void**>(1), 1};
   check(!edvr::eliteOculusProfileValidateMapped(nullptr, 0, &out), "null image rejected");
   check(!out.loadLibrarySlot && !out.callerReturnRva, "null image clears output");
+  check(out.failureStage == static_cast<std::uint32_t>(edvr::OculusProfileFailureStage::Header),
+        "invalid mapped header reports its failure phase");
   Bytes malformed(64, 0);
   malformed[0] = 'M'; malformed[1] = 'Z';
   out = {reinterpret_cast<void**>(1), 1};
@@ -227,6 +229,15 @@ void selfTest() {
   check(!detail::relocated_pointer(view, 0x4DB32E0, 0x1000), "changed relocated pointer rejected");
   check(!edvr::eliteOculusProfileValidateMapped(importFixture.data(), importFixture.size(), &out),
         "synthetic executable with valid imports cannot satisfy audited code fingerprints");
+  put64(importFixture, 0x98 + 24, address);
+  check(detail::image_view(importFixture.data(), importFixture.size(), &view),
+        "header validation accepts the actual mapped ImageBase");
+  put64(importFixture, 0x98 + 24, address + 0x10000);
+  check(!detail::image_view(importFixture.data(), importFixture.size(), &view),
+        "header validation rejects an unrelated encoded ImageBase");
+  check(!edvr::eliteOculusProfileValidateMapped(importFixture.data(), importFixture.size(), &out) &&
+        out.failureStage == static_cast<std::uint32_t>(edvr::OculusProfileFailureStage::HeaderImageBase),
+        "unrelated encoded base has a specific failure diagnostic");
 
   // The current test executable is not Elite; the guarded convenience API
   // must refuse it and clear a previously populated result.
@@ -252,6 +263,7 @@ int gameTest(const wchar_t* path) {
         "mapped known Elite profile accepted");
   check(out.loadLibrarySlot != nullptr && out.callerReturnRva == 0x4E70BC,
         "mapped profile returns slot and exact caller RVA");
+  check(out.failureStage == 0, "successful profile has no failure diagnostic");
   if (failures) return 1;
 
   const std::size_t slotOffset = reinterpret_cast<std::uint8_t*>(out.loadLibrarySlot) - mapped.data();
@@ -271,11 +283,15 @@ int gameTest(const wchar_t* path) {
   const auto nt = u32(mapped, 0x3C);
   for (const auto offset : {nt + 4, nt + 8, nt + 24 + 56})
     rejectsMutation(offset, "qualified PE identity mutation rejected");
+  rejectsMutation(nt + 24 + 24, "foreign encoded image base rejected");
   const auto importRva = u32(mapped, nt + 24 + 112 + 8);
   const auto importSize = u32(mapped, nt + 24 + 112 + 12);
   rejectsMutation(importRva + importSize - 20 + 4, "partial import terminator rejected");
   check(edvr::eliteOculusProfileValidateMapped(mapped.data(), mapped.size(), &out),
         "restored image still passes after all independent mutations");
+  put64(mapped, nt + 24 + 24, reinterpret_cast<std::uintptr_t>(mapped.data()));
+  check(edvr::eliteOculusProfileValidateMapped(mapped.data(), mapped.size(), &out),
+        "known profile accepts Windows-adjusted ImageBase with all other proofs retained");
   check(slotOffset == 0x4DB32E0, "validated slot has qualified RVA");
 
   Bytes relocated = mapped;
@@ -286,6 +302,60 @@ int gameTest(const wchar_t* path) {
   edvr::OculusProfileMatch rebased{};
   check(edvr::eliteOculusProfileValidateMapped(relocated.data(), relocated.size(), &rebased),
         "different mapped base accepted");
+  return failures ? 1 : 0;
+}
+
+int secImageTest(const wchar_t* path) {
+  HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE |
+                            FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    std::printf("FAIL: SEC_IMAGE_NO_EXECUTE file open, error=%lu\n", GetLastError());
+    return 1;
+  }
+  HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY | SEC_IMAGE_NO_EXECUTE,
+                                      0, 0, nullptr);
+  if (!mapping) {
+    CloseHandle(file);
+    std::puts("FAIL: SEC_IMAGE_NO_EXECUTE mapping creation");
+    return 1;
+  }
+  void* first = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+  if (!first) {
+    CloseHandle(mapping); CloseHandle(file);
+    std::puts("FAIL: SEC_IMAGE_NO_EXECUTE view creation");
+    return 1;
+  }
+  const auto* bytes = static_cast<const std::uint8_t*>(first);
+  const std::uint32_t headerNt = static_cast<std::uint32_t>(bytes[0x3C]) |
+                                 static_cast<std::uint32_t>(bytes[0x3D]) << 8 |
+                                 static_cast<std::uint32_t>(bytes[0x3E]) << 16 |
+                                 static_cast<std::uint32_t>(bytes[0x3F]) << 24;
+  const std::uint8_t* optional = bytes + headerNt + 24;
+  std::uint64_t encodedBase = 0;
+  for (unsigned i = 0; i != 8; ++i) encodedBase |= static_cast<std::uint64_t>(optional[24 + i]) << (i * 8);
+  const auto actualBase = reinterpret_cast<std::uintptr_t>(first);
+  edvr::OculusProfileMatch match{};
+  bool accepted = eliteOculusProfileValidate(first, &match);
+  if (encodedBase != actualBase) {
+    check(!accepted, "incoherent SEC_IMAGE header base rejected");
+    UnmapViewOfFile(first);
+    first = MapViewOfFileEx(mapping, FILE_MAP_READ, 0, 0, 0,
+                            reinterpret_cast<void*>(encodedBase));
+    if (!first) {
+      CloseHandle(mapping); CloseHandle(file);
+      std::puts("FAIL: encoded SEC_IMAGE base unavailable for coherent remap");
+      return 1;
+    }
+    accepted = eliteOculusProfileValidate(first, &match);
+  }
+  check(accepted, "SEC_IMAGE_NO_EXECUTE profile accepted without execution");
+  check(match.loadLibrarySlot != nullptr && match.callerReturnRva == 0x4E70BC,
+        "SEC_IMAGE profile returns validated slot and caller RVA");
+  std::printf("elite_oculus_test: SEC_IMAGE_NO_EXECUTE header_base=0x%llX mapped_base=0x%llX, %u checks, %u failures\n",
+              static_cast<unsigned long long>(encodedBase),
+              static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(first)), checks, failures);
+  UnmapViewOfFile(first); CloseHandle(mapping); CloseHandle(file);
   return failures ? 1 : 0;
 }
 
@@ -308,6 +378,7 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("elite_oculus_test: %u checks, %u failures\n", checks, failures);
     return result;
   }
-  std::fputs("usage: --self-test | --dry-run | --game EliteDangerous64.exe\n", stderr);
+  if (argc == 3 && !std::wcscmp(argv[1], L"--sec-image")) return secImageTest(argv[2]);
+  std::fputs("usage: --self-test | --dry-run | --game EliteDangerous64.exe | --sec-image EliteDangerous64.exe\n", stderr);
   return 2;
 }

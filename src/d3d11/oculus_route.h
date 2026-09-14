@@ -67,6 +67,7 @@ struct OculusRouteStatus {
     uint32_t lastError;
     uint32_t reportCount;
     uint32_t reportLimitReached;
+    uint32_t profileFailureStage;
 
     uintptr_t iatSlot;
     uintptr_t originalTarget;
@@ -74,6 +75,11 @@ struct OculusRouteStatus {
     uintptr_t callerReturnRva;
     uintptr_t lastCallerReturnRva;
 };
+
+static_assert(sizeof(OculusRouteStatus) == 152,
+              "OculusRouteStatus ABI must remain a 152-byte x64 POD");
+static_assert(offsetof(OculusRouteStatus, iatSlot) == 112,
+              "OculusRouteStatus pointer fields must retain their ABI offset");
 
 OculusRouteStatus oculusRouteStatusSnapshot();
 

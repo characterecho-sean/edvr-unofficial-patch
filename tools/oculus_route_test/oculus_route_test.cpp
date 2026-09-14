@@ -77,12 +77,12 @@ int main(int argc, char** argv) {
               baselineSlot == reinterpret_cast<void*>(&fakeLoadLibraryW),
           "legacy capability is a no-op and does not touch the IAT");
 
-    edvr::oculusRouteTestSetProfile(nullptr, 0, false);
     edvr::oculusRouteTestReset();
     edvr::oculusRouteInstallEarly(true);
     auto unknown = edvr::oculusRouteStatusSnapshot();
     check(unknown.nativeBuild == 1 && unknown.profileKnown == 0 &&
-              unknown.installed == 0 && unknown.installFailures == 1,
+              unknown.installed == 0 && unknown.installFailures == 1 &&
+              unknown.profileFailureStage == 2,
           "unknown profile refuses installation without touching an IAT");
 
     g_reportSinkCalls.store(0, std::memory_order_relaxed);
@@ -90,7 +90,8 @@ int main(int argc, char** argv) {
     edvr::oculusRouteReport();
     check(g_reportSinkCalls.load(std::memory_order_relaxed) == 1 &&
               g_lastReported.profileKnown == 0 && g_lastReported.installed == 0 &&
-              g_lastReported.installFailures == 1,
+              g_lastReported.installFailures == 1 &&
+              g_lastReported.profileFailureStage == 2,
           "initial report records unknown profile without claiming success");
 
     void* slot = reinterpret_cast<void*>(&fakeLoadLibraryW);
@@ -102,6 +103,7 @@ int main(int argc, char** argv) {
     edvr::oculusRouteInstallEarly(true);
     auto installed = edvr::oculusRouteStatusSnapshot();
     check(installed.profileKnown == 1 && installed.installed == 1 &&
+              installed.profileFailureStage == 0 &&
               installed.originalPublished == 1 && slot != reinterpret_cast<void*>(&fakeLoadLibraryW),
           "validated profile publishes the wrapper into the synthetic IAT slot");
     check(g_afterCasCalls.load(std::memory_order_relaxed) == 1,

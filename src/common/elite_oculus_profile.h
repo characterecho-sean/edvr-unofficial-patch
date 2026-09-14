@@ -4,11 +4,10 @@
 //
 // This header is intentionally allocation-free and does not use the CRT.  The
 // mapped entry point is suitable for a process-attach caller after that
-// caller has obtained and guarded a complete MEM_IMAGE span.  The two-argument
-// convenience entry point obtains that span with VirtualQuery; callers that
-// run under loader lock should put their call in their existing OS exception
-// guard.  No profile is enabled when any PE, import, section or code check
-// fails.
+// caller has obtained and guarded a complete MEM_IMAGE span.  The public
+// two-argument convenience entry point obtains that span with VirtualQuery
+// and guards its own mapped reads.  No profile is enabled when any PE,
+// import, section or code check fails.
 
 #include <cstddef>
 #include <cstdint>
@@ -19,9 +18,23 @@
 
 namespace edvr {
 
+enum class OculusProfileFailureStage : std::uint32_t {
+  None = 0,
+  Mapping = 1,
+  Header = 2,
+  HeaderImageBase = 3,
+  Imports = 4,
+  DelayImports = 5,
+  Fingerprints = 6,
+  CallChain = 7,
+  Fault = 8,
+};
+
 struct OculusProfileMatch {
   void** loadLibrarySlot = nullptr;
   std::uintptr_t callerReturnRva = 0;
+  std::uint32_t failureStage =
+      static_cast<std::uint32_t>(OculusProfileFailureStage::None);
 };
 
 namespace elite_oculus_profile_detail {
@@ -29,6 +42,7 @@ namespace elite_oculus_profile_detail {
 constexpr char kProfileId[] = "elite-odyssey-e6be8bbe-libovr-r1";
 constexpr char kGameSha256[] =
     "e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988";
+constexpr std::uint64_t kPreferredImageBase = 0x140000000ull;
 constexpr std::uint32_t kLoadLibraryIatRva = 0x4DB32E0u;
 constexpr std::uint32_t kLoaderCallRva = 0x4E70B6u;
 constexpr std::uint32_t kLoaderReturnRva = 0x4E70BCu;
@@ -160,7 +174,8 @@ inline bool cstring_contains_libovr(const View& v, std::uint32_t rva) noexcept {
   return false;
 }
 
-inline bool image_view(const void* image, std::size_t span, View* out) noexcept {
+inline bool image_view(const void* image, std::size_t span, View* out,
+                       std::uint32_t* failureStage = nullptr) noexcept {
   if (!image || !out || span < 64) return false;
   View v{static_cast<const std::uint8_t*>(image), span, 0, 0, 0, 0, 0, 0, 0};
   if (v.base[0] != 'M' || v.base[1] != 'Z' || !span_range(v, 0x3C, 4)) return false;
@@ -183,10 +198,20 @@ inline bool image_view(const void* image, std::size_t span, View* out) noexcept 
   if (v.sectionCount != 7 || v.imageSize != 0x6409000u ||
       v.headersSize != 0x400u || v.imageSize > span || v.headersSize > v.imageSize ||
       v.headersSize < v.optional + v.optionalSize) return false;
-  // PE32+ ImageBase must be 0x140000000 for this revision.  The high dword
-  // check avoids a 64-bit load on an unaligned optional-header field.
-  if (u32(v, v.optional + 24) != 0x40000000u ||
-      u32(v, v.optional + 28) != 1u) return false;
+  // Disk images carry the preferred base.  Windows' SEC_IMAGE mapping may
+  // rewrite the header's ImageBase to the actual allocation base, so accept
+  // exactly those two identities and reject an unrelated forged base.  Code
+  // fingerprints are relocation-audited; vtable pointers are checked against
+  // the actual mapped address below.
+  const std::uint64_t imageBase = u64(v, v.optional + 24);
+  const std::uint64_t mappedBase = reinterpret_cast<std::uintptr_t>(v.base);
+  if (imageBase != kPreferredImageBase && imageBase != mappedBase) {
+    if (failureStage) {
+      *failureStage = static_cast<std::uint32_t>(
+          OculusProfileFailureStage::HeaderImageBase);
+    }
+    return false;
+  }
   v.sectionTable = v.optional + v.optionalSize;
   if (!range(v, v.sectionTable, static_cast<std::uint64_t>(v.sectionCount) * 40u))
     return false;
@@ -274,8 +299,12 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
   using namespace elite_oculus_profile_detail;
   if (!out) return false;
   *out = OculusProfileMatch{};
+  out->failureStage = static_cast<std::uint32_t>(
+      OculusProfileFailureStage::Header);
   View v{};
-  if (!image_view(exeBase, mappedSize, &v)) return false;
+  if (!image_view(exeBase, mappedSize, &v, &out->failureStage)) return false;
+  out->failureStage = static_cast<std::uint32_t>(
+      OculusProfileFailureStage::Imports);
   if (v.directoryCount <= 1) return false;
   const std::uint32_t importRva = u32(v, v.optional + 112 + 8);
   const std::uint32_t importSize = u32(v, v.optional + 112 + 12);
@@ -285,6 +314,8 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
   // Delay imports use RVA attributes in this mapped image.  They cannot
   // supply the qualified regular slot, but a LibOVR delay import would make
   // the executable identity ambiguous, so reject it before scanning thunks.
+  out->failureStage = static_cast<std::uint32_t>(
+      OculusProfileFailureStage::DelayImports);
   if (v.directoryCount > 13) {
     const std::uint32_t delayRva = u32(v, v.optional + 112 + 13 * 8);
     const std::uint32_t delaySize = u32(v, v.optional + 112 + 13 * 8 + 4);
@@ -314,6 +345,8 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
     }
   }
 
+  out->failureStage = static_cast<std::uint32_t>(
+      OculusProfileFailureStage::Imports);
   void** loadSlot = nullptr;
   unsigned loadCount = 0;
   bool descriptorTerminated = false;
@@ -363,6 +396,8 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
   }
   if (!descriptorTerminated || loadCount != 1 || !loadSlot) return false;
 
+  out->failureStage = static_cast<std::uint32_t>(
+      OculusProfileFailureStage::Fingerprints);
   if (!fingerprint(v, 0x8D52A0, 0xF3, 0xD7AF874FE886692Full) ||
       !fingerprint(v, 0x4E4AA0, 0x2C7, 0x004862E1F4FCB501ull) ||
       !fingerprint(v, 0x4E4630, 0x23C, 0x6A3EB060D842540Aull) ||
@@ -394,6 +429,8 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
   static constexpr std::uint8_t nullModule[] = {
       0x48, 0x85, 0xC0, 0x75, 0x1D, 0xB8, 0x47, 0xF4, 0xFF, 0xFF,
   };
+  out->failureStage = static_cast<std::uint32_t>(
+      OculusProfileFailureStage::CallChain);
   if (!bytes(v, 0x8D530B, selectorKinds, sizeof(selectorKinds)) ||
       !bytes(v, 0x8D5318, selectorKind2, sizeof(selectorKind2)) ||
       !bytes(v, 0x8D5320, selectorKind3, sizeof(selectorKind3)) ||
@@ -419,6 +456,8 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
   OculusProfileMatch match{};
   match.loadLibrarySlot = loadSlot;
   match.callerReturnRva = kLoaderReturnRva;
+  match.failureStage = static_cast<std::uint32_t>(
+      OculusProfileFailureStage::None);
   *out = match;
   return true;
 }
@@ -430,6 +469,10 @@ inline bool eliteOculusProfileValidateUnguarded(void* exeBase,
                                                 OculusProfileMatch* out) noexcept {
 #if defined(_WIN32)
   if (out) *out = OculusProfileMatch{};
+  if (out) {
+    out->failureStage = static_cast<std::uint32_t>(
+        OculusProfileFailureStage::Mapping);
+  }
   if (!exeBase || !out) return false;
   MEMORY_BASIC_INFORMATION mbi{};
   if (VirtualQuery(exeBase, &mbi, sizeof(mbi)) != sizeof(mbi) ||
@@ -468,7 +511,11 @@ inline bool eliteOculusProfileValidate(void* exeBase,
   __try {
     return eliteOculusProfileValidateUnguarded(exeBase, out);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
-    if (out) *out = OculusProfileMatch{};
+    if (out) {
+      *out = OculusProfileMatch{};
+      out->failureStage = static_cast<std::uint32_t>(
+          OculusProfileFailureStage::Fault);
+    }
     return false;
   }
 #else
