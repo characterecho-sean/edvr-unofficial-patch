@@ -1168,3 +1168,64 @@ exposure fixture, parser checks and config contract. The completed-build
 NVIDIA smoke test passes with live NGX evaluations and motion/jitter
 convention checks. The counterfactual remains an offline experiment; the
 production change only completes diagnostic exposure capture.
+
+The native census provides candidate later panel writers, including
+81216C77F90DEDD6/A2965EC2931A39C8. The candidate at native ordinal 186
+reads three PS textures: 1536x512 (resource/view formats 9/11), 512x512
+(70/71), and 1107x692 (27/28). Its 208/5376/224-byte constant buffers
+are retained, but the needed texture pixels, draw-local depth/stencil,
+vertex/index data, input layout and full state descriptors are
+incomplete. Specifically, PS t2 is retained as surface 1 in frame 16777,
+with 3,064,176 bytes at 1107x692 in format 28; PS t0/t1 pixels and the
+remaining listed state are absent. The sprite-only diagnostic does not
+supply those for a later panel. Native census ordinals and snapshot
+ordinals must not be silently equated: the tone operation is 285 in that
+census and 286 in its tone snapshot. This supports identifying candidate
+shader families, not an exact replay of the panel or a claim that one
+particular panel caused the attenuation.
+
+Ruled out: absence of direct writes after the last panel implies an
+unknown UAV/copy path caused the attenuation. The last captured sprite
+precedes the known later panel draws, so those draws remain candidates.
+There is no evidence requiring a hidden compositor operation.
+
+A further limitation of the signed-colour experiment is that adding
+fullLDR-cleanLDR to a reconstructed background preserves the difference
+between reconstructed and current raw background underneath opaque text.
+It proves locality but not exact current text colour. An implementation
+must also preserve effective target opacity through later blending, or
+otherwise account for that background residual. For example, given a
+validated effective opacity A, the expression
+modelWorld*(1-A)+fullLDR-cleanLDR*(1-A) preserves opaque current text
+and uncovered model background. This is a design constraint, not a
+validated production compositor; partial-opacity tone response and
+output-scale filtering still need explicit checks.
+
+A cropped 32-frame experiment now runs the saved target contribution
+over the cleaned star background at 1280x720 input and 1920x1080 output.
+Both combined and background-only preset-K NGX runs complete 32
+evaluations. The input includes fractional and fast target motion,
+nonzero raster jitter, zero background motion and a glyph block removed
+at frame 16 and restored at frame 24. The actual UI shader runs on WARP
+with correctly laid-out coverage, source edits and alternating history.
+The CPU comparison samples the current signed contribution at the
+output-to-input coordinate including the current jitter. Earlier
+fixtures with incorrect mask layout/bits, unapplied raster jitter, edit
+flags without actual content changes, or a CPU composite that omitted
+jitter are invalidated.
+
+Across the final sequence, the combined NGX/UI output differs from the
+background-only control on 738,462 pixel-frame samples outside the
+filtered current target footprint, counting any byte difference. The
+background-only model plus current contribution differs on zero such
+samples. The zero follows from explicit layer isolation; it is not a
+claim that the experiment has solved opacity, output-resolution text
+quality, full-game blending or runtime performance. The test supports
+keeping target colour out of world history, while the unresolved
+effective-alpha and later-panel requirements above still prevent
+shipping that experimental composite.
+
+Code revision ab74d7d was fast-forwarded to main and pushed, rebuilt
+there, NVIDIA-smoke-tested, installed to Steam and separately verified
+for both DLLs. The installed version is v0.16.2-15-gab74d7d. Subsequent
+investigation-only documentation does not change that installed code.
