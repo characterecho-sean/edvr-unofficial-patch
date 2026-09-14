@@ -1,9 +1,23 @@
 # Elite's legacy Oculus selection
 
-The requested behavior is for Elite to reach EDVR's OpenXR backend on Meta and
-older Oculus headsets, with Windows selecting the OpenXR runtime. System OpenXR
-runtime selection and Elite's choice between LibOVR and OpenVR are separate
-decisions. Changing the former does not force the latter.
+The release goal is to migrate every EDVR user to the native OpenXR backend,
+including Meta and older Oculus users whom Elite currently routes through
+LibOVR. Windows selects the OpenXR runtime. SteamVR remains supported as an
+OpenXR runtime; forwarding to native OpenVR, OpenComposite and Elite's direct
+LibOVR backend are not target transports.
+
+Bypassing Elite's LibOVR preference is required migration work and must be
+automatic in the native release. It is not a headset-specific opt-in or a
+permanent choice between EDVR backends. Separate qualification builds and an
+explicit rollback artifact are temporary migration tools. An upgrade must
+install the complete native pair and preserve user settings; rollback restores
+the previous installation deliberately rather than silently selecting a legacy
+backend after OpenXR failure.
+
+System OpenXR runtime selection and Elite's choice between LibOVR and OpenVR
+are separate decisions. Changing the former does not force the latter. The
+game-facing OpenVR API remains the compatibility entry into EDVR; the runtime
+transport behind it is OpenXR.
 
 ## Static investigation result
 
@@ -77,13 +91,17 @@ early interception point. Normal graphics initialization runs at the first D3D
 export call; its ordering relative to the Oculus probe still requires a launch
 trace.
 
-Package scoping is the remaining design issue. The installer currently uses the
-same graphics binary for legacy and native installs; the native package is
-identified by `Openvr/win64/edvr_openxr.ini`. That file is currently read by
-the native module after reaching OpenVR. Do not move configuration parsing,
-proxy-chain loading or normal logging into `DllMain` to obtain this
-information. The existing early configuration reader also allocates and
-performs file I/O, so it is not a suitable primitive for a strict
+Early activation is the remaining design issue. Today's development installer
+uses the same graphics binary for legacy and native installs; the native
+package is identified by `Openvr/win64/edvr_openxr.ini`, read by the native
+module after reaching OpenVR. That arrangement must not become a permanent
+per-user opt-in gate. The native release must make the graphics component's
+startup-routing responsibility explicit and ensure the matching native facade
+is installed.
+
+Do not move configuration parsing, proxy-chain loading or normal logging into
+`DllMain` to obtain that identity. The existing early configuration reader also
+allocates and performs file I/O, so it is not a suitable primitive for a strict
 loader-lock-safe hook.
 
 The existing [runtime detector](../src/d3d11/vr_runtime.cpp) recognizes loaded
@@ -97,10 +115,12 @@ checkpoint.
 
 Prefer an executable-only `LoadLibraryW` IAT wrapper over a process-wide loader
 detour or edits to Elite's code. Suppression must require a validated Elite SDK
-call site, an exact LibOVR runtime filename and positive native-package
-identification. Unknown executables, unrecognized callers and legacy packages
-must retain the original behavior. Do not ship the local offsets as an
-unconditional patch.
+call site and an exact LibOVR runtime filename. Every qualified native release
+must enable this routing automatically, with the installer guaranteeing the
+paired native facade. Unrecognized callers must forward unchanged. Unknown
+executable revisions must not receive an unvalidated patch; report the
+compatibility gap and do not qualify a silent return to LibOVR as successful
+migration. Do not ship the local offsets as an unconditional patch.
 
 The next implementation should first record the relevant loader calls without
 changing their result. Install only the minimal IAT exchange during process
@@ -113,12 +133,14 @@ wrapper must tolerate concurrent calls and must not recursively initialize
 EDVR.
 
 Use that trace to establish whether normal graphics initialization precedes the
-LibOVR probe. If it does, validated native configuration can arm the hook
-outside loader lock. If it does not, an explicit native graphics build marker
-available in memory at process attach is a candidate; this would require
-separate build/install identity and rollback coverage. Reading an adjacent
-marker in `DllMain`, assuming the first loader call is outside loader lock, or
-enabling suppression for every graphics install is not an acceptable shortcut.
+LibOVR probe. The implementation must activate early enough for the observed
+order, without depending on a user-selected backend setting. An immutable
+native graphics build capability available in memory at process attach can
+identify its responsibility without file I/O; the development installer and
+rollback tests must distinguish that paired build from the prior proxy. This is
+a rollout distinction, not a plan to maintain two shipping backends. Reading an
+adjacent marker in `DllMain` or assuming the first loader call is outside
+loader lock is not an acceptable shortcut.
 
 Once early activation is established, test a refusal of only Elite's own LibOVR
 probe. All other calls must forward unchanged, including matching filenames
@@ -138,8 +160,11 @@ Qualification must cover:
 - Offline wrapper tests for caller/path/package filtering, forwarding,
   last-error preservation, concurrent publication, unknown executable behavior,
   and uninstall/rollback.
-- Legacy and native installs with the SDK absent and present. A legacy install
-  must keep its original backend choice.
+- Upgrade from each existing route (SteamVR/OpenVR, OpenComposite and direct
+  LibOVR), with the SDK absent and present. Every upgraded installation must
+  reach native OpenXR automatically and preserve settings.
+- Explicit rollback restores the previous DLL/configuration arrangement. OpenXR
+  initialization failure must not silently select a legacy runtime path.
 - A connected Meta/Oculus headset with its compatible Windows-selected OpenXR
   runtime: record Elite's refused probe, subsequent native `VR_InitInternal`,
   selected runtime, rendering, recenter and clean shutdown.

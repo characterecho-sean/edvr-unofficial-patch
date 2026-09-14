@@ -132,8 +132,9 @@ separability channels (`advanced.cull_guard_channel=raw/matrix`) and
 alternative copy probes remain legacy diagnostics; native gameplay uses the
 normal both- projection guard and bounds crop. Their diagnostic behavior is not
 qualified by this batch. Broad performance/image quality comparison remains
-deferred. Forcing Elite's legacy Oculus probe into OpenXR is a separate
-startup-selection problem, tracked in the [LibOVR
+deferred. Migrating everyone to native OpenXR also requires bypassing Elite's
+legacy Oculus preference automatically and upgrading all prior backend
+installations. The startup-selection implementation is tracked in the [LibOVR
 investigation](openxr-oculus-selection-2026-09-14.md). Static analysis now
-establishes the loader call and fallback loop; early native-package activation
-and a controlled launch still need qualification before suppression is enabled.
+establishes the loader call and fallback loop; early automatic activation and a
+controlled launch still need qualification before suppression is enabled.

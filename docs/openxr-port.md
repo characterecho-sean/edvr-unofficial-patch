@@ -22,6 +22,15 @@ resolve, FSS theater and gaze foveation are deferred; the broader inventory and
 original implementation sequence below remain historical. Existing settings and
 the temporal behavior already implemented are preserved.
 
+**Release destination:** migrate every EDVR user to native OpenXR, including
+users currently routed through Elite's LibOVR backend. The native release is
+the standard installation and automatically bypasses Elite's Oculus preference;
+it does not offer a permanent legacy-backend choice. Windows selects the
+runtime, including SteamVR when selected as the OpenXR runtime. Separate builds
+and rollback artifacts serve qualification and recovery during migration.
+LibOVR startup routing and installer upgrades are required completion work
+alongside supported feature parity.
+
 **Approval boundary:** Sean approved implementation by Luna agents with parent
 review. On 2026-09-14 he requested that supported parity work continue while he
 is away, with desktop checks and one consolidated headset retest afterward.
@@ -42,9 +51,12 @@ calling OpenVR and nothing in the game changes.
 
 Two requirements come with it:
 
-1. **OpenXR exclusively.** No SteamVR-native forwarding path is kept once the
-   layer is trusted. SteamVR is itself an OpenXR runtime, so SteamVR users are
-   served through it.
+1. **OpenXR exclusively for everyone.** Once qualified, the standard installer
+   migrates existing OpenVR, OpenComposite and direct LibOVR users to EDVR's
+   native OpenXR pair. Elite's LibOVR preference is bypassed automatically.
+   SteamVR users remain served through SteamVR's OpenXR runtime. Legacy
+   artifacts provide explicit rollback during rollout, not an alternative
+   shipping transport or silent fallback.
 2. **The Monitor keeps useful, measured GPU figures.** App GPU time must work
    independently of the runtime. Core OpenXR does not provide the equivalent of
    OpenVR's compositor timing record. Exact compositor GPU time, drops and
@@ -632,11 +644,13 @@ misleading percentage. Preserve unavailable values when there is no source.
 
 ## Migration decisions
 
-1. **Separate build first.** Keep the shipping proxy default while the OpenXR
-   backend is qualified. Select transport before initialization; no live switch
-   or silent fallback after an OpenXR session fails. Keep a documented rollback
-   artifact. Retire the proxy only after acceptance gates, not an arbitrary
-   number of releases.
+1. **Qualify separately, then migrate the standard release.** Separate builds
+   protect qualification and explicit rollback. The destination is one native
+   OpenXR transport for all users, with automatic routing around Elite's LibOVR
+   preference. The standard installer must upgrade every existing backend path.
+   No live transport switch or silent fallback after OpenXR initialization
+   fails. Retire the forwarding proxy after acceptance gates; preserving a
+   permanent legacy choice is not a release requirement.
 2. **Paired DLLs required.** Match shared protocol/build capabilities and
    verify the device before session creation. No openvr-only temporary-session
    path.
@@ -712,7 +726,7 @@ proof that a method will never be called.
 | 0 | Census, ownership evidence, bracket prototype, runtime desk harness | Reproducible evidence and safe instrument operation; unresolved first-device/geometry assumptions recorded as blockers |
 | 1 | App GPU span and Monitor source/validity changes in proxy | Desk failures covered; SteamVR correlation explained; useful measured values on native-runtime rigs; existing SteamVR counters preserved |
 | 2 | Opt-in OpenXR backend with required EDVR features | ABI and fake-XR tests pass; real loader validation; initial geometry, stereo/colour/pose and lifecycle parity on each desk runtime |
-| 3 | Field qualification and retirement proposal | Named runtime matrix with results, rollback/install verification and explicit sign-off on exact retired settings/features |
+| 3 | Native OpenXR as the standard release for all users | Named runtime matrix; automatic LibOVR bypass; upgrades from each existing backend and explicit rollback verified; exact retired settings/features documented and approved |
 
 Headset acceptance includes intro/menu/loading, cockpit and terrain edges, FSS
 entry/exit, theater/heal, on-foot screen, Explorer Cam, temporal modes and
@@ -742,9 +756,12 @@ files; agents must not race edits to `frame_flag.*`, `build.bat` or config.
 4. **Submission and feature integration:** pair state, swapchains/conversion,
    projection and shadow metadata, then extract/adapt existing feature paths.
    This depends on reviewed core contracts and must preserve each branch.
-5. **Build and distribution:** pinned dependencies/notices, backend selection,
-   both build flavours, installer/rollback and config documentation. Begin
-   after artifact and configuration contracts are agreed.
+5. **Build and distribution:** pinned dependencies/notices, native as the
+   standard installation, automatic LibOVR routing, upgrades from all prior
+   backend paths, explicit rollback and config documentation. Keep
+   qualification artifacts separate until acceptance; maintaining two shipping
+   transports is not the objective. Begin after artifact and configuration
+   contracts are agreed.
 
 Required desk tests cover incomplete/reversed/duplicate eye pairs,
 `shouldRender=false`, invalid tracking, acquire/wait/release failures, missing

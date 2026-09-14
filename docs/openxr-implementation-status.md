@@ -1,5 +1,12 @@
 # OpenXR implementation status
 
+The release goal is native OpenXR for every EDVR user, including those Elite
+currently routes through LibOVR. Windows selects the OpenXR runtime. Automatic
+bypass of Elite's Oculus preference and installer migration from all existing
+backend paths are required; separate legacy artifacts serve qualification and
+explicit rollback only. Native OpenXR is the destination standard release, not
+a permanent opt-in backend.
+
 The [supported feature batch and consolidated
 retest](openxr-feature-parity-2026-09-14.md) connects physical pose
 publication, Explorer Cam, terrain cull guard, completed stereo replay for
@@ -12,7 +19,7 @@ startup-centering change, awaits one combined headset retest. Experimental
 features and performance comparisons remain deferred. The [legacy Oculus
 startup-selection investigation](openxr-oculus-selection-2026-09-14.md) now
 statically confirms Elite's LibOVR-first selection loop and fallback to OpenVR
-when LibOVR fails to load. Native-package activation and launch qualification
+when LibOVR fails to load. Early automatic activation and launch qualification
 remain pending; no suppression is implemented or installed.
 
 The user has deferred performance comparisons and prioritized metrics, then
