@@ -111,12 +111,13 @@ revised monitor presentation has not yet been checked in the headset.
 
 ## Next Frontier flight
 
-Before another performance comparison, connect native timing at the real frame
-boundaries and distinguish producer GPU work, transfer/compose cost and runtime
-pacing. The native shared-device path performs additional eye copies; their
-cost is a candidate to measure, not a confirmed cause of this report. Compare
-the same scene, actual input/output dimensions and DLSS preset across runtimes.
-Keep compositor timing and the local GPU span clearly distinguished.
+The [native timing checkpoint](openxr-native-timing-2026-09-13.md) connects the
+frame boundaries to producer GPU spans and separate CPU wall measurements.
+Check its game integration before another performance comparison. The native
+shared-device path performs additional eye copies; their cost is a candidate to
+measure, not a confirmed cause of this report. Compare the same scene, actual
+input/output dimensions and DLSS preset across runtimes. Keep compositor timing
+and the local GPU span clearly distinguished.
 
 Launch manually with the native runtime and SteamVR closed. Check cockpit text
 and scene geometry while still and during slow head translation and rotation.

@@ -937,6 +937,14 @@ void buildMonitor(MenuContent& c) {
         l.style = kMenuNote;
         l.badge = kBadgeNone;
     }
+    if (nativeMenuActive()) {
+        char line[240];
+        perfMonitorNativeTimingLine(line, sizeof(line));
+        MenuLine& l = c.lines[c.lineCount++];
+        strncpy(l.left, line, sizeof(l.left) - 1);
+        l.style = kMenuNote;
+        l.badge = kBadgeNone;
+    }
     // One line under the gauges: the last drop and what EDVR was doing.
     {
         char line[200];

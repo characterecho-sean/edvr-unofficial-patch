@@ -235,6 +235,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrMenuPanel ^
     --extra-export edvrAcquireNativeMenu ^
     --extra-export edvrAcquireNativeTemporal ^
+    --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
     --extra-export edvrCensusBeginVr ^
@@ -318,6 +319,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" ^
+    "src\d3d11\native_timing.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
@@ -653,6 +655,29 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native temporal GPU test build failed & exit /b 1 )
 "%BUILD%\native_temporal_gpu_test.exe" --dry-run || exit /b 1
+
+echo [edvr] === native_timing_test.exe ===
+if not exist "%OBJ%\native_timing" mkdir "%OBJ%\native_timing"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_timing_test.exe" ^
+    "tools\native_timing_test\native_timing_test.cpp" "src\d3d11\native_timing.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib
+if errorlevel 1 ( echo [edvr] ERROR: native timing contract test build failed & exit /b 1 )
+"%BUILD%\native_timing_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_timing_test.exe" --self-test || exit /b 1
+
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_timing_gpu_test.exe" ^
+    "tools\native_timing_test\native_timing_gpu_test.cpp" "src\d3d11\native_timing.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: native timing GPU test build failed & exit /b 1 )
+"%BUILD%\native_timing_gpu_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_timing_gpu_test.exe" --self-test || exit /b 1
 
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout

@@ -1,5 +1,13 @@
 # OpenXR implementation status
 
+The [native timing checkpoint](openxr-native-timing-2026-09-13.md) now measures
+CPU wall phases and connects native waits/submits to the existing producer GPU
+span. The monitor distinguishes these sources from unsupported compositor
+measurements. The full build, 60 provider checks and 102 real WARP query and
+dispatcher checks passed. The DLL pair is installed and hash-verified in
+Frontier; the next manual flight checks timing engagement and monitor output.
+Matched-resolution performance and quality parity remain unqualified.
+
 The [native temporal checkpoint](openxr-native-temporal-2026-09-13.md) connects
 the frame's pose, projection, jitter and eye input to the existing TAA and
 DLAA/DLSS filter before menu composition and shared capture. The full build,
@@ -9,9 +17,8 @@ installed and hash-verified in Frontier. Manual DLSS flights now confirm
 both-eye treatment, current-frame projection-query coverage and native
 teardown. The user reports working DLSS. Performance and quality parity still
 need a controlled comparison: the first comparison used unsupported native
-monitor fields and different render resolutions. The monitor correction is
-built and installed, explicitly identifying unavailable timing; native timing
-integration is the next gate. Other submission effects remain pending.
+monitor fields and different render resolutions. Native measurement integration
+is tracked above. Other submission effects remain pending.
 
 The native menu checkpoint has completed its first manual Frontier flight.
 Local startup, menu submission in both eyes and internal native teardown are

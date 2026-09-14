@@ -73,6 +73,10 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen);
 // compositor numbers. The line reports disabled, pending, invalid, or stale
 // state explicitly rather than treating it as a zero.
 void perfMonitorLocalGpuLine(char* buf, size_t bufLen);
+// Native OpenXR timing is wall time on the serialized owner/producer path:
+// submit spans include blocking and rendezvous, while producer spans include
+// queued GPU work and exclude the XR device. These are never compositor times.
+void perfMonitorNativeTimingLine(char* buf, size_t bufLen);
 
 // DROP ATTRIBUTION (docs/settings-menu.md, "diagnosing drops caused by the
 // mod"). Every frame's ring entry carries what EDVR did in it -- the events

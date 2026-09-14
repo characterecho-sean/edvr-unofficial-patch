@@ -20,11 +20,13 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <atomic>
 #include <memory>
 #include "native_device.h"
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
+#include "native_timing_client.h"
 #include "render_route.h"
 #include "shutdown_trace.h"
 #include "session_state.h"
@@ -133,6 +135,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EyeCapture captured;
   NativeMenuClient menu;
   NativeTemporalClient temporal;
+  NativeTimingClient timing;
+  uint64_t timingSequence=0;
+  bool timingFrameActive=false;
+  unsigned timingFrameMask=0;
+  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_1};
+  bool timingGpuBegun[2]{};
   float frameTangentShift[2][2]{};
   unsigned temporalFrameEyes=0;
   uint64_t temporalEyes[2]{},temporalFrames=0,temporalFailures=0;
@@ -227,6 +235,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
       menu.invalidate();
       temporal.invalidate();
+      timingInvalidate();
       result("service_poll_terminal",r);return;
     }
     if(lifecycle==Lifecycle::Stopping) {
@@ -234,7 +243,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(r==XR_SUCCESS)r=state.stop();
       serviceStopped=r==XR_SUCCESS;serviceFailed=!serviceStopped;
       geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
-      menu.invalidate();temporal.invalidate();
+      menu.invalidate();temporal.invalidate();timingInvalidate();
       result("service_xrEndSession",r);
       return;
     }
@@ -284,9 +293,31 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
     }
   }
+  static double elapsedMs(const LARGE_INTEGER& begin,const LARGE_INTEGER& end) {
+    LARGE_INTEGER frequency{}; if(!QueryPerformanceFrequency(&frequency)||!frequency.QuadPart)return std::numeric_limits<double>::quiet_NaN();
+    return 1000.0*double(end.QuadPart-begin.QuadPart)/double(frequency.QuadPart);
+  }
+  void timingInvalidate() {
+    if(timing.acquired()) timing.invalidate();
+    timingFrameActive=false; timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
+  }
+  void timingRetire() {
+    timingFrameActive=false; timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
+  }
+  void timingResetFrame(uint64_t sequence) {
+    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_1};
+    timingFrame.sequence=sequence;
+    const double missing=std::numeric_limits<double>::quiet_NaN();
+    for(double& value:timingFrame.submitMs)value=missing;
+    for(double& value:timingFrame.temporalMs)value=missing;
+    for(double& value:timingFrame.menuMs)value=missing;
+    for(double& value:timingFrame.transferMs)value=missing;
+    timingFrame.composeMs=missing;
+  }
   bool invalidateOrigin() {
     menu.invalidate(); // CPU only, including callers without a producer boundary.
     temporal.invalidate();
+    timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
     return poses.resetOrigin(compositorGeneration);
   }
@@ -301,10 +332,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||!seated.space()||!changes.active())
       return vr::VRCompositorError_InvalidTexture;
+    timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
+    timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
+    timingResetFrame(timingSequence);
     if(temporalFrameEyes!=3)temporal.invalidate(); // prior incomplete pair never reached the runtime
     temporalFrameEyes=0;std::memset(frameTangentShift,0,sizeof(frameTangentShift));
     ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
-    auto fail=[&](XrResult error){lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();temporal.invalidate();
+    auto fail=[&](XrResult error){timingInvalidate();lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();temporal.invalidate();
       geometry.invalidate(geometryGeneration);
       if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
       return vr::VRCompositorError_InvalidTexture;};
@@ -348,7 +382,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto snapshot=poses.read();snapshot.sequence=frame.sequence;snapshot.renderTime=render.time;snapshot.gameTime=game.time;
     snapshot.renderPose=render.pose;snapshot.gamePose=game.pose;snapshot.posesAvailable=true;
     if(!poses.publish(snapshot)){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
-    out=snapshot;lastCompositorResult=XR_SUCCESS;return vr::VRCompositorError_None;
+    out=snapshot;lastCompositorResult=XR_SUCCESS;
+    if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
+      timingInvalidate();
+    return vr::VRCompositorError_None;
   }
   bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=setTrackingSpace(generation,origin);})&&result;}
@@ -366,9 +403,31 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return vr::VRCompositorError_InvalidTexture;
+    if(eye!=vr::Eye_Left&&eye!=vr::Eye_Right) {
+      timingInvalidate();temporal.invalidate();
+      const auto rejected=boundary.submit(eye,texture,bounds,flags);
+      lastCompositorResult=boundary.lastResult();return rejected;
+    }
+    LARGE_INTEGER submitBegin{},submitEnd{}; const auto submitClock=QueryPerformanceCounter(&submitBegin);
     const auto r=boundary.submit(eye,texture,bounds,flags);
+    const auto submitClockEnd=QueryPerformanceCounter(&submitEnd);
+    if(submitClock&&submitClockEnd) timingFrame.submitMs[unsigned(eye)]=elapsedMs(submitBegin,submitEnd);
     lastCompositorResult=boundary.lastResult();
     if(r!=vr::VRCompositorError_None)temporal.invalidate();
+    if(r==vr::VRCompositorError_None&&timingGpuBegun[unsigned(eye)]) {
+      const bool markerDispatched=graphicsCalls.invoke([&]{
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+        ID3D11Texture2D* raw=nullptr;
+        if(texture&&texture->handle&&SUCCEEDED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source))))raw=source.Get();
+        if(raw) timing.gpuEye(timingSequence,unsigned(eye),false,true,raw);
+      });
+      if(!markerDispatched) timingInvalidate();
+      timingGpuBegun[unsigned(eye)]=false;
+    }
+    if(r!=vr::VRCompositorError_None) timingInvalidate();
+    else if(timingFrameActive) { timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask==3) {
+      if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else timingRetire();
+    } }
     if(r==vr::VRCompositorError_None){++compositorSubmits;if(loading.sceneSubmitted())++loadingToScene;}
     return r;
   }
@@ -378,7 +437,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration)return false;
     if(boundary.clear()!=XR_SUCCESS)return false;
-    temporal.invalidate();temporalFrameEyes=0;
+    temporal.invalidate();timingInvalidate();temporalFrameEyes=0;
     loading.sceneCleared();
     return loading.visible(); // no default historical grid when no override exists
   }
@@ -425,23 +484,27 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto r=vr::VRCompositorError_InvalidTexture;
     // Validate the game submission before any menu GPU work or capture mutation.
     if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,false);
-    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,false);}))return r;
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,false);})) { timingInvalidate(); return r; }
     if(r!=vr::VRCompositorError_None)return r;
-    if(!copyPixels){menu.invalidate();temporal.invalidate();return r;}
+    if(!copyPixels){menu.invalidate();temporal.invalidate();timingInvalidate();return r;}
     Microsoft::WRL::ComPtr<ID3D11Texture2D> temporalOutput,treated;
     vr::VRTextureBounds_t temporalBounds{};
     vr::VRTextureBounds_t treatedBounds{};
     const auto sequence=boundary.frame().sequence;
     if(temporal.acquired()) {
       HRESULT treatment=E_FAIL;
+      LARGE_INTEGER began{},ended{}; const auto clock=QueryPerformanceCounter(&began);
       const bool dispatched=graphicsCalls.invoke([&] {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
         const auto queried=static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source));
         if(FAILED(queried)){treatment=queried;return;}
+        if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,source.Get())) timingGpuBegun[unsigned(eye)]=true;
         treatment=temporal.treat(sequence,unsigned(eye),source.Get(),bounds,temporalOutput,temporalBounds);
       });
+      const auto clockEnd=QueryPerformanceCounter(&ended);
+      if(clock&&clockEnd) timingFrame.temporalMs[unsigned(eye)]=elapsedMs(began,ended);
       if(!dispatched||FAILED(treatment)) {
-        temporal.invalidate();
+        temporal.invalidate();timingInvalidate();
         if(temporalFailures++<8)nativeTracePrintf("native_temporal,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
         return vr::VRCompositorError_InvalidTexture;
       }
@@ -456,7 +519,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto* shift=frameTangentShift[unsigned(eye)];
       if(shift[0]!=0||shift[1]!=0) {
         RawFov raw{};
-        if(!fovToRaw(fov,raw))return vr::VRCompositorError_InvalidTexture;
+        if(!fovToRaw(fov,raw)){timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
         fov={std::atan(raw.left+shift[0]),std::atan(raw.right+shift[0]),
              std::atan(raw.bottom+shift[1]),std::atan(raw.top+shift[1])};
       }
@@ -466,6 +529,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto* menuBounds=temporalOutput?&temporalBounds:bounds;
     if(menu.acquired()) {
       HRESULT treatment=E_FAIL;
+      LARGE_INTEGER menuBegan{},menuEnded{}; const auto menuClock=QueryPerformanceCounter(&menuBegan);
       const bool dispatched=graphicsCalls.invoke([&] {
         auto menuGeometry=frameGeometry;
         menuGeometry.views[0]=frameViews[0];menuGeometry.views[1]=frameViews[1];
@@ -476,8 +540,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         if(FAILED(queried)){treatment=queried;return;}
         treatment=menu.treat(unsigned(eye),source.Get(),menuBounds,treated,treatedBounds);
       });
+      const auto menuClockEnd=QueryPerformanceCounter(&menuEnded);
+      if(menuClock&&menuClockEnd) timingFrame.menuMs[unsigned(eye)]=elapsedMs(menuBegan,menuEnded);
       if(!dispatched||FAILED(treatment)) {
-        menu.invalidate();temporal.invalidate();
+        menu.invalidate();temporal.invalidate();timingInvalidate();
         if(menuFailures++<8)nativeTracePrintf("native_menu,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
         return vr::VRCompositorError_InvalidTexture;
       }
@@ -488,16 +554,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // Menu output is AddRef'd and remains stable until this synchronous private
     // capture completes. Shared capture runs on the XR owner and schedules its
     // own producer copy; it must never be nested in the menu callback.
+    LARGE_INTEGER transferBegan{},transferEnded{}; const auto transferClock=QueryPerformanceCounter(&transferBegan);
     if(separateGraphics())r=captured.capture(eye,selected,region,flags,true);
-    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);}))return vr::VRCompositorError_InvalidTexture;
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
+    const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
+    if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
     if(r==vr::VRCompositorError_None&&treated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
     if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
-    else temporal.invalidate();
+    else { temporal.invalidate(); timingInvalidate(); }
     return r;
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
+    LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
     const auto r=stereo.renderCaptured(frameViews,frameSpace,captured,layer);
+    const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
+    if(composeClock&&composeClockEnd) timingFrame.composeMs=elapsedMs(composeBegan,composeEnded);
     if(r==XR_SUCCESS)++composedPairs;
     return r;
   }
@@ -568,6 +640,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
     const auto menuClosed=menu.close(); // no producer admission or GPU work required
     if(FAILED(menuClosed))return clean=false;
+    timingInvalidate();
+    const auto timingClosed=timing.close();
+    if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
     if(FAILED(temporal.close()))return clean=false;
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)temporalFrames,(unsigned long long)temporalEyes[0],(unsigned long long)temporalEyes[1],(unsigned long long)temporalFailures);
@@ -775,6 +850,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         nativeTracePrintf("native_temporal,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
       }
       nativeTracePuts("native_temporal,provider_acquired=1,other_submission_effects=0");
+      acquired=E_FAIL;
+      const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);});
+      if(!timingAdmission) acquired=E_FAIL;
+      if(acquired!=S_OK) nativeTracePrintf("native_timing,unavailable=%08lx\n",(unsigned long)acquired);
+      else nativeTracePuts("native_timing,provider_acquired=1");
     }
     return runtimeGeneration!=0&&compositorGeneration!=0;
   }
