@@ -1,5 +1,11 @@
 # Native timing checkpoint
 
+This checkpoint's producer/CPU measurements have passed their initial manual
+flight. The subsequent [XR-device timing and system-runtime
+checkpoint](openxr-device-timing-2026-09-14.md) implements the additional
+device measurements proposed below and updates Frontier's default runtime
+selection.
+
 The first native DLSS comparison used unsupported monitor fields and different
 render resolutions. This checkpoint connects native frame boundaries to the
 existing producer GPU instrument and adds CPU wall measurements. It measures

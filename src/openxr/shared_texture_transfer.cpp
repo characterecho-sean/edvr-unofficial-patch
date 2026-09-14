@@ -1,6 +1,7 @@
 #include "shared_texture_transfer.h"
 
 #include "immediate_executor.h"
+#include "gpu_work_observer.h"
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -247,7 +248,8 @@ struct SharedTextureTransfer::Impl final {
     return S_OK;
   }
 
-  HRESULT producerCopy(ID3D11Texture2D* source, DWORD timeoutMs) noexcept {
+  HRESULT producerCopy(ID3D11Texture2D* source, DWORD timeoutMs,
+                       GpuWorkObserver* observer, unsigned phase) noexcept {
     if (!source || !hasResources()) return E_INVALIDARG;
     HRESULT mutexResult = E_FAIL;
     bool callbackRan = false;
@@ -276,10 +278,10 @@ struct SharedTextureTransfer::Impl final {
       return mutexResult;
     }
     pendingStage = Stage::ConsumerAcquire;
-    return consume(timeoutMs);
+    return consume(timeoutMs, observer, phase);
   }
 
-  HRESULT consume(DWORD timeoutMs) noexcept {
+  HRESULT consume(DWORD timeoutMs, GpuWorkObserver* observer = nullptr, unsigned phase = 0) noexcept {
     if (!hasResources() || pendingStage != Stage::ConsumerAcquire) return E_INVALIDARG;
     HRESULT mutexResult = consumerMutex->AcquireSync(1, timeoutMs);
     if (mutexResult == WAIT_TIMEOUT) {
@@ -290,7 +292,9 @@ struct SharedTextureTransfer::Impl final {
       faulted = true;
       return mutexResult;
     }
+    if(observer) observer->beginGpuWork(phase, consumerContext.Get());
     consumerContext->CopyResource(privateTexture.Get(), sharedConsumer.Get());
+    if(observer) observer->endGpuWork(phase, consumerContext.Get());
     consumerContext->Flush();
     const HRESULT deviceResult = consumer->GetDeviceRemovedReason();
     const HRESULT releaseResult = consumerMutex->ReleaseSync(0);
@@ -303,10 +307,11 @@ struct SharedTextureTransfer::Impl final {
     return S_OK;
   }
 
-  HRESULT receiveInternal(ID3D11Texture2D*& output, DWORD timeoutMs) noexcept {
+  HRESULT receiveInternal(ID3D11Texture2D*& output, DWORD timeoutMs,
+                          GpuWorkObserver* observer = nullptr, unsigned phase = 0) noexcept {
     output = nullptr;
     if (pendingStage != Stage::ConsumerAcquire) return E_UNEXPECTED;
-    const HRESULT consumed = consume(timeoutMs);
+    const HRESULT consumed = consume(timeoutMs, observer, phase);
     if (consumed != S_OK) return consumed;
     return publish(output);
   }
@@ -405,7 +410,8 @@ HRESULT SharedTextureTransfer::initialize(ID3D11Device* producer,
 
 HRESULT SharedTextureTransfer::copy(ID3D11Texture2D* source,
                                     ID3D11Texture2D*& output,
-                                    DWORD timeoutMs) noexcept {
+                                    DWORD timeoutMs, GpuWorkObserver* observer,
+                                    unsigned phase) noexcept {
   output = nullptr;
   if (!impl_ || !impl_->onOwner()) return E_ACCESSDENIED;
   if (timeoutMs == INFINITE) return E_INVALIDARG;
@@ -423,7 +429,7 @@ HRESULT SharedTextureTransfer::copy(ID3D11Texture2D* source,
     if (!sameDevice(sourceDevice.Get(), impl_->producer.Get())) return E_INVALIDARG;
     const HRESULT resources = impl_->createResources(sourceDescription, choice, timeoutMs);
     if (resources != S_OK) return resources;
-    const HRESULT copied = impl_->producerCopy(source, timeoutMs);
+    const HRESULT copied = impl_->producerCopy(source, timeoutMs, observer, phase);
     return copied == S_OK ? impl_->publish(output) : copied;
   } catch (...) {
     impl_->faulted = true;
@@ -432,13 +438,14 @@ HRESULT SharedTextureTransfer::copy(ID3D11Texture2D* source,
 }
 
 HRESULT SharedTextureTransfer::receive(ID3D11Texture2D*& output,
-                                       DWORD timeoutMs) noexcept {
+                                       DWORD timeoutMs, GpuWorkObserver* observer,
+                                       unsigned phase) noexcept {
   output = nullptr;
   if (!impl_ || !impl_->onOwner()) return E_ACCESSDENIED;
   if (timeoutMs == INFINITE) return E_INVALIDARG;
   if (!impl_->initialized || impl_->faulted) return E_FAIL;
   try {
-    return impl_->receiveInternal(output, timeoutMs);
+    return impl_->receiveInternal(output, timeoutMs, observer, phase);
   } catch (...) {
     impl_->faulted = true;
     return E_FAIL;

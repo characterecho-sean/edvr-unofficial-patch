@@ -6,7 +6,7 @@
 #include <wrl/client.h>
 #include "../openvr/compat/openvr_v0_9_20.h"
 
-namespace edvr::openxr { class ImmediateExecutor; class SharedTextureTransfer; }
+namespace edvr::openxr { class ImmediateExecutor; class SharedTextureTransfer; struct GpuWorkObserver; }
 
 namespace edvr::openxr {
 
@@ -32,7 +32,8 @@ class EyeCapture final {
   vr::EVRCompositorError capture(vr::EVREye eye, const vr::Texture_t* texture,
                                  const vr::VRTextureBounds_t* bounds = nullptr,
                                  vr::EVRSubmitFlags flags = vr::Submit_Default,
-                                 bool copyPixels = true);
+                                 bool copyPixels = true,
+                                 GpuWorkObserver* observer = nullptr);
 
   // Borrowed pointers: pixels remain immutable until reset, shutdown, or the
   // next capture of the same eye. The owner supplies once-per-frame ordering;
@@ -45,7 +46,8 @@ class EyeCapture final {
  private:
   vr::EVRCompositorError captureShared(vr::EVREye eye, const vr::Texture_t* texture,
                                        const vr::VRTextureBounds_t* bounds,
-                                       vr::EVRSubmitFlags flags, bool copyPixels);
+                                       vr::EVRSubmitFlags flags, bool copyPixels,
+                                       GpuWorkObserver* observer);
   struct Eye {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
     vr::VRTextureBounds_t bounds{0.f, 0.f, 1.f, 1.f};

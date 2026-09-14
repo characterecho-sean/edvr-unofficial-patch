@@ -12,6 +12,10 @@ struct LocalConfig {
   bool separateDevice=false;
 };
 
+inline bool localConfigUsesSystemRuntime(const std::wstring& value) noexcept {
+  return value == L"system";
+}
+
 inline bool localConfigAbsolute(const std::wstring& value) noexcept {
   return value.size()>3&&value.size()<32768&&value.find(L'\0')==std::wstring::npos&&
     ((value[0]>='A'&&value[0]<='Z')||(value[0]>='a'&&value[0]<='z'))&&value[1]==L':'&&
@@ -61,7 +65,7 @@ inline LocalConfigResult readLocalConfig(const std::wstring& path,LocalConfig& o
     else if(key==L"runtime"){seen=&runtime;target=&candidate.runtime;}
     else if(key==L"separate_device"){if(separate||value!=L"1")return LocalConfigResult::Invalid;separate=true;candidate.separateDevice=true;continue;}
     else return LocalConfigResult::Invalid;
-    if(*seen||!localConfigAbsolute(value))return LocalConfigResult::Invalid;*seen=true;*target=std::move(value);
+    if(*seen||((key!=L"runtime"||!localConfigUsesSystemRuntime(value))&&!localConfigAbsolute(value)))return LocalConfigResult::Invalid;*seen=true;*target=std::move(value);
   }
   if(!section||!version||!loader||!graphics||!runtime||!separate)return LocalConfigResult::Invalid;
   output=std::move(candidate);return LocalConfigResult::Ready;
@@ -71,9 +75,18 @@ class ScopedRuntimeManifest final {
  public:
   bool apply(const std::wstring& local) noexcept {
     if(local.empty())return true;
+    if(!applied_.empty()||systemCleared_)return false;
     wchar_t buffer[32768]{};SetLastError(ERROR_SUCCESS);const DWORD n=GetEnvironmentVariableW(L"XR_RUNTIME_JSON",buffer,_countof(buffer));
     const DWORD error=GetLastError();
     if(n>=_countof(buffer)||(error!=ERROR_SUCCESS&&error!=ERROR_ENVVAR_NOT_FOUND))return false;
+    if(localConfigUsesSystemRuntime(local)) {
+      // Follow the Windows runtime even if a launcher inherited a diagnostic
+      // manifest override. This affects only Elite's process and is restored.
+      if(error==ERROR_ENVVAR_NOT_FOUND)return true;
+      previous_.assign(buffer,n);
+      if(!SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr)){previous_.clear();return false;}
+      systemCleared_=true;return true;
+    }
     if(n||error==ERROR_SUCCESS)return n&&localConfigAbsolute(std::wstring(buffer,n))&&regular(buffer,n);
     if(!localConfigAbsolute(local)||!regular(local))return false;
     applied_=local;
@@ -81,6 +94,12 @@ class ScopedRuntimeManifest final {
     return true;
   }
   void restore() noexcept {
+    if(systemCleared_) {
+      wchar_t probe[1]{};SetLastError(ERROR_SUCCESS);
+      const DWORD n=GetEnvironmentVariableW(L"XR_RUNTIME_JSON",probe,_countof(probe));
+      if(!n&&GetLastError()==ERROR_ENVVAR_NOT_FOUND)SetEnvironmentVariableW(L"XR_RUNTIME_JSON",previous_.c_str());
+      systemCleared_=false;previous_.clear();
+    }
     if(applied_.empty())return;
     wchar_t buffer[32768]{};const DWORD n=GetEnvironmentVariableW(L"XR_RUNTIME_JSON",buffer,_countof(buffer));
     if(n==applied_.size()&&!std::wstring(buffer,n).compare(applied_))SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr);
@@ -95,5 +114,7 @@ class ScopedRuntimeManifest final {
     if(file==INVALID_HANDLE_VALUE)return false;CloseHandle(file);return true;
   }
   std::wstring applied_;
+  std::wstring previous_;
+  bool systemCleared_=false;
 };
 }

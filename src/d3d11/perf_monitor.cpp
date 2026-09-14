@@ -901,7 +901,40 @@ int perfMonitorTiles(PerfTile* out, int max) {
     {
         const double frames = cnt > 0 ? static_cast<double>(cnt) : 1.0;
         if (native) {
-            tile("EDVR GPU", "--", "native OpenXR timing unavailable");
+            char xr[32] = "--";
+            const char* xrSub = "native timing unavailable";
+            if (nativeTiming.active && nativeTiming.firstSequence) {
+                if (!nativeTiming.haveDeviceGpu) {
+                    xrSub = "pending";
+                } else {
+                    const auto& sample = nativeTiming.deviceGpu;
+                    const uint64_t age = nativeTimingAge(sample.completedAtMs);
+                    if (sample.status == EdvrNativeGpuDisabled) {
+                        snprintf(sub, sizeof(sub), "disabled; age %llums",
+                                 static_cast<unsigned long long>(age));
+                        xrSub = sub;
+                    } else if (sample.status == EdvrNativeGpuPending) {
+                        snprintf(sub, sizeof(sub), "pending; age %llums",
+                                 static_cast<unsigned long long>(age));
+                        xrSub = sub;
+                    } else if (age > 2000 || sample.status == EdvrNativeGpuStale) {
+                        snprintf(sub, sizeof(sub), "stale; age %llums",
+                                 static_cast<unsigned long long>(age));
+                        xrSub = sub;
+                    } else if (sample.status == EdvrNativeGpuNotSeparate) {
+                        xrSub = "N/A; not separate";
+                    } else if (sample.status == EdvrNativeGpuValid) {
+                        snprintf(xr, sizeof(xr), "%.1f+%.1f",
+                                 sample.transferMs[0] + sample.transferMs[1],
+                                 sample.composeMs[0] + sample.composeMs[1]);
+                        snprintf(sub, sizeof(sub), "ms stereo; EDVR on XR device");
+                        xrSub = sub;
+                    } else {
+                        xrSub = "unavailable";
+                    }
+                }
+            }
+            tile("XR COPY/COMPOSE", xr, xrSub);
         } else if (doorGpuN) {
             snprintf(v, sizeof(v), "%.2f", doorGpu / doorGpuN);
             snprintf(sub, sizeof(sub), "ms/frame at the door");

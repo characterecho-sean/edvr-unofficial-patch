@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../../src/openxr/d3d11_stereo.h"
+#include "../../src/openxr/gpu_work_observer.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -24,6 +25,13 @@ struct Fake {
   ID3D11RenderTargetView* preservedRtv=nullptr;
 };
 Fake* fake=nullptr;
+struct RecordingObserver final : GpuWorkObserver {
+  struct Event { unsigned phase; bool begin; ID3D11DeviceContext* context; };
+  RecordingObserver() { events.reserve(8); }
+  void beginGpuWork(unsigned phase, ID3D11DeviceContext* context) noexcept override { events.push_back({phase,true,context}); }
+  void endGpuWork(unsigned phase, ID3D11DeviceContext* context) noexcept override { events.push_back({phase,false,context}); }
+  std::vector<Event> events;
+};
 int index(XrSwapchain chain){const int n=int(reinterpret_cast<uintptr_t>(chain))-10;check(n>=0&&n<2,"swapchain handle");return n<0||n>1?0:n;}
 XrResult outcome(const char* action,int eye){const std::string name=std::string(action)+std::to_string(eye);fake->trace.push_back(name);return fake->failure==name?fake->error:XR_SUCCESS;}
 XrResult XRAPI_PTR formats(XrSession s,uint32_t cap,uint32_t* count,int64_t* out){
@@ -160,7 +168,14 @@ void capturedSelfTest() {
         f.runtime.context->RSSetState(wrongRaster.Get());
         XrCompositionLayerProjection layer{};f.runtime.trace.clear();
         const unsigned image=f.runtime.eyes[0].calls%2;
-        check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_SUCCESS,"captured shader path");
+        RecordingObserver observer;
+        check(f.renderer.renderCaptured(f.views,space,capture,layer,&observer)==XR_SUCCESS,"captured shader path");
+        check(observer.events.size()==4&&observer.events[0].begin&&!observer.events[1].begin&&
+          observer.events[2].begin&&!observer.events[3].begin&&observer.events[0].phase==2&&
+          observer.events[1].phase==2&&observer.events[2].phase==3&&observer.events[3].phase==3&&
+          observer.events[0].context==f.runtime.context.Get()&&observer.events[1].context==f.runtime.context.Get()&&
+          observer.events[2].context==f.runtime.context.Get()&&observer.events[3].context==f.runtime.context.Get(),
+          "observer brackets captured command lists by eye and context");
         check(f.runtime.trace==std::vector<std::string>({"A0","W0","R0","A1","W1","R1"}),"captured image order");
         for(unsigned eye=0;eye<2;++eye)for(unsigned y:{16u,111u})for(unsigned x:{16u,111u,127u}) {
           unsigned quadrant=0;

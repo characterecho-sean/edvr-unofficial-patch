@@ -742,23 +742,28 @@ def do_verify(plan):
 
 def _native_direct_plan(root, target, loader, runtime):
     if not os.path.isabs(loader) or not os.path.isfile(loader): raise ValueError("native loader must be an existing absolute file")
-    if not os.path.isabs(runtime) or not os.path.isfile(runtime): raise ValueError("native runtime must be an existing absolute file")
-    loader = os.path.abspath(loader); runtime = os.path.abspath(runtime)
+    runtime = runtime or "system"
+    if runtime != "system" and (not os.path.isabs(runtime) or not os.path.isfile(runtime)): raise ValueError("native runtime must be an existing absolute file or system")
+    loader = os.path.abspath(loader)
+    if runtime != "system": runtime = os.path.abspath(runtime)
     paths = native_paths(root, target)
     for key in ("native_source", "graphics_source", "original", "native_target", "graphics_target"):
         if not os.path.isfile(paths[key]): raise ValueError("missing native path: %s" % paths[key])
     game = os.path.join(target, GAME_EXE)
     if not os.path.isfile(game): raise ValueError("missing game executable: %s" % game)
-    try:
-        with open(runtime, "r", encoding="utf-8") as stream:
-            data = json.load(stream)
-        lib = data["runtime"]["library_path"]
-        if not isinstance(lib, str): raise ValueError
-        lib = os.path.abspath(os.path.join(os.path.dirname(runtime), lib)) if not os.path.isabs(lib) else lib
-        if not os.path.isfile(lib): raise ValueError("missing runtime library: %s" % lib)
-        from openxr_pe import validate_frontier_imports
-        validate_frontier_imports(game, paths["native_source"])
-    except (KeyError, TypeError, ValueError, OSError) as exc: raise ValueError("native direct preflight failed: %s" % exc)
+    lib = None
+    if runtime != "system":
+        try:
+            with open(runtime, "r", encoding="utf-8") as stream:
+                data = json.load(stream)
+            lib = data["runtime"]["library_path"]
+            if not isinstance(lib, str): raise ValueError
+            lib = os.path.abspath(os.path.join(os.path.dirname(runtime), lib)) if not os.path.isabs(lib) else lib
+            if not os.path.isfile(lib): raise ValueError("missing runtime library: %s" % lib)
+        except (KeyError, TypeError, ValueError, OSError) as exc: raise ValueError("native direct preflight failed: %s" % exc)
+    # The game's import contract is independent of runtime selection.
+    from openxr_pe import validate_frontier_imports
+    validate_frontier_imports(game, paths["native_source"])
     config = "[openxr]\nversion=1\nloader=%s\ngraphics=%s\nruntime=%s\nseparate_device=1\n" % (loader, paths["graphics_target"], runtime)
     return paths, config.encode("utf-8"), lib
 
@@ -774,7 +779,7 @@ def native_direct(root, target, loader, runtime, dry_run=False):
     print("       %s -> %s" % (paths["native_source"], paths["native_target"]))
     print("       %s -> %s" % (paths["graphics_source"], paths["graphics_target"]))
     print("       local startup config -> %s" % config_path)
-    print("       runtime library: %s" % lib)
+    print("       runtime selection: %s" % (lib if lib else "system discovery"))
     if dry_run: return 0
     shutil.copy2(paths["native_source"], paths["native_target"])
     shutil.copy2(paths["graphics_source"], paths["graphics_target"])
@@ -874,15 +879,15 @@ def main(argv=None):
             ap.error("--native-openxr is mutually exclusive with --openvr, "
                      "--all, --ini, --dlss, and --force")
         if direct:
-            if not args.native_loader or not args.native_runtime:
-                ap.error("direct native route requires --native-loader and --native-runtime")
+            if not args.native_loader:
+                ap.error("direct native route requires --native-loader")
             if args.native_receipt:
                 ap.error("--native-receipt is incompatible with direct native route")
             root = os.path.abspath(args.root) if args.root else repo_root()
             target = resolve_target(args.target)
             try:
-                if args.verify_only: return native_direct_verify(root, target, args.native_loader, args.native_runtime)
-                return native_direct(root, target, args.native_loader, args.native_runtime, args.dry_run)
+                if args.verify_only: return native_direct_verify(root, target, args.native_loader, args.native_runtime or "system")
+                return native_direct(root, target, args.native_loader, args.native_runtime or "system", args.dry_run)
             except (OSError, ValueError) as exc:
                 print("[edvr] ERROR: direct native operation failed: %s" % exc)
                 return 1
@@ -1023,6 +1028,10 @@ def self_test():
         if native_direct(droot,dgame,loader,manifest,False)!=0 or calls[0]!=1: ok=False
         paths=native_paths(droot,dgame)
         if native_direct_verify(droot,dgame,loader,manifest)!=0: ok=False
+        validations_before=calls[0]
+        system_paths, system_config, system_lib = _native_direct_plan(droot,dgame,loader,None)
+        if b"runtime=system" not in system_config or system_lib is not None or calls[0]!=validations_before+1: ok=False
+        if native_direct(droot,dgame,loader,None,True)!=0: ok=False
         with open(paths["graphics_target"],"wb") as f:f.write(b"STALE")
         if native_direct_verify(droot,dgame,loader,manifest)==0: ok=False
         with open(paths["graphics_target"],"wb") as f:f.write(b"GRAPHICS")
@@ -1039,6 +1048,8 @@ def self_test():
             return {os.path.relpath(os.path.join(dp,n),direct_tmp):sha256(os.path.join(dp,n))
                     for dp,dn,fn in os.walk(direct_tmp) for n in fn}
         before=direct_snapshot()
+        if main(["--root",droot,"--target",dgame,"--native-openxr","--dll","--no-backup","--native-loader",loader,"--dry-run"])!=0: ok=False
+        if direct_snapshot()!=before: ok=False
         globals()["strict_game_running"]=lambda:(False,False)
         if native_direct(droot,dgame,loader,os.path.join(direct_tmp,"runtime.json"),True)!=0: ok=False
         after=direct_snapshot()

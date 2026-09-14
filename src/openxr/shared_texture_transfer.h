@@ -7,6 +7,7 @@
 namespace edvr::openxr {
 
 class ImmediateExecutor;
+struct GpuWorkObserver;
 
 // Experimental CPU-owned handoff for copying one producer-device texture to a
 // private texture on a distinct consumer device. Construct this object on the
@@ -44,11 +45,13 @@ class SharedTextureTransfer final {
   // positive values. INFINITE is rejected. timeoutMs bounds each GPU wait,
   // not the complete operation or the executor's synchronous admission wait.
   HRESULT copy(ID3D11Texture2D* source, ID3D11Texture2D*& output,
-               DWORD timeoutMs = 100) noexcept;
+               DWORD timeoutMs = 100, GpuWorkObserver* observer = nullptr,
+               unsigned phase = 0) noexcept;
   // Retries a published consumer handoff. A producer key-0 timeout occurs
   // before publication and is returned by copy() for the caller to retry with
   // its next copy call.
-  HRESULT receive(ID3D11Texture2D*& output, DWORD timeoutMs = 100) noexcept;
+  HRESULT receive(ID3D11Texture2D*& output, DWORD timeoutMs = 100,
+                  GpuWorkObserver* observer = nullptr, unsigned phase = 0) noexcept;
   HRESULT shutdown(DWORD timeoutMs = 5000) noexcept;
 
   bool ready() const noexcept;

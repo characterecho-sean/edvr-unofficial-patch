@@ -232,7 +232,8 @@ bool runtimeInstalled() noexcept {
   if(bootstrap!=BootstrapResult::Unconfigured)return false;
   LocalConfig local;
   return readLocalConfig(localConfigPath(),local)==LocalConfigResult::Ready&&
-      readableRegularFile(local.loader)&&readableRegularFile(local.graphics)&&readableRegularFile(local.runtime);
+      readableRegularFile(local.loader)&&readableRegularFile(local.graphics)&&
+      (localConfigUsesSystemRuntime(local.runtime)||readableRegularFile(local.runtime));
 }
 
 HRESULT configureModule(RuntimeOptions options,uint32_t wait,std::wstring manifest={}) {
@@ -298,7 +299,7 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
       LocalConfig local;
       const auto localResult=readLocalConfig(localConfigPath(),local);
       if(localResult==LocalConfigResult::Ready&&readableRegularFile(local.loader)&&
-         readableRegularFile(local.graphics)&&readableRegularFile(local.runtime)) {
+         readableRegularFile(local.graphics)&&(localConfigUsesSystemRuntime(local.runtime)||readableRegularFile(local.runtime))) {
         RuntimeOptions options;options.loader=std::move(local.loader);options.graphicsProxy=std::move(local.graphics);
         options.separateDevice=local.separateDevice;localManifest=std::move(local.runtime);
         const auto configured=configureModule(std::move(options),5000,localManifest);

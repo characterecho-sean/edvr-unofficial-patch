@@ -1,5 +1,6 @@
 #include "eye_capture.h"
 #include "shared_texture_transfer.h"
+#include "gpu_work_observer.h"
 #include <cmath>
 #include <exception>
 #include <new>
@@ -135,7 +136,7 @@ HRESULT EyeCapture::shutdownShared(DWORD timeoutMs) {
 vr::EVRCompositorError EyeCapture::captureShared(
     vr::EVREye eye, const vr::Texture_t* texture,
     const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags,
-    bool copyPixels) {
+    bool copyPixels, GpuWorkObserver* observer) {
   if (!sharedInitialized_ || sharedOwner_ != std::this_thread::get_id() ||
       !sharedProducer_ || !sharedConsumer_ || !sharedExecutor_)
     return vr::VRCompositorError_InvalidTexture;
@@ -178,11 +179,11 @@ vr::EVRCompositorError EyeCapture::captureShared(
     }
     if (transfer->pending()) {
       ID3D11Texture2D* previous = nullptr;
-      if (transfer->receive(previous) != S_OK)
+      if (transfer->receive(previous, 100) != S_OK)
         return vr::VRCompositorError_InvalidTexture;
     }
     ID3D11Texture2D* output = nullptr;
-    const HRESULT copied = transfer->copy(source.Get(), output);
+    const HRESULT copied = transfer->copy(source.Get(), output, 100, observer, index);
     if (copied != S_OK || !output) return vr::VRCompositorError_InvalidTexture;
     eyes_[index].copy = output;
     eyes_[index].bounds = b;
@@ -196,8 +197,9 @@ vr::EVRCompositorError EyeCapture::captureShared(
 
 vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* texture,
                                             const vr::VRTextureBounds_t* bounds,
-                                            vr::EVRSubmitFlags flags, bool copyPixels) {
-  if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels);
+                                            vr::EVRSubmitFlags flags, bool copyPixels,
+                                            GpuWorkObserver* observer) {
+  if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels, observer);
   if (!initialized_ || !device_ || !context_) return vr::VRCompositorError_InvalidTexture;
   if (!validEye(eye) || !texture || !texture->handle || flags != vr::Submit_Default ||
       texture->eType != vr::API_DirectX || texture->eColorSpace < vr::ColorSpace_Auto ||

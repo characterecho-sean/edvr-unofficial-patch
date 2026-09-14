@@ -1,5 +1,16 @@
 # OpenXR implementation status
 
+The [XR-device timing and system-runtime
+checkpoint](openxr-device-timing-2026-09-14.md) adds separate consumer-copy and
+composition GPU measurements to F8. Direct native installs now follow Windows'
+active OpenXR runtime by default, while explicit diagnostic manifests remain
+supported. The full build passed with 501 source hashes unchanged, including 83
+provider checks, 102 producer GPU checks and 101 new device GPU checks. The new
+pair and configuration are installed and hash-verified in Frontier; its manual
+flight remains pending. The [legacy Oculus selection
+investigation](openxr-oculus-selection-2026-09-14.md) is recorded separately;
+no LibOVR suppression is implemented yet.
+
 The [native timing checkpoint](openxr-native-timing-2026-09-13.md) now measures
 CPU wall phases and connects native waits/submits to the existing producer GPU
 span. The monitor distinguishes these sources from unsupported compositor
@@ -7,9 +18,9 @@ measurements. The full build, 60 provider checks and 102 real WARP query and
 dispatcher checks passed. The DLL pair is installed and hash-verified in
 Frontier. The matching manual flight confirms valid timing samples, both-eye
 temporal treatment, complete shutdown and normal monitor/rendering behavior.
-The timing baseline must stay independent of headset-vendor SDKs; the proposed
-next measurement is EDVR's GPU work on the OpenXR device. Matched-resolution
-performance and quality parity remain unqualified.
+The timing baseline must stay independent of headset-vendor SDKs; EDVR's GPU
+work on the OpenXR device is implemented in the next checkpoint above.
+Matched-resolution performance and quality parity remain unqualified.
 
 The [native temporal checkpoint](openxr-native-temporal-2026-09-13.md) connects
 the frame's pose, projection, jitter and eye input to the existing TAA and

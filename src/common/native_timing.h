@@ -3,7 +3,7 @@
 #include <d3d11.h>
 #include <stdint.h>
 
-#define EDVR_NATIVE_TIMING_VERSION_1 1u
+#define EDVR_NATIVE_TIMING_VERSION_2 2u
 // Private paired-module measurement capability. Acquire binds the producer;
 // gpuEye runs only on that thread. All other callbacks are CPU-only and may
 // run on the XR owner. The host retains the module/device through close.
@@ -19,6 +19,19 @@ struct EdvrNativeTimingFrame {
     // driver/runtime waits and commands. Not exclusive CPU or GPU work.
     double submitMs[2], temporalMs[2], menuMs[2], transferMs[2];
     double composeMs;
+};
+enum EdvrNativeGpuStatus : uint32_t {
+    EdvrNativeGpuPending, EdvrNativeGpuValid, EdvrNativeGpuDisabled,
+    EdvrNativeGpuIncomplete, EdvrNativeGpuQueryFailure, EdvrNativeGpuStale,
+    EdvrNativeGpuNotSeparate
+};
+struct EdvrNativeDeviceGpuSample {
+    uint32_t size, version;
+    uint64_t sequence, completedAtMs;
+    uint32_t status;
+    // Four narrow spans on the separate XR immediate context. They exclude
+    // producer work, keyed-mutex waits and the runtime's final compositor.
+    double transferMs[2], composeMs[2];
 };
 struct EdvrNativeTimingTable {
     uint32_t size, version;
@@ -37,5 +50,8 @@ struct EdvrNativeTimingTable {
     HRESULT (WINAPI *publishCpu)(void*, const EdvrNativeTimingFrame*);
     HRESULT (WINAPI *invalidate)(void*);
     HRESULT (WINAPI *close)(void*);
+    // CPU-only configuration and delayed publication; never dispatch graphics.
+    uint32_t (WINAPI *gpuEnabled)(void*);
+    HRESULT (WINAPI *publishDeviceGpu)(void*, const EdvrNativeDeviceGpuSample*);
 };
 extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest*, EdvrNativeTimingTable*);

@@ -679,6 +679,17 @@ if errorlevel 1 ( echo [edvr] ERROR: native timing GPU test build failed & exit 
 "%BUILD%\native_timing_gpu_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_timing_gpu_test.exe" --self-test || exit /b 1
 
+REM Separate XR-device queries; real WARP work and injected query failures.
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_device_gpu_test.exe" ^
+    "tools\native_device_gpu_test\native_device_gpu_test.cpp" ^
+    "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native device GPU test build failed & exit /b 1 )
+"%BUILD%\native_device_gpu_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_device_gpu_test.exe" --self-test || exit /b 1
+
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout
 REM depends on two parser properties -- repeated section headers, last value
@@ -1043,6 +1054,7 @@ for %%T in (native stereo) do (
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
         "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
         "src\openxr\shared_texture_transfer.cpp" ^
+        "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
         /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
@@ -1175,6 +1187,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )

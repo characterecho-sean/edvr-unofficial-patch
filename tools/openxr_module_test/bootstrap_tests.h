@@ -92,6 +92,11 @@ void runBootstrapTests(Check&& check) {
       config.loader==L"C:\\loader.dll"&&config.graphics==L"D:\\d3d11.dll"&&config.runtime==L"E:\\runtime.json"&&config.separateDevice,
       "valid local OpenXR config parses strictly");
   }
+  {
+    const std::string system="[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=system\nseparate_device=1\n";
+    LocalConfig config;check(writeLocalFixture(localPath,system)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&
+      localConfigUsesSystemRuntime(config.runtime), "system runtime sentinel parses strictly");
+  }
   for(const std::string& malformed:{
       "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\n",
       "[openxr]\nversion=1\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n",
@@ -135,6 +140,21 @@ void runBootstrapTests(Check&& check) {
     check(GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value))==other.size()&&!std::wstring(value,other.size()).compare(other),
       "manifest restore does not clobber an external environment change");
     SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr);DeleteFileW(runtimePath.c_str());DeleteFileW(other.c_str());
+  }
+  {
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON",L"inherited.json");ScopedRuntimeManifest system;
+    check(system.apply(L"system"), "system runtime selection applies without manifest");
+    wchar_t value[64]{};SetLastError(ERROR_SUCCESS);GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value));
+    check(GetLastError()==ERROR_ENVVAR_NOT_FOUND, "system selection suppresses inherited process override");
+    system.restore();const DWORD n=GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value));
+    check(n==14&&!std::wstring(value,n).compare(L"inherited.json"), "system selection restores inherited override on close");
+    check(system.apply(L"system"),"system selection can be reused after restoration");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON",L"externally-changed.json");system.restore();
+    check(GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value))==23,"system restore preserves external process change");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON",nullptr);
+    check(system.apply(L"system"),"system selection with absent inherited override");system.restore();
+    SetLastError(ERROR_SUCCESS);GetEnvironmentVariableW(L"XR_RUNTIME_JSON",value,_countof(value));
+    check(GetLastError()==ERROR_ENVVAR_NOT_FOUND,"system selection leaves absent override absent");
   }
   DeleteFileW(localPath.c_str());
 

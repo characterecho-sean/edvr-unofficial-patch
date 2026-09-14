@@ -27,6 +27,7 @@
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
 #include "native_timing_client.h"
+#include "device_gpu_timing.h"
 #include "render_route.h"
 #include "shutdown_trace.h"
 #include "session_state.h"
@@ -136,10 +137,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeMenuClient menu;
   NativeTemporalClient temporal;
   NativeTimingClient timing;
+  DeviceGpuTiming deviceTiming;
+  bool deviceTimingReady=false;
   uint64_t timingSequence=0;
   bool timingFrameActive=false;
   unsigned timingFrameMask=0;
-  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_1};
+  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_2};
   bool timingGpuBegun[2]{};
   float frameTangentShift[2][2]{};
   unsigned temporalFrameEyes=0;
@@ -298,14 +301,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return 1000.0*double(end.QuadPart-begin.QuadPart)/double(frequency.QuadPart);
   }
   void timingInvalidate() {
+    deviceTiming.invalidate(); // CPU-only; never admits context work here.
     if(timing.acquired()) timing.invalidate();
     timingFrameActive=false; timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
   }
   void timingRetire() {
     timingFrameActive=false; timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
   }
+  // Only called from actual capture/submit work on the separate XR owner.
+  void pollDeviceTiming() {
+    if(!deviceTimingReady)return;
+    EdvrNativeDeviceGpuSample samples[8]{};
+    const auto count=deviceTiming.poll(samples,8);
+    for(unsigned i=0;i<count;++i)timing.publishDeviceGpu(samples[i]);
+  }
   void timingResetFrame(uint64_t sequence) {
-    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_1};
+    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_2};
     timingFrame.sequence=sequence;
     const double missing=std::numeric_limits<double>::quiet_NaN();
     for(double& value:timingFrame.submitMs)value=missing;
@@ -385,6 +396,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     out=snapshot;lastCompositorResult=XR_SUCCESS;
     if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
       timingInvalidate();
+    if(timingFrameActive) {
+      const bool enabled=timing.gpuEnabled();
+      if(deviceTimingReady)deviceTiming.beginFrame(timingSequence,enabled);
+      else {
+        EdvrNativeDeviceGpuSample missing{sizeof(missing),EDVR_NATIVE_TIMING_VERSION_2,
+          timingSequence,GetTickCount64(),enabled ? uint32_t(separateGraphics()?EdvrNativeGpuQueryFailure:EdvrNativeGpuNotSeparate) : uint32_t(EdvrNativeGpuDisabled)};
+        timing.publishDeviceGpu(missing);
+      }
+    }
     return vr::VRCompositorError_None;
   }
   bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
@@ -426,6 +446,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(r!=vr::VRCompositorError_None) timingInvalidate();
     else if(timingFrameActive) { timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask==3) {
+      deviceTiming.acceptFrame(timingSequence);
+      pollDeviceTiming();
       if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else timingRetire();
     } }
     if(r==vr::VRCompositorError_None){++compositorSubmits;if(loading.sceneSubmitted())++loadingToScene;}
@@ -555,7 +577,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // capture completes. Shared capture runs on the XR owner and schedules its
     // own producer copy; it must never be nested in the menu callback.
     LARGE_INTEGER transferBegan{},transferEnded{}; const auto transferClock=QueryPerformanceCounter(&transferBegan);
-    if(separateGraphics())r=captured.capture(eye,selected,region,flags,true);
+    if(separateGraphics()) {
+      pollDeviceTiming();
+      r=captured.capture(eye,selected,region,flags,true,
+        timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr);
+    }
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
     if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
@@ -567,7 +593,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
     LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
-    const auto r=stereo.renderCaptured(frameViews,frameSpace,captured,layer);
+    const auto r=stereo.renderCaptured(frameViews,frameSpace,captured,layer,
+      timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr);
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
     if(composeClock&&composeClockEnd) timingFrame.composeMs=elapsedMs(composeBegan,composeEnded);
     if(r==XR_SUCCESS)++composedPairs;
@@ -641,6 +668,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto menuClosed=menu.close(); // no producer admission or GPU work required
     if(FAILED(menuClosed))return clean=false;
     timingInvalidate();
+    deviceTiming.abandon();deviceTimingReady=false; // Release only, including partial frames.
     const auto timingClosed=timing.close();
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
     if(FAILED(temporal.close()))return clean=false;
@@ -854,7 +882,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);});
       if(!timingAdmission) acquired=E_FAIL;
       if(acquired!=S_OK) nativeTracePrintf("native_timing,unavailable=%08lx\n",(unsigned long)acquired);
-      else nativeTracePuts("native_timing,provider_acquired=1");
+      else {
+        nativeTracePuts("native_timing,provider_acquired=1");
+        if(separateGraphics()) {
+          Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;
+          graphics.device()->GetImmediateContext(&immediate);
+          deviceTimingReady=deviceTiming.initialize(graphics.device(),immediate.Get());
+          nativeTracePrintf("native_device_timing,initialized=%u,source=EDVR_on_XR_device,compositor=0\n",unsigned(deviceTimingReady));
+        }
+      }
     }
     return runtimeGeneration!=0&&compositorGeneration!=0;
   }

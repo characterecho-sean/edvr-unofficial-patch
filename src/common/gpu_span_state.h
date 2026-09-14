@@ -24,7 +24,9 @@ struct GpuSpanRawSample {
     bool timestampsReady = false, disjoint = false;
     uint64_t frequency = 0;
     // 0 outer start, 1 outer end, 2/3 left interval, 4/5 right interval.
-    std::array<uint64_t, 6> ticks{};
+    // The frame policy uses six. Independent native phase collectors may
+    // use all eight without changing the legacy frame marker layout above.
+    std::array<uint64_t, 8> ticks{};
 };
 struct GpuSpanDriver {
     virtual ~GpuSpanDriver() = default;

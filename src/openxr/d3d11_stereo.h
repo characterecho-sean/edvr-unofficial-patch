@@ -14,6 +14,7 @@
 #include "skybox_capture.h"
 #include "graphics_bridge_client.h"
 #include "immediate_executor.h"
+#include "gpu_work_observer.h"
 #include <vector>
 
 namespace edvr::openxr {
@@ -51,7 +52,7 @@ class D3D11Stereo final {
   XrResult render(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
   XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
-                          XrCompositionLayerProjection&);
+                          XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&);
   // Complete submitted GPU work before retiring the render caller. Uses its
@@ -106,7 +107,7 @@ class D3D11Stereo final {
   bool ready_ = false;
   XrResult lastResult_ = XR_SUCCESS;
 
-  XrResult submitCommands();
+  XrResult submitCommands(GpuWorkObserver* observer = nullptr, unsigned phase = 0);
 };
 
 } // namespace edvr::openxr

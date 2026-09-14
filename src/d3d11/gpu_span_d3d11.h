@@ -39,7 +39,7 @@ private:
     struct Slot {
         State state = State::Empty;
         ID3D11Query* disjoint = nullptr;
-        ID3D11Query* stamps[6]{};
+        ID3D11Query* stamps[8]{};
         unsigned issued = 0, ready = 0;
         bool disjointReady = false;
         GpuSpanRawSample raw{};

@@ -16,15 +16,16 @@ class NativeTimingClient final {
     if (!provider || !device || !generation) return E_INVALIDARG;
     const auto entry = GetProcAddress(provider, "edvrAcquireNativeTiming");
     if (!owned(provider, entry)) return E_NOINTERFACE;
-    EdvrNativeTimingRequest request{sizeof(request), EDVR_NATIVE_TIMING_VERSION_1, device, generation};
-    EdvrNativeTimingTable candidate{sizeof(candidate), EDVR_NATIVE_TIMING_VERSION_1};
+    EdvrNativeTimingRequest request{sizeof(request), EDVR_NATIVE_TIMING_VERSION_2, device, generation};
+    EdvrNativeTimingTable candidate{sizeof(candidate), EDVR_NATIVE_TIMING_VERSION_2};
     const auto result = reinterpret_cast<decltype(&edvrAcquireNativeTiming)>(entry)(&request, &candidate);
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
-    if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_TIMING_VERSION_1 ||
+    if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_TIMING_VERSION_2 ||
         !candidate.context || !owned(provider, candidate.waitBegin) ||
         !owned(provider, candidate.waitEnd) || !owned(provider, candidate.gpuEye) ||
         !owned(provider, candidate.publishCpu) || !owned(provider, candidate.invalidate) ||
-        !owned(provider, candidate.close)) {
+        !owned(provider, candidate.close) || !owned(provider, candidate.gpuEnabled) ||
+        !owned(provider, candidate.publishDeviceGpu)) {
       if (candidate.context && owned(provider, candidate.close)) candidate.close(candidate.context);
       return E_NOINTERFACE;
     }
@@ -54,6 +55,14 @@ class NativeTimingClient final {
   HRESULT publishCpu(const EdvrNativeTimingFrame& frame) {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context ? table_.publishCpu(table_.context, &frame) : S_FALSE;
+  }
+  bool gpuEnabled() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return table_.context && table_.gpuEnabled(table_.context) == 1;
+  }
+  HRESULT publishDeviceGpu(const EdvrNativeDeviceGpuSample& sample) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return table_.context ? table_.publishDeviceGpu(table_.context, &sample) : S_FALSE;
   }
   HRESULT invalidate() {
     std::lock_guard<std::mutex> lock(mutex_);

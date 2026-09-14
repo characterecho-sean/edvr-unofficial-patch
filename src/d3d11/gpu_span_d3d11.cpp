@@ -32,7 +32,7 @@ GpuSpanD3D11Driver::GpuSpanD3D11Driver(ID3D11Device* dev, ID3D11DeviceContext* c
     if (ctx) ctx->AddRef();
     if (!ops_.createQuery && !ops_.begin && !ops_.end && !ops_.getData && !ops_.releaseQuery)
         ops_ = {ops_.user, createQuery, beginQuery, endQuery, getData, releaseQuery};
-    if (!dev || !ctx || markerCount_ > 6 || !ops_.createQuery || !ops_.begin || !ops_.end ||
+    if (!dev || !ctx || markerCount_ > 8 || !ops_.createQuery || !ops_.begin || !ops_.end ||
         !ops_.getData || !ops_.releaseQuery || ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return;
     ID3D11Device* contextDevice = nullptr;
     ID3D11DeviceContext* immediate = nullptr;
@@ -45,8 +45,8 @@ GpuSpanD3D11Driver::GpuSpanD3D11Driver(ID3D11Device* dev, ID3D11DeviceContext* c
 }
 
 GpuSpanD3D11Driver::~GpuSpanD3D11Driver() {
-    // Release only. A live scope must be closed through owner-thread shutdown
-    // before destroying the driver; destructors never issue context commands.
+    // Release only. Close a live scope before reuse. At permanent device
+    // retirement it may be abandoned; destructors never issue context commands.
     for (unsigned i = 0; i < kSlots; ++i) release(i);
     if (context_) context_->Release();
     if (device_) device_->Release();
@@ -136,7 +136,7 @@ GpuSpanPoll GpuSpanD3D11Driver::poll(unsigned i, GpuSpanRawSample& raw) noexcept
         s.raw.disjoint = dj.Disjoint != FALSE;
         s.disjointReady = true;
     }
-    for (unsigned n = 0; n < 6; ++n) {
+    for (unsigned n = 0; n < markerCount_; ++n) {
         const unsigned mask = 1u << n;
         if (!(s.issued & mask) || (s.ready & mask)) continue;
         UINT64 tick = 0;

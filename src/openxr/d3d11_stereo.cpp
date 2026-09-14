@@ -117,7 +117,7 @@ void skyRotation(const XrQuaternionf& q,float (&r)[3][4]) {
 }
 
 D3D11Stereo::~D3D11Stereo(){shutdown();if(gpuPending_)std::terminate();}
-XrResult D3D11Stereo::submitCommands() {
+XrResult D3D11Stereo::submitCommands(GpuWorkObserver* observer, unsigned phase) {
   ComPtr<ID3D11CommandList> list;
   const HRESULT finished=context_->FinishCommandList(FALSE,&list);
   if(FAILED(finished)||!list) {
@@ -140,7 +140,10 @@ XrResult D3D11Stereo::submitCommands() {
         return;
       }
     } else {
+      const bool observe = observer && !immediateExecutor_ && !graphicsBridge_.active();
+      if(observe) observer->beginGpuWork(phase, immediateContext_.Get());
       immediateContext_->ExecuteCommandList(list.Get(),TRUE);
+      if(observe) observer->endGpuWork(phase, immediateContext_.Get());
       immediateContext_->Flush();
     }
     result=XR_SUCCESS;
@@ -389,7 +392,7 @@ XrResult D3D11Stereo::drawEye(unsigned eye, const XrView& view, ID3D11Texture2D*
 }
 
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
-                                   XrCompositionLayerProjection& layer) {
+                                   XrCompositionLayerProjection& layer, GpuWorkObserver* observer) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
@@ -456,7 +459,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     context_->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);context_->Draw(3,0);
     ID3D11ShaderResourceView* nullSrv=nullptr;context_->PSSetShaderResources(0,1,&nullSrv);
     context_->OMSetRenderTargets(0,nullptr,nullptr);
-    r=submitCommands();if(r!=XR_SUCCESS)return failed(r);
+    r=submitCommands(observer,2u+i);if(r!=XR_SUCCESS)return failed(r);
     if(FAILED(device_->GetDeviceRemovedReason()))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     r=dispatch_.releaseSwapchainImage(eyes_[i].swapchain,&ri);if(r!=XR_SUCCESS)return failed(r);

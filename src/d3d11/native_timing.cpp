@@ -1,5 +1,6 @@
 #include "native_timing.h"
 #include "../common/gpu_frame_protocol.h"
+#include "../common/config.h"
 #include "../common/log.h"
 #include "../common/timing.h"
 
@@ -31,6 +32,8 @@ struct Context {
     unsigned attempted = 0, opened = 0, ended = 0;
     uint64_t validCount = 0, invalidCount = 0, publishedCount = 0;
     uint64_t lastLogMs = 0;
+    uint64_t gpuRejectFloor = 0, lastGpuSequence = 0, lastGpuLogMs = 0;
+    bool gpuLoggedValid = false;
 };
 
 Context pool[kCapacity];
@@ -74,6 +77,29 @@ void clearCpu() noexcept {
     snapshot.sequence = 0;
 }
 
+void clearDeviceGpu() noexcept {
+    snapshot.haveDeviceGpu = false;
+    snapshot.deviceGpu = {};
+}
+
+void rejectGpu(Context& c, uint64_t sequence) noexcept {
+    if (sequence > c.gpuRejectFloor) c.gpuRejectFloor = sequence;
+    clearDeviceGpu();
+}
+
+const char* gpuStatusName(uint32_t status) noexcept {
+    switch (status) {
+    case EdvrNativeGpuPending: return "pending";
+    case EdvrNativeGpuValid: return "valid";
+    case EdvrNativeGpuDisabled: return "disabled";
+    case EdvrNativeGpuIncomplete: return "incomplete";
+    case EdvrNativeGpuQueryFailure: return "query-failure";
+    case EdvrNativeGpuStale: return "stale";
+    case EdvrNativeGpuNotSeparate: return "not-separate";
+    default: return "invalid";
+    }
+}
+
 void poison(uint64_t sequence) noexcept {
     if (sequence) edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
         static_cast<unsigned>(edvr::GpuFrameEvent::Cancel), sequence, 0, 0, nullptr);
@@ -97,6 +123,7 @@ uint64_t WINAPI waitBegin(void* p) {
     // An unfinished prior wait cannot leave its CPU sample fresh.
     if (c->waitSequence && !c->published) {
         poison(c->waitSequence);
+        rejectGpu(*c, c->waitSequence);
         clearCpu();
     }
     const uint64_t sequence = edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
@@ -107,7 +134,7 @@ uint64_t WINAPI waitBegin(void* p) {
     c->waitValid = false;
     c->published = false;
     c->attempted = c->opened = c->ended = 0;
-    if (!sequence) { clearCpu(); snapshot.invalid = true; }
+    if (!sequence) { clearCpu(); rejectGpu(*c, c->waitSequence); snapshot.invalid = true; }
     if (sequence && !c->firstSequence) {
         c->firstSequence = sequence;
         snapshot.firstSequence = sequence;
@@ -132,6 +159,7 @@ HRESULT WINAPI waitEnd(void* p, uint64_t sequence, uint32_t valid, int64_t perio
     ++(ok ? c->validCount : c->invalidCount);
     if (!ok) {
         poison(sequence);
+        rejectGpu(*c, sequence);
         clearCpu();
         snapshot.invalid = true;
         logCounts(*c, "invalid wait sample");
@@ -150,20 +178,20 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
     Context* c = identify(p);
     if (!c || !c->active || c != current || !sequence || !c->waitValid || c->published || sequence != c->waitSequence) return 0;
     if (GetCurrentThreadId() != c->producer || eye > 1 || begin > 1 || accepted > 1 || !texture) {
-        poison(sequence); return 0;
+        poison(sequence); rejectGpu(*c, sequence); return 0;
     }
     Microsoft::WRL::ComPtr<ID3D11Device> sourceDevice;
     Microsoft::WRL::ComPtr<IUnknown> a, b;
     texture->GetDevice(&sourceDevice);
     const bool same = sourceDevice && SUCCEEDED(c->device->QueryInterface(IID_PPV_ARGS(&a))) &&
         SUCCEEDED(sourceDevice->QueryInterface(IID_PPV_ARGS(&b))) && a.Get() == b.Get();
-    if (!same) { poison(sequence); return 0; }
+    if (!same) { poison(sequence); rejectGpu(*c, sequence); return 0; }
     const unsigned bit = 1u << eye;
     if (begin) {
-        if ((c->attempted & bit) || c->opened) { poison(sequence); return 0; }
+        if ((c->attempted & bit) || c->opened) { poison(sequence); rejectGpu(*c, sequence); return 0; }
         c->attempted |= bit;
     } else {
-        if (!(c->opened & bit) || (c->ended & bit)) { poison(sequence); return 0; }
+        if (!(c->opened & bit) || (c->ended & bit)) { poison(sequence); rejectGpu(*c, sequence); return 0; }
         c->opened &= ~bit; c->ended |= bit;
     }
     const auto event = begin ? edvr::GpuFrameEvent::SubmitBegin : edvr::GpuFrameEvent::SubmitEnd;
@@ -179,7 +207,7 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
     std::lock_guard<std::mutex> lock(lifetime);
     Context* c = identify(p);
     if (!c || !c->active || c != current || !frame ||
-        frame->size != sizeof(*frame) || frame->version != EDVR_NATIVE_TIMING_VERSION_1 ||
+        frame->size != sizeof(*frame) || frame->version != EDVR_NATIVE_TIMING_VERSION_2 ||
         !c->waitValid || c->published || frame->sequence != c->waitSequence) return E_INVALIDARG;
     bool fieldsValid = finiteNonnegative(frame->composeMs);
     for (unsigned eye = 0; eye < 2; ++eye) fieldsValid = fieldsValid &&
@@ -217,8 +245,68 @@ HRESULT WINAPI invalidate(void* p) {
     Context* c = identify(p);
     if (!c || !c->active || c != current) return E_INVALIDARG;
     poison(c->waitSequence);
+    rejectGpu(*c, c->waitSequence);
     c->waitOutstanding = c->waitValid = c->published = false;
     clearCpu(); snapshot.active = true; snapshot.generation = c->generation; snapshot.invalid = true;
+    return S_OK;
+}
+
+uint32_t WINAPI gpuEnabled(void* p) {
+    std::lock_guard<std::mutex> lock(lifetime);
+    Context* c = identify(p);
+    if (!c || !c->active || c != current) return 0u;
+    const bool enabled = edvr::Config::get().getBool("advanced.app_gpu_timing", true);
+    if (!enabled) {
+        clearDeviceGpu();
+        // Older asynchronous work must not reappear after a disable/re-enable.
+        if (c->waitSequence && c->waitSequence-1 > c->gpuRejectFloor)
+            c->gpuRejectFloor = c->waitSequence-1;
+        snapshot.deviceGpu = {sizeof(EdvrNativeDeviceGpuSample), EDVR_NATIVE_TIMING_VERSION_2,
+            c->waitSequence, nowMs(), EdvrNativeGpuDisabled};
+        snapshot.haveDeviceGpu = true;
+    }
+    return enabled ? 1u : 0u;
+}
+
+HRESULT WINAPI publishDeviceGpu(void* p, const EdvrNativeDeviceGpuSample* sample) {
+    std::lock_guard<std::mutex> lock(lifetime);
+    Context* c = identify(p);
+    const auto now = nowMs();
+    if (!c || !c->active || c != current || !sample || sample->size != sizeof(*sample) ||
+        sample->version != EDVR_NATIVE_TIMING_VERSION_2 || !sample->sequence || !c->firstSequence ||
+        sample->sequence < c->firstSequence || sample->sequence > c->waitSequence ||
+        sample->sequence <= c->gpuRejectFloor ||
+        sample->sequence < c->lastGpuSequence ||
+        (sample->sequence == c->lastGpuSequence &&
+         !(snapshot.haveDeviceGpu && snapshot.deviceGpu.status == EdvrNativeGpuPending &&
+           sample->status == EdvrNativeGpuValid)) ||
+        !sample->completedAtMs || sample->completedAtMs > now ||
+        (now - sample->completedAtMs > 2000 && sample->status != EdvrNativeGpuStale) ||
+        (!edvr::Config::get().getBool("advanced.app_gpu_timing", true) && sample->status != EdvrNativeGpuDisabled) ||
+        sample->status > EdvrNativeGpuNotSeparate)
+        return E_INVALIDARG;
+    for (double value : sample->transferMs)
+        if (!finiteNonnegative(value)) return E_INVALIDARG;
+    for (double value : sample->composeMs)
+        if (!finiteNonnegative(value)) return E_INVALIDARG;
+    c->lastGpuSequence = sample->sequence;
+    if (sample->status != EdvrNativeGpuPending &&
+        (!c->lastGpuLogMs || now - c->lastGpuLogMs >= 5000 ||
+         (sample->status == EdvrNativeGpuValid && !c->gpuLoggedValid))) {
+        c->lastGpuLogMs = now;
+        if (sample->status == EdvrNativeGpuValid) c->gpuLoggedValid = true;
+        edvr::Log::get().note("native device GPU: %s, seq %llu, age %llu ms, transfer %.3f/%.3f ms, compose %.3f/%.3f ms; spans exclude producer and runtime compositor.",
+            gpuStatusName(sample->status), (unsigned long long)sample->sequence,
+            (unsigned long long)(now - sample->completedAtMs), sample->transferMs[0], sample->transferMs[1],
+            sample->composeMs[0], sample->composeMs[1]);
+    }
+    if (sample->status == EdvrNativeGpuDisabled) {
+        snapshot.deviceGpu = *sample;
+        snapshot.haveDeviceGpu = true;
+        return S_OK;
+    }
+    snapshot.deviceGpu = *sample;
+    snapshot.haveDeviceGpu = true;
     return S_OK;
 }
 
@@ -245,10 +333,10 @@ NativeTimingSnapshot nativeTimingSnapshot() noexcept {
 
 extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest* request,
                                                     EdvrNativeTimingTable* table) {
-    if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_TIMING_VERSION_1)
+    if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_TIMING_VERSION_2)
         return E_INVALIDARG;
-    *table = {sizeof(*table), EDVR_NATIVE_TIMING_VERSION_1};
-    if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_TIMING_VERSION_1 ||
+    *table = {sizeof(*table), EDVR_NATIVE_TIMING_VERSION_2};
+    if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_TIMING_VERSION_2 ||
         !request->device || !request->generation) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(lifetime);
     if (current || used == kCapacity) return E_PENDING;
@@ -258,5 +346,6 @@ extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest*
     snapshot = {}; snapshot.active = true; snapshot.generation = c.generation;
     table->context = &c; table->waitBegin = waitBegin; table->waitEnd = waitEnd;
     table->gpuEye = gpuEye; table->publishCpu = publishCpu; table->invalidate = invalidate; table->close = close;
+    table->gpuEnabled = gpuEnabled; table->publishDeviceGpu = publishDeviceGpu;
     return S_OK;
 }

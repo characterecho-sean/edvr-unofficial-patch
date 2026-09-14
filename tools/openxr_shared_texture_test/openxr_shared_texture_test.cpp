@@ -4,6 +4,7 @@
 #include "../../src/openxr/skybox_capture.h"
 #include "../../src/openxr/shared_texture_transfer.h"
 #include "../../src/openxr/immediate_executor.h"
+#include "../../src/openxr/gpu_work_observer.h"
 #include "../../src/openxr/owner_service.h"
 #include <d3d11.h>
 #include <d3d11sdklayers.h>
@@ -47,6 +48,15 @@ class ProducerExecutor final : public ImmediateExecutor {
   std::atomic<unsigned> rejectAt_{0};
   std::atomic<unsigned> calls_{0};
   std::atomic<DWORD> thread_{0};
+};
+
+class RecordingObserver final : public GpuWorkObserver {
+ public:
+  struct Event { unsigned phase; bool begin; ID3D11DeviceContext* context; };
+  RecordingObserver() { events.reserve(16); }
+  void beginGpuWork(unsigned phase, ID3D11DeviceContext* context) noexcept override { events.push_back({phase,true,context}); }
+  void endGpuWork(unsigned phase, ID3D11DeviceContext* context) noexcept override { events.push_back({phase,false,context}); }
+  std::vector<Event> events;
 };
 
 struct Fixture {
@@ -352,11 +362,16 @@ int run(bool hardware){
   for(auto format:kFormats)for(unsigned round=0;round<3;++round){
     const UINT w=W+(round==2?5:0),h=H+(round==2?3:0);ComPtr<ID3D11Texture2D> source;check(sourceTexture(f,format,w,h,round+1,source),"producer source created on owner thread");
     ID3D11Texture2D* output=nullptr;const auto beforeCopy=f.executor.calls();const auto started=GetTickCount64();
-    const HRESULT copied=f.transfer.copy(source.Get(),output);
+    RecordingObserver observer; const bool observe=format==kFormats[0]&&round==0;
+    const HRESULT copied=f.transfer.copy(source.Get(),output,100,observe?&observer:nullptr,1);
     std::printf("shared_texture copy format=%u round=%u width=%u height=%u hr=%08lx elapsed_ms=%llu producer_attempts=%u pending=%u faulted=%u\n",
       unsigned(format),round,w,h,static_cast<unsigned long>(copied),GetTickCount64()-started,f.executor.calls()-beforeCopy,
       f.transfer.pending()?1u:0u,f.transfer.faulted()?1u:0u);
     check(copied==S_OK&&output,"copy returns borrowed consumer texture");
+    if(observe) check(observer.events.size()==2&&observer.events[0].begin&&
+      !observer.events[1].begin&&observer.events[0].phase==1&&observer.events[1].phase==1&&
+      observer.events[0].context==f.consumerContext.Get()&&observer.events[1].context==f.consumerContext.Get(),
+      "observer brackets one consumer copy with phase and context");
     check(!f.transfer.pending()&&f.transfer.ready(),"successful copy is immediately ready");
     ID3D11Texture2D* retry=sentinel;check(f.transfer.receive(retry,0)!=S_OK&&!retry,"receive rejects after successful copy");
     auto expected=pattern(format,w,h,round+1);if(output){
