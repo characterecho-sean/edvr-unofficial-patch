@@ -1286,3 +1286,117 @@ production panel writer/reader gate and the config contract. The
 completed-build NVIDIA smoke test also passes with live NGX evaluations
 and motion/jitter convention checks. No D3D debug-layer validation is
 claimed; that SDK component is unavailable on this machine.
+
+## Native OpenXR captures after reboot: 152121/152136
+
+The user reports that restarting Windows stopped the startup crashes.
+The new successful flight is gfx log edvr_gfx_20260914_151812.log,
+v0.16.2-119-gd160499, graphics build 6AA85C83, with native OpenXR log
+151813_548_6608. This is the standard native OpenXR main revision, not
+an incompatible experimental transport. SteamVR supplies 4980x4916
+output; DLSS receives 3237x3195. The first dump concerns high-speed
+corona smear; the second contains UNIDENTIFIED SIGNAL SOURCE against the
+stellar limb. The separate crash-reporting change is documented in
+startup-input-crash-2026-09-14.md and does not claim to fix the
+intermittent exception.
+
+Both dumps now have complete panel and tone-map inputs, including the
+previously missing exposure texture. Panel snapshots retain twelve draws
+with zero declines or failures. The first actual captured frames are
+16833 and 17801, respectively, one after the logical temporal arm
+counters. The native crop origin is (918,897), size 1400x1400. The
+treated crop origin is (1413,1380), size 2154x2155. In 152136, T00 is
+byte-identical to that central L0 crop. In both dumps, the captured
+tone-map output RGB is byte-identical to C00.
+
+In 152136 the post-NGX UI resolver changes 77,854 output pixels by more
+than one byte. Mean signed RGB over those changed pixels is
+(-2.3276,-0.4236,-0.1632) bytes. The moving-label ROI
+(2500,2000)-(3500,2850) includes 59,649 retained-only pixels; 42,763
+change by more than one byte. This confirms that the resolver
+contributes darkening outside the current label. It does not establish
+that NGX contributes nothing. The six native sprite before/after pairs
+contain clean current text without the broad plume.
+
+In 152121 the stellar-limb/glow ROI, crop-local (1500,0)-(2154,1500),
+has 16,058 pixels whose mean absolute RGB change exceeds one byte
+between DlssBeforeUi and T00. All belong to current or retained UI
+resolve activity. This ROI includes the MIDNIGHT SUN banner; it is not
+an isolated corona-motion measurement. The audit uses
+q=floor(output*input/outputSize), r=floor(q+jitter+0.5), current class
+1/2 and edits around r, stationary Previous[q], and bilinear history at
+q+MV[r], rejecting off-screen history. Class 3 is smoke/corona, not UI.
+Earlier scratch audits using a jittered q, outgoing alpha, or omitting
+stationary history are invalid. Their apparent 603 unowned changed
+pixels disappear with the correct ownership rule.
+
+Mode-5 record 2 is matched and covers 72,052 input pixels. Its submitted
+motion agrees with its recorded affine transform after the jitter delta;
+this checks the consumer, not independently the original geometry. The
+original 5E417E9DF2E7F9E6/BD801F2FB02522EB shader pair and retained
+vertices show that fixed width/geometry pairs admit the producer's
+affine mapping. The first retained Holo map points to the preceding
+frame, whereas draw geometry begins at the current frame. Comparing that
+map with the following frame was invalid and its apparent 6.376-pixel
+error is discarded. These captures do not establish a separate corona
+motion-vector defect or rule out smearing within NGX itself.
+
+The exact panel word comparison finds visible changes only at ordinal
+234 (27,404 pixels, lower-left HUD) and ordinal 252 (21,331 pixels,
+MIDNIGHT SUN/INFO). The other ten panel draws change zero packed words.
+None of these panel change masks overlaps the first targeting sprite's
+changed pixels. There are nevertheless 41 later writes to the first-eye
+target before tone mapping, including draws outside the instrumented
+panel family. Ruled out: copying the HDR scene before the first sprite
+and restoring it at tone mapping is a general clean-background solution.
+It would omit valid later writers; their identity cannot be inferred
+from draw size.
+
+The corrected original-panel WARP replay changes the same 21,331 packed
+pixels, within crop bounds (514,657)-(1019,838). Against the captured
+after image it differs at 3,516 packed pixels, maximum native RGB error
+0.03125. Mean absolute RGB error on those residual pixels is
+0.000399012. These are freshly verified panel metrics; older BINET'S
+FOLLY metrics accidentally reused in an intermediate scratch report are
+invalid here. Initial no-op runs were caused by uploading the retained
+VB0 window at byte zero instead of its captured byte offset 1440.
+Neither bypassing depth nor a solid pixel shader validates a no-op
+replay.
+
+WARP tone-map replay now uses the actual captured six-texel exposure,
+original shaders, lookup table, constants and viewport. Both complete
+output crops differ from the native capture by at most two channel
+bytes; 184,951 and 245,546 RGB pixels differ respectively. This is a
+bounded software-versus-hardware replay discrepancy, not byte-exact
+reproduction. No exposure fitting or old inferred exposure is used.
+
+A further original-panel replay retains accumulated alpha using an
+RGBA16_FLOAT target. The alpha footprint has 21,331 pixels, including
+618 above one; the maximum is 1.033203125. Rendering the same original
+background into that format produces thirty pixels with negative RGB,
+down to -0.02192688. The game's unsigned R11G11B10_FLOAT target clips
+those negative components. For example, crop pixel (984,795) produces
+blue -0.000225067 in the half-float target and zero in the
+original-format replay. Ruled out: replacing the clean HDR target with
+RGBA16_FLOAT solely to store UI opacity is behaviorally equivalent. It
+changes blend clamping as well as quantization, and the stored alpha is
+not necessarily opacity in [0,1]. Clamping it to one is also incorrect.
+
+Keeping current text out of world history remains the supported
+direction, but a production implementation must preserve later writers,
+original-format blending, and world-only depth/motion beneath the
+removed text. Removing colour while retaining the target's motion
+vectors would feed NGX inconsistent inputs. The CPU algebra sketch and
+the first synthetic sidecar GPU fixture do not validate that
+implementation; review rejected the fixture's no-op/occluder checks,
+blend/depth differences and incorrect packed-format decoding. No new
+rendering fix or experimental compositor was installed from this
+investigation. The current captures are sufficient for the next offline
+implementation work; another user capture is not requested at this
+point.
+
+Validation: the full absolute-path build and all gates pass, followed by
+the NVIDIA smoke test with live NGX evaluations. These validate the
+existing rendering code and the separate crash diagnostics, not the
+rejected compositor experiment. Crash diagnostics commit 58cd817 is on
+main; the working game remains on d160499.
