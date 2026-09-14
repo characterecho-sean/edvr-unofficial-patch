@@ -857,3 +857,50 @@ instance reordering, exact ambiguity, source/width/colour changes and
 continuity rejection. The absolute-path full build and completed-build
 NVIDIA smoke test pass, including DLSS evaluation and jitter/motion
 convention checks.
+
+## Text cleanup alternatives checked after the orbital correction
+
+Code commit 2427d96 contains only the orbital matching correction and
+its tests/documentation. It was fast-forwarded to main, pushed, rebuilt
+in the main checkout, smoke-tested on NVIDIA and installed to Steam.
+Separate installer verification confirms both DLL hashes. The UI
+experiments below remain in scratch files and are not installed.
+
+Ruled out: replacing the RGB cleanup with invalid motion across all UI
+coverage, because a fresh preset-K sequence with translucent small
+digits, fractional/fast motion, content changes and nonzero raster
+jitter loses current text accuracy when current coverage is invalidated.
+The matched valid and invalid inputs differ only in motion vectors. A
+separate all-pixel invalid-motion control confirms the runtime consumes
+those vectors. These runs use the same 1280x720 input, 1920x1080 output,
+310.7.0.0 runtime and 90 Hz evaluation interval.
+
+A narrower experiment invalidates only the departing footprint outside
+the current 3x3-expanded UI. It preserves current motion and applies the
+existing current-raster bounds and edited-digit cubic replacement, while
+dropping retained RGB clamping. A corrected WARP replay executes the
+actual UI shader over 32 frames. Its texture dimensions, half-float
+motion upload, alternating history bindings, frame-major mask indexing
+and source-edit textures were checked explicitly. The optional Windows
+D3D debug-layer component is unavailable; the replay therefore runs on
+WARP without that component. Both variants still render the changed
+digit correctly.
+
+Ruled out: departing-only invalid motion is an established solution to
+the background mask, because a matched background-only DLSS control
+still shows nearly the same brightness discontinuity with this
+alternative. At frame 16, departing-region mean red bias relative to the
+background-only model is -2.040 bytes with shipping cleanup and -2.107
+with the alternative. At frame 27 the biases are +3.388 and +3.237. Some
+samples improve, but the replacement does not reliably separate
+stale-text rejection from the background's reconstruction. No new motion
+invalidation or UI cleanup change is shipped on that evidence.
+
+Earlier scratch CPU and WARP replicas had data-layout and sampling
+errors and are not evidence for this conclusion. In particular, a
+single-byte motion read, an incorrect coverage-frame stride, an
+input-sized model texture and a float32 upload into an RG16 texture were
+caught in review. The final WARP replay fixes these; the original CPU
+comparison and its crops remain explicitly invalidated. The unresolved
+work is obtaining a UI/background decomposition with correct blending
+and draw order, rather than changing another colour-clamp threshold.
