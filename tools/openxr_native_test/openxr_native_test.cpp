@@ -10,6 +10,7 @@
 #include "launch_centre_cases.h"
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -147,6 +148,82 @@ bool samePose(const vr::TrackedDevicePose_t& a,const vr::TrackedDevicePose_t& b)
   return std::memcmp(&a.mDeviceToAbsoluteTracking,&b.mDeviceToAbsoluteTracking,sizeof(a.mDeviceToAbsoluteTracking))==0&&
     std::memcmp(&a.vVelocity,&b.vVelocity,sizeof(a.vVelocity))==0&&std::memcmp(&a.vAngularVelocity,&b.vAngularVelocity,sizeof(a.vAngularVelocity))==0&&
     a.eTrackingResult==b.eTrackingResult&&a.bPoseIsValid==b.bPoseIsValid&&a.bDeviceIsConnected==b.bDeviceIsConnected;
+}
+
+// Inert owner-thread dispatch used by the lifecycle regression below. It
+// exercises NativeRuntimeHost's event/restart paths without opening a loader,
+// creating a device, or contacting an OpenXR runtime.
+struct HostLifecycleFake {
+  std::deque<XrSessionState> events;
+  XrResult endResult=XR_SUCCESS;
+  unsigned beginCalls=0,endCalls=0;
+  bool running=false,frameOpen=false;
+  XrTime nextTime=100;
+};
+HostLifecycleFake* hostLifecycleFake=nullptr;
+XrResult XRAPI_PTR hostPollEvent(XrInstance instance,XrEventDataBuffer* buffer) {
+  if(!hostLifecycleFake||instance!=reinterpret_cast<XrInstance>(1)||!buffer)return XR_ERROR_HANDLE_INVALID;
+  if(hostLifecycleFake->events.empty())return XR_EVENT_UNAVAILABLE;
+  const auto state=hostLifecycleFake->events.front();hostLifecycleFake->events.pop_front();
+  XrEventDataSessionStateChanged event{XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED};
+  event.session=reinterpret_cast<XrSession>(2);event.state=state;
+  std::memcpy(buffer,&event,sizeof(event));return XR_SUCCESS;
+}
+XrResult XRAPI_PTR hostBeginSession(XrSession session,const XrSessionBeginInfo* info) {
+  if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2)||!info)return XR_ERROR_HANDLE_INVALID;
+  ++hostLifecycleFake->beginCalls;hostLifecycleFake->running=true;return XR_SUCCESS;
+}
+XrResult XRAPI_PTR hostEndSession(XrSession session) {
+  if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2))return XR_ERROR_HANDLE_INVALID;
+  ++hostLifecycleFake->endCalls;
+  if(hostLifecycleFake->endResult==XR_SUCCESS)hostLifecycleFake->running=false;
+  return hostLifecycleFake->endResult;
+}
+XrResult XRAPI_PTR hostWaitFrame(XrSession session,const XrFrameWaitInfo* info,XrFrameState* state) {
+  if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2)||!info||!state||!hostLifecycleFake->running||hostLifecycleFake->frameOpen)
+    return XR_ERROR_CALL_ORDER_INVALID;
+  state->predictedDisplayTime=hostLifecycleFake->nextTime++;state->predictedDisplayPeriod=1;state->shouldRender=XR_FALSE;return XR_SUCCESS;
+}
+XrResult XRAPI_PTR hostBeginFrame(XrSession session,const XrFrameBeginInfo* info) {
+  if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2)||!info||hostLifecycleFake->frameOpen||!hostLifecycleFake->running)
+    return XR_ERROR_CALL_ORDER_INVALID;
+  hostLifecycleFake->frameOpen=true;return XR_SUCCESS;
+}
+XrResult XRAPI_PTR hostEndFrame(XrSession session,const XrFrameEndInfo* info) {
+  if(!hostLifecycleFake||session!=reinterpret_cast<XrSession>(2)||!info||!hostLifecycleFake->frameOpen)return XR_ERROR_CALL_ORDER_INVALID;
+  hostLifecycleFake->frameOpen=false;return XR_SUCCESS;
+}
+Dispatch hostDispatch() {return {hostPollEvent,hostBeginSession,hostEndSession,hostWaitFrame,hostBeginFrame,hostEndFrame};}
+void hostStateEvent(HostLifecycleFake& fake,XrSessionState state) {fake.events.push_back(state);}
+GeometryInput hostGeometry(uint64_t generation,uint64_t sequence) {
+  GeometryInput input{};input.generation=generation;input.sequence=sequence;
+  input.viewFlags=XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
+  input.headFlags=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
+  input.headPose.orientation.w=1;
+  for(unsigned eye=0;eye<2;++eye) {
+    input.views[eye].pose.orientation.w=1;input.views[eye].fov={-.6f,.6f,.5f,-.5f};
+    input.width[eye]=640;input.height[eye]=480;
+  }
+  return input;
+}
+bool hostFixtureSetup(NativeRuntimeHost& host) {
+  host.instance=reinterpret_cast<XrInstance>(1);host.session=reinterpret_cast<XrSession>(2);
+  const bool stateBound=host.state.reset(hostDispatch(),host.instance,host.session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)==XR_SUCCESS;
+  SystemRead metadata{};metadata.connected=true;metadata.recommendedWidth[0]=metadata.recommendedWidth[1]=640;
+  metadata.recommendedHeight[0]=metadata.recommendedHeight[1]=480;
+  host.geometryGeneration=host.geometry.begin(metadata);host.compositorGeneration=host.poses.begin();
+  const bool publications=host.geometryGeneration&&host.compositorGeneration&&host.changes.begin(host.session)&&
+    host.resetEvents.begin(host.geometryGeneration);
+  host.runtimeGeneration=host.gate.beginGeneration();
+  return stateBound&&publications&&host.runtimeGeneration;
+}
+bool hostStartSession(NativeRuntimeHost& host,HostLifecycleFake& fake) {
+  hostStateEvent(fake,XR_SESSION_STATE_READY);host.pumpEvents();
+  return host.state.running()&&!host.serviceStopped&&!host.serviceFailed;
+}
+void hostFixtureCleanup(std::unique_ptr<NativeRuntimeHost>& host) {
+  host->state.abandonAfterOwnerDestruction();host->session=XR_NULL_HANDLE;host->instance=XR_NULL_HANDLE;
+  host->view=host->local=XR_NULL_HANDLE;host->runtimeGeneration=0;host.reset();
 }
 int run(const Options& options,PresentHost* present=nullptr) {
   // Process-lifetime objects back the exported function pointers. Their
@@ -633,6 +710,105 @@ int selfTest() {
     width=height=0; inertHost.systemInterface.GetRecommendedRenderTargetSize(&width,&height);
     aux=inertHost.readAuxiliary();
     check(width==0&&height==0&&!aux.width[0]&&!aux.height[0],"native retirement clears display dimensions");
+  }
+  // Lifecycle regression: STOPPING must end exactly once, and a subsequent
+  // runtime terminal event must remain visible through the OpenVR system ABI.
+  {
+    OwnerService owner;RenderThreadDispatcher dispatcher(owner);RenderRoute route{dispatcher};
+    std::unique_ptr<NativeRuntimeHost> host;HostLifecycleFake fake;hostLifecycleFake=&fake;
+    check(owner.start(),"inert lifecycle owner starts");
+    check(owner.invoke([&]{host=std::make_unique<NativeRuntimeHost>(owner,dispatcher,route);
+      const bool setup=hostFixtureSetup(*host)&&hostStartSession(*host,fake);check(setup,"inert terminal fixture setup");
+      if(!setup)return;
+      hostStateEvent(fake,XR_SESSION_STATE_STOPPING);host->pumpEvents();
+      check(fake.endCalls==1&&host->serviceStopped&&!host->serviceFailed,"STOPPING ends the session once");
+      vr::VREvent_t stoppingEvent{};
+      check(!host->systemInterface.PollNextEvent(&stoppingEvent,sizeof(stoppingEvent)),"STOPPING alone does not queue Quit");
+      hostStateEvent(fake,XR_SESSION_STATE_EXITING);host->pumpEvents();
+      check(host->serviceFailed&&host->quitEventPending,"EXITING queues one native quit event");
+      vr::VREvent_t event{};vr::TrackedDevicePose_t pose{};
+      const bool delivered=host->systemInterface.PollNextEventWithPose(vr::TrackingUniverseSeated,
+        &event,sizeof(event),&pose);
+      check(delivered&&event.eventType==vr::VREvent_Quit&&!pose.bPoseIsValid,"OpenVR observes terminal quit event");
+      check(!host->systemInterface.PollNextEvent(&event,sizeof(event)),"terminal quit event is one-shot");
+    }),"inert lifecycle terminal dispatch runs");
+    check(fake.endCalls==1,"terminal event never repeats xrEndSession");
+    owner.invoke([&]{hostFixtureCleanup(host);});owner.stop();hostLifecycleFake=nullptr;
+  }
+  // Lifecycle regression: the same session can return to READY after end;
+  // retained publication/provider sequence floors must still accept the next
+  // frame, and focus is republished only after a real FOCUSED event.
+  {
+    OwnerService owner;RenderThreadDispatcher dispatcher(owner);RenderRoute route{dispatcher};
+    std::unique_ptr<NativeRuntimeHost> host;HostLifecycleFake fake;hostLifecycleFake=&fake;
+    check(owner.start(),"inert restart owner starts");
+    check(owner.invoke([&]{host=std::make_unique<NativeRuntimeHost>(owner,dispatcher,route);
+      const bool setup=hostFixtureSetup(*host)&&hostStartSession(*host,fake);check(setup,"inert restart fixture setup");
+      if(!setup)return;
+      check(!host->poses.read().canRender,"initial READY session is not renderable before focus");
+      for(uint64_t expected=1;expected<=3;++expected) {
+        check(host->boundary.waitAndBegin()==XR_SUCCESS,"first session boundary begins");
+        auto first=host->boundary.frame();
+        check(first.sequence==expected&&host->applyFrameSequence(first)&&first.sequence==expected,
+          "first session boundary sequence is monotonic");
+        const auto input=hostGeometry(host->geometryGeneration,first.sequence);
+        check(host->geometry.publish(input,true,true),"seed publication sequence floor");
+        auto poseFrame=host->poses.read();poseFrame.sequence=first.sequence;poseFrame.posesAvailable=true;
+        poseFrame.renderPose=invalidHeadPose(true);poseFrame.renderPose.bPoseIsValid=true;
+        for(unsigned axis=0;axis<3;++axis)poseFrame.renderPose.mDeviceToAbsoluteTracking.m[axis][axis]=1;
+        check(host->poses.publish(poseFrame),"seed compositor sequence floor and available pose");
+        check(host->boundary.clear()==XR_SUCCESS,"first session boundary clears");
+      }
+      hostStateEvent(fake,XR_SESSION_STATE_STOPPING);host->pumpEvents();
+      const auto stoppedGeometry=host->geometry.read();const auto stoppedPoses=host->poses.read();
+      check(!stoppedGeometry.geometryValid&&stoppedGeometry.opticsValid&&stoppedGeometry.optics.sequence==3&&
+        stoppedGeometry.recommendedWidth[0]==640&&!stoppedPoses.posesAvailable&&!stoppedPoses.renderPose.bPoseIsValid,
+        "STOPPING invalidates poses while retaining display recommendations and optics");
+      hostStateEvent(fake,XR_SESSION_STATE_IDLE);host->pumpEvents();
+      hostStateEvent(fake,XR_SESSION_STATE_READY);host->pumpEvents();
+      check(!host->poses.read().canRender,"READY restart remains unavailable before focus");
+      check(fake.endCalls==1&&fake.beginCalls==2&&host->state.running()&&!host->serviceStopped,
+        "READY restarts stopped session without repeated end");
+      hostStateEvent(fake,XR_SESSION_STATE_FOCUSED);host->pumpEvents();
+      check(host->poses.read().canRender,"FOCUSED republishes render availability");
+      check(host->boundary.waitAndBegin()==XR_SUCCESS,"resumed boundary begins");
+      auto frame=host->boundary.frame();
+      check(frame.sequence==1,"resumed boundary sequence resets locally");
+      check(host->applyFrameSequence(frame)&&frame.sequence==4,"restart preserves provider sequence floor");
+      auto next=hostGeometry(host->geometryGeneration,frame.sequence);
+      check(host->geometry.publish(next,true,true),"resumed geometry accepts monotonic sequence");
+      auto resumedPose=host->poses.read();resumedPose.sequence=frame.sequence;resumedPose.posesAvailable=true;
+      check(host->poses.publish(resumedPose),"resumed compositor accepts monotonic sequence in retained generation");
+      check(host->boundary.clear()==XR_SUCCESS,"resumed boundary closes cleanly");
+      hostStateEvent(fake,XR_SESSION_STATE_STOPPING);host->pumpEvents();
+      hostStateEvent(fake,XR_SESSION_STATE_IDLE);host->pumpEvents();
+      hostStateEvent(fake,XR_SESSION_STATE_READY);host->pumpEvents();
+      hostStateEvent(fake,XR_SESSION_STATE_FOCUSED);host->pumpEvents();
+      check(fake.endCalls==2&&fake.beginCalls==3&&host->state.running()&&host->poses.read().canRender,
+        "second READY restart preserves lifecycle and focus");
+      check(host->boundary.waitAndBegin()==XR_SUCCESS,"second resumed boundary begins");
+      auto second=host->boundary.frame();
+      check(second.sequence==1&&host->applyFrameSequence(second)&&second.sequence==5,
+        "second resumed boundary advances sequence floor");
+      check(host->boundary.clear()==XR_SUCCESS,"second resumed boundary closes cleanly");
+    }),"inert lifecycle restart dispatch runs");
+    owner.invoke([&]{hostFixtureCleanup(host);});owner.stop();hostLifecycleFake=nullptr;
+  }
+  // A failed xrEndSession is terminal and must not be retried by later owner
+  // idle pumps; the queued quit remains the only game-facing signal.
+  {
+    OwnerService owner;RenderThreadDispatcher dispatcher(owner);RenderRoute route{dispatcher};
+    std::unique_ptr<NativeRuntimeHost> host;HostLifecycleFake fake;fake.endResult=XR_ERROR_RUNTIME_FAILURE;hostLifecycleFake=&fake;
+    check(owner.start(),"inert failed-stop owner starts");
+    check(owner.invoke([&]{host=std::make_unique<NativeRuntimeHost>(owner,dispatcher,route);
+      const bool setup=hostFixtureSetup(*host)&&hostStartSession(*host,fake);check(setup,"inert failed-stop fixture setup");
+      if(!setup)return;
+      hostStateEvent(fake,XR_SESSION_STATE_STOPPING);host->pumpEvents();
+      const auto calls=fake.endCalls;host->pumpEvents();
+      check(calls==1&&fake.endCalls==1&&host->serviceFailed&&host->quitEventPending,
+        "failed endSession is not retried");
+    }),"inert failed-stop dispatch runs");
+    owner.invoke([&]{hostFixtureCleanup(host);});owner.stop();hostLifecycleFake=nullptr;
   }
   // Exercise the real native adapter's worker construction and partial-start
   // cleanup without ever opening a loader or contacting an installed runtime.

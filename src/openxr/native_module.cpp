@@ -332,7 +332,10 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
   return 0;
 }
 extern "C" void __cdecl edvr_module_VR_ShutdownInternal() noexcept {
-  try { if(auto* owner=module.load(std::memory_order_acquire))owner->lifecycle.shutdown(); } catch (...) {}
+  try {
+    nativeTracePuts("module_shutdown_entry");
+    if(auto* owner=module.load(std::memory_order_acquire))owner->lifecycle.shutdown();
+  } catch (...) {}
 }
 extern "C" void* __cdecl edvr_module_VR_GetGenericInterface(const char* version,vr::EVRInitError* error) noexcept {
   try { if(auto* owner=module.load(std::memory_order_acquire))return owner->lifecycle.getInterface(version,error); }

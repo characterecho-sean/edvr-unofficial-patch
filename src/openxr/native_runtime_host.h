@@ -142,6 +142,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t eventPumps=0;
   std::atomic<uint64_t> publishedPumps{0};
   bool serviceStopped=false,serviceFailed=false;
+  // A terminal OpenXR event is surfaced through the OpenVR event queue.  The
+  // owner records it here; pollEvent is also marshalled to the owner, so no
+  // cross-thread event queue is needed.
+  bool quitEventPending=false;
+  uint64_t quitEventGeneration=0;
+  Lifecycle tracedLifecycle=Lifecycle::Uninitialized;
   OpenVRExtendedDisplay displayInterface{*this};OpenVRChaperone chaperoneInterface{*this};
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
   XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
@@ -205,6 +211,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool renderSettingsCaptured=false;
   uint64_t renderSizingGeneration=0;
   EdvrNativeRenderViewBounds renderBounds[2]{};
+  // SessionState frame tokens restart at one when the same bound session is
+  // begun again. Provider tables deliberately retain their sequence floors,
+  // so the host adds this offset to every published frame sequence.
+  uint64_t frameSequenceOffset=0,lastPublishedFrameSequence=0;
+  uint64_t activeFrameSequence=0;
   mutable std::atomic<unsigned> geometryQueryNotes[6][2]{};
   unsigned originInvalidationNotes=0;
   bool clean=true;
@@ -295,8 +306,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void traceGeometryQuery(unsigned slot,const SystemRead& snapshot) const noexcept {
     if(slot>=6||geometryQueryNotes[slot][snapshot.geometryValid?1:0].fetch_add(1,std::memory_order_relaxed)>=4)return;
-    nativeTracePrintf("system_geometry_query,slot=%u,generation=%llu,connected=%u,geometry_valid=%u,sequence=%llu,recommended=%ux%u/%ux%u\n",
+    nativeTracePrintf("system_geometry_query,slot=%u,generation=%llu,connected=%u,geometry_valid=%u,optics_valid=%u,optics_sequence=%llu,sequence=%llu,recommended=%ux%u/%ux%u\n",
       slot,(unsigned long long)snapshot.generation,unsigned(snapshot.connected),unsigned(snapshot.geometryValid),
+      unsigned(snapshot.opticsValid),(unsigned long long)snapshot.optics.sequence,
       (unsigned long long)snapshot.geometry.native.sequence,snapshot.recommendedWidth[0],snapshot.recommendedHeight[0],
       snapshot.recommendedWidth[1],snapshot.recommendedHeight[1]);
   }
@@ -348,33 +360,60 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   bool stop()noexcept override {
     ++stops;
+    nativeTracePrintf("service_shutdown_entry,source=runtime_backend,stops=%llu\n",(unsigned long long)stops);
     if(runtimeGeneration)gate.requestStop(runtimeGeneration);
     geometry.retire(geometryGeneration);poses.retire(compositorGeneration);resetEvents.retire(geometryGeneration);
     if(GetCurrentThreadId()!=ownerThread)return false;
     return close();
   }
   void pumpEvents() {
-    if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceStopped||serviceFailed)return;
+    if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceFailed)return;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation){serviceFailed=true;return;}
     ++eventPumps;
     XrResult r=state.pollEvents();
     publishedPumps.store(eventPumps,std::memory_order_release);
     const auto lifecycle=state.lifecycle();
+    traceLifecycle(lifecycle);
     poses.focus(compositorGeneration,true,state.running()&&!state.terminal()&&lifecycle==Lifecycle::Focused);
     if(XR_FAILED(r)||state.terminal()||!changes.active()) {
       serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
       menu.invalidate();
       invalidateEyeTreatments();
       timingInvalidate();
+      // A retired reference-change policy is also a fatal service state: the
+      // game must observe the same quit path instead of rendering forever on
+      // invalidated publications.
+      queueQuitEvent(r);
       result("service_poll_terminal",r);return;
     }
-    if(lifecycle==Lifecycle::Stopping) {
+    if(lifecycle==Lifecycle::Ready&&!state.running()) {
+      // Ended sessions may receive READY again. Keep publication generations
+      // and provider tables alive, but clear cached poses/history and advance
+      // the frame sequence above every sequence already admitted this session.
+      if(!prepareSessionRestart()) {
+        serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();queueQuitEvent(XR_ERROR_LIMIT_REACHED);
+        result("service_session_rebind",XR_ERROR_LIMIT_REACHED);return;
+      }
+      r=state.startIfReady();
+      if(XR_FAILED(r)||state.terminal()) {
+        serviceFailed=true;geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+        if(XR_FAILED(r)||state.terminal())queueQuitEvent(r);
+        result("service_session_restart",r);return;
+      }
+      serviceStopped=false;
+      nativeTracePrintf("service_session_restart,generation=%llu\n",(unsigned long long)compositorGeneration);
+      return;
+    }
+    if(lifecycle==Lifecycle::Stopping&&state.running()) {
       r=boundary.clear();
       if(r==XR_SUCCESS)r=state.stop();
       serviceStopped=r==XR_SUCCESS;serviceFailed=!serviceStopped;
       geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
       menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+      if(XR_FAILED(r)||state.terminal())queueQuitEvent(r);
       result("service_xrEndSession",r);
       return;
     }
@@ -395,7 +434,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(work==LoadingWork::None)return XR_ERROR_CALL_ORDER_INVALID;
     auto r=boundary.waitAndBegin();
     if(r!=XR_SUCCESS&&r!=XR_FRAME_DISCARDED&&r!=XR_SESSION_LOSS_PENDING)return r;
-    const auto frame=boundary.frame();
+    auto frame=boundary.frame();
+    if(!applyFrameSequence(frame)){boundary.clear();return XR_ERROR_LIMIT_REACHED;}
     if(state.terminal())return boundary.clear();
     if(work==LoadingWork::Empty) {
       r=boundary.clear();
@@ -489,7 +529,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
     loading.sceneWaited();
-    const Frame frame=boundary.frame();
+    Frame frame=boundary.frame();
+    if(!applyFrameSequence(frame)){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}
     if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
     uint64_t applied=0;
     if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return fail(XR_ERROR_TIME_INVALID);}
@@ -693,7 +734,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     Microsoft::WRL::ComPtr<ID3D11Texture2D> temporalOutput,treated;
     vr::VRTextureBounds_t temporalBounds{};
     vr::VRTextureBounds_t treatedBounds{};
-    const auto sequence=boundary.frame().sequence;
+    const auto sequence=activeFrameSequence;
     if(features.acquired()&&!frameDecisionReady) {
       if(features.latch(sequence,featureDecision)!=S_OK)return vr::VRCompositorError_InvalidTexture;
       frameDecisionReady=true;frameWithheld=featureDecision.withhold!=0;
@@ -964,12 +1005,45 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);})&&result;}
     if(generation!=geometryGeneration)return false;
+    if(quitEventPending&&quitEventGeneration==generation) {
+      event={};event.eventType=vr::VREvent_Quit;
+      event.trackedDeviceIndex=vr::k_unTrackedDeviceIndexInvalid;
+      event.eventAgeSeconds=0.0f;pose=invalidHeadPose(true);
+      quitEventPending=false;return true;
+    }
     const bool found=resetEvents.pop(generation,poses.read().originGeneration,origin,GetTickCount64(),event,pose);
     if(found)++resetPolls;return found;
   }
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
   ~NativeRuntimeHost() {close();}
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); }
+  void traceLifecycle(Lifecycle lifecycle) noexcept {
+    if(lifecycle==tracedLifecycle)return;
+    nativeTracePrintf("service_lifecycle,from=%u,to=%u,running=%u,terminal=%u\n",
+      unsigned(tracedLifecycle),unsigned(lifecycle),unsigned(state.running()),unsigned(state.terminal()));
+    tracedLifecycle=lifecycle;
+  }
+  bool applyFrameSequence(Frame& frame) {
+    if(!frame.sequence||frameSequenceOffset>(std::numeric_limits<uint64_t>::max)()-frame.sequence)return false;
+    frame.sequence+=frameSequenceOffset;activeFrameSequence=frame.sequence;
+    if(frame.sequence>lastPublishedFrameSequence)lastPublishedFrameSequence=frame.sequence;
+    return true;
+  }
+  void queueQuitEvent(XrResult r) noexcept {
+    if(quitEventPending&&quitEventGeneration==geometryGeneration)return;
+    quitEventPending=true;quitEventGeneration=geometryGeneration;
+    nativeTracePrintf("openvr_quit_event,generation=%llu,result=%d\n",
+      (unsigned long long)geometryGeneration,int(r));
+  }
+  bool prepareSessionRestart() {
+    if(GetCurrentThreadId()!=ownerThread||state.running()||state.terminal()||!session)return false;
+    if(lastPublishedFrameSequence==(std::numeric_limits<uint64_t>::max)())return false;
+    frameSequenceOffset=lastPublishedFrameSequence;
+    if(!invalidateOrigin("session_restart"))return false;
+    frameGeometryAvailable=false;frameGeometry={};previousPairValid=false;
+    activeFrameSequence=0;
+    return true;
+  }
   bool close() {
     const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
     if(renderSettingsCaptured) {
@@ -1008,6 +1082,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     geometry.retire(geometryGeneration);
     poses.retire(compositorGeneration);
     resetEvents.retire(geometryGeneration);changes.clear();
+    quitEventPending=false;quitEventGeneration=0;
     loading={};
     if(separateGraphics()) {
       // Rendering may still reference capture outputs. Drain the XR context

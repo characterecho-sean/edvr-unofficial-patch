@@ -11,6 +11,7 @@ class SystemPublication {
     std::lock_guard<std::mutex> lock(mutex_);
     if(active_||generation_==(std::numeric_limits<uint64_t>::max)())return 0;
     metadata.generation=++generation_;metadata.geometry={};metadata.geometryValid=false;
+    metadata.optics={};metadata.opticsValid=false;
     metadata.tangentShift[0][0]=metadata.tangentShift[0][1]=0.0f;
     metadata.tangentShift[1][0]=metadata.tangentShift[1][1]=0.0f;
     state_=metadata;sequence_=0;active_=true;return generation_;
@@ -20,7 +21,21 @@ class SystemPublication {
     GeometrySnapshot candidate{};const bool valid=makeGeometrySnapshot(input,candidate);
     std::lock_guard<std::mutex> lock(mutex_);
     if(!active_||input.generation!=generation_||input.sequence<=sequence_)return false;
-    sequence_=input.sequence;state_.geometryValid=valid;
+    sequence_=input.sequence;
+    // Optics are session-generation calibration. Publish the last validated
+    // unjittered FOV and eye placement before applying the frame's tangent
+    // jitter. A bad tracking sample or a bad jitter request must not erase the
+    // calibration needed by game-facing projection queries.
+    if(valid) {
+      state_.optics.generation=candidate.native.generation;
+      state_.optics.sequence=candidate.native.sequence;
+      for(unsigned eye=0;eye<2;++eye) {
+        state_.optics.raw[eye]=candidate.raw[eye];
+        state_.optics.eyeToHead[eye]=candidate.eyeToHead[eye];
+      }
+      state_.opticsValid=true;
+    }
+    state_.geometryValid=valid;
     state_.focusKnown=focusKnown;state_.focused=focused;
     bool shiftsValid=true; RawFov shifted{};
     if(tangentShift) for(unsigned eye=0;eye<2;++eye)

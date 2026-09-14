@@ -14,6 +14,10 @@ bool live(const SystemRead& s) { return s.connected && s.generation; }
 bool eyeValid(EVREye e) { return e==Eye_Left || e==Eye_Right; }
 bool originValid(ETrackingUniverseOrigin o) { return o==TrackingUniverseSeated || o==TrackingUniverseStanding || o==TrackingUniverseRawAndUncalibrated; }
 bool geometryValid(const SystemRead& s) { return live(s) && s.geometryValid && s.geometry.native.generation==s.generation; }
+bool cachedOpticsValid(const SystemRead& s) {
+  return live(s) && s.opticsValid && s.optics.generation==s.generation && s.optics.sequence;
+}
+bool opticsAvailable(const SystemRead& s) { return cachedOpticsValid(s) || geometryValid(s); }
 enum class PropertyType { Unknown, Bool, Float, Int, Uint, Matrix, String };
 PropertyType propertyType(ETrackedDeviceProperty p) {
   switch(p) {
@@ -134,12 +138,16 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
   const auto s=source_.read();HmdMatrix44_t out{};
   source_.noteGeometryQuery(1,s);
   const unsigned eye=unsigned(e);
-  if(geometryValid(s)&&eyeValid(e)) {
+  const bool liveGeometry=geometryValid(s);
+  if(opticsAvailable(s)&&eyeValid(e)) {
+    const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
     RawFov raw{};
-    if(shiftedRawFov(s.geometry.raw[eye],s.tangentShift[eye][0],
-                     s.tangentShift[eye][1],raw) &&
-       projectionMatrix(raw,nearZ,farZ,api,out))
-      source_.noteProjection(s.geometry.native.sequence,eye,nearZ,farZ);
+    const bool rawValid=liveGeometry ? shiftedRawFov(base,s.tangentShift[eye][0],
+                                                      s.tangentShift[eye][1],raw) : false;
+    if(!liveGeometry) raw=base;
+    if((!liveGeometry || rawValid) && projectionMatrix(raw,nearZ,farZ,api,out)) {
+      if(liveGeometry) source_.noteProjection(s.geometry.native.sequence,eye,nearZ,farZ);
+    }
   }
   return out;
 }
@@ -147,15 +155,20 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
   const auto s=source_.read();RawFov out{};
   source_.noteGeometryQuery(2,s);
   const unsigned eye=unsigned(e);
-  if(geometryValid(s)&&eyeValid(e))
-    shiftedRawFov(s.geometry.raw[eye],s.tangentShift[eye][0],
-                  s.tangentShift[eye][1],out);
+  const bool liveGeometry=geometryValid(s);
+  if(opticsAvailable(s)&&eyeValid(e)) {
+    const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
+    if(liveGeometry) shiftedRawFov(base,s.tangentShift[eye][0],
+                                   s.tangentShift[eye][1],out);
+    else out=base;
+  }
   if(l)*l=out.left;if(r)*r=out.right;if(t)*t=out.top;if(b)*b=out.bottom;
 }
 DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { unavailable(3);return {}; }
 HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {
   const auto s=source_.read();source_.noteGeometryQuery(4,s);
-  return geometryValid(s)&&eyeValid(e)?s.geometry.eyeToHead[unsigned(e)]:HmdMatrix34_t{};
+  const bool liveGeometry=geometryValid(s);
+  return opticsAvailable(s)&&eyeValid(e)?(liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)]):HmdMatrix34_t{};
 }
 bool OpenVRSystem::GetTimeSinceLastVsync(float* seconds,uint64_t* frame) {
   if(seconds)*seconds=0;if(frame)*frame=0;unavailable(5);return false;

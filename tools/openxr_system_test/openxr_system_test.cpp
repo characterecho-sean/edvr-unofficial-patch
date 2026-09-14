@@ -61,6 +61,11 @@ struct FakeSource final : SystemSource {
     state.recommendedWidth[0] = in.width[0]; state.recommendedWidth[1] = in.width[1];
     state.recommendedHeight[0] = in.height[0]; state.recommendedHeight[1] = in.height[1];
     state.focusKnown = true; state.focused = true; state.geometry = original;
+    state.opticsValid = true; state.optics.generation = in.generation; state.optics.sequence = in.sequence;
+    for (unsigned eye = 0; eye != 2; ++eye) {
+      state.optics.raw[eye] = original.raw[eye];
+      state.optics.eyeToHead[eye] = original.eyeToHead[eye];
+    }
     state.adapterIndex = 7;
     std::strcpy(state.runtimeName, "fake-openxr-runtime");
     std::strcpy(state.systemName, "fake-headset");
@@ -156,7 +161,11 @@ void publicationTest() {
   check(width==672&&height==496&&!source.state.geometryValid,"size API uses session recommendations before first located geometry");
   auto valid = geometry(generation, 1);
   check(publication.publish(valid, true, true), "publication accepts first valid frame");
-  auto read = publication.read(); check(read.connected && read.geometryValid && read.generation == generation, "publication read has connected geometry");
+  auto read = publication.read(); check(read.connected && read.geometryValid && read.opticsValid && read.generation == generation, "publication read has connected geometry and optics");
+  check(read.optics.generation == generation && read.optics.sequence == 1 &&
+        std::memcmp(read.optics.raw, read.geometry.raw, sizeof(read.optics.raw)) == 0 &&
+        std::memcmp(read.optics.eyeToHead, read.geometry.eyeToHead, sizeof(read.optics.eyeToHead)) == 0,
+        "publication caches unjittered optics from the accepted frame");
   check(read.recommendedWidth[0]==640&&read.recommendedWidth[1]==672&&
         read.recommendedHeight[0]==480&&read.recommendedHeight[1]==496,
         "publication stores session display dimensions before geometry");
@@ -167,12 +176,26 @@ void publicationTest() {
       read.tangentShift[1][0]==-.375f&&read.tangentShift[1][1]==.5f, "publication stores per-eye shifts");
   const float badShifts[2][2]={{NAN,0},{0,0}};
   publication.invalidate(generation);source.state=publication.read();
+  // Even if a caller retains a stale copy of the old frame shifts, fallback
+  // optics are explicitly unjittered.
+  source.state.tangentShift[0][0]=9;source.state.tangentShift[0][1]=-9;
   width=height=0;system.GetRecommendedRenderTargetSize(&width,&height);
   check(width==672&&height==496&&!source.state.geometryValid,"explicit origin invalidation preserves size API");
-  const auto cleared=system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
-  check(allZero(&cleared,sizeof(cleared)),"origin invalidation still rejects cached projection");
+  const unsigned projectionNotesBeforeFallback=source.projectionNotes;
+  const auto retained=system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(near(retained.m[0][0],2.f/(.8422884f+.6841368f)) &&
+        near(retained.m[0][2],(.8422884f-.6841368f)/(.8422884f+.6841368f)),
+        "origin invalidation preserves cached unjittered projection");
+  float cachedLeft,cachedRight,cachedTop,cachedBottom;
+  system.GetProjectionRaw(vr::Eye_Left,&cachedLeft,&cachedRight,&cachedTop,&cachedBottom);
+  check(near(cachedLeft,-.6841368f) && near(cachedRight,.8422884f) &&
+        near(cachedTop,-.4227932f) && near(cachedBottom,.5463025f) &&
+        near(system.GetEyeToHeadTransform(vr::Eye_Left).m[2][3],-.06f),
+        "origin invalidation preserves cached raw FOV and eye placement");
+  check(source.projectionNotes==projectionNotesBeforeFallback,
+        "cached projection fallback does not advertise a stale temporal sequence");
   check(!publication.publish(geometry(generation, 3), true, true, badShifts), "publication rejects non-finite shifts");
-  read=publication.read(); check(read.geometry.native.sequence==0&&!read.geometryValid&&
+  read=publication.read(); check(read.geometry.native.sequence==0&&!read.geometryValid&&read.opticsValid&&
       read.tangentShift[0][0]==0, "invalid shifts retire visible publication");
   check(read.recommendedWidth[0]==640&&read.recommendedWidth[1]==672&&
         read.recommendedHeight[0]==480&&read.recommendedHeight[1]==496,
@@ -180,17 +203,25 @@ void publicationTest() {
   check(!publication.publish(geometry(generation, 3), true, true), "invalid shift sequence cannot be replayed");
   auto invalid = geometry(generation, 2); invalid.headFlags = 0;
   invalid.sequence=4; check(!publication.publish(invalid, true, false), "publication rejects invalid tracking");
-  read = publication.read(); check(read.connected && !read.geometryValid && read.focusKnown && !read.focused, "invalid tracking clears geometry but keeps HMD connected");
+  read = publication.read(); check(read.connected && !read.geometryValid && read.opticsValid && read.focusKnown && !read.focused, "invalid tracking clears geometry but keeps HMD connected");
+  check(read.optics.sequence == 3 && near(read.optics.raw[0].left,-.6841368f),
+        "invalid tracking retains the last valid unjittered optics");
   check(read.recommendedWidth[0]==640&&read.recommendedWidth[1]==672&&
         read.recommendedHeight[0]==480&&read.recommendedHeight[1]==496,
         "invalid tracking preserves session display dimensions");
   check(read.tangentShift[0][0]==0&&read.tangentShift[0][1]==0&&read.tangentShift[1][0]==0&&read.tangentShift[1][1]==0, "invalid tracking clears shifts");
   check(!publication.publish(geometry(generation - 1, 3), true, true), "publication rejects stale generation");
-  publication.retire(generation); read=publication.read(); check(!read.connected && !read.recommendedWidth[0] && !read.recommendedWidth[1] &&
+  publication.retire(generation); read=publication.read(); check(!read.connected && !read.opticsValid && !read.recommendedWidth[0] && !read.recommendedWidth[1] &&
       !read.recommendedHeight[0] && !read.recommendedHeight[1], "retired publication clears display dimensions");
   metadata.tangentShift[0][0]=9;metadata.tangentShift[1][1]=-9;
   const auto fresh=publication.begin(metadata);check(fresh>generation,"new generation increases");
-  read=publication.read();check(read.tangentShift[0][0]==0&&read.tangentShift[1][1]==0,"new generation clears shifts");
+  read=publication.read();check(read.tangentShift[0][0]==0&&read.tangentShift[1][1]==0&&!read.opticsValid,"new generation clears shifts and optics");
+  FakeSource freshState;freshState.state=read;edvr::openxr::OpenVRSystem freshSystem(freshState);
+  float freshLeft=1,freshRight=1,freshTop=1,freshBottom=1;
+  freshSystem.GetProjectionRaw(vr::Eye_Left,&freshLeft,&freshRight,&freshTop,&freshBottom);
+  check(allZero(&freshLeft,sizeof(freshLeft))&&allZero(&freshRight,sizeof(freshRight))&&
+        allZero(&freshTop,sizeof(freshTop))&&allZero(&freshBottom,sizeof(freshBottom)),
+        "fresh generation has no optics fallback before its first valid frame");
   check(!publication.publish(geometry(generation,999),true,true),"old writer cannot enter new generation");
   publication.retire(generation);check(publication.read().connected,"old cleanup cannot retire new generation");
   check(publication.publish(geometry(fresh,1),true,true),"new generation starts sequence anew");
@@ -221,8 +252,14 @@ int selfTest() {
   source.state.geometryValid=false; source.state.geometry={};
   width=height=0; system->GetRecommendedRenderTargetSize(&width,&height);
   check(width==1128&&height==786, "recommended size survives invalid live geometry");
-  const auto invalidProjection=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
-  check(allZero(&invalidProjection,sizeof(invalidProjection)), "projection remains invalid while geometry is unavailable");
+  const auto retainedProjection=system->GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(retainedProjection.m[0][0]>0.0f && near(retainedProjection.m[0][0],2.f/(.8422884f+.6841368f)),
+        "projection survives invalid live geometry through optics cache");
+  float retainedLeft=0,retainedRight=0,retainedTop=0,retainedBottom=0;
+  system->GetProjectionRaw(vr::Eye_Left,&retainedLeft,&retainedRight,&retainedTop,&retainedBottom);
+  check(near(retainedLeft,-.6841368f)&&near(retainedRight,.8422884f)&&
+        near(retainedTop,-.4227932f)&&near(retainedBottom,.5463025f),
+        "invalid live geometry uses unjittered cached raw FOV");
   source.state.geometry=source.original; source.state.geometryValid=true;
   vr::HmdMatrix44_t dx = system->GetProjectionMatrix(vr::Eye_Left, .025f, 50000.f, vr::API_DirectX);
   vr::HmdMatrix44_t gl = system->GetProjectionMatrix(vr::Eye_Right, .1f, 1000.f, vr::API_OpenGL);

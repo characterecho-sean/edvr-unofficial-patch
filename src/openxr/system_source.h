@@ -2,16 +2,29 @@
 #include "geometry_snapshot.h"
 
 namespace edvr::openxr {
+// Session-generation optics that remain meaningful when the current tracking
+// sample is unavailable. This deliberately contains no world-space head pose:
+// projection and eye placement can be reused across a recenter without
+// accidentally reusing stale tracking or per-frame tangent jitter. The raw FOV
+// is the game-facing value, so any bounded cull widening remains paired with
+// the recommendations that produced it.
+struct SystemOptics {
+  uint64_t generation=0, sequence=0;
+  RawFov raw[2]{};
+  vr::HmdMatrix34_t eyeToHead[2]{};
+};
 // One copied read transaction. No borrowed runtime strings, pointers or handles.
-// A live HMD may have temporarily invalid tracking. Geometry is native, before
-// the future game-facing jitter/crop/pose policies are applied.
+// A live HMD may have temporarily invalid tracking. geometry is the current
+// game-facing frame record; optics is the stable, unjittered calibration cache.
 struct SystemRead {
   uint64_t generation=0;
   bool connected=false, geometryValid=false, focusKnown=false, focused=false;
+  bool opticsValid=false;
   // Session-stable view configuration recommendations. These remain available
   // while tracking/pose geometry is temporarily invalid.
   uint32_t recommendedWidth[2]{}, recommendedHeight[2]{};
   GeometrySnapshot geometry{};
+  SystemOptics optics{};
   int32_t adapterIndex=-1;
   char runtimeName[XR_MAX_RUNTIME_NAME_SIZE]{};
   char systemName[XR_MAX_SYSTEM_NAME_SIZE]{};
@@ -19,7 +32,7 @@ struct SystemRead {
   float displayFrequency=0;
   bool seatedToStandingValid=false, rawToStandingValid=false;
   vr::HmdMatrix34_t seatedToStanding{}, rawToStanding{};
-  // Game-facing per-eye tangent offsets. Native geometry remains immutable.
+  // Game-facing per-eye tangent offsets. Cached optics remains unjittered.
   float tangentShift[2][2]{};
 };
 

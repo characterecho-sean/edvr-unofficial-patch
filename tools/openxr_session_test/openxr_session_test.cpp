@@ -138,7 +138,9 @@ void restart() {
   check(!t.core.running() && !t.core.terminal(),"stopped session can later restart");
   check(t.core.startIfReady()==XR_ERROR_CALL_ORDER_INVALID,"restart requires new READY");
   event(XR_SESSION_STATE_IDLE);t.core.pollEvents();check(t.core.lifecycle()==Lifecycle::Idle,"IDLE after stop");
-  t.ready();Frame fresh;t.core.waitAndBegin(fresh);const auto at=t.fake.trace.size();
+  t.ready();event(XR_SESSION_STATE_FOCUSED);check(t.core.pollEvents()==XR_SUCCESS&&
+    t.core.lifecycle()==Lifecycle::Focused,"restarted session reaches focused after READY");
+  Frame fresh;t.core.waitAndBegin(fresh);const auto at=t.fake.trace.size();
   check(t.core.end(old,supplied())==XR_ERROR_CALL_ORDER_INVALID && t.fake.trace.size()==at,"stale generation rejected after restart");
   check(fresh.generation!=old.generation,"restart changes generation");t.core.end(fresh,supplied());t.stopping();t.core.stop();
   check(t.core.reset(api(),instance,session,XR_ENVIRONMENT_BLEND_MODE_ADDITIVE)==XR_SUCCESS,"stopped reset");
