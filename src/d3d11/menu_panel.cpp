@@ -6,6 +6,7 @@
 #include <d3d11.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "../common/frame_flag.h"
+#include "../common/perf_graph.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -524,27 +526,27 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             bg.alpha = 0.35f;
             ops.push_back(bg);
         }
-        const float scale = mg.budgetMs > 0.0f ? 2.0f * mg.budgetMs : 22.2f;
+        const float scale = perfGraphScale(mg.samples, mg.count, mg.budgetMs);
         const int   plotH = gy1 - gy0;
         const float barW =
             mg.count > 0 ? static_cast<float>(gx1 - gx0) / static_cast<float>(mg.count) : 0.0f;
         for (int i = 0; i < mg.count; ++i) {
             const float ms = mg.samples[i];
-            if (!(ms > 0.0f)) continue;   // a frame with no measurement is a gap
+            if (!perfGraphSampleVisible(ms, mg.zeroIsValid)) continue;
             float frac = ms / scale;
             if (frac > 1.0f) frac = 1.0f;
-            const int h = static_cast<int>(frac * plotH + 0.5f);
+            const int h = (std::max)(1, static_cast<int>(frac * plotH + 0.5f));
             Op b;
             b.rect = {gx0 + static_cast<int>(i * barW), gy1 - h,
                       gx0 + static_cast<int>((i + 1) * barW) - 1, gy1};
             if (b.rect.right <= b.rect.left) b.rect.right = b.rect.left + 1;
-            b.rgb = ms > 2.0f * mg.budgetMs   ? Rgb{255, 90, 70}
-                    : ms > mg.budgetMs * 1.02f ? Rgb{255, 170, 60}
-                                               : Rgb{110, 200, 120};
+            const int band = perfGraphBand(ms, mg.budgetMs);
+            b.rgb = band < 0 ? Rgb{120, 175, 220} : band == 2 ? Rgb{255, 90, 70}
+                    : band == 1 ? Rgb{255, 170, 60} : Rgb{110, 200, 120};
             b.alpha = 0.9f;
             ops.push_back(b);
         }
-        {
+        if (perfGraphHasReference(mg.budgetMs)) {
             Op line;
             const int ly = gy1 - static_cast<int>(0.5f * plotH + 0.5f);
             line.rect = {gx0, ly, gx1, ly + (cap / 12 > 0 ? cap / 12 : 1)};

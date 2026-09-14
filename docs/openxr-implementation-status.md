@@ -1,5 +1,13 @@
 # OpenXR implementation status
 
+The user has deferred performance comparisons and prioritized metrics, then
+features. The [native monitor-history
+checkpoint](openxr-metrics-parity-2026-09-14.md) adds consistent short
+averages, independent timing graphs, and a clearly labelled predicted-period
+reference. Runtime compositor statistics retain explicit unavailable states.
+The next manual gate checks the presentation before continuing
+submission-feature migration.
+
 The [VDXR startup investigation](openxr-vdxr-startup-2026-09-14.md) confirms
 that Windows runtime selection reached VirtualDesktopXR successfully. Elite
 then requested a zero-sized depth texture and aborted; the following attempt

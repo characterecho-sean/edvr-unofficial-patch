@@ -22,6 +22,7 @@
 #include "../../src/common/hotkey.h"
 #include "../../src/common/iniedit.h"
 #include "../../src/common/perf_math.h"
+#include "../../src/common/perf_graph.h"
 #include "../../src/d3d11/input_gate.h"
 #include "../../src/d3d11/menu_keys.h"
 #include "../../src/d3d11/menu_panel.h"
@@ -447,6 +448,16 @@ void testIniWrite() {
 }
 
 // --- the Monitor page's statistics ------------------------------------------
+
+void testPerfGraphs() {
+    const float values[] = {0.0f, 3.0f, 10.0f, NAN, -1.0f, INFINITY};
+    check(!perfGraphSampleVisible(0, false) && perfGraphSampleVisible(0, true), "graph: native measured zero remains distinct from a legacy missing sample");
+    check(!perfGraphSampleVisible(NAN, true) && !perfGraphSampleVisible(INFINITY, true) && !perfGraphSampleVisible(-1, true), "graph: missing/nonfinite observations remain gaps");
+    check(approx(perfGraphScale(values, 6, 0), 11) && perfGraphBand(10, 0) == -1, "graph: missing runtime reference autoscales without over-budget colours");
+    check(!perfGraphHasReference(NAN) && !perfGraphHasReference(-1), "graph: invalid references draw no line");
+    check(approx(perfGraphScale(values, 6, 8), 16) && perfGraphBand(8, 8) == 0 && perfGraphBand(9, 8) == 1 && perfGraphBand(17, 8) == 2, "graph: published reference sets scale and bands");
+    check(perfGraphScale(nullptr, 0, 0) > 0, "graph: empty/zero history has a finite scale");
+}
 
 void testPerfStats() {
     PerfRecentTimes recent;
@@ -1417,6 +1428,7 @@ int main(int argc, char** argv) {
     testAsymmetricProjection();
     testIniWrite();
     testPerfStats();
+    testPerfGraphs();
     testHotkeyRegisteredKeys();
     testKeyRepeatStep();
     testEditPrime();

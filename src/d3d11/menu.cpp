@@ -959,15 +959,22 @@ void buildMonitor(MenuContent& c) {
     // the render thread's own busy time.
     const int kinds[2] = {kGraphGpu, kGraphCpu};
     const char* names[2] = {"GPU", "CPU"};
+    const bool nativeGraphs = nativeMenuActive();
     c.graphCount = 0;
-    if (nativeMenuActive()) return; // Neither these series nor the refresh budget is published.
     for (int g = 0; g < 2; ++g) {
         MenuGraph& mg = c.graphs[c.graphCount];
         mg.count = perfMonitorGraph(kinds[g], mg.samples,
                                     static_cast<int>(sizeof(mg.samples) / sizeof(mg.samples[0])),
                                     &mg.budgetMs);
         if (!mg.count) continue;
-        snprintf(mg.label, sizeof(mg.label), "%s, last %d frames; the line is the %.1f ms budget",
+        mg.zeroIsValid = nativeGraphs;
+        if (nativeGraphs && mg.budgetMs > 0.0f)
+            snprintf(mg.label, sizeof(mg.label), "%s, %d samples; predicted period %.1f ms",
+                     g == 0 ? "Producer GPU" : "Submit wall", mg.count, double(mg.budgetMs));
+        else if (nativeGraphs)
+            snprintf(mg.label, sizeof(mg.label), "%s, %d samples; no runtime reference",
+                     g == 0 ? "Producer GPU" : "Submit wall", mg.count);
+        else snprintf(mg.label, sizeof(mg.label), "%s, last %d frames; the line is the %.1f ms budget",
                  names[g], mg.count, static_cast<double>(mg.budgetMs));
         ++c.graphCount;
     }

@@ -26,6 +26,7 @@
 #include "gpu_timing.h"
 #include "native_menu.h"
 #include "native_timing.h"
+#include "native_perf_history.h"
 
 namespace edvr {
 namespace {
@@ -128,6 +129,9 @@ struct QuerySlot {
 constexpr int kQueryRing = 6;
 
 struct State {
+    NativePerfHistory nativeHistory;
+    uint64_t nativeHistoryLogMs=0;
+    unsigned nativeHistoryReports=0;
     Frame    ring[kRing];
     int      head = 0;          // next write
     int      count = 0;
@@ -457,11 +461,14 @@ void dropLine(const Frame& f, float budgetMs) {
                  static_cast<unsigned long long>(inProgress ? inProgress - 1 : 0));
     }
     if (f.native) {
+        char reference[80];
+        if (budgetMs > 0.0f) snprintf(reference, sizeof(reference), "runtime predicted period %.1f ms", double(budgetMs));
+        else snprintf(reference, sizeof(reference), "runtime predicted period unavailable");
         Log::get().note(
-            "monitor: %s -- %.1f ms between Presents (native OpenXR reference budget unavailable), no "
+            "monitor: %s -- %.1f ms between Presents (%s), no "
             "WaitGetPoses, CPU busy, compositor, reprojection, or door samples; "
             "game creations: %u textures, %u buffers, %u shaders (%.1f MB); EDVR events: %s.%s",
-            f.dropped ? "DROPPED FRAME" : "LONG FRAME", static_cast<double>(f.presentMs),
+            f.dropped ? "DROPPED FRAME" : "LONG FRAME", static_cast<double>(f.presentMs), reference,
             f.createTextures, f.createBuffers, f.createShaders, static_cast<double>(f.createMb), ev, stamp);
         return;
     }
@@ -512,6 +519,7 @@ void noteDrop(const Frame& f, float budgetMs) {
 
 float budgetNow() {
     const State& s = g_s;
+    if (nativeMenuActive()) return static_cast<float>(s.nativeHistory.predictedPeriod(GetTickCount64()));
     const float hz = s.haveSample && s.lastSample.displayHz > 0.0f ? s.lastSample.displayHz : 0.0f;
     return hz > 0.0f ? 1000.0f / hz : 11.1f;
 }
@@ -533,6 +541,19 @@ void perfMonitorFrame(ID3D11Device* dev) {
     f.presentWaitMs = s.pendingPresentWaitMs;
     s.pendingPresentWaitMs = 0.0f;
     f.native = nativeMenuActive() ? 1 : 0;
+    // Independent completion histories: an asynchronous GPU result is not
+    // assigned to whichever Present happened to observe it.
+    if (f.native) {
+        const uint64_t historyNow=GetTickCount64();
+        s.nativeHistory.observe(true, nativeTimingSnapshot(), gpuFrameSnapshot(), historyNow);
+        if (s.nativeHistoryReports<60 && (!s.nativeHistoryLogMs || historyNow-s.nativeHistoryLogMs>=5000)) {
+            s.nativeHistoryLogMs=historyNow;++s.nativeHistoryReports;
+            const auto cpu=s.nativeHistory.submit(historyNow,200), gpu=s.nativeHistory.producer(historyNow,200);
+            const auto copy=s.nativeHistory.transfer(historyNow,200), compose=s.nativeHistory.compose(historyNow,200);
+            Log::get().note("native metrics history: 200ms window, submit %.3f ms (%u samples), producer %.3f ms (%u samples), XR copy %.3f ms (%u samples), XR compose %.3f ms (%u samples), predicted period %.3f ms; zero samples means unavailable; independent sources.",
+                cpu.meanMs,cpu.count,gpu.meanMs,gpu.count,copy.meanMs,copy.count,compose.meanMs,compose.count,s.nativeHistory.predictedPeriod(historyNow));
+        }
+    } else s.nativeHistory.clear();
     const auto waitUs = takeWaitCpuUs(); // Drain legacy accounting without attributing it to native frames.
     f.posesWaitMs = f.native ? 0.0f : static_cast<float>(waitUs) / 1000.0f;
     // EDVR's part: the events of the frame just ending, from both halves.
@@ -600,7 +621,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
     const float budget = budgetNow();
     if (settled && settled->dropped) {
         noteDrop(*settled, budget);
-    } else if (f.presentMs > 2.0f * budget && f.presentMs < 5000.0f) {
+    } else if (budget > 0.0f && f.presentMs > 2.0f * budget && f.presentMs < 5000.0f) {
         noteDrop(*ringLast(), budget);
     }
 
@@ -664,7 +685,7 @@ PerfRecentTimes recentTimes() {
 
 uint64_t nativeTimingAge(uint64_t capturedAtMs) {
     const uint64_t now = GetTickCount64();
-    return now >= capturedAtMs ? now - capturedAtMs : 0;
+    return capturedAtMs && now >= capturedAtMs ? now - capturedAtMs : UINT64_MAX;
 }
 
 bool nativeCpuReady(const NativeTimingSnapshot& timing) {
@@ -673,13 +694,15 @@ bool nativeCpuReady(const NativeTimingSnapshot& timing) {
 }
 
 bool nativeGpuReady(const NativeTimingSnapshot& timing, const GpuFrameSnapshot& gpu) {
-    return timing.active && timing.firstSequence && gpu.enabled && gpu.haveResult &&
+    const uint64_t observedAge = nativeTimingAge(gpu.capturedAtMs);
+    return timing.active && !timing.invalid && timing.firstSequence && gpu.enabled && gpu.haveResult &&
            gpu.result.reason == GpuSpanReason::Valid && gpu.result.sequence >= timing.firstSequence &&
-           gpu.result.ageMs + nativeTimingAge(gpu.capturedAtMs) <= 2000;
+           observedAge <= 2000 && gpu.result.ageMs <= 2000 - observedAge;
 }
 
 uint64_t nativeGpuAge(const GpuFrameSnapshot& gpu) {
-    return gpu.result.ageMs + nativeTimingAge(gpu.capturedAtMs);
+    const uint64_t age = nativeTimingAge(gpu.capturedAtMs);
+    return gpu.result.ageMs > UINT64_MAX - age ? UINT64_MAX : gpu.result.ageMs + age;
 }
 }
 
@@ -709,6 +732,10 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const GpuFrameSnapshot producerGpu = gpuFrameSnapshot();
     const bool haveNativeCpu = native && nativeCpuReady(nativeTiming);
     const bool haveNativeGpu = native && nativeGpuReady(nativeTiming, producerGpu);
+    const uint64_t historyNow = GetTickCount64();
+    const auto nativeSubmit = s.nativeHistory.submit(historyNow, 200);
+    const auto nativeWait = s.nativeHistory.wait(historyNow, 200);
+    const auto nativeRender = s.nativeHistory.producer(historyNow, 200);
     // The mean over fpsVR's own update window, so the two numbers can be
     // read side by side. Averaging the whole ten-second ring instead read
     // about a millisecond under it (flown 2026-09-07).
@@ -785,10 +812,9 @@ int perfMonitorTiles(PerfTile* out, int max) {
     } else {
         tile("GPU TIME", "--", noTiming);
     }
-    if (native && haveNativeCpu) {
-        const double wall = nativeTiming.cpu.submitMs[0] + nativeTiming.cpu.submitMs[1];
-        snprintf(v, sizeof(v), "%.1f", wall);
-        snprintf(sub, sizeof(sub), "ms stereo wall; wait %.1f", nativeTiming.waitMs);
+    if (native && haveNativeCpu && nativeSubmit.count) {
+        snprintf(v, sizeof(v), "%.1f", nativeSubmit.meanMs);
+        snprintf(sub, sizeof(sub), "ms, 200ms mean; wait %.1f", nativeWait.meanMs);
         tile("SUBMIT WALL", v, sub);
     } else if (ps.count && !native) {
         const PerfStats bs = perfStatsOf(busy, cnt);
@@ -806,9 +832,9 @@ int perfMonitorTiles(PerfTile* out, int max) {
     }
 
     // Row 2: the app's GPU share, and the drops.
-    if (native && haveNativeGpu) {
-        snprintf(v, sizeof(v), "%.1f", producerGpu.result.outerMs);
-        snprintf(sub, sizeof(sub), "ms producer span; excludes XR device");
+    if (native && haveNativeGpu && nativeRender.count) {
+        snprintf(v, sizeof(v), "%.1f", nativeRender.meanMs);
+        snprintf(sub, sizeof(sub), "ms, 200ms mean; producer only");
         tile("RENDER GPU", v, sub);
     } else if (compCnt && !native) {
         const PerfStats ag = perfStatsOf(appGpu, compCnt);
@@ -844,10 +870,11 @@ int perfMonitorTiles(PerfTile* out, int max) {
     {
         uint32_t ew = 0, eh = 0;
         const bool haveEye = eyeTextureSize(&ew, &eh);
-        if (native && nativeCpuReady(nativeTiming) && nativeTiming.predictedPeriodMs > 0.0) {
-            snprintf(v, sizeof(v), "--");
-            if (haveEye) snprintf(sub, sizeof(sub), "predicted period %.1f ms, %ux%u", nativeTiming.predictedPeriodMs, ew, eh);
-            else snprintf(sub, sizeof(sub), "predicted period %.1f ms", nativeTiming.predictedPeriodMs);
+        const double predicted = s.nativeHistory.predictedPeriod(historyNow);
+        if (native && haveNativeCpu && predicted > 0.0) {
+            snprintf(v, sizeof(v), "%.1f ms", predicted);
+            if (haveEye) snprintf(sub, sizeof(sub), "runtime prediction; %ux%u", ew, eh);
+            else snprintf(sub, sizeof(sub), "runtime prediction");
         } else if (hz > 0.0f) {
             snprintf(v, sizeof(v), "%.0f Hz", hz);
             if (haveEye) snprintf(sub, sizeof(sub), "%.1f ms budget, %ux%u", budget, ew, eh);
@@ -859,7 +886,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
             snprintf(v, sizeof(v), "--");
             snprintf(sub, sizeof(sub), "not published yet");
         }
-        tile("DISPLAY", v, sub);
+        tile(native ? "XR PERIOD" : "DISPLAY", v, sub);
     }
     if (s.cpuSystemPct >= 0.0f) {
         snprintf(v, sizeof(v), "%.0f%%", s.cpuSystemPct);
@@ -903,7 +930,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
         if (native) {
             char xr[32] = "--";
             const char* xrSub = "native timing unavailable";
-            if (nativeTiming.active && nativeTiming.firstSequence) {
+            if (nativeTiming.active && !nativeTiming.invalid && nativeTiming.firstSequence) {
                 if (!nativeTiming.haveDeviceGpu) {
                     xrSub = "pending";
                 } else {
@@ -924,11 +951,13 @@ int perfMonitorTiles(PerfTile* out, int max) {
                     } else if (sample.status == EdvrNativeGpuNotSeparate) {
                         xrSub = "N/A; not separate";
                     } else if (sample.status == EdvrNativeGpuValid) {
-                        snprintf(xr, sizeof(xr), "%.1f+%.1f",
-                                 sample.transferMs[0] + sample.transferMs[1],
-                                 sample.composeMs[0] + sample.composeMs[1]);
-                        snprintf(sub, sizeof(sub), "ms stereo; EDVR on XR device");
-                        xrSub = sub;
+                        const auto copy = s.nativeHistory.transfer(historyNow, 200);
+                        const auto compose = s.nativeHistory.compose(historyNow, 200);
+                        if (copy.count && compose.count) {
+                            snprintf(xr, sizeof(xr), "%.2f / %.2f", copy.meanMs, compose.meanMs);
+                            snprintf(sub, sizeof(sub), "ms, 200ms mean; XR device only");
+                            xrSub = sub;
+                        } else xrSub = "no recent samples";
                     } else {
                         xrSub = "unavailable";
                     }
@@ -1067,6 +1096,8 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs) {
     State& s = g_s;
     if (budgetMs) *budgetMs = budgetNow();
     if (!out || max <= 0) return 0;
+    if (nativeMenuActive() && (which == kGraphGpu || which == kGraphCpu))
+        return s.nativeHistory.graph(which == kGraphGpu, out, max, GetTickCount64());
     const int n = s.count < max ? s.count : max;
     for (int i = 0; i < n; ++i) {
         const Frame& f = ringAt(s.count - n + i);
@@ -1106,9 +1137,10 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     if (nativeMenuActive()) {
         const NativeTimingSnapshot timing = nativeTimingSnapshot();
         const GpuFrameSnapshot gpu = gpuFrameSnapshot();
-        const bool haveGpu = nativeGpuReady(timing, gpu);
+        const auto render = s.nativeHistory.producer(GetTickCount64(), 200);
+        const bool haveGpu = nativeGpuReady(timing, gpu) && render.count;
         if (haveGpu)
-            snprintf(buf, bufLen, "%.0f fps   period %.1f ms   producer span %.1f ms", perfFpsOf(ps.avgMs), ps.avgMs, gpu.result.outerMs);
+            snprintf(buf, bufLen, "%.0f fps   period %.1f ms   producer %.1f ms (200ms mean)", perfFpsOf(ps.avgMs), ps.avgMs, render.meanMs);
         else
             snprintf(buf, bufLen, "%.0f fps   period %.1f ms   producer span unavailable", perfFpsOf(ps.avgMs), ps.avgMs);
         return;
@@ -1135,6 +1167,7 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
 
 void perfMonitorShutdown() {
     State& s = g_s;
+    s.nativeHistory.clear();
     if (s.adapter3) {
         s.adapter3->Release();
         s.adapter3 = nullptr;

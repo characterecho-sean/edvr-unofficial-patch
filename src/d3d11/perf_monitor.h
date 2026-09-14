@@ -60,6 +60,9 @@ void perfMonitorLastDropLine(char* buf, size_t bufLen);
 // the two as separate strips, and a frame over budget on one of them is a
 // different problem from a frame over budget on the other.
 enum PerfGraph { kGraphGpu = 0, kGraphCpu = 1, kGraphPeriod = 2 };
+// Native mode uses independent unique completion samples for kGraphGpu
+// (producer span) and kGraphCpu (Submit wall), not compositor CPU/GPU frames.
+// The reference is the fresh runtime-predicted period, or 0 if unavailable.
 int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 
 // The one-line readout for the head-locked overlay (menu.fps_overlay):

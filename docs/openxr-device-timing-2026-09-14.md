@@ -100,9 +100,11 @@ separate gates.
 
 ## Remaining port work
 
-After measurement qualification, compare actual input/output dimensions and
-temporal settings against the established path, then address measured
-performance or image differences. Remaining submission features include terrain
+The user has deferred performance comparisons. Complete the [native
+monitor-history and metric-presentation
+gate](openxr-metrics-parity-2026-09-14.md), then proceed with feature
+migration. A later performance comparison must match actual input/output
+dimensions and temporal settings. Remaining submission features include terrain
 overscan/cropping, supersample resolve and sharpening, withholding, Explorer
 Cam, theater/heal and gaze foveation. Each needs its own
 pose/projection/history correctness checks and appropriate in-game transitions.

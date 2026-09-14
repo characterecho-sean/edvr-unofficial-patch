@@ -93,6 +93,7 @@ struct MenuGraph {
     float samples[120];
     int   count = 0;        // how many samples; 0 draws nothing
     float budgetMs = 11.1f;
+    bool zeroIsValid = false; // Native history distinguishes measured zero from missing data.
     char  label[64];
 };
 constexpr int kMenuMaxGraphs = 2;
