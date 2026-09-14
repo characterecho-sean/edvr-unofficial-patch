@@ -4,6 +4,10 @@ For the implemented DLSS path, see the
 [2026-09-10 performance review](review-dlss-performance-2026-09-10.md), including
 flight measurements and isolated GPU experiments. The design below is historical.
 
+See the [September 14 foveated DLSS design](foveated-dlss-design-2026-09-14.md)
+for the current native OpenXR assessment, updated upstream stereo support,
+and the unresolved temporal-quality tradeoff.
+
 *A design document, written before the code. Claims about EDVR cite the
 source; claims about runtimes, drivers and SDKs are labelled measured
 (established in this repo's field logs or code), vendor-stated (their
