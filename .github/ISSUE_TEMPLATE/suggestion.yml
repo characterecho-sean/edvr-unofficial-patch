@@ -1,0 +1,56 @@
+name: A suggestion
+description: Something EDVR could do, or do differently. For something broken, use the fix template instead — it asks for the log, which is usually the whole answer.
+title: "[suggestion] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things before you write it up. **What EDVR can reach** is the picture on its way to your headset and the game's Direct3D calls; it cannot touch sound, the network, or anything the server decides, and a few things have been measured as unreachable — the README's *What it does and does not do* and [docs/fixes.md](https://github.com/characterecho-sean/edvr-unofficial-patch/blob/main/docs/fixes.md) say which. And **a look through the open issues** — the thing you want may already have a thread with the measurements in it.
+
+        The most useful suggestion here describes what you would *see or feel in the headset*, and how that differs from what the game does now. How to build it is my problem, and guesses about the mechanism tend to age badly.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you would like
+      description: What it would look like in the headset, as plainly as you can put it. If it is something the game does wrong only in VR — fine on a monitor, wrong in a headset — say so; that is what most of the fixes here are.
+    validations:
+      required: true
+
+  - type: textarea
+    id: now
+    attributes:
+      label: What it is like now
+      description: What the game (or EDVR) does today, and whether that is the game's own behaviour or something one of EDVR's settings already changes. If a setting nearly does what you want, name it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it applies
+      options:
+        - In the ship
+        - On foot
+        - The intro, the menus and loading
+        - The cockpit interface and HUD
+        - Anti-aliasing and performance
+        - The installer, edvr.ini or the in-headset menu
+        - Somewhere else, or everywhere
+    validations:
+      required: false
+
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and runtime (optional)
+      description: Which headset, and what it runs through — SteamVR, OpenComposite (Virtual Desktop, PiOpenXR), Oculus. Some things depend on it; a Quest over Link is not on the same path as a Quest over Steam Link.
+      placeholder: Pimax Crystal Super via SteamVR
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else (optional)
+      description: |
+        A screenshot or a short video of the thing, if it is something you can see. A link to a Frontier issue-tracker entry if one exists. If it is about performance, the zip from the installer's **Save logs** is still the most useful thing you can attach — the log prices every pass EDVR runs.
