@@ -7,6 +7,19 @@ backend paths are required; separate legacy artifacts serve qualification and
 explicit rollback only. Native OpenXR is the destination standard release, not
 a permanent opt-in backend.
 
+The [Air Link menu and exit retest](openxr-airlink-menu-exit-2026-09-14.md)
+passed on the pair reviewed in `5b9dc99`. The native backend now preserves
+validated eye calibration across recentering, keeps polling after a stopped
+session, resumes with monotonic published frame sequences and exposes terminal
+runtime events through OpenVR Quit. The full build and real TAA/DLSS/sharpening
+checks passed. Sean reported a perfect retest; matching Quest 3/Air Link logs
+confirm Windows selected the Oculus OpenXR runtime, 180% resolution, retained
+optics through two recenters, 13,918 stereo pairs with zero pose failures and
+complete shutdown without retained resources. Elite's audited LibOVR probe was
+rejected twice with zero routing failures. This qualifies the reported Air Link
+startup/menu/exit path, not every supported feature or the full cross-runtime
+matrix. Detailed evidence and the remaining scope are in that checkpoint.
+
 The [supported feature batch and consolidated
 retest](openxr-feature-parity-2026-09-14.md) connects physical pose
 publication, Explorer Cam, terrain cull guard, completed stereo replay for
@@ -25,9 +38,10 @@ capability; its installer validates the matching DLL pair and exact supported
 executable before writing. The wrapper checks both the caller and DLL basename,
 preserves unrelated loads, and records its decisions in `edvr_logs`. Windows
 continues to select the OpenXR runtime. This implements the entry-path fix;
-live Meta/Oculus fallback, the cross-runtime regression matrix and release
-installer migration remain qualification work. Desktop and installed-build
-evidence is recorded in that checkpoint.
+live Meta/Air Link fallback is now confirmed by the retest above. The
+cross-runtime regression matrix and release installer migration remain
+qualification work. Desktop and installed-build evidence is recorded in that
+checkpoint.
 
 The user has deferred performance comparisons and prioritized metrics, then
 features. The [native monitor-history
@@ -80,7 +94,8 @@ pair and configuration were installed and hash-verified in Frontier. The first
 VDXR flight selected the expected runtime but failed during game startup; the
 corrected flight above qualifies the timing data path. The [legacy Oculus
 selection investigation](openxr-oculus-selection-2026-09-14.md) is recorded
-separately; no LibOVR suppression is implemented yet.
+separately; subsequent LibOVR suppression and the successful Air Link flight
+are summarized above.
 
 The [native timing checkpoint](openxr-native-timing-2026-09-13.md) now measures
 CPU wall phases and connects native waits/submits to the existing producer GPU

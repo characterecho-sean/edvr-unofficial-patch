@@ -203,7 +203,7 @@ and original OpenVR DLL were preserved; runtime selection remains `system`. The
 private qualification archive is `build/openxr-airlink-menu-exit-20260914`. No
 game was launched by the agent.
 
-## Next Air Link flight
+## Air Link retest checklist
 
 1. Check Elite's main-menu text in both eyes before changing anything. The
    saved 180% render scale will apply at startup.
@@ -214,6 +214,34 @@ game was launched by the agent.
    preceded it. Compare the desktop mirror if available.
 4. Select Elite's own Quit option and verify that the process exits normally.
 
-Desktop checks validate the confirmed calibration and lifecycle defects. Menu
-visibility and normal Air Link game exit remain unqualified until this flight;
-the absent interface input has not yet been causally traced to either fix.
+## Successful Air Link retest
+
+Sean reported "Worked perfectly this time" after the checklist above. Both
+flight logs identify the installed `v0.16.2-95-g12152c5-dirty` pair reviewed in
+`5b9dc99`; the installer also verified the current pair and configuration. The
+Windows-selected runtime is Oculus. Startup captured 180% resolution, 3283x3542
+per eye from the runtime's 1824x1968 recommendation. The culling guard later
+recommended 4079x3542 game buffers. DLSS engaged in both eyes.
+
+The native trace records seated resets at 16:59:10.805 and 16:59:13.264 UTC.
+Immediate game queries correctly retain `optics_valid=1` at sequences 1857 and
+2018 while frame geometry is invalid. The run completes 13,918 stereo pairs
+with zero pose, temporal-treatment or wrong-thread failures. Graphics temporal
+totals report 27,811 treated eyes, zero missing projections and no stand-down.
+Resolution percentage edits are not separately present in these logs; the
+user's success report supplies the visual result of the requested retest.
+
+Elite enters native shutdown at 17:02:00.892 UTC and finishes at 17:02:01.369
+UTC. Every recorded teardown stage succeeds; the final module summary reports
+`owner_joined=1,cleanup=1,callback_retired=1,retained=0`. The game process is
+no longer running. This qualifies the reported menu retest, recenter behavior
+and normal Air Link game exit for this pair.
+
+The two logs are archived under
+`build/openxr-airlink-menu-exit-20260914/airlink-retest-105838`, with hashes
+and the user's report in the qualification record. STOPPING/resume and terminal
+Quit event delivery were not exercised by this successful flight; their
+injected-dispatch regression coverage remains distinct. The successful menu
+result does not isolate which correction resolved the previously absent
+interface input. Cross-runtime feature qualification and release installer
+migration remain separate work.
