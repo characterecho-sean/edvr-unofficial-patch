@@ -7,6 +7,7 @@
 #include "present_device.h"
 #include "../../src/openxr/render_shutdown.h"
 #include "../../src/openxr/native_render_binding.h"
+#include "launch_centre_cases.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -198,6 +199,8 @@ int run(const Options& options,PresentHost* present=nullptr) {
     initToken,windowWidth,windowHeight);
   compositor->SetTrackingSpace(vr::TrackingUniverseSeated);
   if(compositor->GetTrackingSpace()!=vr::TrackingUniverseSeated)return 3;
+  uint64_t startupRecenters=0;
+  if(!backend.owner.invoke([&]{startupRecenters=host.recenters;}))return 3;
   bool resetsPassed=true;
   if(!systemClient.invoke([&]{
     for(unsigned reset=0;reset<2;++reset) {
@@ -209,7 +212,7 @@ int run(const Options& options,PresentHost* present=nullptr) {
         atEvent.bPoseIsValid&&!system->PollNextEvent(&event,sizeof(event));
       bool stateValid=false;
       if(!backend.owner.invoke([&]{
-        stateValid=host.recenters==reset+1&&host.lastResetResult==XR_SUCCESS&&!host.read().geometryValid&&
+        stateValid=host.recenters==startupRecenters+reset+1&&host.lastResetResult==XR_SUCCESS&&!host.read().geometryValid&&
           cache!=vr::VRCompositorError_None&&!stale.bPoseIsValid&&host.resetPositionError<=.01f&&host.resetYawError<=.01f;
         std::printf("seated_reset,count=%llu,time=%lld,origin_generation=%llu,position_error=%g,yaw_error=%g,event=804,cache_invalidated=%u\n",
           (unsigned long long)host.recenters,(long long)host.lastResetTime,(unsigned long long)host.compositorRead().originGeneration,
@@ -455,7 +458,7 @@ int run(const Options& options,PresentHost* present=nullptr) {
   std::printf("summary,frames=%llu,stereo=%llu,empty=%llu,valid_views=%llu,invalid_views=%llu,valid_head=%llu,normal_stop=%u,cleanup=%u\n",
     (unsigned long long)frames,(unsigned long long)layers,(unsigned long long)empty,(unsigned long long)valid,(unsigned long long)invalid,
     (unsigned long long)headValid,unsigned(stopped),unsigned(cleanup));
-  const bool passed=!failed && stopped && cleanup && renderGate && layers && headValid && bootstrapComplete &&host.recenters==2&&host.resetPolls==2&&
+  const bool passed=!failed && stopped && cleanup && renderGate && layers && headValid && bootstrapComplete &&host.recenters==startupRecenters+2&&host.resetPolls==2&&
     systemQueries&&validSystemQueries&&host.eventPumps>beforePumps&&loadingGate&&host.skyboxSets==1&&host.skyboxClears==1&&
     host.loadingToScene==1&&host.loadingLayers>=2&&host.loadingFrames==host.loadingLayers+host.loadingEmpty&&!host.skybox.ready()&&
     host.copiedEyes==layers*2 && host.composedPairs==layers && host.compositorSubmits==layers*2 &&
@@ -533,6 +536,7 @@ int runWithPresent(const Options& options) {
 }
 int selfTest() {
   unsigned checks=0,failures=0;auto check=[&](bool yes,const char* msg){++checks;if(!yes){++failures;std::printf("FAIL: %s\n",msg);}};
+  edvr::openxr::test::runLaunchCentreCases(check);
   Options o;
   check(parse({L"--loader",L"C:\\runtime\\loader.dll"},o)&&o.seconds==10,"default duration");
   check(parse({L"--seconds",L"60",L"--loader",L"D:/a.dll"},o)&&o.seconds==60,"bounded duration");

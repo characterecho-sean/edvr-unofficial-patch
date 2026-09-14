@@ -177,7 +177,7 @@ void nativeRenderBindingFrameWork(const std::wstring& path,
   std::atomic<unsigned> frameCalls{0}, queuedCalls{0}; std::atomic<DWORD> frameThread{0};
   std::atomic<bool> frameOrder{true};
   NativeRenderBinding binding;
-  Event registered, queueReady;
+  Event registered, firstPresented, queueReady;
   std::thread init([&] {
     const HRESULT acquired=binding.acquire(path,[&] {
       const unsigned call=++frameCalls; frameThread.store(GetCurrentThreadId(),std::memory_order_release);
@@ -189,6 +189,10 @@ void nativeRenderBindingFrameWork(const std::wstring& path,
     if(acquired!=S_OK)return;
     check(binding.waitForRender(std::chrono::seconds(2)),"frame work binding reaches Present");
     if(binding.renderThread()) {
+      // waitForRender wakes inside the first Present callback, before its
+      // queue pump. Submit only after that Present returns so this fixture
+      // actually tests work waiting for the next Present, on every schedule.
+      if(!firstPresented.wait()){check(false,"first frame Present returns before queuing");return;}
       queueReady.signal();
       const bool queued=binding.work().invoke([&]{++queuedCalls;});
       check(queued,"frame work test queues render work");
@@ -196,6 +200,7 @@ void nativeRenderBindingFrameWork(const std::wstring& path,
   });
   check(registered.wait(),"frame work registration completes");
   check(SUCCEEDED(present.present()),"frame work first Present succeeds");
+  firstPresented.signal();
   check(queueReady.wait()&&reaches([&]{return binding.work().pending()==1;}),
         "frame work request waits for next Present");
   check(SUCCEEDED(present.present()),"frame work second Present succeeds");

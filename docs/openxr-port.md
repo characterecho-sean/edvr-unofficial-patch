@@ -429,10 +429,13 @@ rings, temporal history and stereo shadows together at a frame boundary.
 [Reference-space
 contract](https://raw.githubusercontent.com/KhronosGroup/OpenXR-Docs/main/specification/sources/chapters/spaces.adoc).
 
-Preserve `fix.launch_centre`'s user choice: today `auto` enables it only under
-OpenComposite, `on` enables it explicitly and `off` disables it. A
-runtime-independent implementation needs an agreed new Auto policy; do not
-silently centre everyone on first pose, particularly users who chose off.
+The user approved unconditional native startup centering on 2026-09-14: native
+OpenXR always establishes its seated origin from a trustworthy tracked head
+position and horizontal heading before exposing startup geometry. It has no
+toggle and is independent of runtime vendor. The legacy OpenVR path retains
+`fix.launch_centre` and its current `auto` / `on` / `off` policy. See the
+[native startup-centering checkpoint](openxr-launch-centre-2026-09-14.md) for
+tracking readiness, startup bounds and reference-space lifetime handling.
 
 Synthesize only events whose OpenVR semantics are defined and exercised. A
 FOCUSED transition alone does not prove a dashboard opened or closed; an
@@ -647,7 +650,7 @@ misleading percentage. Preserve unavailable values when there is no source.
 | `advanced.compositor_timing` | Enables existing compositor timing collection | Define separate measured-source behaviour before changing this switch; never make local queries depend accidentally on a legacy timing decoder |
 | `advanced.app_gpu_timing` | Enables the local render-to-submit instrument independently; source and age appear alongside SteamVR | Reuse the owner/frame policy with validated OpenXR boundary publication |
 | `fix.vr_handover` | `early` submitted a 1x1 texture before the game's compositor calls; `stock` did not | **Removed 2026-09-13** ahead of its replacement (`early_session.cpp` gone with it); the channel's game-device field it introduced stays for the cull guard's presence test |
-| `fix.launch_centre` | `auto` is OpenComposite-only; `on`/`off` explicit | Preserve explicit choice; review new Auto policy before changing behaviour |
+| `fix.launch_centre` | Legacy OpenVR: `auto` is OpenComposite-only; `on`/`off` explicit | Native always centers at startup, without a toggle, as approved 2026-09-14 |
 
 The OpenXR loader/SDK and OpenVR declarations must retain their upstream
 license notices. Forking OpenComposite would be a different project and

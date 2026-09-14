@@ -11,12 +11,19 @@ sharpening and logging checkpoint](openxr-native-sharpen-2026-09-14.md)
 restores `fix.render_sharpness`, moves native traces to `edvr_logs` beside the
 game, and restores the floating monitor's CPU readout with the requested
 compact `gpu`/`cpu` labels. The full build passed with 511 unchanged source
-hashes, and both real-shader configurations passed. The paired DLLs are
-installed and hash-verified in Frontier; manual verification is next. The user
-has excluded features listed under `[experimental]` from this parity work:
-supersample resolve, FSS theater and gaze foveation are deferred. This scope
-change does not remove existing settings or alter temporal AA already
-implemented.
+hashes, and both real-shader configurations passed. The matching SteamVR/OpenXR
+flight confirms working sharpening, with 2,831 sharpened pairs and complete
+native teardown. The user reported a startup origin behind and above them; the
+[startup-centering checkpoint](openxr-launch-centre-2026-09-14.md) addresses
+the missing native startup reset. At the user's request, native OpenXR always
+launches centered on a trustworthy tracked pose, with no toggle; legacy OpenVR
+retains its settings. The full build passed with 514 unchanged source hashes,
+24 policy checks and 60 native host checks. The new pair is installed and
+hash-verified in Frontier; the startup-facing headset check is next. Detailed
+qualification is recorded in that checkpoint. The user has excluded features
+listed under `[experimental]` from this parity work: supersample resolve, FSS
+theater and gaze foveation are deferred. This scope change does not remove
+existing settings or alter temporal AA already implemented.
 
 The [VDXR startup investigation](openxr-vdxr-startup-2026-09-14.md) confirms
 that Windows runtime selection reached VirtualDesktopXR successfully. Elite

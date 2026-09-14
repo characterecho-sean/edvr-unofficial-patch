@@ -1184,6 +1184,13 @@ if errorlevel 1 ( echo [edvr] ERROR: owned OpenVR system test build failed & exi
 "%BUILD%\openxr_system_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_system_test.exe" --self-test || exit /b 1
 
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_launch_centre_test.exe" ^
+    "tools\openxr_launch_centre_test\openxr_launch_centre_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: OpenXR launch centering test build failed & exit /b 1 )
+"%BUILD%\openxr_launch_centre_test.exe" --dry-run || exit /b 1
+"%BUILD%\openxr_launch_centre_test.exe" --self-test || exit /b 1
+
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_native\\" /Fe"%BUILD%\openxr_compositor_test.exe" ^
     "tools\openxr_compositor_test\openxr_compositor_test.cpp" "tools\openxr_compositor_test\abi_caller.cpp" ^

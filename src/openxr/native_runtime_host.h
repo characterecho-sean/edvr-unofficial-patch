@@ -47,6 +47,7 @@
 #include "compositor_publication.h"
 #include "space_pose.h"
 #include "seated_origin.h"
+#include "launch_centre_policy.h"
 #include "seated_space.h"
 #include "reference_changes.h"
 #include "reset_events.h"
@@ -127,6 +128,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   BridgeCounts bridgeCounts=nullptr;
   RuntimeOptions startupOptions;
   uint64_t starts=0,stops=0,startupFrames=0;
+  LaunchCentrePolicy launchCentre;
+  uint64_t launchCentreSamples=0,launchCentreBegan=0;
   uint64_t eventPumps=0;
   std::atomic<uint64_t> publishedPumps{0};
   bool serviceStopped=false,serviceFailed=false;
@@ -223,6 +226,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(closeDiagnosticFrame()!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
       const auto snapshot=read();
       if(snapshot.geometryValid) {
+        // No game interface or loading callback has escaped Init yet. Finish
+        // this zero-layer frame before replacing its space, then obtain a new
+        // geometry snapshot before publishing the interfaces to Elite.
+        if(launchCentre.pending()) {
+          bool refresh=false;
+          if(!centreAtStartup(refresh))return vr::VRInitError_Init_Internal;
+          if(refresh)continue;
+        }
         out={&systemInterface,&compositorInterface,&chaperoneInterface,&displayInterface};
         nativeTracePrintf("runtime_startup,token=%u,zero_layer_frames=%llu,geometry_sequence=%llu,prior_submits=%llu,geometry_ready=1\n",
           token,(unsigned long long)startupFrames,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)compositorSubmits);
@@ -676,11 +687,20 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow);
     if(lastResetResult!=XR_SUCCESS)return false;
+    return applySeatedReset(head,"seated_reset",true);
+  }
+  // Owner-only, with no open frame. Both startup and explicit game resets
+  // use a pose in the natural LOCAL space, so resets never accumulate offsets.
+  bool applySeatedReset(const XrSpaceLocation& head,const char* reason,bool notifyGame) {
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen()||!seated.space()||
+       (notifyGame&&!resetEvents.room(geometryGeneration))) {
+      lastResetResult=XR_ERROR_CALL_ORDER_INVALID;return false;
+    }
     XrPosef origin{};
     if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
     lastResetResult=seated.replace(origin);
-    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(generation);poses.invalidate(compositorGeneration);return false;}
-    if(!invalidateOrigin("seated_reset")){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
+    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);return false;}
+    if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
     lastResetResult=locateHeadAt(api.locateSpace,view,seated.space(),lastResetTime,true,atReset);
@@ -689,10 +709,49 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto& matrix=atReset.pose.mDeviceToAbsoluteTracking.m;
     resetPositionError=std::sqrt(matrix[0][3]*matrix[0][3]+matrix[1][3]*matrix[1][3]+matrix[2][3]*matrix[2][3]);
     resetYawError=std::fabs(std::atan2(matrix[0][2],matrix[2][2]));
-    if(!resetEvents.push(generation,poses.read().originGeneration,GetTickCount64(),atReset.pose)){
+    if(notifyGame&&!resetEvents.push(geometryGeneration,poses.read().originGeneration,GetTickCount64(),atReset.pose)){
       lastResetResult=XR_ERROR_LIMIT_REACHED;return false;
     }
     ++recenters;return true;
+  }
+  bool centreAtStartup(bool& refresh) {
+    refresh=false;
+    if(!launchCentre.pending())return true;
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen())return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||!state.running()||state.terminal()||!changes.active())return false;
+    const auto now=GetTickCount64();
+    if(!launchCentreSamples)launchCentreBegan=now;
+    ++launchCentreSamples;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow);
+    // A temporarily unavailable current-time pose must not trigger a reset
+    // using a cached/predicted pose or extend startup indefinitely.
+    if(lastResetResult!=XR_SUCCESS&&lastResetResult!=XR_ERROR_TIME_INVALID&&lastResetResult!=XR_ERROR_POSE_INVALID)
+      return result("launch_centre_locate",lastResetResult);
+    if(lastResetResult!=XR_SUCCESS)head.locationFlags=0;
+    auto decision=launchCentre.consider(head.pose,head.locationFlags);
+    if(decision==LaunchCentreDecision::Wait&&now-launchCentreBegan>=2000)decision=launchCentre.expire();
+    if(decision==LaunchCentreDecision::Wait) {
+      if(launchCentreSamples==1)nativeTracePrintf("native_launch_centre,waiting_for_tracking=1,flags=%llu,result=%d\n",
+          (unsigned long long)head.locationFlags,int(lastResetResult));
+      refresh=true;return true;
+    }
+    if(decision==LaunchCentreDecision::Centre) {
+      nativeTracePrintf("native_launch_centre,applying=1,samples=%llu,position=%.6f/%.6f/%.6f,orientation=%.6f/%.6f/%.6f/%.6f,flags=%llu\n",
+        (unsigned long long)launchCentreSamples,double(head.pose.position.x),double(head.pose.position.y),double(head.pose.position.z),
+        double(head.pose.orientation.x),double(head.pose.orientation.y),double(head.pose.orientation.z),double(head.pose.orientation.w),
+        (unsigned long long)head.locationFlags);
+      if(!applySeatedReset(head,"launch_centre",false)) {
+        result("launch_centre_reset",lastResetResult);return false;
+      }
+      nativeTracePrintf("native_launch_centre,applied=1,position_error=%.6f,yaw_error_rad=%.6f,origin_generation=%llu\n",
+        double(resetPositionError),double(resetYawError),(unsigned long long)poses.read().originGeneration);
+      refresh=true;return true;
+    }
+    nativeTracePrintf("native_launch_centre,tracking_deadline=1,samples=%llu,elapsed_ms=%llu,origin_unchanged=1\n",
+        (unsigned long long)launchCentreSamples,(unsigned long long)(now-launchCentreBegan));
+    return true;
   }
   bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);})&&result;}

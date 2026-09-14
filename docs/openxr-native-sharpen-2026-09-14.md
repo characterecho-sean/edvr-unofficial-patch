@@ -96,9 +96,16 @@ The paired `v0.16.2-88-gbe44d38-dirty` DLLs are installed and hash-verified in
 Frontier. The game INI and original OpenVR DLL were preserved, and startup
 remains `runtime=system`. Exact sources, binaries, build and shader-test logs,
 and installer verification are archived locally under
-`build/openxr-native-sharpen-20260914/`. The manual gate remains pending.
+`build/openxr-native-sharpen-20260914/`.
 
-The next manual Frontier gate is normal rendering/menu behavior, checking the
-floating `gpu`/`cpu` values, changing F8's Sharpening control from zero to a
-visible strength and back, and normal exit. Both-eye engagement and clean
-teardown must be visible in the matching logs under `edvr_logs`.
+The matching 06:46 Frontier flight passed sharpening: the user reports that it
+works, and SteamVR/OpenXR logs show 2,831 sharpened stereo pairs, 6,000
+disabled eye submissions, no sharpening refusals and no standdown. The full run
+contains 5,831 stereo pairs with no pose or graphics-thread failures and all
+ten native shutdown stages complete. Both logs are under `edvr_logs` and
+archived in `flight-sharpen-success-064627/`. The floating monitor was not
+separately confirmed by the user in this run.
+
+This flight also exposed a startup origin behind and significantly above the
+user. Native startup centering is the next supported feature, tracked in the
+[startup-centering investigation](openxr-launch-centre-2026-09-14.md).
