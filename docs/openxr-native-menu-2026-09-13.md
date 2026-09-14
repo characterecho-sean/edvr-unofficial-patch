@@ -67,7 +67,7 @@ Frontier files:
 
 The game was closed for installation. The original OpenVR DLL (`243a818d...`)
 and live game INI (`22f91f84...`) retained their hashes. No launcher was
-started. Manual Frontier qualification remains pending.
+started. The first manual result is recorded below.
 
 ## Manual Frontier flight
 
@@ -88,3 +88,16 @@ Close the menu and exit the game normally. Collect the matching graphics and
 native logs, confirm `source=local`, nonzero menu captures for both eyes and
 completed native shutdown with callback retirement. Treat submission effects
 that remain pending separately from bootstrap, menu and transport failures.
+
+## First manual flight result
+
+The menu now opens and closes in the native Frontier path. The installed pair
+still verifies, and flight evidence confirms local startup, menu submission in
+both eyes and complete native resource/callback teardown. Both-eye appearance,
+anchoring during head movement and normal game exit are confirmed. No code or
+installed files changed while recording this result.
+
+Detailed flight evidence remains local. The existing startup pose-query warning
+remains open, and this flight does not qualify loading overrides or pending
+native submission effects. Next is the remaining eye-processing chain,
+including geometry and motion data required by temporal AA/DLSS.

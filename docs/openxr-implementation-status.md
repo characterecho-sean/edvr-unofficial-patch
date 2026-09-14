@@ -1,5 +1,12 @@
 # OpenXR implementation status
 
+The native menu checkpoint has completed its first manual Frontier flight.
+Local startup, menu submission in both eyes and internal native teardown are
+confirmed; the menu opens and closes successfully. Both-eye appearance,
+anchoring during head movement and normal exit are also confirmed. Detailed
+evidence remains local. Next is the remaining native eye-processing chain and
+temporal AA/DLSS data.
+
 The [manual-launch and menu checkpoint](openxr-native-menu-2026-09-13.md) is
 installed and verified in Frontier. Native startup now supports adjacent
 configuration, the native compositor connects EDVR's menu through the game
@@ -10,10 +17,8 @@ identifies native OpenXR correctly. Parent review corrected configuration
 reachability, lifecycle admission, pose retirement, frustum/flip handling and
 test coverage in Luna's implementation. The full build passed with all 485
 source hashes unchanged, including 40 real menu/client/shared-copy checks and
-14 local-bootstrap checks. Restart the Frontier launcher once and launch
-manually with PiOpenXR and SteamVR closed to test F8 and normal exit. This
-flight remains pending. Native temporal AA and the other legacy submission
-effects remain unported.
+14 local-bootstrap checks. The first manual result is recorded above. Native
+temporal AA and the other legacy submission effects remain unported.
 
 The [first native Frontier
 flight](openxr-frontier-entry-2026-09-13.md#first-native-frontier-flight)
