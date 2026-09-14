@@ -234,6 +234,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDlaaCounts ^
     --extra-export edvrMenuPanel ^
     --extra-export edvrAcquireNativeMenu ^
+    --extra-export edvrAcquireNativeTemporal ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
     --extra-export edvrCensusBeginVr ^
@@ -316,6 +317,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
     "src\d3d11\native_menu.cpp" ^
+    "src\d3d11\native_temporal.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
@@ -632,6 +634,25 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: native menu test build failed & exit /b 1 )
 "%BUILD%\native_menu_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_menu_test.exe" --self-test || exit /b 1
+
+echo [edvr] === native_temporal_test.exe ===
+if not exist "%OBJ%\native_temporal" mkdir "%OBJ%\native_temporal"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
+    "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
+    "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native temporal test build failed & exit /b 1 )
+"%BUILD%\native_temporal_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_temporal_test.exe" --self-test || exit /b 1
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_gpu_test.exe" ^
+    "tools\native_temporal_test\native_temporal_gpu_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: native temporal GPU test build failed & exit /b 1 )
+"%BUILD%\native_temporal_gpu_test.exe" --dry-run || exit /b 1
 
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout

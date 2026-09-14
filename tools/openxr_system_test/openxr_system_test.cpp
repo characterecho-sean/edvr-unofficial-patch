@@ -50,6 +50,8 @@ struct FakeSource final : SystemSource {
   float locatedPrediction = 0;
   vr::ETrackingUniverseOrigin locatedOrigin = vr::TrackingUniverseRawAndUncalibrated;
   unsigned locateCalls = 0, resetCalls = 0, pollCalls = 0;
+  unsigned projectionNotes = 0; uint64_t notedSequence = 0; unsigned notedEye = 99;
+  float notedNear = 0, notedFar = 0;
   std::atomic<unsigned> unsupportedCalls{0};
 
   explicit FakeSource() {
@@ -83,6 +85,10 @@ struct FakeSource final : SystemSource {
     if (generation != state.generation || !state.connected) return false;
     event = {}; event.eventType = vr::VREvent_TrackedDeviceActivated; event.trackedDeviceIndex = 0;
     pose = {}; pose.bPoseIsValid = true;pose.mDeviceToAbsoluteTracking.m[2][3]=1234; return true;
+  }
+  void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex); ++projectionNotes;
+    notedSequence=sequence;notedEye=eye;notedNear=nearZ;notedFar=farZ;
   }
   void unsupported(unsigned) noexcept override { ++unsupportedCalls; }
   void retire() { std::lock_guard<std::mutex> lock(mutex); state.connected = false; state.geometryValid = false; }
@@ -145,12 +151,24 @@ void publicationTest() {
   check(publication.publish(valid, true, true), "publication accepts first valid frame");
   auto read = publication.read(); check(read.connected && read.geometryValid && read.generation == generation, "publication read has connected geometry");
   check(!publication.publish(geometry(generation, 1), true, true), "publication rejects stale sequence");
+  const float shifts[2][2]={{.125f,-.25f},{-.375f,.5f}};
+  check(publication.publish(geometry(generation, 2), true, true, shifts), "publication accepts finite tangent shifts");
+  read=publication.read(); check(read.tangentShift[0][0]==.125f&&read.tangentShift[0][1]==-.25f&&
+      read.tangentShift[1][0]==-.375f&&read.tangentShift[1][1]==.5f, "publication stores per-eye shifts");
+  const float badShifts[2][2]={{NAN,0},{0,0}};
+  check(!publication.publish(geometry(generation, 3), true, true, badShifts), "publication rejects non-finite shifts");
+  read=publication.read(); check(read.geometry.native.sequence==0&&!read.geometryValid&&
+      read.tangentShift[0][0]==0, "invalid shifts retire visible publication");
+  check(!publication.publish(geometry(generation, 3), true, true), "invalid shift sequence cannot be replayed");
   auto invalid = geometry(generation, 2); invalid.headFlags = 0;
-  check(!publication.publish(invalid, true, false), "publication rejects invalid tracking");
+  invalid.sequence=4; check(!publication.publish(invalid, true, false), "publication rejects invalid tracking");
   read = publication.read(); check(read.connected && !read.geometryValid && read.focusKnown && !read.focused, "invalid tracking clears geometry but keeps HMD connected");
+  check(read.tangentShift[0][0]==0&&read.tangentShift[0][1]==0&&read.tangentShift[1][0]==0&&read.tangentShift[1][1]==0, "invalid tracking clears shifts");
   check(!publication.publish(geometry(generation - 1, 3), true, true), "publication rejects stale generation");
   publication.retire(generation); check(!publication.read().connected, "retired publication disconnected");
+  metadata.tangentShift[0][0]=9;metadata.tangentShift[1][1]=-9;
   const auto fresh=publication.begin(metadata);check(fresh>generation,"new generation increases");
+  read=publication.read();check(read.tangentShift[0][0]==0&&read.tangentShift[1][1]==0,"new generation clears shifts");
   check(!publication.publish(geometry(generation,999),true,true),"old writer cannot enter new generation");
   publication.retire(generation);check(publication.read().connected,"old cleanup cannot retire new generation");
   check(publication.publish(geometry(fresh,1),true,true),"new generation starts sequence anew");
@@ -183,6 +201,26 @@ int selfTest() {
   check(std::isfinite(dx.m[0][0]) && std::isfinite(gl.m[3][2]) && near(dx.m[3][2], -1), "by-value projection returns both conventions");
   float l=0,r=0,t=0,b=0; system->GetProjectionRaw(vr::Eye_Left,&l,&r,&t,&b);
   check(near(l, -0.6841368f) && near(r, 0.8422884f) && near(t, -0.4227932f) && near(b, 0.5463025f), "raw projection preserves all planes");
+  {
+    const float shifts[2][2]={{.125f,-.075f},{-.2f,.11f}};
+    source.state.tangentShift[0][0]=shifts[0][0];source.state.tangentShift[0][1]=shifts[0][1];
+    source.state.tangentShift[1][0]=shifts[1][0];source.state.tangentShift[1][1]=shifts[1][1];
+    float sl,sr,st,sb; system->GetProjectionRaw(vr::Eye_Left,&sl,&sr,&st,&sb);
+    check(near(sl,-.6841368f+shifts[0][0])&&near(sr,.8422884f+shifts[0][0])&&
+          near(st,-.4227932f+shifts[0][1])&&near(sb,.5463025f+shifts[0][1]), "raw applies left shift");
+    const auto shifted=system->GetProjectionMatrix(vr::Eye_Left,.1f,1000.f,vr::API_DirectX);
+    check(near(shifted.m[0][2],(sl+sr)/(sr-sl))&&near(shifted.m[1][2],(st+sb)/(sb-st)), "matrix matches shifted raw");
+    check(source.projectionNotes==3&&source.notedSequence==23&&source.notedEye==0&&
+          near(source.notedNear,.1f)&&near(source.notedFar,1000.f), "matrix query notes exact frame");
+    float rl,rr,rt,rb; system->GetProjectionRaw(vr::Eye_Right,&rl,&rr,&rt,&rb);
+    const auto rightShifted=system->GetProjectionMatrix(vr::Eye_Right,.1f,1000.f,vr::API_OpenGL);
+    check(near(rl,-.6841368f+shifts[1][0])&&near(rr,.8422884f+shifts[1][0])&&
+          near(rt,-.4227932f+shifts[1][1])&&near(rb,.5463025f+shifts[1][1])&&
+          near(rightShifted.m[0][2],(rl+rr)/(rr-rl))&&near(rightShifted.m[1][2],(rt+rb)/(rb-rt)),
+          "raw and matrix stay coherent for right eye and OpenGL");
+    source.state.tangentShift[0][0]=source.state.tangentShift[0][1]=0;
+    source.state.tangentShift[1][0]=source.state.tangentShift[1][1]=0;
+  }
   system->GetProjectionRaw(static_cast<vr::EVREye>(9),&l,&r,&t,&b);
   const float rawAfter[4] = {l,r,t,b};
   check(allZero(rawAfter, sizeof(rawAfter)), "invalid raw eye zeros outputs");

@@ -46,6 +46,29 @@ bool selfTest() {
       {0.0f, 0.0f, -1.0f, 0.0f}}};
   for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c)
     ok &= check(near(gl.m[r][c], glExpected.m[r][c]), "GL independent entries");
+  // Raw tangent input is the matrix path used after game-facing shifts; it
+  // must produce the same coefficients without an atan round trip.
+  const edvr::openxr::RawFov shifted{raw.left + .125f, raw.right + .125f,
+                                     raw.top - .075f, raw.bottom - .075f};
+  vr::HmdMatrix44_t shiftedMatrix{};
+  ok &= check(edvr::openxr::projectionMatrix(shifted, .1f, 1000.0f,
+                                              vr::API_DirectX, shiftedMatrix),
+              "raw tangent matrix overload");
+  ok &= check(near(shiftedMatrix.m[0][2],
+                   (shifted.right + shifted.left) / (shifted.right - shifted.left)) &&
+              near(shiftedMatrix.m[1][2],
+                   (shifted.bottom + shifted.top) / (shifted.bottom - shifted.top)),
+              "raw tangent matrix preserves shifted asymmetry");
+  ok &= check(near(shiftedMatrix.m[0][0], 1.1158524f) &&
+              near(shiftedMatrix.m[0][2], .3595913f) &&
+              near(shiftedMatrix.m[1][1], 2.2615001f) &&
+              near(shiftedMatrix.m[1][2], -.0208476f),
+              "raw tangent matrix independent expected coefficients");
+  ok &= check(near(shiftedMatrix.m[0][0] * shifted.left - shiftedMatrix.m[0][2], -1.0f) &&
+              near(shiftedMatrix.m[0][0] * shifted.right - shiftedMatrix.m[0][2], 1.0f) &&
+              near(shiftedMatrix.m[1][1] * shifted.top - shiftedMatrix.m[1][2], -1.0f) &&
+              near(shiftedMatrix.m[1][1] * shifted.bottom - shiftedMatrix.m[1][2], 1.0f),
+              "shift signs preserve edge pixel positions");
   ok &= check(near((-dx.m[2][2] * 0.1f + dx.m[2][3]) / 0.1f, 0.0f) &&
               near((-dx.m[2][2] * 1000.0f + dx.m[2][3]) / 1000.0f, 1.0f),
               "DX near/far depth endpoints");

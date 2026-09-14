@@ -16,6 +16,8 @@ struct SystemRead {
   float displayFrequency=0;
   bool seatedToStandingValid=false, rawToStandingValid=false;
   vr::HmdMatrix34_t seatedToStanding{}, rawToStanding{};
+  // Game-facing per-eye tangent offsets. Native geometry remains immutable.
+  float tangentShift[2][2]{};
 };
 
 // The source outlives the concrete IVRSystem object and protects its resources
@@ -33,6 +35,10 @@ class SystemSource {
   // pose if unavailable. No synthesized focus/quit events are implied here.
   virtual bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,
                          vr::VREvent_t& event,vr::TrackedDevicePose_t& pose)=0;
+  // Successful projection queries may be observed by a temporal consumer.
+  virtual void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept {
+    (void)sequence;(void)eye;(void)nearZ;(void)farZ;
+  }
   virtual void unsupported(unsigned slot) noexcept=0;
 };
 }

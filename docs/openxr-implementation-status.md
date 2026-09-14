@@ -1,11 +1,19 @@
 # OpenXR implementation status
 
+The [native temporal checkpoint](openxr-native-temporal-2026-09-13.md) connects
+the frame's pose, projection, jitter and eye input to the existing TAA and
+DLAA/DLSS filter before menu composition and shared capture. The full build,
+157 provider-contract checks and real-filter desktop runs pass, with 18 eye
+images and 169 checks in each of native TAA and DLSS modes. The pair is
+installed and hash-verified in Frontier. The next flight must validate game
+projection-query ordering and image quality during head movement. Other
+submission effects remain pending.
+
 The native menu checkpoint has completed its first manual Frontier flight.
 Local startup, menu submission in both eyes and internal native teardown are
 confirmed; the menu opens and closes successfully. Both-eye appearance,
 anchoring during head movement and normal exit are also confirmed. Detailed
-evidence remains local. Next is the remaining native eye-processing chain and
-temporal AA/DLSS data.
+evidence remains local. Subsequent temporal integration is tracked above.
 
 The [manual-launch and menu checkpoint](openxr-native-menu-2026-09-13.md) is
 installed and verified in Frontier. Native startup now supports adjacent
@@ -17,8 +25,9 @@ identifies native OpenXR correctly. Parent review corrected configuration
 reachability, lifecycle admission, pose retirement, frustum/flip handling and
 test coverage in Luna's implementation. The full build passed with all 485
 source hashes unchanged, including 40 real menu/client/shared-copy checks and
-14 local-bootstrap checks. The first manual result is recorded above. Native
-temporal AA and the other legacy submission effects remain unported.
+14 local-bootstrap checks. The first manual result is recorded above. At that
+checkpoint, native temporal AA and other legacy submission effects remained
+unported.
 
 The [first native Frontier
 flight](openxr-frontier-entry-2026-09-13.md#first-native-frontier-flight)

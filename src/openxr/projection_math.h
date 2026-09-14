@@ -44,11 +44,26 @@ inline bool fovToRaw(const XrFovf& fov, RawFov& out) {
   return true;
 }
 
-inline bool projectionMatrix(const XrFovf& fov, float nearZ, float farZ,
+// Apply a game-facing tangent translation while checking that narrowing or
+// addition overflow cannot create a malformed frustum.
+inline bool shiftedRawFov(const RawFov& input, float dx, float dy, RawFov& out) {
+  if (!finite(input.left) || !finite(input.right) || !finite(input.top) ||
+      !finite(input.bottom) || input.left >= input.right || input.top >= input.bottom ||
+      !finite(dx) || !finite(dy)) return false;
+  RawFov candidate{input.left + dx, input.right + dx,
+                   input.top + dy, input.bottom + dy};
+  if (!finite(candidate.left) || !finite(candidate.right) ||
+      !finite(candidate.top) || !finite(candidate.bottom) ||
+      candidate.left >= candidate.right || candidate.top >= candidate.bottom) return false;
+  out = candidate;
+  return true;
+}
+
+inline bool projectionMatrix(const RawFov& raw, float nearZ, float farZ,
                              vr::EGraphicsAPIConvention convention,
                              vr::HmdMatrix44_t& out) {
-  RawFov raw{};
-  if (!fovToRaw(fov, raw) || !finite(nearZ) || !finite(farZ) ||
+  if (!finite(raw.left) || !finite(raw.right) || !finite(raw.top) || !finite(raw.bottom) ||
+      raw.left >= raw.right || raw.top >= raw.bottom || !finite(nearZ) || !finite(farZ) ||
       nearZ <= 0.0f || farZ <= nearZ)
     return false;
   if (convention != vr::API_DirectX && convention != vr::API_OpenGL)
@@ -85,6 +100,14 @@ inline bool projectionMatrix(const XrFovf& fov, float nearZ, float farZ,
     }
   out = candidate;
   return true;
+}
+
+inline bool projectionMatrix(const XrFovf& fov, float nearZ, float farZ,
+                             vr::EGraphicsAPIConvention convention,
+                             vr::HmdMatrix44_t& out) {
+  RawFov raw{};
+  if (!fovToRaw(fov, raw)) return false;
+  return projectionMatrix(raw, nearZ, farZ, convention, out);
 }
 
 } // namespace edvr::openxr
