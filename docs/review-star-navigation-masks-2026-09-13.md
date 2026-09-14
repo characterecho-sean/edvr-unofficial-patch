@@ -789,3 +789,71 @@ completed-build rerun exercises those checks successfully. Preset K is
 confirmed in the flight log. These checks establish the depth-history
 correction; headset confirmation of the remaining visible halo is
 pending.
+
+## Intermittent bands and returning target smears, 202111 and 202117
+
+The next graphics flight, edvr_gfx_20260913_201901.log, verifies
+v0.16.2-10-gbd8f6f2, build 6AA757B9, linked 02:11:05 UTC. The paired VR
+flight uses Valve SteamVR. DLSS runs preset K at 2774x2740 input and
+4268x4216 output. Captures 202111 and 202117 begin at temporal frames
+14454 and 14968, with jitter (0.375,0.055555582) and (0,-0.166666657).
+Their raw crops are 1400x1400, starting at (687,670); output crops are
+2155x2155, starting at (1056,1030). Capture 202117 has 1,034 draw
+snapshots, seven surfaces, and no capped draws, failed copies or missing
+shaders.
+
+Ruled out: the orbital depth fix failed to take effect, because all
+27,340 orbital coverage pixels in 202117 have zero original scene depth
+and 27,027 also have zero merged depth. The remaining 313 overlap other
+geometry; the orbital line no longer populates private depth. An
+orbital-only output ROI (500,0)-(850,600) contains 210,000 pixels and is
+byte-identical before and after UI resolve. A separate 125,000 pixel
+orbital ROI in 202111 is also unchanged by UI resolve.
+
+The orbital instances do not all have the same history failure. In
+202117, records 3 through 6 match; record 7 is eligible but unmatched.
+The original instance stream is present for all 19 captured draw frames
+14969 through 14987. The first four instances keep their quaternion and
+radius, whereas the fifth changes both every frame. Those fields are
+currently part of the exact history key, despite already being
+represented in the captured geometry transform. Record 7 was also
+unmatched in the preceding 194149 dump. An unmatched record falls back
+to camera motion; it does not automatically emit invalid motion.
+
+Normalized RGB distinguishes this animated green/yellow curve from the
+other four orange curves throughout the captured sequence: its ratio is
+(1,1,0), versus (1,0.555556,0.111111). Absolute brightness changes on
+both families. This supports testing a unique, colour-family match after
+the exact search fails, retaining draw/mesh identity, width and the
+existing projected-center/depth continuity checks. The user reports that
+only some lines exhibit bands and suggests speed dependence. The
+identity failure is consistent with that observation, but it does not
+establish that every observed band has this cause.
+
+Ruled out: fractional history transport alone eliminated targeting
+smears, because 202117 still has 8,322 retained-only output pixels in
+the target ROI, with mean before-to-after RGB change of
+(-3.390,-1.448,-0.797) bytes. The post-DLSS resolver clamps complete RGB
+values to the current composited raster. It cannot distinguish stale
+text from a legitimate difference in the reconstructed corona. Removing
+the clamp without an alternative would restore known stale digits; a
+replacement must preserve changing text and translucent backgrounds in a
+controlled temporal test.
+
+The orbital correction retains exact matching first and only falls back
+when no exact candidate exists. The fallback requires one prior record
+with the same draw/mesh keys, line width and normalized RGB ratio, plus
+the existing center/depth continuity checks. It rejects ambiguous,
+nonfinite or zero-colour candidates. No texture or render pass is added.
+
+Validation: all five instances from consecutive captured draw frames
+14969 and 14970 now match. Independent double-precision quaternion and
+scene projections agree with the generated affine maps within 0.002
+input pixels. These compare points on the local orbital plane, without
+claiming an exact screen-width extrusion correction. A scratch control
+with only the fallback removed fails at the expected animated-instance
+match assertion. The 386-check hologram suite covers transformed maps,
+instance reordering, exact ambiguity, source/width/colour changes and
+continuity rejection. The absolute-path full build and completed-build
+NVIDIA smoke test pass, including DLSS evaluation and jitter/motion
+convention checks.

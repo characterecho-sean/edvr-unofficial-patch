@@ -63,6 +63,11 @@ float3 turn(float4 q, float3 v) {
             // Geometry lies at local Z=0. A comparable unused Z axis avoids
             // an ill-conditioned inverse for billion-metre orbital ellipses.
             scale.z=max(abs(scale.x),abs(scale.y));
+            // The RGBA float4 at byte offset 44 is the instance
+            // colour/alpha. It is useful only for disambiguating the
+            // fallback below: intensity and alpha can animate, while
+            // chromaticity identifies the stroke.
+            n.key[6]=Instance.Load4(at+44);
         } else {
             uint index=Instance.Load(0), count,stride; Pool.GetDimensions(count,stride);
             if(index>=count) { Current[info.x]=n; return; }
@@ -93,7 +98,12 @@ float3 turn(float4 q, float3 v) {
     uint matches=0,match=0;
     [loop] for(uint i=0;i<info.y;++i) {
         Record old=Previous[i]; bool same=old.meta.x==1;
-        [unroll] for(uint j=0;j<8;++j) same=same && all(n.key[j]==old.key[j]);
+        [unroll] for(uint j=0;j<8;++j) {
+            // Mode 2 keeps key[6] as diagnostic identity data, but colour
+            // intensity/alpha changes must not make an otherwise exact
+            // orbital record miss the existing strict path.
+            if(info.z!=2 || j!=6) same=same && all(n.key[j]==old.key[j]);
+        }
         // Identical meshes can occur on multiple panels. Require one nearby
         // projected origin; an ambiguous match or a newly opened panel declines.
         float2 here=float2(n.clip[0].w,n.clip[1].w)/n.clip[2].w;
@@ -107,6 +117,30 @@ float3 turn(float4 q, float3 v) {
             [unroll] for(uint row=0;row<3;++row) duplicate=duplicate && all(old.clip[row]==Previous[match].clip[row]);
             if(!duplicate) { ++matches; match=i; }
         }
+    }
+    // A changing orbital instance can alter its quaternion/scale while
+    // retaining the same draw/mesh, width and colour family. Only use this
+    // relaxed identity when the original exact search found no candidate;
+    // every candidate must be unique and retain the same continuity checks.
+    if(valid && info.z==2 && matches==0) {
+        uint fallbackMatches=0,fallbackMatch=0;
+        float3 newRgb=asfloat(n.key[6].xyz); float newMax=max(newRgb.x,max(newRgb.y,newRgb.z));
+        bool newRgbValid=all(isfinite(newRgb)) && isfinite(newMax) && newMax>0;
+        [loop] for(uint i=0;i<info.y;++i) {
+            Record old=Previous[i]; bool candidate=old.meta.x==1;
+            [unroll] for(uint j=0;j<4;++j) candidate=candidate && all(n.key[j]==old.key[j]);
+            candidate=candidate && n.key[5].w==old.key[5].w;
+            float3 oldRgb=asfloat(old.key[6].xyz); float oldMax=max(oldRgb.x,max(oldRgb.y,oldRgb.z));
+            bool oldRgbValid=all(isfinite(oldRgb)) && isfinite(oldMax) && oldMax>0;
+            bool sameChroma=false;
+            if(newRgbValid && oldRgbValid) sameChroma=all(abs(newRgb/newMax-oldRgb/oldMax)<=1e-6);
+            candidate=candidate && sameChroma;
+            float2 here=float2(n.clip[0].w,n.clip[1].w)/n.clip[2].w;
+            float2 there=float2(old.clip[0].w,old.clip[1].w)/old.clip[2].w;
+            candidate=candidate && all(abs(here-there)<.2) && old.clip[2].w>n.clip[2].w*.5 && old.clip[2].w<n.clip[2].w*2;
+            if(candidate) { ++fallbackMatches; fallbackMatch=i; }
+        }
+        if(fallbackMatches==1) { matches=1; match=fallbackMatch; }
     }
     if(valid && matches==1) {
         Record old=Previous[match]; float3 t=float3(n.clip[0].w,n.clip[1].w,n.clip[2].w);

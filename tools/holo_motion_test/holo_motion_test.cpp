@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <fstream>
 #include <iterator>
@@ -24,6 +25,40 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,const char* so
 }
 }
 using namespace edvr;
+struct DVec3 { double x,y,z; };
+DVec3 add(DVec3 a,DVec3 b) { return {a.x+b.x,a.y+b.y,a.z+b.z}; }
+DVec3 mul(DVec3 a,double s) { return {a.x*s,a.y*s,a.z*s}; }
+double dot(DVec3 a,DVec3 b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
+DVec3 cross(DVec3 a,DVec3 b) { return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x}; }
+DVec3 rotate(const float* q,DVec3 v) {
+    DVec3 qv{q[4],q[5],q[6]}; double qw=q[7];
+    return add(mul(v,2*qw*qw-1),add(mul(qv,2*dot(qv,v)),mul(cross(qv,v),2*qw)));
+}
+void expectedOrbitalMap(const float* oldInst,const float* currentInst,double out[3][4]) {
+    const double oldZ=std::max(std::fabs(double(oldInst[8])),std::fabs(double(oldInst[9])));
+    const double currentZ=std::max(std::fabs(double(currentInst[8])),std::fabs(double(currentInst[9])));
+    DVec3 oldColumns[3]={rotate(oldInst,{oldInst[8],0,0}),rotate(oldInst,{0,oldInst[9],0}),rotate(oldInst,{0,0,oldZ})};
+    DVec3 currentColumns[3]={rotate(currentInst,{currentInst[8],0,0}),rotate(currentInst,{0,currentInst[9],0}),rotate(currentInst,{0,0,currentZ})};
+    DVec3 oldBasis[3]={{oldColumns[0].x,oldColumns[1].x,oldColumns[2].x},{oldColumns[0].y,oldColumns[1].y,oldColumns[2].y},{oldColumns[0].z,oldColumns[1].z,oldColumns[2].z}};
+    DVec3 currentBasis[3]={{currentColumns[0].x,currentColumns[1].x,currentColumns[2].x},{currentColumns[0].y,currentColumns[1].y,currentColumns[2].y},{currentColumns[0].z,currentColumns[1].z,currentColumns[2].z}};
+    DVec3 a=cross(currentBasis[1],currentBasis[2]),b=cross(currentBasis[2],currentBasis[0]),c=cross(currentBasis[0],currentBasis[1]);
+    double det=dot(currentBasis[0],a);
+    DVec3 oldT{oldInst[0],oldInst[1],oldInst[2]+1}; DVec3 currentT{currentInst[0],currentInst[1],currentInst[2]+1};
+    for(int row=0;row<3;++row) {
+        DVec3 v{dot(oldBasis[row],a)/det,dot(oldBasis[row],b)/det,dot(oldBasis[row],c)/det};
+        out[row][0]=v.x; out[row][1]=v.y; out[row][2]=v.z;
+        const double oldRowT=row==0?oldT.x:row==1?oldT.y:oldT.z;
+        out[row][3]=oldRowT-(currentT.x*v.x+currentT.y*v.y+currentT.z*v.z);
+    }
+}
+void projectOrbitalPoint(const float* inst,DVec3 local,DVec3& out) {
+    const double z=std::max(std::fabs(double(inst[8])),std::fabs(double(inst[9])));
+    DVec3 columns[3]={rotate(inst,{inst[8],0,0}),rotate(inst,{0,inst[9],0}),rotate(inst,{0,0,z})};
+    DVec3 basis[3]={{columns[0].x,columns[1].x,columns[2].x},{columns[0].y,columns[1].y,columns[2].y},{columns[0].z,columns[1].z,columns[2].z}};
+    DVec3 t{inst[0],inst[1],inst[2]+1};
+    out={dot(basis[0],local)+t.x,dot(basis[1],local)+t.y,dot(basis[2],local)+t.z};
+}
+double orbitalCoordinate(DVec3 p,int row) { return row==0?p.x:row==1?p.y:p.z; }
 std::vector<float> read(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* srv) {
     ComPtr<ID3D11Resource> resource; srv->GetResource(&resource); ComPtr<ID3D11Buffer> buffer; hr(resource.As(&buffer));
     D3D11_BUFFER_DESC bd{}; buffer->GetDesc(&bd); bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0; bd.Usage=D3D11_USAGE_STAGING; bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
@@ -49,11 +84,22 @@ int main(int argc,char** argv) {
     auto pool=buffer(sizeof(records),D3D11_BIND_SHADER_RESOURCE,336);
     ComPtr<ID3D11ShaderResourceView> poolSrv; hr(dev->CreateShaderResourceView(pool.Get(),nullptr,&poolSrv));
     auto instances=buffer(32,D3D11_BIND_VERTEX_BUFFER),vertices=buffer(160,D3D11_BIND_VERTEX_BUFFER),indices=buffer(12,D3D11_BIND_INDEX_BUFFER);
+    auto orbitalVertices=buffer(16,D3D11_BIND_VERTEX_BUFFER),orbitalStream=buffer(2*60,D3D11_BIND_VERTEX_BUFFER),orbitalVerticesChanged=buffer(16,D3D11_BIND_VERTEX_BUFFER);
+    float orbital[2][15]{};
+    auto setOrbital=[&](unsigned i,float x,float width,float qx,float qy,float qz,float qw,float sx,float sy,float r,float g,float b,float alpha) {
+        std::memset(orbital[i],0,sizeof(orbital[i])); orbital[i][0]=x; orbital[i][3]=width;
+        orbital[i][4]=qx; orbital[i][5]=qy; orbital[i][6]=qz; orbital[i][7]=qw;
+        orbital[i][8]=sx; orbital[i][9]=sy; orbital[i][10]=std::max(std::fabs(sx),std::fabs(sy));
+        orbital[i][11]=r; orbital[i][12]=g; orbital[i][13]=b; orbital[i][14]=alpha;
+    };
+    setOrbital(0,-.2f,.5f,0,0,0,1,1,1,1,.5f,.1f,1);
+    setOrbital(1,.2f,.5f,0,0,0,1,1.1f,1,1,1,0,1);
     UINT inst[8]{};
     D3D11_TEXTURE2D_DESC td{}; td.Width=td.Height=8; td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R32_FLOAT; td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
     ComPtr<ID3D11Texture2D> scene; ComPtr<ID3D11ShaderResourceView> surface; hr(dev->CreateTexture2D(&td,nullptr,&scene)); hr(dev->CreateShaderResourceView(scene.Get(),nullptr,&surface));
     HoloMotion motion; HoloDraw args{'X',6,1,0,0,0};
+    HoloMotion orbitalMotion; HoloDraw orbitalArgs{'N',6,2,0,0,0};
     auto bind=[&] {
         ctx->UpdateSubresource(cb[0].Get(),0,nullptr,model,0,0); ctx->UpdateSubresource(cb[1].Get(),0,nullptr,sceneData,0,0); ctx->UpdateSubresource(cb[2].Get(),0,nullptr,material,0,0);
         ctx->UpdateSubresource(pool.Get(),0,nullptr,records,0,0); ctx->UpdateSubresource(instances.Get(),0,nullptr,inst,0,0);
@@ -74,6 +120,18 @@ int main(int argc,char** argv) {
         ComPtr<ID3D11ShaderResourceView> afterSrv; ctx->CSGetShaderResources(2,1,&afterSrv); check(afterSrv.Get()==poolSrv.Get(),"caller CS resource restored");
         ID3D11ShaderResourceView* views[2]{}; motion.views(scene.Get(),views); check(views[0] && views[1],"current-eye inputs exposed"); return read(dev.Get(),ctx.Get(),views[1]);
     };
+    auto runOrbital=[&](ID3D11Buffer* geometry) {
+        bind();
+        ctx->UpdateSubresource(orbitalStream.Get(),0,nullptr,orbital,0,0);
+        ID3D11Buffer* vb[2]={geometry,orbitalStream.Get()}; UINT strides[2]={16,60},offsets[2]{};
+        ctx->IASetVertexBuffers(0,2,vb,strides,offsets);
+        ctx->CSSetConstantBuffers(1,1,cb[1].GetAddressOf());
+        ctx->CSSetShaderResources(2,1,poolSrv.GetAddressOf());
+        check(orbitalMotion.prepare(ctx.Get(),scene.Get(),orbitalArgs,10,2,2),"orbital fallback history prepared");
+        ID3D11ShaderResourceView* views[2]{}; orbitalMotion.views(scene.Get(),views);
+        check(views[0] && views[1],"orbital fallback inputs exposed");
+        return read(dev.Get(),ctx.Get(),views[1]);
+    };
     auto values=run(); check(values[56]==1 && values[59]==0,"first frame valid geometry, no invented predecessor");
     motion.frameBoundary(); model[4][3]=.02f; values=run();
     check(values[59]==1 && std::fabs(values[47]+.02f)<1e-6,"draw-time clip translation captured");
@@ -88,6 +146,79 @@ int main(int argc,char** argv) {
     motion.frameBoundary(); records[1][0]=1; values=run(); check(values[56]==0 && values[59]==0,"skinned geometry declines"); records[1][0]=0;
     float farDepth=16000; std::memcpy(&records[1][6],&farDepth,4); motion.frameBoundary(); values=run(); check(values[56]==0,"distant target marker declines");
     std::memcpy(&records[1][6],&z,4); motion.frameBoundary(); run();
+    // Mode 2 keeps exact orbital matching strict while allowing one unique
+    // prior with the same draw/mesh, width and colour chromaticity when the
+    // transform itself changes.  The synthetic projection is deliberately
+    // simple so map values can be checked directly on WARP.
+    sceneData[270][0]=sceneData[271][1]=sceneData[272][3]=sceneData[273][3]=1;
+    auto orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[56]==1 && orbitalValues[116]==1 && orbitalValues[59]==0 && orbitalValues[119]==0,
+          "orbital first frame has two valid records without predecessor");
+    orbitalMotion.frameBoundary(); orbital[0][0]+=.01f; orbital[1][0]+=.01f; orbital[0][11]=.5f; orbital[0][12]=.25f; orbital[0][13]=.05f; orbital[0][14]=.35f;
+    orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==1 && orbitalValues[119]==1,"orbital exact identity ignores intensity and alpha changes");
+    // Reordering the instance stream must preserve the transform identity;
+    // compare the two signed map translations, not only the valid bits.
+    orbitalMotion=HoloMotion{}; orbital[0][0]=-.2f; orbital[1][0]=.2f; orbital[0][4]=orbital[1][4]=0; orbital[0][7]=orbital[1][7]=1; orbital[0][8]=1; orbital[1][8]=1.1f; orbital[0][11]=1; orbital[0][12]=.5f; orbital[0][13]=.1f; orbital[1][11]=1; orbital[1][12]=1; orbital[1][13]=0;
+    runOrbital(orbitalVertices.Get()); orbitalMotion.frameBoundary();
+    float reordered[15]; std::memcpy(reordered,orbital[0],sizeof(reordered)); std::memcpy(orbital[0],orbital[1],sizeof(reordered)); std::memcpy(orbital[1],reordered,sizeof(reordered)); orbital[0][0]=.21f; orbital[1][0]=-.21f;
+    orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==1 && orbitalValues[119]==1 && std::fabs(orbitalValues[47]+.01f)<1e-5 && std::fabs(orbitalValues[107]-.01f)<1e-5,
+          "reordered orbital instances retain their independent maps");
+    // Start the relaxed-identity cases from a clean two-record history.
+    orbitalMotion=HoloMotion{}; setOrbital(0,-.2f,.5f,0,0,0,1,1,1,1,.5f,.1f,1); setOrbital(1,.2f,.5f,0,0,0,1,1.1f,1,1,1,0,1);
+    runOrbital(orbitalVertices.Get()); orbitalMotion.frameBoundary();
+    float oldFallback[2][15]; std::memcpy(oldFallback,orbital,sizeof(oldFallback));
+    orbital[0][4]=.15f; orbital[0][7]=.98868599f; orbital[0][8]=1.2f;
+    orbital[1][4]=-.12f; orbital[1][7]=.992773f; orbital[1][9]=1.15f;
+    float currentFallback[2][15]; std::memcpy(currentFallback,orbital,sizeof(currentFallback));
+    orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==1 && orbitalValues[119]==1,"unique chromatic orbital fallback follows changed transforms");
+    for(int i=0;i<2;++i) {
+        double expected[3][4]; expectedOrbitalMap(oldFallback[i],currentFallback[i],expected);
+        for(int row=0;row<3;++row) for(int col=0;col<4;++col) {
+            double actual=orbitalValues[i*60+44+row*4+col];
+            if(std::fabs(actual-expected[row][col])>=2e-5) std::printf("map[%d][%d] actual %.9g expected %.9g\n",row,col,actual,expected[row][col]);
+            check(std::fabs(actual-expected[row][col])<2e-5,"fallback affine map agrees with double reference");
+        }
+        const DVec3 points[]={{0,0,0},{.3,-.4,.7},{-1.1,.2,.25}};
+        for(DVec3 local:points) {
+            DVec3 currentPoint,oldPoint; projectOrbitalPoint(currentFallback[i],local,currentPoint); projectOrbitalPoint(oldFallback[i],local,oldPoint);
+            for(int row=0;row<3;++row) {
+                const double* m=expected[row]; double mapped=m[0]*currentPoint.x+m[1]*currentPoint.y+m[2]*currentPoint.z+m[3];
+                check(std::fabs(mapped-orbitalCoordinate(oldPoint,row))<2e-5,"fallback map transports independent local point");
+            }
+        }
+    }
+    orbitalMotion.frameBoundary(); orbital[0][3]=.75f; orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==0 && orbitalValues[119]==1,"orbital width change rejects only that fallback");
+    orbitalMotion.frameBoundary(); orbital[0][3]=.5f; orbitalValues=runOrbital(orbitalVertices.Get());
+    orbitalMotion.frameBoundary(); orbital[0][4]=.25f; orbital[0][7]=.9682458f; orbital[0][11]=.8f; orbital[0][12]=.1f; orbital[0][13]=.1f; orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==0 && orbitalValues[119]==1,"orbital chromaticity change rejects only that fallback");
+    orbitalMotion.frameBoundary(); orbitalValues=runOrbital(orbitalVerticesChanged.Get());
+    check(orbitalValues[59]==0 && orbitalValues[119]==0,"orbital source change rejects fallback candidates");
+    // Exact ambiguity is terminal: the relaxed search must not rescue a
+    // current record when the strict identity already has two candidates.
+    orbitalMotion=HoloMotion{}; setOrbital(0,0,.5f,0,0,0,1,1,1,1,.5f,.1f,1); setOrbital(1,0,.5f,0,0,0,1,1,1,1,1,.1f,1);
+    runOrbital(orbitalVertices.Get()); orbitalMotion.frameBoundary(); orbital[0][14]=.4f; orbital[1][14]=.6f; orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==0 && orbitalValues[119]==0,"exact ambiguity does not fall back");
+    // Origin/depth continuity remains a hard gate for a unique relaxed
+    // candidate even when its chromaticity and width are unchanged.
+    orbitalMotion=HoloMotion{}; setOrbital(0,0,.5f,0,0,0,1,1,1,1,.5f,.1f,1); setOrbital(1,.3f,.5f,0,0,0,1,1.1f,1,1,1,0,1);
+    runOrbital(orbitalVertices.Get()); orbitalMotion.frameBoundary(); setOrbital(0,1,.5f,.15f,0,0,.98868599f,1.2f,1,1,.5f,.1f,1); orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==0 && orbitalValues[119]==1,"origin continuity rejects distant fallback");
+    // Two prior records with the same chromaticity are intentionally
+    // ambiguous after both transforms change; neither may borrow history.
+    orbitalMotion=HoloMotion{}; setOrbital(0,0,.5f,0,0,0,1,1,1,1,.5f,.1f,1); setOrbital(1,.05f,.5f,0,0,0,1,1.1f,1,1,.5f,.1f,1); orbitalValues=runOrbital(orbitalVertices.Get());
+    orbitalMotion.frameBoundary(); setOrbital(0,0,.5f,.2f,0,0,.9797959f,1,1,1,.5f,.1f,1); setOrbital(1,.05f,.5f,-.2f,0,0,.9797959f,1.1f,1,1,.5f,.1f,1); orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==0 && orbitalValues[119]==0,"ambiguous orbital fallback declines both records");
+    orbitalArgs.instances=1; orbitalMotion=HoloMotion{}; setOrbital(0,0,.5f,0,0,0,1,1,1,0,0,0,1); orbitalValues=runOrbital(orbitalVertices.Get());
+    orbitalMotion.frameBoundary(); orbital[0][4]=.2f; orbital[0][7]=.9797959f; orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==0,"zero chromaticity fails closed");
+    orbitalMotion=HoloMotion{}; setOrbital(0,0,.5f,0,0,0,1,1,1,std::numeric_limits<float>::quiet_NaN(),.5f,.1f,1); orbitalValues=runOrbital(orbitalVertices.Get());
+    orbitalMotion.frameBoundary(); orbital[0][4]=-.2f; orbital[0][7]=.9797959f; orbitalValues=runOrbital(orbitalVertices.Get());
+    check(orbitalValues[59]==0,"nonfinite chromaticity fails closed");
+    orbitalArgs.instances=2;
     // Actual captured constants and reordered pool records, against double-
     // precision projected motion at the panel centre. Optional local fixture.
     for(int fixture=1;fixture<argc && fixture<=2;++fixture) {
