@@ -71,7 +71,7 @@ int wmain(int argc, wchar_t** argv) {
 
     EdvrNativeMenuRequest request{sizeof(request), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 17};
     EdvrNativeMenuTable table{sizeof(table), EDVR_NATIVE_MENU_VERSION_1};
-    check(edvrAcquireNativeMenu(&request, &table) == S_OK && table.context, "provider acquire");
+    check(edvrAcquireNativeMenu(&request, &table) == S_OK && table.context && nativeMenuActive() && !nativeMenuAvailable(), "provider acquire; session active before pose");
     float head[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
     float eyes[2][12] = {{1,0,0,-.03f,0,1,0,0,0,0,1,0}, {1,0,0,.03f,0,1,0,0,0,0,1,0}};
     float frusta[2][4] = {{-.9f,1.1f,-1.2f,.8f}, {-1.1f,.9f,-.8f,1.2f}};
@@ -83,7 +83,7 @@ int wmain(int argc, wchar_t** argv) {
     bool ready = false;
     for (unsigned ms = 0; ms < 3000 && !ready; ms += 5) { ready = edvr::menuPanelWorkerReadyForTest(); if (!ready) Sleep(5); }
     check(ready, "bounded raster worker ready"); edvr::menuPanelTick(device.Get());
-    check(table.publishPose(table.context, head, eyes, frusta, 17, 3) == S_OK && nativeMenuAvailable(), "publish valid pose");
+    check(table.publishPose(table.context, head, eyes, frusta, 17, 3) == S_OK && nativeMenuAvailable() && nativeMenuActive(), "publish valid pose; session active");
 
     ComPtr<ID3D11Texture2D> source; check(makeSource(device.Get(), context.Get(), source, 0xff202020u), "source texture");
     ComPtr<ID3D11ShaderResourceView> sentinelSrv;
@@ -121,15 +121,16 @@ int wmain(int argc, wchar_t** argv) {
     ID3D11Texture2D* rejected = nullptr; float rejectBounds[4]{};
     check(table.treatEye(table.context, 0, foreignSource.Get(), normal, &rejected, rejectBounds) == E_INVALIDARG && !rejected, "foreign device rejected");
     float badBounds[4] = {-.1f,0,1,1}; check(table.treatEye(table.context, 0, source.Get(), badBounds, &rejected, rejectBounds) == E_INVALIDARG && !rejected, "bad bounds rejected");
-    check(table.publishPose(table.context, nullptr, nullptr, nullptr, 17, 0) == S_OK && !nativeMenuAvailable(), "CPU invalidation");
-    check(table.close(table.context) == S_OK && !nativeMenuAvailable(), "CPU close");
+    check(table.publishPose(table.context, nullptr, nullptr, nullptr, 17, 0) == S_OK && !nativeMenuAvailable() && nativeMenuActive(), "CPU invalidation keeps session active");
+    check(table.close(table.context) == S_OK && !nativeMenuAvailable() && !nativeMenuActive(), "CPU close retires session");
     EdvrNativeMenuTable second{sizeof(second), EDVR_NATIVE_MENU_VERSION_1}; EdvrNativeMenuRequest secondRequest{sizeof(secondRequest), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 29};
-    check(edvrAcquireNativeMenu(&secondRequest, &second) == S_OK && second.context, "reacquire after close");
+    check(edvrAcquireNativeMenu(&secondRequest, &second) == S_OK && second.context && nativeMenuActive(), "reacquire after close; session active");
     check(second.publishPose(second.context, head, eyes, frusta, 29, 4) == S_OK && nativeMenuAvailable(), "second publish");
-    check(table.publishPose(table.context, nullptr, nullptr, nullptr, 17, 0) == E_INVALIDARG && nativeMenuAvailable(), "stale context cannot invalidate active generation");
-    check(second.close(second.context) == S_OK && !nativeMenuAvailable(), "second close");
+    check(table.publishPose(table.context, nullptr, nullptr, nullptr, 17, 0) == E_INVALIDARG && nativeMenuAvailable() && nativeMenuActive(), "stale context cannot invalidate active generation");
+    check(table.close(table.context) == S_FALSE && nativeMenuActive(), "stale context cannot retire active generation");
+    check(second.close(second.context) == S_OK && !nativeMenuAvailable() && !nativeMenuActive(), "second close");
     edvr::openxr::NativeMenuClient client;
-    check(client.acquire(GetModuleHandleW(nullptr), device.Get(), 31) == S_OK, "client acquire");
+    check(client.acquire(GetModuleHandleW(nullptr), device.Get(), 31) == S_OK && nativeMenuActive(), "client acquire; session active");
     edvr::openxr::GeometryInput gi{}; gi.generation = 31; gi.sequence = 1;
     gi.viewFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
     gi.headFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;

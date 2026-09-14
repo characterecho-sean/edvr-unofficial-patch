@@ -23,6 +23,7 @@ unsigned used = 0;
 State* current = nullptr;
 std::mutex mutex;
 std::atomic<bool> available{false};
+std::atomic<bool> active{false};
 std::atomic<uint64_t> revision{0};
 State* identify(void* context) {
   for (unsigned i = 0; i < used; ++i) if (context == &pool[i]) return &pool[i];
@@ -136,12 +137,14 @@ HRESULT WINAPI close(void* context) {
   if (!s) return E_INVALIDARG;
   if (!s->active) return S_FALSE;
   invalidate(*s); s->active = false; s->device = nullptr;
+  active.store(false, std::memory_order_release);
   if (current == s) current = nullptr;
   return S_OK;
 }
 }
 
 bool nativeMenuAvailable() { return available.load(std::memory_order_acquire); }
+bool nativeMenuActive() { return active.load(std::memory_order_acquire); }
 uint64_t nativeMenuRevision() { return revision.load(std::memory_order_acquire); }
 extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest* request, EdvrNativeMenuTable* table) {
   if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_MENU_VERSION_1) return E_INVALIDARG;
@@ -152,6 +155,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest* req
   if (current || used == _countof(pool)) return E_PENDING;
   auto& s = pool[used++]; s.device = request->gameDevice; s.thread = GetCurrentThreadId();
   s.generation = request->generation; s.active = true; current = &s;
+  active.store(true, std::memory_order_release);
   table->context = &s; table->publishPose = publish; table->treatEye = treat; table->close = close;
   return S_OK;
 }

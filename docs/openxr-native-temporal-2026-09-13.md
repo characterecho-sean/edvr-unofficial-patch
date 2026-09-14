@@ -2,8 +2,9 @@
 
 This checkpoint connects native OpenXR submission to EDVR's existing temporal
 filter and NVIDIA DLAA/DLSS path. It follows the qualified manual startup and
-menu checkpoint. In-game image quality and projection-query ordering still
-require the next Frontier flight.
+menu checkpoint. The first manual DLSS flights confirmed both-eye treatment,
+current-frame projection queries and complete native teardown. A controlled
+performance and image-quality comparison remains pending.
 
 ## Frame and graphics contract
 
@@ -77,9 +78,45 @@ The full build passed with all 490 source hashes unchanged, including the
 native system/projection and existing shutdown, shared-transfer, bootstrap and
 configuration gates. The paired DLLs are installed and hash-verified in
 Frontier. The live INI and preserved original runtime DLL retained their
-hashes. No launcher was started. In-game qualification remains pending.
+hashes. No launcher was started. The subsequent manual results are below.
+
+## First manual result and monitor correction
+
+The matching native flights processed both eyes without missing projection
+queries, treatment failures or filter stand-down. Scene depth was acquired and
+native teardown completed. The user reported that DLSS worked.
+
+The initial performance comparison used the in-game monitor, whose native
+integration lacks the legacy compositor timing, pose-wait CPU accounting and
+render-to-submit GPU event callbacks. Present-to-Present cadence is measured,
+but subtracting an unreported pose wait incorrectly labels runtime pacing as
+render-thread work. A pending GPU result is not a GPU measurement. Those
+figures cannot establish a native DLSS performance regression.
+
+Ruled out: these flights constitute a matched-resolution quality comparison,
+because the user confirmed the softer image occurred after lowering Pimax
+render quality, and the captured output dimensions were below the SteamVR
+comparison. Quality parity at matched resolution remains unqualified.
+
+The monitor correction retains measured frame cadence and independent hardware
+statistics, identifies unavailable native timing explicitly, and suppresses
+unsupported CPU/GPU and compositor-state claims. Native session detection must
+survive temporary tracking invalidation. Rendering and resolution are
+unchanged.
+
+The correction passed the full build with all 490 source hashes unchanged,
+including 41 native menu lifecycle checks and the existing temporal gates. The
+paired DLLs are installed and verified in Frontier with settings preserved. The
+revised monitor presentation has not yet been checked in the headset.
 
 ## Next Frontier flight
+
+Before another performance comparison, connect native timing at the real frame
+boundaries and distinguish producer GPU work, transfer/compose cost and runtime
+pacing. The native shared-device path performs additional eye copies; their
+cost is a candidate to measure, not a confirmed cause of this report. Compare
+the same scene, actual input/output dimensions and DLSS preset across runtimes.
+Keep compositor timing and the local GPU span clearly distinguished.
 
 Launch manually with the native runtime and SteamVR closed. Check cockpit text
 and scene geometry while still and during slow head translation and rotation.

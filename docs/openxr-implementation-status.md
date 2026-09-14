@@ -5,9 +5,13 @@ the frame's pose, projection, jitter and eye input to the existing TAA and
 DLAA/DLSS filter before menu composition and shared capture. The full build,
 157 provider-contract checks and real-filter desktop runs pass, with 18 eye
 images and 169 checks in each of native TAA and DLSS modes. The pair is
-installed and hash-verified in Frontier. The next flight must validate game
-projection-query ordering and image quality during head movement. Other
-submission effects remain pending.
+installed and hash-verified in Frontier. Manual DLSS flights now confirm
+both-eye treatment, current-frame projection-query coverage and native
+teardown. The user reports working DLSS. Performance and quality parity still
+need a controlled comparison: the first comparison used unsupported native
+monitor fields and different render resolutions. The monitor correction is
+built and installed, explicitly identifying unavailable timing; native timing
+integration is the next gate. Other submission effects remain pending.
 
 The native menu checkpoint has completed its first manual Frontier flight.
 Local startup, menu submission in both eyes and internal native teardown are

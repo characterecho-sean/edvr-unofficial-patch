@@ -33,6 +33,7 @@ extern "C" {
 #endif
 HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest*, EdvrNativeMenuTable*);
 bool nativeMenuAvailable();
+bool nativeMenuActive(); // graphics-local session presence, independent of pose validity
 uint64_t nativeMenuRevision(); // graphics-local menu model retirement epoch
 #ifdef __cplusplus
 }

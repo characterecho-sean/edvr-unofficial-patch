@@ -796,10 +796,11 @@ void buildStatus(MenuContent& c) {
     statusLine(c, "EDVR", buf);
     const uint32_t rk = runtimeKind();
     statusLine(c, "Runtime",
-               rk == 1 ? "SteamVR (Valve's own)"
+               nativeMenuActive() ? "native OpenXR (experimental)"
+               : rk == 1 ? "SteamVR (Valve's own)"
                : rk == 2 ? "OpenComposite"
-               : (glitchConsumerPresent() ? "not identified" : nativeMenuAvailable() ? "native OpenXR (experimental)" : "no compositor consumer"));
-    if (nativeMenuAvailable()) statusLine(c, "Native effects", "Submission effects pending");
+               : (glitchConsumerPresent() ? "not identified" : "no compositor consumer"));
+    if (nativeMenuActive()) statusLine(c, "Native effects", "Menu and temporal connected; other effects pending");
     uint32_t ew = 0, eh = 0;
     float outer = 0.0f, inner = 0.0f;
     if (eyeTextureSize(&ew, &eh) && eyeTangents(&outer, &inner)) {
@@ -951,6 +952,7 @@ void buildMonitor(MenuContent& c) {
     const int kinds[2] = {kGraphGpu, kGraphCpu};
     const char* names[2] = {"GPU", "CPU"};
     c.graphCount = 0;
+    if (nativeMenuActive()) return; // Neither these series nor the refresh budget is published.
     for (int g = 0; g < 2; ++g) {
         MenuGraph& mg = c.graphs[c.graphCount];
         mg.count = perfMonitorGraph(kinds[g], mg.samples,
