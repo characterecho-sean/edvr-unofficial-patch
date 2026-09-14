@@ -1927,7 +1927,10 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
             UINT ref = 0; ctx->OMGetDepthStencilState(&original, &ref);
             if (original) { D3D11_DEPTH_STENCIL_DESC desc{}; original->GetDesc(&desc); overlay = !desc.DepthEnable; }
         }
-        ID3D11DepthStencilState* dss = depthPass ? reissueState(ctx, overlay) : maskDepthState(ctx);
+        // Orbital HC is motion/visibility metadata, not a new private
+        // occluder: keep the seeded DSV's GEQUAL test, but never write it.
+        const bool orbitalDepth = shader==&g_depthShaders[7];
+        ID3D11DepthStencilState* dss = depthPass ? (orbitalDepth ? maskDepthState(ctx) : reissueState(ctx, overlay)) : maskDepthState(ctx);
         ID3D11Buffer* cb = floorBuffer(ctx, g_reissueMaskSlot, g_reissueMaskOffset);
         if (!dss || !cb) {
             ++g_wNoTwin;

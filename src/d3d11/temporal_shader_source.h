@@ -410,7 +410,8 @@ bool uiCovered(int2 q) {
     return (v & 1u) != 0u;
 }
 // Follow the actual nearby panel transform, including pool quantization
-// and animation. Exact coverage depth rejects later foreground geometry.
+// and animation. Coverage depth rejects later foreground geometry; orbital
+// HC accepts its line in front of or equal to the physical scene depth.
 // Offset is jitter for native TAA's output grid, zero for DLSS's input grid.
 bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     pp=0; zp=0;
@@ -418,8 +419,14 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     int2 q=region.xy+int2(round(p+offset));
     float2 cov=HC.Load(int3(q,0)); uint index=uint(cov.x+.5);
     if(index==0 || index>128) return false;
-    if(cov.y<=knobs.x || abs(zSceneAt(q)-cov.y)>abs(cov.y)*1e-6) return false;
+    if(cov.y<=knobs.x) return false;
     HoloRecord r=HR[index-1]; if(r.meta.w!=1) return false;
+    if(r.key[3].w==2) {
+        // Orbital coverage uses a read-only private DSV with the scene's
+        // GEQUAL test. Its HC depth may therefore be in front of the
+        // physical scene depth; only a nearer physical occluder rejects it.
+        if(cov.y<zSceneAt(q)) return false;
+    } else if(abs(zSceneAt(q)-cov.y)>abs(cov.y)*1e-6) return false;
     if(r.key[3].w==5) {
         uint kind=probe.z!=0 ? uint(UM.Load(int3(q-region.xy,0))*255.0+.5)&3u : 0u;
         if(kind!=3u) return false;

@@ -75,7 +75,7 @@ struct In {float4 colour:__USER_STELLARVERTEX_COLOUR;
 float4 main(In i,out float2 motion:SV_Target1):SV_Target0 {
     float a=material[1].z==1 ? 1 : smoothstep(1,material[1].z,abs(i.distance/i.pos.w));
     clip(a*i.colour.a-1.0/255.0);
-    // Orbital geometry keeps its RT1 record and private depth.  Class 1
+    // Orbital geometry keeps its RT1 record and coverage depth. Class 1
     // incorrectly seeded retained text-cleanup influence around moving
     // lines.  Return zero to keep orbital geometry out of text cleanup.
     motion=float2(i.record,i.pos.z); return 0;

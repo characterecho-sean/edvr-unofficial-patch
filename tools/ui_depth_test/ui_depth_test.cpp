@@ -468,20 +468,59 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
         float vertices[16]={-.5f,0,1,0,-.5f,0,1,0,.5f,0,1,0,.5f,0,1,0},instances[30]{};
         for(int i=0;i<2;++i){float* p=instances+i*15;p[1]=i?.5f:-.5f;p[2]=1;p[3]=1;p[7]=1;p[8]=p[9]=p[10]=p[11]=p[12]=p[13]=p[14]=1;}
         auto vb0=make(sizeof(vertices),D3D11_BIND_VERTEX_BUFFER,vertices),vb1=make(sizeof(instances),D3D11_BIND_VERTEX_BUFFER,instances);
-        ID3D11Buffer* vb[]={vb0.Get(),vb1.Get()};UINT strides[]={16,60},offsets[]={0,0};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);ctx->IASetInputLayout(layout.Get());ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,sceneCb.GetAddressOf());ctx->PSSetConstantBuffers(2,1,materialCb.GetAddressOf());ctx->VSSetConstantBuffers(12,1,savedCb.GetAddressOf());ctx->PSSetConstantBuffers(12,1,savedCb.GetAddressOf());
-        ctx->RSSetState(raster.Get());D3D11_VIEWPORT orbitalVp{0,0,8,8,0,1};ctx->RSSetViewports(1,&orbitalVp);ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);testScene=scene.tex.Get();ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),scene.dsv.Get());
+        auto bindOrbital=[&]() {
+            ID3D11Buffer* vb[]={vb0.Get(),vb1.Get()};UINT strides[]={16,60},offsets[]={0,0};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);ctx->IASetInputLayout(layout.Get());ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,sceneCb.GetAddressOf());ctx->PSSetConstantBuffers(2,1,materialCb.GetAddressOf());ctx->VSSetConstantBuffers(12,1,savedCb.GetAddressOf());ctx->PSSetConstantBuffers(12,1,savedCb.GetAddressOf());
+            ctx->RSSetState(raster.Get());D3D11_VIEWPORT orbitalVp{0,0,8,8,0,1};ctx->RSSetViewports(1,&orbitalVp);ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),scene.dsv.Get());
+        };
+        ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);testScene=scene.tex.Get();bindOrbital();
         g_on=true;g_mode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
         check(uiDepthReissueBegin(ctx.Get()),"orbital private reissue begins");ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
         ComPtr<ID3D11VertexShader> afterVs;ctx->VSGetShader(&afterVs,nullptr,nullptr);check(afterVs.Get()==vs.Get(),"orbital reissue restores original vertex shader");
         ComPtr<ID3D11Buffer> afterCb;ctx->VSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores VS constants");afterCb.Reset();ctx->PSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores PS constants");
         ID3D11ShaderResourceView* views[2]{};g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> orbitalCoverage;views[0]->GetResource(&orbitalCoverage);auto indices=read(dev.Get(),ctx.Get(),orbitalCoverage.Get());auto orbitalDepth=read(dev.Get(),ctx.Get(),orbitalCoverage.Get(),1);unsigned counts[3]{};for(float v:indices)if(v>=0&&v<=2)++counts[unsigned(v)];
         std::printf("orbital indices %u/%u/%u\n",counts[0],counts[1],counts[2]);check(counts[1]>0&&counts[2]>0,"orbital pixels carry their actual instance index");for(size_t i=0;i<indices.size();++i)if(indices[i]>0)check(std::fabs(orbitalDepth[i]-.025f)<1e-6f,"orbital HC preserves exact raster depth");for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==0,"orbital coverage preserves live game depth");
+        ID3D11ShaderResourceView* privateOrbital=nullptr;check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&privateOrbital)&&privateOrbital,"orbital publishes its private depth seed");ComPtr<ID3D11Resource> privateOrbitalResource;privateOrbital->GetResource(&privateOrbitalResource);
+        for(float v:read(dev.Get(),ctx.Get(),privateOrbitalResource.Get()))check(v==0,"orbital coverage leaves the private scene-depth seed unchanged");
         // Orbital geometry has its own HC/record motion path.  It must not
         // enter the ordinary text cleanup mask: the temporal consumer gets
         // the record and exact coverage depth, while ui_resolve sees zero.
         for(float v:read(dev.Get(),ctx.Get(),g_mask[0].tex))
             check(v==0,"orbital coverage does not seed ordinary UI resolve");
+        // A nearer physical hull in the seeded private DSV must prevent the
+        // orbital HC record from being written, even though depth writes are
+        // disabled for this coverage family.
+        ctx->ClearState();uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,.05f,0);
+        testScene=scene.tex.Get();bindOrbital();
+        g_on=true;g_mode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+        check(uiDepthReissueBegin(ctx.Get()),"orbital coverage begins behind a nearer hull");
+        const float hcSentinel[4]={91,.123f,0,0};ctx->ClearRenderTargetView(g_holoMotion[0].target(),hcSentinel);
+        // The sentinel is cleared after Begin, then the depth-tested draw is
+        // issued; a nearer hull must leave the existing HC record untouched.
+        ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
+        views[0]=views[1]=nullptr;g_holoMotion[0].views(scene.tex.Get(),views);check(views[0]!=nullptr,"occluded orbital coverage resource remains available");ComPtr<ID3D11Resource> occludedOrbital;views[0]->GetResource(&occludedOrbital);auto occludedIndices=read(dev.Get(),ctx.Get(),occludedOrbital.Get()),occludedDepth=read(dev.Get(),ctx.Get(),occludedOrbital.Get(),1);
+        for(float v:occludedIndices)check(v==91,"nearer physical hull preserves the prior HC record");
+        for(float v:occludedDepth)check(std::fabs(v-.123f)<1e-6f,"nearer physical hull preserves the prior HC depth");
+        for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==.05f,"orbital coverage never writes the original scene depth");
+        // Put the second line behind the first with exactly the same
+        // projected footprint. The original draw blends in instance order
+        // without writing depth, so the later visible line owns HC.
+        ctx->ClearState();uiDepthFrameBoundary(ctx.Get());
+        std::memcpy(instances+15,instances,15*sizeof(float));
+        instances[16]*=2;instances[17]*=2;
+        instances[23]*=2;instances[24]*=2;instances[25]*=2;
+        ctx->UpdateSubresource(vb1.Get(),0,nullptr,instances,0,0);
+        ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,.00625f,0);bindOrbital();
+        g_on=true;g_mode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+        check(uiDepthReissueBegin(ctx.Get()),"overlapping orbital coverage begins over farther physical depth");ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
+        views[0]=views[1]=nullptr;g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> overlapCoverage;views[0]->GetResource(&overlapCoverage);
+        auto overlapIndices=read(dev.Get(),ctx.Get(),overlapCoverage.Get()),overlapDepth=read(dev.Get(),ctx.Get(),overlapCoverage.Get(),1);unsigned overlapCount=0;
+        for(size_t i=0;i<overlapIndices.size();++i)if(overlapIndices[i]>0){++overlapCount;check(std::fabs(overlapDepth[i]-.0125f)<1e-6f,"later overlapping orbital line retains its own motion depth");}
+        check(overlapCount==counts[1],"overlapping lines draw the original single-line footprint");
+        privateOrbital=nullptr;check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&privateOrbital)&&privateOrbital,"overlapping orbitals publish private depth");privateOrbitalResource.Reset();privateOrbital->GetResource(&privateOrbitalResource);
+        for(float v:read(dev.Get(),ctx.Get(),privateOrbitalResource.Get()))check(v==.00625f,"overlapping orbital coverage preserves finite physical depth");
+        for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==.00625f,"overlapping orbital coverage preserves the game's finite depth");
+        ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_holoDraw={};
     }
     // Execute the actual adaptive UI helper, including its production t8/u6

@@ -252,14 +252,16 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
         auto out=mode5Probe(3,nearer,1);
         check(out[4*coronaAt+3]==0,"mode5 rejects nearer original, private UI or smoke depth");
     }
-    // Mode 2 is the orbital-instance path.  Its HC record and exact depth
-    // remain tracked, but ordinary text kinds must not claim the record.  A
-    // zero mask is valid orbital coverage, and smoke kind 3 is also valid
-    // when it shares the stellar depth path.
-    auto mode2Probe=[&](int kind,int badDepth,int matched) {
+    // Mode 2 is the orbital-instance path. Its HC record remains tracked
+    // when it is in front of or equal to the physical scene depth, while
+    // ordinary text kinds must not claim the record. A zero mask is valid
+    // orbital coverage, and smoke kind 3 is also valid on this path.
+    auto mode2Probe=[&](int kind,int depthCase,int matched) {
         std::fill(z.begin(),z.end(),.000025f);
         std::fill(marks.begin(),marks.end(),0.0f);marks[4*16+4]=float(kind)/255.0f;
-        if(badDepth) z[7*16+6]=.025f;
+        if(depthCase==1) z[7*16+6]=0.0f;       // farther sky accepts the line
+        if(depthCase==2) z[7*16+6]=.025f;     // nearer physical hull rejects it
+        if(depthCase==3) z[7*16+6]=.0000125f; // finite farther surface accepts it
         reinterpret_cast<UINT*>(record)[15]=2;
         for(int i=16;i<28;++i) record[i]=1.0f;
         record[44]=record[49]=record[54]=1.0f;
@@ -279,10 +281,12 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
         auto out=read(dev,ctx,result.Get());ctx->ClearState();return out;
     };
     for(int kind : {0,3})
-        check(mode2Probe(kind,0,1)[4*coronaAt+3]==1,"mode2 accepts exact depth, matched record and non-text coverage kind");
+        check(mode2Probe(kind,0,1)[4*coronaAt+3]==1,"mode2 accepts equal depth, matched record and non-text coverage kind");
+    check(mode2Probe(0,1,1)[4*coronaAt+3]==1,"mode2 accepts a matched orbital line in farther sky");
+    check(mode2Probe(0,3,1)[4*coronaAt+3]==1,"mode2 accepts a line over a finite farther surface");
     for(int kind : {1,2})
         check(mode2Probe(kind,0,1)[4*coronaAt+3]==0,"mode2 rejects ordinary text coverage kinds");
-    check(mode2Probe(0,1,1)[4*coronaAt+3]==0,"mode2 rejects a depth-mismatched orbital record");
+    check(mode2Probe(0,2,1)[4*coronaAt+3]==0,"mode2 rejects a nearer physical occluder");
     check(mode2Probe(0,0,0)[4*coronaAt+3]==0,"mode2 rejects an unmatched orbital record");
     // The source and both shipping MV blobs must consume an accepted mode-2
     // record as tracked foreground, preserving its affine vector and depth.
@@ -308,6 +312,53 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
         check(std::fabs(orbitalMotion[2*coronaAt]-2.75f)<1e-5f && std::fabs(orbitalMotion[2*coronaAt+1])<1e-5f,
               "mode2 tracked foreground keeps affine motion through source and shipping MV variants");
         check(std::fabs(orbitalDepth[coronaAt]-.000025f)<1e-6f,"mode2 tracked foreground preserves exact merged depth");
+    }
+    // The same accepted record remains finite when its current physical
+    // scene depth is sky (the HC line is farther than no scene surface).
+    // Exercise source and both embedded variants, since stale blobs must not
+    // silently retain the old exact-depth rejection.
+    std::fill(z.begin(),z.end(),0.0f);ctx->UpdateSubresource(scene.Get(),0,nullptr,z.data(),16*4,0);
+    for(int variant=0;variant<3;++variant) {
+        ComPtr<ID3D11ComputeShader> tested=mv;
+        if(variant)hr(dev->CreateComputeShader(embedded[variant-1].data,embedded[variant-1].size,nullptr,&tested));
+        ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+        ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(3,1,previousView.GetAddressOf());
+        ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());ctx->CSSetShaderResources(12,2,coronaInputs);
+        ctx->CSSetSamplers(0,1,sampler.GetAddressOf());ctx->CSSetUnorderedAccessViews(3,3,orbitalOutputs,nullptr);
+        ctx->CSSetShader(tested.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+        auto farMotion=read(dev,ctx,motion.Get()),farDepth=read(dev,ctx,depth.Get());
+        check(std::isfinite(farMotion[2*coronaAt])&&std::isfinite(farMotion[2*coronaAt+1])&&
+              std::fabs(farMotion[2*coronaAt]-2.75f)<1e-5f&&std::fabs(farMotion[2*coronaAt+1])<1e-5f,
+              "mode2 source and shipping variants retain finite affine motion over sky");
+        check(farDepth[coronaAt]==0.0f,"mode2 sky keeps physical ZC depth at zero");
+    }
+    // Orbital depth is coverage metadata, not a physical occluder in the
+    // previous-depth history. A sky neighbour beside the current line must
+    // keep its ordinary camera vector when ZP has no physical depth, while a
+    // real hull depth in the same previous footprint still invalidates it.
+    const unsigned orbitalNeighbour=4*8+3;
+    for(int variant=0;variant<3;++variant) {
+        ComPtr<ID3D11ComputeShader> tested=mv;
+        if(variant)hr(dev->CreateComputeShader(embedded[variant-1].data,embedded[variant-1].size,nullptr,&tested));
+        std::fill(prior.begin(),prior.end(),0.0f);std::fill(z.begin(),z.end(),0.0f);
+        ctx->UpdateSubresource(previous.Get(),0,nullptr,prior.data(),8*4,0);
+        ctx->UpdateSubresource(scene.Get(),0,nullptr,z.data(),16*4,0);
+        ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+        ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(3,1,previousView.GetAddressOf());
+        ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());ctx->CSSetShaderResources(12,2,coronaInputs);
+        ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
+        ctx->CSSetUnorderedAccessViews(3,3,orbitalOutputs,nullptr);ctx->CSSetShader(tested.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+        auto skyMotion=read(dev,ctx,motion.Get()),skyDepth=read(dev,ctx,depth.Get());
+        check(std::fabs(skyMotion[2*orbitalNeighbour]-2.0f)<1e-5f && std::fabs(skyMotion[2*orbitalNeighbour+1])<1e-5f,
+              "orbital coverage depth absent from ZP preserves the adjacent sky camera vector");
+        check(skyDepth[coronaAt]==0.0f && skyDepth[orbitalNeighbour]==0.0f,
+              "orbital HC depth does not enter the physical ZC copy");
+        std::fill(prior.begin(),prior.end(),.025f);
+        ctx->UpdateSubresource(previous.Get(),0,nullptr,prior.data(),8*4,0);
+        ctx->CSSetShader(tested.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+        auto hullMotion=read(dev,ctx,motion.Get());
+        check(std::fabs(hullMotion[2*orbitalNeighbour]-16.0f)<1e-5f && std::fabs(hullMotion[2*orbitalNeighbour+1]-16.0f)<1e-5f,
+              "physical hull depth in ZP still invalidates adjacent background history");
     }
     // A valid corona record is tracked foreground.  Even when its previous
     // raster location contains a nearer hull, mv must keep the affine vector

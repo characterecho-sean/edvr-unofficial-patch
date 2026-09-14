@@ -723,3 +723,69 @@ original shader at the expected off-glyph influence assertion. These
 checks establish the transport correction and preserve the existing
 fast-motion, edited-text, alpha and output-ownership controls; the next
 headset comparison is still needed to judge the complete visible halo.
+
+## Remaining orbital band, capture 194149
+
+The user confirms targeting text looks good on 23deddd, while a slight
+dark band remains around orbital lines. The new graphics flight
+edvr_gfx_20260913_193915.log verifies v0.16.2-9-g23deddd, build
+6AA74103, linked 00:34:11 UTC. The paired VR log identifies Valve
+SteamVR. Capture 194149 has 844 draw snapshots, six surfaces and zero
+capped draws, failed copies or missing shaders. First temporal frame
+13639 uses 2774x2740 input, 4268x4216 output and jitter
+(0,-0.166666657).
+
+Ruled out: the remaining isolated orbital band is produced by retained
+text cleanup, because the full-input ROI (1487,750)-(1727,1090) contains
+only UI class 0, empty previous/next UI influence, and zero changed
+output pixels between DlssBeforeUi and T00. There are 1,004 invalid
+motion-vector pixels in this region, beside the orbital curve.
+
+Three raw-crop row samples locate the curve at (914,120), (884,240) and
+(859,360). Its HC record index is 7 and its private depth is about
+3e-11, while the original scene depth is zero. The preceding merged
+depth also contains the line. Immediately outside its left coverage
+edge, two or three input pixels carry (5548,5480), the explicit invalid
+history sentinel, instead of the approximately (1,-1) motion of their
+neighbours. These are unmarked background pixels with zero current
+depth. The backgroundHistoryHidden helper takes a maximum of the
+previous merged depth over 3x3 samples and treats any positive depth as
+an occluder when current depth is zero. Thus private navigation-line
+depth rejects history in the surrounding transparent corona.
+
+The correction separates the orbital line's geometric motion depth from
+opaque scene depth. Orbital coverage keeps its private DSV bound with
+GEQUAL testing and depth writes disabled, matching the original orbital
+draw. Its HC record still carries the line's exact geometric depth and
+instance transform. Keeping the depth test prevents a hidden line from
+overwriting another object's motion record.
+
+The mode-2 motion consumer accepts HC depth in front of or equal to the
+merged scene depth, while rejecting nearer occluders, unmatched records
+and ordinary text coverage. Other motion families retain their
+exact-depth equality gate. Both the current DLSS depth and subsequent
+history now contain the underlying scene at the line, so it cannot
+invalidate adjacent corona history as though it were a solid object. No
+extra texture, render pass or copy is introduced.
+
+Validation: the absolute-path full build passes. The actual orbital
+reissue preserves zero and finite private depth, retains per-instance
+HC, preserves an existing HC record behind a nearer hull, and follows
+the original draw order for overlapping lines at different depths. The
+UI suite passes 25,084 checks on WARP and 26,830 on hardware with the
+captured HUD pixel shader. The 55,320-check screen-motion suite verifies
+source plus both shipping MV variants retain orbital affine motion over
+sky, write underlying scene depth to ZC, preserve neighbouring camera
+motion, and still invalidate background hidden by a physical hull.
+Native TAA's shared HC consumer and far-sky call order were reviewed.
+
+A scratch control restoring only the old orbital depth-writing state
+compiles, then fails at "orbital coverage leaves the private scene-depth
+seed unchanged" after the same 48/8/8 HC footprint. The final NVIDIA DLL
+smoke passes, including DLSS evaluation, foveation and jitter/motion
+convention checks, with runtime 310.7.0.0. An earlier smoke launched
+before the full build finished skipped NGX initialization; the
+completed-build rerun exercises those checks successfully. Preset K is
+confirmed in the flight log. These checks establish the depth-history
+correction; headset confirmation of the remaining visible halo is
+pending.
