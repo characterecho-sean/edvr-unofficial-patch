@@ -5,8 +5,11 @@ CPU wall phases and connects native waits/submits to the existing producer GPU
 span. The monitor distinguishes these sources from unsupported compositor
 measurements. The full build, 60 provider checks and 102 real WARP query and
 dispatcher checks passed. The DLL pair is installed and hash-verified in
-Frontier; the next manual flight checks timing engagement and monitor output.
-Matched-resolution performance and quality parity remain unqualified.
+Frontier. The matching manual flight confirms valid timing samples, both-eye
+temporal treatment, complete shutdown and normal monitor/rendering behavior.
+The timing baseline must stay independent of headset-vendor SDKs; the proposed
+next measurement is EDVR's GPU work on the OpenXR device. Matched-resolution
+performance and quality parity remain unqualified.
 
 The [native temporal checkpoint](openxr-native-temporal-2026-09-13.md) connects
 the frame's pose, projection, jitter and eye input to the existing TAA and

@@ -80,19 +80,36 @@ malformed inputs, incomplete pairs, independent CPU/GPU validity and context
 retirement. The production fixture uses actual WARP queries and copies through
 the native client and owner/producer dispatcher, including both eye orders,
 nested pass timers, disabled GPU timing and CPU-only close. Synthetic durations
-are not a game performance benchmark. Actual game call ordering and monitor
-presentation remain pending the manual check below.
+are not a game performance benchmark. Initial game integration and monitor
+presentation are confirmed by the manual result below.
 
-## Next manual Frontier check
+## Manual Frontier validation
 
-After the verified pair is installed, launch Frontier manually with the native
-Pimax runtime and SteamVR closed. Keep the main-menu scene and DLSS settings
-steady for about 30 seconds. Open F8 and inspect the Submit wall and render GPU
-readouts, then exit normally. Record actual input/output dimensions from the
-matching build before choosing a SteamVR comparison. Matching quality-slider
-labels across runtimes does not establish matching resolution.
+The first matching native timing flight passed on 2026-09-14. Both modules
+match the installed pair, CPU wall and producer GPU samples are valid, both
+eyes receive temporal treatment, and all native shutdown stages complete. The
+user confirms that F8 shows both new readings, rendering looks normal and the
+game exits normally. This qualifies initial game integration and monitor
+presentation; it does not establish timing accuracy, overhead or performance
+parity across runtimes. Detailed records remain in the local test archive.
 
-The next log review must confirm valid current-session CPU and producer GPU
+The timing baseline must remain independent of headset-vendor SDKs. Public
+OpenXR performance counters may be optional, capability-detected additions;
+their absence must not block rendering or the baseline monitor. The recommended
+next measurement is EDVR's consumer transfer and composition GPU span on the
+OpenXR device, retaining its separate source and avoiding a summed total across
+devices. Exact runtime compositor time remains unavailable without a validated
+source. Windows GPU tracing is a development diagnostic fallback.
+
+For repeat checks after installing a verified pair, launch Frontier manually
+with the native Pimax runtime and SteamVR closed. Keep the main-menu scene and
+DLSS settings steady for about 30 seconds. Open F8 and inspect the Submit wall
+and render GPU readouts, then exit normally. Record actual input/output
+dimensions from the matching build before choosing a SteamVR comparison.
+Matching quality-slider labels across runtimes does not establish matching
+resolution.
+
+Each log review must confirm valid current-session CPU and producer GPU
 samples, both-eye temporal processing and complete shutdown. Unsupported
 compositor fields should stay unavailable. This gate qualifies the instrument's
 game integration and monitor presentation; performance, measurement overhead,
