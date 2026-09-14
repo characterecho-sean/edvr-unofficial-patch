@@ -348,7 +348,7 @@ void celestialMotionShutdown() {
     for (auto& e:g_eyes) e=Eye{};
     g_build.Reset(); g_index.Reset(); g_indexOriginal.Reset(); g_draw.Reset(); g_blend.Reset(); g_depth.Reset();
     g_dump.Reset(); g_dumpCount=0;
-    g_gpu={};g_costFrames=g_costDraws=g_originalDraws=0;
+    g_gpu.reset();g_costFrames=g_costDraws=g_originalDraws=0;
     g_failed=g_noted=g_capNoted=false;
 }
 void celestialMotionStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {

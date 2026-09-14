@@ -1622,7 +1622,12 @@ bool systemHookEffectiveTangents(vr::EVREye eye, float out[4]) {
     if (!s || !out) return false;
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
     if (!s->trueSeen[e]) return false;
-    memcpy(out, lieActiveFor(s, e) ? s->lied[e] : s->trueRaw[e], sizeof(float) * 4);
+    // Temporal consumers must follow the projection matrix the game actually
+    // renders through.  In the split raw channel the raw answer is widened
+    // only as a diagnostic; the matrix remains the truth, so returning the
+    // raw lie here would give motion vectors and jitter a different frustum
+    // from the rendered image.
+    memcpy(out, lieMatrixFor(s, e) ? s->lied[e] : s->trueRaw[e], sizeof(float) * 4);
     return true;
 }
 
@@ -1759,4 +1764,11 @@ extern "C" unsigned int edvr_selftest_cull_guard(int eye, float out[4]) {
     if (!s || !out || eye < 0 || eye > 1) return 0;
     if (!edvr::lieActiveFor(s, eye)) return 0;
     return edvr::cropFractions(s, eye, out) ? 1u : 0u;
+}
+
+extern "C" unsigned int edvr_selftest_render_tangents(int eye, float out[4]) {
+    if (eye < 0 || eye > 1 || !out) return 0;
+    return edvr::systemHookEffectiveTangents(
+               eye == 0 ? vr::Eye_Left : vr::Eye_Right, out)
+               ? 1u : 0u;
 }

@@ -6,6 +6,7 @@
 #include <d3d11.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -16,15 +17,19 @@
 #include <vector>
 
 #include "../common/frame_flag.h"
+#include "../common/perf_graph.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
 #include "../common/timing.h"
 #include "perf_monitor.h"   // the upload is an event for the drop attribution
 #include "shader_swap.h"
+#include "gpu_timing.h"
 
 namespace edvr {
 namespace {
+thread_local bool g_nativeFrustum = false;
+thread_local float g_nativeTans[4] = {};
 
 // ---------------------------------------------------------------------------
 // The raster
@@ -521,27 +526,27 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             bg.alpha = 0.35f;
             ops.push_back(bg);
         }
-        const float scale = mg.budgetMs > 0.0f ? 2.0f * mg.budgetMs : 22.2f;
+        const float scale = perfGraphScale(mg.samples, mg.count, mg.budgetMs);
         const int   plotH = gy1 - gy0;
         const float barW =
             mg.count > 0 ? static_cast<float>(gx1 - gx0) / static_cast<float>(mg.count) : 0.0f;
         for (int i = 0; i < mg.count; ++i) {
             const float ms = mg.samples[i];
-            if (!(ms > 0.0f)) continue;   // a frame with no measurement is a gap
+            if (!perfGraphSampleVisible(ms, mg.zeroIsValid)) continue;
             float frac = ms / scale;
             if (frac > 1.0f) frac = 1.0f;
-            const int h = static_cast<int>(frac * plotH + 0.5f);
+            const int h = (std::max)(1, static_cast<int>(frac * plotH + 0.5f));
             Op b;
             b.rect = {gx0 + static_cast<int>(i * barW), gy1 - h,
                       gx0 + static_cast<int>((i + 1) * barW) - 1, gy1};
             if (b.rect.right <= b.rect.left) b.rect.right = b.rect.left + 1;
-            b.rgb = ms > 2.0f * mg.budgetMs   ? Rgb{255, 90, 70}
-                    : ms > mg.budgetMs * 1.02f ? Rgb{255, 170, 60}
-                                               : Rgb{110, 200, 120};
+            const int band = perfGraphBand(ms, mg.budgetMs);
+            b.rgb = band < 0 ? Rgb{120, 175, 220} : band == 2 ? Rgb{255, 90, 70}
+                    : band == 1 ? Rgb{255, 170, 60} : Rgb{110, 200, 120};
             b.alpha = 0.9f;
             ops.push_back(b);
         }
-        {
+        if (perfGraphHasReference(mg.budgetMs)) {
             Op line;
             const int ly = gy1 - static_cast<int>(0.5f * plotH + 0.5f);
             line.rect = {gx0, ly, gx1, ly + (cap / 12 > 0 ? cap / 12 : 1)};
@@ -833,7 +838,12 @@ struct Worker {
     int                     livePopupScrollMax = 0;
     double                  lastMs = 0.0;
 };
-Worker g_w;
+// The OS ends the worker before DLL process-detach. A static Worker would
+// still destroy its joinable std::thread in the CRT's later atexit pass and
+// call terminate (confirmed in the 2026-09-11 Frontier/Steam crash dumps).
+// Keep process-lifetime storage, as the logger does. Explicit shutdown still
+// joins on the normal stop path; process exit must neither join nor destruct.
+Worker& g_w = *new Worker;
 
 void workerMain() {
     for (;;) {
@@ -886,6 +896,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float4 src = S.Load(int3(region.x + id.x, region.y + id.y, 0));
     float u = (id.x + 0.5) / outSize.x;
     float v = (id.y + 0.5) / outSize.y;
+    if (misc.z > 0.5) u = 1.0 - u;
     if (flipV) v = 1.0 - v;
     float tx = lerp(-tans.x, tans.y, u);
     float ty = lerp(tans.z, -tans.w, v);
@@ -982,9 +993,7 @@ uint32_t g_draws = 0;
 // and the dispatch, never awaited, averaged and said once after enough of
 // them -- so the overlay's cost is a number in the log, not a belief.
 struct QuerySlot {
-    ID3D11Query* disjoint = nullptr;
-    ID3D11Query* begin = nullptr;
-    ID3D11Query* end = nullptr;
+    GpuTimer     timer;
     bool         inUse = false;
 };
 constexpr int kQueryRing = 8;
@@ -1000,24 +1009,20 @@ FaultBudget g_budget("menuPanel", 8);
 
 void releaseQueries() {
     for (QuerySlot& q : g_qring) {
-        if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-        if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-        if (q.end) { q.end->Release(); q.end = nullptr; }
+        q.timer.reset();
         q.inUse = false;
     }
 }
 
 void pollQueries(ID3D11DeviceContext* ctx) {
+    if (!gpuTimingOwns(ctx)) return;
     for (QuerySlot& q : g_qring) {
         if (!q.inUse) continue;
-        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
-        if (ctx->GetData(q.disjoint, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
-        UINT64 t0 = 0, t1 = 0;
-        const HRESULT h0 = ctx->GetData(q.begin, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        const HRESULT h1 = ctx->GetData(q.end, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        double ms = 0.0;
+        const GpuTimerPoll result = q.timer.poll(ctx, ms);
+        if (result == GpuTimerPoll::Pending) continue;
         q.inUse = false;
-        if (dj.Disjoint || h0 != S_OK || h1 != S_OK || dj.Frequency == 0) continue;
-        const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+        if (result != GpuTimerPoll::Ready) continue;
         ++g_timeCount;
         g_timeSum += ms;
         if (ms > g_timeMax) g_timeMax = ms;
@@ -1032,24 +1037,14 @@ void pollQueries(ID3D11DeviceContext* ctx) {
     }
 }
 
-int acquireQuery(ID3D11Device* dev) {
+int acquireQuery(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (!dev || !ctx) return -1;
+    if (!gpuTimingAccepts(ctx) && !gpuTimingBind(dev, ctx)) return -1;
     for (int i = 0; i < kQueryRing; ++i) {
         QuerySlot& q = g_qring[i];
         if (q.inUse) continue;
-        if (!q.disjoint) {
-            D3D11_QUERY_DESC qd{};
-            qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
-            D3D11_QUERY_DESC qt{};
-            qt.Query = D3D11_QUERY_TIMESTAMP;
-            if (FAILED(dev->CreateQuery(&qd, &q.disjoint)) || FAILED(dev->CreateQuery(&qt, &q.begin)) ||
-                FAILED(dev->CreateQuery(&qt, &q.end))) {
-                if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
-                if (q.begin) { q.begin->Release(); q.begin = nullptr; }
-                if (q.end) { q.end->Release(); q.end = nullptr; }
-                return -1;
-            }
-        }
-        return i;
+        if (q.timer.begin(dev, ctx)) { q.inUse = true; return i; }
+        return -1; // Shared clock pressure cannot be fixed by trying another free slot.
     }
     return -1;
 }
@@ -1059,7 +1054,7 @@ int acquireQuery(ID3D11Device* dev) {
 // is inside it) projected through the eye's frustum. False when the panel
 // is behind the eye or entirely outside it: nothing to draw here.
 bool panelBox(const float* xf, const float* tans, float dist, float curve, float halfW, float halfH,
-              float shift, uint32_t regionW, uint32_t regionH, bool flipV, int32_t box[4]) {
+              float shift, uint32_t regionW, uint32_t regionH, bool flipV, bool flipU, int32_t box[4]) {
     float minU = 1e9f, maxU = -1e9f, minV = 1e9f, maxV = -1e9f;
     const float lt = tans[0], rt = tans[1], top = tans[2], bot = tans[3];
     for (int i = 0; i <= 8; ++i) {
@@ -1085,7 +1080,8 @@ bool panelBox(const float* xf, const float* tans, float dist, float curve, float
             const float vz = xf[2] * q[0] + xf[5] * q[1] + xf[8] * q[2];
             if (vz > -1e-3f) return false;   // at or behind the eye: draw the whole region instead
             const float tx = vx / -vz, ty = vy / -vz;
-            const float u = (tx + lt) / (lt + rt);
+            float u = (tx + lt) / (lt + rt);
+            if (flipU) u = 1.0f - u;
             float v = (top - ty) / (top + bot);
             if (flipV) v = 1.0f - v;
             if (u < minU) minU = u;
@@ -1319,7 +1315,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // give the culling box and the shader different panels for a frame.
         const float aspect = g_panelAspect.load();
         const float halfH = g.halfW * aspect;
-        if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, g.shift, regionW, regionH, flipV,
+        if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, g.shift, regionW, regionH, flipV, g_nativeFrustum && flipU,
                      box) &&
             (box[2] <= box[0] || box[3] <= box[1])) {
             if (ctx) ctx->Release();
@@ -1328,11 +1324,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             return nullptr;
         }
         pollQueries(ctx);
-        const int qs = acquireQuery(dev);
-        if (qs >= 0) {
-            ctx->Begin(g_qring[qs].disjoint);
-            ctx->End(g_qring[qs].begin);
-        }
+        const int qs = acquireQuery(dev, ctx);
         D3D11_BOX rb{};
         rb.left = region[0];
         rb.top = region[1];
@@ -1370,6 +1362,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         p.geom[3] = halfH;
         p.misc[0] = g.alpha;
         p.misc[1] = g.shift;
+        p.misc[2] = g_nativeFrustum && flipU ? 1.0f : 0.0f;
         D3D11_MAPPED_SUBRESOURCE m{};
         bool ran = false;
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) && m.pData) {
@@ -1401,11 +1394,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
             ctx->Dispatch((static_cast<UINT>(box[2] - box[0]) + 7) / 8,
                           (static_cast<UINT>(box[3] - box[1]) + 7) / 8, 1);
-            if (qs >= 0) {
-                ctx->End(g_qring[qs].end);
-                ctx->End(g_qring[qs].disjoint);
-                g_qring[qs].inUse = true;
-            }
+            if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
 
             ctx->CSSetShaderResources(0, 2, nullSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
@@ -1436,10 +1425,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             }
         } else {
             if (qs >= 0) {
-                // A query begun and never ended would wedge its slot.
-                ctx->End(g_qring[qs].end);
-                ctx->End(g_qring[qs].disjoint);
-                g_qring[qs].inUse = true;
+                g_qring[qs].timer.end(ctx); // Keep the slot until its invalid sample is consumed.
             }
             failOnce("the parameter buffer could not be written");
         }
@@ -1455,6 +1441,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
 // ---------------------------------------------------------------------------
 
 void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]) {
+    if (g_nativeFrustum) { memcpy(tans, g_nativeTans, sizeof(g_nativeTans)); return; }
     float outer = 1.0f, inner = 1.0f;
     eyeTangents(&outer, &inner);
     float rawTop = 0.0f, rawBottom = 0.0f;
@@ -1471,6 +1458,15 @@ void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]) {
     // a symmetric headset conceals the error entirely.
     tans[2] = rawBottom;
     tans[3] = rawTop;
+}
+
+void menuPanelSetNativeFrustum(const float tans[4]) { if (tans) { memcpy(g_nativeTans,tans,sizeof(g_nativeTans)); g_nativeFrustum=true; } }
+void menuPanelClearNativeFrustum() { g_nativeFrustum=false; }
+void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bounds, const float xf[12]) {
+    if (graphicsRuntimeDisabled() || !src || !xf || eye < 0 || eye > 1) return nullptr;
+    void* out = nullptr;
+    guardedBudget(g_budget, [&] { out = compositeInner(src, eye, bounds, xf); });
+    return out;
 }
 
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve, float halfW,
@@ -1519,6 +1515,13 @@ void menuPanelSubmit(const MenuContent& c) {
     g_w.hasPending = true;
     g_w.cv.notify_one();
 }
+
+#ifdef EDVR_MENU_TEST
+bool menuPanelWorkerReadyForTest() {
+    std::lock_guard<std::mutex> lock(g_w.m);
+    return g_w.hasReady && !g_w.hasPending;
+}
+#endif
 
 void menuPanelTick(ID3D11Device* dev) {
     if (!dev) return;

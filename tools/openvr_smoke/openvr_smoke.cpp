@@ -27,6 +27,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -492,6 +494,62 @@ int guardCropChecks() {
 // promotes the lie; the crop fractions through the selftest export; and a
 // second object of the hooked class still receiving pure truth while the
 // lie is live for the game's own interface.
+// Exercise the diagnostic wrapper through the built proxy and its real hooks.
+int censusChild(const char* dir) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                 SEM_NOOPENFILEERRORBOX);
+    wchar_t proxy[MAX_PATH];
+    _snwprintf_s(proxy, _TRUNCATE, L"%hs\\openvr_api.dll", dir);
+    HMODULE m = LoadLibraryW(proxy);
+    if (!m) { printf("  FAIL  census child could not load the proxy\n"); return 10; }
+    typedef void*(__cdecl* PFN_GetGenericInterface)(const char*, int*);
+    typedef unsigned int(*PFN_Selftest)(void);
+    typedef void*(*PFN_FakePtr)(void);
+    auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
+        GetProcAddress(m, "VR_GetGenericInterface"));
+    auto selftest = reinterpret_cast<PFN_Selftest>(
+        GetProcAddress(m, "edvr_selftest_system_hook"));
+    if (!getIface || !selftest) return 11;
+    int err = -1;
+    void* wrapped = getIface("IVRSystem_012", &err); // Also performs lazy runtime loading.
+    HMODULE fake = GetModuleHandleW(L"openvr_api_orig.dll");
+    auto fakePtr = fake ? reinterpret_cast<PFN_FakePtr>(
+                              GetProcAddress(fake, "VR_FakeSystemPtr")) : nullptr;
+    if (!fakePtr) return 11;
+    void* wrappedAgain = getIface("IVRSystem_012", &err);
+    if (!wrapped || wrappedAgain != wrapped || wrapped == fakePtr()) {
+        printf("  FAIL  census child did not return a distinct stable wrapper\n");
+        return 12;
+    }
+    auto* sys = static_cast<fakevr::ISystem012*>(wrapped);
+    uint32_t w = 0, h = 0;
+    sys->GetRecommendedRenderTargetSize(&w, &h);
+    if (w != fakevr::kSizeW || h != fakevr::kSizeH) return 13;
+    for (int eye = 0; eye < 2; ++eye) {
+        fakevr::M44 got = sys->GetProjectionMatrix(eye, 0.1f, 1000.0f, 1);
+        fakevr::M44 want = fakevr::expectedMatrix(eye, 0.1f, 1000.0f, 1);
+        if (memcmp(&got, &want, sizeof(got)) != 0) return 14;
+        fakevr::M34 gotEye = sys->GetEyeToHeadTransform(eye);
+        fakevr::M34 wantEye = fakevr::expectedEyeToHead(eye);
+        if (memcmp(&gotEye, &wantEye, sizeof(gotEye)) != 0) return 15;
+        float l = 0, r = 0, t = 0, b = 0, expected[4];
+        sys->GetProjectionRaw(eye, &l, &r, &t, &b);
+        fakevr::expectedRaw(eye, expected);
+        if (l != expected[0] || r != expected[1] || t != expected[2] ||
+            b != expected[3]) return 16;
+    }
+    const unsigned int flags = selftest();
+    if ((flags & 1u) == 0 || ((flags >> 8) & 0xFF) == 0 ||
+        ((flags >> 16) & 0xFF) == 0 || ((flags >> 24) & 0xFF) == 0) {
+        printf("  FAIL  census child existing system hook counters did not advance (0x%08X)\n",
+               flags);
+        return 17;
+    }
+    // The parent reads the log after exit, when the DLL has flushed it.
+    printf("  ok    census child: stable typed wrapper and existing hook counters\n");
+    return 0;
+}
+
 // The separability probe (advanced.cull_guard_channel = raw | matrix).
 //
 // This is the cell that keeps a flight honest. The probe's whole value is
@@ -507,6 +565,36 @@ int guardCropChecks() {
 // Same fixture and same margins as guardChild, so the lied numbers are the
 // ones documented there: left eye truth l=-1.25 r=+0.75 t=-1.2 b=+0.8 ->
 // lie l=-1.25 r=+1.25 t=-1.2 b=+1.0 at fraction_v = 0.5.
+using RenderTangentsFn = unsigned int(*)(int, float*);
+
+int checkRenderTangents(fakevr::ISystem012* sys, RenderTangentsFn renderTangents,
+                        const char* chan, int& bad) {
+    for (int e = 0; e < 2; ++e) {
+        float effective[4] = {};
+        fakevr::M44 actual = sys->GetProjectionMatrix(e, 0.5f, 100.0f, 0);
+        float expected[4] = {
+            (actual.m[0][2] - 1.0f) / actual.m[0][0],
+            (actual.m[0][2] + 1.0f) / actual.m[0][0],
+            (actual.m[1][2] - 1.0f) / actual.m[1][1],
+            (actual.m[1][2] + 1.0f) / actual.m[1][1]};
+        if (renderTangents(e, effective) == 0u) {
+            printf("  FAIL  probe child (%s): effective render tangents unavailable for eye %d\n",
+                   chan, e);
+            ++bad;
+            continue;
+        }
+        for (int k = 0; k < 4; ++k) {
+            if (!std::isfinite(effective[k]) || !std::isfinite(expected[k]) ||
+                fabsf(effective[k] - expected[k]) > 1e-5f) {
+                printf("  FAIL  probe child (%s): effective eye %d tangent[%d]=%g, expected %g\n",
+                       chan, e, k, effective[k], expected[k]);
+                ++bad;
+            }
+        }
+    }
+    return bad;
+}
+
 int probeChild(const char* dir, bool rawChannel) {
     const char* chan = rawChannel ? "raw" : "matrix";
     wchar_t proxy[MAX_PATH];
@@ -520,6 +608,12 @@ int probeChild(const char* dir, bool rawChannel) {
     auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
         GetProcAddress(m, "VR_GetGenericInterface"));
     if (!getIface) { printf("  FAIL  probe child (%s): no VR_GetGenericInterface\n", chan); return 11; }
+    auto renderTangents = reinterpret_cast<RenderTangentsFn>(
+        GetProcAddress(m, "edvr_selftest_render_tangents"));
+    if (!renderTangents) {
+        printf("  FAIL  probe child (%s): edvr_selftest_render_tangents not exported\n", chan);
+        return 11;
+    }
     int err = -1;
     void* iface = getIface("IVRSystem_012", &err);
     if (!iface) { printf("  FAIL  probe child (%s): interface came back null\n", chan); return 12; }
@@ -575,6 +669,9 @@ int probeChild(const char* dir, bool rawChannel) {
         ++bad;
     }
 
+    // Temporal consumers must receive the same frustum as the matrix path.
+    checkRenderTangents(sys, renderTangents, chan, bad);
+
     // And the image path is untouched on BOTH channels. This is the half
     // that makes the probe readable: the game renders exactly what it would
     // have rendered anyway, so anything that moves is the lie's doing.
@@ -617,6 +714,12 @@ int guardChild(const char* dir) {
     auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
         GetProcAddress(m, "VR_GetGenericInterface"));
     if (!getIface) { printf("  FAIL  guard child: no VR_GetGenericInterface\n"); return 11; }
+    auto renderTangents = reinterpret_cast<RenderTangentsFn>(
+        GetProcAddress(m, "edvr_selftest_render_tangents"));
+    if (!renderTangents) {
+        printf("  FAIL  guard child: edvr_selftest_render_tangents not exported\n");
+        return 11;
+    }
     int err = -1;
     void* iface = getIface("IVRSystem_012", &err);
     if (!iface) { printf("  FAIL  guard child: interface came back null\n"); return 12; }
@@ -690,6 +793,7 @@ int guardChild(const char* dir) {
                "(m00 %g want %g)\n", got.m[0][0], want.m[0][0]);
         ++bad;
     }
+    checkRenderTangents(sys, renderTangents, "guard-pre", bad);
 
     // The churn-attribution channel (frame_flag, spec §1g) is silent before
     // go-live: zero is "no answer" and the d3d11 half must read guard-off.
@@ -758,6 +862,7 @@ int guardChild(const char* dir) {
                got.m[1][2], -0.2f / 2.2f);
         ++bad;
     }
+    checkRenderTangents(sys, renderTangents, "guard-post", bad);
     if (fabsf(got.m[2][2] - want.m[2][2]) > 1e-5f ||
         fabsf(got.m[2][3] - want.m[2][3]) > 1e-5f ||
         got.m[3][1] != want.m[3][1] || got.m[3][2] != want.m[3][2]) {
@@ -2351,6 +2456,7 @@ int sentinelChecks() {
 
 int main(int argc, char** argv) {
     if (argc >= 3 && strcmp(argv[2], "--fault-child") == 0) return faultChild(argv[1]);
+    if (argc >= 3 && strcmp(argv[2], "--census-child") == 0) return censusChild(argv[1]);
     if (argc >= 3 && strcmp(argv[2], "--guard-child") == 0) return guardChild(argv[1]);
     if (argc >= 3 && strcmp(argv[2], "--probe-raw-child") == 0) return probeChild(argv[1], true);
     if (argc >= 3 && strcmp(argv[2], "--probe-matrix-child") == 0) return probeChild(argv[1], false);
@@ -2444,6 +2550,66 @@ int main(int argc, char** argv) {
     if (systemHookChecks(argv[1]) != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;
+    }
+
+    // Census is opt-in and runs in a fresh child so the existing default-off
+    // in-place hook assertions above remain unchanged.
+    {
+        char dir3[MAX_PATH * 2];
+        snprintf(dir3, sizeof(dir3), "%s_census_%lu_%llu", argv[1],
+                 GetCurrentProcessId(), GetTickCount64());
+        CreateDirectoryA(dir3, nullptr);
+        char src[MAX_PATH * 2], dst[MAX_PATH * 2];
+        snprintf(src, sizeof(src), "%s\\openvr_api.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api.dll", dir3);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the census child's proxy");
+        snprintf(src, sizeof(src), "%s\\openvr_api_orig.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api_orig.dll", dir3);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the census child's stand-in");
+        snprintf(dst, sizeof(dst), "%s\\edvr.ini", dir3);
+        FILE* f = nullptr;
+        if (fopen_s(&f, dst, "w") != 0 || !f) return fail("could not write the census child's edvr.ini");
+        fputs("[advanced]\nopenvr_census = on\n", f);
+        fprintf(f, "[log]\ndir = %s\\edvr_logs\n", dir3);
+        fclose(f);
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        wchar_t cmd[MAX_PATH * 2];
+        _snwprintf_s(cmd, _TRUNCATE, L"\"%s\" \"%hs\" --census-child", self, dir3);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr,
+                            nullptr, &si, &pi))
+            return fail("could not start the census child");
+        const DWORD censusWait = WaitForSingleObject(pi.hProcess, 30000);
+        if (censusWait != WAIT_OBJECT_0) {
+            TerminateProcess(pi.hProcess, 124);
+            WaitForSingleObject(pi.hProcess, 5000);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return fail("the census child exceeded its bounded timeout");
+        }
+        DWORD code = 0xFFFFFFFF;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (code != 0) {
+            printf("  FAIL  census child exited 0x%08lX\n", code);
+            return 1;
+        }
+        char pattern[MAX_PATH * 2];
+        snprintf(pattern, sizeof(pattern), "%s\\edvr_logs\\edvr_vr_*.log", dir3);
+        WIN32_FIND_DATAA data{};
+        HANDLE found = FindFirstFileA(pattern, &data);
+        if (found == INVALID_HANDLE_VALUE) return fail("census child wrote no VR log");
+        FindClose(found);
+        snprintf(pattern, sizeof(pattern), "%s\\edvr_logs\\%s", dir3, data.cFileName);
+        std::ifstream logFile(pattern, std::ios::binary);
+        std::string log((std::istreambuf_iterator<char>(logFile)), std::istreambuf_iterator<char>());
+        if (log.find("origin=game-exe interface=IVRSystem_012 slot=1 ") == std::string::npos)
+            return fail("census geometry call did not record the game executable origin");
+        printf("  ok    census log: geometry call attributed to the game executable\n");
     }
 
     // The cull guard, in a child with the guard armed -- this parent's own

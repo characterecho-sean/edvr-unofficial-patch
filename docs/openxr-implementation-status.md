@@ -1,0 +1,886 @@
+# OpenXR implementation status
+
+The [branch review corrections](openxr-review-fixes-2026-09-14.md) notify Elite
+when native frame or loading work fails permanently, accept GUI startup-config
+line endings in CLI verification, and keep optional DLSS packaging consistent
+with the embedded installer. Astra and parent review are complete; the full
+build and new regressions passed. This checkpoint adds no headset
+qualification.
+
+The release goal is native OpenXR for every EDVR user, including those Elite
+currently routes through LibOVR. Windows selects the OpenXR runtime. Automatic
+bypass of Elite's Oculus preference and installer migration from existing
+backend paths are required. Standard artifacts now use native OpenXR; legacy
+proxies are regression fixtures only. Deliberate file recovery remains
+available through uninstall and receipts.
+
+The [native-only migration](openxr-native-only-2026-09-14.md) removes the old
+default deployment branch, requires a complete native pair, bundles the pinned
+Khronos loader and checks the installer resources against the release DLLs.
+Existing graphics-mod chains and user settings are preserved. Native startup
+errors do not switch to LibOVR or legacy OpenVR. See the checkpoint for build
+evidence, installation hashes and the next flight checklist.
+
+The [Air Link menu and exit retest](openxr-airlink-menu-exit-2026-09-14.md)
+passed on the pair reviewed in `5b9dc99`. The native backend now preserves
+validated eye calibration across recentering, keeps polling after a stopped
+session, resumes with monotonic published frame sequences and exposes terminal
+runtime events through OpenVR Quit. The full build and real TAA/DLSS/sharpening
+checks passed. Sean reported a perfect retest; matching Quest 3/Air Link logs
+confirm Windows selected the Oculus OpenXR runtime, 180% resolution, retained
+optics through two recenters, 13,918 stereo pairs with zero pose failures and
+complete shutdown without retained resources. Elite's audited LibOVR probe was
+rejected twice with zero routing failures. This qualifies the reported Air Link
+startup/menu/exit path, not every supported feature or the full cross-runtime
+matrix. Detailed evidence and the remaining scope are in that checkpoint.
+
+The [supported feature batch and consolidated
+retest](openxr-feature-parity-2026-09-14.md) connects physical pose
+publication, Explorer Cam, terrain cull guard, completed stereo replay for
+transition suppression, and FSS arrival healing to the native backend. The user
+is away and requested continued implementation without a headset gate after
+each feature. The full build passed with 526 unchanged source hashes and the
+paired DLLs are installed and hash-verified in Frontier. Details are tracked in
+that checkpoint; all new visual behavior, including the preceding
+startup-centering change, awaits one combined headset retest. Experimental
+features and performance comparisons remain deferred.
+
+The [legacy Oculus startup route](openxr-oculus-selection-2026-09-14.md) now
+implements automatic refusal of Elite's audited LibOVR probe before normal
+graphics initialization. The native graphics artifact carries an immutable
+capability; its installer validates the matching DLL pair and exact supported
+executable before writing. The wrapper checks both the caller and DLL basename,
+preserves unrelated loads, and records its decisions in `edvr_logs`. Windows
+continues to select the OpenXR runtime. This implements the entry-path fix;
+live Meta/Air Link fallback is now confirmed by the retest above. The
+cross-runtime regression matrix and release installer migration remain
+qualification work. Desktop and installed-build evidence is recorded in that
+checkpoint.
+
+The user has deferred performance comparisons and prioritized metrics, then
+features. The [native monitor-history
+checkpoint](openxr-metrics-parity-2026-09-14.md) adds consistent short
+averages, independent timing graphs, and a clearly labelled predicted-period
+reference. Runtime compositor statistics retain explicit unavailable states.
+The matching Pimax presentation flight passed with 5,430 stereo pairs,
+independent nonempty timing histories and complete native teardown. The [native
+sharpening and logging checkpoint](openxr-native-sharpen-2026-09-14.md)
+restores `fix.render_sharpness`, moves native traces to `edvr_logs` beside the
+game, and restores the floating monitor's CPU readout with the requested
+compact `gpu`/`cpu` labels. The full build passed with 511 unchanged source
+hashes, and both real-shader configurations passed. The matching SteamVR/OpenXR
+flight confirms working sharpening, with 2,831 sharpened pairs and complete
+native teardown. The user reported a startup origin behind and above them; the
+[startup-centering checkpoint](openxr-launch-centre-2026-09-14.md) addresses
+the missing native startup reset. At the user's request, native OpenXR always
+launches centered on a trustworthy tracked pose, with no toggle; legacy OpenVR
+retains its settings. The full build passed with 514 unchanged source hashes,
+24 policy checks and 60 native host checks. The new pair is installed and
+hash-verified in Frontier; the startup-facing headset check is included in the
+combined retest above. Detailed qualification is recorded in that checkpoint.
+The user has excluded features listed under `[experimental]` from this parity
+work: supersample resolve, FSS theater and gaze foveation are deferred. This
+scope change does not remove existing settings or alter temporal AA already
+implemented.
+
+The [VDXR startup investigation](openxr-vdxr-startup-2026-09-14.md) confirms
+that Windows runtime selection reached VirtualDesktopXR successfully. Elite
+then requested a zero-sized depth texture and aborted; the following attempt
+used crash-sentinel recovery. A desktop regression reproduces an unsafe
+dependency between recommended render dimensions and transient pose validity.
+The correction preserves validated session dimensions across geometry
+invalidation, including extended-display queries, and adds bounded startup
+traces. The full build passed, and the matching Quest 3/VDXR flight now works.
+Its trace captures size queries immediately after a startup recenter
+invalidates geometry, with the recommendations preserved. The run completed
+4,184 stereo pairs, produced valid CPU and GPU timing samples, and finished all
+native shutdown stages without retained resources. Detailed qualification is
+recorded in that investigation; matched-resolution performance and quality
+remain pending.
+
+The [XR-device timing and system-runtime
+checkpoint](openxr-device-timing-2026-09-14.md) adds separate consumer-copy and
+composition GPU measurements to F8. Direct native installs now follow Windows'
+active OpenXR runtime by default, while explicit diagnostic manifests remain
+supported. The full build passed with 501 source hashes unchanged, including 83
+provider checks, 102 producer GPU checks and 101 new device GPU checks. The new
+pair and configuration were installed and hash-verified in Frontier. The first
+VDXR flight selected the expected runtime but failed during game startup; the
+corrected flight above qualifies the timing data path. The [legacy Oculus
+selection investigation](openxr-oculus-selection-2026-09-14.md) is recorded
+separately; subsequent LibOVR suppression and the successful Air Link flight
+are summarized above.
+
+The [native timing checkpoint](openxr-native-timing-2026-09-13.md) now measures
+CPU wall phases and connects native waits/submits to the existing producer GPU
+span. The monitor distinguishes these sources from unsupported compositor
+measurements. The full build, 60 provider checks and 102 real WARP query and
+dispatcher checks passed. The DLL pair is installed and hash-verified in
+Frontier. The matching manual flight confirms valid timing samples, both-eye
+temporal treatment, complete shutdown and normal monitor/rendering behavior.
+The timing baseline must stay independent of headset-vendor SDKs; EDVR's GPU
+work on the OpenXR device is implemented in the next checkpoint above.
+Matched-resolution performance and quality parity remain unqualified.
+
+The [native temporal checkpoint](openxr-native-temporal-2026-09-13.md) connects
+the frame's pose, projection, jitter and eye input to the existing TAA and
+DLAA/DLSS filter before menu composition and shared capture. The full build,
+157 provider-contract checks and real-filter desktop runs pass, with 18 eye
+images and 169 checks in each of native TAA and DLSS modes. The pair is
+installed and hash-verified in Frontier. Manual DLSS flights now confirm
+both-eye treatment, current-frame projection-query coverage and native
+teardown. The user reports working DLSS. Performance and quality parity still
+need a controlled comparison: the first comparison used unsupported native
+monitor fields and different render resolutions. Native measurement integration
+is tracked above. Later supported submission effects are implemented in the
+feature batch above; their visual qualification remains pending.
+
+The native menu checkpoint has completed its first manual Frontier flight.
+Local startup, menu submission in both eyes and internal native teardown are
+confirmed; the menu opens and closes successfully. Both-eye appearance,
+anchoring during head movement and normal exit are also confirmed. Detailed
+evidence remains local. Subsequent temporal integration is tracked above.
+
+The [manual-launch and menu checkpoint](openxr-native-menu-2026-09-13.md) is
+installed and verified in Frontier. Native startup now supports adjacent
+configuration, the native compositor connects EDVR's menu through the game
+graphics callback before shared eye capture, and native diagnostics persist
+independently of launcher stdout. A separate menu capability avoids falsely
+enabling the legacy glitch consumer; the graphics runtime detector now
+identifies native OpenXR correctly. Parent review corrected configuration
+reachability, lifecycle admission, pose retirement, frustum/flip handling and
+test coverage in Luna's implementation. The full build passed with all 485
+source hashes unchanged, including 40 real menu/client/shared-copy checks and
+14 local-bootstrap checks. The first manual result is recorded above. At that
+checkpoint, native temporal AA and other legacy submission effects remained
+unported.
+
+The [first native Frontier
+flight](openxr-frontier-entry-2026-09-13.md#first-native-frontier-flight)
+rendered normally per the user on the installed `642907b` checkpoint. The
+graphics DLL's build and active hooks match, and Pimax records Elite's native
+OpenXR client, rendering and final disconnect. F8 did not open because the
+native compositor does not yet register EDVR's menu/postprocessing callbacks;
+the old runtime detector also mislabels this native DLL as foreign OpenVR. This
+is successful native game rendering with incomplete EDVR feature integration.
+Internal teardown counters were not captured by the launcher, and one startup
+`XR_ERROR_TIME_INVALID` remains to correlate. The user now authorizes
+direct/destructive Frontier test installs and will launch manually: no scripted
+launcher or automatic restore. Next work is install-local bootstrap, durable
+native diagnostics and integration of existing EDVR compositor callbacks.
+Frontier remains on the verified native pair, with the existing INI retained.
+
+The [native Frontier entry checkpoint](openxr-frontier-entry-2026-09-13.md)
+completes the fourteen historical exports with fixed ordinals and typed
+probe/factory behavior, adds strict separate-device environment bootstrap, and
+provides reversible paired installation plus a fresh-launch preflight. Parent
+review corrected stale presence, executable parsing, installed graphics
+identity and rollback handling in Luna's implementation. The full build passed
+with all 478 source hashes unchanged: module gates passed 223/229/223/229
+checks, the PE reader passed 22 and the launcher passed 25. The built export
+table and Frontier's five OpenVR delay imports validated. Both sanctioned
+previews passed and the installed `2f051db` baseline remains hash-verified. The
+next gate is the first native Frontier/PiOpenXR flight with SteamVR and the
+existing EDLaunch closed; the selected native and graphics DLLs are archived
+with a fixed install root. Native installation, actual game rendering/exit and
+full EDVR feature parity remain unqualified.
+
+The [separate-device Pimax
+gate](openxr-owned-capture-2026-09-13.md#pimax-result) passed on `8388961`. All
+488 input hashes matched before and after. The diagnostic rendered 1,531 stereo
+pairs and 315 loading projections; the user confirmed normal viewing, tracking
+and closure without headlock. System-caller shutdown completed all ten teardown
+stages on the XR owner after the application stopped Present: its count stayed
+at 1,917, callbacks retired and no resources were retained. Pimax recorded the
+final client disconnect, and the child exited normally. The next implementation
+step is completing native legacy exports and opt-in Frontier launch with this
+ownership mode. No native Frontier installation or flight has occurred.
+
+The [separate-device capture integration](openxr-owned-capture-2026-09-13.md)
+connects eye and six-face loading captures to an explicitly configured XR-owned
+device. Luna implemented capture and fixture changes; parent review tightened
+startup validation, publication, module ownership and allocation flags. The
+extended transfer fixture passed 261 checks on both WARP and RTX 5090,
+including preserving the old skybox after a middle-face refusal and retiring
+capture without new producer callbacks. The hardware factory fixture passed all
+11 checks for a distinct device/context on the requested adapter. The staged
+module and runner now offer `--separate-device`; its native diagnostic stops
+application Present before System-caller shutdown and requires complete
+unretained cleanup. The full build passed with all 476 source hashes unchanged,
+including 206 explicit-module, 212 bootstrap and 206 separate-mode
+failed-startup checks. The final binaries repeated the successful RTX 5090
+checks. The next gate is actual PiOpenXR rendering and teardown in that mode.
+Native game launch remains pending; Frontier is unchanged.
+
+The [separate-device transfer checkpoint](openxr-shared-device-2026-09-13.md)
+implements the image handoff needed for a future XR-owned D3D11 device. Luna
+implemented the transfer and fixture; parent review corrected ownership,
+cancellation and retirement behavior. All 216 checks passed on WARP and on the
+RTX 5090, including byte preservation across six formats, reuse/resize and
+consumer-only retirement after producer callback admission closes. A
+hardware-only resize drain failure was isolated to completion-query polling;
+permitting driver flushing resolved it with the same deadline. The full build
+passed with all 476 source hashes unchanged. This primitive is not wired into
+the native host yet, so session cleanup still uses the existing callback-held
+path. Next is integrating both eye and loading captures with a separately owned
+XR device, followed by actual runtime teardown with application Present
+stopped. No Frontier installation or headset test was performed for this
+checkpoint.
+
+The [stopped-Present desktop checkpoint](openxr-stopped-present-2026-09-13.md)
+shares the native module's existing two-stage shutdown coordinator with a real
+WARP graphics-callback fixture. All eight cases passed with 63 checks:
+unserviced drain, missing final callback, resumed Present, held callback
+lifetime, and drain/finalizer failures. The full build passed, with all 473
+source hashes unchanged. Parent review tightened retained references, capture
+lifetime, queue ordering and owner-join checks. Production cleanup policy and
+deadlines are unchanged; this provides desktop coverage for the ordering
+observed in Frontier, not a new cleanup fallback or an OpenXR runtime result.
+Frontier remains on the verified `2f051db` proxies with its INI and original
+runtime preserved. Native game integration still needs different graphics
+ownership or explicit rendering exclusion when the live caller stops Present
+service.
+
+The [render-caller lifetime checkpoint](openxr-shutdown-lifetime-2026-09-13.md)
+extends the passive shutdown observer after the measured-zero Frontier flight.
+It retains the original render caller's thread handle and records whole owned
+Present activity at both ends of shutdown, distinguishing exited, live idle and
+live in-Present callers. Failed and TEST Presents count as activity but remain
+excluded from successful callback-service samples. Paired bridge version 2
+rejects old snapshots. The full build passed with all seven paired-DLL
+children, CPU lifetime/activity tests and existing regressions; all 471 source
+hashes were unchanged. Both shipping proxies are installed and hash-verified in
+Frontier with the live INI and original runtime preserved. Native teardown is
+unchanged: these observations do not establish general immediate-context
+quiescence or qualify cleanup from another caller. The `2f051db` Frontier
+flight verified the live caller outside Present case: original render thread
+19820 remained alive at both shutdown snapshots, with no active Present and
+unchanged balanced counts of 5,785. There were zero service-point samples
+during the 51.4957 ms forwarded shutdown; the last Present had exited 0.3060 ms
+before it began. Runtime shutdown returned and the game process was absent
+afterward; visual/exit confirmation is pending. This rules out an
+already-exited render caller or a held owned Present in that window. Native
+game export/launch integration still needs a shutdown contract that can handle
+a live caller after Present service stops.
+
+The [shutdown progress checkpoint](openxr-shutdown-progress-2026-09-13.md) adds
+a separate, passive observation window to the shipping OpenVR census. It counts
+successful owned Presents reaching the native callback service point around
+forwarded shutdown, with QPC bounds and explicit measured/unavailable outcomes.
+Full-build verification passed, including six actual paired-DLL children
+checking positive and zero progress, excluded Presents, unavailable receivers
+and exact forwarding. All 471 source hashes were unchanged during the build.
+The `e4f4ef9` Frontier flight looked normal to the user and both installed
+hashes matched. It produced a valid measured zero: no successful owned Present
+reached the native callback service point during the 51.8276 ms forwarded
+shutdown. The game's runtime returned normally. This does not establish
+render-thread termination or general graphics inactivity. The native module's
+final GPU drain and callback-held cleanup still require Present service, so
+teardown needs a safe contract for stopped application rendering before native
+game launch. The original runtime is preserved; the only observed INI change
+during the flight was `fix.intro_video = screen` to `skip`, which is retained.
+Native export/launch integration remains open.
+
+The latest [application System caller
+checkpoint](openxr-system-caller-2026-09-13.md) extends the staged native DLL
+diagnostic to match Frontier's observed caller split: separate Init, persistent
+System and render callers, with shutdown on the System caller. Startup geometry
+and properties are checked before the first application pose wait; tracking and
+event polls run between completed scene pairs while Present continues. Parent
+review corrected callback lifetime and observer checks. The full build passed,
+including 201 explicit-module and 207 bootstrap checks. All 483 source, binary,
+stage, environment and build-log hashes matched before and after the `ec3dd92`
+Pimax gate. That run passed with 1,527 stereo pairs, 68 valid periodic System
+samples and complete callback-held cleanup. Shutdown ran on the persistent
+System caller. The user confirmed normal viewing, tracking and closure without
+headlock. Rechecking the archived Frontier semantic trace also proves a
+complete Present during Init; shutdown progress remains unmeasured after its
+bounded census samples expired. The next step measures Frontier's actual
+shutdown window on the existing OpenVR path. Complete legacy exports, opt-in
+native game launch and game feature integration remain open.
+
+The preceding [graphics transport
+checkpoint](openxr-transport-hooks-2026-09-13.md) removes native discovery's
+dependency on optional vScreen hooks. The deliberate feature-off path now
+installs a minimal ExecuteCommandList hook while retaining the normal rendering
+path. The full build passed: 184 checks per shared/private/LiveCopy case and 25
+checks per deliberately unavailable swap/live probe case, alongside the
+existing suites. The new fixture reproduces the missing bridge on the previous
+archived DLL. All 481 source, binary, environment, stage and log hashes are
+recorded and matched before and after the `3362685` Pimax headset gate. That
+run passed with 1,530 stereo pairs, 313 loading projections and complete
+callback-held cleanup; session binding shutdown spanned 15 ms on the coarse
+tick clock. The graphics log confirms that minimal LiveCopy transport was
+active. The user reported "Looks normal." The next diagnostic adds a persistent
+application System caller and shutdown on that same thread, matching the
+Frontier census. Native Frontier startup progress, complete legacy exports and
+game feature integration remain open.
+
+Main through `0d7251b` was merged and verified as `9f26dd4`. The preceding
+[native startup checkpoint](openxr-native-bootstrap-2026-09-13.md) adds
+initialization through the application's ordinary Init export using explicit
+child environment paths, plus three typed initialization-error exports. The
+full build passed, including 169 explicit-configuration checks, 175 bootstrap
+checks, 168 Present/discovery checks and 46 runner checks. All 477 source,
+binary, environment and build-log hashes matched before and after the `eee7a1c`
+bootstrap headset gate. It passed with 1529 stereo pairs, 314 loading
+projections and complete callback-held cleanup. The user confirmed normal
+grid/triangle tracking and closure without headlock, then noted a dark-grey
+background; the fixture's RGB `(0.03, 0.03, 0.03)` clear is unchanged from the
+previous flight and explains the expected shade. The staged DLL is still
+outside the installer payload; full legacy exports and native Frontier
+integration remain open.
+
+The preceding [native-module checkpoint](openxr-native-module-2026-09-13.md)
+puts the native backend behind a separately loaded DLL exposing Frontier's five
+imported OpenVR entry points. An application fixture creates its device before
+Init, discovers the returned interfaces through those exports, renders from
+their poses and matrices, and drives loading and shutdown through real Present
+callbacks. Its first PiOpenXR DLL run reported successful counters and cleanup,
+but failed visual inspection: the user saw a grey void without the grid, then a
+triangle at the end. Pimax's log shows the headset left standby about ten
+seconds after launch, after the grid interval had expired. The revised test
+waits for sustained runtime focus before timing and recentering, replays an
+interrupted grid and pauses scene timing during focus loss. The full build
+passed, including 66 DLL/scene/timing checks and 168 Present/discovery checks.
+The `7ec4f85` focused native DLL gate passed with 314 loading projections,
+1,530 stereo pairs and session binding shutdown in 16 ms inside the final
+callback. The user confirmed the grid and triangle in both eyes, normal
+appearance and tracking, and closure without headlock. Focus was already true
+at the first sample, so delayed physical wake and focus-loss replay remain
+desktop-tested only; runtime focus alone does not prove physical display wake.
+The DLL is staged outside the installer payload; full legacy export policy,
+native Frontier startup selection and feature integration remain open.
+
+The preceding [startup-discovery
+checkpoint](openxr-native-discovery-2026-09-13.md) obtains the graphics proxy's
+validated device and context on the Init caller, then learns the render caller
+from its first real Present callback before starting OpenXR. It replaces
+device/thread handoff from the diagnostic with shared paired-module discovery
+and bounded readiness. The full build passed, including 153 actual-DLL
+Present/discovery checks. The `b8db929` PiOpenXR headset gate passed: discovery
+matched the device/provider before runtime startup, 269 loading projections and
+1,528 stereo pairs completed, and session shutdown took 15 ms inside the final
+callback. The user confirmed normal appearance, tracking and closure without
+headlock. Shipping OpenVR discovery still forwards and native Frontier
+integration remains open.
+
+The preceding [shared-host checkpoint](openxr-shared-host-2026-09-13.md)
+extracts the tested native runtime from the diagnostic and tests owner teardown
+while the render caller remains inside its final Present callback. This removes
+the diagnostic's dependency on pausing the entire application loop, a
+requirement for later Frontier startup integration. The full build passed,
+including 101 actual-DLL Present and 67 CPU queue checks. The `3fcadf7`
+20-second PiOpenXR headset gate passed with 1,529 stereo pairs, 268 loading
+projections and correct private command-list totals. All shutdown stages
+completed; session binding shutdown took 15 ms inside the active render
+callback, which retired afterward. The user confirmed normal appearance, head
+tracking and closure without headlock. This qualifies the diagnostic's
+callback-held teardown; native shipping export discovery and Frontier
+integration are still open.
+
+The preceding [Present-hook checkpoint](openxr-present-boundary-2026-09-13.md)
+routes staged OpenXR work through the graphics proxy's real owned-swapchain
+Present callback, with separate Init/render callers and a D3D11 device created
+before VR Init. Its `2734c15` PiOpenXR run reached the scene with four distinct
+callers and successful final GPU drains, then stalled during shutdown until the
+watchdog terminated it. The traced `74612d5` repeat also became headlocked at
+the end. A short automated reproduction and local minidump narrowed the stall
+to session destruction overlapping continued Present calls; both callers were
+waiting in the graphics driver. This does not establish an internal driver lock
+cycle. The correction waits for the final Present to return and its callback
+lease to retire before allowing XR-owner teardown, while continuing window
+message delivery. The full build passed, including 80 actual-DLL Present and 63
+CPU queue checks. A five-second automated PiOpenXR probe then passed: the
+callback retired, no further Presents occurred, session destruction completed
+in 63 ms and the child exited normally. The `20cad71` full-length PiOpenXR
+headset test then passed: 1,529 stereo pairs, 268 loading projections, correct
+private command-list totals and completed shutdown. The user confirmed normal
+appearance, head tracking and closure without an end-of-run headlock. Present
+and its callback retired before XR teardown, and binding shutdown completed in
+16 ms. This qualifies the diagnostic's real Present route; native Frontier
+integration remains open. The earlier [render-caller
+handoff](openxr-render-thread-2026-09-13.md) passed its `064fc0d` paired-proxy
+PiOpenXR run, with normal grid/triangle appearance, tracking and closure
+confirmed by the user. Native Frontier transport remains unimplemented. The
+entries below retain earlier evidence and limits.
+
+The approved design in [openxr-port.md](openxr-port.md) was pushed to main as
+`8c617dc` before implementation began. Work remains in Phase 0; native Frontier
+integration and complete Phase 0 qualification remain pending. The earlier
+preparation adds a [bounded semantic and export
+census](openxr-semantic-census-2026-09-12.md) and an [installed runtime
+inventory](openxr-runtime-inventory-2026-09-12.md), followed by a successful
+[Frontier semantic census flight](openxr-semantic-flight-2026-09-12.md). It
+confirms paired init/shutdown records, stable interface identity, seated
+tracking and three projection plane pairs. Native game transport remains
+unimplemented. Reusable [session/frame and projection
+policies](openxr-core-policy-2026-09-12.md) now exist under desktop tests; they
+are not connected to the shipping proxies. A standalone [native session and
+stereo diagnostic](openxr-native-harness-2026-09-12.md) now binds a diagnostic
+D3D11 device, obtains native geometry and submits a test scene; its first
+[PiOpenXR headset run](openxr-native-pimax-2026-09-12.md) completed 1800 stereo
+submissions with valid tracking and normal shutdown, and the user saw the
+triangle. The next [device-binding and startup-geometry
+checkpoint](openxr-binding-geometry-2026-09-12.md) adds caller-device session
+ownership, coherent geometry readers and a zero-layer bootstrap in that
+diagnostic. Its desktop fixture also exercises device publication through the
+actual graphics proxy. The revised native bootstrap passed a second PiOpenXR
+run: valid geometry was published on frame 1 before any stereo submission,
+followed by 1798 stereo frames and normal shutdown. The user confirmed both
+eyes, stable head tracking and normal exit. Frontier integration remains
+pending. Earlier review decisions below record the state at those checkpoints.
+
+The original motion regression has recovered on the corrected `f622cd2`
+main-menu capture. The user deferred the remaining stationary wing-line flicker
+and its image-quality comparison. Resume port preparation with the bounded
+semantic ABI/export census and installed runtime capability inventory; do not
+change rendering quality to investigate the deferred issue. Broad functional
+and timing qualification remain distinct gates.
+
+## Implemented evidence tools
+
+The [owned System-interface checkpoint](openxr-system-interface-2026-09-12.md)
+connects the exact 44-method `IVRSystem_012` shape to native geometry and
+runtime metadata, with explicit unavailable policies and a QPC-to-OpenXR
+absolute-pose query. It is exercised in the diagnostic and remains absent from
+shipping discovery. Other owned interfaces, export lifecycle and
+game-thread/feature integration remain pending; the concrete ABI object is not
+full System functionality or a game backend.
+
+The `6be3d8d` PiOpenXR diagnostic passed the owned System startup gate: native
+geometry was published before stereo, the absolute-pose query used
+QPC-to-OpenXR conversion with zero prediction and returned valid tracking, and
+runtime metadata/adapter queries succeeded. It completed 1798 stereo
+submissions and normal shutdown with SteamVR absent before and after. The user
+confirmed both eyes, stable tracking during head movement and normal exit.
+Frontier integration remains separate.
+
+The next [eye-capture and frame-ownership
+checkpoint](openxr-frame-boundary-2026-09-12.md) connects Submit-style pairing,
+private per-eye copies and a runtime operation lifetime gate to the standalone
+diagnostic. It adds desktop coverage for copy isolation, bounds/color
+conversion, incomplete frames and shutdown during a blocked wait. The `57e82ca`
+PiOpenXR run completed 3596 eye captures, 1798 stereo pairs and normal
+shutdown, with SteamVR absent before and after. The user confirmed both eyes,
+stable head tracking, normal color/clarity and normal exit. This is still
+preparation for the owned compositor ABI and game feature integration; no
+shipping discovery or Frontier installation changes are made.
+
+The [owned compositor-interface
+checkpoint](openxr-compositor-interface-2026-09-12.md) adds the exact 29-method
+`IVRCompositor_014` facade, independent render/gameplay predictions and a
+generation-aware cache. The native diagnostic calls its historical virtual
+wait, cached-pose, Submit and handoff methods. Desktop fixtures cover array
+boundaries, unavailable methods and cache access during a blocked wait. The
+full build passed, including 201 compositor, 173 timed-pose and 470 binding
+checks. The `10eb85d` PiOpenXR run passed 1800 wait/cache comparisons, 3596
+Submit calls, 1798 stereo pairs and normal shutdown, with valid gameplay
+predictions and SteamVR absent before and after. The user confirmed both eyes,
+stable head tracking, normal color/clarity and normal exit. Startup
+origins/recenter/events, export lifecycle, required compositor features and
+game integration remain open.
+
+The [seated-origin checkpoint](openxr-seated-origin-2026-09-12.md) adds an
+application-owned recenter space, timestamped runtime-origin discontinuity
+tracking and historical reset events to the diagnostic. All native pose,
+geometry and layer operations use that selected space, and reset invalidates
+the old caches before the next frame. The full build passed, including 131
+origin, 120 reference-change, 166 ownership/event and 476 binding checks. The
+`66def0b` PiOpenXR run passed both resets and reset events, then 1801
+wait/cache checks, 1797 stereo pairs and normal shutdown, with SteamVR absent
+before and after. The user confirmed placement in both eyes, world-up, stable
+tracking, normal color/clarity and normal exit. Standing/raw mapping,
+runtime-origin headset qualification and game ownership remain open.
+
+The [runtime-startup checkpoint](openxr-runtime-startup-2026-09-12.md) adds an
+owned lifecycle coordinator, the five game-imported C entry points and the
+exact ExtendedDisplay/Chaperone shapes. Native Init now caches valid geometry
+before exposing System; a second thread reads that geometry before Compositor
+is requested. Desktop fixtures cover cancellation, cleanup failure, token and
+interface publication, and actual exported calls through a test DLL. The full
+build passed with 73 lifecycle, 234 auxiliary and 35 export checks. The
+`d7623ed` PiOpenXR run passed native Init geometry, all four interface getters,
+the second-thread cached query, repeated Init/identity and shutdown retirement.
+It completed both resets, 1801 waits, 1800 cache comparisons, 1796 stereo pairs
+and normal cleanup, with SteamVR absent before and after. The user confirmed
+placement in both eyes, world-up, stable tracking, normal color/clarity and
+normal exit. Complete legacy exports, persistent game-thread ownership,
+required compositor features and Frontier integration remain open; the
+installed Frontier pair stays `f3c205e`.
+
+The [owner-service checkpoint](openxr-owner-service-2026-09-12.md) moves
+diagnostic runtime construction, event pumping, frame work and cleanup to an
+explicit owner thread. A separate System caller dispatches live pose/reset
+requests and invokes exported Shutdown; cached geometry remains directly
+readable. The full build passed, including 62 service and 28 native checks
+covering queue cancellation, cleanup order, concurrent stop, restart and idle
+pumping. The `141ea14` PiOpenXR run passed distinct caller/owner threads, 1805
+event pumps, 1800 valid live System queries, both resets, 1800 stereo pairs and
+cleanup through System-thread Shutdown. The user reported that it looked good.
+SteamVR and Frontier were absent at preflight; the subsequently observed
+processes started after the diagnostic exited, with their launch cause
+unconfirmed. Production game-device ownership and Frontier integration remain
+separate work.
+
+The [six-face skybox/loading checkpoint](openxr-skybox-loading-2026-09-12.md)
+adds transactional private face copies and a native-FOV projection renderer to
+the standalone diagnostic. The owner can render a loading override while the
+game supplies no frames, retire a cleared override with an empty frame, and
+hand control back to scene Submit without replacing the game's cached poses.
+The full build passed, including 5240 stereo, 74 skybox-copy and 150
+frame/loading checks. WARP pixel tests cover face orientation, color
+conversion, source lifetime and swapchain failures. The `612d73e` PiOpenXR run
+passed the API/loading/lifecycle checks: 223 loading projection frames with
+unchanged game pose caches, one transition to scene rendering, 1529 game stereo
+pairs and normal cleanup. Frontier and SteamVR were absent before and after.
+The user confirmed the grid in both eyes, stable orientation, normal
+transition, triangle tracking and closure. Default grid rendering, fades,
+lat-long forms and live game integration remain open.
+
+The [renderer context-preservation
+checkpoint](openxr-context-state-2026-09-12.md) records private per-eye command
+lists and restores the caller's immediate-context state when executing them. It
+also tests the actual graphics proxy's binding shadow. The full build passed
+with 10,774 stereo and 196 actual-proxy state checks. The `8ff82f2` PiOpenXR
+run passed its API/loading/lifecycle checks with 234 loading frames, 1,529
+stereo pairs and normal shutdown. The user confirmed normal grid placement,
+tracking, transition, triangle appearance and closure. Frontier and SteamVR
+were absent before and after. This establishes a rendering-state contract;
+game/owner thread exclusion, compatible paired-device publication and native
+Frontier discovery remain separate integration work.
+
+The following main refresh merges `origin/main` at `6de325e` into the OpenXR
+branch after that passed headset gate. It includes weapon/rigid-mesh motion,
+rendered-scene transition detection and night vision changes. The merge has no
+text conflicts and leaves `src/openxr` and the native harness source unchanged.
+The full merged build passed, including 10,774 OpenXR stereo, 196 actual-proxy
+state, 80,493 weapon-motion and 1,242 mesh-motion checks. The configuration
+contract passes with 254 keys. The complete log is
+`build/openxr-main-6de325e-final-build.log`, with executable/source hashes in
+`build/openxr-main-6de325e-validation.json`. The earlier headset receipt
+remains evidence for `8ff82f2`; it is not a Frontier qualification of these new
+game features. That exact tested executable is archived beside its native
+receipt.
+
+The first merged build exposed a link dependency in the new mesh-motion test:
+this branch's `GpuIntervals` uses the shared timing service. Luna added the
+real `gpu_timing.cpp` and `gpu_span_d3d11.cpp` sources to that test target;
+parent review confirmed the change preserves the timer implementation and all
+other test gates. Its targeted WARP run passed 1,242 checks. The failed build
+log is retained as `build/openxr-main-6de325e-build.log`.
+
+Review identified a concrete dependency for the upcoming graphics bridge:
+`hookedExecuteCommandList` now reaches both weapon and rigid-mesh history
+invalidation through `weaponStabilityResourceWritten(nullptr)`, and invalidates
+the transition detector's observed pools. Binding-pointer restoration alone
+does not preserve those content histories. The paired native compositor must
+identify its own bounded private writes while retaining conservative handling
+of unknown game command lists, together with explicit immediate-context
+serialization. This remains required before native Frontier integration; no
+installed game files or live settings are changed by this merge.
+
+The subsequent [private graphics bridge](openxr-private-bridge-2026-09-13.md)
+adds a versioned, explicitly selected graphics-provider lease for the staged
+renderer. Its exact private command lists can preserve motion/pool history
+while unknown game lists retain conservative invalidation. The actual-DLL
+fixture checks both branches, all four renderer paths, device/context identity
+and rejected worker/reentrant submissions. The full build passed with 290
+actual-proxy, 10,774 stereo, 80,493 weapon-motion and 1,242 mesh-motion checks;
+the configuration contract remains 254 keys. This is desktop preparation: the
+lease requires existing exclusive context ownership and does not establish
+game-thread scheduling. The native harness still uses its standalone device
+path, and the installed Frontier pair remains `f3c205e`.
+
+The subsequent [render-caller handoff](openxr-render-thread-2026-09-13.md)
+replaces idle graphics work with explicit synchronous render boundaries. It
+adds cancellation/lifetime coordination, paired-proxy native selection and GPU
+completion before owner-side teardown. The 100-check CPU and 504-check
+actual-DLL fixtures cover distinct owner/caller threads and retained resources
+after rejected shutdown. The native harness now supports this boundary; real
+game Init/render ownership and render hooks remain separate integration work.
+
+The `064fc0d` PiOpenXR run passed 9,719 graphics callbacks on the render
+caller, all 6,654 expected private command lists with zero unknown executions,
+idle graphics exclusion, 269 loading projections, 1,529 stereo pairs and
+completed GPU teardown. The user confirmed both-eye placement, stable tracking,
+normal transition/appearance and closure. Frontier and SteamVR were absent
+before and after. Exact binaries and receipts are archived in
+`build/openxr-native-20260913-064435/`; the installed Frontier pair remains
+`f3c205e`.
+
+- The original shipping proxy remains the default. The new startup-only
+  `advanced.openvr_census = on` setting enables typed forwarding for the exact
+  four historical interfaces. The 84 methods use Valve v0.9.20 declarations;
+  aggregate returns are ordinary C++ member calls. The bounded cache preserves
+  repeated-getter wrapper identity and passes through when exhausted. Runtime
+  targets remain owned by the runtime.
+- The ABI log records up to four samples for each of 16 exact discriminator
+  keys per method and caller category, with QPC and thread ID. Selected methods
+  include arguments and results; both eyes and distinct properties have
+  independent budgets. Empty event polls have a separate budget from successful
+  events. Five wrapped exports record bounded, paired
+  initialization/interface/shutdown calls. See the semantic census checkpoint
+  for exact coverage and limits. The call site is classified by its containing
+  module: game executable, EDVR, another module, or unknown. Calls EDVR makes
+  directly to saved runtime pointers bypass these wrappers. Other interface
+  versions retain proxy behaviour. This instrumentation does not define the
+  future owned backend's supported-interface policy.
+- CPU order logs record at most 64 observations per wait/submit/Present event
+  kind and 16 per intercepted GPU-command kind, independently for startup and
+  the initial VR capture. The owned compositor's first pose wait selects the VR
+  bank locally and requests the same switch from the paired graphics DLL. The
+  receiver acknowledges only when its census is enabled; missing, older or
+  uninitialized receivers are retried on at most 64 pose waits, with explicit
+  pending/exhausted diagnostics. Repeated requests cannot refill the budgets.
+  The bridge does not initialize graphics, load a DLL or issue GPU work. The
+  records include phase, actual context pointers, immediate/deferred type,
+  thread IDs and QPC. The two DLLs have independent ordinals; use QPC to
+  compare them. A command entry is a CPU observation, not evidence of GPU
+  completion. Existing unhooked commands are outside this capture.
+- Device creation logs include adapter LUID, feature level and the published
+  first-device identity. Validated eye submissions log texture/device identity,
+  full descriptors, colour space and submit flags before EDVR substitutes a
+  texture. Changes are bounded to 16 lines; unchanged handles are resampled no
+  more often than every six seconds. The initial unvalidated submissions and
+  skybox resources are not covered by this descriptor probe.
+- `build\openxr_probe.exe --loader C:\absolute\openxr_loader.dll` loads a
+  trusted, explicitly selected loader with restricted dependency search. It
+  reports extensions, runtime identity, HMD system limits, stereo view sizes,
+  blend modes and D3D11 adapter/feature-level requirements. It requests OpenXR
+  1.0, creates an instance, and destroys it on exit. It creates no session,
+  device or swapchain and does not change runtime selection. The declarations
+  are pinned to Khronos SDK 1.1.46 with the upstream license retained.
+
+Set the census key in each proxy's applicable INI before launch. Use
+`tools/install_edvr.py` for installation and `tools/edvr_log.py` to retrieve
+logs and verify build identity. The selected test installation is Frontier.
+Preserve its tuned INI and runtime choice when enabling the census; use a
+backup and review the single-key change before installing it. Steam is not the
+test target.
+
+## Review decisions and remaining gates
+
+The GPU timing draft failed review: it permitted overlapping outer scopes,
+accepted deferred contexts, recreated queries instead of reusing them, aged
+samples by API-call count and mishandled zero-frequency results. It and its
+insufficient tests were excluded. No new GPU queries or Monitor values were
+enabled at that initial checkpoint. Rebuild the bracket after an
+ownership/order capture, with the single outer scope and failure tests
+specified in the approved plan.
+
+The [first Frontier census flight](openxr-flight-2026-09-11.md), using build
+`070e49d`, observed 19 methods, consistent device identity for all 16 sampled
+eye textures, and multi-threaded System calls before compositor startup. The
+startup Present budget ended before the first pose wait, so the initial VR
+capture bank was added. This flight supports the published-device candidate for
+that run, but does not qualify an overlapping graphics/VR frame bracket.
+
+The repeat Frontier flight on `2a56da3` passed the overlap check: both DLLs
+selected their VR banks on the first pose wait, and all 32 captured stereo
+pairs followed wait, left submit, right submit, Present on one thread. All
+sampled commands used one immediate context, and all 16 sampled eye textures
+again matched the published device. There is measured work after Submit and
+even after Present; the approved render-to-submit span must exclude and name
+that later work. This supports a guarded single-context prototype for the
+observed configuration. It does not establish complete command coverage,
+whole-session ownership, telemetry overhead or compatibility on other runtimes.
+Sean reported normal visuals and tracking on the repeat flight.
+
+The desk prototype in `src/common/gpu_span_state.h` separates the query-state
+policy from the D3D11 adapter. Its contract is one outer scope, six timestamp
+markers (outer start/end and two eye intervals), eight reusable slots,
+immutable device/immediate-context/thread ownership, and explicit
+frame-associated valid/invalid outcomes. Pending results retain their resources
+until ready, failed or expired by elapsed time. Tests must derive results from
+markers actually issued, rather than returning a canned valid sample when a
+marker is missing. The D3D11 adapter must preserve `S_FALSE` as pending and use
+`D3D11_ASYNC_GETDATA_DONOTFLUSH`; timestamp ticks are integers, and a disjoint
+counter cannot produce a valid duration. See Microsoft's [GetData
+contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-getdata)
+and [query
+definitions](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_query).
+This state prototype alone is not an implemented or qualified GPU measurement;
+real D3D11 workloads, shared door-query ownership, game-path placement and
+Monitor integration remain separate gates.
+
+The first state-policy draft failed review because it omitted the outer end
+timestamp, could close an unfinished eye pair, lost resource ownership on some
+retirement paths and checked sequence freshness only against undrained slots.
+Its fake driver supplied valid-looking timestamps independently of issued
+commands. The retained version uses an explicit active eye, a persistent
+sequence watermark, integer timestamp differences, bounded per-frame result
+records, and terminal shutdown after uncertain query closure. Its fake records
+each marker and checks live scopes and resource ownership. Desk tests cover
+both eye orders, malformed and incomplete pairs, every timestamp failure,
+creation/begin/end/poll failures, partial readiness, disjoint/invalid values,
+resource reuse, ring pressure, elapsed-time expiry and owner rejection. No
+shipping proxy called this prototype at that checkpoint. Native ownership,
+shared-clock migration and integration were kept as subsequent gates.
+
+The first ABI test draft used a hand-built raw vtable and crashed on a matrix
+return, causing a Windows error dialog. That fixture was removed. The retained
+tests use concrete C++ implementations and set Windows error mode to suppress
+interactive crash dialogs.
+
+Before treating Phase 0 as complete, still collect and review:
+
+1. Exact init/shutdown/re-init and interface-validity export traffic,
+   meaningful property/controller/event arguments and returned events, first
+   geometry results, skybox descriptors and complete lifecycle behaviour. The
+   new semantic/export census has passed an ordinary Frontier capture; its
+   bounded observations cannot establish this full semantic inventory alone.
+2. Real startup and flight order/context/device evidence, including texture
+   reuse, both eyes, mirror work and deferred command-list execution. A missing
+   line is not proof of absence. The first published device matched the sampled
+   textures in both Frontier flights; other configurations and complete
+   lifecycle ownership remain unverified.
+3. The installed runtime reports are now
+   [recorded](openxr-runtime-inventory-2026-09-12.md): PiOpenXR and SteamVR
+   find the Pimax system and matching adapter; VDXR reports no available
+   headset. Still run a separate session harness for actual formats, startup
+   geometry, refresh rate, gaze, tracking and loss/focus behaviour. Extension
+   advertisement alone is not functional support.
+4. A corrected GPU bracket, matched-frame SteamVR correlation and the Monitor
+   source/validity changes. The OpenXR backend, transport parity, field
+   qualification and retirement proposal follow those gates.
+
+The CPU policy now separates `endEye` from `finishFrame`: both EDVR eye
+intervals can end before the outer marker is placed after final submit work.
+Explicit rejection or an early final boundary produces an incomplete sample.
+The updated command-derived tests also prove that extra work after the eye
+intervals extends only the outer duration. The full build passed with 2,465 CPU
+policy assertions; that count includes repeated driver/resource checks, not
+2,465 independent scenarios.
+
+The first real D3D11 adapter and shared-clock drafts failed review and runtime
+tests. They were moved out of the source tree to an ignored local draft
+directory and are not linked into either DLL. They require a fresh reviewed
+implementation: partial-issued timestamp handling, actual OS-thread ownership,
+COM/module lifetime and meaningful controlled workloads remain mandatory. The
+integration audit also found disjoint clocks in the temporal, sharpening,
+supersample, DLAA, menu and sampled-draw instruments; sharing only the Monitor
+door clock would not resolve the overlap risk.
+
+The game-exit interruption is resolved: the menu-worker lifetime fix in
+`e9802b7` passed its Frontier exit check, and `58d1566` passed a second exit
+check with no matching Windows crash record. The later findings in
+`openxr-flight-2026-09-11.md` still qualify the earlier `2a56da3` run: its
+capture passed the bounded ordering gate, but its process aborted in the
+menu-worker destructor.
+
+The separately reported startup black screen is also resolved on Frontier.
+Build `58d1566` embeds the unchanged temporal shader bytecode compiled during
+the build. Its verified first Present hook took approximately 23 ms instead of
+18.365 seconds, and Sean confirmed the initial black screen is gone. See [the
+startup investigation](startup-delay-2026-09-12.md). These results clear the
+game startup/exit interruption; they do not qualify the rejected GPU harnesses.
+The replacement adapter and shared-clock desk results are recorded in the query
+foundation follow-up below. Game integration remains a separate gate.
+
+No configuration key or existing feature has been retired.
+
+## Query foundation follow-up
+
+The reviewed native adapter and shared-disjoint lease policy now have required
+desk-test gates. See [GPU query foundation](gpu-query-foundation-2026-09-12.md)
+for ownership rules, rejected draft findings, real WARP workloads and remaining
+game integration. The existing CPU frame policy still owns frame association;
+these components alone do not publish a game GPU value.
+
+The startup shader fix was separately merged and pushed to main as `ec26970`,
+after a full regression build on current main. The unfinished OpenXR/GPU work
+was not included in that merge.
+
+## Main integration and next Frontier flight
+
+Main including PR #33 is merged at `06636b2`. Both context-hook diagnostics and
+the bounded VR census survived the merge, as did the startup and worker-exit
+fixes. The full paired build passed. The next flight uses Pimax through SteamVR
+and explicitly checks LiveCopy activation, working rendering fixes, startup,
+exit and refreshed ordering evidence; see the [Frontier flight
+checklist](frontier-livecopy-flight-2026-09-12.md).
+
+The `f08098c` Frontier check passed on Pimax through SteamVR: Sean confirmed
+normal on-foot/cockpit rendering, prompt intro and clean exit. Both logs match
+the installed build; LiveCopy is active in both context hooks, feature counters
+advance, and all 32 captured stereo pairs retain wait/both-eyes/Present order
+on one immediate context and thread. The flight lasted about 3 minutes 15
+seconds and included AA changes and the existing culling diagnostic, so it is
+functional integration evidence rather than a controlled overhead measurement.
+The shared-clock migration and later GPU accuracy/overhead gates remain open.
+
+## Existing timer migration checkpoint
+
+The existing production GPU timers now use the shared frequency service. See
+[the migration review and regression gate](gpu-timer-migration-2026-09-12.md)
+for caller coverage, inactive-producer recovery, explicit cleanup, desk results
+and the next Frontier check. The render-to-submit frame instrument is still
+inactive. This checkpoint must pass its Frontier regression before broader
+measurement is enabled.
+
+The `cc3d882` Frontier functional check passed: Sean reported normal behavior,
+both logs match the installed checkpoint, the shared clock produced completed
+and nonzero pass samples, LiveCopy remained active, and the 32 captured pairs
+retained the same immediate-context owner and order. F8 was closed and
+reopened, and the exited process had no matching Windows crash/hang event. The
+roughly 4.5-minute run included an initial period dominated by SteamVR pose
+waits, so it is not a controlled performance comparison. Full evidence and
+limits are recorded in the migration document. The next implementation step is
+the guarded render-to-submit span and frame-associated Monitor output; accuracy
+and overhead remain separate gates.
+
+
+## Render-to-submit checkpoint
+
+The local GPU span now runs through the current paired proxies, with a
+versioned CPU boundary bridge and owner-thread query operations on the shared
+frequency scope. The Monitor adds a separate source/frame/age readout; existing
+SteamVR readings and graphs remain intact. See the [implementation and test
+record](render-to-submit-gpu-2026-09-12.md) for the exact boundary, command
+coverage, review corrections, invalidation behavior and Frontier checklist. The
+two inner intervals include runtime Submit and are labeled submit paths, not
+EDVR-only cost. The next gate is a Frontier functional test; matched-frame
+accuracy, overhead and other runtime/lifecycle checks remain open.
+
+
+The clean `0ac3095` checkpoint passed the full build and production WARP smoke,
+but failed the Pimax/SteamVR visual gate: Sean reported renewed shimmering
+during head movement. Both flight logs and installed DLL hashes match that
+checkpoint. The instrument completed samples, but the cause of the visual
+regression is unresolved. The test fixtures did not exercise production
+temporal rendering with the outer frame scope active.
+
+Frontier was restored to the exact previously normal `cc3d882` DLL pair, with
+both hashes verified and current INI bytes preserved. Use `--expect-build
+cc3d882` for the next flight, which compares the same scene and head movement
+before any speculative rendering fix. The implementation remains on this branch
+and must not advance until this gate is resolved. See the [regression evidence
+and rollback
+record](render-to-submit-gpu-2026-09-12.md#head-movement-regression-and-rollback).
+
+The verified rollback still shimmers and blurs during head movement, on both
+scene geometry and text; AA off is clearer. That rules out the new outer
+instrument as a necessary cause. The current investigation follows temporal
+reconstruction using the existing paired raw/treated eye capture and motion
+inputs. The baseline remains installed while this is resolved.
+
+The captures identified a projection mismatch under the existing raw-only
+culling probe: the game renders through its true matrix while temporal motion
+and jitter use the widened raw frustum. The fix makes temporal consumers follow
+the matrix channel. See the [captured evidence and regression
+gate](temporal-projection-probe-2026-09-12.md). The clean `f622cd2` paired
+build is now installed and hash-verified in Frontier, with current INI bytes
+preserved. It includes this correction and the current timing work. Use
+`--expect-build f622cd2` for both logs; visual recovery still needs a headset
+check before advancing the OpenXR work.
+
+The next `f622cd2` flight and three paired captures confirm the corrected
+projection, and the user reports that the original head-motion problem appears
+fixed. This is main-menu hangar evidence with the timing instrument active;
+cockpit/on-foot and timing accuracy/overhead checks remain open. A separate
+stationary flicker persists on three thin wing lines. The captured masks and
+history do not identify another fault; the next comparison changes only input
+quality while retaining DLSS preset K. See the [corrected-build result and
+remaining wing-line
+investigation](temporal-projection-probe-2026-09-12.md#corrected-build-capture-result).

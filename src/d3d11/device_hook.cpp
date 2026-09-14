@@ -1,8 +1,13 @@
-﻿#include "device_hook.h"
+﻿#include "../common/vr_census.h"
+#include "device_hook.h"
+#include "shutdown_census.h"
+#include "gpu_timing.h"
+#include "gpu_frame_timing.h"
 
 #include "shader_sig.h"
 #include "weapon_motion.h"
 #include "input_gate.h"
+#include "oculus_route.h"
 #include "vr_runtime.h"
 
 #include <windows.h>
@@ -11,6 +16,7 @@
 #include <dxgi1_2.h>
 
 #include "graphics_runtime.h"
+#include "render_boundary.h"
 
 #include <atomic>
 
@@ -886,12 +892,27 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
+    VrCensusScope census(VrCensusEvent::PresentEnter, VrCensusEvent::PresentExit,
+                          self, self == g_state->swapChain ? 1 : 0);
     // Not our swapchain: forward and do no frame work. A second swapchain
     // (an overlay's, a mod's) shares this vtable and its Present is not our
     // frame boundary. See vtable_hook.h.
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    // The Oculus probe may follow initial device creation. Drain changed
+    // routing observations from ordinary execution, never from the loader.
+    oculusRouteReport();
+    struct ShutdownCensusPresentScope final {
+        bool enabled;
+        explicit ShutdownCensusPresentScope(bool enabled_) noexcept : enabled(enabled_) {
+            if (enabled) edvr::shutdownPresentCensus().enterPresent();
+        }
+        ~ShutdownCensusPresentScope() noexcept {
+            if (enabled) edvr::shutdownPresentCensus().leavePresent();
+        }
+    } shutdownCensusPresent(vrCensusEnabled());
+
     // The time blocked in the real Present is the monitor's, with the time
     // blocked in WaitGetPoses: the frame period less the two is the render
     // thread's own busy time.
@@ -900,6 +921,18 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (qpcFrequency() > 0) {
         perfMonitorNotePresentWait(static_cast<double>(qpcNow() - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
+    }
+    // Bind the first successful owned, non-TEST Present thread even before
+    // the paired consumer registers. Exclude registration from Present timing.
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST)) {
+        if (vrCensusEnabled()) shutdownPresentCensus().noteOwner();
+        renderBoundaryNoteOwnedPresent(g_state->device);
+    }
+    ID3D11DeviceContext* timingContext = nullptr;
+    g_state->device->GetImmediateContext(&timingContext);
+    if (timingContext) {
+        gpuFramePresent(timingContext, g_state->frameCounter + 1);
+        timingContext->Release();
     }
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
@@ -1427,6 +1460,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (qpcFrequency() > 0) {
         perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
                                              static_cast<double>(qpcFrequency()));
+    }
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST)) {
+        // Observe native callback availability, after the real Present and all
+        // preceding frame work. This is not the timestamp of realPresent's return.
+        if (vrCensusEnabled()) edvr::shutdownPresentCensus().notePresent();
+        renderBoundaryPresent(g_state->device);
     }
     return hr;
 }
@@ -2621,6 +2660,11 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
+    // FreeLibrary teardown can run under the loader lock on another thread.
+    // Invalidate timing first, then let each owner release its queries without
+    // issuing context commands. Normal process exit skips this entire path.
+    gpuTimingAbandon();
+    gpuFrameAbandon();
     // The keyboard first: a gate left set past the module's life is a
     // keyboard the game never gets back.
     menuShutdown();

@@ -1,4 +1,5 @@
-﻿#include "exposure_fix.h"
+﻿#include "../common/vr_census.h"
+#include "exposure_fix.h"
 
 #include <windows.h>
 
@@ -18,6 +19,7 @@
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
+#include "gpu_frame_timing.h"
 #include "fss_dump.h"     // the reconstruction bracket, round 30
                           // writers through THIS module's Dispatch hook,
                           // because slot 41 is already ours and a second
@@ -923,7 +925,9 @@ bool isExposureDispatch() {
 // chain ran passes no census line ever showed, and DispatchIndirect was one
 // of the three ways that could be true.
 void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
-                                              ID3D11Buffer* args, UINT off) {
+                                               ID3D11Buffer* args, UINT off) {
+    gpuFrameCommand(self);
+    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DispatchIndirect, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (drawCensusArmed()) {
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
@@ -934,6 +938,8 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
 }
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
+    gpuFrameCommand(self);
+    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Dispatch, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     ++s->thunkHits[kHitDispatch];
     if (foreignContext(self)) {

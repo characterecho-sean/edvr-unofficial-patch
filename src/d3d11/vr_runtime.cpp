@@ -37,6 +37,8 @@ constexpr uint64_t kAnnounceMs = 10000;
 // is a different diagnosis from "not ours", and version skew belongs in the
 // first of those, not the second.
 constexpr char kOursExport[] = "edvr_selftest_system_hook";
+constexpr char kNativeConfigureExport[] = "edvrConfigureNativeRuntime";
+constexpr char kNativeStatusExport[] = "edvrGetNativeRuntimeStatus";
 
 struct State {
     CRITICAL_SECTION lock{};
@@ -119,6 +121,12 @@ void buildWhy(State& s) {
                      "holds the file. The installer does this for you.",
                      s.foreignPath[0] ? s.foreignPath : "another copy", kOursExport);
             break;
+        case VrRuntime::NativeOpenXR:
+            snprintf(s.whyBuf, sizeof(s.whyBuf),
+                     "EDVR's experimental native OpenXR OpenVR facade is loaded. Its session and "
+                     "submission path is still being integrated, so EDVR's established OpenVR "
+                     "AA, crop and compositor effects are not promised on this backend yet.");
+            break;
         case VrRuntime::EdvrOpenvr:
             snprintf(s.whyBuf, sizeof(s.whyBuf),
                      "EDVR's own openvr_api.dll IS loaded here, and has not announced a validated "
@@ -162,6 +170,7 @@ void measureLocked(State& s) {
     if (n > sizeof(mods) / sizeof(mods[0])) n = sizeof(mods) / sizeof(mods[0]);
 
     HMODULE openvrOurs = nullptr;
+    HMODULE openvrNative = nullptr;
     HMODULE openvrForeign = nullptr;
     char    oculus[64] = {};
 
@@ -172,7 +181,10 @@ void measureLocked(State& s) {
             // Two modules CAN share a base name if each was loaded by full
             // path from a different folder. Ours wins the verdict if it is
             // there at all, because ours is the one that would be acting.
-            if (GetProcAddress(mods[i], kOursExport)) {
+            if (GetProcAddress(mods[i], kNativeConfigureExport) &&
+                GetProcAddress(mods[i], kNativeStatusExport)) {
+                openvrNative = mods[i];
+            } else if (GetProcAddress(mods[i], kOursExport)) {
                 openvrOurs = mods[i];
             } else if (!openvrForeign) {
                 openvrForeign = mods[i];
@@ -185,7 +197,11 @@ void measureLocked(State& s) {
     s.oculusAlsoLoaded = oculus[0] != 0;
     snprintf(s.oculusModule, sizeof(s.oculusModule), "%s", oculus);
 
-    if (openvrOurs) {
+    if (openvrNative) {
+        s.verdict = VrRuntime::NativeOpenXR;
+        s.settled = true;
+        s.foreignPath[0] = 0;
+    } else if (openvrOurs) {
         s.verdict = VrRuntime::EdvrOpenvr;
         s.settled = true;
         s.foreignPath[0] = 0;
@@ -222,6 +238,8 @@ const char* shortWhyOf(VrRuntime v) {
     switch (v) {
         case VrRuntime::EdvrOpenvr:
             return "EDVR's openvr half is loaded but has not validated its compositor hook";
+        case VrRuntime::NativeOpenXR:
+            return "EDVR's experimental native OpenXR backend is loaded; submission effects are still being integrated";
         case VrRuntime::ForeignOpenvr:
             return "the openvr_api.dll loaded here is not EDVR's";
         case VrRuntime::OculusNative:
@@ -236,6 +254,7 @@ const char* shortWhyOf(VrRuntime v) {
 const char* nameOf(VrRuntime v) {
     switch (v) {
         case VrRuntime::EdvrOpenvr:    return "OpenVR, through EDVR's own openvr_api.dll";
+        case VrRuntime::NativeOpenXR:  return "EDVR's experimental native OpenXR backend";
         case VrRuntime::ForeignOpenvr: return "OpenVR, through an openvr_api.dll that is not EDVR's";
         case VrRuntime::OculusNative:  return "Elite's native Oculus back end";
         case VrRuntime::NoneLoaded:
@@ -295,14 +314,16 @@ void vrRuntimeTick() {
     if (s.firstTickMs == 0) s.firstTickMs = now;
     refresh(s);
     const VrRuntime v = s.verdict;
-    const bool due = (v == VrRuntime::EdvrOpenvr) || (now - s.firstTickMs >= kAnnounceMs);
+    const bool due = (v == VrRuntime::EdvrOpenvr) || (v == VrRuntime::NativeOpenXR) ||
+                     (now - s.firstTickMs >= kAnnounceMs);
     const bool speak = !s.announced && due;
     // The one correction: a launch slow enough to be announced as something
     // else before its runtime arrived. Bounded at one line, and only ever
     // towards the terminal verdict -- this must not become a thing that
     // narrates a flapping module list.
-    const bool correct = s.announced && !s.corrected && v == VrRuntime::EdvrOpenvr &&
-                         s.announcedAs != VrRuntime::EdvrOpenvr;
+    const bool correct = s.announced && !s.corrected &&
+                         (v == VrRuntime::EdvrOpenvr || v == VrRuntime::NativeOpenXR) &&
+                         s.announcedAs != v;
     char oculus[64];
     snprintf(oculus, sizeof(oculus), "%s", s.oculusModule);
     const bool both = s.oculusAlsoLoaded && v == VrRuntime::EdvrOpenvr;
@@ -324,13 +345,15 @@ void vrRuntimeTick() {
             v == VrRuntime::OculusNative
                 ? " EDVR's openvr half cannot run on this back end, so the fixes that live in it "
                   "are inert this session; see \"Headsets and VR runtimes\" in the README."
-                : "",
+                : v == VrRuntime::NativeOpenXR
+                    ? " This experimental native OpenXR backend is still integrating submission; "
+                      "the established OpenVR AA, crop and compositor effects are not promised yet."
+                    : "",
             both ? " (An Oculus runtime module is loaded as well.)" : "");
     }
     if (correct) {
         Log::get().note(
-            "vr runtime: correction -- EDVR's own openvr_api.dll is loaded after all. The line "
-            "above was said before this runtime finished starting. Said once.");
+            "vr runtime: correction -- %s. The earlier line preceded runtime startup.", nameOf(v));
     }
 }
 

@@ -10,17 +10,10 @@ first one where somebody double-clicked it in Explorer's zip view.
 
 Generated rather than committed for two reasons:
 
-  * openvr_api.dll is optional. It can only be built where the game's own copy
-    is available to generate an export table from (see build.bat), so a build
-    on a machine without the game must ship an installer WITHOUT that half
-    rather than fail to compile. A committed .rc naming a file that is not
-    there is a build error; this script simply leaves the line out, and
-    payloadInfo() reports the half as absent at runtime.
-  * nvngx_dlss.dll, NVIDIA's DLSS runtime, is optional the same way: build.bat
-    copies it into the build only when the DLSS SDK is present, and an
-    installer without it says so in its window. The SDK's licence allows the
-    runtime to ship as part of an application and not as a stand-alone
-    download, which is why it rides inside this executable.
+  * The native graphics/runtime pair and bundled OpenXR loader are mandatory.
+    A partial installer is worse than a build failure, so all native resources
+    are validated before the generated directory is created.
+  * nvngx_dlss.dll remains optional; it is included when the build provides it.
   * The version string comes from `git describe`, like the DLLs'.
 
 Usage:
@@ -34,10 +27,12 @@ import struct
 import sys
 
 # Resource ids, matched by src/installer/payload.h.
-IDR_D3D11 = 101
-IDR_OPENVR = 102
+IDR_NATIVE_GRAPHICS = 101
+IDR_NATIVE_RUNTIME = 102
 IDR_INI = 103
 IDR_NGX = 104   # NVIDIA's DLSS runtime, when the build had the SDK
+IDR_LOADER = 105
+IDR_LOADER_NOTICE = 106
 RT_MANIFEST = 24
 
 
@@ -126,27 +121,44 @@ def ico_bytes():
     return bytes(out)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument('--root', required=True)
-    ap.add_argument('--build', required=True)
-    ap.add_argument('--out', required=True)
+    ap.add_argument('--root')
+    ap.add_argument('--build')
+    ap.add_argument('--out')
     ap.add_argument('--version', default='unknown')
-    args = ap.parse_args()
+    ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--self-test', action='store_true')
+    args = ap.parse_args(argv)
+    if args.self_test:
+        return self_test()
+    if not args.root or not args.build or not args.out:
+        ap.error('--root, --build, and --out are required')
 
-    os.makedirs(args.out, exist_ok=True)
-
-    d3d11 = os.path.join(args.build, 'd3d11.dll')
-    openvr = os.path.join(args.build, 'openvr_api.dll')
+    d3d11 = os.path.join(args.build, 'edvr_openxr_graphics.dll')
+    runtime = os.path.join(args.build, 'edvr_openxr_runtime.dll')
+    loader = os.path.join(args.build, 'openxr_loader.dll')
+    notice = os.path.join(args.build, 'OPENXR-LOADER-LICENSE.txt')
     ini = os.path.join(args.root, 'edvr.ini')
     ngx = os.path.join(args.build, 'nvngx_dlss.dll')
     manifest = os.path.join(args.root, 'src', 'installer', 'installer.manifest')
 
-    if not os.path.exists(d3d11):
-        print('gen_installer_rc: ERROR: %s is not there; build it first' % d3d11)
+    required = (("native graphics", d3d11), ("native runtime", runtime),
+                ("OpenXR loader", loader), ("OpenXR loader notice", notice),
+                ("INI", ini))
+    missing = [(label, path) for label, path in required if not os.path.isfile(path)]
+    if missing:
+        for label, path in missing:
+            print('gen_installer_rc: ERROR: %s (%s) is not there; build it first' % (label, path))
         return 1
-    if not os.path.exists(ini):
-        print('gen_installer_rc: ERROR: %s is not there' % ini)
+    try:
+        import openxr_pe
+        openxr_pe.native_graphics_exports(d3d11)
+        openxr_pe.native_exports(runtime)
+        from fetch_openxr_loader import verify
+        verify(args.build)
+    except (ImportError, OSError, ValueError) as exc:
+        print('gen_installer_rc: ERROR: native payload validation failed: %s' % exc)
         return 1
 
     # The manifest has to be valid XML or Windows refuses to start the program
@@ -163,6 +175,10 @@ def main():
         print('  A manifest Windows cannot parse is an installer that cannot start.')
         return 1
 
+    if args.dry_run:
+        print('gen_installer_rc: dry run; validated native resources and wrote nothing')
+        return 0
+    os.makedirs(args.out, exist_ok=True)
     icon_path = os.path.join(args.out, 'edvr_installer.ico')
     with open(icon_path, 'wb') as f:
         f.write(ico_bytes())
@@ -173,22 +189,19 @@ def main():
         '1 %d "%s"' % (RT_MANIFEST, rc_path(manifest)),
         '1 ICON "%s"' % rc_path(icon_path),
         '',
-        '%d RCDATA "%s"' % (IDR_D3D11, rc_path(d3d11)),
+        '%d RCDATA "%s"' % (IDR_NATIVE_GRAPHICS, rc_path(d3d11)),
+        '%d RCDATA "%s"' % (IDR_NATIVE_RUNTIME, rc_path(runtime)),
         '%d RCDATA "%s"' % (IDR_INI, rc_path(ini)),
+        '%d RCDATA "%s"' % (IDR_LOADER, rc_path(loader)),
+        '%d RCDATA "%s"' % (IDR_LOADER_NOTICE, rc_path(notice)),
     ]
-    if os.path.exists(openvr):
-        lines.append('%d RCDATA "%s"' % (IDR_OPENVR, rc_path(openvr)))
-        carried = 'd3d11.dll, openvr_api.dll and edvr.ini'
-    else:
-        lines.append('// no openvr_api.dll in the build: this installer ships without the')
-        lines.append('// transition flash fix and Explorer Cam, and says so in its window.')
-        carried = 'd3d11.dll and edvr.ini'
+    carried = 'native graphics/runtime pair, OpenXR loader, loader notice and edvr.ini'
     if os.path.exists(ngx):
         lines.append('%d RCDATA "%s"' % (IDR_NGX, rc_path(ngx)))
         carried += ", and NVIDIA's DLSS runtime (nvngx_dlss.dll)"
     else:
         lines.append('// no nvngx_dlss.dll in the build (no DLSS SDK): this installer ships without')
-        lines.append("// NVIDIA's runtime, and temporal_aa = dlaa falls back to EDVR's own history.")
+        lines.append("// NVIDIA's optional anti-aliasing runtime; native OpenXR remains complete.")
 
     version = args.version
     lines += [
@@ -228,6 +241,35 @@ def main():
     with open(out_path, 'w', encoding='utf-8', newline='\r\n') as f:
         f.write('\n'.join(lines))
     print('gen_installer_rc: wrote %s (%s)' % (out_path, carried))
+    return 0
+
+
+def self_test():
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='edvr-rc-test-') as scratch:
+        root = os.path.join(scratch, 'root'); build = os.path.join(root, 'build')
+        out = os.path.join(root, 'generated'); os.makedirs(build)
+        os.makedirs(os.path.join(root, 'src', 'installer'))
+        for name in ('edvr_openxr_graphics.dll', 'edvr_openxr_runtime.dll', 'openxr_loader.dll',
+                     'OPENXR-LOADER-LICENSE.txt'):
+            with open(os.path.join(build, name), 'wb') as stream: stream.write(b'x')
+        with open(os.path.join(root, 'edvr.ini'), 'wb') as stream: stream.write(b'[openxr]\n')
+        with open(os.path.join(root, 'src', 'installer', 'installer.manifest'), 'w') as stream:
+            stream.write('<assembly></assembly>')
+        import openxr_pe, fetch_openxr_loader
+        old_g, old_r, old_v = openxr_pe.native_graphics_exports, openxr_pe.native_exports, fetch_openxr_loader.verify
+        openxr_pe.native_graphics_exports = lambda path: None; openxr_pe.native_exports = lambda path: None
+        fetch_openxr_loader.verify = lambda path: None
+        try:
+            assert main(['--root', root, '--build', build, '--out', out,
+                         '--version', '1.2.3', '--dry-run']) == 0 and not os.path.exists(out)
+            os.remove(os.path.join(build, 'edvr_openxr_runtime.dll'))
+            assert main(['--root', root, '--build', build, '--out', out,
+                         '--version', '1.2.3']) == 1 and not os.path.exists(out)
+        finally:
+            openxr_pe.native_graphics_exports, openxr_pe.native_exports = old_g, old_r
+            fetch_openxr_loader.verify = old_v
+    print('gen_installer_rc: self-test passed')
     return 0
 
 

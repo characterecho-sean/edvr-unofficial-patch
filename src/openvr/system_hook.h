@@ -124,9 +124,9 @@ int systemHookJitterVerdict();
 // reads the projection relative to the boundary its jitter is set at.
 uint32_t systemHookProjectionReads();
 
-// The tangents the game is being told THIS frame, jitter excluded: the lie
-// under a live guard, the truth otherwise. False until that eye has been
-// seen.
+// The tangents matching the projection matrix the game renders through,
+// jitter excluded. False until that eye has been seen; a split raw-channel
+// guard leaves this answer at the matrix truth for temporal consumers.
 bool systemHookEffectiveTangents(vr::EVREye eye, float out[4]);
 
 // The IVRSystem the game was handed, or null.
@@ -172,6 +172,11 @@ extern "C" unsigned int edvr_selftest_system_hook(void);
 // otherwise 1, with out[4] = the crop fractions {left, top, right, bottom}
 // of the true frustum within the reported one.
 extern "C" unsigned int edvr_selftest_cull_guard(int eye, float out[4]);
+
+// Test seam for temporal consumers: returns the frustum corresponding to the
+// projection matrix the game renders through; the raw diagnostic hook remains
+// independently observable when the cull guard uses the split raw channel.
+extern "C" unsigned int edvr_selftest_render_tangents(int eye, float out[4]);
 
 // Test seam for the stage 1 -> 2 adoption rule, which is pure arithmetic and
 // has no other coverage: the live path needs a game rebuilding its targets.

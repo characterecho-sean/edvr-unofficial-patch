@@ -7,10 +7,42 @@ review checked source and vendor documentation, not new headset flights or a
 fresh scan of the installed game. Phase 0 must preserve reproducible evidence
 before an observation becomes a compatibility requirement.*
 
-**Approval boundary:** this revision is for review. After Sean confirms it,
-Luna agents can implement the bounded work packages below, with the parent
-agent reviewing their changes and validation. Flights remain explicit gates; an
-implementation or passing desk test is not a flight result.
+The [native-only migration checkpoint](openxr-native-only-2026-09-14.md)
+implements the current release policy: complete native packages using the
+bundled Khronos loader and Windows runtime selection, with no legacy backend
+fallback. Historical proxies remain regression fixtures; explicit uninstall and
+file recovery are preserved.
+
+Implementation and subsequent evidence are tracked in
+[openxr-implementation-status.md](openxr-implementation-status.md). The
+[2026-09-11 Frontier census flight](openxr-flight-2026-09-11.md) adds measured
+device and caller-thread evidence and records the startup capture limitation;
+the original inventory below remains historical.
+
+**Current scope (2026-09-14):** the user has deferred performance comparisons
+and excluded features listed under `[experimental]` from parity work. The
+native metric-presentation flight has passed. Continue with supported
+submission features, including `fix.render_sharpness`, `fix.cull_guard`,
+`fix.transition_flash`, Explorer Cam and `fix.fss_eye_sync`. Supersample
+resolve, FSS theater and gaze foveation are deferred; the broader inventory and
+original implementation sequence below remain historical. Existing settings and
+the temporal behavior already implemented are preserved.
+
+**Release destination:** migrate every EDVR user to native OpenXR, including
+users currently routed through Elite's LibOVR backend. The native release is
+the standard installation and automatically bypasses Elite's Oculus preference;
+it does not offer a permanent legacy-backend choice. Windows selects the
+runtime, including SteamVR when selected as the OpenXR runtime. Separate builds
+and rollback artifacts serve qualification and recovery during migration.
+LibOVR startup routing and installer upgrades are required completion work
+alongside supported feature parity.
+
+**Approval boundary:** Sean approved implementation by Luna agents with parent
+review. On 2026-09-14 he requested that supported parity work continue while he
+is away, with desktop checks and one consolidated headset retest afterward.
+Individual headset checks no longer gate each implementation step. Passing
+desktop tests does not establish a successful flight; record those results
+separately.
 
 ## The ask
 
@@ -25,9 +57,12 @@ calling OpenVR and nothing in the game changes.
 
 Two requirements come with it:
 
-1. **OpenXR exclusively.** No SteamVR-native forwarding path is kept once the
-   layer is trusted. SteamVR is itself an OpenXR runtime, so SteamVR users are
-   served through it.
+1. **OpenXR exclusively for everyone.** Once qualified, the standard installer
+   migrates existing OpenVR, OpenComposite and direct LibOVR users to EDVR's
+   native OpenXR pair. Elite's LibOVR preference is bypassed automatically.
+   SteamVR users remain served through SteamVR's OpenXR runtime. Legacy
+   artifacts provide explicit rollback during rollout, not an alternative
+   shipping transport or silent fallback.
 2. **The Monitor keeps useful, measured GPU figures.** App GPU time must work
    independently of the runtime. Core OpenXR does not provide the equivalent of
    OpenVR's compositor timing record. Exact compositor GPU time, drops and
@@ -76,7 +111,7 @@ writes, in the three newest VR logs across the two installs (Frontier
 | Compositor re-requests per session | 2 to 3, each a few seconds before the eye textures change size ("ONE EYE ... CHANGED") |
 | Methods across the four requested interfaces | 84 in Valve's 0.9.20 header: System 44, Compositor 29, Chaperone 8, ExtendedDisplay 3. Hook coverage is not a census of what the game calls |
 | System calls per frame | `GetRecommendedRenderTargetSize`, `GetProjectionMatrix`, `GetProjectionRaw`, `GetEyeToHeadTransform`, each about 12 times a frame (~1080/s at 90 Hz: `system_hook.cpp`) |
-| Compositor calls per frame | `WaitGetPoses` once, `Submit` twice; `SetSkyboxOverride` once at startup with a 1x1 texture (OpenComposite's log, `early_session.cpp`) |
+| Compositor calls per frame | `WaitGetPoses` once, `Submit` twice. The earlier OpenComposite skybox log described a 1x1 texture's dimensions; the later [semantic flight](openxr-semantic-flight-2026-09-12.md) recorded three successful `SetSkyboxOverride` calls with six textures each. `early_session.cpp` itself submits a single 1x1 left-eye handover texture; it does not call `SetSkyboxOverride`. |
 | Projection planes asked for | 0.025..50000 for the scene and 0.1..1000 for something else (`system_hook.cpp`) |
 | Tracking space | seated (the launch centre's reset reached it) |
 | Eye-to-head rotation | dropped by the game (docs/canted-projection.md) |
@@ -180,8 +215,12 @@ shared hook machinery as part of retiring the VR hooks. Old comments about the
   Explorer Cam, theater/heal, loading panels, menu anchoring and transition
   withholding all depend on the current pose/projection/submit contract.
   Removing OpenComposite alone does not establish correctness for any of them.
-- **Oculus-native Elite remains outside scope.** It does not load this DLL. The
-  replacement also does not promise general OpenVR compatibility, controller
+- **Elite's Oculus preference requires a separate entry fix.** Its legacy
+  Oculus path does not load this DLL. Routing that path through EDVR is now
+  part of the port; the [LibOVR selection
+  investigation](openxr-oculus-selection-2026-09-14.md) tracks the confirmed
+  fallback, implemented early routing and remaining live qualification. The
+  replacement does not promise general OpenVR compatibility, controller
   support, overlay support, other graphics APIs or quad-view stereo.
 - **Migration and distribution need work.** The current build generates exports
   from the game's DLL; the installer backs up and chains an existing runtime. A
@@ -414,10 +453,13 @@ rings, temporal history and stereo shadows together at a frame boundary.
 [Reference-space
 contract](https://raw.githubusercontent.com/KhronosGroup/OpenXR-Docs/main/specification/sources/chapters/spaces.adoc).
 
-Preserve `fix.launch_centre`'s user choice: today `auto` enables it only under
-OpenComposite, `on` enables it explicitly and `off` disables it. A
-runtime-independent implementation needs an agreed new Auto policy; do not
-silently centre everyone on first pose, particularly users who chose off.
+The user approved unconditional native startup centering on 2026-09-14: native
+OpenXR always establishes its seated origin from a trustworthy tracked head
+position and horizontal heading before exposing startup geometry. It has no
+toggle and is independent of runtime vendor. The legacy OpenVR path retains
+`fix.launch_centre` and its current `auto` / `on` / `off` policy. See the
+[native startup-centering checkpoint](openxr-launch-centre-2026-09-14.md) for
+tracking readiness, startup bounds and reference-space lifetime handling.
 
 Synthesize only events whose OpenVR semantics are defined and exercised. A
 FOCUSED transition alone does not prove a dashboard opened or closed; an
@@ -608,11 +650,13 @@ misleading percentage. Preserve unavailable values when there is no source.
 
 ## Migration decisions
 
-1. **Separate build first.** Keep the shipping proxy default while the OpenXR
-   backend is qualified. Select transport before initialization; no live switch
-   or silent fallback after an OpenXR session fails. Keep a documented rollback
-   artifact. Retire the proxy only after acceptance gates, not an arbitrary
-   number of releases.
+1. **Qualify separately, then migrate the standard release.** Separate builds
+   protect qualification and explicit rollback. The destination is one native
+   OpenXR transport for all users, with automatic routing around Elite's LibOVR
+   preference. The standard installer must upgrade every existing backend path.
+   No live transport switch or silent fallback after OpenXR initialization
+   fails. Retire the forwarding proxy after acceptance gates; preserving a
+   permanent legacy choice is not a release requirement.
 2. **Paired DLLs required.** Match shared protocol/build capabilities and
    verify the device before session creation. No openvr-only temporary-session
    path.
@@ -630,8 +674,9 @@ misleading percentage. Preserve unavailable values when there is no source.
 | `advanced.real_openvr_dll` | Chooses the forwarded DLL | Proxy-only during migration; retire with proxy |
 | `advanced.suppress_interfaces` | Refuses configured interface prefixes before reaching the runtime | Keep proxy behaviour; owned backend has a fixed supported-interface table |
 | `advanced.compositor_timing` | Enables existing compositor timing collection | Define separate measured-source behaviour before changing this switch; never make local queries depend accidentally on a legacy timing decoder |
+| `advanced.app_gpu_timing` | Enables the local render-to-submit instrument independently; source and age appear alongside SteamVR | Reuse the owner/frame policy with validated OpenXR boundary publication |
 | `fix.vr_handover` | `early` submitted a 1x1 texture before the game's compositor calls; `stock` did not | **Removed 2026-09-13** ahead of its replacement (`early_session.cpp` gone with it); the channel's game-device field it introduced stays for the cull guard's presence test |
-| `fix.launch_centre` | `auto` is OpenComposite-only; `on`/`off` explicit | Preserve explicit choice; review new Auto policy before changing behaviour |
+| `fix.launch_centre` | Legacy OpenVR: `auto` is OpenComposite-only; `on`/`off` explicit | Native always centers at startup, without a toggle, as approved 2026-09-14 |
 
 The OpenXR loader/SDK and OpenVR declarations must retain their upstream
 license notices. Forking OpenComposite would be a different project and
@@ -687,7 +732,7 @@ proof that a method will never be called.
 | 0 | Census, ownership evidence, bracket prototype, runtime desk harness | Reproducible evidence and safe instrument operation; unresolved first-device/geometry assumptions recorded as blockers |
 | 1 | App GPU span and Monitor source/validity changes in proxy | Desk failures covered; SteamVR correlation explained; useful measured values on native-runtime rigs; existing SteamVR counters preserved |
 | 2 | Opt-in OpenXR backend with required EDVR features | ABI and fake-XR tests pass; real loader validation; initial geometry, stereo/colour/pose and lifecycle parity on each desk runtime |
-| 3 | Field qualification and retirement proposal | Named runtime matrix with results, rollback/install verification and explicit sign-off on exact retired settings/features |
+| 3 | Native OpenXR as the standard release for all users | Named runtime matrix; automatic LibOVR bypass; upgrades from each existing backend and explicit rollback verified; exact retired settings/features documented and approved |
 
 Headset acceptance includes intro/menu/loading, cockpit and terrain edges, FSS
 entry/exit, theater/heal, on-foot screen, Explorer Cam, temporal modes and
@@ -717,9 +762,12 @@ files; agents must not race edits to `frame_flag.*`, `build.bat` or config.
 4. **Submission and feature integration:** pair state, swapchains/conversion,
    projection and shadow metadata, then extract/adapt existing feature paths.
    This depends on reviewed core contracts and must preserve each branch.
-5. **Build and distribution:** pinned dependencies/notices, backend selection,
-   both build flavours, installer/rollback and config documentation. Begin
-   after artifact and configuration contracts are agreed.
+5. **Build and distribution:** pinned dependencies/notices, native as the
+   standard installation, automatic LibOVR routing, upgrades from all prior
+   backend paths, explicit rollback and config documentation. Keep
+   qualification artifacts separate until acceptance; maintaining two shipping
+   transports is not the objective. Begin after artifact and configuration
+   contracts are agreed.
 
 Required desk tests cover incomplete/reversed/duplicate eye pairs,
 `shouldRender=false`, invalid tracking, acquire/wait/release failures, missing

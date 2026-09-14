@@ -22,8 +22,11 @@ spent reading counters off a log that a stale DLL wrote; the exit code is
 there so a script can refuse to go on.
 
 Log names are edvr_<tag>_YYYYMMDD_HHMMSS.log, where the tag is `gfx` for
-the d3d11 half and `vr` for the openvr half. They land in edvr_logs\\
-beside the game unless log.dir in edvr.ini says otherwise, and this reads
+the d3d11 half and `vr` for the openvr half. Native OpenXR logs add
+millisecond and pid fields: edvr_openxr_YYYYMMDD_HHMMSS_mmm_pid.log. New native
+logs always land in edvr_logs\\ beside the executable, with local-time names
+and UTC body timestamps. Older native logs beside the DLL have UTC names.
+Legacy logs honor log.dir in edvr.ini, and this reads
 that key rather than assuming the default -- a redirected log directory
 is exactly when you would rather not be told there are no logs.
 
@@ -41,7 +44,8 @@ import sys
 import tempfile
 
 GAME_EXE = "EliteDangerous64.exe"
-LOG_RE = re.compile(r"^edvr_(?P<tag>[a-z0-9]+)_(?P<stamp>\d{8}_\d{6})\.log$",
+LOG_RE = re.compile(r"^edvr_(?P<tag>[a-z0-9]+)_(?P<stamp>\d{8}_\d{6})"
+                    r"(?:_(?P<ms>\d{3})_(?P<pid>\d+))?\.log$",
                     re.IGNORECASE)
 # `version <string> (build <hex>)`, with the linked-at tail optional --
 # log.cpp prints a shorter form when the timestamp will not convert.
@@ -53,6 +57,9 @@ LOG_RE = re.compile(r"^edvr_(?P<tag>[a-z0-9]+)_(?P<stamp>\d{8}_\d{6})\.log$",
 # with the word "version" in it cannot be mistaken for the version note.
 VERSION_RE = re.compile(r"^(?:\[[\d:.]+\]\s*)?version\s+(?P<ver>\S+)"
                         r"(?:\s+\(build\s+(?P<stamp>[0-9A-Fa-f]+)\))?")
+NATIVE_VERSION_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} UTC "
+    r"pid=\d+ tid=\d+ module_init,version=(?P<ver>[^,\s]+),durable_log=1$")
 
 
 def repo_root():
@@ -110,6 +117,17 @@ def log_dir_for(game_dir):
     return os.path.join(game_dir, "edvr_logs")
 
 
+def log_dirs_for(game_dir, tag):
+    """Native OpenXR always follows the executable; legacy halves honor log.dir."""
+    native = os.path.join(game_dir, "edvr_logs")
+    legacy = log_dir_for(game_dir)
+    if tag == "openxr":
+        return [native]
+    if tag == "all" and os.path.normcase(os.path.abspath(native)) != os.path.normcase(os.path.abspath(legacy)):
+        return [legacy, native]
+    return [legacy]
+
+
 def find_logs(directory, tag=None):
     """Newest first. The name carries the timestamp, so it sorts without
     stat()ing anything -- and a file copied off another rig keeps the time
@@ -121,9 +139,13 @@ def find_logs(directory, tag=None):
         m = LOG_RE.match(name)
         if not m:
             continue
+        native_name = m.group("ms") is not None
+        if native_name != (m.group("tag").lower() == "openxr"):
+            continue
         if tag and m.group("tag").lower() != tag.lower():
             continue
-        out.append((m.group("stamp"), m.group("tag"),
+        stamp = m.group("stamp") + ("_" + m.group("ms") if native_name else "")
+        out.append((stamp, m.group("tag"),
                     os.path.join(directory, name)))
     out.sort(reverse=True)
     return out
@@ -135,6 +157,9 @@ def version_line(text):
         m = VERSION_RE.search(line)
         if m:
             return line.strip(), m.group("ver"), m.group("stamp")
+        m = NATIVE_VERSION_RE.match(line)
+        if m:
+            return line.strip(), m.group("ver"), None
     return None, None, None
 
 
@@ -242,7 +267,7 @@ def main(argv=None):
                     help="read this log directory directly, ignoring --target")
     ap.add_argument("--file", default=None, help="read exactly this log file")
     ap.add_argument("--tag", default="gfx",
-                    help="gfx (the d3d11 half), vr (the openvr half), or all")
+                    help="gfx (d3d11), vr (OpenVR), openxr (native OpenXR), or all")
     ap.add_argument("--nth", type=int, default=0,
                     help="0 is the newest log, 1 the one before it")
     ap.add_argument("--list", action="store_true",
@@ -272,14 +297,17 @@ def main(argv=None):
             return 1
         logs = [("", "", path)]
     else:
-        directory = args.dir or log_dir_for(resolve_target(args.target))
-        logs = find_logs(directory, None if args.tag == "all" else args.tag)
+        directories = [args.dir] if args.dir else log_dirs_for(resolve_target(args.target), args.tag.lower())
+        logs = []
+        for directory in directories:
+            logs.extend(find_logs(directory, None if args.tag == "all" else args.tag))
+        logs.sort(reverse=True)
         if not logs:
             print("[edvr] no edvr_%s_*.log in %s"
-                  % (args.tag, directory))
+                  % (args.tag, ", ".join(directories)))
             return 1
         if args.list:
-            print("[edvr] %d log(s) in %s:" % (len(logs), directory))
+            print("[edvr] %d log(s) in %s:" % (len(logs), ", ".join(directories)))
             for stamp, tag, p in logs:
                 print("       %-4s %s  %s"
                       % (tag, stamp, os.path.basename(p)))
@@ -342,6 +370,7 @@ def self_test():
 
     for name, want in (("edvr_gfx_20260910_042313.log", "gfx"),
                        ("edvr_vr_20260910_042313.log", "vr"),
+                       ("edvr_openxr_20260914_042313_007_1234.log", "openxr"),
                        ("notalog.txt", None)):
         m = LOG_RE.match(name)
         got = m.group("tag") if m else None
@@ -366,6 +395,22 @@ def self_test():
     if ver3 is not None:
         print("version_line matched prose: %r" % ver3)
         ok = False
+
+    native = ("2026-09-13 14:01:42.659 UTC pid=1234 tid=5678 "
+              "module_init,version=v0.16.2-77-gab80a6c-dirty,durable_log=1")
+    native2 = native.replace("14:01:42.659", "14:01:43.001")
+    _, nver, nstamp = version_line("noise version=v0.0.0\n" + native + "\n" + native2 + "\n")
+    if nver != "v0.16.2-77-gab80a6c-dirty" or nstamp is not None:
+        print("native version_line -> %r %r" % (nver, nstamp)); ok = False
+    for label in ("v0.16.2", "ab80a6c", "ab80a6c-dirty"):
+        if version_line(native.replace("v0.16.2-77-gab80a6c-dirty", label))[1] != label:
+            print("native version label rejected: %r" % label); ok = False
+    for bad in ("native module_init,version=v0.16.2-77-gab80a6c,durable_log=1",
+                native.replace("durable_log=1", "durable_log=0"),
+                native.replace("UTC", "LOCAL"),
+                "[14:01:42.659] module_init,version=v0.16.2-77-gab80a6c,durable_log=1"):
+        if version_line(bad)[1] is not None:
+            print("native false positive: %r" % bad); ok = False
 
     # Matching has to tolerate the suffixes `git describe` adds, and must
     # still refuse a genuinely different commit -- the whole point.
@@ -410,6 +455,10 @@ def self_test():
                   "wb") as f:
             f.write(b"[00:00:00.001] version 0.14.1-93-gf78eba4 "
                     b"(build 68C0A1F2)\n")
+        with open(os.path.join(logs, "edvr_openxr_20260910_060001_123_77.log"),
+                  "wb") as f:
+            f.write(b"2026-09-13 14:01:42.659 UTC pid=1234 tid=5678 "
+                    b"module_init,version=v0.16.2-77-gab80a6c,durable_log=1\n")
 
         # The default log directory, and the ini's override, both found.
         if log_dir_for(game) != logs:
@@ -422,7 +471,20 @@ def self_test():
         if log_dir_for(game) != other:
             print("log_dir_for ignored log.dir in the ini")
             ok = False
+        if log_dirs_for(game, "openxr") != [logs] or log_dirs_for(game, "all") != [other, logs]:
+            print("native and redirected legacy discovery did not remain independent")
+            ok = False
         os.remove(os.path.join(game, "edvr.ini"))
+
+        # Native discovery remains beside the executable even if legacy logs
+        # are redirected by log.dir, and --all combines both directories.
+        if len(log_dirs_for(game, "openxr")) != 1 or \
+                log_dirs_for(game, "openxr")[0] != logs:
+            print("native discovery did not use executable edvr_logs")
+            ok = False
+        if main(["--dir", logs, "--tag", "openxr", "--version"]) != 0:
+            print("native --version discovery failed")
+            ok = False
 
         # Newest first, and the tag filter separates the two halves.
         found = find_logs(logs, "gfx")
@@ -433,9 +495,26 @@ def self_test():
         if len(find_logs(logs, "vr")) != 1:
             print("find_logs tag filter is wrong")
             ok = False
-        if len(find_logs(logs)) != 3:
-            print("find_logs with no tag did not return all three")
+        if len(find_logs(logs)) != 4:
+            print("find_logs with no tag did not return all four")
             ok = False
+        if len(find_logs(logs, "openxr")) != 1:
+            print("find_logs native OpenXR tag filter is wrong")
+            ok = False
+        with open(os.path.join(logs, "edvr_gfx_20260910_040000_001_1.log"),
+                  "wb") as f:
+            f.write(b"not a valid legacy name\n")
+        if len(find_logs(logs, "gfx")) != 2:
+            print("native suffix was accepted for legacy gfx")
+            ok = False
+        # Distinct native Init attempts within one second sort by milliseconds.
+        newer_native = os.path.join(logs, "edvr_openxr_20260910_060001_999_2.log")
+        with open(newer_native, "wb") as f:
+            f.write(b"native later in the same second\n")
+        if find_logs(logs, "openxr")[0][2] != newer_native:
+            print("native millisecond ordering is wrong")
+            ok = False
+        os.remove(newer_native)
 
         newest = os.path.join(logs, "edvr_gfx_20260910_050000.log")
         if main(["--file", newest, "--version"]) != 0:

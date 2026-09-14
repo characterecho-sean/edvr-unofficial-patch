@@ -1,0 +1,18 @@
+LIBRARY edvr_openxr_runtime
+EXPORTS
+    VRControlPanel=edvr_module_VRControlPanel @1
+    VRDashboardManager=edvr_module_VRDashboardManager @2
+    VRTrackedCamera=edvr_module_VRTrackedCamera @3
+    VR_GetGenericInterface=edvr_module_VR_GetGenericInterface @4
+    VR_GetInitToken=edvr_module_VR_GetInitToken @5
+    VR_GetStringForHmdError=edvr_module_VR_GetStringForHmdError @6
+    VR_GetVRInitErrorAsEnglishDescription=edvr_module_VR_GetVRInitErrorAsEnglishDescription @7
+    VR_GetVRInitErrorAsSymbol=edvr_module_VR_GetVRInitErrorAsSymbol @8
+    VR_InitInternal=edvr_module_VR_InitInternal @9
+    VR_IsHmdPresent=edvr_module_VR_IsHmdPresent @10
+    VR_IsInterfaceVersionValid=edvr_module_VR_IsInterfaceVersionValid @11
+    VR_IsRuntimeInstalled=edvr_module_VR_IsRuntimeInstalled @12
+    VR_RuntimePath=edvr_module_VR_RuntimePath @13
+    VR_ShutdownInternal=edvr_module_VR_ShutdownInternal @14
+    edvrConfigureNativeRuntime @15
+    edvrGetNativeRuntimeStatus @16

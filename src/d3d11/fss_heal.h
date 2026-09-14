@@ -21,6 +21,10 @@
 #pragma once
 
 #include <cstdint>
+namespace edvr {
+// Release cached shader resources after native calls have quiesced. CPU only.
+void fssHealRelease();
+}
 
 extern "C" {
 // leftTex/rightTex: ID3D11Texture2D* of the two submitted eyes (right is

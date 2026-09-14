@@ -9,6 +9,7 @@
 // theirs and point advanced.real_dll at it in edvr.ini. Ours will load and forward
 // through it, and both mods keep working.
 #include <windows.h>
+#include "../common/vr_census.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -17,12 +18,24 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/d3d11_device_identity.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/native_startup.h"
 #include "../common/proxy.h"
 #include "device_hook.h"
 #include "input_gate.h"
+#include "oculus_route.h"
+#include "shutdown_census.h"
+
+#ifndef EDVR_NATIVE_OPENXR_BUILD
+#define EDVR_NATIVE_OPENXR_BUILD 0
+#endif
+
+extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
+    sizeof(EdvrNativeStartupRouting), EDVR_NATIVE_STARTUP_VERSION_1,
+    EDVR_NATIVE_OPENXR_BUILD ? EDVR_NATIVE_STARTUP_ROUTE_OCULUS : 0u, 0u};
 
 extern "C" {
 extern void* edvr_realProcs_d3d11[];
@@ -66,6 +79,15 @@ void logDeviceCreation(ID3D11Device* device, D3D_DRIVER_TYPE driverType, UINT fl
     edvr::Log::get().note(
         "D3D11 device %p created: featureLevel=0x%04X flags=0x%08X driverType=%d hr=0x%08lX",
         static_cast<void*>(device), level, created, static_cast<int>(driverType), hr);
+    if (device && edvr::vrCensusEnabled()) {
+        LUID luid{};
+        const bool known = edvr::d3d11AdapterLuid(device, &luid);
+        edvr::Log::get().note(
+            "VR device census: created=%p adapterLuid=%08lX:%08lX known=%u "
+            "thread=%lu publishedBefore=%p (adapter identity is not device identity)",
+            static_cast<void*>(device), static_cast<unsigned long>(luid.HighPart),
+            luid.LowPart, known ? 1u : 0u, GetCurrentThreadId(), edvr::gameDevice());
+    }
 }
 
 void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
@@ -103,6 +125,9 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
         if (!edvr::gameDevice()) {
             device->AddRef();
             edvr::publishGameDevice(device);
+            if (edvr::vrCensusEnabled()) edvr::Log::get().note("VR device census: first device published=%p; "
+                                  "compare with validated eye texture devices in the vr log.",
+                                  static_cast<void*>(device));
         }
         edvr::hookDevice(device);
         if (swapChain) {
@@ -252,6 +277,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().open(cfg.logDir(), L"gfx");
     edvr::Log::get().note("edvr d3d11 proxy attached; module dir %S",
                           g_moduleDir->c_str());
+    edvr::oculusRouteReport();
 
     const std::string build = edvr::gameBuildVersion();
     // The builds named here come from the list itself, never a literal. A
@@ -298,6 +324,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     const DWORD n = g_realModule ? GetModuleFileNameW(g_realModule, realPath, MAX_PATH) : 0;
     if (n == 0 || n >= MAX_PATH) wcscpy_s(realPath, L"(unknown)");
     edvr::Log::get().note("forwarding to %S", realPath);
+    edvr::vrCensusConfigure();
     edvr::breadcrumb("gfx: log open");
     // From here on an unhandled exception names the module it came from
     // instead of leaving the trail blank. Faults on our own frame path do not
@@ -312,6 +339,7 @@ void ensureInitialised() {
 }
 
 void shutdown() {
+    edvr::oculusRouteReport();
     // Per-site fault totals, so "logged once" does not mean "counted once".
     edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();
@@ -361,6 +389,14 @@ void reportLoopOnce() {
 }  // namespace
 
 namespace edvr {
+
+namespace {
+ShutdownPresentCensus g_shutdownPresentCensus;
+}
+
+ShutdownPresentCensus& shutdownPresentCensus() noexcept {
+    return g_shutdownPresentCensus;
+}
 
 // The mechanism decision, made from the fact that actually settles safety:
 // whose CODE implements this context's methods?
@@ -563,16 +599,51 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDeviceAndSwapChain(
     return hr;
 }
 
+// Versioned CPU-only census handshake. In particular do not call
+// ensureInitialised here: a pose wait must not initialize graphics or a chain.
+extern "C" BOOL WINAPI edvrCensusBeginVr(unsigned protocol) {
+    return protocol == 1 && edvr::vrCensusBeginVr() ? TRUE : FALSE;
+}
+
+extern "C" std::uint64_t WINAPI edvrCensusBeginShutdown(std::uint32_t version) {
+    const bool enabled = edvr::vrCensusEnabled() && edvr::Log::get().isOpen();
+    return edvr::shutdownPresentCensus().begin(version, enabled);
+}
+
+extern "C" BOOL WINAPI edvrCensusEndShutdown(
+    std::uint64_t token, edvr::ShutdownCensusSnapshot* result) {
+    return edvr::shutdownPresentCensus().end(token, result);
+}
+
+// CPU-only diagnostic query. It must not trigger normal initialization: the
+// first relevant loader call can precede the first D3D export.
+extern "C" BOOL WINAPI edvrQueryOculusRouting(uint32_t version, uint32_t size,
+                                            void* output) {
+    if (version != 1 || size != sizeof(edvr::OculusRouteStatus) || !output) return FALSE;
+    __try {
+        *static_cast<edvr::OculusRouteStatus*>(output) = edvr::oculusRouteStatusSnapshot();
+        return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+}
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
             g_selfModule = module;
             DisableThreadLibraryCalls(module);
+            // Native routing is a build capability, available before Elite's
+            // first VR probe. No configuration or logging under loader lock.
+            edvr::oculusRouteInstallEarly(EDVR_NATIVE_OPENXR_BUILD != 0);
+            if (EDVR_NATIVE_OPENXR_BUILD != 0 && !edvr::oculusRouteProcessAttachAllowed())
+                return FALSE;
             loaderPhase();
             edvr::inputGateInstallEarly();
             break;
 
         case DLL_PROCESS_DETACH:
+            edvr::oculusRouteUninstallEarly();
             // reserved != NULL means process termination: other threads are
             // already dead and may have been holding our spinlock or the heap
             // lock. Do the minimum and leak the rest.

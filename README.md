@@ -1,135 +1,87 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
 Fixes for things that make Odyssey uncomfortable in a headset. Two dozen fixes,
-two files, about three minutes — the short list is under
-[What it fixes](#what-it-fixes), and each one in full is in
+a native OpenXR package, about three minutes — the short list is under [What it
+fixes](#what-it-fixes), and each one in full is in
 [docs/fixes.md](docs/fixes.md).
 
-**It needs Elite running on its OpenVR path** — SteamVR, or an OpenXR runtime
-through OpenComposite. Elite's own Oculus path is not supported; if a Meta
-headset is driven by the Meta PC app over Link or Air Link, read
-[Headsets and VR runtimes](#headsets-and-vr-runtimes) before you install.
+**The Windows release uses Elite's OpenVR-facing path to reach native OpenXR.**
+The bundled Khronos loader uses the Windows Active OpenXR Runtime. SteamVR is a
+valid selected runtime; no SteamVR loader or OpenComposite installation is
+required. Elite's legacy LibOVR path is not a fallback.
 
 **Something not working?** [Open an
 issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
 — that is the place a bug gets fixed, because you can attach the log, and the
-log is usually the whole answer. For everything else — setup questions,
-"is this normal", or just talking about it — there is a
+log is usually the whole answer. For everything else — setup questions, "is
+this normal", or just talking about it — there is a
 [Discord](https://discord.gg/ynkdf6Gdua).
 
-EDVR is free and stays free. If it improves your VR experience,
-[tips are welcome](https://ko-fi.com/seancharacterecho) — please do not feel any obligation to do so.
+EDVR is free and stays free. If it improves your VR experience, [tips are
+welcome](https://ko-fi.com/seancharacterecho) — please do not feel any
+obligation to do so.
 
 > **Already running EDHM or ReShade?** Both can run alongside EDVR. EDHM
 > installs itself as `d3d11.dll` too, and only one file can have that name —
 > don't overwrite it. The installer handles this for you; by hand it is one
-> rename and one setting, under
-> [Running alongside other mods](#running-alongside-other-mods). ReShade needs
-> nothing at all as of 0.7.2.
+> rename and one setting, under [Running alongside other
+> mods](#running-alongside-other-mods). ReShade needs nothing at all as of
+> 0.7.2.
 
 ## Headsets and VR runtimes
 
-**EDVR supports headsets that reach Elite through OpenVR — SteamVR, or an
-OpenXR runtime by way of OpenComposite. Elite's own Oculus/Meta path is not
-supported.**
+**EDVR supports the native OpenXR route on Windows.** The selected Active
+Runtime may be SteamVR. Pimax over PiOpenXR, Quest 3 over Virtual Desktop's
+VDXR, and the latest Air Link flight are the current field checks; other
+headsets and runtimes are not implied to be qualified.
 
-Elite ships two VR back ends and picks one at launch: OpenVR, and Oculus'
-native SDK. It has no OpenXR back end of its own. EDVR's second file *is*
-`openvr_api.dll` — the fixes that act on a finished frame live inside the game's
-own OpenVR library — so if the game does not take the OpenVR path, that half of
-the patch is never loaded and everything in it is inert.
+Elite's OpenVR-facing entry point is retained for compatibility, while EDVR's
+native runtime facade owns the OpenXR session. The package has no backend
+choice and does not silently fall back to LibOVR or a legacy EDVR pair.
 
-**Works:**
+The bundled loader can select SteamVR, PiOpenXR, VDXR, or Meta's OpenXR
+runtime. A compatible runtime and connected headset must be available before
+launch. These choices use the same native EDVR backend.
 
-- **SteamVR**, and anything SteamVR drives — Valve Index, HTC Vive, Bigscreen
-  Beyond, Pimax through its SteamVR driver, a Quest over **Steam Link**, and so
-  on.
-- **OpenXR runtimes through [OpenComposite](https://gitlab.com/znixian/OpenOVR)**
-  — Virtual Desktop's VDXR, PiOpenXR, Meta's own OpenXR runtime. OpenComposite
-  supplies the `openvr_api.dll` the game loads and translates to OpenXR
-  underneath, so as far as Elite and EDVR are concerned it is still the OpenVR
-  path. EDVR knows OpenComposite when it is there — it identifies the runtime
-  beneath it by its exports, says which in the `vr` log, and has settings that
-  exist only for it (`launch_centre`, `advanced.suppress_interfaces`).
+The legacy LibOVR path is unsupported. A release installer validates the Elite
+executable profile and refuses an unsupported revision before writing, rather
+than silently selecting a legacy route.
 
-Field-verified on a Quest 3 over Virtual Desktop and a Pimax Crystal Super over
-PiOpenXR, both through OpenComposite. Real SteamVR is supported and less
-measured — a log from there is a useful report either way.
+The Windows OpenXR Active Runtime selector matters to the bundled loader. Set
+it to the runtime you intend to use before launching Elite.
 
-**Does not work: Elite's native Oculus path.** When the Meta (Oculus) PC runtime
-is what drives your headset — a Rift, a Rift S, or a Quest over Link or Air Link
-with the Meta PC app — Elite prefers its own Oculus back end, loads
-`LibOVRRT64_1.dll`, and never loads `openvr_api.dll` at all. Measured on a Rift
-S user's machine in September 2026: a byte-perfect, correctly-placed install of
-both EDVR files that the game simply never opened. **Nothing about the install
-can fix this** — it is which back end the game chose, decided before EDVR has a
-say.
-
-Elite having no OpenXR back end is worth stating separately, because it is where
-people look first: **Windows' OpenXR runtime selector and the Meta app's OpenXR
-toggles have no bearing on any of this.** Changing them does not move Elite onto
-OpenXR, because Elite never asks for OpenXR. OpenComposite is what makes an
-OpenXR runtime reachable, and it does it by answering as OpenVR.
-
-**Which one am I on?** Look in `edvr_logs\` next to the game after a session:
+**Which runtime am I on?** Look in `edvr_logs\` next to the game after a
+session:
 
 | What you find | What it means |
 |---|---|
-| Two logs, the second with `vr` in the name | The OpenVR path. Its `launch centre:` line names the runtime underneath — Valve's SteamVR or OpenComposite. The in-headset menu's **Status** page says the same. |
-| One log only, and `edvr_breadcrumbs.txt` has `gfx:` lines but never a `vr:` line | The Oculus path. EDVR's `openvr_api.dll` was never loaded. |
+| Native OpenXR startup and runtime name | The bundled loader reached the Windows Active Runtime. |
+| Unsupported profile error | This game revision needs an updated EDVR profile. |
+| No native startup log | Native startup has not been confirmed; attach the available logs for diagnosis. |
 
-One caution while reading that log on the Oculus path: several messages say
-`openvr_api.dll is NOT installed` when the file is installed, correct, and
-merely never opened. Take them as "the openvr half never ran", not as an install
-fault — the breadcrumb test above is the one that decides.
-
-**What still works there.** The fixes that live entirely in `d3d11.dll` keep
-working — the exposure fix, the RemLok lines, the sun's glare, the particle
-billboards, the loading hologram, the scanner body, the on-foot screen's
-resolution and curvature — though a few of them lean on the other half for
-per-headset tuning and fall back to their defaults without it. What goes
-outright: the temporal pass and DLAA/DLSS, the supersample resolve, the
-sharpening, the terrain fix, the transition flash, Explorer Cam, the in-headset
-settings menu, the black void and the panel distance. That is most of the reason
-to install it.
-
-**Getting a Meta headset onto OpenVR.** Both of the usual routes bypass the Meta
-PC runtime rather than arguing with it:
-
-- **Steam Link** on Quest 2/3/Pro — streams to SteamVR directly, and the game
-  finds no Oculus runtime to prefer.
-- **Virtual Desktop** — either its SteamVR mode, or VDXR with OpenComposite,
-  which is the configuration this project measures on a Quest 3.
-
-With Link or Air Link and the Meta app running, Elite will keep choosing Oculus.
-There is an old community workaround — running `EliteDangerous64.exe` in Windows
-7 compatibility mode, which Oculus' runtime refuses, pushing the game onto
-SteamVR — but it dates from the Rift CV1 era, this project has not tested it,
-and it is not something to rely on. If you try it and it works, that is a useful
-thing to report.
+The native route is selected by the Windows Active Runtime. Do not install
+OpenComposite or a vendor OpenXR loader to make the package work. User launches
+Elite normally after choosing the desired Windows runtime.
 
 ## Install
 
 **Run `edvr-installer.exe`** from the release. One file, nothing to extract,
-nothing to put in the right folder — it carries both DLLs, `edvr.ini` and
-NVIDIA's DLSS runtime inside it and does the whole install:
+nothing to put in the right folder — it carries the native graphics/runtime
+pair, bundled OpenXR loader and notice, `edvr.ini`, and optional DLSS runtime:
 
-- **Finds the game.** Frontier launcher, Steam or Epic, on whichever drive —
-  it asks each launcher where it put the game rather than guessing paths, and
+- **Finds the game.** Frontier launcher, Steam or Epic, on whichever drive — it
+  asks each launcher where it put the game rather than guessing paths, and
   confirms every answer by finding `EliteDangerous64.exe`. Or point it at a
   folder yourself.
-- **Places NVIDIA's DLSS runtime** (`nvngx_dlss.dll`, 59 MB) beside the game
-  when the machine has an NVIDIA card, which is what `temporal_aa = dlaa`
-  needs; on any other card it skips it and says so. A copy you put there
-  yourself, or one NVIDIA's own updater replaced, is left alone, and
-  uninstall removes only the copy it placed.
+- **Places the bundled OpenXR loader** beside the native runtime and selects
+  Windows' Active Runtime. It does not search for or load a SteamVR or vendor
+  loader.
 - **Keeps your settings.** Updating never overwrites `edvr.ini`: it writes the
   new version's file with your values put back into it, so new settings and
   changed defaults arrive and nothing you tuned is lost. It says which is which
   afterwards.
-- **Renames the game's `openvr_api.dll` instead of overwriting it**, which is
-  the step most manual installs get wrong — and it can tell the game's own copy
-  from EDVR's by reading the file, so it will not rename the wrong one.
+- **Preserves the game's original `openvr_api.dll`** as a recovery backup for
+  uninstall; it never treats a missing original as permission to fall back.
 - **Leaves other mods working.** If EDHM (or anything else) is already
   installed as `d3d11.dll`, it renames that aside, takes the name, and sets
   `advanced.real_dll` so EDVR passes every call through to it.
@@ -148,30 +100,31 @@ NVIDIA's DLSS runtime inside it and does the whole install:
 
 It shows you exactly what it is about to do and waits for a yes, and every file
 it replaces is copied into `edvr_backup\` first. It needs administrator rights
-only if the game is under `Program Files`, and asks at that point rather than up
-front. It has no network access at all — it installs what it carries. *What it
-decides and why: [docs/installer.md](docs/installer.md).*
+only if the game is under `Program Files`, and asks at that point rather than
+up front. It has no network access at all — it installs what it carries. *What
+it decides and why: [docs/installer.md](docs/installer.md).*
 
 Windows will say the program is unrecognised, because it is unsigned: **More
 info → Run anyway**. Every release lists the installer's SHA-256, which is the
 only provenance an unsigned binary can offer.
 
-**Would rather place the two files yourself?**
+**Would rather place the package yourself?**
 [docs/manual-install.md](docs/manual-install.md) is the same install by hand:
 where each file goes, and the `openvr_api.dll` rename that most manual installs
 get wrong.
 
 ### Checking it worked
 
-Logs appear in `edvr_logs\` next to the game. There are two of them; the second,
-with `vr` in the name, says
-`compositor hook installed on IVRCompositor_014`. If it reports an unknown
-compositor version instead, the fix is off, the game runs normally, and that
-version string is worth reporting. **If there is no second log at all**, the
-game is not on its OpenVR path and half the patch never loaded — see
-[Headsets and VR runtimes](#headsets-and-vr-runtimes). If you see a flash anyway, press **Pause**
-straight after and send the logs — that writes the last ten seconds of viewpoint
-history, which separates "detected and let through" from "never detected".
+Logs appear in `edvr_logs\` next to the game. There are two of them; the
+second, with `vr` in the name, says `compositor hook installed on
+IVRCompositor_014`. If it reports an unknown compositor version instead, the
+fix is off, the game runs normally, and that version string is worth reporting.
+**If there is no second log at all**, the game is not on its OpenVR path and
+half the patch never loaded — see [Headsets and VR
+runtimes](#headsets-and-vr-runtimes). If you see a flash anyway, press
+**Pause** straight after and send the logs — that writes the last ten seconds
+of viewpoint history, which separates "detected and let through" from "never
+detected".
 
 ### Reporting a problem
 
@@ -188,8 +141,8 @@ is very little to go on. If the game will not start at all,
 survives a crash that eats the log — send that.
 
 The [Discord](https://discord.gg/ynkdf6Gdua) is good for setup questions and
-for "is this normal". Bugs still want an issue: chat loses attachments and
-the thread, and an issue is what remembers a problem long enough to fix it.
+for "is this normal". Bugs still want an issue: chat loses attachments and the
+thread, and an issue is what remembers a problem long enough to fix it.
 
 ### If the game dies a second or two after launch
 
@@ -259,12 +212,11 @@ d3d11_fixes = 0
 ```
 
 turns the Direct3D fixes off for good. Nothing is hooked on the device or on
-its render context, so the black void, the panel fixes, the shader
-replacements and the anti-aliasing passes are all inert. The `openvr_api.dll`
-half keeps working, and so do the swapchain and DXGI hooks that carry the
-frame boundary it runs on -- so this is not "EDVR loads and does nothing", and
-if a crash survives it, that is worth reporting: it is in one of those or in
-the VR half.
+its render context, so the black void, the panel fixes, the shader replacements
+and the anti-aliasing passes are all inert. The `openvr_api.dll` half keeps
+working, and so do the swapchain and DXGI hooks that carry the frame boundary
+it runs on -- so this is not "EDVR loads and does nothing", and if a crash
+survives it, that is worth reporting: it is in one of those or in the VR half.
 
 Please report which of the three you needed, with the log from each -- that is
 the measurement that turns a workaround into a fix.
@@ -279,22 +231,23 @@ vtable_flip_timeline = 1
 
 to whichever of the three you ended up on. It logs every change to the game's
 Direct3D function table -- what changed, from what to what, at which frame, and
-which instruction did it -- and writes the first few to
-`edvr_breadcrumbs.txt`, which survives a crash that eats the log. That file is
-what says whether the table changed *before* the crash or *after* it, which is
-the one thing the reports so far cannot settle. Every line that carries a frame
-number now counts frames the same way, including the monitor's "LONG FRAME"
-line, so the ordering can be read straight off the file.
+which instruction did it -- and writes the first few to `edvr_breadcrumbs.txt`,
+which survives a crash that eats the log. That file is what says whether the
+table changed *before* the crash or *after* it, which is the one thing the
+reports so far cannot settle. Every line that carries a frame number now counts
+frames the same way, including the monitor's "LONG FRAME" line, so the ordering
+can be read straight off the file.
 
 On `context_hook_mode = shared` the table changes every frame anyway — that is
 Windows' own `d3d11.dll` writing its entry back over EDVR's hook — so the
 per-change lines stop after the first few thousand and only the running tally
 continues. That is expected, not a fault. (EDVR's own writes never appear in
 the list: it unlocks the memory before writing, so they raise nothing for the
-watch to see.) It makes every write to the memory the table lives on take an exception,
-which costs a few milliseconds a frame; it prints what it cost, switches itself
-off if that ever gets serious (never in the first ten seconds, which is where
-the crash is), and is meant for one session. Set it back to 0 afterwards.
+watch to see.) It makes every write to the memory the table lives on take an
+exception, which costs a few milliseconds a frame; it prints what it cost,
+switches itself off if that ever gets serious (never in the first ten seconds,
+which is where the crash is), and is meant for one session. Set it back to 0
+afterwards.
 
 ### Uninstall
 
@@ -315,25 +268,25 @@ wrong in a headset — drawn once for two eyes, pinned to your face instead of
 standing in the world, or sized for a screen you are not looking at.
 
 - **The two eyes made to agree.** One eye stopping down near a star while the
-  other does not (1.5 stops apart, measured; 0.4 with the fix). The planet
-  that renders as a black disc in one eye in the scanners. The FSS showing
-  each eye a different scan. The RemLok helmet's edge lines hanging along your
-  nose instead of at your temples.
-- **Things put back in the world.** A star's whole glare, which stock rolls
-  and tilts with your head like a camera overlay. Geyser plumes and solar
-  prominences, which swim as you look past them. The loading ship's
-  head-locked scan pattern. The launch movie, off its 27-degree rectangle and
-  onto the splash screen's own surface.
+  other does not (1.5 stops apart, measured; 0.4 with the fix). The planet that
+  renders as a black disc in one eye in the scanners. The FSS showing each eye
+  a different scan. The RemLok helmet's edge lines hanging along your nose
+  instead of at your temples.
+- **Things put back in the world.** A star's whole glare, which stock rolls and
+  tilts with your head like a camera overlay. Geyser plumes and solar
+  prominences, which swim as you look past them. The loading ship's head-locked
+  scan pattern. The launch movie, off its 27-degree rectangle and onto the
+  splash screen's own surface.
 - **The one-frame flash** each time you jump or drop out of supercruise —
   detected and not sent, so the runtime holds the previous frame instead.
 - **Shimmer and sharpness.** Temporal anti-aliasing, with DLAA and DLSS on RTX
   cards, includes UI and smoke depth and rotating-station motion automatically.
   Choose it and the **DLSS preset** (default K) on Performance; AA remains off
-  by default. RCAS sharpening is available separately. Supersample filtering
-  is experimental and off by default.
+  by default. RCAS sharpening is available separately. Supersample filtering is
+  experimental and off by default.
 - **The terrain missing at the edges of view** over planets — Elite culls
-  against a narrower frustum than it renders, so squares of ground go
-  undrawn. Off by default; it costs about 6% GPU at the tested values.
+  against a narrower frustum than it renders, so squares of ground go undrawn.
+  Off by default; it costs about 6% GPU at the tested values.
 - **On foot:** the grey surround made properly black, the screen moved, bent
   and raised above its forced 1920x1080, and Explorer Cam, which gives you a
   real stereo view of your commander in the external camera.
@@ -345,8 +298,8 @@ menu.
 
 ## Explorer Cam
 
-On foot, Elite renders the world once, flat, and shows that image to both eyes —
-there is no depth because none is being drawn. The external camera renders in
+On foot, Elite renders the world once, flat, and shows that image to both eyes
+— there is no depth because none is being drawn. The external camera renders in
 proper stereo, so that is where Explorer Cam works: it moves your viewpoint to
 your commander's head while you are in that camera. **It cannot make first
 person 3D** — the flat screen stays flat — and it does not try.
@@ -354,7 +307,8 @@ person 3D** — the flat screen stays flat — and it does not try.
 **It replaces one camera preset: Commander Right Shoulder.** On that preset the
 camera sits at your commander's head instead of the preset's usual framing;
 cycle to it for the 3D view, off it for normal framing. Every other preset is
-untouched. `advanced.head_offset_view` selects a different preset to give up instead.
+untouched. `advanced.head_offset_view` selects a different preset to give up
+instead.
 
 ### It gives you no capability you do not already have
 
@@ -364,9 +318,9 @@ shooting, scanning, opening a panel, using a terminal, or picking anything up.
 To act you switch back to first person, exactly as you do today. Explorer Cam
 changes **where the camera is while you are already in that mode** and nothing
 else — no extra reach, nothing revealed the camera was not already showing, no
-step removed that anyone else has to take. A player with it and a player without
-it can do the same things, in the same order, with the same clicks. One of them
-is looking at it in 3D.
+step removed that anyone else has to take. A player with it and a player
+without it can do the same things, in the same order, with the same clicks. One
+of them is looking at it in 3D.
 
 It touches nothing shared: no network path, no server state, nothing another
 player observes, and no gameplay data read or written.
@@ -375,26 +329,26 @@ player observes, and no gameplay data read or written.
 
 1. **Hotkeys: nothing to do.** EDVR reads your external-camera and
    next-camera-view keys straight from your Elite key configuration — the
-   *on-foot* camera binding, which Elite keeps separate from the ship's.
-   If they are on keyboard keys, you are done: the log's first lines name
-   the keys it adopted and the file they came from. Rebind them in Elite,
-   even mid-session, and EDVR follows within a few seconds. EDVR only
-   *watches* these keys; it never presses them or interferes with the game
-   receiving them.
+   *on-foot* camera binding, which Elite keeps separate from the ship's. If
+   they are on keyboard keys, you are done: the log's first lines name the keys
+   it adopted and the file they came from. Rebind them in Elite, even
+   mid-session, and EDVR follows within a few seconds. EDVR only *watches*
+   these keys; it never presses them or interferes with the game receiving
+   them.
 
    They matter because on screen, entering the camera looks identical to
-   boarding your ship — the camera key is how EDVR knows which it was. And
-   near a planet the game rebuilds its camera data every few seconds, so the
+   boarding your ship — the camera key is how EDVR knows which it was. And near
+   a planet the game rebuilds its camera data every few seconds, so the
    next-view key's presses are what carry "which preset am I on" through the
    gaps.
 
-   If your camera is bound **only to a controller**, bind a keyboard key for
-   it in Elite (Options → Controls) for now — EDVR watches the keyboard, and
+   If your camera is bound **only to a controller**, bind a keyboard key for it
+   in Elite (Options → Controls) for now — EDVR watches the keyboard, and
    controller support is planned.
 
 2. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
-   two presses from the view the camera opens on. That is the preset the
-   offset replaces; every other preset keeps its normal framing.
+   two presses from the view the camera opens on. That is the preset the offset
+   replaces; every other preset keeps its normal framing.
 
 3. Tune the offsets with the headset on; they reload about once a second:
 
@@ -406,9 +360,9 @@ player observes, and no gameplay data read or written.
 
    These are tuned for Commander Right Shoulder, which already sits close to
    your commander and faces the way they face — so the numbers are small, and
-   the negative `right` brings you off the shoulder onto the centre line. Pick a
-   preset several metres further back and `forward` becomes the large one, two
-   to three metres instead of one. Starting points, not universal answers.
+   the negative `right` brings you off the shoulder onto the centre line. Pick
+   a preset several metres further back and `forward` becomes the large one,
+   two to three metres instead of one. Starting points, not universal answers.
 
 **Comfort.** These move the viewpoint of a headset you are wearing; change them
 a little at a time. Entering and leaving is a cut rather than a glide, because
@@ -419,9 +373,9 @@ the game's own camera change is already a cut.
 Two things the other fixes do not:
 
 - **It changes the headset position the game is told about.** Each frame the
-  game asks SteamVR where your head is; EDVR adds your offset to the answer. The
-  game then moves its *own* camera — as far as Elite knows, you leaned. That is
-  what makes it work: culling and object placement follow.
+  game asks SteamVR where your head is; EDVR adds your offset to the answer.
+  The game then moves its *own* camera — as far as Elite knows, you leaned.
+  That is what makes it work: culling and object placement follow.
 - **It reads one number from the game's memory:** which external-camera view is
   showing, so the offset applies to the right preset. To find where that number
   lives it searches once, on the first frame you are on foot, for a marker
@@ -431,19 +385,19 @@ Two things the other fixes do not:
   writes for third-party tools in Saved Games — to know when gameplay has
   started, when you step onto your feet (where the game resets its camera
   view), and when a jump begins and resolves. Names only (`LoadGame`,
-  `Disembark`, `StartJump`, `FSDJump`, `SupercruiseEntry`); no other content
-  is read or kept, and `d3d11.journal_watch = 0` turns it off entirely.
+  `Disembark`, `StartJump`, `FSDJump`, `SupercruiseEntry`); no other content is
+  read or kept, and `d3d11.journal_watch = 0` turns it off entirely.
 
 Its safeguards, because they are the reason to trust it:
 
 - **Nothing happens without your camera key**, as above — and EDVR only
   *watches* that key; it never presses or sends it.
-- **Your viewpoint moves at most 10 m per axis.** Beyond that it clamps and says
-  so — refusing outright would snap the view, which is worse when worn.
+- **Your viewpoint moves at most 10 m per axis.** Beyond that it clamps and
+  says so — refusing outright would snap the view, which is worse when worn.
 - **It counts your camera-key presses**, and since build 332753 that is all it
   does. Reading the preset out of the game is off by default — see below.
-- **It expires.** The two halves of EDVR agree once a frame about which mode you
-  are in; if the deciding half stops running, the half that moves your view
+- **It expires.** The two halves of EDVR agree once a frame about which mode
+  you are in; if the deciding half stops running, the half that moves your view
   stops trusting it within about a second and puts your viewpoint back.
 - **Reading the preset from the game is off** (`camera_index_track = 0`). It
   was a correction on top of the press count: better where it worked, because
@@ -462,11 +416,10 @@ Its safeguards, because they are the reason to trust it:
 
 ## The terrain fix (cull guard)
 
-For Frontier issue
-[72609](https://issues.frontierstore.net/issue-detail/72609) — "Culling of
-planet surface in VR too aggressive", the black squares at the edges of view
-over planets. What was measured, why the fix works from outside the game, and
-what a fix inside it would look like:
+For Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609)
+— "Culling of planet surface in VR too aggressive", the black squares at the
+edges of view over planets. What was measured, why the fix works from outside
+the game, and what a fix inside it would look like:
 [docs/terrain-culling.md](docs/terrain-culling.md). It is off by default
 because it costs GPU time; enabling it is three settings in `edvr.ini`.
 
@@ -478,20 +431,20 @@ because it costs GPU time; enabling it is three settings in `edvr.ini`.
    ```
 
 2. **Gate it to your headset** (recommended). The `vr` log prints your
-   headset's signature — `cull guard: this headset's signature is 94x99` —
-   copy that value in:
+   headset's signature — `cull guard: this headset's signature is 94x99` — copy
+   that value in:
 
    ```
    cull_guard_headsets = 94x99
    ```
 
-   The guard then runs only on that headset. On a rig that swaps headsets,
-   the other one pays nothing, with no ini edits at swap time.
+   The guard then runs only on that headset. On a rig that swaps headsets, the
+   other one pays nothing, with no ini edits at swap time.
 
 3. **Pick the margin.** Left alone the guard covers the full shortfall —
-   guaranteed wherever the fix works at all, and the most expensive (~48%
-   more rendered pixels on a Quest 3). The values tested on a Quest 3 keep
-   the edges clean at about **6%**:
+   guaranteed wherever the fix works at all, and the most expensive (~48% more
+   rendered pixels on a Quest 3). The values tested on a Quest 3 keep the edges
+   clean at about **6%**:
 
    ```
    cull_guard_fraction_h = 0.25
@@ -499,22 +452,21 @@ because it costs GPU time; enabling it is three settings in `edvr.ini`.
    ```
 
    Both are live — save the file mid-flight and the guard picks them up. If
-   black squares persist on your headset, raise `_h` in steps; the log's
-   `cull guard margins` line names what each step leaves uncovered.
+   black squares persist on your headset, raise `_h` in steps; the log's `cull
+   guard margins` line names what each step leaves uncovered.
 
 Working, the `vr` log says `cull guard stage 1`, then two `cull guard LIVE`
 lines. `cull guard INERT` means this runtime shapes its projections in a way
 the guard refuses to edit — the game runs normally, and that log is worth
-attaching to an issue. Field-verified on Quest 3 via Virtual Desktop (where
-the missing tiles reproduced, and are gone) and Pimax via PiOpenXR; real
-SteamVR is unmeasured so far, so a log from there is a useful report either
-way.
+attaching to an issue. Field-verified on Quest 3 via Virtual Desktop (where the
+missing tiles reproduced, and are gone) and Pimax via PiOpenXR; real SteamVR is
+unmeasured so far, so a log from there is a useful report either way.
 
 ## Settings
 
-Everything is in `edvr.ini`, next to the game; with the file missing you get the
-defaults. `black_void`, `panel_distance` and the Explorer Cam offsets reload
-while the game runs; the rest need a restart.
+Everything is in `edvr.ini`, next to the game; with the file missing you get
+the defaults. `black_void`, `panel_distance` and the Explorer Cam offsets
+reload while the game runs; the rest need a restart.
 
 **The in-headset menu.** Press **F8** in the game (the key is `hotkey.menu`)
 and a settings panel appears where you are looking, anchored in the world so it
@@ -522,16 +474,16 @@ stays put while you read it. Up and Down pick a row; Left and Right change it;
 Enter toggles; Tab changes page; Escape closes. The keys you already use to
 walk Elite's own cockpit panels -- up, down, left, right, select, back, next
 and previous panel -- work in the menu too, read from your Elite bindings
-(`hotkey.read_game_bindings`), and the panel's bottom line names them. Tab,
-the arrows, Enter and Escape always work as well. While it is open the game
-sees no keyboard at all, so none of those keys reach the ship -- your HOTAS
-and mouse still do. Every change is written to `edvr.ini` and applies the way a
-hand edit would, and a row that only takes effect at the next launch says so.
-The **Monitor** page is fpsVR's readout -- frame rate and 1% low, the app's
-and the compositor's GPU time, dropped and reprojected frames, CPU, GPU, VRAM
-and RAM -- with a frame-time strip; `menu.fps_overlay = on` pins a one-line
-version of it to your view while the menu is closed. `menu.developer = on`
-adds the advanced and experimental sections. The whole design is in
+(`hotkey.read_game_bindings`), and the panel's bottom line names them. Tab, the
+arrows, Enter and Escape always work as well. While it is open the game sees no
+keyboard at all, so none of those keys reach the ship -- your HOTAS and mouse
+still do. Every change is written to `edvr.ini` and applies the way a hand edit
+would, and a row that only takes effect at the next launch says so. The
+**Monitor** page is fpsVR's readout -- frame rate and 1% low, the app's and the
+compositor's GPU time, dropped and reprojected frames, CPU, GPU, VRAM and RAM
+-- with a frame-time strip; `menu.fps_overlay = on` pins a one-line version of
+it to your view while the menu is closed. `menu.developer = on` adds the
+advanced and experimental sections. The whole design is in
 [docs/settings-menu.md](docs/settings-menu.md).
 
 ## Running alongside other mods
@@ -559,20 +511,20 @@ parked under the renamed file — and puts both back.)
 **ReShade** needs no configuration — install it the way ReShade tells you to
 (normally as `dxgi.dll`) and EDVR composes with it. Both mods' effects apply.
 
-**If something has gone wrong** and the log has not answered it — a launch crash on
-0.7.1 or earlier, every fix except the brightness one going quiet at once, or
-an old EDHM pairing that crashed —
+**If something has gone wrong** and the log has not answered it — a launch
+crash on 0.7.1 or earlier, every fix except the brightness one going quiet at
+once, or an old EDHM pairing that crashed —
 [docs/troubleshooting.md](docs/troubleshooting.md) has the three faults with a
 known cause and what each one needs.
 
 ## Game updates
 
-**The brightness fix finds its target by what it does**, not by which version of
-Elite compiled it: the calculation that writes the exposure result exactly twice
-per frame, stable for five frames running, before it acts. The black-void and
-screen-distance fixes key off image sizes and a clear colour, neither version
-specific. **The resolution fix** looks for the shape of the code it changes
-rather than trusting a version number — its safeguards are described
+**The brightness fix finds its target by what it does**, not by which version
+of Elite compiled it: the calculation that writes the exposure result exactly
+twice per frame, stable for five frames running, before it acts. The black-void
+and screen-distance fixes key off image sizes and a clear colour, neither
+version specific. **The resolution fix** looks for the shape of the code it
+changes rather than trusting a version number — its safeguards are described
 [below](#what-it-does-and-does-not-do).
 
 **Two things are measured from a specific build** (330683 / 4.4.0.3, the one
@@ -583,26 +535,26 @@ update (build 332753) moved the second of them and left the first alone —
 - **The transition flash fix** watches a viewpoint in a constant buffer — no
   instruction pattern to recognise, only a size and an offset. So it checks the
   *data*: a viewpoint moves smoothly, and EDVR requires the first 300 rendered
-  frames to behave that way before acting. If an update moves the block, what is
-  at the old offset will not move like a viewpoint, and the fix disables itself
-  and says so. It also switches off for the session if it ever withholds
+  frames to behave that way before acting. If an update moves the block, what
+  is at the old offset will not move like a viewpoint, and the fix disables
+  itself and says so. It also switches off for the session if it ever withholds
   continuously — permanent judder would be worse than the flash.
 - **Explorer Cam's camera marker** will also move on update — and did, in
   332753. Reading the preset is now off by default and Explorer Cam counts key
   presses instead; see its section above for what that costs.
 
 **Recurring false jumps are recognised and left alone.** Flying low over
-terrain, the game alternates between shadow cameras whose fixed separation looks
-like an enormous jump — measured at ~568,000 units, recurring for eight minutes,
-each withhold felt as judder. A jump that keeps recurring at the same size is a
-distance between render passes, not a transition — real transitions vary,
-because real motion does — so the first of a size is withheld and matching ones
-are left alone. `transition_flash_repeat_percent` controls it; the ini notes why
-raising `transition_flash_units` cannot help (the false jumps are *larger* than
-real ones, not smaller). Both eyes of a frame also follow one verdict, decided
-at whichever eye submits first. A `transition flash so far:` line counts
-withheld and recognised separately when something changes; no such line means it
-never fired.
+terrain, the game alternates between shadow cameras whose fixed separation
+looks like an enormous jump — measured at ~568,000 units, recurring for eight
+minutes, each withhold felt as judder. A jump that keeps recurring at the same
+size is a distance between render passes, not a transition — real transitions
+vary, because real motion does — so the first of a size is withheld and
+matching ones are left alone. `transition_flash_repeat_percent` controls it;
+the ini notes why raising `transition_flash_units` cannot help (the false jumps
+are *larger* than real ones, not smaller). Both eyes of a frame also follow one
+verdict, decided at whichever eye submits first. A `transition flash so far:`
+line counts withheld and recognised separately when something changes; no such
+line means it never fired.
 
 Frontier's launcher may remove `d3d11.dll` when it verifies the install — that
 is not a fault, it has simply uninstalled EDVR. Copy the file back.
@@ -610,8 +562,8 @@ is not a fault, it has simply uninstalled EDVR. Copy the file back.
 ## What it does and does not do
 
 It loads alongside the game as a `d3d11.dll` proxy, forwarding every call to
-Windows' real `d3d11.dll`; the `openvr_api.dll` proxy forwards every call to the
-game's own copy.
+Windows' real `d3d11.dll`; the `openvr_api.dll` proxy forwards every call to
+the game's own copy.
 
 **Most of the fixes never touch the game.** They change how frames are drawn
 from outside it: four small copies per frame so both eyes share an exposure
@@ -619,20 +571,20 @@ value, one substituted argument to a screen-clearing call, one substituted copy
 of the panel's position if you change the distance, and — for the transition
 flash — reading a constant buffer the game has already filled and, on the rare
 frame drawn from the wrong place, not forwarding one call to SteamVR. That read
-is camera state, not gameplay state; it never writes to the buffer it reads, and
-the only action it can take is to not forward a call — or to hand SteamVR the
-game's own previous frame in its place: a copy EDVR keeps of the last frame it
-forwarded, always the game's content, never EDVR's.
+is camera state, not gameplay state; it never writes to the buffer it reads,
+and the only action it can take is to not forward a call — or to hand SteamVR
+the game's own previous frame in its place: a copy EDVR keeps of the last frame
+it forwarded, always the game's content, never EDVR's.
 
-**The supersample resolve** is experimental and off by default:
-when the game submits a larger frame than the headset asked for, one GPU
-filter pass shrinks the game's frame into a texture EDVR owns, and that copy
-is what SteamVR receives — the game's texture is read, never written, no
-answer the game asks for changes, and nothing is read from memory. The
-temporal pass and the sharpening (`temporal_aa`, `render_sharpness`, both
-off by default) are two more passes of exactly that kind, except that the
-temporal pass also shifts the projection the game is told by a fraction of
-a pixel each frame, the way the terrain fix shifts it by a margin.
+**The supersample resolve** is experimental and off by default: when the game
+submits a larger frame than the headset asked for, one GPU filter pass shrinks
+the game's frame into a texture EDVR owns, and that copy is what SteamVR
+receives — the game's texture is read, never written, no answer the game asks
+for changes, and nothing is read from memory. The temporal pass and the
+sharpening (`temporal_aa`, `render_sharpness`, both off by default) are two
+more passes of exactly that kind, except that the temporal pass also shifts the
+projection the game is told by a fraction of a pixel each frame, the way the
+terrain fix shifts it by a margin.
 
 **Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam
@@ -641,16 +593,16 @@ the headset position the game is told about; the cull guard
 ([above](#the-terrain-fix-cull-guard)) changes the field of view the game is
 told the headset shows — the game then draws the wider view itself, and EDVR
 submits only the true region, copied from the game's own frame. It edits
-answers, never memory: the runtime and anything else asking always receive
-the truth, and it validates the runtime's projection against the shape it
-expects before changing anything, standing down loudly on a mismatch. None
-of the three does anything until you configure it.
+answers, never memory: the runtime and anything else asking always receive the
+truth, and it validates the runtime's projection against the shape it expects
+before changing anything, standing down loudly on a mismatch. None of the three
+does anything until you configure it.
 
-**The resolution fix, off by default,** rewrites the twelve numbers that are the
-width and height the game forces for the on-foot screen, in the places it does
-so — nothing else: not the surrounding instructions, not the game's decision
-about which screen to draw. Its safeguards, because they are the reason to
-trust it:
+**The resolution fix, off by default,** rewrites the twelve numbers that are
+the width and height the game forces for the on-foot screen, in the places it
+does so — nothing else: not the surrounding instructions, not the game's
+decision about which screen to draw. Its safeguards, because they are the
+reason to trust it:
 
 - **No file on disk is modified.** The change exists only in memory and the
   original values are put back when the game closes.
@@ -676,51 +628,47 @@ credits, missions. Nothing interacts with anti-cheat, and nothing attempts to
 hide from anything.
 
 If you would rather no part of this went near the game's code or memory, leave
-`vscreen_res_width`/`_height` at the stock 1920x1080 (the shipped default, which
-means "do not patch") and Explorer Cam unconfigured — the DLL then behaves as
-earlier versions did.
+`vscreen_res_width`/`_height` at the stock 1920x1080 (the shipped default,
+which means "do not patch") and Explorer Cam unconfigured — the DLL then
+behaves as earlier versions did.
 
 ## Build
 
-Needs Visual Studio 2022 with the C++ workload, and Python (used only to read
-export tables, so each proxy exports exactly what the original does).
+Needs Visual Studio 2022 with the C++ workload and Python. Before building,
+prepare the pinned official Khronos loader and notice:
+
+```
+python tools\fetch_openxr_loader.py
+```
 
 ```
 build.bat
 ```
 
-Produces `build\d3d11.dll` and `build\smoke.exe`; the second checks the build
-without the game or a headset:
+Produces the native graphics/runtime pair, `build\openxr_loader.dll`, and
+`build\smoke.exe`; the second checks the build without the game or a headset:
 
 ```
 build\smoke.exe build\d3d11.dll
 ```
 
-For the DLAA and DLSS modes, and for an installer that carries NVIDIA's
-runtime, the DLSS SDK has to be on the machine. It is not in this repository
-(its licence keeps it out) and it is not in the graphics driver:
+For the optional DLSS mode and an installer that carries NVIDIA's runtime, the
+DLSS SDK has to be on the machine. It is not in this repository (its licence
+keeps it out) and it is not in the graphics driver:
 
 ```
 python tools\fetch_ngx.py
 ```
 
 fetches one pinned commit of NVIDIA's public SDK repository into
-`%LOCALAPPDATA%\EDVR\ngx-sdk`, a single copy every checkout and worktree
-finds, and checks the runtime's hash against the pin in the script. A build
-without it still succeeds and says so loudly: it has no DLAA and its
-installer carries no runtime. `package.bat` refuses to package such a build
-unless told `--no-dlss`. `EDVR_NGX_SDK` points the build at a copy somewhere
-else.
+`%LOCALAPPDATA%\EDVR\ngx-sdk` and checks the runtime's hash against the pin in
+the script. `EDVR_NGX_SDK` points the build at a copy somewhere else.
 
-`build\openvr_api.dll` is built too if a copy of the real file can be found to
-read exports from — it looks in the game's install and `reference\`, or point at
-one explicitly:
-
-```
-build.bat --openvr "path\to\openvr_api.dll"
-```
-
-Without it, everything except the flash fix and Explorer Cam still builds.
+The installer resource generation requires the native pair and bundled loader;
+it does not offer a legacy OpenVR-only package. `package.bat <version>
+--no-dlss` allows packaging a build made without the DLSS SDK. When the build
+contains DLSS, the archive retains its matching DLL and NVIDIA license notice
+alongside the installer that embeds it.
 
 ## Antivirus
 

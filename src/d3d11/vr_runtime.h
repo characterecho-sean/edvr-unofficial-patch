@@ -51,6 +51,7 @@ namespace edvr {
 enum class VrRuntime {
     NoneLoaded,     // no VR runtime library in this process
     EdvrOpenvr,     // an openvr_api.dll is loaded, and it is ours
+    NativeOpenXR,   // EDVR's native OpenXR openvr facade is loaded
     ForeignOpenvr,  // an openvr_api.dll is loaded, and it is not ours
     OculusNative,   // no openvr_api.dll, and Oculus' LibOVR runtime is loaded
 };

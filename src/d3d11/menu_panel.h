@@ -30,12 +30,17 @@
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
 
 namespace edvr {
 
 // GPU ray tangents: physical left/right/up/down magnitudes. The shared
 // vertical pair uses OpenVR's historical pfTop/pfBottom names instead.
 void menuPanelFrustum(int eye, uint32_t w, uint32_t h, float tans[4]);
+void menuPanelSetNativeFrustum(const float tans[4]);
+void menuPanelClearNativeFrustum();
+void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bounds,
+                               const float xf[12]);
 
 enum MenuLineStyle : uint8_t {
     kMenuRow = 0,       // label left, value right
@@ -88,6 +93,7 @@ struct MenuGraph {
     float samples[120];
     int   count = 0;        // how many samples; 0 draws nothing
     float budgetMs = 11.1f;
+    bool zeroIsValid = false; // Native history distinguishes measured zero from missing data.
     char  label[64];
 };
 constexpr int kMenuMaxGraphs = 2;
@@ -160,6 +166,9 @@ struct MenuGeometry {
 
 // Hand the raster a new content (copied; the worker wakes). Frame thread.
 void menuPanelSubmit(const MenuContent& c);
+#ifdef EDVR_MENU_TEST
+bool menuPanelWorkerReadyForTest();
+#endif
 
 // Once per frame: upload a finished raster, create the texture as needed.
 void menuPanelTick(ID3D11Device* dev);

@@ -41,6 +41,8 @@ int main(int argc,char** argv){
         check(timer.totals.samples==2&&timer.totals.invalid==0&&timer.totals.ms>=0,"GPU coverage timestamps complete and are counted exactly once");
         timer.poll(ctx.Get());check(timer.totals.samples==2,"completed GPU intervals are not counted twice");
         check(timer.begin(ctx.Get()),"completed GPU interval can be reused");timer.end(ctx.Get());
+        timer.reset(ctx.Get());
+        check(gpuTimingShutdown(ctx.Get()),"shared GPU coverage clock closes on its owner");
     }
     auto buffer=[&](UINT size,UINT bind){D3D11_BUFFER_DESC d{};d.ByteWidth=size;d.BindFlags=bind;ComPtr<ID3D11Buffer> b;hr(dev->CreateBuffer(&d,nullptr,&b));return b;};
     auto read=[&](ID3D11ShaderResourceView* view){

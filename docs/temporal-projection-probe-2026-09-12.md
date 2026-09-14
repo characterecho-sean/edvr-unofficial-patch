@@ -1,0 +1,159 @@
+# Temporal reconstruction under the raw-only culling probe
+
+The reported head-movement shimmer and blur persisted after Frontier was
+restored from the render-to-submit timing checkpoint to `cc3d882`. Both logs
+and DLL hashes verified the rollback; current INI bytes still matched the
+earlier run. Geometry and text were affected, and switching AA off made the
+moving image clearer.
+
+The capture environment is OpenVR on Pimax through SteamVR, DLSS Quality with
+preset K and runtime file version 310.7.0.0, at 2774x2740 input and 4268x4216
+output per eye. The probe bug depends on an asymmetric projection widened only
+through the raw channel; a symmetric projection or ordinary both-channel guard
+does not exhibit this particular disagreement.
+
+Ruled out: the new outer GPU instrument as a necessary cause, because the
+verified baseline reproduces the symptom without that implementation.
+
+## Captured cause
+
+The two requested captures show the main-menu ship, rather than a cockpit. They
+contain a nearly still sequence and a slow head turn, with sixteen paired
+raw/processed frames each, motion metadata for both eyes, and the first frame's
+motion/depth/UI inputs. They are useful evidence for the reported geometry and
+text problem; they do not qualify other scenes.
+
+History remains valid in both sequences, with no reset requests or detected
+camera jumps. Head and camera rotations agree closely when measured with a
+small-angle calculation that avoids trace/acos error on float matrices. The
+scene depth is populated, and the recorded motion texture agrees with a CPU
+reconstruction using the captured shader parameters to within expected numeric
+precision on most pixels.
+
+The VR log identifies an active `advanced.cull_guard_channel = raw` probe. This
+deliberately widens `GetProjectionRaw` alone, leaving `GetProjectionMatrix`,
+target sizes and submission cropping unchanged. However,
+`systemHookEffectiveTangents` selected widened tangents whenever the guard was
+live, without considering the selected channel. Both temporal reprojection and
+the conversion of pixel jitter to projection offsets consume that function.
+
+Consequently, the game renders through its original asymmetric projection while
+the temporal pass reconstructs through a symmetric one. The same wrong span
+increases horizontal raster jitter by about 19 percent while the pass and DLSS
+are told the original pixel offset. The captured input motion texture
+faithfully contains the wrong reconstruction; this is not a missing shader or a
+timer suppressing the pass.
+
+## Independent image check
+
+Consecutive raw frames were fitted against the captured camera/depth warp,
+using blurred luminance and a residual translation fit on separate hull, floor
+and text regions. The alternative uses the original projection reported by the
+runtime and accounts for the larger jitter that the existing bug actually
+injected. It does not assume that the corrected jitter was already rendered.
+
+Residual RMS in input pixels during the moving sequence:
+
+| Region | Captured projection, X/Y | Original projection and actual jitter, X/Y |
+| --- | --- | --- |
+| Hull | 0.5305 / 0.1168 | 0.0242 / 0.0029 |
+| Floor | 0.2435 / 0.4416 | 0.0070 / 0.0033 |
+| Text | 0.1140 / 0.3172 | 0.1476 / 0.0228 |
+
+The still sequence also agrees with the original projection and enlarged
+jitter. A one-frame jitter lag or reversed sign fits substantially worse. Ruled
+out for these captures: repeated history resets and a one-frame jitter lag as
+the cause of the measured projection mismatch.
+
+This fit uses first-frame depth for the short sequence; it is not a complete
+per-frame optical-flow ground truth. Text retains a horizontal residual and may
+involve additional UI-specific motion. The strong agreement on two separate
+geometry regions, the actual matrix/raw split, and the shader's captured inputs
+establish the projection bug without claiming every remaining artifact has the
+same cause. Full capture files and analysis stay local.
+
+## Correction and next gate
+
+Temporal consumers must use the unjittered projection actually supplied by the
+matrix path: true tangents for the raw-only probe, widened tangents for a live
+matrix or both-channel guard. Both motion reconstruction and pixel-jitter
+conversion then use the same projection as the rasterizer. The diagnostic raw
+answer, its independent matrix counterpart, and its no-crop/no-resize behavior
+retain their existing meaning.
+
+The regression fixture compares the temporal tangents with the actual hooked
+matrix for both eyes, using asymmetric horizontal and vertical projections. It
+covers the raw-only and matrix-only probes and the ordinary guard before and
+after activation, preserving their existing raw/matrix and image-path checks. A
+read-only export exposes the same helper used by the temporal consumers;
+expected values are derived independently from the matrix received through the
+historical OpenVR interface.
+
+The full paired build passed, including the extended actual-proxy projection
+checks, existing ABI and rendering tests, the shared/frame timing suite and the
+config/Python gates. The production change is the projection selection; no
+shader math, AA preset, sharpening setting or live INI was adjusted.
+
+The clean `f622cd2` paired build is installed in Frontier. Both installed DLLs
+match the build by SHA-256, the previous pair was backed up, and the current
+INI bytes are unchanged. The full build passed again with the clean commit
+version. This pair includes the current render-to-submit timing work and the
+projection correction. Exact installation receipts remain local.
+
+The next headset gate repeats the same head movement on the main-menu ship with
+DLSS, then checks cockpit and on-foot rendering. Visual recovery is not yet
+verified. Use `--expect-build f622cd2` for both flight logs, even if a later
+documentation commit is HEAD.
+
+## Corrected-build capture result
+
+The subsequent Frontier flight verified `f622cd2` independently in both logs.
+The user reported that the original motion problem appears fixed and supplied
+three complete paired captures: nearly still, a slow head turn, and a view of
+the ship's wing. All three show the main-menu hangar; they do not qualify the
+cockpit or on-foot view. Insert was restored through `hotkey.dump_eyes`, with
+every other INI byte preserved, and the flight log confirms that binding.
+
+All 96 captured eye evaluations retain DLSS history, with no reset request or
+camera jump. Both eyes now use their true asymmetric projection throughout. An
+independent raw-image fit during the head turn gives residual RMS of 0.0138 /
+0.0020 input pixels on the hull away from menu UI and 0.0039 / 0.0028 on the
+floor, after the recorded camera warp and current-phase jitter. These are new
+scene regions, not a pixel-identical before/after benchmark. The fit still uses
+first-frame depth over the short sequence.
+
+The render-to-submit instrument is active alongside the corrected temporal
+path, with completed samples and no invalid samples in the last retained
+summary. Capture readback creates a large interval during the dump; this run
+does not measure normal overhead or establish matched-frame timing accuracy.
+
+### Remaining wing-line flicker
+
+The user clarified that the three thin wing lines flicker even while still. The
+wing capture has only about 0.002 to 0.026 degrees of head rotation per frame.
+The raw input visibly contains strongly aliased thin lines; DLSS makes them
+smoother but does not fully stabilize their brightness across the saved
+sequence. Input aliasing alone does not prove that reconstruction is correct.
+
+Ruled out for the captured wing region: a repeated history reset, the previous
+projection mismatch, and a nonzero captured UI/reactive/edit mask. Those masks
+are zero over the examined lines. First-frame motion agrees with a CPU
+reconstruction from the corrected captured parameters to within RG16_FLOAT
+precision on nearly all samples. This proves consistency of those inputs, not
+perfect motion on every later pixel. A translation fit on the thin, largely
+parallel lines is poorly constrained along the lines and cannot by itself
+identify a motion bug.
+
+No additional rendering change is justified yet. The next comparison keeps DLSS
+and preset K, temporarily changes Elite's HMD Image Quality from the current
+reduced input to 1.0, waits for the new history to settle, and captures the
+same stationary wing. At 1.0 this project's DLSS selection runs as DLAA. That
+tests sensitivity to input sampling and reconstruction scale; it does not by
+itself distinguish every shader, material or reconstruction cause. Restore the
+prior image quality afterward. Broader cockpit/on-foot validation and the
+original OpenXR timing gates remain open.
+
+The user subsequently deferred this wing-line investigation to keep work
+focused on the OpenXR port. The image-quality comparison above is not a pending
+test request or a blocker for port preparation. Keep the projection correction
+and current settings; retain the evidence for a separate follow-up.

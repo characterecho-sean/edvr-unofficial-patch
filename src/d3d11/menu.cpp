@@ -20,6 +20,7 @@
 #include "../common/hotkey.h"
 #include "../common/iniedit.h"
 #include "../common/log.h"
+#include "../common/native_render_settings.h"
 #include "../common/proxy.h"
 #include "../common/timing.h"
 #include "../common/temporal_mode.h"
@@ -28,6 +29,8 @@
 #include "input_gate.h"
 #include "menu_keys.h"
 #include "menu_panel.h"
+#include "native_menu.h"
+#include "vr_runtime.h"
 #include "menu_schema.h"
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
@@ -169,6 +172,12 @@ struct State {
     bool contentDirty = true;
     bool developerBuilt = false;
 
+    // The graphics provider publishes the live OpenXR view bounds after the
+    // native session starts.  Keep the last coherent snapshot so the menu
+    // can preview a restart value without constructing a runtime of its own.
+    EdvrNativeRenderSizing renderSizing{};
+    bool renderSizingAvailable = false;
+
     KeyRepeat keys[12];
     bool shiftHeld = false;
 
@@ -290,6 +299,143 @@ std::string formatNumber(double v, int precision) {
         return s;
     }
     return std::string(buf);
+}
+
+bool isOpenxrRenderScaleRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 &&
+           strcmp(d.key, "openxr_render_scale") == 0;
+}
+
+bool coherentNativeRenderSizing(const EdvrNativeRenderSizing& sizing) {
+    if (sizing.size != sizeof(sizing) ||
+        sizing.version != EDVR_NATIVE_RENDER_SIZING_VERSION_1 ||
+        sizing.valid != 1 || sizing.generation == 0 ||
+        !std::isfinite(sizing.requestedScale) ||
+        !std::isfinite(sizing.effectiveScale) || sizing.reserved != 0) {
+        return false;
+    }
+    const float expected = edvr::native_render::effectiveScale(
+        sizing.requestedScale, sizing.eyes, 2);
+    if (std::fabs(expected - sizing.effectiveScale) > 0.0001f) return false;
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        const EdvrNativeRenderViewBounds& bounds = sizing.eyes[eye];
+        if (!bounds.originalWidth || !bounds.originalHeight ||
+            !bounds.maxWidth || !bounds.maxHeight ||
+            bounds.originalWidth > bounds.maxWidth ||
+            bounds.originalHeight > bounds.maxHeight ||
+            !sizing.activeWidth[eye] || !sizing.activeHeight[eye] ||
+            sizing.activeWidth[eye] > bounds.maxWidth ||
+            sizing.activeHeight[eye] > bounds.maxHeight) {
+            return false;
+        }
+        if (sizing.activeWidth[eye] != edvr::native_render::scaledDimension(
+                bounds.originalWidth, bounds.maxWidth, sizing.effectiveScale) ||
+            sizing.activeHeight[eye] != edvr::native_render::scaledDimension(
+                bounds.originalHeight, bounds.maxHeight, sizing.effectiveScale)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool readNativeRenderSizing(EdvrNativeRenderSizing* out) {
+    if (!out) return false;
+    EdvrNativeRenderSizing candidate{};
+    if (!edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,
+                                     sizeof(candidate), &candidate) ||
+        !coherentNativeRenderSizing(candidate)) {
+        return false;
+    }
+    *out = candidate;
+    return true;
+}
+
+bool parseScale(const std::string& value, float* out) {
+    if (!out) return false;
+    char* end = nullptr;
+    const float parsed = std::strtof(value.c_str(), &end);
+    if (end == value.c_str() || !std::isfinite(parsed)) return false;
+    // Match Config::getFloat's numeric-prefix interpretation of existing
+    // files. The menu editor validates newly typed values separately.
+    *out = edvr::native_render::clampScale(parsed);
+    return true;
+}
+
+std::string scalePercent(float scale) {
+    const double percent = static_cast<double>(scale) * 100.0;
+    const double rounded = std::round(percent * 10.0) / 10.0;
+    const int precision = std::fabs(rounded - std::round(rounded)) < 0.0001 ? 0 : 1;
+    return formatNumber(rounded, precision) + "%";
+}
+
+std::string eyeDimensions(const EdvrNativeRenderSizing& sizing, float scale) {
+    const float effective = edvr::native_render::effectiveScale(
+        scale, sizing.eyes, 2);
+    const uint32_t width[2] = {
+        edvr::native_render::scaledDimension(sizing.eyes[0].originalWidth,
+                                             sizing.eyes[0].maxWidth, effective),
+        edvr::native_render::scaledDimension(sizing.eyes[1].originalWidth,
+                                             sizing.eyes[1].maxWidth, effective)};
+    const uint32_t height[2] = {
+        edvr::native_render::scaledDimension(sizing.eyes[0].originalHeight,
+                                             sizing.eyes[0].maxHeight, effective),
+        edvr::native_render::scaledDimension(sizing.eyes[1].originalHeight,
+                                             sizing.eyes[1].maxHeight, effective)};
+    char text[96];
+    if (width[0] == width[1] && height[0] == height[1]) {
+        snprintf(text, sizeof(text), "%ux%u", width[0], height[0]);
+    } else {
+        snprintf(text, sizeof(text), "L%ux%u R%ux%u", width[0], height[0],
+                 width[1], height[1]);
+    }
+    return text;
+}
+
+std::string openxrRenderScaleValue(const RowState& row,
+                                   const EdvrNativeRenderSizing* sizing) {
+    float requested = 0.0f;
+    if (!parseScale(row.value, &requested)) return "(invalid)";
+    if (!sizing) return "unavailable";
+    const std::string dimensions = eyeDimensions(*sizing, requested);
+    // The percentage is beside the label, leaving the value column for
+    // pixels. Distinct eyes are expanded in the always-visible selected-row
+    // hint; keep the explicitly labelled left eye here so neither number is
+    // clipped by the fixed-width value column.
+    const size_t rightEye = dimensions.find(" R");
+    return dimensions.substr(0, rightEye);
+}
+
+std::string openxrRenderScaleHint(const RowState& row,
+                                  const EdvrNativeRenderSizing* sizing, bool concise = false) {
+    if (!sizing) {
+        return "Dimensions unavailable. OpenXR changes apply after restarting Elite.";
+    }
+    float requested = 0.0f;
+    if (!parseScale(row.value, &requested)) return "The selected scale is invalid.";
+    const float effective = edvr::native_render::effectiveScale(
+        requested, sizing->eyes, 2);
+    std::string hint = "After restart: ";
+    if (!concise) {
+        hint += scalePercent(requested);
+        if (effective + 0.0005f < requested)
+            hint += " (runtime cap " + scalePercent(effective) + ")";
+        hint += " ";
+    }
+    hint += eyeDimensions(*sizing, requested) + ". Active: ";
+    if (sizing->activeWidth[0] == sizing->activeWidth[1] &&
+        sizing->activeHeight[0] == sizing->activeHeight[1]) {
+        char active[48];
+        snprintf(active, sizeof(active), "%ux%u", sizing->activeWidth[0],
+                 sizing->activeHeight[0]);
+        hint += active;
+    } else {
+        char active[80];
+        snprintf(active, sizeof(active), "L%ux%u R%ux%u", sizing->activeWidth[0],
+                 sizing->activeHeight[0], sizing->activeWidth[1],
+                 sizing->activeHeight[1]);
+        hint += active;
+    }
+    return hint + (concise ? " / eye." : " per eye. Based on the current runtime.");
 }
 
 // A step a person would choose: the range in about twenty steps, rounded to
@@ -580,7 +726,10 @@ struct Writer {
     std::vector<WriteJob>   queue;
     std::vector<WriteDone>  done;
 };
-Writer g_writer;
+// Like the panel worker, this may still be joinable when Windows terminates
+// the other threads before DLL detach. Do not register a thread destructor
+// with the CRT; stopWriter remains the normal explicit join path.
+Writer& g_writer = *new Writer;
 
 void writerMain() {
     for (;;) {
@@ -791,9 +940,11 @@ void buildStatus(MenuContent& c) {
     statusLine(c, "EDVR", buf);
     const uint32_t rk = runtimeKind();
     statusLine(c, "Runtime",
-               rk == 1 ? "SteamVR (Valve's own)"
+               nativeMenuActive() ? "native OpenXR (experimental)"
+               : rk == 1 ? "SteamVR (Valve's own)"
                : rk == 2 ? "OpenComposite"
-               : glitchConsumerPresent() ? "not identified" : "no openvr half hooked");
+               : (glitchConsumerPresent() ? "not identified" : "no compositor consumer"));
+    if (nativeMenuActive()) statusLine(c, "Native effects", "Menu, temporal and sharpening connected; other effects pending");
     uint32_t ew = 0, eh = 0;
     float outer = 0.0f, inner = 0.0f;
     if (eyeTextureSize(&ew, &eh) && eyeTangents(&outer, &inner)) {
@@ -921,6 +1072,23 @@ void buildMonitor(MenuContent& c) {
     }
     c.tileCount = n;
     c.tileColumns = 4;
+    // The local render-to-submit diagnostic is separate from SteamVR's gauges.
+    {
+        char line[200];
+        perfMonitorLocalGpuLine(line, sizeof(line));
+        MenuLine& l = c.lines[c.lineCount++];
+        strncpy(l.left, line, sizeof(l.left) - 1);
+        l.style = kMenuNote;
+        l.badge = kBadgeNone;
+    }
+    if (nativeMenuActive()) {
+        char line[240];
+        perfMonitorNativeTimingLine(line, sizeof(line));
+        MenuLine& l = c.lines[c.lineCount++];
+        strncpy(l.left, line, sizeof(l.left) - 1);
+        l.style = kMenuNote;
+        l.badge = kBadgeNone;
+    }
     // One line under the gauges: the last drop and what EDVR was doing.
     {
         char line[200];
@@ -935,6 +1103,7 @@ void buildMonitor(MenuContent& c) {
     // the render thread's own busy time.
     const int kinds[2] = {kGraphGpu, kGraphCpu};
     const char* names[2] = {"GPU", "CPU"};
+    const bool nativeGraphs = nativeMenuActive();
     c.graphCount = 0;
     for (int g = 0; g < 2; ++g) {
         MenuGraph& mg = c.graphs[c.graphCount];
@@ -942,7 +1111,14 @@ void buildMonitor(MenuContent& c) {
                                     static_cast<int>(sizeof(mg.samples) / sizeof(mg.samples[0])),
                                     &mg.budgetMs);
         if (!mg.count) continue;
-        snprintf(mg.label, sizeof(mg.label), "%s, last %d frames; the line is the %.1f ms budget",
+        mg.zeroIsValid = nativeGraphs;
+        if (nativeGraphs && mg.budgetMs > 0.0f)
+            snprintf(mg.label, sizeof(mg.label), "%s, %d samples; predicted period %.1f ms",
+                     g == 0 ? "Producer GPU" : "Submit wall", mg.count, double(mg.budgetMs));
+        else if (nativeGraphs)
+            snprintf(mg.label, sizeof(mg.label), "%s, %d samples; no runtime reference",
+                     g == 0 ? "Producer GPU" : "Submit wall", mg.count);
+        else snprintf(mg.label, sizeof(mg.label), "%s, last %d frames; the line is the %.1f ms budget",
                  names[g], mg.count, static_cast<double>(mg.budgetMs));
         ++c.graphCount;
     }
@@ -1129,13 +1305,26 @@ void buildContent(MenuContent& c) {
                 const std::string mode = Config::get().getString("fix.temporal_aa", "off");
                 snprintf(l.left, sizeof(l.left), "%s preset", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
             }
-            std::string v = displayValue(d, r.value);
+            const bool openxrScaleRow = isOpenxrRenderScaleRow(d);
+            if (openxrScaleRow && !editingThis) {
+                float requested = 0.f;
+                if (parseScale(r.value, &requested))
+                    snprintf(l.left, sizeof(l.left), "OpenXR res. %s", scalePercent(requested).c_str());
+            }
+            std::string v = openxrScaleRow
+                                ? openxrRenderScaleValue(
+                                      r, s.renderSizingAvailable ? &s.renderSizing : nullptr)
+                                : displayValue(d, r.value);
             if (editingThis) {
                 // What has been typed, with a caret. The raster shows a
                 // typed row in the value colour whatever its kind.
                 v = s.editBuf + "_";
             } else if (r.pending) {
-                v = displayValue(d, r.snapshot) + " -> " + v;
+                // The resolution preview already describes the selected
+                // after-restart value.  The pending badge supplies the same
+                // timing cue as every other restart row, while keeping the
+                // per-eye dimensions readable.
+                if (!openxrScaleRow) v = displayValue(d, r.snapshot) + " -> " + v;
                 l.badge = kBadgePending;
             } else if (d.applies == 2) {
                 l.badge = kBadgeRestart;
@@ -1163,6 +1352,10 @@ void buildContent(MenuContent& c) {
                 }
             }
             l.style = editingThis ? kMenuRowEdit : (hi ? kMenuRowHi : kMenuRow);
+            if (hi && openxrScaleRow) {
+                snprintf(c.hint, sizeof(c.hint), "%s", openxrRenderScaleHint(
+                    r, s.renderSizingAvailable ? &s.renderSizing : nullptr, true).c_str());
+            }
             if (hi && showTip) {
                 // The tooltip beside the row: what the ini says about this
                 // key, in the ini's own words, plus the facts a person
@@ -1192,6 +1385,8 @@ void buildContent(MenuContent& c) {
                         (d.applies == 1   ? "Applies at once."
                          : d.applies == 2 ? "Takes effect at the next launch."
                                           : "When it applies is not documented.");
+                if (openxrScaleRow) body += "\n" + openxrRenderScaleHint(
+                    r, s.renderSizingAvailable ? &s.renderSizing : nullptr);
                 if (editingThis) {
                     body += s.editBad ? "\nThat is not a value this key accepts."
                                       : "\nEnter writes it, Escape leaves it alone.";
@@ -2042,13 +2237,14 @@ void latchAnchor(float yawDeg, float pitchDeg) {
 
 void openMenu(uint64_t now) {
     State& s = g_s;
-    if (!glitchConsumerPresent()) {
+    if (!glitchConsumerPresent() && !nativeMenuAvailable()) {
         if (!s.noConsumerNoted) {
             s.noConsumerNoted = true;
-            Log::get().note("menu: the menu key was pressed, but no openvr_api.dll half has "
+            Log::get().note("menu: the menu key was pressed, but no compositor consumer has "
                             "hooked the compositor, so there is no door to draw the panel "
                             "at. The menu stays closed and the keyboard stays the game's. "
-                            "Install the second file (README) to use it.");
+                            "See the runtime diagnosis in this log.");
+            vrRuntimeExplainOnce();
         }
         return;
     }
@@ -2322,6 +2518,13 @@ void menuTick(ID3D11Device* dev) {
     State& s = g_s;
     if (!s.configured) return;
     guardedBudget(g_budget, [&] {
+        static uint64_t lastNativeRevision = 0;
+        const uint64_t nativeRevision = nativeMenuRevision();
+        if (nativeRevision != lastNativeRevision) {
+            lastNativeRevision = nativeRevision;
+            closeMenu("native tracking origin or availability changed");
+            s.alpha = 0.0f;
+        }
         const uint64_t now = nowMs();
         const uint64_t dt = s.lastTickMs ? now - s.lastTickMs : 0;
         s.lastTickMs = now;
@@ -2354,6 +2557,22 @@ void menuTick(ID3D11Device* dev) {
             Log::get().note("menu: %s was received but another application had focus. "
                             "Focus Elite's desktop window and press it again.",
                             s.summonName.c_str());
+        }
+
+        // Refresh the read-only OpenXR sizing snapshot while the menu is
+        // visible. Comparing the whole POD also notices a stop/restart that
+        // happened while the menu was hidden, without opening an XR session.
+        if (s.open) {
+            EdvrNativeRenderSizing latest{};
+            const bool available = readNativeRenderSizing(&latest);
+            const bool changed = available != s.renderSizingAvailable ||
+                                 (available &&
+                                  std::memcmp(&latest, &s.renderSizing, sizeof(latest)) != 0);
+            if (changed) {
+                s.renderSizingAvailable = available;
+                s.renderSizing = available ? latest : EdvrNativeRenderSizing{};
+                s.contentDirty = true;
+            }
         }
 
         if (s.open) {
@@ -2522,6 +2741,10 @@ void menuTick(ID3D11Device* dev) {
         g.halfW = panelHalfW(widthDeg, menuBranch && tooltipsOn());
         g.shift = panelShift(g.halfW, menuBranch && tooltipsOn());
         g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
+        if (!glitchConsumerPresent() && !nativeMenuAvailable()) {
+            g.alpha = 0.0f;
+            inputGateSetPrivate(false);
+        }
         menuPanelSetGeometry(g);
         setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
         setMenuVisible(g.alpha);

@@ -60,6 +60,9 @@ void perfMonitorLastDropLine(char* buf, size_t bufLen);
 // the two as separate strips, and a frame over budget on one of them is a
 // different problem from a frame over budget on the other.
 enum PerfGraph { kGraphGpu = 0, kGraphCpu = 1, kGraphPeriod = 2 };
+// Native mode uses independent unique completion samples for kGraphGpu
+// (producer span) and kGraphCpu (Submit wall), not compositor CPU/GPU frames.
+// The reference is the fresh runtime-predicted period, or 0 if unavailable.
 int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 
 // The one-line readout for the head-locked overlay (menu.fps_overlay):
@@ -67,7 +70,18 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 // and frames dropped in the last ten seconds. Without app timing the CPU
 // fallback is labelled "thread". Needs nothing the slow samplers
 // gather.
+// Native gpu/cpu labels show independent 200ms means of producer GPU and
+// submit wall. Submit includes blocking/rendezvous, not exclusive CPU execution.
 void perfMonitorOverlayLine(char* buf, size_t bufLen);
+
+// The local D3D11 render-to-submit diagnostic, kept separate from SteamVR's
+// compositor numbers. The line reports disabled, pending, invalid, or stale
+// state explicitly rather than treating it as a zero.
+void perfMonitorLocalGpuLine(char* buf, size_t bufLen);
+// Native OpenXR timing is wall time on the serialized owner/producer path:
+// submit spans include blocking and rendezvous, while producer spans include
+// queued GPU work and exclude the XR device. These are never compositor times.
+void perfMonitorNativeTimingLine(char* buf, size_t bufLen);
 
 // DROP ATTRIBUTION (docs/settings-menu.md, "diagnosing drops caused by the
 // mod"). Every frame's ring entry carries what EDVR did in it -- the events

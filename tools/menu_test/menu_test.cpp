@@ -22,6 +22,7 @@
 #include "../../src/common/hotkey.h"
 #include "../../src/common/iniedit.h"
 #include "../../src/common/perf_math.h"
+#include "../../src/common/perf_graph.h"
 #include "../../src/d3d11/input_gate.h"
 #include "../../src/d3d11/menu_keys.h"
 #include "../../src/d3d11/menu_panel.h"
@@ -447,6 +448,16 @@ void testIniWrite() {
 }
 
 // --- the Monitor page's statistics ------------------------------------------
+
+void testPerfGraphs() {
+    const float values[] = {0.0f, 3.0f, 10.0f, NAN, -1.0f, INFINITY};
+    check(!perfGraphSampleVisible(0, false) && perfGraphSampleVisible(0, true), "graph: native measured zero remains distinct from a legacy missing sample");
+    check(!perfGraphSampleVisible(NAN, true) && !perfGraphSampleVisible(INFINITY, true) && !perfGraphSampleVisible(-1, true), "graph: missing/nonfinite observations remain gaps");
+    check(approx(perfGraphScale(values, 6, 0), 11) && perfGraphBand(10, 0) == -1, "graph: missing runtime reference autoscales without over-budget colours");
+    check(!perfGraphHasReference(NAN) && !perfGraphHasReference(-1), "graph: invalid references draw no line");
+    check(approx(perfGraphScale(values, 6, 8), 16) && perfGraphBand(8, 8) == 0 && perfGraphBand(9, 8) == 1 && perfGraphBand(17, 8) == 2, "graph: published reference sets scale and bands");
+    check(perfGraphScale(nullptr, 0, 0) > 0, "graph: empty/zero history has a finite scale");
+}
 
 void testPerfStats() {
     PerfRecentTimes recent;
@@ -1361,7 +1372,49 @@ void testFooterTwoLines() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    if (argc == 2 && (strcmp(argv[1], "--worker-exit-child") == 0 ||
+                      strcmp(argv[1], "--worker-stop-child") == 0)) {
+        MenuContent content{};
+        content.widthPx = content.cardPx = 256;
+        content.capPx = 20;
+        content.lineCount = 1;
+        strcpy_s(content.lines[0].left, "Exit regression");
+        menuPanelSubmit(content);
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        while (!menuPanelWorkerReadyForTest() && GetTickCount64() < deadline) Sleep(1);
+        if (!menuPanelWorkerReadyForTest()) return 2;
+        if (strcmp(argv[1], "--worker-stop-child") == 0) {
+            menuPanelShutdown();
+            menuPanelSubmit(content); // Re-start after a normal explicit stop.
+            menuPanelShutdown();
+        }
+        // Intentionally omit shutdown in the exit case. Returning through the
+        // actual CRT catches a joinable static thread destructor; _Exit would
+        // bypass that destructor and make the regression test meaningless.
+        return 0;
+    }
+    wchar_t executable[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+    check(length > 0 && length < MAX_PATH, "worker exit: locate self");
+    for (const wchar_t* mode : {L"--worker-exit-child", L"--worker-stop-child"}) {
+        std::wstring command = L"\"" + std::wstring(executable) + L"\" " + mode;
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const bool launched = CreateProcessW(executable, &command[0], nullptr, nullptr, FALSE,
+                                             CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) != FALSE;
+        check(launched, "worker exit: launch isolated child");
+        if (!launched) continue;
+        const DWORD wait = WaitForSingleObject(process.hProcess, 10000);
+        DWORD result = ~0u;
+        if (wait == WAIT_OBJECT_0) GetExitCodeProcess(process.hProcess, &result);
+        else { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && result == 0, "worker exit/explicit stop: no abort or hang");
+    }
     printf("menu_test: the settings menu's pure parts\n");
     testFilterState();
     testFilterData();
@@ -1375,6 +1428,7 @@ int main() {
     testAsymmetricProjection();
     testIniWrite();
     testPerfStats();
+    testPerfGraphs();
     testHotkeyRegisteredKeys();
     testKeyRepeatStep();
     testEditPrime();

@@ -36,6 +36,11 @@ struct DllInfo {
     bool hasEdvrExports  = false;
     bool hasVrInit       = false;
     bool hasD3d11Create  = false;
+    bool hasXrGetInstanceProcAddr = false;
+    bool hasNativeConfigure = false;
+    bool nativeMarkerValid = false;
+    bool nativeGraphicsProviders = false;
+    bool nativeRuntimeExports = false;
 
     // VERSIONINFO, when there is any. Used only to give a foreign file a NAME
     // in the report and a sensible filename when we rename it: "EDHM" reads
@@ -50,6 +55,15 @@ struct DllInfo {
 };
 
 DllInfo probeDll(const std::wstring& path);
+
+// Read-only package and executable qualification. These never load or execute
+// the inspected image.
+bool validateNativeGraphics(const DllInfo& info);
+bool validateNativeRuntime(const DllInfo& info);
+bool validateOpenxrLoader(const DllInfo& info);
+bool qualifiedEliteExecutable(const std::wstring& path);
+enum class NativeImageKind { Graphics, Runtime, Loader };
+bool validateNativePayloadBytes(const void* data, size_t size, NativeImageKind kind);
 
 std::string sha256File(const std::wstring& path);
 std::string sha256Bytes(const void* data, size_t bytes);
