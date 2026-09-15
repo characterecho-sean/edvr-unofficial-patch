@@ -1400,3 +1400,222 @@ the NVIDIA smoke test with live NGX evaluations. These validate the
 existing rendering code and the separate crash diagnostics, not the
 rejected compositor experiment. Crash diagnostics commit 58cd817 is on
 main; the working game remains on d160499.
+
+## Current target colour outside DLSS history
+
+The implementation following the 152121/152136 analysis separates the
+recognized planar target-sprite family before DLSS. Its current colour
+is restored after temporal reconstruction. Other UI continues through
+the existing resolver. This does not change the corona's motion-vector
+producer; the captures did not establish an independent defect there.
+
+The original SM5 pixel shader now exports its result to three render
+targets during the original draw. MRT0 retains the game's exact target,
+blend, raster and depth/stencil state. MRT1 has the same R11G11B10
+format and receives every subsequent supported world draw, but omits
+separated target sprites. MRT2 stores signed scalar influence as
+R32_FLOAT, with source alpha exported in both X and W for fixed-function
+blending. Influence is deliberately not clamped to [0,1]. Opaque world
+draws erase it; later source-over world draws attenuate it; additive
+world draws preserve it. Destination-dependent source factors,
+unsupported destination factors, existing MRT/UAV output, linked shaders
+and unsafe bytecode decline to the original rendering path.
+
+The game's original tone-map draw runs again on the clean HDR texture,
+using its existing exposure, LUT, shader and constants. The measured
+152136 tone state satisfies the guards: N/3/1, single R8G8B8A8_UNORM
+RTV, 3237x3195 viewport, solid rasterization, no scissor, blend, depth
+or stencil. Repeated, partial, predicated or side-effecting tone passes
+are rejected. The submitted colour must be the tracked tone-map output.
+
+Private depth, UI mask, content-edit mask and hologram coverage are
+snapshotted before the first removed sprite. Later supported coverage
+draws replay into those clean metadata targets. The original game depth
+is preserved. A missing twin or unsupported later coverage owner
+disables separation instead of combining clean colour with target
+motion.
+
+The post-DLSS composite uses matching full/clean current tone-map
+samples and signed influence. It exactly restores the full current
+colour when the reconstructed world equals the clean current sample.
+Applying HDR influence to a temporally reconstructed LDR background is a
+local reconstruction approximation through the nonlinear tone curve, not
+an assertion that tone mapping is linear. Bilinear current sampling
+avoids introducing negative filter lobes around glyphs. The existing
+resolver must be available before clean colour can be submitted to NGX.
+Entering separation or abandoning it on a detected failure resets the
+affected temporal history once.
+
+The actual captured panel test uses the production UiColourLayer and the
+original 15992-byte pixel shader after fanout. MRT0 is bit-identical to
+the original software replay, clean colour is bit-identical to the
+pre-panel image, and R32 influence has 21,331 nonzero pixels with
+maximum 1.03355. This tests the original-format blend mechanism; the
+production classifier currently removes target sprites, not these
+panels.
+
+The corrected late-draw audit uses ph= for pixel shader identity, not
+vh=. All thirteen available pixel shader programs are accepted by WARP
+after the production transformation. EA02FAC2BD6C643C and
+E95634B0F61D218F contain immediate constant-buffer data with a separate
+length word; the parser now preserves those blocks. Three later pixel
+shader binaries were not retained in these captures: 5E72F436FC8A5736,
+2B156A05E98F2D5D and 16196F69ADE35E77. Their runtime programs must pass
+the same guarded transformation; they are not claimed as replay-tested.
+
+The repository GPU test checks original-output identity, later opaque,
+translucent and additive world draws, discard/scissor behavior, signed
+influence, current-composite identity, frame reset, state restoration
+and unsupported-state rejection. Its 415 checks pass on WARP and the RTX
+5090. A separate 51-check controller test exercises target draw, later
+world draw, tone replay, input publication and safe fallback using real
+D3D11 calls with fixture classification and coverage discovery. It also
+checks that an internal render-thread scope cannot suppress shader
+bytecode capture on a worker thread, and that tracked view writes
+decline while unrelated writes remain harmless. Compute UAV bindings and
+UAV clears use this guard without adding resource queries to every
+dispatch.
+
+A partial GPU cost probe at 3237x3195 input and 4980x4916 output
+measured the production resolver at 0.2820 ms/eye without separation and
+0.3663 ms/eye with separation on the RTX 5090. Six input-sized seed
+copies measured 0.1611 ms/eye. These measured components add
+approximately 0.49 ms per stereo frame. The probe uses uniform images;
+it is not a flight performance result and excludes the extra tone pass,
+later MRT writes and clean coverage replays. Memory and total flight
+cost still need observation under the real scene.
+
+Eye dumps now retain DlssColour, UiInfluence and UiDepth when separation
+is active. HoloCoverage and UiEdits then hold the clean maps actually
+used, and EDVRTEX1 UI-flags bit 64 identifies that path. Logs
+distinguish prepared input, actual DLSS evaluation/current compositing,
+and a session-level decline. These signals are necessary before
+attributing a future visual result to this implementation.
+
+Validation of this implementation: the absolute-path full build and all
+gates passed, including 25,123 private-depth checks, 415
+colour/composite checks and 51 controller checks. The colour/composite
+checks also passed on NVIDIA hardware, followed by the completed DLL's
+full smoke test with live NGX evaluations and the motion-convention
+probe. One earlier full run stopped in the census bridge's timing
+assertion; that child left both logs empty. The identical binaries
+passed the isolated repeat, and the next complete full build passed that
+gate as well. No timing-test or production-timer change was made to
+conceal the failure.
+
+The test package was built before committing, with version
+`v0.16.2-121-gf264560-dirty`. Its native graphics SHA-256 is
+`c0243e75b1e5b6959c6802b47b33b8ed85f768362873fa8006dd441ba2af7f2b`; the
+native runtime SHA-256 is
+`d5bd872d26aef5a74035e2cca1a503415125c7445295e29760c6a56a5e3d334d`.
+These identify the tested binaries independently of the later source
+commit. A user flight has not yet confirmed activation, visual behavior,
+or total performance cost.
+
+## Native UI replay after DLSS (2026-09-14)
+
+Run 173641 used the installed binaries identified above. At
+17:36:27.030, the old separation controller disabled itself because
+submitted colour differed from the tracked tone-map output. Neither
+successful preparation nor evaluation was logged. The screenshot
+therefore did not exercise that separation code. Ruled out: a simple eye
+swap, because the C00 crop matches tone-map output 0 byte for byte and
+differs from output 1. The replacement tracks complete resource copies
+and canonical COM identity rather than assuming that the submitted
+pointer is the original tone target. Partial copies and later writes
+cannot qualify as matching colour.
+
+The requested output path captures recognized UI draws and runs their
+original vertex and pixel shaders at output resolution after DLSS. The
+supported scene families are E508 target sprites, 8121 lit/unlit
+holograms, C7FA orbital lines, and B779 planetary flight HUD.
+Classification still requires the measured UI-depth scene context, not
+only a shader hash. Planets, rings, the corona and smoke remain world
+draws. Full-eye DLSS/DLAA uses this path; AA Off, TAA and cropped/foveal
+AA retain the existing path.
+
+The capture also proves that UI is not a contiguous final block. Solar
+surface 4D516EF05C68FFA5 and several other world draws occur between the
+two UI groups. Moving only the colour writes in time would change the
+original fallback image. Instead, the game keeps its original colour and
+depth/stencil writes. Interleaved world draws export the same shader
+colour to a clean HDR target with the original blend state in the same
+raster pass. UI is omitted from that target. Elite's original tone
+shader, LUT, exposure and constants produce the clean input for DLSS.
+Unsupported states leave the original game image intact.
+
+Native replay snapshots mutable vertex/index/constant buffers and
+sampled resources on the GPU. Draw packets retain input streams,
+instancing and offsets, samplers, blend factors, scissor, depth/stencil
+and immutable shader state. Source versions share snapshots until a
+tracked write; storage is reused after the frame boundary. The pool is
+capped at 256 MiB. There is no production CPU readback, wait, flush or
+staging map. Original draw ordering is preserved within the native UI
+layer. The original world depth seeds its clipping; UI that writes scene
+depth or changes a stencil bit needed by another UI draw is declined.
+World draws that read stencil bits changed by UI are also declined. An
+unsupported sequence latches the new controller off until AA is switched
+Off and back on, or the game restarts. Existing UI handling resumes on
+subsequent frames, with one history reset per eye. A native overlay
+already prepared for the other eye can still complete.
+
+The output viewport removes the input jitter and scales to native output
+resolution. Replay uses an R11 HDR scratch target and scalar
+transmission. Elite's original tone shader evaluates the clean and
+UI-bearing HDR images with identical state; the current UI residual is
+then combined with the DLSS world. Outside coverage, output passes
+through exactly. Across a nonlinear tone curve this residual remains a
+local reconstruction approximation, not an assumption that tone mapping
+is linear. Deferred UI does not write the existing UI
+motion/reactive/history passes. The entire native command list must be
+ready before clean input is published, and it executes only after
+successful DLSS evaluation.
+
+The first seeder copied all eight stencil bits. On the RTX 5090, D3D11
+reported no pixel-shader stencil-reference support, so that meant eight
+stencil passes. Reading the union of the actual UI stencil masks reduces
+this to the bits needed for clipping, and a depth pass is omitted when
+all captured UI has depth testing disabled. The isolated 2913x2913 to
+4482x4482 probe fell from 1.5714 to 0.5570 ms per eye; command
+preparation measured 0.0477 ms per eye over 20 warmed samples. These are
+synthetic one-draw, simple-tone measurements. They exclude DLSS,
+pre-tone work, the actual game materials and whole-flight cost. Output
+scratch allocation is shared between eyes; native resolution still has a
+material memory cost.
+
+The controller regression performs actual WARP readback for native
+scale, 2x scale, positive/negative jitter, premultiplied and additive
+UI, stencil clipping, copied submits, later writes and unsupported state
+rejection. Opaque, source-over and additive world draws interleaved
+between UI groups leave original colour byte-identical and clean colour
+equal to a separate world-only reference. The shader test initially had
+incompatible VS/PS input register signatures; correcting the fixture,
+rather than relaxing pixel comparisons, made both WARP and NVIDIA
+comparisons pass. The depth test exercises D24S8, D32S8 and D32,
+spatially varying depth, all stencil bits, output reuse and jittered
+source addressing. Mutable draw-input snapshots also have independent
+GPU cases. The final controller suite contains 840 checks, including
+failure latching, per-eye recovery, preservation of a prepared overlay,
+and rejecting world draws that depend on UI stencil changes.
+
+Flight logs distinguish captured UI, successful native composition,
+route mismatch, unsupported states and allocation failure. Periodic
+totals report captured/applied/declined counts and snapshot memory. Eye
+input slot 16 contains the actual clean DlssColour when active. A flight
+is still needed to confirm activation and appearance of all requested UI
+families with Elite's full scene and to measure total cost.
+
+Final validation: the absolute-path full build completed with all gates
+passing, including the 255-key config contract and native installer
+payload comparison. The completed controller's 840 checks and all depth
+cases passed on NVIDIA hardware, and the completed native graphics DLL
+passed the full smoke test, including live NGX evaluations and the
+motion/jitter convention probe. No D3D debug-layer validation is
+claimed.
+
+The tested package is stamped `v0.16.2-127-g66aea5a-dirty`. The native
+graphics SHA-256 is
+`3d881702d6955b737910212d54a070e223ce2c10ff2d0d14a6d31cf9fad1eef4`; the
+native runtime SHA-256 is
+`97a0002c489f81df693600e2e80d50308a3943ca31918583afaf0d7c32eb7f18`. The
+later source commit does not change those tested binaries.

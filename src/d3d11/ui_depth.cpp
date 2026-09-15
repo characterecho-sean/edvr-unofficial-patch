@@ -677,6 +677,8 @@ struct Mask {
 };
 Mask     g_mask[2];
 Mask     g_edits[2];
+Mask     g_separatedMask[2];
+Mask     g_separatedEdits[2];
 UiContent g_uiContent;
 bool g_contentNoted=false;
 bool     g_maskFailedNoted = false;
@@ -731,6 +733,7 @@ ID3D11DepthStencilState* g_maskDss = nullptr; // test as the game, writes off
 // Private UI depth, seeded from the matching scene eye once per frame.
 constexpr uint32_t kMaxRtvs = 8;
 UiDepthLayer g_uiDepth[2];
+UiDepthLayer g_separatedDepth[2];
 bool g_privateDepthNoted = false;
 bool g_privateDepthFailedNoted = false;
 // The eye a treated draw belongs to, by the ORDER its colour target first
@@ -813,6 +816,13 @@ bool g_reBlendSaved = false;
 FLOAT                    g_reSavedBlendFactor[4] = {};
 UINT                     g_reSavedSampleMask = 0;
 bool                     g_reissueOn = false;
+bool                     g_targetSeparated = false;
+bool                     g_separatedFailed[2] = {};
+bool                     g_cleanReplayOn = false;
+ID3D11RenderTargetView*   g_reissueRtvs[3] = {};
+UINT                     g_reissueRtvCount = 0;
+ID3D11DepthStencilView*   g_reissueTarget = nullptr;
+ID3D11Texture2D*          g_reissueScene = nullptr;
 
 // Counters: this window, and the session.
 uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0, g_wDepthless = 0,
@@ -1629,6 +1639,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     g_rebindEye = -1;
     g_drawEye = -1;
     g_reissueShader = nullptr;
+    g_targetSeparated = false;
     g_reissueMaskOffset = 0.0f;   // the interface proper unless the family below says otherwise
     g_reissueMaskSlot = 0;
     if (!g_on || g_stoodDown) return false;
@@ -1848,6 +1859,24 @@ void uiDepthEnd(ID3D11DeviceContext*) {
     // Also clear classification when the caller skipped or swallowed a draw.
     g_mode = Mode::kNone;
     g_reissueShader = nullptr;
+    g_targetSeparated = false;
+}
+
+void uiDepthSetTargetSeparated(bool separated) {
+    // Only the recognized planar target-sprite family may opt into this
+    // sidecar.  Unknown draws leave the clean pair untouched.
+    g_targetSeparated = separated && g_reissueShader == &g_depthShaders[5] && g_drawEye >= 0;
+}
+
+int uiDepthTargetSpriteEye() {
+    return g_reissueShader == &g_depthShaders[5] ? g_drawEye : -1;
+}
+int uiDepthDeferredEye() {
+    if(g_mode!=Mode::kReissueScene)return -1;
+    // Only these verified UI materials are deferred. Planet surfaces, rings,
+    // corona and smoke keep their world rendering and motion classification.
+    for(unsigned i:{1u,3u,5u,7u,8u})if(g_reissueShader==&g_depthShaders[i])return g_drawEye;
+    return -1;
 }
 
 // True when the second draw is set up to write DEPTH, the reactive mask,
@@ -1966,7 +1995,57 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
                 Log::get().note("holo motion: draw-time cockpit transform history active; 128 draws per eye, pool-slot-independent matching, TAA/DLSS.");
             }
         }
-        if (scene) scene->Release();
+        // The clean sidecars are seeded only after the ordinary private
+        // target exists, before the first removed target sprite writes it.
+        const bool cleanSeeded = g_drawEye >= 0 && scene &&
+            g_separatedMask[g_drawEye].marked &&
+            g_holoMotion[g_drawEye].separatedValid(scene);
+        if (g_targetSeparated && sprite && holo && scene && g_drawEye >= 0 && !cleanSeeded &&
+            !g_separatedFailed[g_drawEye]) {
+            Mask* clean = maskFor(ctx,g_drawEye,g_rebindW,g_rebindH,g_separatedMask);
+            Mask* editTwin = maskFor(ctx,g_drawEye,g_rebindW,g_rebindH,g_separatedEdits);
+            ID3D11DepthStencilView* cleanDsv = g_separatedDepth[g_drawEye].acquire(ctx,scene);
+            if (clean && editTwin && cleanDsv && g_holoMotion[g_drawEye].ensureSeparated(ctx,scene) &&
+                g_holoMotion[g_drawEye].snapshotSeparated(ctx)) {
+                // UiDepthLayer::acquire seeds from raw scene depth. Replace
+                // that initial copy with the current private UI depth so the
+                // clean replay begins at the exact same occlusion boundary
+                // as the ordinary coverage pass.
+                ID3D11Resource* mainDepth=nullptr;
+                ID3D11Resource* cleanDepth=nullptr;
+                target->GetResource(&mainDepth);
+                cleanDsv->GetResource(&cleanDepth);
+                if (!mainDepth || !cleanDepth) {
+                    if (mainDepth) mainDepth->Release();
+                    if (cleanDepth) cleanDepth->Release();
+                    g_targetSeparated=false; g_separatedFailed[g_drawEye]=true;
+                    g_separatedMask[g_drawEye].marked=false;
+                    g_separatedEdits[g_drawEye].marked=false;
+                    g_holoMotion[g_drawEye].invalidateSeparated();
+                    ++g_wNoTwin;
+                    scene->Release();
+                    releaseSavedOm();
+                    return;
+                }
+                ctx->CopyResource(cleanDepth,mainDepth);
+                mainDepth->Release(); cleanDepth->Release();
+                if (g_mask[g_drawEye].tex)
+                    ctx->CopyResource(clean->tex,g_mask[g_drawEye].tex);
+                clean->marked=true;
+                if (g_edits[g_drawEye].tex)
+                    ctx->CopyResource(editTwin->tex,g_edits[g_drawEye].tex);
+                editTwin->marked = g_edits[g_drawEye].marked;
+            } else {
+                g_targetSeparated=false;
+                g_separatedFailed[g_drawEye]=true;
+                g_separatedMask[g_drawEye].marked=false;
+                g_separatedEdits[g_drawEye].marked=false;
+                g_holoMotion[g_drawEye].invalidateSeparated();
+                ++g_wNoTwin;
+            }
+        }
+        if (g_reissueScene) { g_reissueScene->Release(); g_reissueScene=nullptr; }
+        if (scene) { g_reissueScene=scene; g_reissueScene->AddRef(); scene->Release(); }
         // A stellar coverage draw requires its complete transform/VS path.
         // Never write anonymous depth if that path declined.
         if((ring || orbital) && !holo) { releaseSavedOm(); return; }
@@ -2107,6 +2186,9 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // describing the game's bindings.
         ID3D11RenderTargetView* rtv = mask ? mask->rtv : nullptr;
         ID3D11RenderTargetView* rtvs[3]={rtv,holo?g_holoMotion[g_drawEye].target():nullptr,edits?edits->rtv:nullptr};
+        g_reissueRtvCount = edits ? 3 : holo ? 2 : (mask ? 1 : 0);
+        for (UINT i=0;i<3;++i) g_reissueRtvs[i]=i<g_reissueRtvCount?rtvs[i]:nullptr;
+        g_reissueTarget=target;
         vScreenSetRenderTargetsRaw(ctx, edits?3:holo?2:(mask?1:0), mask?rtvs:nullptr, target);
         if(g_coronaMotion) {
             ctx->PSSetShaderResources(2,1,&coronaDepth);
@@ -2159,6 +2241,57 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     return g_reissueOn;
 }
 
+bool uiDepthSeparatedReissueBegin(ID3D11DeviceContext* ctx) {
+    if (!ctx || !g_reissueOn || g_targetSeparated || g_drawEye < 0 || g_drawEye > 1 ||
+        g_separatedFailed[g_drawEye]) return false;
+    ID3D11Texture2D* scene = g_reissueScene;
+    if (!scene) return false;
+    const bool valid = g_separatedMask[g_drawEye].marked &&
+        g_separatedEdits[g_drawEye].tex &&
+        g_holoMotion[g_drawEye].separatedValid(scene);
+    if (!valid) return false;
+    // Smoke/corona use their own private DSV and depth convention. The
+    // clean UI DSV cannot safely replay those tests, so abandon separation
+    // only once a seeded pair exists and this unsupported family is reached.
+    if (g_reissueMaskSlot == 3) {
+        uiDepthSeparatedInvalidate(g_drawEye); return false;
+    }
+    ID3D11DepthStencilView* cleanDsv = g_separatedDepth[g_drawEye].target(scene,g_rebindW,g_rebindH);
+    if (!cleanDsv) { g_separatedFailed[g_drawEye]=true; return false; }
+    ID3D11RenderTargetView* clean[3]={
+        g_reissueRtvs[0] ? g_separatedMask[g_drawEye].rtv : nullptr,
+        g_reissueRtvs[1] ? g_holoMotion[g_drawEye].separatedTarget() : nullptr,
+        g_reissueRtvs[2] ? g_separatedEdits[g_drawEye].rtv : nullptr};
+    if ((g_reissueRtvs[0] && !clean[0]) || (g_reissueRtvs[1] && !clean[1]) ||
+        (g_reissueRtvs[2] && !clean[2])) { g_separatedFailed[g_drawEye]=true; return false; }
+    vScreenSetRenderTargetsRaw(ctx,g_reissueRtvCount,clean,cleanDsv);
+    if(g_reissueRtvs[2])g_separatedEdits[g_drawEye].marked=true;
+    g_cleanReplayOn=true;
+    return true;
+}
+
+void uiDepthSeparatedReissueEnd(ID3D11DeviceContext* ctx) {
+    if (!ctx || !g_cleanReplayOn) return;
+    vScreenSetRenderTargetsRaw(ctx,g_reissueRtvCount,g_reissueRtvs,g_reissueTarget);
+    g_cleanReplayOn=false;
+}
+
+void uiDepthSeparatedInvalidate(int eye) {
+    const int first = eye < 0 ? 0 : eye;
+    const int last = eye < 0 ? 1 : eye;
+    for (int i=first; i<=last; ++i) if (i>=0 && i<2) {
+        // A broadcast invalidation is used by late coverage owners before a
+        // target has seeded anything. It must not poison the next target's
+        // first seed; only an already active pair becomes sticky-invalid.
+        if (eye < 0 && !g_separatedMask[i].marked &&
+            !g_holoMotion[i].separatedValid(g_reissueScene)) continue;
+        g_separatedFailed[i]=true;
+        g_separatedMask[i].marked=false;
+        g_separatedEdits[i].marked=false;
+        g_holoMotion[i].invalidateSeparated();
+    }
+}
+
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
     if (g_reissueOn) {
         g_reissueOn = false;
@@ -2209,6 +2342,11 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
         g_reSavedSampleMask = 0;
         g_reBlendSaved = false;
     }
+    // Begin may retain the scene and subsequently decline before binding.
+    // Its identity must not survive that failed reissue either.
+    if (g_reissueScene) { g_reissueScene->Release(); g_reissueScene=nullptr; }
+    g_cleanReplayOn=false;g_reissueTarget=nullptr;g_reissueRtvCount=0;
+    for(auto& target:g_reissueRtvs)target=nullptr;
     if (g_rebound) {
         g_rebound = false;
         guarded("uiDepth.reissueRestore", [&] { restoreOm(ctx); });
@@ -2280,6 +2418,29 @@ void uiDepthHoloMotion(int eye, ID3D11Texture2D* scene, ID3D11ShaderResourceView
     views[0]=views[1]=nullptr;
     if(g_on && !g_stoodDown && eye>=0 && eye<2) g_holoMotion[eye].views(scene,views);
 }
+
+bool uiDepthSeparatedCoverage(uint32_t w, uint32_t h, int eye,
+                              ID3D11Texture2D* scene,
+                              ID3D11Texture2D** mask,
+                              ID3D11ShaderResourceView** holo,
+                              ID3D11ShaderResourceView** edits,
+                              ID3D11ShaderResourceView** depth) {
+    if (mask) *mask=nullptr;
+    if (holo) *holo=nullptr;
+    if (edits) *edits=nullptr;
+    if (depth) *depth=nullptr;
+    if (!mask || !holo || !edits || !depth || !scene || !g_on || g_stoodDown || eye<0 || eye>1 || g_separatedFailed[eye]) return false;
+    Mask& m=g_separatedMask[eye];
+    if (!m.marked || !m.tex || !m.srv || m.w!=w || m.h!=h) return false;
+    if (!g_holoMotion[eye].separatedValid(scene)) return false;
+    ID3D11ShaderResourceView* hv=g_holoMotion[eye].separatedView();
+    if (!hv) return false;
+    Mask& e=g_separatedEdits[eye];
+    if (!e.tex || !e.srv || e.w!=w || e.h!=h) return false;
+    ID3D11ShaderResourceView* dv=g_separatedDepth[eye].view(scene,w,h);
+    if (!dv) return false;
+    *mask=m.tex; *holo=hv; *edits=e.srv; *depth=dv; return true;
+}
 void uiDepthMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end) {
     if(!resource && !g_on) return;
     for(auto& motion:g_holoMotion) motion.resourceWritten(resource,first,end);
@@ -2318,12 +2479,15 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     if(ctx)g_uiContent.gpu.poll(ctx);
     if(ctx) for(auto& sample:g_stellarGpu) sample.poll(ctx);
     for (UiDepthLayer& layer : g_uiDepth) layer.frameBoundary();
+    for (UiDepthLayer& layer : g_separatedDepth) layer.frameBoundary();
     for(auto& motion:g_holoMotion) motion.frameBoundary();
+    g_separatedFailed[0]=g_separatedFailed[1]=false;
+    g_cleanReplayOn=false;
     g_frameTargetCount = 0;
     // The masks are marked during the frame and read at its submits, so
     // the clear belongs here, after both.
     if (ctx) {
-        for(auto* masks:{g_mask,g_edits}) for(unsigned eye=0;eye<2;++eye) {
+        for(auto* masks:{g_mask,g_edits,g_separatedMask,g_separatedEdits}) for(unsigned eye=0;eye<2;++eye) {
             Mask& m=masks[eye];
             if (!m.rtv || !m.marked) continue;
             const FLOAT zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -2406,6 +2570,7 @@ void uiDepthShutdown() {
         g_savedPs->Release();
         g_savedPs = nullptr;
     }
+    if (g_reissueScene) { g_reissueScene->Release(); g_reissueScene=nullptr; }
     if (g_reSavedDss) {
         g_reSavedDss->Release();
         g_reSavedDss = nullptr;
@@ -2419,8 +2584,9 @@ void uiDepthShutdown() {
     g_mode = Mode::kNone;
     releaseSavedOm();
     for (UiDepthLayer& layer : g_uiDepth) layer.release();
+    for (UiDepthLayer& layer : g_separatedDepth) layer.release();
     releaseStates();
-    for(auto* masks:{g_mask,g_edits}) for(unsigned eye=0;eye<2;++eye) {
+    for(auto* masks:{g_mask,g_edits,g_separatedMask,g_separatedEdits}) for(unsigned eye=0;eye<2;++eye) {
         Mask& m=masks[eye];
         if (m.rtv) m.rtv->Release();
         if (m.srv) m.srv->Release();

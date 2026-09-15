@@ -1,0 +1,7 @@
+// Carry the upstream notices in every distributed graphics DLL, including
+// copies embedded in the standalone installer.
+40065 RCDATA
+BEGIN
+    "DxilHash.cpp - Copyright (C) Microsoft Corporation. All rights reserved.\0"
+END
+40066 RCDATA "third_party/dxbc_hash/LICENSE.TXT"

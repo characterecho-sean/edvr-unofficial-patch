@@ -484,6 +484,21 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
         ComPtr<ID3D11Buffer> afterCb;ctx->VSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores VS constants");afterCb.Reset();ctx->PSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores PS constants");
         ID3D11ShaderResourceView* views[2]{};g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> orbitalCoverage;views[0]->GetResource(&orbitalCoverage);auto indices=read(dev.Get(),ctx.Get(),orbitalCoverage.Get());auto orbitalDepth=read(dev.Get(),ctx.Get(),orbitalCoverage.Get(),1);unsigned counts[3]{};for(float v:indices)if(v>=0&&v<=2)++counts[unsigned(v)];
         std::printf("orbital indices %u/%u/%u\n",counts[0],counts[1],counts[2]);check(counts[1]>0&&counts[2]>0,"orbital pixels carry their actual instance index");for(size_t i=0;i<indices.size();++i)if(indices[i]>0)check(std::fabs(orbitalDepth[i]-.025f)<1e-6f,"orbital HC preserves exact raster depth");for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==0,"orbital coverage preserves live game depth");
+        // The separated HC twin is seeded from the current main HC, then
+        // remains independent: a removed target may alter only the main HC,
+        // while a later world replay may write the clean twin explicitly.
+        check(g_holoMotion[0].ensureSeparated(ctx.Get(),scene.tex.Get()),"separated HC allocation after orbital prepare");
+        const float hcSeed[4]={.25f,.5f,0,0};ctx->ClearRenderTargetView(g_holoMotion[0].target(),hcSeed);
+        check(g_holoMotion[0].snapshotSeparated(ctx.Get()),"separated HC snapshot ready");
+        check(g_holoMotion[0].separatedValid(scene.tex.Get()),"separated HC identity and readiness");
+        const float hcMainAfter[4]={.9f,.1f,0,0};ctx->ClearRenderTargetView(g_holoMotion[0].target(),hcMainAfter);
+        ID3D11ShaderResourceView* cleanHcSrv=g_holoMotion[0].separatedView();ComPtr<ID3D11Resource> cleanHc;cleanHcSrv->GetResource(&cleanHc);
+        check(std::fabs(read(dev.Get(),ctx.Get(),cleanHc.Get()) [0]-.25f)<1e-6f,"clean HC retains pre-target sentinel");
+        const float hcCleanAfter[4]={.7f,.2f,0,0};ctx->ClearRenderTargetView(g_holoMotion[0].separatedTarget(),hcCleanAfter);
+        check(std::fabs(read(dev.Get(),ctx.Get(),cleanHc.Get())[0]-.7f)<1e-6f,"later clean replay can write HC independently");
+        g_holoMotion[0].frameBoundary();check(!g_holoMotion[0].separatedValid(scene.tex.Get()),"HC frame boundary rejects stale twin");
+        uiDepthSeparatedInvalidate(-1);check(!g_separatedFailed[0],"inactive broadcast invalidation does not poison next seed");
+        check(g_holoMotion[0].ensureSeparated(ctx.Get(),scene.tex.Get()),"active HC reseed allocation");check(g_holoMotion[0].snapshotSeparated(ctx.Get()),"active HC reseed");g_separatedMask[0].marked=true;uiDepthSeparatedInvalidate(-1);check(g_separatedFailed[0],"active broadcast invalidation is sticky");
         ID3D11ShaderResourceView* privateOrbital=nullptr;check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&privateOrbital)&&privateOrbital,"orbital publishes its private depth seed");ComPtr<ID3D11Resource> privateOrbitalResource;privateOrbital->GetResource(&privateOrbitalResource);
         for(float v:read(dev.Get(),ctx.Get(),privateOrbitalResource.Get()))check(v==0,"orbital coverage leaves the private scene-depth seed unchanged");
         // Orbital geometry has its own HC/record motion path.  It must not
@@ -947,6 +962,9 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         UiDepthLayer layer; auto t=depth(dev.Get(),formats.first,formats.second);
         ctx->ClearDepthStencilView(t.dsv.Get(),D3D11_CLEAR_DEPTH,.25f,0);
         check(layer.acquire(ctx.Get(),t.tex.Get())!=nullptr,"private allocation for depth format");
+        auto* acquired=layer.target(t.tex.Get(),8,8);
+        check(acquired!=nullptr,"private replay target follows source identity");
+        check(!layer.target(scene.tex.Get(),8,8) && !layer.target(t.tex.Get(),9,8),"replay target rejects different source or extent");
         auto* liveRead=layer.sourceView(ctx.Get());
         check(liveRead!=nullptr,"floating HUD can read original scene depth in each supported format");
         ComPtr<ID3D11Resource> liveRes;liveRead->GetResource(&liveRes);
@@ -960,6 +978,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         layer.acquire(ctx.Get(),t.tex.Get());
         check(std::fabs(read(dev.Get(),ctx.Get(),privateRes.Get())[0]-.25f)<1e-5f,"one seed per frame preserves earlier UI");
         layer.frameBoundary(); check(layer.view(t.tex.Get(),8,8)==nullptr,"frame invalidation");
+        check(!layer.target(t.tex.Get(),8,8),"old frame replay target is unavailable");
         check(layer.sourceView(ctx.Get())==nullptr,"old-frame HUD scene view is not published");
         layer.acquire(ctx.Get(),t.tex.Get()); check(std::fabs(read(dev.Get(),ctx.Get(),privateRes.Get())[0]-.75f)<1e-5f,"next frame reseeded");
         auto resized=depth(dev.Get(),formats.first,formats.second,16);

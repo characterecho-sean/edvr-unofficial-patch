@@ -49,6 +49,19 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 // coverage depth; the caller reissues it after the original draw.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 
+// Colour separation hook: the owner sets this after routing a recognized
+// target-sprite draw out of the clean colour stream and before the matching
+// coverage reissue.  The flag is per-draw and is cleared by uiDepthEnd().
+void uiDepthSetTargetSeparated(bool separated);
+int uiDepthTargetSpriteEye();
+int uiDepthDeferredEye();
+// After the original private coverage draw, bind the same reissue shader to
+// clean sidecars and a private clean depth copy for one pure replay.
+bool uiDepthSeparatedReissueBegin(ID3D11DeviceContext* ctx);
+void uiDepthSeparatedReissueEnd(ID3D11DeviceContext* ctx);
+// A later coverage owner without the pure-replay hook must fail closed.
+void uiDepthSeparatedInvalidate(int eye = -1);
+
 // Clear per-draw classification, including when another fix skipped the
 // draw. The original draw's depth state is never changed by this module.
 void uiDepthEnd(ID3D11DeviceContext* ctx);
@@ -106,6 +119,15 @@ bool uiDepthTemporalDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D* scen
                           ID3D11ShaderResourceView** srv);
 // Exact draw-transform history for nearby holograms; borrowed coverage/record views.
 void uiDepthHoloMotion(int eye, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views);
+
+// Borrowed clean-world coverage twins.  These are valid only after a
+// separated mode-3 draw has seeded them for the current frame/eye.
+bool uiDepthSeparatedCoverage(uint32_t w, uint32_t h, int eye,
+                              ID3D11Texture2D* scene,
+                              ID3D11Texture2D** mask,
+                              ID3D11ShaderResourceView** holo,
+                              ID3D11ShaderResourceView** edits,
+                              ID3D11ShaderResourceView** depth);
 void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene);
 void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx, const wchar_t* directory, const wchar_t* stamp);
 // Geometry writes invalidate only accepted corona generations; nullptr is an
