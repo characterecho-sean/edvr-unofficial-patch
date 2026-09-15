@@ -198,14 +198,16 @@ XrResult D3D11Stereo::shutdown() {
   graphicsBridge_.reset();
   completion_.Reset();
   immediateExecutor_=nullptr;
+  ownedImmediateScene_=false;sceneOwnerThread_=0;
   context_.Reset();immediateContext_.Reset();device_.Reset();session_=XR_NULL_HANDLE;format_=0;dispatch_={};lastResult_=XR_SUCCESS;
   for(auto& view:layerViews_)view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
   return first;
 }
 XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D11Device* device,
                                const XrViewConfigurationView (&views)[2],HMODULE graphicsProvider,
-                               ImmediateExecutor* immediateExecutor) {
+                               ImmediateExecutor* immediateExecutor,bool ownedImmediateScene) {
   const XrResult closed=shutdown();if(closed!=XR_SUCCESS)return closed;
+  if(ownedImmediateScene&&(graphicsProvider||immediateExecutor))return XR_ERROR_VALIDATION_FAILURE;
   if(!session||!device)return XR_ERROR_HANDLE_INVALID;
   if(!d.enumerateSwapchainFormats||!d.createSwapchain||!d.destroySwapchain||!d.enumerateSwapchainImages||
      !d.acquireSwapchainImage||!d.waitSwapchainImage||!d.releaseSwapchainImage)return XR_ERROR_FUNCTION_UNSUPPORTED;
@@ -216,6 +218,7 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
   if(device->GetFeatureLevel()<D3D_FEATURE_LEVEL_11_0)return XR_ERROR_GRAPHICS_DEVICE_INVALID;
   dispatch_=d;session_=session;device_=device;device_->GetImmediateContext(&immediateContext_);
   immediateExecutor_=immediateExecutor;
+  ownedImmediateScene_=ownedImmediateScene;sceneOwnerThread_=GetCurrentThreadId();
   auto failed=[&](XrResult r){shutdown();return r;};
   if(!immediateContext_||FAILED(device_->CreateDeferredContext(0,&context_)))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
   const D3D11_QUERY_DESC completionDesc{D3D11_QUERY_EVENT,0};
@@ -392,8 +395,10 @@ XrResult D3D11Stereo::drawEye(unsigned eye, const XrView& view, ID3D11Texture2D*
 }
 
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
-                                   XrCompositionLayerProjection& layer, GpuWorkObserver* observer) {
+                                   XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
+                                   StereoWallTimes* times) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+  if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
   if(FAILED(device_->GetDeviceRemovedReason()))return XR_ERROR_GRAPHICS_DEVICE_INVALID;
@@ -432,33 +437,50 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     c.encodeSRGB=(format_==DXGI_FORMAT_R8G8B8A8_UNORM||format_==DXGI_FORMAT_B8G8R8A8_UNORM)?1.f:0.f;
   }
   auto failed=[&](XrResult r){ready_=false;lastResult_=r;return r;};
+  auto* drawContext=ownedImmediateScene_?immediateContext_.Get():context_.Get();
   for(unsigned i=0;i<2;++i) {
     uint32_t index=0;XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    XrResult r=dispatch_.acquireSwapchainImage(eyes_[i].swapchain,&ai,&index);
+    XrResult r;
+    { SubmissionWallScope measured(times?&times->acquire:nullptr);
+      r=dispatch_.acquireSwapchainImage(eyes_[i].swapchain,&ai,&index); }
     if(r!=XR_SUCCESS)return failed(r);
     if(index>=eyes_[i].rtvs.size())return failed(XR_ERROR_RUNTIME_FAILURE);
     XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wi.timeout=1000000000LL;
-    r=dispatch_.waitSwapchainImage(eyes_[i].swapchain,&wi);
+    { SubmissionWallScope measured(times?&times->wait:nullptr);
+      r=dispatch_.waitSwapchainImage(eyes_[i].swapchain,&wi); }
     if(r!=XR_SUCCESS)return failed(r); // timeout is not permission to write/release
-    context_->ClearState();
-    context_->OMSetBlendState(nullptr,nullptr,~0u);context_->OMSetDepthStencilState(depth_.Get(),0);
-    context_->RSSetState(rasterizer_.Get());
-    context_->IASetInputLayout(nullptr);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context_->VSSetShader(blitVertexShader_.Get(),nullptr,0);context_->PSSetShader(blitPixelShader_.Get(),nullptr,0);
-    context_->PSSetSamplers(0,1,blitSampler_.GetAddressOf());
-    context_->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
+    {
+    SubmissionWallScope measured(times?&times->draw:nullptr);
+    if(ownedImmediateScene_) {
+      gpuPending_=true; // before any immediate GPU command or observer marker
+      if(observer)observer->beginGpuWork(2u+i,drawContext);
+    }
+    // Runtime calls may change state even on our device; bind the full pass.
+    drawContext->ClearState();
+    drawContext->OMSetBlendState(nullptr,nullptr,~0u);drawContext->OMSetDepthStencilState(depth_.Get(),0);
+    drawContext->RSSetState(rasterizer_.Get());
+    drawContext->IASetInputLayout(nullptr);drawContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    drawContext->VSSetShader(blitVertexShader_.Get(),nullptr,0);drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
+    drawContext->PSSetSamplers(0,1,blitSampler_.GetAddressOf());
+    drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
     // This scene shader writes every pixel with no discard. Diagnostics and
     // partial rendering still clear their targets where coverage requires it.
-    auto* rtv=eyes_[i].rtvs[index].Get();context_->OMSetRenderTargets(1,&rtv,nullptr);
-    D3D11_VIEWPORT vp{0,0,float(eyes_[i].width),float(eyes_[i].height),0,1};context_->RSSetViewports(1,&vp);
-    context_->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
-    context_->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);context_->Draw(3,0);
-    ID3D11ShaderResourceView* nullSrv=nullptr;context_->PSSetShaderResources(0,1,&nullSrv);
-    context_->OMSetRenderTargets(0,nullptr,nullptr);
-    r=submitCommands(observer,2u+i);if(r!=XR_SUCCESS)return failed(r);
+    auto* rtv=eyes_[i].rtvs[index].Get();drawContext->OMSetRenderTargets(1,&rtv,nullptr);
+    D3D11_VIEWPORT vp{0,0,float(eyes_[i].width),float(eyes_[i].height),0,1};drawContext->RSSetViewports(1,&vp);
+    drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
+    drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+    ID3D11ShaderResourceView* nullSrv=nullptr;drawContext->PSSetShaderResources(0,1,&nullSrv);
+    drawContext->OMSetRenderTargets(0,nullptr,nullptr);
+    if(ownedImmediateScene_) {
+      if(observer)observer->endGpuWork(2u+i,drawContext);
+      drawContext->Flush();
+    } else { r=submitCommands(observer,2u+i);if(r!=XR_SUCCESS)return failed(r); }
+    }
     if(FAILED(device_->GetDeviceRemovedReason()))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    r=dispatch_.releaseSwapchainImage(eyes_[i].swapchain,&ri);if(r!=XR_SUCCESS)return failed(r);
+    { SubmissionWallScope measured(times?&times->release:nullptr);
+      r=dispatch_.releaseSwapchainImage(eyes_[i].swapchain,&ri); }
+    if(r!=XR_SUCCESS)return failed(r);
   }
   for(unsigned i=0;i<2;++i) {
     auto& v=layerViews_[i];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose=views[i].pose;v.fov=views[i].fov;

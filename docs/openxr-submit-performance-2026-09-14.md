@@ -38,6 +38,12 @@ altering them requires separate measurements.
 
 ## Measurement contract
 
+The September 15 [submit-overlap
+follow-up](openxr-submit-overlap-2026-09-15.md) replaces the single
+early-session window with recurring windows and changes the transfer/compose
+wall boundaries. The measurements below describe this September 14
+implementation.
+
 `temporalMs` and `menuMs` now measure treatment wall time inside the combined
 callback, excluding its queue wait. They still include driver calls and are not
 exclusive CPU or GPU busy time. Submit, transfer, compose and producer GPU

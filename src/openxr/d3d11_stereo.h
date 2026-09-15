@@ -31,7 +31,8 @@ struct StereoDispatch {
 
 class D3D11Stereo final {
  public:
-  // Diagnostic renderer: records private command lists. Not a game pass.
+  // XR renderer: records private command lists unless an exclusively owned
+  // immediate scene context is explicitly selected. Not a game-device pass.
   // Borrowed session/dispatch must remain valid until shutdown/destruction.
   D3D11Stereo() = default;
   ~D3D11Stereo();
@@ -42,7 +43,12 @@ class D3D11Stereo final {
 
   XrResult initialize(const StereoDispatch&, XrSession, ID3D11Device*,
                       const XrViewConfigurationView (&)[2], HMODULE graphicsProvider = nullptr,
-                      ImmediateExecutor* immediateExecutor = nullptr);
+                      ImmediateExecutor* immediateExecutor = nullptr,
+                      bool ownedImmediateScene = false);
+  // ownedImmediateScene is an explicit promise of exclusive owner-thread
+  // access to a separate XR device. It cannot accompany a provider/executor.
+  // Only the steady-state captured-eye draw bypasses deferred command lists;
+  // borrowed-context and diagnostic state preservation remains unchanged.
   // An explicit provider requires the paired private-submission capability.
   // Omission is for a standalone diagnostic device only. Neither mode grants
   // ownership of a game's context or permits background game-device access.
@@ -52,7 +58,8 @@ class D3D11Stereo final {
   XrResult render(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
   XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
-                          XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr);
+                          XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
+                          StereoWallTimes* times = nullptr);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&);
   // Complete submitted GPU work before retiring the render caller. Uses its
@@ -79,13 +86,16 @@ class D3D11Stereo final {
   StereoDispatch dispatch_{};
   XrSession session_ = XR_NULL_HANDLE;
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
-  // This deferred context records the complete pass. The immediate context
-  // only executes command lists, preserving caller state; externally
-  // serialized ownership is still required because it is not thread safe.
+  // The deferred context records diagnostic and borrowed-device passes.
+  // Captured scenes can draw directly only on an explicitly owned context;
+  // other paths execute command lists and preserve caller state. Both modes
+  // require serialized context access.
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediateContext_;
   GraphicsBridgeClient graphicsBridge_;
   ImmediateExecutor* immediateExecutor_ = nullptr;
+  bool ownedImmediateScene_ = false;
+  DWORD sceneOwnerThread_ = 0;
   Microsoft::WRL::ComPtr<ID3D11Query> completion_;
   bool gpuPending_ = false;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader_;

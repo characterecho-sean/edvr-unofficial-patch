@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <memory>
 #include <windows.h>
+#include "submission_measurement.h"
 
 namespace edvr::openxr {
 
@@ -31,7 +32,7 @@ class SharedTextureTransfer final {
   // initialized lifetime and synchronously retires started callbacks. The
   // consumer context is exclusively owned by this thread; serialize its other
   // users with these calls. Sources must be live COM objects with pixels
-  // stable until copy returns.
+  // stable until copy/enqueue returns.
   HRESULT initialize(ID3D11Device* producer, ID3D11Device* consumer,
                      ImmediateExecutor* producerExecutor) noexcept;
   // On success output receives a borrowed consumer-private texture. It remains
@@ -47,11 +48,18 @@ class SharedTextureTransfer final {
   HRESULT copy(ID3D11Texture2D* source, ID3D11Texture2D*& output,
                DWORD timeoutMs = 100, GpuWorkObserver* observer = nullptr,
                unsigned phase = 0) noexcept;
+  // Snapshot the source on its producer and publish key 1, but do not wait
+  // for the consumer. S_OK means EDVR owns the pending pixels; the caller may
+  // immediately reuse its source. receive/shutdown complete this bounded slot
+  // without another producer callback. A second enqueue returns E_PENDING.
+  HRESULT enqueue(ID3D11Texture2D* source, DWORD timeoutMs = 100,
+                  TransferWallTimes* times = nullptr) noexcept;
   // Retries a published consumer handoff. A producer key-0 timeout occurs
   // before publication and is returned by copy() for the caller to retry with
   // its next copy call.
   HRESULT receive(ID3D11Texture2D*& output, DWORD timeoutMs = 100,
-                  GpuWorkObserver* observer = nullptr, unsigned phase = 0) noexcept;
+                  GpuWorkObserver* observer = nullptr, unsigned phase = 0,
+                  TransferWallTimes* times = nullptr) noexcept;
   HRESULT shutdown(DWORD timeoutMs = 5000) noexcept;
 
   bool ready() const noexcept;

@@ -102,16 +102,20 @@ void EyeCapture::reset() {
     e.bounds = {0.f, 0.f, 1.f, 1.f};
     e.colorSpace = vr::ColorSpace_Auto;
     e.captured = false;
+    e.pending = false;
   }
 }
 
 bool EyeCapture::exchangeBuffers(EyeCapture& other) {
   if (this == &other || initialized_ != other.initialized_ ||
-      sharedInitialized_ != other.sharedInitialized_) return false;
+      sharedInitialized_ != other.sharedInitialized_ || hasPending() || other.hasPending()) return false;
   if (sharedInitialized_) {
     if (sharedOwner_ != std::this_thread::get_id() || sharedOwner_ != other.sharedOwner_ ||
         sharedProducer_ != other.sharedProducer_ || sharedConsumer_ != other.sharedConsumer_ ||
         sharedExecutor_ != other.sharedExecutor_) return false;
+    for(unsigned e=0;e<2;++e)
+      if((sharedTransfers_[e]&&sharedTransfers_[e]->pending())||
+         (other.sharedTransfers_[e]&&other.sharedTransfers_[e]->pending()))return false;
   } else if (!initialized_ || device_ != other.device_) return false;
   for (unsigned eye = 0; eye < 2; ++eye) {
     std::swap(eyes_[eye], other.eyes_[eye]);
@@ -152,7 +156,8 @@ HRESULT EyeCapture::shutdownShared(DWORD timeoutMs) {
 vr::EVRCompositorError EyeCapture::captureShared(
     vr::EVREye eye, const vr::Texture_t* texture,
     const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags,
-    bool copyPixels, GpuWorkObserver* observer) {
+    bool copyPixels, GpuWorkObserver* observer, bool deferConsumer,
+    TransferWallTimes* times) {
   if (!sharedInitialized_ || sharedOwner_ != std::this_thread::get_id() ||
       !sharedProducer_ || !sharedConsumer_ || !sharedExecutor_)
     return vr::VRCompositorError_InvalidTexture;
@@ -197,6 +202,16 @@ vr::EVRCompositorError EyeCapture::captureShared(
       ID3D11Texture2D* previous = nullptr;
       if (transfer->receive(previous, 100) != S_OK)
         return vr::VRCompositorError_InvalidTexture;
+      eyes_[index].pending = false;
+    }
+    if (deferConsumer) {
+      if (transfer->enqueue(source.Get(), 100, times) != S_OK)
+        return vr::VRCompositorError_InvalidTexture;
+      eyes_[index].bounds = b;
+      eyes_[index].colorSpace = texture->eColorSpace;
+      eyes_[index].captured = false;
+      eyes_[index].pending = true;
+      return vr::VRCompositorError_None;
     }
     ID3D11Texture2D* output = nullptr;
     const HRESULT copied = transfer->copy(source.Get(), output, 100, observer, index);
@@ -216,8 +231,10 @@ vr::EVRCompositorError EyeCapture::captureShared(
 vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* texture,
                                             const vr::VRTextureBounds_t* bounds,
                                             vr::EVRSubmitFlags flags, bool copyPixels,
-                                            GpuWorkObserver* observer) {
-  if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels, observer);
+                                            GpuWorkObserver* observer, bool deferConsumer,
+                                            TransferWallTimes* times) {
+  if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels, observer, deferConsumer, times);
+  if (deferConsumer) return vr::VRCompositorError_InvalidTexture;
   if (!initialized_ || !device_ || !context_) return vr::VRCompositorError_InvalidTexture;
   if (!validEye(eye) || !texture || !texture->handle || flags != vr::Submit_Default ||
       texture->eType != vr::API_DirectX || texture->eColorSpace < vr::ColorSpace_Auto ||
@@ -274,6 +291,28 @@ vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* 
   dst.colorSpace = texture->eColorSpace;
   dst.captured = true;
   return vr::VRCompositorError_None;
+}
+
+bool EyeCapture::hasPending() const {
+  return eyes_[0].pending || eyes_[1].pending;
+}
+
+HRESULT EyeCapture::completePending(GpuWorkObserver* observer, TransferWallTimes* times) {
+  if (!sharedInitialized_ || sharedOwner_ != std::this_thread::get_id()) return E_ACCESSDENIED;
+  for (unsigned i=0;i<2;++i) {
+    auto& eye=eyes_[i];
+    if (!eye.pending) continue;
+    if (!sharedTransfers_[i]) return E_UNEXPECTED;
+    ID3D11Texture2D* output=nullptr;
+    const HRESULT result=sharedTransfers_[i]->receive(output,100,observer,i,times);
+    if (result!=S_OK) return result;
+    if (!output) return E_UNEXPECTED;
+    if (eye.copy.Get()!=output) for (auto& view:eye.shaderViews) view.Reset();
+    eye.copy=output;
+    eye.pending=false;
+    eye.captured=true;
+  }
+  return S_OK;
 }
 
 ID3D11Texture2D* EyeCapture::texture(vr::EVREye eye) const {

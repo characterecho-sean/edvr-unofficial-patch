@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <thread>
+#include <algorithm>
 #include <d3dcompiler.h>
 using namespace edvr::openxr;
 using Microsoft::WRL::ComPtr;
@@ -20,6 +22,7 @@ struct Eye {ComPtr<ID3D11Texture2D> images[2];bool alive=false,acquired=false,wa
 struct Fake {
   ComPtr<ID3D11Device> device,foreign;ComPtr<ID3D11DeviceContext> context;Eye eyes[2];
   unsigned creates=0,destroys=0,formatCalls=0;std::vector<std::string> trace;
+  unsigned width=size,height=size;
   std::string failure;XrResult error=XR_ERROR_RUNTIME_FAILURE;
   bool noFormats=false,wrongDimensions=false,wrongDevice=false,typeless=true,unorm=false,grow=false,badCount=false;
   ID3D11RenderTargetView* preservedRtv=nullptr;
@@ -44,12 +47,12 @@ XrResult XRAPI_PTR formats(XrSession s,uint32_t cap,uint32_t* count,int64_t* out
 XrResult XRAPI_PTR create(XrSession s,const XrSwapchainCreateInfo* ci,XrSwapchain* out){
   const unsigned eye=fake->creates++;
   check(s==session&&eye<2&&ci->type==XR_TYPE_SWAPCHAIN_CREATE_INFO&&!ci->next,"create ABI");
-  check(ci->width==size&&ci->height==size&&ci->arraySize==1&&ci->faceCount==1&&ci->mipCount==1&&ci->sampleCount==1&&
+  check(ci->width==fake->width&&ci->height==fake->height&&ci->arraySize==1&&ci->faceCount==1&&ci->mipCount==1&&ci->sampleCount==1&&
     ci->usageFlags==XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT,"swapchain shape/usage");
   XrResult r=outcome("C",eye);if(r!=XR_SUCCESS)return r;
   auto& e=fake->eyes[eye];
   for(auto& image:e.images){
-    D3D11_TEXTURE2D_DESC d{};d.Width=size+(fake->wrongDimensions?1:0);d.Height=size;d.MipLevels=d.ArraySize=1;
+    D3D11_TEXTURE2D_DESC d{};d.Width=fake->width+(fake->wrongDimensions?1:0);d.Height=fake->height;d.MipLevels=d.ArraySize=1;
     d.Format=fake->typeless?DXGI_FORMAT_R8G8B8A8_TYPELESS:DXGI_FORMAT(ci->format);d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_RENDER_TARGET;
     ID3D11Device* dev=fake->wrongDevice?fake->foreign.Get():fake->device.Get();
     if(FAILED(dev->CreateTexture2D(&d,nullptr,&image)))return XR_ERROR_RUNTIME_FAILURE;
@@ -89,16 +92,16 @@ XrResult XRAPI_PTR release(XrSwapchain chain,const XrSwapchainImageReleaseInfo* 
 StereoDispatch dispatch(){return {formats,create,destroy,images,acquire,wait,release};}
 struct Fixture {
   Fake runtime;D3D11Stereo renderer;XrViewConfigurationView sizes[2]{};XrView views[2]{};
-  Fixture(){
+  Fixture(bool hardware=false){
     fake=&runtime;D3D_FEATURE_LEVEL level{};
-    check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.device,&level,&runtime.context)),"WARP device");
+    check(SUCCEEDED(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.device,&level,&runtime.context)),"fixture device");
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.foreign,&level,nullptr)),"foreign WARP device");
     for(unsigned i=0;i<2;++i){sizes[i]={XR_TYPE_VIEW_CONFIGURATION_VIEW};sizes[i].recommendedImageRectWidth=sizes[i].recommendedImageRectHeight=size;
       sizes[i].maxImageRectWidth=sizes[i].maxImageRectHeight=512;sizes[i].maxSwapchainSampleCount=1;
       views[i]={XR_TYPE_VIEW};views[i].pose.orientation.w=1;views[i].fov={-0.785398163f,0.785398163f,0.785398163f,-0.785398163f};}
   }
   ~Fixture(){renderer.shutdown();}
-  XrResult init(){return renderer.initialize(dispatch(),session,runtime.device.Get(),sizes);}
+  XrResult init(bool owned=false){return renderer.initialize(dispatch(),session,runtime.device.Get(),sizes,nullptr,nullptr,owned);}
   uint32_t pixel(unsigned eye,unsigned image,unsigned x,unsigned y){
     auto* source=runtime.eyes[eye].images[image].Get();D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
     desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
@@ -146,9 +149,9 @@ void pixelNear(uint32_t actual,uint32_t expected,const char* name) {
   bool match=true;for(unsigned c=0;c<4;++c)match=match&&std::abs(int((actual>>(8*c))&255)-int((expected>>(8*c))&255))<=2;
   check(match,name);
 }
-void capturedSelfTest() {
+void capturedSelfTest(bool owned=false) {
   for(bool unorm:{false,true})for(bool bgra:{false,true}) {
-    Fixture f;f.runtime.unorm=unorm;check(f.init()==XR_SUCCESS,"captured initialize");
+    Fixture f;f.runtime.unorm=unorm;check(f.init(owned)==XR_SUCCESS,"captured initialize");
     EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"captured owner");
     for(auto color:{vr::ColorSpace_Auto,vr::ColorSpace_Gamma,vr::ColorSpace_Linear})
       for(unsigned crop=0;crop<3;++crop) {
@@ -169,13 +172,15 @@ void capturedSelfTest() {
         XrCompositionLayerProjection layer{};f.runtime.trace.clear();
         const unsigned image=f.runtime.eyes[0].calls%2;
         RecordingObserver observer;
-        check(f.renderer.renderCaptured(f.views,space,capture,layer,&observer)==XR_SUCCESS,"captured shader path");
+        StereoWallTimes times{};
+        check(f.renderer.renderCaptured(f.views,space,capture,layer,&observer,&times)==XR_SUCCESS,"captured shader path");
+        check(times.acquire>=0&&times.wait>=0&&times.draw>0&&times.release>=0,"draw submission wall brackets available");
         check(observer.events.size()==4&&observer.events[0].begin&&!observer.events[1].begin&&
           observer.events[2].begin&&!observer.events[3].begin&&observer.events[0].phase==2&&
           observer.events[1].phase==2&&observer.events[2].phase==3&&observer.events[3].phase==3&&
           observer.events[0].context==f.runtime.context.Get()&&observer.events[1].context==f.runtime.context.Get()&&
           observer.events[2].context==f.runtime.context.Get()&&observer.events[3].context==f.runtime.context.Get(),
-          "observer brackets captured command lists by eye and context");
+          "observer brackets captured GPU work by eye and context");
         check(f.runtime.trace==std::vector<std::string>({"A0","W0","R0","A1","W1","R1"}),"captured image order");
         for(unsigned eye=0;eye<2;++eye)for(unsigned y:{0u,16u,111u,127u})for(unsigned x:{0u,16u,111u,127u}) {
           unsigned quadrant=0;
@@ -197,9 +202,14 @@ void capturedSelfTest() {
     XrView invalid[2]={f.views[0],f.views[1]};invalid[1].pose.orientation.w=2;
     check(f.renderer.renderCaptured(invalid,space,capture,layer)==XR_ERROR_VALIDATION_FAILURE&&f.runtime.trace.empty(),"invalid second view no acquire");
     check(f.renderer.renderCaptured(f.views,XR_NULL_HANDLE,capture,layer)==XR_ERROR_HANDLE_INVALID&&f.runtime.trace.empty(),"invalid space no acquire");
+    if(owned) {
+      XrResult wrong=XR_SUCCESS;
+      std::thread foreign([&]{wrong=f.renderer.renderCaptured(f.views,space,capture,layer);});foreign.join();
+      check(wrong==XR_ERROR_CALL_ORDER_INVALID&&f.runtime.trace.empty(),"owned scene rejects foreign thread before touching context/runtime");
+    }
   }
   for(bool unorm:{false,true}) {
-    Fixture f;f.runtime.unorm=unorm;check(f.init()==XR_SUCCESS,"offscreen fixture");
+    Fixture f;f.runtime.unorm=unorm;check(f.init(owned)==XR_SUCCESS,"offscreen fixture");
     f.views[0].pose.position.x=.2f;f.views[1].pose.orientation={0,float(std::sin(.1)),0,float(std::cos(.1))};
     XrCompositionLayerProjection layer{};check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"direct reference scene");
     uint32_t reference[2]={f.pixel(0,0,58,59),f.pixel(1,0,77,59)};
@@ -224,7 +234,7 @@ void capturedSelfTest() {
   }
   for(const char* point:{"A0","W0","R0","A1","W1","R1"})for(XrResult error:{XR_ERROR_RUNTIME_FAILURE,XR_SESSION_LOSS_PENDING,XR_TIMEOUT_EXPIRED}) {
     if(error==XR_TIMEOUT_EXPIRED&&point[0]!='W')continue;
-    Fixture f;check(f.init()==XR_SUCCESS,"captured failure fixture");EyeCapture capture;
+    Fixture f;check(f.init(owned)==XR_SUCCESS,"captured failure fixture");EyeCapture capture;
     check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"captured failure owner");
     auto source=pattern(f,false);vr::Texture_t t{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
     check(capture.capture(vr::Eye_Left,&t)==vr::VRCompositorError_None&&capture.capture(vr::Eye_Right,&t)==vr::VRCompositorError_None,"failure fixture captures");
@@ -571,6 +581,52 @@ void desktopStateSelfTest() {
     }
   }
 }
+int benchmark(){
+  // Same immutable full-size input and adapter, ABBA order. A one-pixel
+  // readback completes prior work outside each measured submission interval.
+  // No OpenXR runtime or headset, and no production per-frame readback.
+  std::setvbuf(stdout,nullptr,_IONBF,0);
+  for(bool direct:{false,true,true,false}) {
+    std::printf("stereo_benchmark_begin,path=%s,warmup=32,samples=128\n",direct?"immediate":"deferred_restore");
+    Fixture f(true);if(!f.runtime.device)return 1;
+    f.runtime.width=4068;f.runtime.height=4016;
+    for(auto& v:f.sizes){v.recommendedImageRectWidth=v.maxImageRectWidth=4068;v.recommendedImageRectHeight=v.maxImageRectHeight=4016;}
+    if(f.init(direct)!=XR_SUCCESS)return 1;
+    D3D11_TEXTURE2D_DESC desc{};desc.Width=4068;desc.Height=4016;desc.MipLevels=desc.ArraySize=1;
+    desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    std::vector<uint32_t> pixels(size_t(desc.Width)*desc.Height);
+    for(size_t i=0;i<pixels.size();++i)pixels[i]=0xff000000u|uint32_t((i*31u)&0x00ffffffu);
+    D3D11_SUBRESOURCE_DATA data{pixels.data(),desc.Width*4,0};ComPtr<ID3D11Texture2D> source;
+    if(FAILED(f.runtime.device->CreateTexture2D(&desc,&data,&source)))return 1;
+    EyeCapture capture;if(FAILED(capture.initialize(f.runtime.device.Get())))return 1;
+    vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
+    if(capture.capture(vr::Eye_Left,&texture)!=vr::VRCompositorError_None||capture.capture(vr::Eye_Right,&texture)!=vr::VRCompositorError_None)return 1;
+    auto readDesc=desc;readDesc.Width=readDesc.Height=1;readDesc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    readDesc.Usage=D3D11_USAGE_STAGING;readDesc.BindFlags=0;readDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> readback;
+    if(FAILED(f.runtime.device->CreateTexture2D(&readDesc,nullptr,&readback)))return 1;
+    std::vector<double> samples,barriers;samples.reserve(128);barriers.reserve(128);
+    for(unsigned frame=0;frame<160;++frame) {
+      f.runtime.trace.clear();XrCompositionLayerProjection layer{};double ms=0;
+      {SubmissionWallScope timer(&ms);if(f.renderer.renderCaptured(f.views,space,capture,layer)!=XR_SUCCESS)return 1;}
+      double barrier=0;
+      {SubmissionWallScope timer(&barrier);
+        const D3D11_BOX box{0,0,0,1,1,1};D3D11_MAPPED_SUBRESOURCE mapped{};
+        f.runtime.context->CopySubresourceRegion(readback.Get(),0,0,0,0,f.runtime.eyes[1].images[frame%2].Get(),0,&box);
+        if(FAILED(f.runtime.context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped)))return 1;
+        f.runtime.context->Unmap(readback.Get(),0);
+      }
+      if(frame>=32){samples.push_back(ms);barriers.push_back(barrier);}
+      if(frame%32==31)std::printf("stereo_benchmark_progress,frames=%u,last_readback_ms=%.3f\n",frame+1,barrier);
+    }
+    std::sort(samples.begin(),samples.end());std::sort(barriers.begin(),barriers.end());
+    std::printf("stereo_benchmark,path=%s,size=4068x4016,samples=%zu,p50=%.6f,p95=%.6f,p99=%.6f,readback_p50=%.6f,units=cpu_wall_ms,runtime=0,readback_included=0\n",
+      direct?"immediate":"deferred_restore",samples.size(),samples[63],samples[121],samples[126],barriers[63]);
+    if(f.renderer.drain()!=XR_SUCCESS)return 1;
+  }
+  return failures?1:0;
+}
+
 int selfTest(){
   for(bool unorm:{false,true}){
     Fixture f;f.runtime.unorm=unorm;f.runtime.grow=true;check(f.init()==XR_SUCCESS,"initialize actual swapchains/RTVs/shaders");
@@ -625,6 +681,7 @@ int selfTest(){
   {Fixture f;check(f.init()==XR_SUCCESS,"cleanup error fixture");f.runtime.failure="D0";
     check(f.renderer.shutdown()==XR_ERROR_RUNTIME_FAILURE&&f.runtime.destroys==2,"cleanup error reported, second chain attempted");}
   capturedSelfTest();
+  capturedSelfTest(true);
   skyboxSelfTest();
   desktopStateSelfTest();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
@@ -633,5 +690,6 @@ int selfTest(){
 int main(int argc,char** argv){
   SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
   if(argc!=2)return 2;if(!std::strcmp(argv[1],"--dry-run")){std::puts("Would test stereo rendering with fake XR and WARP; no files/runtime/device created.");return 0;}
+  if(!std::strcmp(argv[1],"--benchmark"))return benchmark();
   return !std::strcmp(argv[1],"--self-test")?selfTest():2;
 }

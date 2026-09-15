@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <thread>
 #include <vector>
+#include <algorithm>
 
 using Microsoft::WRL::ComPtr;
 using namespace edvr::openxr;
@@ -346,6 +347,107 @@ void captureIntegration(Fixture& f) {
   f.executor.resume();skybox.shutdown();
 }
 
+void deferredIntegration(Fixture& f) {
+  for(auto format:kFormats) {
+    SharedTextureTransfer transfer;
+    check(transfer.initialize(f.producer.Get(),f.consumer.Get(),&f.executor)==S_OK,"deferred transfer initializes");
+    ComPtr<ID3D11Texture2D> source;
+    check(sourceTexture(f,format,W,H,701,source),"deferred source");
+    TransferWallTimes times{};
+    check(transfer.enqueue(source.Get(),100,&times)==S_OK&&transfer.pending()&&!transfer.ready(),"enqueue publishes one pending slot");
+    check(transfer.enqueue(source.Get())==E_PENDING,"pending slot cannot be overwritten");
+    HRESULT foreign=S_OK;
+    std::thread caller([&]{foreign=transfer.enqueue(source.Get());});caller.join();
+    check(foreign==E_ACCESSDENIED,"foreign enqueue does not touch the pending slot");
+    check(f.executor.invoke([&]{auto bytes=pattern(format,W,H,999);
+      f.producerContext->UpdateSubresource(source.Get(),0,nullptr,bytes.data(),W*4,0);
+      f.producerContext->Flush();}),"source can be overwritten before consumer acquisition");
+    const auto calls=f.executor.calls();f.executor.refuse();
+    ID3D11Texture2D* output=nullptr;RecordingObserver observer;
+    check(transfer.receive(output,5000,&observer,0,&times)==S_OK&&output&&!transfer.pending(),"consumer completes after producer admission closes");
+    check(f.executor.calls()==calls&&observer.events.size()==2,"deferred receive brackets GPU copy without producer callbacks");
+    check(readback(f,output,format,W,H,pattern(format,W,H,701)),"deferred pixels precede producer overwrite for every format");
+    check(times.producerDispatch>=times.producerAcquire&&times.producerAcquire>=0&&times.producerFlush>=0&&
+      times.consumerAcquire>=0&&times.consumerFlush>=0,"transfer wall measurements are finite ordered scopes");
+    check(transfer.shutdown()==S_OK&&f.executor.calls()==calls,"deferred transfer retires without producer");
+    f.executor.resume();
+  }
+  for(bool rightFirst:{false,true}) {
+    EyeCapture eyes,previous;
+    check(eyes.initializeShared(f.producer.Get(),f.consumer.Get(),&f.executor)==S_OK&&
+      previous.initializeShared(f.producer.Get(),f.consumer.Get(),&f.executor)==S_OK,"deferred eye banks initialize");
+    ComPtr<ID3D11Texture2D> source[2];vr::Texture_t textures[2]{};
+    for(unsigned e=0;e<2;++e) {
+      check(sourceTexture(f,DXGI_FORMAT_R8G8B8A8_UNORM,W,H,800+e,source[e]),"deferred eye input");
+      textures[e]={source[e].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
+    }
+    const unsigned first=rightFirst?1u:0u,second=1u-first;
+    check(eyes.capture(vr::EVREye(first),&textures[first],nullptr,vr::Submit_Default,true,nullptr,true)==vr::VRCompositorError_None&&
+      eyes.hasPending()&&!eyes.texture(vr::EVREye(first)),"first eye returns with a snapshot but no readable consumer image");
+    check(!eyes.exchangeBuffers(previous),"pending capture cannot become a retained stereo pair");
+    check(eyes.capture(vr::EVREye(second),&textures[second],nullptr,vr::Submit_Default,true,nullptr,true)==vr::VRCompositorError_None,"second eye enqueued");
+    const auto calls=f.executor.calls();f.executor.refuse();RecordingObserver observer;
+    check(eyes.completePending(&observer)==S_OK&&!eyes.hasPending()&&f.executor.calls()==calls&&observer.events.size()==4,"both eyes consumed in one owner operation without producer calls");
+    for(unsigned e=0;e<2;++e)check(readback(f,eyes.texture(vr::EVREye(e)),DXGI_FORMAT_R8G8B8A8_UNORM,W,H,
+      pattern(DXGI_FORMAT_R8G8B8A8_UNORM,W,H,800+e)),"completed deferred pair has correct eye pixels");
+    check(eyes.exchangeBuffers(previous),"only completed pair is retained");f.executor.resume();
+    check(eyes.capture(vr::EVREye(first),&textures[first],nullptr,vr::Submit_Default,true,nullptr,true)==vr::VRCompositorError_None,"partial next pair enqueued");
+    eyes.reset();check(!eyes.hasPending()&&!eyes.texture(vr::EVREye(first)),"clear discards pending metadata");
+    check(eyes.completePending()==S_OK&&!eyes.texture(vr::EVREye(first)),"clear cannot republish discarded pending pixels");
+    f.executor.refuse();const auto shutdownCalls=f.executor.calls();
+    check(eyes.shutdownShared()==S_OK&&previous.shutdownShared()==S_OK&&f.executor.calls()==shutdownCalls,"shutdown drains abandoned first eye after producer stop");
+    f.executor.resume();
+  }
+}
+
+int benchmark(){
+  std::setvbuf(stdout,nullptr,_IONBF,0);
+  Fixture f;if(!makeFixture(f,true))return 1;
+  printAdapter(f.producer.Get(),"benchmark");
+  ComPtr<ID3D11Texture2D> sources[2];
+  for(unsigned e=0;e<2;++e)if(!sourceTexture(f,DXGI_FORMAT_R8G8B8A8_UNORM,4068,4016,31+e,sources[e]))return 1;
+  D3D11_TEXTURE2D_DESC readDesc{};readDesc.Width=readDesc.Height=readDesc.MipLevels=readDesc.ArraySize=1;
+  readDesc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;readDesc.SampleDesc.Count=1;
+  readDesc.Usage=D3D11_USAGE_STAGING;readDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+  ComPtr<ID3D11Texture2D> readback;if(FAILED(f.consumer->CreateTexture2D(&readDesc,nullptr,&readback)))return 1;
+  for(bool deferred:{false,true,true,false}) {
+    std::printf("transfer_benchmark_begin,path=%s,warmup=32,samples=128\n",deferred?"pair_receive":"immediate_receive");
+    struct Bank {
+      SharedTextureTransfer eyes[2];
+      ~Bank(){for(auto& eye:eyes)if(eye.shutdown()!=S_OK)ExitProcess(1);}
+    } bank;
+    auto& eyes=bank.eyes;
+    for(auto& eye:eyes)if(eye.initialize(f.producer.Get(),f.consumer.Get(),&f.executor)!=S_OK)return 1;
+    bool ok=true;std::vector<double> first,pair;first.reserve(128);pair.reserve(128);
+    for(unsigned n=0;n<160&&ok;++n) {
+      double firstMs=0,pairMs=0;ID3D11Texture2D* outputs[2]{};
+      {SubmissionWallScope all(&pairMs);
+        for(unsigned e=0;e<2;++e) {
+          SubmissionWallScope eyeTimer(e==0?&firstMs:nullptr);
+          const auto result=deferred?eyes[e].enqueue(sources[e].Get()):eyes[e].copy(sources[e].Get(),outputs[e]);
+          if(result!=S_OK){ok=false;break;}
+        }
+        if(deferred&&ok)for(unsigned e=0;e<2;++e)if(eyes[e].receive(outputs[e])!=S_OK)ok=false;
+      }
+      // Complete both copies before the next sample, without including the
+      // test-only readback in either measured interval.
+      if(ok) {
+        const D3D11_BOX box{0,0,0,1,1,1};D3D11_MAPPED_SUBRESOURCE mapped{};
+        f.consumerContext->CopySubresourceRegion(readback.Get(),0,0,0,0,outputs[1],0,&box);
+        if(FAILED(f.consumerContext->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped)))ok=false;
+        else f.consumerContext->Unmap(readback.Get(),0);
+      }
+      if(n>=32&&ok){first.push_back(firstMs);pair.push_back(pairMs);}
+    }
+    for(auto& eye:eyes)if(eye.shutdown()!=S_OK)ok=false;
+    if(!ok)return 1;
+    std::sort(first.begin(),first.end());std::sort(pair.begin(),pair.end());
+    std::printf("transfer_benchmark,path=%s,size=4068x4016,samples=%zu,first_p50=%.6f,pair_p50=%.6f,pair_p95=%.6f,pair_p99=%.6f,units=cpu_wall_ms,runtime=0,readback_included=0\n",
+      deferred?"pair_receive":"immediate_receive",pair.size(),first[63],pair[63],pair[121],pair[126]);
+  }
+  return failures?1:0;
+}
+
 int run(bool hardware){
   Fixture f;if(!makeFixture(f,hardware)){check(false,"create two same-adapter devices and initialize");return 1;}
   LUID a{},b{};check(luid(f.producer.Get(),a)&&luid(f.consumer.Get(),b)&&std::memcmp(&a,&b,sizeof(a))==0,"devices share adapter LUID");
@@ -353,6 +455,7 @@ int run(bool hardware){
   std::printf("shared_texture consumer_thread=%lu\n",static_cast<unsigned long>(GetCurrentThreadId()));
   invalidInputs(f);
   captureIntegration(f);
+  deferredIntegration(f);
   {
     ComPtr<ID3D11Device> singleProducer,singleConsumer;ComPtr<ID3D11DeviceContext> singleProducerContext,singleConsumerContext;
     check(createDevice(nullptr,singleProducer,singleProducerContext,D3D11_CREATE_DEVICE_SINGLETHREADED)&&
@@ -442,6 +545,7 @@ int run(bool hardware){
 int main(int argc,char** argv){
   SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
   if(argc==2&&!std::strcmp(argv[1],"--dry-run")){std::puts("Would test two-device WARP shared texture transfer; no devices or files.");return 0;}
+  if(argc==2&&!std::strcmp(argv[1],"--benchmark"))return benchmark();
   if(argc<2||std::strcmp(argv[1],"--self-test"))return 2;
   const bool hardware=argc==3&&!std::strcmp(argv[2],"--hardware");if(argc>3||(argc==3&&!hardware))return 2;
   std::thread watchdog([]{Sleep(30000);ExitProcess(124);});watchdog.detach();return run(hardware);

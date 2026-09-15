@@ -137,8 +137,63 @@ template<class Check> void runTreatmentCases(Check check) {
   f.dispatcher.close();h.fss.close();h.temporal.close();h.sharpen.close();h.menu.close();h.captured.shutdown();state={};
 }
 
+template<class Check> void runDeferredTreatmentCases(Check check) {
+  using namespace treatment_fixture;
+  state={};state.thread=GetCurrentThreadId();
+  ComPtr<ID3D11Device> producer,consumer;ComPtr<ID3D11DeviceContext> producerContext,consumerContext;
+  check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&producer,nullptr,&producerContext))&&
+    SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&consumer,nullptr,&consumerContext)),"host handoff devices");
+  if(!producer||!consumer)return;
+  ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC adapterDesc{};
+  check(SUCCEEDED(consumer.As(&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter))&&SUCCEEDED(adapter->GetDesc(&adapterDesc)),"host handoff adapter");
+  D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=4;desc.MipLevels=desc.ArraySize=1;
+  desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+  for(auto& output:state.outputs) {
+    check(SUCCEEDED(producer->CreateTexture2D(&desc,nullptr,&output)),"host handoff treatment allocation");
+    if(!output)return;
+  }
+  uint32_t pixels[16];std::fill_n(pixels,16,0xff123456u);
+  producerContext->UpdateSubresource(state.outputs[3].Get(),0,nullptr,pixels,16,0);
+  launch_fixture::Fixture f;auto& h=f.host;
+  h.startupOptions.separateDevice=true;h.externalDevice=producer.Get();
+  h.frameViews[0]=h.frameGeometry.views[0];h.frameViews[1]=h.frameGeometry.views[1];
+  const auto provider=GetModuleHandleW(nullptr);
+  check(h.fss.acquire(provider,producer.Get(),1)==S_OK&&h.temporal.acquire(provider,producer.Get(),1)==S_OK&&
+    h.sharpen.acquire(provider,producer.Get(),1)==S_OK&&h.menu.acquire(provider,producer.Get(),1)==S_OK,"host handoff providers");
+  check(f.route.bind()&&f.owner.start(),"host handoff route");
+  bool initialized=false;
+  check(f.route.invoke([&]{initialized=h.graphics.initializeExisting(consumer.Get(),adapterDesc.AdapterLuid,D3D_FEATURE_LEVEL_11_0)==S_OK&&
+    h.captured.initializeShared(producer.Get(),consumer.Get(),&h.graphicsCalls)==S_OK;} )&&initialized,"host capture owns separate XR device");
+  if(!initialized){f.owner.stop();return;}
+  const vr::Texture_t texture{state.outputs[0].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
+  check(f.route.invoke([&]{h.activeFrameSequence=1;check(h.capture(vr::Eye_Left,&texture,nullptr,vr::Submit_Default,true)==vr::VRCompositorError_None&&
+    h.captured.hasPending()&&!h.captured.texture(vr::Eye_Left),"actual host first eye does not wait for consumer");}),"host first eye returns");
+  std::fill_n(pixels,16,0xffabcdefu);producerContext->UpdateSubresource(state.outputs[3].Get(),0,nullptr,pixels,16,0);
+  check(f.route.invoke([&]{check(h.capture(vr::Eye_Right,&texture,nullptr,vr::Submit_Default,true)==vr::VRCompositorError_None&&
+    h.captured.hasPending()&&!h.captured.texture(vr::Eye_Right),"actual host second eye also publishes producer-owned pixels");}),"host second eye returns");
+  const auto calls=h.graphicsCalls.calls;f.dispatcher.close();
+  check(f.owner.invoke([&]{
+    check(h.captured.completePending()==S_OK,"host pair can consume after render admission closes");
+    auto stagingDesc=desc;stagingDesc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;stagingDesc.BindFlags=0;
+    stagingDesc.Usage=D3D11_USAGE_STAGING;stagingDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;check(SUCCEEDED(consumer->CreateTexture2D(&stagingDesc,nullptr,&staging)),"host snapshot readback");
+    if(staging)for(unsigned e=0;e<2;++e) {
+      auto* image=h.captured.texture(vr::EVREye(e));
+      check(image!=nullptr,"host snapshot published");if(!image)continue;
+      consumerContext->CopyResource(staging.Get(),image);
+      D3D11_MAPPED_SUBRESOURCE mapped{};const bool mappedOk=SUCCEEDED(consumerContext->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped));
+      check(mappedOk,"host snapshot mapped");
+      if(mappedOk){check(*static_cast<uint32_t*>(mapped.pData)==(e?0xffabcdefu:0xff123456u),"host preserves per-eye output before producer reuse");consumerContext->Unmap(staging.Get(),0);}
+    }
+    check(h.captured.shutdownShared()==S_OK,"host pending transfers retire without callbacks");h.graphics.reset();
+  })&&h.graphicsCalls.calls==calls,"host consumption and shutdown never reenter stopped producer");
+  check(f.owner.stop(),"host handoff owner stopped");
+  h.fss.close();h.temporal.close();h.sharpen.close();h.menu.close();state={};
+}
+
 template<class Check> void runSubmissionStatsCases(Check check) {
   SubmissionStats stats;SubmissionStats::Sample sample{};
+  check(stats.advance(1000)&&stats.window()==1,"initial periodic window armed");
   sample.width[0]=sample.width[1]=100;sample.height[0]=sample.height[1]=120;
   sample.callbacks=6;sample.dispatchMs=2;sample.treatmentMs=1;
   for(unsigned n=1;n<=SubmissionStats::warmup+SubmissionStats::capacity;++n) {
@@ -151,6 +206,17 @@ template<class Check> void runSubmissionStatsCases(Check check) {
   check(stats.count()==256&&d.p50==128&&d.p95==244&&d.p99==254&&stats.meanCallbacks()==6,
     "window percentiles exclude warmup and count callbacks per stereo pair");
   ++sample.sequence;check(!stats.add(sample)&&stats.count()==256,"full window never samples or reports again");
+  check(!stats.advance(30999)&&stats.full(),"periodic window remains bounded before its deadline");
+  check(stats.advance(31000)&&!stats.full()&&stats.count()==0&&stats.window()==2,"periodic window rearms after 30 seconds");
+  for(unsigned n=0;n<SubmissionStats::warmup+1;++n){++sample.sequence;stats.add(sample);}
+  check(stats.count()==1,"rearmed window warms up before sampling");
+  ++sample.sequence;++sample.outputWidth[0];stats.add(sample);
+  check(stats.count()==0,"postprocess output resize restarts warmup");
+  for(unsigned n=0;n<SubmissionStats::warmup;++n){++sample.sequence;stats.add(sample);}
+  check(stats.count()==1,"stable output can collect again");
+  sample.sequence+=2;stats.add(sample);check(stats.count()==0,"missing/withheld frame restarts warmup");
+  for(unsigned n=0;n<SubmissionStats::warmup;++n){++sample.sequence;stats.add(sample);}
+  ++sample.sequence;++sample.treatments[1];stats.add(sample);check(stats.count()==0,"changed treatment mask restarts warmup");
   SubmissionStats changed;
   for(unsigned n=1;n<=SubmissionStats::warmup+1;++n){sample.sequence=n;changed.add(sample);}
   check(changed.count()==1,"second fixture has a sample");

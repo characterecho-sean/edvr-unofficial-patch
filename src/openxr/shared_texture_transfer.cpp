@@ -249,18 +249,21 @@ struct SharedTextureTransfer::Impl final {
   }
 
   HRESULT producerCopy(ID3D11Texture2D* source, DWORD timeoutMs,
-                       GpuWorkObserver* observer, unsigned phase) noexcept {
+                       TransferWallTimes* times) noexcept {
     if (!source || !hasResources()) return E_INVALIDARG;
     HRESULT mutexResult = E_FAIL;
     bool callbackRan = false;
     bool callbackCompleted = false;
     try {
+      SubmissionWallScope dispatch(times?&times->producerDispatch:nullptr);
       (void)producerExecutor->invoke([&] {
         callbackRan = true;
-        mutexResult = producerMutex->AcquireSync(0, timeoutMs);
+        { SubmissionWallScope measured(times?&times->producerAcquire:nullptr);
+          mutexResult = producerMutex->AcquireSync(0, timeoutMs); }
         if (mutexResult != S_OK) { callbackCompleted = true; return; }
         producerContext->CopyResource(sharedProducer.Get(), source);
-        producerContext->Flush();
+        { SubmissionWallScope measured(times?&times->producerFlush:nullptr);
+          producerContext->Flush(); }
         const HRESULT deviceResult = producer->GetDeviceRemovedReason();
         const HRESULT releaseResult = producerMutex->ReleaseSync(1);
         mutexResult = deviceResult == S_OK ? releaseResult : deviceResult;
@@ -278,12 +281,15 @@ struct SharedTextureTransfer::Impl final {
       return mutexResult;
     }
     pendingStage = Stage::ConsumerAcquire;
-    return consume(timeoutMs, observer, phase);
+    return S_OK;
   }
 
-  HRESULT consume(DWORD timeoutMs, GpuWorkObserver* observer = nullptr, unsigned phase = 0) noexcept {
+  HRESULT consume(DWORD timeoutMs, GpuWorkObserver* observer = nullptr, unsigned phase = 0,
+                  TransferWallTimes* times = nullptr) noexcept {
     if (!hasResources() || pendingStage != Stage::ConsumerAcquire) return E_INVALIDARG;
-    HRESULT mutexResult = consumerMutex->AcquireSync(1, timeoutMs);
+    HRESULT mutexResult;
+    { SubmissionWallScope measured(times?&times->consumerAcquire:nullptr);
+      mutexResult = consumerMutex->AcquireSync(1, timeoutMs); }
     if (mutexResult == WAIT_TIMEOUT) {
       pendingStage = Stage::ConsumerAcquire;
       return mutexResult;
@@ -295,7 +301,8 @@ struct SharedTextureTransfer::Impl final {
     if(observer) observer->beginGpuWork(phase, consumerContext.Get());
     consumerContext->CopyResource(privateTexture.Get(), sharedConsumer.Get());
     if(observer) observer->endGpuWork(phase, consumerContext.Get());
-    consumerContext->Flush();
+    { SubmissionWallScope measured(times?&times->consumerFlush:nullptr);
+      consumerContext->Flush(); }
     const HRESULT deviceResult = consumer->GetDeviceRemovedReason();
     const HRESULT releaseResult = consumerMutex->ReleaseSync(0);
     mutexResult = deviceResult == S_OK ? releaseResult : deviceResult;
@@ -308,10 +315,11 @@ struct SharedTextureTransfer::Impl final {
   }
 
   HRESULT receiveInternal(ID3D11Texture2D*& output, DWORD timeoutMs,
-                          GpuWorkObserver* observer = nullptr, unsigned phase = 0) noexcept {
+                          GpuWorkObserver* observer = nullptr, unsigned phase = 0,
+                          TransferWallTimes* times = nullptr) noexcept {
     output = nullptr;
     if (pendingStage != Stage::ConsumerAcquire) return E_UNEXPECTED;
-    const HRESULT consumed = consume(timeoutMs, observer, phase);
+    const HRESULT consumed = consume(timeoutMs, observer, phase, times);
     if (consumed != S_OK) return consumed;
     return publish(output);
   }
@@ -413,6 +421,12 @@ HRESULT SharedTextureTransfer::copy(ID3D11Texture2D* source,
                                     DWORD timeoutMs, GpuWorkObserver* observer,
                                     unsigned phase) noexcept {
   output = nullptr;
+  const HRESULT queued=enqueue(source,timeoutMs);
+  return queued==S_OK ? receive(output,timeoutMs,observer,phase) : queued;
+}
+
+HRESULT SharedTextureTransfer::enqueue(ID3D11Texture2D* source, DWORD timeoutMs,
+                                       TransferWallTimes* times) noexcept {
   if (!impl_ || !impl_->onOwner()) return E_ACCESSDENIED;
   if (timeoutMs == INFINITE) return E_INVALIDARG;
   if (!impl_->initialized || impl_->faulted) return E_FAIL;
@@ -429,8 +443,7 @@ HRESULT SharedTextureTransfer::copy(ID3D11Texture2D* source,
     if (!sameDevice(sourceDevice.Get(), impl_->producer.Get())) return E_INVALIDARG;
     const HRESULT resources = impl_->createResources(sourceDescription, choice, timeoutMs);
     if (resources != S_OK) return resources;
-    const HRESULT copied = impl_->producerCopy(source, timeoutMs, observer, phase);
-    return copied == S_OK ? impl_->publish(output) : copied;
+    return impl_->producerCopy(source, timeoutMs, times);
   } catch (...) {
     impl_->faulted = true;
     return E_FAIL;
@@ -439,13 +452,13 @@ HRESULT SharedTextureTransfer::copy(ID3D11Texture2D* source,
 
 HRESULT SharedTextureTransfer::receive(ID3D11Texture2D*& output,
                                        DWORD timeoutMs, GpuWorkObserver* observer,
-                                       unsigned phase) noexcept {
+                                       unsigned phase, TransferWallTimes* times) noexcept {
   output = nullptr;
   if (!impl_ || !impl_->onOwner()) return E_ACCESSDENIED;
   if (timeoutMs == INFINITE) return E_INVALIDARG;
   if (!impl_->initialized || impl_->faulted) return E_FAIL;
   try {
-    return impl_->receiveInternal(output, timeoutMs, observer, phase);
+    return impl_->receiveInternal(output, timeoutMs, observer, phase, times);
   } catch (...) {
     impl_->faulted = true;
     return E_FAIL;

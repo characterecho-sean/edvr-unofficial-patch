@@ -2,6 +2,7 @@
 #include "session_state.h"
 #include "../openvr/compat/openvr_v0_9_20.h"
 #include <thread>
+#include "submission_measurement.h"
 
 namespace edvr::openxr {
 
@@ -40,6 +41,7 @@ class FrameBoundary final {
     const auto closed = clear();
     if (closed != XR_SUCCESS) return closed;
     frame_ = {};
+    endFrameMs_ = 0;
     lastResult_ = session_.waitAndBegin(frame_);
     if (XR_FAILED(lastResult_)) failed_ = true;
     return lastResult_;
@@ -102,7 +104,8 @@ class FrameBoundary final {
     const auto* header = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
     end.layerCount = pixels ? 1u : 0u; end.layers = pixels ? &header : nullptr;
-    lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});
+    { SubmissionWallScope measured(&endFrameMs_);
+      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels}); }
     if (!background) sink_.sceneFinished(pixels, lastResult_);
     if (lastResult_ != XR_SUCCESS) failed_ = true;
     return lastResult_;
@@ -123,6 +126,7 @@ class FrameBoundary final {
     return XR_SUCCESS;
   }
   XrResult lastResult() const { return lastResult_; }
+  double endFrameMs() const { return endFrameMs_; }
   // A failed boundary has consumed an uncertain XR operation or observed an
   // irreversible composition/end failure. Callers must retire their native
   // publications before admitting another frame.
@@ -136,5 +140,6 @@ class FrameBoundary final {
   Frame frame_{};
   bool accepted_[2]{}, geometryReady_ = false, failed_ = false;
   XrResult lastResult_ = XR_SUCCESS;
+  double endFrameMs_ = 0;
 };
 } // namespace edvr::openxr

@@ -183,6 +183,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool timingGpuBegun[2]{};
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
+  TransferWallTimes transferWall;
   uint64_t submitCallbacksBegin=0;
   float frameTangentShift[2][2]{};
   unsigned temporalFrameEyes=0;
@@ -628,7 +629,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
     timingResetFrame(timingSequence);
-    submitSample={};submitSample.sequence=timingSequence;submitCallbacksBegin=graphicsCalls.calls;
+    if(submitStats.advance(GetTickCount64()))nativeTracePrintf("native_submit_window_begin,window=%llu,warmup=%u,samples=%u,interval_ms=30000\n",
+      (unsigned long long)submitStats.window(),SubmissionStats::warmup,SubmissionStats::capacity);
+    submitSample={};transferWall={};submitSample.sequence=timingSequence;submitCallbacksBegin=graphicsCalls.calls;
     if(temporalFrameEyes!=3)invalidateEyeTreatments(); // prior incomplete pair never reached the runtime
     temporalFrameEyes=0;std::memset(frameTangentShift,0,sizeof(frameTangentShift));
     frameWithheld=false;frameDecisionReady=false;
@@ -791,6 +794,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else {
         submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
         submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
+        submitSample.featureEpoch=featureChanges;
+        submitSample.producerDispatchMs=transferWall.producerDispatch;
+        submitSample.producerAcquireMs=transferWall.producerAcquire;
+        submitSample.producerFlushMs=transferWall.producerFlush;
+        submitSample.consumerAcquireMs=transferWall.consumerAcquire;
+        submitSample.consumerFlushMs=transferWall.consumerFlush;
+        submitSample.endFrameMs=boundary.endFrameMs();
         if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
         timingRetire();
       }
@@ -942,6 +952,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     selected=treated?treated.Get():menuSource;
     selectedBounds=treated?treatedBounds:menuBounds?*menuBounds:fullBounds;
     menuTreated=treated!=nullptr;
+    submitSample.treatments[unsigned(eye)]=(healed?1u:0u)|(temporalOutput?2u:0u)|
+      (sharpenOutput?4u:0u)|(menuTreated?8u:0u);
     return vr::VRCompositorError_None;
   }
   vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
@@ -995,15 +1007,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
     if(r!=vr::VRCompositorError_None)return r;
     const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
+    D3D11_TEXTURE2D_DESC outputDesc{};treated->GetDesc(&outputDesc);
+    submitSample.outputWidth[unsigned(eye)]=outputDesc.Width;
+    submitSample.outputHeight[unsigned(eye)]=outputDesc.Height;
     const auto* selected=&processed;const auto* region=&treatedBounds;
-    // Menu output is AddRef'd and remains stable until this synchronous private
-    // capture completes. Shared capture runs on the XR owner and schedules its
-    // own producer copy; it must never be nested in the menu callback.
+    // The selected output stays stable until its producer snapshot completes.
+    // Shared capture publishes an EDVR-owned slot now and consumes it only at
+    // pair composition. It must never be nested in the treatment callback.
     LARGE_INTEGER transferBegan{},transferEnded{}; const auto transferClock=QueryPerformanceCounter(&transferBegan);
     if(separateGraphics()) {
       pollDeviceTiming();
       r=captured.capture(eye,selected,region,flags,true,
-        timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr);
+        nullptr,true,submitStats.full()?nullptr:&transferWall);
     }
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
@@ -1026,12 +1041,42 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       sizes[1].recommendedImageRectWidth,sizes[1].recommendedImageRectHeight,
       submitStats.meanCallbacks(),(unsigned long long)(captured.shaderViewsCreated()+previousPair.shaderViewsCreated()),
       wall.p50,wall.p95,wall.p99,dispatch.p50,dispatch.p95,dispatch.p99,work.p50,work.p95,work.p99);
+    char phases[2048]{};size_t used=0;
+    const auto phase=[&](const char* name,double SubmissionStats::Sample::*field){
+      const auto d=submitStats.distribution(field);
+      if(used>=sizeof(phases))return;
+      const int n=std::snprintf(phases+used,sizeof(phases)-used,",%s=%.4f/%.4f/%.4f",name,d.p50,d.p95,d.p99);
+      if(n>0)used+=(std::min)(size_t(n),sizeof(phases)-used);
+    };
+    phase("producer_dispatch",&SubmissionStats::Sample::producerDispatchMs);
+    phase("producer_acquire",&SubmissionStats::Sample::producerAcquireMs);
+    phase("producer_flush",&SubmissionStats::Sample::producerFlushMs);
+    phase("consumer_acquire",&SubmissionStats::Sample::consumerAcquireMs);
+    phase("consumer_flush",&SubmissionStats::Sample::consumerFlushMs);
+    phase("receive",&SubmissionStats::Sample::receiveMs);
+    phase("xr_acquire",&SubmissionStats::Sample::xrAcquireMs);
+    phase("xr_wait",&SubmissionStats::Sample::xrWaitMs);
+    phase("xr_draw_submit",&SubmissionStats::Sample::xrDrawMs);
+    phase("xr_release",&SubmissionStats::Sample::xrReleaseMs);
+    phase("xr_end_frame",&SubmissionStats::Sample::endFrameMs);
+    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,separate=%u%s,percentiles=50/95/99,units=wall_ms,nested=1,gpu=0\n",
+      (unsigned long long)submitStats.window(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
+      last.outputWidth[0],last.outputHeight[0],last.outputWidth[1],last.outputHeight[1],last.treatments[0],last.treatments[1],
+      (unsigned long long)last.featureEpoch,unsigned(cullGuard.stage()),cullGuard.factorWidth(),cullGuard.factorHeight(),unsigned(separateGraphics()),phases);
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
     LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
     auto* observer=timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr;
+    if(!frameWithheld&&separateGraphics()) {
+      SubmissionWallScope measured(submitStats.full()?nullptr:&submitSample.receiveMs);
+      if(captured.completePending(observer,submitStats.full()?nullptr:&transferWall)!=S_OK)
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    StereoWallTimes wall{};
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer);
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall);
+    submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
+    submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
     if(composeClock&&composeClockEnd) timingFrame.composeMs=elapsedMs(composeBegan,composeEnded);
     if(r==XR_SUCCESS)++composedPairs;
@@ -1451,7 +1496,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     refreshHiddenMasks("session_created");
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
     if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes,
-        separateGraphics()?nullptr:graphicsProxy,separateGraphics()?nullptr:&graphicsCalls))) return false;
+        separateGraphics()?nullptr:graphicsProxy,separateGraphics()?nullptr:&graphicsCalls,separateGraphics()))) return false;
+    nativeTracePrintf("native_submit_path,deferred_consumer=%u,direct_scene=%u,timing_markers=after_submit\n",
+      unsigned(separateGraphics()),unsigned(separateGraphics()));
     bool capturesReady=false;
     if(separateGraphics()) {
       capturesReady=captured.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK&&

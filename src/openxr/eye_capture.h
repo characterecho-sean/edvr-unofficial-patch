@@ -4,6 +4,7 @@
 #include <memory>
 #include <thread>
 #include <wrl/client.h>
+#include "submission_measurement.h"
 #include "../openvr/compat/openvr_v0_9_20.h"
 
 namespace edvr::openxr { class ImmediateExecutor; class SharedTextureTransfer; struct GpuWorkObserver; }
@@ -37,7 +38,15 @@ class EyeCapture final {
                                  const vr::VRTextureBounds_t* bounds = nullptr,
                                  vr::EVRSubmitFlags flags = vr::Submit_Default,
                                  bool copyPixels = true,
-                                 GpuWorkObserver* observer = nullptr);
+                                 GpuWorkObserver* observer = nullptr,
+                                 bool deferConsumer = false,
+                                 TransferWallTimes* times = nullptr);
+  // Deferred shared captures have no readable texture until this owner-only
+  // operation succeeds. It never calls the producer. reset discards their
+  // metadata; transfer retirement still drains any outstanding handoff.
+  HRESULT completePending(GpuWorkObserver* observer = nullptr,
+                          TransferWallTimes* times = nullptr);
+  bool hasPending() const;
 
   // Borrowed pointers: pixels remain immutable until reset, shutdown, or the
   // next capture of the same eye. The owner supplies once-per-frame ordering;
@@ -57,13 +66,15 @@ class EyeCapture final {
   vr::EVRCompositorError captureShared(vr::EVREye eye, const vr::Texture_t* texture,
                                        const vr::VRTextureBounds_t* bounds,
                                        vr::EVRSubmitFlags flags, bool copyPixels,
-                                       GpuWorkObserver* observer);
+                                       GpuWorkObserver* observer, bool deferConsumer,
+                                       TransferWallTimes* times);
   struct Eye {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
     mutable Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shaderViews[2];
     vr::VRTextureBounds_t bounds{0.f, 0.f, 1.f, 1.f};
     vr::EColorSpace colorSpace = vr::ColorSpace_Auto;
     bool captured = false;
+    bool pending = false;
   } eyes_[2];
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;

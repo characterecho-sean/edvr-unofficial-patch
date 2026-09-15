@@ -632,6 +632,7 @@ int selfTest() {
   edvr::openxr::test::runLaunchCentreCases(check);
   edvr::openxr::test::runFeatureHostCases(check);
   edvr::openxr::test::runTreatmentCases(check);
+  edvr::openxr::test::runDeferredTreatmentCases(check);
   edvr::openxr::test::runSubmissionStatsCases(check);
   edvr::openxr::test::runFrequencyCases(check);
   edvr::openxr::test::runVisibilityCases(check);
