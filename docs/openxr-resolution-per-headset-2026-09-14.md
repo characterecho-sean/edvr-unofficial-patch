@@ -2,11 +2,13 @@
 
 ## Status
 
-- **Current fix (2026-09-15):** Pimax HMD Quality 0.5's DLSS dropout is fixed
-  by even widened recommendations. Desktop NGX and full build passed;
-  installed for retest. See "Half-quality DLSS rejection" at the end.
+- **Current fix (2026-09-15):** Widened-only alignment missed the menu's odd
+  output height. Initial and live game-facing recommendations now align both
+  axes, including inactive guard states. Full build and desktop checks pass;
+  installed/verified on both installs. Headset retest pending; see
+  "Startup/menu odd-height recurrence" at the end.
 
-- **State:** Revision 3, DECIDED and BUILT (ab48589 on native runtime
+- **Original sizing plan:** Revision 3, DECIDED and BUILT (ab48589 on native runtime
   d160499; every gate green incl. 205 native_render_settings_test checks)
   but NOT YET FLOWN. `openxr_render_scale` renamed `openxr_resolution`;
   the unit changes from percent/fraction to per-eye width in pixels,
@@ -34,15 +36,11 @@
     (checker, audit, installer merge, menu, dotted-key split).
   - A wildcard entry for unlisted headsets: reintroduces the
     cross-headset hazard the design exists to remove.
-- **Next flight:** Desk pass first (re-read both live `edvr.ini` files +
-  mirrors via explicit UTF-8 decode; build; install `--verify-only`; run
-  the unpaired native diagnostic per runtime to record `runtime,`,
-  `system,vendor=`, `headset_key,` and `size,...,max=` lines -- system
-  names and PiOpenXR's bytes are unrecorded today). Then Flight 1 (Quest
-  3, Air Link then Virtual Desktop): confirm the 100% fallback, set a
-  width from F8, confirm no 5530x5875-style blowup, watch for a
-  shutdown/startup re-init pair. Then Flight 2 (Pimax/SteamVR, both
-  installs) and optional Flight 2b (Steam Link). See "Retest plan".
+- **Next flight:** Pimax OpenXR, current Frontier settings, HMD quality 0.5.
+  Check DLSS at startup/menu and in the cockpit, monitor padding, and normal
+  exit. Verify the installed build first, then require explicit DLSS feature
+  creation and no render-range rejection. The earlier cross-runtime plan is
+  retained under "Retest plan".
 - **Environment:** Native OpenXR host only (SteamVR/OpenComposite never
   call this query). Runtimes on record: Oculus 1.207.0, SteamVR/OpenXR
   2.17.9, VirtualDesktopXR 1.0.10, PiOpenXR (bytes unconfirmed). Two
@@ -2240,3 +2238,53 @@ checks and 77 native overlay checks, archived in
 preserving settings. Retest HMD Quality 0.5 and the smaller single-line
 monitor in the next Pimax flight. Expected evidence is DLSS feature creation
 for 2429x2008 to 4858x4016, no render-range rejection, and normal exit.
+
+## Startup/menu odd-height recurrence (2026-09-15)
+
+Ruled out: aligning only widened cull-guard recommendations is sufficient,
+because the next verified Frontier run used `cull=0` and rejected
+1982x1956 input for 3964x3913 output before any widening. The earlier fix
+qualified its widened case but left startup, Off, WaitingScene and Inert
+recommendations unchanged.
+
+Evidence: `edvr_gfx_20260915_102357.log` matches installed build
+`v0.16.2-142-g11722af-dirty`. At 10:24:02.526 it explicitly reports the
+DLSS render-range rejection. The accompanying OpenXR log reports Pimax
+OpenXR, Crystal Super, 90 Hz, runtime base 4068x4016, and selected XR targets
+3964x3913 (scale 0.974435). The native frame line reports `cull=0`. Matching
+depth is found at 10:24:02.545, but TAA continues. Exit completes normally.
+
+The generic `native temporal: engaged mode=dlss` and benchmark `aa=dlss`
+labels describe the configured mode, not successful NGX evaluation. Use the
+explicit `dlss: the feature is created` and rejection lines to judge this
+failure; those timing windows are not evidence of DLSS rendering cost.
+
+The RTX 5090 desktop NGX probe confirms minimum input 1982x1957 for both
+3964x3913 and 3964x3914 outputs. Actual feature creation and evaluation for
+1982x1957 to 3964x3914 with Performance/preset K both succeed (`0x1`). Odd
+width and height together, 3965x3913, require 1983x1957; 3966x3914 accepts
+that same input. Results are in `build/ngx_optimal_probe_3964.txt`, using
+pinned NGX 310.7.0.
+
+The revised policy aligns both axes of every game-facing recommendation,
+including the initial query before a valid pose and every inactive guard
+state. `SystemPublication` normalizes both bootstrap metadata and later
+recommendations. The host gives the game and temporal provider the same
+normalized `gameGeometry`, even without a feature provider. Raw runtime
+swapchain sizes, field of view and canonical crop math stay separate.
+
+Qualification: the absolute-path full build and all gates passed in
+`build/frontier-lod-callers-20260915/attempt-16`. The cull fixture passes 58
+checks, including every guard state, the failed odd menu height, odd widths,
+unchanged even sizes, and the 16384 boundary. The system fixture passes 205
+checks, including the actual OpenVR query before tracking, both eye maxima,
+atomic rejection of invalid size pairs, and retention through tracking loss
+and recenter. The separate NGX creation/evaluation probe above uses the same
+310.7.0 DLL shipped in this build.
+
+Build `v0.16.2-144-ge2a11e7-dirty` was installed into Frontier and Steam with
+the sanctioned installer, then verified against the qualified source and
+binary hashes. Both user INIs were preserved. Installation records are in
+the same attempt directory. The next flight should retain HMD quality 0.5
+and confirm DLSS feature creation for 1982x1957 to 3964x3914 at the current
+menu setting, no render-range rejection, normal cockpit rendering and exit.

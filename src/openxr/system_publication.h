@@ -1,5 +1,6 @@
 #pragma once
 #include "system_source.h"
+#include "game_render_size.h"
 #include <cmath>
 #include <mutex>
 
@@ -14,6 +15,13 @@ class SystemPublication {
     metadata.generation=++generation_;metadata.geometry={};metadata.geometryValid=false;
     metadata.optics={};metadata.opticsValid=false;
     metadata.hiddenMasks.reset();metadata.hiddenMasksCompatible=true;
+    // The game may query this metadata before any valid pose is available.
+    // Normalize here as well as on live updates so startup cannot cache an
+    // odd size while temporal rendering later uses an even output target.
+    for(unsigned eye=0;eye<2;++eye) {
+      metadata.recommendedWidth[eye]=gameFacingDimension(metadata.recommendedWidth[eye]);
+      metadata.recommendedHeight[eye]=gameFacingDimension(metadata.recommendedHeight[eye]);
+    }
     metadata.tangentShift[0][0]=metadata.tangentShift[0][1]=0.0f;
     metadata.tangentShift[1][0]=metadata.tangentShift[1][1]=0.0f;
     state_=metadata;sequence_=0;active_=true;return generation_;
@@ -88,7 +96,8 @@ class SystemPublication {
       if (!width[eye] || !height[eye] || width[eye]>16384 || height[eye]>16384) return;
     }
     for (unsigned eye=0; eye<2; ++eye) {
-      state_.recommendedWidth[eye]=width[eye];state_.recommendedHeight[eye]=height[eye];
+      state_.recommendedWidth[eye]=gameFacingDimension(width[eye]);
+      state_.recommendedHeight[eye]=gameFacingDimension(height[eye]);
     }
   }
  private:

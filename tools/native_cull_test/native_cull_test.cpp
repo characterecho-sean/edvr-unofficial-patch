@@ -46,6 +46,26 @@ int main(int argc,char** argv) {
   CHECK(odd0.width==4858 && odd0.width/2==2429 && odd0.height==4016 && odd0.height/2==2008);
   CHECK((odd0.width&1u)==0u && (odd0.height&1u)==0u);
   CHECK((odd1.width&1u)==0u && (odd1.height&1u)==0u);
+  oddGuard.noteSubmittedSize(0,odd0.width,odd0.height);oddGuard.noteSubmittedSize(1,odd1.width,odd1.height);
+  CHECK(oddGuard.beginFrame(odd,pimax,oddDims,true,1)==NativeCullStage::Adopting);
+  oddGuard.noteSubmittedSize(0,odd0.width*2,odd0.height*2);oddGuard.noteSubmittedSize(1,odd1.width*2,odd1.height*2);
+  CHECK(oddGuard.beginFrame(odd,pimax,oddDims,true,1)==NativeCullStage::Live);
+  CHECK(oddGuard.recommended(0).width==4858 && oddGuard.recommended(0).height==4016);
+  // The next flight failed before widening: 3964x3913 became 1982x1956.
+  // Waiting/off paths must also give NGX an exact half of an even target.
+  NativeCullDimensions menuDims[2]{{3964,3913},{3965,3913}};
+  NativeCullSettings waitingSettings=odd;
+  NativeCullGuard waitingGuard;
+  CHECK(waitingGuard.beginFrame(waitingSettings,pimax,menuDims,false,1)==NativeCullStage::WaitingScene);
+  CHECK(waitingGuard.recommended(0).width==3964 && waitingGuard.recommended(0).height==3914);
+  CHECK(waitingGuard.recommended(1).width==3966 && waitingGuard.recommended(1).height==3914);
+  NativeCullSettings offSettings{};
+  NativeCullGuard offGuard;
+  CHECK(offGuard.beginFrame(offSettings,pimax,menuDims,true,1)==NativeCullStage::Off);
+  CHECK(offGuard.recommended(0).width==3964 && offGuard.recommended(0).height==3914);
+  CHECK(offGuard.recommended(1).width/2==1983 && offGuard.recommended(1).height/2==1957);
+  CHECK(offGuard.recommended(2).width==0 && offGuard.recommended(2).height==0);
+  CHECK(menuDims[0].height==3913 && menuDims[1].width==3965);
   NativeCullSettings evenSettings{}; evenSettings.mode=NativeCullMode::Percent; evenSettings.percent=20;
   NativeCullDimensions evenDims[2]{{4000,3000},{4000,3000}};
   NativeCullGuard evenGuard;
@@ -55,9 +75,15 @@ int main(int argc,char** argv) {
   NativeCullGuard verticalGuard;
   CHECK(verticalGuard.beginFrame(evenSettings,fs,verticalDims,true,1)==NativeCullStage::Adopting);
   CHECK(verticalGuard.recommended(0).height==4802 && verticalGuard.recommended(0).height/2==2401);
+  CHECK(gameFacingDimension(4800)==4800 && gameFacingDimension(4801)==4802);
+  CHECK(gameFacingDimension(16383)==16384 && gameFacingDimension(16384)==16384 && gameFacingDimension(0)==0);
+  CHECK(gameFacingDimension(16385)==0 && gameFacingDimension(UINT32_MAX)==0);
 
   NativeCullSettings bad=s; bad.signatureCount=1; bad.signatures[0]={999,999};
   NativeCullGuard gated; CHECK(gated.beginFrame(bad,fs,ds,true,1)==NativeCullStage::Inert);
+  NativeCullDimensions oddInert[2]{{4857,3913},{4857,3913}}; NativeCullGuard oddInertGuard;
+  CHECK(oddInertGuard.beginFrame(bad,pimax,oddInert,true,1)==NativeCullStage::Inert);
+  CHECK(oddInertGuard.recommended(0).width==4858 && oddInertGuard.recommended(0).height==3914);
   bad.signatures[0]={95,84}; NativeCullGuard allowed; CHECK(allowed.beginFrame(bad,fs,ds,true,1)==NativeCullStage::Adopting);
   NativeCullSettings pct{}; pct.mode=NativeCullMode::Percent; pct.percent=10;
   NativeCullGuard pg; CHECK(pg.beginFrame(pct,fs,ds,true,1)==NativeCullStage::Adopting);
@@ -88,7 +114,7 @@ int main(int argc,char** argv) {
   NativeCullDimensions tooWide[2]{{16384,16384},{16384,16384}};NativeCullGuard dimensions;
   CHECK(dimensions.beginFrame(pct,fs,tooWide,true,1)==NativeCullStage::Inert&&dimensions.recommended(0).width==16384);
   NativeCullDimensions oddCap[2]{{16383,16000},{16383,16000}};NativeCullGuard cappedOdd;
-  CHECK(cappedOdd.beginFrame(pct,fs,oddCap,true,1)==NativeCullStage::Inert&&cappedOdd.recommended(0).width==16383);
+  CHECK(cappedOdd.beginFrame(pct,fs,oddCap,true,1)==NativeCullStage::Inert&&cappedOdd.recommended(0).width==16384);
   NativeCullFrustum equal[2]{{-1,1,-1,1},{-1,1,-1,1}};NativeCullGuard noMargin;
   CHECK(noMargin.beginFrame(s,equal,ds,true,1)==NativeCullStage::Inert);
   CHECK(noMargin.beginFrame(s,equal,ds,true,1)==NativeCullStage::Inert&&!noMargin.changed());

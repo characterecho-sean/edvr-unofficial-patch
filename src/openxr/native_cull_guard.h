@@ -1,4 +1,5 @@
 #pragma once
+#include "game_render_size.h"
 
 #include <array>
 #include <cmath>
@@ -25,6 +26,14 @@ struct NativeCullSettings {
 struct NativeCullFrustum { float left=0, right=0, down=0, up=0; };
 struct NativeCullDimensions { uint32_t width=0, height=0; };
 struct NativeCullBounds { float left=0, top=0, right=1, bottom=1; };
+
+// Elite applies its HMD quality multiplier with integer truncation. Keep the
+// game-facing recommendation even on both axes so quality 0.5 cannot lose a
+// pixel from an odd runtime or widened size. The XR swapchain dimensions stay
+// in the host's raw `sizes` records; this helper is only for game geometry.
+inline NativeCullDimensions gameFacingDimensions(NativeCullDimensions v) noexcept {
+  return {gameFacingDimension(v.width), gameFacingDimension(v.height)};
+}
 
 // Owner-thread policy. It does no OpenXR, graphics, or configuration I/O.
 class NativeCullGuard final {
@@ -97,7 +106,8 @@ class NativeCullGuard final {
   bool changed() const noexcept { return changed_; }
   NativeCullDimensions recommended(unsigned eye) const noexcept {
     if (eye >= 2) return {};
-    if (stage_ != NativeCullStage::Adopting && stage_ != NativeCullStage::Live) return runtime_[eye];
+    if (stage_ != NativeCullStage::Adopting && stage_ != NativeCullStage::Live)
+      return gameFacingDimensions(runtime_[eye]);
     return {roundRecommendedDim(float(runtime_[eye].width)*maxFactorW_),
             roundRecommendedDim(float(runtime_[eye].height)*maxFactorH_)};
   }
@@ -125,9 +135,7 @@ class NativeCullGuard final {
   // canonical crop retain their existing dimensions and rounding.
   static uint32_t roundRecommendedDim(float v) noexcept {
     if (!(v > 0.0f) || !std::isfinite(v) || v > 16384.0f) return 0;
-    uint32_t rounded = static_cast<uint32_t>(std::lround(v));
-    if (rounded & 1u) ++rounded;
-    return rounded <= 16384u ? rounded : 0u;
+    return gameFacingDimension(static_cast<uint32_t>(std::lround(v)));
   }
   static bool finiteFrustum(const NativeCullFrustum& f) noexcept {
     return std::isfinite(f.left)&&std::isfinite(f.right)&&std::isfinite(f.down)&&std::isfinite(f.up)&&

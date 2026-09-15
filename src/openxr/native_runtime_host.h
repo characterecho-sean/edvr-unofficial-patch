@@ -685,6 +685,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometrySnapshot temporalGeometry{};
     const bool locatedValid=makeGeometrySnapshot(located,temporalGeometry);
     auto gameGeometry=located;
+    // This is the geometry exposed to Elite and the temporal provider. Keep
+    // runtime `located` dimensions raw for XR/cull accounting, but make every
+    // game-facing path even so Elite's quality multiplier cannot truncate an
+    // odd width or height below NGX's legal input range.
+    for(unsigned eye=0;eye<2;++eye) {
+      const auto dims=gameFacingDimensions({located.width[eye],located.height[eye]});
+      gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
+    }
     if(features.acquired()) {
       EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_1};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
@@ -727,9 +735,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           gameGeometry.views[e].fov={std::atan(raw.left),std::atan(raw.right),std::atan(raw.up),std::atan(raw.down)};
           gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
         }
-        geometry.recommend(gameGeometry.width,gameGeometry.height);
       }
     }
+    if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
     for(unsigned eye=0;eye<2;++eye) {
       const auto& fov=gameGeometry.views[eye].fov;
       timingFrame.gameFov[eye][0]=fov.angleLeft;

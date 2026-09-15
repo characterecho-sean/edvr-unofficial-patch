@@ -333,8 +333,70 @@ void publicationTest() {
   check(reads==20000&&!torn,"metadata and geometry stay coherent during concurrent publication");
 }
 
+void oddRecommendationTest() {
+  using namespace edvr::openxr;
+  SystemPublication publication;
+  SystemRead metadata{}; metadata.connected = true;
+  metadata.recommendedWidth[0] = 3964; metadata.recommendedWidth[1] = 3965;
+  metadata.recommendedHeight[0] = metadata.recommendedHeight[1] = 3913;
+  const uint64_t generation = publication.begin(metadata);
+  check(generation != 0 && metadata.recommendedWidth[0] == 3964 && metadata.recommendedWidth[1] == 3965 &&
+        metadata.recommendedHeight[0] == 3913 && metadata.recommendedHeight[1] == 3913,
+        "odd bootstrap metadata remains unchanged at the caller");
+  auto read = publication.read();
+  check(read.recommendedWidth[0] == 3964 && read.recommendedWidth[1] == 3966 &&
+        read.recommendedHeight[0] == 3914 && read.recommendedHeight[1] == 3914,
+        "odd bootstrap recommendations are normalized per eye");
+
+  FakeSource source; source.state = read;
+  OpenVRSystem system(source);
+  uint32_t width = 0, height = 0;
+  system.GetRecommendedRenderTargetSize(&width, &height);
+  check(width == 3966 && height == 3914 && !source.state.geometryValid,
+        "OpenVR size query returns even bootstrap maxima before geometry");
+
+  const uint32_t replacementWidth[2] = {4111, 4223};
+  const uint32_t replacementHeight[2] = {3001, 3003};
+  publication.recommend(replacementWidth, replacementHeight);
+  read = publication.read();
+  check(read.recommendedWidth[0] == 4112 && read.recommendedWidth[1] == 4224 &&
+        read.recommendedHeight[0] == 3002 && read.recommendedHeight[1] == 3004,
+        "recommend aligns every eye dimension to even");
+  const auto beforeInvalid = read;
+  const uint32_t badWidth[2] = {5001, 0};
+  const uint32_t badHeight[2] = {3001, 3001};
+  publication.recommend(badWidth, badHeight);
+  read = publication.read();
+  check(read.recommendedWidth[0] == beforeInvalid.recommendedWidth[0] &&
+        read.recommendedWidth[1] == beforeInvalid.recommendedWidth[1] &&
+        read.recommendedHeight[0] == beforeInvalid.recommendedHeight[0] &&
+        read.recommendedHeight[1] == beforeInvalid.recommendedHeight[1],
+        "invalid recommendation leaves all eyes unchanged");
+
+  check(publication.publish(geometry(generation, 1), true, true), "valid tracking accepts geometry with even recommendations");
+  auto invalid = geometry(generation, 2); invalid.headFlags = 0;
+  check(!publication.publish(invalid, true, false), "invalid tracking rejects geometry");
+  source.state = publication.read();
+  system.GetRecommendedRenderTargetSize(&width, &height);
+  check(width == 4224 && height == 3004 && !source.state.geometryValid,
+        "invalid tracking retains even recommendations");
+  publication.invalidate(generation);
+  source.state = publication.read();
+  system.GetRecommendedRenderTargetSize(&width, &height);
+  check(width == 4224 && height == 3004 && !source.state.geometryValid,
+        "recenter invalidation retains even recommendations");
+
+  publication.retire(generation);
+  source.state = publication.read();
+  width = height = 0xdeadbeef;
+  system.GetRecommendedRenderTargetSize(&width, &height);
+  check(width == 0 && height == 0 && !source.state.recommendedWidth[0] &&
+        !source.state.recommendedHeight[0], "retirement clears recommendations");
+}
+
 int selfTest() {
   publicationTest();
+  oddRecommendationTest();
   capabilityTests();
   FakeSource source;
   edvr::openxr::OpenVRSystem concrete(source);
