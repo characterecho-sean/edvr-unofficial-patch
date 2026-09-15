@@ -2,9 +2,10 @@
 
 ## Status
 
-- **State (2026-09-15):** Implemented and reviewed; full build and all gates
-  passed. Matching binaries are installed and verified in Steam and Frontier,
-  with user INIs unchanged. Qualification details are below.
+- **State (2026-09-15):** Timing, single-line monitor and Pimax half-quality
+  sizing corrections are reviewed; full build and all gates passed. Matching
+  binaries are installed and verified in Steam and Frontier, with user INIs
+  unchanged. Qualification details are below.
 - **Open:** Headset validation and hardware scheduling calibration remain. CPU
   and GPU values measure elapsed rendering intervals, not exclusive busy time;
   metadata alone does not establish a matched scene benchmark.
@@ -87,6 +88,13 @@ vendor-neutral GPUView/WPR calibration when hardware scheduling attribution is
 needed; the benchmark itself does not claim that calibration has been done.
 
 ## Combined headset check
+
+For the Pimax follow-up, use the newer qualified build
+`v0.16.2-139-ga97759b-dirty` (archive `attempt-13` in the same directory
+below). It passed all gates and is installed in Steam and Frontier. The monitor
+uses a smaller single-line font; widened game dimensions are even so HMD
+Quality 0.5 stays inside the DLSS range. Repeat that quality setting alongside
+the checks below. The earlier timing qualification remains recorded.
 
 The absolute-path full build passed every gate. Qualification is archived in
 `build/frontier-lod-callers-20260915/attempt-12/`, including source and binary

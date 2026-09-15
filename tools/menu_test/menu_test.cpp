@@ -1371,15 +1371,15 @@ void testFooterTwoLines() {
 }
 
 void testPerformanceOverlayLayout() {
-    struct Case { const char* input; const char* first; const char* second; };
+    struct Case { const char* input; const char* line; };
     const Case cases[] = {
-        {"90 fps   gpu 13.3 ms   cpu 1.4 ms", "90 fps", "gpu 13.3 ms   cpu 1.4 ms"},
-        {"120 fps   gpu -- ms   cpu -- ms", "120 fps", "gpu -- ms   cpu -- ms"},
-        {"999 fps   gpu 999.9 ms   cpu 999.9 ms", "999 fps", "gpu 999.9 ms   cpu 999.9 ms"},
-        {"90 fps   gpu 9.5   cpu 3.1   12 dropped", "90 fps   12 dropped", "gpu 9.5   cpu 3.1"},
-        {"72 fps   submit gpu 13.9   thread 4.2   999 dropped", "72 fps   999 dropped", "submit gpu 13.9   thread 4.2"},
-        {"60 fps   16.7 ms   thread 4.1", "60 fps", "16.7 ms   thread 4.1"},
-        {"measuring", "measuring", ""},
+        {"90 fps   gpu 13.3 ms   cpu 1.4 ms", "90 fps   gpu 13.3 ms   cpu 1.4 ms"},
+        {"120 fps   gpu -- ms   cpu -- ms", "120 fps   gpu -- ms   cpu -- ms"},
+        {"999 fps   gpu 999.9 ms   cpu 999.9 ms", "999 fps   gpu 999.9 ms   cpu 999.9 ms"},
+        {"90 fps   gpu 9.5   cpu 3.1   12 dropped", "90 fps   gpu 9.5   cpu 3.1   12 dropped"},
+        {"999 fps   submit gpu 999.9   thread 999.9   999 dropped", "999 fps   submit gpu 999.9   thread 999.9   999 dropped"},
+        {"60 fps   16.7 ms   thread 4.1", "60 fps   16.7 ms   thread 4.1"},
+        {"measuring", "measuring"},
     };
     for (float textDegrees : {.6f, 1.1f, 3.f}) {
         int fixedWidth = 0, fixedHeight = 0;
@@ -1389,11 +1389,10 @@ void testPerformanceOverlayLayout() {
             float angle = 0.f;
             check(menuPanelBuildOverlayContent(c, test.input, textDegrees, &angle),
                   "overlay: production builder accepts each current metric state");
-            check(c.toast && c.lineCount == 2 && strcmp(c.lines[0].left, test.first) == 0 &&
-                  strcmp(c.lines[1].left, test.second) == 0,
-                  "overlay: every value/label survives the two-row layout");
-            float rows[4]{};
-            const int height = menuPanelLayoutHeightForTest(c, nullptr, nullptr, rows, 2);
+            check(c.toast && c.lineCount == 1 && strcmp(c.lines[0].left, test.line) == 0,
+                  "overlay: every value/label survives the single-row layout");
+            float rows[2]{};
+            const int height = menuPanelLayoutHeightForTest(c, nullptr, nullptr, rows, 1);
             check(c.widthPx >= 64 && c.widthPx <= 2600 && height >= 32 && height <= 2048 &&
                   c.cardPx == c.widthPx && angle > 0.f && angle < 90.f,
                   "overlay: supported text sizes fit the raster and forward view");
@@ -1407,7 +1406,10 @@ void testPerformanceOverlayLayout() {
 
             // Use the exact Row face and its measured line height. A width
             // check alone misses the old compact row's vertical clipping.
-            const int em = c.capPx * 10 / 7;
+            // Use the face selected by rasterise(), so this test checks the
+            // actual renderer font rather than repeating its default.
+            const int em = c.rowFontPx > 0 ? c.rowFontPx : c.capPx * 10 / 7;
+            check(em < c.capPx * 10 / 7, "overlay: displayed font is smaller than the ordinary menu face");
             LOGFONTW font{};
             font.lfHeight = -em; font.lfWeight = FW_NORMAL;
             font.lfQuality = ANTIALIASED_QUALITY; font.lfCharSet = DEFAULT_CHARSET;

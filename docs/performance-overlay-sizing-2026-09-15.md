@@ -2,12 +2,12 @@
 
 ## Status
 
-- **State (2026-09-15):** Implemented and reviewed; full build and all gates
-  passed. Matching binaries are installed and verified in Steam and Frontier.
+- **State (2026-09-15):** Single-row layout correction reviewed; full build and
+  all gates passed. Installed and verified in Steam and Frontier.
 - **Open:** Headset readability at different resolutions and text sizes.
 - **Ruled out:** Fixed panel width alone does not preserve apparent size;
   independent raster/font clamps change their ratio ("Evidence and scope").
-- **Next flight:** Check the two-row GPU/CPU card at low/high OpenXR
+- **Next flight:** Check the single-row GPU/CPU card at low/high OpenXR
   resolution, with AA off and usual DLSS, and through F8/toast transitions. Use
   the combined check in [the timing
   guide](native-render-benchmark-2026-09-15.md).
@@ -37,12 +37,19 @@ their existing layout. No configuration key is removed or renamed.
 
 ## Implementation
 
-The monitor uses a fixed reference font and GDI-measured card width. FPS and
-any existing dropped-frame count occupy the first row; the GPU and CPU fields
-occupy the second. Both rows remain allocated while samples are pending.
+The monitor uses a fixed reference font and GDI-measured card width. FPS, GPU,
+CPU, and any existing dropped-frame count occupy one measured row. The
+reference font is smaller so the complete readout fits without clipping.
 Representative maximum values reserve stable space, and the complete current
-strings are measured as well. Rows accommodate the font's measured line height,
-including descenders. An oversized field is rejected rather than truncated.
+string is measured as well. The row accommodates the font's measured line
+height, including descenders. An oversized field is rejected rather than
+truncated.
+
+The Pimax follow-up requested one line after testing the two-row version. The
+overlay now selects a 48-pixel Row face instead of the ordinary 60-pixel face
+at its fixed 42-pixel reference cap. Both GDI measurement and rasterisation use
+that selected face, making the text 20% smaller without tying its apparent size
+to eye resolution. Full menus and notification toasts keep their font.
 
 `menu.text_degrees` scales the angular mapping of this reference raster;
 changing the eye texture size has no effect on its layout. A text-size edit
@@ -55,11 +62,16 @@ toast.
 
 ## Desktop checks
 
-The targeted menu fixture passed its GDI width and line-height checks at
+The single-line menu fixture passed its GDI width and line-height checks at
 `menu.text_degrees` values 0.6, 1.1 and 3.0. Cases include valid native values,
 unavailable samples, startup, large values, legacy diagnostic labels and
-dropped counts. Ordinary digits and missing samples retain identical card
-dimensions.
+dropped counts on one line. Ordinary digits and missing samples retain
+identical card dimensions.
+
+The corrected raster is 1241x158 at all three text settings. Its card width is
+14.983 degrees at 0.6, 27.110 degrees at 1.1 and 66.660 degrees at 3.0. The
+single-line maximum includes the longest legacy labels and dropped count;
+startup and missing measurements reserve the same card size.
 
 The native menu fixture passed 77 checks, including real WARP composition at
 256x256, 512x512, 1024x512 and 512x1024 in asymmetric left/right frusta with a
@@ -68,7 +80,7 @@ pixels. A deliberately incorrect model width verifies that the compositor uses
 the live raster's geometry, and a pending overlay cannot display the previous
 settings raster. The targeted logs are `build/performance-overlay/tests-2.log`.
 The combined absolute-path full build passed every gate; its log and qualified
-source/binary hashes are in `build/frontier-lod-callers-20260915/attempt-12/`.
+source/binary hashes are in `build/frontier-lod-callers-20260915/attempt-13/`.
 
 ## Qualification plan
 

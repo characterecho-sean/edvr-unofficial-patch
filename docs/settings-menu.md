@@ -5,7 +5,7 @@
 *Updated 2026-09-15. Historical findings summarize the journal below; the
 current timing and overlay qualification is linked separately.*
 
-- **Current change:** The two-row overlay keeps its apparent size across
+- **Current change:** The smaller single-line overlay keeps its apparent size across
   OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
   desktop gates passed; headset checks remain in the
   [combined test guide](native-render-benchmark-2026-09-15.md).
@@ -874,7 +874,7 @@ the page says so by calling it clean.
 **The overlay** (`menu.fps_overlay`, off by default, and **a switch on
 the Performance page** since 2026-09-08 -- it is the one thing a player
 wants to turn on from inside the headset, and until then it was reachable
-only by editing the file): a two-row readout with frames per second over
+only by editing the file): a single-line readout with frames per second over
 the last second, then concise GPU and CPU labels averaged over 0.2 seconds.
 Native OpenXR uses application GPU segments and producer-thread CPU wall
 intervals, excluding known runtime and transfer waits. Missing measurements

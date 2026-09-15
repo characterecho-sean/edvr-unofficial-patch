@@ -2,9 +2,9 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-09-14 (revision 3) and
-2026-09-15 (the step-size decision). It restates the journal below and is
-not new evidence; update it whenever this doc changes.*
+- **Current fix (2026-09-15):** Pimax HMD Quality 0.5's DLSS dropout is fixed
+  by even widened recommendations. Desktop NGX and full build passed;
+  installed for retest. See "Half-quality DLSS rejection" at the end.
 
 - **State:** Revision 3, DECIDED and BUILT (ab48589 on native runtime
   d160499; every gate green incl. 205 native_render_settings_test checks)
@@ -2183,3 +2183,60 @@ revision are marked and kept for the record.
     `module_startup,...,result=124`; the 21:16 Steam log prints
     `module_startup,graphics_unavailable=80004002` and no `runtime,` line.
     All read for this revision.
+
+## Half-quality DLSS rejection (2026-09-15)
+
+The Frontier graphics log `edvr_gfx_20260915_094505.log` matches the installed
+qualified build `v0.16.2-135-gd0971fd-dirty`. Environment: Pimax OpenXR, Pimax
+Crystal Super, 90 Hz, native XR targets 4068x4016 per eye, DLSS 310.7.0 with
+preset K. The symmetric game field of view expands the game recommendation
+to 4857x4016 while the XR targets stay unchanged.
+
+At 09:46:49.399, HMD Quality 0.5 produces 2428x2008. The log explicitly rejects
+that input as outside every DLSS mode's range for a 4857x4016 output and runs
+the pass's own history instead. Earlier successful feature creations report a
+minimum of 2429x2008. The odd output width is halved downward by the game,
+leaving its real input one pixel below the runtime's reported minimum.
+
+Ruled out: changing HMD Quality switches the configured AA mode off, because
+the native settings remain `dlss` through the size change and the range
+rejection occurs before the later manual off/on/dlss cycle at 09:47:21-23.
+Ruled out: missing depth caused this rejection, because the explicit failure
+is the DLSS render-size range, and matching 2428x2008 depth is found at
+09:46:49.416 without restoring DLSS.
+
+The correction must keep the game recommendation and temporal output
+consistent with Elite's integer half-size input, without weakening NGX range
+checks or inventing pixels in the submitted texture. Desktop geometry and NGX
+checks must qualify the exact odd-width case before the next flight.
+
+`NativeCullGuard::recommended()` now aligns widened recommendations to even
+dimensions, within the existing 16384 texture limit. The native host uses
+that single result for the game's published recommendation and temporal AA's
+output target. Thus 4857x4016 becomes 4858x4016, and Elite's half-size input is
+2429x2008. The runtime swapchains and canonical crop calculations are
+unchanged; NGX range checks remain strict. This correction is scoped to the
+widened game targets that caused the failure, not the runtime's raw sizes
+when the cull guard is inactive.
+
+The regression fixture uses the flight's symmetric Pimax frusta to reproduce
+the old 4857 width and checks both corrected dimensions. It also covers
+asymmetric eyes, already-even output, odd height and texture-limit rejection.
+
+Desktop NGX qualification used the RTX 5090 and pinned DLSS 310.7.0. For
+Quality, Balanced and Performance, output 4857x4016 reports minimum
+2429x2008; 4858x4016 retains that minimum, while 4856x4016 permits 2428x2008.
+Ultra Performance instead reports its fixed 1619x1339 input. The exact
+corrected pair, 2429x2008 to 4858x4016 with Performance/preset K, passed real
+feature creation and evaluation (both NGX success `0x1`). The isolated
+desktop probe is archived in `build/ngx_optimal_probe_4858.txt`. This proves
+the corrected dimensions are accepted; visual headset quality remains the
+next flight's check.
+
+The absolute-path full build passed every gate, including 42 native cull
+checks and 77 native overlay checks, archived in
+`build/frontier-lod-callers-20260915/attempt-13/`. Qualified binaries stamped
+`v0.16.2-139-ga97759b-dirty` were installed and verified in Steam and Frontier,
+preserving settings. Retest HMD Quality 0.5 and the smaller single-line
+monitor in the next Pimax flight. Expected evidence is DLSS feature creation
+for 2429x2008 to 4858x4016, no render-range rejection, and normal exit.

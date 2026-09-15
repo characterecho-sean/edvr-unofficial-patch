@@ -31,6 +31,31 @@ int main(int argc,char** argv) {
   g.standDown(); CHECK(g.stage()==NativeCullStage::Live);
   CHECK(g.beginFrame(s,fs,ds,true,1)==NativeCullStage::Inert);
 
+  // The native cull recommendation is also the game's DLSS output size.
+  // Elite floors HMD Quality 0.5, so an odd widened width would turn
+  // 4857 into 2428 and miss NGX Performance's 2429 minimum. The game-facing
+  // recommendation rounds up to an even width while preserving the eye pair.
+  NativeCullSettings odd=s;
+  const float outer=std::tan(.99168f),inner=std::tan(.80133f),vertical=std::tan(.90179f);
+  NativeCullFrustum pimax[2]{{-outer,inner,-vertical,vertical},{-inner,outer,-vertical,vertical}};
+  NativeCullDimensions oddDims[2]{{4068,4016},{4067,4016}};
+  NativeCullGuard oddGuard;
+  CHECK(oddGuard.beginFrame(odd,pimax,oddDims,true,1)==NativeCullStage::Adopting);
+  const auto odd0=oddGuard.recommended(0), odd1=oddGuard.recommended(1);
+  CHECK(std::lround(4068.f*oddGuard.factorWidth())==4857);
+  CHECK(odd0.width==4858 && odd0.width/2==2429 && odd0.height==4016 && odd0.height/2==2008);
+  CHECK((odd0.width&1u)==0u && (odd0.height&1u)==0u);
+  CHECK((odd1.width&1u)==0u && (odd1.height&1u)==0u);
+  NativeCullSettings evenSettings{}; evenSettings.mode=NativeCullMode::Percent; evenSettings.percent=20;
+  NativeCullDimensions evenDims[2]{{4000,3000},{4000,3000}};
+  NativeCullGuard evenGuard;
+  CHECK(evenGuard.beginFrame(evenSettings,fs,evenDims,true,1)==NativeCullStage::Adopting);
+  CHECK(evenGuard.recommended(0).width==4800 && evenGuard.recommended(0).height==3600);
+  NativeCullDimensions verticalDims[2]{{4000,4001},{4000,4001}};
+  NativeCullGuard verticalGuard;
+  CHECK(verticalGuard.beginFrame(evenSettings,fs,verticalDims,true,1)==NativeCullStage::Adopting);
+  CHECK(verticalGuard.recommended(0).height==4802 && verticalGuard.recommended(0).height/2==2401);
+
   NativeCullSettings bad=s; bad.signatureCount=1; bad.signatures[0]={999,999};
   NativeCullGuard gated; CHECK(gated.beginFrame(bad,fs,ds,true,1)==NativeCullStage::Inert);
   bad.signatures[0]={95,84}; NativeCullGuard allowed; CHECK(allowed.beginFrame(bad,fs,ds,true,1)==NativeCullStage::Adopting);
@@ -62,6 +87,8 @@ int main(int argc,char** argv) {
   CHECK(bounded.beginFrame(excessive,fs,ds,true,1)==NativeCullStage::Off&&bounded.recommended(0).width==900);
   NativeCullDimensions tooWide[2]{{16384,16384},{16384,16384}};NativeCullGuard dimensions;
   CHECK(dimensions.beginFrame(pct,fs,tooWide,true,1)==NativeCullStage::Inert&&dimensions.recommended(0).width==16384);
+  NativeCullDimensions oddCap[2]{{16383,16000},{16383,16000}};NativeCullGuard cappedOdd;
+  CHECK(cappedOdd.beginFrame(pct,fs,oddCap,true,1)==NativeCullStage::Inert&&cappedOdd.recommended(0).width==16383);
   NativeCullFrustum equal[2]{{-1,1,-1,1},{-1,1,-1,1}};NativeCullGuard noMargin;
   CHECK(noMargin.beginFrame(s,equal,ds,true,1)==NativeCullStage::Inert);
   CHECK(noMargin.beginFrame(s,equal,ds,true,1)==NativeCullStage::Inert&&!noMargin.changed());

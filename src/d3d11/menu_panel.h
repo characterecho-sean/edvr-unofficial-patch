@@ -114,6 +114,9 @@ struct MenuContent {
     bool     tabMoreRight = false;
     MenuLine lines[kMenuMaxLines];
     int      lineCount = 0;
+    // Zero uses the ordinary Row face; overlay content supplies a smaller
+    // fixed reference face here so measurement and rasterisation match.
+    int      rowFontPx = 0;
     // Tiles are laid out ABOVE the lines, `tileColumns` across (4 when 0).
     MenuTile tiles[kMenuMaxTiles];
     int      tileCount = 0;
@@ -154,8 +157,9 @@ struct MenuContent {
 };
 
 // Build the floating performance readout from the line produced by
-// perfMonitorOverlayLine. The raster uses fixed reference typography, so its
-// pixel dimensions do not follow the current eye texture. The returned angle
+// perfMonitorOverlayLine. FPS, GPU, CPU, and any dropped-frame suffix stay on
+// one measured line. The raster uses fixed reference typography, so its pixel
+// dimensions do not follow the current eye texture. The returned angle
 // is the width of the card (and is also copied into `c.angularWidthDeg`) so
 // the caller can use the same geometry as the ready raster.
 bool menuPanelBuildOverlayContent(MenuContent& c, const char* line, float textDegrees,

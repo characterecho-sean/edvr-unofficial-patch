@@ -98,7 +98,8 @@ class NativeCullGuard final {
   NativeCullDimensions recommended(unsigned eye) const noexcept {
     if (eye >= 2) return {};
     if (stage_ != NativeCullStage::Adopting && stage_ != NativeCullStage::Live) return runtime_[eye];
-    return {roundDim(float(runtime_[eye].width)*maxFactorW_), roundDim(float(runtime_[eye].height)*maxFactorH_)};
+    return {roundRecommendedDim(float(runtime_[eye].width)*maxFactorW_),
+            roundRecommendedDim(float(runtime_[eye].height)*maxFactorH_)};
   }
   NativeCullFrustum gameFrustum(unsigned eye) const noexcept {
     return eye < 2 && stage_ == NativeCullStage::Live ? lied_[eye] : (eye < 2 ? true_[eye] : NativeCullFrustum{});
@@ -117,6 +118,17 @@ class NativeCullGuard final {
 
  private:
   static uint32_t roundDim(float v) noexcept { return v > 0 && std::isfinite(v) && v <= 16384.0f ? uint32_t(std::lround(v)) : 0; }
+  // Elite applies HMDRenderTargetMultiplier with integer truncation. An odd
+  // widened recommendation can therefore lose a pixel at quality 0.5
+  // (4857 -> 2428), falling below NGX's strict minimum (2429). This helper
+  // is used only for the game-facing recommendation; XR targets and the
+  // canonical crop retain their existing dimensions and rounding.
+  static uint32_t roundRecommendedDim(float v) noexcept {
+    if (!(v > 0.0f) || !std::isfinite(v) || v > 16384.0f) return 0;
+    uint32_t rounded = static_cast<uint32_t>(std::lround(v));
+    if (rounded & 1u) ++rounded;
+    return rounded <= 16384u ? rounded : 0u;
+  }
   static bool finiteFrustum(const NativeCullFrustum& f) noexcept {
     return std::isfinite(f.left)&&std::isfinite(f.right)&&std::isfinite(f.down)&&std::isfinite(f.up)&&
       f.left < f.right && f.down < f.up && f.left >= -20 && f.right <= 20 && f.down >= -20 && f.up <= 20;
@@ -161,8 +173,8 @@ class NativeCullGuard final {
     }
     maxFactorW_=std::max(factorW_[0],factorW_[1]);maxFactorH_=std::max(factorH_[0],factorH_[1]);
     return (maxFactorW_>=1.01f||maxFactorH_>=1.01f) &&
-      roundDim(float(runtime_[0].width)*maxFactorW_) && roundDim(float(runtime_[0].height)*maxFactorH_) &&
-      roundDim(float(runtime_[1].width)*maxFactorW_) && roundDim(float(runtime_[1].height)*maxFactorH_);
+      roundRecommendedDim(float(runtime_[0].width)*maxFactorW_) && roundRecommendedDim(float(runtime_[0].height)*maxFactorH_) &&
+      roundRecommendedDim(float(runtime_[1].width)*maxFactorW_) && roundRecommendedDim(float(runtime_[1].height)*maxFactorH_);
   }
   NativeCullSettings settings_{}; NativeCullFrustum true_[2]{},lied_[2]{}; NativeCullDimensions runtime_[2]{},baseline_[2]{},submitted_[2]{},adopted_[2]{};
   float factorW_[2]{1,1},factorH_[2]{1,1},maxFactorW_=1,maxFactorH_=1; uint64_t referenceGeneration_=0; uint32_t submittedMask_=0; NativeCullStage stage_=NativeCullStage::Off; bool baselineReady_=false,submittedReady_=false,adoptedReady_=false,forcedInert_=false,pendingStandDown_=false,changed_=false;
