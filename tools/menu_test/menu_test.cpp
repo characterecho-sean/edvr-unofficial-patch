@@ -1382,8 +1382,7 @@ void testPerformanceOverlayLayout() {
         {"measuring", "measuring"},
     };
     for (float textDegrees : {.6f, 1.1f, 3.f}) {
-        int fixedWidth = 0, fixedHeight = 0;
-        float fixedAngle = 0.f;
+        int fixedHeight = 0;
         for (const auto& test : cases) {
             MenuContent c{};
             float angle = 0.f;
@@ -1396,13 +1395,17 @@ void testPerformanceOverlayLayout() {
             check(c.widthPx >= 64 && c.widthPx <= 2600 && height >= 32 && height <= 2048 &&
                   c.cardPx == c.widthPx && angle > 0.f && angle < 90.f,
                   "overlay: supported text sizes fit the raster and forward view");
-            if (!fixedWidth) {
-                fixedWidth = c.widthPx; fixedHeight = height; fixedAngle = angle;
+            if (!fixedHeight) {
+                fixedHeight = height;
                 printf("  overlay geometry: text %.1f deg, raster %dx%d, cap %d, width %.3f deg\n",
-                       textDegrees, fixedWidth, fixedHeight, c.capPx, fixedAngle);
+                       textDegrees, c.widthPx, fixedHeight, c.capPx, angle);
             }
-            check(c.widthPx == fixedWidth && height == fixedHeight && angle == fixedAngle,
-                  "overlay: ordinary digits, missing samples and startup do not resize the card");
+            const int textWidth = menuPanelMeasureLine(c.lines[0].left, c.rowFontPx);
+            const int padding = c.capPx * 8 / 10;
+            check(textWidth > 0 && c.widthPx == textWidth + 2 * padding,
+                  "overlay: current text gets equal left and right padding");
+            check(height == fixedHeight,
+                  "overlay: one-row height stays stable as readings change");
 
             // Use the exact Row face and its measured line height. A width
             // check alone misses the old compact row's vertical clipping.

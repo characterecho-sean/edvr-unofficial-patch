@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State (2026-09-15):** Timing, single-line monitor and Pimax half-quality
-  sizing corrections are reviewed; full build and all gates passed. Matching
-  binaries are installed and verified in Steam and Frontier, with user INIs
-  unchanged. Qualification details are below.
+- **State (2026-09-15):** Timing, fitted single-line monitor and Pimax
+  half-quality sizing corrections are reviewed; full build and all gates
+  passed. Matching binaries are installed and verified in Steam and Frontier,
+  with user INIs unchanged. Qualification details are below.
 - **Open:** Headset validation and hardware scheduling calibration remain. CPU
   and GPU values measure elapsed rendering intervals, not exclusive busy time;
   metadata alone does not establish a matched scene benchmark.
@@ -88,6 +88,11 @@ vendor-neutral GPUView/WPR calibration when hardware scheduling attribution is
 needed; the benchmark itself does not claim that calibration has been done.
 
 ## Combined headset check
+
+The latest monitor-padding build is `v0.16.2-142-g11722af-dirty`, qualified in
+`build/frontier-lod-callers-20260915/attempt-15/` and installed in both Steam
+and Frontier. Its background fits the current text with equal side padding. Use
+this build for further checks; earlier qualifications follow.
 
 For the Pimax follow-up, use the newer qualified build
 `v0.16.2-139-ga97759b-dirty` (archive `attempt-13` in the same directory

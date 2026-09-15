@@ -405,6 +405,12 @@ including the double-wide and flipped bounds) and by `tools/smoke`,
 which runs the pass on a real device against a double-wide source and
 asserts no bleed across the seam.
 
+**Corrected 2026-09-15.** The compositor hook's fallback string for
+`experimental.supersample_resolve` — the value used only when the ini
+lacks the key — was found still saying `auto`, missed by 6d22901, and
+was corrected to `off` in `src/openvr/compositor_hook.cpp`. Changes
+nothing on an install whose ini already carries the key.
+
 What the log says, and which Phase 0 item each line answers:
 
 - `supersample resolve: engaged -- each eye arrives at WxH against the

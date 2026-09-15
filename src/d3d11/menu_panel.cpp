@@ -1695,31 +1695,16 @@ bool menuPanelBuildOverlayContent(MenuContent& c, const char* line, float textDe
     c.lines[0].style = kMenuInfo;
     c.lines[0].badge = kBadgeNone;
 
-    // Reserve the actual supplied strings and stable maxima. The latter keep
-    // ordinary digit changes from resizing the panel, while the former make
-    // the no-ellipsis guarantee apply to every current metric/fallback line.
-    const char* stable[] = {
-        "999 fps   gpu 999.9 ms   cpu 999.9 ms",
-        "999 fps   submit gpu 999.9   thread 999.9",
-        "999 fps   gpu -- ms   cpu -- ms",
-        "999 fps   submit gpu --   thread --",
-        "999 fps   gpu 999.9 ms   cpu 999.9 ms   999 dropped",
-        "999 fps   submit gpu 999.9   thread 999.9   999 dropped",
-        "measuring",
-    };
-    int maxText = 0;
-    auto measure = [&](const std::string& s) {
-        const int w = menuPanelMeasureLine(s.c_str(), em);
-        if (w > maxText) maxText = w;
-    };
-    measure(first);
-    for (const char* s : stable) measure(s);
-    if (maxText <= 0) return false;
+    // Size to the complete current line. Keeping a stable maximum here made
+    // ordinary readings carry the width of a worst-case legacy suffix, which
+    // left excessive empty space to the right of the text.
+    const int textWidth = menuPanelMeasureLine(first.c_str(), em);
+    if (textWidth <= 0) return false;
 
     // A normal monitor line is well below this bound. If a future producer
     // adds an unusually long field, reject the content rather than allowing
     // DT_END_ELLIPSIS (or a fixed buffer) to hide part of a metric.
-    int card = maxText + 2 * pad;
+    int card = textWidth + 2 * pad;
     if (card < 64) card = 64;
     if (card > 2600) return false;
     c.cardPx = c.widthPx = card;

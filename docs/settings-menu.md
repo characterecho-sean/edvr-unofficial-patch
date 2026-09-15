@@ -5,7 +5,7 @@
 *Updated 2026-09-15. Historical findings summarize the journal below; the
 current timing and overlay qualification is linked separately.*
 
-- **Current change:** The smaller single-line overlay keeps its apparent size across
+- **Current change:** The smaller single-line overlay fits its displayed text and keeps its font size across
   OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
   desktop gates passed; headset checks remain in the
   [combined test guide](native-render-benchmark-2026-09-15.md).
