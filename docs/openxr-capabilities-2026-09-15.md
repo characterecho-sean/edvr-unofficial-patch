@@ -68,21 +68,22 @@ capabilities, owner affinity and events. The integrated absolute-path full
 build passed every gate: 590 native, 194 system, 12,254 stereo and 151 capture
 checks, plus the UI replay tests, Python tools, 255-key config contract and
 actual installer resource verification. Sources matched their pre-build hashes.
-This includes main through `0bab722`, with its per-headset resolution and
-native UI replay changes.
+This includes main through `f4bcb9a`, with its per-headset resolution,
+100-pixel menu steps and native UI replay changes. Main advanced after the
+initial qualification, so the combined sources received a second full build.
 
 The exact tested DLLs were installed and hash-verified in Frontier, with the
 user's INI unchanged. Local build/source/binary and installation receipts are
-under `build/frontier-lod-callers-20260915/attempt-5`. The binary identifies
-its pre-commit source as `v0.16.2-131-g0bab722-dirty`; committing the verified
-sources afterward does not relink it. Match the artifact hashes when reading
-the next flight rather than assuming its embedded revision equals the later
-merge commit.
+under `build/frontier-lod-callers-20260915/attempt-6`, superseding attempt 5.
+The binary identifies its pre-commit source as `v0.16.2-132-gc5e88dc-dirty`;
+committing the verified sources afterward does not relink it. Match the
+artifact hashes when reading the next flight rather than assuming its embedded
+revision equals the later merge commit.
 
 | Installed file | SHA-256 |
 | --- | --- |
-| Native runtime | `8db54549baed92d29c7fec4d5ac7653763a0c4de4ba708f4bb2e91bd6e321e36` |
-| Graphics proxy | `3689cd35eab5562ac6df254f7bfe6280ef33dbfb5ff7e448a5a697c2a98aebda` |
+| Native runtime | `0abf66a51c479de8b63c859807e4d49983cc5ca1f89321c8f677eeba8268f425` |
+| Graphics proxy | `ed0f0a0015d9a0f9b93066504ab8291b75a98acf5a2534ad5a2b625ebf4854cc` |
 
 The next manual flight should check both eyes at the main menu and in the
 cockpit, visible edges during head movement with AA off and DLSS/TAA enabled,

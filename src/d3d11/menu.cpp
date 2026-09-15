@@ -681,28 +681,23 @@ std::string openxrResolutionTooltip(const ResolutionView& v) {
     return body;
 }
 
-// One Left/Right step: 5% of the recommended width rounded to the nearest
-// multiple of 8 (88 px on 1824, 248 on 4980; never below 8) is the grid
-// from the recommendation; a press moves to the ADJACENT grid point in the
-// direction pressed, `mult` of them with Shift, and the result is clamped
-// to a quarter..twice the recommendation and to the effective cap over both
-// eyes and both axes (the height can bind before maxWidth does). From 1824
-// the grid passes through 3232 and 3320 and never 3283: an off-grid width
-// is reached by typing, and the next step lands on the neighbouring grid
-// point (3283 -> 3320 or 3232), not on the nearest one after moving (which
-// skipped 3320 for 3408). Shift counts fine steps, so it moves exactly
-// five grid points from an on-grid width rather than snapping to a coarser
-// grid that could move three or seven. A press never moves against its
-// own direction: Right from a width already above the clamp leaves it
+// One Left/Right step: 100 px, on the grid of round hundreds (Sean's
+// choice, 2026-09-15; the earlier 5%-of-recommendation grid gave 88 px on
+// the Quest 3 and 248 on the Pimax and never landed on a number anyone
+// would type). A press moves to the ADJACENT hundred in the direction
+// pressed (3283 -> 3300 or 3200; the 1824 recommendation -> 1900 or 1800),
+// `mult` hundreds with Shift, and the result is clamped to a quarter..twice
+// the recommendation and to the effective cap over both eyes and both axes
+// (the height can bind before maxWidth does). A press never moves against
+// its own direction: Right from a width already above the clamp leaves it
 // alone rather than writing the lower clamped value.
+constexpr uint32_t kResolutionStep = 100;
 uint32_t steppedResolution(const ResolutionView& v, int dir, int mult) {
     const uint32_t rec = v.sizing.eyes[0].originalWidth;
-    uint32_t fine = static_cast<uint32_t>(rec * 0.05 / 8.0 + 0.5) * 8;
-    if (fine < 8) fine = 8;
     const double count = static_cast<double>(mult > 0 ? mult : 1);
-    const double pos = (static_cast<double>(v.width) - rec) / fine;
+    const double pos = static_cast<double>(v.width) / kResolutionStep;
     const double target = dir > 0 ? std::floor(pos) + count : std::ceil(pos) - count;
-    double snapped = rec + target * fine;
+    double snapped = target * kResolutionStep;
     const double lo = std::ceil(rec * 0.25);
     double hi = rec * 2.0;
     const uint32_t cap = edvr::native_render::effectiveWidthCap(v.sizing.eyes);
@@ -2015,8 +2010,8 @@ void stepRow(int defIndex, int dir, int mult) {
     const MenuRowDef& d = kMenuRows[defIndex];
     const std::string& cur = g_rows[defIndex].value;
     if (isOpenxrRenderScaleRow(d)) {
-        // A width for the worn headset, stepped on the 5% grid from its
-        // recommendation (steppedResolution); the generated row is Text,
+        // A width for the worn headset, stepped by 100 px on the grid of
+        // round hundreds (steppedResolution); the generated row is Text,
         // for which stepping would otherwise be a no-op.
         const ResolutionView v = resolutionView(cur);
         if (!v.headset) {

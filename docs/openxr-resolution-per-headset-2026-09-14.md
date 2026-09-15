@@ -1102,38 +1102,37 @@ through to the Text wording.
   and push the ini prose out of the buffer entirely, so the tooltip lists at
   most four entries and then `and N more (see edvr.ini)`; the log line carries
   the whole list.
-- Editing: `stepRow` (:1552-1588) for this row steps the resolved width by one
-  step, where a step is 5% of the recommended width rounded to the nearest
-  multiple of 8 (88 px on 1824, 152 on 3072, 128 on 2528, 248 on 4980, 272 on
-  5424; never below 8), times the existing `mult` (:1575), snapped to the step
-  grid from the recommendation and clamped to the quarter-to-double range and
-  to the effective cap (`min` over both eyes and both axes, the Unit section
-  above, not `eyes[0].maxWidth` alone); decision 4 is the step. Two
-  consequences of the grid are stated so a flight cannot misread them: from
-  1824 the reachable widths are 1824 + 88n, which passes through 3232 and 3320
-  and never 3283, so a width off the grid is reached only by typing; and a
-  typed off-grid width (3283) snaps to the grid on the next step (to 3320 or
-  3232), so a user who types and then steps sees the row jump once. About
-  twenty steps span 100% to 200% (the twentieth from 1824 is 3584, 196.5%; the
-  twenty-first is clamped to 3648). `beginEdit` (:1867-1883) seeds the buffer
-  with the resolved width as digits, not the list (so `kEditMax = 40`, :137,
-  :1872, never truncates it); `editBufferBad` (:1853-1865) and `commitEdit`
-  (:1897-1916) treat it as an unsigned integer in 1..16384; both write the
-  result of `mergeResolutionEntry(r.value, rt, sys, width)` through
-  `applyChange` (:1499-1515) and the existing one-value merge (`menuIniWrite`
-  :650-699), so the other headsets' entries are preserved (re-serialised in the
-  canonical `rt/sys:W` spacing and case, as the header section says --
-  `Oculus/Meta-Quest-3:3283` comes back as `oculus/meta-quest-3:3283`, the same
-  key -- never resized or re-keyed). Stepping moves to the ADJACENT grid point
-  in the direction pressed, Shift to the fifth, so an on-grid width never skips
-  a point and Shift moves exactly five; a press never moves against its own
-  direction (Right from a stored width above the clamp writes nothing rather
-  than the lower clamped value). With no coherent sizing or invalid labels,
-  editing is refused and `s.lastWrite` (the Status page's last-write line,
-  :1511, a 63-byte field) reads `No headset sizing published yet; try again in
-  a moment.` (55 characters). The "moment" covers the F8-open-before-VR-init
-  window: the per-tick refresh at :2565 picks the sizing up within a second of
-  the host publishing it.
+- Editing: `stepRow` (:1552-1588) for this row steps the resolved width by 100
+  px on the grid of round hundreds (`kResolutionStep`; Sean's choice on
+  2026-09-15, replacing the first build's 5%-of-recommendation grid, which gave
+  88 px on the Quest 3 and 248 on the Pimax and never landed on a number anyone
+  would type). A press moves to the adjacent hundred in the direction pressed,
+  `mult` hundreds with Shift (:1575), and the result is clamped to the
+  quarter-to-double range and to the effective cap (`min` over both eyes and
+  both axes, the Unit section above, not `eyes[0].maxWidth` alone); a press
+  never moves against its own direction, so Right from a width already at or
+  above the clamp writes nothing. Stated so a flight cannot misread it: from
+  the 1824 recommendation Right gives 1900, 2000, ... 3200, 3300, and stops at
+  3648 (the 2x clamp); a typed 3283 steps to 3300 or 3200. `beginEdit`
+  (:1867-1883) seeds the buffer with the resolved width as digits, not the list
+  (so `kEditMax = 40`, :137, :1872, never truncates it); `editBufferBad`
+  (:1853-1865) and `commitEdit` (:1897-1916) treat it as an unsigned integer in
+  1..16384; both write the result of `mergeResolutionEntry(r.value, rt, sys,
+  width)` through `applyChange` (:1499-1515) and the existing one-value merge
+  (`menuIniWrite` :650-699), so the other headsets' entries are preserved
+  (re-serialised in the canonical `rt/sys:W` spacing and case, as the header
+  section says -- `Oculus/Meta-Quest-3:3283` comes back as
+  `oculus/meta-quest-3:3283`, the same key -- never resized or re-keyed).
+  Stepping moves to the ADJACENT grid point in the direction pressed, Shift to
+  the fifth, so an on-grid width never skips a point and Shift moves exactly
+  five; a press never moves against its own direction (Right from a stored
+  width above the clamp writes nothing rather than the lower clamped value).
+  With no coherent sizing or invalid labels, editing is refused and
+  `s.lastWrite` (the Status page's last-write line, :1511, a 63-byte field)
+  reads `No headset sizing published yet; try again in a moment.` (55
+  characters). The "moment" covers the F8-open-before-VR-init window: the
+  per-tick refresh at :2565 picks the sizing up within a second of the host
+  publishing it.
 - Write log and last write, the eleventh site: `drainWrites` (:1533-1538)
   prints `w.job.before` and `w.job.value` whole, which for this row are the two
   lists, and `applyChange` (:1511) puts the whole new list in `s.lastWrite`,
@@ -1629,16 +1628,16 @@ row `OpenXR res. 1824 px` / `1824x1968` with the hint `Not set for this
 headset: 100% = 1824x1968 (3.6 MP) / eye.`; Status `Headset`, `Headset key` and
 `Recommended` lines naming the runtime, system, token and size. Then set the
 width, by one of two routes, and say in the log which was used, because they do
-not reach the same number: type `3283` (Enter, digits, Enter), which is the
-only way to 3283, since the 88-px grid from 1824 passes through 3232 and 3320;
-or step Right until the row reads `3320 px` (seventeen steps, 182.0%). Expect
-the write log `menu: fix.openxr_resolution oculus/<sys> (none) -> 3283 (list
-now oculus/<sys>:3283; ...)` (or `-> 3320`), the pending badge, the preview
-`3283x3542 (11.6 MP, 180%)` (or `3320x3582 (11.9 MP, 182%)`), and the session
-size unchanged. Then, still in the session, open Elite's Graphics options and
-Apply an unrelated change: read the native trace for a `module_shutdown,` line
-followed by a second `module_startup,` and a second `openxr_resolution,`. If
-the shutdown line and the pair appear, Elite re-initialises VR in-process
+not reach the same number: type `3283` (Enter, digits, Enter), the exact width
+the 180% flights used; or step Right until the row reads `3300 px` (fifteen
+presses of 100 from 1824, 180.9%). Expect the write log `menu:
+fix.openxr_resolution oculus/<sys> (none) -> 3283 (list now oculus/<sys>:3283;
+...)` (or `-> 3300`), the pending badge, the preview `3283x3542 (11.6 MP,
+180%)` (or `3300x3561 (11.8 MP, 180.9%)`), and the session size unchanged.
+Then, still in the session, open Elite's Graphics options and Apply an
+unrelated change: read the native trace for a `module_shutdown,` line followed
+by a second `module_startup,` and a second `openxr_resolution,`. If the
+shutdown line and the pair appear, Elite re-initialises VR in-process
 (`VR_Shutdown` then `VR_Init`, runtime_lifecycle.h:68-79 then :41-47), Launch B
 below is that Apply, the badge must clear by itself, and decision 8 flips the
 wording to "at the next VR start"; a second `openxr_resolution,` with no
@@ -1655,8 +1654,8 @@ that.
 
 Launch B, Air Link: `key=oculus/<sys>,headset=1824x1968,matched=1,
 entries=1,requested=1.799890`; `scaled=3283x3542`, `megapixels=11.63` (or, if
-Launch A stepped, `requested=1.820175`, `scaled=3320x3582`,
-`megapixels=11.89`); `native temporal: engaged ... output=3283x3542`; the
+Launch A stepped, `requested=1.809211`, `scaled=3300x3561`,
+`megapixels=11.75`); `native temporal: engaged ... output=3283x3542`; the
 guard's later recommendation about 4079x3542 as in the airlink doc :224; row
 `3283 px` with no badge; tooltip shows `Elite submits WxH (x0.NN of what it was
 given; guard x1.24)` while the guard is live, and that ratio is recorded in the
@@ -1807,13 +1806,12 @@ an install mismatch, not evidence.
    except when the runtime reports an empty system name, and it is the only
    bridge if flight 2b finds SteamVR reporting one system string for both
    headsets) or refuse them and require the full key.
-4. Step size. Left/Right steps by 5% of the recommended width rounded to a
-   multiple of 8 (recommended: 88 px on the Quest 3 over Oculus, 248 on the
-   Pimax over SteamVR, about twenty steps from 100% to 200% -- the twentieth
-   from 1824 is 3584 and the twenty-first clamps at 3648 -- and typed values
-   remain any integer, with the one visible seam that a typed off-grid width
-   snaps to the grid on the next step), or a fixed 64 px everywhere, or 1% of
-   the recommendation with the fast-step multiplier doing the work.
+4. Step size. DECIDED 2026-09-15: a fixed 100 px on the grid of round hundreds,
+   Shift for 500. The first build shipped 5% of the recommended width rounded
+   to a multiple of 8 (88 px on the Quest 3, 248 on the Pimax over SteamVR);
+   Sean asked for about a hundred, which also means a stepped value is one a
+   person would type. Typed values remain any integer, and a typed off-grid
+   width steps to the neighbouring hundred.
 5. Paired-query test. Two pure functions in the host header plus the in-process
    v2 export test (recommended: covers the field-order class with no fixture
    DLL and no dispatcher choreography) or additionally stand up the
@@ -1898,7 +1896,7 @@ revision are marked and kept for the record.
    5530x5875 and at 3283/3072 -> 3283x3488; 4980x4916 (max 8192) at 9000/4980
    -> effective 1.644980, 8192x8087; 4068x4016 at 4980/4068 -> 4980x4916;
    1824x1968 at 4000/1824 -> 2.0, 3648x3936, and at 400/1824 -> 0.25, 456x492;
-   1824x1968 at 3320/1824 -> 1.820175, 3320x3582; 5424x5356 at 3283/5424 ->
+   1824x1968 at 3300/1824 -> 1.809211, 3300x3561; 5424x5356 at 3283/5424 ->
    3283x3242; 4000x4500 (max 8192x8192) at 8000/4000 -> effective 1.820444,
    7282x8192 (the height binds first). Computed by hand from the header for
    this revision; to be confirmed in the self-test, not by hand.
