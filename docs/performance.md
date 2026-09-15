@@ -1,16 +1,62 @@
 # Upscaling and foveated rendering: a design
 
-For the implemented DLSS path, see the
-[2026-09-10 performance review](review-dlss-performance-2026-09-10.md), including
-flight measurements and isolated GPU experiments. The design below is historical.
+## Status
 
-See the [September 14 foveated DLSS design](foveated-dlss-design-2026-09-14.md)
-for the current native OpenXR assessment, updated upstream stereo support,
-and the unresolved temporal-quality tradeoff.
+*Written 2026-09-15 from the entries dated 2026-09-04 to 2026-09-07 (this
+file's own log) and its header redirect notices. It restates the journal
+below and is not new evidence; update it whenever this doc changes.*
 
-See the [September 14 native OpenXR performance review](openxr-performance-review-2026-09-14.md)
-for transfer, submission, hidden-area masking and composition opportunities
-in the current native stack.
+- **State:** A pre-implementation design doc, now mostly historical — see
+  Detail for the three newer docs with the current picture. Within this
+  file's own log (the foveation branch, 2026-09-04 to 2026-09-06):
+  feature 1's sharpening shipped in 0.14.0 as `render_sharpness`
+  (2026-09-04 note); feature 2 (fixed-centre VRS foveation) was built,
+  flown six times, and ships OFF — measured, not a performance lever on
+  Elite; feature 3 (eye-tracked centre) is blocked by the Pimax Crystal
+  Super's SteamVR driver, not by EDVR; feature 4 is superseded by
+  settings-menu.md (2026-09-07); feature 6 (DLSS where you look) has a
+  built and flown fixed-centre fovea, while its eye-tracked-crop variant
+  was designed and dropped the same day (2026-09-05).
+- **Open:**
+  - Feature 6's seam blend-band width: "a headset-on judgement" not yet
+    made (under "What must be measured first").
+  - NVAPI on hybrid-GPU laptops: "believed fine ... but believed is not
+    measured" (Phase 0 item 4).
+  - Features 1 and 5 have no flight entries in this file beyond the
+    design and the 0.14.0 sharpening note.
+- **Ruled out:**
+  - Feature 2 (VRS foveation) as an Elite performance lever: culling all
+    eye-draw pixel shading bought zero fps ("Flight 6", 2026-09-06);
+    revisit only if render scale is pushed far past native.
+  - DLSS history smearing into the fovea disc, as the cause of menu-text
+    blockiness: falsified by the `fix.temporal_aa`-off flight ("The
+    preset is not a free choice, and 38 degrees is not much", 2026-09-06)
+    — the real cause is ring radius.
+  - Feature 6's eye-tracked crop: dropped 2026-09-05 ("Where the crop
+    design stands") — under upscaling a crop cannot hold history for
+    where the eyes go next; the fixed centre and feature 2 absorb the
+    gaze's value instead.
+  - Feature 3's eye-tracked centre on the Pimax Crystal Super: the
+    driver's value is a damped, mis-framed constant, not recoverable
+    gaze ("Flights 3 and 4", 2026-09-05); the probe stays in the tree to
+    re-ask later or on other headsets.
+- **Next flight:** None named as still pending; the two Open items above
+  are desk/headset judgements this file has not yet scheduled.
+- **Environment:** D3D11 VRS (feature 2) needs NVIDIA Turing or newer via
+  NVAPI — no AMD/Intel D3D11 path. Measurements here are from an RTX 5090
+  (nvapi64.dll 32.0.16.1664) and a Pimax Crystal Super at HMD Quality 1.0
+  with a 120 Hz eye tracker; feature 3's finding is specific to Pimax
+  Play's SteamVR driver.
+- **Detail:** Current/implemented picture:
+  [review-dlss-performance-2026-09-10.md](review-dlss-performance-2026-09-10.md),
+  [foveated-dlss-design-2026-09-14.md](foveated-dlss-design-2026-09-14.md),
+  [openxr-performance-review-2026-09-14.md](openxr-performance-review-2026-09-14.md).
+  In this file: "Feature 2 — fixed foveation, by variable-rate shading"
+  and "Why the preset does not move the needle" for the VRS measurements;
+  "Feature 6 — DLSS where you look" for the crop design and flights;
+  "Feature 3 — the eye-tracked centre" and "Phase 0" for the gaze-driver
+  finding; "Feature 4 — the in-headset menu" for the design now
+  superseded by settings-menu.md; "Phasing" for the build order.
 
 *A design document, written before the code. Claims about EDVR cite the
 source; claims about runtimes, drivers and SDKs are labelled measured
@@ -18,19 +64,6 @@ source; claims about runtimes, drivers and SDKs are labelled measured
 documentation or release notes), or believed; what can only be settled at
 implementation time or in a live session is collected under Phase 0.
 Nothing here is implemented yet.*
-
-*Status, 2026-09-04. Feature 1's render scale exists on a branch; the
-sharpening half shipped in 0.14.0 as `render_sharpness`, alongside the
-temporal pass and NVIDIA's DLAA and DLSS at the door
-([anti-aliasing.md](anti-aliasing.md)). That work measured the one number
-this document lacked: NVIDIA's pass costs by output size, 2.7 ms per eye on
-a Pimax Crystal Super at HMD Quality 1.0, and it made a third foveation
-saving worth designing — feature 6 below, DLSS where you look. The field
-rig now includes that headset, whose eye tracker runs at 120 Hz, so
-feature 3's open question can be asked of a real driver; the gaze probe
-(`advanced.gaze_probe`, `src/openvr/gaze_probe.cpp`) is the first code
-from this document, and the phasing at the end now puts three probes
-before any feature.*
 
 ## The ask
 

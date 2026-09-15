@@ -1,9 +1,65 @@
 # Anti-aliasing and the shimmer: a design
 
-**Current defaults (2026-09-10):** TAA/DLSS includes UI/smoke depth and station
-motion automatically. The Performance page exposes **DLSS preset**, default K.
-Supersample filtering is experimental and its resolve defaults off. Earlier
-flight notes below describe the settings available at the time.
+## Status
+
+*Written 2026-09-15 from the entries dated 2026-09-10, 2026-09-08,
+2026-09-06 and 2026-09-02 through 09-04. Restates the journal below;
+not new evidence — update it whenever this doc changes.*
+
+- **State:** Per "Current defaults" (2026-09-10, the doc's latest
+  note): TAA/DLSS includes UI/smoke depth and station motion
+  automatically; Feature A's resolve is experimental, defaulting OFF —
+  conflicting with the 2026-09-03 narrative where `auto` "became the
+  shipped default"; unclear which is current, check `edvr.ini`
+  directly. Feature A is built, field-verified on both rigs. Feature B
+  (temporal AA, DLAA/DLSS) is built, flown almost daily 2026-09-02 to
+  09-08, but "is on its branch" per "Guidance for players now"; a
+  2026-09-06 pass cut its cost 2.80 -> 2.02 ms/eye. C and D remain
+  unbuilt sketches. The rest lock shipped 09-03, retired 09-04.
+- **Open:**
+  - Features C and D: still unbuilt design sketches.
+  - DLSS/FSR 2 as default engines behind the door (Phasing step 6): not
+    phased in, only proof-of-concept flights so far.
+  - Whether the 2026-09-04 far-warp/darkness review's four fixes and
+    that evening's five-lever cleanup hold up in flight — "Unflown as
+    of the commit."
+  - Phase 0 items 1, 7, 8, 9, 11 unaddressed (AA-option census, HUD
+    legibility under jitter, crop-edge behaviour, feature D's passes,
+    foveation reach) — see "Phase 0".
+  - Whether `shimmer_rest_still`/`_moving` can be raised past the Quest
+    3's tracker-noise floor was left as "the next flight's question" at
+    retirement; not answered later here.
+- **Ruled out:**
+  - MSAA from outside a deferred renderer: structurally unreachable
+    (views, shading and every downstream pass would need rewriting).
+  - Conservative rasterisation for the menu-ship seam: built, flown
+    2026-09-03, reverted the same day — no effect, new artifacts.
+  - The rest lock (`shimmer_rest`): shipped 2026-09-03, retired
+    2026-09-04 — TAA integrates the wander instead, and it could not
+    engage on the Quest 3's noisier tracker.
+  - Five TAA levers named dead in "The cleanup of the same evening"
+    (2026-09-04): the rest snap, HUD depth layers, the assumed HUD
+    distance, the `camera` motion source, the transposed-reading A/B.
+  - Full per-object motion-vector matrices: declined — the neighbourhood
+    clamp already handles unmatched motion (unbuilt; per-object-motion.md).
+- **Environment:** Native SteamVR is measured; under OpenComposite the
+  game-side half "works regardless" but reaching the OpenXR layer is
+  unverified. Two rigs disagree sharply: Pimax Crystal Super (~42
+  px/deg, tracking floors at 0.53 arcmin/frame) vs. Quest 3 (~20-40.6
+  px/deg, never under 1.9 arcmin/frame) — why the rest lock shipped on
+  one and not the other. Eye texture `R8G8B8A8_TYPELESS`, linear light;
+  depth reversed-Z, two plane pairs seen (0.025..50000 for the scene,
+  0.1..1000 elsewhere). DLSS/DLAA need an NVIDIA RTX GPU (Turing+) and
+  the NGX runtime; the field rig is an RTX 5090.
+- **Detail:** "What EDVR already owns" has the shared hooks. "Feature
+  A" and "Feature B" carry each feature's mechanism, settings and full
+  flight log (dates inline). "Considered and declined" and "The tracker
+  never rests: the rest lock" hold the retired ideas. "Phase 0" lists
+  what's unmeasured; "Phasing" is the build order. Linked:
+  performance.md (render_scale, HMD Quality), per-object-motion.md
+  (per-mover vectors), rest-lock-handoff.md, and the two 2026-09-04
+  adversarial reviews (review-motion-vectors and
+  review-temporal-far-warp-darkness).
 
 *A design document, written before the code, as a companion to
 [performance.md](performance.md). Claims about EDVR cite the source; claims

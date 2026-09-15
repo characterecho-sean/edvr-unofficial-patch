@@ -1,5 +1,65 @@
 # OpenXR implementation status
 
+## Status
+
+*Written 2026-09-15 from the entries dated 2026-09-11 through 2026-09-14.
+This file is itself a rolling, reverse-chronological log — newest at the
+top, "preceding"/"earlier" pointing further down — so this block restates
+only the top and the standout findings; update it as entries are added.*
+
+- **State:** Goal: native OpenXR for every user, including those Elite
+  currently routes through LibOVR; Windows selects the runtime. Per the
+  top entries (2026-09-14): "Standard artifacts now use native OpenXR;
+  legacy proxies are regression fixtures only." Individually flight-
+  qualified: Air Link startup/menu/exit (Quest 3, "a perfect retest",
+  13,918 pairs); native sharpening (SteamVR/OpenXR, 2,831 pairs); the
+  metrics/monitor checkpoint (Pimax, 5,430 pairs); a VDXR startup abort,
+  found and fixed, then a working VDXR flight (4,184 pairs). Built, full
+  build/regressions passed, but NOT yet headset-qualified: the newest
+  entry (branch review corrections) and a feature batch (pose
+  publication, Explorer Cam, terrain cull guard, transition-suppression
+  replay, FSS arrival healing) plus startup-centering — together, "all
+  new visual behavior... awaits one combined headset retest."
+- **Open:**
+  - The named combined headset retest for the feature batch plus
+    startup-centering — not yet flown.
+  - A stationary flicker on three wing lines, deferred with its
+    image-quality comparison (bottom of file, render-to-submit section).
+  - The cross-runtime regression matrix and release installer migration:
+    named remaining qualification work, not yet done as one pass.
+  - Matched-resolution performance/quality parity vs. the legacy path:
+    named open at several checkpoints (VDXR, native timing, DLSS).
+  - `[experimental]` features (supersample resolve, FSS theater, gaze
+    foveation) are explicitly excluded from this parity work.
+- **Ruled out:**
+  - The new outer GPU-timing instrument as the cause of head-movement
+    shimmering — "rules out the new outer instrument as a necessary
+    cause"; the real fault was temporal motion/jitter following the
+    widened raw culling frustum instead of the true projection matrix,
+    fixed in `f622cd2`.
+  - VDXR's startup abort: not a runtime incompatibility but "an unsafe
+    dependency between recommended render dimensions and transient pose
+    validity"; fixed by preserving validated session dimensions across
+    geometry invalidation.
+  - Several early desk drafts (a GPU-timing bracket, a state-policy
+    draft whose fake driver returned canned timestamps, a hand-built ABI
+    vtable that crashed) failed review and were removed, not fixed in
+    place.
+- **Next flight:** The named "combined headset retest" for the feature
+  batch and startup-centering change; openxr-native-only-2026-09-14.md
+  separately names its own next-flight checklist for the native-only
+  migration.
+- **Environment:** Runtimes qualified individually, not yet cross-checked
+  as one matrix: PiOpenXR + Pimax, SteamVR/OpenXR + Pimax, Meta/Air Link
+  (Oculus OpenXR runtime) + Quest 3 at 180% resolution, VDXR + Quest 3.
+  LibOVR is the legacy path being refused/bypassed, not a target.
+- **Detail:** Read top-down for the newest work. Later H2 sections:
+  "Implemented evidence tools", "Review decisions and remaining gates",
+  "Query foundation follow-up", "Main integration and next Frontier
+  flight", "Existing timer migration checkpoint", "Render-to-submit
+  checkpoint" (the shimmer regression and fix). Every paragraph links its
+  own dated checkpoint doc; no other file summarizes them all.
+
 The [branch review corrections](openxr-review-fixes-2026-09-14.md) notify Elite
 when native frame or loading work fails permanently, accept GUI startup-config
 line endings in CLI verification, and keep optional DLSS packaging consistent

@@ -1,5 +1,63 @@
 # The Full System Scanner in VR
 
+## Status
+
+*Written 2026-09-15 from the entries dated 2026-08-24 through
+2026-08-27, the only dates in this doc. Restates the journal below;
+update it whenever this doc changes.*
+
+- **State:** SOLVED and shipped, field-verified 2026-08-27. Findings
+  1-2 (the zoomed body renders mono, at half eye resolution) are
+  addressed by the opt-in `fix.fss_res`. The "black squares" hunt ran
+  ~48 rounds to round 33's finding: for ~10 frames at each zoom's
+  arrival, the primary (left) eye's submitted image carries
+  not-yet-resolved tiles the right does not. Shipped and on by
+  default: `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = on`. Bug is
+  ring-only.
+- **Open:**
+  - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
+    far only Toolkit-off).
+  - `fix.fss_res` stays opt-in; a default-on ship is a release-train
+    call.
+  - The flash detector withholds frames at every fresh FSS zoom (its
+    own arc).
+  - The census still misses `GenerateMips`, `ClearUnorderedAccessView*`
+    and command-list contents.
+- **Ruled out:**
+  - "The eyes sweep the ring in opposite directions": died to a
+    single-eye look.
+  - A write landing between the two composite reads: zero writes found
+    in a q-ordered capture (round two).
+  - A per-eye fill-rate difference and a desynced per-eye resolve map
+    (Method notes 3-4): a "working" fix changed nothing under a
+    magenta control; the map proved an unrelated screen-space grid.
+  - The composite draw itself (constants, depth, blend, discard):
+    every probe (rounds three-four, seven-thirteen) came back null;
+    the two draws are byte-equivalent.
+  - "Harmless mono scan-resolve art, symmetric in both eyes" (round
+    six): superseded by round seven's monocular re-test, a genuine
+    per-eye split.
+  - "The second eye's reveal is the smoothed, wrong one" (round 31):
+    superseded by round 33 -- the PRIMARY eye carries the defect.
+  - A carried/stale temporal accumulator: round fourteen's pair-sync
+    was null; the left eye regenerates its squares every frame.
+- **Next flight:** One confirmation flight of the shipped heal with
+  the OpenXR Toolkit ON (proven so far only Toolkit-off).
+- **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
+  confounded many rounds until identified and excluded; the shipped
+  fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
+  native SteamVR (also SteamVR-via-Steam-Link) on two headsets, at eye
+  size 4340x4284 with a 16x16-tile (272x268) grid; the body layer
+  defaults to half that and `fix.fss_res` doubles it.
+- **Detail:** "Finding 1", "Finding 2" and "The fix: `fix.fss_res` --
+  the body layer at full eye resolution" cover the mono/half-res bug.
+  The black-squares hunt runs "Round four" through "Rounds forty-five
+  through forty-eight"; the decisive measurement is "Round
+  thirty-three: the arrival window, measured", the shipped state is
+  "The ring, and the shipping state". "Method notes -- five theories
+  died here, and how" is process lessons worth reading first.
+  Companion: frontier-fss-bug-report.md.
+
 Investigated 2026-08-24, from a field report: zooming the Full System Scanner
 onto a planet **with rings** looks wrong in a headset. The ring "tiles in" over
 a few frames and the two eyes appear to disagree about how far that build has

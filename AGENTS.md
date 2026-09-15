@@ -20,6 +20,29 @@ exe's stderr with `2>&1` — 5.1 wraps each line in an ErrorRecord and sets
 `build.bat` must be launched **by absolute path**; a `cmd` invocation that
 never ran the batch still exits 0, which has read as a successful build.
 
+## Reading at low token cost
+
+Every tool call re-sends the whole context, so anything read into it is
+paid for again on every later call. Measured 2026-09-15: a 359-call
+session averaged 427k tokens per call and never compacted.
+
+- **Never read a large file whole.** `edvr.ini` (148 KB), `build.bat`
+  (94 KB), `README.md`, `vscreen.cpp`, `temporal_pass.cpp` and most docs
+  are far past the 30 KB line. Grep for the key or symbol, then read a
+  range with the Read tool's offset and limit. A whole-file dump through
+  PowerShell is not a way to read a file.
+- **An investigation doc starts with a `## Status` block** of at most 60
+  lines: state, open hypotheses, ruled-out pointer, next flight. Read the
+  block first and go into the journal only where it points. Update the
+  block whenever the doc changes; add one to any doc that lacks it.
+- **Keep new docs small.** Append a dated entry to the arc's own doc
+  rather than starting another review doc; a review that must be its own
+  file stays under about 15 KB.
+- **Delegate to Sonnet subagents** (the Agent tool with `model: "sonnet"`)
+  for research, exploration and implementation. The main context is for
+  diagnosis and decisions; only the agent's conclusion comes back.
+- Memory topic files point at the doc; they never mirror its journal.
+
 ## The sanctioned tools
 
 These four operations go through `tools\`, and **only** through `tools\`.
@@ -148,6 +171,6 @@ minutes after a flight finally reproduced the effect being chased.
 | `src\installer\` | the self-contained installer and its log bundler |
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
-| `docs\` | one investigation doc per arc — read the relevant one first |
+| `docs\` | one investigation doc per arc — read its `## Status` block first |
 | `build.bat` | builds everything, runs every gate |
 | `package.bat <version>` | builds, tests, then packages a release |

@@ -1,48 +1,65 @@
 # Elite on OpenXR: a drop-in `openvr_api.dll` that speaks OpenXR
 
-*Design, reviewed against the source and API contracts on 2026-09-11. The
-replacement transport and whole-frame GPU instrument are not implemented. The
-session inventory below is retained from the original investigation; this
-review checked source and vendor documentation, not new headset flights or a
-fresh scan of the installed game. Phase 0 must preserve reproducible evidence
-before an observation becomes a compatibility requirement.*
+## Status
 
-The [native-only migration checkpoint](openxr-native-only-2026-09-14.md)
-implements the current release policy: complete native packages using the
-bundled Khronos loader and Windows runtime selection, with no legacy backend
-fallback. Historical proxies remain regression fixtures; explicit uninstall and
-file recovery are preserved.
+*Written 2026-09-15 from the entries dated 2026-09-14 ("Current scope",
+"Release destination", "Approval boundary") and the 2026-09-11 review
+note. Restates the journal below; not new evidence. Update it whenever
+this doc changes.*
 
-Implementation and subsequent evidence are tracked in
-[openxr-implementation-status.md](openxr-implementation-status.md). The
-[2026-09-11 Frontier census flight](openxr-flight-2026-09-11.md) adds measured
-device and caller-thread evidence and records the startup capture limitation;
-the original inventory below remains historical.
-
-**Current scope (2026-09-14):** the user has deferred performance comparisons
-and excluded features listed under `[experimental]` from parity work. The
-native metric-presentation flight has passed. Continue with supported
-submission features, including `fix.render_sharpness`, `fix.cull_guard`,
-`fix.transition_flash`, Explorer Cam and `fix.fss_eye_sync`. Supersample
-resolve, FSS theater and gaze foveation are deferred; the broader inventory and
-original implementation sequence below remain historical. Existing settings and
-the temporal behavior already implemented are preserved.
-
-**Release destination:** migrate every EDVR user to native OpenXR, including
-users currently routed through Elite's LibOVR backend. The native release is
-the standard installation and automatically bypasses Elite's Oculus preference;
-it does not offer a permanent legacy-backend choice. Windows selects the
-runtime, including SteamVR when selected as the OpenXR runtime. Separate builds
-and rollback artifacts serve qualification and recovery during migration.
-LibOVR startup routing and installer upgrades are required completion work
-alongside supported feature parity.
-
-**Approval boundary:** Sean approved implementation by Luna agents with parent
-review. On 2026-09-14 he requested that supported parity work continue while he
-is away, with desktop checks and one consolidated headset retest afterward.
-Individual headset checks no longer gate each implementation step. Passing
-desktop tests does not establish a successful flight; record those results
-separately.
+- **State:** Reviewed against source 2026-09-11 (then: transport and
+  GPU instrument not implemented; inventory below already historical).
+  By 2026-09-14 (latest): Luna agents implement under parent review, a
+  native metric-presentation flight has passed, and work continues on
+  named submission features while supersample resolve, FSS theater,
+  gaze foveation and `[experimental]` features are deferred. Destination:
+  native OpenXR for every user, retiring the forwarding proxy after
+  acceptance gates. This doc is the spec, not a build tracker;
+  completion is tracked in openxr-implementation-status.md.
+- **Open:**
+  - LibOVR/Oculus-path routing: "required completion work," remaining
+    live qualification in openxr-oculus-selection-2026-09-14.md.
+  - Depth-layer support: "the unresolved issue" is whether EDVR can
+    supply matching final depth for every relevant pixel; omitted until it can.
+  - Canted/PP-off support: gated behind the matrix fold and all its
+    consumers (canted-projection.md); not part of initial parity.
+  - The runtime matrix and installer/migration: SteamVR OpenXR, VDXR,
+    the installed Pimax runtime, Varjo and Meta OpenXR need desk
+    qualification, and upgrading every existing backend path with
+    explicit rollback is named as required, not-yet-done work.
+- **Ruled out:**
+  - A live transport switch or silent runtime fallback after OpenXR
+    init fails: rejected by design.
+  - A permanent legacy-backend choice: retire the forwarding proxy
+    after acceptance gates instead (Migration decision 1).
+  - General OpenVR compatibility, controller/overlay support, other
+    graphics APIs, quad-view stereo: explicitly not promised.
+  - Sidecar timing, PDH sampling, direct swapchain output, the PP-off
+    fold, depth layers, the quad menu: excluded from initial parity.
+  - Supersample resolve, FSS theater, gaze foveation,
+    `[experimental]` features: deferred from parity, not abandoned.
+- **Next flight:** Per "Approval boundary" (2026-09-14): desktop checks
+  continue while Sean is away; individual headset checks no longer gate
+  each step, though "passing desktop tests does not establish a
+  successful flight." One consolidated headset retest follows on his
+  return, covering "Phasing and acceptance"'s full list.
+- **Environment:** First backend: D3D11, primary stereo, opaque blend
+  only (`XR_KHR_D3D11_enable` required). Runtimes to qualify: SteamVR
+  OpenXR, VDXR, the installed Pimax runtime (PiOpenXR vs. PimaxXR are
+  distinct), Varjo, Meta OpenXR. Latest recommended sizes: Steam/Valve
+  4536x4480/eye; Frontier/OpenComposite 5424x5356/eye. Planes seen:
+  0.025..50000 (scene), 0.1..1000 (elsewhere). Format family: 8-bit
+  RGBA/BGRA (typeless, UNORM, sRGB).
+- **Detail:** "What Elite needs from openvr_api.dll" has the measured
+  export/interface inventory (2026-09-11). "The layer, specified enough
+  to implement" and its subsections are the full spec. "Migration
+  decisions" has the settings table; "Phase 0" and "Phasing and
+  acceptance" are the evidence/gate checklist. Linked:
+  openxr-native-only-2026-09-14.md (release policy),
+  openxr-implementation-status.md (completion tracking, not here),
+  openxr-flight-2026-09-11.md (census flight),
+  openxr-oculus-selection-2026-09-14.md (LibOVR routing),
+  canted-projection.md (matrix-fold proposal).
 
 ## The ask
 
