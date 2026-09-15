@@ -29,7 +29,7 @@ static std::vector<BYTE> read(ID3D11Device*d,ID3D11DeviceContext*c,ID3D11Texture
 static edvr::Surface surf(ID3D11Device*d,UINT w,UINT h,DXGI_FORMAT f){edvr::Surface s;check(s.ensure(d,w,h,f),"surface created");return s;}
 struct Harness {
  ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>c;
- ComPtr<ID3D11VertexShader>vs;ComPtr<ID3D11PixelShader>ui,tone;
+ ComPtr<ID3D11VertexShader>vs;ComPtr<ID3D11PixelShader>ui,tone,postTone;
  ComPtr<ID3D11DepthStencilState>noDepth,uiDepth;
  ComPtr<ID3D11BlendState>over,add,destAlpha,unsupported;
  ComPtr<ID3D11RasterizerState>rs;ComPtr<ID3D11SamplerState>sampler;
@@ -47,6 +47,8 @@ struct Harness {
   b=compile(p,strlen(p),"main","ps_5_0");hr(d->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&ui));edvr::uiDeferredRemember(ui.Get(),b->GetBufferPointer(),b->GetBufferSize(),false);
   const char*t="Texture2D<float3> H:register(t1);SamplerState S:register(s0);float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target{float3 h=H.SampleLevel(S,uv,0);return float4(h/(1+h),1);}";
   b=compile(t,strlen(t),"main","ps_5_0");hr(d->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&tone));edvr::uiDeferredRemember(tone.Get(),b->GetBufferPointer(),b->GetBufferSize(),false);
+  const char*post="Texture2D<float4> T:register(t0);SamplerState S:register(s0);float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target{return T.Sample(S,uv);}";
+  b=compile(post,strlen(post),"main","ps_5_0");hr(d->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&postTone));edvr::uiDeferredRemember(postTone.Get(),b->GetBufferPointer(),b->GetBufferSize(),false);
   D3D11_BUFFER_DESC bd{};bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;hr(d->CreateBuffer(&bd,nullptr,&cb));
   D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthFunc=D3D11_COMPARISON_ALWAYS;hr(d->CreateDepthStencilState(&dd,&noDepth));dd.StencilEnable=TRUE;dd.StencilReadMask=1;dd.StencilWriteMask=5;dd.FrontFace=dd.BackFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_EQUAL};hr(d->CreateDepthStencilState(&dd,&uiDepth));
   D3D11_BLEND_DESC blend{};auto&r=blend.RenderTarget[0];r.BlendEnable=TRUE;r.SrcBlend=r.SrcBlendAlpha=D3D11_BLEND_ONE;r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=15;hr(d->CreateBlendState(&blend,&over));r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_ONE;hr(d->CreateBlendState(&blend,&add));r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_DEST_ALPHA;hr(d->CreateBlendState(&blend,&destAlpha));r.SrcBlend=D3D11_BLEND_DEST_COLOR;hr(d->CreateBlendState(&blend,&unsupported));
@@ -59,7 +61,9 @@ struct Harness {
  void setup(edvr::Surface&s,UINT w,UINT h,ID3D11PixelShader*p,ID3D11BlendState*b,ID3D11DepthStencilView*depth){c->ClearState();c->RSSetState(rs.Get());D3D11_VIEWPORT vp{0,0,float(w),float(h),0,1};c->RSSetViewports(1,&vp);c->OMSetRenderTargets(1,s.rtv.GetAddressOf(),depth);c->OMSetBlendState(b,nullptr,~0u);c->OMSetDepthStencilState(depth?uiDepth.Get():noDepth.Get(),15);c->VSSetShader(vs.Get(),nullptr,0);c->PSSetShader(p,nullptr,0);c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);c->VSSetConstantBuffers(0,1,cb.GetAddressOf());c->PSSetConstantBuffers(0,1,cb.GetAddressOf());c->PSSetSamplers(0,1,sampler.GetAddressOf());}
  void start(){edvr::uiDeferredFrameBoundary(c.Get());edvr::enabled=true;edvr::failed=edvr::routeNoted=false;edvr::resetPending[0]=edvr::resetPending[1]=false;vsHash=psHash=0;c->ClearState();c->ClearRenderTargetView(hdr.rtv.Get(),bg);c->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.6f,1);}
  void uiDraw(float jx,float jy,ID3D11BlendState*blend,bool defer){constants(jx,jy);setup(hdr,inW,inH,ui.Get(),blend,dsv.Get());edvr::uiDeferredBeforeDraw(c.Get());bool captured=defer&&edvr::uiDeferredBegin(c.Get(),0,'N',3,1,0,0,0);check(!defer||captured,"recognized UI captured");c->DrawInstanced(3,1,0,0);if(captured)edvr::uiDeferredEnd(c.Get());}
- void toneDraw(bool defer){constants(0,0);setup(ldr,inW,inH,tone.Get(),nullptr,nullptr);c->PSSetShaderResources(1,1,hdr.srv.GetAddressOf());vsHash=edvr::EyeTonemapSnapshot::kVs;psHash=edvr::EyeTonemapSnapshot::kPs;edvr::uiDeferredBeforeDraw(c.Get());if(defer)edvr::uiDeferredBeforeTone(c.Get(),'N',3,1,0,0,0);c->DrawInstanced(3,1,0,0);}
+ void toneDraw(bool defer){constants(0,0);setup(ldr,inW,inH,tone.Get(),nullptr,nullptr);c->PSSetShaderResources(1,1,hdr.srv.GetAddressOf());vsHash=edvr::EyeTonemapSnapshot::kVs;psHash=edvr::EyeTonemapSnapshot::kPs;edvr::uiDeferredBeforeDraw(c.Get());if(defer){edvr::uiDeferredBeforeTone(c.Get(),'N',3,1,0,0,0);check(!edvr::uiDeferredBegin(c.Get(),-1,'N',3,1,0,0,0),"full wrapper tone has no later world mirror");}c->DrawInstanced(3,1,0,0);if(defer)edvr::uiDeferredEnd(c.Get());}
+ void candidateDraw(edvr::Surface&target,ID3D11ShaderResourceView*source,uint64_t vh,uint64_t ph){constants(0,0);setup(target,inW,inH,postTone.Get(),nullptr,nullptr);c->PSSetShaderResources(0,1,&source);vsHash=vh;psHash=ph;edvr::uiDeferredBeforeDraw(c.Get());c->DrawInstanced(3,1,0,0);edvr::uiDeferredEnd(c.Get());}
+ void postToneDraw(edvr::Surface&target,ID3D11ShaderResourceView*source){candidateDraw(target,source,0x20F383BBAC05C031ull,0xDED8796049C7BB4Aull);}
  void baselineNative(ID3D11BlendState*b){constants(0,0);c->ClearRenderTargetView(expectedHdr.rtv.Get(),bg);setup(expectedHdr,outW,outH,ui.Get(),b,nullptr);c->DrawInstanced(3,1,0,0);setup(expected,outW,outH,tone.Get(),nullptr,nullptr);c->PSSetShaderResources(1,1,expectedHdr.srv.GetAddressOf());c->DrawInstanced(3,1,0,0);}
  ~Harness(){edvr::uiDeferredShutdown();c->ClearState();}
 };
@@ -82,6 +86,40 @@ int main(int argc,char**argv){
  bool hardware=argc>1&&strcmp(argv[1],"--hardware")==0;
  for(UINT scale:{1u,2u})for(float j:{0.f,.25f,-.25f}){
   Harness h(hardware,8,8*scale);auto*d=h.d.Get();auto*c=h.c.Get();
+  {
+   const auto before=edvr::diagnostic;h.start();h.uiDraw(j,-j,h.over.Get(),true);auto submitted=surf(d,8,8,DXGI_FORMAT_R8G8B8A8_UNORM);
+   check(!edvr::uiDeferredPrepare(c,submitted.tex.Get(),h.zSrv.Get(),h.output.tex.Get(),0,8,8,j,-j),"prepare before tone reproduces route failure");
+   check(edvr::diagnostic.captures==before.captures+1 && edvr::diagnostic.prepares==before.prepares+1,"early route diagnostic sees capture and prepare");
+   check(edvr::diagnostic.toneObservations==before.toneObservations && edvr::diagnostic.toneAliases==before.toneAliases,"early route diagnostic proves no tone observation or alias");
+   const auto failed=edvr::diagnostic;const auto toneLogs=edvr::toneReports,postLogs=edvr::postToneReports,lateLogs=edvr::lateCompositeReports,boundaryLogs=edvr::boundaryReports;
+   h.toneDraw(true);auto post=surf(d,8,8,DXGI_FORMAT_R8G8B8A8_UNORM);h.postToneDraw(post,h.ldr.srv.Get());h.candidateDraw(submitted,h.ldr.srv.Get(),0xA888D51024D9798Eull,0x015EF9349EC097E8ull);
+   check(!edvr::enabled && edvr::diagnostic.toneObservations==failed.toneObservations+1 && edvr::diagnostic.toneAliases==failed.toneAliases,"post-failure tone is observed without replay or state reactivation");
+   check(edvr::diagnostic.postToneCandidates==failed.postToneCandidates+1 && edvr::diagnostic.lateCompositeCandidates==failed.lateCompositeCandidates+1,"post-failure route candidates remain observable");
+   check(edvr::toneReports==toneLogs+1 && edvr::postToneReports==postLogs+1 && edvr::lateCompositeReports==lateLogs+1,"post-failure observations emit bounded trace messages");
+   const auto boundary=edvr::diagnostic.boundaries;edvr::uiDeferredFrameBoundary(c);check(edvr::diagnostic.boundaries==boundary+1 && edvr::boundaryReports==boundaryLogs+1,"failed capture is reported before its first boundary clear");
+   const auto next=edvr::diagnostic;h.toneDraw(true);h.postToneDraw(post,h.ldr.srv.Get());
+   check(edvr::diagnostic.toneObservations==next.toneObservations+1 && edvr::diagnostic.postToneCandidates==next.postToneCandidates+1,"diagnostic window observes the frame following failure");
+   edvr::uiDeferredFrameBoundary(c);check(edvr::diagnostic.boundaries==boundary+2,"diagnostic window reports two boundaries");
+   const auto expired=edvr::diagnostic;h.toneDraw(true);h.postToneDraw(post,h.ldr.srv.Get());
+   check(edvr::diagnostic.toneObservations==expired.toneObservations && edvr::diagnostic.postToneCandidates==expired.postToneCandidates,"post-failure diagnostic window expires after two boundaries");
+  }
+  {
+   h.start();h.uiDraw(j,-j,h.over.Get(),true);const auto before=edvr::diagnostic;h.toneDraw(true);
+   check(edvr::diagnostic.toneObservations==before.toneObservations+1 && edvr::diagnostic.toneAliases==before.toneAliases+1,"full wrapper tone wires observation and alias diagnostics");
+   check(edvr::eyes[0].complete && edvr::eyes[0].aliases.size()==1,"full wrapper tone leaves a complete route");
+   auto post=surf(d,8,8,DXGI_FORMAT_R8G8B8A8_UNORM);const auto afterTone=edvr::diagnostic;h.postToneDraw(post,h.ldr.srv.Get());
+   check(edvr::diagnostic.postToneCandidates==afterTone.postToneCandidates+1,"post-tone sampled blit diagnostic is wired");
+   check(edvr::eyes[0].complete && edvr::eyes[0].aliases.front().Get()==h.ldr.tex.Get(),"sampled blit destination is not falsely propagated");
+   check(!edvr::uiDeferredPrepare(c,post.tex.Get(),h.zSrv.Get(),h.output.tex.Get(),0,8,8,j,-j),"sampled blit destination deterministically misses current alias tracker");
+  }
+  {
+   h.start();h.uiDraw(j,-j,h.over.Get(),true);h.toneDraw(true);auto source=surf(d,8,8,DXGI_FORMAT_R8G8B8A8_UNORM);const auto before=edvr::diagnostic;
+   h.postToneDraw(h.ldr,source.srv.Get());
+   check(edvr::diagnostic.aliasRemovals==before.aliasRemovals+1 && !edvr::eyes[0].complete,"in-place post-tone write records first alias removal");
+   h.start();h.uiDraw(j,-j,h.over.Get(),true);const auto late=edvr::diagnostic;
+   h.candidateDraw(source,h.ldr.srv.Get(),0xA888D51024D9798Eull,0x015EF9349EC097E8ull);
+   check(edvr::diagnostic.lateCompositeCandidates==late.lateCompositeCandidates+1,"late composite source/target diagnostic is wired");
+  }
   for(auto*b:{h.over.Get(),h.add.Get()}){
    h.start();h.uiDraw(j,-j,b,false);h.toneDraw(false);auto fallback=read(d,c,h.ldr.tex.Get());
    h.start();h.uiDraw(j,-j,b,true);h.toneDraw(true);check(read(d,c,h.ldr.tex.Get())==fallback,"fallback retains original UI and stencil");check(edvr::eyes[0].complete,"tone recognized");

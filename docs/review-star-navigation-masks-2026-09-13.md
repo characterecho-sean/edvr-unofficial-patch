@@ -2,54 +2,54 @@
 
 ## Status
 
-Updated 2026-09-15 after Steam eye run `113532`. Orbital lines looked
-clean to Sean; targeting label text still showed dark smearing. That
-flight's native package matches the tested `28f21c8` build
-(`v0.17.0-rc.1-dirty`, graphics PE `6AA97DFB`, linked 17:18:51 UTC).
-Pimax OpenXR reported a Pimax Crystal Super at approximately 90 Hz. DLSS
-310.7.0.0, preset K, used 2644x2610 input and 4068x4016 output per eye.
+Updated 2026-09-15 after Steam eye run `154217`: targeting label
+smearing persists. The tested eeb1928 correction ran: installed package
+verification and graphics SHA-256 match the previous validation. The
+binary is stamped `v0.17.0-rc.1-1-ga44ae48-dirty`, PE `6AA98CD6`, linked
+18:22:14 UTC; eeb1928 is the subsequent source commit. A literal HEAD
+version comparison therefore differs; the exact binary provenance is
+verified, not stale. DLSS 310.7.0.0 preset K uses 2644x2610 input,
+4068x4016 output per eye.
 
-The new replay was inactive during the capture. At 11:33:46.523 it
-captured one B779/8DEF planetary HUD draw, then latched off on an
-interleaved world draw, VS `6DB587D29F43A9A6` / PS `B2DE0A41A4C2B4F5`,
-with `interleaved world shader/blend unsupported`. The eye run followed
-at 11:35:32. No native UI composition succeeded.
+Replay again disabled itself before the capture. At 15:41:18.579 it
+captured eleven 8121/A296 holo draws per eye. At 15:41:18.584 both tone
+alias lists were empty and the submitted texture had no complete
+matching replay. The failure shader pair is
+DEF19B035D5EDEDC/831DF02EBA8AE814. No successful `Deferred UI: active`
+line appears. The eye dump was taken at 15:42:17 (scene frame 15054),
+after fallback resumed.
 
-Ruled out: native UI replay caused the captured dark smearing, because
-replay disabled itself before the captured scene. The original UI
-handling resumed. Earlier ruled-out hypotheses remain in the dated
-journal below; the current implementation is described under "Native UI
-replay after DLSS (2026-09-14)".
+Ruled out: fixing the destination-alpha material rejection alone makes
+the replay path usable in this flight, because it reaches a separate
+tone/submit routing failure before any successful composition. The same
+visual symptom is still not evidence about native UI replay's output.
+The previous blend evidence and validation remain under "Captured replay
+rejection, 113532"; older rejected hypotheses remain in the dated
+journal.
 
-Confirmed blocker: the census records ONE / DEST_ALPHA / ADD blending
-for that world draw; the shared material validator rejects DEST_ALPHA
-because its UI transmission path accepts only a narrower set of factors.
-The original shader has a full RGBA output. World mirroring now accepts
-this exact blend and preserves it on both HDR targets; UI validation
-remains strict. The isolated controller passes 1086 checks, including
-byte-exact original HDR/LDR and independent UI-free reference images.
-See "Captured replay rejection, 113532" below for evidence and
-validation.
+Open: trace why both tone aliases are empty at the first scene submit.
+Discriminate a missed tone hook, HDR source mismatch, invalidated
+aliases, and early submit ordering before changing rendering behavior.
+The later dump retains two valid tone-map snapshots, but is not the
+startup frame. See "Empty tone route, 154217" below. Existing tests
+exercise the controller separately from the complete hooked draw/submit
+sequence. The later frame confirms an untracked sampled blit after tone
+mapping and further panel writes; these must be handled together. A
+bounded tone/alias/submission trace is implemented to resolve the
+startup failure without changing rendering. Its isolated controller
+tests pass 1,320 checks on WARP and hardware; the native harness passes
+622 checks. Full build and live NVIDIA NGX validation passed. The
+diagnostic candidate is stamped `v0.17.0-rc.1-2-geeb1928-dirty`; hashes
+and validation are below. Next flight: normal launch and one eye dump
+near the affected targeting label. No AA reset is needed: the bounded
+trace records startup automatically. Sean confirmed Elite is closed, so
+the earlier optional in-flight AA reset comparison was not available.
 
-Aligned frame 19834 already contains the target-text overlap before the
-final UI stage; the final image is essentially unchanged. Later captured
-frames have no corresponding before-UI image, so their extra softness
-cannot be assigned to a stage. No evidence identifies 6DB/B2DE as the
-target label itself. Earlier mis-scaled comparison images are invalid.
-
-The corrected candidate passed the full DLSS-enabled build, 1086
-controller checks on WARP and NVIDIA, and live NGX smoke including the
-motion/jitter convention rig. Graphics PE `6AA98CD6`, linked 18:22:14
-UTC, is stamped `v0.17.0-rc.1-1-ga44ae48-dirty`; hashes are recorded
-below.
-
-Open: verify the correction in flight. First require successful native
-UI composition in the log, then assess targeting text near the corona. A
-bounded census review found no additional definite blocker; missing
-shader bytes and unrecorded MRT/UAV/logic-op state remain limits. Full
-builds here need the Steam original DLL passed via `--openvr` and
-`EDVR_NGX_SDK` set to the pinned SDK at
-`C:/Users/seanm/AppData/Local/EDVR/ngx-sdk`.
+Build setup: prepend bundled Python, pass Steam's original OpenVR DLL
+using `--openvr`, and set `EDVR_NGX_SDK` to
+`C:/Users/seanm/AppData/Local/EDVR/ngx-sdk`. Run the build with access
+to that SDK. Require a full DLSS-enabled build and live NGX smoke
+without runtime skips before installation; preserve Steam's edvr.ini.
 
 [Issue
 36](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/36)
@@ -1766,3 +1766,138 @@ subsequent source commit does not alter these tested binaries. The next
 flight must show `Deferred UI: active` and advancing applied totals; if
 it falls back, use its new specific failure reason before drawing a
 visual conclusion about native UI replay.
+
+## Empty tone route, 154217 (2026-09-15)
+
+Sean reports the same targeting-label smear. Flight
+`edvr_gfx_20260915_153936.log` matches the installed graphics PE and
+SHA-256 recorded above; `install_edvr.py --all --verify-only` also
+passes. The source commit followed the build, explaining the literal
+HEAD version mismatch. This is evidence from the intended correction.
+
+At 15:41:18.579 the controller captures 8121/A296 holo draws at
+2644x2610, with eleven draws retained per eye. At 15:41:18.584 it
+reports `submitted=0000024E0981F520 tone0=0 tone1=0`, then disables
+replay with `submitted colour has no complete matching replay`. The
+bound shader pair is DEF19B035D5EDEDC/831DF02EBA8AE814. No tone-pass
+validation failure or successful composition is logged. The 15:42:17
+dump is after that latch.
+
+Ruled out: destination-alpha world blend support alone enables the new
+UI path in this flight, because a separate tone/submit handoff fails
+before any successful application. No conclusion about the native UI
+path's image quality follows from this fallback capture.
+
+Candidates and discriminating evidence before any rendering change:
+
+- Tone hook not reached: the actual tone VS/PS pair or hook ordering
+  must differ from the recognized pair and controller test sequence.
+- HDR source mismatch: tone PS t1 resolves to a different texture from
+  the captured UI's HDR target, potentially after a fullscreen pass.
+- Alias invalidation: a recognized tone output was recorded, then a draw
+  or resource write removed it before submission.
+- Early submission: reconstruction was requested before the matching
+  tone pass completed in the same frame.
+
+The later census contains the expected 2D78/99C2 tone pair and two valid
+retained tone snapshots (first matching frame 15055). It cannot directly
+reconstruct the startup failure at 15:41:18. Decode render-target and
+SRV views through their resource records; `c=` is a constant-buffer
+binding, not the colour target. The existing controller's tone helper
+omits the intervening full game hook sequence; cover that before another
+test flight.
+
+The later census resolves the first-eye resource chain exactly. UI HDR
+RTV @224 and tone t1 SRV @1547 both view `0000024E098244E0`. Tone draw
+261 writes @1564 (`0000024E09825560`). Draw 262 samples the same texture
+through @1578 and writes @1577 (`0000024E0981F520`), exactly the
+submitted resource in the startup failure. The other eye follows the
+same chain: HDR `098289A0`, tone output `09828C60`, final output
+`0981EFA0`.
+
+Ruled out: an HDR ping-pong copy causes the later tone source mismatch,
+because the UI RTV and tone HDR SRV share the same underlying resource.
+This later evidence does not reconstruct startup resource lifetimes.
+
+Draw 262 uses VS `20F383BBAC05C031` and PS `DED8796049C7BB4A`: the VS
+forwards position/UV; the PS samples t0 through s0 directly into RGBA.
+It is N4, triangle strip, same-size UNORM source/destination,
+depth/stencil/blending disabled, full viewport and write mask. The
+shader does no AA, sharpening, or gamma math. The sampler and vertex UV
+alignment still matter, so do not treat it as a bit-exact CopyResource
+alias without validation or replay. Current UI routing follows resource
+copies only.
+
+Further full-size writes at q1985/q1991 use A888/015 after those blits.
+Do not ignore them or preserve a clean-image alias through an
+unclassified write. The earlier bounded claim that the blit was the
+terminal write was incomplete; ordered census review found these panel
+draws afterward.
+
+Native code permits both direct render-thread treatment and queued
+Present-boundary work. Present clears the current UI frame state before
+pumping queued work. Existing logs give the treatment thread but not the
+Submit caller/path, so a previous/current-frame association error
+remains an open hypothesis. The retained DEF19/831 binding alone cannot
+prove it.
+
+The terminal writes are indexed six-vertex A888D51024D9798E /
+015EF9349EC097E8 composites over both final eye textures. They use
+premultiplied-over RGB, preserve destination alpha, and have depth
+disabled. PS t1 is a 259x154 interface surface; its retained frame-15055
+payload is entirely zero. PS t0 is a 512x512 BC1 effect texture whose
+pixels were not retained. The PS includes an eight-tap holographic smear
+and material/tone terms. An empty t1 does not prove no visible write
+from t0, so these draws must be preserved or replayed, never silently
+ignored. The exact pair is recognized among final GUI canvases by
+screen_motion, but A888 is also the game's general world-quad pipeline.
+
+Sean had already closed Elite, so an AA Off/On control capture could not
+test whether this is startup-only. The next diagnostic build will retain
+bounded tone, sampled-blit, panel-tail, alias invalidation and native
+submission-path events together. No rendering or frame-lifetime change
+is justified by the evidence yet; first resolve which branch caused the
+empty aliases.
+
+The diagnostic implementation records UI frame generations, both pending
+eyes at tone observation and preparation, alias creation/removal, the
+exact sampled blit and late composite pairs, and the boundary that
+clears the packets. Native submission reports its first direct and
+queued routes with caller/render/owner thread IDs. On rejection,
+observations continue through the failed frame and one following frame
+without reactivating replay or changing the fallback. Event budgets
+bound logging and stop diagnostic-only resource queries once exhausted.
+
+The isolated controller passes 1,320 checks on both WARP and NVIDIA.
+Synthetic cases cover preparation before tone, the controller's
+BeforeDraw/BeforeTone/Begin/draw/End hook order, sampled-copy
+destination nonmatching, alias invalidation, both candidate families
+after failure, and diagnostic expiry after the following frame boundary.
+These are controller tests, not a complete replay of the captured game
+shaders or the full panel override pipeline. The native harness passes
+622 checks with no runtime.
+
+Full validation completed with SDK 310.7.0 explicitly verified and
+Steam's original OpenVR DLL used to rebuild the legacy fixture. The
+absolute build.bat returned 0 and reported DLSS runtime CARRIED and all
+native OpenXR gates passed. Live NVIDIA NGX smoke against the final
+graphics DLL returned 0, including DLAA/DLSS evaluation, crop, motion
+and cost probes, and the jitter/motion convention rig (17.54 error for
+the shipped pairing versus 19.43 runner-up). The final hardware
+controller passed 1,320 checks. This does not claim a headset or D3D
+debug-layer test.
+
+Candidate version is `v0.17.0-rc.1-2-geeb1928-dirty`, built before its
+source commit. Graphics PE `6AA9C287` links at 2026-09-15 22:11:19 UTC;
+runtime PE `6AA9C363` at 22:14:59 UTC. SHA-256:
+
+- Graphics:
+  `627FBC149681154C750C0C996E2557AE0142DE027C798C7B32F3F13B94E49CE2`
+- Runtime:
+  `4CEB42A4AF383D4EB398765549EC547D319FECB91804E22F31E2763FF53C4C41`
+
+Validation logs are under `build/review_motion/issue36/`:
+`build-ui-route-154217.log`, `smoke-ui-route-154217-live-ngx.log`, and
+`controller-ui-route-154217-hardware.log`. This build only adds
+diagnostics; the next flight must establish the tone/submission ordering
+before a rendering correction is proposed.

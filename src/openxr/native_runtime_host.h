@@ -187,6 +187,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   SubmissionStats::Sample submitSample;
   TransferWallTimes transferWall;
   uint64_t submitCallbacksBegin=0;
+  std::atomic<bool> submitRouteNoted[2]{};
   float frameTangentShift[2][2]{};
   unsigned temporalFrameEyes=0;
   uint64_t temporalEyes[2]{},temporalFrames=0,temporalFailures=0;
@@ -790,6 +791,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
       const auto sequence=timingApplicationSequence.load(std::memory_order_acquire);
+      const bool queued=renderRoute.present&&!renderRoute.present->isRenderThread();
+      bool expected=false;
+      if(submitRouteNoted[queued?1:0].compare_exchange_strong(expected,true,std::memory_order_relaxed))
+        nativeTracePrintf("native_submit_route,path=%s,caller_thread=%lu,render_thread=%lu,owner_thread=%lu,sequence=%llu,eye=%u\n",
+          queued?"present_queue":"direct",(unsigned long)GetCurrentThreadId(),
+          (unsigned long)graphicsCalls.thread,(unsigned long)ownerThread,
+          (unsigned long long)sequence,unsigned(eye));
       if(timingApplicationOpen.exchange(false,std::memory_order_acq_rel) && sequence)
         timing.applicationSegment(sequence,false);
       if(sequence) timing.producerPause(sequence);

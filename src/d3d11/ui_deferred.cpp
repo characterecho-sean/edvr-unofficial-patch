@@ -101,6 +101,7 @@ struct Eye {
     std::vector<std::unique_ptr<Draw>> draws;
     std::vector<Ptr<ID3D11Resource>> aliases;
     Ptr<ID3D11CommandList> output;
+    uint64_t generation=0;
     UINT count=0,w=0,h=0,changedStencil=0;
     size_t bytes=0;
     bool complete=false,restored=false,aborted=false;
@@ -113,6 +114,14 @@ Ptr<ID3D11DepthStencilView> savedDepth;
 float savedFactors[4]{};UINT savedMask=0;bool colourMuted=false;
 uint64_t captured=0,applied=0,declined=0;
 bool noted=false,routeNoted=false;
+struct DiagnosticCounters {
+    uint64_t captures=0,toneObservations=0,toneAliases=0,aliasRemovals=0,prepares=0;
+    uint64_t postToneCandidates=0,lateCompositeCandidates=0,boundaries=0;
+} diagnostic;
+uint64_t generation=1;
+uint64_t diagnosticUntilGeneration=0;
+unsigned toneReports=0,aliasReports=0,prepareReports=0,postToneReports=0,lateCompositeReports=0,boundaryReports=0;
+static bool diagnosticWindow(){return diagnosticUntilGeneration && generation<=diagnosticUntilGeneration;}
 bool sameIdentity(IUnknown* a,IUnknown* b) {
     if(a==b)return true;if(!a || !b)return false;
     Ptr<IUnknown> x,y;return SUCCEEDED(a->QueryInterface(IID_PPV_ARGS(&x))) && SUCCEEDED(b->QueryInterface(IID_PPV_ARGS(&y))) && x==y;
@@ -121,6 +130,7 @@ bool sameIdentity(IUnknown* a,IUnknown* b) {
 void decline(Eye& e,const char* why) {
     ++declined;e.complete=false;e.aborted=true;
     if(!failed){failed=true;enabled=false;resetPending[0]=resetPending[1]=true;
+        diagnosticUntilGeneration=generation+1;
         Log::get().note("Deferred UI: disabled until AA is switched Off and back on, or the game restarts. Existing UI handling resumes on following frames; temporal history restarts once per eye.");}
     static unsigned reports=0;
     if(reports++<12)Log::get().note("Deferred UI: original frame retained: %s (draws=%u, VS=%016llX PS=%016llX).",why,e.count,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
@@ -292,8 +302,11 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
     }
     d.material=material(dev.Get(),d.packet.originalPixelShader(),d.packet.blendState());
     if(d.material==SIZE_MAX)return false;
+    if(!e.count)e.generation=generation;
     ++e.count;++captured;
-    if(captured<=12)Log::get().note("Deferred UI: captured %c draw, VS=%016llX PS=%016llX eye=%d %ux%u.",kind,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),eye,e.w,e.h);
+    ++diagnostic.captures;
+    if(captured<=12)Log::get().note("Deferred UI: captured %c draw, gen=%llu VS=%016llX PS=%016llX eye=%d %ux%u HDR=%p.",kind,
+        static_cast<unsigned long long>(generation),bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),eye,e.w,e.h,e.hdr.Get());
     return true;
 }
 bool uiDeferredBegin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
@@ -315,10 +328,21 @@ void uiDeferredEnd(ID3D11DeviceContext* ctx) {
 }
 
 static void beforeTone(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
-    if(inside || !enabled)return;
+    if(inside)return;
     if(bindingShaderHash(BindSlot::Vs)!=EyeTonemapSnapshot::kVs || bindingShaderHash(BindSlot::Ps)!=EyeTonemapSnapshot::kPs)return;
-    Scope scope;Ptr<ID3D11ShaderResourceView> input;ctx->PSGetShaderResources(1,1,&input);if(!input)return;
-    Ptr<ID3D11Resource> source;input->GetResource(&source);
+    const bool observe=eyes[0].count || eyes[1].count || diagnosticWindow();
+    const bool report=observe && toneReports<8;
+    if(!enabled && !report){if(observe)++diagnostic.toneObservations;return;}
+    Scope scope;Ptr<ID3D11ShaderResourceView> input;ctx->PSGetShaderResources(1,1,&input);
+    Ptr<ID3D11Resource> source;if(input)input->GetResource(&source);
+    if(observe) {
+        ++diagnostic.toneObservations;
+        if(report){++toneReports;Log::get().note(
+            "Deferred UI: expected tone observed enabled=%u gen=%llu t1=%p; eye0 gen=%llu HDR=%p draws=%u complete=%u restored=%u aborted=%u, eye1 gen=%llu HDR=%p draws=%u complete=%u restored=%u aborted=%u.",
+            unsigned(enabled),static_cast<unsigned long long>(generation),source.Get(),static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),eyes[0].count,unsigned(eyes[0].complete),unsigned(eyes[0].restored),unsigned(eyes[0].aborted),
+            static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),eyes[1].count,unsigned(eyes[1].complete),unsigned(eyes[1].restored),unsigned(eyes[1].aborted));}
+    }
+    if(!enabled || !input)return;
     for(auto& e:eyes)if(e.count && sameIdentity(e.hdr.Get(),source.Get()) && !e.restored && !e.aborted) {
         Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;Ptr<ID3D11Texture2D> tex;
         bool valid=kind=='N' && count==3 && instances==1 && target(ctx,rt,ds,tex);
@@ -342,7 +366,9 @@ static void beforeTone(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instan
         // The game receives a complete colour image regardless of NGX success,
         // unsupported submit routes, cropped AA modes, or capture-only submits.
         restore(ctx,e);
-        if(valid){e.complete=true;e.aliases.clear();e.aliases.push_back(tex);}
+        if(valid){e.complete=true;e.aliases.clear();e.aliases.push_back(tex);++diagnostic.toneAliases;
+            if(aliasReports++<8)Log::get().note("Deferred UI: tone alias added enabled=%u gen=%llu eye=%u eye_gen=%llu tone=%p HDR=%p draws=%u.",
+                unsigned(enabled),static_cast<unsigned long long>(generation),unsigned(&e-eyes),static_cast<unsigned long long>(e.generation),tex.Get(),e.hdr.Get(),e.count);}
         else decline(e,"tone pass unsupported");
         return;
     }
@@ -355,6 +381,15 @@ void uiDeferredBeforeTone(ID3D11DeviceContext* ctx,char kind,UINT count,UINT ins
 static ID3D11ShaderResourceView* prepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* submitted,
     ID3D11ShaderResourceView* sceneDepth,ID3D11Texture2D* output,int eye,UINT w,UINT h,float jx,float jy) {
     if(!enabled || inside || eye<0 || eye>1 || !submitted || !output || !sceneDepth)return nullptr;
+    ++diagnostic.prepares;
+    if((eyes[0].count || eyes[1].count || eyes[0].complete || eyes[1].complete) && prepareReports++<8)
+        Log::get().note("Deferred UI: prepare enabled=%u gen=%llu eye=%d submitted=%p output=%p; eye0 gen=%llu HDR=%p tone=%p, eye1 gen=%llu HDR=%p tone=%p; VS=%016llX PS=%016llX.",
+            unsigned(enabled),static_cast<unsigned long long>(generation),eye,submitted,output,
+            static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),
+            eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),
+            static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),
+            eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get(),
+            bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
     Eye* match=nullptr;
     for(auto& e:eyes)if(e.complete && e.w==w && e.h==h)for(const auto& alias:e.aliases)if(sameIdentity(alias.Get(),submitted)){if(match && match!=&e)return nullptr;match=&e;break;}
     if(!match){if(!routeNoted && (eyes[0].count || eyes[1].count)){routeNoted=true;Log::get().note("Deferred UI: submit route not matched: submitted=%p tone0=%p tone1=%p; original frame retained.",submitted,eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get());decline(eyes[eye],"submitted colour has no complete matching replay");}return nullptr;}
@@ -407,12 +442,23 @@ void uiDeferredApply(ID3D11DeviceContext* ctx,int eye) {
     if(eye<0 || eye>1 || !eyes[eye].output)return;Scope scope;execute(ctx,eyes[eye].output.Get());eyes[eye].output.Reset();++applied;
     if(!noted){noted=true;Log::get().note("Deferred UI: active. DLSS receives world colour; captured UI draws run at output resolution after reconstruction, with original shaders, tone map and depth/stencil. No deferred UI motion/history pass.");}
 }
+static void removeAlias(ID3D11DeviceContext*,Eye& e,ID3D11Resource* r,const char* operation) {
+    if(!e.complete || !r)return;
+    const auto before=e.aliases.size();
+    e.aliases.erase(std::remove_if(e.aliases.begin(),e.aliases.end(),[&](const auto& a){return a.Get()==r;}),e.aliases.end());
+    if(e.aliases.size()!=before) {
+        ++diagnostic.aliasRemovals;
+        if(aliasReports++<8)Log::get().note("Deferred UI: tone alias removed enabled=%u gen=%llu eye=%u eye_gen=%llu op=%s target=%p VS=%016llX PS=%016llX remaining=%u.",
+            unsigned(enabled),static_cast<unsigned long long>(generation),unsigned(&e-eyes),static_cast<unsigned long long>(e.generation),operation,r,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),unsigned(e.aliases.size()));
+    }
+    e.complete=!e.aliases.empty();
+}
 void uiDeferredResourceWrite(ID3D11DeviceContext* ctx,ID3D11Resource* r) {
     if(inside || !enabled || !r)return;
     snapshots.written(r);
     for(auto& e:eyes){
         if(!e.restored && e.count && (e.hdr.Get()==r || e.depth.source.Get()==r)){restore(ctx,e);decline(e,"scene overwritten before deferred replay");}
-        if(e.complete){e.aliases.erase(std::remove_if(e.aliases.begin(),e.aliases.end(),[&](const auto& a){return a.Get()==r;}),e.aliases.end());e.complete=!e.aliases.empty();}
+        removeAlias(ctx,e,r,"resource-write");
     }
 }
 void uiDeferredViewWrite(ID3D11DeviceContext* ctx,ID3D11View* v){if(inside || !enabled || !v)return;Ptr<ID3D11Resource> r;v->GetResource(&r);uiDeferredResourceWrite(ctx,r.Get());}
@@ -432,11 +478,39 @@ void uiDeferredCopyRegion(ID3D11Resource* dst,UINT dstSub,UINT x,UINT y,UINT z,I
     uiDeferredCopy(dst,src,true);
 }
 void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx) {
-    if(inside || !enabled || (!eyes[0].count && !eyes[1].count))return;
+    if(inside)return;
+    const bool active=eyes[0].count || eyes[1].count;
+    if(!active && !diagnosticWindow())return;
+    const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
+    const bool postTone=vs==0x20F383BBAC05C031ull && ps==0xDED8796049C7BB4Aull;
+    const bool lateComposite=vs==0xA888D51024D9798Eull && ps==0x015EF9349EC097E8ull;
+    auto& reports=postTone?postToneReports:lateCompositeReports;
+    const bool diagnosticCandidate=postTone || lateComposite;
+    const bool report=diagnosticCandidate && reports<8;
+    if(!enabled && !report){
+        if(postTone)++diagnostic.postToneCandidates;
+        if(lateComposite)++diagnostic.lateCompositeCandidates;
+        return;
+    }
     ID3D11RenderTargetView* views[8]{};Ptr<ID3D11DepthStencilView> depth;ctx->OMGetRenderTargets(8,views,&depth);
+    if(postTone || lateComposite) {
+        auto& observations=postTone?diagnostic.postToneCandidates:diagnostic.lateCompositeCandidates;
+        ++observations;
+        if(report){
+            Ptr<ID3D11Resource> target,s0,s1;Ptr<ID3D11ShaderResourceView> v0,v1;
+            if(views[0])views[0]->GetResource(&target);
+            ctx->PSGetShaderResources(0,1,&v0);ctx->PSGetShaderResources(1,1,&v1);
+            if(v0)v0->GetResource(&s0);if(v1)v1->GetResource(&s1);
+            ++reports;Log::get().note("Deferred UI: %s candidate enabled=%u gen=%llu target=%p t0=%p t1=%p; eye0 gen=%llu HDR=%p tone=%p draws=%u, eye1 gen=%llu HDR=%p tone=%p draws=%u; VS=%016llX PS=%016llX.",
+            postTone?"post-tone copy":"late composite",unsigned(enabled),static_cast<unsigned long long>(generation),target.Get(),s0.Get(),s1.Get(),
+            static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),eyes[0].count,
+            static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get(),eyes[1].count,
+            vs,ps);}
+    }
+    if(!enabled){for(auto* v:views)if(v)v->Release();return;}
     if(depth){Ptr<ID3D11Resource> r;depth->GetResource(&r);snapshots.written(r.Get());}
     for(auto* v:views)if(v){Ptr<ID3D11Resource> r;v->GetResource(&r);snapshots.written(r.Get());
-        for(auto& e:eyes)if(e.complete){e.aliases.erase(std::remove_if(e.aliases.begin(),e.aliases.end(),[&](const auto& a){return a==r;}),e.aliases.end());e.complete=!e.aliases.empty();}
+        for(auto& e:eyes)removeAlias(ctx,e,r.Get(),"draw-target");
         v->Release();}
 }
 void uiDeferredBeforeDispatch(ID3D11DeviceContext* ctx) {
@@ -448,8 +522,15 @@ void uiDeferredUnknownWrite(ID3D11DeviceContext* ctx){if(inside || !enabled)retu
 void uiDeferredFrameBoundary(ID3D11DeviceContext* ctx) {
     static uint64_t frames=0;
     if(enabled && ++frames%600==0)Log::get().note("Deferred UI: totals captured=%llu applied=%llu declined=%llu, snapshots copied=%.2f MiB allocated=%.2f MiB.",captured,applied,declined,snapshots.copiedBytes()/1048576.,snapshots.allocatedBytes()/1048576.);
+    if((eyes[0].count || eyes[1].count || eyes[0].complete || eyes[1].complete || diagnosticWindow())) {
+        ++diagnostic.boundaries;
+        if(boundaryReports++<4)Log::get().note("Deferred UI: frame boundary enabled=%u gen=%llu; eye0 gen=%llu HDR=%p draws=%u complete=%u aliases=%u restored=%u aborted=%u, eye1 gen=%llu HDR=%p draws=%u complete=%u aliases=%u restored=%u aborted=%u.",
+            unsigned(enabled),static_cast<unsigned long long>(generation),static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),eyes[0].count,unsigned(eyes[0].complete),unsigned(eyes[0].aliases.size()),unsigned(eyes[0].restored),unsigned(eyes[0].aborted),
+            static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),eyes[1].count,unsigned(eyes[1].complete),unsigned(eyes[1].aliases.size()),unsigned(eyes[1].restored),unsigned(eyes[1].aborted));
+    }
     for(auto& e:eyes){if(e.count && !e.restored)restore(ctx,e);for(UINT i=0;i<e.count;++i){e.draws[i]->packet=UiDeferredDraw{};}e.tone=UiDeferredDraw{};e.count=e.changedStencil=0;e.bytes=0;e.complete=e.restored=e.aborted=false;e.aliases.clear();e.output.Reset();}
     snapshots.frameBoundary();
+    ++generation;
 }
-void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=false;captured=applied=declined=0;}
+void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=0;}
 }
