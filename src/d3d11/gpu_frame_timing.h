@@ -19,8 +19,15 @@ struct GpuFrameSnapshot {
     GpuSpanResult result{};
     uint64_t capturedAtMs = 0;
 };
-// CPU snapshots only. Consumers must reject samples older than two seconds;
-// invalid samples replace previous valid values and retain original identity.
+// CPU snapshots only. ApplicationRender samples contain the sum of bounded,
+// non-overlapping producer GPU segments; runtime and transfer waits are not
+// included. Consumers must reject samples older than two seconds; invalid
+// samples replace previous valid values and retain original identity.
 GpuFrameSnapshot gpuFrameSnapshot() noexcept;
+// Non-destructive bounded completion history for benchmark collectors. Cursor
+// is an event ordinal, independent of frame sequence; dropped reports count
+// completions overwritten before the caller could observe them.
+unsigned gpuFrameReadCompletions(uint64_t& cursor, GpuFrameSnapshot* out,
+                                 unsigned capacity, uint64_t& dropped) noexcept;
 const char* gpuFrameReason(GpuSpanReason) noexcept;
 } // namespace edvr

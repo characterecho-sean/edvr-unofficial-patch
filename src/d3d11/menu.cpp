@@ -238,6 +238,7 @@ struct State {
     float    overlayAlpha = 0.0f;
     uint64_t overlayTextMs = 0;
     std::string overlayText;
+    float    overlayTextDeg = 0.0f;
 
     // Restart bookkeeping.
     bool snapshotTaken = false;
@@ -2911,6 +2912,12 @@ void menuConfigure(Config& cfg) {
     s.curve = c;
     float t = cfg.getFloat("menu.text_degrees", 1.1f);
     if (!(t >= 0.6f) || t > 3.0f) t = 1.1f;
+    if (s.configured && t != s.textDeg) {
+        // The floating monitor has its own reference raster. Make a text
+        // setting edit wake its half-second refresh even when the measured
+        // line itself has not changed.
+        s.overlayTextMs = 0;
+    }
     s.textDeg = t;
     float w = cfg.getFloat("menu.width_degrees", 30.0f);
     if (!(w >= 16.0f) || w > 45.0f) w = 30.0f;
@@ -3232,11 +3239,14 @@ void menuTick(ID3D11Device* dev) {
                         s.overlayTextMs = stampMs();
                         char line[120];
                         perfMonitorOverlayLine(line, sizeof(line));
-                        if (!s.overlayUp || line != s.overlayText) {
+                        if (!s.overlayUp || line != s.overlayText || s.overlayTextDeg != s.textDeg) {
                             s.overlayText = line;
                             MenuContent c;
-                            buildToastContent(c, s.overlayText, kOverlayWidthDeg, 0.85f);
-                            menuPanelSubmit(c);
+                            if (menuPanelBuildOverlayContent(c, s.overlayText.c_str(), s.textDeg,
+                                                              nullptr)) {
+                                s.overlayTextDeg = s.textDeg;
+                                menuPanelSubmit(c);
+                            }
                         }
                         s.overlayUp = true;
                     }
@@ -3304,6 +3314,7 @@ void menuTick(ID3D11Device* dev) {
         g.halfW = panelHalfW(widthDeg, menuBranch && tooltipsOn());
         g.shift = panelShift(g.halfW, menuBranch && tooltipsOn());
         g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
+        g.overlayRaster = showingOverlay;
         if (!glitchConsumerPresent() && !nativeMenuAvailable()) {
             g.alpha = 0.0f;
             inputGateSetPrivate(false);

@@ -313,14 +313,14 @@ void frameDriverCases(Device& d) {
             check(policy.endEye(eye,GetTickCount64(),owner)==GpuSpanReason::Valid,"reversed eye ends");
         }
         check(f.timers[0].end(f.ctx()),"borrower ends before parent");
-        check(f.ops.active==1&&f.ops.allocated==9,"six markers plus borrowed pair use one disjoint");
+        check(f.ops.active==1&&f.ops.allocated==11,"eight allocated frame timestamps plus borrowed pair use one disjoint");
         check(policy.finishFrame(GetTickCount64(),owner)==GpuSpanReason::Valid,"frame finishes");
         f.ops.pendingQuery=5;
         check(policy.poll(GetTickCount64(),owner,results)==0,"issued right-end timestamp stays pending");
-        const auto read0=f.ops.queries[0].reads,readFreq=f.ops.queries[6].reads;
+        const auto read0=f.ops.queries[0].reads,readFreq=f.ops.queries[8].reads;
         f.ops.pendingQuery=-1;
         check(policy.poll(GetTickCount64(),owner,results)==1,"partial frame becomes ready");
-        check(f.ops.queries[0].reads==read0&&f.ops.queries[6].reads==readFreq,"ready frame timestamp/frequency cached");
+        check(f.ops.queries[0].reads==read0&&f.ops.queries[8].reads==readFreq,"ready frame timestamp/frequency cached");
         const auto& r=results[0];
         check(r.sequence==101&&r.sourceFrame==77&&r.reason==GpuSpanReason::Valid,"original metadata preserved");
         check(r.outerMs==7&&r.leftMs==1&&r.rightMs==1,"durations derived from issued command positions");
@@ -335,7 +335,7 @@ void frameDriverCases(Device& d) {
         check(rejected&&f.ops.commands==calls,"actual thread gates policy and driver before mutation");
         policy.shutdown(GetTickCount64(),owner);driver.reset(f.ctx());f.finish();
     }
-    for(int allocation=0;allocation<7;++allocation) for(int mode=0;mode<3;++mode) {
+    for(int allocation=0;allocation<9;++allocation) for(int mode=0;mode<3;++mode) {
         Fixture f(d); f.ops.failCreate=allocation;f.ops.nonnullFailure=mode==1;f.ops.nullSuccess=mode==2;
         GpuTimingFrameDriver driver;check(driver.bind(d.dev.Get(),f.ctx()),"allocation case bind");
         GpuSpanState p(driver,driver.currentOwner());const auto owner=driver.currentOwner();
@@ -402,16 +402,28 @@ uint64_t event(GpuFrameEvent e,uint64_t seq=0,unsigned eye=0,unsigned flags=0,vo
 }
 uint64_t poses() {
     const auto seq=event(GpuFrameEvent::WaitBegin);
-    check(seq&&event(GpuFrameEvent::WaitEnd,seq,0,1),"CPU pose mailbox arms sequence");return seq;
+    check(seq&&event(GpuFrameEvent::WaitEnd,seq,0,kGpuFrameNativeWait),"CPU pose mailbox arms native sequence");
+    check(bool(event(GpuFrameEvent::SegmentResume,seq))==gpuFrameSnapshot().enabled,
+          "producer return admits rendering only with GPU timing enabled");
+    return seq;
 }
 void controllerCases(Device& d,Runtime& runtime) {
     D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=16;td.MipLevels=td.ArraySize=1;
     td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.SampleDesc.Count=1;td.BindFlags=D3D11_BIND_RENDER_TARGET;
     ComPtr<ID3D11Texture2D> tex;hr(d.dev->CreateTexture2D(&td,nullptr,&tex));
     Fixture f(d);check(gpuFrameBind(d.dev.Get(),f.ctx(),true),"controller binds actual shared owner");
+    uint64_t pairSequence=0;unsigned pairMask=0;
     auto finishEye=[&](uint64_t seq,unsigned eye,bool accepted=true) {
+        if(pairSequence!=seq){pairSequence=seq;pairMask=0;}
+        check(event(GpuFrameEvent::SegmentPause,seq)==1,"game segment ends before submit route");
         check(event(GpuFrameEvent::SubmitBegin,seq,eye,0,tex.Get())==1,"submit path begins");
-        return event(GpuFrameEvent::SubmitEnd,seq,eye,accepted?1:0);
+        check(event(GpuFrameEvent::SegmentEnd,seq,eye,1,tex.Get())==1,"treatment timestamp precedes transfer");
+        const auto result=event(GpuFrameEvent::SubmitEnd,seq,eye,accepted?1:0);
+        if(result) {
+            pairMask|=1u<<eye;
+            if(pairMask!=3)check(event(GpuFrameEvent::SegmentResume,seq)==1,"first submit return admits between-eye work");
+        }
+        return result;
     };
     auto completed=[&](uint64_t seq,uint64_t next,GpuSpanReason reason) {
         gpuFramePresent(f.ctx(),next);const auto snap=gpuFrameSnapshot();
@@ -428,7 +440,8 @@ void controllerCases(Device& d,Runtime& runtime) {
     check(f.ops.commands==began&&f.ops.active==1,"only first covered command starts frame");
     check(finishEye(seq,1)&&finishEye(seq,0),"reversed pair accepted");
     auto snap=completed(seq,901,GpuSpanReason::Valid);
-    check(snap.result.sourceFrame==900&&snap.result.outerMs==5,"result uses original source frame and command interval");
+    check(snap.result.sourceFrame==900&&snap.result.source==GpuSpanSource::ApplicationRender&&
+          snap.result.outerMs==3,"result uses original frame and three non-overlapping command intervals");
     gpuFrameCommand(f.ctx());check(f.ops.active==0,"mirror commands never reopen completed frame");
 
     seq=poses();check(!event(GpuFrameEvent::SubmitBegin,seq,0,0,tex.Get()),"submit without covered command rejected");
@@ -439,7 +452,7 @@ void controllerCases(Device& d,Runtime& runtime) {
 
     seq=poses();gpuFrameCommand(f.ctx());check(finishEye(seq,0),"duplicate-eye first submit");
     check(!event(GpuFrameEvent::SubmitBegin,seq,0,0,tex.Get()),"duplicate eye rejected");
-    completed(seq,904,GpuSpanReason::BadPair);
+    completed(seq,904,GpuSpanReason::Incomplete);
 
     seq=poses();gpuFrameCommand(f.ctx());check(!finishEye(seq,0,false),"runtime rejected submit invalidates");
     completed(seq,905,GpuSpanReason::Incomplete);
@@ -471,7 +484,8 @@ void controllerCases(Device& d,Runtime& runtime) {
     const auto beforeFailed=f.ops.commands;gpuFrameCommand(f.ctx());
     check(f.ops.active==0&&f.ops.commands==beforeFailed,"failed pose wait stays disarmed");
     const auto old=event(GpuFrameEvent::WaitBegin),newer=event(GpuFrameEvent::WaitBegin);
-    check(!event(GpuFrameEvent::WaitEnd,old,0,1)&&event(GpuFrameEvent::WaitEnd,newer,0,1),"out-of-order wait cannot arm stale sequence");
+    check(!event(GpuFrameEvent::WaitEnd,old,0,kGpuFrameNativeWait)&&event(GpuFrameEvent::WaitEnd,newer,0,kGpuFrameNativeWait),"out-of-order wait cannot arm stale sequence");
+    check(event(GpuFrameEvent::SegmentResume,newer)==1,"newer route return admits producer commands");
     gpuFrameCommand(f.ctx());finishEye(newer,0);finishEye(newer,1);completed(newer,910,GpuSpanReason::Valid);
 
     gpuFrameConfigure(false);const auto disabledCalls=f.ops.commands;
@@ -484,7 +498,21 @@ void controllerCases(Device& d,Runtime& runtime) {
     check(f.ops.commands==beforePresent,"foreign Present only publishes CPU identity and rejection");
     seq=poses();gpuFrameCommand(f.ctx());finishEye(seq,0);finishEye(seq,1);
     check(completed(seq,921,GpuSpanReason::Valid).result.sourceFrame==920,"new frame retains published identity after foreign Present");
-    gpuFrameConfigure(false);gpuFramePresent(f.ctx(),922);gpuFrameAbandon();f.finish();
+    const auto legacy=event(GpuFrameEvent::WaitBegin);
+    check(event(GpuFrameEvent::WaitEnd,legacy,0,1)==1,"legacy wait keeps its original measurement contract");
+    gpuFrameCommand(f.ctx());
+    for(unsigned eye=0;eye<2;++eye) {
+        check(event(GpuFrameEvent::SubmitBegin,legacy,eye,0,tex.Get())==1&&
+              event(GpuFrameEvent::SubmitEnd,legacy,eye,1)==1,"legacy submit markers remain complete");
+    }
+    auto legacyResult=completed(legacy,922,GpuSpanReason::Valid).result;
+    check(legacyResult.source==GpuSpanSource::RenderToSubmit&&legacyResult.outerMs==5,
+          "legacy outer span remains explicitly distinct from native application intervals");
+    seq=poses();gpuFrameCommand(f.ctx());finishEye(seq,0);finishEye(seq,1);
+    auto nativeResult=completed(seq,923,GpuSpanReason::Valid).result;
+    check(nativeResult.source==GpuSpanSource::ApplicationRender&&nativeResult.outerMs==3,
+          "native measurement after legacy frame still excludes gaps");
+    gpuFrameConfigure(false);gpuFramePresent(f.ctx(),924);gpuFrameAbandon();f.finish();
 }
 void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);frameDriverCases(device);controllerCases(device,runtime);nativeWork(device);nativeFrameWork(device);std::printf("PASS: %u shared GPU timer lifecycle checks\n",checks);}
 } // namespace

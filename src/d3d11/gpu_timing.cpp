@@ -260,7 +260,7 @@ struct GpuTimingFrameDriver::State {
     enum class Phase { Empty, Idle, Open, Pending, Failed };
     struct Slot {
         Phase phase = Phase::Empty;
-        ID3D11Query* stamps[6]{};
+        ID3D11Query* stamps[8]{};
         DisjointClock::Lease lease{};
         unsigned issued = 0, ready = 0;
         bool invalid = false;
@@ -338,7 +338,7 @@ bool GpuTimingFrameDriver::begin(unsigned i) noexcept {
 }
 bool GpuTimingFrameDriver::timestamp(unsigned i, unsigned n) noexcept {
     auto* s = state_;
-    if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots || n >= 6) return false;
+    if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots || n >= 8) return false;
     if (s->open != static_cast<int>(i)) return false;
     auto& q = s->slots[i];
     if (!q.stamps[n] || (q.issued & (1u << n))) return false;
@@ -375,7 +375,7 @@ GpuSpanPoll GpuTimingFrameDriver::poll(unsigned i, GpuSpanRawSample& out) noexce
     }
     q.raw.frequency = result.frequency;
     q.raw.disjoint = result.reason == DisjointReason::Disjoint || result.disjoint;
-    for (unsigned n = 0; n < 6; ++n) {
+    for (unsigned n = 0; n < 8; ++n) {
         if (!(q.issued & (1u << n)) || (q.ready & (1u << n))) continue;
         const HRESULT hr = s->domain->ops.getData(s->domain->ops.user, s->context(), q.stamps[n],
             &q.raw.ticks[n], sizeof(uint64_t), D3D11_ASYNC_GETDATA_DONOTFLUSH);

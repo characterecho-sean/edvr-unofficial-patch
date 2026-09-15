@@ -71,6 +71,7 @@ void run() {
     require(SUCCEEDED(device->CreateRenderTargetView(source.Get(),nullptr,&target)), "render target");
     uint64_t previousSequence=0;
     double observedOuter=0;
+    double observedApplication=0;
     // Both eye orders, then disabled GPU: same owner/producer and CPU path.
     for (unsigned frame=0; frame<3; ++frame) {
         const bool enabled=frame!=2;
@@ -85,24 +86,38 @@ void run() {
         require(service.graphics.calls==callbacksBeforeWait, "wait issues no graphics callbacks");
         if (frame) require(edvr::nativeTimingSnapshot().cpu.sequence==previousSequence,
             "previous completed CPU sample survives next wait");
+        // The producer admission and first CPU marker happen after the owner
+        // route returns. Deliberate work before the marker must stay outside
+        // the application interval.
+        Sleep(15);
+        require(client.producerResume(sequence)==enabled,
+            "initial producer GPU admission");
+        require(client.applicationSegment(sequence,true), "initial CPU application segment");
         edvr::gpuFrameCommand(context.Get()); // Same pre-command seam used by the game hooks.
         const float color[4]={.1f,.3f,.6f,1};
         context->ClearRenderTargetView(target.Get(),color);
-        EdvrNativeTimingFrame cpu{sizeof(cpu),EDVR_NATIVE_TIMING_VERSION_2,sequence};
+        EdvrNativeTimingFrame cpu{sizeof(cpu),EDVR_NATIVE_TIMING_VERSION_3,sequence};
         for (unsigned order=0; order<2; ++order) {
             const unsigned eye=order^(frame&1);
+            require(client.applicationSegment(sequence,false), "CPU segment closes at submit route entry");
+            require(client.producerPause(sequence)==enabled, "producer GPU pause before submit route");
             require(service.route.invoke([&] {
                 LARGE_INTEGER began{},ended{},frequency{};
                 require(QueryPerformanceCounter(&began)!=FALSE, "submit QPC begin");
                 require(service.graphics.invoke([&] {
                     require(client.gpuEye(sequence,eye,true,false,source.Get())==enabled,
                         "GPU begin enabled/disabled state");
+                    require(client.applicationSegment(sequence,true), "treatment CPU segment begins");
                     // A nested pass uses the same production frequency scope.
                     edvr::GpuTimer pass;
                     require(pass.begin(device.Get(),context.Get()), "nested pass starts");
                     for(unsigned n=0;n<8;++n)context->CopyResource(copy.Get(),source.Get());
                     require(pass.end(context.Get()), "nested pass ends");
                     pass.reset(context.Get());
+                    Sleep(3); // Deliberate measured producer work.
+                    require(client.applicationSegment(sequence,false), "treatment CPU segment ends");
+                    require(client.producerSegmentEnd(sequence,eye,source.Get())==enabled,
+                        "GPU treatment segment ends before transfer");
                 }), "producer processing callback");
                 require(service.graphics.invoke([&] {
                     context->CopyResource(source.Get(),copy.Get()); // final producer transfer
@@ -113,12 +128,24 @@ void run() {
                 require(QueryPerformanceCounter(&ended) && QueryPerformanceFrequency(&frequency), "submit QPC end");
                 cpu.submitMs[eye]=double(ended.QuadPart-began.QuadPart)*1000.0/double(frequency.QuadPart);
             }), "submit owner route");
+            if(order==0) {
+                // Between-eye admission starts after the first submit route
+                // returns. No producer command is issued here, so the next
+                // treatment creates the third GPU segment directly.
+                require(client.producerResume(sequence)==enabled,
+                    "between-eye producer GPU admission");
+                require(client.applicationSegment(sequence,true), "between-eye CPU segment");
+            }
         }
         require(service.owner.invoke([&] { require(client.publishCpu(cpu)==S_OK, "complete stereo CPU publication"); }),
             "CPU publish without graphics admission");
         const auto snapshot=edvr::nativeTimingSnapshot();
         require(snapshot.haveCpu && snapshot.cpu.sequence==sequence && !snapshot.invalid &&
-            snapshot.predictedPeriodMs>0 && snapshot.cpu.submitMs[0]>0, "fresh measured CPU sample");
+            snapshot.predictedPeriodMs>0 && snapshot.cpu.submitMs[0]>0,
+            "fresh CPU sample");
+        require(snapshot.applicationValid, "segmented application CPU sample is complete");
+        require(snapshot.applicationMs>4.0, "segmented application CPU work is measured");
+        observedApplication=snapshot.applicationMs;
         // Only this fixture flushes; production readback is nonblocking and DONOTFLUSH.
         context->Flush();
         edvr::GpuFrameSnapshot gpu;

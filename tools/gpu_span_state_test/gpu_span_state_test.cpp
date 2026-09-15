@@ -47,7 +47,7 @@ struct Driver final : GpuSpanDriver {
     }
     bool timestamp(unsigned i, unsigned index) noexcept override {
         ++calls;
-        check(index < 6 && liveOuter == static_cast<int>(i), "timestamp inside its outer scope");
+        check(index < 8 && liveOuter == static_cast<int>(i), "timestamp inside its outer scope");
         check((slots[i].mask & (1u << index)) == 0, "timestamp index is issued once");
         markers.push_back(index);
         if (static_cast<int>(index) == failStamp) return false;
@@ -290,9 +290,87 @@ static void pressureAndOwner() {
     check(!stopped.state.shutdown(0, owner) && stopped.state.beginFrame(1,1,0,owner) == R::Stopped &&
           stopped.state.poll(0,owner,stopped.results) == 0, "shutdown terminal and idempotent cleanup");
 }
+static void applicationSegments() {
+    const auto run = [](uint64_t outsideTicks, uint64_t extraWorkTicks, unsigned segments) {
+        Fixture f;
+        f.driver.tick = 1000;
+        check(f.state.beginApplicationFrame(1, 77, 0, owner) == R::Valid,
+              "application frame begins before scene commands");
+        for (unsigned part = 0; part < segments; ++part) {
+            if (part) {
+                f.driver.tick += outsideTicks;
+                check(f.state.resumeApplicationSegment(part * 2, owner) == R::Valid,
+                      "application resumes after excluded handoff");
+            }
+            if (part == 1) f.driver.tick += extraWorkTicks;
+            check(f.state.endApplicationSegment(part * 2 + 1, owner) == R::Valid,
+                  "application pauses before handoff");
+        }
+        f.driver.tick += outsideTicks;
+        const unsigned markersBeforeAcceptance = static_cast<unsigned>(f.driver.markers.size());
+        check(f.state.finishApplicationFrame(10, owner) == R::Valid &&
+              f.driver.markers.size() == markersBeforeAcceptance,
+              "accepting a frame never moves its final rendering timestamp");
+        f.driver.pending = false;
+        check(f.state.poll(11, owner, f.results) == 1 && f.results[0].reason == R::Valid &&
+              f.results[0].source == GpuSpanSource::ApplicationRender &&
+              f.results[0].sourceFrame == 77 && f.results[0].sequence == 1,
+              "application result retains its own stereo-frame identity");
+        return f.results[0].outerMs;
+    };
+    check(run(0, 0, 3) == 40.0, "three segments use their exact GPU tick differences");
+    check(run(50000, 0, 3) == 40.0,
+          "large delays in every handoff and acceptance do not inflate rendering time");
+    check(run(50000, 7, 3) == 47.0,
+          "additional rendering work increases the metric by its actual duration");
+    check(run(50000, 0, 4) == 50.0,
+          "both game intervals and both treatment intervals are counted once");
+
+    for (unsigned kind = 0; kind < 6; ++kind) {
+        Fixture f;
+        f.driver.tick = 1000;
+        check(f.state.beginApplicationFrame(1, 1, 0, owner) == R::Valid &&
+              f.state.endApplicationSegment(1, owner) == R::Valid &&
+              f.state.resumeApplicationSegment(2, owner) == R::Valid &&
+              f.state.endApplicationSegment(3, owner) == R::Valid &&
+              f.state.resumeApplicationSegment(4, owner) == R::Valid &&
+              f.state.endApplicationSegment(5, owner) == R::Valid &&
+              f.state.finishApplicationFrame(6, owner) == R::Valid,
+              "application validation fixture closes its scope");
+        auto& raw = f.driver.slots[0].raw;
+        R expected = R::BadTimestamps;
+        if (kind == 0) raw.ticks[2] = raw.ticks[1] - 1; // overlapping segments
+        if (kind == 1) raw.ticks[3] = raw.ticks[2] - 1; // backwards segment
+        if (kind == 2) { raw.disjoint = true; expected = R::Disjoint; }
+        if (kind == 3) { raw.frequency = 0; expected = R::ZeroFrequency; }
+        if (kind == 4) { f.driver.partial = true; expected = R::Valid; }
+        if (kind == 5) { raw.frequency = 2000; expected = R::Valid; }
+        f.driver.pending = false;
+        const unsigned count = f.state.poll(7, owner, f.results);
+        if (kind == 4) {
+            check(count == 0, "partially ready GPU timestamps never publish a benchmark value");
+        } else {
+            check(count == 1 && f.results[0].reason == expected,
+                  "application timestamps reject overlap, reversal, disjoint and missing frequency");
+            if (kind == 5) check(f.results[0].outerMs == 20.0,
+                               "milliseconds come from GPU clock frequency");
+            else check(f.results[0].outerMs == 0,
+                       "invalid application samples retain no prior measurement");
+        }
+    }
+    {
+        Fixture f;
+        check(f.state.beginApplicationFrame(1, 1, 0, owner) == R::Valid &&
+              f.state.finishApplicationFrame(1, owner) == R::Incomplete,
+              "an unclosed rendering segment cannot become an accepted benchmark frame");
+        f.driver.pending = false;
+        check(f.state.poll(2, owner, f.results) == 1 && f.results[0].reason == R::Incomplete,
+              "incomplete application frame stays invalid after GPU completion");
+    }
+}
 int main(int argc, char** argv) {
     check(argc == 2 && std::strcmp(argv[1], "--self-test") == 0, "expected --self-test");
-    validAndReuse(); pairing(); failures(); finalBoundary(); pressureAndOwner();
+    validAndReuse(); pairing(); failures(); finalBoundary(); pressureAndOwner(); applicationSegments();
     std::printf("PASS: %u GPU span CPU policy and command-driven fake-driver checks (no GPU measurement).\n", checks);
     return 0;
 }

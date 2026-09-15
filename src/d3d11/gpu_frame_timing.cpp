@@ -4,6 +4,8 @@
 #include "../common/log.h"
 #include "../common/guard.h"
 #include <atomic>
+#include <algorithm>
+#include <limits>
 #include <new>
 
 namespace edvr {
@@ -12,6 +14,7 @@ namespace {
 // publishes a disarmed sequence immediately, on any thread, without touching
 // the context. The graphics DLL allocates IDs across compositor reinitialization.
 std::atomic<uint64_t> g_token{0}, g_nextSequence{0}, g_poisoned{0};
+std::atomic<uint64_t> g_applicationSequence{0};
 thread_local bool g_internal = false;
 struct Internal {
     bool previous = g_internal;
@@ -20,6 +23,11 @@ struct Internal {
 };
 SRWLOCK g_snapshotLock = SRWLOCK_INIT;
 GpuFrameSnapshot g_snapshot;
+constexpr unsigned kCompletionCapacity = 256;
+struct Completion { uint64_t ordinal = 0; GpuFrameSnapshot snapshot{}; };
+std::array<Completion, kCompletionCapacity> g_completions{};
+uint64_t g_nextCompletion = 1;
+uint64_t g_completionFloor = 1;
 
 GpuSpanOwner bindOwner(GpuTimingFrameDriver& driver, ID3D11Device* d,
                        ID3D11DeviceContext* c) noexcept {
@@ -32,7 +40,9 @@ struct Controller {
     std::atomic<bool> enabled{false};
     uint64_t seenToken = 0, activeSequence = 0, startedAt = 0;
     std::atomic<uint64_t> sourceFrame{1};
-    unsigned ended = 0, commandBudget = 0;
+    unsigned begun = 0, ended = 0, commandBudget = 0;
+    bool segmentOpen = false, segmentAdmitted = false;
+    bool applicationMode = false;
     int activeEye = -1;
     uint64_t validCount = 0, invalidCount = 0, lastReport = 0;
     Controller(ID3D11Device* d, ID3D11DeviceContext* c) noexcept
@@ -63,22 +73,29 @@ struct Controller {
             g_snapshot.haveResult = true;
             g_snapshot.capturedAtMs = now;
         }
+        const auto ordinal = g_nextCompletion++;
+        g_completions[ordinal % kCompletionCapacity] = {ordinal,
+            GpuFrameSnapshot{enabled.load(std::memory_order_relaxed), true, result, now}};
         ReleaseSRWLockExclusive(&g_snapshotLock);
         if (validCount + invalidCount == 1 ||
             (validCount == 1 && result.reason == GpuSpanReason::Valid) ||
             !lastReport || now - lastReport >= 5000) {
             lastReport = now;
-            Log::get().note("Render-to-submit GPU: seq %llu frame %llu %s, outer %.4f ms, "
-                "submit paths L %.4f R %.4f ms (include runtime Submit), age %llu ms; "
+            Log::get().note("%s GPU: seq %llu frame %llu %s, %s %.4f ms, "
+                "age %llu ms; "
                 "valid %llu invalid %llu; context %p thread %lu.",
+                result.source == GpuSpanSource::ApplicationRender ? "Application-render" : "Render-to-submit",
                 result.sequence, result.sourceFrame, gpuFrameReason(result.reason),
-                result.outerMs, result.leftMs, result.rightMs, result.ageMs,
+                result.source == GpuSpanSource::ApplicationRender ? "render" : "outer",
+                result.outerMs, result.ageMs,
                 validCount, invalidCount, static_cast<void*>(context()), GetCurrentThreadId());
         }
     }
     void immediate(GpuSpanReason reason, uint64_t sequence, uint64_t now) noexcept {
         GpuSpanResult result{};
         result.reason = reason;
+        result.source = g_applicationSequence.load(std::memory_order_acquire) == sequence ?
+            GpuSpanSource::ApplicationRender : GpuSpanSource::RenderToSubmit;
         result.sequence = sequence;
         result.sourceFrame = sourceFrame;
         result.completedAtMs = now;
@@ -93,7 +110,8 @@ struct Controller {
         if (activeSequence) ring.invalidateFrame(now, driver.currentOwner());
         activeSequence = 0;
         activeEye = -1;
-        ended = 0;
+        begun = ended = 0;
+        segmentOpen = segmentAdmitted = false;
     }
     void sync(uint64_t token, uint64_t now) noexcept {
         if (seenToken != token || (activeSequence &&
@@ -151,9 +169,8 @@ bool gpuFrameBind(ID3D11Device* d, ID3D11DeviceContext* c, bool enabled) noexcep
     }
     gpuFrameConfigure(enabled);
     if (!enabled) Log::get().note("Render-to-submit GPU: disabled (advanced.app_gpu_timing).");
-    Log::get().note("Render-to-submit GPU: owner bound, first covered immediate command after "
-        "pose wait through second accepted Submit plus EDVR follow-up copies. "
-        "One shared frequency scope; mirror/post-marker commands excluded.");
+    Log::get().note("Application-render GPU: owner bound; non-overlapping producer segments "
+        "cover game rendering and native treatment, while transfer/runtime waits are excluded.");
     return true;
 }
 void gpuFrameConfigure(bool enabled) noexcept {
@@ -189,19 +206,40 @@ void gpuFrameCommand(ID3D11DeviceContext* ctx) noexcept {
     // Most commands pay only this owner/token check. An unusually long frame
     // without a Present or new pose wait still has a bounded open scope.
     if (c->seenToken == token) {
-        if (!c->activeSequence || (++c->commandBudget & 1023u)) return;
+        if (c->activeSequence && c->segmentAdmitted && !c->segmentOpen) {
+            Internal internal;
+            const uint64_t now = GetTickCount64();
+            if (c->ring.resumeApplicationSegment(now, c->driver.currentOwner()) == GpuSpanReason::Valid) {
+                c->segmentOpen = true;
+                c->segmentAdmitted = false;
+            } else {
+                c->invalidate(now); poison(token >> 1); return;
+            }
+        }
+        if (!c->activeSequence && !c->segmentAdmitted) return;
+        if (c->activeSequence && (++c->commandBudget & 1023u)) return;
     }
     Internal internal;
     const uint64_t now = GetTickCount64();
     c->sync(token, now);
-    if (c->seenToken == token) return;
-    c->seenToken = token; // Set before issuing query commands through hooked End.
+    if (c->seenToken == token && !c->segmentAdmitted) return;
+    // The native producer explicitly admits the first segment after the pose
+    // route returns. Commands observed before that admission remain outside
+    // the application sample and must not silently start a frame.
     const uint64_t sequence = token >> 1;
+    const bool application = g_applicationSequence.load(std::memory_order_acquire) == sequence;
+    if (application && !c->segmentAdmitted) return;
+    c->seenToken = token; // Set before issuing query commands through hooked End.
     if (!(token & 1) || !sequence || g_poisoned.load(std::memory_order_acquire) >= sequence) return;
-    const auto reason = c->ring.beginFrame(sequence, c->sourceFrame, now, c->driver.currentOwner());
+    c->applicationMode = application;
+    const auto reason = application ? c->ring.beginApplicationFrame(sequence, c->sourceFrame, now,
+        c->driver.currentOwner()) : c->ring.beginFrame(sequence,c->sourceFrame,now,c->driver.currentOwner());
     if (reason == GpuSpanReason::Valid) {
         c->activeSequence = sequence;
         c->startedAt = now;
+        c->begun = c->ended = 0;
+        c->segmentOpen = true;
+        c->segmentAdmitted = false;
     } else c->immediate(reason, sequence, now);
 }
 void gpuFramePresent(ID3D11DeviceContext* ctx, uint64_t nextSourceFrame) noexcept {
@@ -233,11 +271,44 @@ GpuFrameSnapshot gpuFrameSnapshot() noexcept {
     }
     return result;
 }
+unsigned gpuFrameReadCompletions(uint64_t& cursor, GpuFrameSnapshot* out,
+                                 unsigned capacity, uint64_t& dropped) noexcept {
+    if (!out || !capacity) return 0;
+    AcquireSRWLockShared(&g_snapshotLock);
+    const uint64_t latest = g_nextCompletion ? g_nextCompletion - 1 : 0;
+    const uint64_t oldest = (std::max)(g_completionFloor,
+        latest >= kCompletionCapacity ? latest - kCompletionCapacity + 1 : uint64_t(1));
+    const uint64_t next = cursor == (std::numeric_limits<uint64_t>::max)() ?
+        (std::numeric_limits<uint64_t>::max)() : cursor + 1;
+    if (next < oldest) {
+        dropped += oldest - next;
+        cursor = oldest - 1;
+    }
+    const uint64_t start = (std::max)(cursor == (std::numeric_limits<uint64_t>::max)() ?
+        (std::numeric_limits<uint64_t>::max)() : cursor + 1, oldest);
+    const uint64_t available = latest >= start ? latest - start + 1 : 0;
+    const unsigned count = static_cast<unsigned>((std::min)(uint64_t(capacity), available));
+    for (unsigned i = 0; i < count; ++i) {
+        const auto& item = g_completions[(start + i) % kCompletionCapacity];
+        if (item.ordinal != start + i) { ++dropped; cursor = start + i; continue; }
+        out[i] = item.snapshot;
+        if (out[i].result.reason == GpuSpanReason::Valid &&
+            out[i].result.sequence <= g_poisoned.load(std::memory_order_acquire)) {
+            out[i].result.reason = GpuSpanReason::Incomplete;
+            out[i].result.outerMs = out[i].result.leftMs = out[i].result.rightMs = 0;
+        }
+        cursor = item.ordinal;
+    }
+    ReleaseSRWLockShared(&g_snapshotLock);
+    return count;
+}
 void gpuFrameAbandon() noexcept {
     auto* c = g_controller.exchange(nullptr, std::memory_order_acq_rel);
     if (c) { c->driver.reset(); delete c; }
     AcquireSRWLockExclusive(&g_snapshotLock);
     g_snapshot = {};
+    g_completions = {};
+    g_completionFloor = g_nextCompletion;
     ReleaseSRWLockExclusive(&g_snapshotLock);
     g_token.store(0, std::memory_order_release);
 }
@@ -257,12 +328,61 @@ uint64_t gpuFrameEvent(unsigned protocol, unsigned eventValue, uint64_t sequence
     }
     if (!sequence || sequence > UINT64_MAX / 2) return 0;
     if (event == GpuFrameEvent::WaitEnd) {
-        if (flags != 1) { poison(sequence); return 0; }
+        if (flags != 1 && flags != kGpuFrameNativeWait) { poison(sequence); return 0; }
+        if (flags == kGpuFrameNativeWait) {
+            auto old=g_applicationSequence.load(std::memory_order_relaxed);
+            while(old<sequence&&!g_applicationSequence.compare_exchange_weak(old,sequence,
+                std::memory_order_release,std::memory_order_relaxed)) {}
+        }
         auto expected = sequence << 1;
         return g_token.compare_exchange_strong(expected, expected | 1,
             std::memory_order_release, std::memory_order_relaxed) ? 1 : 0;
     }
     if (event == GpuFrameEvent::Cancel) { poison(sequence); return 1; }
+    if (event == GpuFrameEvent::SegmentResume) {
+        if (g_applicationSequence.load(std::memory_order_acquire) != sequence) return 0;
+        auto* c = g_controller.load(std::memory_order_acquire);
+        if (!c || !c->enabled.load(std::memory_order_acquire) || !c->owns(c->context())) return 0;
+        Internal internal;
+        const uint64_t now = GetTickCount64();
+        const uint64_t token = g_token.load(std::memory_order_acquire);
+        c->sync(token, now);
+        if (token != ((sequence << 1) | 1) || c->segmentOpen ||
+            c->segmentAdmitted || (c->activeSequence && c->activeSequence != sequence) ||
+            c->ended == 3 ||
+            g_poisoned.load(std::memory_order_acquire) >= sequence) return 0;
+        // Mark the new token as synchronized here. The first command will
+        // consume the admission below without sync() clearing it as stale.
+        if (!c->activeSequence) c->seenToken = token;
+        c->segmentAdmitted = true;
+        return 1;
+    }
+    if (event == GpuFrameEvent::SegmentPause || event == GpuFrameEvent::SegmentEnd) {
+        if (g_applicationSequence.load(std::memory_order_acquire) != sequence) return 0;
+        auto* c = g_controller.load(std::memory_order_acquire);
+        if (!c || !c->enabled.load(std::memory_order_acquire) || !c->owns(c->context())) return 0;
+        Internal internal;
+        const uint64_t now = GetTickCount64();
+        const uint64_t token = g_token.load(std::memory_order_acquire);
+        c->sync(token, now);
+        if (token != ((sequence << 1) | 1) || c->activeSequence != sequence ||
+            g_poisoned.load(std::memory_order_acquire) >= sequence) return 0;
+        if (event == GpuFrameEvent::SegmentPause) {
+            if (!c->segmentOpen) {
+                c->segmentAdmitted = false;
+                return 1; // idempotent at a transfer boundary
+            }
+            if (c->activeEye >= 0) return 0;
+        } else if (c->activeEye != static_cast<int>(eye) || !c->segmentOpen) {
+            c->invalidate(now); poison(sequence); return 0;
+        }
+        if (c->ring.endApplicationSegment(now, c->driver.currentOwner()) != GpuSpanReason::Valid) {
+            c->invalidate(now); poison(sequence); return 0;
+        }
+        c->segmentOpen = false;
+        if (event == GpuFrameEvent::SegmentEnd) c->activeEye = -1;
+        return 1;
+    }
     if (event != GpuFrameEvent::SubmitBegin && event != GpuFrameEvent::SubmitEnd) return 0;
     auto* c = g_controller.load(std::memory_order_acquire);
     if (!c || !c->enabled.load(std::memory_order_acquire)) return 0;
@@ -287,21 +407,53 @@ uint64_t gpuFrameEvent(unsigned protocol, unsigned eventValue, uint64_t sequence
         const bool sameDevice = device && reinterpret_cast<uintptr_t>(device) == c->owner.device;
         if (device) device->Release();
         if (!sameDevice || eye > 1) { c->invalidate(now); poison(sequence); return 0; }
-        const auto reason = c->ring.beginEye(eye, now, c->driver.currentOwner());
-        if (reason != GpuSpanReason::Valid) { c->invalidate(now); poison(sequence); return 0; }
+        if (!c->applicationMode) {
+            if(c->ring.beginEye(eye,now,c->driver.currentOwner())!=GpuSpanReason::Valid) {
+                c->invalidate(now);poison(sequence);return 0;
+            }
+            c->activeEye=static_cast<int>(eye);
+            return 1;
+        }
+        if (c->ended & (1u << eye) || c->activeEye >= 0 || (c->begun & (1u << eye))) {
+            c->invalidate(now); poison(sequence); return 0;
+        }
+        // The first segment was opened by the first real producer command.
+        // Later segments are admitted only by this explicit producer callback,
+        // after the preceding transfer has returned.
+        if (!c->segmentOpen) {
+            if (c->ring.resumeApplicationSegment(now, c->driver.currentOwner()) !=
+                    GpuSpanReason::Valid) {
+                c->invalidate(now); poison(sequence); return 0;
+            }
+            c->segmentOpen = true;
+            c->segmentAdmitted = false;
+        }
         c->activeEye = static_cast<int>(eye);
+        c->begun |= 1u << eye;
         return 1;
     }
-    if (c->activeSequence != sequence || c->activeEye != static_cast<int>(eye) || flags != 1) {
+    if (!c->applicationMode) {
+        if(c->activeSequence!=sequence||c->activeEye!=static_cast<int>(eye)||flags!=1||
+            c->ring.endEye(eye,now,c->driver.currentOwner())!=GpuSpanReason::Valid) {
+            c->invalidate(now);poison(sequence);return 0;
+        }
+        c->activeEye=-1;c->ended|=1u<<eye;
+        if(c->ended==3) {
+            c->ring.finishFrame(now,c->driver.currentOwner());c->activeSequence=0;c->ended=0;
+        }
+        return 1;
+    }
+    if (c->activeSequence != sequence || c->activeEye != -1 ||
+        !(c->begun & (1u << eye)) || (c->ended & (1u << eye)) || flags != 1) {
         c->invalidate(now); poison(sequence); return 0;
     }
-    if (c->ring.endEye(eye, now, c->driver.currentOwner()) != GpuSpanReason::Valid) {
-        c->invalidate(now); poison(sequence); return 0;
-    }
-    c->activeEye = -1;
     c->ended |= 1u << eye;
     if (c->ended == 3) {
-        c->ring.finishFrame(now, c->driver.currentOwner());
+        if (c->begun != 3) { c->invalidate(now); poison(sequence); return 0; }
+        if (c->ring.finishApplicationFrame(now, c->driver.currentOwner()) !=
+                GpuSpanReason::Valid) {
+            c->invalidate(now); poison(sequence); return 0;
+        }
         c->activeSequence = 0;
         c->ended = 0;
     }

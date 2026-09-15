@@ -41,8 +41,8 @@ int NativePerfHistory::Stream::graph(float* out,int max,uint64_t now) const noex
     return static_cast<int>(n);
 }
 void NativePerfHistory::clear() noexcept {
-    cpu_.reset();producer_.reset();device_.reset();
-    cpu_.floor=producer_.floor=device_.floor=0;
+    cpu_.reset(); applicationCpu_.reset(); producer_.reset(); applicationGpu_.reset(); device_.reset();
+    cpu_.floor=applicationCpu_.floor=producer_.floor=applicationGpu_.floor=device_.floor=0;
     generation_=firstSequence_=periodAt_=0;period_=0;
 }
 void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const GpuFrameSnapshot& g,uint64_t now) noexcept {
@@ -52,7 +52,9 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
     }
     if(t.invalid) {
         cpu_.reset((std::max)(t.sequence,t.cpu.sequence));
+        applicationCpu_.reset((std::max)(t.sequence,t.cpu.sequence));
         producer_.reset(g.haveResult?g.result.sequence:0);
+        applicationGpu_.reset(g.haveResult?g.result.sequence:0);
         device_.reset(t.haveDeviceGpu?t.deviceGpu.sequence:0);
         period_=0;periodAt_=0;return;
     }
@@ -68,6 +70,14 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
         period_=std::isfinite(t.predictedPeriodMs)&&t.predictedPeriodMs>0&&t.predictedPeriodMs<=10000?t.predictedPeriodMs:0;
         periodAt_=period_?t.capturedAtMs:0;
     }
+    const bool applicationCpuOk = t.haveCpu && t.applicationValid &&
+        c.sequence >= firstSequence_ && c.sequence == t.sequence &&
+        age(now, t.capturedAtMs, 2000) && duration(t.applicationMs);
+    if (!applicationCpuOk) {
+        applicationCpu_.reset(t.haveCpu ? c.sequence : 0);
+    } else if (c.sequence > applicationCpu_.floor) {
+        applicationCpu_.add(c.sequence, t.capturedAtMs, t.applicationMs);
+    }
     // Include the age accumulated before publication; subtraction guards keep
     // old or malformed timestamps from becoming fresh through integer wrap.
     const bool stampOk=g.capturedAtMs&&g.capturedAtMs<=now&&g.result.ageMs<g.capturedAtMs;
@@ -75,6 +85,13 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
     const bool gpuOk=g.enabled&&g.haveResult&&g.result.reason==GpuSpanReason::Valid&&g.result.sequence>=firstSequence_&&age(now,gpuAt,2000)&&duration(g.result.outerMs);
     if(!gpuOk)producer_.reset(g.haveResult?g.result.sequence:0);
     else producer_.add(g.result.sequence,gpuAt,g.result.outerMs);
+    const bool applicationGpuOk = g.enabled && g.haveResult &&
+        g.result.source == GpuSpanSource::ApplicationRender &&
+        g.result.reason == GpuSpanReason::Valid &&
+        g.result.sequence >= firstSequence_ && age(now, gpuAt, 2000) &&
+        duration(g.result.outerMs);
+    if (!applicationGpuOk) applicationGpu_.reset(g.haveResult ? g.result.sequence : 0);
+    else applicationGpu_.add(g.result.sequence, gpuAt, g.result.outerMs);
     const auto& d=t.deviceGpu;
     bool deviceOk=t.haveDeviceGpu&&d.sequence>=firstSequence_&&d.status==EdvrNativeGpuValid&&age(now,d.completedAtMs,2000);
     for(unsigned eye=0;eye<2;++eye)deviceOk=deviceOk&&duration(d.transferMs[eye])&&duration(d.composeMs[eye]);
@@ -88,10 +105,12 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
     } else device_.add(d.sequence,d.completedAtMs,copy,compose);
 }
 NativePerfAverage NativePerfHistory::submit(uint64_t n,uint64_t w)const noexcept{return cpu_.average(0,n,w);}
+NativePerfAverage NativePerfHistory::applicationCpu(uint64_t n,uint64_t w)const noexcept{return applicationCpu_.average(0,n,w);}
+NativePerfAverage NativePerfHistory::applicationGpu(uint64_t n,uint64_t w)const noexcept{return applicationGpu_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::wait(uint64_t n,uint64_t w)const noexcept{return cpu_.average(1,n,w);}
 NativePerfAverage NativePerfHistory::producer(uint64_t n,uint64_t w)const noexcept{return producer_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::transfer(uint64_t n,uint64_t w)const noexcept{return device_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::compose(uint64_t n,uint64_t w)const noexcept{return device_.average(1,n,w);}
 double NativePerfHistory::predictedPeriod(uint64_t n)const noexcept{return age(n,periodAt_,2000)?period_:0;}
-int NativePerfHistory::graph(bool p,float* o,int m,uint64_t n)const noexcept{return (p?producer_:cpu_).graph(o,m,n);}
+int NativePerfHistory::graph(bool p,float* o,int m,uint64_t n)const noexcept{return (p?applicationGpu_:applicationCpu_).graph(o,m,n);}
 }

@@ -1,4 +1,5 @@
 #include "../../src/d3d11/native_perf_history.h"
+#include "../../src/d3d11/native_benchmark_collector.h"
 #include <cstdio>
 #include <cmath>
 #include <cwchar>
@@ -12,15 +13,17 @@ bool approx(double a,double b){return std::fabs(a-b)<1e-8;}
 NativeTimingSnapshot cpu(uint64_t seq,uint64_t at) {
     NativeTimingSnapshot s{};s.active=true;s.generation=7;s.firstSequence=1;s.sequence=seq;
     s.capturedAtMs=at;s.waitMs=4;s.predictedPeriodMs=11;s.haveCpu=true;
-    s.cpu={sizeof(s.cpu),EDVR_NATIVE_TIMING_VERSION_2,seq};s.cpu.submitMs[0]=1;s.cpu.submitMs[1]=2;
+    s.applicationMs=3;s.applicationValid=true;
+    s.cpu={sizeof(s.cpu),EDVR_NATIVE_TIMING_VERSION_3,seq};s.cpu.submitMs[0]=1;s.cpu.submitMs[1]=2;
     return s;
 }
 GpuFrameSnapshot gpu(uint64_t seq,uint64_t at,uint64_t age=0,double ms=5) {
     GpuFrameSnapshot s{};s.enabled=s.haveResult=true;s.capturedAtMs=at;
-    s.result.sequence=seq;s.result.ageMs=age;s.result.outerMs=ms;s.result.reason=GpuSpanReason::Valid;return s;
+    s.result.sequence=seq;s.result.ageMs=age;s.result.outerMs=ms;
+    s.result.source=GpuSpanSource::ApplicationRender;s.result.reason=GpuSpanReason::Valid;return s;
 }
 void device(NativeTimingSnapshot& s,uint64_t seq,uint64_t at,uint32_t status=EdvrNativeGpuValid) {
-    s.haveDeviceGpu=true;s.deviceGpu={sizeof(s.deviceGpu),EDVR_NATIVE_TIMING_VERSION_2,seq,at,status,{1,2},{3,4}};
+    s.haveDeviceGpu=true;s.deviceGpu={sizeof(s.deviceGpu),EDVR_NATIVE_TIMING_VERSION_3,seq,at,status,{1,2},{3,4}};
 }
 void averages() {
     NativePerfHistory h;auto t=cpu(1,10000);auto g=gpu(1,10000);device(t,1,10000);
@@ -40,6 +43,14 @@ void averages() {
 }
 void invalidation() {
     NativePerfHistory h;auto t=cpu(10,10000);auto g=gpu(10,10000);device(t,10,10000);h.observe(true,t,g,10000);
+    auto partial=t;partial.applicationValid=false;h.observe(true,partial,g,10000);
+    check(!h.applicationCpu(10000,200).count&&h.applicationGpu(10000,200).count==1&&
+          h.submit(10000,200).count==1,"incomplete application CPU does not substitute submit wall or erase GPU");
+    h.clear();auto oldDefinition=g;oldDefinition.result.source=GpuSpanSource::RenderToSubmit;
+    h.observe(true,t,oldDefinition,10000);
+    check(h.applicationCpu(10000,200).count==1&&!h.applicationGpu(10000,200).count,
+          "legacy GPU interval cannot become an application benchmark measurement");
+    h.clear();h.observe(true,t,g,10000);
     auto bad=t;bad.invalid=true;bad.sequence=bad.cpu.sequence=0;bad.haveDeviceGpu=false;h.observe(true,bad,{},10000);
     check(!h.submit(10000,200).count&&!h.producer(10000,200).count&&!h.transfer(10000,200).count&&!h.predictedPeriod(10000),"recenter clears all histories and prediction");
     h.observe(true,t,g,10000);check(!h.submit(10000,200).count&&!h.producer(10000,200).count&&!h.transfer(10000,200).count,"cleared snapshots cannot replay even when invalidation lost their identity");
@@ -84,7 +95,7 @@ void agesAndValues() {
     t=cpu(3,10020);t.predictedPeriodMs=0;h.observe(true,t,gpu(3,10020),10020);check(!h.predictedPeriod(10020),"zero period is unavailable");
 }
 void graphs() {
-    NativePerfHistory h;for(uint64_t i=1;i<=950;++i){auto t=cpu(i,10000+i);t.cpu.submitMs[0]=double(i);t.cpu.submitMs[1]=0;h.observe(true,t,gpu(i,10000+i,0,double(i)+100),10000+i);}
+    NativePerfHistory h;for(uint64_t i=1;i<=950;++i){auto t=cpu(i,10000+i);t.cpu.submitMs[0]=double(i);t.cpu.submitMs[1]=0;t.applicationMs=double(i);h.observe(true,t,gpu(i,10000+i,0,double(i)+100),10000+i);}
     check(h.submit(10950,10000).count==900&&approx(h.submit(10950,10000).meanMs,500.5),"ring wraps without overweighting or losing ordering");
     float values[5]={-99,-99,-99,-99,-99};check(h.graph(false,values,3,10950)==3&&values[0]==948&&values[1]==949&&values[2]==950&&values[3]==-99,"CPU graph uses newest bounded tail oldest-first");
     check(h.graph(true,values,3,10950)==3&&values[0]==1048&&values[2]==1050,"producer graph uses its own observations");
@@ -92,11 +103,175 @@ void graphs() {
     check(!h.graph(true,values,3,12951),"stale graph never continues to present old results as live");
     check(!h.graph(false,values,3,9000),"time reversal never exposes future observations");
 }
+
+NativeBenchmarkObservation benchmarkSample(uint64_t seq, uint64_t at,
+                                           double cpuMs, double gpuMs) {
+    NativeBenchmarkObservation s{};
+    s.scope = 1;
+    s.cpuSequence = seq; s.cpuAtMs = at; s.cpuMs = cpuMs; s.cpuValid = true;
+    s.gpuSequence = seq; s.gpuAtMs = at; s.gpuMs = gpuMs; s.gpuValid = true;
+    return s;
+}
+
+void benchmarkAdmission() {
+    NativeBenchmarkCollector c;
+    NativeBenchmarkObservation tick{};tick.scope=1;
+    c.observe(tick,1000);c.observe(tick,3000);
+    check(c.sampling(),"metadata-only monitor ticks start a usable window");
+    const auto onlyGpu=[](uint64_t seq,uint64_t at,double value) {
+        auto s=benchmarkSample(seq,at,0,value);s.cpuSequence=s.cpuAtMs=0;return s;
+    };
+    const auto onlyCpu=[](uint64_t seq,uint64_t at,double value) {
+        auto s=benchmarkSample(seq,at,value,0);s.gpuSequence=s.gpuAtMs=0;return s;
+    };
+    c.observe(onlyGpu(1,3010,10),3010);
+    c.observe(onlyGpu(257,3011,20),3011); // Same hash bucket.
+    c.observe(onlyCpu(1,3001,1),3012); // Removing it must not hide 257.
+    c.observe(onlyCpu(257,3002,2),3013);
+    c.observe(onlyGpu(3,3014,999),3014);
+    c.observe(onlyCpu(3,2999,999),3015); // Pre-warmup, completed late.
+    auto invalid=onlyCpu(4,3020,NAN);invalid.cpuValid=false;c.observe(invalid,3020);
+    c.observe(onlyGpu(4,3021,0),3021); // Valid measured zero remains valid.
+    c.observe({},33000);
+    c.observe(onlyGpu(5,33500,30),33500); // Completion in drain before CPU arrival.
+    c.observe(onlyCpu(5,32999,3),33501);
+    c.observe(onlyCpu(6,33000,999),33502); // Half-open sample interval.
+    c.observe(onlyCpu(7,32998,4),35000);
+    c.observe(onlyGpu(7,34999,40),35000);
+    check(!c.ready(),"deadline batch drains before the final monitor tick");
+    c.observe({},35000);
+    NativeBenchmarkReport r{};
+    check(c.takeReport(&r)&&!r.aborted&&r.cpu.valid==4&&r.cpu.invalid==1&&
+          r.gpu.valid==5&&r.gpu.missing==0,"colliding and drain orphans retain their own admitted frames");
+    check(approx(r.cpu.p50,2)&&approx(r.cpu.p99,4)&&approx(r.gpu.p50,20)&&
+          approx(r.gpu.p99,40),"warmup and boundary frames cannot bias either distribution");
+    check(r.startedAtMs==3000&&r.sampleEndedAtMs==33000&&r.drainMs==2000,
+          "sample and drain durations are distinct");
+    c.observe(tick,40000);c.observe(tick,42000);
+    c.observe(onlyCpu(100,42001,7),42001);tick.scope=2;c.observe(tick,42500);
+    check(c.takeReport(&r)&&r.aborted&&r.sampleEndedAtMs-r.startedAtMs==500&&r.drainMs==0,
+          "partial reports state actual duration, not planned thirty seconds");
+}
+void benchmarkWindows() {
+    NativeBenchmarkCollector c;
+    c.observe(benchmarkSample(1, 0, 1, 2), 0);
+    check(c.warming() && !c.ready(), "benchmark starts in warmup");
+    c.observe(benchmarkSample(1, 1999, 1, 2), 1999);
+    check(c.warming(), "two-second warmup excludes early samples");
+    c.observe(benchmarkSample(1, 2000, 1, 2), 2000);
+    c.observe(benchmarkSample(2, 2010, 9, 6), 2010);
+    c.observe(benchmarkSample(2, 2011, 9, 6), 2011);
+    check(c.sampling(), "window samples after warmup");
+    c.observe({}, 32000);
+    check(!c.ready(), "window enters a bounded GPU completion drain");
+    c.observe({}, 34000);
+    check(c.ready(), "elapsed window and drain produce one report");
+    NativeBenchmarkReport report{};
+    check(c.takeReport(&report) && report.complete && !report.aborted,
+          "completed benchmark report is consumable");
+    check(report.cpu.valid == 2 && report.cpu.stored == 2 && report.cpu.missing == 0 &&
+          approx(report.cpu.p50, 1) && approx(report.cpu.p95, 9) && approx(report.cpu.p99, 9),
+          "CPU distribution uses individual values and nearest-rank percentiles");
+    check(report.gpu.valid == 2 && report.gpu.stored == 2 && report.gpu.missing == 0 &&
+          approx(report.gpu.p50, 2) && approx(report.gpu.p95, 6),
+          "GPU distribution remains independent from CPU");
+    check(!c.ready() && !c.takeReport(&report), "report is emitted once and next window is idle");
+
+    c.observe(benchmarkSample(10, 40000, 3, 4), 40000);
+    c.observe(benchmarkSample(11, 40001, 5, 6), 40001);
+    c.observe(benchmarkSample(200, 40002, 7, 8), 40002);
+    c.observe(benchmarkSample(12, 42000, 7, 8), 42000);
+    c.observe({}, 74000);
+    check(c.ready() && c.takeReport(&report), "second recurring window completes");
+    check(report.cpu.valid == 1 && report.gpu.valid == 1 && report.cpu.missing == 0,
+          "a recurring window resets values without replaying old samples");
+
+    c.observe(benchmarkSample(300, 80000, 1, 1), 80000);
+    c.observe(benchmarkSample(300, 82000, 1, 1), 82000);
+    NativeBenchmarkObservation invalid = benchmarkSample(301, 82001, 0, 0);
+    invalid.cpuValid = false;
+    c.observe(invalid, 82001);
+    NativeBenchmarkObservation changed = benchmarkSample(1, 82002, 2, 2);
+    changed.scope = 2;
+    c.observe(changed, 82002);
+    check(c.ready(), "scope change emits an aborted partial report");
+    check(c.takeReport(&report) && report.aborted &&
+          report.abortReason == kNativeBenchmarkScopeChanged,
+          "scope change identifies why a window was aborted");
+    c.observe(changed, 82003);
+    check(c.warming() && !c.ready(), "scope change starts a new warmup");
+
+    c.reset();
+    c.observe(benchmarkSample(1, 0, 1, 1), 0);
+    c.observe(benchmarkSample(1, 2000, 1, 1), 2000);
+    NativeBenchmarkObservation cpuOnly = benchmarkSample(200, 2001, 2, 0);
+    cpuOnly.gpuSequence = cpuOnly.gpuAtMs = 0;
+    cpuOnly.gpuValid = false;
+    c.observe(cpuOnly, 2001);
+    c.observe({}, 32000);
+    c.observe({}, 34000);
+    check(c.takeReport(&report) && report.cpu.missing == 0 && report.gpu.missing == 1,
+          "retirement marks a missing asynchronous GPU counterpart");
+
+    c.reset();
+    c.observe(benchmarkSample(1, 0, 1, 1), 0);
+    c.observe(benchmarkSample(1, 2000, 1, 3), 2000);
+    NativeBenchmarkObservation cpuTwo = benchmarkSample(2, 2001, 2, 0);
+    cpuTwo.gpuSequence = cpuTwo.gpuAtMs = 0;
+    cpuTwo.gpuValid = false;
+    c.observe(cpuTwo, 2001);
+    c.observe({}, 32000);
+    // GPU completion order and completion timestamps are independent from
+    // CPU admission. Both belong to admitted window frames and are allowed
+    // through the bounded drain even when they arrive out of order or late.
+    NativeBenchmarkObservation lateGpu = benchmarkSample(2, 1000, 0, 4);
+    lateGpu.cpuSequence = lateGpu.cpuAtMs = 0;
+    lateGpu.cpuValid = false;
+    c.observe(lateGpu, 33000);
+    NativeBenchmarkObservation oldGpu = benchmarkSample(1, 1001, 0, 3);
+    oldGpu.cpuSequence = oldGpu.cpuAtMs = 0;
+    oldGpu.cpuValid = false;
+    c.observe(oldGpu, 33001);
+    c.observe({}, 34000);
+    check(c.takeReport(&report) && report.cpu.valid == 2 && report.gpu.valid == 2 &&
+          report.gpu.missing == 0 && approx(report.gpu.p50, 3) && approx(report.gpu.p95, 4),
+          "late out-of-order GPU completions attach to their own CPU frame");
+
+    c.reset();
+    c.observe(benchmarkSample(1, 0, 1, 1), 0);
+    c.observe(benchmarkSample(1, 2000, 1, 1), 2000);
+    c.noteDropped(true, 2);
+    c.noteDropped(false, 3);
+    c.observe({}, 32000);
+    c.observe({}, 34000);
+    check(c.takeReport(&report) && report.aborted &&
+          report.abortReason == kNativeBenchmarkTransportLoss &&
+          report.cpu.invalid == 2 && report.gpu.invalid == 3,
+          "completion queue overwrite is reported as invalid coverage");
+
+    c.reset();
+    c.observe(benchmarkSample(1, 0, 1, 1), 0);
+    c.observe(benchmarkSample(1, 2000, 1, 1), 2000);
+    c.observe({}, 1999);
+    check(c.ready() && c.takeReport(&report) && report.aborted &&
+          report.abortReason == kNativeBenchmarkClockReversed,
+          "clock reversal aborts an active benchmark window");
+
+    c.reset();
+    c.observe(benchmarkSample(1, 0, 1, 1), 0);
+    c.observe(benchmarkSample(1, 2000, 1, 1), 2000);
+    for (unsigned i = 0; i <= NativeBenchmarkCollector::kCapacity; ++i) {
+        c.observe(benchmarkSample(100 + i, 2001 + i, 1, 1), 2001 + i);
+        if (c.ready()) break;
+    }
+    check(c.ready() && c.takeReport(&report) && report.aborted && report.overflow,
+          "storage overflow aborts instead of silently truncating samples");
+}
 }
 int wmain(int argc,wchar_t** argv) {
     if(argc!=2)return 2;
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
-    averages();invalidation();agesAndValues();graphs();
+    averages();invalidation();agesAndValues();graphs();benchmarkWindows();benchmarkAdmission();
     std::printf("native_perf_history_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

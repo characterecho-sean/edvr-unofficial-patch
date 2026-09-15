@@ -27,6 +27,10 @@
 #include "native_menu.h"
 #include "native_timing.h"
 #include "native_perf_history.h"
+#include "native_benchmark_collector.h"
+#include "native_render_labels.h"
+#include "../common/native_render_settings.h"
+#include "../common/config.h"
 
 namespace edvr {
 namespace {
@@ -130,6 +134,14 @@ constexpr int kQueryRing = 6;
 
 struct State {
     NativePerfHistory nativeHistory;
+    NativeBenchmarkCollector nativeBenchmark;
+    NativeBenchmarkMetadata nativeBenchmarkMetadata{};
+    uint64_t nativeBenchmarkMetadataMs = 0;
+    uint64_t nativeBenchmarkGeneration = 0, nativeBenchmarkFirstSequence = 0;
+    uint64_t nativeBenchmarkScope = 0;
+    std::atomic<uint64_t> nativeBenchmarkSettingsEpoch{0};
+    uint64_t nativeBenchmarkCpuCursor = 0;
+    uint64_t nativeBenchmarkGpuCursor = 0;
     uint64_t nativeHistoryLogMs=0;
     unsigned nativeHistoryReports=0;
     Frame    ring[kRing];
@@ -524,6 +536,160 @@ float budgetNow() {
     return hz > 0.0f ? 1000.0f / hz : 11.1f;
 }
 
+#ifndef EDVR_VERSION_STRING
+#define EDVR_VERSION_STRING "unknown"
+#endif
+
+uint64_t benchmarkHashBytes(uint64_t hash, const void* data, size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+uint64_t benchmarkScope(const NativeTimingSnapshot& timing,
+                        const NativeBenchmarkMetadata& metadata,
+                        uint64_t settingsEpoch) {
+    uint64_t hash = 1469598103934665603ull;
+    hash = benchmarkHashBytes(hash, &timing.generation, sizeof(timing.generation));
+    hash = benchmarkHashBytes(hash, &timing.firstSequence, sizeof(timing.firstSequence));
+    hash = benchmarkHashBytes(hash, metadata.inputWidth, sizeof(metadata.inputWidth));
+    hash = benchmarkHashBytes(hash, metadata.inputHeight, sizeof(metadata.inputHeight));
+    hash = benchmarkHashBytes(hash, metadata.outputWidth, sizeof(metadata.outputWidth));
+    hash = benchmarkHashBytes(hash, metadata.outputHeight, sizeof(metadata.outputHeight));
+    hash = benchmarkHashBytes(hash, &metadata.refreshMilliHz, sizeof(metadata.refreshMilliHz));
+    hash = benchmarkHashBytes(hash, metadata.gameFov, sizeof(metadata.gameFov));
+    hash = benchmarkHashBytes(hash, metadata.treatments, sizeof(metadata.treatments));
+    hash = benchmarkHashBytes(hash, &metadata.featureEpoch, sizeof(metadata.featureEpoch));
+    hash = benchmarkHashBytes(hash, metadata.runtime, sizeof(metadata.runtime));
+    hash = benchmarkHashBytes(hash, metadata.headset, sizeof(metadata.headset));
+    hash = benchmarkHashBytes(hash, metadata.aaMode, sizeof(metadata.aaMode));
+    hash = benchmarkHashBytes(hash, metadata.dlssMode, sizeof(metadata.dlssMode));
+    hash = benchmarkHashBytes(hash, metadata.build, sizeof(metadata.build));
+    hash = benchmarkHashBytes(hash, &settingsEpoch, sizeof(settingsEpoch));
+    return hash ? hash : 1;
+}
+
+// Defined with the other native readiness helpers below; the benchmark uses
+// the same freshness rules as the monitor's native tiles.
+bool nativeCpuReady(const NativeTimingSnapshot& timing);
+bool nativeGpuReady(const NativeTimingSnapshot& timing, const GpuFrameSnapshot& gpu);
+bool nativeApplicationCpuReady(const NativeTimingSnapshot& timing);
+bool nativeApplicationGpuReady(const NativeTimingSnapshot& timing, const GpuFrameSnapshot& gpu);
+
+void benchmarkCopy(char* out, size_t size, const char* value) {
+    if (!out || !size) return;
+    std::strncpy(out, value ? value : "", size - 1);
+    out[size - 1] = 0;
+}
+
+bool updateBenchmarkMetadata(State& s, const NativeTimingSnapshot& timing,
+                             uint64_t nowMs) {
+    if (!timing.active || !timing.generation || !timing.firstSequence) return false;
+    if (s.nativeBenchmarkGeneration != timing.generation ||
+        s.nativeBenchmarkFirstSequence != timing.firstSequence) {
+        s.nativeBenchmarkGeneration=timing.generation;
+        s.nativeBenchmarkFirstSequence=timing.firstSequence;
+        s.nativeBenchmarkMetadata={};
+        s.nativeBenchmarkMetadataMs=0;
+    }
+    const bool refreshMetadata = !s.nativeBenchmarkMetadataMs ||
+        nowMs < s.nativeBenchmarkMetadataMs || nowMs - s.nativeBenchmarkMetadataMs >= 500;
+    NativeBenchmarkMetadata metadata=s.nativeBenchmarkMetadata;
+    if (timing.haveCpu) {
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            if (!timing.cpu.inputWidth[eye] || !timing.cpu.inputHeight[eye] ||
+                !timing.cpu.outputWidth[eye] || !timing.cpu.outputHeight[eye]) return false;
+            metadata.inputWidth[eye]=timing.cpu.inputWidth[eye];
+            metadata.inputHeight[eye]=timing.cpu.inputHeight[eye];
+            metadata.outputWidth[eye]=timing.cpu.outputWidth[eye];
+            metadata.outputHeight[eye]=timing.cpu.outputHeight[eye];
+        }
+        std::memcpy(metadata.gameFov,timing.cpu.gameFov,sizeof(metadata.gameFov));
+        std::memcpy(metadata.treatments,timing.cpu.treatments,sizeof(metadata.treatments));
+        metadata.featureEpoch=timing.cpu.featureEpoch;
+    }
+    if (!metadata.inputWidth[0]) return false;
+    if (refreshMetadata) {
+        NativeRenderLabels labels{};
+        if (nativeRenderLabels(&labels) && labels.valid) {
+            benchmarkCopy(metadata.runtime, sizeof(metadata.runtime), labels.runtimeName);
+            benchmarkCopy(metadata.headset, sizeof(metadata.headset), labels.systemName);
+        }
+        const std::string aa = Config::get().getString("fix.temporal_aa", "off");
+        const std::string dlss = Config::get().getString("fix.temporal_aa_model", "k");
+        benchmarkCopy(metadata.aaMode, sizeof(metadata.aaMode), aa.c_str());
+        benchmarkCopy(metadata.dlssMode, sizeof(metadata.dlssMode), dlss.c_str());
+        benchmarkCopy(metadata.build, sizeof(metadata.build), EDVR_VERSION_STRING);
+        s.nativeBenchmarkMetadataMs = nowMs;
+    }
+    if (std::isfinite(timing.predictedPeriodMs) && timing.predictedPeriodMs > 0.0) {
+        // Quantize to 0.1 Hz so normal prediction jitter cannot restart a
+        // benchmark scope. This is context, not the GPU conversion factor.
+        const double hz = 1000.0 / timing.predictedPeriodMs;
+        metadata.refreshMilliHz = static_cast<uint32_t>(std::llround(hz * 10.0) * 100.0);
+    }
+    const uint64_t scope = benchmarkScope(timing, metadata,
+                                          s.nativeBenchmarkSettingsEpoch.load(std::memory_order_relaxed));
+    if (scope != s.nativeBenchmarkScope) {
+        s.nativeBenchmarkScope = scope;
+        s.nativeBenchmarkMetadata = metadata;
+    }
+    return true;
+}
+
+const char* benchmarkAbortName(uint32_t reason) {
+    switch (reason) {
+    case kNativeBenchmarkScopeChanged: return "scope-changed";
+    case kNativeBenchmarkOverflow: return "overflow";
+    case kNativeBenchmarkClockReversed: return "clock-reversed";
+    case kNativeBenchmarkTransportLoss: return "transport-loss";
+    default: return "completed";
+    }
+}
+
+void logNativeBenchmark(State& s, const NativeBenchmarkReport& report) {
+    const auto& m = report.metadata;
+    char cpuPercentiles[96] = "--/--/--";
+    char gpuPercentiles[96] = "--/--/--";
+    if (report.cpu.available)
+        snprintf(cpuPercentiles, sizeof(cpuPercentiles), "%.3f/%.3f/%.3f",
+                 report.cpu.p50, report.cpu.p95, report.cpu.p99);
+    if (report.gpu.available)
+        snprintf(gpuPercentiles, sizeof(gpuPercentiles), "%.3f/%.3f/%.3f",
+                 report.gpu.p50, report.gpu.p95, report.gpu.p99);
+    const uint64_t sampleDuration = report.sampleEndedAtMs >= report.startedAtMs
+        ? report.sampleEndedAtMs - report.startedAtMs : 0;
+    Log::get().note("native benchmark: window %llu, scope %llu, status %s, "
+                    "sample %llu ms [%llu..%llu], drain %llu ms (finished %llu), cpu p50/p95/p99 %s ms valid %llu invalid %llu missing %llu, "
+                    "gpu p50/p95/p99 %s ms valid %llu invalid %llu missing %llu, "
+                    "input %ux%u/%ux%u output %ux%u/%ux%u refresh %u mHz, runtime=\"%s\" headset=\"%s\" aa=\"%s\" dlss=\"%s\" build=\"%s\"; elapsed windows are independent CPU/GPU samples.",
+                    static_cast<unsigned long long>(report.window),
+                    static_cast<unsigned long long>(report.scope), benchmarkAbortName(report.abortReason),
+                    static_cast<unsigned long long>(sampleDuration),
+                    static_cast<unsigned long long>(report.startedAtMs),
+                    static_cast<unsigned long long>(report.sampleEndedAtMs),
+                    static_cast<unsigned long long>(report.drainMs),
+                    static_cast<unsigned long long>(report.endedAtMs), cpuPercentiles,
+                    static_cast<unsigned long long>(report.cpu.valid),
+                    static_cast<unsigned long long>(report.cpu.invalid),
+                    static_cast<unsigned long long>(report.cpu.missing),
+                    gpuPercentiles,
+                    static_cast<unsigned long long>(report.gpu.valid),
+                    static_cast<unsigned long long>(report.gpu.invalid),
+                    static_cast<unsigned long long>(report.gpu.missing),
+                    m.inputWidth[0], m.inputHeight[0], m.inputWidth[1], m.inputHeight[1],
+                    m.outputWidth[0], m.outputHeight[0], m.outputWidth[1], m.outputHeight[1],
+                    m.refreshMilliHz, m.runtime, m.headset, m.aaMode, m.dlssMode, m.build);
+    (void)s;
+    Log::get().note("native benchmark workload: window %llu, feature epoch %llu, treatments %u/%u, game FOV radians L %.5f/%.5f/%.5f/%.5f R %.5f/%.5f/%.5f/%.5f; order left/right/up/down; input is submitted ROI, output is active XR target.",
+        static_cast<unsigned long long>(report.window),static_cast<unsigned long long>(m.featureEpoch),
+        m.treatments[0],m.treatments[1],m.gameFov[0][0],m.gameFov[0][1],m.gameFov[0][2],m.gameFov[0][3],
+        m.gameFov[1][0],m.gameFov[1][1],m.gameFov[1][2],m.gameFov[1][3]);
+}
+
 }  // namespace
 
 void perfMonitorFrame(ID3D11Device* dev) {
@@ -545,15 +711,79 @@ void perfMonitorFrame(ID3D11Device* dev) {
     // assigned to whichever Present happened to observe it.
     if (f.native) {
         const uint64_t historyNow=GetTickCount64();
-        s.nativeHistory.observe(true, nativeTimingSnapshot(), gpuFrameSnapshot(), historyNow);
+        const NativeTimingSnapshot timing = nativeTimingSnapshot();
+        const GpuFrameSnapshot gpu = gpuFrameSnapshot();
+        s.nativeHistory.observe(true, timing, gpu, historyNow);
+        if (!updateBenchmarkMetadata(s, timing, historyNow)) {
+            s.nativeBenchmark.reset();
+            s.nativeBenchmarkScope = 0;
+        }
+        NativeBenchmarkObservation tick{};
+        tick.scope = s.nativeBenchmarkScope;
+        tick.metadata = &s.nativeBenchmarkMetadata;
+        // Consume completion queues rather than the latest-value snapshots:
+        // a single Present can retire several delayed timestamp results.
+        NativeTimingSnapshot cpuCompletions[32]{};
+        uint64_t cpuDropped = 0;
+        const unsigned cpuCount = nativeTimingReadCompletions(
+            s.nativeBenchmarkCpuCursor, cpuCompletions, _countof(cpuCompletions), cpuDropped);
+        s.nativeBenchmark.noteDropped(true, cpuDropped);
+        for (unsigned i = 0; i < cpuCount; ++i) {
+            const NativeTimingSnapshot& completion = cpuCompletions[i];
+            if (completion.generation != timing.generation ||
+                completion.firstSequence != timing.firstSequence || !completion.sequence) continue;
+            if (!updateBenchmarkMetadata(s, completion, historyNow)) continue;
+            NativeBenchmarkObservation benchmark{};
+            benchmark.scope = s.nativeBenchmarkScope;
+            benchmark.metadata = &s.nativeBenchmarkMetadata;
+            benchmark.cpuSequence = completion.sequence;
+            benchmark.cpuAtMs = completion.capturedAtMs;
+            benchmark.cpuMs = completion.applicationMs;
+            benchmark.cpuValid = completion.haveCpu && !completion.invalid &&
+                                 completion.applicationValid;
+            s.nativeBenchmark.observe(benchmark, historyNow);
+        }
+        GpuFrameSnapshot gpuCompletions[32]{};
+        uint64_t gpuDropped = 0;
+        const unsigned gpuCount = gpuFrameReadCompletions(
+            s.nativeBenchmarkGpuCursor, gpuCompletions, _countof(gpuCompletions), gpuDropped);
+        s.nativeBenchmark.noteDropped(false, gpuDropped);
+        for (unsigned i = 0; i < gpuCount; ++i) {
+            const GpuFrameSnapshot& completion = gpuCompletions[i];
+            if (!completion.haveResult || !completion.result.sequence ||
+                completion.result.sequence < timing.firstSequence ||
+                completion.result.source != GpuSpanSource::ApplicationRender) continue;
+            NativeBenchmarkObservation benchmark{};
+            benchmark.scope = s.nativeBenchmarkScope;
+            benchmark.metadata = &s.nativeBenchmarkMetadata;
+            benchmark.gpuSequence = completion.result.sequence;
+            benchmark.gpuAtMs = completion.result.completedAtMs;
+            benchmark.gpuMs = completion.result.outerMs;
+            benchmark.gpuValid = completion.result.reason == GpuSpanReason::Valid;
+            s.nativeBenchmark.observe(benchmark, historyNow);
+        }
+        // Drain observations before the clock tick can finalize the window.
+        // A completion already queued at the deadline still belongs to it.
+        updateBenchmarkMetadata(s, timing, historyNow);
+        tick.scope=s.nativeBenchmarkScope;
+        tick.metadata=&s.nativeBenchmarkMetadata;
+        s.nativeBenchmark.observe(tick, historyNow);
+        NativeBenchmarkReport report{};
+        if (s.nativeBenchmark.takeReport(&report)) logNativeBenchmark(s, report);
         if (s.nativeHistoryReports<60 && (!s.nativeHistoryLogMs || historyNow-s.nativeHistoryLogMs>=5000)) {
             s.nativeHistoryLogMs=historyNow;++s.nativeHistoryReports;
-            const auto cpu=s.nativeHistory.submit(historyNow,200), gpu=s.nativeHistory.producer(historyNow,200);
+            const auto cpu=s.nativeHistory.submit(historyNow,200), historyGpu=s.nativeHistory.producer(historyNow,200);
             const auto copy=s.nativeHistory.transfer(historyNow,200), compose=s.nativeHistory.compose(historyNow,200);
             Log::get().note("native metrics history: 200ms window, submit %.3f ms (%u samples), producer %.3f ms (%u samples), XR copy %.3f ms (%u samples), XR compose %.3f ms (%u samples), predicted period %.3f ms; zero samples means unavailable; independent sources.",
-                cpu.meanMs,cpu.count,gpu.meanMs,gpu.count,copy.meanMs,copy.count,compose.meanMs,compose.count,s.nativeHistory.predictedPeriod(historyNow));
+                cpu.meanMs,cpu.count,historyGpu.meanMs,historyGpu.count,copy.meanMs,copy.count,compose.meanMs,compose.count,s.nativeHistory.predictedPeriod(historyNow));
         }
-    } else s.nativeHistory.clear();
+    } else {
+        s.nativeHistory.clear();
+        s.nativeBenchmark.reset();
+        s.nativeBenchmarkScope = 0;
+        s.nativeBenchmarkMetadataMs = 0;
+        s.nativeBenchmarkMetadata = {};
+    }
     const auto waitUs = takeWaitCpuUs(); // Drain legacy accounting without attributing it to native frames.
     f.posesWaitMs = f.native ? 0.0f : static_cast<float>(waitUs) / 1000.0f;
     // EDVR's part: the events of the frame just ending, from both halves.
@@ -636,6 +866,13 @@ void perfMonitorFrame(ID3D11Device* dev) {
 void perfMonitorNoteEvent(uint32_t bits, double ms) {
     State& s = g_s;
     s.events.fetch_or(bits, std::memory_order_relaxed);
+    // These events can change the render treatment or native menu state in
+    // the middle of a benchmark window. Advance a cheap epoch immediately;
+    // the next monitor tick hashes it into the scope and aborts the window.
+    constexpr uint32_t kBenchmarkScopeEvents = kEvReload | kEvIniWrite |
+        kEvBinds | kEvNgx | kEvMenu;
+    if (bits & kBenchmarkScopeEvents)
+        s.nativeBenchmarkSettingsEpoch.fetch_add(1, std::memory_order_relaxed);
     if (ms > 0.0) {
         const int32_t us = ms < 60000.0 ? static_cast<int32_t>(ms * 1000.0) : 60000000;
         // The longest event of the frame is the one worth naming.
@@ -693,11 +930,22 @@ bool nativeCpuReady(const NativeTimingSnapshot& timing) {
            timing.cpu.sequence >= timing.firstSequence && nativeTimingAge(timing.capturedAtMs) <= 2000;
 }
 
+bool nativeApplicationCpuReady(const NativeTimingSnapshot& timing) {
+    return nativeCpuReady(timing) && timing.applicationValid &&
+           std::isfinite(timing.applicationMs) && timing.applicationMs >= 0.0 &&
+           timing.applicationMs <= 600000.0;
+}
+
 bool nativeGpuReady(const NativeTimingSnapshot& timing, const GpuFrameSnapshot& gpu) {
     const uint64_t observedAge = nativeTimingAge(gpu.capturedAtMs);
     return timing.active && !timing.invalid && timing.firstSequence && gpu.enabled && gpu.haveResult &&
            gpu.result.reason == GpuSpanReason::Valid && gpu.result.sequence >= timing.firstSequence &&
            observedAge <= 2000 && gpu.result.ageMs <= 2000 - observedAge;
+}
+
+bool nativeApplicationGpuReady(const NativeTimingSnapshot& timing, const GpuFrameSnapshot& gpu) {
+    return nativeGpuReady(timing, gpu) &&
+           gpu.result.source == GpuSpanSource::ApplicationRender;
 }
 
 uint64_t nativeGpuAge(const GpuFrameSnapshot& gpu) {
@@ -729,13 +977,12 @@ int perfMonitorTiles(PerfTile* out, int max) {
     int cnt = 0, compCnt = 0, reproj = 0, dropped = 0;
     const bool native = nativeMenuActive();
     const NativeTimingSnapshot nativeTiming = nativeTimingSnapshot();
-    const GpuFrameSnapshot producerGpu = gpuFrameSnapshot();
-    const bool haveNativeCpu = native && nativeCpuReady(nativeTiming);
-    const bool haveNativeGpu = native && nativeGpuReady(nativeTiming, producerGpu);
+    const bool haveNativePeriod = native && nativeCpuReady(nativeTiming);
     const uint64_t historyNow = GetTickCount64();
+    const auto nativeApplicationCpu = s.nativeHistory.applicationCpu(historyNow, 200);
+    const auto nativeApplicationGpu = s.nativeHistory.applicationGpu(historyNow, 200);
     const auto nativeSubmit = s.nativeHistory.submit(historyNow, 200);
     const auto nativeWait = s.nativeHistory.wait(historyNow, 200);
-    const auto nativeRender = s.nativeHistory.producer(historyNow, 200);
     // The mean over fpsVR's own update window, so the two numbers can be
     // read side by side. Averaging the whole ten-second ring instead read
     // about a millisecond under it (flown 2026-09-07).
@@ -804,7 +1051,10 @@ int perfMonitorTiles(PerfTile* out, int max) {
         tile("FRAME RATE", "--", "measuring");
         tile("1% LOW", "--", "");
     }
-    if (compCnt && !native) {
+    if (native && nativeApplicationGpu.count) {
+        snprintf(v, sizeof(v), "%.1f", nativeApplicationGpu.meanMs);
+        tile("GPU TIME", v, "ms application render; elapsed");
+    } else if (compCnt && !native) {
         const PerfStats gf = perfStatsOf(gpuFrame, compCnt);
         snprintf(v, sizeof(v), "%.1f", recentGpu > 0.0f ? recentGpu : gf.avgMs);
         snprintf(sub, sizeof(sub), "ms now; %.1f over 10 s", gf.avgMs);
@@ -812,10 +1062,10 @@ int perfMonitorTiles(PerfTile* out, int max) {
     } else {
         tile("GPU TIME", "--", noTiming);
     }
-    if (native && haveNativeCpu && nativeSubmit.count) {
-        snprintf(v, sizeof(v), "%.1f", nativeSubmit.meanMs);
-        snprintf(sub, sizeof(sub), "ms, 200ms mean; wait %.1f", nativeWait.meanMs);
-        tile("SUBMIT WALL", v, sub);
+    if (native && nativeApplicationCpu.count) {
+        snprintf(v, sizeof(v), "%.1f", nativeApplicationCpu.meanMs);
+        snprintf(sub, sizeof(sub), "ms render thread; XR waits excluded");
+        tile("CPU TIME", v, sub);
     } else if (ps.count && !native) {
         const PerfStats bs = perfStatsOf(busy, cnt);
         if (recentAppCpu > 0.0f) {
@@ -828,14 +1078,14 @@ int perfMonitorTiles(PerfTile* out, int max) {
         }
         tile("CPU TIME", v, sub);
     } else {
-        tile(native ? "SUBMIT WALL" : "CPU TIME", "--", native ? "native wall timing unavailable" : "");
+        tile("CPU TIME", "--", native ? "application timing unavailable" : "");
     }
 
     // Row 2: the app's GPU share, and the drops.
-    if (native && haveNativeGpu && nativeRender.count) {
-        snprintf(v, sizeof(v), "%.1f", nativeRender.meanMs);
-        snprintf(sub, sizeof(sub), "ms, 200ms mean; producer only");
-        tile("RENDER GPU", v, sub);
+    if (native && nativeSubmit.count) {
+        snprintf(v, sizeof(v), "%.1f", nativeSubmit.meanMs);
+        snprintf(sub, sizeof(sub), "ms elapsed; pose wait %.1f", nativeWait.meanMs);
+        tile("SUBMIT WALL", v, sub);
     } else if (compCnt && !native) {
         const PerfStats ag = perfStatsOf(appGpu, compCnt);
         const PerfStats cg = perfStatsOf(compGpu, compCnt);
@@ -843,7 +1093,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
         snprintf(sub, sizeof(sub), "ms scene; %.1f compositor", cg.avgMs);
         tile("APP GPU", v, sub);
     } else {
-        tile(native ? "RENDER GPU" : "APP GPU", "--", noTiming);
+        tile(native ? "SUBMIT WALL" : "APP GPU", "--", noTiming);
     }
     if (compCnt && !native) {
         snprintf(v, sizeof(v), "%d", dropped);
@@ -871,7 +1121,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
         uint32_t ew = 0, eh = 0;
         const bool haveEye = eyeTextureSize(&ew, &eh);
         const double predicted = s.nativeHistory.predictedPeriod(historyNow);
-        if (native && haveNativeCpu && predicted > 0.0) {
+        if (native && haveNativePeriod && predicted > 0.0) {
             snprintf(v, sizeof(v), "%.1f ms", predicted);
             if (haveEye) snprintf(sub, sizeof(sub), "runtime prediction; %ux%u", ew, eh);
             else snprintf(sub, sizeof(sub), "runtime prediction");
@@ -1033,18 +1283,20 @@ void perfMonitorLocalGpuLine(char* buf, size_t bufLen) {
     if (nativeMenuActive()) {
         const NativeTimingSnapshot timing = nativeTimingSnapshot();
         const GpuFrameSnapshot snap = gpuFrameSnapshot();
-        if (!timing.active || !timing.firstSequence) { snprintf(buf, bufLen, "Render to submit: native timing unavailable"); return; }
-        if (!snap.enabled) { snprintf(buf, bufLen, "Render to submit: disabled"); return; }
-        if (!snap.haveResult) { snprintf(buf, bufLen, "Render to submit: pending"); return; }
+        const char* label = snap.haveResult && snap.result.source == GpuSpanSource::ApplicationRender
+                                ? "Application render" : "Render to submit";
+        if (!timing.active || !timing.firstSequence) { snprintf(buf, bufLen, "%s: native timing unavailable", label); return; }
+        if (!snap.enabled) { snprintf(buf, bufLen, "%s: disabled", label); return; }
+        if (!snap.haveResult) { snprintf(buf, bufLen, "%s: pending", label); return; }
         if (snap.result.reason == GpuSpanReason::Valid && snap.result.sequence < timing.firstSequence) {
-            snprintf(buf, bufLen, "Render to submit: pending (new native session)"); return;
+            snprintf(buf, bufLen, "%s: pending (new native session)", label); return;
         }
         if (snap.result.reason != GpuSpanReason::Valid) {
-            snprintf(buf, bufLen, "Render to submit: unavailable (%s; producer span)", gpuFrameReason(snap.result.reason)); return;
+            snprintf(buf, bufLen, "%s: unavailable (%s)", label, gpuFrameReason(snap.result.reason)); return;
         }
         const uint64_t age = nativeGpuAge(snap);
-        if (age > 2000) { snprintf(buf, bufLen, "Render to submit: stale"); return; }
-        snprintf(buf, bufLen, "Render to submit: %.2f ms (producer span; frame %llu; age %llu ms)",
+        if (age > 2000) { snprintf(buf, bufLen, "%s: stale", label); return; }
+        snprintf(buf, bufLen, "%s: %.2f ms (elapsed; frame %llu; age %llu ms)", label,
                  snap.result.outerMs, static_cast<unsigned long long>(snap.result.sourceFrame),
                  static_cast<unsigned long long>(age));
         buf[bufLen - 1] = 0;
@@ -1138,10 +1390,10 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
         const NativeTimingSnapshot timing = nativeTimingSnapshot();
         const GpuFrameSnapshot gpu = gpuFrameSnapshot();
         const uint64_t now = GetTickCount64();
-        const auto render = s.nativeHistory.producer(now, 200);
-        const auto submit = s.nativeHistory.submit(now, 200);
-        const bool haveGpu = nativeGpuReady(timing, gpu) && render.count;
-        const bool haveCpu = nativeCpuReady(timing) && submit.count;
+        const auto render = s.nativeHistory.applicationGpu(now, 200);
+        const auto submit = s.nativeHistory.applicationCpu(now, 200);
+        const bool haveGpu = nativeApplicationGpuReady(timing, gpu) && render.count;
+        const bool haveCpu = nativeApplicationCpuReady(timing) && submit.count;
         char gpuValue[24] = "--", cpuValue[24] = "--";
         if (haveGpu) snprintf(gpuValue, sizeof(gpuValue), "%.1f", render.meanMs);
         if (haveCpu) snprintf(cpuValue, sizeof(cpuValue), "%.1f", submit.meanMs);

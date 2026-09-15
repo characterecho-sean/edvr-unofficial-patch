@@ -13,6 +13,10 @@ public:
     void observe(bool native, const NativeTimingSnapshot&, const GpuFrameSnapshot&, uint64_t nowMs) noexcept;
     void clear() noexcept;
     NativePerfAverage submit(uint64_t nowMs, uint64_t windowMs) const noexcept;
+    // Application render elapsed time. These streams are independent from
+    // submit wall/XR wait diagnostics and are the values suitable for the UI.
+    NativePerfAverage applicationCpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
+    NativePerfAverage applicationGpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage wait(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage producer(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage transfer(uint64_t nowMs, uint64_t windowMs) const noexcept;
@@ -32,7 +36,7 @@ private:
         bool fresh(uint64_t now) const noexcept;
         NativePerfAverage average(unsigned field,uint64_t now,uint64_t window) const noexcept;
         int graph(float* out,int max,uint64_t now) const noexcept;
-    } cpu_, producer_, device_;
+    } cpu_, applicationCpu_, producer_, applicationGpu_, device_;
     uint64_t generation_=0, firstSequence_=0;
     double period_=0;
     uint64_t periodAt_=0;

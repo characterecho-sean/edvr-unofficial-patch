@@ -8,12 +8,16 @@
 #include <cstring>
 #include <mutex>
 #include <wrl/client.h>
+#include <array>
+#include <algorithm>
+#include <limits>
 
 extern "C" uint64_t WINAPI edvrGpuFrameEvent(unsigned, unsigned, uint64_t,
                                                unsigned, unsigned, void*);
 
 namespace {
 constexpr unsigned kCapacity = 16;
+constexpr unsigned kApplicationSegments = 4;
 constexpr int64_t kMaxPeriodNs = 1000000000LL * 10; // 10 seconds
 constexpr double kMaxFieldMs = 600000.0;            // malformed input guard
 
@@ -34,6 +38,11 @@ struct Context {
     uint64_t lastLogMs = 0;
     uint64_t gpuRejectFloor = 0, lastGpuSequence = 0, lastGpuLogMs = 0;
     bool gpuLoggedValid = false;
+    int64_t applicationQpc = 0;
+    double applicationMs = 0;
+    unsigned applicationSegments = 0;
+    bool applicationOpen = false, applicationValid = true;
+    bool completionQueued = false;
 };
 
 Context pool[kCapacity];
@@ -41,6 +50,10 @@ unsigned used = 0;
 Context* current = nullptr;
 std::mutex lifetime;
 edvr::NativeTimingSnapshot snapshot;
+constexpr unsigned kCompletionCapacity = 256;
+struct Completion { uint64_t ordinal = 0; edvr::NativeTimingSnapshot value{}; };
+std::array<Completion,kCompletionCapacity> completions{};
+uint64_t nextCompletion = 1;
 
 Context* identify(void* p) noexcept {
     for (unsigned i = 0; i < used; ++i) if (p == &pool[i]) return &pool[i];
@@ -75,6 +88,29 @@ void clearCpu() noexcept {
     snapshot.waitMs = 0;
     snapshot.predictedPeriodMs = 0;
     snapshot.sequence = 0;
+    snapshot.applicationMs = 0;
+    snapshot.applicationValid = false;
+}
+
+void queueCompletion(Context& c, uint64_t sequence, bool invalid) noexcept {
+    if (!sequence || c.completionQueued) return;
+    auto value = snapshot;
+    value.active = true;
+    value.generation = c.generation;
+    value.sequence = sequence;
+    value.capturedAtMs = nowMs();
+    if (invalid) {
+        value.haveCpu = false;
+        value.invalid = true;
+        value.cpu = {};
+        value.waitMs = 0;
+        value.predictedPeriodMs = 0;
+        value.applicationMs = 0;
+        value.applicationValid = false;
+    }
+    const auto ordinal = nextCompletion++;
+    completions[ordinal % kCompletionCapacity] = {ordinal, value};
+    c.completionQueued = true;
 }
 
 void clearDeviceGpu() noexcept {
@@ -122,6 +158,7 @@ uint64_t WINAPI waitBegin(void* p) {
     if (!c || !c->active || c != current) return 0;
     // An unfinished prior wait cannot leave its CPU sample fresh.
     if (c->waitSequence && !c->published) {
+        queueCompletion(*c, c->waitSequence, true);
         poison(c->waitSequence);
         rejectGpu(*c, c->waitSequence);
         clearCpu();
@@ -133,7 +170,11 @@ uint64_t WINAPI waitBegin(void* p) {
     c->waitOutstanding = sequence != 0;
     c->waitValid = false;
     c->published = false;
+    c->completionQueued = false;
     c->attempted = c->opened = c->ended = 0;
+    c->applicationQpc = 0; c->applicationMs = 0;
+    c->applicationSegments = 0;
+    c->applicationOpen = false; c->applicationValid = true;
     if (!sequence) { clearCpu(); rejectGpu(*c, c->waitSequence); snapshot.invalid = true; }
     if (sequence && !c->firstSequence) {
         c->firstSequence = sequence;
@@ -152,12 +193,13 @@ HRESULT WINAPI waitEnd(void* p, uint64_t sequence, uint32_t valid, int64_t perio
     double elapsedMs = 0;
     const bool ok = valid == 1 && sensible && qpcMs(c->waitQpc, end, elapsedMs) &&
         edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
-            static_cast<unsigned>(edvr::GpuFrameEvent::WaitEnd), sequence, 0, 1, nullptr);
+            static_cast<unsigned>(edvr::GpuFrameEvent::WaitEnd), sequence, 0, edvr::kGpuFrameNativeWait, nullptr);
     c->waitOutstanding = false;
     c->waitValid = ok;
     c->published = false;
     ++(ok ? c->validCount : c->invalidCount);
     if (!ok) {
+        queueCompletion(*c, sequence, true);
         poison(sequence);
         rejectGpu(*c, sequence);
         clearCpu();
@@ -177,6 +219,41 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
     std::lock_guard<std::mutex> lock(lifetime);
     Context* c = identify(p);
     if (!c || !c->active || c != current || !sequence || !c->waitValid || c->published || sequence != c->waitSequence) return 0;
+    if (eye == 2u) {
+        // Reserved CPU wall marker. All intervals are measured on the bound
+        // producer thread; the route caller is the producer in native mode.
+        if (begin > 1 || accepted > 1 || texture || !c->waitValid || c->published ||
+            !c->applicationValid || GetCurrentThreadId() != c->producer) return 0;
+        if (begin) {
+            if (c->applicationOpen || !(c->applicationQpc = qpcNow())) return 0;
+            c->applicationOpen = true;
+        } else {
+            if (!c->applicationOpen) return 0;
+            const int64_t end = qpcNow(); double elapsed = 0;
+            if (!qpcMs(c->applicationQpc, end, elapsed)) {
+                c->applicationValid = false; c->applicationOpen = false; return 0;
+            }
+            c->applicationMs += elapsed;
+            ++c->applicationSegments;
+            c->applicationQpc = 0; c->applicationOpen = false;
+        }
+        return 1;
+    }
+    if (eye == 3u || eye == 4u || (eye >= 5u && eye <= 6u)) {
+        if (GetCurrentThreadId() != c->producer) return 0;
+        if (eye >= 5u) {
+            if (begin != 0 || accepted != 1 || !texture || !c->waitValid || c->published) return 0;
+            return edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
+                static_cast<unsigned>(edvr::GpuFrameEvent::SegmentEnd), sequence,
+                eye - 5u, 1u, texture) ? 1u : 0u;
+        }
+        if (begin != (eye == 3u ? 1u : 0u) || accepted != 1 || texture ||
+            !c->waitValid || c->published) return 0;
+        const auto event = eye == 3u ? edvr::GpuFrameEvent::SegmentResume :
+                                      edvr::GpuFrameEvent::SegmentPause;
+        return edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
+            static_cast<unsigned>(event), sequence, 0, 0, nullptr) ? 1u : 0u;
+    }
     if (GetCurrentThreadId() != c->producer || eye > 1 || begin > 1 || accepted > 1 || !texture) {
         poison(sequence); rejectGpu(*c, sequence); return 0;
     }
@@ -207,13 +284,14 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
     std::lock_guard<std::mutex> lock(lifetime);
     Context* c = identify(p);
     if (!c || !c->active || c != current || !frame ||
-        frame->size != sizeof(*frame) || frame->version != EDVR_NATIVE_TIMING_VERSION_2 ||
+        frame->size != sizeof(*frame) || frame->version != EDVR_NATIVE_TIMING_VERSION_3 ||
         !c->waitValid || c->published || frame->sequence != c->waitSequence) return E_INVALIDARG;
     bool fieldsValid = finiteNonnegative(frame->composeMs);
     for (unsigned eye = 0; eye < 2; ++eye) fieldsValid = fieldsValid &&
         finiteNonnegative(frame->submitMs[eye]) && finiteNonnegative(frame->temporalMs[eye]) &&
         finiteNonnegative(frame->menuMs[eye]) && finiteNonnegative(frame->transferMs[eye]);
     if (!fieldsValid) {
+        queueCompletion(*c, frame->sequence, true);
         poison(frame->sequence); c->waitValid = false;
         clearCpu(); snapshot.invalid = true; return E_INVALIDARG;
     }
@@ -226,7 +304,15 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
     snapshot.capturedAtMs = nowMs();
     snapshot.waitMs = c->pendingWaitMs;
     snapshot.predictedPeriodMs = c->pendingPeriodMs;
+    snapshot.applicationMs = c->applicationMs;
+    // Native routing has four required wall intervals: initial game work,
+    // left treatment, between-eye route/game work, and right treatment.
+    // Direct-owner calls and failed route returns cannot publish a plausible
+    // partial application measurement.
+    snapshot.applicationValid = c->applicationValid && !c->applicationOpen &&
+        c->applicationSegments == kApplicationSegments;
     c->published = true;
+    queueCompletion(*c, frame->sequence, false);
     if (++c->publishedCount == 1 || !c->lastLogMs || snapshot.capturedAtMs - c->lastLogMs >= 5000) {
         c->lastLogMs = snapshot.capturedAtMs;
         edvr::Log::get().note("native timing CPU: seq %llu, wait %.3f ms, submits %.3f ms, "
@@ -244,9 +330,11 @@ HRESULT WINAPI invalidate(void* p) {
     std::lock_guard<std::mutex> lock(lifetime);
     Context* c = identify(p);
     if (!c || !c->active || c != current) return E_INVALIDARG;
+    if (!c->published) queueCompletion(*c, c->waitSequence, true);
     poison(c->waitSequence);
     rejectGpu(*c, c->waitSequence);
     c->waitOutstanding = c->waitValid = c->published = false;
+    c->applicationQpc = 0; c->applicationOpen = false; c->applicationValid = false;
     clearCpu(); snapshot.active = true; snapshot.generation = c->generation; snapshot.invalid = true;
     return S_OK;
 }
@@ -261,7 +349,7 @@ uint32_t WINAPI gpuEnabled(void* p) {
         // Older asynchronous work must not reappear after a disable/re-enable.
         if (c->waitSequence && c->waitSequence-1 > c->gpuRejectFloor)
             c->gpuRejectFloor = c->waitSequence-1;
-        snapshot.deviceGpu = {sizeof(EdvrNativeDeviceGpuSample), EDVR_NATIVE_TIMING_VERSION_2,
+        snapshot.deviceGpu = {sizeof(EdvrNativeDeviceGpuSample), EDVR_NATIVE_TIMING_VERSION_3,
             c->waitSequence, nowMs(), EdvrNativeGpuDisabled};
         snapshot.haveDeviceGpu = true;
     }
@@ -273,7 +361,7 @@ HRESULT WINAPI publishDeviceGpu(void* p, const EdvrNativeDeviceGpuSample* sample
     Context* c = identify(p);
     const auto now = nowMs();
     if (!c || !c->active || c != current || !sample || sample->size != sizeof(*sample) ||
-        sample->version != EDVR_NATIVE_TIMING_VERSION_2 || !sample->sequence || !c->firstSequence ||
+        sample->version != EDVR_NATIVE_TIMING_VERSION_3 || !sample->sequence || !c->firstSequence ||
         sample->sequence < c->firstSequence || sample->sequence > c->waitSequence ||
         sample->sequence <= c->gpuRejectFloor ||
         sample->sequence < c->lastGpuSequence ||
@@ -315,6 +403,7 @@ HRESULT WINAPI close(void* p) {
     Context* c = identify(p);
     if (!c) return E_INVALIDARG;
     if (!c->active) return S_FALSE;
+    if (!c->published) queueCompletion(*c, c->waitSequence, true);
     poison(c->waitSequence);
     c->active = false; c->device = nullptr; c->waitOutstanding = c->waitValid = false;
     c->published = false;
@@ -329,14 +418,36 @@ NativeTimingSnapshot nativeTimingSnapshot() noexcept {
     std::lock_guard<std::mutex> lock(lifetime);
     return snapshot;
 }
+unsigned nativeTimingReadCompletions(uint64_t& cursor, NativeTimingSnapshot* out,
+                                     unsigned capacity, uint64_t& dropped) noexcept {
+    if (!out || !capacity) return 0;
+    std::lock_guard<std::mutex> lock(lifetime);
+    const uint64_t latest = nextCompletion ? nextCompletion - 1 : 0;
+    const uint64_t oldest = latest >= kCompletionCapacity ?
+        latest - kCompletionCapacity + 1 : 1;
+    const uint64_t next = cursor == (std::numeric_limits<uint64_t>::max)() ?
+        (std::numeric_limits<uint64_t>::max)() : cursor + 1;
+    if (next < oldest) { dropped += oldest - next; cursor = oldest - 1; }
+    const uint64_t start = (std::max)(cursor == (std::numeric_limits<uint64_t>::max)() ?
+        (std::numeric_limits<uint64_t>::max)() : cursor + 1, oldest);
+    const uint64_t available = latest >= start ? latest - start + 1 : 0;
+    const unsigned count = static_cast<unsigned>((std::min)(uint64_t(capacity), available));
+    for (unsigned i = 0; i < count; ++i) {
+        const auto& item = completions[(start + i) % kCompletionCapacity];
+        if (item.ordinal != start + i) { ++dropped; cursor = start + i; continue; }
+        out[i] = item.value;
+        cursor = item.ordinal;
+    }
+    return count;
+}
 }
 
 extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest* request,
                                                     EdvrNativeTimingTable* table) {
-    if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_TIMING_VERSION_2)
+    if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_TIMING_VERSION_3)
         return E_INVALIDARG;
-    *table = {sizeof(*table), EDVR_NATIVE_TIMING_VERSION_2};
-    if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_TIMING_VERSION_2 ||
+    *table = {sizeof(*table), EDVR_NATIVE_TIMING_VERSION_3};
+    if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_TIMING_VERSION_3 ||
         !request->device || !request->generation) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(lifetime);
     if (current || used == kCapacity) return E_PENDING;

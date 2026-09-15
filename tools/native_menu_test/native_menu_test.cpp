@@ -12,6 +12,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <algorithm>
 #include <functional>
 #include <cmath>
 using Microsoft::WRL::ComPtr;
@@ -43,14 +44,33 @@ static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,
 }
 
 static bool makeSource(ID3D11Device* d, ID3D11DeviceContext* c,
-                       ComPtr<ID3D11Texture2D>& out, UINT color) {
-    D3D11_TEXTURE2D_DESC desc{}; desc.Width = desc.Height = 256;
+                       ComPtr<ID3D11Texture2D>& out, UINT color, UINT width = 256, UINT height = 256) {
+    D3D11_TEXTURE2D_DESC desc{}; desc.Width = width; desc.Height = height;
     desc.ArraySize = desc.MipLevels = 1; desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(d->CreateTexture2D(&desc, nullptr, &out))) return false;
-    std::vector<UINT> pixels(256u * 256u, color);
-    c->UpdateSubresource(out.Get(), 0, nullptr, pixels.data(), 256u * 4, 0); return true;
+    std::vector<UINT> pixels(size_t(width) * height, color);
+    c->UpdateSubresource(out.Get(), 0, nullptr, pixels.data(), width * 4, 0); return true;
+}
+
+// Read the actual composite bounds, rather than asserting only the input
+// geometry. A resolution-dependent draw/crop would change these fractions.
+static bool changedBounds(const std::vector<UINT>& pixels, UINT width, UINT height,
+                          UINT background, float bounds[4]) {
+    if (pixels.size() != size_t(width) * height) return false;
+    UINT x0 = width, y0 = height, x1 = 0, y1 = 0;
+    bool found = false;
+    for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x) {
+        if (pixels[size_t(y) * width + x] == background) continue;
+        found = true;
+        x0 = (std::min)(x0, x); y0 = (std::min)(y0, y);
+        x1 = (std::max)(x1, x + 1); y1 = (std::max)(y1, y + 1);
+    }
+    if (!found || !x0 || !y0 || x1 == width || y1 == height) return false;
+    bounds[0] = float(x0) / width; bounds[1] = float(y0) / height;
+    bounds[2] = float(x1) / width; bounds[3] = float(y1) / height;
+    return true;
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -112,6 +132,86 @@ int wmain(int argc, wchar_t** argv) {
         check(leftChanged < baseline.size() && rightChanged < baseline.size(), "color pass remains outside panel");
     } else check(false, "readback sizes");
     if (left) left->Release(); if (right) right->Release();
+
+    // Head-locked monitor: change the actual source texture dimensions and
+    // the published sizing channel together, then compare what was rendered.
+    // Both asymmetric eyes must retain the same angular rectangle, including
+    // a flipped input and an aspect-ratio change (not just uniform scaling).
+    {
+        const UINT dimensions[][2] = {{256,256}, {512,512}, {1024,512}, {512,1024}};
+        constexpr UINT background = 0xff202020u;
+        const char* readout = "90 fps   gpu 13.3 ms   cpu 1.4 ms";
+        edvr::MenuContent reference{};
+        float referenceWidth = 0.f;
+        check(edvr::menuPanelBuildOverlayContent(reference, readout, 1.1f, &referenceWidth),
+              "overlay production content builder");
+        edvr::setMenuHeadLock(true, 9.f, -8.f);
+        edvr::MenuGeometry pendingGeometry{};
+        pendingGeometry.alpha = 1.f;
+        pendingGeometry.overlayRaster = true;
+        edvr::menuPanelSetGeometry(pendingGeometry);
+        ComPtr<ID3D11Texture2D> pendingOutput;
+        float pendingBounds[4]{};
+        check(table.treatEye(table.context, 0, source.Get(), normal,
+              pendingOutput.GetAddressOf(), pendingBounds) == S_FALSE && !pendingOutput,
+              "overlay handover suppresses the previous settings raster");
+        float expected[2][4]{};
+        bool haveExpected[2]{};
+        for (const auto& dim : dimensions) {
+            edvr::announceEyeTextureSize(dim[0], dim[1]);
+            edvr::announceEyeTangents(1.1f, .9f);
+            edvr::MenuContent overlay{};
+            float width = 0.f;
+            check(edvr::menuPanelBuildOverlayContent(overlay, readout, 1.1f, &width) &&
+                  width == referenceWidth && overlay.widthPx == reference.widthPx &&
+                  overlay.capPx == reference.capPx && overlay.lineCount == reference.lineCount,
+                  "overlay raster and angular width ignore render resolution");
+            edvr::menuPanelSubmit(overlay);
+            bool uploaded = false;
+            for (unsigned ms = 0; ms < 3000 && !uploaded; ms += 5) {
+                uploaded = edvr::menuPanelWorkerReadyForTest();
+                if (!uploaded) Sleep(5);
+            }
+            check(uploaded, "overlay worker completes");
+            edvr::menuPanelTick(device.Get());
+            edvr::MenuGeometry overlayGeometry{};
+            overlayGeometry.alpha = 1.f;
+            overlayGeometry.overlayRaster = true;
+            // Deliberately stale model width: an upload can land after the
+            // menu tick has set its geometry. The compositor must use the
+            // angular width associated with the newly uploaded bitmap.
+            overlayGeometry.halfW = 100.f;
+            edvr::menuPanelSetGeometry(overlayGeometry);
+            ComPtr<ID3D11Texture2D> resized;
+            check(makeSource(device.Get(), context.Get(), resized, background, dim[0], dim[1]),
+                  "overlay resized source");
+            if (!resized) continue;
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                ComPtr<ID3D11Texture2D> output;
+                float bounds[4]{};
+                check(table.treatEye(table.context, eye, resized.Get(), eye ? flipped : normal,
+                      output.GetAddressOf(), bounds) == S_OK && output,
+                      "overlay composite in each asymmetric eye");
+                std::vector<UINT> pixels;
+                float actual[4]{};
+                const bool haveBounds = output && readPixels(device.Get(), context.Get(), output.Get(), pixels) &&
+                    changedBounds(pixels, dim[0], dim[1], background, actual);
+                check(haveBounds, "overlay bounds are visible and do not touch eye edges");
+                if (!haveBounds) continue;
+                if (!haveExpected[eye]) {
+                    std::memcpy(expected[eye], actual, sizeof(actual));
+                    haveExpected[eye] = true;
+                } else {
+                    bool same = true;
+                    for (unsigned axis = 0; axis < 4; ++axis)
+                        same = same && std::fabs(actual[axis] - expected[eye][axis]) <= 2.f / 256.f;
+                    check(same, "overlay rendered bounds remain stable within pixel rounding");
+                }
+            }
+        }
+        edvr::setMenuHeadLock(false, 0.f, 0.f);
+        edvr::menuPanelSetGeometry(geometry);
+    }
 
     std::atomic<long> wrongThread{0}; std::thread worker([&] { ID3D11Texture2D* o = nullptr; float b[4]{}; wrongThread = table.treatEye(table.context, 0, source.Get(), normal, &o, b); if (o) o->Release(); }); worker.join();
     check(wrongThread == E_INVALIDARG, "wrong producer thread rejected");

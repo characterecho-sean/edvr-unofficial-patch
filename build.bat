@@ -339,7 +339,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
-    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" ^
+    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
@@ -710,7 +710,7 @@ if errorlevel 1 ( echo [edvr] ERROR: native timing contract test build failed & 
 
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_perf_history_test.exe" ^
-    "tools\native_perf_history_test\native_perf_history_test.cpp" "src\d3d11\native_perf_history.cpp"
+    "tools\native_perf_history_test\native_perf_history_test.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: native perf history test build failed & exit /b 1 )
 "%BUILD%\native_perf_history_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_perf_history_test.exe" --self-test || exit /b 1

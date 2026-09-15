@@ -1370,6 +1370,67 @@ void testFooterTwoLines() {
     check(topT == -1 && bottomT == -1, "two lines: a toast makes no footer box");
 }
 
+void testPerformanceOverlayLayout() {
+    struct Case { const char* input; const char* first; const char* second; };
+    const Case cases[] = {
+        {"90 fps   gpu 13.3 ms   cpu 1.4 ms", "90 fps", "gpu 13.3 ms   cpu 1.4 ms"},
+        {"120 fps   gpu -- ms   cpu -- ms", "120 fps", "gpu -- ms   cpu -- ms"},
+        {"999 fps   gpu 999.9 ms   cpu 999.9 ms", "999 fps", "gpu 999.9 ms   cpu 999.9 ms"},
+        {"90 fps   gpu 9.5   cpu 3.1   12 dropped", "90 fps   12 dropped", "gpu 9.5   cpu 3.1"},
+        {"72 fps   submit gpu 13.9   thread 4.2   999 dropped", "72 fps   999 dropped", "submit gpu 13.9   thread 4.2"},
+        {"60 fps   16.7 ms   thread 4.1", "60 fps", "16.7 ms   thread 4.1"},
+        {"measuring", "measuring", ""},
+    };
+    for (float textDegrees : {.6f, 1.1f, 3.f}) {
+        int fixedWidth = 0, fixedHeight = 0;
+        float fixedAngle = 0.f;
+        for (const auto& test : cases) {
+            MenuContent c{};
+            float angle = 0.f;
+            check(menuPanelBuildOverlayContent(c, test.input, textDegrees, &angle),
+                  "overlay: production builder accepts each current metric state");
+            check(c.toast && c.lineCount == 2 && strcmp(c.lines[0].left, test.first) == 0 &&
+                  strcmp(c.lines[1].left, test.second) == 0,
+                  "overlay: every value/label survives the two-row layout");
+            float rows[4]{};
+            const int height = menuPanelLayoutHeightForTest(c, nullptr, nullptr, rows, 2);
+            check(c.widthPx >= 64 && c.widthPx <= 2600 && height >= 32 && height <= 2048 &&
+                  c.cardPx == c.widthPx && angle > 0.f && angle < 90.f,
+                  "overlay: supported text sizes fit the raster and forward view");
+            if (!fixedWidth) {
+                fixedWidth = c.widthPx; fixedHeight = height; fixedAngle = angle;
+                printf("  overlay geometry: text %.1f deg, raster %dx%d, cap %d, width %.3f deg\n",
+                       textDegrees, fixedWidth, fixedHeight, c.capPx, fixedAngle);
+            }
+            check(c.widthPx == fixedWidth && height == fixedHeight && angle == fixedAngle,
+                  "overlay: ordinary digits, missing samples and startup do not resize the card");
+
+            // Use the exact Row face and its measured line height. A width
+            // check alone misses the old compact row's vertical clipping.
+            const int em = c.capPx * 10 / 7;
+            LOGFONTW font{};
+            font.lfHeight = -em; font.lfWeight = FW_NORMAL;
+            font.lfQuality = ANTIALIASED_QUALITY; font.lfCharSet = DEFAULT_CHARSET;
+            font.lfOutPrecision = OUT_TT_PRECIS;
+            wcscpy_s(font.lfFaceName, L"Segoe UI");
+            HDC dc = CreateCompatibleDC(nullptr);
+            HFONT face = CreateFontIndirectW(&font);
+            HGDIOBJ previous = dc && face ? SelectObject(dc, face) : nullptr;
+            TEXTMETRICW metrics{};
+            check(dc && face && GetTextMetricsW(dc, &metrics), "overlay: measure actual GDI line height");
+            for (int row = 0; row < c.lineCount; ++row) {
+                check(menuPanelMeasureLine(c.lines[row].left, em) <= c.widthPx - 2 * (c.capPx * 8 / 10),
+                      "overlay: complete metric row fits without ellipsis");
+                check((rows[row * 2 + 1] - rows[row * 2]) * height + .01f >= metrics.tmHeight,
+                      "overlay: font ascenders and descenders fit their row");
+            }
+            if (previous) SelectObject(dc, previous);
+            if (face) DeleteObject(face);
+            if (dc) DeleteDC(dc);
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1442,6 +1503,7 @@ int main(int argc, char** argv) {
     testFooterComposeDrops();
     testFooterFitsGdi();
     testFooterTwoLines();
+    testPerformanceOverlayLayout();
     if (g_fails) {
         printf("MENU TEST FAILED (%d)\n", g_fails);
         return 1;

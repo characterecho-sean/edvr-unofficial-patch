@@ -839,10 +839,16 @@ the page says so by calling it clean.
 **The overlay** (`menu.fps_overlay`, off by default, and **a switch on
 the Performance page** since 2026-09-08 -- it is the one thing a player
 wants to turn on from inside the headset, and until then it was reachable
-only by editing the file): a one-line readout -- frames per second over
-the last second, CPU/GPU time over the same 0.2-second window and from the
-same compositor source as the menu, and frames dropped in the last ten seconds.
-The label `thread` identifies the CPU fallback when app stamps are absent.
+only by editing the file): a two-row readout with frames per second over
+the last second, then concise GPU and CPU labels averaged over 0.2 seconds.
+Native OpenXR uses application GPU segments and producer-thread CPU wall
+intervals, excluding known runtime and transfer waits. Missing measurements
+show `--`. The retained legacy path also shows dropped frames when available;
+its `thread` label identifies the CPU fallback when app stamps are absent.
+The fixed reference raster preserves apparent size across eye resolutions,
+and `menu.text_degrees` controls its angular text size. See the
+[layout checks](performance-overlay-sizing-2026-09-15.md) and
+[benchmark method](native-render-benchmark-2026-09-15.md).
 It is shown while the
 menu is CLOSED and pinned to the head, the toolkit's overlay, because that
 is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`

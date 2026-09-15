@@ -141,6 +141,10 @@ struct MenuContent {
     int      widthPx = 0;
     int      cardPx = 0;
     int      capPx = 0;
+    // For the head-locked performance overlay only: the angular width that
+    // belongs to this fixed-reference raster. Zero keeps the ordinary menu
+    // sizing path unchanged.
+    float    angularWidthDeg = 0.0f;
     // The Monitor page's strips: the last `count` frames in ms, oldest
     // first, drawn as bars against the display's budget. fpsVR draws the
     // GPU and the CPU as two strips, because a frame over budget on one is
@@ -148,6 +152,14 @@ struct MenuContent {
     MenuGraph graphs[kMenuMaxGraphs];
     int       graphCount = 0;   // how many strips, not how many samples
 };
+
+// Build the floating performance readout from the line produced by
+// perfMonitorOverlayLine. The raster uses fixed reference typography, so its
+// pixel dimensions do not follow the current eye texture. The returned angle
+// is the width of the card (and is also copied into `c.angularWidthDeg`) so
+// the caller can use the same geometry as the ready raster.
+bool menuPanelBuildOverlayContent(MenuContent& c, const char* line, float textDegrees,
+                                  float* angularWidthDeg);
 
 // Where the panel sits, in the anchor's frame: metres to it, how much it
 // wraps (0 flat .. 0.9), its half-width along the surface, and the fade.
@@ -165,6 +177,11 @@ struct MenuGeometry {
     float halfW = 0.3f;
     float shift = 0.0f;
     float alpha = 0.0f;
+    // The producer resolves halfW from the angular width carried by the
+    // currently uploaded overlay raster. This prevents a frame from using
+    // new bitmap dimensions with the previous frame's geometry during a
+    // worker handover. Ordinary menu and toast callers leave this false.
+    bool overlayRaster = false;
 };
 
 // Hand the raster a new content (copied; the worker wakes). Frame thread.

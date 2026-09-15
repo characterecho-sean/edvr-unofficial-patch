@@ -145,7 +145,7 @@ unsigned DeviceGpuTiming::poll(EdvrNativeDeviceGpuSample* out, unsigned capacity
         if (index<0) break;
         auto& s=slots_[index];
         if (s.sequence<=lastPublishedSequence_) { driver_->destroy(unsigned(index)); s={}; continue; }
-        EdvrNativeDeviceGpuSample sample{sizeof(sample),EDVR_NATIVE_TIMING_VERSION_2,
+        EdvrNativeDeviceGpuSample sample{sizeof(sample),EDVR_NATIVE_TIMING_VERSION_3,
             s.sequence,s.completedAtMs,EdvrNativeGpuValid};
         const uint64_t now=nowMs();
         GpuSpanRawSample raw{};
@@ -185,7 +185,7 @@ unsigned DeviceGpuTiming::poll(EdvrNativeDeviceGpuSample* out, unsigned capacity
         for (unsigned i=0; i<kSlots; ++i)
             if (slots_[i].pending && slots_[i].sequence<sequence_) retireMask_|=1u<<i;
         retireLocked();
-        out[count++]={sizeof(EdvrNativeDeviceGpuSample),EDVR_NATIVE_TIMING_VERSION_2,
+        out[count++]={sizeof(EdvrNativeDeviceGpuSample),EDVR_NATIVE_TIMING_VERSION_3,
             sequence_,statusAtMs_,frameStatus_};
         lastPublishedSequence_=sequence_; statusPending_=false;
     }

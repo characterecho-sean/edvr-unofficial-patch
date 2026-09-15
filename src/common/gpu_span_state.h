@@ -6,6 +6,7 @@
 // A future pose-wait publisher uses a separate atomic mailbox, never this ring.
 #include <array>
 #include <cstdint>
+#include <limits>
 
 namespace edvr {
 struct GpuSpanOwner {
@@ -19,13 +20,13 @@ enum class GpuSpanReason {
     BadPair, DriverFailure, Disjoint, ZeroFrequency, BadTimestamps,
     Stale, RingFull, CreateFailed
 };
-enum class GpuSpanSource { RenderToSubmit };
+enum class GpuSpanSource { RenderToSubmit, ApplicationRender };
 struct GpuSpanRawSample {
     bool timestampsReady = false, disjoint = false;
     uint64_t frequency = 0;
-    // 0 outer start, 1 outer end, 2/3 left interval, 4/5 right interval.
-    // The frame policy uses six. Independent native phase collectors may
-    // use all eight without changing the legacy frame marker layout above.
+    // Legacy frame mode uses 0/1 for the outer interval and 2/3, 4/5 for
+    // ordered eye intervals. Application mode uses four non-overlapping
+    // segment pairs (0/1, 2/3, 4/5, 6/7) and sums those pairs.
     std::array<uint64_t, 8> ticks{};
 };
 struct GpuSpanDriver {
@@ -63,6 +64,8 @@ private:
         uint64_t sequence = 0, sourceFrame = 0, closedAtMs = 0;
         unsigned begun = 0, ended = 0, order[2]{}, orderCount = 0;
         int activeEye = -1;
+        bool application = false, segmentOpen = false;
+        unsigned segmentCount = 0;
     };
     GpuSpanDriver& driver_;
     const GpuSpanOwner owner_;
@@ -94,6 +97,23 @@ private:
         open_ = -1;
         return reason;
     }
+    GpuSpanReason closeApplication(GpuSpanReason reason, uint64_t now) noexcept {
+        const unsigned i = static_cast<unsigned>(open_);
+        Slot& s = slots_[i];
+        if (s.segmentOpen) {
+            const unsigned end = 2 * s.segmentCount - 1;
+            const bool stamp = end < 8 && driver_.timestamp(i, end);
+            s.segmentOpen = false;
+            if (!stamp) reason = GpuSpanReason::DriverFailure;
+        }
+        const bool ended = driver_.end(i);
+        if (!ended) { reason = GpuSpanReason::DriverFailure; failed_ = true; }
+        s.reason = reason;
+        s.closedAtMs = now;
+        s.state = State::Pending;
+        open_ = -1;
+        return reason;
+    }
     void retire(unsigned i, bool destroy) noexcept {
         Slot& s = slots_[i];
         const bool keep = s.created && !destroy;
@@ -119,6 +139,27 @@ private:
             return GpuSpanReason::BadTimestamps;
         return GpuSpanReason::Valid;
     }
+    static GpuSpanReason validateApplication(const Slot& s, const GpuSpanRawSample& raw,
+                                             double& elapsed) noexcept {
+        if (raw.disjoint) return GpuSpanReason::Disjoint;
+        if (!raw.frequency || s.segmentCount < 3 || s.segmentCount > 4)
+            return !raw.frequency ? GpuSpanReason::ZeroFrequency : GpuSpanReason::BadTimestamps;
+        uint64_t ticks = 0, previousEnd = 0;
+        for (unsigned n = 0; n < s.segmentCount; ++n) {
+            const unsigned k = 2 * n;
+            if (raw.ticks[k] > raw.ticks[k + 1] ||
+                (n && previousEnd > raw.ticks[k]))
+                return GpuSpanReason::BadTimestamps;
+            const uint64_t width = raw.ticks[k + 1] - raw.ticks[k];
+            if (ticks > (std::numeric_limits<uint64_t>::max)() - width)
+                return GpuSpanReason::BadTimestamps;
+            ticks += width;
+            previousEnd = raw.ticks[k + 1];
+        }
+        elapsed = static_cast<double>(ticks) * 1000.0 /
+            static_cast<double>(raw.frequency);
+        return (elapsed >= 0.0) ? GpuSpanReason::Valid : GpuSpanReason::BadTimestamps;
+    }
 public:
     explicit GpuSpanState(GpuSpanDriver& driver, GpuSpanOwner owner) noexcept
         : driver_(driver), owner_(owner) {}
@@ -132,7 +173,12 @@ public:
         if (checked != GpuSpanReason::Valid) return checked;
         if (!sequence || sequence <= lastSequence_) return GpuSpanReason::OldSequence;
         lastSequence_ = sequence; // Includes skipped/failed measurements.
-        if (open_ >= 0) close(GpuSpanReason::Incomplete, now);
+        if (open_ >= 0) {
+            if (slots_[static_cast<unsigned>(open_)].application)
+                closeApplication(GpuSpanReason::Incomplete, now);
+            else
+                close(GpuSpanReason::Incomplete, now);
+        }
         if (failed_) return GpuSpanReason::DriverFailure;
         unsigned i = 0;
         while (i < kSlots && slots_[i].state != State::Free) ++i;
@@ -154,6 +200,91 @@ public:
         open_ = static_cast<int>(i);
         if (!driver_.timestamp(i, 0)) return close(GpuSpanReason::DriverFailure, now);
         return GpuSpanReason::Valid;
+    }
+    // Application rendering mode brackets only producer GPU work. The
+    // disjoint scope stays open while keyed transfers/runtime calls are out
+    // of scope; each actual producer run is a separate timestamp pair.
+    GpuSpanReason beginApplicationFrame(uint64_t sequence, uint64_t sourceFrame,
+                                        uint64_t now, const GpuSpanOwner& owner) noexcept {
+        const auto checked = gate(owner);
+        if (checked != GpuSpanReason::Valid) return checked;
+        if (!sequence || sequence <= lastSequence_) return GpuSpanReason::OldSequence;
+        lastSequence_ = sequence;
+        if (open_ >= 0) {
+            if (slots_[static_cast<unsigned>(open_)].application)
+                closeApplication(GpuSpanReason::Incomplete, now);
+            else
+                close(GpuSpanReason::Incomplete, now);
+        }
+        if (failed_) return GpuSpanReason::DriverFailure;
+        unsigned i = 0;
+        while (i < kSlots && slots_[i].state != State::Free) ++i;
+        if (i == kSlots) return GpuSpanReason::RingFull;
+        Slot& s = slots_[i];
+        if (!s.created) {
+            if (!driver_.create(i)) return GpuSpanReason::CreateFailed;
+            s.created = true;
+        }
+        s = Slot{};
+        s.created = true;
+        s.application = true;
+        s.sequence = sequence;
+        s.sourceFrame = sourceFrame;
+        if (!driver_.begin(i)) {
+            s.state = State::Failed;
+            s.reason = GpuSpanReason::DriverFailure;
+            s.closedAtMs = now;
+            return s.reason;
+        }
+        s.state = State::Open;
+        open_ = static_cast<int>(i);
+        s.segmentCount = 1;
+        s.segmentOpen = driver_.timestamp(i, 0);
+        if (!s.segmentOpen) return closeApplication(GpuSpanReason::DriverFailure, now);
+        return GpuSpanReason::Valid;
+    }
+    GpuSpanReason endApplicationSegment(uint64_t now, const GpuSpanOwner& owner) noexcept {
+        const auto checked = gate(owner);
+        if (checked != GpuSpanReason::Valid) return checked;
+        if (open_ < 0) return GpuSpanReason::NoOpenFrame;
+        Slot& s = slots_[static_cast<unsigned>(open_)];
+        if (!s.application || !s.segmentOpen || !s.segmentCount || s.segmentCount > 4)
+            return closeApplication(GpuSpanReason::Incomplete, now);
+        const unsigned marker = 2 * s.segmentCount - 1;
+        if (!driver_.timestamp(static_cast<unsigned>(open_), marker))
+            return closeApplication(GpuSpanReason::DriverFailure, now);
+        s.segmentOpen = false;
+        return GpuSpanReason::Valid;
+    }
+    GpuSpanReason resumeApplicationSegment(uint64_t now, const GpuSpanOwner& owner) noexcept {
+        const auto checked = gate(owner);
+        if (checked != GpuSpanReason::Valid) return checked;
+        if (open_ < 0) return GpuSpanReason::NoOpenFrame;
+        Slot& s = slots_[static_cast<unsigned>(open_)];
+        if (!s.application || s.segmentOpen || s.segmentCount >= 4)
+            return s.application ? GpuSpanReason::RingFull : GpuSpanReason::Incomplete;
+        const unsigned marker = 2 * s.segmentCount;
+        if (!driver_.timestamp(static_cast<unsigned>(open_), marker))
+            return closeApplication(GpuSpanReason::DriverFailure, now);
+        ++s.segmentCount;
+        s.segmentOpen = true;
+        return GpuSpanReason::Valid;
+    }
+    GpuSpanReason finishApplicationFrame(uint64_t now, const GpuSpanOwner& owner) noexcept {
+        const auto checked = gate(owner);
+        if (checked != GpuSpanReason::Valid) return checked;
+        if (open_ < 0) return GpuSpanReason::NoOpenFrame;
+        Slot& s = slots_[static_cast<unsigned>(open_)];
+        if (!s.application) return GpuSpanReason::Incomplete;
+        if (s.segmentOpen || !s.segmentCount || s.segmentCount < 3)
+            return closeApplication(GpuSpanReason::Incomplete, now);
+        const bool ended = driver_.end(static_cast<unsigned>(open_));
+        if (!ended) { failed_ = true; s.reason = GpuSpanReason::DriverFailure; }
+        s.reason = ended ? GpuSpanReason::Valid : GpuSpanReason::DriverFailure;
+        s.closedAtMs = now;
+        s.state = State::Pending;
+        open_ = -1;
+        return s.reason;
     }
     GpuSpanReason beginEye(unsigned eye, uint64_t now, const GpuSpanOwner& owner) noexcept {
         const auto checked = gate(owner);
@@ -196,7 +327,10 @@ public:
     GpuSpanReason invalidateFrame(uint64_t now, const GpuSpanOwner& owner) noexcept {
         const auto checked = gate(owner);
         if (checked != GpuSpanReason::Valid) return checked;
-        return open_ < 0 ? GpuSpanReason::NoOpenFrame : close(GpuSpanReason::Incomplete, now);
+        if (open_ < 0) return GpuSpanReason::NoOpenFrame;
+        return slots_[static_cast<unsigned>(open_)].application ?
+            closeApplication(GpuSpanReason::Incomplete, now) :
+            close(GpuSpanReason::Incomplete, now);
     }
     unsigned poll(uint64_t now, const GpuSpanOwner& owner, Results& out) noexcept {
         if (!identity(owner)) return 0;
@@ -215,7 +349,8 @@ public:
                 if (status == GpuSpanPoll::Pending ||
                     (status == GpuSpanPoll::Ready && !raw.timestampsReady)) continue;
                 if (status == GpuSpanPoll::Failed) reason = GpuSpanReason::DriverFailure;
-                else if (reason == GpuSpanReason::Valid) reason = validate(s, raw);
+                else if (reason == GpuSpanReason::Valid && !s.application)
+                    reason = validate(s, raw);
             }
             GpuSpanResult& result = out[count++];
             result = GpuSpanResult{}; // Invalid results never retain old values.
@@ -223,14 +358,18 @@ public:
             result.sourceFrame = s.sourceFrame;
             result.completedAtMs = now;
             result.ageMs = elapsed;
-            result.reason = reason;
-            if (reason == GpuSpanReason::Valid) {
+            if (s.application) {
+                result.source = GpuSpanSource::ApplicationRender;
+                if (reason == GpuSpanReason::Valid)
+                    reason = validateApplication(s, raw, result.outerMs);
+            } else if (reason == GpuSpanReason::Valid) {
                 const double scale = 1000.0 / static_cast<double>(raw.frequency);
                 const auto& t = raw.ticks;
                 result.outerMs = static_cast<double>(t[1] - t[0]) * scale;
                 result.leftMs = static_cast<double>(t[3] - t[2]) * scale;
                 result.rightMs = static_cast<double>(t[5] - t[4]) * scale;
             }
+            result.reason = reason;
             retire(i, reason != GpuSpanReason::Valid && reason != GpuSpanReason::BadPair &&
                       reason != GpuSpanReason::Incomplete);
         }
@@ -241,7 +380,12 @@ public:
     bool shutdown(uint64_t now, const GpuSpanOwner& owner) noexcept {
         if (!identity(owner)) return false;
         if (shut_) return false;
-        if (open_ >= 0) close(GpuSpanReason::Incomplete, now);
+        if (open_ >= 0) {
+            if (slots_[static_cast<unsigned>(open_)].application)
+                closeApplication(GpuSpanReason::Incomplete, now);
+            else
+                close(GpuSpanReason::Incomplete, now);
+        }
         for (unsigned i = 0; i < kSlots; ++i) retire(i, true);
         shut_ = true;
         return true;

@@ -178,8 +178,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool deviceTimingReady=false;
   uint64_t timingSequence=0;
   bool timingFrameActive=false;
+  std::atomic<bool> timingApplicationOpen{false};
+  std::atomic<uint64_t> timingApplicationSequence{0};
   unsigned timingFrameMask=0;
-  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_2};
+  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_3};
   bool timingGpuBegun[2]{};
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
@@ -583,10 +585,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void timingInvalidate() {
     deviceTiming.invalidate(); // CPU-only; never admits context work here.
     if(timing.acquired()) timing.invalidate();
-    timingFrameActive=false; timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
+    timingFrameActive=false; timingApplicationOpen.store(false,std::memory_order_release); timingApplicationSequence.store(0,std::memory_order_release); timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
   }
   void timingRetire() {
-    timingFrameActive=false; timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
+    timingFrameActive=false; timingApplicationOpen.store(false,std::memory_order_release); timingApplicationSequence.store(0,std::memory_order_release); timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
   }
   // Only called from actual capture/submit work on the separate XR owner.
   void pollDeviceTiming() {
@@ -596,7 +598,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     for(unsigned i=0;i<count;++i)timing.publishDeviceGpu(samples[i]);
   }
   void timingResetFrame(uint64_t sequence) {
-    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_2};
+    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_3};
     timingFrame.sequence=sequence;
     const double missing=std::numeric_limits<double>::quiet_NaN();
     for(double& value:timingFrame.submitMs)value=missing;
@@ -620,7 +622,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
-      return service.invoke([&]{result=waitPoses(generation,out);})?result:vr::VRCompositorError_InvalidTexture;
+      const bool dispatched=service.invoke([&]{result=waitPoses(generation,out);});
+      // Start after the route returns so the dispatch/rendezvous is outside
+      // the application interval. Direct owner calls have no producer-side
+      // route return and therefore do not claim this interval.
+      if(dispatched&&result==vr::VRCompositorError_None&&out.sequence) {
+        const auto sequence=timingApplicationSequence.load(std::memory_order_acquire);
+        timing.producerResume(sequence);
+        const bool opened=timing.applicationSegment(sequence,true);
+        timingApplicationOpen.store(opened,std::memory_order_release);
+        timingApplicationSequence.store(opened?sequence:0,std::memory_order_release);
+      }
+      return dispatched?result:vr::VRCompositorError_InvalidTexture;
     }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
@@ -628,6 +641,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return vr::VRCompositorError_InvalidTexture;
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
+    timingApplicationSequence.store(timingSequence,std::memory_order_release);
     timingResetFrame(timingSequence);
     if(submitStats.advance(GetTickCount64()))nativeTracePrintf("native_submit_window_begin,window=%llu,warmup=%u,samples=%u,interval_ms=30000\n",
       (unsigned long long)submitStats.window(),SubmissionStats::warmup,SubmissionStats::capacity);
@@ -716,6 +730,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         geometry.recommend(gameGeometry.width,gameGeometry.height);
       }
     }
+    for(unsigned eye=0;eye<2;++eye) {
+      const auto& fov=gameGeometry.views[eye].fov;
+      timingFrame.gameFov[eye][0]=fov.angleLeft;
+      timingFrame.gameFov[eye][1]=fov.angleRight;
+      timingFrame.gameFov[eye][2]=fov.angleUp;
+      timingFrame.gameFov[eye][3]=fov.angleDown;
+      timingFrame.outputWidth[eye]=sizes[eye].recommendedImageRectWidth;
+      timingFrame.outputHeight[eye]=sizes[eye].recommendedImageRectHeight;
+    }
+    timingFrame.featureEpoch=featureChanges;
     if(temporal.acquired()&&locatedValid&&frame.shouldRender) {
       const auto begun=temporal.begin(gameGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking);
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
@@ -739,7 +763,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const bool enabled=timing.gpuEnabled();
       if(deviceTimingReady)deviceTiming.beginFrame(timingSequence,enabled);
       else {
-        EdvrNativeDeviceGpuSample missing{sizeof(missing),EDVR_NATIVE_TIMING_VERSION_2,
+        EdvrNativeDeviceGpuSample missing{sizeof(missing),EDVR_NATIVE_TIMING_VERSION_3,
           timingSequence,GetTickCount64(),enabled ? uint32_t(separateGraphics()?EdvrNativeGpuQueryFailure:EdvrNativeGpuNotSeparate) : uint32_t(EdvrNativeGpuDisabled)};
         timing.publishDeviceGpu(missing);
       }
@@ -757,11 +781,30 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
-      return renderRoute.invoke([&]{result=submitEye(generation,eye,texture,bounds,flags);})?result:vr::VRCompositorError_InvalidTexture;
+      const auto sequence=timingApplicationSequence.load(std::memory_order_acquire);
+      if(timingApplicationOpen.exchange(false,std::memory_order_acq_rel) && sequence)
+        timing.applicationSegment(sequence,false);
+      if(sequence) timing.producerPause(sequence);
+      const bool dispatched=renderRoute.invoke([&]{result=submitEye(generation,eye,texture,bounds,flags);});
+      // Admission after the route returns excludes the rendezvous itself and
+      // permits the next between-eye game interval. A completed pair retires
+      // the timing context, in which case this callback correctly returns 0.
+      if(dispatched&&result==vr::VRCompositorError_None&&sequence)
+        timing.producerResume(sequence);
+      if(dispatched&&result==vr::VRCompositorError_None&&sequence&&
+          timing.applicationSegment(sequence,true))
+        timingApplicationOpen.store(true,std::memory_order_release);
+      return dispatched?result:vr::VRCompositorError_InvalidTexture;
     }
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return vr::VRCompositorError_InvalidTexture;
+    // Close the initial game interval at Submit admission, before any
+    // producer rendezvous. The treatment callback below opens its own
+    // interval so its native GPU/CPU work remains part of application time.
+    if(timingFrameActive && timingApplicationOpen.exchange(false,std::memory_order_acq_rel)) {
+      if(!timing.applicationSegment(timingSequence,false)) timingInvalidate();
+    }
     if(eye!=vr::Eye_Left&&eye!=vr::Eye_Right) {
       timingInvalidate();invalidateEyeTreatments();
       const auto rejected=boundary.submit(eye,texture,bounds,flags);
@@ -781,14 +824,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const bool markerDispatched=graphicsCalls.invoke([&]{
         Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
         ID3D11Texture2D* raw=nullptr;
-        if(texture&&texture->handle&&SUCCEEDED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source))))raw=source.Get();
+        if(texture&&texture->handle&&SUCCEEDED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source))))
+          raw=source.Get();
         if(raw) timing.gpuEye(timingSequence,unsigned(eye),false,true,raw);
       });
       if(!markerDispatched) timingInvalidate();
       timingGpuBegun[unsigned(eye)]=false;
     }
     if(r!=vr::VRCompositorError_None) timingInvalidate();
-    else if(timingFrameActive) { timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask==3) {
+    if(r==vr::VRCompositorError_None&&timingFrameActive) { timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask==3) {
       deviceTiming.acceptFrame(timingSequence);
       pollDeviceTiming();
       if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else {
@@ -872,7 +916,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto sequence=activeFrameSequence;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> healed;
     if(fss.acquired()) {
-      if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource))timingGpuBegun[unsigned(eye)]=true;
       const auto treatment=fss.treat(sequence,unsigned(eye),submittedSource,bounds,healed);
       if(FAILED(treatment)) {invalidateEyeTreatments();timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
       if(healed) {
@@ -882,7 +925,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(temporal.acquired()&&!healed) {
       LARGE_INTEGER began{},ended{}; const auto clock=QueryPerformanceCounter(&began);
-      if(timingFrameActive && !timingGpuBegun[unsigned(eye)] && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource)) timingGpuBegun[unsigned(eye)]=true;
       const auto treatment=temporal.treat(sequence,unsigned(eye),submittedSource,bounds,temporalOutput,temporalBounds);
       const auto clockEnd=QueryPerformanceCounter(&ended);
       if(clock&&clockEnd) timingFrame.temporalMs[unsigned(eye)]=elapsedMs(began,ended);
@@ -954,6 +996,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     menuTreated=treated!=nullptr;
     submitSample.treatments[unsigned(eye)]=(healed?1u:0u)|(temporalOutput?2u:0u)|
       (sharpenOutput?4u:0u)|(menuTreated?8u:0u);
+    timingFrame.treatments[unsigned(eye)]=submitSample.treatments[unsigned(eye)];
     return vr::VRCompositorError_None;
   }
   vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
@@ -979,6 +1022,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto submittedHeight=uint32_t(std::lround(submittedDesc.Height*(bounds?std::fabs(bounds->vMax-bounds->vMin):1.f)));
     cullGuard.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);
     submitSample.width[unsigned(eye)]=submittedWidth;submitSample.height[unsigned(eye)]=submittedHeight;
+    timingFrame.inputWidth[unsigned(eye)]=submittedWidth;
+    timingFrame.inputHeight[unsigned(eye)]=submittedHeight;
     if(frameWithheld) {
       if(FAILED(temporal.skip(sequence,unsigned(eye),featureDecision.jumpOnly!=0,featureDecision.verdict)))
         return vr::VRCompositorError_InvalidTexture;
@@ -992,7 +1037,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     bool workClock=false;
     const auto treat=[&]{
       workClock=measure&&counterNow(&workBegan);
+      if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource.Get()))
+        timingGpuBegun[unsigned(eye)]=true;
+      const bool appOpened=timingFrameActive && timing.applicationSegment(timingSequence,true);
+      if(timingFrameActive && !appOpened) timingInvalidate();
       r=treatCapturedEye(eye,submittedSource.Get(),bounds,treated,treatedBounds,menuTreated);
+      if(appOpened && !timing.applicationSegment(timingSequence,false)) timingInvalidate();
+      if(timingGpuBegun[unsigned(eye)] &&
+          !timing.producerSegmentEnd(timingSequence,unsigned(eye),submittedSource.Get()))
+        timingInvalidate();
       workClock=workClock&&counterNow(&workEnded);
     };
     if(fss.acquired()||temporal.acquired()||sharpen.acquired()||menu.acquired()) {
