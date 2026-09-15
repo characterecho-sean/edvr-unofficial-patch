@@ -442,7 +442,7 @@ start; the F8 row is labelled `OpenXR res.` and shows it as a percent
 Decided: it is renamed to `fix.openxr_resolution`, because the value is no
 longer a scale of anything, the row label already says `OpenXR res.`, and the
 key is in no public release. The rename was put to Sean with the line above
-quoted, as CLAUDE.md requires, and he answered yes on 2026-09-14; the rest of
+quoted, as AGENTS.md requires, and he answered yes on 2026-09-14; the rest of
 this document uses the new name throughout. No `moved-from`: the old grammar (a
 bare number) is refused under the new key, so there is nothing to carry across.
 What happens to the two live files that still carry the old line is under

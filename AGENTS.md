@@ -1,4 +1,6 @@
-# EDVR — working notes for Codex
+# EDVR — working notes for coding agents
+
+This is the only instructions file in the repo. CLAUDE.md is a one-line @AGENTS.md import because Claude Code reads only CLAUDE.md; do not add content there.
 
 Unofficial VR fixes for Elite Dangerous: Odyssey. Two proxy DLLs
 (`d3d11.dll` beside the game, `openvr_api.dll` in `Openvr\win64`), a
@@ -133,8 +135,9 @@ minutes after a flight finally reproduced the effect being chased.
   `Get-Content` on a BOM-less UTF-8 file decodes as the ANSI codepage and
   turns every em-dash into mojibake — that reached a public GitHub comment
   once.
-- Worktrees under `.Codex\worktrees\` share one stash stack with the main
-  checkout. Never use bare `git stash` / `git stash pop`.
+- Worktrees under `.claude\worktrees\` and `.Codex\worktrees\` share one
+  stash stack with the main checkout. Never use bare `git stash` / `git
+  stash pop`.
 
 ## Layout
 
