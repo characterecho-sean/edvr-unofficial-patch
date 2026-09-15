@@ -68,6 +68,7 @@ struct DepthCopy {
 struct Material {
     Ptr<ID3D11PixelShader> original,fanout;
     Ptr<ID3D11BlendState> originalBlend,transmission,world;
+    bool worldRole=false;
 };
 std::vector<Material> materials;
 UiDeferredSnapshots snapshots;
@@ -144,33 +145,47 @@ bool target(ID3D11DeviceContext* ctx,Ptr<ID3D11RenderTargetView>& rt,Ptr<ID3D11D
     if(!single)return false;
     Ptr<ID3D11Resource> r;rt->GetResource(&r);return SUCCEEDED(r.As(&tex));
 }
-size_t material(ID3D11Device* dev,ID3D11PixelShader* ps,ID3D11BlendState* blend) {
-    for(size_t i=0;i<materials.size();++i)if(materials[i].original.Get()==ps && materials[i].originalBlend.Get()==blend)return i;
-    if(materials.size()>=128)return SIZE_MAX;
+size_t material(ID3D11Device* dev,ID3D11PixelShader* ps,ID3D11BlendState* blend,bool worldRole=false,std::string* failure=nullptr) {
+    for(size_t i=0;i<materials.size();++i)if(materials[i].original.Get()==ps && materials[i].originalBlend.Get()==blend && materials[i].worldRole==worldRole)return i;
+    auto fail=[&](const std::string& why){if(failure)*failure=why;return SIZE_MAX;};
+    if(materials.size()>=128)return fail("material cache full");
     D3D11_BLEND_DESC bd{};
     for(auto& r:bd.RenderTarget){r.SrcBlend=r.SrcBlendAlpha=D3D11_BLEND_ONE;r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_ZERO;r.BlendOp=r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=15;}
     if(blend)blend->GetDesc(&bd);
-    Ptr<ID3D11BlendState1> b1;if(blend && SUCCEEDED(blend->QueryInterface(IID_PPV_ARGS(&b1)))){D3D11_BLEND_DESC1 d{};b1->GetDesc1(&d);if(d.RenderTarget[0].LogicOpEnable)return SIZE_MAX;}
+    Ptr<ID3D11BlendState1> b1;if(blend && SUCCEEDED(blend->QueryInterface(IID_PPV_ARGS(&b1)))){D3D11_BLEND_DESC1 d{};b1->GetDesc1(&d);if(d.RenderTarget[0].LogicOpEnable)return fail("render-target logic operation");}
     auto r=bd.RenderTarget[0];
     const bool sourceIndependent=r.SrcBlend==D3D11_BLEND_ZERO || r.SrcBlend==D3D11_BLEND_ONE || r.SrcBlend==D3D11_BLEND_SRC_COLOR || r.SrcBlend==D3D11_BLEND_INV_SRC_COLOR || r.SrcBlend==D3D11_BLEND_SRC_ALPHA || r.SrcBlend==D3D11_BLEND_INV_SRC_ALPHA || r.SrcBlend==D3D11_BLEND_BLEND_FACTOR || r.SrcBlend==D3D11_BLEND_INV_BLEND_FACTOR;
     // Only source-independent attenuation can be carried in one scalar.
-    if(bd.AlphaToCoverageEnable || (r.RenderTargetWriteMask&7)!=7 ||
-       (r.BlendEnable && (!sourceIndependent || r.BlendOp!=D3D11_BLEND_OP_ADD ||
-        (r.DestBlend!=D3D11_BLEND_ZERO && r.DestBlend!=D3D11_BLEND_ONE && r.DestBlend!=D3D11_BLEND_INV_SRC_ALPHA) ||
-        r.SrcBlend==D3D11_BLEND_DEST_COLOR || r.SrcBlend==D3D11_BLEND_INV_DEST_COLOR ||
-        r.SrcBlend==D3D11_BLEND_DEST_ALPHA || r.SrcBlend==D3D11_BLEND_INV_DEST_ALPHA)))return SIZE_MAX;
-    UINT n=0;ps->GetPrivateData(kDeferredBytes,&n,nullptr);if(!n || n>1024*1024)return SIZE_MAX;
+    const bool uiBlendSupported=!bd.AlphaToCoverageEnable && (r.RenderTargetWriteMask&7)==7 &&
+       (!r.BlendEnable || (sourceIndependent && r.BlendOp==D3D11_BLEND_OP_ADD &&
+        (r.DestBlend==D3D11_BLEND_ZERO || r.DestBlend==D3D11_BLEND_ONE || r.DestBlend==D3D11_BLEND_INV_SRC_ALPHA) &&
+        r.SrcBlend!=D3D11_BLEND_DEST_COLOR && r.SrcBlend!=D3D11_BLEND_INV_DEST_COLOR &&
+        r.SrcBlend!=D3D11_BLEND_DEST_ALPHA && r.SrcBlend!=D3D11_BLEND_INV_DEST_ALPHA));
+    const bool destinationAlphaWorld=r.BlendEnable && r.SrcBlend==D3D11_BLEND_ONE && r.DestBlend==D3D11_BLEND_DEST_ALPHA && r.BlendOp==D3D11_BLEND_OP_ADD &&
+        r.SrcBlendAlpha==D3D11_BLEND_ONE && r.DestBlendAlpha==D3D11_BLEND_DEST_ALPHA && r.BlendOpAlpha==D3D11_BLEND_OP_ADD;
+    if(worldRole) {
+        if(bd.AlphaToCoverageEnable)return fail("world alpha-to-coverage");
+        if((r.RenderTargetWriteMask&7)!=7)return fail("world RGB write mask incomplete");
+        if(!uiBlendSupported && !destinationAlphaWorld)return fail("world blend unsupported (enabled="+std::to_string(r.BlendEnable)+
+            ", colour="+std::to_string(r.SrcBlend)+"/"+std::to_string(r.DestBlend)+"/"+std::to_string(r.BlendOp)+
+            ", alpha="+std::to_string(r.SrcBlendAlpha)+"/"+std::to_string(r.DestBlendAlpha)+"/"+std::to_string(r.BlendOpAlpha)+")");
+    } else if(!uiBlendSupported)return fail("UI scalar transmission cannot represent blend");
+    UINT n=0;ps->GetPrivateData(kDeferredBytes,&n,nullptr);if(!n || n>1024*1024)return fail("pixel shader bytecode unavailable");
     std::vector<BYTE> original(n),patched;std::string why;
-    if(FAILED(ps->GetPrivateData(kDeferredBytes,&n,original.data())) || !uiColourFanout(original.data(),n,patched,why))return SIZE_MAX;
-    Material m;m.original=ps;m.originalBlend=blend;
-    if(FAILED(dev->CreatePixelShader(patched.data(),patched.size(),nullptr,&m.fanout)))return SIZE_MAX;
-    auto world=bd;world.IndependentBlendEnable=TRUE;world.RenderTarget[1]=r;
-    if(FAILED(dev->CreateBlendState(&world,&m.world)))return SIZE_MAX;
-    bd.IndependentBlendEnable=TRUE;bd.RenderTarget[1].RenderTargetWriteMask=0;
-    auto& t=bd.RenderTarget[2];t={};t.BlendEnable=TRUE;t.SrcBlend=t.SrcBlendAlpha=D3D11_BLEND_ZERO;
-    t.DestBlend=t.DestBlendAlpha=r.BlendEnable?r.DestBlend:D3D11_BLEND_ZERO;
-    t.BlendOp=t.BlendOpAlpha=D3D11_BLEND_OP_ADD;t.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;
-    if(FAILED(dev->CreateBlendState(&bd,&m.transmission)))return SIZE_MAX;
+    if(FAILED(ps->GetPrivateData(kDeferredBytes,&n,original.data())))return fail("pixel shader bytecode read failed");
+    if(!uiColourFanout(original.data(),n,patched,why))return fail("pixel shader fanout: "+why);
+    Material m;m.original=ps;m.originalBlend=blend;m.worldRole=worldRole;
+    if(FAILED(dev->CreatePixelShader(patched.data(),patched.size(),nullptr,&m.fanout)))return fail("fanout pixel shader creation failed");
+    if(worldRole) {
+        auto world=bd;world.IndependentBlendEnable=TRUE;world.RenderTarget[1]=r;
+        if(FAILED(dev->CreateBlendState(&world,&m.world)))return fail("world dual-target blend creation failed");
+    } else {
+        bd.IndependentBlendEnable=TRUE;bd.RenderTarget[1].RenderTargetWriteMask=0;
+        auto& t=bd.RenderTarget[2];t={};t.BlendEnable=TRUE;t.SrcBlend=t.SrcBlendAlpha=D3D11_BLEND_ZERO;
+        t.DestBlend=t.DestBlendAlpha=r.BlendEnable?r.DestBlend:D3D11_BLEND_ZERO;
+        t.BlendOp=t.BlendOpAlpha=D3D11_BLEND_OP_ADD;t.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;
+        if(FAILED(dev->CreateBlendState(&bd,&m.transmission)))return fail("UI transmission blend creation failed");
+    }
     materials.push_back(std::move(m));return materials.size()-1;
 }
 
@@ -237,8 +252,8 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
             if(dd.StencilEnable && (dd.StencilReadMask&e.changedStencil) && (dd.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || dd.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS)){
                 decline(e,"world draw reads stencil changed by UI");return false;}
             Ptr<ID3D11BlendState> blend;ctx->OMGetBlendState(&blend,nullptr,nullptr);
-            auto index=ps?material(dev.Get(),ps.Get(),blend.Get()):SIZE_MAX;
-            if(index==SIZE_MAX){decline(e,"interleaved world shader/blend unsupported");return false;}
+            std::string why;auto index=ps?material(dev.Get(),ps.Get(),blend.Get(),true,&why):SIZE_MAX;
+            if(index==SIZE_MAX){decline(e,why.empty()?"interleaved world pixel shader absent":why.c_str());return false;}
             savedTarget=rt;savedDepth=ds;savedPs=ps;ctx->OMGetBlendState(&savedBlend,savedFactors,&savedMask);
             ID3D11RenderTargetView* targets[2]={rt.Get(),e.cleanHdr.rtv.Get()};
             vScreenSetRenderTargetsRaw(ctx,2,targets,ds.Get());ctx->OMSetBlendState(materials[index].world.Get(),savedFactors,savedMask);ctx->PSSetShader(materials[index].fanout.Get(),nullptr,0);colourMuted=true;

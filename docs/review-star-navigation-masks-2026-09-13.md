@@ -1,5 +1,56 @@
 # Navigation masks against stellar glow: issue 36
 
+## Status
+
+Updated 2026-09-15 after Steam eye run `113532`. Orbital lines looked
+clean to Sean; targeting label text still showed dark smearing. That
+flight's native package matches the tested `28f21c8` build
+(`v0.17.0-rc.1-dirty`, graphics PE `6AA97DFB`, linked 17:18:51 UTC).
+Pimax OpenXR reported a Pimax Crystal Super at approximately 90 Hz. DLSS
+310.7.0.0, preset K, used 2644x2610 input and 4068x4016 output per eye.
+
+The new replay was inactive during the capture. At 11:33:46.523 it
+captured one B779/8DEF planetary HUD draw, then latched off on an
+interleaved world draw, VS `6DB587D29F43A9A6` / PS `B2DE0A41A4C2B4F5`,
+with `interleaved world shader/blend unsupported`. The eye run followed
+at 11:35:32. No native UI composition succeeded.
+
+Ruled out: native UI replay caused the captured dark smearing, because
+replay disabled itself before the captured scene. The original UI
+handling resumed. Earlier ruled-out hypotheses remain in the dated
+journal below; the current implementation is described under "Native UI
+replay after DLSS (2026-09-14)".
+
+Confirmed blocker: the census records ONE / DEST_ALPHA / ADD blending
+for that world draw; the shared material validator rejects DEST_ALPHA
+because its UI transmission path accepts only a narrower set of factors.
+The original shader has a full RGBA output. World mirroring now accepts
+this exact blend and preserves it on both HDR targets; UI validation
+remains strict. The isolated controller passes 1086 checks, including
+byte-exact original HDR/LDR and independent UI-free reference images.
+See "Captured replay rejection, 113532" below for evidence and
+validation.
+
+Aligned frame 19834 already contains the target-text overlap before the
+final UI stage; the final image is essentially unchanged. Later captured
+frames have no corresponding before-UI image, so their extra softness
+cannot be assigned to a stage. No evidence identifies 6DB/B2DE as the
+target label itself. Earlier mis-scaled comparison images are invalid.
+
+The corrected candidate passed the full DLSS-enabled build, 1086
+controller checks on WARP and NVIDIA, and live NGX smoke including the
+motion/jitter convention rig. Graphics PE `6AA98CD6`, linked 18:22:14
+UTC, is stamped `v0.17.0-rc.1-1-ga44ae48-dirty`; hashes are recorded
+below.
+
+Open: verify the correction in flight. First require successful native
+UI composition in the log, then assess targeting text near the corona. A
+bounded census review found no additional definite blocker; missing
+shader bytes and unrecorded MRT/UAV/logic-op state remain limits. Full
+builds here need the Steam original DLL passed via `--openvr` and
+`EDVR_NGX_SDK` set to the pinned SDK at
+`C:/Users/seanm/AppData/Local/EDVR/ngx-sdk`.
+
 [Issue
 36](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/36)
 reports visible masks around navigation targets and orbital lines near a
@@ -1619,3 +1670,99 @@ graphics SHA-256 is
 native runtime SHA-256 is
 `97a0002c489f81df693600e2e80d50308a3943ca31918583afaf0d7c32eb7f18`. The
 later source commit does not change those tested binaries.
+
+## Captured replay rejection, 113532 (2026-09-15)
+
+The flight's bounded census records VS `6DB587D29F43A9A6` / PS
+`B2DE0A41A4C2B4F5` at DC 0 draw 170 and the other eye's draw 232. The
+first has 342 indices, one instance, target @236, and `bl=12,7,1/2,7,1
+bm=F`. The formatter in `draw_census.cpp` prints the enable digit
+immediately before SrcBlend: this means enabled, ONE, DEST_ALPHA, ADD
+for both colour and alpha. It does not mean enum 12. `material()`
+rejects destination factor 7 before attempting shader fanout. Its
+permitted destination factors were written for scalar UI transmission
+but also applied to world draws.
+
+The retained `edvr_logs/shaders/ps_B2DE0A41A4C2B4F5.dxbc` is 2020 bytes.
+Disassembly shows a full RGBA target and a single final return; the
+RGB-only output hypothesis is ruled out. The correction keeps the
+original world blend on both original and clean HDR targets and keeps
+the narrower restrictions for UI composition. Material cache keys now
+include the UI/world role. A rejected world material reports the
+specific blend or shader reason before the existing failure latch
+disables replay. The 128-entry material cache remains bounded; no new
+frame readbacks or GPU waits are introduced.
+
+The retained shader passes fanout (2020 to 2152 bytes) and WARP shader
+creation. The isolated controller passes 1086 checks, including the
+exact destination-alpha blend as an interleaved world draw, byte-exact
+original HDR and LDR preservation, and clean input compared with an
+independent world-only render. The same blend still correctly rejects UI
+scalar transmission. Full build and hardware validation follow
+separately.
+
+Independent capture review aligns `DlssBeforeUi` and C00/T00 to scene
+frame 19834 using the binary header and motion CSV. The ledger sentence
+uses 19835 because its draw counter deliberately records `g_frame + 1`.
+The 2155-square final crop at output origin 956,930 is 98.81% identical
+to the matching before-UI crop, with mean absolute error 0.0337/255. The
+target label overlaps separate panel text/rules already in raw input and
+in `DlssBeforeUi`; it is essentially unchanged afterward.
+
+Ruled out: post-DLSS UI replay or final cropping creates the frame-00
+target smear, because it is already present before that stage. This does
+not localize softer text in frames 03/07/12, whose before-UI images were
+not retained, or prove which draw family renders the label. Initial
+C03/C07/C12 comparison composites used the wrong scale and included 200
+padded black columns; discard their pixel comparisons. Correct alignment
+scales the full 1400-square raw crop to the 2155-square output crop
+before selecting the same target region.
+
+A bounded first-eye census review found no additional definite blocker
+in the reconstructable interval, same target @236 through draw 218.
+Interleaved world draws use supported blends, complete RGB write masks,
+and no conflicting stencil comparisons. Available shaders write full
+RGBA with one final return. Bytecode is missing for families 5E72, 2B15,
+and 1619. The census records only RTV0 and basic blend state, so it
+cannot rule out extra MRTs, OM UAVs, or logic operations. No retained
+census line reconstructs the earlier B779 failure interval itself. These
+limits must remain explicit when assessing the next flight's
+activation/failure log.
+
+Build setup: the first full build skipped legacy OpenVR export
+generation because its default Frontier runtime path was absent. That
+left the prior native `build/openvr_api.dll` in place for the legacy
+census bridge test. Both children exited 1 immediately; direct child
+execution reported `real typed compositor through proxy`, not a timeout.
+Rebuild with `--openvr` pointing to Steam's
+`Openvr/win64/openvr_api_orig.dll` to create the required legacy test
+fixture before the final native outputs replace it. This requires no
+source or installed-runtime changes.
+
+The next build passed its gates but compiled DLSS out because SDK
+discovery was not configured. Its smoke explicitly reported no DLSS SDK;
+do not install those binaries for this task. The previously working SDK
+is `C:/Users/seanm/AppData/Local/EDVR/ngx-sdk` (310.7.0), selected using
+`EDVR_NGX_SDK`. The final build must verify it before compilation and
+its smoke must execute live NGX and motion/jitter conventions, not skip
+them.
+
+Final validation passed with the pinned SDK configured and the build
+process granted access to it. `build-ui-world-blend-113532-ngx.log`
+records SDK 310.7.0 verification, legacy OpenVR rebuilt, all seven
+census bridge cases passing, the 255-key config contract, DLSS runtime
+carried, and all gates passed. The completed controller passes 1086
+checks on WARP and NVIDIA hardware. Retained B2DE fanout passes four
+checks. The live NVIDIA smoke passes DLSS evaluations and the
+motion/jitter convention rig without skipped checks. No D3D debug-layer
+validation is claimed.
+
+The final test package is `v0.17.0-rc.1-1-ga44ae48-dirty`. Graphics PE
+`6AA98CD6` was linked at 2026-09-15 18:22:14 UTC; its SHA-256 is
+`9b451b8916a61a67204e8bdf0ab84ae781a3f610482956e8f259b4f7472c58ba`. The
+native runtime SHA-256 is
+`ed12a9230ee51904019c93102c91a4fb858127afb7725d1d2a51d2230cc87c06`. The
+subsequent source commit does not alter these tested binaries. The next
+flight must show `Deferred UI: active` and advancing applied totals; if
+it falls back, use its new specific failure reason before drawing a
+visual conclusion about native UI replay.

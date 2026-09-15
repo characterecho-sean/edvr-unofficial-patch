@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <chrono>
+#include <fstream>
 using Microsoft::WRL::ComPtr;
 static unsigned checks=0;
 static uint64_t vsHash=0,psHash=0;
@@ -30,7 +31,7 @@ struct Harness {
  ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>c;
  ComPtr<ID3D11VertexShader>vs;ComPtr<ID3D11PixelShader>ui,tone;
  ComPtr<ID3D11DepthStencilState>noDepth,uiDepth;
- ComPtr<ID3D11BlendState>over,add,unsupported;
+ ComPtr<ID3D11BlendState>over,add,destAlpha,unsupported;
  ComPtr<ID3D11RasterizerState>rs;ComPtr<ID3D11SamplerState>sampler;
  ComPtr<ID3D11Buffer>cb;
  edvr::Surface hdr,ldr,output,expected,expectedHdr;
@@ -48,7 +49,7 @@ struct Harness {
   b=compile(t,strlen(t),"main","ps_5_0");hr(d->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&tone));edvr::uiDeferredRemember(tone.Get(),b->GetBufferPointer(),b->GetBufferSize(),false);
   D3D11_BUFFER_DESC bd{};bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;hr(d->CreateBuffer(&bd,nullptr,&cb));
   D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthFunc=D3D11_COMPARISON_ALWAYS;hr(d->CreateDepthStencilState(&dd,&noDepth));dd.StencilEnable=TRUE;dd.StencilReadMask=1;dd.StencilWriteMask=5;dd.FrontFace=dd.BackFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_EQUAL};hr(d->CreateDepthStencilState(&dd,&uiDepth));
-  D3D11_BLEND_DESC blend{};auto&r=blend.RenderTarget[0];r.BlendEnable=TRUE;r.SrcBlend=r.SrcBlendAlpha=D3D11_BLEND_ONE;r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=15;hr(d->CreateBlendState(&blend,&over));r.DestBlend=D3D11_BLEND_ONE;hr(d->CreateBlendState(&blend,&add));r.SrcBlend=D3D11_BLEND_DEST_COLOR;hr(d->CreateBlendState(&blend,&unsupported));
+  D3D11_BLEND_DESC blend{};auto&r=blend.RenderTarget[0];r.BlendEnable=TRUE;r.SrcBlend=r.SrcBlendAlpha=D3D11_BLEND_ONE;r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=15;hr(d->CreateBlendState(&blend,&over));r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_ONE;hr(d->CreateBlendState(&blend,&add));r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_DEST_ALPHA;hr(d->CreateBlendState(&blend,&destAlpha));r.SrcBlend=D3D11_BLEND_DEST_COLOR;hr(d->CreateBlendState(&blend,&unsupported));
   D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;hr(d->CreateRasterizerState(&rd,&rs));
   D3D11_SAMPLER_DESC sd{};sd.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;sd.AddressU=sd.AddressV=sd.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sd.MaxLOD=D3D11_FLOAT32_MAX;hr(d->CreateSamplerState(&sd,&sampler));
   hdr=surf(d.Get(),input,input,DXGI_FORMAT_R11G11B10_FLOAT);ldr=surf(d.Get(),input,input,DXGI_FORMAT_R8G8B8A8_UNORM);output=surf(d.Get(),out,out,DXGI_FORMAT_R8G8B8A8_UNORM);expected=surf(d.Get(),out,out,DXGI_FORMAT_R8G8B8A8_UNORM);expectedHdr=surf(d.Get(),out,out,DXGI_FORMAT_R11G11B10_FLOAT);
@@ -63,6 +64,14 @@ struct Harness {
  ~Harness(){edvr::uiDeferredShutdown();c->ClearState();}
 };
 int main(int argc,char**argv){
+ if(argc==3 && strcmp(argv[1],"--fanout")==0){
+  std::ifstream input(argv[2],std::ios::binary);check(bool(input),"captured shader opened");
+  std::vector<BYTE> code((std::istreambuf_iterator<char>(input)),{}),patched;std::string why;
+  check(edvr::uiColourFanout(code.data(),code.size(),patched,why),why.c_str());
+  ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>c;D3D_FEATURE_LEVEL level{};hr(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,&level,&c));
+  ComPtr<ID3D11PixelShader>ps;hr(d->CreatePixelShader(patched.data(),patched.size(),nullptr,&ps));
+  printf("Captured shader fanout: %zu -> %zu bytes, %u checks passed.\n",code.size(),patched.size(),checks);return 0;
+ }
  if(argc>1 && strcmp(argv[1],"--benchmark")==0){
   Harness h(true,2913,4482);auto*c=h.c.Get();auto*d=h.d.Get();
   ComPtr<IDXGIDevice> gd;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC adapterDesc{};hr(d->QueryInterface(IID_PPV_ARGS(&gd)));hr(gd->GetAdapter(&adapter));hr(adapter->GetDesc(&adapterDesc));wprintf(L"GPU: %s\n",adapterDesc.Description);
@@ -85,11 +94,12 @@ int main(int argc,char**argv){
    edvr::uiDeferredResourceWrite(c,alias.tex.Get());check(!edvr::uiDeferredPrepare(c,alias.tex.Get(),h.zSrv.Get(),h.output.tex.Get(),0,8,8,j,-j),"modified submit is rejected");
   }
   h.start();h.uiDraw(0,0,h.over.Get(),true);h.constants(0,0);h.setup(h.hdr,8,8,h.ui.Get(),h.unsupported.Get(),h.dsv.Get());check(!edvr::uiDeferredBegin(c,0,'N',3,1,0,0,0),"unsupported UI flushes sequence");check(edvr::eyes[0].aborted&&edvr::eyes[0].restored,"decline retains prior UI");check(!edvr::enabled&&edvr::failed,"late failure latches off");check(edvr::uiDeferredFallbackReset(0)&&!edvr::uiDeferredFallbackReset(0)&&edvr::uiDeferredFallbackReset(1)&&!edvr::uiDeferredFallbackReset(1),"one reset per eye after fallback");check(!edvr::uiDeferredBegin(c,0,'N',3,1,0,0,0),"disabled controller leaves subsequent UI to existing path");
-  for(auto* blend:{static_cast<ID3D11BlendState*>(nullptr),h.add.Get(),h.over.Get()}){
+  h.start();h.uiDraw(0,0,h.over.Get(),true);h.constants(0,0);h.setup(h.hdr,8,8,h.ui.Get(),h.destAlpha.Get(),h.dsv.Get());check(!edvr::uiDeferredBegin(c,0,'N',3,1,0,0,0),"destination-alpha blend remains unsupported for UI");check(edvr::eyes[0].aborted&&edvr::failed,"destination-alpha UI declines the sequence");
+  for(auto* blend:{static_cast<ID3D11BlendState*>(nullptr),h.add.Get(),h.over.Get(),h.destAlpha.Get()}){
    auto world=[&](bool mirror){h.constants(0,0,.25);h.setup(h.hdr,8,8,h.ui.Get(),blend,h.dsv.Get());edvr::uiDeferredBeforeDraw(c);if(mirror)check(!edvr::uiDeferredBegin(c,-1,'N',3,1,0,0,0),"world is mirrored without UI classification");c->DrawInstanced(3,1,0,0);edvr::uiDeferredEnd(c);};
    h.start();world(false);h.toneDraw(false);auto cleanExpected=read(d,c,h.ldr.tex.Get());
-   h.start();h.uiDraw(0,0,h.over.Get(),false);world(false);h.uiDraw(0,0,h.add.Get(),false);h.toneDraw(false);auto original=read(d,c,h.ldr.tex.Get());
-   h.start();h.uiDraw(0,0,h.over.Get(),true);world(true);h.uiDraw(0,0,h.add.Get(),true);h.toneDraw(true);check(read(d,c,h.ldr.tex.Get())==original,"interleaved world/UI preserves original colour bit for bit");
+   h.start();h.uiDraw(0,0,h.over.Get(),false);world(false);h.uiDraw(0,0,h.add.Get(),false);auto originalHdr=read(d,c,h.hdr.tex.Get());h.toneDraw(false);auto original=read(d,c,h.ldr.tex.Get());
+   h.start();h.uiDraw(0,0,h.over.Get(),true);world(true);h.uiDraw(0,0,h.add.Get(),true);check(read(d,c,h.hdr.tex.Get())==originalHdr,"interleaved world/UI preserves original HDR bit for bit");h.toneDraw(true);check(read(d,c,h.ldr.tex.Get())==original,"interleaved world/UI preserves original LDR bit for bit");
    auto*clean=edvr::uiDeferredPrepare(c,h.ldr.tex.Get(),h.zSrv.Get(),h.output.tex.Get(),0,8,8,0,0);check(clean,"interleaved world path prepares");ComPtr<ID3D11Resource>r;clean->GetResource(&r);ComPtr<ID3D11Texture2D>t;hr(r.As(&t));check(read(d,c,t.Get())==cleanExpected,"clean image preserves interleaved world and removes both UI groups");
   }
   h.start();h.uiDraw(0,0,h.over.Get(),true);h.toneDraw(true);
