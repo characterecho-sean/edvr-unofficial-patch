@@ -76,7 +76,10 @@ constexpr float kTipWidthFrac = 0.52f;
 constexpr float kTipRatio = 1.0f + kTipGapFrac + kTipWidthFrac;
 
 constexpr int kMenuMaxTabs = 8;
-constexpr int kMenuMaxLines = 14;
+// The Status page reaches 15 on the native path (the three headset lines
+// of docs/openxr-resolution-per-headset-2026-09-14.md); statusLine drops
+// silently past this, and the line it would drop is `Last write`.
+constexpr int kMenuMaxLines = 16;
 constexpr int kMenuMaxTiles = 16;
 
 // A gauge: a big number with a small caption above and one small line

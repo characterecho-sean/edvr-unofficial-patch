@@ -1,5 +1,13 @@
 # OpenXR resolution control
 
+**Superseded the same day** by
+[openxr-resolution-per-headset-2026-09-14.md](openxr-resolution-per-headset-2026-09-14.md):
+the percentage control below (`fix.openxr_render_scale`) was on main only
+briefly, never in a public release, and is replaced by a per-headset width
+(`fix.openxr_resolution`). This page is kept for the
+history of the percentage design and its desk checks; the retest below was
+written for that control and is not the current one.
+
 The Performance page gains an OpenXR resolution percentage. The default is
 100%, using the active runtime's recommended per-eye width and height. The
 percentage scales each dimension: 50% means half the width and half the height,
@@ -19,12 +27,15 @@ distinguished. If the runtime limits the selection, the displayed target
 reflects that limit. A runtime change at the next launch can change the
 recommendation, so this is a preview for the currently connected runtime.
 
-The row places the percentage beside the compact label (`OpenXR res. 75%`) and
-the pixel dimensions in the value column. If the eyes differ, the row labels
-the left eye with `L`; highlighting it shows both eyes, along with the active
-and after-restart sizes. The tooltip also identifies any runtime cap. Editing
-retains the menu's existing numeric-factor input convention: type `0.75` for
-75%, or use Left/Right to step.
+The row places the per-eye width beside the compact label (`OpenXR res. 3283
+px`) and the pixel dimensions in the value column. If the eyes differ, the row
+labels the left eye with `L`; highlighting it shows both eyes, along with the
+active and after-restart sizes. The tooltip also identifies any runtime cap.
+Superseded 2026-09-14 by
+[openxr-resolution-per-headset-2026-09-14.md](openxr-resolution-per-headset-2026-09-14.md):
+the key is now `fix.openxr_resolution`, a list of per-headset entries whose
+unit is the per-eye width in pixels, so the row edits the worn headset's width
+(type `3283`, or step Left/Right on a 5% grid) rather than a factor.
 
 One shared calculation controls startup sizing and the menu preview. A common
 scale is capped against both eyes' runtime limits and the D3D11 texture limit,

@@ -1119,7 +1119,14 @@ through to the Text wording.
   (:1897-1916) treat it as an unsigned integer in 1..16384; both write the
   result of `mergeResolutionEntry(r.value, rt, sys, width)` through
   `applyChange` (:1499-1515) and the existing one-value merge (`menuIniWrite`
-  :650-699), so the other headsets' entries are preserved byte for byte. With
+  :650-699), so the other headsets' entries are preserved (re-serialised in
+  the canonical `rt/sys:W` spacing and case, as the header section says --
+  `Oculus/Meta-Quest-3:3283` comes back as `oculus/meta-quest-3:3283`, the
+  same key -- never resized or re-keyed). Stepping moves to the ADJACENT
+  grid point in the direction pressed, Shift to the fifth, so an on-grid
+  width never skips a point and Shift moves exactly five; a press never
+  moves against its own direction (Right from a stored width above the
+  clamp writes nothing rather than the lower clamped value). With
   no coherent sizing or invalid labels, editing is refused and `s.lastWrite`
   (the Status page's last-write line, :1511, a 63-byte field) reads `No headset
   sizing published yet; try again in a moment.` (55 characters). The "moment"
@@ -1177,7 +1184,25 @@ through to the Text wording.
   two read `unknown`. The key line is what a user with the desktop settings
   window or Notepad open copies; the first draft's single line (`Headset: Pimax
   Crystal Super via SteamVR/OpenXR (steamvr-openxr/pimax-crystal-super),
-  4980x4916`, 87 characters) would have been cut mid-key.
+  4980x4916`, 87 characters) would have been cut mid-key. The three lines are
+  drawn only while `nativeMenuActive()` (the Runtime line's own predicate):
+  on SteamVR and OpenComposite no v2 query ever runs, so they would read
+  `unknown` for the whole session, and the page shows one line, `Headset` /
+  `native OpenXR only (not in use on this runtime)`, instead; the row's
+  refusals on those runtimes read `Native OpenXR only; this runtime ignores
+  it.` (hint) and `not written: native OpenXR only` (last write), never the
+  "moment" wording, which is the native path's. Two constants the lines
+  depend on, recorded so the next Status line does not push `Last write` off
+  silently: `statusLine` drops lines past `kMenuMaxLines` (menu_panel.h),
+  raised from 14 to 16 because the native Status page is now fifteen
+  `statusLine` calls and the fifteenth is `Last write`, where this row's
+  refusals and confirmations appear; and the page is drawn `compact`
+  (row pitch 1.7 cap, the Monitor page's), because at the two-cap pitch the
+  raster's 2048-px height guard (`rasterise`, menu_panel.cpp) trips from a
+  51-px cap with fifteen rows, which is the Pimax at the default 1.1 deg,
+  and a page it refuses keeps its previous bitmap; the guard now logs once
+  (`menu panel: a WxH layout ... is outside the raster's ... box`) so a stale
+  page is distinguishable from a missing one.
 
 That is eleven sites (label, value, hint, tooltip facts, tooltip body,
 step/edit, reset, badge x3 recomputes plus the tick, toast, audit, Status,

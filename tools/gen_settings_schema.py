@@ -908,6 +908,30 @@ def self_test():
     expect_in(name, said, '`percent` but are not numbers')
     expect_in(name, said, 'fix.word  (text)')
 
+    # fix.openxr_resolution's shape: a live [fix] key whose shipped value is
+    # empty, read as text, with a restart ui: line and no range or percent.
+    # It generates a Text menu row with empty bounds, and the summary is the
+    # block's first sentence whole -- the grammar and the example are what
+    # the settings window shows above a text box (no other [fix] key ships
+    # empty with a ui: line, so nothing else exercises this).
+    name = 'empty-text-restart'
+    first = ('Per-headset OpenXR render width in pixels per eye, as runtime/system:width '
+             'entries such as oculus/meta-quest-3:3283.')
+    wrote = case(name, ('[fix]\n'
+                        '# Per-headset OpenXR render width in pixels per eye, as runtime/system:width\n'
+                        '# entries such as oculus/meta-quest-3:3283. Set it from the F8 menu with the\n'
+                        '# headset on -- copy the key from the log. Entries are separated by\n'
+                        '# commas, up to 8. Swapchains are fixed when VR starts, so a change\n'
+                        '# applies after a game restart.\n'
+                        '# ui: OpenXR resolution | restart | menu performance\n'
+                        'openxr_resolution =\n'),
+                 {'a.cpp': 'const std::string v = cfg.getString("fix.openxr_resolution", "");\n'}, 0)
+    expect_in(name, wrote, 'MenuKind::Text, "", "", "", 2, "", false, 2,')
+    expect_in(name, wrote, 'MenuTier::Fix, "performance"')
+    expect_in(name, wrote, '"' + first + '",')
+    expect_in(name, wrote, 'SettingKind::Text, "", "",')
+    expect_not_in(name, wrote, 'MenuKind::Number')
+
     shutil.rmtree(base, ignore_errors=True)
     if failures:
         print('gen_settings_schema: self-test FAILED')

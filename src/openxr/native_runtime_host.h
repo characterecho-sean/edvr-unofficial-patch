@@ -61,6 +61,7 @@
 #include "render_thread_dispatcher.h"
 #include "present_work_queue.h"
 #include "../common/native_render_settings.h"
+#include "../common/openxr_resolution_entries.h"
 
 namespace edvr::openxr {
 struct RuntimeOptions {
@@ -208,6 +209,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrViewConfigurationView sizes[2]{};
   float requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
   float effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+  // The headset's identity for fix.openxr_resolution: the runtime and system
+  // names as the v2 settings ABI carries them (63 bytes plus NUL). The token
+  // traced as headset_key is computed from these copies, so it is byte-equal
+  // to the one the graphics DLL matched on whatever the raw string's length.
+  char runtimeLabel[64]{};
+  char systemLabel[64]{};
+  static void copyLabel(char (&label)[64],const char* raw) {
+    std::memset(label,0,sizeof(label)); if(raw) std::strncpy(label,raw,sizeof(label)-1);
+  }
   bool renderSettingsCaptured=false;
   uint64_t renderSizingGeneration=0;
   EdvrNativeRenderViewBounds renderBounds[2]{};
@@ -227,28 +237,38 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
     effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
     renderSettingsCaptured=false;
+    const std::string key=edvr::native_render::headsetKey(
+        edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
+        edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel)));
     // The headset-free/native host diagnostic has no paired graphics
     // provider, so its recommendation remains the runtime's 100% size.
     if(!graphicsProxy) {
       renderSettingsCaptured=true;
-      nativeTracePrintf("openxr_render_scale,provider=0,requested=1.000000\n");
+      nativeTracePrintf("openxr_resolution,provider=0,key=%s,headset=%ux%u,matched=0,entries=0,requested=1.000000\n",
+          key.c_str(),renderBounds[0].originalWidth,renderBounds[0].originalHeight);
       return true;
     }
     const auto query=reinterpret_cast<EdvrQueryNativeRenderSettings>(
         GetProcAddress(graphicsProxy,"edvrQueryNativeRenderSettings"));
     if(!query) return result("native_render_settings_export",XR_ERROR_FUNCTION_UNSUPPORTED);
-    EdvrNativeRenderSettings settings{sizeof(settings),EDVR_NATIVE_RENDER_SETTINGS_VERSION_1,0,0};
+    // One in/out buffer: the bounds and names go in, the graphics DLL
+    // resolves fix.openxr_resolution for this headset and echoes the inputs,
+    // and the echo is compared byte for byte (a stale DLL on either side
+    // fails here with -1 rather than flying a wrong size).
+    const EdvrNativeRenderSettings request=edvr::native_render::buildRenderSettingsRequest(
+        renderBounds,runtimeLabel,systemLabel);
+    EdvrNativeRenderSettings settings=request;
     BOOL answered=FALSE;
     if(!graphicsCalls.invoke([&]{
-         answered=query(EDVR_NATIVE_RENDER_SETTINGS_VERSION_1,sizeof(settings),&settings);
-       }) || !answered || settings.size!=sizeof(settings) ||
-       settings.version!=EDVR_NATIVE_RENDER_SETTINGS_VERSION_1 || settings.reserved!=0 ||
-       !std::isfinite(settings.openxrRenderScale))
+         answered=query(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,sizeof(settings),&settings);
+       }) || !answered || !edvr::native_render::validateRenderSettingsAnswer(request,settings))
       return result("native_render_settings_query",XR_ERROR_VALIDATION_FAILURE);
     requestedRenderScale=settings.openxrRenderScale;
     effectiveRenderScale=edvr::native_render::clampScale(requestedRenderScale);
     renderSettingsCaptured=true;
-    nativeTracePrintf("openxr_render_scale,provider=1,requested=%.6f\n",requestedRenderScale);
+    nativeTracePrintf("openxr_resolution,provider=1,key=%s,headset=%ux%u,matched=%u,entries=%u,requested=%.6f\n",
+        key.c_str(),renderBounds[0].originalWidth,renderBounds[0].originalHeight,
+        settings.matchedEntry,settings.entryCount,requestedRenderScale);
     return true;
   }
   void applyRenderScale() {
@@ -263,9 +283,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           originalWidth,maxWidth,effectiveRenderScale);
       sizes[eye].recommendedImageRectHeight=edvr::native_render::scaledDimension(
           originalHeight,maxHeight,effectiveRenderScale);
-      nativeTracePrintf("openxr_render_size,eye=%u,original=%ux%u,scaled=%ux%u,requested=%.6f,effective=%.6f\n",
+      nativeTracePrintf("openxr_render_size,eye=%u,original=%ux%u,scaled=%ux%u,requested=%.6f,effective=%.6f,megapixels=%.2f\n",
           eye,originalWidth,originalHeight,sizes[eye].recommendedImageRectWidth,
-          sizes[eye].recommendedImageRectHeight,requestedRenderScale,effectiveRenderScale);
+          sizes[eye].recommendedImageRectHeight,requestedRenderScale,effectiveRenderScale,
+          edvr::native_render::megapixels(sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight));
     }
   }
   bool publishRenderSizing(bool valid) {
@@ -1064,6 +1085,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       publishRenderSizing(false);
       renderSettingsCaptured=false;
     }
+    std::memset(runtimeLabel,0,sizeof(runtimeLabel));std::memset(systemLabel,0,sizeof(systemLabel));
     const auto menuClosed=menu.close(); // no producer admission or GPU work required
     if(FAILED(menuClosed))return clean=false;
     timingInvalidate();
@@ -1194,10 +1216,24 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
     if(!result("xrGetInstanceProperties",api.instanceProperties(instance,&ip))) return false;
     nativeTracePrintf("runtime,%.*s,%llu\n",XR_MAX_RUNTIME_NAME_SIZE,ip.runtimeName,(unsigned long long)ip.runtimeVersion);
+    copyLabel(runtimeLabel,ip.runtimeName);
     XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};si.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     if(!result("xrGetSystem",api.getSystem(instance,&si,&system))) return false;
     XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
     if(!result("xrGetSystemProperties",api.systemProperties(instance,system,&properties)))return false;
+    copyLabel(systemLabel,properties.systemName);
+    // The name goes last: systemName is up to 256 bytes and may carry commas,
+    // and the fixed fields must not shift. Traced here so the line exists even
+    // when a later step fails, and so the unpaired diagnostic prints it.
+    nativeTracePrintf("system,vendor=%u,max_size=%ux%u,name=%.*s\n",properties.vendorId,
+        properties.graphicsProperties.maxSwapchainImageWidth,properties.graphicsProperties.maxSwapchainImageHeight,
+        XR_MAX_SYSTEM_NAME_SIZE,properties.systemName);
+    // The key the user copies into fix.openxr_resolution, from the same 64-byte
+    // copies the ABI carries; only the first two fields are machine-readable.
+    nativeTracePrintf("headset_key,%s,runtime=%.*s,system=%.*s\n",
+        edvr::native_render::headsetKey(edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
+            edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel))).c_str(),
+        XR_MAX_RUNTIME_NAME_SIZE,ip.runtimeName,XR_MAX_SYSTEM_NAME_SIZE,properties.systemName);
     std::vector<XrViewConfigurationType> configs;
     if(!result("view_configurations",enumerate<XrViewConfigurationType>([&](uint32_t c,uint32_t*n,XrViewConfigurationType*p){
       return api.configurations(instance,system,c,n,p);},configs))) return false;
@@ -1217,7 +1253,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       renderBounds[eye]={sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight,
           (std::min)(uint32_t(sizes[eye].maxImageRectWidth),uint32_t(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)),
           (std::min)(uint32_t(sizes[eye].maxImageRectHeight),uint32_t(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION))};
-      nativeTracePrintf("size,%u,%u,%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight);
+      nativeTracePrintf("size,%u,%u,%u,max=%ux%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight,
+          renderBounds[eye].maxWidth,renderBounds[eye].maxHeight);
     }
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;

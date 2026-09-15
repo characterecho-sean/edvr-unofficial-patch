@@ -692,6 +692,69 @@ int selfTest() {
       host.effectiveRenderScale>1.49f && host.effectiveRenderScale<1.50f,
       "the tighter eye height caps the common scale without distorting either eye");
   }
+  // The per-headset resolution arithmetic pinned from the host side
+  // (docs/openxr-resolution-per-headset-2026-09-14.md): the 2026-09-14 20:05
+  // incident (180% on a Virtual Desktop base), the width that replaces it,
+  // and the runtime cap; then the labels and the pure v2 request/validate.
+  {
+    OwnerService owner; RenderThreadDispatcher dispatcher(owner); RenderRoute route{dispatcher};
+    NativeRuntimeHost host(owner,dispatcher,route);
+    for(unsigned eye=0;eye<2;++eye) { host.sizes[eye]={XR_TYPE_VIEW_CONFIGURATION_VIEW}; host.sizes[eye].maxSwapchainSampleCount=1; }
+    host.renderBounds[0]=host.renderBounds[1]={3072,3264,16384,16384};
+    host.sizes[0].maxImageRectWidth=host.sizes[1].maxImageRectWidth=host.sizes[0].maxImageRectHeight=host.sizes[1].maxImageRectHeight=16384;
+    host.requestedRenderScale=1.8f; host.applyRenderScale();
+    check(host.sizes[0].recommendedImageRectWidth==5530 && host.sizes[0].recommendedImageRectHeight==5875,
+      "180 percent of the Virtual Desktop base is 5530x5875 (the incident)");
+    host.requestedRenderScale=1.068685f; host.applyRenderScale();
+    check(host.sizes[0].recommendedImageRectWidth==3283 && host.sizes[0].recommendedImageRectHeight==3488,
+      "3283 wide on the Virtual Desktop base is 3283x3488");
+    host.renderBounds[0]=host.renderBounds[1]={4980,4916,8192,8192};
+    host.sizes[0].maxImageRectWidth=host.sizes[1].maxImageRectWidth=host.sizes[0].maxImageRectHeight=host.sizes[1].maxImageRectHeight=8192;
+    host.requestedRenderScale=1.807229f; host.applyRenderScale();
+    check(host.sizes[0].recommendedImageRectWidth==8192 && host.sizes[0].recommendedImageRectHeight==8087 &&
+      host.effectiveRenderScale>1.64497f && host.effectiveRenderScale<1.64499f && validSize(host.sizes[0]),
+      "9000 wide on the Pimax base is capped by the runtime at 8192x8087");
+    const std::string longName(300,'x');
+    NativeRuntimeHost::copyLabel(host.runtimeLabel,longName.c_str());
+    NativeRuntimeHost::copyLabel(host.systemLabel,"Pimax Crystal Super");
+    check(host.runtimeLabel[63]==0 && std::strlen(host.runtimeLabel)==63 && !std::strcmp(host.systemLabel,"Pimax Crystal Super") &&
+      host.systemLabel[63]==0,"labels are truncated to 63 bytes and NUL-terminated for a 300-byte input");
+    check(edvr::native_render::headsetToken(host.runtimeLabel,sizeof(host.runtimeLabel))==
+      edvr::native_render::headsetToken(std::string(63,'x').c_str(),64).substr(0,30) &&
+      edvr::native_render::headsetToken(host.runtimeLabel,sizeof(host.runtimeLabel)).size()==30,
+      "the token the host traces is headsetToken of the 64-byte copy");
+    NativeRuntimeHost::copyLabel(host.runtimeLabel,"SteamVR/OpenXR");
+    check(edvr::native_render::headsetKey(edvr::native_render::headsetToken(host.runtimeLabel,64),
+      edvr::native_render::headsetToken(host.systemLabel,64))=="steamvr-openxr/pimax-crystal-super","the traced key is rt/sys");
+    const EdvrNativeRenderSettings sent=edvr::native_render::buildRenderSettingsRequest(host.renderBounds,host.runtimeLabel,host.systemLabel);
+    check(sent.size==184 && sent.version==EDVR_NATIVE_RENDER_SETTINGS_VERSION_2 && sent.reserved==0 &&
+      sent.eyes[0].originalWidth==4980 && sent.eyes[1].maxHeight==8192 && !std::strcmp(sent.runtimeName,"SteamVR/OpenXR") &&
+      !std::strcmp(sent.systemName,"Pimax Crystal Super") && sent.openxrRenderScale==0.f && sent.matchedEntry==0 && sent.entryCount==0,
+      "buildRenderSettingsRequest fills the 184-byte struct from the host's bounds and labels");
+    bool zeroed=true;
+    for(size_t i=std::strlen(sent.runtimeName);i<64;++i) zeroed=zeroed && !sent.runtimeName[i];
+    for(size_t i=std::strlen(sent.systemName);i<64;++i) zeroed=zeroed && !sent.systemName[i];
+    check(zeroed,"the request's name fields are zero after each NUL");
+    EdvrNativeRenderSettings answer=sent; answer.openxrRenderScale=1.807229f; answer.matchedEntry=1; answer.entryCount=2;
+    check(edvr::native_render::validateRenderSettingsAnswer(sent,answer),"a correct echo validates");
+    EdvrNativeRenderSettings bad=answer; bad.size=16;
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"a wrong size is rejected");
+    bad=answer; bad.version=1;
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"a wrong version is rejected");
+    bad=answer; bad.matchedEntry=3;
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"matchedEntry 3 is rejected");
+    bad=answer; bad.entryCount=9;
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"entryCount 9 is rejected");
+    bad=answer; bad.eyes[1].originalWidth++;
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"a changed bound is rejected");
+    bad=answer; bad.systemName[5]='X';
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"a changed name byte is rejected");
+    bad=answer; bad.reserved=1;
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"a non-zero reserved word is rejected");
+    bad=answer; bad.openxrRenderScale=std::numeric_limits<float>::quiet_NaN();
+    check(!edvr::native_render::validateRenderSettingsAnswer(sent,bad),"a non-finite scale is rejected");
+    check(host.captureRenderSettings() && host.requestedRenderScale==1.f,"the unpaired branch stays provider=0 at 100 percent");
+  }
   // Session display dimensions survive transient geometry invalidation. This
   // inert host opens no loader, device, session, or XR operation.
   {

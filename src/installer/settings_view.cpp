@@ -362,6 +362,12 @@ std::wstring recommendedWord(const SettingRow& row) {
 // "640 to 819" is a wrong number rather than a shortened one.
 std::wstring recommendLink(const SettingRow& row) {
     if (row.isRecommended) return std::wstring();
+    // A text row that ships empty (fix.openxr_resolution, a list of
+    // per-headset entries) gets no link: "reset to nothing" is what
+    // clearing the field already does, and one click that empties every
+    // headset's entry is a hazard, not a convenience
+    // (docs/openxr-resolution-per-headset-2026-09-14.md, "Menu").
+    if (row.def->kind == SettingKind::Text && !row.def->recommended[0]) return std::wstring();
     if (strcmp(row.def->recommended, row.def->shipped) == 0) return L"reset";
     return L"try " + recommendedWord(row);
 }

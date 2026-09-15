@@ -763,7 +763,19 @@ bool rasterise(const MenuContent& c, Raster& out) {
     // The width is bounded upstream (the model clamps the CARD, and the
     // strip is a fixed fraction of it), but say so here too: this is the
     // twin of the height guard, and the DIBs below are sized from it.
-    if (W < 64 || W > 2600 || H < 32 || H > 2048) return false;
+    if (W < 64 || W > 2600 || H < 32 || H > 2048) {
+        // Loud, once: the worker keeps the previous bitmap when this
+        // refuses, so a page that stopped updating (the fifteen-line Status
+        // page at a large cap) would otherwise look exactly like one that
+        // was never drawn.
+        static std::atomic<bool> refusedLogged{false};
+        if (!refusedLogged.exchange(true)) {
+            Log::get().note("menu panel: a %dx%d layout (%d lines, %d tiles, cap %d px) is outside the "
+                            "raster's 64..2600 by 32..2048 box; the panel keeps its previous bitmap "
+                            "until the content fits.", W, H, c.lineCount, c.tileCount, c.capPx);
+        }
+        return false;
+    }
     Dib colour, cover;
     if (!makeDib(colour, W, H) || !makeDib(cover, W, H)) {
         freeDib(colour);

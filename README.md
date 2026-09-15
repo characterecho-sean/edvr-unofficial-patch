@@ -249,6 +249,24 @@ switches itself off if that ever gets serious (never in the first ten seconds,
 which is where the crash is), and is meant for one session. Set it back to 0
 afterwards.
 
+### VR failed to start after an EDVR update
+
+EDVR is two files that must be from the same build: the graphics half
+(`d3d11.dll`) and the VR half (`openvr_api.dll`). They agree on the size of a
+message the VR half sends at startup, and a half-updated install — one file
+new, the other old — fails that check on purpose rather than running at a
+size it did not ask for. Elite then reports `VRInitError_Init_Internal` and
+the native log (`edvr_logs\edvr_openxr_*.log`) carries
+`result,native_render_settings_query,-1` with no `openxr_render_size` lines
+after it. That `-1` says one side is stale, not which.
+
+Run `edvr-installer.exe` and press **Repair**: it writes both halves from the
+one package it carries, so they cannot disagree. If you build from source,
+`python tools\install_edvr.py --target <store> --verify-only` (`steam`,
+`frontier`, or the path to the game directory) compares each installed file's
+hash with the build and prints `native verify mismatch:` with the path of the
+one that differs; run it before every flight of a fresh build.
+
 ### Uninstall
 
 Run `edvr-installer.exe` and press **Uninstall**. It removes EDVR's files,
