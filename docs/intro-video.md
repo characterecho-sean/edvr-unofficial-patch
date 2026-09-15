@@ -1,5 +1,63 @@
 # The intro movie
 
+## Status
+
+*Written 2026-09-15 from the entries dated 2026-08-28 and 2026-09-13,
+plus one undated flight after them (the "Flight 09:43" log, commit
+fbd8284). Restates the journal below; update it whenever this doc
+changes.*
+
+- **State:** Two phases, both off by default. (1) The splash-panel
+  placement/world-lock/FSR fix (`fix.intro_video_size`,
+  `intro_video_lock`, `intro_video_upscale` + deband/dither/sharpen):
+  SHIPPED, field-verified 2026-08-28. (2) `fix.intro_video = skip`
+  (built 2026-09-13): its first flight found the executable-import
+  hook alone was bypassed by Windows' own quartz.dll reader, so
+  quartz.dll's CreateFileW import is hooked too now -- but that fix is
+  UNCONFIRMED by an actual game launch (the doc's last words ask for
+  exactly that flight).
+- **Open:**
+  - The quartz.dll-hook fix for `skip` needs a real game-launch
+    confirmation (see Next flight).
+  - Facing the wrong way at the splash after the cut: unmeasured,
+    likely a second, separate fix.
+  - Whether the movie already plays during phase A (first 3-5 s):
+    unmeasured; changes nothing about the fix either way.
+  - Whether EDVR is party to either stall (the freeze or phase A):
+    "never A/B'd".
+- **Ruled out:**
+  - `fix.panel_distance` moving the movie panel: this draw binds no
+    constant buffer at all.
+  - `fix.black_void` blackening the surround: it's a full-eye blit
+    from a texture, not a clear.
+  - "Its placement is in four vertices and nowhere else": refuted by
+    flight 3 -- a full-screen quad; real placement is VS `cb2`.
+  - A viewport counter-move to world-lock the panel: can only
+    translate, so it can never produce stereo.
+  - Intercepting only the executable's own file-open imports to skip
+    the movie: bypassed by quartz.dll's reader (0 refusals, 902
+    frames played).
+  - The resample cache keyed on the source resource: each eye's draw
+    destroyed the other eye's cached build.
+- **Next flight:** A real game launch with `fix.intro_video = skip`,
+  checking for `DirectShow reader CreateFileW patched`, a refusal
+  naming `DirectShow CreateFileW`, and `WORKED` with no movie frames.
+- **Environment:** The placement fix was measured on a Frontier
+  install, game build 330683, Pimax via OpenComposite, eye 5424x5356.
+  The skip feature's flight used a different install (Steam, verifying
+  commit fbd8284) and needs no headset. Placement lives in vertex
+  shader constant buffer 2 (80 bytes); the census's constant-watch
+  reads slot b0 by default (`advanced.census_cb_slot` reads others).
+- **Detail:** The placement mechanism runs "Flight 3" through "Flight
+  6" (a full-screen quad; real placement is VS `cb2`); "Stage one,
+  built: fix.intro_video_size" and "What shipped" cover what it
+  built; "What the bugs were, since the pattern is the lesson" is
+  process lessons. The skip feature is "Not playing it at all:
+  `fix.intro_video = skip`" and "Flight 09:43: the file reader
+  bypassed the executable hook". "The other symptom: facing the wrong
+  way at the cut" is the separate unmeasured issue. Companion:
+  docs/loading-panel-handoff.md, docs/loading-scrim.md.
+
 Reported 2026-08-28 and **measured the same day**, across two flights, on the
 field rig (Frontier launcher install, game build 330683, one eye 5424x5356,
 Pimax via OpenComposite). The model this page opened with was a hypothesis
@@ -7,11 +65,6 @@ built from the install's own files and from old logs; flight 1 confirmed it,
 including the vertex shader, and flight 3 then refuted the part of it that
 said where the fix would go. Both are below, because the correction is the
 finding.
-
-**Shipped and field-verified the same day.** The movie now plays on the
-splash's own screen, at the splash's size, world-anchored, debanded and
-resampled with AMD's FSR. What shipped, what it deliberately does not do,
-and the four bugs it took to get there are at the end.
 
 ## The defect, in the field's words
 
@@ -675,18 +728,6 @@ on the physics, and they are worth listing together:
 The physics was read correctly at every stage -- from the shader
 disassembly, the constants, the frustum tangents. What went wrong was
 assumed: a handedness, a lifetime, a threshold, a mode string.
-
-## Status
-
-Shipped and field-verified 2026-08-28: the movie plays on the splash's own
-screen, at the splash's size, world-anchored, debanded and resampled with
-FSR. Every stage is off by default and each has a log line naming what it
-did.
-
-Open: the movie's first three to five seconds, which are not reachable from
-here; early VR init as a way to recover part of them (unbuilt, and it would
-only shorten the gap rather than close it); and the runtime's play space,
-which is where the 180-degree forward gets fixed.
 
 ## Not playing it at all: `fix.intro_video = skip` (built 2026-09-13, unflown)
 

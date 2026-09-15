@@ -1,54 +1,64 @@
 # Per-object motion vectors: a design
 
-**Reading this on 2026-09-11:** this is a historical design followed by a
-flight journal; the opening's "Nothing here is implemented" describes its
-original state. Later entries implement and revise several approaches.
-For the current review of blur during movement, including two reproduced
-origin-continuity bugs and a correction to the DLAA resolution test, see
-[the distance-and-motion review](review-distance-motion-2026-09-10.md).
-The [follow-up smoke review](review-smoke-voids-2026-09-10.md) checks the
-branch through `44edb30`, verifies those two fixes, and examines the new
-10:25–10:26 eye runs and draw ledgers.
-The [latest-run and switch review](review-smoke-toggles-2026-09-10.md)
-checks `794ee65` and the 11:14 capture, and documents the takeover changes
-on `codex/smoke-temporal-history`.
-The [12:02 capture review](review-smoke-capture-1202.md) retracts the
-earlier ship-smoke-volume identification: that shader also renders
-planetary bodies/rings. It documents the trails surviving both switches
-and the particle families selected for a controlled diagnostic.
-The [12:19 capture review](review-smoke-capture-1219.md) records that those
-particle skips did not remove the confirmed blue-haze gaps. It connects
-their AA-only occurrence to shared upstream processing and documents the
-successful UI-depth-off diagnostic. The follow-up implementation moves
-HUD/interface depth into private targets; the user confirmed that it fixed
-the smoke holes with UI depth enabled again.
-The [13:02 flight review](review-station-flicker-2026-09-10.md) investigates
-the remaining whole-station flicker, reproduces a carried-motion origin
-mismatch, and adds matching raw/treated captures with per-eye motion data.
-The [13:33 UI and panel review](review-ui-panels-2026-09-10.md) identifies
-two targeting-chevron motion errors, adds adaptive UI history, and fixes
-paired crop coverage under DLSS for the remaining solar-panel investigation.
-The [14:16 coverage review](review-ui-coverage-2026-09-10.md) reproduces
-false chevron coverage against the game's shader, separates smoke from UI
-history evidence, and repairs AA-off dumps. It distinguishes the approved
-higher-resolution experiment from the unresolved loss of station detail
-during temporal reconstruction.
-The [14:53 station-depth review](review-station-depth-2026-09-10.md)
-uses the new GPU inputs to identify near-plane depth beneath the chevrons
-and the finite-far fallback misplacing distant station surfaces by kilometres.
-It corrects the fallback and preserves original scene depth under floating HUD.
-The [15:20 yaw and sprite review](review-yaw-sprite-depth-2026-09-10.md)
-measures a false world-motion shutdown during opposing ship/head turns,
-and traces persistent chevron depth one to the sprite vertex shader's
-forced raster depth. It corrects both without changing resolution or sharpening.
-The [September 11 panel and approach review](review-planet-panels-2026-09-11.md)
-measures missing dim rank-label coverage and celestial expansion absent from
-the supplied vectors. It rules out the cockpit split for these bodies and
-adds draw-time transform and source-alpha capture; it is not a rendering fix.
-The [September 11 roll and orbit follow-up](review-roll-and-orbits-2026-09-11.md#follow-up-0930-flight-regression)
-corrects the assumption that modern DLSS models honor the UI bias mask.
-It documents a model-independent UI resolve, the remaining target-motion
-capture gap, and inner-ring aliasing already present in raw eye images.
+## Status
+
+*Written 2026-09-15 from the entries dated 2026-09-07 through
+2026-09-10 (the journal) and 2026-09-11 (the preamble it replaces). It
+restates the journal below and is not new evidence; update it whenever
+this doc changes.*
+
+- **State:** Reprojects movers (stations, ships) by their own rigid
+  motion instead of the camera-only path. Tier 1 (a depth-consistency
+  mask, `fix.temporal_aa_movers`) flew 2026-09-08, shipped OFF by
+  default. Tier 2 dropped the designed stencil tags for a simpler
+  "body path" (`fix.temporal_aa_objects`, geometry-grid membership),
+  built 2026-09-08 and refined over 48 flights to 2026-09-10. The last
+  entry here (review-smoke-voids-2026-09-10.md's fix) leaves the
+  station and ships mostly fixed, smoke-trail voids partly fixed; this
+  journal stops there and twelve later reviews carry the arc on.
+- **Open:**
+  - Smoke-trail voids: cause (injected pass, history, or game's own
+    draws) undecided pending the Next-flight A/B.
+  - Far station detail's real spin (a skinning bone the pool can't see)
+    is unmodelled; fixed-range vs. LOD "not yet known".
+  - Ships' applied rate is up to 8 frames stale; a per-frame diff would
+    close it "if the flights ask for it".
+  - A bias-mask switch for the ring/hub point lights was built, unflown.
+- **Ruled out:**
+  - Tier 1's mask moving geometry: it can't; a mover's interior still
+    ghosts (2026-09-08).
+  - A draw-shape memo for per-draw identity: order agreed ~0% across
+    ~3s, misnaming ~96% of draws (2026-09-07/08).
+  - The pool slot as identity: repacked whenever the visible set
+    changes (2026-09-08).
+  - A 3x3 SAD match for camera- vs. body-path: self-confirming, the
+    camera always won (2026-09-08); replaced by the occupancy grid.
+  - "The hub turns with the ring, one cluster" (16:22 flight):
+    retracted, it always counter-turns.
+  - The "stepped parts" per-record-multiple fix: retracted (37th
+    flight), records show no net turn; the spin is in a hidden bone.
+  - Distant shimmer as a pure sampling limit (8th flight): retired by
+    the 9th -- it was the reversed-Z depth decode.
+- **Next flight:** Two eye runs of the smoke trail mid-view (DLSS on,
+  `drives_smoke` on), raw crops plus a treated overview, with
+  `fix.temporal_aa_smoke` on then off, to tell the voids' cause apart.
+- **Environment:** DLSS at varying render fractions (Elite's HMD
+  Quality) and under the pass's own non-DLSS history; only one flight
+  names the headset, a Pimax (2026-09-04); eye sizes from 2514x2482 to
+  5424x5356 appear across sessions. Depth decode needs the game's own
+  reversed-Z, no-far-plane row, not the runtime's 0.025-50000 m planes.
+  Fixed tables: a 128-cell/side grid; up to 8 ships and 2 rigid bodies
+  per frame.
+- **Detail:** The flight log (48 numbered flights) is inline under
+  "Phasing" item 3 (Tier 2, `fix.temporal_aa_objects`); "Phase 0 --
+  what must be measured, not assumed" holds the census/stencil/pool
+  questions feeding it. "The moving ships", "The second body" and "The
+  stepped parts" cover those three sub-mechanisms on their own. This
+  journal ends at the 2026-09-10 smoke-voids review; twelve later
+  reviews (2026-09-10/11) carry the arc on, filed beside this doc as
+  review-<topic>-<date>.md (distance-motion, smoke-voids/toggles/
+  captures x2, station-flicker/depth, ui-panels/coverage,
+  yaw-sprite-depth, planet-panels, roll-and-orbits).
 
 *A design document, written before the code, as a companion to
 [anti-aliasing.md](anti-aliasing.md) (feature B, the temporal pass) and to

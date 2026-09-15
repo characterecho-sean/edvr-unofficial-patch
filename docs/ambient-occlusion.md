@@ -1,20 +1,68 @@
 # Ambient occlusion that disagrees between the eyes: a design for the hunt
 
+## Status
+
+*Written 2026-09-15 from the entries dated 2026-09-07 (first worksheet and
+first capture) and 2026-09-10 (second capture). It restates the journal
+below and is not new evidence; update it whenever this doc changes.*
+
+- **State:** Issue #23, two captures in. The pass is named and measured:
+  Elite's ambient occlusion is HBAO, three compute dispatches per eye per
+  frame (`FB277B33F0865348`, `9347F8FC2DCE0248`, `D31E7812990B19A6`). Of
+  the four candidate mechanisms: **D** (EDVR itself) and **B** (one eye
+  per frame) are closed; **C2** (half resolution) is closed — the
+  reported tier runs at full `ResolutionScale`, and the fault persists at
+  Low too; **C** (noise anchored to the pixel grid, a 16-layer
+  deinterleave) is measured and confirmed, "nothing left to capture for
+  it"; **A** (the rotation seed stepping per pass, not per frame) is the
+  one mechanism still open, and per "Where A and C stand" no shipped
+  instrument can settle it — the rotation table is bound as a shader
+  resource (`s2`), not a constant buffer, which is all `census_cb_watch`
+  can read.
+- **Open:**
+  - Whether A is also present on top of C: the two eyes' 768-byte,
+    16-entry rotation tables may or may not hold the same values —
+    unmeasured.
+  - Whether "Low looks exactly the same as High" (first worksheet) is
+    real or a tier that did not take without a restart — flagged to
+    re-ask, not resolved.
+  - "Everywhere, or only asteroids?" — the arm, the cockpit and a station
+    hangar are still unlooked at ("Beyond asteroids").
+- **Ruled out:**
+  - The eye-split dump had "probably already photographed the [occlusion]
+    buffer" — struck through in this doc; it photographed the sun-shadow
+    mask instead, proved independently two ways.
+  - "A single census settles both [A and C]" — half wrong:
+    `census_cb_watch` reads only constant buffers, and the rotation table
+    lives in an SRV-bound buffer at `s2`.
+- **Next flight:** Two shipped keys, "one flight each, in this order"
+  (Phase 2): `census_skip_dispatch = 9347F8FC2DCE0248` should make the
+  occlusion vanish (confirms the pass); then
+  `experimental.dispatch_pair_sync = D31E7812990B19A6:all` copies eye A's
+  occlusion over eye B's — if the cracks stop disagreeing, the fault is
+  entirely inside these three dispatches and the fix is a substitution.
+- **Environment:** First capture: Quest 3 via OpenComposite on SteamVR's
+  OpenXR layer, HMD Quality 1.0, supersampling 1.0, RTX 4080 Super, EDVR
+  0.14.0, `AOQuality 3` ("High", the worksheet's "Ultra"), game build
+  332841. Second capture differed only in `HMDRenderTargetMultiplier`
+  (0.750 vs 1.000), which made the occlusion target 1896x2028 rather than
+  the 2528x2704 published eye. The rotation table is a fixed 768-byte,
+  16-entry buffer. Reading it needs the compute-shader-dump commit
+  `192a36d`, on main but unreleased; the reporter is on v0.14.0.
+- **Detail:** "What the second capture said" (esp. "The chain, named" and
+  "Where A and C stand") for the current measurements and "Phase 2, as it
+  can be typed today" for the next probes; "What the capture said" for
+  the first session and the eye-split/shader-dump dead ends; "Open
+  questions" for the full Q1-13 recap; "What this capture changes about
+  the instruments" for tooling gaps. Linked: scanner-body.md (the
+  shadow-mask connection), eye-brightness.md ("a note on method").
+
 *A design document, written before any capture. Written 2026-09-07 on
 branch `claude/asteroid-ao-inconsistency-xt19n7` off main `dc3ebad`. Claims
 about EDVR cite the source; claims about the game are labelled measured
 (this repo's censuses, dumps and disassemblies), read (taken from a
 captured shader's bytecode), or believed; what only a live session can
-settle is collected under Phase 0. Nothing here is built. Two captures have
-arrived on issue #23, and their readings are under
-[What the first worksheet said](#what-the-first-worksheet-said),
-[What the capture said](#what-the-capture-said) and
-[What the second capture said](#what-the-second-capture-said). **The pass
-is named**: Elite's ambient occlusion is HBAO, a chain of three compute
-dispatches per eye per frame -- `FB277B33F0865348`, `9347F8FC2DCE0248`,
-`D31E7812990B19A6` -- and mechanism C is measured, its sixteen-layer
-deinterleave anchored to the pixel grid. Mechanism A is the one thing left
-open, and no shipped instrument can reach it.*
+settle is collected under Phase 0.*
 
 ## The ask
 

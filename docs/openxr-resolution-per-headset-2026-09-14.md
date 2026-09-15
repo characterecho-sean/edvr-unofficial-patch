@@ -1,5 +1,65 @@
 # OpenXR resolution per headset
 
+## Status
+
+*Written 2026-09-15 from the entries dated 2026-09-14 (revision 3) and
+2026-09-15 (the step-size decision). It restates the journal below and is
+not new evidence; update it whenever this doc changes.*
+
+- **State:** Revision 3, DECIDED and BUILT (ab48589 on native runtime
+  d160499; every gate green incl. 205 native_render_settings_test checks)
+  but NOT YET FLOWN. `openxr_render_scale` renamed `openxr_resolution`;
+  the unit changes from percent/fraction to per-eye width in pixels,
+  keyed on the sanitised (runtime name, system name) pair -- because
+  2026-09-14's logs show one Quest 3's saved 180% resolving to 5530x5875
+  per eye (32.5 MP) the moment Virtual Desktop supplied a bigger base.
+- **Open:**
+  - "Decisions for Sean" #2, 3, 5-9 carry no DECIDED tag (only #1, #4 do).
+  - Whether SteamVR/OpenXR reports one `systemName` for two headsets
+    (flight 2b; "Risks").
+  - Every runtime's `systemName`, and PiOpenXR's exact bytes, unrecorded.
+  - Whether Elite's Graphics Apply re-inits VR in-process (flight 1 looks
+    for a shutdown/startup pair; decision 8 depends on it).
+  - Decision 9: widen the 0.25-2.0 width clamp, or leave it.
+- **Ruled out:**
+  - Keying entries on the runtime's recommended `WxH` (rev. 2): one Pimax
+    gave six different sizes on 2026-09-14 alone.
+  - A single per-eye-megapixel budget: Sean's rigs sit at 11.6 MP and
+    16-29 MP, so one number serves neither.
+  - FOV signature (angular density) for startup sizing: needs a begun
+    frame, which comes after the swapchains exist; extension unprobed.
+  - A table of panel resolutions per headset model: no panel size is
+    exposed and no `systemName` is on record.
+  - A `[headset:<name>]` ini section per headset: breaks five consumers
+    (checker, audit, installer merge, menu, dotted-key split).
+  - A wildcard entry for unlisted headsets: reintroduces the
+    cross-headset hazard the design exists to remove.
+- **Next flight:** Desk pass first (re-read both live `edvr.ini` files +
+  mirrors via explicit UTF-8 decode; build; install `--verify-only`; run
+  the unpaired native diagnostic per runtime to record `runtime,`,
+  `system,vendor=`, `headset_key,` and `size,...,max=` lines -- system
+  names and PiOpenXR's bytes are unrecorded today). Then Flight 1 (Quest
+  3, Air Link then Virtual Desktop): confirm the 100% fallback, set a
+  width from F8, confirm no 5530x5875-style blowup, watch for a
+  shutdown/startup re-init pair. Then Flight 2 (Pimax/SteamVR, both
+  installs) and optional Flight 2b (Steam Link). See "Retest plan".
+- **Environment:** Native OpenXR host only (SteamVR/OpenComposite never
+  call this query). Runtimes on record: Oculus 1.207.0, SteamVR/OpenXR
+  2.17.9, VirtualDesktopXR 1.0.10, PiOpenXR (bytes unconfirmed). Two
+  headsets/installs (Quest 3; Pimax Crystal Super), recommended sizes
+  1824x1968 to 5424x5356. Fixed tables: D3D11's 16384 cap, the per-view
+  max (8192 SteamVR, 16384 PiOpenXR), the 184-byte v2 ABI, 30-byte token.
+- **Detail:** "The problem" has the flight-log tables and the 5530x5875
+  incident. "What the runtime tells us, and what it does not" has the
+  startup order. "Options considered" has every ruled-out identity/unit.
+  "The recommended design" (all subsections) is the build itself.
+  "Decisions for Sean" and "Claims to verify" close the doc. Linked:
+  openxr-resolution-2026-09-14.md (design being replaced),
+  openxr-airlink-menu-exit-2026-09-14.md and
+  openxr-metrics-parity-2026-09-14.md (cited flights, one attribution
+  corrected here), openxr-runtime-inventory-2026-09-12.md and
+  openxr-native-discovery-2026-09-13.md (fixture values).
+
 Design for setting the OpenXR render resolution per headset and runtime, so
 that a value chosen on the Quest 3 cannot follow Sean onto the Pimax, or onto
 the same Quest 3 through a different streaming app. It replaces the unreleased
@@ -442,7 +502,7 @@ start; the F8 row is labelled `OpenXR res.` and shows it as a percent
 Decided: it is renamed to `fix.openxr_resolution`, because the value is no
 longer a scale of anything, the row label already says `OpenXR res.`, and the
 key is in no public release. The rename was put to Sean with the line above
-quoted, as CLAUDE.md requires, and he answered yes on 2026-09-14; the rest of
+quoted, as AGENTS.md requires, and he answered yes on 2026-09-14; the rest of
 this document uses the new name throughout. No `moved-from`: the old grammar (a
 bare number) is refused under the new key, so there is nothing to carry across.
 What happens to the two live files that still carry the old line is under

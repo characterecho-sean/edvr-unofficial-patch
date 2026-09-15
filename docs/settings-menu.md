@@ -1,5 +1,64 @@
 # The in-headset settings menu: a design
 
+## Status
+
+*Updated 2026-09-15. Historical findings summarize the journal below; the
+current timing and overlay qualification is linked separately.*
+
+- **Current change:** The two-row overlay keeps its apparent size across
+  OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
+  desktop gates passed; headset checks remain in the
+  [combined test guide](native-render-benchmark-2026-09-15.md).
+- **State:** Supersedes and extends Feature 4 of performance.md
+  (2026-09-05), which now points here. Written 2026-09-07 on branch
+  `claude/ingame-settings-menu-78317d` off main `5e2d545`; claims are
+  marked MEASURED (desk or field log) or BELIEVED (inference, gated in
+  "Phase 0"). Phase A (the menu) was BUILT and UNFLOWN per the 2026-09-07
+  status note, then FLOWN that evening on a Pimax Crystal Super under
+  SteamVR — panel holds still, keys private, rows write the ini — and
+  has taken fixes through 2026-09-11 (see Detail). The 2026-09-07 claim
+  that every Phase 0 gate was open is not revisited later, though gates
+  get dated measurements below.
+- **Open:**
+  - The four items under "Open questions for Sean" (F8 vs a chord as
+    summon key; `keyboard = private` as default; where `developer`
+    lives; which `[fix]` rows get the `menu` token) — "Settings sketch"
+    already ships F8 and `private`, so those two may be settled without
+    this section saying so.
+  - Whether the 2026-09-10 DirectInput8Create-capture fix (see Ruled
+    out) has itself been confirmed by a flight is not stated.
+  - Phase 0 gates with no dated measurement here: G4 (GDI cost and
+    legibility), G6 (`aim = both` tuning), G11 (focus/Alt-Tab), G14 (the
+    leak audit).
+- **Ruled out:**
+  - The shared-DirectInput-vtable door, on the Steam install: the menu
+    reported "keys private" while Tab still reached the ship
+    (2026-09-08), confirmed by a 2026-09-10 flight log — fixed by
+    capturing `DirectInput8Create` itself instead of a shared table.
+  - `menu.aim = both` as default: "fought the keys" in the first flight
+    (2026-09-07) — `keys` ships as the default instead.
+  - Reading `Compositor_FrameTiming` at the modern struct's offsets: it
+    is really the 176-byte v0.9.20 layout ("cost four flights and two
+    wrong answers"); two claims are explicitly retracted ("Elite calls
+    WaitGetPoses thirty microseconds before it submits", "the app's GPU
+    time reads 0.2 ms").
+  - The climbing "with EDVR" drop count on the second flight (2026-09-07):
+    a ring-buffer bug (record written to the wrong entry), not real
+    menu-caused drops.
+- **Environment:** The DirectInput8Create fix is stated
+  runtime-independent ("applies to both SteamVR and OpenComposite"); the
+  first flight (2026-09-07) was a Pimax Crystal Super under SteamVR;
+  later entries (2026-09-08 on) say "the Steam copy" or "Sean's rig"
+  without restating the headset. The shared-vtable door held on the
+  install tested first but not the Steam copy, where Steam's overlay may
+  hand out private per-device tables.
+- **Detail:** "The keyboard gate" for the three doors and fail-open
+  rules; "Navigation and interaction" for the DirectInput finding, the
+  footer fix, "Your Elite keys (2026-09-11)" and the Tab-follows-page-pair
+  fix; "What it shows" for the Monitor page's `Compositor_FrameTiming`
+  finding; "Phase 0 -- what must be measured before code depends on it"
+  for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
+
 *A design document, written before the code. It supersedes and extends
 Feature 4 of [performance.md](performance.md) (2026-09-05), which stays as
 the origin and now points here. Claims about EDVR cite the source; claims
@@ -9,30 +68,6 @@ a gate below that turns it into a measurement before code may depend on
 it); what can only be settled with a headset on is collected under Phase 0.
 Written 2026-09-07 on branch `claude/ingame-settings-menu-78317d` off main
 `5e2d545`.*
-
-*Status, 2026-09-07, later the same day: **phase A is BUILT and UNFLOWN**
-on the same branch -- the three doors (`src/d3d11/input_gate.cpp` over
-`src/common/iat_hook.cpp`), the model and the ini write
-(`src/d3d11/menu.cpp`), the GDI raster and the compute composite
-(`src/d3d11/menu_panel.cpp`, export `edvrMenuPanel`), the door's caller
-(`src/openvr/menu_door.cpp`), the channel fields (`frame_flag` `_v24`),
-the generated row table (`menu_schema.inc` from
-`tools/gen_settings_schema.py`), the `[menu]` section and `hotkey.menu = F8`
-in `edvr.ini`, and `tools/menu_test`. Two things differ from the text
-below and are marked where they occur: the developer tier's restart
-enforcement is a build WARNING with a `?` badge rather than an error (61
-keys in `[advanced]` and `[experimental]` do not yet say when they apply,
-and rewriting 61 comments was not this change's job), and `iniedit` moved
-to `src/common` in namespace `edvr`. Every Phase 0 gate is still open.*
-
-*Flown 2026-09-07, the same evening, on the Pimax Crystal Super under
-SteamVR: the panel appears where you look and holds still, the keys are
-private, the rows write the ini. Two changes from that flight, both below:
-head-aim fought the arrow keys and is off by default now (`menu.aim =
-keys`), and the frame-time line left the Status page for a **Monitor
-page** with fpsVR's readout and a frame-time strip, plus an optional
-head-locked readout while the menu is closed (`menu.fps_overlay`), the
-toolkit's overlay.*
 
 ## The ask
 
