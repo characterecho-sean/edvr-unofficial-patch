@@ -38,9 +38,18 @@ session averaged 427k tokens per call and never compacted.
 - **Keep new docs small.** Append a dated entry to the arc's own doc
   rather than starting another review doc; a review that must be its own
   file stays under about 15 KB.
-- **Delegate to Sonnet subagents** (the Agent tool with `model: "sonnet"`)
-  for research, exploration and implementation. The main context is for
-  diagnosis and decisions; only the agent's conclusion comes back.
+- **Delegate to subagents on the cheapest model that will do the job
+  well.** Research, exploration and implementation go to a subagent, and
+  only its conclusion comes back, so the main context stays small. Pick
+  the tier by the task: mechanical, fully specified work with a check at
+  the end (a reflow, an install and verify, a log read, a rename) goes to
+  the cheapest tier; work needing judgment across files or a build gate
+  goes to a mid tier; the top tier stays in the main context for diagnosis
+  and decisions, where a wrong call costs a test flight. If a cheaper tier
+  fails its check or reports doubt, rerun on the next tier up with its
+  report attached rather than finishing by hand in the main context. Do
+  not delegate a job of two or three tool calls: a subagent's own overhead
+  exceeds it.
 - Memory topic files point at the doc; they never mirror its journal.
 
 ## The sanctioned tools
