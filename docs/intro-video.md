@@ -2,23 +2,21 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-08-28 and 2026-09-13,
-plus one undated flight after them (the "Flight 09:43" log, commit
-fbd8284). Restates the journal below; update it whenever this doc
-changes.*
+*Written 2026-09-15 from the entries dated 2026-08-28 and 2026-09-13 --
+the latter spanning the Flight 09:43 and Flight 10:09 entries (commits
+fbd8284, 2aa0c2d, 0d7251b). Restates the journal below; update it
+whenever this doc changes.*
 
 - **State:** Two phases, both off by default. (1) The splash-panel
   placement/world-lock/FSR fix (`fix.intro_video_size`,
   `intro_video_lock`, `intro_video_upscale` + deband/dither/sharpen):
   SHIPPED, field-verified 2026-08-28. (2) `fix.intro_video = skip`
-  (built 2026-09-13): its first flight found the executable-import
-  hook alone was bypassed by Windows' own quartz.dll reader, so
-  quartz.dll's CreateFileW import is hooked too now -- but that fix is
-  UNCONFIRMED by an actual game launch (the doc's last words ask for
-  exactly that flight).
+  (built 2026-09-13, SHIPPED v0.16.2): Flight 09:43 found the
+  executable-import hook alone bypassed by quartz.dll's reader; fix
+  2aa0c2d patched quartz's CreateFileW too, CONFIRMED by Flight 10:09 --
+  WORKED, 2 refusals, scene at 22.5 s against the 28.8 s baseline (~6 s
+  saved, not ~20 s).
 - **Open:**
-  - The quartz.dll-hook fix for `skip` needs a real game-launch
-    confirmation (see Next flight).
   - Facing the wrong way at the splash after the cut: unmeasured,
     likely a second, separate fix.
   - Whether the movie already plays during phase A (first 3-5 s):
@@ -39,24 +37,27 @@ changes.*
     frames played).
   - The resample cache keyed on the source resource: each eye's draw
     destroyed the other eye's cached build.
-- **Next flight:** A real game launch with `fix.intro_video = skip`,
-  checking for `DirectShow reader CreateFileW patched`, a refusal
-  naming `DirectShow CreateFileW`, and `WORKED` with no movie frames.
+  - The "DRAWING anyway" line after Flight 10:09's WORKED verdict:
+    the front end's own loop on the same composite, not a second
+    ident replay (0d7251b).
+- **Next flight:** Confirm `skip`'s missing-file handling on the
+  Frontier install (Flight 09:43 and 10:09 are both Steam), and the
+  fourth outcome -- a hang or crash with `skip` set.
 - **Environment:** The placement fix was measured on a Frontier
   install, game build 330683, Pimax via OpenComposite, eye 5424x5356.
-  The skip feature's flight used a different install (Steam, verifying
-  commit fbd8284) and needs no headset. Placement lives in vertex
-  shader constant buffer 2 (80 bytes); the census's constant-watch
-  reads slot b0 by default (`advanced.census_cb_slot` reads others).
+  The skip feature's flights used the Steam install (commits fbd8284,
+  then 2aa0c2d) and need no headset. Placement lives in vertex shader
+  constant buffer 2 (80 bytes); the census's constant-watch reads
+  slot b0 by default (`advanced.census_cb_slot` reads others).
 - **Detail:** The placement mechanism runs "Flight 3" through "Flight
   6" (a full-screen quad; real placement is VS `cb2`); "Stage one,
   built: fix.intro_video_size" and "What shipped" cover what it
   built; "What the bugs were, since the pattern is the lesson" is
-  process lessons. The skip feature is "Not playing it at all:
-  `fix.intro_video = skip`" and "Flight 09:43: the file reader
-  bypassed the executable hook". "The other symptom: facing the wrong
-  way at the cut" is the separate unmeasured issue. Companion:
-  docs/loading-panel-handoff.md, docs/loading-scrim.md.
+  process lessons. The skip feature is "Not playing it at all",
+  "Flight 09:43" (the quartz.dll bypass) and "Flight 10:09" (its fix
+  confirmed). "The other symptom: facing the wrong way at the cut" is
+  the separate unmeasured issue. Companion: docs/loading-panel-handoff.md,
+  docs/loading-scrim.md.
 
 Reported 2026-08-28 and **measured the same day**, across two flights, on the
 field rig (Frontier launcher install, game build 330683, one eye 5424x5356,
@@ -838,3 +839,41 @@ handling: look for `DirectShow reader CreateFileW patched`, a refusal
 naming `DirectShow CreateFileW`, and `WORKED` with no movie frames. The
 standalone reader test cannot by itself establish Elite's scene
 transition behavior.
+
+## Flight 10:09: the quartz.dll fix confirmed, and a false alarm explained
+
+Steam log `edvr_gfx_20260913_100913.log` verifies v0.16.1-14-g2aa0c2d,
+linked 2026-09-13 16:05:14 UTC. Skip armed at 10:09:14.213; the
+DirectShow reader's `CreateFileW` refused
+`Movies/Ident_Frontier_EliteNeutral.webm` twice, at 10:09:17.620; and
+`intro skip: WORKED -- 2 refusal(s), the movie never drew, and the
+first rendered scene arrived 22.5 s after the skip armed` printed at
+10:09:36.745. Against the 28.8 s Flight 09:43 measured when the movie
+played in full, that is about 6 s saved to first scene, not the ~20 s
+the movie itself runs (the WORKED line's own parenthetical). A
+near-identical run the same morning, log `edvr_gfx_20260913_100228.log`
+on the same build, also WORKED: 2 refusals, scene at 22.3 s.
+
+This is the confirmation the doc's last entry asked for. The log's
+version line verifies build 2aa0c2d, which patches quartz.dll's own
+`CreateFileW` import before graph setup -- closing the gap Flight
+09:43 found. And the game's missing-file handling, which Flight 09:43
+left as "the field's word, not this project's measurement," is now
+measured directly: two refusals, no movie frames, no hang, and a
+clean scene transition.
+
+One line in the same log reads oddly: `intro skip: the movie is
+DRAWING anyway, after 2 refusal(s): ... Please report this log`, at
+10:09:37.330 -- 0.585 s after WORKED. Commit 0d7251b (2026-09-13, the
+same day) explains and silences it: the front end's own background
+loops (`FrontEnd*.webm`) ride the same YUV composite the fill detector
+matches, and start once the scene is up, so a fill counted after the
+verdict is that loop, not a second ident replay. "Log discipline only
+... no behaviour changes" per the commit message. Both 2aa0c2d and
+0d7251b are in tag v0.16.2 (`git merge-base --is-ancestor 2aa0c2d
+v0.16.2` confirms the first; the tag's own tip is 0d7251b itself).
+
+Not yet flown: the fourth outcome (a hang or crash with `skip` set,
+per the table above), and whether the Frontier install's missing-movie
+path behaves the same -- Flight 09:43 and Flight 10:09 are both the
+Steam rig.

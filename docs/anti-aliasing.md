@@ -6,16 +6,16 @@
 2026-09-06 and 2026-09-02 through 09-04. Restates the journal below;
 not new evidence — update it whenever this doc changes.*
 
-- **State:** Per "Current defaults" (2026-09-10, the doc's latest
-  note): TAA/DLSS includes UI/smoke depth and station motion
-  automatically; Feature A's resolve is experimental, defaulting OFF —
-  conflicting with the 2026-09-03 narrative where `auto` "became the
-  shipped default"; unclear which is current, check `edvr.ini`
-  directly. Feature A is built, field-verified on both rigs. Feature B
-  (temporal AA, DLAA/DLSS) is built, flown almost daily 2026-09-02 to
-  09-08, but "is on its branch" per "Guidance for players now"; a
-  2026-09-06 pass cut its cost 2.80 -> 2.02 ms/eye. C and D remain
-  unbuilt sketches. The rest lock shipped 09-03, retired 09-04.
+- **State:** Per "Current defaults" (2026-09-10): TAA/DLSS includes
+  UI/smoke depth and station motion automatically. Feature A's
+  resolve defaults `off` (`auto` shipped 2026-09-03, 06430da, until
+  6d22901 flipped it 2026-09-10 in v0.15.0, bundling per-object motion
+  into `temporal_aa` the same commit; `off` is current). Feature A is
+  built, field-verified on both rigs. Feature B (temporal AA,
+  DLAA/DLSS) is built, flown almost daily 2026-09-02 to 09-08, but
+  "is on its branch" per "Guidance for players now"; a 2026-09-06
+  pass cut its cost 2.80 -> 2.02 ms/eye. C and D remain unbuilt
+  sketches. The rest lock shipped 09-03, retired 09-04.
 - **Open:**
   - Features C and D: still unbuilt design sketches.
   - DLSS/FSR 2 as default engines behind the door (Phasing step 6): not
@@ -362,7 +362,8 @@ in the graphics log; believed well under a millisecond per eye at headset
 sizes until the field says otherwise.
 
 **What was built (2026-09-02: the passive mode; `auto` by default since
-2026-09-03).** The
+2026-09-03).** `auto` stayed the shipped default until 6d22901
+(2026-09-10, in v0.15.0) flipped it to `off`; see the Status block. The
 openvr half decides (`src/openvr/supersample_resolve.cpp`). Every
 forwarded submit's per-eye size — the texture's size narrowed by its
 bounds, which is the post-crop size when the cull guard is live — is
