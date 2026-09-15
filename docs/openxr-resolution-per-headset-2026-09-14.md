@@ -6,8 +6,10 @@ the same Quest 3 through a different streaming app. It replaces the unreleased
 `fix.openxr_render_scale` key described in
 [openxr-resolution-2026-09-14.md](openxr-resolution-2026-09-14.md) with
 `fix.openxr_resolution` (the rename was put to Sean and agreed on 2026-09-14)
-and builds on the native runtime merged in d160499. Nothing here is built; this
-is the design and its retest plan.
+and builds on the native runtime merged in d160499. Built 2026-09-14 (ab48589,
+every gate green, 205 checks in native_render_settings_test) and not yet flown:
+the retest plan below is the next step, and the system tokens in the ini
+example are placeholders until a flight records the real strings.
 
 Revision 3, after the flight logs of 2026-09-14. Revision 2 keyed entries on
 the runtime's recommended per-eye size and stored a percent of it; the same
@@ -1119,19 +1121,19 @@ through to the Text wording.
   (:1897-1916) treat it as an unsigned integer in 1..16384; both write the
   result of `mergeResolutionEntry(r.value, rt, sys, width)` through
   `applyChange` (:1499-1515) and the existing one-value merge (`menuIniWrite`
-  :650-699), so the other headsets' entries are preserved (re-serialised in
-  the canonical `rt/sys:W` spacing and case, as the header section says --
-  `Oculus/Meta-Quest-3:3283` comes back as `oculus/meta-quest-3:3283`, the
-  same key -- never resized or re-keyed). Stepping moves to the ADJACENT
-  grid point in the direction pressed, Shift to the fifth, so an on-grid
-  width never skips a point and Shift moves exactly five; a press never
-  moves against its own direction (Right from a stored width above the
-  clamp writes nothing rather than the lower clamped value). With
-  no coherent sizing or invalid labels, editing is refused and `s.lastWrite`
-  (the Status page's last-write line, :1511, a 63-byte field) reads `No headset
-  sizing published yet; try again in a moment.` (55 characters). The "moment"
-  covers the F8-open-before-VR-init window: the per-tick refresh at :2565 picks
-  the sizing up within a second of the host publishing it.
+  :650-699), so the other headsets' entries are preserved (re-serialised in the
+  canonical `rt/sys:W` spacing and case, as the header section says --
+  `Oculus/Meta-Quest-3:3283` comes back as `oculus/meta-quest-3:3283`, the same
+  key -- never resized or re-keyed). Stepping moves to the ADJACENT grid point
+  in the direction pressed, Shift to the fifth, so an on-grid width never skips
+  a point and Shift moves exactly five; a press never moves against its own
+  direction (Right from a stored width above the clamp writes nothing rather
+  than the lower clamped value). With no coherent sizing or invalid labels,
+  editing is refused and `s.lastWrite` (the Status page's last-write line,
+  :1511, a 63-byte field) reads `No headset sizing published yet; try again in
+  a moment.` (55 characters). The "moment" covers the F8-open-before-VR-init
+  window: the per-tick refresh at :2565 picks the sizing up within a second of
+  the host publishing it.
 - Write log and last write, the eleventh site: `drainWrites` (:1533-1538)
   prints `w.job.before` and `w.job.value` whole, which for this row are the two
   lists, and `applyChange` (:1511) puts the whole new list in `s.lastWrite`,
@@ -1185,24 +1187,23 @@ through to the Text wording.
   window or Notepad open copies; the first draft's single line (`Headset: Pimax
   Crystal Super via SteamVR/OpenXR (steamvr-openxr/pimax-crystal-super),
   4980x4916`, 87 characters) would have been cut mid-key. The three lines are
-  drawn only while `nativeMenuActive()` (the Runtime line's own predicate):
-  on SteamVR and OpenComposite no v2 query ever runs, so they would read
-  `unknown` for the whole session, and the page shows one line, `Headset` /
-  `native OpenXR only (not in use on this runtime)`, instead; the row's
-  refusals on those runtimes read `Native OpenXR only; this runtime ignores
-  it.` (hint) and `not written: native OpenXR only` (last write), never the
-  "moment" wording, which is the native path's. Two constants the lines
-  depend on, recorded so the next Status line does not push `Last write` off
-  silently: `statusLine` drops lines past `kMenuMaxLines` (menu_panel.h),
-  raised from 14 to 16 because the native Status page is now fifteen
-  `statusLine` calls and the fifteenth is `Last write`, where this row's
-  refusals and confirmations appear; and the page is drawn `compact`
-  (row pitch 1.7 cap, the Monitor page's), because at the two-cap pitch the
-  raster's 2048-px height guard (`rasterise`, menu_panel.cpp) trips from a
-  51-px cap with fifteen rows, which is the Pimax at the default 1.1 deg,
-  and a page it refuses keeps its previous bitmap; the guard now logs once
-  (`menu panel: a WxH layout ... is outside the raster's ... box`) so a stale
-  page is distinguishable from a missing one.
+  drawn only while `nativeMenuActive()` (the Runtime line's own predicate): on
+  SteamVR and OpenComposite no v2 query ever runs, so they would read `unknown`
+  for the whole session, and the page shows one line, `Headset` / `native
+  OpenXR only (not in use on this runtime)`, instead; the row's refusals on
+  those runtimes read `Native OpenXR only; this runtime ignores it.` (hint) and
+  `not written: native OpenXR only` (last write), never the "moment" wording,
+  which is the native path's. Two constants the lines depend on, recorded so
+  the next Status line does not push `Last write` off silently: `statusLine`
+  drops lines past `kMenuMaxLines` (menu_panel.h), raised from 14 to 16 because
+  the native Status page is now fifteen `statusLine` calls and the fifteenth is
+  `Last write`, where this row's refusals and confirmations appear; and the
+  page is drawn `compact` (row pitch 1.7 cap, the Monitor page's), because at
+  the two-cap pitch the raster's 2048-px height guard (`rasterise`,
+  menu_panel.cpp) trips from a 51-px cap with fifteen rows, which is the Pimax
+  at the default 1.1 deg, and a page it refuses keeps its previous bitmap; the
+  guard now logs once (`menu panel: a WxH layout ... is outside the raster's
+  ... box`) so a stale page is distinguishable from a missing one.
 
 That is eleven sites (label, value, hint, tooltip facts, tooltip body,
 step/edit, reset, badge x3 recomputes plus the tick, toast, audit, Status,
