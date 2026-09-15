@@ -418,12 +418,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     const auto color=capture.colorSpace(eye);
     if(color!=vr::ColorSpace_Auto&&color!=vr::ColorSpace_Gamma&&color!=vr::ColorSpace_Linear)
       return XR_ERROR_VALIDATION_FAILURE;
-    const bool gamma=color!=vr::ColorSpace_Linear,bgra=td.Format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-    sd.Format=bgra?(gamma?DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:DXGI_FORMAT_B8G8R8A8_UNORM):
-      (gamma?DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:DXGI_FORMAT_R8G8B8A8_UNORM);
-    sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
-    if(FAILED(device_->CreateShaderResourceView(texture,&sd,&srvs[i])))return XR_ERROR_RUNTIME_FAILURE;
+    if(FAILED(capture.shaderView(eye,&srvs[i])))return XR_ERROR_RUNTIME_FAILURE;
     auto& c=constants[i];
     c.bounds[0]=b.uMin;c.bounds[1]=b.vMin;c.bounds[2]=b.uMax;c.bounds[3]=b.vMax;
     // Clamp filtering inside the selected crop, including reversed bounds, so
@@ -452,8 +447,9 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     context_->VSSetShader(blitVertexShader_.Get(),nullptr,0);context_->PSSetShader(blitPixelShader_.Get(),nullptr,0);
     context_->PSSetSamplers(0,1,blitSampler_.GetAddressOf());
     context_->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
-    auto* rtv=eyes_[i].rtvs[index].Get();const float black[]={0,0,0,1};
-    context_->ClearRenderTargetView(rtv,black);context_->OMSetRenderTargets(1,&rtv,nullptr);
+    // This scene shader writes every pixel with no discard. Diagnostics and
+    // partial rendering still clear their targets where coverage requires it.
+    auto* rtv=eyes_[i].rtvs[index].Get();context_->OMSetRenderTargets(1,&rtv,nullptr);
     D3D11_VIEWPORT vp{0,0,float(eyes_[i].width),float(eyes_[i].height),0,1};context_->RSSetViewports(1,&vp);
     context_->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
     context_->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);context_->Draw(3,0);

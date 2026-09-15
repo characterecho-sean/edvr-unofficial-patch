@@ -46,6 +46,12 @@ class EyeCapture final {
   ID3D11Texture2D* texture(vr::EVREye eye) const;
   vr::VRTextureBounds_t bounds(vr::EVREye eye) const;
   vr::EColorSpace colorSpace(vr::EVREye eye) const;
+  // Cached by captured resource and color interpretation. Views travel with
+  // exchanged buffers and retire with their texture on reset/resize/close.
+  // Like capture, this is serialized by the caller (the XR owner in shared
+  // mode). The returned COM reference belongs to the caller.
+  HRESULT shaderView(vr::EVREye eye, ID3D11ShaderResourceView** output) const;
+  uint64_t shaderViewsCreated() const { return shaderViewsCreated_; }
 
  private:
   vr::EVRCompositorError captureShared(vr::EVREye eye, const vr::Texture_t* texture,
@@ -54,6 +60,7 @@ class EyeCapture final {
                                        GpuWorkObserver* observer);
   struct Eye {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
+    mutable Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shaderViews[2];
     vr::VRTextureBounds_t bounds{0.f, 0.f, 1.f, 1.f};
     vr::EColorSpace colorSpace = vr::ColorSpace_Auto;
     bool captured = false;
@@ -67,6 +74,7 @@ class EyeCapture final {
   ImmediateExecutor* sharedExecutor_ = nullptr;
   bool sharedInitialized_ = false;
   bool initialized_ = false;
+  mutable uint64_t shaderViewsCreated_ = 0;
 };
 
 } // namespace edvr::openxr

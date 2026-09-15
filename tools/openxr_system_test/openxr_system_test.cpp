@@ -52,6 +52,22 @@ struct FakeSource final : SystemSource {
   unsigned locateCalls = 0, resetCalls = 0, pollCalls = 0;
   unsigned projectionNotes = 0; uint64_t notedSequence = 0; unsigned notedEye = 99;
   float notedNear = 0, notedFar = 0;
+  unsigned queryAccepted=0,queryRejected=0;
+  unsigned frequencyNotes=0;vr::ETrackedPropertyError frequencyError{};float frequencyValue=0;
+  std::atomic<unsigned> propertyNotes{0},meshNotes{0};
+  vr::ETrackedDeviceProperty lastProperty{};vr::ETrackedPropertyError lastError{};
+  void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,vr::ETrackedDeviceProperty p,vr::ETrackedPropertyError e) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex);++propertyNotes;lastProperty=p;lastError=e;
+  }
+  void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*) noexcept override {++meshNotes;}
+  void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,vr::ETrackedPropertyError error,
+      float value,unsigned) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex);++frequencyNotes;frequencyError=error;frequencyValue=value;
+  }
+  void noteProjectionQuery(const SystemRead&,unsigned,float,float,vr::EGraphicsAPIConvention,
+      bool accepted,const vr::HmdMatrix44_t&,const void*) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex);if(accepted)++queryAccepted;else ++queryRejected;
+  }
   std::atomic<unsigned> unsupportedCalls{0};
 
   explicit FakeSource() {
@@ -149,6 +165,84 @@ void boundaryTests(vr::IVRSystem* system,FakeSource& source) {
   system->ApplyTransform(&eventPose,nullptr,nullptr);check(!eventPose.bPoseIsValid&&!eventPose.bDeviceIsConnected,"unsupported transform cannot claim valid pose");
 }
 
+void capabilityTests() {
+  using namespace edvr::openxr;
+  FakeSource source;OpenVRSystem system(source);vr::ETrackedPropertyError error{};
+  const auto saved=source.state;
+  check(near(system.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&error),.12f)&&error==vr::TrackedProp_Success,
+    "IPD uses full eye separation, including non-X displacement");
+  source.state.geometryValid=false;source.state.opticsValid=true;
+  source.state.optics.generation=source.state.generation;source.state.optics.sequence=1;
+  std::memcpy(source.state.optics.eyeToHead,saved.geometry.eyeToHead,sizeof(source.state.optics.eyeToHead));
+  check(near(system.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,nullptr),.12f),"IPD survives temporary tracking invalidation");
+  source.state.optics.eyeToHead[1].m[0][3]=NAN;
+  check(system.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&error)==0&&error==vr::TrackedProp_ValueNotProvidedByDevice,
+    "invalid eye separation never returns successful zero or NaN");
+  source.state.optics.generation++;
+  check(system.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&error)==0&&error==vr::TrackedProp_ValueNotProvidedByDevice,"IPD rejects stale-generation optics");
+  check(system.GetFloatTrackedDeviceProperty(1,vr::Prop_UserIpdMeters_Float,&error)==0&&error==vr::TrackedProp_InvalidDevice,"IPD validates device index");
+  check(!system.GetBoolTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&error)&&error==vr::TrackedProp_WrongDataType,"IPD preserves typed property contract");
+  source.state=saved;
+  auto masks=std::make_shared<NativeHiddenMasks>();masks->generation=source.state.generation;masks->revision=1;
+  // Asymmetric view and non-unit tangents; the triangle maps to (0,0),
+  // (0,1),(1,0) before the guard. This catches treating XR rays as UVs.
+  for(unsigned e=0;e<2;++e) {
+    source.state.geometry.raw[e]={-2,1,-1,3};
+    masks->eyes[e].vertices={{-2,-1},{-2,3},{1,-1}};masks->eyes[e].indices={0,1,2};
+    masks->guard[e][0]=masks->guard[e][1]=.01f;
+  }
+  source.state.hiddenMasks=masks;
+  auto left=system.GetHiddenAreaMesh(vr::Eye_Left),right=system.GetHiddenAreaMesh(vr::Eye_Right);
+  check(left.unTriangleCount==1&&right.unTriangleCount==1&&left.pVertexData!=right.pVertexData,"both eyes receive distinct immutable runtime meshes");
+  check(near(left.pVertexData[0].v[0],.01f)&&near(left.pVertexData[0].v[1],.01f)&&
+    left.pVertexData[1].v[1]>.9f&&left.pVertexData[2].v[0]>.9f,"mask axes and asymmetric projection match OpenVR UV convention");
+  bool inside=true;
+  for(unsigned i=0;i<3;++i)inside&=left.pVertexData[i].v[0]>=.00999f&&left.pVertexData[i].v[1]>=.00999f&&
+      left.pVertexData[i].v[0]+left.pVertexData[i].v[1]<=1-.014f;
+  check(inside,"every inset vertex stays strictly inside the original hidden triangle");
+  const auto oldVertex=left.pVertexData[1];
+  source.state.tangentShift[0][0]=.123f;
+  check(system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData==left.pVertexData,"jitter cannot allocate or move the retained mask");
+  source.state.recommendedWidth[0]/=2;
+  check(system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData==left.pVertexData,"resolution changes retain normalized mask and guard");
+  source.state.hiddenMasksCompatible=false;
+  check(!system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData,"experimental modified frustum does not receive a native mask");
+  source.state.hiddenMasksCompatible=true;
+  auto updated=std::make_shared<NativeHiddenMasks>(*masks);updated->revision=2;
+  updated->eyes[0].indices={0,2,1};source.state.hiddenMasks=updated;
+  check(system.GetHiddenAreaMesh(vr::Eye_Left).unTriangleCount==1&&
+    std::memcmp(&oldVertex,&left.pVertexData[1],sizeof(oldVertex))==0,"runtime replacement preserves old caller pointers and both windings");
+  updated=std::make_shared<NativeHiddenMasks>(*masks);updated->revision=3;updated->eyes[0].indices[0]=999;
+  source.state.hiddenMasks=updated;
+  check(!system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData,"invalid index cannot escape conversion");
+  source.state.hiddenMasks.reset();
+  check(!system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData&&left.pVertexData[1].v[1]==oldVertex.v[1],"mask invalidation does not free previously returned storage");
+  for(unsigned revision=4;revision<75;++revision) {
+    updated=std::make_shared<NativeHiddenMasks>(*masks);updated->revision=revision;source.state.hiddenMasks=updated;
+    system.GetHiddenAreaMesh(vr::Eye_Left);
+  }
+  check(!system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData&&left.pVertexData[1].v[1]==oldVertex.v[1],"mask retention limit refuses new data without dangling old pointers");
+  source.state.connected=false;
+  check(!system.GetHiddenAreaMesh(vr::Eye_Right).pVertexData&&
+    system.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&error)==0&&error==vr::TrackedProp_InvalidDevice,"retirement removes current IPD and mask availability");
+  check(!system.GetHiddenAreaMesh(static_cast<vr::EVREye>(99)).pVertexData,"invalid eye returns empty mesh");
+  FakeSource diagnostic;OpenVRSystem observed(diagnostic);
+  for(unsigned i=0;i<100;++i)observed.GetStringTrackedDeviceProperty(0,vr::Prop_ManufacturerName_String,nullptr,0,nullptr);
+  check(diagnostic.propertyNotes==1&&diagnostic.lastProperty==vr::Prop_ManufacturerName_String&&
+    diagnostic.lastError==vr::TrackedProp_ValueNotProvidedByDevice,"property diagnostic records exact missing ID/error once, with null caller error pointer");
+  for(unsigned i=0;i<200;++i)observed.GetInt32TrackedDeviceProperty(0,static_cast<vr::ETrackedDeviceProperty>(8000+i),nullptr);
+  check(diagnostic.propertyNotes==128,"property diagnostics have a fixed lifetime budget");
+  SystemPublication publication;SystemRead metadata{};metadata.connected=true;
+  const auto generation=publication.begin(metadata);masks=std::make_shared<NativeHiddenMasks>();masks->generation=generation;
+  check(publication.hiddenMasks(generation,masks)&&publication.publish(geometry(generation,1),false,false,nullptr,false)&&
+    !publication.read().hiddenMasksCompatible,"mask compatibility publishes with matching geometry");
+  publication.invalidate(generation);
+  check(publication.read().hiddenMasks==masks,"recenter preserves immutable runtime mask");
+  publication.retire(generation);
+  check(!publication.read().hiddenMasks&&!publication.hiddenMasks(generation,masks),"retirement prevents mask resurrection");
+  check(publication.begin(metadata)>generation&&!publication.hiddenMasks(generation,masks),"stale mask cannot enter replacement session");
+}
+
 void publicationTest() {
   edvr::openxr::SystemPublication publication;
   SystemRead metadata{}; metadata.connected = true; metadata.adapterIndex = 42;
@@ -241,6 +335,7 @@ void publicationTest() {
 
 int selfTest() {
   publicationTest();
+  capabilityTests();
   FakeSource source;
   edvr::openxr::OpenVRSystem concrete(source);
   vr::IVRSystem* system = openxrAbiCaller(&concrete);
@@ -354,7 +449,44 @@ int selfTest() {
   check(system->PerformFirmwareUpdate(0)==vr::VRFirmwareError_Fail,"firmware update unavailable result"); system->AcknowledgeQuit_Exiting(); system->AcknowledgeQuit_UserPrompt();
 
   boundaryTests(system,source);
+  {
+    FakeSource diagnostic;edvr::openxr::OpenVRSystem observed(diagnostic);
+    for(unsigned i=0;i<100;++i) {
+      observed.GetProjectionMatrix(vr::Eye_Left,0.025f,50000,vr::API_DirectX);
+      observed.GetProjectionMatrix(vr::Eye_Left,1,1000,vr::API_DirectX);
+    }
+    check(diagnostic.queryAccepted==2,"alternating normal clip planes do not consume diagnostic capacity");
+    const auto ordinary=observed.GetProjectionMatrix(vr::Eye_Left,2,100000,vr::API_DirectX);
+    const auto reversed=observed.GetProjectionMatrix(vr::Eye_Left,50000,1,vr::API_DirectX);
+    const auto infinite=observed.GetProjectionMatrix(vr::Eye_Left,1,std::numeric_limits<float>::infinity(),vr::API_DirectX);
+    const auto zeros=observed.GetProjectionMatrix(vr::Eye_Left,0,0,vr::API_DirectX);
+    check(diagnostic.queryAccepted==3 && diagnostic.queryRejected==3,"later new planes and rejection reasons remain observable");
+    check(ordinary.m[0][0]>0 && allZero(&reversed,sizeof(reversed)) && allZero(&infinite,sizeof(infinite)) && allZero(&zeros,sizeof(zeros)),
+          "projection diagnostics preserve normal and rejected return matrices");
+    for(unsigned i=3;i<80;++i)observed.GetProjectionMatrix(vr::Eye_Left,float(i),100000,vr::API_DirectX);
+    check(diagnostic.queryAccepted==32 && diagnostic.queryRejected==3,"successful log cap cannot exhaust rejection capacity");
+    { std::lock_guard<std::mutex> lock(diagnostic.mutex);diagnostic.state.geometryValid=false; }
+    const auto cached=observed.GetProjectionMatrix(vr::Eye_Left,1,1000,vr::API_DirectX);
+    check(cached.m[0][0]>0,"diagnostic capacity does not alter cached-optics availability");
+  }
 
+  {
+    FakeSource diagnostic;edvr::openxr::OpenVRSystem observed(diagnostic);
+    vr::ETrackedPropertyError e=vr::TrackedProp_Success;
+    diagnostic.state.displayFrequencyAvailable=false;
+    check(observed.GetFloatTrackedDeviceProperty(0,vr::Prop_DisplayFrequency_Float,&e)==0 &&
+          e==vr::TrackedProp_ValueNotProvidedByDevice && diagnostic.frequencyNotes==1 &&
+          diagnostic.frequencyError==e && diagnostic.frequencyValue==0,"frequency observer receives actual unavailable result");
+    diagnostic.state.displayFrequencyAvailable=true;diagnostic.state.displayFrequency=90;
+    check(observed.GetFloatTrackedDeviceProperty(0,vr::Prop_DisplayFrequency_Float,nullptr)==90 &&
+          diagnostic.frequencyNotes==2 && diagnostic.frequencyError==vr::TrackedProp_Success &&
+          diagnostic.frequencyValue==90,"frequency observer preserves available result and null error pointer");
+    check(observed.GetFloatTrackedDeviceProperty(1,vr::Prop_DisplayFrequency_Float,&e)==0 &&
+          e==vr::TrackedProp_InvalidDevice && diagnostic.frequencyNotes==3 && diagnostic.frequencyError==e,
+          "invalid-device frequency result is preserved");
+    observed.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&e);
+    check(diagnostic.frequencyNotes==3,"other float properties do not consume frequency samples");
+  }
   FakeSource freshSource;edvr::openxr::OpenVRSystem fresh(freshSource);vr::IVRSystem* concurrent=openxrAbiCaller(&fresh);
   auto unsupportedCalls = [&] {for(unsigned n=0;n<1000;++n){concurrent->ComputeDistortion(vr::Eye_Left,0,0);concurrent->GetTimeSinceLastVsync(nullptr,nullptr);}};
   std::thread a(unsupportedCalls), c(unsupportedCalls);a.join();c.join();check(freshSource.unsupportedCalls==2,"exactly one diagnostic per unsupported slot across threads");

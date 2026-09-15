@@ -303,6 +303,7 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
     if(application==vr::VRApplication_Scene) {
       const bool logging=NativeTrace::get().begin(reinterpret_cast<const void*>(&edvr_module_VR_InitInternal));
       nativeTracePrintf("module_init,version=%s,durable_log=%u\n",EDVR_VERSION_STRING,unsigned(logging));
+      nativeTracePuts("native_call_probes,frequency_property=2002,early=4,interval_ms=20000,max_samples=16,shutdown_return_marker=1,frequency_policy=runtime_or_90hz");
     }
     if (auto* owner=module.load(std::memory_order_acquire)) return owner->lifecycle.init(error,application);
     // The staged DLL can also be initialized by an unmodified application:
@@ -369,10 +370,17 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
   return 0;
 }
 extern "C" void __cdecl edvr_module_VR_ShutdownInternal() noexcept {
+  static std::atomic<unsigned> samples{0};
+  const bool trace=samples.fetch_add(1,std::memory_order_relaxed)<16;
   try {
     nativeTracePuts("module_shutdown_entry");
+    if(trace) {
+      const auto stack=edvr::captureGameCallStack();
+      nativeTracePrintf("module_shutdown_caller,stack_frames=%u,game_frames=%u,game_rvas=%s\n",stack.captured,stack.gameFrames,stack.rvas);
+    }
     if(auto* owner=module.load(std::memory_order_acquire))owner->lifecycle.shutdown();
-  } catch (...) {}
+    if(trace)nativeTracePuts("module_shutdown_return,exception=0");
+  } catch (...) { if(trace)nativeTracePuts("module_shutdown_return,exception=1"); }
 }
 extern "C" void* __cdecl edvr_module_VR_GetGenericInterface(const char* version,vr::EVRInitError* error) noexcept {
   try { if(auto* owner=module.load(std::memory_order_acquire))return owner->lifecycle.getInterface(version,error); }

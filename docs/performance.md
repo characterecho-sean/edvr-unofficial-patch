@@ -8,6 +8,10 @@ See the [September 14 foveated DLSS design](foveated-dlss-design-2026-09-14.md)
 for the current native OpenXR assessment, updated upstream stereo support,
 and the unresolved temporal-quality tradeoff.
 
+See the [September 14 native OpenXR performance review](openxr-performance-review-2026-09-14.md)
+for transfer, submission, hidden-area masking and composition opportunities
+in the current native stack.
+
 *A design document, written before the code. Claims about EDVR cite the
 source; claims about runtimes, drivers and SDKs are labelled measured
 (established in this repo's field logs or code), vendor-stated (their

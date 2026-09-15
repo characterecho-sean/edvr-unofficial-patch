@@ -177,7 +177,7 @@ void capturedSelfTest() {
           observer.events[2].context==f.runtime.context.Get()&&observer.events[3].context==f.runtime.context.Get(),
           "observer brackets captured command lists by eye and context");
         check(f.runtime.trace==std::vector<std::string>({"A0","W0","R0","A1","W1","R1"}),"captured image order");
-        for(unsigned eye=0;eye<2;++eye)for(unsigned y:{16u,111u})for(unsigned x:{16u,111u,127u}) {
+        for(unsigned eye=0;eye<2;++eye)for(unsigned y:{0u,16u,111u,127u})for(unsigned x:{0u,16u,111u,127u}) {
           unsigned quadrant=0;
           if(crop==0)quadrant=(y>64?2:0)+(x>64?1:0);
           if(crop==1)quadrant=y>64?2:0;
@@ -187,6 +187,7 @@ void capturedSelfTest() {
           pixelNear(f.pixel(eye,image,x,y),expected[quadrant],"RGBA/BGRA, crop/flip, gamma/linear and crop edge");
         }
       }
+    check(capture.shaderViewsCreated()==4,"two color interpretations per eye cached across all crops/frames");
     capture.reset();f.runtime.trace.clear();XrCompositionLayerProjection layer{};
     check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_ERROR_VALIDATION_FAILURE&&f.runtime.trace.empty(),"missing pair no acquire");
     auto source=pattern(f,false);vr::Texture_t t{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};

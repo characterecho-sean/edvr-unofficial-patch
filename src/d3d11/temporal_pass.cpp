@@ -1,5 +1,6 @@
 #include "temporal_pass.h"
 #include "temporal_history.h"
+#include "draw_census.h"
 
 #include <cmath>
 #include <cstdio>
@@ -5156,6 +5157,10 @@ void temporalPassArmEyeDump() {
     // The key takes a RUN of the left eye (kEyeRun says why): sixteen raw
     // crops and the first treated frame; a run under way is left to finish.
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+    // Temporary terrain investigation: align the existing bounded draw/compute
+    // census with Insert's eye run, including when temporal AA is disabled.
+    drawCensusAutoRequest();
+    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
     weaponStabilityArmTrace();
     SYSTEMTIME stm{};
     GetLocalTime(&stm);

@@ -1,5 +1,10 @@
 # Native timing checkpoint
 
+The [September 14 submission
+optimization](openxr-submit-performance-2026-09-14.md) batches producer
+treatments: temporal/menu wall spans now exclude their former individual queue
+waits. Other measurement boundaries below remain unchanged.
+
 This checkpoint's producer/CPU measurements have passed their initial manual
 flight. The subsequent [XR-device timing and system-runtime
 checkpoint](openxr-device-timing-2026-09-14.md) implements the additional

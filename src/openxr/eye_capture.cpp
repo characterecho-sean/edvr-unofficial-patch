@@ -97,6 +97,7 @@ HRESULT EyeCapture::initializeShared(ID3D11Device* producer, ID3D11Device* consu
 
 void EyeCapture::reset() {
   for (auto& e : eyes_) {
+    for (auto& view : e.shaderViews) view.Reset();
     e.copy.Reset();
     e.bounds = {0.f, 0.f, 1.f, 1.f};
     e.colorSpace = vr::ColorSpace_Auto;
@@ -200,6 +201,8 @@ vr::EVRCompositorError EyeCapture::captureShared(
     ID3D11Texture2D* output = nullptr;
     const HRESULT copied = transfer->copy(source.Get(), output, 100, observer, index);
     if (copied != S_OK || !output) return vr::VRCompositorError_InvalidTexture;
+    if (eyes_[index].copy.Get() != output)
+      for (auto& view : eyes_[index].shaderViews) view.Reset();
     eyes_[index].copy = output;
     eyes_[index].bounds = b;
     eyes_[index].colorSpace = texture->eColorSpace;
@@ -263,7 +266,10 @@ vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* 
   ID3D11Texture2D* target = reuse ? dst.copy.Get() : fresh.Get();
   context_->CopyResource(target, source.Get());
   if (FAILED(device_->GetDeviceRemovedReason())) return vr::VRCompositorError_InvalidTexture;
-  if (!reuse) dst.copy = std::move(fresh);
+  if (!reuse) {
+    for (auto& view : dst.shaderViews) view.Reset();
+    dst.copy = std::move(fresh);
+  }
   dst.bounds = b;
   dst.colorSpace = texture->eColorSpace;
   dst.captured = true;
@@ -280,5 +286,32 @@ vr::VRTextureBounds_t EyeCapture::bounds(vr::EVREye eye) const {
 
 vr::EColorSpace EyeCapture::colorSpace(vr::EVREye eye) const {
   return validEye(eye) && eyes_[eyeIndex(eye)].captured ? eyes_[eyeIndex(eye)].colorSpace : vr::ColorSpace_Auto;
+}
+
+HRESULT EyeCapture::shaderView(vr::EVREye eye, ID3D11ShaderResourceView** output) const {
+  if (!output) return E_POINTER;
+  *output = nullptr;
+  if (sharedInitialized_ && sharedOwner_ != std::this_thread::get_id()) return E_ACCESSDENIED;
+  if (!texture(eye)) return E_INVALIDARG;
+  const auto& e = eyes_[eyeIndex(eye)];
+  if (e.colorSpace != vr::ColorSpace_Auto && e.colorSpace != vr::ColorSpace_Gamma &&
+      e.colorSpace != vr::ColorSpace_Linear) return E_INVALIDARG;
+  const bool gamma = e.colorSpace != vr::ColorSpace_Linear;
+  auto& view = e.shaderViews[gamma ? 1 : 0];
+  if (!view) {
+    D3D11_TEXTURE2D_DESC td{}; e.copy->GetDesc(&td);
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    if (td.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS)
+      sd.Format = gamma ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    else if (td.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS)
+      sd.Format = gamma ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
+    else return E_INVALIDARG;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels = 1;
+    ComPtr<ID3D11Device> device; e.copy->GetDevice(&device);
+    const HRESULT result = device->CreateShaderResourceView(e.copy.Get(), &sd, &view);
+    if (FAILED(result)) return result;
+    ++shaderViewsCreated_;
+  }
+  return view.CopyTo(output);
 }
 } // namespace edvr::openxr

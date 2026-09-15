@@ -8,6 +8,9 @@
 
 #include "../../src/common/vtable_hook.h"
 #include "../../src/d3d11/gpu_disjoint_d3d11.h"
+#include "../../src/d3d11/game_query_probe.h"
+#include "../../src/d3d11/game_exit_probe.h"
+#include <thread>
 
 using Microsoft::WRL::ComPtr;
 using namespace edvr;
@@ -164,7 +167,61 @@ struct Cleanup {
     }
 };
 
+void queryProbeTests() {
+    GameQueryProbe probe;
+    auto* q=reinterpret_cast<ID3D11Asynchronous*>(uintptr_t(1));
+    check(probe.observe(q,0x123,S_FALSE,100).first,"query probe records first direct observation");
+    check(!probe.observe(q,0x123,S_FALSE,1099).detail,"ordinary pending query is not called stalled");
+    check(probe.observe(q,0x123,S_FALSE,1100).detail,"repeated pending interval reports after threshold");
+    check(!probe.observe(q,0x123,S_FALSE,2100).detail,"same delayed interval reports only once");
+    probe.ended(q);
+    check(!probe.observe(q,0x123,S_FALSE,2200).detail,"query reuse after End starts a new interval");
+    probe.observe(q,0x123,S_OK,2300);
+    auto summary=probe.observe(nullptr,0x123,E_FAIL,20100);
+    check(summary.summary && summary.outstanding==0 && summary.ready==1 && summary.failed==1,
+          "completed query and error retire pending accounting without retaining COM objects");
+    GameQueryProbe pressure;
+    for(uintptr_t i=1;i<=65;++i)pressure.observe(reinterpret_cast<ID3D11Asynchronous*>(i),0x456,S_FALSE,100);
+    check(pressure.observe(q,0x456,S_FALSE,1100).detail,"table pressure preserves existing unresolved query");
+    summary=pressure.observe(q,0x456,S_OK,20100);
+    check(summary.overflow==1 && summary.outstanding==63,"overflow is explicit and completion frees tracking capacity");
+    // Exercise the production forwarding adapter with caller-owned bytes and
+    // unusual flags: exactly one underlying call, exact HRESULT, no writes by probe.
+    for(HRESULT result:{S_OK,S_FALSE,E_FAIL}) {
+        unsigned calls=0;UINT bytes[3]={0xaabbccdd,0x11223344,0x55667788};
+        auto forward=[&](ID3D11DeviceContext* ctx,ID3D11Asynchronous* query,void* data,UINT n,UINT flags) {
+            ++calls;check(!ctx && query==q && data==&bytes[1] && n==4 && flags==0x1234,"query forward arguments unchanged");
+            if(result==S_OK)*static_cast<UINT*>(data)=42;return result;
+        };
+        const auto got=probe.read(forward,nullptr,q,&bytes[1],4,0x1234,nullptr);
+        check(got==result && calls==1 && bytes[0]==0xaabbccdd && bytes[2]==0x55667788 &&
+              bytes[1]==(result==S_OK?42u:0x11223344u),"query result and buffer preserved for ready, pending and error");
+    }
+}
+
 void run() {
+    {
+        GameCallProbeBudget budget;
+        for(unsigned i=1;i<=4;++i)check(budget.take(100)==i,"four early call-stack samples");
+        check(!budget.take(99)&&!budget.take(20099),"stack sampling handles rollback and suppresses repeated frames");
+        check(budget.take(20100)==5,"stack sampling uses elapsed wall time");
+        for(unsigned i=6;i<=16;++i)check(budget.take(20100+uint64_t(i-5)*20000)==i,"periodic samples until finite cap");
+        check(!budget.take(100000000),"stack sample cap does not reopen later");
+        GameExitProbeSchedule schedule;
+        check(!schedule.take(1,EDVR_NATIVE_STARTING),"startup does not consume present sample budgets");
+        for(unsigned i=0;i<100;++i)schedule.take(20000ull*i,EDVR_NATIVE_RUNNING);
+        check(schedule.take(3600000,EDVR_NATIVE_STOPPED)==1 && schedule.take(3601000,EDVR_NATIVE_STOPPED)==2,
+              "long session preserves independent post-stop budget");
+        check(schedule.take(3602000,EDVR_NATIVE_RETAINED)==3,"retained teardown is observable without claiming cleanup");
+        const auto stack=captureGameCallStack();
+        check(stack.captured && stack.gameFrames && stack.rvas[0] && stack.rvas[sizeof(stack.rvas)-1]==0,
+              "actual return-address capture includes executable RVAs and stays bounded");
+        GameCallProbeBudget concurrent;std::atomic<unsigned> accepted{0};
+        auto calls=[&]{for(unsigned i=0;i<1000;++i)if(concurrent.take(100))++accepted;};
+        std::thread a(calls),b(calls);a.join();b.join();
+        check(accepted==4,"concurrent early calls share a fixed sample budget");
+    }
+    queryProbeTests();
     Runtime runtime; // Retained until Device, hooks, backend and queries release.
     Device device(runtime);
     ID3D11DeviceContext* context = device.context.Get();

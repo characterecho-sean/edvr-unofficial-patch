@@ -85,6 +85,8 @@
 #include "sunglare_fix.h"
 #include "witchstar_fix.h"
 #include "graphics_bridge.h"
+#include "game_query_probe.h"
+#include <intrin.h>
 
 namespace edvr {
 namespace {
@@ -194,6 +196,7 @@ constexpr size_t kSlotClearDepthStencilView = 53;
 constexpr size_t kSlotGenerateMips          = kGpuSlotGenerateMips;
 constexpr size_t kSlotBegin                 = 27;
 constexpr size_t kSlotEnd                   = 28;
+constexpr size_t kSlotGetData               = 29;
 constexpr size_t kSlotResolveSubresource    = 57;
 // The FSS resolution fix's half: a viewport of exactly the body layer's
 // requested (half) size, set while an inflated target is bound, is scaled
@@ -305,6 +308,7 @@ typedef void(STDMETHODCALLTYPE* PFN_ClearDsv)(ID3D11DeviceContext*,
                                               UINT, FLOAT, UINT8);
 typedef void(STDMETHODCALLTYPE* PFN_QueryMark)(ID3D11DeviceContext*,
                                                ID3D11Asynchronous*);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_QueryData)(ID3D11DeviceContext*, ID3D11Asynchronous*, void*, UINT, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawIndirectArgs)(ID3D11DeviceContext*,
                                                       ID3D11Buffer*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_CopyStructureCount)(
@@ -376,6 +380,8 @@ struct State {
     PFN_ClearDsv             realClearDsv = nullptr;
     PFN_QueryMark            realBegin = nullptr;
     PFN_QueryMark            realEnd = nullptr;
+    PFN_QueryData            realGetData = nullptr;
+    GameQueryProbe           gameQueries;
     PFN_ExecuteCommandList   realExecuteCommandList = nullptr;
     // The bound target's underlying resource, cached per binding generation
     // for the FSS viewport paths -- resolved only while fssResActive(), so a
@@ -3424,6 +3430,15 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
         drawCensusQuery('E', async, foreignContext(self));
     }
     g_state->realEnd(self, async);
+    if(!foreignContext(self))g_state->gameQueries.noteEnd(async,_ReturnAddress());
+}
+
+HRESULT STDMETHODCALLTYPE hookedGetData(ID3D11DeviceContext* self,ID3D11Asynchronous* query,
+                                        void* data,UINT bytes,UINT flags) {
+    // Forward exactly once with the original buffer and flags. The diagnostic
+    // observes completion; it never tries to make an unfinished query complete.
+    if(foreignContext(self))return g_state->realGetData(self,query,data,bytes,flags);
+    return g_state->gameQueries.read(g_state->realGetData,self,query,data,bytes,flags,_ReturnAddress());
 }
 
 // The argument buffer holds the counts, so the census records n=0 i=0
@@ -5607,6 +5622,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realBegin));
     s.hook.replace(kSlotEnd, &hookedEnd,
                    reinterpret_cast<void**>(&s.realEnd));
+    const bool queryProbe=s.hook.replace(kSlotGetData,&hookedGetData,
+                   reinterpret_cast<void**>(&s.realGetData)) && s.realGetData;
+    Log::get().note("game query probe: %s; direct executable GetData on game context, 64 tracked intervals, 32 delayed-query details, 60 summaries; result buffers and flags unchanged.",queryProbe?"armed":"UNAVAILABLE");
     s.hook.replace(kSlotDrawIndexedInstancedIndirect,
                    &hookedDrawIndexedInstancedIndirect,
                    reinterpret_cast<void**>(&s.realDrawIndexedInstancedIndirect));

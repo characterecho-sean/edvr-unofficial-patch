@@ -15,8 +15,9 @@ struct EdvrNativeTimingRequest {
 struct EdvrNativeTimingFrame {
     uint32_t size, version;
     uint64_t sequence;
-    // Wall time on the serialized XR owner, including producer rendezvous,
-    // driver/runtime waits and commands. Not exclusive CPU or GPU work.
+    // Submit/transfer/compose wall time includes producer rendezvous and
+    // driver/runtime waits. Temporal/menu are treatment wall time inside the
+    // batched producer callback, excluding its queue wait. Not CPU/GPU busy time.
     double submitMs[2], temporalMs[2], menuMs[2], transferMs[2];
     double composeMs;
 };

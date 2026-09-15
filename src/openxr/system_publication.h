@@ -1,5 +1,6 @@
 #pragma once
 #include "system_source.h"
+#include <cmath>
 #include <mutex>
 
 namespace edvr::openxr {
@@ -12,16 +13,18 @@ class SystemPublication {
     if(active_||generation_==(std::numeric_limits<uint64_t>::max)())return 0;
     metadata.generation=++generation_;metadata.geometry={};metadata.geometryValid=false;
     metadata.optics={};metadata.opticsValid=false;
+    metadata.hiddenMasks.reset();metadata.hiddenMasksCompatible=true;
     metadata.tangentShift[0][0]=metadata.tangentShift[0][1]=0.0f;
     metadata.tangentShift[1][0]=metadata.tangentShift[1][1]=0.0f;
     state_=metadata;sequence_=0;active_=true;return generation_;
   }
   bool publish(const GeometryInput& input,bool focusKnown,bool focused,
-               const float (*tangentShift)[2]=nullptr) {
+               const float (*tangentShift)[2]=nullptr,bool masksCompatible=true) {
     GeometrySnapshot candidate{};const bool valid=makeGeometrySnapshot(input,candidate);
     std::lock_guard<std::mutex> lock(mutex_);
     if(!active_||input.generation!=generation_||input.sequence<=sequence_)return false;
     sequence_=input.sequence;
+    state_.hiddenMasksCompatible=masksCompatible;
     // Optics are session-generation calibration. Publish the last validated
     // unjittered FOV and eye placement before applying the frame's tangent
     // jitter. A bad tracking sample or a bad jitter request must not erase the
@@ -65,6 +68,18 @@ class SystemPublication {
   }
   SystemRead read() const {
     std::lock_guard<std::mutex> lock(mutex_);return state_;
+  }
+  bool displayFrequency(uint64_t generation,float hz,bool estimated) {
+    if(!std::isfinite(hz)||hz<=0)return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!active_||generation!=generation_)return false;
+    state_.displayFrequency=hz;state_.displayFrequencyAvailable=true;
+    state_.displayFrequencyEstimated=estimated;return true;
+  }
+  bool hiddenMasks(uint64_t generation,std::shared_ptr<const NativeHiddenMasks> masks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!active_||generation!=generation_||(masks&&masks->generation!=generation))return false;
+    state_.hiddenMasks=std::move(masks);return true;
   }
   void recommend(const uint32_t (&width)[2], const uint32_t (&height)[2]) {
     std::lock_guard<std::mutex> lock(mutex_);

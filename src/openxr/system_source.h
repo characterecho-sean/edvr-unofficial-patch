@@ -1,5 +1,6 @@
 #pragma once
 #include "geometry_snapshot.h"
+#include "visibility_mask.h"
 
 namespace edvr::openxr {
 // Session-generation optics that remain meaningful when the current tracking
@@ -30,6 +31,10 @@ struct SystemRead {
   char systemName[XR_MAX_SYSTEM_NAME_SIZE]{};
   bool displayFrequencyAvailable=false;
   float displayFrequency=0;
+  // True only for the compatibility placeholder, never a measured panel rate.
+  bool displayFrequencyEstimated=false;
+  std::shared_ptr<const NativeHiddenMasks> hiddenMasks;
+  bool hiddenMasksCompatible=true;
   bool seatedToStandingValid=false, rawToStandingValid=false;
   vr::HmdMatrix34_t seatedToStanding{}, rawToStanding{};
   // Game-facing per-eye tangent offsets. Cached optics remains unjittered.
@@ -60,6 +65,13 @@ class SystemSource {
   virtual void noteGeometryQuery(unsigned slot,const SystemRead& snapshot) noexcept {
     (void)slot;(void)snapshot;
   }
+  virtual void noteProjectionQuery(const SystemRead&,unsigned,float,float,
+      vr::EGraphicsAPIConvention,bool,const vr::HmdMatrix44_t&,const void*) noexcept {}
+  virtual void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,
+      vr::ETrackedPropertyError,float,unsigned) noexcept {}
+  virtual void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,
+      vr::ETrackedDeviceProperty,vr::ETrackedPropertyError) noexcept {}
+  virtual void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*) noexcept {}
   virtual void unsupported(unsigned slot) noexcept=0;
 };
 }

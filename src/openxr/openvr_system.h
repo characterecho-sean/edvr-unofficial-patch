@@ -1,6 +1,8 @@
 #pragma once
 #include "system_source.h"
 #include <atomic>
+#include <mutex>
+#include "../common/call_probe_budget.h"
 
 namespace edvr::openxr {
 using namespace vr;
@@ -57,7 +59,26 @@ class OpenVRSystem final : public vr::IVRSystem {
   void AcknowledgeQuit_UserPrompt() override;
  private:
   void unavailable(unsigned slot) noexcept;
+  void noteProperty(unsigned,TrackedDeviceIndex_t,ETrackedDeviceProperty,ETrackedPropertyError) noexcept;
   SystemSource& source_;
   std::atomic<uint64_t> unavailable_{0};
+  struct ProjectionKey { uint64_t clip=0; unsigned eye=0,api=0; bool live=false; };
+  ProjectionKey projectionKeys_[2][32]{};
+  unsigned projectionReports_[2]{};
+  std::atomic_flag projectionProbeLock_=ATOMIC_FLAG_INIT;
+  edvr::GameCallProbeBudget frequencyProbe_;
+  struct PropertyKey { unsigned slot;TrackedDeviceIndex_t index;ETrackedDeviceProperty property;ETrackedPropertyError error; };
+  PropertyKey propertyKeys_[128]{};unsigned propertyNotes_=0;
+  std::atomic_flag propertyProbeLock_=ATOMIC_FLAG_INIT;
+  struct MeshEntry {
+    std::shared_ptr<const NativeHiddenMasks> masks;
+    RawFov fov{};unsigned eye=0;
+    std::vector<HmdVector2_t> vertices;
+  };
+  // Callers may keep the legacy raw pointer. Retain immutable revisions until
+  // this interface is destroyed; refuse new revisions at the bounded limit.
+  std::mutex meshMutex_;
+  std::vector<std::unique_ptr<MeshEntry>> meshes_;
+  edvr::GameCallProbeBudget meshProbe_[2];
 };
 }

@@ -67,6 +67,11 @@ void run() {
   const vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
   const vr::VRTextureBounds_t flipped{1,1,0,0};d.fill(source.Get(),firstColor);
   check(cap.capture(vr::Eye_Left,&texture,&flipped)==vr::VRCompositorError_None,"flipped bounds accepted");
+  ComPtr<ID3D11ShaderResourceView> gammaView,cachedView,linearView;
+  check(cap.shaderView(vr::Eye_Left,&gammaView)==S_OK,"capture provides a cached gamma view");
+  const auto viewCount=cap.shaderViewsCreated();
+  check(cap.shaderView(vr::Eye_Left,&cachedView)==S_OK&&cachedView==gammaView&&
+    cap.shaderViewsCreated()==viewCount,"repeated render reuses the same view without creation");
   ComPtr<ID3D11Texture2D> accepted=cap.texture(vr::Eye_Left);
   const auto preserved=[&] {
     const auto b=cap.bounds(vr::Eye_Left);
@@ -102,22 +107,34 @@ void run() {
   // A capture is only a copy command: even nondefault pipeline bindings survive.
   ID3D11Buffer* cb=buffer.Get();d.context->VSSetConstantBuffers(3,1,&cb);d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
   check(cap.capture(vr::Eye_Left,&linear)==vr::VRCompositorError_None&&cap.texture(vr::Eye_Left)==accepted.Get()&&d.pixels(accepted.Get(),secondColor),"allocation reused and pixels replaced");
+  check(cap.shaderView(vr::Eye_Left,&linearView)==S_OK&&linearView!=gammaView,
+    "color change selects a different interpretation of the same resource");
+  D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};linearView->GetDesc(&viewDesc);
+  check(viewDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM,"linear view does not decode sRGB");
   ComPtr<ID3D11Buffer> bound;d.context->VSGetConstantBuffers(3,1,&bound);D3D11_PRIMITIVE_TOPOLOGY topology{};d.context->IAGetPrimitiveTopology(&topology);
   check(bound.Get()==cb&&topology==D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP,"pipeline bindings preserved");
   auto bigger=d.texture(DXGI_FORMAT_R8G8B8A8_UNORM,8,4);if(!bigger)return;d.fill(bigger.Get(),firstColor);
   const vr::Texture_t resized{bigger.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
   check(cap.capture(vr::Eye_Left,&resized)==vr::VRCompositorError_None&&cap.texture(vr::Eye_Left)!=accepted.Get()&&d.pixels(cap.texture(vr::Eye_Left),firstColor),"resize replaces allocation");
+  cachedView.Reset();check(cap.shaderView(vr::Eye_Left,&cachedView)==S_OK&&cachedView!=gammaView,"resize retires the old cached view");
+  ComPtr<ID3D11Resource> viewed;cachedView->GetResource(&viewed);
+  check(viewed.Get()==cap.texture(vr::Eye_Left),"resized view refers to the new capture");
   const vr::Texture_t own{cap.texture(vr::Eye_Left),vr::API_DirectX,vr::ColorSpace_Auto};
   check(cap.capture(vr::Eye_Left,&own)==vr::VRCompositorError_None&&cap.texture(vr::Eye_Left)!=own.handle&&d.pixels(cap.texture(vr::Eye_Left),firstColor),"self input never copies resource onto itself");
   cap.reset();check(!cap.texture(vr::Eye_Left)&&!cap.texture(vr::Eye_Right),"reset invalidates both eyes");
+  cachedView.Reset();check(cap.shaderView(vr::Eye_Left,&cachedView)==E_INVALIDARG&&!cachedView,
+    "reset cannot return a stale view");
   cap.shutdown();check(cap.capture(vr::Eye_Left,&texture)==vr::VRCompositorError_InvalidTexture,"shutdown refuses capture");
   check(SUCCEEDED(cap.initialize(d.device.Get()))&&!cap.texture(vr::Eye_Left),"reinitialize starts empty");
   EyeCapture previous,badOwner;check(SUCCEEDED(previous.initialize(d.device.Get())),"previous pair initialized");
   badOwner.initialize(foreign.device.Get());
   d.fill(source.Get(),firstColor);cap.capture(vr::Eye_Left,&texture);
   d.fill(source.Get(),secondColor);cap.capture(vr::Eye_Right,&linear);
+  gammaView.Reset();check(cap.shaderView(vr::Eye_Left,&gammaView)==S_OK,"view before pair exchange");
   check(!cap.exchangeBuffers(badOwner)&&!cap.exchangeBuffers(cap),"exchange refuses different ownership and self");
   check(cap.exchangeBuffers(previous)&&!cap.texture(vr::Eye_Left),"complete pair exchanged without extra pixel copy");
+  cachedView.Reset();check(previous.shaderView(vr::Eye_Left,&cachedView)==S_OK&&cachedView==gammaView&&
+    previous.shaderViewsCreated()==0,"cached view travels with retained pair without recreation");
   check(d.pixels(previous.texture(vr::Eye_Left),firstColor)&&d.pixels(previous.texture(vr::Eye_Right),secondColor)&&
     previous.colorSpace(vr::Eye_Right)==vr::ColorSpace_Linear,"stereo pixels and color metadata move together");
   d.fill(source.Get(),0xFF000000);cap.capture(vr::Eye_Left,&texture);

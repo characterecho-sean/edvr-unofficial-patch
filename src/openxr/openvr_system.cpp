@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <intrin.h>
+#include <windows.h>
 
 namespace edvr::openxr {
 namespace {
@@ -112,7 +114,7 @@ ETrackedPropertyError propertyError(const SystemRead& s,TrackedDeviceIndex_t ind
   if(type!=expected)return TrackedProp_WrongDataType;
   switch(p) {
     case Prop_ReportsTimeSinceVSync_Bool:case Prop_IsOnDesktop_Bool:
-    case Prop_DisplayFrequency_Float:case Prop_DeviceClass_Int32:
+    case Prop_DisplayFrequency_Float:case Prop_UserIpdMeters_Float:case Prop_DeviceClass_Int32:
     case Prop_EdidVendorID_Int32:case Prop_EdidProductID_Int32:
     case Prop_TrackingSystemName_String:case Prop_ModelNumber_String:case Prop_ManufacturerName_String:
       return TrackedProp_Success;
@@ -139,6 +141,7 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
   source_.noteGeometryQuery(1,s);
   const unsigned eye=unsigned(e);
   const bool liveGeometry=geometryValid(s);
+  bool accepted=false;
   if(opticsAvailable(s)&&eyeValid(e)) {
     const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
     RawFov raw{};
@@ -146,10 +149,43 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
                                                       s.tangentShift[eye][1],raw) : false;
     if(!liveGeometry) raw=base;
     if((!liveGeometry || rawValid) && projectionMatrix(raw,nearZ,farZ,api,out)) {
+      accepted=true;
       if(liveGeometry) source_.noteProjection(s.geometry.native.sequence,eye,nearZ,farZ);
     }
   }
+  // Record unique clip-plane pairs in each eye/API/live-cache/result bucket.
+  // Jitter and frame sequence are deliberately excluded from the key. Separate
+  // rejection capacity prevents normal scene queries hiding a bad near/far.
+  uint32_t clipBits[2]{};std::memcpy(&clipBits[0],&nearZ,4);std::memcpy(&clipBits[1],&farZ,4);
+  const uint64_t clip=uint64_t(clipBits[0])|(uint64_t(clipBits[1])<<32);
+  bool report=false;
+  if(!projectionProbeLock_.test_and_set(std::memory_order_acquire)) {
+    const unsigned bucket=accepted?1:0;auto& count=projectionReports_[bucket];
+    bool seen=false;
+    for(unsigned i=0;i<count;++i) {
+      const auto& key=projectionKeys_[bucket][i];
+      seen|=key.clip==clip && key.eye==eye && key.api==unsigned(api) && key.live==liveGeometry;
+    }
+    if(!seen && count<32) {
+      projectionKeys_[bucket][count++]={clip,eye,unsigned(api),liveGeometry};report=true;
+    }
+    projectionProbeLock_.clear(std::memory_order_release);
+  }
+  if(report)
+    source_.noteProjectionQuery(s,eye,nearZ,farZ,api,accepted,out,_ReturnAddress());
   return out;
+}
+void OpenVRSystem::noteProperty(unsigned slot,TrackedDeviceIndex_t index,ETrackedDeviceProperty property,ETrackedPropertyError e) noexcept {
+  if(e==TrackedProp_Success&&property!=Prop_UserIpdMeters_Float)return;
+  if(propertyProbeLock_.test_and_set(std::memory_order_acquire))return;
+  bool seen=false;
+  for(unsigned i=0;i<propertyNotes_;++i) {
+    const auto& k=propertyKeys_[i];seen|=k.slot==slot&&k.index==index&&k.property==property&&k.error==e;
+  }
+  const bool report=!seen&&propertyNotes_<128;
+  if(report)propertyKeys_[propertyNotes_++]={slot,index,property,e};
+  propertyProbeLock_.clear(std::memory_order_release);
+  if(report)source_.notePropertyQuery(slot,index,property,e);
 }
 void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b) {
   const auto s=source_.read();RawFov out{};
@@ -208,23 +244,47 @@ ETrackedControllerRole OpenVRSystem::GetControllerRoleForTrackedDeviceIndex(Trac
 ETrackedDeviceClass OpenVRSystem::GetTrackedDeviceClass(TrackedDeviceIndex_t i) {const auto s=source_.read();return live(s)&&i==0?TrackedDeviceClass_HMD:TrackedDeviceClass_Invalid;}
 bool OpenVRSystem::IsTrackedDeviceConnected(TrackedDeviceIndex_t i) {const auto s=source_.read();return live(s)&&i==0;}
 bool OpenVRSystem::GetBoolTrackedDeviceProperty(TrackedDeviceIndex_t i,ETrackedDeviceProperty p,ETrackedPropertyError* out) {
-  const auto s=source_.read();const auto e=propertyError(s,i,p,PropertyType::Bool);error(out,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(21);return false;
+  const auto s=source_.read();const auto e=propertyError(s,i,p,PropertyType::Bool);error(out,e);noteProperty(21,i,p,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(21);return false;
 }
 float OpenVRSystem::GetFloatTrackedDeviceProperty(TrackedDeviceIndex_t i,ETrackedDeviceProperty p,ETrackedPropertyError* out) {
   const auto s=source_.read();auto e=propertyError(s,i,p,PropertyType::Float);float value=0;
-  if(e==TrackedProp_Success){if(s.displayFrequencyAvailable&&std::isfinite(s.displayFrequency)&&s.displayFrequency>0)value=s.displayFrequency;else e=TrackedProp_ValueNotProvidedByDevice;}
-  error(out,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(22);return value;
+  if(e==TrackedProp_Success) {
+    if(p==Prop_DisplayFrequency_Float) {
+      if(s.displayFrequencyAvailable&&std::isfinite(s.displayFrequency)&&s.displayFrequency>0)value=s.displayFrequency;
+      else e=TrackedProp_ValueNotProvidedByDevice;
+    } else {
+      // Effective rendering IPD, derived from runtime eye origins. The full
+      // separation handles asymmetric/canted placement and survives recenter.
+      if(opticsAvailable(s)) {
+        const auto* eyes=geometryValid(s)?s.geometry.eyeToHead:s.optics.eyeToHead;
+        double squared=0;
+        for(unsigned axis=0;axis<3;++axis) {
+          const double d=double(eyes[1].m[axis][3])-eyes[0].m[axis][3];squared+=d*d;
+        }
+        const double ipd=std::sqrt(squared);
+        if(std::isfinite(ipd)&&ipd>0&&ipd<=(std::numeric_limits<float>::max)())value=float(ipd);
+      }
+      if(!(value>0))e=TrackedProp_ValueNotProvidedByDevice;
+    }
+  }
+  noteProperty(22,i,p,e);
+  error(out,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(22);
+  if(p==Prop_DisplayFrequency_Float) {
+    const unsigned sample=frequencyProbe_.take(GetTickCount64());
+    if(sample)source_.noteFrequencyQuery(s,i,e,value,sample);
+  }
+  return value;
 }
 int32_t OpenVRSystem::GetInt32TrackedDeviceProperty(TrackedDeviceIndex_t i,ETrackedDeviceProperty p,ETrackedPropertyError* out) {
   const auto s=source_.read();auto e=propertyError(s,i,p,PropertyType::Int);int32_t value=0;
   if(e==TrackedProp_Success){if(p==Prop_DeviceClass_Int32)value=TrackedDeviceClass_HMD;else e=TrackedProp_ValueNotProvidedByDevice;}
-  error(out,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(23);return value;
+  error(out,e);noteProperty(23,i,p,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(23);return value;
 }
 uint64_t OpenVRSystem::GetUint64TrackedDeviceProperty(TrackedDeviceIndex_t i,ETrackedDeviceProperty p,ETrackedPropertyError* out) {
-  const auto s=source_.read();const auto e=propertyError(s,i,p,PropertyType::Uint);error(out,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(24);return 0;
+  const auto s=source_.read();const auto e=propertyError(s,i,p,PropertyType::Uint);error(out,e);noteProperty(24,i,p,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(24);return 0;
 }
 HmdMatrix34_t OpenVRSystem::GetMatrix34TrackedDeviceProperty(TrackedDeviceIndex_t i,ETrackedDeviceProperty p,ETrackedPropertyError* out) {
-  const auto s=source_.read();const auto e=propertyError(s,i,p,PropertyType::Matrix);error(out,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(25);return identity();
+  const auto s=source_.read();const auto e=propertyError(s,i,p,PropertyType::Matrix);error(out,e);noteProperty(25,i,p,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(25);return identity();
 }
 uint32_t OpenVRSystem::GetStringTrackedDeviceProperty(TrackedDeviceIndex_t i,ETrackedDeviceProperty p,char* buffer,uint32_t capacity,ETrackedPropertyError* out) {
   if(buffer&&capacity)buffer[0]=0;
@@ -236,7 +296,7 @@ uint32_t OpenVRSystem::GetStringTrackedDeviceProperty(TrackedDeviceIndex_t i,ETr
   }
   size_t length=0;if(value)while(length<limit&&value[length])++length;
   if(value&&(!length||length==limit))e=TrackedProp_ValueNotProvidedByDevice;
-  if(e!=TrackedProp_Success){error(out,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(26);return 0;}
+  if(e!=TrackedProp_Success){error(out,e);noteProperty(26,i,p,e);if(e==TrackedProp_UnknownProperty||e==TrackedProp_ValueNotProvidedByDevice)unavailable(26);return 0;}
   const uint32_t needed=uint32_t(length+1);
   if(!buffer||capacity<needed){error(out,TrackedProp_BufferTooSmall);return needed;}
   std::memcpy(buffer,value,needed);error(out,TrackedProp_Success);return needed;
@@ -252,7 +312,35 @@ bool OpenVRSystem::PollNextEventWithPose(ETrackingUniverseOrigin origin,VREvent_
   if(!source_.pollEvent(s.generation,origin,next,atEvent))return false;
   *event=next;if(pose)*pose=atEvent;return true;
 }
-HiddenAreaMesh_t OpenVRSystem::GetHiddenAreaMesh(EVREye) { return {}; }
+HiddenAreaMesh_t OpenVRSystem::GetHiddenAreaMesh(EVREye eye) {
+  if(!eyeValid(eye))return {};
+  const auto s=source_.read();HiddenAreaMesh_t result{};const unsigned e=unsigned(eye);
+  const char* reason="unavailable";uint64_t revision=s.hiddenMasks?s.hiddenMasks->revision:0;
+  try {
+    if(opticsAvailable(s)&&s.hiddenMasksCompatible&&s.hiddenMasks&&s.hiddenMasks->generation==s.generation) {
+      // Keep temporal jitter out of the retained mesh; its conservative inset
+      // leaves the unjittered visible region unmasked.
+      const RawFov fov=geometryValid(s)?s.geometry.raw[e]:s.optics.raw[e];
+      std::lock_guard<std::mutex> lock(meshMutex_);MeshEntry* selected=nullptr;
+      for(auto& entry:meshes_)if(entry->masks==s.hiddenMasks&&entry->eye==e&&
+          std::memcmp(&entry->fov,&fov,sizeof(fov))==0){selected=entry.get();break;}
+      if(!selected&&meshes_.size()<64) {
+        auto entry=std::make_unique<MeshEntry>();entry->masks=s.hiddenMasks;entry->eye=e;entry->fov=fov;
+        if(projectHiddenMask(s.hiddenMasks->eyes[e],fov,s.hiddenMasks->guard[e][0],
+                             s.hiddenMasks->guard[e][1],entry->vertices)) {
+          selected=entry.get();meshes_.push_back(std::move(entry));
+        } else reason="invalid_mesh";
+      } else if(!selected)reason="retention_limit";
+      if(selected) {
+        result.unTriangleCount=uint32_t(selected->vertices.size()/3);
+        result.pVertexData=result.unTriangleCount?selected->vertices.data():nullptr;
+        reason=result.unTriangleCount?"runtime":"empty";
+      }
+    } else if(!s.hiddenMasksCompatible)reason="modified_frustum";
+  } catch(...) {reason="allocation_failure";result={};}
+  if(meshProbe_[e].take(GetTickCount64()))source_.noteHiddenMesh(e,revision,result.unTriangleCount,reason);
+  return result;
+}
 bool OpenVRSystem::GetControllerState(TrackedDeviceIndex_t,VRControllerState_t* state) {if(state)*state={};return false;}
 bool OpenVRSystem::GetControllerStateWithPose(ETrackingUniverseOrigin,TrackedDeviceIndex_t,VRControllerState_t* state,TrackedDevicePose_t* pose) {if(state)*state={};if(pose)*pose=invalidPose();return false;}
 void OpenVRSystem::TriggerHapticPulse(TrackedDeviceIndex_t,uint32_t,unsigned short) {unavailable(34);}

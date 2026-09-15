@@ -11,6 +11,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "../common/game_call_probe.h"
 #include <d3d11.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
@@ -33,6 +34,7 @@
 #include "native_feature_pose.h"
 #include "native_timing_client.h"
 #include "device_gpu_timing.h"
+#include "submission_stats.h"
 #include "render_route.h"
 #include "shutdown_trace.h"
 #include "session_state.h"
@@ -97,6 +99,8 @@ struct Api {
   PFN_xrCreateInstance createInstance=nullptr; PFN_xrDestroyInstance destroyInstance=nullptr;
   PFN_xrGetInstanceProperties instanceProperties=nullptr; PFN_xrGetSystem getSystem=nullptr;
   PFN_xrGetSystemProperties systemProperties=nullptr;
+  PFN_xrGetDisplayRefreshRateFB displayRefreshRate=nullptr;
+  PFN_xrGetVisibilityMaskKHR visibilityMask=nullptr;
   PFN_xrConvertWin32PerformanceCounterToTimeKHR convertTime=nullptr;
   PFN_xrEnumerateViewConfigurations configurations=nullptr;
   PFN_xrEnumerateViewConfigurationViews viewSizes=nullptr;
@@ -177,6 +181,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   unsigned timingFrameMask=0;
   EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_2};
   bool timingGpuBegun[2]{};
+  SubmissionStats submitStats;
+  SubmissionStats::Sample submitSample;
+  uint64_t submitCallbacksBegin=0;
   float frameTangentShift[2][2]{};
   unsigned temporalFrameEyes=0;
   uint64_t temporalEyes[2]{},temporalFrames=0,temporalFailures=0;
@@ -229,6 +236,55 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   mutable std::atomic<unsigned> geometryQueryNotes[6][2]{};
   unsigned originInvalidationNotes=0;
   bool clean=true;
+  bool displayRefreshExtension=false;
+  bool visibilityMaskExtension=false,visibilityMaskDirty=false;
+  uint64_t visibilityRevision=0;
+  unsigned visibilityRefreshes=0;
+  void refreshHiddenMasks(const char* reason) {
+    if(GetCurrentThreadId()!=ownerThread||!session||!geometryGeneration||!read().connected)return;
+    visibilityMaskDirty=false;
+    if(visibilityRefreshes>=32){geometry.hiddenMasks(geometryGeneration,nullptr);return;}
+    ++visibilityRefreshes;
+    std::shared_ptr<NativeHiddenMasks> candidate;
+    XrResult status=XR_ERROR_FUNCTION_UNSUPPORTED;
+    try {
+      if(visibilityMaskExtension&&api.visibilityMask) {
+        candidate=std::make_shared<NativeHiddenMasks>();candidate->generation=geometryGeneration;
+        candidate->revision=++visibilityRevision;status=XR_SUCCESS;
+        for(unsigned eye=0;eye<2;++eye) {
+          status=readHiddenMask(api.visibilityMask,session,eye,candidate->eyes[eye]);
+          if(XR_FAILED(status))break;
+          const auto w=edvr::native_render::scaledDimension(renderBounds[eye].originalWidth,
+              renderBounds[eye].maxWidth,EDVR_NATIVE_RENDER_SCALE_MINIMUM);
+          const auto h=edvr::native_render::scaledDimension(renderBounds[eye].originalHeight,
+              renderBounds[eye].maxHeight,EDVR_NATIVE_RENDER_SCALE_MINIMUM);
+          if(!w||!h){status=XR_ERROR_VALIDATION_FAILURE;break;}
+          candidate->guard[eye][0]=2.0f/w;candidate->guard[eye][1]=2.0f/h;
+        }
+      }
+    } catch(...) {status=XR_ERROR_OUT_OF_MEMORY;}
+    if(XR_FAILED(status))candidate.reset();
+    geometry.hiddenMasks(geometryGeneration,candidate);
+    nativeTracePrintf("visibility_mask,enabled=%u,query=%u,revision=%llu,result=%d,triangles=%u/%u,reason=%s,refresh=%u/32\n",
+      unsigned(visibilityMaskExtension),unsigned(api.visibilityMask!=nullptr),(unsigned long long)visibilityRevision,int(status),
+      candidate?unsigned(candidate->eyes[0].indices.size()/3):0,candidate?unsigned(candidate->eyes[1].indices.size()/3):0,
+      reason,visibilityRefreshes);
+  }
+  void publishDisplayFrequency(float hz,bool estimated,const char* reason,XrResult status) {
+    if(GetCurrentThreadId()!=ownerThread||!geometry.displayFrequency(geometryGeneration,hz,estimated))return;
+    nativeTracePrintf("display_frequency,hz=%.9g,source=%s,extension_enabled=%u,result=%d,reason=%s\n",
+      double(hz),estimated?"compatibility_90hz":"runtime",unsigned(displayRefreshExtension),int(status),reason);
+  }
+  void refreshDisplayFrequency(const char* reason) {
+    if(GetCurrentThreadId()!=ownerThread||!session||!geometryGeneration||!read().connected)return;
+    float hz=0;
+    const XrResult r=displayRefreshExtension&&api.displayRefreshRate?
+      api.displayRefreshRate(session,&hz):XR_ERROR_FUNCTION_UNSUPPORTED;
+    const bool measured=(r==XR_SUCCESS||r==XR_SESSION_LOSS_PENDING)&&std::isfinite(hz)&&hz>0;
+    // OpenComposite's compatibility default. Never infer physical refresh from
+    // predictedDisplayPeriod: application cadence can differ from panel rate.
+    publishDisplayFrequency(measured?hz:90.0f,!measured,reason,r);
+  }
   bool separateGraphics()const{return startupOptions.separateDevice;}
   bool captureRenderSettings() {
     if(renderSettingsCaptured) return true;
@@ -334,8 +390,32 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       snapshot.recommendedWidth[1],snapshot.recommendedHeight[1]);
   }
   void noteGeometryQuery(unsigned slot,const SystemRead& snapshot) noexcept override {traceGeometryQuery(slot,snapshot);}
+  void noteProjectionQuery(const SystemRead& s,unsigned eye,float nearZ,float farZ,
+      vr::EGraphicsAPIConvention convention,bool accepted,const vr::HmdMatrix44_t& m,const void* caller) noexcept override {
+    nativeTracePrintf("projection_query,eye=%u,near=%.9g,far=%.9g,api=%u,accepted=%u,live=%u,optics=%u,sequence=%llu,caller=%p,m00=%.9g,m11=%.9g,m02=%.9g,m12=%.9g,m22=%.9g,m23=%.9g\n",
+      eye,double(nearZ),double(farZ),unsigned(convention),unsigned(accepted),unsigned(s.geometryValid),unsigned(s.opticsValid),
+      (unsigned long long)s.geometry.native.sequence,caller,double(m.m[0][0]),double(m.m[1][1]),double(m.m[0][2]),double(m.m[1][2]),double(m.m[2][2]),double(m.m[2][3]));
+  }
+  void noteFrequencyQuery(const SystemRead& s,vr::TrackedDeviceIndex_t index,
+      vr::ETrackedPropertyError error,float value,unsigned sample) noexcept override {
+    const auto stack=edvr::captureGameCallStack();
+    nativeTracePrintf("frequency_query,index=%u,property=2002,error=%u,value=%.9g,estimated=%u,sample=%u/16,generation=%llu,sequence=%llu,stack_frames=%u,game_frames=%u,game_rvas=%s\n",
+      index,unsigned(error),double(value),unsigned(s.displayFrequencyEstimated),sample,(unsigned long long)s.generation,
+      (unsigned long long)s.geometry.native.sequence,stack.captured,stack.gameFrames,stack.rvas);
+  }
   void auxiliaryUnsupported(unsigned interfaceId,unsigned slot)noexcept override {
     nativeTracePrintf("auxiliary_unavailable,interface=%u,slot=%u\n",interfaceId,slot);
+  }
+  void notePropertyQuery(unsigned slot,vr::TrackedDeviceIndex_t index,vr::ETrackedDeviceProperty property,
+                         vr::ETrackedPropertyError error) noexcept override {
+    const auto stack=edvr::captureGameCallStack();
+    nativeTracePrintf("property_query,slot=%u,index=%u,property=%u,error=%u,game_frames=%u,game_rvas=%s\n",
+      slot,index,unsigned(property),unsigned(error),stack.gameFrames,stack.rvas);
+  }
+  void noteHiddenMesh(unsigned eye,uint64_t revision,uint32_t triangles,const char* reason) noexcept override {
+    const auto stack=edvr::captureGameCallStack();
+    nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
+      eye,(unsigned long long)revision,triangles,reason,stack.gameFrames,stack.rvas);
   }
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
     ++starts;
@@ -353,6 +433,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(state.lifecycle()==Lifecycle::Stopping)return vr::VRInitError_Init_ShuttingDown;
       if(state.lifecycle()==Lifecycle::Ready&&!state.running()) {
         r=state.startIfReady();if(r!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
+        refreshDisplayFrequency("session_started");
+        refreshHiddenMasks("session_started");
       }
       if(!state.running()){operation=RuntimeGate::Lease{};Sleep(10);continue;}
       operation=RuntimeGate::Lease{};
@@ -416,6 +498,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         publishFatalFailure(r,"service_session_restart");return;
       }
       serviceStopped=false;
+      refreshDisplayFrequency("session_restarted");
+      refreshHiddenMasks("session_restarted");
       nativeTracePrintf("service_session_restart,generation=%llu\n",(unsigned long long)compositorGeneration);
       return;
     }
@@ -433,6 +517,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     // Idle service work is CPU/XR only. A loading projection needs an explicit
     // render-caller boundary; it cannot borrow the game context between calls.
+    if(visibilityMaskDirty&&state.running())refreshHiddenMasks("runtime_event");
   }
   void loadingBoundary() {
     if(GetCurrentThreadId()!=ownerThread||serviceStopped||serviceFailed)return;
@@ -473,6 +558,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   static void referenceEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
     auto& host=*static_cast<NativeRuntimeHost*>(context);
+    if(GetCurrentThreadId()!=host.ownerThread)return;
+    if(buffer.type==XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR&&host.visibilityMaskExtension) {
+      const auto& event=*reinterpret_cast<const XrEventDataVisibilityMaskChangedKHR*>(&buffer);
+      if(event.session==host.session&&event.viewConfigurationType==XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO&&event.viewIndex<2) {
+        host.visibilityMaskDirty=true;
+        host.geometry.hiddenMasks(host.geometryGeneration,nullptr);
+      }
+    }
+    if(buffer.type==XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB && host.displayRefreshExtension) {
+      const auto& event=*reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(&buffer);
+      host.publishDisplayFrequency(event.toDisplayRefreshRate,false,"runtime_event",XR_SUCCESS);
+    }
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
       const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
       if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
@@ -531,6 +628,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
     timingResetFrame(timingSequence);
+    submitSample={};submitSample.sequence=timingSequence;submitCallbacksBegin=graphicsCalls.calls;
     if(temporalFrameEyes!=3)invalidateEyeTreatments(); // prior incomplete pair never reached the runtime
     temporalFrameEyes=0;std::memset(frameTangentShift,0,sizeof(frameTangentShift));
     frameWithheld=false;frameDecisionReady=false;
@@ -623,7 +721,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(fss.acquired()&&locatedValid&&frame.shouldRender && fss.begin(gameGeometry,poses.read().originGeneration)!=S_OK) {
       boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
     }
-    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift);
+    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,
+        !featureFrameKnown||featureFrame.cullMode==0);
     boundary.setGeometryReady(geometryValid);
     frameGeometry=located;frameGeometryAvailable=true;
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
@@ -689,7 +788,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     else if(timingFrameActive) { timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask==3) {
       deviceTiming.acceptFrame(timingSequence);
       pollDeviceTiming();
-      if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else timingRetire();
+      if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else {
+        submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
+        submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
+        if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
+        timingRetire();
+      }
     } }
     if(r==vr::VRCompositorError_None){++compositorSubmits;if(loading.sceneSubmitted())++loadingToScene;}
     return r;
@@ -746,65 +850,35 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     return operation?boundary.clear():XR_ERROR_CALL_ORDER_INVALID;
   }
-  vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
-      const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
-    auto r=vr::VRCompositorError_InvalidTexture;
-    // Validate the game submission before any menu GPU work or capture mutation.
-    if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,false);
-    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,false);})) { timingInvalidate(); return r; }
-    if(r!=vr::VRCompositorError_None)return r;
-    if(!copyPixels){menu.invalidate();invalidateEyeTreatments();timingInvalidate();return r;}
+  // Runs as one synchronous producer callback. The XR owner is waiting and
+  // retains this frame's state throughout; no operation here dispatches back
+  // to that owner or invokes SharedTextureTransfer's producer rendezvous.
+  vr::EVRCompositorError treatCapturedEye(vr::EVREye eye,ID3D11Texture2D* submittedSource,
+      const vr::VRTextureBounds_t* bounds,Microsoft::WRL::ComPtr<ID3D11Texture2D>& selected,
+      vr::VRTextureBounds_t& selectedBounds,bool& menuTreated) {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> temporalOutput,treated;
     vr::VRTextureBounds_t temporalBounds{};
     vr::VRTextureBounds_t treatedBounds{};
     const auto sequence=activeFrameSequence;
-    if(features.acquired()&&!frameDecisionReady) {
-      if(features.latch(sequence,featureDecision)!=S_OK)return vr::VRCompositorError_InvalidTexture;
-      frameDecisionReady=true;frameWithheld=featureDecision.withhold!=0;
-      if(frameWithheld){fss.invalidate();++withheldPairs;}
-    }
-    // Dimensions refer to Elite's submitted ROI, before AA upscales it or a
-    // guard crop changes it. Adoption is evaluated only at the next wait.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource;
-    if(FAILED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&submittedSource))))
-      return vr::VRCompositorError_InvalidTexture;
-    D3D11_TEXTURE2D_DESC submittedDesc{};submittedSource->GetDesc(&submittedDesc);
-    const auto submittedWidth=uint32_t(std::lround(submittedDesc.Width*(bounds?std::fabs(bounds->uMax-bounds->uMin):1.f)));
-    const auto submittedHeight=uint32_t(std::lround(submittedDesc.Height*(bounds?std::fabs(bounds->vMax-bounds->vMin):1.f)));
-    cullGuard.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);
-    if(frameWithheld) {
-      if(FAILED(temporal.skip(sequence,unsigned(eye),featureDecision.jumpOnly!=0,featureDecision.verdict)))
-        return vr::VRCompositorError_InvalidTexture;
-      temporalFrameEyes|=1u<<unsigned(eye);
-      return vr::VRCompositorError_None;
-    }
     Microsoft::WRL::ComPtr<ID3D11Texture2D> healed;
     if(fss.acquired()) {
-      HRESULT treatment=E_FAIL;
-      if(!graphicsCalls.invoke([&]{
-        if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource.Get()))timingGpuBegun[unsigned(eye)]=true;
-        treatment=fss.treat(sequence,unsigned(eye),submittedSource.Get(),bounds,healed);
-      })||FAILED(treatment)) {invalidateEyeTreatments();timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
+      if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource))timingGpuBegun[unsigned(eye)]=true;
+      const auto treatment=fss.treat(sequence,unsigned(eye),submittedSource,bounds,healed);
+      if(FAILED(treatment)) {invalidateEyeTreatments();timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
       if(healed) {
         ++fssHealedEyes[unsigned(eye)];
         if(FAILED(temporal.skip(sequence,unsigned(eye),false,0)))return vr::VRCompositorError_InvalidTexture;
       }
     }
     if(temporal.acquired()&&!healed) {
-      HRESULT treatment=E_FAIL;
       LARGE_INTEGER began{},ended{}; const auto clock=QueryPerformanceCounter(&began);
-      const bool dispatched=graphicsCalls.invoke([&] {
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-        const auto queried=static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source));
-        if(FAILED(queried)){treatment=queried;return;}
-        if(timingFrameActive && !timingGpuBegun[unsigned(eye)] && timing.gpuEye(timingSequence,unsigned(eye),true,false,source.Get())) timingGpuBegun[unsigned(eye)]=true;
-        treatment=temporal.treat(sequence,unsigned(eye),source.Get(),bounds,temporalOutput,temporalBounds);
-      });
+      if(timingFrameActive && !timingGpuBegun[unsigned(eye)] && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource)) timingGpuBegun[unsigned(eye)]=true;
+      const auto treatment=temporal.treat(sequence,unsigned(eye),submittedSource,bounds,temporalOutput,temporalBounds);
       const auto clockEnd=QueryPerformanceCounter(&ended);
       if(clock&&clockEnd) timingFrame.temporalMs[unsigned(eye)]=elapsedMs(began,ended);
-      if(!dispatched||FAILED(treatment)) {
+      if(FAILED(treatment)) {
         invalidateEyeTreatments();timingInvalidate();
-        if(temporalFailures++<8)nativeTracePrintf("native_temporal,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
+        if(temporalFailures++<8)nativeTracePrintf("native_temporal,failure=%08lx,callback=1\n",(unsigned long)treatment);
         return vr::VRCompositorError_InvalidTexture;
       }
       if(temporalOutput&&temporalEyes[unsigned(eye)]++==0)
@@ -823,10 +897,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
              std::atan(raw.bottom+shift[1]),std::atan(raw.top+shift[1])};
       }
     }
-    const vr::Texture_t temporalTexture{temporalOutput.Get(),vr::API_DirectX,texture->eColorSpace};
-    const vr::Texture_t healedTexture{healed.Get(),vr::API_DirectX,texture->eColorSpace};
     const vr::VRTextureBounds_t fullBounds{0,0,1,1};
-    const auto* sharpenSource=temporalOutput?&temporalTexture:healed?&healedTexture:texture;
+    auto* sharpenSource=temporalOutput?temporalOutput.Get():healed?healed.Get():submittedSource;
     const auto* sharpenBounds=temporalOutput?&temporalBounds:healed?&fullBounds:bounds;
     vr::VRTextureBounds_t croppedBounds{};
     if(cullGuard.stage()==NativeCullStage::Live) {
@@ -837,16 +909,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sharpenOutput;
     vr::VRTextureBounds_t sharpenedBounds{};
     if(sharpen.acquired()) {
-      HRESULT treatment=E_FAIL;
-      const bool dispatched=graphicsCalls.invoke([&] {
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-        const auto queried=static_cast<IUnknown*>(sharpenSource->handle)->QueryInterface(IID_PPV_ARGS(&source));
-        if(FAILED(queried)){treatment=queried;return;}
-        treatment=sharpen.treat(sequence,unsigned(eye),source.Get(),sharpenBounds,sharpenOutput,sharpenedBounds);
-      });
-      if(!dispatched||FAILED(treatment)) {
+      const auto treatment=sharpen.treat(sequence,unsigned(eye),sharpenSource,sharpenBounds,sharpenOutput,sharpenedBounds);
+      if(FAILED(treatment)) {
         invalidateEyeTreatments();timingInvalidate();
-        if(sharpenFailures++<8)nativeTracePrintf("native_sharpen,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
+        if(sharpenFailures++<8)nativeTracePrintf("native_sharpen,failure=%08lx,callback=1\n",(unsigned long)treatment);
         return vr::VRCompositorError_InvalidTexture;
       }
       if(sharpenOutput&&sharpenEyes[unsigned(eye)]++==0)
@@ -854,33 +920,82 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     // Keep the actual temporal projection regardless of a later spatial pass.
     // Menu text is composited after sharpening, as in the OpenVR submission.
-    const vr::Texture_t sharpenedTexture{sharpenOutput.Get(),vr::API_DirectX,texture->eColorSpace};
-    const auto* menuSource=sharpenOutput?&sharpenedTexture:sharpenSource;
+    auto* menuSource=sharpenOutput?sharpenOutput.Get():sharpenSource;
     const auto* menuBounds=sharpenOutput?&sharpenedBounds:sharpenBounds;
     if(menu.acquired()) {
       HRESULT treatment=E_FAIL;
       LARGE_INTEGER menuBegan{},menuEnded{}; const auto menuClock=QueryPerformanceCounter(&menuBegan);
-      const bool dispatched=graphicsCalls.invoke([&] {
-        auto menuGeometry=frameGeometry;
-        menuGeometry.views[0]=frameViews[0];menuGeometry.views[1]=frameViews[1];
-        if(!frameGeometryAvailable||menu.publish(menuGeometry,poses.read().originGeneration)!=S_OK)return;
+      auto menuGeometry=frameGeometry;
+      menuGeometry.views[0]=frameViews[0];menuGeometry.views[1]=frameViews[1];
+      if(frameGeometryAvailable&&menu.publish(menuGeometry,poses.read().originGeneration)==S_OK) {
         ++menuPosePublications;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-        const auto queried=static_cast<IUnknown*>(menuSource->handle)->QueryInterface(IID_PPV_ARGS(&source));
-        if(FAILED(queried)){treatment=queried;return;}
-        treatment=menu.treat(unsigned(eye),source.Get(),menuBounds,treated,treatedBounds);
-      });
+        treatment=menu.treat(unsigned(eye),menuSource,menuBounds,treated,treatedBounds);
+      }
       const auto menuClockEnd=QueryPerformanceCounter(&menuEnded);
       if(menuClock&&menuClockEnd) timingFrame.menuMs[unsigned(eye)]=elapsedMs(menuBegan,menuEnded);
-      if(!dispatched||FAILED(treatment)) {
+      if(FAILED(treatment)) {
         menu.invalidate();invalidateEyeTreatments();timingInvalidate();
-        if(menuFailures++<8)nativeTracePrintf("native_menu,failure=%08lx,callback=%u\n",(unsigned long)treatment,unsigned(dispatched));
+        if(menuFailures++<8)nativeTracePrintf("native_menu,failure=%08lx,callback=1\n",(unsigned long)treatment);
         return vr::VRCompositorError_InvalidTexture;
       }
     }
+    selected=treated?treated.Get():menuSource;
+    selectedBounds=treated?treatedBounds:menuBounds?*menuBounds:fullBounds;
+    menuTreated=treated!=nullptr;
+    return vr::VRCompositorError_None;
+  }
+  vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
+    auto r=vr::VRCompositorError_InvalidTexture;
+    // Validate the game submission before any menu GPU work or capture mutation.
+    if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,false);
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,false);})) { timingInvalidate(); return r; }
+    if(r!=vr::VRCompositorError_None)return r;
+    if(!copyPixels){menu.invalidate();invalidateEyeTreatments();timingInvalidate();return r;}
+    const auto sequence=activeFrameSequence;
+    if(features.acquired()&&!frameDecisionReady) {
+      if(features.latch(sequence,featureDecision)!=S_OK)return vr::VRCompositorError_InvalidTexture;
+      frameDecisionReady=true;frameWithheld=featureDecision.withhold!=0;
+      if(frameWithheld){fss.invalidate();++withheldPairs;}
+    }
+    // Dimensions describe Elite's ROI before upscaling or a guard crop.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource;
+    if(FAILED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&submittedSource))))
+      return vr::VRCompositorError_InvalidTexture;
+    D3D11_TEXTURE2D_DESC submittedDesc{};submittedSource->GetDesc(&submittedDesc);
+    const auto submittedWidth=uint32_t(std::lround(submittedDesc.Width*(bounds?std::fabs(bounds->uMax-bounds->uMin):1.f)));
+    const auto submittedHeight=uint32_t(std::lround(submittedDesc.Height*(bounds?std::fabs(bounds->vMax-bounds->vMin):1.f)));
+    cullGuard.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);
+    submitSample.width[unsigned(eye)]=submittedWidth;submitSample.height[unsigned(eye)]=submittedHeight;
+    if(frameWithheld) {
+      if(FAILED(temporal.skip(sequence,unsigned(eye),featureDecision.jumpOnly!=0,featureDecision.verdict)))
+        return vr::VRCompositorError_InvalidTexture;
+      temporalFrameEyes|=1u<<unsigned(eye);
+      return vr::VRCompositorError_None;
+    }
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> treated;
+    vr::VRTextureBounds_t treatedBounds{};bool menuTreated=false;
+    LARGE_INTEGER dispatchBegan{},dispatchEnded{},workBegan{},workEnded{};
+    const bool measure=!submitStats.full()&&counterNow(&dispatchBegan);
+    bool workClock=false;
+    const auto treat=[&]{
+      workClock=measure&&counterNow(&workBegan);
+      r=treatCapturedEye(eye,submittedSource.Get(),bounds,treated,treatedBounds,menuTreated);
+      workClock=workClock&&counterNow(&workEnded);
+    };
+    if(fss.acquired()||temporal.acquired()||sharpen.acquired()||menu.acquired()) {
+      if(!graphicsCalls.invoke(treat)) {
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+        return vr::VRCompositorError_InvalidTexture;
+      }
+    } else treat(); // standalone diagnostic: projection bookkeeping only
+    if(measure&&workClock&&counterNow(&dispatchEnded)) {
+      submitSample.dispatchMs+=elapsedMs(dispatchBegan,dispatchEnded);
+      submitSample.treatmentMs+=elapsedMs(workBegan,workEnded);
+    } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
+    if(r!=vr::VRCompositorError_None)return r;
     const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
-    const auto* selected=treated?&processed:menuSource;
-    const auto* region=treated?&treatedBounds:menuBounds;
+    const auto* selected=&processed;const auto* region=&treatedBounds;
     // Menu output is AddRef'd and remains stable until this synchronous private
     // capture completes. Shared capture runs on the XR owner and schedules its
     // own producer copy; it must never be nested in the menu callback.
@@ -893,11 +1008,24 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
     if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
-    if(r==vr::VRCompositorError_None&&treated&&menuEyes[unsigned(eye)]++==0)
+    if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
     if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
     else { invalidateEyeTreatments(); timingInvalidate(); }
     return r;
+  }
+  void reportSubmitStats() {
+    const auto wall=submitStats.distribution(&SubmissionStats::Sample::submitMs);
+    const auto dispatch=submitStats.distribution(&SubmissionStats::Sample::dispatchMs);
+    const auto work=submitStats.distribution(&SubmissionStats::Sample::treatmentMs);
+    const auto& first=submitStats.first();const auto& last=submitStats.last();
+    nativeTracePrintf("native_submit_window,samples=%u,first=%llu,last=%llu,input=%ux%u/%ux%u,xr=%ux%u/%ux%u,callbacks_per_pair=%.2f,scene_srv_creates=%llu,submit_p50_p95_p99=%.4f/%.4f/%.4f,treatment_dispatch_p50_p95_p99=%.4f/%.4f/%.4f,treatment_work_p50_p95_p99=%.4f/%.4f/%.4f,units=wall_ms,gpu=0\n",
+      submitStats.count(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
+      last.width[0],last.height[0],last.width[1],last.height[1],
+      sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,
+      sizes[1].recommendedImageRectWidth,sizes[1].recommendedImageRectHeight,
+      submitStats.meanCallbacks(),(unsigned long long)(captured.shaderViewsCreated()+previousPair.shaderViewsCreated()),
+      wall.p50,wall.p95,wall.p99,dispatch.p50,dispatch.p95,dispatch.p99,work.p50,work.p95,work.p99);
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
     LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
@@ -1183,17 +1311,30 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!result("extensions",enumerate<XrExtensionProperties>([&](uint32_t c,uint32_t*n,XrExtensionProperties*p){
       return api.extensions(nullptr,c,n,p);},extensions,{XR_TYPE_EXTENSION_PROPERTIES}))) return false;
     bool d3d=false,timeConversion=false;
+    displayRefreshExtension=false;
+    api.displayRefreshRate=nullptr;
+    visibilityMaskExtension=false;api.visibilityMask=nullptr;
     for(const auto& e:extensions) {
       d3d|=std::strncmp(e.extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
       timeConversion|=std::strncmp(e.extensionName,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      displayRefreshExtension|=std::strncmp(e.extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      visibilityMaskExtension|=std::strncmp(e.extensionName,XR_KHR_VISIBILITY_MASK_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
     }
     if(!d3d) return result("XR_KHR_D3D11_enable",XR_ERROR_EXTENSION_NOT_PRESENT);
     if(!timeConversion)return result("XR_KHR_win32_convert_performance_counter_time",XR_ERROR_EXTENSION_NOT_PRESENT);
     XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strcpy(ci.applicationInfo.applicationName,"EDVR native stereo diagnostic");
     std::strcpy(ci.applicationInfo.engineName,"EDVR");ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
-    const char* enabled[]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};ci.enabledExtensionCount=2;ci.enabledExtensionNames=enabled;
+    const char* enabled[4]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};
+    unsigned enabledCount=2;
+    if(displayRefreshExtension)enabled[enabledCount++]=XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
+    if(visibilityMaskExtension)enabled[enabledCount++]=XR_KHR_VISIBILITY_MASK_EXTENSION_NAME;
+    ci.enabledExtensionCount=enabledCount;ci.enabledExtensionNames=enabled;
     if(!result("xrCreateInstance",api.createInstance(&ci,&instance))) return false;
+    // Optional capability: an unavailable query cannot prevent VR startup.
+    if(displayRefreshExtension&&!load(api,instance,"xrGetDisplayRefreshRateFB",api.displayRefreshRate))
+      api.displayRefreshRate=nullptr;
+    if(visibilityMaskExtension&&!load(api,instance,"xrGetVisibilityMaskKHR",api.visibilityMask))api.visibilityMask=nullptr;
 #define LOAD(name,field) if(!load(api,instance,name,api.field)) return false
     LOAD("xrDestroyInstance",destroyInstance); LOAD("xrGetInstanceProperties",instanceProperties);
     LOAD("xrGetSystem",getSystem); LOAD("xrEnumerateViewConfigurations",configurations);
@@ -1306,6 +1447,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(metadata.adapterIndex<0)return result("system_adapter_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
     geometryGeneration=geometry.begin(metadata);
+    refreshDisplayFrequency("session_created");
+    refreshHiddenMasks("session_created");
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
     if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes,
         separateGraphics()?nullptr:graphicsProxy,separateGraphics()?nullptr:&graphicsCalls))) return false;
