@@ -379,6 +379,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\hud_grain.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_separation.cpp" ^
+    "src\d3d11\ui_deferred.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -408,7 +409,7 @@ rc.exe /nologo /fo "%OBJ%\d3d11\dxbc_notice.res" "third_party\dxbc_hash\notice.r
 if errorlevel 1 ( echo [edvr] ERROR: DXBC notice resource failed & exit /b 1 )
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" kernel32.lib user32.lib gdi32.lib version.lib %NGXLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
@@ -431,7 +432,7 @@ link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\edvr_openxr_graphics.dll" ^
     "%OBJ%\native_graphics\d3d11_proxy.obj" @"%OBJ%\native_graphics\objects.rsp" ^
     "%OBJ%\d3d11\dxbc_notice.res" ^
-    kernel32.lib user32.lib gdi32.lib version.lib %NGXLIB%
+    kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB%
 if errorlevel 1 ( echo [edvr] ERROR: native graphics link failed & exit /b 1 )
 echo [edvr] built %BUILD%\edvr_openxr_graphics.dll
 
@@ -897,6 +898,18 @@ cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: UI separation controller test build failed & exit /b 1 )
 "%OBJ%\uicolourtest\controller_test.exe" || exit /b 1
+
+echo [edvr] === native deferred UI regression ===
+if not exist "%OBJ%\uideferredtest" mkdir "%OBJ%\uideferredtest"
+for %%T in (controller_test depth_test draw_test) do (
+    cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+        /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+        /Fo"%OBJ%\uideferredtest\\" /Fe"%OBJ%\uideferredtest\%%T.exe" ^
+        "tools\ui_deferred_test\%%T.cpp" ^
+        /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
+    if errorlevel 1 ( echo [edvr] ERROR: deferred UI %%T build failed & exit /b 1 )
+    "%OBJ%\uideferredtest\%%T.exe" --self-test || exit /b 1
+)
 
 if not exist "%OBJ%\holomotion" mkdir "%OBJ%\holomotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^

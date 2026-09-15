@@ -18,6 +18,7 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "ui_separation.h"
+#include "ui_deferred.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
 #include "gpu_frame_timing.h"
@@ -936,7 +937,7 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
     if (drawCensusArmed()) {
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
     }
-    if (!foreignContext(self)) s->computeThisFrame = true;
+    if (!foreignContext(self)) {s->computeThisFrame = true;uiDeferredBeforeDispatch(self);}
 
     s->realDispatchIndirect(self, args, off);
 }
@@ -945,6 +946,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Dispatch, self, static_cast<int>(self->GetType()));
     State* s = g_state;
+    if(!foreignContext(self))uiDeferredBeforeDispatch(self);
     ++s->thunkHits[kHitDispatch];
     if (foreignContext(self)) {
         // Recorded, then passed straight through. Deferred contexts reach

@@ -54,6 +54,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 // coverage reissue.  The flag is per-draw and is cleared by uiDepthEnd().
 void uiDepthSetTargetSeparated(bool separated);
 int uiDepthTargetSpriteEye();
+int uiDepthDeferredEye();
 // After the original private coverage draw, bind the same reissue shader to
 // clean sidecars and a private clean depth copy for one pure replay.
 bool uiDepthSeparatedReissueBegin(ID3D11DeviceContext* ctx);

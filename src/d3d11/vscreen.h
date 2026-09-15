@@ -25,8 +25,10 @@ struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11RenderTargetView;
 struct ID3D11DepthStencilView;
+struct ID3D11CommandList;
 
 namespace edvr {
+void vScreenExecuteCommandListRaw(ID3D11DeviceContext*,ID3D11CommandList*,int restore);
 
 // Above this many draws into the eye textures in one frame, a SCENE is being
 // rendered rather than a menu.

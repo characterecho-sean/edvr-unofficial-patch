@@ -1871,6 +1871,13 @@ void uiDepthSetTargetSeparated(bool separated) {
 int uiDepthTargetSpriteEye() {
     return g_reissueShader == &g_depthShaders[5] ? g_drawEye : -1;
 }
+int uiDepthDeferredEye() {
+    if(g_mode!=Mode::kReissueScene)return -1;
+    // Only these verified UI materials are deferred. Planet surfaces, rings,
+    // corona and smoke keep their world rendering and motion classification.
+    for(unsigned i:{1u,3u,5u,7u,8u})if(g_reissueShader==&g_depthShaders[i])return g_drawEye;
+    return -1;
+}
 
 // True when the second draw is set up to write DEPTH, the reactive mask,
 // or both -- never colour. False means this call declined, and the caller

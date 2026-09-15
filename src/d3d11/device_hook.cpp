@@ -41,6 +41,7 @@
 #include "eye_draw_snapshot.h"
 #include "eye_tonemap_snapshot.h"
 #include "ui_separation.h"
+#include "ui_deferred.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
 #include "quad_probe.h"
@@ -585,6 +586,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // vertices it is handed decides whether the curved screen is possible
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
+        uiDeferredRemember(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
@@ -608,6 +610,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        uiDeferredRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));

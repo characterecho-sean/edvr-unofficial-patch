@@ -26,6 +26,7 @@
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "ui_resolve.h"
 #include "ui_separation.h"
+#include "ui_deferred.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
 #include "weapon_stability.h"
@@ -3604,6 +3605,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Removing UI from the input is safe only when the matching
                     // current-frame composite is available at the output.
                     const bool separated=uiResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
+                    ID3D11ShaderResourceView* deferredInput=nullptr;
+                    if(!debugPaint && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
+                        deferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
                     // The colour, typed, whichever way the source came.
                     D3D11_BOX box{};
                     box.left = viaCopy ? 0 : region[0];
@@ -3625,11 +3629,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
-                    const bool separationChanged=(separated && !e.uiSeparatedHistory) || (!separated && e.uiSeparatedHistory && uiSeparationFailed());
+                    const bool currentSeparated=separated || deferredInput;
+                    const bool deferredFallbackReset=uiDeferredFallbackReset(eye);
+                    const bool separationChanged=currentSeparated!=e.uiSeparatedHistory || deferredFallbackReset;
                     if(separationChanged){e.dlHaveHistory=false;e.uiHistoryValid=false;e.zPrevValid=false;}
-                    if(separated || uiSeparationFailed())e.uiSeparatedHistory=separated;
+                    e.uiSeparatedHistory=currentSeparated;
                     // The eye run's raw frame (g_eyeRawStaging says why).
                     if (eye == 0 && g_eyeRunLeft > 0) captureEyeRunRaw(ctx, e.dlColour);
+                    if(deferredInput){Microsoft::WRL::ComPtr<ID3D11Resource> clean;deferredInput->GetResource(&clean);ctx->CopyResource(e.dlColour,clean.Get());}
                     // The motion vectors and the depth copy -- and, with the
                     // mover mask on, last frame's depth read at t3 and the
                     // mask written at u5 (tier 1, docs/per-object-motion.md).
@@ -3682,7 +3689,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[17] = {separated?separatedCandidate.colourView:inSrv,
+                    ID3D11ShaderResourceView* srvsM[17] = {deferredInput?e.dlColourSrv:separated?separatedCandidate.colourView:inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
@@ -3707,6 +3714,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve) uiEvidenceWritten = true;
                     if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],separated?&separatedCandidate:nullptr);
+                    if(deferredInput && eye==0 && g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame){stageEyeRun(ctx,e.dlColour,g_eyeInputs,16);g_eyeInputsUiFlags|=64u;}
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
                     // the mover mask existed), else nothing.
@@ -3846,6 +3854,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if(captureResolve)stageEyeRun(ctx,e.uiHistory[1-e.uiHistoryRead],g_eyeInputs,15);
                         if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");}
                     } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    if(usedDlaa && deferredInput)uiDeferredApply(ctx,eye);
                 }
             }
         }
