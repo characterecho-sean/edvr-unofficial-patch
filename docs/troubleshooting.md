@@ -1,6 +1,6 @@
 # When something is wrong
 
-Three faults with a known cause and a known answer. Anything else wants
+Four faults with a known cause and a known answer. Anything else wants
 [an issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
 with the logs attached: run `edvr-installer.exe` and press **Save logs**, which
 puts the right session's files into one zip on your Desktop.
@@ -60,3 +60,16 @@ the first graphics call instead. Tested with a stand-in proxy that does work in
 its own `DllMain` — the exact thing that used to crash — plus the three ways it
 can go wrong: a missing name, a non-proxy file, and a setting pointed at EDVR
 itself. All three fall back to the system DLL and say so.
+
+## VR never starts on 0.17.0-rc.1 with EDHM chained
+
+The game runs flat, and `edvr_openxr_*.log` stops at
+`error,D3D11Device,80070005` a few lines after the `size,0,...` and
+`size,1,...` lines, then `module_startup,...,result=124`. EDHM's 3Dmigoto
+hooks `LoadLibraryExW` and answers a request for Windows' own `d3d11.dll`
+with the copy in the game directory, which on an EDVR install is EDVR itself.
+The OpenXR half refused that module, as it should, and never created its
+device. Fixed in the build after rc.1: the OpenXR half now takes the copy of
+Windows' `d3d11.dll` that is already in memory, by its full path, and the log
+names the module it got in a `device_module,route=...,path=...` line. Until
+you have that build, run 0.16.2 with EDHM, or rc.1 without it.

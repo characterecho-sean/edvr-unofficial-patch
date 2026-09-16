@@ -11,6 +11,24 @@ static bool identity(IUnknown* first,IUnknown* second) {
     second->QueryInterface(IID_PPV_ARGS(&b))==S_OK&&a.Get()==b.Get();
 }
 
+// The System32 d3d11.dll path as UTF-8, and whether that module is already
+// mapped (without touching its reference count). A mapped module must be taken
+// over LoadLibraryExW, which chained d3d11 mods hook and redirect.
+static std::string systemD3D11Path() {
+  wchar_t directory[MAX_PATH]{};const UINT length=GetSystemDirectoryW(directory,MAX_PATH);
+  const std::wstring wide=std::wstring(directory,length)+L"\\d3d11.dll";
+  const int needed=WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,nullptr,0,nullptr,nullptr);
+  std::string out(size_t(needed>0?needed:1),'\0');
+  if(needed>0)WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,out.data(),needed,nullptr,nullptr);
+  out.resize(needed>0?size_t(needed-1):0);return out;
+}
+static const char* expectedSeparateRoute() {
+  wchar_t directory[MAX_PATH]{};const UINT length=GetSystemDirectoryW(directory,MAX_PATH);
+  const std::wstring wide=std::wstring(directory,length)+L"\\d3d11.dll";
+  HMODULE mapped=nullptr;
+  return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,wide.c_str(),&mapped)&&mapped?"mapped":"loaded";
+}
+
 int hardwareTest() {
   unsigned fails=0,checks=0;auto check=[&](bool value,const char* name){++checks;if(!value){++fails;std::printf("FAIL: %s\n",name);}};
   ComPtr<IDXGIFactory1> factory;check(CreateDXGIFactory1(IID_PPV_ARGS(&factory))==S_OK,"DXGI factory");
@@ -24,7 +42,10 @@ int hardwareTest() {
   if(!initial)return 1;
   DXGI_ADAPTER_DESC actual{};ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> actualAdapter;
   check(initial.As(&dxgi)==S_OK&&dxgi->GetAdapter(&actualAdapter)==S_OK&&actualAdapter->GetDesc(&actual)==S_OK,"initial hardware identity");
+  const char* expectedRoute=expectedSeparateRoute();
   NativeDevice separate;check(separate.initializeSeparate(actual.AdapterLuid,level)==S_OK,"separate hardware device initialization");
+  check(!std::strcmp(separate.separateModuleRoute(),expectedRoute)&&!_stricmp(separate.separateModulePath().c_str(),systemD3D11Path().c_str()),
+        "separate hardware device came from the mapped System32 d3d11.dll");
   check(separate.device()&&separate.context()&&!identity(separate.device(),initial.Get())&&
         !identity(separate.context(),initialContext.Get()),"separate device and context are distinct COM identities");
   ComPtr<IDXGIDevice> separateDxgi;ComPtr<IDXGIAdapter> separateAdapter;DXGI_ADAPTER_DESC separateDesc{};
@@ -77,9 +98,14 @@ int wmain(int argc,wchar_t** argv) {
   NativeDevice native;
   check(native.initialize(LUID{},D3D_FEATURE_LEVEL_10_0,nullptr)==E_INVALIDARG&&!native.device()&&!native.context(),"null device factory rejected");
   check(FAILED(native.initialize(LUID{},D3D_FEATURE_LEVEL_12_1))&&!native.device()&&!native.context(),"failed initialize leaves empty ownership");
+  check(!std::strcmp(native.separateModuleRoute(),"none")&&native.separateModulePath().empty(),"separate diagnostics start empty");
+  const char* expectedRoute=expectedSeparateRoute();
   check(native.initializeSeparate(LUID{},D3D_FEATURE_LEVEL_12_1)==E_INVALIDARG&&
       !native.device()&&!native.context(),"separate unsupported minimum releases module reference");
+  check(!std::strcmp(native.separateModuleRoute(),expectedRoute),"separate device takes the mapped System32 module before loading one");
+  check(!_stricmp(native.separateModulePath().c_str(),systemD3D11Path().c_str()),"separate device names the System32 d3d11.dll it obtained");
   check(native.initializeSeparate(LUID{0xffffffffu,-1},D3D_FEATURE_LEVEL_10_0)==DXGI_ERROR_NOT_FOUND&&
       !native.device()&&!native.context(),"separate missing adapter fails without fallback");
+  check(!std::strcmp(native.separateModuleRoute(),expectedRoute)&&!native.separateModulePath().empty(),"separate diagnostics survive a failed adapter lookup");
   std::printf("native_device_test: %u checks, %u failures\n",checks,fails);return fails?1:0;
 }

@@ -1,5 +1,31 @@
 # Native capture on a separate OpenXR device
 
+## Status
+
+*Added 2026-09-15. Restates the journal below; update it whenever this doc
+changes.*
+
+- **State:** separate-device capture is the packaged default of 0.17.0-rc.1
+  (`separate_device=1`), qualified on Pimax 2026-09-13 ("Pimax result").
+  2026-09-15: rc.1 lost VR entirely whenever EDHM (3Dmigoto 1.3.16) was
+  chained behind EDVR. Cause found in 3Dmigoto's source, fixed and merged to
+  main 2026-09-15 ("EDHM redirect" below). NOT FLOWN.
+- **Open:** the confirmation flight; and whether 3Dmigoto's own inline hook
+  on `D3D11CreateDevice` lands on EDVR's export or on Windows' (the flight's
+  `device_module` + `error,D3D11Device` lines answer it, see below).
+- **Ruled out:** listed at the end of "EDHM redirect".
+- **Next flight:** Frontier install, EDHM chained, Pimax Crystal Super on
+  Pimax OpenXR. Pass: `device_module,route=mapped,path=C:\WINDOWS\system32\d3d11.dll`
+  then `device,adapter=...` and `module_startup,...,result=0`, submits > 0 in
+  `native_summary`. Fail A: no `device_module` line and
+  `error,D3D11Device,80070005` -- the old DLL flew. Fail B: `device_module`
+  with a game-directory path -- the redirect still bites. Fail C:
+  `device_module` with the System32 path then `error,D3D11Device,<hr>` --
+  the module is right and device creation itself fails (3Dmigoto's wrapper).
+- **Environment:** Frontier install, `[advanced] real_dll = d3d11_edhm.dll`,
+  EDHM's `d3dx.ini` `[System] load_library_redirect=2`, Pimax Crystal Super
+  on Pimax OpenXR, 4068x4016 per eye in the failing log.
+
 The [shared transfer prerequisite](openxr-shared-device-2026-09-13.md) is now
 connected to the staged native module's eye and loading captures. An explicit
 version-2 embedding configuration creates a second D3D11 device on the OpenXR
@@ -143,3 +169,62 @@ stopped-Present teardown on this Pimax setup. It does not establish arbitrary
 concurrent game calls, error recovery, game-feature compatibility or the
 transfer cost in Elite. The next step is completing native legacy exports and
 an opt-in Frontier launch using the qualified ownership mode.
+
+## EDHM redirect (2026-09-15)
+
+**Report.** A user lost VR on 0.17.0-rc.1. Sean reproduced it on the Frontier
+install with EDHM installed; the Steam install, without EDHM, works on the
+same build.
+
+**Evidence.** `edvr_openxr_20260915_175851_097_23448.log`, build
+`v0.17.0-rc.1-1-ga44ae48` (checked with `edvr_log.py --expect-build`):
+`module_configuration,source=local` -> `runtime,Pimax OpenXR` ->
+`system,...,name=Pimax Crystal Super` -> `size,0,4068,4016` ->
+`error,D3D11Device,80070005` -> `module_startup,...,result=124` -> shutdown,
+`native_summary,waits=0,submits=0`. The graphics log of the same session
+shows the chain working for the game's own device: "chaining through
+...\d3d11_edhm.dll -- 41 export(s) from it, 8 from the system d3d11.dll",
+"the chained proxy asked for d3d11.dll and got edvr... Sending it to the
+system d3d11.dll instead", LiveCopy with 96 of 96 sampled vtable entries
+inside Windows' d3d11.dll, 5,693 frames. Every Frontier flight earlier that
+day, before EDHM was installed at 17:56, ended `result=0` with tens of
+thousands of submits.
+
+**Cause.** 80070005 is E_ACCESSDENIED. On the separate-device startup path
+the only producer of it before device creation is the identity check in
+`NativeDevice::initializeSeparate` (src\openxr\native_device.h): it called
+`LoadLibraryExW` with the full System32 path of `d3d11.dll` and required
+`GetModuleFileNameW` of the result to equal that path. EDHM's 3Dmigoto
+(1.3.16; its `d3dx.ini` has `[System] load_library_redirect=2`) hooks
+kernel32 `LoadLibraryExW` from its DllMain (DLLMainHook.cpp:93-95, 338) and
+`ReplaceOnMatch` (D3D11Wrapper.cpp:1134-1190, tag 1.3.16) answers a request
+for exactly `<System32>\d3d11.dll` with `<3Dmigoto's own directory>\d3d11.dll`
+-- the game directory, where that file is EDVR's proxy. The check rejected
+it, as designed, and startup ended with no XR device. EDVR's graphics half is
+unaffected: it loads the system copy in its own DllMain, before EDHM exists.
+
+**Fix** (this branch). `initializeSeparate` now asks for the already mapped
+module by full path with `GetModuleHandleExW`, which 3Dmigoto does not hook
+(the precedent is `native_graphics_client.h`) and which the graphics half
+keeps mapped for the life of the process; it falls back to `LoadLibraryExW`
+only when nothing is mapped at that path (bare test rigs). The identity check
+stays. In separate-device mode the host prints, right after the call,
+`device_module,route=<mapped|loaded|none>,path=<what was actually obtained>`,
+so a redirected module is visible above any `error,D3D11Device` line and an
+old DLL (no `device_module` line) is distinguishable from a new one.
+`native_device_test --self-test` asserts the mapped route and the System32
+path.
+
+- ruled out: a stale build in the log, because `--expect-build` matched.
+- ruled out: producer device validation, because that failure prints
+  `result,producer_device_validation,...` and never `error,D3D11Device`.
+- ruled out: the graphics-bridge and render-callback E_ACCESSDENIED paths
+  (graphics_bridge.cpp, native_render_binding.h), because the binding was
+  acquired before the failure and both fire only after device creation.
+- ruled out: an EDHM chain fault on the game's device, because the graphics
+  log shows the chain resolved and LiveCopy hooking Windows' d3d11.dll for
+  the whole session.
+- ruled out: runtime or headset, because the same Pimax runtime and headset
+  flew `result=0` the same day before EDHM went in.
+- not tried, on purpose: turning off EDHM's `load_library_redirect` or
+  setting `separate_device=0`; neither is a fix EDVR can ship.

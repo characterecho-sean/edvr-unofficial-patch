@@ -61,8 +61,16 @@ class NativeDevice {
     device_=device;feature_=device->GetFeatureLevel();return S_OK;
   }
   // Bypass the application's proxy export when creating the XR-owned device.
+  // Take the System32 module that is already mapped, found by full path with
+  // GetModuleHandleExW rather than LoadLibraryExW: another d3d11 mod chained
+  // behind EDVR (3Dmigoto/EDHM with load_library_redirect=2) hooks
+  // LoadLibraryExW and answers the System32 path with its own game-directory
+  // proxy, which the identity check below then rightly rejects and no XR device
+  // is ever created. The game's d3d11 proxy keeps the genuine module mapped for
+  // the life of the process, so the load fallback only serves bare test rigs.
   // Keep this explicit System32 module reference through device/context release.
   HRESULT initializeSeparate(const LUID& required,D3D_FEATURE_LEVEL minimum) {
+    separateRoute_="none";separateModule_.clear();
     wchar_t directory[MAX_PATH]{};
     const UINT length=GetSystemDirectoryW(directory,MAX_PATH);
     if(!length||length>=MAX_PATH)return E_FAIL;
@@ -70,28 +78,48 @@ class NativeDevice {
     struct ModuleReference {
       HMODULE value=nullptr;
       ~ModuleReference(){if(value)FreeLibrary(value);}
-    } module{LoadLibraryExW(path.c_str(),nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)};
-    if(!module.value)return HRESULT_FROM_WIN32(GetLastError());
+    } module;
+    // Flags 0 (not UNCHANGED_REFCOUNT) adds a reference, balanced by FreeLibrary.
+    if(GetModuleHandleExW(0,path.c_str(),&module.value)&&module.value) {
+      separateRoute_="mapped";
+    } else {
+      module.value=LoadLibraryExW(path.c_str(),nullptr,
+          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+      if(!module.value)return HRESULT_FROM_WIN32(GetLastError());
+      separateRoute_="loaded";
+    }
     wchar_t loaded[MAX_PATH]{};
     const DWORD actual=GetModuleFileNameW(module.value,loaded,MAX_PATH);
-    if(!actual||actual>=MAX_PATH||_wcsicmp(loaded,path.c_str())){
-      return E_ACCESSDENIED;
-    }
+    if(!actual||actual>=MAX_PATH)return E_ACCESSDENIED;
+    separateModule_=utf8(loaded,actual);
+    if(_wcsicmp(loaded,path.c_str()))return E_ACCESSDENIED;
     const auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module.value,"D3D11CreateDevice"));
     const HRESULT result=initialize(required,minimum,create);
     if(FAILED(result))return result;
     systemModule_=module.value;module.value=nullptr;return S_OK;
   }
+  // Diagnostics for the last initializeSeparate: how the d3d11 module was
+  // obtained ("mapped", "loaded" or "none") and the path it actually has.
+  const char* separateModuleRoute()const{return separateRoute_;}
+  const std::string& separateModulePath()const{return separateModule_;}
   void reset(){context_.Reset();device_.Reset();feature_=D3D_FEATURE_LEVEL_1_0_CORE;
     if(systemModule_){FreeLibrary(systemModule_);systemModule_=nullptr;}}
   ID3D11Device* device()const{return device_.Get();}
   ID3D11DeviceContext* context()const{return context_.Get();}
   D3D_FEATURE_LEVEL featureLevel()const{return feature_;}
  private:
+  static std::string utf8(const wchar_t* text,size_t length) {
+    const int needed=WideCharToMultiByte(CP_UTF8,0,text,int(length),nullptr,0,nullptr,nullptr);
+    if(needed<=0)return "?";
+    std::string out(size_t(needed),'\0');
+    if(WideCharToMultiByte(CP_UTF8,0,text,int(length),out.data(),needed,nullptr,nullptr)!=needed)return "?";
+    return out;
+  }
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
   D3D_FEATURE_LEVEL feature_=D3D_FEATURE_LEVEL_1_0_CORE;
   HMODULE systemModule_=nullptr;
+  const char* separateRoute_="none";
+  std::string separateModule_;
 };
 }
