@@ -36,9 +36,10 @@ prepare CPU per eye at the current input/output size (20 samples). This
 excludes DLSS, game rendering, pre-tone work and real materials. The
 full build, live NGX smoke and final hardware check passed. Candidate
 version is `v0.17.0-rc.2-dirty`, built before the source commit,
-graphics PE `6AA9EC43` and runtime PE `6AA9ECE2`. Next headset check:
-confirm target text/corona behavior with this verified Steam package.
-Visual improvement is not yet confirmed in-game.
+graphics PE `6AA9EC43` and runtime PE `6AA9ECE2`. Installed to Steam;
+separate package verification passed and the INI is unchanged. Next
+headset check: confirm target text/corona behavior with this verified
+Steam package. Visual improvement is not yet confirmed in-game.
 
 Build setup: prepend bundled Python, pass Steam's original OpenVR DLL
 using `--openvr`, and set `EDVR_NGX_SDK` to
@@ -2191,4 +2192,16 @@ The sanctioned Steam install dry run passed and wrote nothing. It
 selected the native OpenXR pair, loader and available DLSS payload,
 confirmed Elite was stopped, and retained the existing INI. The
 pre-install INI hash is
-`BDF474BB2A929773FE66AADC790549FA59714830EB9A9FEE5EB4CDD06F45BF9B4`.
+`BDF474BB2A929773FE66AADC790549FA59714830EB9A9FEE5EB4CDD06F45BF9B`.
+
+Source fix e97e2fe was merged with main's documentation-only a82a19a as
+96902e6 and pushed; the additional merge did not change compiled
+sources. The sanctioned Steam install then completed, and a separate
+`--all --verify-only` passed. Installed graphics/runtime hashes match
+the final build above. The original and final INI are both 144,372 bytes
+and have the same 64-character hash recorded above. An extra trailing
+character in the agent's initial prose report was corrected against its
+original preflight tool output and a final read-only hash check.
+
+Install receipt backup in the Steam game directory:
+`edvr_native_receipt.json.pre-96902e6-20260915-192019.bak`.
