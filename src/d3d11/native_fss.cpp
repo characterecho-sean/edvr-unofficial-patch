@@ -23,13 +23,12 @@ struct Raw {
 struct State {
   bool active=false,frameOpen=false,consumed[2]{}; ID3D11Device* device=nullptr;
   ComPtr<ID3D11DeviceContext> ctx; DWORD thread=0; uint64_t generation=0,reference=0,floor=0,sequence=0;
-  Raw current[2],previous[2]; EdvrNativeFssFrame frame{}; edvr::EyeSync sync{};
+  Raw current[2]; EdvrNativeFssFrame frame{}; edvr::EyeSync sync{};
   bool projectionCompatible=false,healGate=false,submitLatched=false,stampsKnown=false; LONG arrival=0,chrome=0;
-  uint64_t previousSequence=0;
   uint64_t arrivalChanged=0,chromeChanged=0;
   bool arrivalRecent=false,chromeRecent=false;
   uint64_t snapshots=0,healed=0,gatedOut=0,donorRefusals=0;
-  bool healNoted=false,projectionNoted=false;
+  bool healNoted=false,projectionNoted=false,healDelivered=false;
 };
 State pool[kCapacity]{}; unsigned used=0; State* live=nullptr; std::mutex mu;
 State* find(void* p){for(unsigned i=0;i<used;++i)if(p==&pool[i])return &pool[i];return nullptr;}
@@ -65,8 +64,8 @@ bool bounds(const float* b,const D3D11_TEXTURE2D_DESC& d,uint32_t roi[4],bool* f
   const double x0=std::floor(double(b[0])*d.Width),y0=std::floor(double(b[1])*d.Height),x1=std::ceil(double(b[2])*d.Width),y1=std::ceil(double(b[3])*d.Height);
   if(x1<=x0||y1<=y0||x0<0||y0<0||x1>d.Width||y1>d.Height)return false;roi[0]=(uint32_t)x0;roi[1]=(uint32_t)y0;roi[2]=(uint32_t)x1;roi[3]=(uint32_t)y1;return true;
 }
-bool compatible(const Raw& r,const D3D11_TEXTURE2D_DESC& d,const uint32_t roi[4]){
-  return r.valid&&r.tex&&r.desc.Width==roi[2]-roi[0]&&r.desc.Height==roi[3]-roi[1]&&r.desc.Format==d.Format;
+bool pairCompatible(const Raw& a,const Raw& b){
+  return a.valid&&a.tex&&b.valid&&b.tex&&a.desc.Width==b.desc.Width&&a.desc.Height==b.desc.Height&&a.desc.Format==b.desc.Format;
 }
 bool snapshot(State& s,unsigned e,ID3D11Texture2D* src,const D3D11_TEXTURE2D_DESC& d,const uint32_t roi[4]){
   Raw& r=s.current[e];D3D11_TEXTURE2D_DESC out=d;out.Width=roi[2]-roi[0];out.Height=roi[3]-roi[1];
@@ -76,17 +75,10 @@ bool snapshot(State& s,unsigned e,ID3D11Texture2D* src,const D3D11_TEXTURE2D_DES
   }
   D3D11_BOX box{roi[0],roi[1],0,roi[2],roi[3],1};s.ctx->CopySubresourceRegion(r.tex.Get(),0,0,0,0,src,0,&box);r.sourceDesc=d;std::memcpy(r.roi,roi,sizeof(r.roi));r.valid=true;return true;
 }
-void clearCopies(State& s){for(unsigned e=0;e<2;++e){s.current[e].reset();s.previous[e].reset();}edvr::publishSubmitTexture(0,nullptr);edvr::publishSubmitTexture(1,nullptr);}
+void clearCopies(State& s){for(unsigned e=0;e<2;++e)s.current[e].reset();edvr::publishSubmitTexture(0,nullptr);edvr::publishSubmitTexture(1,nullptr);}
 void resetStamps(State& s) {
   s.arrival=edvr::fssArrivalStampValue();s.chrome=edvr::fssChromeStampValue();s.stampsKnown=true;
   s.arrivalChanged=s.chromeChanged=0;s.arrivalRecent=s.chromeRecent=s.healGate=false;
-}
-bool sameProjection(const EdvrNativeFssFrame& a,const EdvrNativeFssFrame& b) {
-  for(unsigned e=0;e<2;++e) {
-    for(unsigned i=0;i<4;++i)if(std::fabs(a.frusta[e][i]-b.frusta[e][i])>1.e-5f)return false;
-    for(unsigned i=0;i<12;++i)if(std::fabs(a.eyeToHead[e][i]-b.eyeToHead[e][i])>1.e-5f)return false;
-  }
-  return true;
 }
 bool healRect(float out[4]){
   float c[16]{};if(!edvr::readFssPanelRect(c)||!finite(c,8))return false;float u0=c[0],u1=c[0],v0=c[1],v1=c[1];for(unsigned i=0;i<4;++i){u0=(std::min)(u0,c[2*i]);u1=(std::max)(u1,c[2*i]);v0=(std::min)(v0,c[2*i+1]);v1=(std::max)(v1,c[2*i+1]);}
@@ -97,13 +89,10 @@ void latch(State& s){
   const uint64_t aa=s.arrivalChanged?s.sequence-s.arrivalChanged:99,cc=s.chromeChanged?s.sequence-s.chromeChanged:99;s.arrivalRecent=aa<=3;s.chromeRecent=cc<=10;s.healGate=s.projectionCompatible&&s.sync.healMode!=0&&s.arrivalRecent&&s.chromeRecent;
 }
 HRESULT WINAPI begin(void* p,const EdvrNativeFssFrame* f){
-  std::lock_guard<std::mutex> lock(mu);State*s=find(p);if(!s||!s->active||s!=live||!f||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_FSS_VERSION_1||f->generation!=s->generation||!f->referenceGeneration||!f->sequence||f->sequence<=s->floor||!finite(f->frusta[0],8)||!finite(f->eyeToHead[0],24))return E_INVALIDARG;
-  if(f->referenceGeneration!=s->reference){clearCopies(*s);s->reference=f->referenceGeneration;resetStamps(*s);s->previousSequence=0;}
-  if(s->frameOpen&&!sameProjection(s->frame,*f))clearCopies(*s);
-  const uint64_t oldSequence=s->sequence;const bool hadPrevious=s->frameOpen;
-  for(unsigned e=0;e<2;++e){std::swap(s->current[e],s->previous[e]);s->current[e].clear();}
-  s->previousSequence=hadPrevious?oldSequence:0;
-  if(!s->previousSequence||f->sequence!=s->previousSequence+1)for(unsigned e=0;e<2;++e)s->previous[e].clear();
+  std::lock_guard<std::mutex> lock(mu);State*s=find(p);if(!s||!s->active||s!=live||!f||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_FSS_VERSION_2||f->generation!=s->generation||!f->referenceGeneration||!f->sequence||f->sequence<=s->floor||!finite(f->frusta[0],8)||!finite(f->eyeToHead[0],24))return E_INVALIDARG;
+  if(f->referenceGeneration!=s->reference){clearCopies(*s);s->reference=f->referenceGeneration;resetStamps(*s);}
+  for(unsigned e=0;e<2;++e)s->current[e].clear();
+  s->healDelivered=false;
   s->frame=*f;s->sequence=s->floor=f->sequence;s->frameOpen=true;s->consumed[0]=s->consumed[1]=false;s->sync=edvr::eyeSyncFromConfig(edvr::Config::get());s->projectionCompatible=parallel(*f);if(!s->projectionCompatible&&!s->projectionNoted){s->projectionNoted=true;edvr::Log::get().note("native fss: unsupported canted or unequal projection; healing is guarded off.");}s->healGate=false;s->submitLatched=false;return S_OK;
 }
 HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t e,ID3D11Texture2D* src,const float* b,ID3D11Texture2D** out){
@@ -116,21 +105,26 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t e,ID3D11Texture2D* src,const 
   }
   if(!snapshot(*s,e,src,d,roi))return S_FALSE;
   ++s->snapshots;edvr::publishSubmitTexture(int(e),s->current[e].tex.Get());
-  if(!s->healGate||(s->sync.healMode==1&&e!=0)||(s->sync.healMode==2&&e!=1)){++s->gatedOut;return S_FALSE;}
-  // Mode 2 must use this frame's left even if right was submitted first. A
-  // recycled allocation whose validity was cleared is never a usable donor.
-  Raw& left=s->current[0];
-  Raw& right=s->sync.healMode==1?(s->current[1].valid?s->current[1]:s->previous[1]):s->current[1];
-  if(!compatible(left,d,roi)||!compatible(right,d,roi)){++s->donorRefusals;return S_FALSE;}
+  return S_FALSE;
+}
+HRESULT WINAPI healPair(void* p,uint64_t seq,uint32_t* eye,ID3D11Texture2D** out){
+  if(out)*out=nullptr;std::lock_guard<std::mutex> lock(mu);State*s=find(p);
+  if(!s||!s->active||s!=live||!s->frameOpen||GetCurrentThreadId()!=s->thread||!eye||!out||seq!=s->sequence||seq!=s->floor)return E_INVALIDARG;
+  if(!s->healGate||s->healDelivered)return S_FALSE;
+  const unsigned target=s->sync.healMode==2?1u:0u,donor=1u-target;
+  if(!s->current[target].valid)return S_FALSE;
+  if(!s->current[donor].valid)return s->consumed[donor]?S_FALSE:E_PENDING;
+  Raw& left=s->current[0];Raw& right=s->current[1];
+  if(!pairCompatible(left,right)){++s->donorRefusals;return S_FALSE;}
   float rect[4]{};if(!healRect(rect)){++s->donorRefusals;return S_FALSE;}
   void* raw=edvrFssHealLeft(left.tex.Get(),right.tex.Get(),-s->frame.frusta[0][0],s->frame.frusta[0][1],s->sync.healMode,rect);
   if(!raw){++s->donorRefusals;return S_FALSE;}
-  auto* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*out=result;++s->healed;
+  auto* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*out=result;*eye=target;s->healDelivered=true;++s->healed;
   if(!s->healNoted){s->healNoted=true;edvr::Log::get().note("native fss: arrival heal engaged.");}return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex>lock(mu);State*s=find(p);if(!s||!s->active||s!=live)return E_INVALIDARG;clearCopies(*s);s->frameOpen=false;s->consumed[0]=s->consumed[1]=false;s->healGate=false;return S_OK;}
+HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex>lock(mu);State*s=find(p);if(!s||!s->active||s!=live)return E_INVALIDARG;clearCopies(*s);s->frameOpen=false;s->consumed[0]=s->consumed[1]=false;s->healGate=false;s->healDelivered=false;return S_OK;}
 HRESULT WINAPI close(void* p){std::lock_guard<std::mutex>lock(mu);State*s=find(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;edvr::Log::get().note("native fss totals: snapshots=%llu, healed=%llu, gated_out=%llu, donor_refusals=%llu.",(unsigned long long)s->snapshots,(unsigned long long)s->healed,(unsigned long long)s->gatedOut,(unsigned long long)s->donorRefusals);clearCopies(*s);edvr::fssHealRelease();s->active=false;s->frameOpen=false;s->ctx.Reset();s->device=nullptr;if(live==s)live=nullptr;return S_OK;}
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeFss(const EdvrNativeFssRequest*r,EdvrNativeFssTable*t){
-  if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_FSS_VERSION_1)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_FSS_VERSION_1};if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_FSS_VERSION_1||!r->gameDevice||!r->generation||FAILED(r->gameDevice->GetDeviceRemovedReason()))return E_INVALIDARG;std::lock_guard<std::mutex>lock(mu);if(live||used==kCapacity)return E_PENDING;State&s=pool[used++];s={};s.active=true;s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.device->GetImmediateContext(&s.ctx);if(!s.ctx){s.active=false;return E_FAIL;}live=&s;t->context=&s;t->beginFrame=begin;t->treatEye=treat;t->invalidate=invalidate;t->close=close;return S_OK;
+  if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_FSS_VERSION_2)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_FSS_VERSION_2};if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_FSS_VERSION_2||!r->gameDevice||!r->generation||FAILED(r->gameDevice->GetDeviceRemovedReason()))return E_INVALIDARG;std::lock_guard<std::mutex>lock(mu);if(live||used==kCapacity)return E_PENDING;State&s=pool[used++];s={};s.active=true;s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.device->GetImmediateContext(&s.ctx);if(!s.ctx){s.active=false;return E_FAIL;}live=&s;t->context=&s;t->beginFrame=begin;t->treatEye=treat;t->healPair=healPair;t->invalidate=invalidate;t->close=close;return S_OK;
 }

@@ -76,7 +76,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 terrain, 16 holo, 32 screen
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 terrain, 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path)
     float4 stR0;        // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows,
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
@@ -369,9 +369,12 @@ bool shipPixel(int i, float3 d, float z, out float2 pp, out float zp) {
 // before 2026-09-09 (when a band of values said which, and every stroke
 // fell in the riding band) they rode the station's spin where they
 // crossed its silhouette and kept the camera's path over the sky beside
-// it -- "shimmering on just one side".
+// it -- "shimmering on just one side". One exception to the odd kind: in
+// the scanner (probe.w bit 128) the camera is not the head, and every
+// interface pixel takes the head's path instead (fetchHistoryT says).
 // UI history decisions compare UI evidence, independently of fixed bias.
-// Flags in probe.w: 1 fixed bias, 2 previous evidence valid, 4 capture/adapt.
+// Flags in probe.w: 1 fixed bias, 2 previous evidence valid, 4 capture/adapt,
+// 128 the scanner's screen is up.
 // A one-pixel neighbourhood tolerates raster jitter and subpixel movement.
 float4 uiEvidence(int2 q) {
     q = clamp(q, int2(0,0), size - 1);
@@ -605,7 +608,15 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
         bool far = zr <= 0.0 || den <= 0.0;
         float z = far ? 0.0 : knobs.z / den;
-        if (worldOn && (far || z > split.x)) {
+        // The scanner's interface (probe.w bit 128: the FSS screen is up)
+        // reads a scene depth past the split, and the rule for a stroke --
+        // the camera's path at the pixel's depth -- assumes the camera is
+        // the head, which in the scanner it is not: its camera pans while
+        // the panel stays put in front of the seat (eye dump 170752,
+        // docs/fss-scanner.md). Those pixels take the head's rows given,
+        // at whatever depth they read.
+        bool scannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
+        if (worldOn && (far || z > split.x) && !scannerUi) {
             world = 1;
             dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
             if (!far) {
@@ -838,7 +849,9 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             farPx = far;
             zPx = z;
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
-            if (worldOn && (far || z > split.x)) {
+            // The scanner's interface keeps the head's path (fetchHistoryT says).
+            bool scannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
+            if (worldOn && (far || z > split.x) && !scannerUi) {
                 count15 = 1;
                 dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
                 if (!far) {
