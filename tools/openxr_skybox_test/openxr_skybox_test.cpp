@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include <wrl/client.h>
@@ -27,6 +28,23 @@ struct Checks {
     }
   }
 };
+
+// The exe runs from build\ beside EDVR's own d3d11.dll, which an imported
+// D3D11CreateDevice would resolve to first: take the system module by full
+// path instead, so this rig never runs the proxy. Kept mapped for the whole
+// process.
+decltype(&D3D11CreateDevice) SystemCreateDevice() {
+  static const auto create = []() -> decltype(&D3D11CreateDevice) {
+    wchar_t dir[MAX_PATH]{};
+    const UINT length = GetSystemDirectoryW(dir, MAX_PATH);
+    if (!length || length >= MAX_PATH) return nullptr;
+    const HMODULE module = LoadLibraryW((std::wstring(dir) + L"\\d3d11.dll").c_str());
+    if (!module) return nullptr;
+    return reinterpret_cast<decltype(&D3D11CreateDevice)>(
+        GetProcAddress(module, "D3D11CreateDevice"));
+  }();
+  return create;
+}
 
 DXGI_FORMAT SourceFormat(unsigned face) {
   switch (face % 6) {
@@ -134,12 +152,15 @@ int main(int argc, char** argv) {
   }
 
   Checks checks;
+  const auto createDevice = SystemCreateDevice();
+  checks.expect(createDevice != nullptr, "system d3d11.dll");
+  if (!createDevice) return 1;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   D3D_FEATURE_LEVEL level{};
-  HRESULT created = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
-                                      nullptr, 0, D3D11_SDK_VERSION, &device,
-                                      &level, &context);
+  HRESULT created = createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                 nullptr, 0, D3D11_SDK_VERSION, &device,
+                                 &level, &context);
   checks.expect(SUCCEEDED(created) && device && context, "WARP device");
   if (!device) return 1;
 
@@ -244,8 +265,8 @@ int main(int argc, char** argv) {
   ComPtr<ID3D11Device> secondDevice;
   ComPtr<ID3D11DeviceContext> secondContext;
   D3D_FEATURE_LEVEL secondLevel{};
-  D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
-                    D3D11_SDK_VERSION, &secondDevice, &secondLevel, &secondContext);
+  createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+               D3D11_SDK_VERSION, &secondDevice, &secondLevel, &secondContext);
   checks.expect(!!secondDevice,"foreign WARP device created");
   if (secondDevice) {
     auto foreign = MakeTexture(secondDevice.Get(), 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM,

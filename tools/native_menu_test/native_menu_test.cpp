@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -24,6 +25,23 @@ class InlineExecutor final : public edvr::openxr::ImmediateExecutor {
 };
 
 namespace edvr { void perfMonitorNoteEvent(unsigned, double) {} }
+
+// The exe runs from build\ beside EDVR's own d3d11.dll, which an imported
+// D3D11CreateDevice would resolve to first: take the system module by full
+// path instead, so this rig never runs the proxy. Kept mapped for the whole
+// process.
+static decltype(&D3D11CreateDevice) systemCreateDevice() {
+    static const auto create = []() -> decltype(&D3D11CreateDevice) {
+        wchar_t dir[MAX_PATH]{};
+        const UINT length = GetSystemDirectoryW(dir, MAX_PATH);
+        if (!length || length >= MAX_PATH) return nullptr;
+        const HMODULE module = LoadLibraryW((std::wstring(dir) + L"\\d3d11.dll").c_str());
+        if (!module) return nullptr;
+        return reinterpret_cast<decltype(&D3D11CreateDevice)>(
+            GetProcAddress(module, "D3D11CreateDevice"));
+    }();
+    return create;
+}
 
 static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,
                        ID3D11Texture2D* src, std::vector<UINT>& out) {
@@ -84,9 +102,12 @@ int wmain(int argc, wchar_t** argv) {
     auto check = [&](bool ok, const char* name) {
         ++checks; if (!ok) { ++fails; std::printf("FAIL: %s\n", name); }
     };
+    const auto createDevice = systemCreateDevice();
+    check(createDevice != nullptr, "system d3d11.dll");
+    if (!createDevice) return 1;
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context; D3D_FEATURE_LEVEL feature{};
-    check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
-                                      nullptr, 0, D3D11_SDK_VERSION, &device, &feature, &context)), "WARP device");
+    check(SUCCEEDED(createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                 nullptr, 0, D3D11_SDK_VERSION, &device, &feature, &context)), "WARP device");
     if (!device) return 1;
 
     EdvrNativeMenuRequest request{sizeof(request), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 17};
@@ -216,7 +237,7 @@ int wmain(int argc, wchar_t** argv) {
     std::atomic<long> wrongThread{0}; std::thread worker([&] { ID3D11Texture2D* o = nullptr; float b[4]{}; wrongThread = table.treatEye(table.context, 0, source.Get(), normal, &o, b); if (o) o->Release(); }); worker.join();
     check(wrongThread == E_INVALIDARG, "wrong producer thread rejected");
     ComPtr<ID3D11Device> foreign; ComPtr<ID3D11DeviceContext> foreignContext; D3D_FEATURE_LEVEL foreignFeature{};
-    check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &foreign, &foreignFeature, &foreignContext)), "foreign WARP device");
+    check(SUCCEEDED(createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &foreign, &foreignFeature, &foreignContext)), "foreign WARP device");
     ComPtr<ID3D11Texture2D> foreignSource; check(foreign && makeSource(foreign.Get(), foreignContext.Get(), foreignSource, 0xff303030u), "foreign source");
     ID3D11Texture2D* rejected = nullptr; float rejectBounds[4]{};
     check(table.treatEye(table.context, 0, foreignSource.Get(), normal, &rejected, rejectBounds) == E_INVALIDARG && !rejected, "foreign device rejected");

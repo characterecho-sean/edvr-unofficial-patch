@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <string>
 #include <thread>
 #include <vector>
 #include <algorithm>
@@ -69,14 +70,27 @@ struct Fixture {
   SharedTextureTransfer transfer;
 };
 
+// The exe runs from build\ beside EDVR's own d3d11.dll, which an imported
+// D3D11CreateDevice would resolve to first: take the system module by full path
+// instead, so this rig never runs the proxy. Kept mapped for the whole process.
+decltype(&D3D11CreateDevice) systemCreateDevice(){
+  static const auto create=[]()->decltype(&D3D11CreateDevice){
+    wchar_t dir[MAX_PATH]{};const UINT n=GetSystemDirectoryW(dir,MAX_PATH);
+    const HMODULE module=n&&n<MAX_PATH?LoadLibraryW((std::wstring(dir)+L"\\d3d11.dll").c_str()):nullptr;
+    return module?reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice")):nullptr;
+  }();
+  return create;
+}
 bool createDevice(IDXGIAdapter* adapter, ComPtr<ID3D11Device>& device,
                   ComPtr<ID3D11DeviceContext>& context,UINT flags=0){
+  const auto create=systemCreateDevice();
+  if(!create){check(false,"system d3d11.dll");return false;}
   D3D_FEATURE_LEVEL level{};
-  HRESULT hr=D3D11CreateDevice(adapter, adapter?D3D_DRIVER_TYPE_UNKNOWN:D3D_DRIVER_TYPE_WARP,
+  HRESULT hr=create(adapter, adapter?D3D_DRIVER_TYPE_UNKNOWN:D3D_DRIVER_TYPE_WARP,
       nullptr, flags|D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &device, &level, &context);
   if(hr==DXGI_ERROR_SDK_COMPONENT_MISSING) {
     device.Reset();context.Reset();
-    hr=D3D11CreateDevice(adapter, adapter?D3D_DRIVER_TYPE_UNKNOWN:D3D_DRIVER_TYPE_WARP,
+    hr=create(adapter, adapter?D3D_DRIVER_TYPE_UNKNOWN:D3D_DRIVER_TYPE_WARP,
         nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &device, &level, &context);
   }
   return hr==S_OK;
