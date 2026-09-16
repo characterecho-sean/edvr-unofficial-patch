@@ -11,6 +11,7 @@
 #include "treatment_cases.h"
 #include "frequency_cases.h"
 #include "visibility_cases.h"
+#include "steam_identity_cases.h"
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -636,6 +637,7 @@ int selfTest() {
   edvr::openxr::test::runSubmissionStatsCases(check);
   edvr::openxr::test::runFrequencyCases(check);
   edvr::openxr::test::runVisibilityCases(check);
+  edvr::openxr::test::runSteamIdentityCases(check);
   Options o;
   check(parse({L"--loader",L"C:\\runtime\\loader.dll"},o)&&o.seconds==10,"default duration");
   check(parse({L"--seconds",L"60",L"--loader",L"D:/a.dll"},o)&&o.seconds==60,"bounded duration");
