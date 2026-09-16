@@ -25,8 +25,28 @@ changes.*
     frame's right eye (the left submits first) and the view moves 4-20
     px per frame while zooming, so every hard-black pixel beside the
     limb took a displaced copy of it. Journal entry "2026-09-16: the
-    Quest 3 ghost under the native path". Fix = a same-frame donor, the
-    provider heals at pair completion; see Next flight.
+    Quest 3 ghost under the native path". FIXED by the same-frame donor
+    (10705da, merged to main as e08e899): flight 3 "looks good",
+    receipts `first_healed_eye=0,...,donor=pair`, `fss_healed=4009/0,
+    fss_deferred=4009`, `native_temporal_summary left=19776
+    right=19776`, `donor_refusals=0`.
+  - 2026-09-16, Quest 3, DLSS: the FSS's own UI (the bottom bar, its
+    text, the signal markers) shimmers on the initial screen while
+    panning. MEASURED from eye dump 170752, not fixed: the raw frame
+    draws the UI crisp and static in the eye (0 px/frame), DLSS returns
+    it doubled BEFORE the UI resolve touches it (`DlssBeforeUi` = `L0`
+    at the marker), and the vector DLSS was given at the UI pixels is
+    the scene camera's (-3.8 px at the marker, -5.5 px on the bar) while
+    the head was still (`headR` 0.01 deg against `cameraR` 0.23 deg that
+    frame, 2.1 and 1.5 deg on the next). In the FSS the camera EDVR
+    reads is the scanner's panning view, which the panel's UI does not
+    follow; the "interface keeps the camera's path" rule
+    (temporal_shader_source.h ~359) is right for a camera that is the
+    head and wrong here. Journal entry "2026-09-16: the FSS UI under
+    DLSS". Candidate fix: a head-path kind for interface-projection
+    composites (the head delta is already in hand, `headR/headTv` in
+    motion.csv); the flight HUD's world-tracking families keep the
+    camera's path.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -74,19 +94,13 @@ changes.*
     pixel, and after a frame of motion that pixel holds content that
     has since moved; the simulated fill on dump 154720 paints the limb
     into the black gap, displaced by one frame's motion.
-- **Next flight:** the same-frame donor. BUILT 2026-09-16 on branch
-  claude/session-d0bd49 (the commit after 0522215, not merged),
-  installed to Frontier, NOT FLOWN: `treatEye` snapshots only, the new
-  `healPair` entry heals once both of this frame's eyes are
-  snapshotted, and the host defers the healed eye's sharpen, menu and
-  capture to the other eye's submit. Same ringed body on the Quest 3,
-  `fix.fss_eye_sync = on`. Receipts: `native_fss,first_healed_eye=0,
-  ...,source=temporal,donor=pair`, `native_features_summary ...
-  fss_healed=N/0,fss_deferred=N` with N > 0 and equal, `native fss
-  totals: healed=N`, `native_temporal_summary` left == right. Ghost
-  gone = merge and push. Ghost stays = the fill's own edge (the donor's
-  DLSS history differs from the target's), then a window that closes
-  at the arrival. The Toolkit-ON confirmation under Open still stands.
+- **Next flight:** none owed for the ghost: flight 3 (2026-09-16
+  17:05, `edvr_gfx_20260916_170514.log`, the pre-commit build of
+  10705da, version string `0522215-dirty`) confirmed the same-frame
+  donor and it is on main (e08e899). The FSS UI shimmer above waits on
+  a decision to build the head-path kind; its flight would read
+  `motion.csv` `headR` against the UI pixels' vectors in a dump taken
+  while panning. The Toolkit-ON confirmation under Open still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
@@ -991,6 +1005,65 @@ asymmetric frustum. Two flights and one eye dump later:
   where the target's black is. The mirror mode (`fss_eye_sync =
   mirror`, developer value) rides the same entry and needs no
   deferral, the right is the target and it submits second.
+- Flight 3 (17:05, the built tree of 10705da before its commit, so the
+  version string reads `0522215-dirty`; DLL linked 22:59:35 UTC):
+  "looks good". `native_fss,first_healed_eye=0,sequence=13748,
+  source=temporal,donor=pair`; `native_features_summary ...
+  fss_healed=4009/0,fss_deferred=4009`; `native_temporal_summary
+  frames=19791,left=19776,right=19776`; `native fss totals:
+  snapshots=21358, healed=4009, gated_out=18194, donor_refusals=0`.
+  Merged to main as e08e899 and pushed.
+
+## 2026-09-16: the FSS UI under DLSS
+
+Sean, after flight 3: the FSS's own UI shimmers on the initial screen
+"when moving the UI around" (panning the scanner). Eye dump 170752
+(17:07:52, before the first zoom of that session, Quest 3, DLSS
+quality, preset K, `ui_depth = on`, `ui_depth_reactive = 0.5` in his
+ini, which preset K ignores). Read offline; the scripts are in the
+session scratchpad, the numbers are the evidence:
+
+- The UI covers 2.33% of the input pixels (0.20% solid): the bottom
+  bar and its text, the signal markers, the reticle and the panel's
+  grid lines are all interface-projection composites. The UI surface
+  itself did not change in the dumped frame (`UiEdits` 0.00% at 1,
+  0.21% decaying), so the UI resolve's edits are small (0.14% of the
+  output over 8/255).
+- Raw against treated on the marker at input (1290-1390, 925-995): the
+  raw crops C00-C04 draw the marker crisp and static, 0 px/frame (one
+  (-3,-2) reading at a correlation of 0.42); `DlssBeforeUi` already
+  holds it doubled and `L0` matches it, so the doubling is DLSS's
+  reconstruction, not the UI resolve; the treated crops T00-T03 show it
+  doubled, doubled, cleaner, clean: the shimmer.
+- The vector DLSS was given at the marker's UI pixels: x -3.84 px; on
+  the bottom bar: x -5.5 px. The sky beside them at depth 0: +316/+229
+  px (history refused there, harmless on a dark sky). `motion.csv`
+  frame 16269: `cameraR` yaw 0.23 deg (5 px at this eye) while `headR`
+  is 0.01 deg; the next frames 0.01, 2.1 and 1.5 deg of camera against
+  0.21, 0.07 and 0.00 deg of head. In the FSS the camera EDVR latches
+  is the scanner's panning view, which moves the sky inside the panel
+  and nothing else; the panel's UI moves with the head only. The
+  "interface keeps the camera's path at the pixel's depth" rule
+  (temporal_shader_source.h, the note above `uiEvidence`) assumes the
+  camera is the head, true in the cockpit, false here.
+- Ruled out: the UI resolve (identical before and after), the bias
+  mask (preset K ignores it, and the mask is 0.49-0.51 over the whole
+  coverage either way), the heal and the deferral (the gate was closed:
+  no zoom press yet, `first_healed_eye` comes 4 s later).
+
+Candidate fix, not built: a head-path kind for interface-projection
+composites. ui_depth already tells the temporal pass the path per
+family through the mask value's parity (even rides the body's path, odd
+keeps the camera's); a third kind would reproject with the head delta,
+which the pass already computes for `motion.csv` (`headR/headTv`,
+`temporalHeadDelta`). The flight HUD's world-tracking strokes (the
+station brackets that "track the station's centre") keep the camera's
+path. Before the kind is applied outside the FSS, check what the
+cockpit's read camera is relative to the head there (the HUD is clear
+in flight today, so either the read camera is already cockpit-relative
+or something else carries the ship's motion); the FSS alone can gate
+the kind on the panel rect being live. Testable in the FSS first, then
+on a rolling ship with the HUD up.
 
 ## Open
 
