@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <dxgi.h>
 
 #include "../common/log.h"
 #include "perf_monitor.h"   // the feature's creation is an event with a duration
@@ -39,6 +40,35 @@ uint32_t g_timeCount = 0;
 double   g_timeSum = 0.0;
 double   g_timeMax = 0.0;
 
+// Per-role, per-eye price, alongside the pooled figures above (which stay
+// as they are for their existing callers): which of the three independent
+// NGX features -- the full frame, the fovea's centre crop, or the steady
+// periphery -- paid for a given evaluation, so the totals line can show a
+// real per-eye number instead of a pooled average mislabeled as one.
+// Declared unconditionally, like the pooled figures, so the accessors
+// below compile with no DLSS SDK in the build too (they just never see a
+// count).
+enum class DlaaRole { Full = 0, Centre = 1, Periphery = 2 };
+constexpr int kDlaaRoles = 3;
+struct DlaaRoleStats {
+    uint32_t count = 0;
+    double   sum = 0.0;
+    double   maxMs = 0.0;
+};
+DlaaRoleStats g_roleStats[kDlaaRoles][2];
+
+// The measured price for one role and eye, for the totals line. False when
+// that role/eye combination has not evaluated yet.
+bool roleTotals(DlaaRole role, int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
+    if (eye < 0 || eye > 1) return false;
+    const DlaaRoleStats& rs = g_roleStats[static_cast<int>(role)][eye];
+    if (rs.count == 0) return false;
+    if (evaluations) *evaluations = rs.count;
+    if (avgMs) *avgMs = rs.sum / static_cast<double>(rs.count);
+    if (maxMs) *maxMs = rs.maxMs;
+    return true;
+}
+
 #ifdef EDVR_HAVE_NGX
 
 ID3D11Device*       g_device = nullptr;
@@ -50,6 +80,40 @@ NVSDK_NGX_Parameter* g_params = nullptr;
 // the review of 2026-09-04, F2).
 NVSDK_NGX_Parameter* g_caps = nullptr;
 bool                 g_optimalFailNoted = false;
+
+// Stage 0 price report (docs/foveated-dlss-design-2026-09-14.md): the
+// environment stamp's one new fact. Read once, at the first ask, and kept
+// as a static return so a later call (there is no reason to ask the
+// adapter twice in a session) is free. Driver version and the DLSS
+// runtime's own version/hash are not read here; the OpenXR startup lines
+// already name the runtime and headset, so those are not repeated either.
+const char* adapterName(ID3D11Device* dev) {
+    static char name[128] = "unknown (no device)";
+    static bool tried = false;
+    if (tried || !dev) return name;
+    tried = true;
+    IDXGIDevice* dxgiDev = nullptr;
+    if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev))) &&
+        dxgiDev) {
+        IDXGIAdapter* adapter = nullptr;
+        if (SUCCEEDED(dxgiDev->GetAdapter(&adapter)) && adapter) {
+            DXGI_ADAPTER_DESC desc{};
+            if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof(name), nullptr,
+                                    nullptr);
+            } else {
+                snprintf(name, sizeof(name), "unknown (adapter desc refused)");
+            }
+            adapter->Release();
+        } else {
+            snprintf(name, sizeof(name), "unknown (no adapter)");
+        }
+        dxgiDev->Release();
+    } else {
+        snprintf(name, sizeof(name), "unknown (device is not a DXGI device)");
+    }
+    return name;
+}
 
 struct EyeFeature {
     NVSDK_NGX_Handle* handle = nullptr;
@@ -141,6 +205,8 @@ EyeFeature g_periph[2];
 struct QuerySlot {
     GpuTimer     timer;
     bool         inUse = false;
+    DlaaRole     role = DlaaRole::Full;   // which feature this sample prices
+    int          eye = 0;                 // 0 left, 1 right
 };
 constexpr int kQueryRing = 8;
 QuerySlot g_qring[kQueryRing];
@@ -162,6 +228,12 @@ void pollTimingRing(ID3D11DeviceContext* ctx) {
         ++g_timeCount;
         g_timeSum += ms;
         if (ms > g_timeMax) g_timeMax = ms;
+        if (q.eye == 0 || q.eye == 1) {
+            DlaaRoleStats& rs = g_roleStats[static_cast<int>(q.role)][q.eye];
+            ++rs.count;
+            rs.sum += ms;
+            if (ms > rs.maxMs) rs.maxMs = ms;
+        }
     }
 }
 
@@ -286,6 +358,18 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
                 }
             }
         }
+        // Stage 0 price report: the environment stamp, once, whatever the
+        // answer above -- a refusal is still evidence, and is diagnosed by
+        // the GPU it was refused on. The runtime name, headset and refresh
+        // rate are already on record, but in the OpenXR module's own
+        // edvr_openxr_*.log, not this one; not repeated here. The driver
+        // version and the DLSS runtime's own version are not read anywhere.
+        Log::get().note(
+            "dlaa: first asked for on %s. Driver version and the DLSS "
+            "runtime's own version are not read by this build; the OpenXR "
+            "runtime name, headset and refresh rate are in that module's "
+            "own log, not this one.",
+            adapterName(dev));
     }
     if (reason) *reason = g_reason;
     return g_available;
@@ -468,6 +552,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ctx->GetDevice(&dev);
     const int qs = dev ? acquireQuerySlot(dev, ctx) : -1;
     if (dev) dev->Release();
+    if (qs >= 0) { g_qring[qs].role = DlaaRole::Full; g_qring[qs].eye = eye; }
     const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, g_params, &ep);
     if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
     if (NVSDK_NGX_FAILED(er)) {
@@ -525,6 +610,9 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
         if (reason) *reason = g_reason;
         return false;
     }
+    // Hoisted out of the create-block below: needed again at the eval call
+    // site, well past where that block ends, to tag the timing sample.
+    const bool isFovea = what[0] == 'f';
     pollTimingRing(ctx);
     bool didCreate = false;
     if (!f.handle || f.w != icw || f.h != ich || f.outW != ocw || f.outH != och ||
@@ -558,7 +646,6 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         // NVIDIA writes at the output sub-rectangle's base rather than the origin.
         cp.InEnableOutputSubrects = true;
-        const bool isFovea = what[0] == 'f';
         applyPresetHints(isFovea ? g_presetFovea : g_preset);
         const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
@@ -618,6 +705,10 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
     ctx->GetDevice(&dev);
     const int qs = dev ? acquireQuerySlot(dev, ctx) : -1;
     if (dev) dev->Release();
+    if (qs >= 0) {
+        g_qring[qs].role = isFovea ? DlaaRole::Centre : DlaaRole::Periphery;
+        g_qring[qs].eye = eye;
+    }
     const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, g_params, &ep);
     if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
     if (NVSDK_NGX_FAILED(er)) {
@@ -716,6 +807,22 @@ bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
     if (avgMs) *avgMs = g_timeCount ? g_timeSum / static_cast<double>(g_timeCount) : 0.0;
     if (maxMs) *maxMs = g_timeMax;
     return true;
+}
+
+// The measured price for one role, both eyes visible to the caller by
+// asking twice: the full frame's own NGX feature (every mode), the fovea's
+// centre crop, and the steady periphery, each with its own history and so
+// its own price. False when that role/eye has not evaluated yet -- the
+// pooled dlaaTotals above stays as the fallback for callers that only want
+// one number.
+bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
+    return roleTotals(DlaaRole::Full, eye, evaluations, avgMs, maxMs);
+}
+bool dlaaCentreTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
+    return roleTotals(DlaaRole::Centre, eye, evaluations, avgMs, maxMs);
+}
+bool dlaaPeripheryTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
+    return roleTotals(DlaaRole::Periphery, eye, evaluations, avgMs, maxMs);
 }
 
 void dlaaShutdown() {

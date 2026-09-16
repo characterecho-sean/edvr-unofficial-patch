@@ -128,6 +128,15 @@ void dlaaSetPreset(unsigned preset, unsigned foveaPreset);
 bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
                 uint32_t* resets);
 
+// The same price, split by which of the three independent NGX features
+// paid it (the full frame, the fovea's centre crop, the steady periphery)
+// and by eye, so a display can show a real per-eye figure instead of the
+// pooled average above mislabeled as one. False when that role/eye has
+// not evaluated yet. eye: 0 left, 1 right.
+bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs);
+bool dlaaCentreTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs);
+bool dlaaPeripheryTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs);
+
 void dlaaShutdown();
 
 // The moving-crop probe (docs/performance.md, feature 6 and Phase 0 item

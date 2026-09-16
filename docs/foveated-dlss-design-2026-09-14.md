@@ -1,5 +1,68 @@
 # Foveated DLSS in native OpenXR: feasibility and design
 
+## Status
+
+- **State (2026-09-15, evening):** Stage 0, reproduce and price,
+  instrumentation BUILT, REVIEWED and FIXED on branch
+  `claude/dlss-foveation-design-e02cfe`, merged to main: per-region GPU
+  timing of the temporal pass per eye (prep, reduce, periphery, centre,
+  full, compose, ui, other, total), stereo pairs summed into 600-pair
+  windows, one "temporal aa price" log line per closed window (median/p95
+  per region per stereo pair plus the pairs dropped as unmeasured, lone,
+  no-slot or lease-refused), the same figures on F8, per-role and per-eye
+  NGX totals, and a GPU-name stamp at the first DLAA/DLSS ask. A window
+  closes on 600 pairs or whenever the treatment, output shape or a live
+  temporal_aa_* setting changes. Traced end to end on build\smoke.exe with
+  a stereo probe: the "full-frame ngx" and "foveated ngx" lines both fire
+  with the right regions non-zero and zero drops (journal, 2026-09-15).
+  The acceptance metric (whole-frame GPU per arm) needs no new code: the
+  native benchmark line already logs gpu p50/p95/p99 every 34 s under
+  native OpenXR and restarts on every setting change (journal). NOT DONE:
+  the field flight below. Measurement only; no rendering behaviour changes.
+- **Baseline drift:** written against d160499; three commits since touched
+  the crop-path files (d08f536 target sprites out of world history, c27fe74
+  scene UI replayed at native resolution after DLSS, c5e88dc display
+  properties and hidden-area masks). All three landed in the full-frame
+  branch only; the crop branch still has no reactive mask, no uiResolve and
+  no UI replay.
+- **Reachable:** the fixed crop runs under native OpenXR through the existing
+  advanced.temporal_aa_fovea* keys (native_temporal.cpp treat() ->
+  edvrTemporalAa -> temporalInner); nothing gates it off. Its "DLSS where
+  you look ENGAGED" and "the fovea was asked for, but" log lines are the
+  evidence it ran or stood down.
+- **Open hypotheses for the first flight:** H1 stereo temporal-pass time
+  drops by at least 0.5 ms and 5% with the fovea on at unchanged sizes; H2
+  reduce + periphery + compose eat most of the centre crop's saving, as the
+  2026-09-05 flights found; H3 the seam pulses under head motion on the
+  native build (temporal, not spatial).
+- **Ruled out, do not re-run:** the eye-tracked crop as "no blur where I
+  look", structural under upscaling (performance.md, 2026-09-05); gaze stays
+  Stage 3 and optional. The pooled "NVIDIA ms/eye" figure (dlaa.cpp
+  dlaaTotals) mixes both eyes and all three roles; nothing measured off it
+  compares with the new per-role numbers.
+- **Not yet built (Stage 1):** the crop-policy unit test (cropOf is a lambda
+  inside temporalInner and must be extracted first), the reactive mask and
+  uiResolve on the crop path, history committed only after a successful
+  evaluation (foveaHaveHistory and prHaveHistory are set unconditionally
+  each frame), and the crop branch's unconditional ensureNative and
+  diagnostic motion shader, which Stage 0 times rather than removes.
+- **Next flight (Stage 0 is installed in the FRONTIER directory):** Pimax
+  at the usual settings, temporal_aa = dlss. Windows: A full frame, B
+  temporal_aa_fovea = 40 with temporal_aa_periphery = steady and
+  temporal_aa_periphery_scale = 0.5, A again, each at least 75 s after
+  warm-up so every arm holds one full 34 s native benchmark cycle; edit the
+  live edvr.ini between arms (hot reload within 1 s, which also closes the
+  price window and restarts the benchmark). During B slow turns, fast nods,
+  then hold still and watch the seam. Optional C: full frame one
+  HMD-quality step lower. Read with
+  `python tools\edvr_log.py --target frontier --expect-build HEAD --grep "temporal aa price"`
+  and the same with `--grep "native benchmark"`. A price line counts only
+  when its drop counters are near zero; a line with lone eyes close to its
+  pair count means the stereo pairing failed in the field and the numbers
+  are not evidence.
+
+## Investigation (2026-09-14)
+
 Status: investigation and proposed design, 2026-09-14. No rendering code,
 settings, installed DLLs or runtime registrations were changed for this
 investigation. EDVR baseline:
@@ -474,3 +537,87 @@ that a seam is stable during movement.
 The recommended next action is Stage 0, followed by pipeline parity if the
 renewed measurements justify it. The existing full-frame mode remains the
 reference throughout.
+
+## Journal
+
+### 2026-09-15: Stage 0 instrumentation built, reviewed, fixed, traced
+
+**Built** (branch `claude/dlss-foveation-design-e02cfe`, rebased onto main
+96902e6, measurement only):
+
+- `temporal_pass.cpp`: seven region timers (prep, reduce, periphery, centre,
+  full, compose, ui) nested inside each ring slot's existing total timer, so
+  a region never opens a DisjointClock record of its own; "other" is the
+  total less the seven, taken per pair before the percentile. Eyes pair by
+  the per-frame row counter; pairs sum into windows of 600 keyed by
+  treatment, output size, format and config generation; each closed window
+  writes one `temporal aa price` line. The treatment label is what ran
+  (composited fovea, full-frame NGX, or own history), not what was asked.
+  The `ui` region times whichever UI route ran after NGX: the legacy
+  resolve, or the deferred replay of the captured UI that main's e97e2fe
+  made the live route when it succeeds (the two are exclusive, so the
+  region begins once per slot). Without that the deferred route's cost
+  would have sat in "other" with `ui` reading 0.00 in the field.
+- `dlaa.cpp`: NGX evaluate totals per role (full, centre, periphery) and
+  per eye; the adapter name stamped once at the first DLAA/DLSS ask. Nothing
+  measured off the old pooled figure compares with these.
+- `menu.cpp`: a "Temporal AA price" F8 line from the last closed window.
+- `tools/smoke/smoke.cpp`: a stereo price-report probe, six full-frame
+  DLAA frames, six steady-periphery fovea frames, three own-history frames,
+  both eyes each, asserting each closed window's medians and zero drops.
+  `build.bat` compiles `smoke.exe` but does not run it; it was run by hand
+  as `build\smoke.exe build\d3d11.dll`.
+
+**Review of the first diff** (main session) found four measurement-integrity
+defects and one gap, fixed in a second round:
+
+1. Unmeasured totals priced at 0 ms (no lease, failed end, Invalid poll).
+   Now a per-slot validity flag; a pair with an unmeasured eye is dropped
+   and counted.
+2. A lone eye evicted from the pairing ring was priced as a stereo pair.
+   Now dropped and counted; the ring drains at shutdown before the flush.
+3. The arms sampled at different rates: full-frame DLSS took a timing slot
+   one frame in 32 without diagnostics, the fovea every frame, so a 60 s A
+   window would never have filled. Now a slot every frame the timing owner
+   accepts, ring 8 to 16 slots, staging readback gate unchanged. The pooled
+   F8 "temporal AA ms" average samples every frame as a side effect.
+4. The treatment label recorded the intent; a persistent stand-down would
+   have labelled own-history frames "foveated ngx".
+5. No NGX stereo pair had ever formed on the desk: every smoke probe called
+   eye 0 only. Hence the stereo probe above.
+
+**Smoke evidence** (`build\edvr_logs\edvr_gfx_20260915_190533.log`, RTX
+5090, 400x304 desk source, both lines verbatim; this is the build of the
+same code before the rebase onto 96902e6, and the rebased build is smoked
+again before it is installed, that run's lines going in the flight entry):
+
+```
+temporal aa price: full-frame ngx, 400x304, 8 stereo pairs (window closed), ms per pair median/p95: prep 0.03/0.04 reduce 0.00/0.00 periphery 0.00/0.00 centre 0.00/0.00 full 0.46/15.12 compose 0.00/0.00 ui 0.00/0.00 other 0.00/0.01 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+temporal aa price: foveated ngx, 400x304, 6 stereo pairs (window closed), ms per pair median/p95: prep 0.02/0.03 reduce 0.01/0.02 periphery 0.41/24.37 centre 0.41/4.40 full 0.00/0.00 compose 0.01/0.02 ui 0.00/0.00 other 0.00/0.00 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+```
+
+The regions land where they should (full only under full-frame; reduce,
+periphery, centre and compose only under the fovea) with zero drops. The
+p95 outliers are first-frame NGX warm-up inside a six-frame window; the
+medians are the figure. Absolute values at 400x304 say nothing about the
+flight.
+
+**Whole-frame GPU needs no new code.** Under native OpenXR
+`perf_monitor.cpp` runs a recurring native benchmark whenever the native
+session is present: 2 s warm-up, 30 s sample, 2 s drain, then one
+`native benchmark: ... gpu p50/p95/p99 ...` line carrying sizes, AA and
+DLSS mode and the build. An ini reload, an NGX re-create or a menu event
+bumps its scope and restarts the window, so A/B/A arms separate by
+construction; each arm must last at least 75 s to hold one full cycle.
+That line is the acceptance metric; the price line explains where the
+difference came from. Folding frame GPU into the price line was dropped
+as redundant.
+
+**Known gaps, deliberately left:** the fovea's geometry (degrees, crop
+size) is not on the price line, only on the one-shot "DLSS where you look
+ENGAGED" line; the door GPU figure reaches the log only on dropped or long
+frames (the benchmark line supersedes it); driver and DLSS DLL versions are
+not stamped; the fovea arm does a per-frame 208-byte stats readback outside
+the timed span that the full-frame arm does not (negligible, but it is a
+B-arm-only difference); in the smoke the row counter never advances, so its
+pairing relies on the forced GPU completion after every call.

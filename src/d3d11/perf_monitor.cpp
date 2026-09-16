@@ -1248,10 +1248,16 @@ int perfMonitorTiles(PerfTile* out, int max) {
         if (sharpenPassTotals(&t, &avg, &mx) && t) sharpen = avg;
         if (temporal >= 0.0 && sharpen >= 0.0) {
             snprintf(v, sizeof(v), "%.1f+%.1f", temporal, sharpen);
-            snprintf(sub, sizeof(sub), "ms/eye %s + sharpen", trained ? "NVIDIA" : "temporal");
+            // The NVIDIA figure here is a pooled average over every call
+            // (any role, either eye), not one eye's price -- say so rather
+            // than mislabel it "ms/eye" alongside the sharpen pass, which
+            // genuinely is per eye.
+            snprintf(sub, sizeof(sub), trained ? "ms NVIDIA/call + sharpen/eye"
+                                               : "ms/eye temporal + sharpen");
         } else if (temporal >= 0.0) {
             snprintf(v, sizeof(v), "%.2f", temporal);
-            snprintf(sub, sizeof(sub), "ms/eye, %s pass", trained ? "NVIDIA's" : "temporal");
+            snprintf(sub, sizeof(sub), trained ? "ms/call, NVIDIA's pass"
+                                               : "ms/eye, temporal pass");
         } else if (sharpen >= 0.0) {
             snprintf(v, sizeof(v), "%.2f", sharpen);
             snprintf(sub, sizeof(sub), "ms/eye, sharpen");

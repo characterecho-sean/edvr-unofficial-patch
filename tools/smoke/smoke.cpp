@@ -1234,6 +1234,152 @@ int main(int argc, char** argv) {
                 }
                 srcD->Release();
 
+                // Stage 0 price report (F6, docs/foveated-dlss-design-2026-09-14.md):
+                // every probe above only ever calls eye 0, so no stereo pair ever
+                // forms and the pairing/pricing code above this line has never run
+                // under real NGX timing. Drive both eyes -- full-frame DLAA, then
+                // steady-periphery fovea, then fovea off again -- forcing GPU
+                // completion after EVERY call (checkResolved's readback genuinely
+                // blocks: D3D11_MAP_READ with no DO_NOT_WAIT), so each window
+                // closes on real timed pairs instead of starving on drops.
+                if (!avail) {
+                    printf("  skip  price report: needs the runtime\n");
+                } else if (!foveaDev) {
+                    // edvrTemporalAaFoveaDev missing was already reported above.
+                } else {
+                    typedef void (*PFN_PriceWindow)(double*, double*, unsigned*, unsigned*);
+                    PFN_PriceWindow priceWindow = reinterpret_cast<PFN_PriceWindow>(
+                        GetProcAddress(mod, "edvrTemporalAaPriceWindow"));
+                    ID3D11Texture2D* priceSrc = nullptr;
+                    if (!priceWindow) {
+                        printf("  FAIL  edvrTemporalAaPriceWindow is not exported\n");
+                        rc = 1;
+                    } else if (!makeSolidSrc(device, ctx, 400, 304, colour, true, &priceSrc)) {
+                        printf("  FAIL  price report: could not make the price-report test source\n");
+                        rc = 1;
+                    } else {
+                        bool okPrice = true;
+                        char label[96];
+                        // (a) Six stereo frames of full-frame DLAA (eye 0 then eye
+                        // 1 each frame): the same convention as the dlaa probe
+                        // above, reset on the very first call, NVIDIA's history
+                        // (bit 2) on every call.
+                        for (int k = 0; k < 6 && okPrice; ++k) {
+                            const unsigned flags = k == 0 ? (1u | 2u) : 2u;
+                            void* pe0 = taa(priceSrc, 0, nullptr, tan, tan, 0.0f, 0.0f, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f,
+                                           0u, 0u, flags);
+                            snprintf(label, sizeof(label),
+                                     "price report (full-frame ngx): eye 0, frame %d", k);
+                            if (!checkResolved(device, ctx, pe0, label, 400, 304, 200, 152,
+                                               cr, cg, cb, 4)) okPrice = false;
+                            void* pe1 = taa(priceSrc, 1, nullptr, tan, tan, 0.0f, 0.0f, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f,
+                                           0u, 0u, flags);
+                            snprintf(label, sizeof(label),
+                                     "price report (full-frame ngx): eye 1, frame %d", k);
+                            if (!checkResolved(device, ctx, pe1, label, 400, 304, 200, 152,
+                                               cr, cg, cb, 4)) okPrice = false;
+                        }
+                        // (b) Steady-periphery fovea; six more stereo frames the
+                        // same way. The first priced fovea pair's treatment
+                        // differs from the DLAA pairs above, which closes that
+                        // window (the last CLOSED window read below).
+                        foveaDev(60.0f, 6.0f, 1, 0.5f, 1);
+                        for (int k = 0; k < 6 && okPrice; ++k) {
+                            const unsigned flags = k == 0 ? (1u | 2u) : 2u;
+                            void* pe0 = taa(priceSrc, 0, nullptr, tan, tan, 0.0f, 0.0f, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f,
+                                           0u, 0u, flags);
+                            snprintf(label, sizeof(label),
+                                     "price report (foveated ngx): eye 0, frame %d", k);
+                            if (!checkResolved(device, ctx, pe0, label, 400, 304, 200, 152,
+                                               cr, cg, cb, 4)) okPrice = false;
+                            void* pe1 = taa(priceSrc, 1, nullptr, tan, tan, 0.0f, 0.0f, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f,
+                                           0u, 0u, flags);
+                            snprintf(label, sizeof(label),
+                                     "price report (foveated ngx): eye 1, frame %d", k);
+                            if (!checkResolved(device, ctx, pe1, label, 400, 304, 200, 152,
+                                               cr, cg, cb, 4)) okPrice = false;
+                        }
+                        if (!okPrice) {
+                            rc = 1;
+                        } else {
+                            // (c) The window that just closed is the full-frame
+                            // DLAA one from (a) -- the fovea pair above changed
+                            // the treatment key.
+                            double medians[7] = {};
+                            double other = 0.0;
+                            unsigned pairs = 0, dropped = 0;
+                            priceWindow(medians, &other, &pairs, &dropped);
+                            if (pairs >= 3 && medians[0] > 0.0 && medians[4] > 0.0 && dropped == 0) {
+                                printf("  ok    price report (full-frame ngx): %u pairs, prep "
+                                       "%.3f full %.3f ms, %u dropped\n",
+                                       pairs, medians[0], medians[4], dropped);
+                            } else {
+                                printf("  FAIL  price report (full-frame ngx): %u pairs, prep "
+                                       "%.3f reduce %.3f periphery %.3f centre %.3f full %.3f "
+                                       "compose %.3f ui %.3f ms, other %.3f, %u dropped (want "
+                                       "pairs>=3, prep>0, full>0, dropped==0)\n",
+                                       pairs, medians[0], medians[1], medians[2], medians[3],
+                                       medians[4], medians[5], medians[6], other, dropped);
+                                rc = 1;
+                            }
+                        }
+                        // (d) Fovea off, three stereo frames without NGX: the
+                        // first pair's treatment (own history, no ngx) differs
+                        // from the fovea pairs above, which closes that window.
+                        foveaDev(0.0f, 6.0f, 1, 0.5f, 1);
+                        for (int k = 0; k < 3 && okPrice; ++k) {
+                            void* pe0 = taa(priceSrc, 0, nullptr, tan, tan, 0.0f, 0.0f, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f,
+                                           0u, 0u, 0u);
+                            snprintf(label, sizeof(label),
+                                     "price report (own history): eye 0, frame %d", k);
+                            if (!checkResolved(device, ctx, pe0, label, 400, 304, 200, 152,
+                                               cr, cg, cb, 4)) okPrice = false;
+                            void* pe1 = taa(priceSrc, 1, nullptr, tan, tan, 0.0f, 0.0f, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f,
+                                           0u, 0u, 0u);
+                            snprintf(label, sizeof(label),
+                                     "price report (own history): eye 1, frame %d", k);
+                            if (!checkResolved(device, ctx, pe1, label, 400, 304, 200, 152,
+                                               cr, cg, cb, 4)) okPrice = false;
+                        }
+                        if (!okPrice) {
+                            rc = 1;
+                        } else {
+                            // The window that just closed is the fovea one from
+                            // (b): prep/reduce/periphery/centre/compose all ran
+                            // under it.
+                            double medians[7] = {};
+                            double other = 0.0;
+                            unsigned pairs = 0, dropped = 0;
+                            priceWindow(medians, &other, &pairs, &dropped);
+                            if (pairs >= 3 && medians[0] > 0.0 && medians[1] > 0.0 &&
+                                medians[2] > 0.0 && medians[3] > 0.0 && medians[5] > 0.0 &&
+                                dropped == 0) {
+                                printf("  ok    price report (foveated ngx): %u pairs, prep %.3f "
+                                       "reduce %.3f periphery %.3f centre %.3f compose %.3f ms, "
+                                       "%u dropped\n",
+                                       pairs, medians[0], medians[1], medians[2], medians[3],
+                                       medians[5], dropped);
+                            } else {
+                                printf("  FAIL  price report (foveated ngx): %u pairs, prep %.3f "
+                                       "reduce %.3f periphery %.3f centre %.3f full %.3f compose "
+                                       "%.3f ui %.3f ms, other %.3f, %u dropped (want pairs>=3, "
+                                       "prep>0, reduce>0, periphery>0, centre>0, compose>0, "
+                                       "dropped==0)\n",
+                                       pairs, medians[0], medians[1], medians[2], medians[3],
+                                       medians[4], medians[5], medians[6], other, dropped);
+                                rc = 1;
+                            }
+                        }
+                        priceSrc->Release();
+                    }
+                }
+
                 // The NGX conventions rig (the review of 2026-09-04: F5, and
                 // T2 of its desk tests). A field of soft stripes at infinity,
                 // seen through a camera that yaws one degree a frame, is
