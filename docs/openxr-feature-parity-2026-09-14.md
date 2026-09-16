@@ -38,6 +38,9 @@ normal OpenXR frame pacing. Recenter and scene-clear operations retire replay
 state. An omitted transition frame never enters AA history: floating-origin
 changes retain history when the existing detector says the camera stayed;
 returned jumps, explicit holds, healed images and unanswered verdicts reset it.
+(2026-09-16: healed images no longer reset it -- the heal now follows the
+temporal pass and reads its output, so a healed eye keeps its history; the
+reset had cost the left eye its DLSS for the whole arrival window.)
 
 The FSS arrival repair uses the existing graphics shader and input-lockstep
 settings. Its donor textures are owned copies and never mutable game pointers.

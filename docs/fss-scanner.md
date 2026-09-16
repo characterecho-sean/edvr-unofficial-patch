@@ -3,8 +3,9 @@
 ## Status
 
 *Written 2026-09-15 from the entries dated 2026-08-24 through
-2026-08-27, the only dates in this doc. Restates the journal below;
-update it whenever this doc changes.*
+2026-08-27; the 2026-09-16 items below are from a log read, not a
+journal entry. Restates the journal below; update it whenever this doc
+changes.*
 
 - **State:** SOLVED and shipped, field-verified 2026-08-27. Findings
   1-2 (the zoomed body renders mono, at half eye resolution) are
@@ -15,6 +16,34 @@ update it whenever this doc changes.*
   default: `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = on`. Bug is
   ring-only.
 - **Open:**
+  - 2026-09-16, Quest 3 / VirtualDesktopXR, native path, DLSS on
+    (`edvr_gfx_20260916_142750.log`, build e8c5bfe): a slight double
+    ghost on the body while zooming in, `fix.fss_eye_sync = on`. The
+    heal engaged at a 0 px shift, which is correct there: the cull
+    guard's Symmetric mode tells the game a symmetric horizontal
+    frustum (+-1.2799; the game re-queried `m02=0`) and the panel
+    centre projects to the same u in both eyes (`uA=uB=0.496`). What
+    the heal does per frame is the only per-eye asymmetry in play, and
+    it does two things for the whole 600-frame window after every zoom
+    press (the arrival stamp bumps every frame of it): the healed left
+    eye SKIPS the temporal pass (`native_temporal_summary left=19125,
+    right=22322`, the difference exactly `healed=3197`), so the left is
+    the raw jittered 2307x1652 input while the right is the 3550x2542
+    DLSS output; and the fill's donor is the previous frame's right eye
+    (the left submits first), so on a growing body every hard-black
+    pixel beside a bright edge takes a one-frame-displaced copy. The
+    window's "free" premise (a no-op over void) held when the heal ran
+    on the final submitted image; it no longer does. FLIGHT 1
+    (`edvr_gfx_20260916_151842.log`, same build, heal toggled live in
+    one session): heal on = ghost (`engaged (0 px)` 15:21:01,
+    `healed=604`, `skipped=614`); `fss eye heal: off.` 15:21:20 and
+    three zooms after it clean. The ghost is the heal half. The stale
+    donor is geometrically null on a zoom-in (a pure scale-up: a black
+    pixel outside an edge now was outside it a frame ago), so the DLSS
+    skip is the favoured mechanism. Not a port regression: the OpenVR
+    path's heal also forwards resolve+sharpen without `applyTemporal`
+    (compositor_hook.cpp ~1539); the heal shipped in 0.11.0, DLSS in
+    0.14.0, never re-examined together.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -41,8 +70,24 @@ update it whenever this doc changes.*
     superseded by round 33 -- the PRIMARY eye carries the defect.
   - A carried/stale temporal accumulator: round fourteen's pair-sync
     was null; the left eye regenerates its squares every frame.
-- **Next flight:** One confirmation flight of the shipped heal with
-  the OpenXR Toolkit ON (proven so far only Toolkit-off).
+  - The Quest 3 ghost as an asymmetric-frustum error in the heal's
+    shift (2026-09-16): the game renders the guard's symmetric lie and
+    0 px is the infinity shift for that image (receipts above). "Not
+    on the Pimax" is untested on the native path: no Pimax session in
+    the last 60 Frontier logs reached the heal (`snapshots=0` in every
+    one), and the only two native heals on record were both Quest 3
+    rigs at 0 px (today, and 2026-09-14 via Steam Link).
+  - The lockstep half lending a differently-jittered body layer: one
+    `temporalJitter(frameCounter)` serves both eyes, so the lent
+    texture carries the jitter the receiving eye rendered with. And
+    the lockstep half at all: flight 1 (sync-only) had no ghost.
+- **Next flight:** the fix flight. Build: heal the temporal OUTPUTS
+  (both eyes post-DLSS, same size) instead of the raw source, and stop
+  skipping the temporal pass for the healed eye; `fix.fss_eye_sync =
+  on`, same ringed body on the Quest 3. Ghost gone = done. Ghost stays
+  = the fill itself (then: heal at pair completion with this frame's
+  right, or a window that closes at the arrival). The Toolkit-ON
+  confirmation under Open still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and

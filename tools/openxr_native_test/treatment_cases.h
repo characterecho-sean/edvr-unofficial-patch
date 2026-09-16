@@ -113,7 +113,10 @@ template<class Check> void runTreatmentCases(Check check) {
       h.frameTangentShift[0][0]=.02f;h.frameTangentShift[0][1]=-.01f;
       result=h.capture(vr::Eye_Left,&texture,&bounds,vr::Submit_Default,true);
     }),"host capture completed through owner/render rendezvous");
-    const char* expected[]={"FTSPM","FTSPM","FHSPM","F","FT","FTS","FTSP","FTSPM"};
+    // Temporal first, then the FSS heal on its output (never a skip 'H':
+    // a healed eye keeps its temporal frame since 2026-09-16), then
+    // sharpen, publish, menu; a failure stops the chain where it happens.
+    const char* expected[]={"TFSPM","TFSPM","TFSPM","TF","T","TFS","TFSP","TFSPM"};
     check(state.calls==expected[scenario]&&!state.wrongThread,"all treatments ordered on the bound producer, stopping at failure");
     if(scenario<3) {
       check(result==vr::VRCompositorError_None&&h.graphicsCalls.calls-before==3,
@@ -124,10 +127,11 @@ template<class Check> void runTreatmentCases(Check check) {
         check(std::memcmp(&bounds,&outputBounds,sizeof(bounds))==0,"passthrough preserves cropped/flipped input bounds");
         check(std::fabs(std::tan(h.frameViews[0].fov.angleLeft)-std::tan(h.frameGeometry.views[0].fov.angleLeft)-.02f)<.00001f,
           "passthrough retains rendered jitter despite spatial passthrough callbacks");
+        check(state.inputs.size()>1&&state.inputs[1]==source.Get(),"with no temporal output the heal reads the raw source");
       } else {
-        const unsigned sharpenIndex=scenario==2?1:2;
-        check(state.inputs.size()>sharpenIndex+1&&state.inputs[sharpenIndex]==state.outputs[scenario==2?0:1].Get()&&state.inputs[sharpenIndex+1]==state.outputs[2].Get(),
-          "sharpen follows temporal/healed output and menu follows sharpen");
+        check(state.inputs.size()>1&&state.inputs[1]==state.outputs[1].Get(),"the heal reads the temporal output, not the raw source");
+        check(state.inputs.size()>3&&state.inputs[2]==state.outputs[scenario==2?0:1].Get()&&state.inputs[3]==state.outputs[2].Get(),
+          "sharpen follows the healed or temporal output and menu follows sharpen");
       }
     } else {
       check(result==vr::VRCompositorError_InvalidTexture&&h.graphicsCalls.calls-before==2&&capturedPixel()==oldPixel,

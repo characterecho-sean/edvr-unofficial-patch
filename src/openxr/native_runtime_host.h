@@ -1030,15 +1030,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     vr::VRTextureBounds_t treatedBounds{};
     const auto sequence=activeFrameSequence;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> healed;
-    if(fss.acquired()) {
-      const auto treatment=fss.treat(sequence,unsigned(eye),submittedSource,bounds,healed);
-      if(FAILED(treatment)) {invalidateEyeTreatments();timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
-      if(healed) {
-        ++fssHealedEyes[unsigned(eye)];
-        if(FAILED(temporal.skip(sequence,unsigned(eye),false,0)))return vr::VRCompositorError_InvalidTexture;
-      }
-    }
-    if(temporal.acquired()&&!healed) {
+    if(temporal.acquired()) {
       LARGE_INTEGER began{},ended{}; const auto clock=QueryPerformanceCounter(&began);
       const auto treatment=temporal.treat(sequence,unsigned(eye),submittedSource,bounds,temporalOutput,temporalBounds);
       const auto clockEnd=QueryPerformanceCounter(&ended);
@@ -1050,6 +1042,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
       if(temporalOutput&&temporalEyes[unsigned(eye)]++==0)
         nativeTracePrintf("native_temporal,first_treated_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
+    }
+    // The FSS heal reads the temporal OUTPUT, both eyes at the same stage, so
+    // a healed eye keeps its DLSS frame. Until 2026-09-16 it read the raw
+    // source and the healed eye skipped the temporal pass: for the 600-frame
+    // window after every zoom press the left eye reached the headset as the
+    // raw jittered input beside a DLSS right, seen on the Quest 3 as a
+    // slight double on the body while zooming (docs/fss-scanner.md). With no
+    // temporal output the heal reads the raw source as before, and the raw
+    // pixels keep their jittered FOV below.
+    if(fss.acquired()) {
+      auto* healSource=temporalOutput?temporalOutput.Get():submittedSource;
+      const auto* healBounds=temporalOutput?&temporalBounds:bounds;
+      const auto treatment=fss.treat(sequence,unsigned(eye),healSource,healBounds,healed);
+      if(FAILED(treatment)) {invalidateEyeTreatments();timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
+      if(healed&&fssHealedEyes[unsigned(eye)]++==0)
+        nativeTracePrintf("native_fss,first_healed_eye=%u,sequence=%llu,source=%s\n",unsigned(eye),(unsigned long long)sequence,temporalOutput?"temporal":"raw");
     }
     // A refused temporal pass leaves jitter in the raw pixels. Preserve their
     // actual projection for this frame: in the menu and the XR layer both,
@@ -1092,9 +1100,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         } else frameViews[unsigned(eye)].fov=fov;
       }
     }
+    // A healed texture is the heal's own copy of its source's region, so its
+    // bounds are the whole of it whichever stage it came from.
     const vr::VRTextureBounds_t fullBounds{0,0,1,1};
-    auto* sharpenSource=temporalOutput?temporalOutput.Get():healed?healed.Get():submittedSource;
-    const auto* sharpenBounds=temporalOutput?&temporalBounds:healed?&fullBounds:bounds;
+    auto* sharpenSource=healed?healed.Get():temporalOutput?temporalOutput.Get():submittedSource;
+    const auto* sharpenBounds=healed?&fullBounds:temporalOutput?&temporalBounds:bounds;
     vr::VRTextureBounds_t croppedBounds{};
     if(cullGuard.stage()==NativeCullStage::Live) {
       const auto crop=cullGuard.cropBounds(unsigned(eye));

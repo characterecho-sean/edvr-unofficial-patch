@@ -14,7 +14,10 @@ and EDVR menu composition through one synchronous render callback. Each
 provider still runs when acquired, including passthrough bookkeeping. The
 selected texture is retained until the existing separate copy callback has
 consumed it. Failure ends the chain before capture; FSS healing still consumes
-the temporal eye through `skip`; raw pixels keep their jittered FOV. The ending
+the temporal eye through `skip`; raw pixels keep their jittered FOV. (Superseded
+2026-09-16: the heal now runs after the temporal pass on its output and no eye
+is skipped; the skip had put a raw left eye beside a DLSS right for the whole
+arrival window, see fss-scanner.md.) The ending
 producer GPU marker remains after Submit, with the previous
 acceptance/invalidation rules.
 
@@ -111,7 +114,8 @@ launched during installation, and no in-game speedup has been measured.
 The new host fixture exports private test providers from the diagnostic
 executable and exercises the real owner/render rendezvous. It checks stage
 order and producer thread, distinct intermediate outputs, passthrough
-bounds/jitter, healed-eye temporal skipping, failure at each treatment stage,
+bounds/jitter, healed-eye temporal skipping (since 2026-09-16: the heal reading
+the temporal output, no skip), failure at each treatment stage,
 and no-render submissions. Capture tests check view reuse, color changes,
 resizing, reset and retention. Stereo tests cover RGBA/BGRA, gamma/linear,
 crops/flips and target corners; existing borrowed-state and runtime failure
