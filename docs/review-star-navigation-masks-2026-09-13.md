@@ -2,50 +2,58 @@
 
 ## Status
 
-Updated 2026-09-15 after Steam eye run `183301`: the evidenced route fix
-is implemented and validated on top of b12122a. The capture's fc32749
-package was verified by stamp, PE and both DLL hashes after checking the
-expected precommit HEAD-version difference.
+Updated 2026-09-15 after Steam eye run `194533`: user still sees
+smearing. The correct installed package is confirmed by installer
+verification, both DLL hashes, literal version `v0.17.0-rc.2-dirty` and
+graphics PE `6AA9EC43`. HEAD was checked first; its expected precommit
+version difference was resolved against exact provenance.
 
 Pimax OpenXR / Crystal Super uses 4068x4016 per-eye output and 2644x2610
 scene input with preset K. The verified installed package carries DLSS
 310.7.0.0.
 
-The old controller rejected the initial tone producer's VS
-`642017A6FEDAE0E8` despite the correct PS `99C21CEB7A699821`, then
-latched off before later 2D78 tone frames. It now captures either exact
-pair with its own exposure state, replays the sampled copy and terminal
-canvases, and keeps those canvases out of DLSS's clean world input.
+The new route never applied. At 19:44:52.339, generation 10014, an
+interleaved world shader is rejected with `unsupported opcode 77`: VS
+`8C091FFD08644E02`, PS `3EAF4DB5B3E21089`. Only one flight-HUD draw has
+been captured. This disables deferred replay before the tone pass and
+leaves the old UI handling active for the whole flight.
 
-Ruled out: a wrapper skipped this producer or changed its shader between
-entry and BeforeTone, because both stages name the same actual pair and
-original-issued is true. The prior submission-order and alias
-invalidation exclusions remain under "Missing tone hook, 174541".
-Current evidence is under "Observed tone variant, 183301" below.
+Ruled out: this capture demonstrates smearing during successful native
+UI replay, because applied remains zero and the first sequence aborts
+before tone mapping. It does not validate or refute the new composition.
+Current evidence is under "World shader rejection, 194533" below; prior
+ruled-out causes remain under 174541 and 183301.
 
-The terminal canvas's measured Halton jitter is removed during native
-replay. Its 8,388,624-byte SRV/UAV buffer receives a fresh private
-snapshot per capture. Native replay takes precedence over the legacy
-input/resolve and resets history when ownership changes. Shared corona,
-ring and other world-motion resources remain enabled. Exact unsupported
-state falls back to intact original game colour.
+The shader contains six SINCOS and one IMUL, both with two destination
+operands including NULL. The retained corpus also writes o0 through an
+IMUL second destination. The strict two-destination parser now passes
+GPU equivalence checks and all sixteen route shaders, including the four
+recovered from the installed Effects2 archive.
 
-Focused validation passes 2,040 checks on WARP and RTX 5090. The
-synthetic sampled-copy/tail route measures 0.5589 ms GPU and 0.0501 ms
-prepare CPU per eye at the current input/output size (20 samples). This
-excludes DLSS, game rendering, pre-tone work and real materials. The
-full build, live NGX smoke and final hardware check passed. Candidate
-version is `v0.17.0-rc.2-dirty`, built before the source commit,
-graphics PE `6AA9EC43` and runtime PE `6AA9ECE2`. Installed to Steam;
-separate package verification passed and the INI is unchanged. Next
-headset check: confirm target text/corona behavior with this verified
-Steam package. Visual improvement is not yet confirmed in-game.
+The downstream audit found two further blockers: the holo UI reads VS
+t38 from an SRV/UAV buffer, and its changing 124 MiB vertex allocation
+would exhaust the 256 MiB snapshot pool when copied whole. Bounded
+16-bit-index windows and versioned SRV copies now pass GPU equality,
+mutation and stereo-budget tests. The controller passes 2,251 checks on
+WARP and hardware. Full build and live NGX validation passed on main
+377c520 plus this patch. Steam installation and a separate verification
+passed, with the live INI unchanged. Final hashes are recorded below.
 
-Build setup: prepend bundled Python, pass Steam's original OpenVR DLL
-using `--openvr`, and set `EDVR_NGX_SDK` to
-`C:/Users/seanm/AppData/Local/EDVR/ngx-sdk`. Run the build with access
-to that SDK. Require a full DLSS-enabled build and live NGX smoke
-without runtime skips before installation; preserve Steam's edvr.ini.
+The previous full build, live NGX smoke and 2,040 WARP/hardware
+controller checks passed but did not cover this real interleaved shader.
+Startup B779 stencil state remains unretained; bounded capture logs now
+expose its exact fields if that becomes the next rejection. Next flight:
+inspect target text near the corona and confirm successful deferred
+application in the log. Headset visual quality is not yet validated.
+
+Build setup on 377c520: prepend bundled Python, set `OPENVR_SRC` to
+Steam's verified original OpenVR DLL, set `EDVR_JOBS=1`, and set
+`EDVR_NGX_SDK` to `C:/Users/seanm/AppData/Local/EDVR/ngx-sdk`. Run the
+build with access to that SDK and no CLI arguments (see launcher issue
+below). Require a full DLSS-enabled build and live NGX smoke without
+runtime skips before installation; preserve Steam's edvr.ini.
+
+## Investigation
 
 [Issue
 36](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/36)
@@ -2205,3 +2213,208 @@ original preflight tool output and a final read-only hash check.
 
 Install receipt backup in the Steam game directory:
 `edvr_native_receipt.json.pre-96902e6-20260915-192019.bak`.
+
+## World shader rejection, 194533 — 2026-09-15
+
+The user reports continued smearing. The first log check compared HEAD
+and reported the expected precommit mismatch. The literal stamp and PE
+match the installed package recorded above; the sanctioned installer
+verification and exact graphics/runtime hashes confirm this is the
+intended build. GFX log is `edvr_gfx_20260915_194316.log`; matching
+native log is `edvr_openxr_20260915_194317_509_13804.log`. Runtime,
+headset and eye sizes are unchanged, native submission remains direct,
+and shutdown reports `graphics_wrong_thread=0`.
+
+At 19:44:52.334, generation 10014, the first captured X draw is flight
+HUD VS `B7790CBFC6554097` / PS `8DEF46452FA459F5`, eye 0 HDR
+`000001F7055C2A60`. At .339 the interleaved world path rejects PS
+`3EAF4DB5B3E21089` with `pixel shader fanout: unsupported opcode 77` and
+latches the controller off. VS is `8C091FFD08644E02`; count remains one
+and no native UI replay applies. The following 642/99 tone passes,
+sampled copies and terminal canvases are observed only in disabled
+diagnostic mode. Thus the repaired handoff is not exercised in this
+flight.
+
+Ruled out: the current eye dump shows an artifact while deferred native
+UI replay is successfully active, because applied stays zero and the
+first capture sequence aborts before tone mapping.
+
+Eye stamp 194533 captures scene frame 13519, with crops C00..C15 from
+13520..13535. All twelve eye inputs and the panel, tone, drawstate,
+eye-mesh, GUI and draw snapshots are written; zero missing shader files
+or snapshot declines are reported. This is distinct from the production
+controller's rejection. The rejected 20,740-byte pixel shader is
+retained as `shaders/ps_3EAF4DB5B3E21089.dxbc`.
+
+Discriminating checks before another build:
+
+- Confirm opcode 77 and every destination operand in the actual shader,
+  including whether an output or null destination is present.
+- Scan the relevant retained shader corpus through the real fanout
+  transformer and D3D shader creation, rather than testing only that PS.
+- Audit the ordered HDR/UI interval for later blend, stencil, resource
+  or wrapper-state blockers which would disable the route next.
+- Defer visual-composition hypotheses until a run actually records
+  successful applied frames; sharpening or mask changes cannot repair a
+  route that never runs.
+
+The actual rejected PS disassembles to six `sincos r2.z, null, r2.z`
+instructions and one `imul null, r3.y, r2.w, l(48)`. These are opcodes
+77 and 38, with two destinations and SDK operand type 13 for NULL. The
+469 retained pixel shaders parse structurally; the unsupported
+arithmetic encountered consists of IMUL, SINCOS, UDIV and SWAPC. Two
+instructions in retained PS `1B2C9D080A23CCE6` use `imul null, o0.xy,
+...`: a parser which only redirects the first destination would silently
+leave output writes unredirected.
+
+The conservative ordered route contains sixteen distinct pixel shaders.
+Eleven retained shaders already pass transformation and WARP creation;
+3EAF is the arithmetic rejection. Four hashes have not yet been found in
+the Steam retained corpus: `6EEF165A350DA30F`, `5E72F436FC8A5736`,
+`2B156A05E98F2D5D`, `16196F69ADE35E77`. Prior local replay artifacts are
+being checked before these are called unavailable.
+
+The downstream A296 holo packets have separate retained resource
+blockers. Reflected VS t38 is an 8,388,624-byte SRV/UAV buffer, while
+the current opt-in applies only to terminal canvases. The IA stream uses
+a 130,023,424-byte VB1; its retained draw-window bytes differ on all
+twelve UI draws. Whole-allocation copies plus the 32 MiB index buffer
+would exceed the shared 256 MiB budget by the second or third packet.
+Merely allowing the UAV-backed SRV would not make this route usable. The
+corrective contract must preserve draw addressing and resource versions
+without synchronous index-buffer readback.
+
+The decoder correction passed 2,236 controller checks on WARP and the
+hardware GPU, including original/patched RGBA equality and clean-colour
+and alpha-influence outputs. The actual 3EAF program transforms from
+20,740 to 20,872 bytes and D3D creates the result. Of 469 retained pixel
+shaders, 320 applicable programs transform and create successfully; 143
+output-signature and six early-return cases retain the previous safety
+declines. There are no opcode or destination-cursor failures. The twelve
+available route shaders all pass. This focused result does not yet
+validate the resource changes or establish successful in-game replay.
+Logs: `controller-fanout-warp-194533.log`,
+`controller-fanout-hardware-194533.log`, `fanout-3EAF-fixed-194533.log`,
+`fanout-route16-fixed.csv`, `fanout-corpus-fixed.csv` under
+`build/review_motion/issue36/`.
+
+The retained A296 layout proves VB1 is per-vertex, with stride 40 and
+16-bit indices; VB0 is an eight-byte, step-one instance stream. The VS
+has no vertex/instance system-ID input. The bounded capture therefore
+copies the complete 65,536-entry index domain from BaseVertexLocation,
+the exact index window and the selected instance, preserving every
+possible fetched byte while rebasing the replay arguments. It does not
+infer the highest index from a partial dump. The policy is restricted to
+the proven shader pair and exact reflected layout, with checked
+arithmetic and fail-closed bounds. Shader-readable UAV snapshots must
+advance on graphics and compute writes; identical retained t38 bytes
+alone are insufficient proof that a later flight cannot update them.
+
+Main was fast-forwarded to 749a4e9 before final validation. Its temporal
+region timing changes do not overlap the capture/decoder patch and will
+be included in the full build and live NGX smoke.
+
+All four missing PS programs were recovered from the Steam installed
+`Win64/EffectsBinary/Effects2_Win64_SM50.arc`. Its 13,109,377-byte file
+contains raw-deflate data beginning at byte 16, expanding to 71,115,408
+bytes with 1,831 DXBC containers. Exact whole-bytecode FNV identities
+match the recovered files: 6EEF is 1,804 bytes, 5E72 is 2,784, 2B156 is
+1,400, and 16196 is 1,448. Artifacts are under
+`build/review_motion/issue36/deferred-ui-shaders/recovered-route-ps/`.
+An initial repository search compared DXBC header checksums, which is
+not the production identity algorithm. That search was redone using FNV
+and the known A296 blob as a control before archive recovery; checksum
+matching is not counted as evidence of shader-hash absence.
+
+All sixteen route programs now transform and D3D-create successfully.
+Final focused controller validation passes 2,251 checks on WARP and
+hardware, including actual CS and OM write callbacks producing distinct
+retained t38 versions. Compact-IA replay matches a nonblank original
+image byte for byte with nonzero base, start-index and start-instance
+arguments. Mutating the source leaves older packets intact; changed
+layouts and system-ID inputs are rejected. The 24-draw stereo stress
+case copies and allocates 60.00 MiB, within the existing 256 MiB budget,
+and reuses storage across frames with different index counts.
+
+The synthetic 24-draw IA capture benchmark measures CPU-plus-GPU wall
+clock including completion, not isolated GPU time: RTX 5090 cold 1.593
+ms, warm 0.555 ms; WARP cold 15.360 ms, warm 15.367 ms. It excludes
+DLSS, UI shading/composition and the game's rendering, and is not a
+claim about headset frame time. Shader reflection is cached per shader
+pair, rather than repeated for every label.
+
+Startup B779 was not present in the retained steady-state packets. Its
+exact stencil effect before orbital 6EEF cannot be proven from these
+dumps. The existing first-twelve capture log now includes depth
+enable/write and stencil enable/read/write/reference plus both face
+functions and operations. An unsupported stencil dependency still
+retains the original frame and declines; the guard was not weakened.
+This remains a validation limit to inspect in the next flight.
+
+Main advanced again to 377c520 with concurrent build-test orchestration.
+It was fast-forwarded before the final build, without overlapping the
+five changed production/test files. Source freeze began after the
+focused checks above; full build and live NGX validation use this merged
+baseline.
+
+The first full build compiled the DLLs but stopped at the newly merged
+runner with `the script defines no :rig_<label> subroutines`.
+`build.bat` saves ROOT before parsing arguments, but `shift` advances
+`%0`; the later `--script "%~f0"` therefore names the last `--openvr`
+argument rather than the batch file. The unchanged script already
+supports inherited `OPENVR_SRC`, so final validation is rerun with that
+variable set to the verified Steam original and no CLI arguments. This
+runs the same gates; it does not skip the concurrent runner. The
+launcher implementation is outside this rendering patch.
+
+The environment-path retry reached the concurrent rigs but failed seven
+`openxr_module_test` lifecycle/timing assertions under load. Its exact
+six-command gate then passed in isolation from the same binary
+(`openxr-module-standalone.log`, including the 28-check local test).
+Final full validation therefore uses inherited `EDVR_JOBS=1` to run the
+unchanged 68 jobs serially. The failing build logs are retained
+separately; no failing gate is treated as passed or removed.
+
+Final validation passed using the unchanged serial runner: all 65 pool
+jobs plus three quiet jobs, SDK 310.7 verified, config 255/255, DLSS
+runtime CARRIED and installer resources matching the release files. The
+previously failing module test reports 247 checks and zero failures.
+Live smoke against the final graphics DLL passes with DLAA available,
+eleven evaluations and two resets, live crop/motion/cost/fovea/price
+probes, zero drops and no runtime skips. The shipped motion/jitter
+convention scores 17.54 versus the runner-up 19.43.
+
+The final hardware controller passes 2,251 checks and the draw-replay
+suite passes. Its 24-draw compact-IA workload still uses 60.00 MiB; the
+final run measures cold 2.010 ms and warm 1.169 ms CPU-plus-GPU wall
+clock. The variation from the earlier 0.555 ms warm result is reported
+rather than selecting only the faster result. Neither is isolated GPU
+time or total flight cost. No additional source changes were made after
+the final build.
+
+Final logs under `build/review_motion/issue36/`:
+`fullbuild-compact-panel-serial.log`,
+`smoke-compact-panel-live-ngx.log`, and `deferred-hardware-final.log`.
+Version is `v0.17.0-rc.2-6-g377c520-dirty`. Exact final binary
+provenance:
+
+- Graphics (`d3d11.dll` and identical `edvr_openxr_graphics.dll`): PE
+  `6AA9FDBA`, link 2026-09-16 02:23:54 UTC, SHA-256
+  `AC580E3A2FDA8AAA6F23E6B248286A50CCF3FE18A32379017B54052740887158`.
+- Runtime: PE `6AA9FDBF`, link 2026-09-16 02:23:59 UTC, SHA-256
+  `9AA88D3B90BD015BA7891584006AFB454D2177C6F5AA41A9B6CA70E93C2FF19B`.
+
+Steam dry-run installation passed and wrote nothing. The subsequent
+sanctioned `--all` install and separate `--all --verify-only` both
+exited zero. Installed graphics/runtime hashes match the final build
+above. The live INI was 144,372 bytes before and after, with unchanged
+SHA-256
+`BDF474BB2A929773FE66AADC790549FA59714830EB9A9FEE5EB4CDD06F45BF9B`. No
+INI overwrite, forced install or process termination was requested.
+Receipt backup:
+`edvr_native_receipt.json.pre-377c520-20260915-203111.bak`.
+
+Next flight: inspect target text near the corona, then confirm the log
+records successful deferred application rather than the legacy fallback.
+The offline results fix confirmed blockers; they do not establish the
+headset result or eliminate the unretained startup-stencil limitation.

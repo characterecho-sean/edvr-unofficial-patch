@@ -87,6 +87,7 @@ struct ShaderMask {
     bool valid=false;
 };
 std::vector<ShaderMask> masks;
+constexpr uint64_t kCompactPanelVs=0x81216C77F90DEDD6ull,kCompactPanelPs=0xA2965EC2931A39C8ull;
 const UiDeferredCaptureMask* reflect(ID3D11DeviceContext* ctx) {
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
     if(!vs || !ps)return nullptr;
@@ -94,6 +95,8 @@ const UiDeferredCaptureMask* reflect(ID3D11DeviceContext* ctx) {
     if(masks.size()>=128)return nullptr;
     ShaderMask m;m.vs=vs;m.ps=ps;
     m.valid=uiDeferredReflect(vs.Get(),m.mask.cbVs,m.mask.srvVs) && uiDeferredReflect(ps.Get(),m.mask.cbPs,m.mask.srvPs);
+    const bool compactPanel=bindingShaderHash(BindSlot::Vs)==kCompactPanelVs && bindingShaderHash(BindSlot::Ps)==kCompactPanelPs;
+    if(compactPanel)m.valid=m.valid && uiDeferredPanelVertexInputs(vs.Get());m.mask.compactPanelIa=compactPanel && m.valid;
     masks.push_back(std::move(m));return masks.back().valid?&masks.back().mask:nullptr;
 }
 struct Draw {
@@ -132,6 +135,8 @@ uint64_t generation=1;
 uint64_t diagnosticUntilGeneration=0;
 unsigned toneReports=0,aliasReports=0,prepareReports=0,postToneReports=0,lateCompositeReports=0,boundaryReports=0;
 unsigned routeCaptureReports=0;
+struct CaptureFailure { uint64_t vs=0,ps=0;std::string reason; };
+std::vector<CaptureFailure> captureFailures;
 static bool diagnosticWindow(){return diagnosticUntilGeneration && generation<=diagnosticUntilGeneration;}
 
 // The sampled blit immediately after tone mapping is a draw, not a resource
@@ -444,7 +449,12 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
     if(e.draws.size()==e.count)e.draws.push_back(std::make_unique<Draw>());
     auto& d=*e.draws[e.count];
     const auto* mask=reflect(ctx);if(!mask)return false;
-    if(!d.packet.capture(ctx,snapshots,kind,count,instances,start,base,first,*mask))return false;
+    if(!d.packet.capture(ctx,snapshots,kind,count,instances,start,base,first,*mask)){
+        const auto vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);const char* why=d.packet.failureReason();bool seen=false;
+        for(const auto& f:captureFailures)seen=seen || (f.vs==vs && f.ps==ps && f.reason==why);
+        if(!seen && captureFailures.size()<32){captureFailures.push_back({vs,ps,why});Log::get().note("Deferred UI: draw capture refused VS=%016llX PS=%016llX: %s.",vs,ps,why);}
+        return false;
+    }
     D3D11_DEPTH_STENCIL_DESC depthState{};
     if(d.packet.depthState())d.packet.depthState()->GetDesc(&depthState);
     else {depthState.DepthEnable=TRUE;depthState.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;}
@@ -460,8 +470,11 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
     if(!e.count)e.generation=generation;
     ++e.count;++captured;
     ++diagnostic.captures;
-    if(captured<=12)Log::get().note("Deferred UI: captured %c draw, gen=%llu VS=%016llX PS=%016llX eye=%d %ux%u HDR=%p.",kind,
-        static_cast<unsigned long long>(generation),bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),eye,e.w,e.h,e.hdr.Get());
+    if(captured<=12)Log::get().note("Deferred UI: captured %c draw, gen=%llu VS=%016llX PS=%016llX eye=%d %ux%u HDR=%p; depth=%u/%u stencil=%u read=%02X write=%02X ref=%u front=%u/%u/%u/%u back=%u/%u/%u/%u.",kind,
+        static_cast<unsigned long long>(generation),bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),eye,e.w,e.h,e.hdr.Get(),
+        unsigned(depthState.DepthEnable),unsigned(depthState.DepthWriteMask),unsigned(depthState.StencilEnable),unsigned(depthState.StencilReadMask),unsigned(depthState.StencilWriteMask),unsigned(d.packet.stencilRef()),
+        unsigned(depthState.FrontFace.StencilFunc),unsigned(depthState.FrontFace.StencilFailOp),unsigned(depthState.FrontFace.StencilDepthFailOp),unsigned(depthState.FrontFace.StencilPassOp),
+        unsigned(depthState.BackFace.StencilFunc),unsigned(depthState.BackFace.StencilFailOp),unsigned(depthState.BackFace.StencilDepthFailOp),unsigned(depthState.BackFace.StencilPassOp));
     return true;
 }
 bool uiDeferredBegin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
@@ -746,6 +759,7 @@ void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx,char kind,UINT count,UINT ins
     if(inside)return;
     const bool active=eyes[0].count || eyes[1].count;
     if(!active && !diagnosticWindow())return;
+    if(enabled && active){ID3D11UnorderedAccessView* uavs[8]{};ctx->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,8,uavs);for(auto* v:uavs)if(v){uiDeferredViewWrite(ctx,v);v->Release();}}
     const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
     const bool postTone=vs==kPostToneVs && ps==kPostTonePs;
     const bool lateComposite=vs==kTailVs && ps==kTailPs;
@@ -803,5 +817,5 @@ void uiDeferredFrameBoundary(ID3D11DeviceContext* ctx) {
     writerTraceOrdinal=0;writerTracePending=-1;
     if(!enabled && !diagnosticWindow())clearWriterTrace();
 }
-void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=routeHandledThisDraw=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=routeCaptureReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
+void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();captureFailures.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=routeHandledThisDraw=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=routeCaptureReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
 }

@@ -24,6 +24,52 @@ static UINT instructionLength(const std::vector<UINT>& t,size_t p) {
     if(!len || len>t.size()-p)throw std::runtime_error("instruction length");
     return len;
 }
+static bool twoDestinations(UINT op) {
+    // Integer multiply/divide, sincos, add/subtract-with-carry and swapc all
+    // encode two destinations.  Either destination may be the NULL operand.
+    return op==38||op==77||op==78||op==81||op==132||op==133||op==142;
+}
+static size_t firstOperand(const std::vector<UINT>& inst) {
+    size_t p=1;
+    while(p<inst.size()&&(inst[p-1]&0x80000000u))++p;
+    if(p>=inst.size())throw std::runtime_error("missing operands");
+    return p;
+}
+static size_t rewriteSimpleDestination(std::vector<UINT>& inst,size_t p,UINT temp,UINT& mask) {
+    if(p>=inst.size())throw std::runtime_error("missing destination operand");
+    const UINT token=inst[p];
+    // The retained game corpus uses only the SDK's exact 0D NULL operand, or
+    // a 4-component mask on a 1D immediate-index TEMP/OUTPUT operand.  Decline
+    // extensions and relative/indexed forms instead of guessing their length.
+    if(token==0x0000d000u)return p+1;
+    const UINT type=(token>>12)&255;
+    const UINT base=type==0?0x00100002u:type==2?0x00102002u:~0u;
+    if(base==~0u||(token&~0xf0u)!=base||p+1>=inst.size())
+        throw std::runtime_error("unsupported destination operand");
+    if(type==2) {
+        if(inst[p+1]!=0)throw std::runtime_error("output operand");
+        mask|=(token>>4)&15;inst[p]&=~0x2000u;inst[p+1]=temp;
+    }
+    return p+2;
+}
+static void rewriteDestinations(std::vector<UINT>& inst,UINT op,UINT temp,UINT& mask) {
+    if(twoDestinations(op)) {
+        size_t p=firstOperand(inst);
+        p=rewriteSimpleDestination(inst,p,temp,mask);
+        rewriteSimpleDestination(inst,p,temp,mask);
+        return;
+    }
+    if((op<88&&op!=62&&op!=53)||(op>=108&&op<=141)||op==165||op==167) {
+        size_t dest=1;
+        while(dest<inst.size()&&(inst[dest-1]&0x80000000u))++dest;
+        if(dest>=inst.size())return;
+        if(((inst[dest]>>12)&255)==2) {
+            if(dest+1>=inst.size()||(inst[dest]&~0xf0u)!=0x00102002u||inst[dest+1]!=0)
+                throw std::runtime_error("output operand");
+            mask|=(inst[dest]>>4)&15;inst[dest]&=~0x2000u;inst[dest+1]=temp;
+        }
+    }
+}
 static std::vector<BYTE> patch(const std::vector<BYTE>& in){
  if(in.size()>1024*1024||in.size()<32||word(in,28)>128||memcmp(in.data(),"DXBC",4)||word(in,24)!=in.size())throw std::runtime_error("container");
  BYTE digest[16];ComputeHashRetail(in.data()+20,UINT(in.size()-20),digest);if(memcmp(digest,in.data()+4,16))throw std::runtime_error("input checksum");
@@ -47,8 +93,8 @@ static std::vector<BYTE> patch(const std::vector<BYTE>& in){
        if(op==104){if(temp!=~0u||len!=2||t[p+1]>=4096)throw std::runtime_error("temps");temp=t[p+1];}
        if(op==101){if(len!=3||t[p+1]!=0x001020f2||t[p+2]!=0)throw std::runtime_error("output declaration");++decls;}
        if(op==62){if(len!=1||p+1!=t.size())throw std::runtime_error("early return");++returns;}
-       const bool supportedNew=(op>=108&&op<=111)||(op>=121&&op<=141)||op==161||op==162||op==165||op==167;
-       if(op==4||op==5||op==44||op==63||op==102||op==103||op==38||op==77||op==78||op==81||op==132||op==133||(op>=109&&!supportedNew))throw std::runtime_error("unsupported opcode "+std::to_string(op));
+       const bool supportedNew=(op>=108&&op<=111)||(op>=121&&op<=142)||op==161||op==162||op==165||op==167;
+       if(op==4||op==5||op==44||op==63||op==102||op==103||(op>=109&&!supportedNew))throw std::runtime_error("unsupported opcode "+std::to_string(op));
        p+=len;
      }
      if(decls!=1||returns!=1)throw std::runtime_error("missing declarations");
@@ -57,13 +103,7 @@ static std::vector<BYTE> patch(const std::vector<BYTE>& in){
      for(size_t p=2;p<t.size();){UINT op=t[p]&0x7ff,len=instructionLength(t,p);
        std::vector<UINT> inst(t.begin()+p,t.begin()+p+len);
        if(op==104)inst[1]=temp+1;
-       if((op<88&&op!=62&&op!=53)||(op>=108&&op<=141)||op==165||op==167){
-         size_t dest=1;while(dest<len&&(inst[dest-1]&0x80000000u))++dest;
-         if(dest<len&&((inst[dest]>>12)&255)==2){
-           if(op==38||op==77||op==78||op==81||dest+1>=len||(inst[dest]&~0xf0u)!=0x00102002u||inst[dest+1]!=0)throw std::runtime_error("output operand");
-           mask|=(inst[dest]>>4)&15;inst[dest]&=~0x2000u;inst[dest+1]=temp;
-         }
-       }
+       rewriteDestinations(inst,op,temp,mask);
        if(op==62){for(UINT r=0;r<3;++r){UINT mov[]={0x05000036,0x001020f2,r,r==2?0x00100ff6u:0x00100e46u,temp};out.insert(out.end(),mov,mov+5);}}
        out.insert(out.end(),inst.begin(),inst.end());
        if(op==101){for(UINT r=1;r<3;++r){UINT decl[]={0x03000065,0x001020f2,r};out.insert(out.end(),decl,decl+3);}if(addTemps){out.push_back(0x02000068);out.push_back(1);}}
