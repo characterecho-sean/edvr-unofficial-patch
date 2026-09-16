@@ -2,64 +2,63 @@
 
 ## Status
 
-- **State (2026-09-15, evening):** Stage 0, reproduce and price,
-  instrumentation BUILT, REVIEWED and FIXED on branch
-  `claude/dlss-foveation-design-e02cfe`, merged to main: per-region GPU
-  timing of the temporal pass per eye (prep, reduce, periphery, centre,
-  full, compose, ui, other, total), stereo pairs summed into 600-pair
-  windows, one "temporal aa price" log line per closed window (median/p95
-  per region per stereo pair plus the pairs dropped as unmeasured, lone,
-  no-slot or lease-refused), the same figures on F8, per-role and per-eye
-  NGX totals, and a GPU-name stamp at the first DLAA/DLSS ask. A window
-  closes on 600 pairs or whenever the treatment, output shape or a live
-  temporal_aa_* setting changes. Traced end to end on build\smoke.exe with
-  a stereo probe: the "full-frame ngx" and "foveated ngx" lines both fire
-  with the right regions non-zero and zero drops (journal, 2026-09-15).
-  The acceptance metric (whole-frame GPU per arm) needs no new code: the
-  native benchmark line already logs gpu p50/p95/p99 every 34 s under
-  native OpenXR and restarts on every setting change (journal). NOT DONE:
-  the field flight below. Measurement only; no rendering behaviour changes.
-- **Baseline drift:** written against d160499; three commits since touched
-  the crop-path files (d08f536 target sprites out of world history, c27fe74
-  scene UI replayed at native resolution after DLSS, c5e88dc display
-  properties and hidden-area masks). All three landed in the full-frame
-  branch only; the crop branch still has no reactive mask, no uiResolve and
-  no UI replay.
-- **Reachable:** the fixed crop runs under native OpenXR through the existing
-  advanced.temporal_aa_fovea* keys (native_temporal.cpp treat() ->
-  edvrTemporalAa -> temporalInner); nothing gates it off. Its "DLSS where
-  you look ENGAGED" and "the fovea was asked for, but" log lines are the
-  evidence it ran or stood down.
-- **Open hypotheses for the first flight:** H1 stereo temporal-pass time
-  drops by at least 0.5 ms and 5% with the fovea on at unchanged sizes; H2
-  reduce + periphery + compose eat most of the centre crop's saving, as the
-  2026-09-05 flights found; H3 the seam pulses under head motion on the
-  native build (temporal, not spatial).
+- **State (2026-09-15, 19:52, Stage 0 FLOWN):** one A/B/A flight in the
+  FRONTIER install, Pimax Crystal Super on Pimax OpenXR, 2576x2544 per eye
+  in, 3964x3913 out, 90 Hz, temporal_aa = dlss model k, log
+  edvr_gfx_20260915_195200.log on build v0.17.0-rc.2-5-g749a4e9 (on main;
+  read it with `--expect-build 749a4e9`). The whole-frame gate PASSED
+  against the A arm before it: fovea 40 deg with the steady periphery at
+  0.5 took the native benchmark gpu p50 from 8.84-9.10 ms (A, three
+  windows) to 7.95-8.13 ms (B, four windows), 0.76-1.02 ms and 8-11% off,
+  above the 0.26 ms drift inside A; p95 9.91-10.37 -> 9.22-9.55, no rise.
+  The pass itself went 4.10 -> 2.61 ms per stereo pair (full 3.35 ->
+  centre 0.60 + periphery 0.99 + reduce 0.09 + compose 0.25; prep 0.50 ->
+  0.68; ui 0.25 -> 0.00) with every drop counter zero after the first
+  minute. CPU p50 rose 0.2 ms in every B window (3.61-3.68 -> 3.77-3.90),
+  a price, not a stall; the frame is GPU-bound. INCOMPLETE: the trailing A
+  ran 25 s, so it has price lines (identical to the leading A) but no
+  benchmark window, and Sean has not yet said what the seam looked like.
+  The lines are verbatim in the journal (2026-09-15, flown).
+- **Settled by the flight:** H1 CONFIRMED (1.5 ms and 36% on the pass,
+  0.8-1.0 ms and 8-11% on the frame). ruled out: H2 (reduce + periphery +
+  compose eat most of the crop's saving), because at 40 deg / 0.5 they
+  cost 1.33 ms per pair against the 2.75 ms the crop saves over full-frame
+  NGX, 48%, and the pass still nets 1.5 ms. H3 (the seam pulses) UNJUDGED.
+  The angle decides the saving: centre 0.60 ms at 40 deg (8.2% of the
+  output), 0.71 at 49, 1.73 at 80, where the frame gain is gone (p50 8.99
+  vs 9.05-9.10). Engaging costs one 445 ms frame (two NGX features per eye
+  and a 303 ms shader compile), reported separately as the gates ask.
+- **UI parity is the first Stage 1 item, now field-confirmed:** the fovea
+  branch of temporalInner (the block ending at the compose dispatch) runs
+  neither the UI resolve nor the deferred replay; both exist only in the
+  full-frame block, so `ui` reads 0.00 under the fovea by construction and
+  B's UI was the periphery's half-size DLAA upscaled bicubically plus the
+  crop's DLSS. A parity build pays the 0.25 ms back, net about 1.25 ms on
+  the pass. Until then B's numbers price a different image-processing
+  feature, exactly as "UI and failure behavior" warned.
 - **Ruled out, do not re-run:** the eye-tracked crop as "no blur where I
-  look", structural under upscaling (performance.md, 2026-09-05); gaze stays
-  Stage 3 and optional. The pooled "NVIDIA ms/eye" figure (dlaa.cpp
-  dlaaTotals) mixes both eyes and all three roles; nothing measured off it
-  compares with the new per-role numbers.
-- **Not yet built (Stage 1):** the crop-policy unit test (cropOf is a lambda
-  inside temporalInner and must be extracted first), the reactive mask and
-  uiResolve on the crop path, history committed only after a successful
-  evaluation (foveaHaveHistory and prHaveHistory are set unconditionally
-  each frame), and the crop branch's unconditional ensureNative and
-  diagnostic motion shader, which Stage 0 times rather than removes.
-- **Next flight (Stage 0 is installed in the FRONTIER directory):** Pimax
-  at the usual settings, temporal_aa = dlss. Windows: A full frame, B
-  temporal_aa_fovea = 40 with temporal_aa_periphery = steady and
-  temporal_aa_periphery_scale = 0.5, A again, each at least 75 s after
-  warm-up so every arm holds one full 34 s native benchmark cycle; edit the
-  live edvr.ini between arms (hot reload within 1 s, which also closes the
-  price window and restarts the benchmark). During B slow turns, fast nods,
-  then hold still and watch the seam. Optional C: full frame one
-  HMD-quality step lower. Read with
+  look", structural under upscaling (performance.md, 2026-09-05); gaze
+  stays Stage 3 and optional. The pooled "NVIDIA ms/eye" figure mixes both
+  eyes and all three roles; nothing measured off it compares with the
+  per-role numbers. H2, above.
+- **Not yet built (Stage 1):** the UI resolve / deferred replay and the
+  reactive mask on the crop path (above); the crop-policy unit test (cropOf
+  is a lambda inside temporalInner and must be extracted first); history
+  committed only after a successful evaluation (foveaHaveHistory and
+  prHaveHistory are set unconditionally each frame); the crop branch's
+  unconditional ensureNative, diagnostic motion shader and per-frame stats
+  readback (the 0.2 ms CPU candidate), which Stage 0 timed, not removed.
+- **Next flight (after Stage 1, on the parity build, FRONTIER install):**
+  the same A/B/A with every arm at least 75 s INCLUDING the trailing A, no
+  angle sweep inside an arm, and the picture verdict written down. Change
+  arms by editing the live edvr.ini, not the F8 menu: every menu open or
+  close restarts the benchmark scope (perf_monitor.cpp, kEvMenu), which cut
+  every B window short this time; the 17 s one ran only because the menu
+  stayed open. The "DLSS where you look ENGAGED" line is the proof B ran.
+  Read with
   `python tools\edvr_log.py --target frontier --expect-build HEAD --grep "temporal aa price"`
-  and the same with `--grep "native benchmark"`. A price line counts only
-  when its drop counters are near zero; a line with lone eyes close to its
-  pair count means the stereo pairing failed in the field and the numbers
-  are not evidence.
+  and the same with `--grep "native benchmark"`; a price line counts only
+  when its drop counters are near zero.
 
 ## Investigation (2026-09-14)
 
@@ -621,3 +620,151 @@ not stamped; the fovea arm does a per-frame 208-byte stats readback outside
 the timed span that the full-frame arm does not (negligible, but it is a
 B-arm-only difference); in the smoke the row counter never advances, so its
 pairing relies on the forced GPU completion after every call.
+
+### 2026-09-15: Stage 0 flown in Frontier, A/B/A on the Pimax
+
+**Build, smoke, install.** The rebased build (749a4e9, = main) was smoked
+on the desk before the install, `build\edvr_logs\edvr_gfx_20260915_193143.log`,
+the lines the entry above promised, verbatim:
+
+```
+temporal aa price: full-frame ngx, 400x304, 8 stereo pairs (window closed), ms per pair median/p95: prep 0.03/0.03 reduce 0.00/0.00 periphery 0.00/0.00 centre 0.00/0.00 full 0.37/14.71 compose 0.00/0.00 ui 0.00/0.00 other 0.00/0.01 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+temporal aa price: foveated ngx, 400x304, 6 stereo pairs (window closed), ms per pair median/p95: prep 0.02/0.03 reduce 0.01/0.02 periphery 0.43/22.76 centre 0.41/3.00 full 0.00/0.00 compose 0.01/0.02 ui 0.00/0.00 other 0.00/0.00 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+```
+
+Installed into the Frontier directory with `install_edvr.py --target
+frontier` and verified with `--verify-only`. Sean flew it the same
+evening: log `edvr_gfx_20260915_195200.log`, 19:52:00 to 19:56:01,
+version line `v0.17.0-rc.2-5-g749a4e9 (build 6AA9F0B0)`, and
+`--expect-build HEAD` answered "build matches" while HEAD was 749a4e9
+(from any later commit ask for `--expect-build 749a4e9`). Pimax Crystal
+Super on
+"Pimax OpenXR", 2576x2544 per eye in, 3964x3913 out, 90 Hz, aa dlss,
+model k, RTX 5090. (The price line says 3964x3914 for the same output:
+the two instruments take the height from different places; one pixel,
+ignore.)
+
+**What was flown** is not quite the brief. The arms were switched with
+the F8 menu, not the ini (same hot reload, same effect on the pass), and
+the angle was swept inside B: temporal_aa_fovea 0 -> 40 at 19:54:37,
+40 -> 80 at 19:55:02, 80 -> 49 at 19:55:16, 49 -> 40 at 19:55:19, 40 -> 0
+at 19:55:36; the game closed at 19:56:02. So A 157 s, B40 25 s, B80 13 s,
+B49 4 s, B40 17 s, A 25 s. The first 90 s of A were a different workload
+(benchmark cpu p50 0.7-2.6 ms, gpu p50 4.7-6.9 ms: still loading in), and
+the five price windows from 19:52:26 to 19:52:54 had 32-150 region-lease
+refusals each (of 3600 region begins a window; a refused region prices at
+0 for that eye), so both are discounted. From 19:53:32 the benchmark's CPU
+p50 held at 3.6-3.9 ms in every window whatever the arm, and no price
+window dropped anything: 0 unmeasured pairs, 0 lone eyes, 0 no-slot
+frames, 0 lease refusals. The stereo pairing works in the field.
+
+Every menu open or close restarts the benchmark scope
+(perfMonitorNoteEvent, kEvMenu), so no B window completed its 30 s: the
+longest, 17.4 s, ran while the menu stayed open from 19:54:43 to
+19:55:02. The trailing A lasted 25 s against a 34 s cycle and has no
+benchmark line at all.
+
+**The lines**, verbatim. Benchmark windows 5 and 7 are A, 9 and 14 are B
+at 40 deg, 10 is B at 80; the price lines at 19:54:16 and 19:55:50 are A
+(leading and trailing), 19:54:51 B40, 19:55:09 B80, 19:55:19 B49:
+
+```
+[19:54:09.693] native benchmark: window 5, scope 3334388546740028794, status completed, sample 30000 ms [103151296..103181296], drain 2000 ms (finished 103183296), cpu p50/p95/p99 3.682/5.074/5.962 ms valid 2688 invalid 2 missing 0, gpu p50/p95/p99 8.841/9.908/10.817 ms valid 2687 invalid 3 missing 0, input 2576x2544/2576x2544 output 3964x3913/3964x3913 refresh 90000 mHz, runtime="Pimax OpenXR" headset="Pimax Crystal Super" aa="dlss" dlss="k" build="v0.17.0-rc.2-5-g749a4e9"; elapsed windows are independent CPU/GPU samples.
+[19:54:37.359] native benchmark: window 7, scope 5566703953707618203, status scope-changed, sample 15890 ms [103195078..103210968], drain 0 ms (finished 103210968), cpu p50/p95/p99 3.607/4.898/5.354 ms valid 1430 invalid 0 missing 0, gpu p50/p95/p99 9.099/10.333/10.847 ms valid 1429 invalid 0 missing 1, input 2576x2544/2576x2544 output 3964x3913/3964x3913 refresh 90000 mHz, runtime="Pimax OpenXR" headset="Pimax Crystal Super" aa="dlss" dlss="k" build="v0.17.0-rc.2-5-g749a4e9"; elapsed windows are independent CPU/GPU samples.
+[19:55:02.826] native benchmark: window 9, scope 14495965581577975839, status scope-changed, sample 17391 ms [103219046..103236437], drain 0 ms (finished 103236437), cpu p50/p95/p99 3.849/5.177/5.738 ms valid 1564 invalid 0 missing 0, gpu p50/p95/p99 8.082/9.283/9.895 ms valid 1563 invalid 0 missing 1, input 2576x2544/2576x2544 output 3964x3913/3964x3913 refresh 90000 mHz, runtime="Pimax OpenXR" headset="Pimax Crystal Super" aa="dlss" dlss="k" build="v0.17.0-rc.2-5-g749a4e9"; elapsed windows are independent CPU/GPU samples.
+[19:55:33.337] native benchmark: window 14, scope 46199368742522664, status scope-changed, sample 9250 ms [103257687..103266937], drain 0 ms (finished 103266937), cpu p50/p95/p99 3.896/5.172/5.894 ms valid 832 invalid 0 missing 0, gpu p50/p95/p99 8.129/9.361/10.105 ms valid 831 invalid 0 missing 1, input 2576x2544/2576x2544 output 3964x3913/3964x3913 refresh 90000 mHz, runtime="Pimax OpenXR" headset="Pimax Crystal Super" aa="dlss" dlss="k" build="v0.17.0-rc.2-5-g749a4e9"; elapsed windows are independent CPU/GPU samples.
+[19:55:12.514] native benchmark: window 10, scope 3922609364708865138, status scope-changed, sample 6391 ms [103239734..103246125], drain 0 ms (finished 103246125), cpu p50/p95/p99 3.902/5.250/5.746 ms valid 575 invalid 0 missing 0, gpu p50/p95/p99 8.987/10.277/10.973 ms valid 574 invalid 0 missing 1, input 2576x2544/2576x2544 output 3964x3913/3964x3913 refresh 90000 mHz, runtime="Pimax OpenXR" headset="Pimax Crystal Super" aa="dlss" dlss="k" build="v0.17.0-rc.2-5-g749a4e9"; elapsed windows are independent CPU/GPU samples.
+[19:54:16.169] temporal aa price: full-frame ngx, 3964x3914, 600 stereo pairs (600 pairs), ms per pair median/p95: prep 0.50/0.84 reduce 0.00/0.00 periphery 0.00/0.00 centre 0.00/0.00 full 3.34/3.84 compose 0.00/0.00 ui 0.25/0.69 other 0.00/0.00 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+[19:54:51.148] temporal aa price: foveated ngx, 3964x3914, 600 stereo pairs (600 pairs), ms per pair median/p95: prep 0.68/1.03 reduce 0.09/0.09 periphery 0.99/1.51 centre 0.60/0.92 full 0.00/0.00 compose 0.25/0.54 ui 0.00/0.00 other 0.00/0.00 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+[19:55:09.579] temporal aa price: foveated ngx, 3964x3914, 600 stereo pairs (600 pairs), ms per pair median/p95: prep 0.67/1.02 reduce 0.08/0.09 periphery 0.99/1.53 centre 1.73/2.30 full 0.00/0.00 compose 0.25/0.56 ui 0.00/0.00 other 0.00/0.00 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+[19:55:19.965] temporal aa price: foveated ngx, 3964x3914, 331 stereo pairs (window closed), ms per pair median/p95: prep 0.68/1.02 reduce 0.09/0.10 periphery 0.99/1.51 centre 0.71/1.04 full 0.00/0.00 compose 0.25/0.55 ui 0.00/0.00 other 0.00/0.00 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+[19:55:50.181] temporal aa price: full-frame ngx, 3964x3914, 600 stereo pairs (600 pairs), ms per pair median/p95: prep 0.50/0.85 reduce 0.00/0.00 periphery 0.00/0.00 centre 0.00/0.00 full 3.34/3.84 compose 0.00/0.00 ui 0.25/0.57 other 0.00/0.00 dropped 0 unmeasured pairs, 0 lone eyes, 0 no-slot frames, 0 region leases
+[19:54:37.752] temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a 734x734->1128x1128 crop (DLSS, 40 deg, round) around the straight-ahead point (the discs meet at infinity) at (2364, 1954) of the 3964x3914 output, 8.2% of its pixels; the periphery is NVIDIA's too -- DLAA on a 1982x1956 copy (50% of the output each way), upscaled bicubically; the pass's own history stands aside; blended over 6 deg (162 px). NVIDIA's price is in the DLAA totals.
+[19:54:37.816] monitor: LONG FRAME -- 444.9 ms between Presents (runtime predicted period 11.1 ms), no WaitGetPoses, CPU busy, compositor, reprojection, or door samples; game creations: 41 textures, 36 buffers, 2 shaders (786.6 MB); EDVR events: reload (303 ms), shader compile (303 ms), raster upload. This is frame 15965; the flip timeline is not armed, so there are no table changes to order against it.
+```
+
+**The numbers**, medians; the pass is ms per stereo pair, the frame is
+the benchmark's gpu p50 / p95 per frame:
+
+| Arm | Benchmark windows (s) | gpu p50 / p95 | cpu p50 | Pass per pair |
+| --- | --- | --- | --- | --- |
+| A leading | 5 (30), 6 (7.8), 7 (15.9) | 8.84-9.10 / 9.91-10.37 | 3.61-3.68 | 4.10 = prep 0.50 + full 3.35 + ui 0.25 |
+| B 40 deg, periphery 0.5 | 8 (2.2), 9 (17.4), 14 (9.3), 15 (1.5) | 7.95-8.13 / 9.22-9.55 | 3.80-3.90 | 2.61 = prep 0.68 + reduce 0.09 + periphery 0.99 + centre 0.60 + compose 0.25 + ui 0 |
+| B 80 deg | 10 (6.4), 11 (1.6) | 8.99-9.00 / 10.28-10.39 | 3.77-3.90 | 3.74, centre 1.73 |
+| B 49 deg | 12 (1.7) | 8.20 / 9.67 | 3.88 | 2.72, centre 0.71 |
+| A trailing | none (25 s) | | | 4.10 = prep 0.50 + full 3.35 + ui 0.25 |
+
+Inside the leading A the p50 drifted 0.26 ms (window 5 to 7); inside B40
+the four windows spread 0.18 ms. In the steady stretch (price windows from
+19:53:56 on) full held at 3.34-3.38 and ui at 0.25 window to window, and
+every foveated region held to 0.01 ms across the B40 windows; the earlier
+A windows ranged full 2.99-3.59 and ui 0.24-0.49 while the scene was still
+loading. Prep's median in A sat at either 0.23-0.33 or 0.48-0.55 from
+window to window while its p95 stayed at 0.84-0.85 throughout: something
+in prep runs on some frames and not others, unexplained, and the 0.50 used
+above is the steady-stretch value.
+
+**Against the gates.**
+
+- At least 0.5 ms and 5% off the baseline median: B40 against the
+  adjacent A window (7) is -1.02 ms p50, -11.2%; against the one completed
+  A window (5) -0.76 ms, -8.6%; both above the drift inside A. PASSED
+  against the leading arm. Not reproduced across three A/B/A windows: the
+  trailing A has no benchmark window, only price lines, and those match
+  the leading A to the hundredth (prep 0.50, full 3.34, ui 0.25), so the
+  pass came back to baseline but the frame's return is unmeasured.
+- No p95 rise over 2%: B40 p95 9.28 against 9.91-10.37, down 6-10%.
+  PASSED.
+- No new recurring CPU stalls: none; but the benchmark's cpu p50 sat
+  0.2 ms higher in every B window (3.77-3.90 against 3.61-3.68, about 6%),
+  a steady price rather than a stall. Candidates: the second NGX
+  evaluation per eye, the reduce and compose dispatches, and the per-frame
+  208-byte stats readback the entry above listed as B-only. The frame is
+  GPU-bound (8-9 ms of 11.1) so it does not offset the GPU saving today;
+  Stage 1 removes the readback and measures again. The engage cost one
+  444.9 ms frame (the LONG FRAME line: two NGX features per eye, a 303 ms
+  shader compile, 41 textures of 786.6 MB), the preset-switch stall the
+  gates say to report separately.
+- Quality: no verdict yet from Sean, and B did not run the UI route (next
+  paragraph), so its UI is not the product's UI in any case.
+
+**The accounting**, the doc's delta at 40 deg / 0.5:
+
+```text
+delta = 4.10 - (0.68 prep + 0.09 reduce + 0.99 periphery + 0.60 centre
+               + 0.25 compose + 0.00 ui + 0.00 other) = 1.49 ms per pair
+```
+
+The crop replaces full 3.35 with centre 0.60, 2.75 ms saved; reduce,
+periphery and compose take 1.33 of it (48%), prep another 0.18, and ui's
+0.25 is not paid at all. With UI parity the pass nets about 1.25 ms. The
+frame nets 0.76-1.02 ms; the gap to the pass figure sits inside the
+run-to-run band, and medians do not add exactly. H1 stands confirmed on
+both figures. ruled out: H2 (reduce + periphery + compose eat most of the
+crop's saving), because they eat 48% at periphery scale 0.5 and the pass
+still nets 1.5 ms; a larger periphery scale would move that number.
+
+**The UI route is absent under the fovea, by construction.** `ui` reads
+0.00 in every foveated window because nothing ran: in temporal_pass.cpp
+the UI resolve dispatch and the deferred replay (`uiDeferredApply`) both
+live inside the full-frame NGX block, after `dlaaEvaluate`; the fovea
+branch (prep, reduce, periphery, centre, then the compose dispatch into
+`foveaOut`) has neither, and `foveaOut` is what goes out. So B's UI was
+the periphery's 1982x1956 DLAA upscaled bicubically, with the crop's DLSS
+over the centre: c27fe74 and e97e2fe put the UI replay on the full-frame
+branch only, as the baseline-drift note said. That makes UI parity the
+first Stage 1 deliverable and means the 40 deg picture Sean saw is not the
+one that would ship. The instrument is right: 0.00 is the true price of a
+route that did not run, and "other" stayed 0.00 so nothing hid elsewhere.
+
+**Angle.** The centre role scales with the crop: 0.60 ms at 40 deg (8.2%
+of the output, 1128x1128), 0.71 at 49, 1.73 at 80, where the frame's p50
+(8.99-9.00) is back at A's (9.05-9.10). The periphery, reduce and compose
+costs did not move with the angle. On this rig the saving lives at the
+small angles, which is also where the seam sits nearest the centre of the
+view; that is the trade the picture verdict decides.
+
+**Next.** Stage 1 parity (the Status block lists it, UI first), then the
+same A/B/A on the parity build with the trailing A held 75 s, arms changed
+through the ini so the menu does not restart the benchmark, and the seam
+verdict written into this journal. One flight, not two.
