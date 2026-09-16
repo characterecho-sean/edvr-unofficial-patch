@@ -263,7 +263,7 @@ void reportRound(int eye, EyeState& es, const LumaProbeState& state) {
 // Arms the next round for an eye when its throttle allows: no round in
 // progress, no readback outstanding, and at least two seconds since the
 // last completed report (or no report yet). Called at the end of a pass,
-// so the round covers the next frame's draws and the next pass together.
+// so the round covers the next pass's completed route and reconstruction.
 void armIfDue(EyeState& es) {
     if (es.armed) return;   // a round is already in progress; let it run to completion
     for (const auto& s : es.stages) {
@@ -291,10 +291,9 @@ void armIfDue(EyeState& es) {
 
 void lumaProbeBegin(int eye) {
     noteArmedOnce();
-    // Arming happens in lumaProbeEnd, not here: the clean_hdr stage is
-    // sampled during the game's draws, which precede this pass, so a
-    // round armed here would always miss it for the frame the other four
-    // stages describe. This call only marks the probe live in the log.
+    // Arming happens in lumaProbeEnd after the previous round is complete.
+    // This call only marks the probe live in the log; clean_hdr is sampled
+    // in deferred preparation after the world draw sequence has finished.
     (void)eye;
 }
 

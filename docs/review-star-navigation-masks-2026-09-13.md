@@ -2,56 +2,51 @@
 
 ## Status
 
-Updated 2026-09-15 after Steam eye run `194533`: user still sees
-smearing. The correct installed package is confirmed by installer
-verification, both DLL hashes, literal version `v0.17.0-rc.2-dirty` and
-graphics PE `6AA9EC43`. HEAD was checked first; its expected precommit
-version difference was resolved against exact provenance.
+Updated 2026-09-16 after Steam run `051237`, offline black-path checks, and
+completed build validation of the dual-source glass route. The user reported
+the loading cockpit view black until AA was turned Off; the log has no explicit
+toggle timestamp. Target text still smeared after fallback.
 
-Pimax OpenXR / Crystal Super uses 4068x4016 per-eye output and 2644x2610
-scene input with preset K. The verified installed package carries DLSS
-310.7.0.0.
+The flight used Pimax OpenXR on a Crystal Super, 2644x2610 scene input,
+4068x4016 output per eye, preset K, and DLSS 310.7.0.0. Deferred UI became
+active and reached `captured=37293 applied=2638 declined=0`. Exact world-glass
+shaders F512/4A71 later hit the unsupported dual-source blend path and latched
+the route off before the eye dump. The B779 draw had stencil disabled, and the
+later smear does not establish active-route quality; see the `051237` journal.
 
-The new route never applied. At 19:44:52.339, generation 10014, an
-interleaved world shader is rejected with `unsupported opcode 77`: VS
-`8C091FFD08644E02`, PS `3EAF4DB5B3E21089`. Only one flight-HUD draw has
-been captured. This disables deferred replay before the tone pass and
-leaves the old UI handling active for the whole flight.
+The glass route accepts only the exact retained VS/PS, draw shape, dual-source
+blend, depth/stencil, and pipeline state. It reissues into clean HDR only after
+the original draw was issued. Depth writes remain disabled; repeating stencil
+replacement is idempotent. Active counting queries retain fallback. A bounded
+counter and four-line cap report successful replays.
 
-Ruled out: this capture demonstrates smearing during successful native
-UI replay, because applied remains zero and the first sequence aborts
-before tone mapping. It does not validate or refute the new composition.
-Current evidence is under "World shader rejection, 194533" below; prior
-ruled-out causes remain under 174541 and 183301.
+Controller tests pass 2,326 checks on WARP and 2,326 on hardware; the
+query/live-hook rig passes 158. The serial full build and live NVIDIA NGX smoke
+pass at HEAD `fc18b4d`, literal build `v0.17.0-rc.2-14-gfc18b4d-dirty`. All 65
+pool rigs, quiet/package gates, 256/256 config checks, SDK 310.7.0
+verification, carried DLSS runtime, and installer-resource checks pass. Eight
+modified source/test hash rows remained unchanged across the build. The Steam
+`--all` dry run wrote nothing; the actual install and separate verification
+passed for the native pair, loader, and config. Settings stayed byte-identical.
 
-The shader contains six SINCOS and one IMUL, both with two destination
-operands including NULL. The retained corpus also writes o0 through an
-IMUL second destination. The strict two-destination parser now passes
-GPU equivalence checks and all sixteen route shaders, including the four
-recovered from the installed Effects2 archive.
+The real 642/99C2 tone pair produced a nonblack WARP result with the earlier
+retained `054906` packet: mean RGB 47.786 versus captured 47.784, RGB MAE
+0.0297, maximum difference 2. Startup's exact VS b2 was not retained. The
+20F/DED vertices/sampler and complete A888/015 tail packet were also
+unavailable.
 
-The downstream audit found two further blockers: the holo UI reads VS
-t38 from an SRV/UAV buffer, and its changing 124 MiB vertex allocation
-would exhaust the 256 MiB snapshot pool when copied whole. Bounded
-16-bit-index windows and versioned SRV copies now pass GPU equality,
-mutation and stereo-budget tests. The controller passes 2,251 checks on
-WARP and hardware. Full build and live NGX validation passed on main
-377c520 plus this patch. Steam installation and a separate verification
-passed, with the live INI unchanged. Final hashes are recorded below.
+Of 36 HDR-census pixel shaders, 29 now pass fanout, including recovered 4888
+and 702C with four checks each. Four existing dual-output shaders are strict
+pre-UI rejections; three blobs remain absent. Production hashes whole DXBC with
+basis `1469598103934665603`, not canonical basis `14695981039346656037`.
 
-The previous full build, live NGX smoke and 2,040 WARP/hardware
-controller checks passed but did not cover this real interleaved shader.
-Startup B779 stencil state remains unretained; bounded capture logs now
-expose its exact fields if that becomes the next rejection. Next flight:
-inspect target text near the corona and confirm successful deferred
-application in the log. Headset visual quality is not yet validated.
+The five-stage luma probe samples final clean HDR after a complete route match.
+Startup black remains unproven and is not fixed by the completed build. The
+built literal predates the final validation commit, so future provenance must
+use these exact binary hashes and PE stamps with that literal version.
 
-Build setup on 377c520: prepend bundled Python, set `OPENVR_SRC` to
-Steam's verified original OpenVR DLL, set `EDVR_JOBS=1`, and set
-`EDVR_NGX_SDK` to `C:/Users/seanm/AppData/Local/EDVR/ngx-sdk`. Run the
-build with access to that SDK and no CLI arguments (see launcher issue
-below). Require a full DLSS-enabled build and live NGX smoke without
-runtime skips before installation; preserve Steam's edvr.ini.
+Next flight: if black recurs, leave it visible for a few seconds before
+changing AA so the probe completes, then inspect target text near the corona.
 
 ## Investigation
 
@@ -2418,3 +2413,181 @@ Next flight: inspect target text near the corona, then confirm the log
 records successful deferred application rather than the legacy fallback.
 The offline results fix confirmed blockers; they do not establish the
 headset result or eliminate the unretained startup-stencil limitation.
+
+## Steam run 051237, 2026-09-16
+
+The installed package was verified before the log was used. The latest
+Steam graphics log, `edvr_gfx_20260916_050901.log`, reports literal
+version `v0.17.0-rc.2-6-g377c520-dirty` and graphics PE `6AA9FDBA`.
+Installer verification reports graphics SHA-256
+`AC580E3A2FDA8AAA6F23E6B248286A50CCF3FE18A32379017B54052740887158` and
+runtime SHA-256
+`9AA88D3B90BD015BA7891584006AFB454D2177C6F5AA41A9B6CA70E93C2FF19B`. HEAD
+`b327617` was checked first; its known precommit version mismatch was
+resolved by the matching hashes and PE timestamp.
+
+The matching `051237` eye dump is scene frame 21325. All twelve eye
+inputs were written, twenty pool frames were retained, and zero copies
+were skipped. Panel, tone-map, eye-draw, eye-mesh, target-colour, and
+related snapshots were written with zero reported capture failures.
+
+At 05:10:43.921, generation 11282 captured the B779/8DEF flight-HUD draw
+at depth 1/0 with stencil disabled (`StencilEnable=0`). Its read and
+write masks were both `FF`, its reference was 0, and its front and back
+operations were `ALWAYS`/`KEEP`. A296 was a separate UI draw with
+stencil enabled. After tone and post-tone mapping, both eyes reached
+`complete=1 aliases=2 restored=1`. The route became active at
+05:10:43.968, and totals reached `captured=37293 applied=2638 declined=0`
+at 05:10:58.663.
+
+At 05:11:02.853, VS `F512712C40D93C12` and PS `4A71EB0D34E9F2EF` hit the
+enabled world-blend unsupported path: colour `2/16/1`, alpha `2/18/1`.
+The shader is confirmed as world glass using dual-source blending. The
+route latched off and fell back before the `051237` eye dump.
+
+The log contains no explicit AA-toggle timestamp. The user reported that
+the whole loading cockpit view was black, AA Off restored it
+immediately, and re-enabling AA did not make it black again. Target text
+still smeared afterward. Because fallback preceded the dump and the
+later smear report, neither establishes active-route headset quality.
+The cause of the startup black view remains unproven; clean HDR, tone,
+and composite are the paths to investigate.
+
+### Offline black-path diagnosis, 2026-09-16
+
+The bounded GPU test reused the retained `054906` tone packet at frame 17574,
+ordinal 304: real PS `99C21CEB7A699821`, LUT, HDR crop, vertex buffer,
+samplers, blend, raster, viewport, and 272-byte CB2. It substituted real
+constant-exposure VS `642017A6FEDAE0E8` for the packet's VS2D78 and bound that
+retained CB2 to VS slot b2. WARP produced mean RGB 47.7855, maximum RGB 255,
+and 28.375% fully black RGB pixels, versus captured expected mean 47.7836. RGB
+MAE was 0.0297, maximum difference 2, with 8.545% of RGB pixels differing. This
+rules out an inherently black 642/99C2 path for that retained state. It is not
+an exact startup replay: `051237` did not retain the startup VS642 b2, and the
+reused CB2 is a proxy from the earlier packet.
+
+The exact post-tone bytecode is VS `20F383BBAC05C031` and PS
+`DED8796049C7BB4A`. The VS writes the input UV unchanged and forwards the input
+position. The PS performs only `o0 = t0.Sample(s0, uv)`; it has no constant
+buffer, arithmetic, or discard. A constant-one R32 t0 therefore writes one to
+the R32 target at every rasterized sample regardless of filtering. This does
+not prove that every output pixel is rasterized or that border samples are one:
+the actual four-vertex payload and sampler were not retained. The live route
+captures and replays both, while its state gate requires an N4 triangle strip,
+full viewport, no scissor/depth/stencil/blend/logic operation, and the full
+colour write mask. No exact GPU replay of this draw was claimed.
+
+An exact A888/015 tail GPU replay was also unavailable. The retained evidence
+does not contain its geometry, layout, t33, t38, PS b1, t0, and samplers as one
+complete packet. Shader disassembly and the live state contract do not replace
+that missing packet, so the tail remains inside the `final` stage of the next
+probe rather than being ruled out offline.
+
+The current fanout rig checked all 36 pixel-shader hashes in the retained
+`051237` HDR-target census. Twenty-nine whole DXBC containers now pass,
+including four checks each for the recovered `4888F2B05460FA9B` at 2,528 bytes
+and `702C3974A260DE14` at 85,384 bytes. Three remain absent from all 1,831
+valid DXBC containers in the installed `Effects2_Win64_SM50.arc`:
+`188A933094FB422A`, `869FFF43E875906E`, and `DBF1725726018F52`.
+
+Production `fnv1a64` hashes the whole DXBC with offset basis
+`1469598103934665603` and prime `1099511628211`. The canonical FNV-1a64 offset
+basis is `14695981039346656037`; using it produces different names. Independent
+whole-container hashing, archive-slice comparison, DXBC bounds, chunk, and
+pixel-stage checks confirm the two recovered production hashes. Four retained
+shaders correctly fail the strict single-output contract: `50364C9D994141D5`,
+`7CECABDE34FFBE9E`, `81812EF97FB4A361`, and `C6E6E419DA9F6FAD`. Each already
+declares `o0.xyz` and `o1.x`. Exact retained ordering places all four before
+the first captured UI draw and shows no later world draw, so they did not enter
+this active route. They remain a bounded risk if another scene reorders one
+after UI capture.
+
+The five-stage luma probe on main `16adaae` measures game submit, clean HDR,
+DLSS input, DLSS output before UI, and final output. Its first implementation
+copied `clean_hdr` immediately after the first UI seed. A later mirrored world
+draw could modify `e.cleanHdr` after that staging copy, making the evidence
+stale. The sample was moved to `prepare` after a complete route match and
+before renderer seed/tone work, so it now measures the final clean HDR consumed
+by replay. The other four stages already bracket the path correctly. This
+instrumentation correction and the separate world-glass work are not yet a
+built or flight-tested fix for the startup black view.
+
+If the black view recurs, leave it visible for a few seconds before changing AA
+so the probe can complete a round. Its first-black-stage line will separate the
+clean snapshot, replay/format, NGX, apply/tail, and downstream VR paths. After
+that sample, inspect target text near the corona.
+
+### Exact dual-source glass replay, 2026-09-16
+
+The F512/4A71 world-glass rejection now has a narrow replay route. It accepts
+only the retained indexed-instanced triangle-list shape with one instance,
+wrapper verdict `kNone`, exact shadow and actual VS `F512712C40D93C12` and PS
+`4A71EB0D34E9F2EF`, no ancillary shader, stream output, predication, UAV, logic
+operation, or partial sample mask, and the exact dual-source blend equation:
+source `ONE`, destination `SRC1_COLOR` for colour and `SRC1_ALPHA` for alpha,
+both `ADD`, with all channels writable.
+
+The depth/stencil contract is also exact: depth enabled, comparison
+`GREATER_EQUAL`, depth writes disabled; stencil read mask zero, write mask 4,
+reference 4, front `ALWAYS/KEEP/KEEP/REPLACE`, and back
+`ALWAYS/KEEP/KEEP/KEEP`. The original game draw retains its colour and depth
+target. Only after the wrapper reports that the original draw was actually
+issued does the same raw draw run once into clean HDR with the original DSV.
+Depth cannot change because writes are disabled. Replacing the already-written
+front stencil value with 4 again is idempotent and read-independent. An
+abandoned or skipped original never replays.
+
+An active counting query is an explicit refusal condition. Begin/End brackets
+track counting query identities, including duplicates and bounded overflow,
+without changing query results or adding a poll. This prevents the private draw
+from changing an occlusion or statistics count. A successful replay increments
+a runtime counter and emits at most four bounded `replayed dual-source glass
+into clean HDR` lines; unsupported state retains the original fallback.
+
+Focused validation is green: the deferred controller passes 2,326 checks on
+WARP and 2,326 on hardware, including the exact nontrivial dual-source
+equation, depth-pass and depth-fail pixels, unchanged original
+colour/depth/stencil, state restoration, the `originalIssued` negative case,
+counting-query refusal, wrapper-verdict refusal, and partial-sample-mask
+refusal. The query/live-hook rig passes its dry run and 158 checks. The completed full build and live NGX smoke are recorded below. Startup black remains unproven and unfixed pending the five-stage luma
+flight.
+
+### Final build validation, 2026-09-16
+
+The absolute serial build and live NVIDIA NGX smoke passed at HEAD `fc18b4d`.
+The built literal version is `v0.17.0-rc.2-14-gfc18b4d-dirty`. All 65 pool rigs
+passed, as did the quiet and package gates, 256/256 config checks, NGX SDK
+310.7.0 verification, carried DLSS runtime, and exact installer-resource
+comparison. The controller remains green at 2,326 WARP and 2,326 hardware
+checks, and the query/live-hook rig at 158 checks. The two recovered shaders
+each pass their four-check preflight, making the corpus result 29 passes, four
+strict pre-UI dual-output rejections, and three absent blobs.
+
+The full-build log is
+`build/review_motion/issue36/fullbuild-ui-glass-fc18b4d-serial.log`; the live
+smoke log is `build/review_motion/issue36/smoke-ui-glass-fc18b4d-live-ngx.log`.
+All eight modified source/test hash rows were identical before and after the
+build; only the freeze file's UTC header changed.
+
+Graphics `d3d11.dll` and the identical `edvr_openxr_graphics.dll` are 4,480,512
+bytes, PE `6AAA8106`, linked 2026-09-16 11:44:06 UTC, SHA-256
+`53013B93A7568E10488ED389DBAA5E41667F7EFB803C0926351721244F90D274`. The runtime
+is 584,704 bytes, PE `6AAA810C`, linked 2026-09-16 11:44:12 UTC, SHA-256
+`11F40DDD0F4E26E22A0E5E17A11E6039BC7FA9E8C4EA3C89F904E2506868C9FD`. The
+installer SHA-256 is
+`5DDE4BB426D35E4644B2DA73328D07E60C5A55AE82C28591C991D02CD38B470C`.
+
+The Steam `--all` dry run exited 0 and wrote nothing. The actual `--all`
+install completed and verified, and a separate `--all --verify-only` verified
+the native pair, loader, and config. Installed graphics and runtime bytes match
+the hashes above. The live INI stayed 144,372 bytes with SHA-256
+`BDF474BB2A929773FE66AADC790549FA59714830EB9A9FEE5EB4CDD06F45BF9B`. The prior
+receipt was preserved as
+`edvr_native_receipt.json.pre-fc18b4d-20260916-055133.bak` in the Steam game
+folder.
+
+This proves build, live-NGX, and installed-byte integrity, not the headset
+result. Startup black remains unproven and unfixed pending the five-stage luma
+flight. The literal build predates the final validation commit; future HEAD
+checks must resolve that precommit version using the exact hashes and PE stamps
+above.

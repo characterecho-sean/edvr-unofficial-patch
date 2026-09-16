@@ -3297,11 +3297,16 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         celestialMotionBeginOriginal(self,bindingShaderHash(BindSlot::Vs));
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     if(self==g_state->ownerCtx){uiDeferredTraceBeforeTone(self);uiDeferredBeforeTone(self,kind,count,instances,args.start,args.base,args.startInstance);}
-    const bool deferred=self==g_state->ownerCtx && uiDeferredBegin(self,uiDepthDeferredEye(),kind,count,instances,args.start,args.base,args.startInstance);
+    const bool glassQueryActive=self==g_state->ownerCtx &&
+        bindingShaderHash(BindSlot::Vs)==kUiDeferredGlassVs && bindingShaderHash(BindSlot::Ps)==kUiDeferredGlassPs &&
+        g_state->gameQueries.countingActive();
+    const bool deferred=self==g_state->ownerCtx && uiDeferredBegin(self,uiDepthDeferredEye(),kind,count,instances,args.start,args.base,args.startInstance,
+        static_cast<uint32_t>(v),glassQueryActive);
     bool originalIssued=false;
     { struct OriginalDrawScope { bool previous=t_colourOriginal; OriginalDrawScope(){t_colourOriginal=true;} ~OriginalDrawScope(){t_colourOriginal=previous;} } original;
       originalIssued=draw(); }
     if(originalIssued && self==g_state->ownerCtx)uiDeferredTraceOriginalIssued();
+    if(originalIssued && self==g_state->ownerCtx && uiDeferredWorldReplayBegin(self))pureDraw();
     if(self==g_state->ownerCtx)uiDeferredEnd(self);
     if(self==g_state->ownerCtx && uiSeparationToneBegin(self,kind,count,instances)) {
         pureDraw();uiSeparationToneEnd(self);
@@ -3430,6 +3435,7 @@ void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
     if (drawCensusArmed()) {
         drawCensusQuery('B', async, foreignContext(self));
     }
+    if(!foreignContext(self))g_state->gameQueries.bracketBegin(async);
     g_state->realBegin(self, async);
 }
 
@@ -3441,7 +3447,7 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
         drawCensusQuery('E', async, foreignContext(self));
     }
     g_state->realEnd(self, async);
-    if(!foreignContext(self))g_state->gameQueries.noteEnd(async,_ReturnAddress());
+    if(!foreignContext(self)){g_state->gameQueries.bracketEnd(async);g_state->gameQueries.noteEnd(async,_ReturnAddress());}
 }
 
 HRESULT STDMETHODCALLTYPE hookedGetData(ID3D11DeviceContext* self,ID3D11Asynchronous* query,

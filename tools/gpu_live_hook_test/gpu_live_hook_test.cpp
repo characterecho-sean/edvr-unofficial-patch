@@ -199,6 +199,52 @@ void queryProbeTests() {
     }
 }
 
+void queryBracketTests(Device& device) {
+    auto makeQuery = [&](D3D11_QUERY type) {
+        ComPtr<ID3D11Query> query;
+        const D3D11_QUERY_DESC desc{type, 0};
+        hr(device.device->CreateQuery(&desc, &query));
+        return query;
+    };
+
+    auto occlusion = makeQuery(D3D11_QUERY_OCCLUSION);
+    auto unrelated = makeQuery(D3D11_QUERY_OCCLUSION);
+    auto disjoint = makeQuery(D3D11_QUERY_TIMESTAMP_DISJOINT);
+
+    GameQueryProbe probe;
+    check(!probe.countingActive(), "query guard starts open");
+    probe.bracketBegin(nullptr);
+    probe.bracketEnd(nullptr);
+    check(!probe.countingActive(), "null query brackets leave replay open");
+    probe.bracketBegin(disjoint.Get());
+    check(!probe.countingActive(), "timestamp-disjoint interval leaves replay open");
+    probe.bracketEnd(disjoint.Get());
+
+    probe.bracketBegin(occlusion.Get());
+    check(probe.countingActive(), "occlusion interval blocks replay");
+    probe.bracketEnd(unrelated.Get());
+    check(probe.countingActive(), "unknown End does not clear an active counting query");
+    probe.bracketBegin(occlusion.Get());
+    probe.bracketEnd(occlusion.Get());
+    check(probe.countingActive(), "duplicate Begin remains blocked until every matching End");
+    probe.bracketEnd(nullptr);
+    check(probe.countingActive(), "null End does not clear an active counting query");
+    probe.bracketEnd(occlusion.Get());
+    check(!probe.countingActive(), "final matching End reopens replay");
+
+    GameQueryProbe overflow;
+    std::array<ComPtr<ID3D11Query>, 65> active;
+    for(auto& query : active) {
+        query = makeQuery(D3D11_QUERY_OCCLUSION);
+        overflow.bracketBegin(query.Get());
+    }
+    check(overflow.countingActive(), "more than 64 active query identities blocks replay");
+    overflow.bracketEnd(unrelated.Get());
+    check(overflow.countingActive(), "unrelated End cannot clear query-identity overflow");
+    for(auto& query : active) overflow.bracketEnd(query.Get());
+    check(overflow.countingActive(), "query-identity overflow stays conservative after every known End");
+}
+
 void run() {
     {
         GameCallProbeBudget budget;
@@ -224,6 +270,7 @@ void run() {
     queryProbeTests();
     Runtime runtime; // Retained until Device, hooks, backend and queries release.
     Device device(runtime);
+    queryBracketTests(device);
     ID3D11DeviceContext* context = device.context.Get();
     check(context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE, "immediate context");
     ComPtr<ID3D11Device> queriedDevice;

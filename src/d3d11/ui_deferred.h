@@ -9,6 +9,8 @@ struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
 struct D3D11_BOX;
 namespace edvr {
+constexpr uint64_t kUiDeferredGlassVs=0xF512712C40D93C12ull;
+constexpr uint64_t kUiDeferredGlassPs=0x4A71EB0D34E9F2EFull;
 class Config;
 void uiDeferredConfigure(Config&);
 void uiDeferredRemember(ID3D11DeviceChild*,const void*,size_t,bool linked);
@@ -30,7 +32,12 @@ void uiDeferredTraceOriginalIssued();
 // End must follow every Begin, including world draws returning false.
 bool uiDeferredBegin(ID3D11DeviceContext*, int eye, char kind, uint32_t count,
                      uint32_t instances, uint32_t start, int32_t base,
-                     uint32_t startInstance);
+                     uint32_t startInstance, uint32_t verdict=0,
+                     bool countingQuery=false);
+// Arms the exact retained dual-source glass replay after the original draw
+// was issued. A true result means the caller must issue the same draw once
+// through its raw draw pointer before uiDeferredEnd restores game state.
+bool uiDeferredWorldReplayBegin(ID3D11DeviceContext*);
 void uiDeferredEnd(ID3D11DeviceContext*);
 void uiDeferredBeforeTone(ID3D11DeviceContext*, char kind, uint32_t count, uint32_t instances,
                           uint32_t start, int32_t base, uint32_t startInstance);

@@ -33,11 +33,10 @@ struct LumaProbeState {
 
 // Call once at the very top of the per-eye pass, before any of the
 // stages below. Only marks the probe live (the one-shot "armed" line);
-// rounds are armed by lumaProbeEnd, so that a round spans the next
-// frame's draws (where clean_hdr is sampled, before the pass) and the
-// next pass (the other four stages) for the same frame. If the pass
-// returns early after arming, nothing is lost: the round finishes on a
-// later pass, its clean_hdr sample at most a frame older than the rest.
+// rounds are armed by lumaProbeEnd for the next pass. The clean_hdr
+// sample is taken during completed deferred-route preparation, after
+// all interleaved world draws, alongside the other stages in that pass.
+// If a pass returns early, the armed round can finish on a later pass.
 void lumaProbeBegin(int eye);
 
 // Call with each of the five pipeline stages as its texture becomes

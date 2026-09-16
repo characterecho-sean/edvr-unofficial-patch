@@ -124,8 +124,12 @@ Ptr<ID3D11BlendState> savedBlend;
 Ptr<ID3D11PixelShader> savedPs;
 Ptr<ID3D11RenderTargetView> savedTarget;
 Ptr<ID3D11DepthStencilView> savedDepth;
+Ptr<ID3D11RenderTargetView> replayTarget;
+enum class WorldDrawMode : uint8_t { None, Fanout, GlassPending, GlassBound };
+WorldDrawMode worldDrawMode=WorldDrawMode::None;
 float savedFactors[4]{};UINT savedMask=0;bool colourMuted=false;
-uint64_t captured=0,applied=0,declined=0;
+uint64_t captured=0,applied=0,declined=0,glassReplays=0;
+unsigned glassReplayReports=0;
 bool noted=false,routeNoted=false;
 struct DiagnosticCounters {
     uint64_t captures=0,toneObservations=0,toneAliases=0,aliasRemovals=0,prepares=0;
@@ -403,7 +407,50 @@ UiDeferredEyeState uiDeferredEyeState(int eye){
     const Eye& e=eyes[eye];
     return UiDeferredEyeState{enabled,e.postTone.ready(),static_cast<unsigned>(e.aliases.size()),e.count,e.complete};
 }
-static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
+static bool exactGlassReplayState(ID3D11DeviceContext* ctx,char kind,UINT instances,UINT verdict,
+                                  bool countingQuery,ID3D11PixelShader* ps,ID3D11BlendState* blend,
+                                  ID3D11DepthStencilView* depth,std::string& why) {
+    auto fail=[&](const char* reason){why=reason;return false;};
+    if(verdict)return fail("draw wrapper verdict is not kNone");
+    if(kind!='X' || instances!=1)return fail("draw arguments differ from retained indexed-instanced shape");
+    if(countingQuery)return fail("counting query interval is active");
+    if(!depth || !blend)return fail("depth/stencil or blend state is absent");
+    Ptr<ID3D11VertexShader> vs;ctx->VSGetShader(&vs,nullptr,nullptr);
+    if(bindingShaderHash(BindSlot::Vs)!=kUiDeferredGlassVs || bindingShaderHash(BindSlot::Ps)!=kUiDeferredGlassPs ||
+       !vs || lookupShaderHash(vs.Get())!=kUiDeferredGlassVs || lookupShaderHash(ps)!=kUiDeferredGlassPs)
+        return fail("actual shader pair differs from retained glass pair");
+    D3D11_PRIMITIVE_TOPOLOGY topology{};ctx->IAGetPrimitiveTopology(&topology);
+    if(topology!=D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)return fail("primitive topology differs from retained triangle list");
+    Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> ds;
+    ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&ds,nullptr,nullptr);
+    if(gs || hs || ds)return fail("ancillary shader stage is active");
+    ID3D11Buffer* so[4]{};ctx->SOGetTargets(4,so);bool hasSo=false;
+    for(auto* buffer:so)if(buffer){hasSo=true;buffer->Release();}
+    if(hasSo)return fail("stream-output target is active");
+    Ptr<ID3D11Predicate> predicate;BOOL predicateValue=FALSE;ctx->GetPredication(&predicate,&predicateValue);
+    if(predicate)return fail("predication is active");
+    D3D11_BLEND_DESC bd{};blend->GetDesc(&bd);const auto& r=bd.RenderTarget[0];
+    if(bd.AlphaToCoverageEnable || !r.BlendEnable || r.RenderTargetWriteMask!=15 ||
+       r.SrcBlend!=D3D11_BLEND_ONE || r.DestBlend!=D3D11_BLEND_SRC1_COLOR || r.BlendOp!=D3D11_BLEND_OP_ADD ||
+       r.SrcBlendAlpha!=D3D11_BLEND_ONE || r.DestBlendAlpha!=D3D11_BLEND_SRC1_ALPHA || r.BlendOpAlpha!=D3D11_BLEND_OP_ADD)
+        return fail("blend equation differs from retained dual-source transmission");
+    Ptr<ID3D11BlendState1> blend1;if(SUCCEEDED(blend->QueryInterface(IID_PPV_ARGS(&blend1)))) {
+        D3D11_BLEND_DESC1 desc{};blend1->GetDesc1(&desc);if(desc.RenderTarget[0].LogicOpEnable)return fail("render-target logic operation is active");
+    }
+    Ptr<ID3D11DepthStencilState> state;UINT stencilRef=0;ctx->OMGetDepthStencilState(&state,&stencilRef);
+    if(!state)return fail("depth/stencil state is absent");
+    D3D11_DEPTH_STENCIL_DESC dd{};state->GetDesc(&dd);const auto& f=dd.FrontFace;const auto& b=dd.BackFace;
+    if(!dd.DepthEnable || dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ZERO || dd.DepthFunc!=D3D11_COMPARISON_GREATER_EQUAL ||
+       !dd.StencilEnable || dd.StencilReadMask!=0 || dd.StencilWriteMask!=4 || stencilRef!=4 ||
+       f.StencilFunc!=D3D11_COMPARISON_ALWAYS || f.StencilFailOp!=D3D11_STENCIL_OP_KEEP ||
+       f.StencilDepthFailOp!=D3D11_STENCIL_OP_KEEP || f.StencilPassOp!=D3D11_STENCIL_OP_REPLACE ||
+       b.StencilFunc!=D3D11_COMPARISON_ALWAYS || b.StencilFailOp!=D3D11_STENCIL_OP_KEEP ||
+       b.StencilDepthFailOp!=D3D11_STENCIL_OP_KEEP || b.StencilPassOp!=D3D11_STENCIL_OP_KEEP)
+        return fail("depth/stencil state differs from retained idempotent state");
+    return true;
+}
+static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first,
+                  UINT verdict,bool countingQuery) {
     if(!enabled || inside || eye>1 || colourMuted)return false;
     if(eye<0) {
         // Elite interleaves opaque and translucent world draws with UI.
@@ -427,12 +474,23 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
             Ptr<ID3D11DepthStencilState> state;ctx->OMGetDepthStencilState(&state,nullptr);D3D11_DEPTH_STENCIL_DESC dd{};if(state)state->GetDesc(&dd);
             if(dd.StencilEnable && (dd.StencilReadMask&e.changedStencil) && (dd.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || dd.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS)){
                 decline(e,"world draw reads stencil changed by UI");return false;}
-            Ptr<ID3D11BlendState> blend;ctx->OMGetBlendState(&blend,nullptr,nullptr);
+            Ptr<ID3D11BlendState> blend;float factors[4]{};UINT sampleMask=0;ctx->OMGetBlendState(&blend,factors,&sampleMask);
+            const bool glass=bindingShaderHash(BindSlot::Vs)==kUiDeferredGlassVs && bindingShaderHash(BindSlot::Ps)==kUiDeferredGlassPs;
+            if(glass) {
+                std::string why;
+                if(sampleMask!=~0u)why="sample mask differs from retained full mask";
+                else exactGlassReplayState(ctx,kind,instances,verdict,countingQuery,ps.Get(),blend.Get(),ds.Get(),why);
+                if(!why.empty()){decline(e,("dual-source glass replay unsupported: "+why).c_str());return false;}
+                savedTarget=rt;savedDepth=ds;savedPs=ps;savedBlend=blend;
+                memcpy(savedFactors,factors,sizeof(savedFactors));savedMask=sampleMask;
+                replayTarget=e.cleanHdr.rtv;worldDrawMode=WorldDrawMode::GlassPending;colourMuted=true;
+                return false;
+            }
             std::string why;auto index=ps?material(dev.Get(),ps.Get(),blend.Get(),true,&why):SIZE_MAX;
             if(index==SIZE_MAX){decline(e,why.empty()?"interleaved world pixel shader absent":why.c_str());return false;}
             savedTarget=rt;savedDepth=ds;savedPs=ps;ctx->OMGetBlendState(&savedBlend,savedFactors,&savedMask);
             ID3D11RenderTargetView* targets[2]={rt.Get(),e.cleanHdr.rtv.Get()};
-            vScreenSetRenderTargetsRaw(ctx,2,targets,ds.Get());ctx->OMSetBlendState(materials[index].world.Get(),savedFactors,savedMask);ctx->PSSetShader(materials[index].fanout.Get(),nullptr,0);colourMuted=true;
+            vScreenSetRenderTargetsRaw(ctx,2,targets,ds.Get());ctx->OMSetBlendState(materials[index].world.Get(),savedFactors,savedMask);ctx->PSSetShader(materials[index].fanout.Get(),nullptr,0);worldDrawMode=WorldDrawMode::Fanout;colourMuted=true;
             return false;
         }
         return false;
@@ -450,7 +508,6 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
     if(!e.count){
         if(!e.cleanHdr.ensure(dev.Get(),td.Width,td.Height,td.Format) || !e.cleanLdr.ensure(dev.Get(),td.Width,td.Height,DXGI_FORMAT_R8G8B8A8_UNORM) || !e.depth.seed(dev.Get(),ctx,ds.Get()))return false;
         e.hdr=tex;e.hdrTarget=rt;e.w=td.Width;e.h=td.Height;ctx->CopyResource(e.cleanHdr.tex.Get(),tex.Get());
-        lumaProbeSample(ctx,e.cleanHdr.tex.Get(),eye,1);
     }else {Ptr<ID3D11Resource> depth;if(ds)ds->GetResource(&depth);if(e.hdr.Get()!=tex.Get() || !sameIdentity(e.depth.source.Get(),depth.Get()))return false;}
     if(e.count>=64)return false;
     if(e.draws.size()==e.count)e.draws.push_back(std::make_unique<Draw>());
@@ -484,10 +541,10 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
         unsigned(depthState.BackFace.StencilFunc),unsigned(depthState.BackFace.StencilFailOp),unsigned(depthState.BackFace.StencilDepthFailOp),unsigned(depthState.BackFace.StencilPassOp));
     return true;
 }
-bool uiDeferredBegin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
+bool uiDeferredBegin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first,UINT verdict,bool countingQuery) {
     if(routeHandledThisDraw){routeHandledThisDraw=false;return true;}
     bool ok=false;
-    try { ok=begin(ctx,eye,kind,count,instances,start,base,first); }
+    try { ok=begin(ctx,eye,kind,count,instances,start,base,first,verdict,countingQuery); }
     catch(...) {
         uiDeferredEnd(ctx);
         for(auto& e:eyes)if(e.count && !e.complete)decline(e,"draw allocation failed");
@@ -499,8 +556,15 @@ bool uiDeferredBegin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT 
     }
     return ok;
 }
+bool uiDeferredWorldReplayBegin(ID3D11DeviceContext* ctx) {
+    if(!ctx || worldDrawMode!=WorldDrawMode::GlassPending || !replayTarget)return false;
+    Scope scope;ID3D11RenderTargetView* target=replayTarget.Get();
+    vScreenSetRenderTargetsRaw(ctx,1,&target,savedDepth.Get());worldDrawMode=WorldDrawMode::GlassBound;return true;
+}
 void uiDeferredEnd(ID3D11DeviceContext* ctx) {
-    if(!colourMuted)return;Scope scope;vScreenSetRenderTargetsRaw(ctx,1,savedTarget.GetAddressOf(),savedDepth.Get());ctx->OMSetBlendState(savedBlend.Get(),savedFactors,savedMask);ctx->PSSetShader(savedPs.Get(),nullptr,0);savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();colourMuted=false;
+    if(!colourMuted)return;Scope scope;vScreenSetRenderTargetsRaw(ctx,1,savedTarget.GetAddressOf(),savedDepth.Get());ctx->OMSetBlendState(savedBlend.Get(),savedFactors,savedMask);ctx->PSSetShader(savedPs.Get(),nullptr,0);
+    if(worldDrawMode==WorldDrawMode::GlassBound){++glassReplays;if(glassReplayReports++<4)Log::get().note("Deferred UI: replayed dual-source glass into clean HDR gen=%llu VS=%016llX PS=%016llX total=%llu.",static_cast<unsigned long long>(generation),kUiDeferredGlassVs,kUiDeferredGlassPs,static_cast<unsigned long long>(glassReplays));}
+    savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();replayTarget.Reset();worldDrawMode=WorldDrawMode::None;colourMuted=false;
 }
 
 static void beforeTone(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
@@ -571,6 +635,7 @@ static ID3D11ShaderResourceView* prepare(ID3D11DeviceContext* ctx,ID3D11Texture2
     for(auto& e:eyes)if(e.complete && e.w==w && e.h==h)for(const auto& alias:e.aliases)if(sameIdentity(alias.Get(),submitted)){if(match && match!=&e)return nullptr;match=&e;break;}
     if(!match){if(!routeNoted && (eyes[0].count || eyes[1].count)){routeNoted=true;Log::get().note("Deferred UI: submit route not matched: submitted=%p tone0=%p tone1=%p; original frame retained.",submitted,eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get());decline(eyes[eye],"submitted colour has no complete matching replay");}return nullptr;}
     auto& e=*match;Scope scope;const bool sampled=e.postTone.ready();
+    lumaProbeSample(ctx,e.cleanHdr.tex.Get(),eye,1);
     UINT stencilRead=0;bool needsDepth=false;
     for(UINT i=0;i<e.count;++i){D3D11_DEPTH_STENCIL_DESC dd{};e.draws[i]->packet.depthState()->GetDesc(&dd);needsDepth=needsDepth || dd.DepthEnable;
         if(dd.StencilEnable && (dd.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || dd.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS))stencilRead|=dd.StencilReadMask;}
@@ -837,5 +902,5 @@ void uiDeferredFrameBoundary(ID3D11DeviceContext* ctx) {
     writerTraceOrdinal=0;writerTracePending=-1;
     if(!enabled && !diagnosticWindow())clearWriterTrace();
 }
-void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();captureFailures.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=routeHandledThisDraw=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=routeCaptureReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
+void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();captureFailures.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();replayTarget.Reset();worldDrawMode=WorldDrawMode::None;enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=routeHandledThisDraw=false;captured=applied=declined=glassReplays=0;glassReplayReports=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=routeCaptureReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
 }
