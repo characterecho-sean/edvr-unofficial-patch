@@ -46,19 +46,20 @@
   prHaveHistory are set unconditionally each frame); the crop branch's
   unconditional ensureNative, diagnostic motion shader and per-frame stats
   readback (the 0.2 ms CPU candidate), which Stage 0 timed, not removed.
-- **Next (no build): the FRONTIER install now carries 16adaae, the EDHM
-  session's build, which contains the instrument (read with
-  `--expect-build 16adaae`).** Sean finds by eye in the F8 menu the
-  smallest temporal_aa_fovea that covers where his eyes go, holds it 40 s
-  each at temporal_aa_periphery_scale 0.5 and 0.35 with the menu closed
-  (a menu open or close restarts the benchmark scope), then sets the fovea
-  back to 0 so the EDHM flights stay clean. The cost model fitted to the
-  flight (journal, 2026-09-16) predicts the pass saving with UI parity at
-  1.1 ms for 60 deg / 0.35, 0.8 for 70 / 0.35, 0.5 for 80 / 0.3, nothing
-  at 90; the frame saved 0.5-0.7 ms less than the pass at 40 deg. A
-  covering angle of 70 deg or more ends the fixed crop as a perf trade and
-  full-frame DLSS stays (Stage 4). Read:
-  `python tools\edvr_log.py --target frontier --expect-build 16adaae --grep "temporal aa price"`.
+- **Next (no build; the FRONTIER install carries an rc.3-based build with
+  the price instrument, the eye mask ring and the FOV trim: do not
+  reinstall):** Sean sizes the circle with the ring, fix.eye_mask = lens
+  and eye_mask_trim raised live in the performance menu until the black
+  edge sits where DLSS may stop; that circle is temporal_aa_fovea =
+  2 x (51.8 - trim) deg with his Pimax trims on (journal, 2026-09-16, eye
+  mask). Then the fork. Black outside: the FOV trim already gives NVIDIA
+  that rectangle and shrinks the render too (ruled out: the masked circle
+  as a DLSS region), so this arc stops at Stage 4. Periphery visible: the
+  one Stage 1 build is a periphery-free crop (temporal_aa_periphery = off,
+  the raw render de-jittered and upscaled in the compose) plus the UI
+  route, worth 1.25 ms per pair on the pass at 80 deg and 0.7 at 90 by the
+  model against 0.05 and none with the 0.5 periphery; flown A/B/A, read
+  with `--expect-build <the installed hash>`.
 
 ## Investigation (2026-09-14)
 
@@ -839,3 +840,83 @@ Do not reinstall over it.
    perf trade differently from a sharpness fix.
 3. Stage 4: full-frame DLSS stays, the instrument stays on main behind
    fovea 0, and this doc records why.
+
+### 2026-09-16: Sean's eye-mask idea, and what the rectangle does to it
+
+Sean, after main was merged into this branch (e08e899, bringing the same
+day's eye mask arc, docs/eye-mask-2026-09-16.md, and the FOV trim): "I'd
+like to take over the eye mask functionality for this work ... for a given
+eye mask radius, only apply DLSS to that circular area."
+
+**What the eye mask is.** fix.eye_mask draws a depth-only ring into each
+eye's depth buffer so nothing is shaded outside an ellipse centred on the
+optical axis with radius R = R0 - eye_mask_trim degrees, R0 the widest of
+the four frustum half-angles (eye_mask.h). On the Crystal Super R0 is 56.8
+deg (outer) untrimmed and 51.8 with Sean's Pimax FOV trims (outer 5, nasal
+7, vertical 5, his Frontier ini), where the nasal half-angle is 38.9 and
+the vertical 46.7. That doc's Status already found the mask cannot touch
+the DLSS cost and ruled out multi-rectangle evaluations.
+
+**The circle and the crop are the same shape.** cropOf centres the fovea
+on the optical axis when temporal_aa_fovea_distance is 0 and makes it a
+circle in tangent space, the ring's ellipse exactly; a ring at trim t is
+the crop at temporal_aa_fovea = 2 (R0 - t) degrees across. So the ring is
+a way to SEE the crop's boundary (black outside, no seam to hunt for) and
+its live trim is the knob that sizes it: with the Pimax entries, trim 10 is
+84 deg and trim 15 is 74.
+
+**NVIDIA is priced by the rectangle, and the FOV trim owns it.** One
+feature evaluates one rectangle, the circle's bounding box clamped to the
+frame. At trim 0-4 that box is the whole frame (the ring runs past the
+nasal and vertical edges), so DLSS inside the circle costs full-frame
+DLSS. As the trim grows the box shrinks: by t on the outer side, by t - 5
+vertically once t passes 5, by t - 13 nasally once t passes 13.
+fix.fov_trim_outer, _vertical and _nasal set exactly that box, make the
+game render only it, and leave NVIDIA the same rectangle the crop path
+would; for the same DLSS cost the trim shows more (the corners) and saves
+raster and every full-screen pass besides. ruled out: the eye-mask circle
+as a DLSS region with the outside masked, because a circle costs NVIDIA
+its bounding rectangle and the FOV trim already sets that rectangle while
+shrinking the render as well. Sean runs both today.
+
+**What the idea does buy: no periphery.** The 80 deg crop failed on the
+frame because the periphery cost 1.33 ms per pair (DLAA on the reduced
+copy 0.99, reduce 0.09, compose 0.25) for the pixels outside a crop that
+already covered 44% of the frame; DLAA is priced by its rectangle too and
+cannot skip the middle. If the outside of the circle needs no treatment,
+a covering angle pays. The outside needs none in two cases: masked black
+(the FOV trim wins, above) or shown raw: the render itself, 65% of the
+output under balanced (the 0.5 periphery was 50%), upscaled bicubically in
+the compose as the periphery already is, with the frame's raster jitter
+taken back out (the input is jittered for NVIDIA; shown as is, the
+periphery would wobble by a pixel every frame). The resolution Sean saw
+outside the crop, no anti-aliasing, for about 1.3 ms per pair less. Model
+per stereo pair on the flown frame, UI route restored, saving = 2.56 -
+0.194 MP with no periphery:
+
+| fovea | periphery none | 0.3 | 0.5 |
+|---|---|---|---|
+| 60 | 1.9 | 1.2 | 0.75 |
+| 70 | 1.65 | 0.95 | 0.45 |
+| 80 | 1.25 | 0.55 | 0.05 (measured 0.11) |
+| 90 | 0.7 | 0 | none |
+| 100 | 0.1 | none | none |
+
+The frame saved 0.26 ms less than the pass at 80 deg and 0.5-0.7 less at
+40, so a periphery-free 80 deg crop lands near 1.0 ms on the frame and 90
+near 0.4.
+
+**Next.** No build: Sean sets fix.eye_mask = lens and raises eye_mask_trim
+in the performance menu until the black edge sits where DLSS may stop, and
+reports the trim. The Frontier install carries the FSS session's build:
+its 17:09 gfx log names v0.17.0-rc.3-3-g0522215-dirty, and both DLLs were
+replaced again at 17:16, after that flight, by the same session (10705da
+by its memory note; the installer's state.ini still says v0.15.0 from
+2026-09-11 and is no guide). Both are rc.3-based and carry the ring, the
+trim and the price instrument (git merge-base checked); do not reinstall
+over it, and read any flight with --expect-build set to whatever version
+line its log prints.
+Then the fork: black outside means the FOV trim is the tool and this arc
+stops at Stage 4; periphery visible means the one Stage 1 build is
+temporal_aa_periphery = off (the raw render, de-jittered, bicubic) plus
+the UI route on the crop path, flown A/B/A at 2 (R0 - trim) degrees.
