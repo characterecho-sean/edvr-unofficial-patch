@@ -307,7 +307,11 @@ int main(int argc,char** argv) {
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
   flight.trimOuterDeg=5;
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&flightGuard.changed());
-  CHECK(flightGuard.recommended(0).width==3566&&flightGuard.recommended(0).height==2754);
+  // Outer 10 to 5 leaves the height alone, which the game does not rebuild
+  // for on its own (flight 5): it is told two rows under the floor, and the
+  // rebuild is measured against that.
+  CHECK(flightGuard.nudge()==NativeCullNudge::Started&&flightGuard.nudgeFloor()==2754);
+  CHECK(flightGuard.recommended(0).width==3566&&flightGuard.recommended(0).height==2752&&flightGuard.trueRecommended(0).height==2754);
   // The frame in hand was rendered for the previous ask: the temporal pass is
   // sized by that until the rebuild lands, while the game is told the new one.
   CHECK(flightGuard.treatedFor(0).width==3246&&flightGuard.treatedFor(0).height==2754);
@@ -320,24 +324,27 @@ int main(int argc,char** argv) {
   pair(flightGuard,ask1);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting); // unchanged is never evidence
   const auto ask2=q(flightGuard.recommended(0));
-  CHECK(ask2.width==2318&&ask2.height==1790);
+  CHECK(ask2.width==2318&&ask2.height==1789);
   pair(flightGuard,ask2);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
   CHECK(std::fabs(flightGuard.appliedOuterDeg(0)-5.f)<.001f&&std::fabs(flightGuard.appliedVerticalDeg(0)-10.f)<.001f);
-  CHECK(flightGuard.treatedFor(0).width==3566&&flightGuard.treatedFor(0).height==2754); // live: the new ask
+  CHECK(flightGuard.treatedFor(0).width==3566&&flightGuard.treatedFor(0).height==2752); // live: the new ask, dip and all
   CHECK(flightGuard.adoptingFrames()<10);
   // Back to no trim at all, then a trim again: the baseline for the second
   // adoption is rendered for the runtime's own size, which the game was
-  // told while off.
+  // told while off. The game kept the targets it had through the taller
+  // ask, so the same trim again is told two rows under the floor it left.
   NativeCullSettings none{};
   CHECK(flightGuard.beginFrame(none,crystal,crystalDims,true,1)==NativeCullStage::Off&&flightGuard.changed());
   CHECK(flightGuard.recommended(0).width==3964&&flightGuard.recommended(0).height==3914);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  CHECK(flightGuard.nudge()==NativeCullNudge::Started&&flightGuard.nudgeFloor()==2752);
+  CHECK(flightGuard.recommended(0).width==3566&&flightGuard.recommended(0).height==2750);
   pair(flightGuard,true65);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
   CHECK(flightGuard.baselineAsk(0).width==3964&&flightGuard.baselineAsk(0).height==3914);
   CHECK(flightGuard.treatedFor(0).width==3964&&flightGuard.treatedFor(0).height==3914);
-  pair(flightGuard,ask2);
+  pair(flightGuard,q(flightGuard.recommended(0)));
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
 
   // A change before the first rebuild has landed keeps the baseline. The pair
@@ -380,5 +387,117 @@ int main(int argc,char** argv) {
   NativeCullStage idleStage=NativeCullStage::Adopting;
   for(unsigned i=0;i<400&&idleStage==NativeCullStage::Adopting;++i){pair(idleGuard,true65);idleStage=idleGuard.beginFrame(grace,crystal,crystalDims,true,1);}
   CHECK(idleStage==NativeCullStage::Adopting&&idleGuard.adoptingFrames()>=400);
+
+  // ---- the nudge (flight 5, 2026-09-16) -----------------------------------
+  // The game rebuilt its targets on its own only when the height it read
+  // shrank; a width-only change sat at stage 2 for 52 s until an apply. So a
+  // change that does not take the height under the floor (the lowest height
+  // told since the rebuild last seen) is told two rows under that floor.
+  NativeCullSettings nudge{}; nudge.trimVerticalDeg=10; nudge.trimOuterDeg=10;
+  NativeCullGuard nudgeGuard;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::First);
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::None);
+  CHECK(land(nudgeGuard,nudge,crystal,crystalDims)==NativeCullStage::Live);
+  const auto base=nudgeGuard.recommended(0);
+  CHECK(base.width==3246&&base.height==2754&&nudgeGuard.nudge()==NativeCullNudge::None);
+  // A change of the angles alone, the size untouched: nothing to rebuild.
+  nudge.percent=9;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Same);
+  CHECK(nudgeGuard.recommended(0).height==2754);
+  pair(nudgeGuard,q(base));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(nudgeGuard,q(base));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  // Outer 10 to 5: the width grows, the height would stay. Told 2752, both
+  // eyes; the temporal pass keeps the old ask until the rebuild lands, then
+  // takes the dipped one, which is what the game built.
+  nudge.trimOuterDeg=5;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Started);
+  CHECK(nudgeGuard.recommended(0).width==3566&&nudgeGuard.recommended(0).height==2752&&nudgeGuard.recommended(1).height==2752);
+  CHECK(nudgeGuard.trueRecommended(0).height==2754&&nudgeGuard.nudgeFloor()==2754&&nudgeGuard.treatedFor(0).height==2754);
+  pair(nudgeGuard,q(base));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::None);
+  pair(nudgeGuard,q(base));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting); // no rebuild yet
+  pair(nudgeGuard,q(nudgeGuard.recommended(0)));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  CHECK(nudgeGuard.recommended(0).height==2752&&nudgeGuard.treatedFor(0).height==2752);
+  // A second width-only change dips under the floor re-based at that rebuild.
+  nudge.trimOuterDeg=10;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Started);
+  CHECK(nudgeGuard.recommended(0).width==3246&&nudgeGuard.recommended(0).height==2750&&nudgeGuard.nudgeFloor()==2752);
+  pair(nudgeGuard,q({3566,2752}));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(nudgeGuard,q(nudgeGuard.recommended(0)));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  // More vertical trim takes the height under the floor: the game rebuilds
+  // by itself, the ask is told as it is, and the floor follows it down.
+  nudge.trimVerticalDeg=15;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Shrink);
+  const auto shrunk=nudgeGuard.recommended(0);
+  CHECK(shrunk.height<2750&&shrunk.height==nudgeGuard.trueRecommended(0).height);
+  pair(nudgeGuard,q({3246,2750}));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(nudgeGuard,q(shrunk));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  nudge.trimOuterDeg=5;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Started);
+  CHECK(nudgeGuard.recommended(0).height==shrunk.height-2&&nudgeGuard.nudgeFloor()==shrunk.height);
+  pair(nudgeGuard,q(shrunk));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(nudgeGuard,q(nudgeGuard.recommended(0)));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  // Less vertical trim asks for more rows than the floor stood for: never
+  // nudged, told as it is, and it waits for the game's next apply. A
+  // width-only change during that wait is just as tall. The apply lands the
+  // ask, and the floor re-bases there.
+  nudge.trimVerticalDeg=10;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Taller);
+  CHECK(nudgeGuard.recommended(0).width==3566&&nudgeGuard.recommended(0).height==2754);
+  const auto tallerBase=q({3566,shrunk.height-2});
+  pair(nudgeGuard,tallerBase);
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  nudge.trimOuterDeg=10;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Taller);
+  CHECK(nudgeGuard.recommended(0).width==3246&&nudgeGuard.recommended(0).height==2754);
+  pair(nudgeGuard,tallerBase);
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(nudgeGuard,q({3246,2754}));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  nudge.trimOuterDeg=5;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Started);
+  CHECK(nudgeGuard.recommended(0).height==2752&&nudgeGuard.nudgeFloor()==2754);
+  // The floor outlives a scene change; a new scene does not rebuild targets.
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::None);
+  pair(nudgeGuard,q({3246,2754}));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(nudgeGuard,q(nudgeGuard.recommended(0)));
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  nudge.trimOuterDeg=10;
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,false,1)==NativeCullStage::WaitingScene);
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Started);
+  CHECK(nudgeGuard.recommended(0).height==2750&&nudgeGuard.nudgeFloor()==2752);
+  // Every width-only change costs two more rows until a shrink or an apply
+  // re-bases the floor; past kNativeCullNudgeMaxPx the ask is told as it is.
+  NativeCullSettings walk{}; walk.trimVerticalDeg=10; walk.trimOuterDeg=10;
+  NativeCullGuard walkGuard;
+  CHECK(walkGuard.beginFrame(walk,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  CHECK(land(walkGuard,walk,crystal,crystalDims)==NativeCullStage::Live);
+  unsigned started=0,capped=0; uint32_t lastTold=walkGuard.recommended(0).height;
+  CHECK(lastTold==2754);
+  for(unsigned i=0;i<24;++i) {
+    walk.trimOuterDeg=(i&1)?10.f:5.f;
+    CHECK(walkGuard.beginFrame(walk,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+    const uint32_t told=walkGuard.recommended(0).height;
+    if(walkGuard.nudge()==NativeCullNudge::Started){++started;CHECK(told==lastTold-2);}
+    else if(walkGuard.nudge()==NativeCullNudge::Capped){++capped;CHECK(told==2754&&lastTold==2714);}
+    else CHECK(false);
+    pair(walkGuard,q({(i&1)?3566u:3246u,lastTold}));
+    CHECK(walkGuard.beginFrame(walk,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+    pair(walkGuard,q(walkGuard.recommended(0))); // the game's rebuild, or the apply after a capped one
+    CHECK(walkGuard.beginFrame(walk,crystal,crystalDims,true,1)==NativeCullStage::Live);
+    lastTold=told;
+  }
+  CHECK(started==23&&capped==1);
   std::printf("native_cull_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
