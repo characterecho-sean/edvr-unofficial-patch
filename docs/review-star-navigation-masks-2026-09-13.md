@@ -3,8 +3,12 @@
 ## Status
 
 Updated 2026-09-16 (night). Sean chose A. The mask's rule is fixed on branch
-claude/star-corona-ui-smearing-d1d2ae, built clean, and installed to Steam
-for a confirmation flight (numbers and the brief in the night entry).
+claude/star-corona-ui-smearing-d1d2ae, built clean as
+v0.17.0-rc.3-3-ga50dfc6 and pushed to main. The Steam install is pending:
+at 15:20 the game was running and install_edvr.py refused to stage. After
+quitting: `python tools\install_edvr.py --target steam`, then
+`--verify-only`, then the confirmation flight (numbers and the brief in the
+night entry).
 
 What was measured (Steam dumps 131013 and 134857, no flight):
 - a numpy port of `kUiResolve` reproduces `L0` to 0.076/255 and 0.002/255
@@ -3032,12 +3036,15 @@ tolerance relative to the raw level, because on the red corona a fraction of
 the red channel is tens of /255, wide enough to pass a glyph's ghost at near
 half strength, while the measured offset is 12..16 at the 99th percentile.
 
-**Confirmation flight.** The build named in the Status block is installed to
-Steam. Target a signal source or a ship whose label sits over the star's
-corona and hold it there while the distance ticks; then let the label sweep
-across the corona. Expect no dark polygon at the label, no box behind it, no
-trail when it moves, and digits still clean. `python tools\edvr_log.py
---target steam --expect-build HEAD` must name this build. Take an INSERT eye
-dump with the label on the corona. If anything remains, set
-`ui_ghost_tolerance = 0` in the Steam ini for a live side-by-side with the
-old rule, and 16 to remove the last speckle; report which value looked right.
+**Confirmation flight.** The build is v0.17.0-rc.3-3-ga50dfc6, on main.
+Install it with `python tools\install_edvr.py --target steam` once the game
+is closed (the installer refuses to stage while it runs, as it did at
+15:20), then `--verify-only`. Target a signal source or a ship whose label
+sits over the star's corona and hold it there while the distance ticks; then
+let the label sweep across the corona. Expect no dark polygon at the label,
+no box behind it, no trail when it moves, and digits still clean. `python
+tools\edvr_log.py --target steam --expect-build HEAD` must name this build.
+Take an INSERT eye dump with the label on the corona. If anything remains,
+set `ui_ghost_tolerance = 0` in the Steam ini for a live side-by-side with
+the old rule, and 16 to remove the last speckle; report which value looked
+right.
