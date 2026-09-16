@@ -480,14 +480,41 @@ int run(bool hardware){
     check(f.transfer.copy(source.Get(),rejected)!=S_OK&&!rejected,"executor rejection does not publish stale output");
     f.executor.resume();
   }
+  // A 100 ms copy can time out at three waits, and each is a documented,
+  // non-faulting outcome that leaves the transfer retryable: the consumer
+  // drain that precedes re-shaping the slot (HRESULT_FROM_WIN32(ERROR_TIMEOUT),
+  // returned before any producer callback, so producer_attempts is 0 by
+  // construction and does not discriminate), the producer's key-0 acquire
+  // (WAIT_TIMEOUT, slot reset, retry with copy) and the consumer's key-1
+  // acquire (WAIT_TIMEOUT, handoff left pending, retry with receive). Both
+  // devices are CPU work on WARP, and under build.bat's concurrent rig pool a
+  // 2026-09-16 run saw the first re-shape's drain miss its deadline by 10 ms
+  // with no fault; an identical rerun passed. A timeout here is scheduling
+  // starvation, not a transfer failure, so retry once along the path the
+  // header prescribes with the rig's long deadline, on a logged line. Faults,
+  // rejections and a second timeout still fail the check, and the observer
+  // only ever brackets the one consumer copy that succeeds, so every check
+  // below keeps its original form. A scratch build with a 0 ms first deadline
+  // reproduced the exact failing signature on every re-shape and recovered
+  // through this path with all checks green, so the branch is known live.
+  constexpr DWORD kStarvedRetryMs=5000;
+  const auto timedOut=[](HRESULT hr){return hr==HRESULT_FROM_WIN32(ERROR_TIMEOUT)||hr==WAIT_TIMEOUT;};
   for(auto format:kFormats)for(unsigned round=0;round<3;++round){
     const UINT w=W+(round==2?5:0),h=H+(round==2?3:0);ComPtr<ID3D11Texture2D> source;check(sourceTexture(f,format,w,h,round+1,source),"producer source created on owner thread");
     ID3D11Texture2D* output=nullptr;const auto beforeCopy=f.executor.calls();const auto started=GetTickCount64();
     RecordingObserver observer; const bool observe=format==kFormats[0]&&round==0;
-    const HRESULT copied=f.transfer.copy(source.Get(),output,100,observe?&observer:nullptr,1);
+    HRESULT copied=f.transfer.copy(source.Get(),output,100,observe?&observer:nullptr,1);
     std::printf("shared_texture copy format=%u round=%u width=%u height=%u hr=%08lx elapsed_ms=%llu producer_attempts=%u pending=%u faulted=%u\n",
       unsigned(format),round,w,h,static_cast<unsigned long>(copied),GetTickCount64()-started,f.executor.calls()-beforeCopy,
       f.transfer.pending()?1u:0u,f.transfer.faulted()?1u:0u);
+    if(timedOut(copied)&&!f.transfer.faulted()){
+      const bool resume=f.transfer.pending();const auto beforeRetry=f.executor.calls();const auto retryStarted=GetTickCount64();
+      copied=resume?f.transfer.receive(output,kStarvedRetryMs,observe?&observer:nullptr,1)
+                   :f.transfer.copy(source.Get(),output,kStarvedRetryMs,observe?&observer:nullptr,1);
+      std::printf("shared_texture copy_retry format=%u round=%u path=%s hr=%08lx elapsed_ms=%llu producer_attempts=%u pending=%u faulted=%u\n",
+        unsigned(format),round,resume?"receive":"copy",static_cast<unsigned long>(copied),GetTickCount64()-retryStarted,
+        f.executor.calls()-beforeRetry,f.transfer.pending()?1u:0u,f.transfer.faulted()?1u:0u);
+    }
     check(copied==S_OK&&output,"copy returns borrowed consumer texture");
     if(observe) check(observer.events.size()==2&&observer.events[0].begin&&
       !observer.events[1].begin&&observer.events[0].phase==1&&observer.events[1].phase==1&&
