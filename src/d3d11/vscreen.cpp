@@ -1499,8 +1499,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // arrival-mono trigger needs "the player is in the scanner" at the
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
-    // free.
-    if ((s->fssHealOn || s->censusFssJump || s->fssTheaterOn) &&
+    // free. The temporal pass asks too (temporalPassWantsFssChrome): the
+    // scanner's interface takes the head's path while the screen is up,
+    // and the stamp this tracker bumps is how the pass knows it is.
+    if ((s->fssHealOn || s->censusFssJump || s->fssTheaterOn ||
+         temporalPassWantsFssChrome()) &&
         kind == 'X' && count == 6) {
         bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {

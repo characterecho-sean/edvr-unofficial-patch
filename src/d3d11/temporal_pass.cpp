@@ -16,6 +16,7 @@
 #include <cstdarg>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"   // fssChromeStampValue: the scanner's screen is up this frame
 #include "../common/temporal_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -1217,6 +1218,27 @@ DXGI_FORMAT g_histFmt = DXGI_FORMAT_UNKNOWN;
 bool     g_firstNoted = false;
 uint32_t g_treats = 0;
 
+// The scanner's interface on the head's path (docs/fss-scanner.md,
+// 2026-09-16). The FSS composites its own interface -- the bottom bar, the
+// spectral text, the signal markers -- at a scene depth past the world/ship
+// split, and the split's rule for an interface stroke (keep the camera's
+// path at the pixel's depth) assumes the camera is the head, which in the
+// scanner it is not: the scanner's camera pans while the panel stays put
+// in front of the seat, so NVIDIA was told the panel's static text moved
+// by the pan (eye dump 170752: 5 px that frame, 47 two frames on, the head
+// still) and doubled it. While the scanner's screen is up the shader gives
+// interface-marked pixels the head's delta at whatever depth they read
+// (probe.w bit 128). "Up" is the chrome tracker's word (vscreen.cpp,
+// beginPanelOverride): it bumps the shared stamp once per frame it sees
+// the scanner's screen composited, before the eye is submitted, so a
+// stamp that moved since the last treated frame is this frame's answer.
+LONG     g_fssChromeStampSeen = 0;
+uint32_t g_fssChromeStampFrame = 0;
+bool     g_fssChromeStampKnown = false;
+bool     g_fssInterfaceNoted = false;
+uint32_t g_fssInterfaceFrames = 0;   // frames the scanner's interface took the head's path
+// (fssInterfaceLive, the per-frame question, sits below g_rowsFrame.)
+
 // The configure and warm state.
 bool     g_wanted = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
@@ -1649,6 +1671,20 @@ bool stageEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D
 }
 
 uint32_t g_rowsFrame = 0; // scene boundary counter, shared by captures and row selection
+// Is the scanner's screen up this frame (the state above g_wanted says why
+// it is asked)? Answered per eye and idempotent within a frame.
+bool fssInterfaceLive() {
+    const LONG stamp = fssChromeStampValue();
+    if (stamp == 0) return false;
+    if (!g_fssChromeStampKnown || stamp != g_fssChromeStampSeen) {
+        g_fssChromeStampKnown = true;
+        g_fssChromeStampSeen = stamp;
+        g_fssChromeStampFrame = g_rowsFrame;
+    }
+    // This frame's bump, or last frame's: the heal's deferred eye is
+    // finished at its partner's submit, and the boundary may land between.
+    return g_rowsFrame - g_fssChromeStampFrame <= 1;
+}
 TemporalHistory<> g_temporalHistory;
 std::mutex g_temporalHistoryMutex;
 struct TemporalHistoryScope {
@@ -3650,9 +3686,28 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.candMask = useHistory ? candMask : 0;
         const bool uiTrack = uiDepthWantsDraws() && ensureUiHistory(dev,e,w,h);
         if ((flags & 1u) != 0 || !uiTrack) e.uiHistoryValid = false;
+        // The scanner's interface on the head's path (fssInterfaceLive
+        // says): the flag rides probe.w bit 128 and the eye dump's header
+        // (its uiFlags word), so a dump taken in the scanner shows whether
+        // the path was engaged; the note below is the log's word, said once.
+        const bool fssInterface = fssInterfaceLive();
+        if (fssInterface) {
+            if (eye == 0) ++g_fssInterfaceFrames;
+            if (!g_fssInterfaceNoted) {
+                g_fssInterfaceNoted = true;
+                Log::get().note(
+                    "temporal aa: the scanner's screen is up (frame %u), so its interface "
+                    "takes the head's path at whatever depth it reads, not the scanner's "
+                    "panning camera's -- the panel stays put in front of the seat while "
+                    "the camera pans (docs/fss-scanner.md, 2026-09-16). Said once; the eye "
+                    "dump's uiFlags word carries bit 0x80 on every frame it is engaged.",
+                    g_rowsFrame);
+            }
+        }
         auto uiFlags = [&]() {
             return static_cast<float>((uiDepthReactive()>0.0f?1u:0u) |
-                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (terrainSrvs[0]?8u:0u) | (holoSrvs[0]?16u:0u) | (screenSrv?32u:0u));
+                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (terrainSrvs[0]?8u:0u) | (holoSrvs[0]?16u:0u) | (screenSrv?32u:0u) |
+                (fssInterface?128u:0u));
         };
 
         // Capture before either temporal path changes colour. Paired runs
@@ -4132,7 +4187,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     p.holoJitter[3] = haveDepth && e.zPrevValid && e.zPrevSrv && useTanPrev && haveDelta && p.holoJitter[2] != 0 ? 1.0f : 0.0f;
                     const bool wantUi = coverageMask != nullptr &&
                                         (p.holoJitter[3] != 0.0f || (p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f ||
-                                         p.ships[0] != 0.0f || uiTrack);
+                                         p.ships[0] != 0.0f || uiTrack || fssInterface);
                     const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, coverageMask);
                     if(uiResolve && !e.uiResolvedHistory) e.uiHistoryValid=false;
                     p.probe[2] = uiBound ? 1.0f : 0.0f;
@@ -4368,7 +4423,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (!usedDlaa) {
             if(e.uiResolvedHistory){e.uiHistoryValid=false;e.uiResolvedHistory=false;}
             ID3D11Texture2D* rm = nullptr;
-            const bool uiOwn = (trainedWanted || p.tvSt[3] != 0.0f || p.ships[0] != 0.0f || uiTrack) && uiDepthCoverageMask(w, h, eye, &rm) && rm &&
+            const bool uiOwn = (trainedWanted || p.tvSt[3] != 0.0f || p.ships[0] != 0.0f || uiTrack || fssInterface) && uiDepthCoverageMask(w, h, eye, &rm) && rm &&
                                ensureUiMaskSrv(dev, e, rm);
             p.probe[2] = uiOwn ? 1.0f : 0.0f;
             p.probe[3] = uiFlags();
@@ -5441,6 +5496,8 @@ void temporalPassFrameBoundary() {
     g_curLatched = false;
     g_curValid = false;
 }
+
+bool temporalPassWantsFssChrome() { return g_wanted; }
 
 bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
                         double* rejectPct, double* clipPct) {

@@ -43,10 +43,13 @@ changes.*
     follow; the "interface keeps the camera's path" rule
     (temporal_shader_source.h ~359) is right for a camera that is the
     head and wrong here. Journal entry "2026-09-16: the FSS UI under
-    DLSS". Candidate fix: a head-path kind for interface-projection
-    composites (the head delta is already in hand, `headR/headTv` in
-    motion.csv); the flight HUD's world-tracking families keep the
-    camera's path.
+    DLSS". FIX BUILT, NOT FLOWN (journal entry "2026-09-16: the
+    scanner's interface on the head's path"): while the scanner's
+    screen is up (the chrome tracker's stamp moved this frame), every
+    interface-marked pixel takes the head's delta at whatever depth it
+    reads, in both copies of the world/ship split; `probe.w` bit 128;
+    the flight HUD's world-tracking families are untouched because the
+    gate is the scanner's screen, not the mask's kind.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -97,10 +100,18 @@ changes.*
 - **Next flight:** none owed for the ghost: flight 3 (2026-09-16
   17:05, `edvr_gfx_20260916_170514.log`, the pre-commit build of
   10705da, version string `0522215-dirty`) confirmed the same-frame
-  donor and it is on main (e08e899). The FSS UI shimmer above waits on
-  a decision to build the head-path kind; its flight would read
-  `motion.csv` `headR` against the UI pixels' vectors in a dump taken
-  while panning. The Toolkit-ON confirmation under Open still stands.
+  donor and it is on main (e08e899). Owed for the FSS UI shimmer: one
+  flight on the head-path build, Quest 3, DLSS, the initial FSS screen,
+  pan with the head still and take an eye dump mid-pan. Receipts: the
+  gfx log's once-note `temporal aa: the scanner's screen is up (frame
+  N), so its interface takes the head's path`; the dump's header
+  `uiFlags` (the ninth uint32 after `EDVRTEX1`) with bit 0x80 set;
+  the UI pixels' `MV` at the bar and a marker ~0 px while the sky
+  beside them carries the pan (before: -3.8 / -5.5 px with the sky);
+  and no doubled text in `DlssBeforeUi`. If the note is absent the
+  chrome tracker never fired (its gate is `fix.fss_eye_sync`, the
+  census jump, the theater, or the temporal pass being on). The
+  Toolkit-ON confirmation under Open still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
@@ -1064,6 +1075,53 @@ in flight today, so either the read camera is already cockpit-relative
 or something else carries the ship's motion); the FSS alone can gate
 the kind on the panel rect being live. Testable in the FSS first, then
 on a rolling ship with the HUD up.
+
+## 2026-09-16: the scanner's interface on the head's path
+
+Built on Sean's "build the head path", not flown. What was built is
+the FSS-gated form of the candidate above, not a new mask kind: a
+kind would need ui_depth to know which composites are the scanner's,
+and the scanner's own screen is already tracked per frame.
+
+- The gate. `readFssPanelRect` was the first thought and is the wrong
+  signal: it returns true forever after the first publish
+  (`fssPanelRectSeq != 0`, frame_flag.cpp:379), a "was ever" not an
+  "is". The per-frame word is the chrome tracker in
+  `beginPanelOverride` (vscreen.cpp ~1496): on every frame it sees the
+  scanner's screen composited by the two world-quad pipelines it bumps
+  `fssChromeStamp`, before the eye is submitted. The temporal pass
+  (`fssInterfaceLive`, temporal_pass.cpp) treats a stamp that moved
+  this frame or last as "the scanner is up" -- last, because the heal's
+  deferred eye is finished at its partner's submit and the boundary
+  can land between. The tracker ran only for the heal, the census jump
+  and the theater; `temporalPassWantsFssChrome()` now keeps it running
+  whenever the pass is on, so a rig with `fix.fss_eye_sync = off` still
+  gets the path.
+- The flag. `probe.w` bit 128 (bit 64 was taken by the eye dump's
+  header, which ORs "separated" into the same word). The `uiFlags`
+  lambda sets it for both `p.probe[3]` sites, and `wantUi`/`uiOwn`
+  bind the interface mask when it is set, so the shader can ask
+  `uiCovered` even on a frame nothing else wanted the mask.
+- The shader. Both copies of the world/ship split -- `fetchHistoryT`
+  and the mv pass -- take `&& !scannerUi` on the world branch, where
+  `scannerUi` is the flag and `uiCovered` at the pixel. An interface
+  pixel then falls through to the head's rows at its own depth
+  (`dp * z + tvUsed`), or the rotation-only head path when it reads no
+  depth. The sky beside a stroke keeps the pan, as before; the body
+  path's `!uiCovered` exclusion already skipped these pixels.
+- The receipts. A once-note in the gfx log when the flag first sets,
+  with the frame; the eye dump's header `uiFlags` carries the bit on
+  every engaged frame; `g_fssInterfaceFrames` counts left-eye frames
+  (not printed yet; add it to a summary line if a flight needs it).
+  If the pass never ran the new code there is no note and no bit.
+- Not a rig test: no rig runs the split (the shader rigs extract
+  single functions), and `fetchHistoryT` drags in every layer texture.
+  The eye dump is the test; brief in the Status block.
+- Seen in passing, not folded in: `uiCovered(q)` indexes the
+  region-sized `UM` with the full-target coordinate its callers pass
+  (`region.xy + p`), while every other `UM` read subtracts `region.xy`
+  or uses the local index. Harmless where `region.xy` is 0 (the native
+  path, a whole-texture submit), a one-region offset otherwise.
 
 ## Open
 

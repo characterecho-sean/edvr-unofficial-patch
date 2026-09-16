@@ -87,6 +87,13 @@ void temporalPassFrameBoundary();
 // default; advanced.eye_run_paired=0 keeps the older single-run selection.
 void temporalPassArmEyeDump();
 
+// The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)
+// running whenever it is on: the FSS's interface takes the head's path
+// while the scanner's screen is up (docs/fss-scanner.md, 2026-09-16), and
+// the tracker's stamp is how the pass knows the screen is up. The heal
+// gates the tracker too, but a rig with the heal off still needs the path.
+bool temporalPassWantsFssChrome();
+
 // The eye's offset from the head as the runtime last handed it to the pass
 // (metres, x toward the right), for the foveation's nasal shift. False
 // until a frame has been treated with a head delta and an offset: the
