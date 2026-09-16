@@ -61,6 +61,7 @@
 #include "reset_events.h"
 #include "runtime_exports.h"
 #include "openvr_auxiliary.h"
+#include "steam_identity.h"
 #include "owner_service.h"
 #include "render_thread_dispatcher.h"
 #include "present_work_queue.h"
@@ -1519,6 +1520,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool open(const RuntimeOptions& options) {
     startupSteps=StartupSteps{};
     auto step=StepClock::now();
+    // SteamVR decides what to call this process at the connect inside
+    // xrCreateInstance, so the loan is in place before the runtime loads and
+    // withdrawn the moment the instance exists (steam_identity.h).
+    SteamIdentityLoan identity; identity.begin();
     api.module=LoadLibraryExW(options.loader.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if(!api.module) {nativeTracePrintf("error,LoadLibraryExW,%lu\n",GetLastError());return false;}
     api.get=reinterpret_cast<PFN_xrGetInstanceProcAddr>(GetProcAddress(api.module,"xrGetInstanceProcAddr"));
@@ -1541,14 +1546,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!d3d) return result("XR_KHR_D3D11_enable",XR_ERROR_EXTENSION_NOT_PRESENT);
     if(!timeConversion)return result("XR_KHR_win32_convert_performance_counter_time",XR_ERROR_EXTENSION_NOT_PRESENT);
     XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strcpy(ci.applicationInfo.applicationName,"EDVR native stereo diagnostic");
+    // What a runtime shows when it has nothing better: SteamVR's fallback
+    // entry, Pimax's client log. SteamVR also lowercases it into an app key
+    // that names a .vrappconfig file, so no colon.
+    std::strcpy(ci.applicationInfo.applicationName,"Elite Dangerous (EDVR)");
     std::strcpy(ci.applicationInfo.engineName,"EDVR");ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
     const char* enabled[4]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};
     unsigned enabledCount=2;
     if(displayRefreshExtension)enabled[enabledCount++]=XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
     if(visibilityMaskExtension)enabled[enabledCount++]=XR_KHR_VISIBILITY_MASK_EXTENSION_NAME;
     ci.enabledExtensionCount=enabledCount;ci.enabledExtensionNames=enabled;
-    if(!result("xrCreateInstance",api.createInstance(&ci,&instance))) return false;
+    const XrResult created=api.createInstance(&ci,&instance);
+    identity.end();
+    // Absent from a log means open() never reached the instance; vrserver.txt
+    // then shows the key: "ProcessConnected BEGIN <pid> ... 9 steam.app.359320".
+    nativeTracePrintf("steam_identity,variable=SteamAppId,source=%s,app_id=%ls,withdrawn=%u,instance=%d\n",
+      identity.sourceName(),identity.appId(),unsigned(identity.isWithdrawn()),int(created));
+    if(!result("xrCreateInstance",created)) return false;
     // Optional capability: an unavailable query cannot prevent VR startup.
     if(displayRefreshExtension&&!load(api,instance,"xrGetDisplayRefreshRateFB",api.displayRefreshRate))
       api.displayRefreshRate=nullptr;
