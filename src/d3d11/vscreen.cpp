@@ -3135,7 +3135,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if(self==g_state->ownerCtx){
         uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,static_cast<uint32_t>(v),
             bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
-        uiDeferredBeforeDraw(self);
+        uiDeferredBeforeDraw(self,kind,count,instances,args.start,args.base,args.startInstance,static_cast<uint32_t>(v));
     }
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;

@@ -137,6 +137,29 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
                             uint32_t* resets);
 
+// The same price, split by which of the three independent NGX features
+// paid it (the full frame, the fovea's centre crop, the steady periphery)
+// and by eye (0 left, 1 right), so a display can show a real per-eye
+// figure instead of the pooled average above mislabeled as one. False
+// when that role/eye has not evaluated yet.
+bool temporalPassDlaaFullTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs);
+bool temporalPassDlaaCentreTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs);
+bool temporalPassDlaaPeripheryTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs);
+
+// Stage 0 price report (docs/foveated-dlss-design-2026-09-14.md): the last
+// CLOSED window's per-region median milliseconds, stereo-pair-summed, in
+// the fixed order prep/reduce/periphery/centre/full/compose/ui -- the same
+// order as kRegionNames in temporal_pass.cpp -- plus "other" (the pair's
+// total less the sum of those seven), how many stereo pairs the window
+// covered, and how many pairs/calls it dropped before pricing (unmeasured
+// pairs, lone eyes, no-slot frames and region-lease failures, summed).
+// A window closes every 600 pairs, or sooner on a treatment, output
+// size/format, or live temporal_aa_* setting change. False until one
+// window has closed this session; regionMedianMs must hold 7 doubles.
+// droppedTotal may be null.
+bool temporalPassPriceWindow(double regionMedianMs[7], double* otherMedianMs,
+                              uint32_t* pairs, uint32_t* droppedTotal);
+
 // The scene's near and far planes the last treat decoded depth with (the
 // openvr half's smallest-near pair). For ui_depth, which re-scales a
 // composite's depth from the interface projection's encoding into the

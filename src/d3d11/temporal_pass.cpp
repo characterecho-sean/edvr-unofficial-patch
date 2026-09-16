@@ -2,6 +2,7 @@
 #include "temporal_history.h"
 #include "draw_census.h"
 
+#include <algorithm>  // std::sort, the price report's median/p95
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -338,6 +339,7 @@ struct EyeState {
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
     bool                      uiResolvedHistory = false;
     bool                      uiSeparatedHistory = false;
+    bool                      uiDeferredHistory = false;
     bool                      screenHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
@@ -468,6 +470,7 @@ void releaseDl(EyeState& e) {
     if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
     e.uiResolvedHistory = false;
     e.uiSeparatedHistory = false;
+    e.uiDeferredHistory = false;
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
     e.dlHaveHistory = false;
@@ -525,6 +528,31 @@ void releaseEye(EyeState& e) {
 // buffer. Never awaited (DONOTFLUSH, DO_NOT_WAIT); a slot still in flight
 // is read on a later call, and a call that finds every slot busy runs
 // unmeasured. Measuring must never be able to stall the pass.
+// The price report's regions (docs/foveated-dlss-design-2026-09-14.md Stage
+// 0): every dispatch or NGX call temporalInner makes for one eye, timed the
+// same way. dlaa.cpp already prices the three NGX roles (full, centre,
+// periphery) for Deliverable 2's pooled F8 figures, but only as a running
+// count/mean/max -- there is no per-window distribution to read a median or
+// p95 off, and no reset when a window here closes. So the three roles are
+// timed a second time, right here, with the same per-eye GpuTimer this file
+// uses for its own prep/reduce/compose/ui dispatches: the redundant timer is
+// the price of a uniform sample -- one array, one poll cadence, one pairing
+// path -- for all seven regions instead of four measured one way and three
+// unmeasurable the way this deliverable needs.
+enum class Region { Prep = 0, Reduce, Periphery, Centre, Full, Compose, Ui, Count };
+constexpr int kRegionCount = static_cast<int>(Region::Count);
+// Exact labels the price report and the F8 line key off (tools\edvr_log.py
+// greps the log text, not this array, but the two must agree by hand).
+const char* const kRegionNames[kRegionCount] = {
+    "prep", "reduce", "periphery", "centre", "full", "compose", "ui"
+};
+
+// Which path this eye's call is routed through, decided once per call
+// (temporalInner, alongside foveaMode) before either branch below runs, so
+// a price report window resets on a real mode change and not on a frame
+// where NGX happened to fail inside an unchanged mode.
+enum class Treatment { None = 0, FullFrame, Fovea };
+
 struct Slot {
     GpuTimer      timer;
     ID3D11Buffer* staging = nullptr;
@@ -538,15 +566,319 @@ struct Slot {
     uint64_t      candPixels[4] = {};
     float         headDeg = 0.0f;
     bool          hadHistory = false;
+    // Stage 0 price report: this call's eye and the pass's own frame
+    // counter (g_rowsFrame), for stereo pairing; the treatment and output
+    // shape, for the window-reset test; and the per-region GPU price this
+    // eye's call actually measured (0 and absent when the region did not
+    // run, or its lease could not be had).
+    int           eye = -1;
+    uint32_t      frame = 0;
+    Treatment     treatment = Treatment::None;
+    uint32_t      outW = 0, outH = 0;
+    uint32_t      fmt = 0;
+    uint32_t      configGen = 0;
+    GpuTimer      regionTimer[kRegionCount];
+    bool          regionTiming[kRegionCount] = {};
+    bool          regionEnded[kRegionCount] = {};
+    bool          regionDone[kRegionCount] = {};
+    double        regionMs[kRegionCount] = {};
+    bool          regionsDone = false;
+    // The total timer's own polled milliseconds, retained here (the poll
+    // loop otherwise only folds it into the pooled globals below) so the
+    // price report can pair it with the region prices above; priced guards
+    // against a slot being folded into the window's samples twice.
+    double        totalMs = 0.0;
+    bool          priced = false;
+    // Set only in pollSlots' Ready branch: totalMs actually came off the
+    // GPU this call. A slot that never measures (no lease, an Invalid
+    // poll) still reaches the pending ring so its twin is not left
+    // waiting, but carries this false so the pair prices as dropped
+    // (droppedUnmeasured) instead of pricing an unmeasured 0ms total.
+    bool          totalValid = false;
 };
-constexpr int kSlots = 8;
+constexpr int kSlots = 16;
 constexpr int kStatCount = 52;   // 50 used since 2026-09-09 (39-45 the moving ships, 46 the second body, 47-49 the stepped parts); a 208-byte buffer
 Slot g_slots[kSlots];
 
+// Bumped on every temporalPassConfigure call (both its call sites in
+// vscreen.cpp): the price report's window key folds this in, so a live
+// temporal_aa_* setting change closes the current window even when the
+// treatment and output shape happen to read the same.
+uint32_t g_configGeneration = 0;
+
 void releaseSlot(Slot& q) {
     q.timer.reset();
+    for (auto& t : q.regionTimer) t.reset();
     if (q.staging) { q.staging->Release(); q.staging = nullptr; }
     q = Slot{};
+}
+
+// A region's begin/end, nested inside the enclosing total timer's own
+// lease: only tried when the total timer itself got one (so a region never
+// opens a standalone record of its own), and never blocking or asserting
+// when the shared DisjointClock's 32-lease-per-record budget is out --
+// dropped and counted instead, per docs/foveated-dlss-design-2026-09-14.md.
+uint32_t g_regionBeginFailed = 0;
+bool     g_regionBeginFailedNoted = false;
+// Stage 0 price report: pairs and calls dropped before ever reaching
+// accumulateWindow, broken out on the price line (flushWindow, below) so a
+// low pair count is explained rather than silently absorbed. All three
+// reset when a window closes, same as g_regionBeginFailed just above.
+uint32_t g_droppedUnmeasured = 0;   // both eyes arrived, one or both unmeasured (F1)
+uint32_t g_droppedLone = 0;         // an eye evicted or shut down with no twin (F2)
+uint32_t g_droppedNoSlot = 0;       // gpuTimingOwns this call but every slot was busy (F3)
+
+void beginRegion(int qs, Region r, ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (qs < 0 || !g_slots[qs].timing) return;
+    const int i = static_cast<int>(r);
+    Slot& q = g_slots[qs];
+    q.regionTiming[i] = q.regionTimer[i].begin(dev, ctx);
+    if (!q.regionTiming[i]) {
+        ++g_regionBeginFailed;
+        if (!g_regionBeginFailedNoted) {
+            g_regionBeginFailedNoted = true;
+            Log::get().note(
+                "temporal aa price: a region's GPU timer could not get a lease this frame "
+                "(the shared clock's budget was busy). That sample is dropped from the price "
+                "report; further drops this session are counted but not logged again.");
+        }
+    }
+}
+
+void endRegion(int qs, Region r, ID3D11DeviceContext* ctx) {
+    if (qs < 0) return;
+    const int i = static_cast<int>(r);
+    Slot& q = g_slots[qs];
+    if (q.regionTiming[i] && !q.regionTimer[i].end(ctx)) {
+        q.regionTimer[i].reset(ctx);
+        q.regionTiming[i] = false;
+    }
+    q.regionEnded[i] = true;
+}
+
+// The window a price sample falls into: it closes (docs/foveated-dlss-
+// design-2026-09-14.md Stage 0) on a treatment change, an output size or
+// format change, or an NGX feature recreation. This build's feature
+// recreation triggers are all a size (dlaa.h: "rebuilt on a size change")
+// or a live setting read inside temporalPassConfigure (the model/preset
+// among them) -- both already covered by outW/outH/fmt and configGen, so
+// no separate "recreated" flag is tracked.
+struct WindowKey {
+    Treatment treatment = Treatment::None;
+    uint32_t  outW = 0, outH = 0;
+    uint32_t  fmt = 0;
+    uint32_t  configGen = 0;
+    bool operator==(const WindowKey& o) const {
+        return treatment == o.treatment && outW == o.outW && outH == o.outH &&
+               fmt == o.fmt && configGen == o.configGen;
+    }
+    bool operator!=(const WindowKey& o) const { return !(*this == o); }
+};
+
+constexpr int kWindowPairs = 600;
+WindowKey g_windowKey;
+bool      g_windowKeyValid = false;
+int       g_windowCount = 0;
+double    g_windowTotal[kWindowPairs];
+double    g_windowRegion[kRegionCount][kWindowPairs];
+
+// The most recently CLOSED window's per-region median/p95, for the F8
+// line's live figures; kept even while the next window is still filling.
+double    g_lastWindowMedian[kRegionCount] = {};
+double    g_lastWindowP95[kRegionCount] = {};
+double    g_lastWindowOtherMedian = 0.0, g_lastWindowOtherP95 = 0.0;
+uint32_t  g_lastWindowPairs = 0;
+Treatment g_lastWindowTreatment = Treatment::None;
+bool      g_lastWindowValid = false;
+// The four drop counters' sum for the window this closed (F5): unmeasured
+// pairs, lone eyes, no-slot frames and region-lease failures, latched at
+// close time after which the running counters reset for the next window.
+uint32_t  g_lastWindowDropped = 0;
+
+// Sorts v[0..n) in place and reads off one percentile by linear
+// interpolation between the two bracketing order statistics -- the usual
+// definition, and the one tools\edvr_log.py's own reader (if it ever
+// checks these figures) would reproduce with numpy.
+double windowPercentile(double* v, int n, double frac) {
+    if (n <= 0) return 0.0;
+    std::sort(v, v + n);
+    const double pos = frac * static_cast<double>(n - 1);
+    int lo = static_cast<int>(pos);
+    if (lo < 0) lo = 0;
+    if (lo > n - 1) lo = n - 1;
+    const int hi = (lo + 1 < n) ? lo + 1 : lo;
+    const double t = pos - static_cast<double>(lo);
+    return v[lo] * (1.0 - t) + v[hi] * t;
+}
+
+const char* treatmentName(Treatment t) {
+    switch (t) {
+        case Treatment::Fovea:     return "foveated ngx";
+        case Treatment::FullFrame: return "full-frame ngx";
+        default:                   return "own history (no ngx)";
+    }
+}
+
+// Closes the current window (if any samples reached it) and writes the one
+// required log line: treatment, output size, pair count and reason, then
+// every region's stereo-sum median/p95, then "other" -- total less the sum
+// of the seven regions, taken per pair before the percentile (a median is
+// not linear, so subtracting already-reduced medians would not be the same
+// number). Also latches the F8 line's live figures from this window.
+void flushWindow(const char* reason) {
+    if (!g_windowKeyValid || g_windowCount <= 0) { g_windowKeyValid = false; g_windowCount = 0; return; }
+    const int n = g_windowCount;
+    double scratch[kWindowPairs];
+    double regionMed[kRegionCount] = {}, regionP95[kRegionCount] = {};
+    for (int ri = 0; ri < kRegionCount; ++ri) {
+        for (int k = 0; k < n; ++k) scratch[k] = g_windowRegion[ri][k];
+        regionP95[ri] = windowPercentile(scratch, n, 0.95);
+        for (int k = 0; k < n; ++k) scratch[k] = g_windowRegion[ri][k];
+        regionMed[ri] = windowPercentile(scratch, n, 0.5);
+    }
+    double otherScratch[kWindowPairs];
+    for (int k = 0; k < n; ++k) {
+        double sum = 0.0;
+        for (int ri = 0; ri < kRegionCount; ++ri) sum += g_windowRegion[ri][k];
+        otherScratch[k] = g_windowTotal[k] - sum;
+    }
+    for (int k = 0; k < n; ++k) scratch[k] = otherScratch[k];
+    const double otherP95 = windowPercentile(scratch, n, 0.95);
+    for (int k = 0; k < n; ++k) scratch[k] = otherScratch[k];
+    const double otherMed = windowPercentile(scratch, n, 0.5);
+
+    char line[1100];
+    int len = snprintf(line, sizeof(line),
+        "temporal aa price: %s, %ux%u, %d stereo pairs (%s), ms per pair "
+        "median/p95:", treatmentName(g_windowKey.treatment), g_windowKey.outW,
+        g_windowKey.outH, n, reason);
+    for (int ri = 0; ri < kRegionCount && len > 0 && len < static_cast<int>(sizeof(line)); ++ri) {
+        len += snprintf(line + len, sizeof(line) - len, " %s %.2f/%.2f",
+                        kRegionNames[ri], regionMed[ri], regionP95[ri]);
+    }
+    if (len > 0 && len < static_cast<int>(sizeof(line))) {
+        len += snprintf(line + len, sizeof(line) - len, " other %.2f/%.2f", otherMed, otherP95);
+    }
+    // F5: the pairs and calls dropped before pricing, per window, so a low
+    // pair count against the session's runtime is explained on the same
+    // line rather than needing a second instrument to notice.
+    if (len > 0 && len < static_cast<int>(sizeof(line))) {
+        snprintf(line + len, sizeof(line) - len,
+                 " dropped %u unmeasured pairs, %u lone eyes, %u no-slot frames, "
+                 "%u region leases",
+                 g_droppedUnmeasured, g_droppedLone, g_droppedNoSlot, g_regionBeginFailed);
+    }
+    Log::get().note("%s", line);
+
+    for (int ri = 0; ri < kRegionCount; ++ri) {
+        g_lastWindowMedian[ri] = regionMed[ri];
+        g_lastWindowP95[ri] = regionP95[ri];
+    }
+    g_lastWindowOtherMedian = otherMed;
+    g_lastWindowOtherP95 = otherP95;
+    g_lastWindowPairs = static_cast<uint32_t>(n);
+    g_lastWindowTreatment = g_windowKey.treatment;
+    g_lastWindowValid = true;
+    g_lastWindowDropped = g_droppedUnmeasured + g_droppedLone + g_droppedNoSlot + g_regionBeginFailed;
+    // The one-shot log note above (g_regionBeginFailedNoted) stays latched
+    // for the session; only the per-window counters it and the others feed
+    // reset here.
+    g_droppedUnmeasured = 0;
+    g_droppedLone = 0;
+    g_droppedNoSlot = 0;
+    g_regionBeginFailed = 0;
+
+    g_windowCount = 0;
+    g_windowKeyValid = false;
+}
+
+// Folds one resolved stereo pair (both eyes' totals and region prices,
+// already summed) into the current window, opening or closing a window as
+// the key requires.
+void accumulateWindow(const WindowKey& key, double totalSum, const double regionSum[kRegionCount]) {
+    if (!g_windowKeyValid || key != g_windowKey) {
+        if (g_windowKeyValid) flushWindow("window closed");
+        g_windowKey = key;
+        g_windowKeyValid = true;
+        g_windowCount = 0;
+    }
+    if (g_windowCount < kWindowPairs) {
+        g_windowTotal[g_windowCount] = totalSum;
+        for (int ri = 0; ri < kRegionCount; ++ri) g_windowRegion[ri][g_windowCount] = regionSum[ri];
+        ++g_windowCount;
+    }
+    if (g_windowCount >= kWindowPairs) flushWindow("600 pairs");
+}
+
+// Buffers one eye's priced call until its stereo twin (the other eye, same
+// frame) is priced too, then hands the summed pair to accumulateWindow. A
+// small ring: normally at most the two eyes of the current and previous
+// frame are ever pending at once. An entry whose twin never arrives (a
+// dropped eye, or this build ever running one-eyed) is evicted oldest-
+// first, dropped and counted (droppedLone) rather than held forever or
+// priced alone as if it were a true stereo pair.
+struct PendingPair {
+    bool      used = false;
+    uint32_t  frame = 0;
+    uint32_t  seq = 0;
+    bool      have[2] = {false, false};
+    bool      valid[2] = {false, false};
+    double    totalMs[2] = {0.0, 0.0};
+    double    regionMs[2][kRegionCount] = {};
+    WindowKey key[2];
+};
+constexpr int kPendingCap = 8;
+PendingPair g_pending[kPendingCap];
+uint32_t    g_pendingSeq = 0;
+
+// Complete AND fully-measured pairs are folded into the window; anything
+// else is dropped and counted rather than priced as an approximation --
+// an incomplete pair (only one eye ever arrived) counts as a lone eye,
+// and a complete pair with an unmeasured eye counts as unmeasured.
+void finalizePending(PendingPair& p) {
+    if (p.have[0] && p.have[1]) {
+        if (p.valid[0] && p.valid[1]) {
+            double totalSum = p.totalMs[0] + p.totalMs[1];
+            double regionSum[kRegionCount] = {};
+            for (int ri = 0; ri < kRegionCount; ++ri) regionSum[ri] = p.regionMs[0][ri] + p.regionMs[1][ri];
+            accumulateWindow(p.key[0], totalSum, regionSum);
+        } else {
+            ++g_droppedUnmeasured;
+        }
+    } else if (p.have[0] || p.have[1]) {
+        ++g_droppedLone;
+    }
+    p = PendingPair{};
+}
+
+void priceSlot(const Slot& q) {
+    if (q.eye != 0 && q.eye != 1) return;   // an eye index this report cannot place
+    const WindowKey key{q.treatment, q.outW, q.outH, q.fmt, q.configGen};
+    int idx = -1;
+    for (int i = 0; i < kPendingCap; ++i) {
+        if (g_pending[i].used && g_pending[i].frame == q.frame) { idx = i; break; }
+    }
+    if (idx < 0) {
+        int chosen = 0;
+        bool haveFree = false;
+        for (int i = 0; i < kPendingCap; ++i) {
+            if (!g_pending[i].used) { chosen = i; haveFree = true; break; }
+            if (!haveFree && g_pending[i].seq < g_pending[chosen].seq) chosen = i;
+        }
+        if (!haveFree && g_pending[chosen].used) finalizePending(g_pending[chosen]);
+        g_pending[chosen] = PendingPair{};
+        g_pending[chosen].used = true;
+        g_pending[chosen].frame = q.frame;
+        g_pending[chosen].seq = ++g_pendingSeq;
+        idx = chosen;
+    }
+    PendingPair& p = g_pending[idx];
+    p.have[q.eye] = true;
+    p.valid[q.eye] = q.totalValid;
+    p.totalMs[q.eye] = q.totalMs;
+    for (int ri = 0; ri < kRegionCount; ++ri) p.regionMs[q.eye][ri] = q.regionMs[ri];
+    p.key[q.eye] = key;
+    if (p.have[0] && p.have[1]) finalizePending(p);
 }
 
 uint32_t g_timeCount = 0;
@@ -682,7 +1014,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
         if (!q.timeDone) {
             if (!q.timing) q.timeDone = true;
             else { double ms=0.0; const auto status=q.timer.poll(ctx,ms);
-                if(status==GpuTimerPoll::Ready){q.timeDone=true;++g_timeCount;g_timeSum+=ms;if(ms>g_timeMax)g_timeMax=ms;}
+                if(status==GpuTimerPoll::Ready){q.timeDone=true;++g_timeCount;g_timeSum+=ms;if(ms>g_timeMax)g_timeMax=ms;q.totalMs=ms;q.totalValid=true;}
                 else if(status==GpuTimerPoll::Invalid) q.timeDone=true;
             }
         }
@@ -750,7 +1082,30 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 q.statsDone = true;   // an unreadable sample; drop it
             }
         }
-        if (q.timeDone && q.statsDone) q.inUse = false;
+        // Stage 0 price report: each region polled the same way as the
+        // total timer above -- a region never begun this call (regionEnded
+        // false) or begun but refused a lease (regionEnded true,
+        // regionTiming false) is done immediately at 0 ms, same as the
+        // deliverable's "absent"/"dropped" contribute 0.
+        bool regionsDone = true;
+        for (int ri = 0; ri < kRegionCount; ++ri) {
+            if (q.regionDone[ri]) continue;
+            if (!q.regionEnded[ri] || !q.regionTiming[ri]) {
+                q.regionDone[ri] = true;
+                continue;
+            }
+            double rms = 0.0;
+            const auto rstatus = q.regionTimer[ri].poll(ctx, rms);
+            if (rstatus == GpuTimerPoll::Ready) { q.regionMs[ri] = rms; q.regionDone[ri] = true; }
+            else if (rstatus == GpuTimerPoll::Invalid) q.regionDone[ri] = true;
+            if (!q.regionDone[ri]) regionsDone = false;
+        }
+        q.regionsDone = regionsDone;
+        if (q.timeDone && q.regionsDone && !q.priced) {
+            q.priced = true;
+            priceSlot(q);
+        }
+        if (q.timeDone && q.statsDone && q.regionsDone) q.inUse = false;
     }
     maybeLogPrice();
 }
@@ -3354,8 +3709,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const bool diagnostics = g_diagnostics || g_debugMode != 0 || g_eyeRunLeft > 0 || g_eyeRunReady;
         const bool statsWritten = diagnostics || (flags & 2u) == 0 || g_foveaDeg > 0.0f;
         const bool timingOwner = gpuTimingBind(dev, ctx) && gpuTimingAccepts(ctx);
-        const int qs = gpuTimingOwns(ctx) && (statsWritten || (g_rowsFrame & 31u) == 0)
-            ? acquireSlot(dev) : -1;
+        // Stage 0 price report: sample every call the timing owner accepts,
+        // not just the stats-written 1-in-32 (fovea already ran every call;
+        // full-frame DLAA did not, so its price sample was 32x sparser than
+        // the fovea's). The STAGING READBACK gate just below is unchanged --
+        // this only widens which calls get a GPU-timer lease. The pooled F8
+        // "temporal AA ms" average (temporalPassDlaaTotals) is fed by the
+        // same widened set, so it now samples every frame instead of 1-in-32;
+        // its meaning (an average ms per eye-call) is unchanged.
+        const bool timingWanted = gpuTimingOwns(ctx);
+        const int qs = timingWanted ? acquireSlot(dev) : -1;
+        if (timingWanted && qs < 0) ++g_droppedNoSlot;
         if (qs >= 0) {
             auto& slot = g_slots[qs];
             slot.timing = timingOwner && slot.timer.begin(dev, ctx);
@@ -3364,6 +3728,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // Only the later CopyResource makes staging readable. An aborted
             // pass must not consume a previous frame's staging contents.
             slot.statsDone = true;
+            // Stage 0 price report: this ring slot may carry a previous
+            // eye-call's region bookkeeping (the slot is reused, not reset,
+            // between calls) -- clear it before this call's begin/end pairs
+            // below write into it.
+            slot.priced = false;
+            slot.totalValid = false;
+            slot.totalMs = 0.0;
+            slot.regionsDone = false;
+            for (int ri = 0; ri < kRegionCount; ++ri) {
+                slot.regionTiming[ri] = false;
+                slot.regionEnded[ri] = false;
+                slot.regionDone[ri] = false;
+                slot.regionMs[ri] = 0.0;
+            }
         }
         const UINT zeros[4] = {0, 0, 0, 0};
         if (statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
@@ -3635,12 +4013,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         g_csUiResolve=shaderSwapCompileCs(ctx,kUiResolve,sizeof(kUiResolve)-1,"main","UI resolve",nullptr,"UI resolve");
                     }
                     const bool uiResolve=uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaint;
-                    // Removing UI from the input is safe only when the matching
-                    // current-frame composite is available at the output.
-                    const bool separated=uiResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
                     ID3D11ShaderResourceView* deferredInput=nullptr;
                     if(!debugPaint && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
                         deferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
+                    // Deferred replay owns both clean input and final native UI
+                    // when it succeeds. The older separation/resolve path stays
+                    // available as the fallback, but must not replace that clean
+                    // input or modify dlSubmit before uiDeferredApply reads it.
+                    const bool applyLegacyResolve=uiResolve && !deferredInput;
+                    const bool separated=applyLegacyResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
                     // The colour, typed, whichever way the source came.
                     D3D11_BOX box{};
                     box.left = viaCopy ? 0 : region[0];
@@ -3649,6 +4030,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     box.right = box.left + w;
                     box.bottom = box.top + h;
                     box.back = 1;
+                    // "prep": the colour copy and the motion-vector dispatch
+                    // below, NVIDIA's inputs.
+                    beginRegion(qs, Region::Prep, dev, ctx);
                     if (viaCopy) {
                         D3D11_BOX full{};
                         full.left = region[0];
@@ -3662,11 +4046,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
-                    const bool currentSeparated=separated || deferredInput;
+                    const bool currentDeferred=deferredInput!=nullptr;
+                    const bool currentSeparated=separated || currentDeferred;
                     const bool deferredFallbackReset=uiDeferredFallbackReset(eye);
-                    const bool separationChanged=currentSeparated!=e.uiSeparatedHistory || deferredFallbackReset;
+                    const bool separationChanged=currentSeparated!=e.uiSeparatedHistory || currentDeferred!=e.uiDeferredHistory || deferredFallbackReset;
                     if(separationChanged){e.dlHaveHistory=false;e.uiHistoryValid=false;e.zPrevValid=false;}
                     e.uiSeparatedHistory=currentSeparated;
+                    e.uiDeferredHistory=currentDeferred;
+                    if(currentDeferred)e.uiHistoryValid=false;
                     // The eye run's raw frame (g_eyeRawStaging says why).
                     if (eye == 0 && g_eyeRunLeft > 0) captureEyeRunRaw(ctx, e.dlColour);
                     if(deferredInput){Microsoft::WRL::ComPtr<ID3D11Resource> clean;deferredInput->GetResource(&clean);ctx->CopyResource(e.dlColour,clean.Get());}
@@ -3714,7 +4101,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Modern DLSS presets ignore the bias mask. The final UI
                     // resolve writes its own influence history below; avoid
                     // the ineffective adaptive colour work in the MV shader.
-                    if(uiResolve) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
+                    if(uiResolve || deferredInput) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[17] = {};
@@ -3729,12 +4116,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           uiBound ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
-                                                          uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
+                                                          uiTrack && !deferredInput && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1]};
                     ID3D11UnorderedAccessView* uavsM[7] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
-                                                           uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
+                                                            uiTrack && !uiResolve && !deferredInput ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
                     ctx->CSSetShaderResources(0, 17, srvsM);
@@ -3744,8 +4131,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
-                    if (uiTrack && !uiResolve) uiEvidenceWritten = true;
+                    if (uiTrack && !uiResolve && !deferredInput) uiEvidenceWritten = true;
                     if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],separated?&separatedCandidate:nullptr);
                     if(deferredInput && eye==0 && g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame){stageEyeRun(ctx,e.dlColour,g_eyeInputs,16);g_eyeInputsUiFlags|=64u;}
                     // What NVIDIA is handed: the union when the mover mask
@@ -3789,9 +4177,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         // starts afresh after.
                         usedDlaa = true;
                         e.dlHaveHistory = false;
-                    } else if (dlaaEvaluate(ctx, eye, separated?separatedCandidate.colour:e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
+                    } else if ((beginRegion(qs, Region::Full, dev, ctx),
+                                dlaaEvaluate(ctx, eye, separated?separatedCandidate.colour:e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
                                             biasMask, w, h,
-                                            oW, oH, jxNow, jyNow, resetHist, frameMs, &why)) {
+                                            oW, oH, jxNow, jyNow, resetHist, frameMs, &why))) {
+                        endRegion(qs, Region::Full, ctx);
                         usedDlaa = true;
                         e.dlHaveHistory = true;
                         if (!g_dlaaNoted || (oW != w && !g_dlssNoted)) {
@@ -3848,6 +4238,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             }
                         }
                     } else {
+                        endRegion(qs, Region::Full, ctx);
                         e.dlHaveHistory = false;
                         if (!g_dlaaFailNoted) {
                             g_dlaaFailNoted = true;
@@ -3865,7 +4256,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if(usedDlaa && captureResolve)stageEyeRun(ctx,e.dlOut,g_eyeInputs,13);
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
-                    if (usedDlaa && uiResolve) {
+                    if (usedDlaa && applyLegacyResolve) {
+                        // "ui": the UI resolve dispatch, after DLAA/DLSS.
+                        beginRegion(qs, Region::Ui, dev, ctx);
                         ctx->CSSetShaderResources(0,17,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
                         auto* resolveScreen=screenSrv;
                         if(screenSrv && (p.region[0]!=int32_t(region[0]) || p.region[1]!=int32_t(region[1]))) {
@@ -3882,12 +4275,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->CSSetConstantBuffers(0,1,&g_cb);
                         ctx->Dispatch((w+7)/8,(h+7)/8,1);
                         ctx->CSSetShaderResources(0,17,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
+                        endRegion(qs, Region::Ui, ctx);
                         uiEvidenceWritten=uiResolveWritten=true;
                         if(separated)uiSeparationEvaluated();
                         if(captureResolve)stageEyeRun(ctx,e.uiHistory[1-e.uiHistoryRead],g_eyeInputs,15);
                         if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");}
                     } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
-                    if(usedDlaa && deferredInput)uiDeferredApply(ctx,eye);
+                    // "ui" for the deferred route instead: the replay of the
+                    // captured UI onto the submit. Exclusive with the legacy
+                    // resolve above (applyLegacyResolve is uiResolve without a
+                    // deferred input), so the region begins once per slot.
+                    if(usedDlaa && deferredInput){beginRegion(qs, Region::Ui, dev, ctx);uiDeferredApply(ctx,eye);endRegion(qs, Region::Ui, ctx);}
                 }
             }
         }
@@ -4016,6 +4414,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // The colour, typed, whichever way the source came (the
                     // full path's copy logic).
                     D3D11_BOX box{};
+                    beginRegion(qs, Region::Prep, dev, ctx);
                     box.left = viaCopy ? 0 : region[0];
                     box.top = viaCopy ? 0 : region[1];
                     box.front = 0;
@@ -4065,6 +4464,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack) uiEvidenceWritten = true;
 
@@ -4087,6 +4487,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (steady) {
                         bool inputsOk = true;
                         if (reduce) {
+                            // "reduce": the periphery's own downsample dispatch.
+                            beginRegion(qs, Region::Reduce, dev, ctx);
                             D3D11_MAPPED_SUBRESOURCE dm{};
                             if (SUCCEEDED(ctx->Map(g_downCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &dm)) &&
                                 dm.pData) {
@@ -4114,7 +4516,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 ctx->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
                                 ctx->CSSetShaderResources(0, 3, nullD3);
                                 ctx->CSSetUnorderedAccessViews(0, 3, nullDu, nullptr);
+                                endRegion(qs, Region::Reduce, ctx);
                             } else {
+                                endRegion(qs, Region::Reduce, ctx);
                                 inputsOk = false;
                             }
                         }
@@ -4124,10 +4528,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             const float sx = static_cast<float>(rw) / static_cast<float>(w);
                             const float sy = static_cast<float>(rh) / static_cast<float>(h);
                             const bool resetP = (flags & 1u) != 0 || !e.prHaveHistory;
+                            // "periphery": the steady periphery's own NGX role.
+                            beginRegion(qs, Region::Periphery, dev, ctx);
                             periphOk = dlaaEvaluatePeriphery(
                                 ctx, eye, reduce ? e.prColour : e.dlColour,
                                 reduce ? e.prDepth : e.dlDepth, reduce ? e.prMv : e.dlMv, e.prOut,
                                 rw, rh, jxNow * sx, jyNow * sy, resetP, frameMs, &whyF);
+                            endRegion(qs, Region::Periphery, ctx);
                             if (!periphOk) standDown(whyF);
                         }
                     }
@@ -4135,11 +4542,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // composited over just failed (the latch has it).
                     if (!steady || periphOk) {
                         const bool resetHist = (flags & 1u) != 0 || !e.foveaHaveHistory;
-                        if (dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
+                        // "centre": the fovea crop's own NGX role.
+                        if ((beginRegion(qs, Region::Centre, dev, ctx),
+                             dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
                                               foW, foH, fcx, fcy, fcw, fch, focx, focy, focw, foch,
-                                              jxNow, jyNow, resetHist, frameMs, &whyF)) {
+                                              jxNow, jyNow, resetHist, frameMs, &whyF))) {
+                            endRegion(qs, Region::Centre, ctx);
                             foveaEvalOk = true;   // e.foveaHaveHistory is set from this at frame end
                         } else {
+                            endRegion(qs, Region::Centre, ctx);
                             standDown(whyF);
                         }
                     }
@@ -4228,6 +4639,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
             // THE COMPOSITE: NVIDIA's crop over whichever periphery there is.
             if (foveaMode && foveaEvalOk && compositeReady && (periphOk || ownRan)) {
+                // "compose": the fovea/periphery blend dispatch.
+                beginRegion(qs, Region::Compose, dev, ctx);
                 ID3D11ShaderResourceView* csrv[2] = {periphOk ? e.prOutSrv : e.outSrv, e.dlOutSrv};
                 // u1 is the own history being written this frame, for the
                 // hand-off (the shader writes it only when mode.y says so).
@@ -4246,6 +4659,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ctx->Dispatch((foW + 7) / 8, (foH + 7) / 8, 1);
                 ctx->CSSetShaderResources(0, 2, nullC2);
                 ctx->CSSetUnorderedAccessViews(0, 2, nullCu, nullptr);
+                endRegion(qs, Region::Compose, ctx);
                 foveaComposited = true;
                 ++g_foveaTreats;
                 if (!g_foveaNoted) {
@@ -4291,6 +4705,24 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 g_slots[qs].candPixels[k] =
                     (useHistory && candValid[k]) ? static_cast<uint64_t>(w) * h : 0;
             }
+            // Stage 0 price report: this call's identity, for stereo pairing
+            // (eye + frame) and the window-reset test (treatment, output
+            // shape, config generation). foW/foH read the same as this
+            // branch's own output size either way (the full-frame branch's
+            // local oW/oH match them exactly when it runs).
+            g_slots[qs].eye = eye;
+            g_slots[qs].frame = g_rowsFrame;
+            // Stage 0 price report: labelled by what actually ran this call,
+            // not what the flags/format/fovea setup intended (F4) -- a
+            // persistent stand-down (NVIDIA refused, the fovea crop failed)
+            // must not be mislabelled by the intent that failed to happen.
+            g_slots[qs].treatment = foveaComposited ? Treatment::Fovea
+                                    : usedDlaa       ? Treatment::FullFrame
+                                                     : Treatment::None;
+            g_slots[qs].outW = foW;
+            g_slots[qs].outH = foH;
+            g_slots[qs].fmt = static_cast<uint32_t>(sd.Format);
+            g_slots[qs].configGen = g_configGeneration;
         }
 
         ID3D11ShaderResourceView* nullSrv2[17] = {};
@@ -4465,6 +4897,10 @@ void temporalPassDumpHistory(const char* trigger) {
 }
 
 void temporalPassConfigure(Config& cfg) {
+    // Stage 0 price report: every call (both its call sites) may change a
+    // live temporal_aa_* setting, so every call closes the report's current
+    // window regardless of whether the values read back the same.
+    ++g_configGeneration;
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     g_wanted = temporalModeEnabled(mode);
     // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 2
@@ -5314,6 +5750,38 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
     return true;
 }
 
+// The same price, split by role and eye, straight from dlaa.cpp: unlike
+// temporalPassDlaaTotals above, these need no g_dlaaTreats gate of their
+// own -- each role/eye's own count already says whether it has run.
+bool temporalPassDlaaFullTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs) {
+    return dlaaFullTotals(eye, frames, avgMs, maxMs);
+}
+bool temporalPassDlaaCentreTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs) {
+    return dlaaCentreTotals(eye, frames, avgMs, maxMs);
+}
+bool temporalPassDlaaPeripheryTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs) {
+    return dlaaPeripheryTotals(eye, frames, avgMs, maxMs);
+}
+
+// Stage 0 price report: the last CLOSED window's per-region median, in
+// the fixed order prep/reduce/periphery/centre/full/compose/ui, plus
+// "other" (total less the sum of those seven), the pair count the window
+// covered, and (F5) how many pairs/calls that window dropped before
+// pricing -- unmeasured pairs, lone eyes, no-slot frames and region-lease
+// failures, summed. False until a window has closed this session (every
+// 600 stereo pairs, or sooner on a treatment/size/format/setting change).
+bool temporalPassPriceWindow(double regionMedianMs[7], double* otherMedianMs,
+                              uint32_t* pairs, uint32_t* droppedTotal) {
+    if (!g_lastWindowValid) return false;
+    if (regionMedianMs) {
+        for (int ri = 0; ri < kRegionCount; ++ri) regionMedianMs[ri] = g_lastWindowMedian[ri];
+    }
+    if (otherMedianMs) *otherMedianMs = g_lastWindowOtherMedian;
+    if (pairs) *pairs = g_lastWindowPairs;
+    if (droppedTotal) *droppedTotal = g_lastWindowDropped;
+    return true;
+}
+
 void temporalPassShutdown() {
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     dlaaShutdown();
@@ -5326,6 +5794,16 @@ void temporalPassShutdown() {
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
     if (g_downCb) { g_downCb->Release(); g_downCb = nullptr; }
+    // Stage 0 price report: any eye still waiting for its stereo twin at
+    // shutdown is never going to get one -- drop it and count it (F2)
+    // rather than price it alone, before the window it would have landed
+    // in is closed below.
+    for (PendingPair& p : g_pending) {
+        if (p.used) finalizePending(p);
+    }
+    // The current window, even short of 600 pairs, is still evidence --
+    // write it rather than drop it on the floor.
+    flushWindow("shutdown");
     if (g_treats > 0) {
         Log::get().note("temporal aa: %u eye-submits treated this session.",
                         g_treats);
@@ -5462,4 +5940,13 @@ extern "C" __declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const floa
                                                              const float* nowPose,
                                                              const float* eyeOffset) {
     edvr::temporalPassNoteHead(eye, prevPose, nowPose, eyeOffset);
+}
+
+// For tools/smoke: the Stage 0 price report's last closed window, read
+// directly rather than through the menu's formatted status line. A thin
+// wrapper over temporalPassPriceWindow; medians7 must hold 7 doubles.
+// Any of the four pointers may be null.
+extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7, double* other,
+                                                                unsigned* pairs, unsigned* dropped) {
+    edvr::temporalPassPriceWindow(medians7, other, pairs, dropped);
 }

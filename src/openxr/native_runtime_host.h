@@ -1566,6 +1566,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(!externalDevice||!graphicsCalls.invoke([&]{hr=NativeDevice::validate(externalDevice,req.adapterLuid,req.minFeatureLevel);})||FAILED(hr))
         return result("producer_device_validation",XR_ERROR_GRAPHICS_DEVICE_INVALID);
       hr=graphics.initializeSeparate(req.adapterLuid,req.minFeatureLevel);
+      // Name the d3d11 module the XR device came from, so a proxy handed back
+      // by a hooked LoadLibraryExW (3Dmigoto/EDHM) is visible above the error.
+      nativeTracePrintf("device_module,route=%s,path=%s\n",graphics.separateModuleRoute(),graphics.separateModulePath().c_str());
     } else if(!graphicsCalls.invoke([&]{hr=externalDevice?
         graphics.initializeExisting(externalDevice,req.adapterLuid,req.minFeatureLevel):
         graphics.initialize(req.adapterLuid,req.minFeatureLevel,createDevice);}))
