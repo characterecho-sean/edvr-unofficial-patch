@@ -170,12 +170,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EyeCapture previousPair;
   bool previousPairValid=false,frameWithheld=false,frameDecisionReady=false;
   XrView previousViews[2]{};
+  StereoPlacement previousPlacement[2]{};
   XrSpace previousSpace=XR_NULL_HANDLE;
   uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
   NativeFrameClient features;
   NativeFssClient fss;
   NativeCullGuard cullGuard;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_1};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_2};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t offsetFrames=0,fssHealedEyes[2]{},featureChanges=0;
@@ -214,7 +215,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   float resetPositionError=0,resetYawError=0;
   FrameBoundary boundary{state,*this};
   RuntimeGate gate; uint64_t runtimeGeneration=0;
+  // frameViews is the projection the XR layer advertises: the located one,
+  // always, so every runtime composes it the way it composes an untouched
+  // frame. frameContentViews is the projection the treated pixels actually
+  // hold, which a trim makes narrower, and framePlacement is where those
+  // pixels sit inside the layer's own field. The three agree when no trim
+  // is live, and the placement is then the whole image.
   XrView frameViews[2]{};
+  XrView frameContentViews[2]{};
+  StereoPlacement framePlacement[2]{};
   uint64_t copiedEyes=0, composedPairs=0;
   SystemPublication geometry; uint64_t geometryGeneration=0;
   OpenVRSystem systemInterface{*this};
@@ -595,6 +604,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometrySnapshot snapshot{};
     const bool valid=makeGeometrySnapshot(located,snapshot);
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
+    frameContentViews[0]=frameViews[0];frameContentViews[1]=frameViews[1];
+    framePlacement[0]={};framePlacement[1]={};
     boundary.setGeometryReady(valid);
     r=boundary.background();
     if(r==XR_SUCCESS){++loadingFrames;if(valid&&frame.shouldRender)++loadingLayers;else ++loadingEmpty;}
@@ -735,7 +746,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_1};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_2};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -755,6 +766,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         NativeCullSettings settings{};settings.mode=static_cast<NativeCullMode>(featureFrame.cullMode);
         settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;
         settings.verticalFraction=featureFrame.cullVerticalFraction;settings.signatureCount=featureFrame.cullSignatureCount;
+        settings.trimOuterDeg=featureFrame.trimOuterDeg;settings.trimNasalDeg=featureFrame.trimNasalDeg;
+        settings.trimVerticalDeg=featureFrame.trimVerticalDeg;
         for(unsigned i=0;i<(std::min)(settings.signatureCount,8u);++i)
           settings.signatures[i]={featureFrame.cullSignatures[i][0],featureFrame.cullSignatures[i][1]};
         NativeCullFrustum frusta[2]{};NativeCullDimensions dimensions[2]{};
@@ -765,12 +778,20 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         cullGuard.beginFrame(settings,frusta,dimensions,featureFrame.sceneReady!=0,poses.read().originGeneration);
         if(cullGuard.changed()) {
           invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;
-          nativeTracePrintf("native_cull,stage=%u,factors=%.5f/%.5f,recommended=%ux%u\n",unsigned(cullGuard.stage()),
-            cullGuard.factorWidth(),cullGuard.factorHeight(),cullGuard.recommended(0).width,cullGuard.recommended(0).height);
+          // Eye 0's, as they stand at this stage: the frustum the treated
+          // image will hold and where it sits in the eye's full field, which
+          // are the runtime's own and identity until the stage goes live. A
+          // clamped trim shows as an applied value below the one asked for.
+          const auto target=cullGuard.contentFrustum(0);const auto place=cullGuard.placementBounds(0);
+          nativeTracePrintf("native_cull,stage=%u,factors=%.5f/%.5f,recommended=%ux%u,trim=%.1f/%.1f/%.1f,"
+            "target=%.4f/%.4f/%.4f/%.4f,placement=%.4f/%.4f/%.4f/%.4f\n",unsigned(cullGuard.stage()),
+            cullGuard.factorWidth(),cullGuard.factorHeight(),cullGuard.recommended(0).width,cullGuard.recommended(0).height,
+            cullGuard.appliedOuterDeg(0),cullGuard.appliedNasalDeg(0),cullGuard.appliedVerticalDeg(0),
+            target.left,target.right,target.down,target.up,place.left,place.top,place.right,place.bottom);
         }
         const auto stage=cullGuard.stage();
         features.cull(stage==NativeCullStage::Live?2u:stage==NativeCullStage::Adopting?1u:0u,
-            cullGuard.factorWidth(),cullGuard.factorHeight());
+            cullGuard.widenFactorWidth(),cullGuard.widenFactorHeight());
         for(unsigned e=0;e<2;++e) {
           const auto raw=cullGuard.gameFrustum(e);const auto dims=cullGuard.recommended(e);
           gameGeometry.views[e].fov={std::atan(raw.left),std::atan(raw.right),std::atan(raw.up),std::atan(raw.down)};
@@ -797,11 +818,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(fss.acquired()&&locatedValid&&frame.shouldRender && fss.begin(gameGeometry,poses.read().originGeneration)!=S_OK) {
       boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
     }
+    // The runtime's hidden-area mesh is cut for the runtime's own frustum and
+    // Elite reads it once. A trim changes that frustum exactly as the guard's
+    // widening does, so it withholds the mesh on the same terms -- keyed on
+    // what is configured, not on the stage, because there is no second read.
     const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,
-        !featureFrameKnown||featureFrame.cullMode==0);
+        !featureFrameKnown||(featureFrame.cullMode==0&&featureFrame.trimOuterDeg<=0&&
+          featureFrame.trimNasalDeg<=0&&featureFrame.trimVerticalDeg<=0));
     boundary.setGeometryReady(geometryValid);
     frameGeometry=located;frameGeometryAvailable=true;
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
+    frameContentViews[0]=frameViews[0];frameContentViews[1]=frameViews[1];
+    framePlacement[0]={};framePlacement[1]={};
     auto snapshot=poses.read();snapshot.sequence=frame.sequence;snapshot.renderTime=render.time;snapshot.gameTime=game.time;
     snapshot.renderPose=render.pose;snapshot.gamePose=game.pose;snapshot.posesAvailable=true;
     if(!poses.publish(snapshot)){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
@@ -993,16 +1021,44 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         nativeTracePrintf("native_temporal,first_treated_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
     }
     // A refused temporal pass leaves jitter in the raw pixels. Preserve their
-    // actual projection in both the menu and the XR layer for this frame.
+    // actual projection for this frame: in the menu and the XR layer both,
+    // or, where a trim has moved the two apart, in the menu and the
+    // placement, which is the one that still describes those pixels.
     frameViews[unsigned(eye)]=frameGeometry.views[unsigned(eye)];
+    frameContentViews[unsigned(eye)]=frameViews[unsigned(eye)];
+    framePlacement[unsigned(eye)]={};
+    // A trim narrows what the image holds without narrowing what the layer
+    // advertises: the Oculus runtime ignores a narrower layer FOV, so the
+    // pixels are placed inside the full field instead and the rest is black.
+    // Without a trim the image still holds the located projection, and both
+    // the menu and the layer keep the located angles untouched.
+    const bool placed=cullGuard.stage()==NativeCullStage::Live&&cullGuard.trimmed();
+    if(placed) {
+      const auto content=cullGuard.contentFrustum(unsigned(eye));
+      frameContentViews[unsigned(eye)].fov={std::atan(content.left),std::atan(content.right),
+        std::atan(content.up),std::atan(content.down)};
+      const auto place=cullGuard.placementBounds(unsigned(eye));
+      framePlacement[unsigned(eye)]={place.left,place.top,place.right,place.bottom};
+    }
     if(!temporalOutput) {
-      auto& fov=frameViews[unsigned(eye)].fov;
       const auto* shift=frameTangentShift[unsigned(eye)];
       if(shift[0]!=0||shift[1]!=0) {
+        auto& fov=frameContentViews[unsigned(eye)].fov;
         RawFov raw{};
         if(!fovToRaw(fov,raw)){timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
         fov={std::atan(raw.left+shift[0]),std::atan(raw.right+shift[0]),
              std::atan(raw.bottom+shift[1]),std::atan(raw.top+shift[1])};
+        if(placed) {
+          // The jittered pixels sit a fraction of the eye's own span away
+          // from where the placement put them. Move the rectangle, so the
+          // layer keeps the located field it is composed against.
+          const auto full=cullGuard.runtimeFrustum(unsigned(eye));
+          const float du=full.right-full.left,dv=full.up-full.down;
+          if(!(du>1e-4f&&dv>1e-4f)){timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
+          auto& place=framePlacement[unsigned(eye)];
+          place.left+=shift[0]/du;place.right+=shift[0]/du;
+          place.top-=shift[1]/dv;place.bottom-=shift[1]/dv;
+        } else frameViews[unsigned(eye)].fov=fov;
       }
     }
     const vr::VRTextureBounds_t fullBounds{0,0,1,1};
@@ -1033,8 +1089,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(menu.acquired()) {
       HRESULT treatment=E_FAIL;
       LARGE_INTEGER menuBegan{},menuEnded{}; const auto menuClock=QueryPerformanceCounter(&menuBegan);
+      // The menu is drawn into the treated image, so it is placed by what
+      // that image holds, not by what the layer will advertise.
       auto menuGeometry=frameGeometry;
-      menuGeometry.views[0]=frameViews[0];menuGeometry.views[1]=frameViews[1];
+      menuGeometry.views[0]=frameContentViews[0];menuGeometry.views[1]=frameContentViews[1];
       if(frameGeometryAvailable&&menu.publish(menuGeometry,poses.read().originGeneration)==S_OK) {
         ++menuPosePublications;
         treatment=menu.treat(unsigned(eye),menuSource,menuBounds,treated,treatedBounds);
@@ -1182,8 +1240,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return XR_ERROR_RUNTIME_FAILURE;
     }
     StereoWallTimes wall{};
-    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall);
+    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall,framePlacement);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
@@ -1201,6 +1259,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!pixels||!featureFrame.resubmitEnabled)return;
     if(captured.exchangeBuffers(previousPair)) {
       previousViews[0]=frameViews[0];previousViews[1]=frameViews[1];previousSpace=frameSpace;
+      // The kept pair carries the placement it was drawn with; a replay of it
+      // under a changed trim would otherwise stretch those pixels.
+      previousPlacement[0]=framePlacement[0];previousPlacement[1]=framePlacement[1];
       previousReference=poses.read().originGeneration;previousPairValid=true;
     } else previousPairValid=false;
   }

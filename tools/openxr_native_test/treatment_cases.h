@@ -85,6 +85,9 @@ template<class Check> void runTreatmentCases(Check check) {
   check(SUCCEEDED(device->CreateTexture2D(&desc,&data,&source)),"treatment source");if(!source)return;
   launch_fixture::Fixture f;auto& h=f.host;
   h.frameViews[0]=h.frameGeometry.views[0];h.frameViews[1]=h.frameGeometry.views[1];
+  // The host seeds both at wait-frame; a fixture that hand-builds the pair
+  // has to as well, or the menu is published half a stereo geometry.
+  h.frameContentViews[0]=h.frameViews[0];h.frameContentViews[1]=h.frameViews[1];
   check(f.initialized&&SUCCEEDED(h.captured.initialize(device.Get())),"host treatment capture initialized");
   const auto provider=GetModuleHandleW(nullptr);
   check(h.fss.acquire(provider,device.Get(),1)==S_OK&&h.temporal.acquire(provider,device.Get(),1)==S_OK&&
@@ -160,6 +163,9 @@ template<class Check> void runDeferredTreatmentCases(Check check) {
   launch_fixture::Fixture f;auto& h=f.host;
   h.startupOptions.separateDevice=true;h.externalDevice=producer.Get();
   h.frameViews[0]=h.frameGeometry.views[0];h.frameViews[1]=h.frameGeometry.views[1];
+  // The host seeds both at wait-frame; a fixture that hand-builds the pair
+  // has to as well, or the menu is published half a stereo geometry.
+  h.frameContentViews[0]=h.frameViews[0];h.frameContentViews[1]=h.frameViews[1];
   const auto provider=GetModuleHandleW(nullptr);
   check(h.fss.acquire(provider,producer.Get(),1)==S_OK&&h.temporal.acquire(provider,producer.Get(),1)==S_OK&&
     h.sharpen.acquire(provider,producer.Get(),1)==S_OK&&h.menu.acquire(provider,producer.Get(),1)==S_OK,"host handoff providers");

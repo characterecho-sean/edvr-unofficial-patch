@@ -407,7 +407,7 @@ XrResult D3D11Stereo::drawEye(unsigned eye, const XrView& view, ID3D11Texture2D*
 
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
-                                   StereoWallTimes* times) {
+                                   StereoWallTimes* times, const StereoPlacement* placement) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
@@ -447,6 +447,22 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     }
     c.encodeSRGB=(format_==DXGI_FORMAT_R8G8B8A8_UNORM||format_==DXGI_FORMAT_B8G8R8A8_UNORM)?1.f:0.f;
   }
+  // Where each eye's pixels land in its image, in whole pixels. The whole
+  // image needs no clear -- the blit writes every pixel of it -- and takes
+  // the viewport this renderer has always used. Anything narrower is a game
+  // projection the host trimmed, and the border around it must be black.
+  D3D11_VIEWPORT viewports[2]{};bool clearFirst[2]{false,false};
+  for(unsigned i=0;i<2;++i) {
+    StereoPlacement p=placement?placement[i]:StereoPlacement{};
+    for(float v:{p.left,p.top,p.right,p.bottom})if(!std::isfinite(v))return XR_ERROR_VALIDATION_FAILURE;
+    const auto hold=[](float v){return v<0.f?0.f:(v>1.f?1.f:v);};
+    const float w=float(eyes_[i].width),h=float(eyes_[i].height);
+    const float x=std::round(hold(p.left)*w),y=std::round(hold(p.top)*h);
+    const float right=std::round(hold(p.right)*w),bottom=std::round(hold(p.bottom)*h);
+    if(!(right-x>=1.f)||!(bottom-y>=1.f))return XR_ERROR_VALIDATION_FAILURE;
+    viewports[i]={x,y,right-x,bottom-y,0,1};
+    clearFirst[i]=x>0.f||y>0.f||right<w||bottom<h;
+  }
   auto failed=[&](XrResult r){ready_=false;lastResult_=r;return r;};
   auto* drawContext=ownedImmediateScene_?immediateContext_.Get():context_.Get();
   for(unsigned i=0;i<2;++i) {
@@ -477,7 +493,8 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     // This scene shader writes every pixel with no discard. Diagnostics and
     // partial rendering still clear their targets where coverage requires it.
     auto* rtv=eyes_[i].rtvs[index].Get();drawContext->OMSetRenderTargets(1,&rtv,nullptr);
-    D3D11_VIEWPORT vp{0,0,float(eyes_[i].width),float(eyes_[i].height),0,1};drawContext->RSSetViewports(1,&vp);
+    if(clearFirst[i]){const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);}
+    drawContext->RSSetViewports(1,&viewports[i]);
     drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
     drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
     ID3D11ShaderResourceView* nullSrv=nullptr;drawContext->PSSetShaderResources(0,1,&nullSrv);

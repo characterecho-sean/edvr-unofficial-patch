@@ -86,6 +86,9 @@ int wmain(int argc, wchar_t** argv) {
                             "94x99, 120x130junk, 95X84, 10x20, 95x84 ");
     edvr::Config::get().set("fix.transition_flash", "1");
     edvr::Config::get().set("advanced.transition_flash_resubmit", "0");
+    edvr::Config::get().set("fix.fov_trim_outer", "7");
+    edvr::Config::get().set("fix.fov_trim_nasal", "44");   // clamped to 30
+    edvr::Config::get().set("fix.fov_trim_vertical", "-3"); // clamped to 0
 
     EdvrNativeFrameRequest request{
         sizeof(request), EDVR_NATIVE_FRAME_VERSION_1, device.Get(), 41};
@@ -106,7 +109,7 @@ int wmain(int argc, wchar_t** argv) {
     // a different XR-owner thread.  The provider must not use a producer-ID
     // gate for callbacks.
     EdvrNativeFrameOutput firstOutput{sizeof(firstOutput),
-                                      EDVR_NATIVE_FRAME_VERSION_1};
+                                      EDVR_NATIVE_FRAME_VERSION_2};
     HRESULT workerBegin = E_FAIL;
     HRESULT workerLatch = E_FAIL;
     EdvrNativeFrameDecision firstDecision{
@@ -141,6 +144,13 @@ int wmain(int argc, wchar_t** argv) {
     check(firstOutput.sceneReady && firstOutput.transitionEnabled &&
               !firstOutput.resubmitEnabled,
           "scene and transition outputs");
+    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_2 &&
+              firstOutput.size == sizeof(firstOutput),
+          "version 2 answered in kind");
+    check(firstOutput.trimOuterDeg == 7.0f &&
+              firstOutput.trimNasalDeg == 30.0f &&
+              firstOutput.trimVerticalDeg == 0.0f,
+          "field of view trim clamps to 0..30 degrees");
     check(firstDecision.withhold && firstDecision.jumpOnly,
           "marked frame is withheld as jump-only");
 
@@ -162,7 +172,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput lost = input(41, 7, 2, false);
     lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
     EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
-                                     EDVR_NATIVE_FRAME_VERSION_1};
+                                     EDVR_NATIVE_FRAME_VERSION_2};
     check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK &&
               !lostOutput.offsetEnabled,
           "lost pose succeeds but disables offset gate");
@@ -174,7 +184,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput bad = input(41, 7, 3);
     bad.physicalHead[0] = 2.0f;
     EdvrNativeFrameOutput badOutput{sizeof(badOutput),
-                                    EDVR_NATIVE_FRAME_VERSION_1};
+                                    EDVR_NATIVE_FRAME_VERSION_2};
     check(table.beginFrame(table.context, &bad, &badOutput) == E_INVALIDARG,
           "non-rigid physical pose rejected");
 
@@ -227,6 +237,34 @@ int wmain(int argc, wchar_t** argv) {
     check(table.latchSubmit(table.context, 7, &noHold) == S_OK &&
               !noHold.withhold,
           "hold is consumed once by visible pair");
+
+    // An openvr_api.dll from before the trim asks in version 1 and must be
+    // answered in version 1, in its own smaller struct, with nothing written
+    // past the end of it. A size that does not match its version is refused.
+    struct Guarded { EdvrNativeFrameOutput output; uint32_t sentinel; } guarded{};
+    guarded.output.size = EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
+    guarded.output.version = EDVR_NATIVE_FRAME_VERSION_1;
+    guarded.output.trimOuterDeg = guarded.output.trimNasalDeg =
+        guarded.output.trimVerticalDeg = -99.0f;
+    guarded.sentinel = 0xA5A5A5A5u;
+    EdvrNativeFrameInput legacyFrame = input(41, 7, 8);
+    check(table.beginFrame(table.context, &legacyFrame, &guarded.output) == S_OK &&
+              guarded.output.version == EDVR_NATIVE_FRAME_VERSION_1 &&
+              guarded.output.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1,
+          "version 1 caller answered in version 1");
+    check(guarded.output.cullMode == 2 && guarded.output.sceneReady &&
+              guarded.output.trimOuterDeg == -99.0f &&
+              guarded.sentinel == 0xA5A5A5A5u,
+          "version 1 answer writes no trim and nothing past its struct");
+    EdvrNativeFrameOutput mismatched{EDVR_NATIVE_FRAME_OUTPUT_SIZE_1,
+                                     EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameInput mismatchFrame = input(41, 7, 9);
+    check(table.beginFrame(table.context, &mismatchFrame, &mismatched) ==
+              E_INVALIDARG,
+          "a size that contradicts the version is refused");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_1 + 3 * sizeof(float) ==
+              sizeof(EdvrNativeFrameOutput),
+          "version 2 adds exactly the three trims");
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");

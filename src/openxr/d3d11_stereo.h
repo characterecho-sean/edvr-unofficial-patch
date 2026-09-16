@@ -19,6 +19,16 @@
 
 namespace edvr::openxr {
 
+// Where a treated eye's pixels belong inside the swapchain image, as
+// fractions of it, v running down from the top. The default is the whole
+// image, which is what every path that does not narrow the game's own
+// projection hands over. A narrower one leaves the rest of the image black:
+// the layer still advertises the runtime's full field, because a runtime
+// that ignores a narrower layer FOV (the Oculus one does) would stretch a
+// trimmed image across the lens instead. Deliberately not the guard's own
+// bounds type -- this header stays free of the native feature headers.
+struct StereoPlacement { float left = 0, top = 0, right = 1, bottom = 1; };
+
 struct StereoDispatch {
   PFN_xrEnumerateSwapchainFormats enumerateSwapchainFormats = nullptr;
   PFN_xrCreateSwapchain createSwapchain = nullptr;
@@ -57,9 +67,12 @@ class D3D11Stereo final {
   // XR calls and private deferred recording stay on the renderer owner.
   XrResult render(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
   XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
+  // placement, when given, points at one entry per eye. Absent, or the whole
+  // image, is the path this renderer has always taken.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
-                          StereoWallTimes* times = nullptr);
+                          StereoWallTimes* times = nullptr,
+                          const StereoPlacement* placement = nullptr);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&);
   // Complete submitted GPU work before retiring the render caller. Uses its

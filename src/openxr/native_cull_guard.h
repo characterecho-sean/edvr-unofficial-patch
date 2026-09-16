@@ -21,11 +21,35 @@ struct NativeCullSettings {
   float verticalFraction = 1.0f;
   uint32_t signatureCount = 0;
   std::array<NativeCullSignature, 8> signatures{};
+  // Degrees taken off each eye's own edges before anything else happens, so
+  // the game is told a narrower projection AND a smaller render size: every
+  // pass it runs, upscaler included, is priced by that rectangle. Outer is
+  // the temple side of each eye, nasal the nose side (which costs only the
+  // stereo overlap), vertical both the top and the bottom edge. Zero leaves
+  // the edge exactly where the runtime put it.
+  float trimOuterDeg = 0.0f;
+  float trimNasalDeg = 0.0f;
+  float trimVerticalDeg = 0.0f;
 };
 
 struct NativeCullFrustum { float left=0, right=0, down=0, up=0; };
 struct NativeCullDimensions { uint32_t width=0, height=0; };
 struct NativeCullBounds { float left=0, top=0, right=1, bottom=1; };
+
+// The trim's own limits, in degrees. No edge is brought closer than
+// kNativeCullMinEdgeDeg to straight ahead and no axis is left narrower than
+// kNativeCullMinSpanDeg, whatever is asked for: a trim that closed an eye
+// would look like a broken runtime rather than a setting.
+constexpr float kNativeCullMinEdgeDeg = 5.0f;
+constexpr float kNativeCullMinSpanDeg = 20.0f;
+constexpr float kNativeCullPi = 3.1415926535f;
+
+inline float nativeCullDegrees(float tangent) noexcept {
+  return std::atan(tangent) * 180.0f / kNativeCullPi;
+}
+inline float nativeCullTangent(float degrees) noexcept {
+  return std::tan(degrees * kNativeCullPi / 180.0f);
+}
 
 // Elite applies its HMD quality multiplier with integer truncation. Keep the
 // game-facing recommendation even on both axes so quality 0.5 cannot lose a
@@ -45,11 +69,15 @@ class NativeCullGuard final {
     changed_ = false;
     const bool standDown=pendingStandDown_;pendingStandDown_=false;
     const bool valid = validSettings(settings) && validInputs(trueFrusta, runtimeDims);
-    if (!valid || settings.mode == NativeCullMode::Off) {
+    // A trim alone is reason enough to run: it tells the game a different
+    // projection and a different size, which is the whole of what the stage
+    // machine exists to land safely.
+    if (!valid || (settings.mode == NativeCullMode::Off && !anyTrim(settings))) {
       settings_=settings; referenceGeneration_=referenceGeneration;
-      if (validInputs(trueFrusta,runtimeDims)) { copy(trueFrusta, true_); copy(runtimeDims, runtime_); }
+      if (validInputs(trueFrusta,runtimeDims)) { copy(trueFrusta, true_); copy(runtimeDims, runtime_); copy(true_, target_); }
       if (stage_ != NativeCullStage::Off) changed_ = true;
-      clear();maxFactorW_=maxFactorH_=1; forcedInert_=false; stage_ = NativeCullStage::Off; return stage_;
+      clear();maxFactorW_=maxFactorH_=1;maxWidenW_=maxWidenH_=1;clearApplied();
+      forcedInert_=false; stage_ = NativeCullStage::Off; return stage_;
     }
     const bool configChanged = !sameSettings(settings, settings_);
     // Recenter moves the reference space, not the optical projection or the
@@ -58,8 +86,9 @@ class NativeCullGuard final {
     const bool geometryChanged = !sameFrusta(trueFrusta) || !sameDims(runtimeDims);
     referenceGeneration_ = referenceGeneration;
     if (configChanged || geometryChanged) {
-      settings_ = settings; copy(trueFrusta, true_); copy(runtimeDims, runtime_);
-      referenceGeneration_ = referenceGeneration; resetAdoption(); stage_ = NativeCullStage::Off; forcedInert_=false;
+      settings_ = settings; copy(trueFrusta, true_); copy(runtimeDims, runtime_); copy(true_, target_);
+      referenceGeneration_ = referenceGeneration; resetAdoption(); clearApplied();
+      stage_ = NativeCullStage::Off; forcedInert_=false;
       changed_ = true;
     } else {
       settings_ = settings;
@@ -72,8 +101,8 @@ class NativeCullGuard final {
         bool promote = true;
         for (unsigned e=0;e<2;++e) {
           promote = promote && changedSize(e) &&
-            float(submitted_[e].width) >= float(baseline_[e].width)*maxFactorW_*.97f &&
-            float(submitted_[e].height) >= float(baseline_[e].height)*maxFactorH_*.97f;
+            reached(submitted_[e].width, baseline_[e].width, maxFactorW_) &&
+            reached(submitted_[e].height, baseline_[e].height, maxFactorH_);
         }
         if (promote) { adopted_[0]=submitted_[0]; adopted_[1]=submitted_[1]; adoptedReady_=true; stage_ = NativeCullStage::Live; changed_ = true; }
       }
@@ -103,7 +132,22 @@ class NativeCullGuard final {
   bool pending() const noexcept { return stage_ == NativeCullStage::WaitingScene || stage_ == NativeCullStage::Adopting; }
   float factorWidth() const noexcept { return maxFactorW_; }
   float factorHeight() const noexcept { return maxFactorH_; }
+  // The widening alone, target span -> lied span, never below 1. The channel
+  // to the graphics half carries per-mille ABOVE 1.0 and cannot express a
+  // shrink, so it is told what was added, not the net of add and trim.
+  float widenFactorWidth() const noexcept { return maxWidenW_; }
+  float widenFactorHeight() const noexcept { return maxWidenH_; }
   bool changed() const noexcept { return changed_; }
+  // What the trim actually got, per eye, after the edge and span limits. It
+  // can be less than was asked for; that is the only place a clamp shows.
+  float appliedOuterDeg(unsigned eye) const noexcept { return eye<2?appliedOuter_[eye]:0.0f; }
+  float appliedNasalDeg(unsigned eye) const noexcept { return eye<2?appliedNasal_[eye]:0.0f; }
+  float appliedVerticalDeg(unsigned eye) const noexcept { return eye<2?appliedVertical_[eye]:0.0f; }
+  bool trimmed() const noexcept {
+    for(unsigned e=0;e<2;++e) if(appliedOuter_[e]>0||appliedNasal_[e]>0||appliedVertical_[e]>0) return true;
+    return false;
+  }
+  NativeCullFrustum runtimeFrustum(unsigned eye) const noexcept { return eye<2?true_[eye]:NativeCullFrustum{}; }
   NativeCullDimensions recommended(unsigned eye) const noexcept {
     if (eye >= 2) return {};
     if (stage_ != NativeCullStage::Adopting && stage_ != NativeCullStage::Live)
@@ -114,12 +158,22 @@ class NativeCullGuard final {
   NativeCullFrustum gameFrustum(unsigned eye) const noexcept {
     return eye < 2 && stage_ == NativeCullStage::Live ? lied_[eye] : (eye < 2 ? true_[eye] : NativeCullFrustum{});
   }
+  // What the headset actually shows, inside what the game was asked to
+  // render: the crop taken at submit. With a trim and no widening the two
+  // are the same frustum and this is exactly the whole image.
   NativeCullBounds cropBounds(unsigned eye) const noexcept {
     if (eye >= 2 || stage_ != NativeCullStage::Live) return {};
-    const auto& t=true_[eye]; const auto& l=lied_[eye];
-    const float du=l.right-l.left, dv=l.up-l.down;
-    if (!(du>1e-4f&&dv>1e-4f)) return {};
-    return {(t.left-l.left)/du,(l.up-t.up)/dv,(t.right-l.left)/du,(l.up-t.down)/dv};
+    return inside(target_[eye], lied_[eye]);
+  }
+  // Where that cropped image belongs inside the eye's own full field, which
+  // is what the XR layer still advertises. Identity without a trim.
+  NativeCullBounds placementBounds(unsigned eye) const noexcept {
+    if (eye >= 2 || stage_ != NativeCullStage::Live) return {};
+    return inside(target_[eye], true_[eye]);
+  }
+  // The projection the treated image holds once the crop has been taken.
+  NativeCullFrustum contentFrustum(unsigned eye) const noexcept {
+    return eye < 2 && stage_ == NativeCullStage::Live ? target_[eye] : (eye < 2 ? true_[eye] : NativeCullFrustum{});
   }
   NativeCullDimensions canonical(unsigned eye) const noexcept {
     if (eye >= 2 || stage_ != NativeCullStage::Live || !adoptedReady_) return {};
@@ -127,6 +181,24 @@ class NativeCullGuard final {
   }
 
  private:
+  // The inner frustum expressed as a sub-rectangle of the outer one. v runs
+  // down from the outer frustum's up edge, as every texture bound here does.
+  static NativeCullBounds inside(const NativeCullFrustum& in,const NativeCullFrustum& out) noexcept {
+    const float du=out.right-out.left, dv=out.up-out.down;
+    if (!(du>1e-4f&&dv>1e-4f)) return {};
+    return {(in.left-out.left)/du,(out.up-in.up)/dv,(in.right-out.left)/du,(out.up-in.down)/dv};
+  }
+  // Did the game move its render target as far as it was asked to, and in the
+  // direction it was asked to? A widened ask is met by anything at least the
+  // widened size (the game's own quality multiplier may scale it far past);
+  // a trimmed ask is met by a target that actually came down to it.
+  static bool reached(uint32_t submitted,uint32_t baseline,float factor) noexcept {
+    const float want=float(baseline)*factor;
+    return factor>=1.0f ? float(submitted)>=want*.97f : float(submitted)<=want*1.03f;
+  }
+  static bool anyTrim(const NativeCullSettings& s) noexcept {
+    return s.trimOuterDeg>0||s.trimNasalDeg>0||s.trimVerticalDeg>0;
+  }
   static uint32_t roundDim(float v) noexcept { return v > 0 && std::isfinite(v) && v <= 16384.0f ? uint32_t(std::lround(v)) : 0; }
   // Elite applies HMDRenderTargetMultiplier with integer truncation. An odd
   // widened recommendation can therefore lose a pixel at quality 0.5
@@ -142,6 +214,8 @@ class NativeCullGuard final {
       f.left < f.right && f.down < f.up && f.left >= -20 && f.right <= 20 && f.down >= -20 && f.up <= 20;
   }
   static bool validSettings(const NativeCullSettings& s) noexcept {
+    for (float trim : {s.trimOuterDeg, s.trimNasalDeg, s.trimVerticalDeg})
+      if (!std::isfinite(trim) || trim < 0 || trim > 30) return false;
     if (s.mode == NativeCullMode::Off) return true;
     if (s.mode != NativeCullMode::Symmetric && s.mode != NativeCullMode::Percent) return false;
     if (!std::isfinite(s.percent)||!std::isfinite(s.horizontalFraction)||!std::isfinite(s.verticalFraction)||
@@ -154,6 +228,7 @@ class NativeCullGuard final {
     for (unsigned i=0;i<2;++i) if (!finiteFrustum(f[i])||!d[i].width||!d[i].height||d[i].width>16384||d[i].height>16384) return false; return true;
   }
   static bool sameSettings(const NativeCullSettings& a,const NativeCullSettings& b) noexcept {
+    if (a.trimOuterDeg!=b.trimOuterDeg||a.trimNasalDeg!=b.trimNasalDeg||a.trimVerticalDeg!=b.trimVerticalDeg)return false;
     if (a.mode!=b.mode||a.percent!=b.percent||a.horizontalFraction!=b.horizontalFraction||a.verticalFraction!=b.verticalFraction||a.signatureCount!=b.signatureCount)return false;
     for(uint32_t i=0;i<a.signatureCount;++i)if(a.signatures[i].horizontal!=b.signatures[i].horizontal||a.signatures[i].vertical!=b.signatures[i].vertical)return false;return true;
   }
@@ -163,28 +238,97 @@ class NativeCullGuard final {
   static void copy(const NativeCullFrustum (&a)[2],NativeCullFrustum (&b)[2]) noexcept {b[0]=a[0];b[1]=a[1];}
   static void copy(const NativeCullDimensions (&a)[2],NativeCullDimensions (&b)[2]) noexcept {b[0]=a[0];b[1]=a[1];}
   void clear() noexcept { resetAdoption(); baselineReady_=false; }
+  void clearApplied() noexcept { for(unsigned e=0;e<2;++e) appliedOuter_[e]=appliedNasal_[e]=appliedVertical_[e]=0; }
   void resetAdoption() noexcept { baselineReady_=false; submittedReady_=false; adoptedReady_=false; submittedMask_=0; }
-  bool computeWidened() noexcept {
+  // One edge, trimmed inward by `applied` degrees with its sign kept. Zero is
+  // the tangent untouched, bit for bit: the identity crop and the identity
+  // placement have to be exact, not merely close.
+  static float trimmedEdge(float tangent,float applied) noexcept {
+    if(!(applied>0))return tangent;
+    const float magnitude=nativeCullDegrees(std::fabs(tangent));
+    return (tangent<0?-1.0f:1.0f)*nativeCullTangent(magnitude-applied);
+  }
+  static float edgeRoom(float tangent,float asked) noexcept {
+    const float room=nativeCullDegrees(std::fabs(tangent))-kNativeCullMinEdgeDeg;
+    return (!(asked>0)||room<=0)?0.0f:(asked<room?asked:room);
+  }
+  // Both edges of one axis at once, because the span limit is a property of
+  // the pair: when the two asks together would leave too little to see, both
+  // are scaled back in proportion rather than one being dropped.
+  static void trimAxis(float low,float high,float lowAsk,float highAsk,
+                       float& lowOut,float& highOut,float& lowApplied,float& highApplied) noexcept {
+    float a=edgeRoom(low,lowAsk), b=edgeRoom(high,highAsk);
+    const float span=nativeCullDegrees(high)-nativeCullDegrees(low);
+    for(unsigned pass=0;pass<2&&(a>0||b>0);++pass) {
+      const float lost=span-(nativeCullDegrees(trimmedEdge(high,b))-nativeCullDegrees(trimmedEdge(low,a)));
+      if(lost<=0||span-lost>=kNativeCullMinSpanDeg)break;
+      const float room=span-kNativeCullMinSpanDeg;
+      const float k=room<=0?0.0f:room/lost;
+      a*=k;b*=k;
+    }
+    lowOut=trimmedEdge(low,a);highOut=trimmedEdge(high,b);
+    if(nativeCullDegrees(highOut)-nativeCullDegrees(lowOut)<kNativeCullMinSpanDeg-.01f) {
+      a=b=0;lowOut=low;highOut=high; // an axis the limits cannot serve keeps its edges
+    }
+    lowApplied=a;highApplied=b;
+  }
+  // The trimmed true frustum: what the headset will be shown, and what the
+  // game is asked to render before any widening is added back on top.
+  bool computeTarget() noexcept {
+    clearApplied();
+    if(!anyTrim(settings_)) { copy(true_,target_); return true; }
     for(unsigned e=0;e<2;++e) {
-      const auto& t=true_[e]; auto& l=lied_[e];
-      if(e==0 && settings_.signatureCount) {
-        const auto h=uint32_t(std::lround((std::atan(std::fabs(t.left))*180.0f/3.1415926535f)+(std::atan(std::fabs(t.right))*180.0f/3.1415926535f)));
-        const auto v=uint32_t(std::lround((std::atan(std::fabs(t.down))*180.0f/3.1415926535f)+(std::atan(std::fabs(t.up))*180.0f/3.1415926535f)));
+      const auto& t=true_[e]; auto& g=target_[e]; g=t;
+      // The outer edge is the temple side: the wider of the two horizontal
+      // tangents on every headset seen here (eye 0's left, eye 1's right).
+      const bool outerIsLeft=std::fabs(t.left)>=std::fabs(t.right);
+      float lowApplied=0,highApplied=0,downApplied=0,upApplied=0;
+      trimAxis(t.left,t.right,outerIsLeft?settings_.trimOuterDeg:settings_.trimNasalDeg,
+               outerIsLeft?settings_.trimNasalDeg:settings_.trimOuterDeg,g.left,g.right,lowApplied,highApplied);
+      trimAxis(t.down,t.up,settings_.trimVerticalDeg,settings_.trimVerticalDeg,g.down,g.up,downApplied,upApplied);
+      appliedOuter_[e]=outerIsLeft?lowApplied:highApplied;
+      appliedNasal_[e]=outerIsLeft?highApplied:lowApplied;
+      // The two vertical edges can clamp differently on an asymmetric eye;
+      // report the one that got least, so a clamp is never hidden.
+      appliedVertical_[e]=(std::min)(downApplied,upApplied);
+      if(!finiteFrustum(g))return false;
+    }
+    return true;
+  }
+  bool computeWidened() noexcept {
+    if(!computeTarget())return false;
+    for(unsigned e=0;e<2;++e) {
+      const auto& t=target_[e]; auto& l=lied_[e]; const auto& raw=true_[e];
+      // The signature names the headset, so it is read off the runtime's own
+      // frustum, never the trimmed one -- and only where a mode is running.
+      if(e==0 && settings_.signatureCount && settings_.mode!=NativeCullMode::Off) {
+        const auto h=uint32_t(std::lround((std::atan(std::fabs(raw.left))*180.0f/3.1415926535f)+(std::atan(std::fabs(raw.right))*180.0f/3.1415926535f)));
+        const auto v=uint32_t(std::lround((std::atan(std::fabs(raw.down))*180.0f/3.1415926535f)+(std::atan(std::fabs(raw.up))*180.0f/3.1415926535f)));
         bool match=false;for(uint32_t i=0;i<settings_.signatureCount;++i)match|=settings_.signatures[i].horizontal==h&&settings_.signatures[i].vertical==v;if(!match)return false;
       }
       auto extend=[](float n,float p,float f,float& on,float& op){const float m=std::max(std::fabs(n),std::fabs(p));on=n-(std::fabs(n)<m?f*(m-std::fabs(n)):0);op=p+(std::fabs(p)<m?f*(m-std::fabs(p)):0);};
-      if(settings_.mode==NativeCullMode::Percent){const float f=1+settings_.percent/100;l={t.left*f,t.right*f,t.down*f,t.up*f};}
+      if(settings_.mode==NativeCullMode::Off)l=t; // a trim on its own asks for no margin at all
+      else if(settings_.mode==NativeCullMode::Percent){const float f=1+settings_.percent/100;l={t.left*f,t.right*f,t.down*f,t.up*f};}
       else {extend(t.left,t.right,settings_.horizontalFraction,l.left,l.right);extend(t.down,t.up,settings_.verticalFraction,l.down,l.up);}
       if(!(l.left<=t.left&&l.right>=t.right&&l.down<=t.down&&l.up>=t.up&&finiteFrustum(l)))return false;
-      factorW_[e]=(l.right-l.left)/(t.right-t.left);factorH_[e]=(l.up-l.down)/(t.up-t.down);
-      if(!std::isfinite(factorW_[e])||!std::isfinite(factorH_[e])||factorW_[e]>4||factorH_[e]>4)return false;
+      // The factors are measured against the RUNTIME's frustum, because they
+      // price the render target: a trim makes them smaller than 1.
+      factorW_[e]=(l.right-l.left)/(raw.right-raw.left);factorH_[e]=(l.up-l.down)/(raw.up-raw.down);
+      if(!std::isfinite(factorW_[e])||!std::isfinite(factorH_[e])||factorW_[e]>4||factorH_[e]>4||factorW_[e]<=0||factorH_[e]<=0)return false;
+      widenW_[e]=std::max(1.0f,(l.right-l.left)/(t.right-t.left));widenH_[e]=std::max(1.0f,(l.up-l.down)/(t.up-t.down));
+      if(!std::isfinite(widenW_[e])||!std::isfinite(widenH_[e]))return false;
     }
     maxFactorW_=std::max(factorW_[0],factorW_[1]);maxFactorH_=std::max(factorH_[0],factorH_[1]);
-    return (maxFactorW_>=1.01f||maxFactorH_>=1.01f) &&
+    maxWidenW_=std::max(widenW_[0],widenW_[1]);maxWidenH_=std::max(widenH_[0],widenH_[1]);
+    // A pixel count within one percent of what the runtime asked for, either
+    // way, is not worth a render-target rebuild.
+    return (std::fabs(maxFactorW_-1.0f)>=.01f||std::fabs(maxFactorH_-1.0f)>=.01f) &&
       roundRecommendedDim(float(runtime_[0].width)*maxFactorW_) && roundRecommendedDim(float(runtime_[0].height)*maxFactorH_) &&
       roundRecommendedDim(float(runtime_[1].width)*maxFactorW_) && roundRecommendedDim(float(runtime_[1].height)*maxFactorH_);
   }
-  NativeCullSettings settings_{}; NativeCullFrustum true_[2]{},lied_[2]{}; NativeCullDimensions runtime_[2]{},baseline_[2]{},submitted_[2]{},adopted_[2]{};
-  float factorW_[2]{1,1},factorH_[2]{1,1},maxFactorW_=1,maxFactorH_=1; uint64_t referenceGeneration_=0; uint32_t submittedMask_=0; NativeCullStage stage_=NativeCullStage::Off; bool baselineReady_=false,submittedReady_=false,adoptedReady_=false,forcedInert_=false,pendingStandDown_=false,changed_=false;
+  NativeCullSettings settings_{}; NativeCullFrustum true_[2]{},target_[2]{},lied_[2]{}; NativeCullDimensions runtime_[2]{},baseline_[2]{},submitted_[2]{},adopted_[2]{};
+  float factorW_[2]{1,1},factorH_[2]{1,1},widenW_[2]{1,1},widenH_[2]{1,1},maxFactorW_=1,maxFactorH_=1,maxWidenW_=1,maxWidenH_=1;
+  float appliedOuter_[2]{0,0},appliedNasal_[2]{0,0},appliedVertical_[2]{0,0};
+  uint64_t referenceGeneration_=0; uint32_t submittedMask_=0; NativeCullStage stage_=NativeCullStage::Off; bool baselineReady_=false,submittedReady_=false,adoptedReady_=false,forcedInert_=false,pendingStandDown_=false,changed_=false;
 };
 }

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <string>
 
@@ -169,16 +170,26 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
+    // A version 1 caller is an openvr_api.dll from before the field-of-view
+    // trim existed. It gets exactly the fields it knows about, and the trim
+    // it cannot carry stays out of its struct entirely.
+    const bool wantsTrim = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
+        output->size == sizeof(*output);
+    const bool legacy = output && !wantsTrim &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        output->size != sizeof(*output) || output->version != EDVR_NATIVE_FRAME_VERSION_1 ||
+        (!wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = sizeof(result);
-    result.version = EDVR_NATIVE_FRAME_VERSION_1;
+    result.size = wantsTrim ? sizeof(result) : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
+    result.version = wantsTrim ? EDVR_NATIVE_FRAME_VERSION_2
+                               : EDVR_NATIVE_FRAME_VERSION_1;
     result.headOffset[0] = boundedOffset(edvr::Config::get().getFloat(
         "openvr.head_offset_right", 0.0f));
     result.headOffset[1] = boundedOffset(edvr::Config::get().getFloat(
@@ -212,6 +223,12 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.cullVerticalFraction = clampFraction(edvr::Config::get().getFloat(
         "fix.cull_guard_fraction_v", 1.0f));
     readSignatures(edvr::Config::get().getString("fix.cull_guard_headsets", ""), &result);
+    result.trimOuterDeg = static_cast<float>(edvr::Config::get().getIntInRange(
+        "fix.fov_trim_outer", 0, 0, 30));
+    result.trimNasalDeg = static_cast<float>(edvr::Config::get().getIntInRange(
+        "fix.fov_trim_nasal", 0, 0, 30));
+    result.trimVerticalDeg = static_cast<float>(edvr::Config::get().getIntInRange(
+        "fix.fov_trim_vertical", 0, 0, 30));
     result.sceneReady = edvr::sceneArrived() &&
                         sameDevice(state->device, edvr::gameDevice()) ? 1u : 0u;
     result.transitionEnabled = edvr::Config::get().getBool(
@@ -256,7 +273,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         state->lastResubmitEnabled = result.resubmitEnabled;
         state->lastCullMode = result.cullMode;
     }
-    *output = result;
+    // Only as many bytes as the caller's own struct holds.
+    std::memcpy(output, &result, result.size);
     return S_OK;
 }
 
