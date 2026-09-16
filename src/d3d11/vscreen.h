@@ -26,6 +26,12 @@ struct ID3D11DeviceContext;
 struct ID3D11RenderTargetView;
 struct ID3D11DepthStencilView;
 struct ID3D11CommandList;
+struct ID3D11VertexShader;
+struct ID3D11PixelShader;
+struct ID3D11ClassInstance;
+struct ID3D11Buffer;
+struct ID3D11Resource;
+struct D3D11_BOX;
 
 namespace edvr {
 void vScreenExecuteCommandListRaw(ID3D11DeviceContext*,ID3D11CommandList*,int restore);
@@ -107,6 +113,22 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h);
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
                                 ID3D11RenderTargetView* const* rtvs,
                                 ID3D11DepthStencilView* dsv);
+
+// The same bypass for Draw, the VS/PS stage, a VS constant buffer slot and
+// UpdateSubresource -- everything fix.eye_mask's ring needs past the hook,
+// so the draw census, the eye-draw gate, foveation and the temporal pass
+// never see it. Every one null-safe before the hooks are installed (no-op),
+// same as vScreenSetRenderTargetsRaw above.
+void vScreenDrawRaw(ID3D11DeviceContext* ctx, uint32_t vertexCount, uint32_t startVertex);
+void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs,
+                           ID3D11ClassInstance* const* classInstances, uint32_t numClassInstances);
+void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps,
+                           ID3D11ClassInstance* const* classInstances, uint32_t numClassInstances);
+void vScreenVSSetConstantBuffersRaw(ID3D11DeviceContext* ctx, uint32_t startSlot,
+                                    uint32_t numBuffers, ID3D11Buffer* const* buffers);
+void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
+                                 uint32_t dstSubresource, const D3D11_BOX* dstBox,
+                                 const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch);
 
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on

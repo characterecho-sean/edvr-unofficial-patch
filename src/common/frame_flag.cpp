@@ -224,6 +224,10 @@ struct Shared {
     // reader that remembers the value at a withhold can tell a NEW verdict
     // from the last jump's. One word, so the two never tear.
     volatile LONG     jumpVerdict;
+    // The runtime-supplied hidden-area mesh's triangle count per eye,
+    // openvr -> d3d11, gaze's packing (presence bit, two biased fields): see
+    // announceRuntimeMaskTriangles in frame_flag.h.
+    volatile LONG     runtimeMaskTri;
 };
 
 // Per PROCESS, not per logon session.
@@ -240,6 +244,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v31 because the runtime's hidden-area-mesh triangle counts joined
+// (runtimeMaskTri), for fix.eye_mask's auto mode (frame_flag.h).
 // _v30 because the detector's verdict on a jump crosses to the openvr half
 // (jumpVerdict), which waits for it before restarting the history.
 // _v29 because the head lock's two angles are packed with a bias that fits
@@ -294,7 +300,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v30_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v31_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -704,6 +710,25 @@ bool gazeCentre(float* tx, float* ty, uint32_t* stamp) {
     const uint32_t v = static_cast<uint32_t>(packed);
     if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;
     if (ty) *ty = (static_cast<int32_t>(v & 0x7FFFu) - 16384) / 1000.0f;
+    return true;
+}
+
+void announceRuntimeMaskTriangles(uint32_t leftTri, uint32_t rightTri) {
+    Shared* s = map();
+    if (!s) return;
+    auto clamp15 = [](uint32_t n) -> uint32_t { return n > 0x7FFFu ? 0x7FFFu : n; };
+    const uint32_t packed = 0x80000000u | (clamp15(leftTri) << 15) | clamp15(rightTri);
+    InterlockedExchange(&s->runtimeMaskTri, static_cast<LONG>(packed));
+}
+
+bool runtimeMaskTriangles(uint32_t* leftTri, uint32_t* rightTri) {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG packed = InterlockedCompareExchange(&s->runtimeMaskTri, 0, 0);
+    if (!(static_cast<uint32_t>(packed) & 0x80000000u)) return false;
+    const uint32_t v = static_cast<uint32_t>(packed);
+    if (leftTri) *leftTri = (v >> 15) & 0x7FFFu;
+    if (rightTri) *rightTri = v & 0x7FFFu;
     return true;
 }
 

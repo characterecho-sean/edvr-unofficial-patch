@@ -378,7 +378,13 @@ void mapText(const GridStats& g, char* out, size_t n) {
 
 void depthProbeConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
-    g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
+    const std::string eyeMask = cfg.getString("fix.eye_mask", "off");
+    // fix.eye_mask needs the same clear-value census this probe already
+    // keeps for the temporal pass (depthProbeClearValueFor): the near value
+    // it writes must come from a recorded clear, never a guess, so the probe
+    // must be watching even on a rig with the temporal pass off.
+    g_wanted = (_stricmp(mode.c_str(), "off") != 0 && !mode.empty()) ||
+               (_stricmp(eyeMask.c_str(), "off") != 0 && !eyeMask.empty());
 }
 
 namespace {
@@ -702,6 +708,17 @@ void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth) {
     const int idx = findTarget(dsv);
     if (idx < 0) return;
     g_targets[idx].clearValue = depth;
+}
+
+bool depthProbeClearValueFor(ID3D11DepthStencilView* dsv, float* outClearValue, bool* outReversed) {
+    if (!g_wanted || !dsv) return false;
+    const int idx = findTarget(dsv);
+    if (idx < 0) return false;
+    const float c = g_targets[idx].clearValue;
+    if (c < 0.0f) return false;   // -1 sentinel: never seen (Target's own rule)
+    if (outClearValue) *outClearValue = c;
+    if (outReversed) *outReversed = c < 0.5f;
+    return true;
 }
 
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {

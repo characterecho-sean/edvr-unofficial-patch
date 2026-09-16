@@ -1541,6 +1541,14 @@ void summary(const char* when) {
 
 }  // namespace
 
+bool eyeOfSettled(const ResourceInfo& info, int* outEye) {
+    const int eye = eyeOf(info);
+    Known* k = knownFor(info.resource);
+    if (!k || !k->settled) return false;
+    if (outEye) *outEye = eye;
+    return true;
+}
+
 void foveationConfigure(Config& cfg) {
     const std::string mode = cfg.getString("experimental.foveation", "off");
     Mode m = Mode::Off;

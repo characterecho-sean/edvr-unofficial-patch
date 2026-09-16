@@ -893,6 +893,33 @@ int main(int argc, char** argv) {
         }
     }
 
+    // fix.eye_mask's geometry (eye_mask.h): pure, no device -- the ellipse
+    // that approximates a Pimax lens' visible circle from the eye's own
+    // frustum tangents, checked against the Crystal Super's measured
+    // values, and the trim clamp that keeps the cone from collapsing.
+    {
+        typedef unsigned (*PFN_EyeMask)();
+        PFN_EyeMask eyeMask =
+            reinterpret_cast<PFN_EyeMask>(GetProcAddress(mod, "edvrEyeMaskSelftest"));
+        if (!eyeMask) {
+            printf("  FAIL  edvrEyeMaskSelftest is not exported\n");
+            rc = 1;
+        } else {
+            const unsigned bits = eyeMask();
+            if (bits == 31u) {
+                printf("  ok    eye mask: the Crystal Super's tangents give the right "
+                       "centre and semi-axes, every outer ring vertex clears the "
+                       "screen, 6-9%% masked at trim 0, more at trim 30, and the edge "
+                       "clamp holds at an extreme trim\n");
+            } else {
+                printf("  FAIL  eye mask self-test returned %u (want 31: 1 centre/axes, "
+                       "2 outer ring, 4 masked pct at trim 0, 8 more at trim 30, 16 "
+                       "edge clamp)\n", bits);
+                rc = 1;
+            }
+        }
+    }
+
     // The trained pass (fix.temporal_aa = dlaa), through the temporal
     // export with its DLAA bit: on a machine with the SDK built in, the
     // runtime beside this harness and an RTX GPU, a steady solid colour

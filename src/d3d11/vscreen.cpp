@@ -52,6 +52,7 @@
 #include "fss_scan.h"
 #include "fss_theater.h"  // the warm-up; the theater itself runs at submit
 #include "depth_probe.h"       // Phase 0 item 3: which depth target the eye draws use, and how it reads
+#include "eye_mask.h"          // the lens-ring depth mask: draws past the hooks, once per eye per frame
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
 #include "menu.h"              // the settings menu's reload: its keys, then the row diff
 #include "perf_monitor.h"      // the draw hooks' sampled cost, and the reload as an event
@@ -2014,6 +2015,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The depth target this eye draw uses, for the depth probe -- one
     // pointer compare unless it changed (depth_probe.h).
     depthProbeNoteEyeDraw(self, bindingGet(BindSlot::Dsv0), s->eyeDrawsThisFrame);
+    // fix.eye_mask's own draw, past every hook below (eye_mask.h): at most
+    // once per eye per frame, so the cheap "already drawn" check runs before
+    // anything else even when the feature is off.
+    if (eyeMaskWantsDraws()) {
+        eyeMaskOnEyeDraw(self, bindingGet(BindSlot::Rtv0), bindingGet(BindSlot::Dsv0));
+    }
     // The interface's depth (ui_depth.h): a composite of a learned surface,
     // or a named family drawn straight into the eye, writes its depth. A
     // flag and not a verdict, so it composes with whatever claims the draw
@@ -3419,8 +3426,10 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
                              foreignContext(self));
     }
     // The depth probe learns which value the game clears an eye-draw
-    // target to, which says which way its depth runs.
-    if (!foreignContext(self)) {uiDeferredViewWrite(self,dsv);depthProbeNoteClear(dsv, depth);}
+    // target to, which says which way its depth runs. eye_mask learns
+    // whether this is a re-clear of a target it already drew its ring
+    // into this frame -- which would wipe the ring -- for its summary.
+    if (!foreignContext(self)) {uiDeferredViewWrite(self,dsv);depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);}
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 
@@ -4291,6 +4300,37 @@ void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
     g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
 }
 
+void vScreenDrawRaw(ID3D11DeviceContext* ctx, uint32_t vertexCount, uint32_t startVertex) {
+    if (!g_state || !g_state->realDraw || !ctx) return;
+    g_state->realDraw(ctx, vertexCount, startVertex);
+}
+
+void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs,
+                           ID3D11ClassInstance* const* classInstances, uint32_t numClassInstances) {
+    if (!g_state || !g_state->realVSSetShader || !ctx) return;
+    g_state->realVSSetShader(ctx, vs, classInstances, numClassInstances);
+}
+
+void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps,
+                           ID3D11ClassInstance* const* classInstances, uint32_t numClassInstances) {
+    if (!g_state || !g_state->realPSSetShader || !ctx) return;
+    g_state->realPSSetShader(ctx, ps, classInstances, numClassInstances);
+}
+
+void vScreenVSSetConstantBuffersRaw(ID3D11DeviceContext* ctx, uint32_t startSlot,
+                                    uint32_t numBuffers, ID3D11Buffer* const* buffers) {
+    if (!g_state || !g_state->realVSSetConstantBuffers || !ctx) return;
+    g_state->realVSSetConstantBuffers(ctx, startSlot, numBuffers, buffers);
+}
+
+void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
+                                 uint32_t dstSubresource, const D3D11_BOX* dstBox,
+                                 const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch) {
+    if (!g_state || !g_state->realUpdateSubresource || !ctx) return;
+    g_state->realUpdateSubresource(ctx, dstResource, dstSubresource, dstBox, srcData, srcRowPitch,
+                                   srcDepthPitch);
+}
+
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     State* s = g_state;
     if (!s || !w || !h) return false;
@@ -4364,6 +4404,7 @@ void vScreenRefreshConfig() {
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
     foveationConfigure(cfg);
+    eyeMaskConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
@@ -4644,6 +4685,7 @@ void vScreenFrameBoundary() {
     fssDumpFrameBoundary(s->ownerCtx);
     eyeSplitFrameBoundary(s->ownerCtx);
     foveationFrameBoundary(s->ownerCtx);
+    eyeMaskFrameBoundary(s->ownerCtx);
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -5521,6 +5563,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
     foveationConfigure(cfg);
+    eyeMaskConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
@@ -5872,6 +5915,7 @@ void shutdownVScreenFixes() {
     fssDumpShutdown();
     eyeSplitShutdown();
     foveationShutdown();
+    eyeMaskShutdown();
     resolveProbeShutdown();
     resolveBindShutdown();
     stencilProbeShutdown();

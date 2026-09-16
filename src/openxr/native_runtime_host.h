@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include "../common/frame_flag.h"
 #include "native_device.h"
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
@@ -277,9 +278,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     } catch(...) {status=XR_ERROR_OUT_OF_MEMORY;}
     if(XR_FAILED(status))candidate.reset();
     geometry.hiddenMasks(geometryGeneration,candidate);
+    // Same counts the log line below names, crossed to the graphics half
+    // (frame_flag.h) so fix.eye_mask's auto mode knows whether the runtime
+    // already supplies a mask without adding a second query path. A failed
+    // query (status FAILED, candidate reset above) publishes 0/0 with the
+    // presence bit set, the same as a query that succeeded and confirmed an
+    // empty mesh -- intentionally: either way Elite ends up with no hidden-
+    // area mesh from the runtime, which is the only thing auto mode acts on.
+    const unsigned triLeft=candidate?unsigned(candidate->eyes[0].indices.size()/3):0;
+    const unsigned triRight=candidate?unsigned(candidate->eyes[1].indices.size()/3):0;
+    edvr::announceRuntimeMaskTriangles(triLeft,triRight);
     nativeTracePrintf("visibility_mask,enabled=%u,query=%u,revision=%llu,result=%d,triangles=%u/%u,reason=%s,refresh=%u/32\n",
       unsigned(visibilityMaskExtension),unsigned(api.visibilityMask!=nullptr),(unsigned long long)visibilityRevision,int(status),
-      candidate?unsigned(candidate->eyes[0].indices.size()/3):0,candidate?unsigned(candidate->eyes[1].indices.size()/3):0,
+      triLeft,triRight,
       reason,visibilityRefreshes);
   }
   void publishDisplayFrequency(float hz,bool estimated,const char* reason,XrResult status) {

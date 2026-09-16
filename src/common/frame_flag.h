@@ -318,6 +318,23 @@ bool eyeTangents(float* outerMag, float* innerMag);
 void announceEyeTangentsVertical(float topMag, float botMag);
 bool eyeTangentsVertical(float* topMag, float* botMag);
 
+// Whether the VR runtime supplied a hidden-area mesh for each eye, and how
+// many triangles -- published by openvr_api.dll whenever it refreshes the
+// mesh it holds (native_runtime_host.h, the same count the
+// "visibility_mask," log line reports), read by d3d11.dll for fix.eye_mask's
+// auto mode: draw nothing extra where the runtime already supplies a mask,
+// draw the lens ring where it does not.
+//
+// Zero triangles for an eye is a real, common answer (the Pimax OpenXR route
+// supplies none), not a sentinel -- unlike eyeTangents above, so this cannot
+// pack "no answer" as the all-zero word. It carries an explicit presence bit
+// instead, gaze's discipline: bit 31 set means "the openvr half has
+// published", and only then are the two 15-bit counts (0..32767, clamped)
+// meaningful. False means nobody has published -- an older openvr_api.dll,
+// or no openvr half at all -- and fix.eye_mask's auto mode must not guess.
+void announceRuntimeMaskTriangles(uint32_t leftTri, uint32_t rightTri);
+bool runtimeMaskTriangles(uint32_t* leftTri, uint32_t* rightTri);
+
 // Where the ship's forward axis points in the CURRENT head frame, as
 // tangent-space offsets from straight ahead -- published by openvr_api.dll
 // every frame from the pose it is handed, read by d3d11.dll to counter-move

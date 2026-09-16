@@ -23,11 +23,12 @@
 // buffer is what the two paths, the last-unbind rule and the desk
 // self-test below now decide.
 //
-// Runs only while fix.temporal_aa is on (it exists for that pass), costs
-// one pointer compare per eye draw and per render-target change, and one
-// tiny dispatch every few seconds; dereferences a view only inside the
-// call the game made with it; stands down for the session on any
-// repeated fault. Nothing it does reaches the picture.
+// Runs only while fix.temporal_aa or fix.eye_mask is on (it exists for the
+// temporal pass; eye_mask reuses its clear-value census rather than keeping
+// a second one), costs one pointer compare per eye draw and per render-
+// target change, and one tiny dispatch every few seconds; dereferences a
+// view only inside the call the game made with it; stands down for the
+// session on any repeated fault. Nothing it does reaches the picture.
 #pragma once
 
 #include <cstdint>
@@ -76,6 +77,14 @@ void depthProbeSample(ID3D11DeviceContext* ctx, void* dsv);
 // From the ClearDepthStencilView hook: the value the game clears an eye-
 // draw target to, which says which way its depth runs.
 void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth);
+
+// The clear value on record for THIS EXACT view, and whether it reads as
+// reversed-Z (< 0.5) -- for fix.eye_mask, which must write the near value
+// into the game's own depth convention and must never guess it. False when
+// nothing is on record: the probe is off (fix.temporal_aa and fix.eye_mask
+// both off), this view has never been cleared while watched, or it is not a
+// target the probe tracks. A caller that gets false must not draw.
+bool depthProbeClearValueFor(ID3D11DepthStencilView* dsv, float* outClearValue, bool* outReversed);
 
 // Once per frame: the per-frame bookkeeping, the readback poll, the lines.
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);

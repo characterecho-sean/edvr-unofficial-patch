@@ -432,6 +432,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\foveation.cpp" ^
+    "src\d3d11\eye_mask.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
@@ -579,6 +580,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     "src\openxr\shared_texture_transfer.cpp" ^
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
+    "src\common\frame_flag.cpp" ^
     /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
 
@@ -1469,6 +1471,7 @@ for %%T in (native stereo) do (
         "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
+        "src\common\frame_flag.cpp" ^
         /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
     if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
 )
