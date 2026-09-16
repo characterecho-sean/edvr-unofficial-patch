@@ -3,6 +3,7 @@
 #include "../../src/openxr/eye_capture.h"
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <limits>
 using Microsoft::WRL::ComPtr;
@@ -10,10 +11,22 @@ using edvr::openxr::EyeCapture;
 namespace {
 unsigned checks=0,failures=0;
 void check(bool value,const char* name) {++checks;if(!value){++failures;std::printf("FAIL: %s\n",name);}}
+// The exe runs from build\ beside EDVR's own d3d11.dll, which an imported
+// D3D11CreateDevice would resolve to first: take the system module by full path
+// instead, so this rig never runs the proxy. Kept mapped for the whole process.
+decltype(&D3D11CreateDevice) systemCreateDevice() {
+  static const auto create=[]()->decltype(&D3D11CreateDevice){
+    wchar_t dir[MAX_PATH]{};const UINT n=GetSystemDirectoryW(dir,MAX_PATH);
+    const HMODULE module=n&&n<MAX_PATH?LoadLibraryW((std::wstring(dir)+L"\\d3d11.dll").c_str()):nullptr;
+    return module?reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice")):nullptr;
+  }();
+  return create;
+}
 struct Device {
   ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
   bool open() {
-    const auto hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context);
+    const auto create=systemCreateDevice();check(create!=nullptr,"system d3d11.dll");
+    const auto hr=create?create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context):E_FAIL;
     check(SUCCEEDED(hr),"WARP device");return SUCCEEDED(hr);
   }
   ComPtr<ID3D11Texture2D> texture(DXGI_FORMAT format=DXGI_FORMAT_R8G8B8A8_UNORM,UINT width=4,UINT height=4,

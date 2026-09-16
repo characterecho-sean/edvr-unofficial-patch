@@ -613,22 +613,26 @@ REM build\rig_times.json remembers each rig's duration so the longest start
 REM first next time; delete it freely.
 REM
 REM PROXY_LOADERS (--serial) are the rigs whose test exe loads a proxy DLL out
-REM of build\ -- some on purpose, some only because a plain D3D11CreateDevice
-REM from an exe in build\ finds build\d3d11.dll before System32's. Every such
-REM process logs to build\edvr_logs, where the proxy keeps its crash
-REM sentinels (<hook>.armed, created at hook install and deleted once the hook
-REM has proven itself): a proxy that finds another process's sentinel still
-REM armed takes it for its own crash, stands down, and that rig fails. So these
-REM run one at a time among themselves, beside everything else.
+REM of build\ -- on purpose, or (openxr_native_tests) through an imported
+REM D3D11CreateDevice, which an exe in build\ resolves to build\d3d11.dll
+REM before System32's. Every such process logs to build\edvr_logs, where the
+REM proxy keeps its crash sentinels (<hook>.armed, created at hook install and
+REM deleted once the hook has proven itself): a proxy that finds another
+REM process's sentinel still armed takes it for its own crash, stands down, and
+REM that rig fails. So these run one at a time among themselves, beside
+REM everything else. A rig that only wants a D3D11 device must not import
+REM D3D11CreateDevice but take the export from System32's d3d11.dll by full
+REM path and link without d3d11.lib, as the WARP rigs do. A rig belongs in the
+REM pool only if its exes, run by hand, never put a *.armed file in
+REM build\edvr_logs; a log file is not the test, the stereo rig leaves none.
 REM The --quiet rigs hold wall-clock intervals to tight bounds; they run alone,
 REM after the rest, with the whole machine.
 REM Only a rig's test runs need the restriction, so every rig in either group
 REM is split (see the rig area below): its compiles run in the pool like any
 REM other rig's and only its runs wait their turn.
-set "PROXY_LOADERS=native_menu_test,openxr_capture_test,openxr_skybox_test,native_device_test"
-set "PROXY_LOADERS=%PROXY_LOADERS%,openxr_binding_test,openxr_proxy_state_test,openxr_present_test"
-set "PROXY_LOADERS=%PROXY_LOADERS%,openxr_shutdown_test,openxr_shared_texture_test,openxr_module_test"
-set "PROXY_LOADERS=%PROXY_LOADERS%,openvr_smoke"
+set "PROXY_LOADERS=native_device_test,openxr_binding_test,openxr_proxy_state_test,openxr_present_test"
+set "PROXY_LOADERS=%PROXY_LOADERS%,openxr_shutdown_test,openxr_module_test,openvr_smoke"
+set "PROXY_LOADERS=%PROXY_LOADERS%,openxr_native_tests"
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
@@ -791,7 +795,6 @@ if errorlevel 1 ( echo [edvr] ERROR: menu_test build failed & exit /b 1 )
 exit /b 0
 
 :rig_native_menu_test
-if "%EDVR_RIG_STEP%"=="run" goto native_menu_test_run
 echo [edvr] === native_menu_test.exe ===
 if not exist "%OBJ%\native_menu" mkdir "%OBJ%\native_menu"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
@@ -806,10 +809,8 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib gdi32.lib version.lib d3d11.lib dxgi.lib d3dcompiler.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib gdi32.lib version.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: native menu test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:native_menu_test_run
 "%BUILD%\native_menu_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_menu_test.exe" --self-test || exit /b 1
 exit /b 0
@@ -1453,8 +1454,11 @@ for %%T in (session projection geometry head gate frame pose origin reference sp
 exit /b 0
 
 :rig_openxr_native_tests
+if "%EDVR_RIG_STEP%"=="run" goto openxr_native_tests_run
 REM Standalone native-session harness and fake-XR/WARP stereo renderer.
 REM The build runs only desktop fixtures; real headset sessions are explicit.
+REM Both exes import D3D11CreateDevice, so run from build\ they load the proxy
+REM and arm its sentinel (PROXY_LOADERS above): the runs wait for --serial.
 if not exist "%OBJ%\openxr_native_tests" mkdir "%OBJ%\openxr_native_tests"
 for %%T in (native stereo) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
@@ -1467,37 +1471,35 @@ for %%T in (native stereo) do (
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
         /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
     if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
+)
+if "%EDVR_RIG_STEP%"=="build" exit /b 0
+:openxr_native_tests_run
+for %%T in (native stereo) do (
     "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
     "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
 )
 exit /b 0
 
 :rig_openxr_capture_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_capture_test_run
 if not exist "%OBJ%\openxr_capture_test" mkdir "%OBJ%\openxr_capture_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openxr_capture_test\\" /Fe"%BUILD%\openxr_capture_test.exe" ^
     "tools\openxr_capture_test\openxr_capture_test.cpp" "src\openxr\eye_capture.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR capture test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_capture_test_run
 "%BUILD%\openxr_capture_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_capture_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_skybox_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_skybox_test_run
 if not exist "%OBJ%\openxr_skybox_test" mkdir "%OBJ%\openxr_skybox_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /Fo"%OBJ%\openxr_skybox_test\\" /Fe"%BUILD%\openxr_skybox_test.exe" ^
     "tools\openxr_skybox_test\openxr_skybox_test.cpp" "src\openxr\skybox_capture.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR skybox capture test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_skybox_test_run
 "%BUILD%\openxr_skybox_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_skybox_test.exe" --self-test || exit /b 1
 exit /b 0
@@ -1620,17 +1622,14 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 exit /b 0
 
 :rig_openxr_shared_texture_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_shared_texture_test_run
 if not exist "%OBJ%\openxr_shared_texture_test" mkdir "%OBJ%\openxr_shared_texture_test"
 REM Cross-device texture handoff and consumer-only retirement after producer stop.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openxr_shared_texture_test\\" /Fe"%BUILD%\openxr_shared_texture_test.exe" ^
     "tools\openxr_shared_texture_test\openxr_shared_texture_test.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_shared_texture_test_run
 "%BUILD%\openxr_shared_texture_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_shared_texture_test.exe" --self-test || exit /b 1
 exit /b 0
