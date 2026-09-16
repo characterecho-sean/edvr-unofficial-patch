@@ -181,6 +181,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t offsetFrames=0,fssHealedEyes[2]{},featureChanges=0;
+  uint64_t fssDeferredEyes=0;
+  // The heal's target eye, held from its own submit until the donor eye's
+  // treat delivers the heal; its sharpen, menu and capture run then.
+  struct DeferredEye {
+    bool active=false;vr::EVREye eye=vr::Eye_Left;uint64_t sequence=0;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource,temporalOutput;
+    vr::VRTextureBounds_t bounds{},temporalBounds{};bool hasBounds=false;
+    vr::EVRSubmitFlags flags=vr::Submit_Default;vr::EColorSpace colorSpace=vr::ColorSpace_Auto;
+  } deferredEye;
   NativeMenuClient menu;
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
@@ -1022,14 +1031,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // Runs as one synchronous producer callback. The XR owner is waiting and
   // retains this frame's state throughout; no operation here dispatches back
   // to that owner or invokes SharedTextureTransfer's producer rendezvous.
-  vr::EVRCompositorError treatCapturedEye(vr::EVREye eye,ID3D11Texture2D* submittedSource,
-      const vr::VRTextureBounds_t* bounds,Microsoft::WRL::ComPtr<ID3D11Texture2D>& selected,
-      vr::VRTextureBounds_t& selectedBounds,bool& menuTreated) {
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> temporalOutput,treated;
-    vr::VRTextureBounds_t temporalBounds{};
-    vr::VRTextureBounds_t treatedBounds{};
+  vr::EVRCompositorError treatEyeTemporal(vr::EVREye eye,ID3D11Texture2D* submittedSource,
+      const vr::VRTextureBounds_t* bounds,Microsoft::WRL::ComPtr<ID3D11Texture2D>& temporalOutput,
+      vr::VRTextureBounds_t& temporalBounds) {
     const auto sequence=activeFrameSequence;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> healed;
     if(temporal.acquired()) {
       LARGE_INTEGER began{},ended{}; const auto clock=QueryPerformanceCounter(&began);
       const auto treatment=temporal.treat(sequence,unsigned(eye),submittedSource,bounds,temporalOutput,temporalBounds);
@@ -1043,22 +1048,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(temporalOutput&&temporalEyes[unsigned(eye)]++==0)
         nativeTracePrintf("native_temporal,first_treated_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
     }
-    // The FSS heal reads the temporal OUTPUT, both eyes at the same stage, so
-    // a healed eye keeps its DLSS frame. Until 2026-09-16 it read the raw
-    // source and the healed eye skipped the temporal pass: for the 600-frame
-    // window after every zoom press the left eye reached the headset as the
-    // raw jittered input beside a DLSS right, seen on the Quest 3 as a
-    // slight double on the body while zooming (docs/fss-scanner.md). With no
-    // temporal output the heal reads the raw source as before, and the raw
-    // pixels keep their jittered FOV below.
-    if(fss.acquired()) {
-      auto* healSource=temporalOutput?temporalOutput.Get():submittedSource;
-      const auto* healBounds=temporalOutput?&temporalBounds:bounds;
-      const auto treatment=fss.treat(sequence,unsigned(eye),healSource,healBounds,healed);
-      if(FAILED(treatment)) {invalidateEyeTreatments();timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
-      if(healed&&fssHealedEyes[unsigned(eye)]++==0)
-        nativeTracePrintf("native_fss,first_healed_eye=%u,sequence=%llu,source=%s\n",unsigned(eye),(unsigned long long)sequence,temporalOutput?"temporal":"raw");
-    }
+    return vr::VRCompositorError_None;
+  }
+  vr::EVRCompositorError finishCapturedEye(vr::EVREye eye,ID3D11Texture2D* submittedSource,
+      const vr::VRTextureBounds_t* bounds,const Microsoft::WRL::ComPtr<ID3D11Texture2D>& temporalOutput,
+      const vr::VRTextureBounds_t& temporalBounds,const Microsoft::WRL::ComPtr<ID3D11Texture2D>& healed,
+      Microsoft::WRL::ComPtr<ID3D11Texture2D>& selected,vr::VRTextureBounds_t& selectedBounds,bool& menuTreated) {
+    const auto sequence=activeFrameSequence;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> treated;
+    vr::VRTextureBounds_t treatedBounds{};
     // A refused temporal pass leaves jitter in the raw pixels. Preserve their
     // actual projection for this frame: in the menu and the XR layer both,
     // or, where a trim has moved the two apart, in the menu and the
@@ -1185,8 +1183,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       temporalFrameEyes|=1u<<unsigned(eye);
       return vr::VRCompositorError_None;
     }
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> treated;
-    vr::VRTextureBounds_t treatedBounds{};bool menuTreated=false;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> treated,temporalOutput,deferredTreated;
+    vr::VRTextureBounds_t treatedBounds{},temporalBounds{},deferredTreatedBounds{};
+    bool menuTreated=false,deferred=false,finishingDeferred=false,deferredMenuTreated=false;
     LARGE_INTEGER dispatchBegan{},dispatchEnded{},workBegan{},workEnded{};
     const bool measure=!submitStats.full()&&counterNow(&dispatchBegan);
     bool workClock=false;
@@ -1196,7 +1195,62 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         timingGpuBegun[unsigned(eye)]=true;
       const bool appOpened=timingFrameActive && timing.applicationSegment(timingSequence,true);
       if(timingFrameActive && !appOpened) timingInvalidate();
-      r=treatCapturedEye(eye,submittedSource.Get(),bounds,treated,treatedBounds,menuTreated);
+      // Every exit from the stages below still closes the brackets and the
+      // work clock; a return here would publish a zero work end as cost.
+      do {
+      r=treatEyeTemporal(eye,submittedSource.Get(),bounds,temporalOutput,temporalBounds);
+      if(r!=vr::VRCompositorError_None)break;
+      // The FSS heal reads the temporal OUTPUT, both eyes at the same stage, so
+      // a healed eye keeps its DLSS frame. Until 2026-09-16 it read the raw
+      // source and the healed eye skipped the temporal pass: for the 600-frame
+      // window after every zoom press the left eye reached the headset as the
+      // raw jittered input beside a DLSS right, seen on the Quest 3 as a
+      // slight double on the body while zooming (docs/fss-scanner.md). With no
+      // temporal output the heal reads the raw source as before, and the raw
+      // pixels keep their jittered FOV below.
+      // The heal is delivered by healPair with this frame's other eye; until
+      // 2026-09-16 the donor was the previous frame's right and the view's
+      // motion between frames put a displaced copy of the limb into the fill
+      // (docs/fss-scanner.md, entry 2026-09-16).
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> healed,deferredHealed;bool deferNow=false;
+      if(fss.acquired()) {
+        auto* healSource=temporalOutput?temporalOutput.Get():submittedSource.Get();
+        const auto* healBounds=temporalOutput?&temporalBounds:bounds;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> unused;
+        const auto treatment=fss.treat(sequence,unsigned(eye),healSource,healBounds,unused);
+        if(FAILED(treatment)){invalidateEyeTreatments();timingInvalidate();r=vr::VRCompositorError_InvalidTexture;break;}
+        unsigned healedEye=0;Microsoft::WRL::ComPtr<ID3D11Texture2D> pairOutput;
+        const auto pair=fss.healPair(sequence,healedEye,pairOutput);
+        if(FAILED(pair)&&pair!=E_PENDING){invalidateEyeTreatments();timingInvalidate();r=vr::VRCompositorError_InvalidTexture;break;}
+        if(pair==E_PENDING)deferNow=!deferredEye.active;   // one deferral per frame; a second pending eye goes unhealed
+        else if(pair==S_OK) {
+          if(healedEye==unsigned(eye))healed=pairOutput;
+          else if(deferredEye.active&&deferredEye.sequence==sequence&&unsigned(deferredEye.eye)==healedEye)deferredHealed=pairOutput;
+          if((healed||deferredHealed)&&fssHealedEyes[healedEye]++==0)
+            nativeTracePrintf("native_fss,first_healed_eye=%u,sequence=%llu,source=%s,donor=pair\n",healedEye,(unsigned long long)sequence,temporalOutput?"temporal":"raw");
+        }
+      }
+      if(deferNow) {
+        deferredEye={};deferredEye.active=true;deferredEye.eye=eye;deferredEye.sequence=sequence;
+        deferredEye.submittedSource=submittedSource;deferredEye.temporalOutput=temporalOutput;
+        deferredEye.temporalBounds=temporalBounds;if(bounds){deferredEye.bounds=*bounds;deferredEye.hasBounds=true;}
+        deferredEye.flags=flags;deferredEye.colorSpace=texture->eColorSpace;
+        ++fssDeferredEyes;deferred=true;
+        // A heal frame's GPU brackets no longer describe one eye each: this
+        // eye's later stages run in the other eye's bracket. Drop the sample.
+        timingInvalidate();break;
+      }
+      if(deferredEye.active) {
+        if(deferredEye.sequence!=sequence)deferredEye={};
+        else {
+          r=finishCapturedEye(deferredEye.eye,deferredEye.submittedSource.Get(),deferredEye.hasBounds?&deferredEye.bounds:nullptr,
+            deferredEye.temporalOutput,deferredEye.temporalBounds,deferredHealed,deferredTreated,deferredTreatedBounds,deferredMenuTreated);
+          if(r!=vr::VRCompositorError_None){deferredEye={};break;}
+          finishingDeferred=true;timingInvalidate();
+        }
+      }
+      r=finishCapturedEye(eye,submittedSource.Get(),bounds,temporalOutput,temporalBounds,healed,treated,treatedBounds,menuTreated);
+      } while(false);
       if(appOpened && !timing.applicationSegment(timingSequence,false)) timingInvalidate();
       if(timingGpuBegun[unsigned(eye)] &&
           !timing.producerSegmentEnd(timingSequence,unsigned(eye),submittedSource.Get()))
@@ -1214,6 +1268,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       submitSample.treatmentMs+=elapsedMs(workBegan,workEnded);
     } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
     if(r!=vr::VRCompositorError_None)return r;
+    if(deferred)return r; // None: this eye's copy waits on the donor eye's submit
     const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
     D3D11_TEXTURE2D_DESC outputDesc{};treated->GetDesc(&outputDesc);
     submitSample.outputWidth[unsigned(eye)]=outputDesc.Width;
@@ -1223,6 +1278,35 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // Shared capture publishes an EDVR-owned slot now and consumes it only at
     // pair composition. It must never be nested in the treatment callback.
     LARGE_INTEGER transferBegan{},transferEnded{}; const auto transferClock=QueryPerformanceCounter(&transferBegan);
+    if(finishingDeferred) {
+      const vr::Texture_t deferredProcessed{deferredTreated.Get(),vr::API_DirectX,deferredEye.colorSpace};
+      D3D11_TEXTURE2D_DESC deferredOutputDesc{};deferredTreated->GetDesc(&deferredOutputDesc);
+      submitSample.outputWidth[unsigned(deferredEye.eye)]=deferredOutputDesc.Width;
+      submitSample.outputHeight[unsigned(deferredEye.eye)]=deferredOutputDesc.Height;
+      auto deferredR=vr::VRCompositorError_InvalidTexture;
+      if(separateGraphics()) {
+        pollDeviceTiming();
+        deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true,
+          nullptr,true,nullptr);
+        r=captured.capture(eye,selected,region,flags,true,
+          nullptr,true,submitStats.full()?nullptr:&transferWall);
+      } else if(!graphicsCalls.invoke([&]{
+          deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true);
+          r=captured.capture(eye,selected,region,flags,true);
+        })) { timingInvalidate(); deferredEye={}; return vr::VRCompositorError_InvalidTexture; }
+      const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
+      if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
+      if(deferredR==vr::VRCompositorError_None&&deferredMenuTreated&&menuEyes[unsigned(deferredEye.eye)]++==0)
+        nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(deferredEye.eye));
+      if(deferredR==vr::VRCompositorError_None){++copiedEyes;temporalFrameEyes|=1u<<unsigned(deferredEye.eye);}
+      else { invalidateEyeTreatments(); timingInvalidate(); }
+      deferredEye={};
+      if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
+        nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
+      if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
+      else { invalidateEyeTreatments(); timingInvalidate(); }
+      return deferredR!=vr::VRCompositorError_None?deferredR:r;
+    }
     if(separateGraphics()) {
       pollDeviceTiming();
       r=captured.capture(eye,selected,region,flags,true,
@@ -1423,7 +1507,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
   ~NativeRuntimeHost() {close();}
-  void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); }
+  void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); deferredEye={}; }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
     if(serviceFailed)return;
     serviceFailed=true;
@@ -1479,9 +1563,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
     if(FAILED(fss.close())||FAILED(features.close()))return clean=false;
-    if(tracing)nativeTracePrintf("native_features_summary,offset_frames=%llu,changes=%llu,fss_healed=%llu/%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
+    if(tracing)nativeTracePrintf("native_features_summary,offset_frames=%llu,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
       (unsigned long long)offsetFrames,(unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
-      (unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(cullGuard.stage()));
+      (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(cullGuard.stage()));
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",

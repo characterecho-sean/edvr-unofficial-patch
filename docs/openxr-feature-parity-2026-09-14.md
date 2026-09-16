@@ -44,6 +44,9 @@ reset had cost the left eye its DLSS for the whole arrival window.)
 
 The FSS arrival repair uses the existing graphics shader and input-lockstep
 settings. Its donor textures are owned copies and never mutable game pointers.
+(superseded 2026-09-16: `healPair` delivers the heal with this frame's other
+eye; the target eye's sharpen, menu and capture are deferred to the other
+eye's submit)
 The normal repair is restricted to the arrival/chrome window and the measured
 display rectangle. The existing developer mirror mode retains its bounded-tile
 detector. The legacy shader's projection assumptions must hold; unsupported

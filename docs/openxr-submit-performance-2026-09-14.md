@@ -17,7 +17,9 @@ consumed it. Failure ends the chain before capture; FSS healing still consumes
 the temporal eye through `skip`; raw pixels keep their jittered FOV. (Superseded
 2026-09-16: the heal now runs after the temporal pass on its output and no eye
 is skipped; the skip had put a raw left eye beside a DLSS right for the whole
-arrival window, see fss-scanner.md.) The ending
+arrival window, see fss-scanner.md.) (superseded 2026-09-16: `healPair`
+delivers the heal with this frame's other eye; the target eye's sharpen, menu
+and capture are deferred to the other eye's submit) The ending
 producer GPU marker remains after Submit, with the previous
 acceptance/invalidation rules.
 

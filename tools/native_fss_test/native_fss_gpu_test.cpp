@@ -53,7 +53,7 @@ struct Device {
   }
 };
 EdvrNativeFssFrame frame(uint64_t generation,uint64_t sequence) {
-  EdvrNativeFssFrame f{sizeof(f),1};f.generation=generation;f.referenceGeneration=1;f.sequence=sequence;
+  EdvrNativeFssFrame f{sizeof(f),2};f.generation=generation;f.referenceGeneration=1;f.sequence=sequence;
   for(unsigned e=0;e<2;++e){f.frusta[e][0]=f.frusta[e][2]=-1;f.frusta[e][1]=f.frusta[e][3]=1;
     f.eyeToHead[e][0]=f.eyeToHead[e][5]=f.eyeToHead[e][10]=1;f.eyeToHead[e][3]=e?.032f:-.032f;}return f;
 }
@@ -63,19 +63,22 @@ void run() {
   for(unsigned generation=51;generation<=52;++generation) {
     Device d;auto left=d.texture(black),right=d.texture(warm);
     edvr::Config::get().set("fix.fss_eye_sync","heal");
-    EdvrNativeFssRequest request{sizeof(request),1,d.device.Get(),generation};EdvrNativeFssTable table{sizeof(table),1};
+    EdvrNativeFssRequest request{sizeof(request),2,d.device.Get(),generation};EdvrNativeFssTable table{sizeof(table),2};
     require(edvrAcquireNativeFss(&request,&table)==S_OK,"acquire real shader provider");
     auto f=frame(generation,1);require(table.beginFrame(table.context,&f)==S_OK,"begin arrival");
-    edvr::bumpFssArrivalStamp();edvr::bumpFssChromeStamp();ID3D11Texture2D* output=nullptr;
-    require(table.treatEye(table.context,1,1,right.Get(),full,&output)==S_FALSE&&!output,"current right donor");
-    require(table.treatEye(table.context,1,0,left.Get(),full,&output)==S_OK&&output,"actual FSS heal shader output");
+    edvr::bumpFssArrivalStamp();edvr::bumpFssChromeStamp();ID3D11Texture2D* output=nullptr;uint32_t healedEye=99;
+    require(table.treatEye(table.context,1,1,right.Get(),full,&output)==S_FALSE&&!output,"current right snapshot only");
+    require(table.treatEye(table.context,1,0,left.Get(),full,&output)==S_FALSE&&!output,"left completes the pair");
+    require(table.healPair(table.context,1,&healedEye,&output)==S_OK&&output&&healedEye==0,"actual FSS heal shader output");
     ComPtr<ID3D11Texture2D> healed;healed.Attach(output);auto pixels=d.read(healed.Get());
     require(pixels[(H/2)*W+W/2]==warm&&pixels[0]==black,"actual HLSL fills display interior only");
     require(d.read(left.Get())==std::vector<unsigned>(W*H,black)&&d.read(right.Get())==std::vector<unsigned>(W*H,warm),"shader and copies preserve both game sources");
-    f=frame(generation,2);require(table.beginFrame(table.context,&f)==S_OK,"begin prior-donor frame");
-    require(table.treatEye(table.context,2,0,left.Get(),full,&output)==S_OK&&output,"left-first uses immutable previous right");
-    healed.Attach(output);pixels=d.read(healed.Get());require(pixels[(H/2)*W+W/2]==warm,"prior donor pixels reach real shader");
+    f=frame(generation,2);require(table.beginFrame(table.context,&f)==S_OK,"begin left-first frame");
+    require(table.treatEye(table.context,2,0,left.Get(),full,&output)==S_FALSE&&!output,"left-first only snapshots");
+    require(table.healPair(table.context,2,&healedEye,&output)==E_PENDING,"left alone waits on the right donor");
     require(table.treatEye(table.context,2,1,right.Get(),full,&output)==S_FALSE&&!output,"right completes normal order");
+    require(table.healPair(table.context,2,&healedEye,&output)==S_OK&&output&&healedEye==0,"left-first heals from this frame's right");
+    healed.Attach(output);pixels=d.read(healed.Get());require(pixels[(H/2)*W+W/2]==warm,"left-first pixels reach real shader");
     // Mirror detects bounded black arrival tiles, with lit pixels ten pixels
     // away; an entirely black eye is deliberately not a matching tile.
     std::vector<unsigned> mirrorLeft(W*H,warm);
@@ -84,7 +87,8 @@ void run() {
     d.context->UpdateSubresource(left.Get(),0,nullptr,mirrorLeft.data(),W*4,0);
     edvr::Config::get().set("fix.fss_eye_sync","mirror");f=frame(generation,3);require(table.beginFrame(table.context,&f)==S_OK,"begin mirror mode");
     require(table.treatEye(table.context,3,0,left.Get(),full,&output)==S_FALSE&&!output,"mirror left is donor only");
-    require(table.treatEye(table.context,3,1,right.Get(),full,&output)==S_OK&&output,"real mirror shader output");
+    require(table.treatEye(table.context,3,1,right.Get(),full,&output)==S_FALSE&&!output,"mirror right only snapshots");
+    require(table.healPair(table.context,3,&healedEye,&output)==S_OK&&output&&healedEye==1,"real mirror shader output");
     healed.Attach(output);pixels=d.read(healed.Get());
     require(pixels[(H/2)*W+W/2]==black&&pixels[0]==warm,"mirror stamps bounded left arrival tile and preserves clear regions");
     require(table.close(table.context)==S_OK,"release provider and shader cache");

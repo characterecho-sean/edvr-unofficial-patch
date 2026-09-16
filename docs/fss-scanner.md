@@ -16,34 +16,17 @@ changes.*
   default: `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = on`. Bug is
   ring-only.
 - **Open:**
-  - 2026-09-16, Quest 3 / VirtualDesktopXR, native path, DLSS on
-    (`edvr_gfx_20260916_142750.log`, build e8c5bfe): a slight double
-    ghost on the body while zooming in, `fix.fss_eye_sync = on`. The
-    heal engaged at a 0 px shift, which is correct there: the cull
-    guard's Symmetric mode tells the game a symmetric horizontal
-    frustum (+-1.2799; the game re-queried `m02=0`) and the panel
-    centre projects to the same u in both eyes (`uA=uB=0.496`). What
-    the heal does per frame is the only per-eye asymmetry in play, and
-    it does two things for the whole 600-frame window after every zoom
-    press (the arrival stamp bumps every frame of it): the healed left
-    eye SKIPS the temporal pass (`native_temporal_summary left=19125,
-    right=22322`, the difference exactly `healed=3197`), so the left is
-    the raw jittered 2307x1652 input while the right is the 3550x2542
-    DLSS output; and the fill's donor is the previous frame's right eye
-    (the left submits first), so on a growing body every hard-black
-    pixel beside a bright edge takes a one-frame-displaced copy. The
-    window's "free" premise (a no-op over void) held when the heal ran
-    on the final submitted image; it no longer does. FLIGHT 1
-    (`edvr_gfx_20260916_151842.log`, same build, heal toggled live in
-    one session): heal on = ghost (`engaged (0 px)` 15:21:01,
-    `healed=604`, `skipped=614`); `fss eye heal: off.` 15:21:20 and
-    three zooms after it clean. The ghost is the heal half. The stale
-    donor is geometrically null on a zoom-in (a pure scale-up: a black
-    pixel outside an edge now was outside it a frame ago), so the DLSS
-    skip is the favoured mechanism. Not a port regression: the OpenVR
-    path's heal also forwards resolve+sharpen without `applyTemporal`
-    (compositor_hook.cpp ~1539); the heal shipped in 0.11.0, DLSS in
-    0.14.0, never re-examined together.
+  - 2026-09-16, Quest 3 / VirtualDesktopXR, native path, DLSS on: a
+    slight double ghost on the body while zooming in with
+    `fix.fss_eye_sync = on`. Flight 1 (heal toggled live) put it in the
+    heal half; flight 2 on build 0522215 (heal on the DLSS output, no
+    temporal skip) fixed the blur while moving but not the ghost.
+    Cause, from eye dump 154720: the fill's donor was the PREVIOUS
+    frame's right eye (the left submits first) and the view moves 4-20
+    px per frame while zooming, so every hard-black pixel beside the
+    limb took a displaced copy of it. Journal entry "2026-09-16: the
+    Quest 3 ghost under the native path". Fix = a same-frame donor, the
+    provider heals at pair completion; see Next flight.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -81,13 +64,29 @@ changes.*
     `temporalJitter(frameCounter)` serves both eyes, so the lent
     texture carries the jitter the receiving eye rendered with. And
     the lockstep half at all: flight 1 (sync-only) had no ghost.
-- **Next flight:** the fix flight. Build: heal the temporal OUTPUTS
-  (both eyes post-DLSS, same size) instead of the raw source, and stop
-  skipping the temporal pass for the healed eye; `fix.fss_eye_sync =
-  on`, same ringed body on the Quest 3. Ghost gone = done. Ghost stays
-  = the fill itself (then: heal at pair completion with this frame's
-  right, or a window that closes at the arrival). The Toolkit-ON
-  confirmation under Open still stands.
+  - The healed eye's temporal skip as the ghost (2026-09-16): flight 2
+    on 0522215 kept the DLSS frame in the healed eye
+    (`native_temporal_summary left=12192 right=12192`, `skipped=10`,
+    `native_fss,first_healed_eye=0,...,source=temporal`) and the ghost
+    stayed. The skip was the blur while moving, which that build fixed.
+  - "The stale donor is null on a zoom-in" (claimed 2026-09-16 before
+    the dump was read): wrong. The fill reads the donor at the SAME
+    pixel, and after a frame of motion that pixel holds content that
+    has since moved; the simulated fill on dump 154720 paints the limb
+    into the black gap, displaced by one frame's motion.
+- **Next flight:** the same-frame donor. BUILT 2026-09-16 on branch
+  claude/session-d0bd49 (the commit after 0522215, not merged),
+  installed to Frontier, NOT FLOWN: `treatEye` snapshots only, the new
+  `healPair` entry heals once both of this frame's eyes are
+  snapshotted, and the host defers the healed eye's sharpen, menu and
+  capture to the other eye's submit. Same ringed body on the Quest 3,
+  `fix.fss_eye_sync = on`. Receipts: `native_fss,first_healed_eye=0,
+  ...,source=temporal,donor=pair`, `native_features_summary ...
+  fss_healed=N/0,fss_deferred=N` with N > 0 and equal, `native fss
+  totals: healed=N`, `native_temporal_summary` left == right. Ghost
+  gone = merge and push. Ghost stays = the fill's own edge (the donor's
+  DLSS history differs from the target's), then a window that closes
+  at the arrival. The Toolkit-ON confirmation under Open still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
@@ -945,6 +944,53 @@ the redraw mode); the instruments that earn their keep stay. The
 vendor-facing report — stock repro on two stacks, the ring-only fact,
 the mechanism, three fix directions — is
 [frontier-fss-bug-report.md](frontier-fss-bug-report.md).
+
+## 2026-09-16: the Quest 3 ghost under the native path
+
+Report: on the Frontier install, Quest 3 via VirtualDesktopXR, zooming
+into a planet in the FSS shows a slight double ghost on the body with
+`fix.fss_eye_sync = on`; not seen on the Pimax. Sean suspected the
+asymmetric frustum. Two flights and one eye dump later:
+
+- Frustum: ruled out from the logs before any build. The cull guard's
+  Symmetric mode has the game render +-1.2799 horizontally
+  (`projection_query m02=0`), so the heal's 0 px infinity shift is right
+  for that image, and the panel centre projects to the same u in both
+  eyes (`fss panel rect ... uA=0.496 uB=0.496`).
+- Flight 1 (`edvr_gfx_20260916_151842.log`, build e8c5bfe, heal
+  toggled live): heal on = ghost, off = clean. The heal half owns it;
+  the lockstep half does not.
+- Build 0522215: until then the native heal read the raw source and
+  the healed eye skipped the temporal pass, so for the 600-frame window
+  after a zoom press the left eye reached the headset as the raw
+  jittered 2307x1652 input beside a 3550x2542 DLSS right
+  (`native_temporal_summary left=19125 right=22322`, the difference
+  exactly `healed=3197`). The host now runs the temporal pass first and
+  heals its output. Flight 2 on it: `left=12192 right=12192`,
+  `skipped=10`, `source=temporal`; the blur while moving is gone, the
+  ghost is not.
+- Eye dump 154720 (16 consecutive treated left crops, 2155^2, INSERT
+  during the zoom): the phase-correlated shift between consecutive
+  frames is +208 (the dump hitch), +76, +16, +20, +16, +16, +4, 0, -4,
+  -4, -4, -8, -12, -16, -16 px horizontally, and the body's lit radius
+  is constant to 0.3%: the whole panel translates (head motion; the
+  text moves with the planet), it does not grow. Per frame 30-100k
+  pixels are hard black now and lit a frame earlier. A simulated fill
+  (the previous frame as the donor at the same pixel, which is what
+  the provider did with the previous right; the panel is mono at 0 px)
+  paints a second copy of the limb into the black gap, displaced by one
+  frame's motion: the ghost. My earlier claim that a one-frame-old
+  donor is null on a zoom-in was wrong; it would be null only for a
+  pure scale-up with no translation, and the view translates.
+- Fix: the FSS provider no longer heals at the left's submit with the
+  previous frame's right. `treatEye` snapshots only; the new table
+  entry `healPair` delivers the heal once both of this frame's eyes are
+  snapshotted, and the host defers the target eye's later stages
+  (sharpen, menu, capture) to the other eye's submit when the provider
+  reports the heal pending. Same frame, same pose: the donor pixel is
+  where the target's black is. The mirror mode (`fss_eye_sync =
+  mirror`, developer value) rides the same entry and needs no
+  deferral, the right is the target and it submits second.
 
 ## Open
 
