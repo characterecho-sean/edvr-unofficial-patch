@@ -2,54 +2,51 @@
 
 ## Status
 
-Updated 2026-09-16 (night). Sean chose A. The mask's rule is fixed on branch
-claude/star-corona-ui-smearing-d1d2ae (code commit a50dfc6), built clean,
-pushed to main and installed to Steam on 2026-09-16 from the build of
-main's head (install_edvr.py refused at 15:20 while the game ran; it went
-in at 15:25 and was re-staged from this commit's build), so
-`--expect-build HEAD` is the check. Next: the confirmation flight (numbers
-and the brief in the night entry).
+Updated 2026-09-16 (late evening) after the confirmation flight (Quest 3,
+DLSS quality mode, preset K; dumps 164010 at tolerance 12 and 164455 at
+tolerance 1). Sean: still smears, only on an M dwarf, not an A-type star,
+and the tolerance made no visible difference. The dumps split it into two
+effects under one issue (tables in the late-evening entry):
+- the resolve's polygon and trail: real on the Pimax performance-mode path
+  (-3.6 luma, dumps 131013/134857), fixed on main by the bound tolerance
+  (a50dfc6, `advanced.ui_ghost_tolerance`, default 12, 0 = the old rule);
+  NOT confirmed in flight, because on the Quest 3 quality-mode path
+  NVIDIA's offset is under 1 luma and the resolve adds 0.00 at 12 and
+  -0.25 at 1, so the knob could not show anything there;
+- the smear this flight shows: a HUD panel body (the comms panel; the info
+  notification that pops up beside the target label) drawn by the game
+  over the star, present in the raw frame before DLSS, identical in
+  `DlssBeforeUi` and `L0` and in all 16 stored frame pairs, recorded as a
+  solid element by `HoloCoverage` and as a filled rectangle by the UI
+  depth. A reading for M against A: the HUD is drawn before the tone map,
+  so a dark translucent fill over a saturated white star stays white.
 
-What was measured (Steam dumps 131013 and 134857, no flight):
-- a numpy port of `kUiResolve` reproduces `L0` to 0.076/255 and 0.002/255
-  mean, bit-exact on inactive texels, and `UiNext.a` to 99.7% and 99.9%;
-- NVIDIA's output leaves the 2x2 raw range on clean corona pixels by a
-  median 6/255 and a 99th percentile 12..16/255 (max over rgb), and the
-  label footprint's distribution is the same, so it held no ghost;
-- with the bound widened by 12/255 the footprint's dimming goes from -3.6
-  to -0.1 luma on both dumps, the rim around the text from -1.4/-1.6 to
-  -0.2/-0.3, and a real ghost is still cut to 12/255;
-- a second effect, a box the size of the label while its distance ticks
-  (-1.8 luma on the label's background, 70% of it moved): the edited branch
-  rebuilt every edited texel from the raw cubic; rebuilding only where the
-  cubic disagrees beyond the tolerance leaves +0.2 with 13% moved.
+The change on main: `src/d3d11/ui_resolve.h` widens the clamp by a
+tolerance carried in a b1 constant buffer and gates the edited rebuild on
+it; a numpy port of the shader matched `L0` to 0.076/255 on the Pimax dumps
+and sized the tolerance (NVIDIA's offset there: median 6/255, 99th
+percentile 12..16/255; the footprint held no ghost); rig cases in
+`tools/ui_depth_test`; installed to Steam as the build of main's head.
 
-The change: `src/d3d11/ui_resolve.h` widens the clamp by a tolerance
-carried in a b1 constant buffer and gates the edited rebuild on it;
-`advanced.ui_ghost_tolerance` (default 12, in 8-bit colour steps, live)
-sets it, and 0 restores the old shader to the bit; rig cases in
-`tools/ui_depth_test` cover both sides of the tolerance and the edited
-branch; all gates green (25150 ui_depth checks, config contract 262/262).
+Ruled out (details in the journal): the game drawing a dark backing at the
+Pimax label (raw clean there); NVIDIA producing either effect; the mask
+lying where the UI content changed; the format-9 change ending the
+deferred route's latch-off; a higher `stale` threshold alone; a tolerance
+relative to the raw level; the resolve's clamp as this flight's smear
+(final-dlss 0.00 at 12, -0.25 at 1, the box already in the raw frame).
 
-Ruled out on the way (details in the journal): the game drawing a dark
-backing; NVIDIA producing the label mask; the mask lying where the UI
-content changed; the format-9 change ending the deferred route's latch-off;
-a higher `stale` threshold alone (it shortens the trail, but the clamp still
-dims every active corona pixel each frame); a tolerance relative to the raw
-level (a fraction of the red channel passes a ghost at near half strength).
+Next (no build first): Sean confirms the panel body is the smear he means
+(crops in the chat); then on the M dwarf `fix.temporal_aa = off` (the box
+stays if it is the game's) and a flat-mode look with a comms message over
+the star. If it is the game's fill: leave it, or an EDVR patch of that
+panel body's fill (the loader's scrim has one, "loading panel: FIT"), at
+the cost of readability over bright backgrounds. Still owed: the Pimax
+confirmation of the resolve fix, a label over a corona at performance mode,
+tolerance 0 against 12, the log checked with `--expect-build HEAD`.
 
-Next flight (a confirmation, not a search): a label over the corona while
-the distance ticks, then sweeping across it. Expect no polygon, no box, no
-trail, clean digits. `python tools\edvr_log.py --target steam
---expect-build HEAD` must name the build; take an INSERT eye dump on the
-label. If anything remains: `ui_ghost_tolerance = 0` in the Steam ini is
-the old rule live, 16 removes the last speckle; report which looked right.
-
-The deferred UI route (src/d3d11/ui_deferred.cpp) is untouched by this. It
-was refused for the tenth time on 2026-09-16 13:47 (`panel vertex buffer
-contract changed`) and has never rendered a label in the headset; its
-format-9/11 change was carried into this branch (1b3d864), and the Codex
-worktree c009 itself is still dirty with the same diff.
+The deferred UI route (src/d3d11/ui_deferred.cpp) is untouched: refused
+ten times, never a label in the headset; its format-9/11 change is on this
+branch (1b3d864); the Codex worktree c009 is still dirty with the same diff.
 
 
 ## Investigation
@@ -3049,3 +3046,72 @@ Take an INSERT eye dump with the label on the corona. If anything remains,
 set `ui_ghost_tolerance = 0` in the Steam ini for a live side-by-side with
 the old rule, and 16 to remove the last speckle; report which value looked
 right.
+
+
+
+### Flight 163650/164220 (Quest 3, DLSS quality): the smear is in the raw frame, 2026-09-16 late evening
+
+Sean flew v0.17.0-rc.3-6-g78961cf on the Quest 3 (Virtual Desktop XR, DLSS
+quality mode, preset K, 1996x2121 in, 3072x3264 out), two sessions, dumps
+164010 (tolerance 12) and 164455 (the menu moved the tolerance 12 -> 0 at
+16:43:24 and 0 -> 1 at 16:44:11, so that dump is the old clamp). His report:
+still smears; reproducible on an M dwarf, not on an A-type star; the
+tolerance made no visible difference. Right build on both logs.
+
+What the dumps say (stage split around the panels over the star, luma,
+regions 1750,1350 700x300 and 1500,1250 850x600 in output pixels):
+
+| dump | band | n | raw | dlss | final | dlss-raw | final-dlss |
+|---|---|---|---|---|---|---|---|
+| 164010 (t 12) | class-1 coverage | 38963 | 37.7 | 37.4 | 37.4 | -0.32 | +0.00 |
+| | ring 1-10 px | 20045 | 21.5 | 22.1 | 22.1 | +0.63 | -0.00 |
+| | ring 11-30 px | 27210 | 47.6 | 48.6 | 48.6 | +0.92 | +0.00 |
+| | class-3 corona | 49622 | 120.0 | 118.1 | 118.1 | -1.92 | +0.00 |
+| 164455 (t 1) | class-1 coverage | 96475 | 21.6 | 21.6 | 21.3 | -0.02 | -0.25 |
+| | ring 1-10 px | 45308 | 5.4 | 5.6 | 5.5 | +0.22 | -0.07 |
+| | ring 11-30 px | 62779 | 9.1 | 9.9 | 9.8 | +0.82 | -0.13 |
+| | class-3 corona | 78047 | 174.2 | 171.6 | 171.7 | -2.55 | +0.10 |
+
+- The resolve adds nothing here: final-dlss is 0.00 at tolerance 12 and at
+  most -0.25 at tolerance 1, because on this path NVIDIA's offset above the
+  raw range is under 1 luma (it was +3..+5 on the Pimax at performance
+  mode). The knob could not show a difference on this rig; it was judged on
+  the path where the effect it fixes does not occur.
+- The dark box around the text is in the raw frame the game hands to DLSS
+  (the C crops), identical in `DlssBeforeUi` and `L0`, and identical frame
+  by frame in the 16 stored T/C pairs: no lag, no trail.
+- It is the body of a HUD panel: in 164455 the comms panel ("[LOCAL]
+  Initialising comms system", "[SYSTEM] Entered Channel") over the limb; in
+  164010 the info notification ("MIDNIGHT SUN / INFO / 22:42:59 / >1 new
+  contact") that pops up next to the target label when a contact is
+  targeted. `HoloCoverage` records that body as a solid element and the UI
+  depth (`Z`) as a filled rectangle; the target label itself ("UNIDENTIFIED
+  SIGNAL SOURCE 1.9xLs", "BINET'S FOLLY") has no body, only its glyphs.
+- Inside the body the corona's granulation is dimmed and softened: a dark
+  translucent panel fill with a gradient edge, the game's own material.
+
+Why an M dwarf and not an A-type star (a reading, not measured): the HUD is
+world-space geometry drawn before the tone map, so a translucent dark fill
+over a star that saturates to white stays white, while over the M dwarf's
+unsaturated red disc the fill shows.
+
+ruled out: the resolve's clamp as this flight's smear, because final-dlss
+is 0.00 at tolerance 12 and -0.25 at tolerance 1 in the label bands, and
+the box is already in the raw frame.
+ruled out: NVIDIA producing it, because `DlssBeforeUi` equals raw within
+1 luma in every band and the T/C pairs are identical frame by frame.
+
+Two effects, then, under one issue: (1) the resolve's polygon and trail,
+real on the Pimax performance-mode path (-3.6 luma, fixed by the
+tolerance, unconfirmed in flight because this flight was on the other
+path); (2) the game's panel body over a star, present before DLSS, on both
+paths.
+
+Next (no build): Sean confirms in the headset that the smear he means is
+the panel body (crops sent to the chat); then two live checks on the M
+dwarf: `fix.temporal_aa = off` (the box stays if it is the game's) and a
+look in flat mode with a comms message over the star. If it is the game's
+fill, the choice is to leave it, or an EDVR patch of that panel body's fill
+(the loader's scrim already has one, "loading panel: FIT"), which trades
+readability over bright backgrounds. The Pimax confirmation of (1) is still
+owed: a label over a corona at performance mode, tolerance 0 against 12.
