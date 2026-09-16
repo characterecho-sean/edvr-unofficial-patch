@@ -2019,7 +2019,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // once per eye per frame, so the cheap "already drawn" check runs before
     // anything else even when the feature is off.
     if (eyeMaskWantsDraws()) {
-        eyeMaskOnEyeDraw(self, bindingGet(BindSlot::Rtv0), bindingGet(BindSlot::Dsv0));
+        eyeMaskOnEyeDraw(self, bindingGet(BindSlot::Dsv0));
     }
     // The interface's depth (ui_depth.h): a composite of a learned surface,
     // or a named family drawn straight into the eye, writes its depth. A

@@ -67,9 +67,15 @@
 // WHICH EYE, WHEN
 //
 // Once per eye per frame, at that eye's FIRST draw into its scene target
-// this frame (vscreen.cpp's beginPanelOverride, past foveation.cpp's own
-// eyeOf/settleEyesByOrder via eyeOfSettled) -- only once the eye is
-// SETTLED and the bound depth view has a clear on record.
+// this frame (vscreen.cpp's beginPanelOverride) -- identified by depth
+// target, not colour: depth_probe.h's depthProbeSceneEyeOf says which eye
+// a bound depth-stencil view is, among the two busiest same-size targets
+// of last frame, the identical identity the temporal pass keys on. Not
+// foveation.cpp's own eyeOf/settleEyesByOrder: under the OpenXR port
+// nothing publishes the game's own eye texture into the slot eyeOf roots
+// against, so it never settles for any target (docs/eye-mask-2026-09-16.md)
+// -- only once the view is recognised as the scene's pick and has a clear
+// on record.
 //
 // RUNTIME MASK, ACROSS THE DLL BOUNDARY
 //
@@ -97,10 +103,12 @@
 //
 // FAIL-SAFES
 //
-// Needs an eye settled, a recorded depth clear, a fresh FOV sample, a
-// writable (not read-only) depth view and a clear OM stage (no UAV bound
-// through OMSetRenderTargetsAndUnorderedAccessViews, which this fix's own
-// plain OMSetRenderTargets bind and restore would otherwise silently drop);
+// Needs a depth view bound and recognised as the scene's current pick (not
+// merely of the right size -- depth_probe.h's depthProbeSceneEyeOf), a
+// recorded depth clear, a fresh FOV sample, a writable (not read-only)
+// depth view and a clear OM stage (no UAV bound through
+// OMSetRenderTargetsAndUnorderedAccessViews, which this fix's own plain
+// OMSetRenderTargets bind and restore would otherwise silently drop);
 // missing any one stands this fix down for that eye that frame and logs
 // why, at most once per distinct reason (see the reason table in
 // eye_mask.cpp). Every D3D11 call this fix makes runs under this module's
@@ -122,14 +130,16 @@ void eyeMaskConfigure(Config& cfg);
 bool eyeMaskWantsDraws();
 
 // From vscreen.cpp's beginPanelOverride, at an eye draw's first reach this
-// frame: rtv is the render target just bound (an eye texture, or nothing
-// eye-shaped -- eyeOfSettled sorts that out). dsvIdentity is the binding
-// shadow's Dsv0, an IDENTITY only (never dereferenced): a null there means
-// nothing is bound and this call returns immediately. When something is
-// bound, the actual draw re-fetches a REFERENCED pointer via
-// OMGetRenderTargets before touching it, as ground truth -- the shadow
-// holds no reference and must never be passed to a real D3D11 call.
-void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* rtv, void* dsvIdentity);
+// frame: dsvIdentity is the binding shadow's Dsv0, an IDENTITY only (never
+// dereferenced): a null there means nothing is bound and this call returns
+// immediately. When something is bound, the actual draw re-fetches a
+// REFERENCED pointer via OMGetRenderTargets before touching it, as ground
+// truth -- the shadow holds no reference and must never be passed to a
+// real D3D11 call. Which eye (if either) that view is comes from
+// depth_probe.h's depthProbeSceneEyeOf, keyed on the depth view itself --
+// not from foveation's RTV-rooted eyeOf, which the OpenXR port leaves
+// unsettled for every target (docs/eye-mask-2026-09-16.md).
+void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* dsvIdentity);
 
 // From the ClearDepthStencilView hook, EVERY clear, any view (an IDENTITY
 // only, never dereferenced): was this the depth target a mask was already

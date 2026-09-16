@@ -66,17 +66,6 @@ void foveationConfigure(Config& cfg);
 // One bool for the draw path's early-out set.
 bool foveationWantsDraws();
 
-// Which eye a render target belongs to, and whether that answer is SETTLED
-// -- ground truth from the openvr half's submitted texture, or the census
-// pairing once it has rooted the frame (foveation.cpp: eyeOf,
-// settleEyesByOrder) -- rather than the "left until placed" guess an
-// unplaced target reads as. fix.eye_mask calls this too, independent of
-// whether foveation itself is armed: eyeOf is safe to call more than once a
-// frame for the same resource (its first line returns that frame's cached
-// answer), so a second caller does not double-book the pairing census.
-// False, with *outEye left unmodified, before anything has settled it.
-bool eyeOfSettled(const ResourceInfo& info, int* outEye);
-
 // Every draw on the owner context: whether slot 0's target is eye-sized
 // (the census's own verdict), the view and its binding generation, and the
 // draw's shape for the passes filter. Sets or clears the shading-rate image

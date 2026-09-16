@@ -487,18 +487,35 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
 }
 
 
-bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
-    if (!tex) return false;
-    *tex = nullptr;
-    if (!g_wanted || eye < 0 || eye > 1) return false;
-    // The scene's targets: the two BUSIEST of this size last frame,
-    // whatever the count -- the second depth flight (2026-09-03) had the
-    // world stop being drawn for a minute (the station's own screens)
-    // while the cockpit alone went to a pair with four to nine draws,
-    // which is exactly the depth the text needs, and a threshold of fifty
-    // refused it. Ordered by first bind in the frame; the pair in use is
-    // kept while it stays within half of the busiest, so two pairs the
-    // game alternates between do not flap.
+// Orders the scene pick pair by first bind in the frame: the first bound
+// is the first eye rendered, the left (the registration instrument's
+// "depth, eyes swapped" candidate checks that) -- shared by
+// depthProbeSceneDepth and depthProbeSceneEyeOf so the two can never
+// disagree about which target is which eye. Only meaningful once both
+// g_scenePick entries are valid; callers check that first.
+static void sceneOrderFirstSecond(int* outFirst, int* outSecond) {
+    int first = g_scenePick[0], second = g_scenePick[1];
+    if (g_targets[second].firstBindLastFrame < g_targets[first].firstBindLastFrame) {
+        const int tmp = first; first = second; second = tmp;
+    }
+    *outFirst = first;
+    *outSecond = second;
+}
+
+// The scene's targets for this size: the two BUSIEST of this size last
+// frame, whatever the count -- the second depth flight (2026-09-03) had
+// the world stop being drawn for a minute (the station's own screens)
+// while the cockpit alone went to a pair with four to nine draws, which
+// is exactly the depth the text needs, and a threshold of fifty refused
+// it. The pair in use is kept while it stays within half of the busiest,
+// so two pairs the game alternates between do not flap. One evaluation
+// shared by depthProbeSceneDepth (the temporal pass and the interface
+// depth ask by the eye's size) and depthProbeSceneEyeOf (fix.eye_mask
+// asks by the bound depth view's own size), so the pick forms on a rig
+// where every other asker is off. True when a pick of this size is in
+// place afterwards; a stale pick is left alone when nothing of this size
+// was drawn last frame.
+static bool refreshScenePick(uint32_t w, uint32_t h) {
     int best[2] = {-1, -1};
     for (int i = 0; i < g_targetCount; ++i) {
         const Target& t = g_targets[i];
@@ -527,11 +544,17 @@ bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex
         g_scenePick[0] = best[0];
         g_scenePick[1] = best[1];
     }
-    // The first bound in the frame is the first eye rendered: the left.
-    int first = g_scenePick[0], second = g_scenePick[1];
-    if (g_targets[second].firstBindLastFrame < g_targets[first].firstBindLastFrame) {
-        const int tmp = first; first = second; second = tmp;
-    }
+    return true;
+}
+
+bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
+    if (!tex) return false;
+    *tex = nullptr;
+    if (!g_wanted || eye < 0 || eye > 1) return false;
+    if (!refreshScenePick(w, h)) return false;
+    // Ordered by first bind in the frame: the first bound is the left.
+    int first, second;
+    sceneOrderFirstSecond(&first, &second);
     *tex = g_targets[eye == 0 ? first : second].tex;
     return true;
 }
@@ -558,6 +581,56 @@ bool depthProbeIsSceneDepth(const void* resource) {
         if (g_targets[i].tex == resource) return true;
     }
     return false;
+}
+
+// For fix.eye_mask: which eye (if either) THIS EXACT depth-stencil view
+// is, using the identical scene-pair identity and first-bind ordering
+// depthProbeSceneDepth uses (sceneOrderFirstSecond, above), so the two can
+// never disagree about which target is which eye. *outTargetIndex is set
+// whenever the view is known to the probe at all (even when it answers
+// false), left at -1 only when findTarget itself fails -- so a caller can
+// tell "this view is unknown to the probe" apart from "known, but not (or
+// no longer) the scene's current pick", e.g. a double-buffered twin the
+// game alternates with the chosen pair. No order-based fallback for a
+// same-sized target that is not one of the two picks.
+bool depthProbeSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTargetIndex) {
+    if (outEye) *outEye = -1;
+    if (outTargetIndex) *outTargetIndex = -1;
+    if (!g_wanted || !dsv) return false;
+    const int idx = findTarget(dsv);
+    if (outTargetIndex) *outTargetIndex = idx;
+    if (idx < 0) return false;
+    // Not one of the current pair, or no pair yet: re-evaluate the pick by
+    // this view's own size -- the evaluation the temporal pass makes by
+    // the eye's size, hysteresis included, so the pick forms on a rig
+    // where nothing else asks for it. The caller reaches here only at an
+    // eye draw, where every bound view shares the eye's size by D3D11's
+    // own rule, so this never re-picks by a shadow map's size. A target
+    // that is still not one of the pair afterwards is not the scene's.
+    const bool picked = g_scenePick[0] >= 0 && g_scenePick[1] >= 0 &&
+                        g_scenePick[0] < g_targetCount && g_scenePick[1] < g_targetCount;
+    if (!picked || (idx != g_scenePick[0] && idx != g_scenePick[1])) {
+        const Target& t = g_targets[idx];
+        if (!refreshScenePick(t.w, t.h)) return false;
+        if (idx != g_scenePick[0] && idx != g_scenePick[1]) return false;
+    }
+    int first, second;
+    sceneOrderFirstSecond(&first, &second);
+    if (outEye) *outEye = (idx == first) ? 0 : 1;
+    return true;
+}
+
+// Whether target index (depthProbeSceneEyeOf's outTargetIndex) shares the
+// scene pick's own width/height -- a double-buffered twin the game
+// alternates with the chosen pair, or an unrelated stale target, for the
+// eye mask summary's "not the scene's pick" tally. False with no scene
+// pick yet or an out-of-range index.
+bool depthProbeTargetIsSceneSized(int targetIndex) {
+    if (targetIndex < 0 || targetIndex >= g_targetCount) return false;
+    if (g_scenePick[0] < 0 || g_scenePick[0] >= g_targetCount) return false;
+    const Target& t = g_targets[targetIndex];
+    const Target& ref = g_targets[g_scenePick[0]];
+    return t.dsv && t.w == ref.w && t.h == ref.h;
 }
 
 uint32_t depthProbeSceneDraws() {

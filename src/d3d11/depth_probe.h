@@ -115,6 +115,27 @@ bool depthProbeIsSceneDepth(const void* resource);
 bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
                                 ID3D11Texture2D** tex, uint32_t* dsvFormat);
 
+// For fix.eye_mask: which eye (if either) THIS EXACT depth-stencil view
+// is, among the scene pair depthProbeSceneDepth picks, using the same
+// first-bind ordering (one shared helper, so the two can never disagree).
+// *outTargetIndex is set whenever the probe has ever seen this view at
+// all, even on a false answer, and left at -1 only when it has not -- so
+// a caller can tell "unknown to the probe" apart from "known, but not (or
+// no longer) the scene's current pick". A view outside the current pair
+// re-evaluates the pick by its own size first (the same evaluation the
+// temporal pass makes by the eye's size), so the pair forms on a rig
+// where nothing else asks for it; call this only at an eye draw, where
+// every bound view is eye-sized. No order-based fallback for a same-sized
+// target that is still not one of the two picks.
+bool depthProbeSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTargetIndex);
+
+// Whether target index (from depthProbeSceneEyeOf's outTargetIndex) shares
+// the scene pick's width/height -- a double-buffered twin the game
+// alternates with the chosen pair -- for the eye mask summary's "not the
+// scene's pick" tally. False with no scene pick yet or an out-of-range
+// index.
+bool depthProbeTargetIsSceneSized(int targetIndex);
+
 // How many draws the scene pair's lesser target took last frame: the
 // temporal pass's test of a REAL scene (hundreds in the cockpit and in
 // space; one or two for the main menu's pre-rendered backdrop, whose

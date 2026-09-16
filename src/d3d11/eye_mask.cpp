@@ -17,9 +17,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/timing.h"
-#include "binding_shadow.h"
 #include "depth_probe.h"
-#include "foveation.h"
 #include "native_timing.h"
 #include "vscreen.h"
 
@@ -158,23 +156,27 @@ int g_trimDeg = 0;
 bool g_loggedOff = false;
 
 enum Reason : int {
-    kReasonNotSettled = 0,
+    kReasonNoDsv = 0,
+    kReasonUnknownToProbe,
+    kReasonNotScenePick,
+    kReasonReadOnlyDepth,
     kReasonNoClear,
     kReasonNoFov,
     kReasonNotReported,
-    kReasonSetupFailed,
     kReasonUavBound,
-    kReasonReadOnlyDepth,
+    kReasonSetupFailed,
     kReasonCount
 };
 const char* const kReasonText[kReasonCount] = {
-    "eye not settled",
+    "no depth target bound",
+    "depth target unknown to the probe",
+    "depth target not the scene's pick",
+    "read-only depth view",
     "no clear value on record for this depth target",
     "no FOV yet",
     "runtime mask not reported",
-    "shader or buffer setup failed",
     "uav bound",
-    "read-only depth view",
+    "shader or buffer setup failed",
 };
 bool g_reasonLogged[kReasonCount] = {};
 uint64_t g_reasonCount[kReasonCount] = {};
@@ -197,12 +199,22 @@ EyeState g_eyeState[2];
 
 uint32_t g_frameNo = 0;
 uint32_t g_maskedEyesThisFrameBits = 0;
-// The RTV identity handled for each eye this frame (never dereferenced),
+// The DSV identity handled for each eye this frame (never dereferenced),
 // so a repeat draw into an already-handled eye bails on a pointer compare
-// instead of paying bindingResolve + eyeOfSettled again -- most eye draws
-// in a scene land after the first one per eye.
-void* g_maskedRtvThisFrame[2] = {nullptr, nullptr};
+// instead of paying OMGetRenderTargets + depthProbeSceneEyeOf again --
+// most eye draws in a scene land after the first one per eye.
+void* g_maskedDsvThisFrame[2] = {nullptr, nullptr};
 uint64_t g_lastSummaryMs = 0;
+
+// For the 60 s summary: how many DISTINCT depth targets stood down as
+// "not the scene's pick" this period, and how many of those matched the
+// scene pick's own size -- so a double-buffered pair the game alternates
+// between shows in one line rather than two flights. Reset each time the
+// summary fires; the reason counters above stay cumulative.
+constexpr int kMaxTrackedNotPick = 64;   // headroom over depth_probe's own target cap
+bool g_notPickSeenThisPeriod[kMaxTrackedNotPick] = {};
+uint32_t g_notPickDistinctThisPeriod = 0;
+uint32_t g_notPickSceneSizedThisPeriod = 0;
 
 FaultBudget g_drawBudget("eye_mask.draw", 3);
 
@@ -217,6 +229,20 @@ void noteWaiting(int reason) {
     if (!g_reasonLogged[reason]) {
         g_reasonLogged[reason] = true;
         Log::get().note("eye mask: waiting -- %s.", kReasonText[reason]);
+    }
+}
+
+// Same stand-down as noteWaiting(kReasonNotScenePick), plus the per-period
+// distinct-target tally logSummaryIfDue reports: a same-sized depth target
+// the probe knows but is not (or is no longer) the scene's current pick,
+// e.g. the twin of a double-buffered pair the game alternates between.
+void noteNotScenePick(int targetIndex) {
+    noteWaiting(kReasonNotScenePick);
+    if (targetIndex >= 0 && targetIndex < kMaxTrackedNotPick &&
+        !g_notPickSeenThisPeriod[targetIndex]) {
+        g_notPickSeenThisPeriod[targetIndex] = true;
+        ++g_notPickDistinctThisPeriod;
+        if (depthProbeTargetIsSceneSized(targetIndex)) ++g_notPickSceneSizedThisPeriod;
     }
 }
 
@@ -463,8 +489,8 @@ bool issueRingDraw(ID3D11DeviceContext* ctx, ID3D11Device* device, ID3D11DepthSt
 
 // -------------------------------------------------------------- log lines
 
-void maybeLogEffectiveChange(int eye, const EyeMaskGeometry& geom, float l, float r, float d, float u,
-                             uint32_t triL, uint32_t triR, bool reported,
+void maybeLogEffectiveChange(int eye, int targetIdx, const EyeMaskGeometry& geom, float l, float r,
+                             float d, float u, uint32_t triL, uint32_t triR, bool reported,
                              float clearValue, bool reversed, float depthValue, bool drew) {
     EyeState& es = g_eyeState[eye];
     bool fire = es.forceLog;
@@ -490,9 +516,10 @@ void maybeLogEffectiveChange(int eye, const EyeMaskGeometry& geom, float l, floa
     Log::get().note(
         "eye mask: %s -- runtime mask %s; lens cone %.1f deg (edge %.1f deg, trim %d); "
         "ellipse centre %.3f,%.3f semi-axes %.3f,%.3f in NDC; masks %.1f%% of eye %d's "
-        "viewport; depth written %.1f (clear %.3f, reversed-Z %s); drew %s",
+        "viewport (scene depth target #%d); depth written %.1f (clear %.3f, reversed-Z %s); "
+        "drew %s",
         modeText, triText, geom.rDeg, geom.r0Deg, g_trimDeg,
-        geom.centreX, geom.centreY, geom.a, geom.b, pct, eye,
+        geom.centreX, geom.centreY, geom.a, geom.b, pct, eye, targetIdx,
         depthValue, clearValue, reversed ? "yes" : "no", drew ? "yes" : "no");
 }
 
@@ -514,14 +541,20 @@ void logSummaryIfDue() {
     Log::get().note(
         "eye mask so far: eye 0 masked %llu of %llu frames, eye 1 masked %llu of %llu "
         "frames; %llu frame(s) had the depth target cleared again after the mask; "
-        "stand-downs: %s",
+        "stand-downs: %s; %u distinct depth target(s) stood down as not the scene's "
+        "pick this period, %u of them scene-sized",
         static_cast<unsigned long long>(g_eyeState[0].framesMasked),
         static_cast<unsigned long long>(g_eyeState[0].framesObserved),
         static_cast<unsigned long long>(g_eyeState[1].framesMasked),
         static_cast<unsigned long long>(g_eyeState[1].framesObserved),
         static_cast<unsigned long long>(g_eyeState[0].reclearedFrames +
                                         g_eyeState[1].reclearedFrames),
-        reasons);
+        reasons, g_notPickDistinctThisPeriod, g_notPickSceneSizedThisPeriod);
+
+    // Per-period only; the reason counters above stay cumulative.
+    std::memset(g_notPickSeenThisPeriod, 0, sizeof(g_notPickSeenThisPeriod));
+    g_notPickDistinctThisPeriod = 0;
+    g_notPickSceneSizedThisPeriod = 0;
 }
 
 }  // namespace
@@ -562,27 +595,38 @@ void eyeMaskConfigure(Config& cfg) {
 
 bool eyeMaskWantsDraws() { return g_mode != Mode::Off; }
 
-void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* rtv, void* dsvIdentity) {
+void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* dsvIdentity) {
     if (g_mode == Mode::Off || !ctx) return;
     if ((g_maskedEyesThisFrameBits & 3u) == 3u) return;   // both eyes already handled
-    // Cheap pointer compare against each eye's RTV identity this frame,
-    // before paying bindingResolve + eyeOfSettled again -- most draws into
-    // an eye-sized target in a frame land after that eye's first one.
-    if (rtv && (rtv == g_maskedRtvThisFrame[0] || rtv == g_maskedRtvThisFrame[1])) return;
-    if (!dsvIdentity) { noteWaiting(kReasonNoClear); return; }
-
-    ResourceInfo info;
-    if (!bindingResolve(rtv, &info) || !info.isTexture2D) { noteWaiting(kReasonNotSettled); return; }
-    int eye = -1;
-    if (!eyeOfSettled(info, &eye) || eye < 0 || eye > 1) { noteWaiting(kReasonNotSettled); return; }
-    const uint32_t bit = 1u << eye;
-    if (g_maskedEyesThisFrameBits & bit) return;
+    // Cheap pointer compare against each eye's DSV identity this frame,
+    // before paying OMGetRenderTargets + depthProbeSceneEyeOf again --
+    // most draws into an eye-sized target in a frame land after that
+    // eye's first one.
+    if (dsvIdentity && (dsvIdentity == g_maskedDsvThisFrame[0] ||
+                        dsvIdentity == g_maskedDsvThisFrame[1])) {
+        return;
+    }
+    if (!dsvIdentity) { noteWaiting(kReasonNoDsv); return; }
 
     // Ground truth: a referenced pointer, never the binding shadow's
     // identity-only one (see eye_mask.h's eyeMaskOnEyeDraw comment).
     ID3D11DepthStencilView* dsv = nullptr;
     ctx->OMGetRenderTargets(0, nullptr, &dsv);
-    if (!dsv) { noteWaiting(kReasonNoClear); return; }
+    if (!dsv) { noteWaiting(kReasonNoDsv); return; }
+
+    // Which eye (if either) this depth view is: the depth probe's own
+    // scene pair, the same identity the temporal pass keys on -- not
+    // foveation's RTV-rooted eyeOf, which never settles under the OpenXR
+    // port (docs/eye-mask-2026-09-16.md).
+    int eye = -1, targetIdx = -1;
+    if (!depthProbeSceneEyeOf(dsv, &eye, &targetIdx)) {
+        dsv->Release();
+        if (targetIdx < 0) noteWaiting(kReasonUnknownToProbe);
+        else noteNotScenePick(targetIdx);
+        return;
+    }
+    const uint32_t bit = 1u << eye;
+    if (g_maskedEyesThisFrameBits & bit) { dsv->Release(); return; }
 
     // A read-only depth view means our write would silently do nothing --
     // checked before anything else spends effort on this draw.
@@ -645,7 +689,7 @@ void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* rtv, void* dsvIdentity) {
     if (uavBound) noteWaiting(kReasonUavBound);
 
     g_maskedEyesThisFrameBits |= bit;
-    g_maskedRtvThisFrame[eye] = rtv;
+    g_maskedDsvThisFrame[eye] = dsvIdentity;
     if (drew) {
         EyeState& es = g_eyeState[eye];
         ++es.framesMasked;
@@ -653,7 +697,7 @@ void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* rtv, void* dsvIdentity) {
         es.drawnDsv = dsv;   // identity only, from here on
     }
 
-    maybeLogEffectiveChange(eye, geom, l, r, d, u, triL, triR, reported,
+    maybeLogEffectiveChange(eye, targetIdx, geom, l, r, d, u, triL, triR, reported,
                             clearValue, reversed, depthValue, drew);
 
     dsv->Release();
@@ -674,8 +718,8 @@ void eyeMaskFrameBoundary(ID3D11DeviceContext* ctx) {
     (void)ctx;
     ++g_frameNo;
     g_maskedEyesThisFrameBits = 0;
-    g_maskedRtvThisFrame[0] = nullptr;
-    g_maskedRtvThisFrame[1] = nullptr;
+    g_maskedDsvThisFrame[0] = nullptr;
+    g_maskedDsvThisFrame[1] = nullptr;
     if (g_mode != Mode::Off) logSummaryIfDue();
 }
 
