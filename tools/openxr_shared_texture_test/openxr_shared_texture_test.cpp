@@ -6,6 +6,7 @@
 #include "../../src/openxr/immediate_executor.h"
 #include "../../src/openxr/gpu_work_observer.h"
 #include "../../src/openxr/owner_service.h"
+#include "../../src/common/system_d3d11.h"
 #include <d3d11.h>
 #include <d3d11sdklayers.h>
 #include <dxgi.h>
@@ -70,20 +71,10 @@ struct Fixture {
   SharedTextureTransfer transfer;
 };
 
-// The exe runs from build\ beside EDVR's own d3d11.dll, which an imported
-// D3D11CreateDevice would resolve to first: take the system module by full path
-// instead, so this rig never runs the proxy. Kept mapped for the whole process.
-decltype(&D3D11CreateDevice) systemCreateDevice(){
-  static const auto create=[]()->decltype(&D3D11CreateDevice){
-    wchar_t dir[MAX_PATH]{};const UINT n=GetSystemDirectoryW(dir,MAX_PATH);
-    const HMODULE module=n&&n<MAX_PATH?LoadLibraryW((std::wstring(dir)+L"\\d3d11.dll").c_str()):nullptr;
-    return module?reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice")):nullptr;
-  }();
-  return create;
-}
 bool createDevice(IDXGIAdapter* adapter, ComPtr<ID3D11Device>& device,
                   ComPtr<ID3D11DeviceContext>& context,UINT flags=0){
-  const auto create=systemCreateDevice();
+  // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+  const auto create=edvr::systemD3D11CreateDevice();
   if(!create){check(false,"system d3d11.dll");return false;}
   D3D_FEATURE_LEVEL level{};
   HRESULT hr=create(adapter, adapter?D3D_DRIVER_TYPE_UNKNOWN:D3D_DRIVER_TYPE_WARP,

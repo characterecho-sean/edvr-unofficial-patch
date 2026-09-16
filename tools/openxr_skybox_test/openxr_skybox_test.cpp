@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 
 #include "../../src/openxr/skybox_capture.h"
+#include "../../src/common/system_d3d11.h"
 
 using Microsoft::WRL::ComPtr;
 using edvr::openxr::SkyboxCapture;
@@ -28,23 +29,6 @@ struct Checks {
     }
   }
 };
-
-// The exe runs from build\ beside EDVR's own d3d11.dll, which an imported
-// D3D11CreateDevice would resolve to first: take the system module by full
-// path instead, so this rig never runs the proxy. Kept mapped for the whole
-// process.
-decltype(&D3D11CreateDevice) SystemCreateDevice() {
-  static const auto create = []() -> decltype(&D3D11CreateDevice) {
-    wchar_t dir[MAX_PATH]{};
-    const UINT length = GetSystemDirectoryW(dir, MAX_PATH);
-    if (!length || length >= MAX_PATH) return nullptr;
-    const HMODULE module = LoadLibraryW((std::wstring(dir) + L"\\d3d11.dll").c_str());
-    if (!module) return nullptr;
-    return reinterpret_cast<decltype(&D3D11CreateDevice)>(
-        GetProcAddress(module, "D3D11CreateDevice"));
-  }();
-  return create;
-}
 
 DXGI_FORMAT SourceFormat(unsigned face) {
   switch (face % 6) {
@@ -152,7 +136,8 @@ int main(int argc, char** argv) {
   }
 
   Checks checks;
-  const auto createDevice = SystemCreateDevice();
+  // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+  const auto createDevice = edvr::systemD3D11CreateDevice();
   checks.expect(createDevice != nullptr, "system d3d11.dll");
   if (!createDevice) return 1;
   ComPtr<ID3D11Device> device;

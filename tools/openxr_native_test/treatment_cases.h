@@ -68,7 +68,9 @@ template<class Check> void runTreatmentCases(Check check) {
   using namespace treatment_fixture;
   state={};state.thread=GetCurrentThreadId();
   ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
-  check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)),"treatment WARP device");
+  // System32's d3d11, not an import: this exe sits in build\ beside EDVR's proxy.
+  const auto createDevice=systemD3D11CreateDevice();
+  check(createDevice&&SUCCEEDED(createDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)),"treatment WARP device");
   if(!device)return;
   D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=4;desc.MipLevels=desc.ArraySize=1;
   desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
@@ -141,8 +143,9 @@ template<class Check> void runDeferredTreatmentCases(Check check) {
   using namespace treatment_fixture;
   state={};state.thread=GetCurrentThreadId();
   ComPtr<ID3D11Device> producer,consumer;ComPtr<ID3D11DeviceContext> producerContext,consumerContext;
-  check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&producer,nullptr,&producerContext))&&
-    SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&consumer,nullptr,&consumerContext)),"host handoff devices");
+  const auto createDevice=systemD3D11CreateDevice();
+  check(createDevice&&SUCCEEDED(createDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&producer,nullptr,&producerContext))&&
+    SUCCEEDED(createDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&consumer,nullptr,&consumerContext)),"host handoff devices");
   if(!producer||!consumer)return;
   ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC adapterDesc{};
   check(SUCCEEDED(consumer.As(&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter))&&SUCCEEDED(adapter->GetDesc(&adapterDesc)),"host handoff adapter");

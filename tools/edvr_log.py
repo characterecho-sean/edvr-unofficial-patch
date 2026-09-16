@@ -22,10 +22,12 @@ spent reading counters off a log that a stale DLL wrote; the exit code is
 there so a script can refuse to go on.
 
 Log names are edvr_<tag>_YYYYMMDD_HHMMSS.log, where the tag is `gfx` for
-the d3d11 half and `vr` for the openvr half. Native OpenXR logs add
-millisecond and pid fields: edvr_openxr_YYYYMMDD_HHMMSS_mmm_pid.log. New native
-logs always land in edvr_logs\\ beside the executable, with local-time names
-and UTC body timestamps. Older native logs beside the DLL have UTC names.
+the d3d11 half and `vr` for the openvr half; a second process opening the
+same tag in the same second gets millisecond and pid fields appended,
+edvr_<tag>_YYYYMMDD_HHMMSS_mmm_pid.log. Native OpenXR logs always carry those
+fields: edvr_openxr_YYYYMMDD_HHMMSS_mmm_pid.log. New native logs always land
+in edvr_logs\\ beside the executable, with local-time names and UTC body
+timestamps. Older native logs beside the DLL have UTC names, and no fields.
 Legacy logs honor log.dir in edvr.ini, and this reads
 that key rather than assuming the default -- a redirected log directory
 is exactly when you would rather not be told there are no logs.
@@ -139,12 +141,14 @@ def find_logs(directory, tag=None):
         m = LOG_RE.match(name)
         if not m:
             continue
-        native_name = m.group("ms") is not None
-        if native_name != (m.group("tag").lower() == "openxr"):
-            continue
+        suffixed = m.group("ms") is not None
+        if m.group("tag").lower() == "openxr" and not suffixed:
+            continue   # an older native log with a UTC name, not this build's
         if tag and m.group("tag").lower() != tag.lower():
             continue
-        stamp = m.group("stamp") + ("_" + m.group("ms") if native_name else "")
+        # A legacy log opened in the same second as another carries the suffix
+        # too, and sorts after the one that took the plain name.
+        stamp = m.group("stamp") + ("_" + m.group("ms") if suffixed else "")
         out.append((stamp, m.group("tag"),
                     os.path.join(directory, name)))
     out.sort(reverse=True)
@@ -501,12 +505,24 @@ def self_test():
         if len(find_logs(logs, "openxr")) != 1:
             print("find_logs native OpenXR tag filter is wrong")
             ok = False
-        with open(os.path.join(logs, "edvr_gfx_20260910_040000_001_1.log"),
-                  "wb") as f:
-            f.write(b"not a valid legacy name\n")
-        if len(find_logs(logs, "gfx")) != 2:
-            print("native suffix was accepted for legacy gfx")
+        # A legacy log opened in the same second as another: log.cpp gives it
+        # the suffix, and it is a log like any other, later than the plain
+        # name it lost the second to.
+        same_second = os.path.join(logs, "edvr_gfx_20260910_040000_001_1.log")
+        with open(same_second, "wb") as f:
+            f.write(b"a second process in the same second\n")
+        found = [os.path.basename(p) for _, _, p in find_logs(logs, "gfx")]
+        if found != ["edvr_gfx_20260910_050000.log", "edvr_gfx_20260910_040000_001_1.log",
+                     "edvr_gfx_20260910_040000.log"]:
+            print("a suffixed legacy log is not found, or sorts wrong: %r" % found)
             ok = False
+        os.remove(same_second)
+        with open(os.path.join(logs, "edvr_openxr_20260910_060002.log"), "wb") as f:
+            f.write(b"an old native log with a UTC name\n")
+        if len(find_logs(logs, "openxr")) != 1:
+            print("an unsuffixed native name was accepted")
+            ok = False
+        os.remove(os.path.join(logs, "edvr_openxr_20260910_060002.log"))
         # Distinct native Init attempts within one second sort by milliseconds.
         newer_native = os.path.join(logs, "edvr_openxr_20260910_060001_999_2.log")
         with open(newer_native, "wb") as f:

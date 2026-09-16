@@ -1,4 +1,5 @@
 #include "../../src/openxr/device_gpu_timing.h"
+#include "../../src/common/system_d3d11.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -11,8 +12,8 @@ static void check(bool ok,const char* s){++checks;if(!ok){++failures;std::printf
 static ComPtr<ID3D11Texture2D> makeTexture(ID3D11Device* d){D3D11_TEXTURE2D_DESC x{};x.Width=x.Height=32;x.ArraySize=x.MipLevels=x.SampleDesc.Count=1;x.Format=DXGI_FORMAT_R8G8B8A8_UNORM;x.Usage=D3D11_USAGE_DEFAULT;x.BindFlags=D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D> t;check(SUCCEEDED(d->CreateTexture2D(&x,nullptr,&t)),"texture");return t;}
 int wmain(int argc,wchar_t** argv){
  if(argc!=2)return 2;if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_device_gpu_test: dry-run (no WARP device)");return 0;}if(std::wcscmp(argv[1],L"--self-test"))return 2;
- wchar_t sys[MAX_PATH]{};check(GetSystemDirectoryW(sys,MAX_PATH)!=0,"system directory");HMODULE m=LoadLibraryW((std::wstring(sys)+L"\\d3d11.dll").c_str());check(m!=nullptr,"system D3D11");if(!m)return 1;
- auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(m,"D3D11CreateDevice"));ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>ctx;D3D_FEATURE_LEVEL fl{};check(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,&fl,&ctx)),"WARP device");if(!d)return 1;
+ auto create=edvr::systemD3D11CreateDevice();check(create!=nullptr,"system D3D11");if(!create)return 1;
+ ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>ctx;D3D_FEATURE_LEVEL fl{};check(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,&fl,&ctx)),"WARP device");if(!d)return 1;
  collectorCases(d.Get(),ctx.Get());
  edvr::openxr::DeviceGpuTiming timing;check(timing.initialize(d.Get(),ctx.Get()),"initialize separate timing device");auto a=makeTexture(d.Get()),b=makeTexture(d.Get());
  ComPtr<ID3D11DeviceContext> deferred;check(SUCCEEDED(d->CreateDeferredContext(0,&deferred)),"composition command context");

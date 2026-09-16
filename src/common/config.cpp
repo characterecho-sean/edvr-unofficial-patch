@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <cwchar>
 #include <map>
 #include <set>
 #include <string>
@@ -68,6 +69,30 @@ bool ensureDirectory(const std::wstring& path) {
     return GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
+namespace {
+std::wstring environmentValue(const wchar_t* name) {
+    wchar_t buf[MAX_PATH]{};
+    const DWORD n = GetEnvironmentVariableW(name, buf, MAX_PATH);
+    return n && n < MAX_PATH ? std::wstring(buf, n) : std::wstring();
+}
+
+// Where logs go when the ini does not say: <exe dir>\edvr_logs, unless the
+// environment moves it. EDVR_LOG_DIR names the directory; EDVR_LOG_DIR_FOR,
+// when set, limits the move to processes whose exe sits in that directory.
+// build.bat's test runner sets both, so every proxy a rig loads from build\
+// logs -- and arms its crash sentinels -- in a directory of the rig's own,
+// while the children some rigs stage in private directories, and read the
+// logs of, keep their exe-relative default.
+std::wstring defaultLogDirectory() {
+    const std::wstring exeDir = executableDirectory();
+    const std::wstring moved = environmentValue(L"EDVR_LOG_DIR");
+    if (moved.empty()) return exeDir + L"\\edvr_logs";
+    const std::wstring only = environmentValue(L"EDVR_LOG_DIR_FOR");
+    if (!only.empty() && _wcsicmp(only.c_str(), exeDir.c_str()) != 0) return exeDir + L"\\edvr_logs";
+    return moved;
+}
+}  // namespace
+
 void Config::init(const std::wstring& moduleDir) {
     if (!m_impl) m_impl = new Impl();
 
@@ -87,7 +112,7 @@ void Config::init(const std::wstring& moduleDir) {
     // Defaults to <exe dir>\edvr_logs; the shader dump lands in a subdirectory.
     std::string dirUtf8 = getString("log.dir", "");
     if (dirUtf8.empty()) {
-        m_logDir = executableDirectory() + L"\\edvr_logs";
+        m_logDir = defaultLogDirectory();
     } else {
         const int need = MultiByteToWideChar(CP_UTF8, 0, dirUtf8.c_str(), -1, nullptr, 0);
         std::vector<wchar_t> w(need > 0 ? need : 1, 0);

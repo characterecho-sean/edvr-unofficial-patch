@@ -12,6 +12,7 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/d3d11/fss_heal.h"
 #include "../../src/d3d11/shader_swap.h"
+#include "../../src/common/system_d3d11.h"
 using Microsoft::WRL::ComPtr;
 namespace edvr {
 void breadcrumb(const char*) {}
@@ -31,9 +32,8 @@ constexpr unsigned W=64,H=32,black=0xFF000000,warm=0xFF4080FF;
 struct Device {
   ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
   Device() {
-    wchar_t path[MAX_PATH]{};GetSystemDirectoryW(path,MAX_PATH);
-    auto module=LoadLibraryW((std::wstring(path)+L"\\d3d11.dll").c_str());
-    auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice"));
+    auto create=edvr::systemD3D11CreateDevice();
+    require(create!=nullptr,"System32 D3D11CreateDevice");
     require(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)),"WARP device");
   }
   ComPtr<ID3D11Texture2D> texture(unsigned color) {

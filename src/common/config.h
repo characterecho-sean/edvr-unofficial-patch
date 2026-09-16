@@ -17,6 +17,10 @@ public:
     static Config& get();
 
     // Looks for edvr.ini next to the host module, then next to the .exe.
+    // logDir() is the ini's log.dir, else <exe dir>\edvr_logs, which the
+    // environment may move: EDVR_LOG_DIR names another directory, and
+    // EDVR_LOG_DIR_FOR, when set, applies it only to exes in that directory
+    // (the test runner's way of giving each rig's proxies their own logs).
     void init(const std::wstring& moduleDir);
 
     // Returns true if the file changed and values were re-read.

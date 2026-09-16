@@ -100,29 +100,28 @@ struct Found {
     std::wstring name;  // inside the zip
 };
 
-// EDVR names its logs edvr_<tag>_YYYYMMDD_HHMMSS.log. Native OpenXR adds
-// _mmm_pid after the timestamp; the timestamp remains the local wall-clock
-// value used by the legacy halves, while the body explicitly says UTC.
-// The session a file
-// belongs to is written on the file itself. That is better evidence than the
-// write time, which changes when a folder is copied, restored from a backup or
-// pulled out of somebody else's zip -- exactly the things that happen to a
-// folder on its way into a bug report.
+// EDVR names its logs edvr_<tag>_YYYYMMDD_HHMMSS.log, with _mmm_<pid> after
+// the stamp when a second process opened the same tag in the same second
+// (the native OpenXR trace always carries it). The stamp is the local
+// wall-clock value throughout, though the trace's body says UTC. The session
+// a file belongs to is written on the file itself. That is better evidence
+// than the write time, which changes when a folder is copied, restored from
+// a backup or pulled out of somebody else's zip -- exactly the things that
+// happen to a folder on its way into a bug report.
 bool stampFromName(const std::wstring& name, FILETIME* out) {
     const size_t dot = name.rfind(L'.');
     if (dot == std::wstring::npos || dot < 15) return false;
     size_t stampEnd = dot;
-    if (name.rfind(L"edvr_openxr_", 12) == 0) {
-        const size_t pidSep = name.rfind(L'_', dot - 1);
-        const size_t msSep = pidSep == std::wstring::npos ? std::wstring::npos :
-            name.rfind(L'_', pidSep - 1);
-        if (msSep != 27 || pidSep <= msSep + 1 ||
-            pidSep + 1 >= dot || pidSep != msSep + 4) return false;
-        for (size_t i = msSep + 1; i < pidSep; ++i)
-            if (name[i] < L'0' || name[i] > L'9') return false;
-        for (size_t i = pidSep + 1; i < dot; ++i)
-            if (name[i] < L'0' || name[i] > L'9') return false;
-        stampEnd = msSep;
+    // The suffix: three digits, then one or more, between the last two '_'.
+    // A plain name cannot pass for it -- its last two '_' are nine apart.
+    const size_t pidSep = name.rfind(L'_', dot - 1);
+    const size_t msSep = pidSep == std::wstring::npos || pidSep == 0 ? std::wstring::npos
+                                                                     : name.rfind(L'_', pidSep - 1);
+    if (msSep != std::wstring::npos && msSep >= 15 && pidSep == msSep + 4 && pidSep + 1 < dot) {
+        bool digits = true;
+        for (size_t i = msSep + 1; i < dot && digits; ++i)
+            if (i != pidSep && (name[i] < L'0' || name[i] > L'9')) digits = false;
+        if (digits) stampEnd = msSep;
     }
     const std::wstring tail = name.substr(stampEnd - 15, 15);  // YYYYMMDD_HHMMSS
     if (tail[8] != L'_') return false;

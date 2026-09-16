@@ -10,6 +10,7 @@
 #include "../../src/common/native_fss.h"
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
+#include "../../src/common/system_d3d11.h"
 
 using Microsoft::WRL::ComPtr;
 static unsigned checks=0, failures=0, healCalls=0;
@@ -39,7 +40,7 @@ extern "C" void* edvrFssHealLeft(void* left,void* right,float outer,float inner,
 
 struct Device {
   ComPtr<ID3D11Device> d; ComPtr<ID3D11DeviceContext> c;
-  Device(){wchar_t sys[MAX_PATH]{};require(GetSystemDirectoryW(sys,MAX_PATH)!=0,"system directory");HMODULE m=LoadLibraryW((std::wstring(sys)+L"\\d3d11.dll").c_str());require(m!=nullptr,"load d3d11");auto fn=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(m,"D3D11CreateDevice"));D3D_FEATURE_LEVEL fl{};require(fn&&SUCCEEDED(fn(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,&fl,&c)),"WARP device");}
+  Device(){auto fn=edvr::systemD3D11CreateDevice();require(fn!=nullptr,"System32 D3D11CreateDevice");D3D_FEATURE_LEVEL fl{};require(fn&&SUCCEEDED(fn(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,&fl,&c)),"WARP device");}
   ComPtr<ID3D11Texture2D> tex(unsigned w=32,unsigned h=24){D3D11_TEXTURE2D_DESC x{};x.Width=w;x.Height=h;x.MipLevels=x.ArraySize=x.SampleDesc.Count=1;x.Format=DXGI_FORMAT_R8G8B8A8_UNORM;x.Usage=D3D11_USAGE_DEFAULT;x.BindFlags=D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D> t;require(SUCCEEDED(d->CreateTexture2D(&x,nullptr,&t)),"texture");return t;}
   ComPtr<ID3D11Texture2D> staging(unsigned w=32,unsigned h=24){D3D11_TEXTURE2D_DESC x{};x.Width=w;x.Height=h;x.MipLevels=x.ArraySize=x.SampleDesc.Count=1;x.Format=DXGI_FORMAT_R8G8B8A8_UNORM;x.Usage=D3D11_USAGE_STAGING;x.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> t;require(SUCCEEDED(d->CreateTexture2D(&x,nullptr,&t)),"staging");return t;}
 };

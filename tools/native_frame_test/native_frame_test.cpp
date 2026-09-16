@@ -1,6 +1,7 @@
 #include "../../src/common/native_frame.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/config.h"
+#include "../../src/common/system_d3d11.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -46,19 +47,8 @@ int wmain(int argc, wchar_t** argv) {
         }
     };
 
-    // The repository also builds a d3d11.dll proxy beside this executable.
-    // Resolve the factory from the absolute system path so WARP creation cannot
-    // recursively load the proxy under test.
-    wchar_t systemDirectory[MAX_PATH]{};
-    check(GetSystemDirectoryW(systemDirectory, MAX_PATH) != 0,
-          "system directory");
-    HMODULE systemD3D11 = LoadLibraryW(
-        (std::wstring(systemDirectory) + L"\\d3d11.dll").c_str());
-    check(systemD3D11 != nullptr, "system D3D11");
-    const auto createDevice = systemD3D11
-                                  ? reinterpret_cast<decltype(&D3D11CreateDevice)>(
-                                        GetProcAddress(systemD3D11, "D3D11CreateDevice"))
-                                  : nullptr;
+    // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto createDevice = edvr::systemD3D11CreateDevice();
     check(createDevice != nullptr, "system D3D11 factory");
     std::puts("native_frame_test: factory ready");
 

@@ -160,15 +160,31 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     // empty directory behind.
     ensureDirectory(dir);
 
+    // Named to the second, and never over an existing file: two processes
+    // opening the same tag in one second -- the test rigs do, run
+    // concurrently by build.bat -- used to leave one log truncated by the
+    // other's CREATE_ALWAYS. The second arrival takes a name with the
+    // millisecond and its pid appended, the form the native trace has always
+    // used (native_trace.h), which every reader of these names accepts
+    // (tools\edvr_log.py, the installer's log bundle).
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\edvr_%s_%04u%02u%02u_%02u%02u%02u.log",
                  dir.c_str(), tag, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
                  st.wSecond);
-
     m_impl->file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (m_impl->file == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_EXISTS || error == ERROR_SHARING_VIOLATION) {
+            _snwprintf_s(path, _TRUNCATE, L"%s\\edvr_%s_%04u%02u%02u_%02u%02u%02u_%03u_%lu.log",
+                         dir.c_str(), tag, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+                         st.wSecond, st.wMilliseconds, GetCurrentProcessId());
+            m_impl->file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                       CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        }
+    }
     if (m_impl->file == INVALID_HANDLE_VALUE) {
         delete m_impl;
         m_impl = nullptr;

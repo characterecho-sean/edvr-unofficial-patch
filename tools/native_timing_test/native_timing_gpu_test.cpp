@@ -3,6 +3,7 @@
 #include "../../src/d3d11/gpu_timing.h"
 #include "../../src/openxr/native_timing_client.h"
 #include "../../src/openxr/render_route.h"
+#include "../../src/common/system_d3d11.h"
 #include <wrl/client.h>
 #include <atomic>
 #include <cmath>
@@ -48,12 +49,8 @@ ComPtr<ID3D11Texture2D> texture(ID3D11Device* device, unsigned color) {
 }
 void run() {
     Watchdog watchdog;
-    wchar_t system[MAX_PATH]{};
-    const auto length=GetSystemDirectoryW(system,MAX_PATH);
-    require(length && length<MAX_PATH, "system directory");
-    const HMODULE module=LoadLibraryW((std::wstring(system)+L"\\d3d11.dll").c_str());
-    require(module!=nullptr, "system D3D11 module (no proxy import)");
-    const auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice"));
+    const auto create=edvr::systemD3D11CreateDevice();
+    require(create!=nullptr, "system D3D11 module (no proxy import)");
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context; D3D_FEATURE_LEVEL level{};
     require(create && SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,
         D3D11_SDK_VERSION,&device,&level,&context)), "WARP device");

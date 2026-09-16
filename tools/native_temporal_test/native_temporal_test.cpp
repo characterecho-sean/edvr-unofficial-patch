@@ -13,6 +13,7 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/d3d11/temporal_pass.h"
 #include "../../src/openxr/native_temporal_client.h"
+#include "../../src/common/system_d3d11.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
 using Microsoft::WRL::ComPtr;
 unsigned checks=0,failures=0,dumps=0;
@@ -41,9 +42,7 @@ extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* n
 extern "C" void edvrEyeCaptureUntreated(void*,int,const float*){++dumps;}
 struct Device {
   ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
-  Device(){wchar_t system[MAX_PATH]{};require(GetSystemDirectoryW(system,MAX_PATH)!=0,"system directory");
-    auto module=LoadLibraryW((std::wstring(system)+L"\\d3d11.dll").c_str());require(module!=nullptr,"system D3D11");
-    auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice"));
+  Device(){auto create=edvr::systemD3D11CreateDevice();require(create!=nullptr,"system D3D11");
     D3D_FEATURE_LEVEL level{};require(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context)),"WARP device");}
   ComPtr<ID3D11Texture2D> texture(unsigned w=320,unsigned h=240){D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;
     d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D> t;

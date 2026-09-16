@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/openxr/gpu_work_observer.h"
+#include "../../src/common/system_d3d11.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -15,6 +16,11 @@ using Microsoft::WRL::ComPtr;
 namespace {
 unsigned checks=0,failures=0;
 void check(bool value,const char* msg){++checks;if(!value){++failures;std::printf("FAIL: %s\n",msg);}}
+// System32's d3d11, not an import: this exe sits in build\ beside EDVR's proxy.
+HRESULT createDevice(D3D_DRIVER_TYPE type,UINT flags,ID3D11Device** device,D3D_FEATURE_LEVEL* level,ID3D11DeviceContext** context) {
+  const auto create=edvr::systemD3D11CreateDevice();
+  return create?create(nullptr,type,nullptr,flags,nullptr,0,D3D11_SDK_VERSION,device,level,context):E_FAIL;
+}
 constexpr unsigned size=128;
 const auto session=reinterpret_cast<XrSession>(1);
 const auto space=reinterpret_cast<XrSpace>(2);
@@ -94,8 +100,8 @@ struct Fixture {
   Fake runtime;D3D11Stereo renderer;XrViewConfigurationView sizes[2]{};XrView views[2]{};
   Fixture(bool hardware=false){
     fake=&runtime;D3D_FEATURE_LEVEL level{};
-    check(SUCCEEDED(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.device,&level,&runtime.context)),"fixture device");
-    check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.foreign,&level,nullptr)),"foreign WARP device");
+    check(SUCCEEDED(createDevice(hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,0,&runtime.device,&level,&runtime.context)),"fixture device");
+    check(SUCCEEDED(createDevice(D3D_DRIVER_TYPE_WARP,0,&runtime.foreign,&level,nullptr)),"foreign WARP device");
     for(unsigned i=0;i<2;++i){sizes[i]={XR_TYPE_VIEW_CONFIGURATION_VIEW};sizes[i].recommendedImageRectWidth=sizes[i].recommendedImageRectHeight=size;
       sizes[i].maxImageRectWidth=sizes[i].maxImageRectHeight=512;sizes[i].maxSwapchainSampleCount=1;
       views[i]={XR_TYPE_VIEW};views[i].pose.orientation.w=1;views[i].fov={-0.785398163f,0.785398163f,0.785398163f,-0.785398163f};}
@@ -488,8 +494,7 @@ void desktopStateSelfTest() {
     Fixture f;
     ComPtr<ID3D11Device> single;
     ComPtr<ID3D11DeviceContext> context;
-    check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,
-      D3D11_CREATE_DEVICE_SINGLETHREADED,nullptr,0,D3D11_SDK_VERSION,
+    check(SUCCEEDED(createDevice(D3D_DRIVER_TYPE_WARP,D3D11_CREATE_DEVICE_SINGLETHREADED,
       &single,nullptr,&context)),"singlethreaded WARP fixture");
     D3D11Stereo rejected;
     check(rejected.initialize(dispatch(),session,single.Get(),f.sizes)==XR_ERROR_GRAPHICS_DEVICE_INVALID,
