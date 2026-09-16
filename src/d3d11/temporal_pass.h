@@ -42,6 +42,7 @@ namespace edvr { void temporalPassDumpHistory(const char* trigger); }
 #include <cstddef>
 #include <cstdint>
 
+struct ID3D11Device;
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -52,8 +53,15 @@ class Config;
 // know) and the pass's [advanced] keys.
 void temporalPassConfigure(Config& cfg);
 
-// Once per frame, from the frame boundary: the warm compile when wanted.
+// Once per frame, from the frame boundary: the warm compile when wanted,
+// and the NGX warm-up (advanced.temporal_aa_warm) once its gates open.
 void temporalPassTick(ID3D11DeviceContext* ctx);
+
+// The native temporal channel's game device and render thread, once one
+// is acquired (native_temporal.cpp): the identities its treat() insists
+// on, which the NGX warm-up must match before it touches the device. No
+// AddRef on the device; compare it by identity only. False until acquired.
+bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread);
 
 // The camera capture for the `camera` motion source. Every write of the
 // game's big scene-constants block passes through here (the Unmap tee

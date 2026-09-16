@@ -1785,7 +1785,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // very same composite a few seconds later (intro_panel.h). The
         // slot-1 and slot-2 tests are shadow reads, so the cost while the
         // fix is off is nothing at all.
-        if (introPanelWants() && kind == 'N' && count == 4 &&
+        //
+        // The intro probe reads the same draw, so its fill timing does not
+        // depend on any intro fix being on; introProbeWants is two bools.
+        if ((introPanelWants() || introProbeWants()) && kind == 'N' && count == 4 &&
             bindingGet(BindSlot::PsSrv1) && bindingGet(BindSlot::PsSrv2)) {
             ResourceInfo info;
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
@@ -1794,6 +1797,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 // And the skip's witness: with fix.intro_video = skip this
                 // fill is the movie playing despite the refusal.
                 introSkipNoteMovieDrew();
+                // And the probe's clock: first and last fill, timed.
+                introProbeNoteMovieFill();
             }
         }
         // The menu backdrop (backdrop_fix.h), in the OFFSCREEN branch because
@@ -4553,8 +4558,9 @@ void vScreenFrameBoundary() {
 
     // The intro probe's frame edge, first: it closes the frame's composition
     // and its timing, and both are about the frame that has just ENDED rather
-    // than about anything decided below.
-    introProbeFrameBoundary(s->frameNo);
+    // than about anything decided below. The scene flag is the one the intro
+    // fixes above retire on, so the probe's movie account closes with them.
+    introProbeFrameBoundary(s->frameNo, s->eyeDrawsLastFrame >= kSceneEyeDraws);
 
     // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
     // while the scanner's chrome is up is a zoom's first frame, and the

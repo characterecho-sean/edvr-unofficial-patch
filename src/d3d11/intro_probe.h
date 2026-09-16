@@ -51,9 +51,11 @@
 // read beside DC lines from the same session. No particle draws during a
 // startup, which is what this is for.
 //
-// It changes nothing. It is off by default, free when off (the draw path
-// does not call in), and stands itself down after kWindowMs or kMaxLines so
-// a session left with it on does not grow a log all evening.
+// It changes nothing on its own, but with the movie not skipped it installs
+// the skip's own forwarding file-open hooks to time the movie's open (see
+// intro_skip.h). It is off by default, free when off (the draw path does
+// not call in), and stands itself down after kWindowMs or kMaxLines so a
+// session left with it on does not grow a log all evening.
 #pragma once
 
 #include <cstdint>
@@ -66,6 +68,23 @@ class Config;
 // mid-session records whatever is happening then rather than the startup it
 // is named for.
 void introProbeConfigure(Config& cfg);
+
+// The moment the game's first D3D11 device was created, on this half's own
+// clock: the base every "+X.XXX s after the device" below is read against,
+// and the same moment the log's "D3D11 device ... created" line carries.
+// Stamped once; a second device does not move it. Independent of the
+// probe's on/off, so the base exists whenever the line that needs it does.
+void introProbeNoteDevice();
+
+// Seconds since that moment. False, and seconds untouched, when no device
+// has been created yet -- a caller then says so rather than printing 0.
+bool introProbeSinceDevice(double* seconds);
+
+// The movie's YUV-to-RGB fill drew this frame (introPanelNoteFill's moment).
+// The first one is said with its time since the device; the last one is
+// said, with the count, at the first rendered scene or when the probe
+// closes, whichever comes first. Free when the probe is off.
+void introProbeNoteMovieFill();
 
 // Is the probe recording? False when off and false once the window has
 // closed, which keeps it out of the draw path for the rest of the session.
@@ -80,6 +99,8 @@ void introProbeOnClear(uint32_t targetW, uint32_t targetH, const float rgba[4]);
 
 // The frame edge: close the frame's composition, emit a line if the shape
 // moved or the frame stalled, and retire the probe when its window is spent.
-void introProbeFrameBoundary(uint32_t frameNo);
+// sceneFrame is the caller's scene boundary (the same one intro_panel and
+// intro_skip read): the first one closes the movie-fill account.
+void introProbeFrameBoundary(uint32_t frameNo, bool sceneFrame);
 
 }  // namespace edvr

@@ -204,10 +204,18 @@ bool looksScreenSpace(const float* f) {
 // /fp:precise and the comparison form is unambiguous under it.
 bool isFiniteF(float v) { return v == v && v <= 3.4e38f && v >= -3.4e38f; }
 
+// yawDeg, when asked for, is the head's look direction on the horizon at
+// the pose this transform was built from -- menu.cpp's reading (minus the
+// pose's third column), for the one "holding" line, so it says what the
+// game's forward was being held against.
 bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
-                  float* out, const char** why) {
+                  float* out, const char** why, float* yawDeg = nullptr) {
     float pose[12];
     if (!headPose(pose)) { *why = "no head pose has been published"; return false; }
+    if (yawDeg) {
+        const float fx = -pose[2], fz = -pose[10];
+        *yawDeg = atan2f(-fx, -fz) * 57.2957795f;
+    }
     float outer = 0.0f, inner = 0.0f;
     if (!eyeTangents(&outer, &inner)) {
         *why = "no eye tangents have been published";
@@ -543,10 +551,12 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 D3D11_VIEWPORT vp{};
                 ctx->RSGetViewports(&nvp, &vp);
                 float world[kCbFloats];
+                float yawDeg = 0.0f;
                 const char* why = "the viewport is degenerate";
                 if (nvp == 0 || vp.Width <= 0.0f || vp.Height <= 0.0f ||
                     !buildWorldCb(s->leftEye, g_screenDist, vp.Width,
-                                  vp.Height, world, &why)) {
+                                  vp.Height, world, &why,
+                                  g_anchored ? nullptr : &yawDeg)) {
                     // No pose, no tangents, no viewport: stock rather than a
                     // panel placed on guesses.
                     if (!g_lockRefusedNoted) {
@@ -568,6 +578,19 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 }
                 memcpy(m.pData, world, kCbBytes);
                 ctx->Unmap(s->ours, 0);
+                // The positive: a real pose went into the buffer. Said once
+                // and then off the per-draw path. Without this line the log
+                // had "lock: WORLD" at configure and a refusal when there
+                // was no pose, and nothing at all when the lock took.
+                if (!g_anchored) {
+                    g_anchored = true;
+                    Log::get().note(
+                        "intro video lock: holding -- the panel is anchored "
+                        "on the game's forward (head yaw %.1f deg at bind, "
+                        "panel frame %u, %s eye first). Said once.",
+                        static_cast<double>(yawDeg), g_frame,
+                        s->leftEye ? "left" : "right");
+                }
             }
             g_restore = cb;
             ID3D11Buffer* ours = s->ours;

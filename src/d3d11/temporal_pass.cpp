@@ -19,6 +19,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "device_hook.h"   // the auto mip bias's source, to check against a real frame
+#include "../common/native_render_settings.h"   // the published per-eye render size, for the NGX warm-up
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
@@ -865,6 +866,35 @@ bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | 
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
 float    g_shipMetres = kTemporalShipMetres;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error, 3 depth
+// The NGX warm-up (advanced.temporal_aa_warm): NVIDIA initialised and both
+// eyes' full-frame features made on a loading-screen frame boundary, once
+// openvr_api.dll has published the per-eye render size, instead of inside
+// the first submitted frame -- which paid ~0.8 s for it on both installs
+// (2026-09-15, 'native timing CPU: seq 3 ... temporal 853.701'). A
+// once-per-session state machine: Pending polls the gates every tick; Off,
+// Done, Failed and Late are terminal (a config reload never re-arms it).
+// g_warmWhy is the last gate's reason, printed by the first treat when the
+// warm-up never got there (warmNoteFirstTreat), so the log tells dead code
+// from a gate that never opened from a switch that was off.
+enum class WarmState { Pending, Off, Done, Failed, Late };
+WarmState   g_warmState = WarmState::Pending;
+bool        g_trainedWanted = false;   // fix.temporal_aa = dlaa | dlss (the modes that touch NGX)
+bool        g_warmOn = true;           // advanced.temporal_aa_warm
+bool        g_warmOffNoted = false;
+const char* g_warmWhy = "no frame boundary reached the warm-up: the tick never ran";
+char        g_warmWhyBuf[160] = {};
+
+// The treat side's line, once, when the first trained treat arrives and the
+// warm-up had not run (Pending: a gate never opened, or dead code) or was
+// switched off. Done and Failed print nothing here; their own lines did.
+void warmNoteFirstTreat() {
+    if (g_warmState != WarmState::Pending && g_warmState != WarmState::Off) return;
+    g_warmState = WarmState::Late;
+    Log::get().note(
+        "temporal aa: NVIDIA was not warmed before the first submitted frame (%s); it is "
+        "initialised now, inside this frame, as before.",
+        g_warmWhy);
+}
 float    g_lastNear = 0.0f;        // the planes the last treat decoded with (temporalPassPlanes)
 float    g_lastFar = 0.0f;
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
@@ -3387,6 +3417,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             g_csDown = shaderSwapCompileCs(ctx, kDownCsHlsl, sizeof(kDownCsHlsl) - 1,
                                            "down", "temporal_down_cs", nullptr, "temporal aa");
         }
+        if (foveaWanted && g_csFovea) warmNoteFirstTreat();   // before NGX's first ask, below
         if (foveaWanted && g_csFovea && dlaaAvailable(dev, nullptr)) {
             const float l = tanNow[0], r = tanNow[1], t = tanNow[2], b = tanNow[3];
             if (r > l && b > t) {
@@ -3535,6 +3566,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 formatName(sd.Format));
         }
         if ((flags & 2u) != 0 && fmtIndex == 0 && !foveaMode) {
+            warmNoteFirstTreat();   // before NGX's first ask, below
             const char* why = "";
             if (!dlaaAvailable(dev, &why)) {
                 if (!g_dlaaFailNoted) {
@@ -4435,6 +4467,9 @@ void temporalPassDumpHistory(const char* trigger) {
 void temporalPassConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     g_wanted = temporalModeEnabled(mode);
+    // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 2
+    // at the treat): only these two modes touch NGX, so only they warm it.
+    g_trainedWanted = _stricmp(mode.c_str(), "dlaa") == 0 || _stricmp(mode.c_str(), "dlss") == 0;
     celestialMotionConfigure(g_wanted);
     meshMotionConfigure(g_wanted);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
@@ -4451,6 +4486,7 @@ void temporalPassConfigure(Config& cfg) {
     g_eyeRunTreated = cfg.getBool("advanced.eye_run_treated", false);
     g_eyeRunPaired = cfg.getBool("advanced.eye_run_paired", true);
     g_diagnostics = cfg.getBool("advanced.temporal_aa_diagnostics", false);
+    g_warmOn = cfg.getBool("advanced.temporal_aa_warm", true);   // g_warmState is NOT re-armed here
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
     g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
@@ -4573,6 +4609,188 @@ void temporalPassConfigure(Config& cfg) {
     g_foveaFailed = false;
 }
 
+// The NGX warm-up, once per session, from the frame boundary
+// (docs/intro-video.md, 2026-09-15). The first submitted frame paid 857 ms
+// on the Steam rig, most of it NVIDIA's own one-time initialisation and the
+// two features' creation; the tick reaches here on every loading-screen
+// Present, about two seconds before that frame, on the same thread and
+// device the treat will use. Every gate is a cheap CPU check that fails
+// CLOSED to today's behaviour: the first submitted frame initialises NVIDIA
+// itself, as it always did, and warmNoteFirstTreat says why the warm-up
+// never got there. Off, Done, Failed and Late are terminal for the session.
+void warmFailNote(double ms) {   // L-FAIL: one string, whichever gate or refusal it was
+    Log::get().note(
+        "temporal aa: NVIDIA warm-up did not complete after %.0f ms -- %s. The first submitted "
+        "frame runs as before: a refusal by NVIDIA is remembered for the session and the 'dlaa "
+        "was asked for, but' line repeats why, while a failed feature create is retried there.",
+        ms, g_warmWhy);
+}
+void warmTrainedOnce(ID3D11DeviceContext* ctx) {
+    if (g_warmState != WarmState::Pending || !ctx) return;                              // G1
+    if (!g_trainedWanted) {                                                             // G2
+        g_warmWhy = "fix.temporal_aa was not dlaa or dlss when the warm-up first ran; a reload "
+                    "does not re-arm it";
+        g_warmState = WarmState::Off;
+        return;
+    }
+    if (!g_warmOn) {                                                                    // G3
+        g_warmWhy = "advanced.temporal_aa_warm = 0";
+        g_warmState = WarmState::Off;
+        if (!g_warmOffNoted) {
+            g_warmOffNoted = true;
+            Log::get().note(
+                "temporal aa: NVIDIA warm-up is off (advanced.temporal_aa_warm = 0); the first "
+                "submitted frame initialises NVIDIA itself, as before.");
+        }
+        return;
+    }
+    if (g_debugMode != 0) {                                                             // G4
+        g_warmWhy = "advanced.temporal_aa_debug is on";
+        g_warmState = WarmState::Off;
+        return;
+    }
+    // The size the game will render both eyes at: the runtime's recommended
+    // per-eye size, which GetRecommendedRenderTargetSize answers as the max
+    // over both eyes (src/openxr/openvr_system.cpp). Published at Init by the
+    // openxr half; a mutex and an 80-byte copy per poll until it is.
+    EdvrNativeRenderSizing s{};                                                         // G5
+    if (!edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1, sizeof(s), &s) ||
+        s.valid != 1 || !s.activeWidth[0] || !s.activeHeight[0] || !s.activeWidth[1] ||
+        !s.activeHeight[1]) {
+        g_warmWhy = "openvr_api.dll had not published a native render size";
+        return;   // Pending: polled again next tick
+    }
+    const uint32_t w = s.activeWidth[0] > s.activeWidth[1] ? s.activeWidth[0] : s.activeWidth[1];
+    const uint32_t h = s.activeHeight[0] > s.activeHeight[1] ? s.activeHeight[0] : s.activeHeight[1];
+    ID3D11Device* chanDev = nullptr;
+    unsigned long chanThread = 0;
+    if (!nativeTemporalWarmTarget(&chanDev, &chanThread) || !chanDev) {                // G6
+        g_warmWhy = "the native temporal channel was not acquired (a flat session, the OpenVR "
+                    "path, or VR still starting)";
+        return;   // Pending
+    }
+    const unsigned long here = GetCurrentThreadId();
+    if (here != chanThread) {                                                           // G7
+        snprintf(g_warmWhyBuf, sizeof(g_warmWhyBuf),
+                 "this frame boundary is on thread %lu but the native channel was acquired on %lu",
+                 here, chanThread);
+        g_warmWhy = g_warmWhyBuf;
+        return;   // Pending
+    }
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) {
+        g_warmWhy = "the frame boundary's device is not the native channel's game device";
+        return;   // Pending
+    }
+    {                                                                                   // G8
+        IUnknown* a = nullptr;
+        IUnknown* b = nullptr;
+        const bool same = SUCCEEDED(dev->QueryInterface(IID_IUnknown, (void**)&a)) &&
+                          SUCCEEDED(chanDev->QueryInterface(IID_IUnknown, (void**)&b)) && a == b;
+        if (a) a->Release();
+        if (b) b->Release();
+        if (!same) {
+            dev->Release();
+            g_warmWhy = "the frame boundary's device is not the native channel's game device";
+            return;   // Pending
+        }
+    }
+    const HRESULT removed = dev->GetDeviceRemovedReason();
+    dev->Release();
+    if (FAILED(removed)) {                                                              // G9
+        snprintf(g_warmWhyBuf, sizeof(g_warmWhyBuf), "the device is removed (0x%08X)",
+                 static_cast<unsigned>(removed));
+        g_warmWhy = g_warmWhyBuf;
+        g_warmState = WarmState::Failed;
+        warmFailNote(0.0);
+        return;
+    }
+    if (w == 0 || h == 0 || w > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        h > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {                                     // G10
+        snprintf(g_warmWhyBuf, sizeof(g_warmWhyBuf),
+                 "the published render size %ux%u is out of range", w, h);
+        g_warmWhy = g_warmWhyBuf;
+        g_warmState = WarmState::Failed;
+        warmFailNote(0.0);
+        return;
+    }
+    // COMMIT. Failed before the call: a fault must never retry. Done only on
+    // a whole success. G11 (no SDK in the build, NGX refusing, a create
+    // refusing) is dlaaWarm's own reason.
+    g_warmState = WarmState::Failed;
+    const bool features = g_foveaDeg <= 0.0f;   // the fovea makes its own crop features at the treat
+    Log::get().note(
+        "temporal aa: warming NVIDIA before the first submitted frame -- %ux%u in and out (DLAA) "
+        "for both eyes on the render thread%s. If this is the log's last line the warm-up hung: "
+        "set advanced.temporal_aa_warm = 0 and report this log.",
+        w, h, features ? "" : ", initialisation only: advanced.temporal_aa_fovea is on");
+    bool ok = false;
+    double initMs = 0.0;
+    double createMs[2] = {0.0, 0.0};
+    const char* why = "";
+    // Told apart from a fault so the L-FAULT line does not claim a fresh
+    // crash when this feature's shared budget (g_budget, spent by whatever
+    // else in this pass has faulted this session) was already at zero:
+    // guardedBudget returns false either way, without running the lambda
+    // when the budget was already spent.
+    const bool budgetAlreadySpent = !g_budget.shouldRun();
+    const int64_t t0 = qpcNow();
+    const bool survived = guardedBudget(g_budget, [&] {
+        ok = dlaaWarm(ctx, w, h, features, &initMs, createMs, &why);
+    });
+    const double totalMs = qpcFrequency() > 0
+                               ? static_cast<double>(qpcNow() - t0) * 1000.0 /
+                                     static_cast<double>(qpcFrequency())
+                               : 0.0;
+    // Hygiene, whatever happened: the slots the treat unbinds after its own
+    // dispatches, so the game's next loading frame inherits nothing NGX may
+    // have bound.
+    {
+        ID3D11UnorderedAccessView* nullUav[7] = {};
+        ID3D11ShaderResourceView* nullSrv[17] = {};
+        ctx->CSSetShader(nullptr, nullptr, 0);
+        ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
+        ctx->CSSetShaderResources(0, 17, nullSrv);
+    }
+    if (survived && ok) {
+        g_warmState = WarmState::Done;
+        if (features) {
+            Log::get().note(
+                "temporal aa: NVIDIA warmed before the first submitted frame -- initialisation "
+                "%.0f ms, the feature for eye 0 %.0f ms and eye 1 %.0f ms at %ux%u -> %ux%u, "
+                "%.0f ms in all; the first submitted frame finds them made, so 'native timing "
+                "CPU: seq' should show temporal well under 150 ms.",
+                initMs, createMs[0], createMs[1], w, h, w, h, totalMs);
+        } else {
+            Log::get().note(
+                "temporal aa: NVIDIA warmed its initialisation only (%.0f ms): "
+                "advanced.temporal_aa_fovea is on, and its crop features are made at the first "
+                "submitted frame, as before.",
+                initMs);
+        }
+    } else if (survived) {
+        g_warmWhy = (why && *why) ? why : "dlaaWarm refused without a reason";
+        warmFailNote(totalMs);
+    } else if (budgetAlreadySpent) {
+        g_warmWhy = "not attempted: the pass's fault budget was already spent";
+        Log::get().note(
+            "temporal aa: NVIDIA warm-up not attempted -- the pass's fault budget (%s) was "
+            "already spent by something else this session. The first submitted frame runs as "
+            "before: a refusal by NVIDIA is remembered for the session and the 'dlaa was asked "
+            "for, but' line repeats why, while a failed feature create is retried there.",
+            g_budget.name());
+    } else {
+        g_warmWhy = "the warm-up faulted; see the fault report";
+        Log::get().note(
+            "temporal aa: NVIDIA warm-up faulted after %.0f ms and is not retried. The first "
+            "submitted frame runs as before: a refusal by NVIDIA is remembered for the session "
+            "and the 'dlaa was asked for, but' line repeats why, while a failed feature create "
+            "is retried there. Please report this log.",
+            totalMs);
+    }
+}
+
 void temporalPassTick(ID3D11DeviceContext* ctx) {
     if (!ctx || (!g_wanted && !g_eyeRunReady)) return;
     ID3D11Device* dev = nullptr;
@@ -4599,6 +4817,9 @@ void temporalPassTick(ID3D11DeviceContext* ctx) {
                 "no runtime HLSL compilation.");
         }
     }
+    // NVIDIA's own warm-up, once its gates open (the published render size,
+    // the acquired native channel on this thread and device); a no-op after.
+    warmTrainedOnce(ctx);
 }
 
 void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t bytes) {

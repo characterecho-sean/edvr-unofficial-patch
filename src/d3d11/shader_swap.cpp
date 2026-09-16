@@ -144,6 +144,10 @@ void compileInnerCs(ID3D11DeviceContext* ctx, const char* hlsl,
                     size_t hlslLen, const char* entry, const char* name,
                     const SwapMacro* macros, const char* who,
                     ID3D11ComputeShader** out) {
+    // Timed end to end (the load, the compile, the create): the UI-resolve
+    // compile runs inside the first submitted frame and was one of the
+    // unsplit suspects for its 857 ms (docs/intro-video.md, 2026-09-15).
+    const int64_t t0 = qpcNow();
     HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
     if (!mod) {
         Log::get().note("%s: d3dcompiler_47.dll not found; the swap stands "
@@ -180,8 +184,12 @@ void compileInnerCs(ID3D11DeviceContext* ctx, const char* hlsl,
         dev->Release();
     }
     blobRelease(blob);
-    Log::get().note("%s: replacement compute shader %s.", who,
-                    *out ? "compiled" : "creation FAILED; standing down");
+    const double ms = qpcFrequency() > 0
+                          ? static_cast<double>(qpcNow() - t0) * 1000.0 /
+                                static_cast<double>(qpcFrequency())
+                          : 0.0;
+    Log::get().note("%s: replacement compute shader %s (%.0f ms).", who,
+                    *out ? "compiled" : "creation FAILED; standing down", ms);
 }
 
 }  // namespace

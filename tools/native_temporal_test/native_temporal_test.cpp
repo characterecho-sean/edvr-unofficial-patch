@@ -71,7 +71,15 @@ HRESULT treat(EdvrNativeTemporalTable& t,uint64_t seq,unsigned eye,ID3D11Texture
   if(output)output->Release();return result;
 }
 void run(){
+  // N9: the warm target is the channel's raw pointer, not a live reference --
+  // false with no channel acquired, the acquiring thread and device once one
+  // is, false again once it closes.
+  ID3D11Device* warmDev=reinterpret_cast<ID3D11Device*>(1);unsigned long warmThread=1;
+  check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target before any channel is acquired");
   Device d;auto source=d.texture();auto t=acquire(d,11);auto f=frame(11,1);auto p=begin(t,f);
+  warmDev=nullptr;warmThread=0;
+  check(edvr::nativeTemporalWarmTarget(&warmDev,&warmThread)&&warmDev==d.device.Get()&&warmThread==GetCurrentThreadId(),
+      "warm target names the acquiring thread and device");
   check(p.tangentShift[0][0]==0&&p.tangentShift[1][1]==0,"unknown input size means no jitter");
   check(treat(t,1,1,source.Get())==S_OK&&treat(t,1,0,source.Get())==S_OK,"reversed first pair");
   check(calls.back().flags&1,"first history reset");check(!calls.back().head,"first frame has no invented head pair");
@@ -98,6 +106,8 @@ void run(){
   check(treat(t,8,0,source.Get())==S_OK&&(calls.back().flags&1),"unflipped image resets history");
   f=frame(11,9);begin(t,f,false);check(treat(t,9,0,source.Get())==E_PENDING,"no projection query cannot justify jittered image metadata");
   check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");
+  warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
+  check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
   auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
   // Previous eye yaw 90 degrees, current yaw zero, head translates +X:
   // the translation is +Z in the previous eye and head rotation is zero.

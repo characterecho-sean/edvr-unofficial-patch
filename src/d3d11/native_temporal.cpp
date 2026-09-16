@@ -264,6 +264,24 @@ HRESULT WINAPI close(void* p){
 }
 }
 
+namespace edvr {
+// The device and thread the live channel's treat() will insist on (the
+// sameDevice and GetCurrentThreadId checks above), for the NGX warm-up in
+// temporal_pass.cpp to gate on. No AddRef: acquire stores the raw pointer
+// and close() nulls it, so the channel takes no reference of its own --
+// identity is compared, never dereferenced beyond QueryInterface, only
+// while whatever acquired the channel is still holding the device alive.
+// False until a channel is acquired (a flat session, the OpenVR path, or
+// VR still starting).
+bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread) {
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active || !current->device) return false;
+  if (dev) *dev = current->device;
+  if (thread) *thread = current->thread;
+  return true;
+}
+}
+
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest* r,EdvrNativeTemporalTable* t){
   if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_TEMPORAL_VERSION_1)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};
   if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||!r->gameDevice||!r->generation)return E_INVALIDARG;

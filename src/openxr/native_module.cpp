@@ -56,13 +56,28 @@ class ModuleBackend final : public RuntimeBackend {
       if (generation->host) generation->host->pumpEvents();
     })) return vr::VRInitError_Init_Internal;
     auto error=vr::VRInitError_Init_Internal;
+    RenderRoute::Park park;
     const bool started=generation->route.invoke([&] {
       generation->host=std::make_unique<NativeRuntimeHost>(generation->owner,
           generation->render,generation->route,generation->binding.device());
       auto options=options_; options.graphicsProvider=generation->binding.provider();
       generation->host->startupOptions=std::move(options);
       error=generation->host->start(token,cancelled,interfaces);
-    });
+    },&park);
+    // The game's Present thread sat inside that rendezvous for the whole of
+    // start(), servicing the host's graphics jobs, when path=present_queue --
+    // RenderRoute::invoke routed the call there because this thread was not
+    // it. path=inline means invoke() ran the call directly on the calling
+    // thread instead (render_route.h: present==nullptr, or the caller was
+    // already the render thread), so ms times that thread's own trip through
+    // invokeOwner, not necessarily a hand-off from another thread. The jobs
+    // are the host's counted invokes, which cannot run outside a boundary and
+    // have had no other one yet. No line here means the rendezvous was never
+    // entered on that thread.
+    if(park.measured)
+      nativeTracePrintf("present_park,ms=%.1f,jobs=%llu,reason=runtime_start,result=%d,path=%s\n",
+          park.ms,(unsigned long long)(generation->host?generation->host->graphicsCalls.calls:0),
+          int(error),park.queued?"present_queue":"inline");
     update([&](auto& s) {
       s.renderThread=generation->binding.renderThread();
       s.ownerThread=generation->host?generation->host->ownerThread:0;

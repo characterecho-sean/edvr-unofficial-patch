@@ -43,6 +43,18 @@ class Config;
 // hooks the first time it is seen; any other value disarms (the hooks stay,
 // forwarding everything). Install and reload; the movie is decided at
 // launch, so a change mid-session matters at the next one.
+//
+// Also reads advanced.intro_probe: with the probe on and the movie NOT
+// skipped, the same hooks are installed forwarding as a WATCH, and the
+// first open of an ident is logged with its time since the device line
+// (`intro probe: the game opened ...`). The watch refuses nothing. Its
+// install is announced (`intro probe: watching the movie's open`), so a log
+// with that line and no open line means the game opened the movie by a
+// route these hooks do not see -- Flight 09:43's outcome -- and not that
+// the watch never ran. Its account prints at the first rendered scene.
+// Asked for by a reload after the movie drew or after that scene, the
+// watch is declined and says so (`asked for after ...`): hooks installed
+// then would report NO open about an open they were not there for.
 void introSkipConfigure(Config& cfg);
 
 // The movie's YUV-to-RGB fill drew this frame -- introPanelNoteFill's

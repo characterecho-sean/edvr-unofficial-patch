@@ -72,6 +72,13 @@ class D3D11Stereo final {
   // Destroying this object with uncompleted GPU work is a contract violation.
   XrResult shutdown();
   int64_t format() const { return format_; }
+  // Wall time the last initialize spent creating the two swapchains (format
+  // enumeration through the image views) and building the runtime shaders
+  // (the three D3DCompile pairs and their shader objects). Measured with
+  // std::chrono::steady_clock around each stretch, for the host's startup
+  // trace; 0 when initialize has not run or the clock was unavailable.
+  double initSwapchainMs() const { return initSwapchainMs_; }
+  double initShaderMs() const { return initShaderMs_; }
 
  private:
   struct Eye {
@@ -116,6 +123,7 @@ class D3D11Stereo final {
   int64_t format_ = 0;
   bool ready_ = false;
   XrResult lastResult_ = XR_SUCCESS;
+  double initSwapchainMs_ = 0.0, initShaderMs_ = 0.0;
 
   XrResult submitCommands(GpuWorkObserver* observer = nullptr, unsigned phase = 0);
 };

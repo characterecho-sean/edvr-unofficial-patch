@@ -32,6 +32,20 @@ namespace edvr {
 // the reason is a static string for the log. Cheap after the first call.
 bool dlaaAvailable(ID3D11Device* dev, const char** reason);
 
+// The loading-screen warm-up (temporal_pass.cpp, warmTrainedOnce): initialises
+// NGX on ctx's device and makes the two full-frame features exactly as
+// dlaaEvaluate's next call would -- the same slots, the same key (w x h in
+// and out, DLAA, the current preset generation) -- so that call finds them
+// made and reuses them, or recreates on a size or preset mismatch as it
+// always did. `features = false` initialises only (the fovea path makes its
+// own crop features). initMs is the initialisation's duration (about zero
+// when NGX was already asked), createMs[eye] each create's (zero when the
+// feature already stood). False, with its reason, on the first refusal;
+// the state it leaves behind is the state the first evaluation would have
+// left, so nothing here needs undoing. Render thread only, like the rest.
+bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, bool features,
+              double* initMs, double createMs[2], const char** reason);
+
 // One eye, one frame: colour (R8G8B8A8_UNORM, w x h, a shader view
 // possible), depth (R32_FLOAT, the game's reversed-Z values copied), the
 // motion vectors (R16G16_FLOAT, pixels, current -> previous), into the

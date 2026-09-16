@@ -227,95 +227,16 @@ void releaseFeatures() {
     }
 }
 
-#endif  // EDVR_HAVE_NGX
-
-}  // namespace
-
-bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
-#ifndef EDVR_HAVE_NGX
-    (void)dev;
-    g_reason = "this build has no DLSS SDK in it (build with EDVR_NGX_SDK set)";
-    if (reason) *reason = g_reason;
-    return false;
-#else
-    if (!g_tried) {
-        g_tried = true;
-        g_available = false;
-        if (!dev) {
-            g_reason = "no device";
-        } else {
-            // A project id NGX accepts is a GUID, hex only: the first try had
-            // letters in it and was refused as an invalid parameter (the
-            // harness, 2026-09-03).
-            // The game's own directory is where NGX looks for nvngx_dlss.dll
-            // and where its logs may go; EDVR's logs live beside it too.
-            wchar_t dir[MAX_PATH] = {};
-            GetModuleFileNameW(nullptr, dir, MAX_PATH);
-            wchar_t* slash = wcsrchr(dir, L'\\');
-            if (slash) *slash = 0;
-            const NVSDK_NGX_Result init = NVSDK_NGX_D3D11_Init_with_ProjectID(
-                "6f2c7c6e-3d5a-4b91-8e0d-2a9f4c1b7e33", NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-                "0.13", dir, dev);
-            if (NVSDK_NGX_FAILED(init)) {
-                snprintf(g_reasonBuf, sizeof(g_reasonBuf),
-                         "NGX would not initialise: %s (0x%08X); is nvngx_dlss.dll "
-                         "beside the game's executable, and the driver current?",
-                         ngxResultName(init), static_cast<unsigned>(init));
-                g_reason = g_reasonBuf;
-            } else {
-                g_device = dev;
-                NVSDK_NGX_Parameter* caps = nullptr;
-                const NVSDK_NGX_Result cr = NVSDK_NGX_D3D11_GetCapabilityParameters(&caps);
-                int available = 0;
-                if (NVSDK_NGX_FAILED(cr) || !caps ||
-                    NVSDK_NGX_FAILED(caps->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &available)) ||
-                    !available) {
-                    int needUpdate = 0;
-                    if (caps) caps->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needUpdate);
-                    snprintf(g_reasonBuf, sizeof(g_reasonBuf),
-                             "the runtime says DLSS is not available on this GPU%s",
-                             needUpdate ? " (it wants a newer driver)" : "");
-                    g_reason = g_reasonBuf;
-                } else if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D11_AllocateParameters(&g_params)) ||
-                           !g_params) {
-                    g_reason = "NGX would not allocate its parameters";
-                } else {
-                    g_caps = caps;
-                    g_available = true;
-                    g_reason = "available";
-                }
-            }
-        }
-    }
-    if (reason) *reason = g_reason;
-    return g_available;
-#endif
-}
-
-bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
-                  ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                  ID3D11Texture2D* output, ID3D11Texture2D* reactive,
-                  uint32_t w, uint32_t h,
-                  uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason) {
-#ifndef EDVR_HAVE_NGX
-    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
-    (void)reactive;
-    (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
-    (void)frameMs;
-    if (reason) *reason = "this build has no DLSS SDK in it";
-    return false;
-#else
-    if (!g_available || !g_params || !g_caps || !ctx || !colour || !depth || !motion || !output ||
-        eye < 0 || eye > 1 || !w || !h) {
-        if (reason) *reason = g_available ? "a missing input" : g_reason;
-        return false;
-    }
-    pollTimingRing(ctx);
-    if (!outW || !outH) {
-        outW = w;
-        outH = h;
-    }
+// The full-frame feature for one eye: made when it is missing or its key
+// (the sizes, the preset generation) has moved, left alone otherwise. The
+// ONE block dlaaEvaluate and dlaaWarm share, so what the warm-up makes on
+// the loading screen is exactly what the first evaluation would have made,
+// and that evaluation finds it and skips the create (or recreates on a
+// mismatch, as it always did). createMs is the create's own duration,
+// zero when nothing was made.
+bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
+                   uint32_t outW, uint32_t outH, const char** reason, double* createMs) {
+    if (createMs) *createMs = 0.0;
     EyeFeature& f = g_feature[eye];
     if (!f.handle || f.w != w || f.h != h || f.outW != outW || f.outH != outH ||
         f.presetGen != g_presetGen) {
@@ -402,10 +323,12 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         const int64_t createT0 = qpcNow();
         const NVSDK_NGX_Result cr =
             NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
-        perfMonitorNoteEvent(kEvNgx, qpcFrequency() > 0
-                                         ? static_cast<double>(qpcNow() - createT0) * 1000.0 /
-                                               static_cast<double>(qpcFrequency())
-                                         : 0.0);
+        const double ms = qpcFrequency() > 0
+                              ? static_cast<double>(qpcNow() - createT0) * 1000.0 /
+                                    static_cast<double>(qpcFrequency())
+                              : 0.0;
+        perfMonitorNoteEvent(kEvNgx, ms);
+        if (createMs) *createMs = ms;
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
             snprintf(g_reasonBuf, sizeof(g_reasonBuf),
@@ -424,18 +347,164 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
             Log::get().note(
                 "dlaa: the feature is created for eye %d at %ux%u, DLAA, preset %s (the "
                 "runtime's optimal render size for this output %ux%u, which DLAA ignores); "
-                "the history starts here.",
-                eye, w, h, presetName(presetFor(quality)), optW, optH);
+                "the history starts here (made in %.0f ms).",
+                eye, w, h, presetName(presetFor(quality)), optW, optH, ms);
         } else {
             Log::get().note(
                 "dlss: the feature is created for eye %d, %ux%u in and %ux%u out (%.0f%% "
                 "per axis), the %s mode, preset %s, whose own render size is %ux%u and whose "
-                "range the runtime names as %ux%u..%ux%u; the history starts here.",
+                "range the runtime names as %ux%u..%ux%u; the history starts here (made in %.0f ms).",
                 eye, w, h, outW, outH,
                 100.0 * static_cast<double>(w) / static_cast<double>(outW),
-                qualityName(quality), presetName(presetFor(quality)), optW, optH, minW, minH, maxW, maxH);
+                qualityName(quality), presetName(presetFor(quality)), optW, optH, minW, minH, maxW, maxH, ms);
         }
     }
+    return true;
+}
+
+#endif  // EDVR_HAVE_NGX
+
+}  // namespace
+
+bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
+#ifndef EDVR_HAVE_NGX
+    (void)dev;
+    g_reason = "this build has no DLSS SDK in it (build with EDVR_NGX_SDK set)";
+    if (reason) *reason = g_reason;
+    return false;
+#else
+    if (!g_tried) {
+        // Stamped wherever the first ask runs -- the loading-screen warm-up
+        // (temporal_pass.cpp, warmTrainedOnce) or the first treat -- so the
+        // log prices NGX's own initialisation apart from the feature creates.
+        const int64_t t0 = qpcNow();
+        g_tried = true;
+        g_available = false;
+        if (!dev) {
+            g_reason = "no device";
+        } else {
+            // A project id NGX accepts is a GUID, hex only: the first try had
+            // letters in it and was refused as an invalid parameter (the
+            // harness, 2026-09-03).
+            // The game's own directory is where NGX looks for nvngx_dlss.dll
+            // and where its logs may go; EDVR's logs live beside it too.
+            wchar_t dir[MAX_PATH] = {};
+            GetModuleFileNameW(nullptr, dir, MAX_PATH);
+            wchar_t* slash = wcsrchr(dir, L'\\');
+            if (slash) *slash = 0;
+            const NVSDK_NGX_Result init = NVSDK_NGX_D3D11_Init_with_ProjectID(
+                "6f2c7c6e-3d5a-4b91-8e0d-2a9f4c1b7e33", NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+                "0.13", dir, dev);
+            if (NVSDK_NGX_FAILED(init)) {
+                snprintf(g_reasonBuf, sizeof(g_reasonBuf),
+                         "NGX would not initialise: %s (0x%08X); is nvngx_dlss.dll "
+                         "beside the game's executable, and the driver current?",
+                         ngxResultName(init), static_cast<unsigned>(init));
+                g_reason = g_reasonBuf;
+            } else {
+                g_device = dev;
+                NVSDK_NGX_Parameter* caps = nullptr;
+                const NVSDK_NGX_Result cr = NVSDK_NGX_D3D11_GetCapabilityParameters(&caps);
+                int available = 0;
+                if (NVSDK_NGX_FAILED(cr) || !caps ||
+                    NVSDK_NGX_FAILED(caps->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &available)) ||
+                    !available) {
+                    int needUpdate = 0;
+                    if (caps) caps->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needUpdate);
+                    snprintf(g_reasonBuf, sizeof(g_reasonBuf),
+                             "the runtime says DLSS is not available on this GPU%s",
+                             needUpdate ? " (it wants a newer driver)" : "");
+                    g_reason = g_reasonBuf;
+                } else if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D11_AllocateParameters(&g_params)) ||
+                           !g_params) {
+                    g_reason = "NGX would not allocate its parameters";
+                } else {
+                    g_caps = caps;
+                    g_available = true;
+                    g_reason = "available";
+                }
+            }
+        }
+        const double ms = qpcFrequency() > 0
+                              ? static_cast<double>(qpcNow() - t0) * 1000.0 /
+                                    static_cast<double>(qpcFrequency())
+                              : 0.0;
+        if (g_available) {
+            Log::get().note("dlaa: NGX initialised in %.0f ms on device %p.", ms, (void*)dev);
+        } else {
+            Log::get().note("dlaa: NGX refused after %.0f ms: %s", ms, g_reason);
+        }
+    }
+    if (reason) *reason = g_reason;
+    return g_available;
+#endif
+}
+
+bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, bool features,
+              double* initMs, double createMs[2], const char** reason) {
+#ifndef EDVR_HAVE_NGX
+    (void)ctx; (void)w; (void)h; (void)features;
+    if (initMs) *initMs = 0.0;
+    if (createMs) createMs[0] = createMs[1] = 0.0;
+    if (reason) *reason = "this build has no DLSS SDK in it";
+    return false;
+#else
+    if (initMs) *initMs = 0.0;
+    if (createMs) createMs[0] = createMs[1] = 0.0;
+    if (!ctx || !w || !h) {
+        if (reason) *reason = "a missing input";
+        return false;
+    }
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    const int64_t t0 = qpcNow();
+    const bool ok = dlaaAvailable(dev, reason);   // ~0 ms when already asked
+    if (initMs) {
+        *initMs = qpcFrequency() > 0
+                      ? static_cast<double>(qpcNow() - t0) * 1000.0 /
+                            static_cast<double>(qpcFrequency())
+                      : 0.0;
+    }
+    if (dev) dev->Release();
+    if (!ok) return false;
+    if (!features) return true;
+    for (int eye = 0; eye < 2; ++eye) {
+        if (!ensureFeature(ctx, eye, w, h, w, h, reason, createMs ? &createMs[eye] : nullptr)) {
+            return false;
+        }
+    }
+    return true;
+#endif
+}
+
+bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                  ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                  ID3D11Texture2D* output, ID3D11Texture2D* reactive,
+                  uint32_t w, uint32_t h,
+                  uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
+                  float frameMs, const char** reason) {
+#ifndef EDVR_HAVE_NGX
+    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
+    (void)reactive;
+    (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
+    (void)frameMs;
+    if (reason) *reason = "this build has no DLSS SDK in it";
+    return false;
+#else
+    if (!g_available || !g_params || !g_caps || !ctx || !colour || !depth || !motion || !output ||
+        eye < 0 || eye > 1 || !w || !h) {
+        if (reason) *reason = g_available ? "a missing input" : g_reason;
+        return false;
+    }
+    pollTimingRing(ctx);
+    if (!outW || !outH) {
+        outW = w;
+        outH = h;
+    }
+    // The feature: found made (by the warm-up or a previous frame) or made
+    // here, through the one block the warm-up shares (ensureFeature).
+    if (!ensureFeature(ctx, eye, w, h, outW, outH, reason, nullptr)) return false;
+    EyeFeature& f = g_feature[eye];
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
     ep.Feature.pInColor = colour;

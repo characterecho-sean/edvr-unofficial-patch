@@ -66,9 +66,57 @@ ClearSeen g_clears[kMaxClears];
 uint32_t  g_clearCount = 0;
 uint32_t  g_clearsDropped = 0;
 
+// The device stamp: written once by the proxy at the first device, read by
+// every "+X.XXX s after the device" line here and in intro_skip. 0 is
+// "no device yet" -- stampMs() never returns it.
+uint64_t g_deviceMs = 0;
+
+// The movie's fill account. The first fill and the last are the two edges
+// of the movie's own clock as seen from the draw path; the count between
+// them is fill DRAWS, not frames -- introProbeNoteMovieFill is called once
+// per eye, so it runs twice a frame while both eyes draw.
+uint32_t g_fillFrames = 0;
+uint64_t g_fillLastMs = 0;
+bool     g_fillClosed = false;   // the "last drew" line has been said
+
 double elapsedSec(uint64_t now) {
     if (!g_startMs || now < g_startMs) return 0.0;
     return static_cast<double>(now - g_startMs) / 1000.0;
+}
+
+// Seconds from the device stamp to `at`, as a string, or the honest
+// alternative when there is no stamp -- so no line ever prints "+0.000 s"
+// for a device that does not exist.
+void sinceDeviceText(uint64_t at, char* buf, size_t len) {
+    if (g_deviceMs && at >= g_deviceMs) {
+        snprintf(buf, len, "+%.3f s after the device",
+                 static_cast<double>(at - g_deviceMs) / 1000.0);
+    } else {
+        snprintf(buf, len, "before any D3D11 device (read this line's "
+                           "timestamp against the device line)");
+    }
+}
+
+// The fill account's closing line, once, from whichever edge comes first:
+// the first rendered scene, or the probe closing. A movie that never drew
+// is said too, so a missing "first drew" line reads as "no fill was seen"
+// rather than as a probe that never looked.
+void closeFillAccount(const char* edge) {
+    if (g_fillClosed) return;
+    g_fillClosed = true;
+    if (!g_fillFrames) {
+        Log::get().note(
+            "intro probe: the movie's fill never drew before %s (%u frame(s) "
+            "probed) -- either no movie played or its fill was not the "
+            "four-vertex three-plane draw this looks for.",
+            edge, g_frames);
+        return;
+    }
+    char when[96];
+    sinceDeviceText(g_fillLastMs, when, sizeof(when));
+    Log::get().note("intro probe: the movie's fill last drew at %s (%u fill draws), "
+                    "closed at %s.",
+                    when, g_fillFrames, edge);
 }
 
 // The power-of-two class of a draw count. The signature has to survive the
@@ -113,6 +161,7 @@ void sortBuckets() {
 
 void closeProbe(uint32_t frameNo, const char* why) {
     g_closed = true;
+    closeFillAccount("the probe closing");
     char tail[224];
     if (g_firstEyeFrame) {
         snprintf(tail, sizeof(tail),
@@ -158,12 +207,42 @@ void introProbeConfigure(Config& cfg) {
         "intro probe: on. Every frame's draws are counted by the target they "
         "land in, and a line is written whenever that shape changes, whenever "
         "a frame takes %llu ms or more, and for each new clear colour. An "
-        "eye-sized target is marked with a star. Nothing is changed. "
-        "docs\\intro-video.md",
+        "eye-sized target is marked with a star. The movie's file open and "
+        "its first and last fill are timed against the device line. Nothing "
+        "is changed. docs\\intro-video.md",
         static_cast<unsigned long long>(kStallMs));
 }
 
 bool introProbeWants() { return g_on && !g_closed; }
+
+void introProbeNoteDevice() {
+    if (!g_deviceMs) g_deviceMs = stampMs();
+}
+
+bool introProbeSinceDevice(double* seconds) {
+    if (!g_deviceMs || !seconds) return false;
+    const uint64_t now = nowMs();
+    *seconds = now >= g_deviceMs
+                   ? static_cast<double>(now - g_deviceMs) / 1000.0
+                   : 0.0;
+    return true;
+}
+
+void introProbeNoteMovieFill() {
+    if (!g_on || g_closed || g_fillClosed) return;
+    const uint64_t now = stampMs();
+    g_fillLastMs = now;
+    if (g_fillFrames++ == 0) {
+        char when[96];
+        sinceDeviceText(now, when, sizeof(when));
+        ++g_lines;
+        Log::get().note(
+            "intro probe: the movie's fill first drew at %s (%.2f s into the "
+            "probe). Read this beside the 'intro video upscale' and 'intro "
+            "video size: engaged' lines.",
+            when, elapsedSec(now));
+    }
+}
 
 void introProbeOnDraw(uint32_t targetW, uint32_t targetH, bool eyeSized) {
     if (!g_on || g_closed) return;
@@ -215,7 +294,7 @@ void introProbeOnClear(uint32_t targetW, uint32_t targetH, const float rgba[4]) 
         rgba[3], g_clearCount, kMaxClears);
 }
 
-void introProbeFrameBoundary(uint32_t frameNo) {
+void introProbeFrameBoundary(uint32_t frameNo, bool sceneFrame) {
     if (!g_on || g_closed) return;
     const uint64_t now = nowMs();
     if (g_startMs == 0) {
@@ -225,6 +304,10 @@ void introProbeFrameBoundary(uint32_t frameNo) {
     const uint64_t dt = now >= g_prevMs ? now - g_prevMs : 0;
     g_prevMs = now;
     ++g_frames;
+
+    // The first rendered scene is the intro's end: the movie-fill account
+    // closes here, said once, whether or not the probe itself runs on.
+    if (sceneFrame) closeFillAccount("the first rendered scene");
 
     sortBuckets();
 

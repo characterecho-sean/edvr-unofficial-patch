@@ -13,11 +13,19 @@ unsigned checks=0;
 void check(bool ok,const char* label){++checks;if(!ok){std::printf("FAIL: %s\n",label);std::exit(1);}}
 namespace edvr {
 std::string testMode="screen";
+bool testProbe=false;      // advanced.intro_probe, the watch's switch
+bool testDevice=false;     // whether the probe's device stamp exists
 std::vector<std::string> messages;
 Config& Config::get(){static Config cfg;return cfg;}
 std::string Config::getString(const char* key,const char* fallback)const{
     check(!strcmp(key,"fix.intro_video") && !strcmp(fallback,"screen"),"existing intro setting and default retained");return testMode;
 }
+bool Config::getBool(const char* key,bool fallback)const{
+    check(!strcmp(key,"advanced.intro_probe") && !fallback,"the watch reads the probe's own key, default off");return testProbe;
+}
+// The probe's clock, stood in for: the watch line must read against the
+// device when there is one and say so when there is not.
+bool introProbeSinceDevice(double* seconds){if(!testDevice||!seconds)return false;*seconds=1.234;return true;}
 Log& Log::get(){static Log log;return log;}
 Log::~Log()=default;
 void Log::note(const char* format,...){char text[4096]{};va_list args;va_start(args,format);vsnprintf(text,sizeof(text),format,args);va_end(args);messages.emplace_back(text);}
@@ -81,7 +89,47 @@ void test(){
     check(SUCCEEDED(readerLoad(files.ident)),"intro file remains loadable after shutdown");
     WIN32_FILE_ATTRIBUTE_DATA info{};
     check(GetFileAttributesExW(files.ident.c_str(),GetFileExInfoStandard,&info) && info.nFileSizeLow==4096,"intro file on disk was never changed");
-    check(edvrIntroSkipSelftest()==3,"existing path and direct-refusal regressions still pass");
+    // The probe's WATCH through the actual reader: the same hooks, installed
+    // forwarding, count the ident open and time it, and refuse nothing.
+    auto said=[&](const char* text){for(const auto& line:messages)if(line.find(text)!=std::string::npos)return true;return false;};
+    const auto refusedBefore=g_refused.load();messages.clear();g_identOpens.store(0);
+    // A watch asked for once the scene has passed (the skip's tick above) is
+    // declined with its own line: hooks installed now would report NO open
+    // about an open they were not there for.
+    testMode="screen";testProbe=true;testDevice=true;introSkipConfigure(Config::get());
+    check(!g_watching.load() && said("intro probe: the movie's open watch was asked for after the first rendered scene"),"a watch asked for after the scene is declined and says so");
+    testProbe=false;introSkipConfigure(Config::get());testProbe=true;introSkipConfigure(Config::get());
+    check(!g_watching.load() && !said("no longer watched"),"a declined watch never stood up, so nothing stands down");
+    auto lateLines=[&]{unsigned n=0;for(const auto& line:messages)if(line.find("was asked for after")!=std::string::npos)++n;return n;};
+    check(lateLines()==1,"the late-watch line is said once");
+    // This launch's scene has not arrived: the watch installs at startup.
+    g_sceneSeen=false;messages.clear();introSkipConfigure(Config::get());
+    check(g_watching.load() && !g_armed.load() && g_readerCreateW.applied && g_reader,"the watch owns the reader import without arming the skip");
+    check(said("intro probe: watching the movie's open"),"the watch announces its install before any open");
+    auto openLines=[&]{unsigned n=0;for(const auto& line:messages)if(line.find("intro probe: the game opened ")!=std::string::npos)++n;return n;};
+    // N5 (2026-09-15): the once-guard is per API family, so an existence
+    // check on the ident must not swallow the line the real open earns.
+    // Through this executable's own patched import, never the hook function
+    // directly: a hook forwards through the slot's saved original, which is
+    // only set for imports this process actually has (GetFileAttributesW is
+    // not one of them here; GetFileAttributesExW, called below, is).
+    WIN32_FILE_ATTRIBUTE_DATA probeInfo{};
+    check(g_attrExW.applied && GetFileAttributesExW(files.ident.c_str(),GetFileExInfoStandard,&probeInfo) && probeInfo.nFileSizeLow==4096,"a watched existence check is forwarded, not refused");
+    check(openLines()==1 && said("through GetFileAttributesExW)"),"the existence check gets its own once-only open line");
+    check(SUCCEEDED(readerLoad(files.ident)) && g_identOpens.load()>=2 && g_refused.load()==refusedBefore,"a watched ident open is counted, timed and forwarded");
+    const auto firstOpens=g_identOpens.load();
+    check(openLines()==2 && said("intro probe: the game opened Ident_Frontier_EliteNeutral.webm at +1.234 s after the device") && said("through DirectShow CreateFileW)"),"the CreateFile open still gets its own line, not swallowed by the existence check's guard");
+    check(SUCCEEDED(readerLoad(files.temporary)) && g_identOpens.load()>firstOpens && openLines()==2,"a second ident open in the same family counts without a second line");
+    check(SUCCEEDED(readerLoad(files.loop)) && g_refused.load()==refusedBefore,"the front end's loop is forwarded and never refused");
+    introSkipTick(true);
+    check(said("intro probe: the movie's open watch retires at the first rendered scene -- ") && said(" ident open(s) and "),"the watch's account prints at the scene edge");
+    g_identOpens.store(0);g_identOpenNotedCreate.store(false);g_identOpenNotedAttr.store(false);testDevice=false;
+    check(SUCCEEDED(readerLoad(files.ident)) && said("before any D3D11 device existed"),"with no device stamp the open line says so instead of printing zero");
+    testProbe=false;introSkipConfigure(Config::get());
+    check(!g_watching.load() && said("intro probe: the movie's open is no longer watched"),"the watch stands down when the probe goes off");
+    introSkipShutdown();
+    check(SUCCEEDED(readerLoad(files.ident)),"intro file remains loadable after the watch's shutdown");
+    check(edvrIntroSkipSelftest()==7,"existing path, direct-refusal and watch regressions still pass");
     CoUninitialize();
 }
 int main(int argc,char** argv){

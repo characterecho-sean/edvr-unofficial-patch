@@ -2,70 +2,67 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-08-28 and 2026-09-13 --
-the latter spanning the Flight 09:43 and Flight 10:09 entries (commits
-fbd8284, 2aa0c2d, 0d7251b). Restates the journal below; update it
-whenever this doc changes.*
+*Written 2026-09-15 from the entries dated 2026-08-28, 2026-09-13 (Flights
+09:43 and 10:09; fbd8284, 2aa0c2d, 0d7251b) and 2026-09-15 (two entries).
+Restates the journal below; update it whenever this doc changes.*
 
-- **State:** Two phases, both off by default. (1) The splash-panel
-  placement/world-lock/FSR fix (`fix.intro_video_size`,
-  `intro_video_lock`, `intro_video_upscale` + deband/dither/sharpen):
-  SHIPPED, field-verified 2026-08-28. (2) `fix.intro_video = skip`
-  (built 2026-09-13, SHIPPED v0.16.2): Flight 09:43 found the
-  executable-import hook alone bypassed by quartz.dll's reader; fix
-  2aa0c2d patched quartz's CreateFileW too, CONFIRMED by Flight 10:09 --
-  WORKED, 2 refusals, scene at 22.5 s against the 28.8 s baseline (~6 s
-  saved, not ~20 s).
-- **Open:**
-  - Facing the wrong way at the splash after the cut: unmeasured,
-    likely a second, separate fix.
-  - Whether the movie already plays during phase A (first 3-5 s):
-    unmeasured; changes nothing about the fix either way.
-  - Whether EDVR is party to either stall (the freeze or phase A):
-    "never A/B'd".
+- **State:** (1) `fix.intro_video` defaults to `screen` (world-lock + FSR
+  on the splash's screen), shipped since 2026-08-28 (f908be2); `skip` is
+  the off-by-default alternative, SHIPPED v0.16.2, ~6 s saved not ~20 s.
+  (2) The native OpenXR runtime builds its whole session once inside
+  `VR_InitInternal`, no OpenComposite-style rebuild at the first
+  compositor call: the removed `fix.vr_handover = early` has no native
+  analogue -- the movie already plays natively on the splash's screen,
+  world-locked (2026-09-15 18:30 Steam flight). (3) NGX warm-up
+  (`advanced.temporal_aa_warm`, default on): BUILT 2026-09-15, NOT
+  FLOWN -- NVIDIA's one-time initialisation and both eyes' features are
+  made on a loading frame instead of inside the first Submit (857 ms in
+  that flight). Of that, eye 0's create is <= 58 ms; the ~760 ms before
+  it is UNSPLIT between NGX init, five 16-MP history textures and the
+  runtime UI-resolve compile -- the new per-stage ms lines split it
+  (first 2026-09-15 entry).
+- **Open:** whether the movie reaches the headset earlier once the
+  warm-up flies, or the game just absorbs the stall (section 9, first
+  2026-09-15 entry); ident-open -> first-composite latency, never
+  measured natively; why the movie was visible only ~2 s in the 18:30
+  flight -- keypress or otherwise, unknown; facing the wrong way after
+  the cut, unmeasured, likely a separate fix.
 - **Ruled out:**
-  - `fix.panel_distance` moving the movie panel: this draw binds no
-    constant buffer at all.
-  - `fix.black_void` blackening the surround: it's a full-eye blit
-    from a texture, not a clear.
-  - "Its placement is in four vertices and nowhere else": refuted by
-    flight 3 -- a full-screen quad; real placement is VS `cb2`.
-  - A viewport counter-move to world-lock the panel: can only
-    translate, so it can never produce stereo.
-  - Intercepting only the executable's own file-open imports to skip
-    the movie: bypassed by quartz.dll's reader (0 refusals, 902
-    frames played).
-  - The resample cache keyed on the source resource: each eye's draw
-    destroyed the other eye's cached build.
-  - The "DRAWING anyway" line after Flight 10:09's WORKED verdict:
-    the front end's own loop on the same composite, not a second
-    ident replay (0d7251b).
-- **Next flight:** Confirm `skip`'s missing-file handling on the
-  Frontier install (Flight 09:43 and 10:09 are both Steam), and the
-  fourth outcome -- a hang or crash with `skip` set.
+  - `fix.panel_distance` moving the panel: the draw binds no constant buffer.
+  - `fix.black_void` blackening the surround: a full-eye blit, not a clear.
+  - Placement "in four vertices": refuted by flight 3; it is VS `cb2`.
+  - A viewport counter-move to world-lock the panel: translates, no stereo.
+  - Hooking only the exe's file imports to skip: quartz.dll's reader bypassed it.
+  - The resample cache keyed on the source: each eye destroyed the other's build.
+  - The "DRAWING anyway" line after Flight 10:09's WORKED verdict: the
+    front end's own loop on the same composite, not the ident (0d7251b).
+  - The early handover's mechanism natively: the session forms once
+    inside `VR_InitInternal` (native_runtime_host.h:424-467); the first
+    compositor call costs ~7 ms.
+  - Phase A = 6.4 s as a native number: that was an OpenComposite
+    reading; natively the first frame reaches the headset ~5.0 s after
+    the device.
+- **Next flight:** Steam, `fix.intro_video = screen`,
+  `advanced.intro_probe = 1`, reading `intro probe: watching the movie's
+  open`, `intro probe: the game opened <file> at +X.XXX s after the
+  device`, and `intro video lock: holding` against the device line --
+  plus the first 2026-09-15 entry's section 9 for the warm-up.
 - **Environment:** The placement fix was measured on a Frontier
-  install, game build 330683, Pimax via OpenComposite, eye 5424x5356.
-  The skip feature's flights used the Steam install (commits fbd8284,
-  then 2aa0c2d) and need no headset. Placement lives in vertex shader
-  constant buffer 2 (80 bytes); the census's constant-watch reads
-  slot b0 by default (`advanced.census_cb_slot` reads others).
-- **Detail:** The placement mechanism runs "Flight 3" through "Flight
-  6" (a full-screen quad; real placement is VS `cb2`); "Stage one,
-  built: fix.intro_video_size" and "What shipped" cover what it
-  built; "What the bugs were, since the pattern is the lesson" is
-  process lessons. The skip feature is "Not playing it at all",
-  "Flight 09:43" (the quartz.dll bypass) and "Flight 10:09" (its fix
-  confirmed). "The other symptom: facing the wrong way at the cut" is
-  the separate unmeasured issue. Companion: docs/loading-panel-handoff.md,
+  install, game build 330683, Pimax via OpenComposite, eye 5424x5356;
+  placement is VS cb2 (80 bytes). The skip's flights are Steam, no
+  headset needed. Both 2026-09-15 flights are Steam, Pimax Crystal
+  Super on Pimax OpenXR, eye 4068x4016 then 2644x2610 once HMD Quality
+  applies; the warm-up runs only on the native OpenXR path.
+- **Detail:** Placement is "Flight 3" through "Flight 6", "Stage one,
+  built" and "What shipped"; "What the bugs were" is process lessons;
+  the skip is "Not playing it at all", "Flight 09:43" and "Flight
+  10:09"; the warm-up is the first 2026-09-15 entry; the native-runtime
+  correction is the second. Companion: docs/loading-panel-handoff.md,
   docs/loading-scrim.md.
 
 Reported 2026-08-28 and **measured the same day**, across two flights, on the
-field rig (Frontier launcher install, game build 330683, one eye 5424x5356,
-Pimax via OpenComposite). The model this page opened with was a hypothesis
-built from the install's own files and from old logs; flight 1 confirmed it,
-including the vertex shader, and flight 3 then refuted the part of it that
-said where the fix would go. Both are below, because the correction is the
-finding.
+field rig. The page opened with a hypothesis; flight 1 confirmed it, flight 3
+refuted where the fix would go. Both are below: the correction is the finding.
 
 ## The defect, in the field's words
 
@@ -667,7 +664,7 @@ Escape on somebody's behalf is a patch deciding what they get to watch.
 
 | key | does |
 |---|---|
-| `intro_probe = 1` | records the startup. Per frame: draws counted by the target they land in, logged when that shape changes; every frame of 200 ms or more; every new clear colour, read *before* the black void fix substitutes; and the first frame that draws into an eye texture, called out on its own line. Changes nothing; stands down after three minutes or 96 lines. |
+| `intro_probe = 1` | records the startup. Per frame: draws counted by the target they land in, logged when that shape changes; every frame of 200 ms or more; every new clear colour, read *before* the black void fix substitutes; and the first frame that draws into an eye texture, called out on its own line. With the movie not skipped, the same forwarding file-open hooks the skip uses are installed at launch (`intro probe: watching the movie's open`), so the movie's open (`the game opened Ident_... at +X s after the device`) and its first and last fill are timed against the device line; the watch's account prints at the first rendered scene, and a reload after the movie has drawn declines it and says so. Refuses nothing; stands down after three minutes or 96 lines. |
 | `census_at_ms = A,B,C` | arms a full draw census at named moments after the session's first frame — up to eight, milliseconds. Each records offscreen draws whatever `census_offscreen` says. Read once, at the first frame. An entry due inside a stall fires when the stall ends. |
 
 Milliseconds and not frames, deliberately: this session measured 1130 fps
@@ -877,3 +874,224 @@ Not yet flown: the fourth outcome (a hang or crash with `skip` set,
 per the table above), and whether the Frontier install's missing-movie
 path behaves the same -- Flight 09:43 and Flight 10:09 are both the
 Steam rig.
+
+## 2026-09-15: the first submitted frame's 857 ms, and the NGX warm-up
+
+Steam flight, `edvr_gfx_20260915_183004.log`, v0.17.0-rc.1-3-g3b6715a-dirty,
+Pimax Crystal Super on Pimax OpenXR, `fix.temporal_aa = dlss`. Times are
+the log's own clock (mm:ss.fff).
+
+| t | line |
+|---|---|
+| 04.28 | device created |
+| 05.35 | VR_InitInternal -> `runtime_startup` at 06.23 (the OpenXR session is built synchronously in here; the Present thread is parked servicing graphics jobs) |
+| 08.41 | first WaitGetPoses / Submit |
+| 08.411 | `adaptive UI evidence ready` -- the first treat starts (ensureUiHistory) |
+| 09.170 | `UI resolve: replacement compute shader compiled` -- the runtime D3DCompile |
+| 09.228 | `dlaa: the feature is created for eye 0 at 4068x4016, DLAA, preset K` |
+| 09.265 | `... eye 1` (37 ms later) |
+| 09.268 | `native timing CPU: seq 3, wait 7.077 ms, submits 857.166 ms, temporal 853.701` |
+| 09.479 | `intro video upscale: FSR ... 1920x1080 to 5120x2880` -- the movie's first EDVR composite |
+| 09.721 | `intro video size: engaged -- x4.15`, world lock bound |
+| 10.524 | the game resizes its targets to 2644x2610 (HMD Quality 65%) |
+| 10.556 / 10.586 | `dlss: the feature is created for eye 0/1, 2644x2610 in and 4068x4016 out` -- ~30 ms per eye; LONG FRAME 107.8 ms |
+
+The Frontier 10:45 flight is the same shape: first Submit 780 ms, temporal
+776.8 ms.
+
+**Attribution, corrected.** The first reading put the ~800 ms on eye 0's
+NGX feature creation. In code order the first treat runs ensureUiHistory
+(08.411) -> `dlaaAvailable` = NGX initialisation -> the pass's five
+4068x4016 dl textures -> the UI-resolve runtime compile (09.170) -> eye 0's
+`NGX_D3D11_CREATE_DLSS_EXT` (09.228). So the create itself is <= 58 ms
+(09.170 -> 09.228; eye 1's was 37 ms; the later 65% recreate ~30 ms per
+eye). The ~760 ms before it is NGX init, the five 16-MP textures and the
+UI-resolve compile, unsplit -- nothing in that log times them apart. It is
+a one-time warm-up cost, not a per-size one.
+
+**The design, in five lines.**
+
+1. `temporalPassTick` runs on every non-TEST Present of the game's
+   swapchain, on the game's immediate context, on the render thread --
+   the thread and device the native temporal channel's `treat()` insists
+   on. From the Present after VR_InitInternal's park ends (~06.24) it can
+   see the published render size and the acquired channel, ~2 s before the
+   first Submit.
+2. `warmTrainedOnce` (temporal_pass.cpp) gates once per session on: a
+   trained mode, `advanced.temporal_aa_warm`, no debug paint, a valid
+   published sizing (`edvrQueryNativeRenderSizing`), the channel acquired,
+   this thread == the channel's thread, this device == the channel's device
+   (IUnknown identity), the device not removed, the size in range. Every
+   gate fails closed to today's behaviour: the sizing, channel, thread and
+   device-identity checks poll (Pending until they open); a trained mode,
+   the warm switch and debug paint are terminal to Off; a removed device
+   or an out-of-range size are terminal to Failed.
+3. `dlaaWarm` (dlaa.cpp) calls `dlaaAvailable` (NGX init, latched exactly
+   as the treat's call latches it) then `ensureFeature` for eye 0 and eye 1
+   at w = h = out = the max over both eyes' active sizes -- the value
+   `GetRecommendedRenderTargetSize` hands the game, which creates both eye
+   textures at it (4068x4016 tonight).
+4. `ensureFeature` is the creation block lifted verbatim out of
+   `dlaaEvaluate`, which now calls it: the first treat finds the handle set
+   and every key term equal and goes straight to the evaluate with
+   reset = true; on a mismatch (Frontier's 65% first frame, HMD Quality, a
+   cull-guard-widened width, a preset change) it releases and recreates at
+   the measured ~30-50 ms per eye -- the init saving stands either way.
+5. Every stage is timed whether or not the warm-up runs: `dlaa: NGX
+   initialised in N ms`, `(made in N ms)` on both `created for eye` lines,
+   `(N ms)` on every `replacement compute shader compiled` line. Not made
+   by the warm-up: the fovea/periphery crop features, the pass's dl
+   textures and mover pair (keyed on the treat's real size and the game's
+   swapchain format), any Evaluate.
+
+| key | what |
+|---|---|
+| `advanced.temporal_aa_warm = 1` | NVIDIA initialised and both eyes' DLAA features made on the loading screen, once openvr_api.dll has named the render size; 0 = the first frame pays it, as before. Restart. |
+
+**The never-ran case is distinguishable by construction.** With the tick's
+call deleted, the first treat prints `temporal aa: NVIDIA was not warmed
+before the first submitted frame (no frame boundary reached the warm-up:
+the tick never ran)` and the `created for eye` lines still sit after
+`adaptive UI evidence ready`.
+
+### 9. Flight reading
+
+FIRST: `python tools\edvr_log.py --target steam --expect-build HEAD --version`
+-- exit 2 means a stale DLL and nothing below is evidence. Then read the gfx
+log in this order, with the openxr log beside it.
+
+A. DID IT RUN AT ALL. Look for `temporal aa: warming NVIDIA before the first
+submitted frame` (L-START). Absent, and at the first treat `temporal aa:
+NVIDIA was not warmed before the first submitted frame (<reason>)` (L-LATE)
+= it never ran; the reason says why: `the tick never ran` = dead code (the
+`precompiled shader warmed at session start` canary will also be missing if
+the tick itself is dead); `openvr_api.dll had not published a native render
+size` or `the native temporal channel was not acquired` = the gate never
+opened -- check the openxr log's `openxr_render_size` and
+`native_temporal,provider_acquired=1` stamps against the first boundary
+after runtime_startup; `advanced.temporal_aa_warm = 0` = off (L-OFF also
+printed). In the never-ran case the `dlaa: the feature is created for eye
+0/1` lines still sit AFTER `adaptive UI evidence ready` and BEFORE the first
+`native timing CPU: seq` line, and `dlaa: NGX initialised in N ms` (L-NGX)
+is stamped in the same frame -- read that N and the `(N ms)` on `UI
+resolve: replacement compute shader compiled` anyway: they split tonight's
+760 ms even on a flight where the warm-up never ran.
+
+B. RAN AND HELPED. L-START, then the two `dlaa: the feature is created for
+eye N at WxH ... (made in N ms)` lines, then `temporal aa: NVIDIA warmed
+before the first submitted frame -- initialisation A ms, eye 0 B ms, eye 1
+C ms ...` (L-DONE), ALL stamped before the first `native timing CPU: seq`
+line (and before the openxr log's first native_submit_route seq /
+WaitGetPoses). At the first treat: NO new `created for eye` line (the pair
+was reused), `DLAA engaged` prints as before, no L-LATE. `native timing
+CPU: seq 3 ... temporal` well under 150 ms (from 853.7). AND in the openxr
+log the gap runtime_startup -> first native_submit_route stays ~2.2 s
+(tonight 06.228 -> 08.411): the game did not absorb the stall. Then the
+movie: `intro video upscale: FSR` and `intro video size: engaged` should
+land earlier relative to the `device` line than tonight's +5.20 s / +5.44 s
+by roughly the fall in `temporal`.
+
+C. RAN, DID NOT HELP (three distinguishable shapes). (1) L-DONE present,
+features reused, but `native timing CPU: seq 3 ... temporal` still hundreds
+of ms: the residue is not NGX -- compare L-DONE's initialisation A to ~750:
+a small A means the cost is the five 16-MP dl textures or the UI-resolve
+compile (its line now carries ms; subtract it) -- write the ruled-out line
+and pre-build whichever it is next. (2) L-DONE present and temporal small,
+but the openxr gap runtime_startup -> first native_submit_route grew by
+about L-DONE's total (toward ~3.0 s): the Init thread waited on the render
+thread; the stall moved, the movie is no earlier -- record it, the next
+lever is init off the render thread (needs a decision: the game device is
+render-thread-only by house rule). (3) L-DONE present but a SECOND `created
+for eye 0` line at the first treat at a different size (e.g. 2576x2544 ->
+3964x3914 on Frontier): the size guess was wrong; the init saving stands,
+the recreate's `(made in N ms)` prices the loss; note the sizes for the
+DLSS-fraction follow-up. Also: `temporal aa: NVIDIA warm-up did not
+complete ... -- <reason>` (L-FAIL) or `... faulted` (L-FAULT) = it ran and
+refused; the treat retried; read the reason and, if init refused, the
+treat's `dlaa was asked for, but` line. The monitor's LONG FRAME row may
+not print for the warm frame (the VR_Init line consumes the 5 s budget) --
+its absence is not evidence either way; L-DONE's totals are the record.
+
+**Open after the flight (not in this change):** pre-creating the
+DLSS-fraction pair for rigs whose first engage is 65% (Frontier) from the
+auto bias source's multiplier; pre-building the pass's dl textures if the
+split says the 325 MB block is the cost; precompiling kUiResolve in
+build.bat's temporal shader step if its compile ms is large; NGX init off
+the render thread if the Init thread turns out to wait on the render thread
+in the window; releasing abandoned warm features on the format-family
+fallback.
+
+ruled out: (to fill after the flight)
+
+## 2026-09-15: the native runtime, and what replaced the early handover
+
+**The premise correction.** `fix.vr_handover = early` (removed 2026-09-13)
+submitted a 1x1 texture ahead of the game's own compositor calls under
+OpenComposite, whose session rebuilds at the first such call. The native
+OpenXR bridge (`src/openxr`) has no such rebuild: the whole session --
+instance, EDVR's own D3D11 device, `xrCreateSession`, swapchains, runtime
+shader compiles, `xrBeginSession`, two zero-layer frames, launch centre --
+is built synchronously inside `VR_InitInternal` on an OwnerService thread
+while the game's Init thread waits and its Present thread is parked in
+the Present hook servicing graphics jobs (native_module.cpp:301-367,
+native_runtime_host.h:424-467). There is nothing for an early handover to
+hand over to.
+
+**Tonight's Steam flight** (`edvr_gfx_20260915_183004.log`,
+v0.17.0-rc.1-3-g3b6715a-dirty, Pimax Crystal Super on Pimax OpenXR; times
+are the log's own clock, mm:ss.fff):
+
+| t | line |
+|---|---|
+| 04.28 | device created |
+| 05.35 -> 06.23 | `VR_InitInternal` -> `runtime_startup` |
+| 08.41 | first WaitGetPoses / Submit |
+| 09.228 / 09.265 | `dlaa: the feature is created for eye 0/1 at 4068x4016` |
+| 09.268 | `native timing CPU: seq 3, wait 7.077 ms, submits 857.166 ms, temporal 853.701` |
+| 09.479 | `intro video upscale: FSR ... 1920x1080 to 5120x2880` |
+| 09.721 | `intro video size: engaged -- x4.15` (world lock bound, no refusal) |
+| 10.524 | game resizes to 2644x2610 (HMD Quality) |
+| 10.556 / 10.586 | `dlss: the feature is created for eye 0/1 ...`; LONG FRAME 107.8 ms |
+
+The movie plays natively on the splash's own screen, world-locked, at
++5.44 s after the device (the FSR composite lands at +5.20 s), with no
+refusal line. The only EDVR-owned cost on that path is the 857 ms first
+Submit, of which ~800 ms is eye 0's one-time NGX warm-up -- eye 1 costs
+37 ms, the later 65%-quality recreate ~30 ms per eye -- and the game's
+own first compositor call costs ~7.077 ms (`wait`), not a rebuild. The
+Frontier 10:45 flight shows the same shape (780 ms first Submit, 776.8 ms
+temporal). The 4068x4016 eye size is the runtime's own recommended
+per-eye size, published at Init and read back by the d3d11 half
+(`vScreen: openvr_api.dll says one eye is 4068x4016`).
+
+**Built** (log-only; no ini keys besides the warm-up's; `src/openxr`
+untouched by the instrumentation; nothing committed):
+
+| instrument | adds | signature |
+|---|---|---|
+| I1 ident watch | non-refusing timing of the movie's open, `advanced.intro_probe` | `intro probe: watching the movie's open -- the file hooks are installed and forwarding ...` |
+| I2 fill timing | first/last movie-fill draw vs the device clock | `intro probe: the movie's fill first drew at +X.XXX s after the device` |
+| I3 world-lock confirm | anchor yaw at bind, said once | `intro video lock: holding -- the panel is anchored on the game's forward (head yaw N deg at bind, panel frame N, left/right eye first)` |
+| I4 startup steps | `VR_InitInternal`/`start()` split into instance/device/session/swapchains/shaders/other/frames/centre | `runtime_startup_steps,instance=,device=,session=,swapchains=,shaders=,other=,frames=,centre=,total=,units=wall_ms` |
+| I5 skybox counts | two fields on the existing summary line | `native_summary,...,skybox_sets=<n>,skybox_clears=<n>` |
+| I6 present park | Present-thread cost of the runtime-start invoke | `present_park,ms=<n>,jobs=<n>,reason=runtime_start,result=<EVRInitError>,path=<present_queue\|inline>` |
+| warm-up | `advanced.temporal_aa_warm` (default on) | `temporal aa: NVIDIA warmed before the first submitted frame -- initialisation A ms, eye 0 B ms, eye 1 C ms ...` (L-DONE) |
+
+**Flight reading, in order.** First `edvr_log.py --expect-build HEAD`:
+exit 2 kills the log as evidence. Then: did the warm-up run at all
+(L-START present, or L-LATE naming why -- dead tick, the gate never
+opened, or off); if it ran, did it help (L-DONE before the first `native
+timing CPU: seq` line, that line's `temporal` well under 150 ms, and the
+openxr gap `runtime_startup` -> first `native_submit_route` unchanged at
+~2.2 s); or did it run and not help, in three shapes -- the residue
+survives reuse (not NGX: the dl textures or the UI-resolve compile), the
+gap grew by about L-DONE's total (the Init thread waited on the render
+thread; the stall moved, not removed), or a second `created for eye 0`
+line at a different size (the size guess was wrong, the init saving
+still stands).
+
+**Deferred, not built:** precompiling the openxr half's three D3DCompile
+pairs to shrink `VR_InitInternal`'s ~443 ms shader stretch; an EDVR
+holding layer during the ~2.2 s between `runtime_startup` and the first
+Submit (the first pre-game `xrEndFrame` layer on third-party runtimes).
+Both wait on the warm-up's own measurement landing first.

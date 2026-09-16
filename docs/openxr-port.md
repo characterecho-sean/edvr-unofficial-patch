@@ -692,7 +692,7 @@ misleading percentage. Preserve unavailable values when there is no source.
 | `advanced.suppress_interfaces` | Refuses configured interface prefixes before reaching the runtime | Keep proxy behaviour; owned backend has a fixed supported-interface table |
 | `advanced.compositor_timing` | Enables existing compositor timing collection | Define separate measured-source behaviour before changing this switch; never make local queries depend accidentally on a legacy timing decoder |
 | `advanced.app_gpu_timing` | Enables the local render-to-submit instrument independently; source and age appear alongside SteamVR | Reuse the owner/frame policy with validated OpenXR boundary publication |
-| `fix.vr_handover` | `early` submitted a 1x1 texture before the game's compositor calls; `stock` did not | **Removed 2026-09-13** ahead of its replacement (`early_session.cpp` gone with it); the channel's game-device field it introduced stays for the cull guard's presence test |
+| `fix.vr_handover` | `early` submitted a 1x1 texture before the game's compositor calls; `stock` did not | **Removed 2026-09-13** ahead of its replacement (`early_session.cpp` gone with it); the channel's game-device field it introduced stays for the cull guard's presence test; replacement recorded in docs/intro-video.md (2026-09-15 entry): the native session needs no handover, and the first-Submit NGX warm-up moved to loading |
 | `fix.launch_centre` | Legacy OpenVR: `auto` is OpenComposite-only; `on`/`off` explicit | Native always centers at startup, without a toggle, as approved 2026-09-14 |
 
 The OpenXR loader/SDK and OpenVR declarations must retain their upstream

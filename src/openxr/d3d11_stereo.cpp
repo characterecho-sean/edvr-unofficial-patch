@@ -1,6 +1,7 @@
 #include "d3d11_stereo.h"
 #include "projection_math.h"
 #include <d3dcompiler.h>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -231,6 +232,14 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
     } else acquire();
     if(FAILED(acquired))return failed(XR_ERROR_INITIALIZATION_FAILED);
   }
+  // Two wall-clock stretches for the host's startup trace: the swapchains
+  // (format choice through the image views) and the shaders (the three
+  // D3DCompile pairs and their objects). Measured, not estimated. A failure
+  // inside either leaves it at 0, and the host does not trace a failed open.
+  using Clock=std::chrono::steady_clock;
+  const auto msSince=[](Clock::time_point since){return std::chrono::duration<double,std::milli>(Clock::now()-since).count();};
+  initSwapchainMs_=0;initShaderMs_=0;
+  auto stretch=Clock::now();
   std::vector<int64_t> formats;
   XrResult r=enumerate<int64_t>([&](uint32_t c,uint32_t*n,int64_t*p){return d.enumerateSwapchainFormats(session,c,n,p);},formats);
   if(r!=XR_SUCCESS)return failed(r);
@@ -265,6 +274,7 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
       eye.images.push_back(image.texture);eye.rtvs.push_back(std::move(rtv));
     }
   }
+  initSwapchainMs_=msSince(stretch);stretch=Clock::now();
   ComPtr<ID3DBlob> vs,ps,errors,nativeVS;
   if(FAILED(D3DCompile(shader,std::strlen(shader),"EDVR native stereo",nullptr,nullptr,"vs","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&vs,&errors))||
      FAILED(D3DCompile(shader,std::strlen(shader),"EDVR native stereo",nullptr,nullptr,"ps","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors))||
@@ -292,6 +302,7 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
      FAILED(device->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&skyboxVertexShader_))||
      FAILED(D3DCompile(skyboxShader,std::strlen(skyboxShader),"EDVR skybox",nullptr,nullptr,"ps","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors))||
      FAILED(device->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&skyboxPixelShader_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  initShaderMs_=msSince(stretch);
   bd={sizeof(SkyConstants),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER,0,0,0};
   if(FAILED(device->CreateBuffer(&bd,nullptr,&skyboxConstants_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   if(FAILED(device->CreateSamplerState(&sampler,&skyboxSampler_)))return failed(XR_ERROR_RUNTIME_FAILURE);

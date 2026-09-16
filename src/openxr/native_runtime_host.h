@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <limits>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include "native_device.h"
 #include "native_menu_client.h"
@@ -142,6 +143,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   BridgeCounts bridgeCounts=nullptr;
   RuntimeOptions startupOptions;
   uint64_t starts=0,stops=0,startupFrames=0;
+  // VR_InitInternal's cost by step, wall ms, for the runtime_startup_steps
+  // trace: open()'s stretches (instance/system, device, session, the stereo
+  // renderer, everything after it) and start()'s loop (zero-layer frames,
+  // the launch centre). Each is a measured bracket, not a share of a total.
+  struct StartupSteps{double instance=0,device=0,session=0,stereo=0,other=0,frames=0,centre=0;} startupSteps;
+  using StepClock=std::chrono::steady_clock;
+  static double stepMs(StepClock::time_point since){return std::chrono::duration<double,std::milli>(StepClock::now()-since).count();}
   LaunchCentrePolicy launchCentre;
   uint64_t launchCentreSamples=0,launchCentreBegan=0;
   uint64_t eventPumps=0;
@@ -427,7 +435,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // members. The diagnostic owns its device; game-device use remains separate.
     if(GetCurrentThreadId()!=ownerThread||starts!=1)return vr::VRInitError_Init_Internal;
     if(cancelled.load(std::memory_order_acquire))return vr::VRInitError_Init_ShuttingDown;
+    const auto openBegan=StepClock::now();
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
+    const double openMs=stepMs(openBegan);
+    const auto loopBegan=StepClock::now();
     const auto began=GetTickCount64();
     while(!cancelled.load(std::memory_order_acquire)&&GetTickCount64()-began<15000) {
       auto operation=gate.tryEnter(runtimeGeneration);
@@ -453,12 +464,30 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         // geometry snapshot before publishing the interfaces to Elite.
         if(launchCentre.pending()) {
           bool refresh=false;
-          if(!centreAtStartup(refresh))return vr::VRInitError_Init_Internal;
+          const auto centreBegan=StepClock::now();
+          const bool centred=centreAtStartup(refresh);
+          startupSteps.centre+=stepMs(centreBegan);
+          if(!centred)return vr::VRInitError_Init_Internal;
           if(refresh)continue;
         }
         out={&systemInterface,&compositorInterface,&chaperoneInterface,&displayInterface};
         nativeTracePrintf("runtime_startup,token=%u,zero_layer_frames=%llu,geometry_sequence=%llu,prior_submits=%llu,geometry_ready=1\n",
           token,(unsigned long long)startupFrames,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)compositorSubmits);
+        // The same startup by step. `frames` is the poll/begin/zero-layer
+        // loop less the centre's own brackets; `swapchains` and `shaders`
+        // are the stereo renderer's two measured stretches and `other` is
+        // the measured remainder of open() -- the stereo renderer's
+        // contexts and states, the capture textures, the provider acquires.
+        // The fields sum to total; nothing here is a share of a whole.
+        {
+          const double loopMs=stepMs(loopBegan);
+          startupSteps.frames=loopMs-startupSteps.centre;
+          const double swapchains=stereo.initSwapchainMs(),shaders=stereo.initShaderMs();
+          const double other=startupSteps.other+(startupSteps.stereo-swapchains-shaders);
+          nativeTracePrintf("runtime_startup_steps,instance=%.1f,device=%.1f,session=%.1f,swapchains=%.1f,shaders=%.1f,other=%.1f,frames=%.1f,centre=%.1f,total=%.1f,units=wall_ms\n",
+            startupSteps.instance,startupSteps.device,startupSteps.session,swapchains,shaders,other,
+            startupSteps.frames,startupSteps.centre,openMs+loopMs);
+        }
         return vr::VRInitError_None;
       }
     }
@@ -1344,11 +1373,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)temporalFrames,(unsigned long long)temporalEyes[0],(unsigned long long)temporalEyes[1],(unsigned long long)temporalFailures);
-    if(tracing)nativeTracePrintf("native_summary,waits=%llu,submits=%llu,pairs=%llu,copied_eyes=%llu,loading_layers=%llu,menu_left=%llu,menu_right=%llu,menu_failures=%llu,menu_poses=%llu,pose_failures=%llu,graphics_wrong_thread=%llu\n",
+    if(tracing)nativeTracePrintf("native_summary,waits=%llu,submits=%llu,pairs=%llu,copied_eyes=%llu,loading_layers=%llu,menu_left=%llu,menu_right=%llu,menu_failures=%llu,menu_poses=%llu,pose_failures=%llu,graphics_wrong_thread=%llu,skybox_sets=%llu,skybox_clears=%llu\n",
       (unsigned long long)compositorWaits,(unsigned long long)compositorSubmits,(unsigned long long)composedPairs,
       (unsigned long long)copiedEyes,(unsigned long long)loadingLayers,(unsigned long long)menuEyes[0],
       (unsigned long long)menuEyes[1],(unsigned long long)menuFailures,(unsigned long long)menuPosePublications,
-      (unsigned long long)poseFailures,(unsigned long long)graphicsCalls.wrongThread);
+      (unsigned long long)poseFailures,(unsigned long long)graphicsCalls.wrongThread,
+      (unsigned long long)skyboxSets,(unsigned long long)skyboxClears);
     ShutdownTrace gateStage("host_gate",tracing);
     if(runtimeGeneration) {
       gate.requestStop(runtimeGeneration);
@@ -1415,6 +1445,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return clean;
   }
   bool open(const RuntimeOptions& options) {
+    startupSteps=StartupSteps{};
+    auto step=StepClock::now();
     api.module=LoadLibraryExW(options.loader.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if(!api.module) {nativeTracePrintf("error,LoadLibraryExW,%lu\n",GetLastError());return false;}
     api.get=reinterpret_cast<PFN_xrGetInstanceProcAddr>(GetProcAddress(api.module,"xrGetInstanceProcAddr"));
@@ -1513,6 +1545,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;
+    startupSteps.instance=stepMs(step);step=StepClock::now();
     decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice;
     if(options.graphicsProvider || !options.graphicsProxy.empty()) {
       if(options.graphicsProvider && !externalDevice)
@@ -1544,6 +1577,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!validSize(sizes[0]) || !validSize(sizes[1]))
       return result("scaled_stereo_sizes",XR_ERROR_VALIDATION_FAILURE);
     if(!publishRenderSizing(true)) return result("native_render_sizing_publish",XR_ERROR_RUNTIME_FAILURE);
+    startupSteps.device=stepMs(step);step=StepClock::now();
     const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
     if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
     session=binding.session();local=binding.localSpace();view=binding.viewSpace();
@@ -1564,8 +1598,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     refreshDisplayFrequency("session_created");
     refreshHiddenMasks("session_created");
     if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
+    startupSteps.session=stepMs(step);step=StepClock::now();
     if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes,
         separateGraphics()?nullptr:graphicsProxy,separateGraphics()?nullptr:&graphicsCalls,separateGraphics()))) return false;
+    startupSteps.stereo=stepMs(step);step=StepClock::now();
     nativeTracePrintf("native_submit_path,deferred_consumer=%u,direct_scene=%u,timing_markers=after_submit\n",
       unsigned(separateGraphics()),unsigned(separateGraphics()));
     bool capturesReady=false;
@@ -1625,6 +1661,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
     }
+    startupSteps.other=stepMs(step);
     return runtimeGeneration!=0&&compositorGeneration!=0;
   }
 };

@@ -26,6 +26,7 @@
 #include "../common/proxy.h"
 #include "device_hook.h"
 #include "input_gate.h"
+#include "intro_probe.h"   // the device stamp the intro probe's clock reads
 #include "oculus_route.h"
 #include "shutdown_census.h"
 
@@ -125,6 +126,9 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
         if (!edvr::gameDevice()) {
             device->AddRef();
             edvr::publishGameDevice(device);
+            // The intro probe's clock base: the same moment as the "D3D11
+            // device ... created" line just above, on this half's own clock.
+            edvr::introProbeNoteDevice();
             if (edvr::vrCensusEnabled()) edvr::Log::get().note("VR device census: first device published=%p; "
                                   "compare with validated eye texture devices in the vr log.",
                                   static_cast<void*>(device));
