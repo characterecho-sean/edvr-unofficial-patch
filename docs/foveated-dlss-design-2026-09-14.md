@@ -2,45 +2,43 @@
 
 ## Status
 
-- **State (2026-09-15, 19:52, Stage 0 FLOWN):** one A/B/A flight in the
-  FRONTIER install, Pimax Crystal Super on Pimax OpenXR, 2576x2544 per eye
-  in, 3964x3913 out, 90 Hz, temporal_aa = dlss model k, log
-  edvr_gfx_20260915_195200.log on build v0.17.0-rc.2-5-g749a4e9 (on main;
-  read it with `--expect-build 749a4e9`). The whole-frame gate PASSED
-  against the A arm before it: fovea 40 deg with the steady periphery at
-  0.5 took the native benchmark gpu p50 from 8.84-9.10 ms (A, three
-  windows) to 7.95-8.13 ms (B, four windows), 0.76-1.02 ms and 8-11% off,
-  above the 0.26 ms drift inside A; p95 9.91-10.37 -> 9.22-9.55, no rise.
-  The pass itself went 4.10 -> 2.61 ms per stereo pair (full 3.35 ->
-  centre 0.60 + periphery 0.99 + reduce 0.09 + compose 0.25; prep 0.50 ->
-  0.68; ui 0.25 -> 0.00) with every drop counter zero after the first
-  minute. CPU p50 rose 0.2 ms in every B window (3.61-3.68 -> 3.77-3.90),
-  a price, not a stall; the frame is GPU-bound. INCOMPLETE: the trailing A
-  ran 25 s, so it has price lines (identical to the leading A) but no
-  benchmark window, and Sean has not yet said what the seam looked like.
-  The lines are verbatim in the journal (2026-09-15, flown).
-- **Settled by the flight:** H1 CONFIRMED (1.5 ms and 36% on the pass,
-  0.8-1.0 ms and 8-11% on the frame). ruled out: H2 (reduce + periphery +
-  compose eat most of the crop's saving), because at 40 deg / 0.5 they
-  cost 1.33 ms per pair against the 2.75 ms the crop saves over full-frame
-  NGX, 48%, and the pass still nets 1.5 ms. H3 (the seam pulses) UNJUDGED.
-  The angle decides the saving: centre 0.60 ms at 40 deg (8.2% of the
-  output), 0.71 at 49, 1.73 at 80, where the frame gain is gone (p50 8.99
-  vs 9.05-9.10). Engaging costs one 445 ms frame (two NGX features per eye
-  and a 303 ms shader compile), reported separately as the gates ask.
-- **UI parity is the first Stage 1 item, now field-confirmed:** the fovea
-  branch of temporalInner (the block ending at the compose dispatch) runs
-  neither the UI resolve nor the deferred replay; both exist only in the
-  full-frame block, so `ui` reads 0.00 under the fovea by construction and
-  B's UI was the periphery's half-size DLAA upscaled bicubically plus the
-  crop's DLSS. A parity build pays the 0.25 ms back, net about 1.25 ms on
-  the pass. Until then B's numbers price a different image-processing
-  feature, exactly as "UI and failure behavior" warned.
-- **Ruled out, do not re-run:** the eye-tracked crop as "no blur where I
-  look", structural under upscaling (performance.md, 2026-09-05); gaze
-  stays Stage 3 and optional. The pooled "NVIDIA ms/eye" figure mixes both
-  eyes and all three roles; nothing measured off it compares with the
-  per-role numbers. H2, above.
+- **State (2026-09-16, Stage 0 FLOWN, verdict in):** one A/B/A flight in
+  the FRONTIER install, 2026-09-15 19:52, Pimax Crystal Super, 2576x2544
+  per eye in, 3964x3913 out, 90 Hz, dlss model k, build
+  v0.17.0-rc.2-5-g749a4e9 (on main; read edvr_gfx_20260915_195200.log
+  with `--expect-build 749a4e9`). Timing gate PASSED against the leading
+  A: fovea 40 deg, steady periphery at 0.5, took the native benchmark gpu
+  p50 from 8.84-9.10 ms to 7.95-8.13 ms (0.76-1.02 ms, 8-11%, above the
+  0.26 ms drift inside A; p95 9.91-10.37 -> 9.22-9.55). The pass went
+  4.10 -> 2.61 ms per stereo pair (full 3.35 -> centre 0.60 + periphery
+  0.99 + reduce 0.09 + compose 0.25; prep 0.50 -> 0.68; ui 0.25 -> 0.00),
+  drop counters zero after the first minute. The trailing A ran 25 s: price
+  lines equal to the leading A, no benchmark window. Verbatim: journal.
+- **Settled by the flight and Sean's verdict:** H1 CONFIRMED (1.5 ms and
+  36% on the pass, 0.8-1.0 ms and 8-11% on the frame). ruled out: H2
+  (reduce + periphery + compose eat most of the crop's saving), because at
+  40 deg / 0.5 they cost 1.33 ms per pair against the 2.75 ms the crop
+  saves over full-frame NGX, 48%, and the pass still nets 1.5 ms. H3 (the
+  seam pulses) unjudged. COVERAGE FAILED at the paying angle (Sean,
+  2026-09-16): "40 still looks like a smallish circle in the middle of my
+  screen, does not cover my total eye area at all", as performance.md
+  found on 2026-09-05 (covering where the eyes might look takes 60 deg and
+  more). Centre cost 0.60 ms at 40 deg (8.2% of the output), 0.71 at 49,
+  1.73 at 80, where the frame gain was gone (p50 8.99 vs 9.05-9.10): the
+  angle that pays is too small and the angle that covers does not pay, at
+  periphery 0.5.
+- **UI parity is the first Stage 1 item, field-confirmed:** the fovea
+  branch of temporalInner runs neither the UI resolve nor the deferred
+  replay (both live in the full-frame block only), so `ui` reads 0.00 under
+  the fovea by construction and B's UI was the half-size periphery DLAA
+  upscaled bicubically. Parity pays the 0.25 ms back (net about 1.25 ms on
+  the pass); until then B prices a different feature, as "UI and failure
+  behavior" warned.
+- **Ruled out, do not re-run:** the eye-tracked crop, structural under
+  upscaling and off the plan after Sean's own objections (performance.md,
+  2026-09-05: eyes jump where heads stream, so every large look starts on
+  the post-saccade resolve); gaze stays Stage 3 and optional. The pooled
+  "NVIDIA ms/eye" figure mixes eyes and roles; do not compare. H2, above.
 - **Not yet built (Stage 1):** the UI resolve / deferred replay and the
   reactive mask on the crop path (above); the crop-policy unit test (cropOf
   is a lambda inside temporalInner and must be extracted first); history
@@ -48,17 +46,19 @@
   prHaveHistory are set unconditionally each frame); the crop branch's
   unconditional ensureNative, diagnostic motion shader and per-frame stats
   readback (the 0.2 ms CPU candidate), which Stage 0 timed, not removed.
-- **Next flight (after Stage 1, on the parity build, FRONTIER install):**
-  the same A/B/A with every arm at least 75 s INCLUDING the trailing A, no
-  angle sweep inside an arm, and the picture verdict written down. Change
-  arms by editing the live edvr.ini, not the F8 menu: every menu open or
-  close restarts the benchmark scope (perf_monitor.cpp, kEvMenu), which cut
-  every B window short this time; the 17 s one ran only because the menu
-  stayed open. The "DLSS where you look ENGAGED" line is the proof B ran.
-  Read with
-  `python tools\edvr_log.py --target frontier --expect-build HEAD --grep "temporal aa price"`
-  and the same with `--grep "native benchmark"`; a price line counts only
-  when its drop counters are near zero.
+- **Next (no build): the FRONTIER install now carries 16adaae, the EDHM
+  session's build, which contains the instrument (read with
+  `--expect-build 16adaae`).** Sean finds by eye in the F8 menu the
+  smallest temporal_aa_fovea that covers where his eyes go, holds it 40 s
+  each at temporal_aa_periphery_scale 0.5 and 0.35 with the menu closed
+  (a menu open or close restarts the benchmark scope), then sets the fovea
+  back to 0 so the EDHM flights stay clean. The cost model fitted to the
+  flight (journal, 2026-09-16) predicts the pass saving with UI parity at
+  1.1 ms for 60 deg / 0.35, 0.8 for 70 / 0.35, 0.5 for 80 / 0.3, nothing
+  at 90; the frame saved 0.5-0.7 ms less than the pass at 40 deg. A
+  covering angle of 70 deg or more ends the fixed crop as a perf trade and
+  full-frame DLSS stays (Stage 4). Read:
+  `python tools\edvr_log.py --target frontier --expect-build 16adaae --grep "temporal aa price"`.
 
 ## Investigation (2026-09-14)
 
@@ -768,3 +768,74 @@ view; that is the trade the picture verdict decides.
 same A/B/A on the parity build with the trailing A held 75 s, arms changed
 through the ini so the menu does not restart the benchmark, and the seam
 verdict written into this journal. One flight, not two.
+
+### 2026-09-16: Sean's coverage verdict on the 40 deg crop
+
+Sean, after the 19:52 flight: "40 still looks like a smallish circle in
+the middle of my screen, does not cover my total eye area at all". That is
+the picture half of the gate, and at the angle that pays it fails. The
+crop the flight priced at 40 deg is 1128x1128 output pixels in the
+3964x3913 frame (the feature-creation line at 19:54:37.751): 28% of the
+width, 8.2% of the area. performance.md's 2026-09-05 record said the same
+before any of this was priced: a fixed crop that covers where the eyes
+might look needs 60 deg and more, at which point it is the frame.
+
+**What the flight already says about the covering angles.** cropOf in
+temporal_pass.cpp makes the crop's half-width tan(deg/2) times the frame
+width over the projection's tangent span; on this projection that span is
+2.56 (about 103 deg per eye, horizontally and vertically), so the diameter
+is 2 x tan(deg/2) x 1550 px: 1128 at 40, 1412 at 49, 2596 at 80, as the
+log's feature lines show. The three flown angles fit one cost per NVIDIA
+evaluation: about 0.18 ms fixed plus 0.097 ms per output megapixel, per
+eye (full 15.5 MP: 1.68 predicted, 1.68 measured; 40 deg 1.27 MP: 0.30 vs
+0.30; 49 deg 2.0 MP: 0.37 vs 0.36; 80 deg 6.7 MP: 0.83 vs 0.87; the 0.5
+periphery 3.9 MP: 0.56 vs 0.50). With the UI route restored (Stage 1) the
+pass saving per stereo pair is about 2.11 - 3 s^2 - 0.194 MP, s the
+periphery scale, MP the crop's output megapixels:
+
+| fovea | crop px | % width | MP (% area) | s 0.5 | s 0.35 | s 0.3 |
+|---|---|---|---|---|---|---|
+| 40 | 1128 | 28 | 1.3 (8) | 1.1 | 1.5 | 1.6 |
+| 50 | 1445 | 36 | 2.1 (13) | 0.95 | 1.3 | 1.4 |
+| 60 | 1790 | 45 | 3.2 (21) | 0.75 | 1.1 | 1.2 |
+| 70 | 2170 | 55 | 4.7 (30) | 0.45 | 0.85 | 0.95 |
+| 80 | 2600 | 66 | 6.8 (44) | 0.05 | 0.45 | 0.55 |
+| 90 | 3100 | 78 | 9.6 (62) | -0.5 | -0.1 | 0 |
+
+Measured points for scale: 40 deg / 0.5 saved 1.49 ms on the pass without
+the UI route (1.24 with it); 80 deg / 0.5 saved 0.36 without it (0.11 with
+it) and the frame's p50 was back at A's. The model runs about 0.1 ms
+pessimistic at 40 deg because the periphery came in under it. Two
+cautions: the frame saved 0.5-0.7 ms less than the pass at 40 deg, so a
+pass figure near 1.0 is what the gate's 0.5 ms and 5% need; and a
+periphery at 0.35 is a 2.9x per-axis downscale of everything outside the
+crop, a picture question the table cannot answer.
+
+**What this means.** For a fixed crop, coverage and saving trade one for
+one: the angle Sean finds too small is the one that pays, and the one that
+covers (80 deg, measured) does not pay at periphery 0.5. The one lever the
+flight did not test is a covering angle with a smaller periphery, and it
+needs no build: the FRONTIER install now carries v0.17.0-rc.2-13-g16adaae
+(the EDHM session's luma probe; it contains 749a4e9, so the price and
+benchmark lines are in it; its 05:14 flight on 2026-09-16 ran no fovea).
+Do not reinstall over it.
+
+**Next, in order of cost.**
+
+1. Sean finds the smallest temporal_aa_fovea that covers where his eyes
+   go, by eye in the F8 menu (it is live), then holds that angle with the
+   menu closed for 40 s at temporal_aa_periphery_scale 0.5 and again at
+   0.35, with 40 s of fovea 0 before and after, and leaves it at 0 for the
+   EDHM flights. Read with `--expect-build 16adaae`. If the covering angle
+   is 60 deg the table puts the crop at the gate's edge and only the
+   periphery scale holds it there; at 70 deg or more the fixed crop is
+   finished as a perf trade.
+2. Stage 3, the gaze-following crop: the Crystal Super tracks eyes, the
+   plumbing exists and the crop shift folded into the motion vectors was
+   desk-validated on 2026-09-04, but performance.md's 2026-09-05 record
+   took it off the plan on Sean's own objections (eyes jump where heads
+   stream, so every large look starts on the post-saccade resolve, which no
+   crop under upscaling hides). It comes back only if Sean now weighs a
+   perf trade differently from a sharpness fix.
+3. Stage 4: full-frame DLSS stays, the instrument stays on main behind
+   fovea 0, and this doc records why.
