@@ -4,22 +4,29 @@
 
 Updated 2026-09-16 (late evening) after the confirmation flight (Quest 3,
 DLSS quality mode, preset K; dumps 164010 at tolerance 12 and 164455 at
-tolerance 1). Sean: still smears, only on an M dwarf, not an A-type star,
-and the tolerance made no visible difference. The dumps split it into two
-effects under one issue (tables in the late-evening entry):
-- the resolve's polygon and trail: real on the Pimax performance-mode path
-  (-3.6 luma, dumps 131013/134857), fixed on main by the bound tolerance
-  (a50dfc6, `advanced.ui_ghost_tolerance`, default 12, 0 = the old rule);
-  NOT confirmed in flight, because on the Quest 3 quality-mode path
-  NVIDIA's offset is under 1 luma and the resolve adds 0.00 at 12 and
-  -0.25 at 1, so the knob could not show anything there;
-- the smear this flight shows: a HUD panel body (the comms panel; the info
-  notification that pops up beside the target label) drawn by the game
-  over the star, present in the raw frame before DLSS, identical in
-  `DlssBeforeUi` and `L0` and in all 16 stored frame pairs, recorded as a
-  solid element by `HoloCoverage` and as a filled rectangle by the UI
-  depth. A reading for M against A: the HUD is drawn before the tone map,
-  so a dark translucent fill over a saturated white star stays white.
+tolerance 1, the menu having moved the knob 12 -> 0 -> 1 in flight). Sean:
+still smears, only on an M dwarf, not an A-type star. He pointed at the
+soft, non-rectangular halo around the target label "BINET'S FOLLY" in dump
+164455, over the star's faint outer glow (raw 6..8 luma).
+
+That halo is the resolve's transported footprint at the old rule: NVIDIA
+brightens the faint glow by 1..2 luma there, the clamp at tolerance 1 bites
+on every frame, and the footprint dims a blob above-left of the label that
+is present only in final-dlss (raw and `DlssBeforeUi` are clean; sheet
+stage_1950_1250 of 164455, tables in the late-evening entry). It is effect
+1 below, captured at tolerance 1; at tolerance 12 (dump 164010) the resolve
+adds 0.00 around its label. The Steam ini was left at 1 by the menu.
+
+Two effects, then:
+- effect 1, EDVR's: the resolve's polygon and trail (Pimax performance:
+  -3.6 luma; Quest 3 quality over faint glow: -0.3..-0.6 on a 6..8 luma
+  background), fixed on main by the bound tolerance (a50dfc6,
+  `advanced.ui_ghost_tolerance`, default 12, 0 = the old rule); the flight
+  did not confirm it because the knob sat at 0 and 1 while Sean looked;
+- effect 2, the game's: the body of the comms panel and of the info
+  notification beside the target label, a dark translucent fill drawn over
+  the star before DLSS (raw, `DlssBeforeUi`, `L0` and all 16 stored pairs
+  identical; a solid element in `HoloCoverage`). Not what Sean means.
 
 The change on main: `src/d3d11/ui_resolve.h` widens the clamp by a
 tolerance carried in a b1 constant buffer and gates the edited rebuild on
@@ -29,20 +36,18 @@ percentile 12..16/255; the footprint held no ghost); rig cases in
 `tools/ui_depth_test`; installed to Steam as the build of main's head.
 
 Ruled out (details in the journal): the game drawing a dark backing at the
-Pimax label (raw clean there); NVIDIA producing either effect; the mask
-lying where the UI content changed; the format-9 change ending the
-deferred route's latch-off; a higher `stale` threshold alone; a tolerance
-relative to the raw level; the resolve's clamp as this flight's smear
-(final-dlss 0.00 at 12, -0.25 at 1, the box already in the raw frame).
+label (raw clean at every label); NVIDIA producing the halo (`DlssBeforeUi`
+clean); the mask lying where the UI content changed; the format-9 change
+ending the deferred route's latch-off; a higher `stale` threshold alone; a
+tolerance relative to the raw level; the panel body as Sean's smear (he
+pointed at the label's halo).
 
-Next (no build first): Sean confirms the panel body is the smear he means
-(crops in the chat); then on the M dwarf `fix.temporal_aa = off` (the box
-stays if it is the game's) and a flat-mode look with a comms message over
-the star. If it is the game's fill: leave it, or an EDVR patch of that
-panel body's fill (the loader's scrim has one, "loading panel: FIT"), at
-the cost of readability over bright backgrounds. Still owed: the Pimax
-confirmation of the resolve fix, a label over a corona at performance mode,
-tolerance 0 against 12, the log checked with `--expect-build HEAD`.
+Next flight: set `ui_ghost_tolerance = 12` in the Steam ini (or delete the
+line; the menu left it at 1), target something whose label sits over the M
+dwarf's outer glow, let it move, and take an INSERT dump there. Expect no
+halo and no trail; `python tools\edvr_log.py --target steam --expect-build
+HEAD` must name the build. If a halo remains at 12, the dump says whether
+it is in `DlssBeforeUi` (NVIDIA's) or in final-dlss (the resolve's).
 
 The deferred UI route (src/d3d11/ui_deferred.cpp) is untouched: refused
 ten times, never a label in the headset; its format-9/11 change is on this
@@ -3115,3 +3120,28 @@ fill, the choice is to leave it, or an EDVR patch of that panel body's fill
 (the loader's scrim already has one, "loading panel: FIT"), which trades
 readability over bright backgrounds. The Pimax confirmation of (1) is still
 owed: a label over a corona at performance mode, tolerance 0 against 12.
+
+**Addendum, after Sean's clarification.** He means the soft halo around
+"BINET'S FOLLY" in dump 164455, not the panel body. A tight split around
+that label (region 1950,1250 420x260; background raw 6..8 luma):
+
+| band | n | raw | dlss | final | dlss-raw | final-dlss |
+|---|---|---|---|---|---|---|
+| class-1 coverage | 10195 | 36.9 | 37.6 | 36.9 | +0.66 | -0.64 |
+| ring 1-10 px | 8564 | 6.0 | 7.2 | 6.8 | +1.15 | -0.32 |
+| ring 11-30 px | 15493 | 6.5 | 8.3 | 7.8 | +1.88 | -0.53 |
+| ring 31-60 px | 28598 | 7.0 | 9.3 | 8.9 | +2.22 | -0.35 |
+| beyond 60 px | 46350 | 8.4 | 9.9 | 9.9 | +1.48 | +0.00 |
+
+The final-dlss sheet shows a dark blob above-left of the label, the
+footprint transported from where the label was, present in neither raw
+nor `DlssBeforeUi`: the resolve at tolerance 1 (the menu had moved the
+knob 12 -> 0 -> 1 before the dump) dimming NVIDIA's brightened glow. That
+is effect 1 at the old rule, on a background where 0.3..0.6 luma is 5..10%.
+Around the 164010 label at tolerance 12 (region 1720,1450 400x220) the
+resolve adds 0.00 in every band and its sheet has no blob. The panel body
+above is real but not what Sean means.
+ruled out: the panel body as Sean's smear, because he pointed at the
+label's halo, which is in final-dlss only.
+Next: the Steam ini was left at 1; set 12, a label over the M dwarf's
+outer glow, an INSERT dump there, the log read with `--expect-build HEAD`.
