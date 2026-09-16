@@ -173,6 +173,7 @@ bool g_orbitalBound=false,g_stellarNoted[2]{};
 Microsoft::WRL::ComPtr<ID3D11Buffer> g_holoDump;
 unsigned g_holoDumpCount=0;
 float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
+float    g_ghostTolerance = 12.0f; // advanced.ui_ghost_tolerance: the UI-resolve clamp's bound tolerance, 8-bit colour steps (0..64)
 bool     g_scaleNoted = false;
 constexpr uint32_t kMaxViewports = 16;
 D3D11_VIEWPORT g_savedVps[kMaxViewports];
@@ -1530,6 +1531,13 @@ void uiDepthConfigure(Config& cfg) {
             }
         }
     }
+    {
+        float t = cfg.getFloat("advanced.ui_ghost_tolerance", 12.0f);
+        if (!std::isfinite(t)) t = 12.0f;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 64.0f) t = 64.0f;
+        g_ghostTolerance = t;
+    }
     const std::string eyes = cfg.getString("advanced.ui_depth_eyes", "as_is");
     const bool swapped = eyes == "swapped";
     if (swapped != g_eyesSwapped) {
@@ -1597,6 +1605,8 @@ void uiDepthConfigure(Config& cfg) {
 bool uiDepthWantsDraws() { return g_on && !g_stoodDown; }
 
 float uiDepthReactive() { return g_on && !g_stoodDown ? g_reactive : 0.0f; }
+
+float uiDepthGhostTolerance() { return g_on && !g_stoodDown ? g_ghostTolerance : 0.0f; }
 
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     if (!g_on || g_stoodDown) return;

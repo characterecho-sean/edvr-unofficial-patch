@@ -791,6 +791,11 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         struct Params {int region[4]={0,0,w,h};int size[2]={w,h};int texSize[2]={w,h};float tn[4]={},tp[4]={},jit[4]={};} p;
         D3D11_BUFFER_DESC resolveDesc{};resolveDesc.ByteWidth=sizeof(p);resolveDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         ComPtr<ID3D11Buffer> cb;hr(dev->CreateBuffer(&resolveDesc,nullptr,&cb));
+        // b1: the clamp's bound tolerance. Bound only when a check passes a
+        // nonzero tolerance to run(); every existing call leaves it unbound,
+        // which the shader reads as zero -- the old exact clamp.
+        D3D11_BUFFER_DESC tolDesc{};tolDesc.ByteWidth=16;tolDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> tolCb;hr(dev->CreateBuffer(&tolDesc,nullptr,&tolCb));
         for(auto dims:{std::pair{13u,9u},std::pair{26u,18u},std::pair{21u,14u},std::pair{7u,5u}}){
             const UINT ow=dims.first,oh=dims.second;
             auto trained=texture(ow,oh,DXGI_FORMAT_R8G8B8A8_UNORM),output=texture(ow,oh,DXGI_FORMAT_R8G8B8A8_UNORM);
@@ -800,7 +805,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             std::vector<unsigned char> edit(w*h,0);
             std::vector<float> screenPixels((w+4)*(h+6)*4,0);
             for(UINT i=0;i<ow*oh;++i){model[4*i]=static_cast<unsigned char>(64+i%100);model[4*i+3]=127;}
-            auto run=[&](bool haveHistory){
+            auto run=[&](bool haveHistory,float tolerance=0.0f){
                 ctx->UpdateSubresource(raw.Get(),0,nullptr,colour.data(),w*4,0);ctx->UpdateSubresource(mask.Get(),0,nullptr,mark.data(),w,0);
                 ctx->UpdateSubresource(previous.Get(),0,nullptr,old.data(),w*4,0);ctx->UpdateSubresource(trained.Get(),0,nullptr,model.data(),ow*4,0);
                 ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);
@@ -811,7 +816,12 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 ID3D11UnorderedAccessView* out[]={outputU.Get(),nextU.Get()};
                 const float poison[4]={1,1,1,1};ctx->ClearUnorderedAccessViewFloat(outputU.Get(),poison);
                 ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,7,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
-                ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
+                ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+                if(tolerance!=0.0f){
+                    const float t[4]={tolerance,0,0,0};ctx->UpdateSubresource(tolCb.Get(),0,nullptr,t,0,0);
+                    ctx->CSSetConstantBuffers(1,1,tolCb.GetAddressOf());
+                }
+                ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
                 return read(dev.Get(),ctx.Get(),output.Get());
             };
             auto resolvedValues=run(false);
@@ -870,6 +880,68 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 resolvedValues=run(true);auto halfInfluence=read(dev.Get(),ctx.Get(),next.Get(),3);
                 check(halfInfluence[4*w+4]>.4f&&halfInfluence[4*w+4]<.55f,"bilinear fractional history retains partial age");
                 check(resolvedValues[4*w+4]==0,"partial history still protects the stale glyph footprint");
+            }
+            // Widened clamp tolerance (issue 36): NVIDIA's own DLSS output can
+            // leave the raw 2x2 bound by a few steps on the star corona; a
+            // tolerance widens the bound so an ordinary offset like that
+            // survives, while a real departed glyph, tens of steps away, is
+            // still pulled back to within the tolerance and still marks the
+            // footprint stale. jit is zero and ow==w/oh==h here, so input
+            // texel and output pixel are the same address (the partial-
+            // history check above reads the same cell).
+            if(ow==w&&oh==h) {
+                const UINT cell=4*w+4;
+                colour.assign(w*h*4,100);old.assign(w*h*4,0);mark.assign(w*h,0);
+                motion.assign(w*h*2,0);edit.assign(w*h,0);
+                old[4*cell+3]=128;                  // previous alpha 0.5: a live footprint
+                model.assign(ow*oh*4,105);          // raw 100/255, model +5/255 over it
+                resolvedValues=run(true,8.0f/255.0f);
+                auto expireAlpha=read(dev.Get(),ctx.Get(),next.Get(),3);
+                check(std::fabs(resolvedValues[cell]-105/255.f)<1.0f/255.0f && expireAlpha[cell]==0,
+                      "reconstruction offset inside the tolerance is left alone and the footprint expires");
+
+                colour.assign(w*h*4,0);old.assign(w*h*4,0);old[4*cell+3]=128;
+                model.assign(ow*oh*4,64);           // a departed glyph, tens of steps from raw
+                resolvedValues=run(true,8.0f/255.0f);
+                auto keptAlpha=read(dev.Get(),ctx.Get(),next.Get(),3);
+                check(resolvedValues[cell]<=9/255.f && resolvedValues[cell]>=7/255.f &&
+                      std::fabs(keptAlpha[cell]-(0.5f-1.0f/32.0f))<1.0f/255.0f,
+                      "a ghost beyond the tolerance is clamped to it and keeps the footprint");
+
+                resolvedValues=run(true,0.0f);
+                check(resolvedValues[cell]==0,"tolerance zero is the exact clamp");
+            }
+            // The edited branch's own rebuild gate (issue 36): while a
+            // label's distance readout ticks, its whole crop is marked
+            // edited; rebuilding unconditionally pulled the label's
+            // unchanged background down to the raw cubic. Gate it on the
+            // same tolerance so only a genuine disagreement rebuilds.
+            // With raw perfectly uniform, v.rgb (already bounded to within
+            // the tolerance of raw) and fresh (which equals raw exactly at
+            // zero jitter/1:1 scale, since the cubic collapses to a single
+            // tap) can never disagree by more than the tolerance -- only
+            // reach it exactly, which a strict '>' cannot reliably resolve
+            // either way in floating point. Nudge the one 2x2 corner that
+            // fresh's own tap does not read, so the bound v.rgb saturates
+            // against is wider than what fresh reflects, giving the
+            // disagreement in case (e) a clear, non-boundary margin.
+            if(ow==w&&oh==h) {
+                const UINT cell=4*w+4;
+                colour.assign(w*h*4,100);old.assign(w*h*4,0);mark.assign(w*h,0);
+                motion.assign(w*h*2,0);edit.assign(w*h,0);edit[cell]=255;
+                colour[4*(5*w+5)+0]=116;colour[4*(5*w+5)+1]=116;colour[4*(5*w+5)+2]=116;
+                model.assign(ow*oh*4,105);   // fresh (=raw at this texel, 100/255) agrees with the temporal value within tolerance
+                resolvedValues=run(false,8.0f/255.0f);
+                check(std::fabs(resolvedValues[cell]-105/255.f)<1.0f/255.0f,
+                      "an edited texel keeps the temporal output where the fresh frame agrees within the tolerance");
+
+                model.assign(ow*oh*4,160);   // the temporal value saturates the wider bound; fresh does not follow it
+                resolvedValues=run(false,8.0f/255.0f);
+                check(std::fabs(resolvedValues[cell]-100/255.f)<1.0f/255.0f,
+                      "an edited texel is rebuilt where the fresh frame disagrees");
+                // Restore the resting state (raw 0, nothing edited) that the
+                // tests below assume without re-asserting it themselves.
+                colour.assign(w*h*4,0);edit.assign(w*h,0);
             }
             // Invalid/off-screen motion cannot smear border UI inward.
             old.assign(w*h*4,0);motion.assign(w*h*2,0);mark.assign(w*h,0);

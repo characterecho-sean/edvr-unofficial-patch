@@ -18,6 +18,7 @@ Texture2D<float> UiInfluence:register(t8);
 RWTexture2D<float4> Output:register(u0);
 RWTexture2D<float4> Next:register(u1);
 cbuffer P:register(b0){int4 region;int2 size;int2 texSize;float4 tanNow;float4 tanPrev;float4 jit;}
+cbuffer R:register(b1){float4 resolve;}
 bool marked(int2 p){uint k=uint(Coverage.Load(int3(clamp(p,0,size-1),0))*255+.5)&3u;return k==1u||k==2u;}
 float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2+1.5*t3,.5*t+2*t2-1.5*t3,-.5*t2+.5*t3);}
 [numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
@@ -72,16 +73,41 @@ float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2
                 float3 colour=Raw.Load(int3(clamp(corner+int2(cx,cy),0,size-1),0)).rgb;
                 lo=min(lo,colour);hi=max(hi,colour);
             }
+            // NVIDIA's own DLSS output legitimately leaves this 2x2 raw range:
+            // a median 6/255 and a 99th percentile 12..16/255 on the star
+            // corona (Steam eye dumps 131013 and 134857, 2026-09-16). An exact
+            // bound clamped nearly every corona pixel there, dimming a ~30 px
+            // polygon around every targeting label by 4-7 luma and trailing it
+            // for up to 32 frames (issue 36). Widen the bound by a caller-
+            // supplied tolerance so an ordinary reconstruction offset never
+            // trips the clamp, while a departed glyph -- tens of steps away --
+            // is still pulled back to within it and still marks the footprint
+            // stale. An unbound b1 reads zero: the old exact clamp, which is
+            // what the test rigs get unless they bind one.
+            lo-=resolve.x;hi+=resolve.x;
             float3 bounded=clamp(v.rgb,lo,hi);stale=stale||any(abs(bounded-v.rgb)>1.0/255.0);v.rgb=bounded;
             if(edited){
                 // A previous digit can satisfy today's colour bounds while
                 // spelling the wrong number. Reconstruct real content edits
                 // from current samples until the source edit expires. Static
                 // text keeps the model's subpixel reconstruction above.
+                // Rebuild only where the fresh frame disagrees with the
+                // temporal output beyond the tolerance: while a label's
+                // distance readout ticks, its whole crop is marked edited,
+                // and an unconditional rebuild pulled the label's unchanged
+                // background down to the raw cubic -- which sits below
+                // NVIDIA's level on the corona -- turning the label into a
+                // faint box the size of the crop (issue 36). Where a changed
+                // digit's temporal blend still differs from the fresh frame
+                // by more than the tolerance it is rebuilt; elsewhere the
+                // bound above already holds it within the tolerance of the
+                // fresh frame, so a stale residual is bounded by the same
+                // tolerance as a ghost.
                 float4 wx=cubic(frac(at.x)),wy=cubic(frac(at.y));float3 fresh=0;
                 [unroll]for(int y=0;y<4;++y)[unroll]for(int x=0;x<4;++x)
                     fresh+=Raw.Load(int3(clamp(corner+int2(x-1,y-1),0,size-1),0)).rgb*wx[x]*wy[y];
-                v.rgb=clamp(fresh,lo,hi);
+                fresh=clamp(fresh,lo,hi);
+                if(any(abs(fresh-v.rgb)>resolve.x))v.rgb=fresh;
             }
         }
         uint fullW,fullH;FullCurrent.GetDimensions(fullW,fullH);

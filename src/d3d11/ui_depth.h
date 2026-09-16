@@ -140,6 +140,14 @@ void uiDepthMotionResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=
 // separately: opaque HUD cores drawn at a surface can ride its motion.
 float uiDepthReactive();
 
+// The post-DLSS UI-resolve clamp's bound tolerance (advanced.ui_ghost_tolerance),
+// in 8-bit colour steps (0..64, default 12). The temporal pass widens the
+// exact 2x2 raw bound by this much so an ordinary DLSS reconstruction offset
+// on the star corona does not trip the clamp, while a departed glyph well
+// beyond the tolerance is still pulled back to within it (issue 36). Zero
+// like uiDepthReactive() when the pass is off or stood down.
+float uiDepthGhostTolerance();
+
 // Once per frame: the masks cleared, the engage line, the totals every 20 s.
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx);
 
