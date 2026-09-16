@@ -790,6 +790,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
             cullGuard.appliedOuterDeg(0),cullGuard.appliedNasalDeg(0),cullGuard.appliedVerticalDeg(0),
             target.left,target.right,target.down,target.up,place.left,place.top,place.right,place.bottom);
         }
+        // While a rebuild is awaited, say what is waited for, so a stall
+        // reads as numbers rather than as a stage 2 line with no stage 3
+        // after it (flight 3, 2026-09-16): once as the baseline is seeded,
+        // then every two seconds. `for` is the ask that baseline was
+        // rendered for, `ask` what the game is told now, `last` the newest
+        // complete pair.
+        if(cullGuard.stage()==NativeCullStage::Adopting&&cullGuard.baselineReady()&&(cullGuard.adoptingFrames()%180u)==2u) {
+          const auto b=cullGuard.baseline(0),f=cullGuard.baselineAsk(0),a=cullGuard.recommended(0),l=cullGuard.lastSubmitted(0);
+          nativeTracePrintf("native_cull_adopting,frames=%u,baseline=%ux%u,for=%ux%u,ask=%ux%u,last=%ux%u\n",
+            cullGuard.adoptingFrames(),b.width,b.height,f.width,f.height,a.width,a.height,l.width,l.height);
+        }
         const auto stage=cullGuard.stage();
         features.cull(stage==NativeCullStage::Live?2u:stage==NativeCullStage::Adopting?1u:0u,
             cullGuard.widenFactorWidth(),cullGuard.widenFactorHeight());

@@ -42,6 +42,12 @@ struct NativeCullBounds { float left=0, top=0, right=1, bottom=1; };
 // would look like a broken runtime rather than a setting.
 constexpr float kNativeCullMinEdgeDeg = 5.0f;
 constexpr float kNativeCullMinSpanDeg = 20.0f;
+// Frames of adoption after which a target that has moved at all is taken as
+// the rebuild although no ratio matched. The game's own quality multiplier
+// can change underneath the ask (0.65 to 0.5 and back within one adoption in
+// the flight of 2026-09-16), and then no ratio ever matches; the lie is a
+// projection, which any target size carries correctly. Three seconds at 90 Hz.
+constexpr uint32_t kNativeCullAdoptGraceFrames = 270;
 constexpr float kNativeCullPi = 3.1415926535f;
 
 inline float nativeCullDegrees(float tangent) noexcept {
@@ -68,6 +74,10 @@ class NativeCullGuard final {
       uint64_t referenceGeneration) noexcept {
     changed_ = false;
     const bool standDown=pendingStandDown_;pendingStandDown_=false;
+    // Every exit records what the game is told from here on, so the next
+    // adoption knows what size the pair that seeds its baseline was rendered
+    // for.
+    const auto finish=[this]{told_[0]=recommended(0);told_[1]=recommended(1);return stage_;};
     const bool valid = validSettings(settings) && validInputs(trueFrusta, runtimeDims);
     // A trim alone is reason enough to run: it tells the game a different
     // projection and a different size, which is the whole of what the stage
@@ -77,7 +87,7 @@ class NativeCullGuard final {
       if (validInputs(trueFrusta,runtimeDims)) { copy(trueFrusta, true_); copy(runtimeDims, runtime_); copy(true_, target_); }
       if (stage_ != NativeCullStage::Off) changed_ = true;
       clear();maxFactorW_=maxFactorH_=1;maxWidenW_=maxWidenH_=1;clearApplied();
-      forcedInert_=false; stage_ = NativeCullStage::Off; return stage_;
+      forcedInert_=false; stage_ = NativeCullStage::Off; return finish();
     }
     const bool configChanged = !sameSettings(settings, settings_);
     // Recenter moves the reference space, not the optical projection or the
@@ -87,43 +97,69 @@ class NativeCullGuard final {
     referenceGeneration_ = referenceGeneration;
     if (configChanged || geometryChanged) {
       settings_ = settings; copy(trueFrusta, true_); copy(runtimeDims, runtime_); copy(true_, target_);
-      referenceGeneration_ = referenceGeneration; resetAdoption(); clearApplied();
+      referenceGeneration_ = referenceGeneration;
+      // A change while a rebuild is in flight keeps the baseline: it is the
+      // last pair known to have been rendered for a known ask, whether or not
+      // the game has moved since. Any other re-arm seeds a fresh one from the
+      // next pair, rendered for what the game was told until this frame.
+      resetAdoption(stage_ == NativeCullStage::Adopting && baselineReady_);
+      clearApplied();
       stage_ = NativeCullStage::Off; forcedInert_=false;
       changed_ = true;
     } else {
       settings_ = settings;
     }
-    if(standDown){stage_=NativeCullStage::Inert;forcedInert_=true;resetAdoption();changed_=true;return stage_;}
+    if(standDown){stage_=NativeCullStage::Inert;forcedInert_=true;resetAdoption();changed_=true;return finish();}
     if (stage_ == NativeCullStage::Live || stage_ == NativeCullStage::Adopting) {
+      if (stage_ == NativeCullStage::Adopting) ++adoptingFrames_;
       // Promotion is deliberately evaluated from the pair completed in the
       // preceding frame. A pair that is incomplete never becomes canonical.
       if (stage_ == NativeCullStage::Adopting && baselineReady_ && submittedReady_) {
-        bool promote = true;
+        // The rebuild is measured against the ask the baseline was rendered
+        // for, never against the runtime's size: after a change while live
+        // the game sits at the previous ask, and 0.899 x that baseline is a
+        // size it will never build. Flight 3 of 2026-09-16 spent two minutes
+        // at this stage on exactly that, after outer 10 became 5.
+        bool promote = true, moved = false;
         for (unsigned e=0;e<2;++e) {
-          promote = promote && changedSize(e) &&
-            reached(submitted_[e].width, baseline_[e].width, maxFactorW_) &&
-            reached(submitted_[e].height, baseline_[e].height, maxFactorH_);
+          const auto ask = recommended(e);
+          const float rw = askRatio(ask.width, baselineAsk_[e].width), rh = askRatio(ask.height, baselineAsk_[e].height);
+          const bool askMoved = std::fabs(rw-1.0f) > .005f || std::fabs(rh-1.0f) > .005f;
+          promote = promote && (!askMoved || changedSize(e)) &&
+            reached(submitted_[e].width, baseline_[e].width, rw) &&
+            reached(submitted_[e].height, baseline_[e].height, rh);
+          moved = moved || changedSize(e);
         }
+        if (!promote && moved && adoptingFrames_ > kNativeCullAdoptGraceFrames) promote = true;
         if (promote) { adopted_[0]=submitted_[0]; adopted_[1]=submitted_[1]; adoptedReady_=true; stage_ = NativeCullStage::Live; changed_ = true; }
       }
       submittedReady_ = false; submittedMask_ = 0;
     }
-    if (stage_ == NativeCullStage::Inert && forcedInert_) return stage_;
+    if (stage_ == NativeCullStage::Inert && forcedInert_) return finish();
     if (stage_ == NativeCullStage::Off || stage_ == NativeCullStage::WaitingScene ||
         stage_ == NativeCullStage::Inert) {
-      if (!sceneReady) { stage_ = NativeCullStage::WaitingScene; return stage_; }
-      if (!computeWidened()) { stage_ = NativeCullStage::Inert; forcedInert_=true; changed_ = true; return stage_; }
+      if (!sceneReady) { stage_ = NativeCullStage::WaitingScene; return finish(); }
+      if (!computeWidened()) { stage_ = NativeCullStage::Inert; forcedInert_=true; changed_ = true; return finish(); }
       stage_ = NativeCullStage::Adopting; changed_ = true;
-      baselineReady_ = false; submittedReady_ = false; submittedMask_ = 0;
+      submittedReady_ = false; submittedMask_ = 0; adoptingFrames_ = 0;
+      // A kept baseline keeps its ask. A fresh one is rendered for what the
+      // game was told during the previous frame or, before any frame has
+      // run, for the runtime's own size.
+      if (!baselineReady_) for (unsigned e=0;e<2;++e)
+        pendingAsk_[e] = told_[e].width && told_[e].height ? told_[e] : gameFacingDimensions(runtime_[e]);
     }
-    return stage_;
+    return finish();
   }
 
   void noteSubmittedSize(unsigned eye, uint32_t width, uint32_t height) noexcept {
     if (eye >= 2 || stage_ != NativeCullStage::Adopting || !width || !height || width>16384 || height>16384 || (submittedMask_&(1u<<eye))) return;
     submitted_[eye] = {width,height}; submittedMask_ |= 1u << eye;
     if (submittedMask_ != 3) return;
-    if (!baselineReady_) { baseline_[0]=submitted_[0]; baseline_[1]=submitted_[1]; baselineReady_ = true; submittedReady_ = false; }
+    if (!baselineReady_) {
+      baseline_[0]=submitted_[0]; baseline_[1]=submitted_[1];
+      baselineAsk_[0]=pendingAsk_[0]; baselineAsk_[1]=pendingAsk_[1];
+      baselineReady_ = true; submittedReady_ = false;
+    }
     else submittedReady_ = true;
   }
 
@@ -138,6 +174,14 @@ class NativeCullGuard final {
   float widenFactorWidth() const noexcept { return maxWidenW_; }
   float widenFactorHeight() const noexcept { return maxWidenH_; }
   bool changed() const noexcept { return changed_; }
+  // The adoption in progress, for the trace: the pair the baseline was
+  // seeded from, the ask that pair was rendered for, the last complete pair
+  // seen, and how many frames the stage has waited.
+  bool baselineReady() const noexcept { return baselineReady_; }
+  NativeCullDimensions baseline(unsigned eye) const noexcept { return eye<2&&baselineReady_?baseline_[eye]:NativeCullDimensions{}; }
+  NativeCullDimensions baselineAsk(unsigned eye) const noexcept { return eye<2&&baselineReady_?baselineAsk_[eye]:NativeCullDimensions{}; }
+  NativeCullDimensions lastSubmitted(unsigned eye) const noexcept { return eye<2?submitted_[eye]:NativeCullDimensions{}; }
+  uint32_t adoptingFrames() const noexcept { return adoptingFrames_; }
   // What the trim actually got, per eye, after the edge and span limits. It
   // can be less than was asked for; that is the only place a clamp shows.
   float appliedOuterDeg(unsigned eye) const noexcept { return eye<2?appliedOuter_[eye]:0.0f; }
@@ -239,7 +283,14 @@ class NativeCullGuard final {
   static void copy(const NativeCullDimensions (&a)[2],NativeCullDimensions (&b)[2]) noexcept {b[0]=a[0];b[1]=a[1];}
   void clear() noexcept { resetAdoption(); baselineReady_=false; }
   void clearApplied() noexcept { for(unsigned e=0;e<2;++e) appliedOuter_[e]=appliedNasal_[e]=appliedVertical_[e]=0; }
-  void resetAdoption() noexcept { baselineReady_=false; submittedReady_=false; adoptedReady_=false; submittedMask_=0; }
+  void resetAdoption(bool keepBaseline=false) noexcept {
+    if(!keepBaseline) baselineReady_=false;
+    submittedReady_=false; adoptedReady_=false; submittedMask_=0; adoptingFrames_=0;
+  }
+  // How far the game is expected to move an axis: the ask it is given now
+  // over the ask its baseline pair was rendered for. An unknown ask expects
+  // nothing, and the first pair after the baseline then promotes.
+  static float askRatio(uint32_t ask,uint32_t was) noexcept { return ask&&was?float(ask)/float(was):1.0f; }
   // One edge, trimmed inward by `applied` degrees with its sign kept. Zero is
   // the tangent untouched, bit for bit: the identity crop and the identity
   // placement have to be exact, not merely close.
@@ -327,6 +378,10 @@ class NativeCullGuard final {
       roundRecommendedDim(float(runtime_[1].width)*maxFactorW_) && roundRecommendedDim(float(runtime_[1].height)*maxFactorH_);
   }
   NativeCullSettings settings_{}; NativeCullFrustum true_[2]{},target_[2]{},lied_[2]{}; NativeCullDimensions runtime_[2]{},baseline_[2]{},submitted_[2]{},adopted_[2]{};
+  // baselineAsk_ is what the baseline pair was rendered for, pendingAsk_ the
+  // same for the pair about to seed one, told_ what the game was told at the
+  // end of the previous frame.
+  NativeCullDimensions baselineAsk_[2]{},pendingAsk_[2]{},told_[2]{}; uint32_t adoptingFrames_=0;
   float factorW_[2]{1,1},factorH_[2]{1,1},widenW_[2]{1,1},widenH_[2]{1,1},maxFactorW_=1,maxFactorH_=1,maxWidenW_=1,maxWidenH_=1;
   float appliedOuter_[2]{0,0},appliedNasal_[2]{0,0},appliedVertical_[2]{0,0};
   uint64_t referenceGeneration_=0; uint32_t submittedMask_=0; NativeCullStage stage_=NativeCullStage::Off; bool baselineReady_=false,submittedReady_=false,adoptedReady_=false,forcedInert_=false,pendingStandDown_=false,changed_=false;

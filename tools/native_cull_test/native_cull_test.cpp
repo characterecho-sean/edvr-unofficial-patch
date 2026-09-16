@@ -282,5 +282,97 @@ int main(int argc,char** argv) {
   NativeCullSettings slight{}; slight.trimNasalDeg=0.2f;
   NativeCullGuard slightGuard;
   CHECK(slightGuard.beginFrame(slight,crystal,crystalDims,true,1)==NativeCullStage::Inert);
+
+  // ---- adoption after a change while live (flight 3, 2026-09-16) ---------
+  // The game renders at 65% of what it is told (DLSS quality). Outer 10 and
+  // vertical 10 went live in two seconds; outer 10 to 5 then sat at stage 2
+  // for two minutes, because the rebuilt 2317x1790 could never reach 0.899 x
+  // the 2111x1790 the game already had. The rebuild is measured against the
+  // ask the baseline was rendered for.
+  const auto q=[](NativeCullDimensions d){return NativeCullDimensions{uint32_t(std::lround(d.width*.65f)),uint32_t(std::lround(d.height*.65f))};};
+  const auto pair=[](NativeCullGuard& g,NativeCullDimensions d){g.noteSubmittedSize(0,d.width,d.height);g.noteSubmittedSize(1,d.width,d.height);};
+  const auto true65=q({3964,3914});
+  CHECK(true65.width==2577&&true65.height==2544);
+  NativeCullSettings flight{}; flight.trimOuterDeg=10; flight.trimVerticalDeg=10;
+  NativeCullGuard flightGuard;
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(flightGuard,true65);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  CHECK(flightGuard.baselineReady()&&flightGuard.baselineAsk(0).width==3964&&flightGuard.baselineAsk(0).height==3914);
+  // The flight's tangents are a hair wider than this rig's rounded ones, so
+  // its 3248 is 3246 here and its 2111 is 2110; outer 5 lands on 3566 in both.
+  const auto ask1=q(flightGuard.recommended(0));
+  CHECK(flightGuard.recommended(0).width==3246&&flightGuard.recommended(0).height==2754&&ask1.width==2110&&ask1.height==1790);
+  pair(flightGuard,ask1);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  flight.trimOuterDeg=5;
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&flightGuard.changed());
+  CHECK(flightGuard.recommended(0).width==3566&&flightGuard.recommended(0).height==2754);
+  // The first pair after the change is still the old target, rendered for
+  // the old ask: that is the baseline, and its ask is the old one.
+  pair(flightGuard,ask1);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  CHECK(flightGuard.baselineAsk(0).width==3246&&flightGuard.baselineAsk(0).height==2754);
+  pair(flightGuard,ask1);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting); // unchanged is never evidence
+  const auto ask2=q(flightGuard.recommended(0));
+  CHECK(ask2.width==2318&&ask2.height==1790);
+  pair(flightGuard,ask2);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  CHECK(std::fabs(flightGuard.appliedOuterDeg(0)-5.f)<.001f&&std::fabs(flightGuard.appliedVerticalDeg(0)-10.f)<.001f);
+  CHECK(flightGuard.adoptingFrames()<10);
+  // Back to no trim at all, then a trim again: the baseline for the second
+  // adoption is rendered for the runtime's own size, which the game was
+  // told while off.
+  NativeCullSettings none{};
+  CHECK(flightGuard.beginFrame(none,crystal,crystalDims,true,1)==NativeCullStage::Off&&flightGuard.changed());
+  CHECK(flightGuard.recommended(0).width==3964&&flightGuard.recommended(0).height==3914);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(flightGuard,true65);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  CHECK(flightGuard.baselineAsk(0).width==3964&&flightGuard.baselineAsk(0).height==3914);
+  pair(flightGuard,ask2);
+  CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
+
+  // A change before the first rebuild has landed keeps the baseline. The pair
+  // after the second change may be the old target or the first ask's; only
+  // the second ask's size promotes.
+  NativeCullSettings twice{}; twice.trimVerticalDeg=10;
+  NativeCullGuard twiceGuard;
+  CHECK(twiceGuard.beginFrame(twice,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(twiceGuard,true65);
+  CHECK(twiceGuard.beginFrame(twice,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  const auto first=q(twiceGuard.recommended(0));
+  twice.trimVerticalDeg=15;
+  CHECK(twiceGuard.beginFrame(twice,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&twiceGuard.changed());
+  CHECK(twiceGuard.baselineReady()&&twiceGuard.baseline(0).height==true65.height&&twiceGuard.baselineAsk(0).height==3914);
+  const auto second=q(twiceGuard.recommended(0));
+  CHECK(second.height<first.height&&second.width==first.width);
+  pair(twiceGuard,first); // the game had reached the first ask, not the second
+  CHECK(twiceGuard.beginFrame(twice,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(twiceGuard,second);
+  CHECK(twiceGuard.beginFrame(twice,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  CHECK(std::fabs(twiceGuard.appliedVerticalDeg(0)-15.f)<.001f);
+
+  // The game's own multiplier moved between the baseline and the rebuild
+  // (0.65 to 0.5 in flight 3): no ratio matches, so a target that moved at
+  // all is taken as the rebuild once the grace period has passed, and one
+  // that never moved never is.
+  NativeCullSettings grace{}; grace.trimOuterDeg=10;
+  NativeCullGuard graceGuard;
+  CHECK(graceGuard.beginFrame(grace,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  pair(graceGuard,true65);
+  CHECK(graceGuard.beginFrame(grace,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  const auto askG=graceGuard.recommended(0);
+  const NativeCullDimensions half{askG.width/2,askG.height/2};
+  CHECK(askG.width==3246&&askG.height==3914&&half.height<uint32_t(true65.height*.9f));
+  NativeCullStage graceStage=NativeCullStage::Adopting;unsigned graceFrames=0;
+  while(graceStage==NativeCullStage::Adopting&&graceFrames<400){pair(graceGuard,half);graceStage=graceGuard.beginFrame(grace,crystal,crystalDims,true,1);++graceFrames;}
+  CHECK(graceStage==NativeCullStage::Live&&graceFrames>kNativeCullAdoptGraceFrames-5&&graceFrames<kNativeCullAdoptGraceFrames+5);
+  NativeCullGuard idleGuard;
+  CHECK(idleGuard.beginFrame(grace,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  NativeCullStage idleStage=NativeCullStage::Adopting;
+  for(unsigned i=0;i<400&&idleStage==NativeCullStage::Adopting;++i){pair(idleGuard,true65);idleStage=idleGuard.beginFrame(grace,crystal,crystalDims,true,1);}
+  CHECK(idleStage==NativeCullStage::Adopting&&idleGuard.adoptingFrames()>=400);
   std::printf("native_cull_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
