@@ -2,58 +2,57 @@
 
 ## Status
 
-Updated 2026-09-15 (evening). Cause NOT identified. One flight designed,
-its instrument built on this branch, not yet flown.
+Updated 2026-09-16 (later morning). Cause FOUND in code by a parallel
+session on main; fix BUILT and INSTALLED to Frontier, NOT FLOWN.
 
-Symptom: Frontier install, build `v0.17.0-rc.2-5-g749a4e9`, Pimax Crystal
-Super on Pimax OpenXR, `fix.temporal_aa = dlss`, EDHM chained through
-`[advanced] real_dll = d3d11_edhm.dll`. The headset goes black on cockpit
-entry and stays black; the desktop mirror shows the EDHM-coloured cockpit.
-Flight B is the black one (`edvr_gfx_20260915_194757.log`); flight A is the
-control without chaining, same build, same evening
-(`edvr_gfx_20260915_195200.log`), cockpit fine.
+Cause (main 2c6e820, "Retain shader inputs without reflection
+metadata"): Elite's shipped shaders carry no RDEF chunk, so D3DReflect
+succeeds and reports zero bound resources. The deferred UI's capture
+mask (`uiDeferredReflect`, `src\d3d11\ui_deferred_draw.h`) came from
+that reflection, so the tone-map replay bound no constant buffers
+(exposure, constants) and no colour LUT: a fine snapshot went in, black
+came out. The fix reads the SM5 `dcl_constantbuffer` / `dcl_resource`
+declarations from the bytecode instead. Companion 9d30ac6 keeps the
+path active through the dual-source cockpit glass (replays that draw
+into clean HDR), so the "world blend unsupported" decline that made
+Steam look healthy no longer trips: the feature now runs for every DLSS
+user, and the flight below must show it working, not merely absent.
 
-The one thing that changed at cockpit entry in B and persisted is the
-Deferred UI (post-DLSS UI replay, `src\d3d11\ui_deferred.cpp`) going
-active at 19:49:41.090 and applying on every eye frame for 41 s, until it
-disabled itself at 19:50:22.181 when the escape menu changed the submit
-route. In A it went active at 19:53:28.610 and disabled itself 1.3 s
-later on `pixel shader fanout: unsupported opcode 77` (a world shader with
-SINCOS). That shader never appears in B: under EDHM, EDVR hooks the real
-device below 3Dmigoto and sees EDHM's replacement shader objects, so
-several pixel-shader hashes differ and the SINCOS shader is gone. The
-active path has never been looked at by a human: the Steam flight 194533
-aborted before the tone pass, A ran it for 1.3 s, B ran it for 41 s and
-was black. The deferred UI's own doc says "Headset visual quality is not
-yet validated".
+Symptom (for the record): with `fix.temporal_aa = dlss` the headset went
+black on cockpit entry, desktop mirror fine; Frontier with EDHM chained
+and Steam without EDHM alike. DLSS off restored the view; DLSS back on
+re-enabled the path (leaving dlss/dlaa clears `failed`,
+ui_deferred.cpp:354) and the black returned, except on Steam where the
+glass draw declined the feature 9 ms later.
 
-Open hypotheses:
-- H1 (leading): the active path yields a black frame on its own; EDHM only
-  unmasks it by removing the shader that tripped the disable. If true,
-  main HEAD (eadd586 accepts opcode 77) blacks out every DLSS user in the
-  cockpit, EDHM or not: a 0.17.0 blocker.
-- H2: EDHM-specific. The post-tone copy draw (A: VS `20F383BBAC05C031`,
-  PS `DED8796049C7BB4A`) appears in B with VS `01C3B84C82172B56` and the
-  same PS. The deferred UI needs an exact VS+PS match, so in B `postTone`
-  is never ready, DLSS receives `cleanLdr` instead of `cleanFinal`, and
-  the UI layers skip the post-tone mapping. The code shows that as a wrong
-  image, not a black one.
+Where the black was made: the probe flight (`edvr_gfx_20260916_051454.log`,
+build 16adaae, EDHM chained) read `game` about 0.05 and `clean_hdr`
+about 0.03 on every report, both eyes, while `dlss_in` (= `cleanFinal`,
+the post-tone replay of the tone-map replay) read 0.000/0.000/100%.
+That matches the cause: the replay draws ran and wrote black.
 
-Ruled out: see the list below (void fix, XR copy, DLSS itself, chaining
-loss, transition flash, the ini writer).
+Not the cause (evidence under `## Ruled out`): EDHM, the VR half and the
+runtime, DLSS itself, the game frame, the snapshot, H2 (post-tone VS
+mismatch), scissor, topology and input layout, null views, command lists
+not executing.
 
-Next flight: main HEAD plus the luma probe (five stages, every 2 s per
-eye) with EDHM chained; then the same build without chaining. The
-confirming line is `luma probe: eye=N first black stage is <stage>`; the
-signature table below maps each stage to a cause. `--expect-build HEAD`
-first.
+The second instrument (eight stages, sentinels, reference replay; design
+kept under Flight design) was never built: its implementer was stopped
+when the fix landed. Build it only if the flight below is still black.
 
-Ini note: after flight B the live Frontier ini and its mirror carried
-`#real_dll = d3d11_edhm.dll` (line 1216), a manual control edit. The
-settings writer cannot produce that line (`src\common\iniedit.cpp:547`
-passes uncomment = the template line is commented, and the template's
-line is live). Both files were restored to the live key on 2026-09-15
-evening; comment it out again for the control flight.
+Next flight: Frontier, EDHM chained, `fix.temporal_aa = dlss`, build
+v0.17.0-rc.2-16-g2c6e820 installed 2026-09-16. Confirming lines:
+`luma probe: eye=N first black stage is none` on every report while
+`deferred=1 apply=1`, and `Deferred UI: replayed dual-source glass into
+clean HDR`; the cockpit visible in the headset with its HUD. Read with
+`python tools\edvr_log.py --target frontier --expect-build HEAD --grep
+"luma probe|Deferred UI"`. A still-black flight reads `dlss_in` 0.000
+again and reopens `## Ruled out`; a decline line means the path was
+off, which is not a pass.
+
+Ini note: `fix.temporal_aa` restored to `dlss` on 2026-09-16 in the live
+Frontier ini and its mirror; `real_dll = d3d11_edhm.dll` (line 1216)
+stays; comment it out for a no-EDHM control.
 
 ## Evidence, 2026-09-15
 
@@ -104,6 +103,65 @@ below 3Dmigoto):
 The post-tone pair is the odd one: the vertex shader differs. Whether the
 B pair is the same draw is what the new one-shot line settles.
 
+## Evidence, 2026-09-16: the probe flight and the Steam flight
+
+Frontier flight (`edvr_gfx_20260916_051454.log`, build
+`v0.17.0-rc.2-13-g16adaae`, the probe, EDHM chained):
+
+```
+[05:16:16.001] Deferred UI: retained post-tone sampled draw gen=9791 eye=0 source=000001B195A9DF20 target=000001B195A9A2A0 tails=0.
+[05:16:16.002] Deferred UI: post-tone pixel shader DED8796049C7BB4A bound with an unrecognised vertex shader 01C3B84C82172B56; the post-tone copy is not captured, so DLSS receives the unmapped world colour.
+[05:16:16.012] Deferred UI: active. DLSS receives world colour; ...
+[05:16:16.533] luma probe: eye=0 game=0.058/0.893/77% clean_hdr=0.033/1.522/82% dlss_in=0.000/0.000/100% dlss_out=0.000/0.000/100% final=0.000/0.000/100% | deferred=1 sampled=1 aliases=1 draws=9 apply=1
+[05:16:16.533] luma probe: eye=0 first black stage is dlss_in (game 0.058 clean_hdr 0.033 dlss_in 0.000 dlss_out 0.000 final 0.000).
+[05:16:19.123] menu: fix.temporal_aa dlss -> off (written to edvr.ini; live).
+[05:16:20.442] menu: fix.temporal_aa on -> dlss (written to edvr.ini; live).
+[05:16:23.069] menu: fix.temporal_aa dlss -> off (written to edvr.ini; live).
+[05:16:25.165] luma probe: eye=0 game=- clean_hdr=- dlss_in=- dlss_out=- final=0.056/0.864/71% | deferred=0 sampled=0 aliases=0 draws=0 apply=0
+[05:16:26.159] menu: fix.temporal_aa on -> dlss (written to edvr.ini; live).
+[05:16:27.200] luma probe: eye=0 game=0.048/0.826/74% clean_hdr=0.043/1.686/69% dlss_in=0.000/0.000/100% dlss_out=0.000/0.000/100% final=0.000/0.000/100% | deferred=1 sampled=1 aliases=1 draws=11 apply=1
+```
+
+Every report while the feature was active (05:16:16 to 05:16:22 and
+05:16:27 to 05:16:29, both eyes) reads the same: `game` 0.04 to 0.07,
+`clean_hdr` 0.02 to 0.06 (linear HDR, max up to 2.3), `dlss_in`
+0.000/0.000/100%, `dlss_out` and `final` the same, no HUD at all in
+`final`. No decline line in the whole flight. `sampled=1` and the
+retained post-tone lines show the post-tone draw captured, so
+`prepare()` returned `cleanFinal` (ui_deferred.cpp:624) and that texture
+is black in full. The one-shot line names a second draw that shares the
+post-tone pixel shader; it is not the routed post-tone draw. With DLSS
+off (05:16:23 to 05:16:26) the pass skipped its DLSS block and `final`
+read 0.056: the view came back, as Sean saw; switching back to DLSS
+re-enabled the feature and the black returned at once.
+
+Steam flight (`edvr_gfx_20260916_050901.log`, build
+`v0.17.0-rc.2-6-g377c520-dirty`, no probe, no chaining; main's fanout
+change eadd586 is not in that build):
+
+```
+[05:10:43.957] Deferred UI: retained post-tone sampled draw gen=11282 eye=0 source=000001990E5188A0 target=000001990E5151A0 tails=0.
+[05:10:43.968] Deferred UI: active. DLSS receives world colour; ...
+[05:11:00.031] menu: fix.temporal_aa dlss -> off (written to edvr.ini; live).
+[05:11:01.614] menu: fix.temporal_aa off -> on (written to edvr.ini; live).
+[05:11:02.844] menu: fix.temporal_aa on -> dlss (written to edvr.ini; live).
+[05:11:02.853] Deferred UI: disabled until AA is switched Off and back on, or the game restarts. ...
+[05:11:02.853] Deferred UI: original frame retained: world blend unsupported (enabled=1, colour=2/16/1, alpha=2/18/1) (draws=6, VS=F512712C40D93C12 PS=4A71EB0D34E9F2EF).
+```
+
+Sean saw the black cockpit without EDHM in the 16 s between "active"
+and switching DLSS off. Switching back re-enabled the feature
+(ui_deferred.cpp:354 clears `failed` while the mode is not dlss/dlaa),
+and 9 ms after the mode returned to dlss a dual-source-blend world draw
+(D3D11_BLEND_ONE over SRC1_COLOR) tripped the decline, which lasts the
+session. That is why DLSS was fine afterwards on Steam: the path was
+switched off, not working. Under EDHM the same toggle re-enabled the
+feature and nothing tripped it. The tone-map producer pair is the same
+on both installs (`vs_642017A6FEDAE0E8`, `ps_99C21CEB7A699821`): EDHM
+does not replace the shaders the replay runs. The decline that protected
+flight A after 1.3 s (opcode 77) never fired on Steam in 16 s, so the
+protection is scene-dependent even without eadd586.
+
 ## Ruled out
 
 - ruled out: the black void fix painting black, because B cleared 0 void
@@ -121,6 +179,30 @@ B pair is the same draw is what the new one-shot line settles.
   `mergeIni` uncomments a user-present key (iniedit.cpp:547-548) and its
   removed branch comments out the template's empty-valued line, neither
   of which yields `#real_dll = d3d11_edhm.dll`; B had no menu write.
+
+Added 2026-09-16, from the probe flight and the Steam flight:
+
+- ruled out: H2 (the post-tone vertex-shader mismatch leaving `postTone`
+  unready under EDHM), because both flights logged `retained post-tone
+  sampled draw` and every black probe report carries `sampled=1`; the
+  one-shot names a second draw sharing the pixel shader, not the routed
+  one.
+- ruled out: EDHM as the cause, because the Steam flight without chaining
+  ran the same path black for 16 s with the same producer shaders.
+- ruled out: the VR half and the runtime, because `final` is black before
+  the hand-off.
+- ruled out: DLSS blackening a valid input, because `dlss_in` is already
+  0.000/0.000/100%.
+- ruled out: the game's eye frame and the clean snapshot, because `game`
+  and `clean_hdr` read normal values on every black report.
+- ruled out (by code, not flight): the replay draws losing topology or
+  input layout after the recorder's ClearState, because
+  ui_deferred_draw.h:238 refuses an undefined topology at capture and
+  :266 restores layout, topology, vertex and index buffers in `bind`.
+- ruled out (by code, not flight): the command lists never reaching the
+  GPU, because `execute` (ui_deferred.cpp:260) goes through
+  vscreen.cpp:5761, which calls the real ExecuteCommandList pointer for
+  the owner context.
 
 ## What the code says (trace of 2026-09-15)
 
@@ -144,6 +226,25 @@ combine reads the DLSS output through `world` and the composite replaces
 it. Every failure branch either declines (B declined 0 times) or returns
 null for that frame (B applied on every frame), so no code line yields a
 black image while reporting success.
+
+Addendum 2026-09-16, the two replays that make `dlss_in`. Both run on the
+deferred `recorder` context and are executed on the immediate context
+inside prepare: the tone replay (526-545) and the post-tone replay
+(728-747). Each does `recorder->ClearState()`, then `bind(recorder,
+originalPixelShader(), target.rtv, ...)`; ui_deferred_draw.h:266 restores
+input layout, topology, the 32 vertex-buffer slots and the index buffer,
+and :238 refuses an undefined topology at capture. The source is set
+explicitly at PS slot t1 for the tone replay (540, the same slot the
+apply-time tone draw uses at 611) and t0 for the post-tone replay (742).
+Then `draw`, `FinishCommandList(FALSE)` (252-262) and
+`vScreenExecuteCommandListRaw` (vscreen.cpp:5761-5764), which calls the
+real ExecuteCommandList for the owner context, so the list does reach
+the GPU. `Surface::ensure` (33-47) creates texture, SRV and RTV together,
+so no bound view is null. The tone and post-tone state checks (533/704)
+require scissor disabled. None of this is black by construction; the
+open question is what the capture did NOT record, such that the recorded
+draw is legal but draws nothing or draws black. The doc's `## Status`
+lists the candidates.
 
 ## Flight design: the luma probe
 
@@ -189,6 +290,46 @@ one-shot `post-tone pixel shader ... bound with an unrecognised vertex
 shader` line fires from the per-draw entry point for any draw of a
 generation that has captured UI, once per vertex shader.
 
+### Second instrument, 2026-09-16: the discriminating flight
+
+Built on the probe flight's answer (`dlss_in` black, snapshot fine). The
+probe grows to eight stages in pipeline order: game, clean_hdr,
+clean_ldr (the tone replay's target), clean_ldr_ref (the reference
+replay below), dlss_in, dlss_out, ui_layer (`renderer.ui` after apply),
+final. Three additions let one flight separate the remaining causes:
+
+- Two-level sentinel clears on the replay targets that feed the picture
+  (cleanLdr, cleanFinal, renderer.ui): the immediate context clears the
+  target to grey A = 0.5 right before the command list executes, and the
+  list itself clears it to grey B = 0.25 right before the replay draw. A
+  stage reading 0.500 means the list never ran; 0.250 means it ran and
+  the draw wrote nothing (geometry, viewport, target slot, arguments);
+  0.000 means the draw ran and wrote black (its inputs); a normal value
+  means the replay works.
+- A reference replay: in the same tone hook, on the immediate context
+  with the game's live state, only the render target (cleanLdrRef) and
+  t1 (cleanHdr) swapped, the same DrawInstanced.
+- One-shot capture detail at the tone and post-tone captures: the
+  reflection masks, each captured SRV slot's resource kind/format/size
+  with the first bytes of small snapshot textures, each captured
+  constant buffer's first 16 floats read from the snapshot copy, the
+  game's t1 view against cleanHdr's, viewport, raster and IA state.
+
+| clean_ldr | clean_ldr_ref | ui_layer | Reading |
+|---|---|---|---|
+| 0.500 | any | any | the synchronous list does not execute (contradicts the raw pointer at vscreen.cpp:5761) |
+| 0.250 | normal | 0.250 | bind() sets a state that draws nothing on the deferred context; the capture-detail line names it |
+| 0.250 | 0.250 | any | the draw covers nothing even live: draw arguments or the target |
+| 0.000 | normal | 0.000 | the snapshot inputs are wrong (a zero constant buffer or texture); the float/byte dumps name the slot |
+| 0.000 | 0.000 | any | cleanHdr at t1 is not enough for this tone shader, or the live and recorded draws differ from the game's |
+| normal | normal | black or grey | the synchronous replays work and the apply-time list is the fault; dlss_in then reads the post-tone sentinel |
+
+The active note carries `Probe stages: 8, sentinels A=0.5 B=0.25,
+reference replay on.` so a log from this build is self-identifying. The
+sentinels and the reference replay are diagnostic and come out with the
+fix; the reference replay costs one extra fullscreen draw per eye per
+frame while the deferred UI is active.
+
 ## Journal
 
 ### 2026-09-15 evening
@@ -206,3 +347,32 @@ end of a pass rather than its start, so the clean_hdr hook (which runs
 during the draws, before the pass) is never skipped; the post-tone
 one-shot moved from the route capture (only reached with a zero verdict)
 to the per-draw entry point.
+
+### 2026-09-16 morning
+
+Probe flight flown in Frontier with EDHM chained (build 16adaae,
+`--expect-build HEAD` clean): first black stage is `dlss_in` on every
+report, both eyes, `game` and `clean_hdr` fine, `sampled=1`. H1 confirmed
+by Sean's Steam flight without EDHM (377c520-dirty, no probe): black for
+the 16 s until DLSS off; the re-enable declined 9 ms later on "world
+blend unsupported", which is why DLSS then "worked" on Steam and not
+under EDHM. H2 refuted: the post-tone draw was retained in both flights.
+Branch fast-forwarded onto origin/main (fc18b4d). The code trace of the
+replay path went to a subagent; the Status block carries the candidates
+and the fallback instrument.
+
+Later morning: a parallel session found the cause on main and pushed
+9d30ac6 and 2c6e820 (Status block): the shaders have no RDEF, so the
+reflection-derived capture mask was empty and the tone replay bound no
+constant buffers and no LUT. The second instrument's implementer was
+stopped before it wrote a line; the design stays under Flight design in
+case the flight is still black. The pointer added to the star-navigation
+review doc was dropped: that session rewrote the doc and it records the
+black itself now. Branch fast-forwarded to 2c6e820.
+
+Rebuilding for the flight tripped the rig pool twice on timing rigs:
+openxr_present_test failed 13 checks at the first graphics acquire in an
+8-wide pool, openxr_module_test failed 7 in a 4-wide one; each passes
+alone (168, and 247/253 per variant, 0 failures) with no crash sentinel
+and no other build on the machine. Built with the pool serialized
+(`EDVR_JOBS=1`).
