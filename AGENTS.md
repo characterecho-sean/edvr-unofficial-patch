@@ -2,9 +2,10 @@
 
 This is the only instructions file in the repo. CLAUDE.md is a one-line @AGENTS.md import because Claude Code reads only CLAUDE.md; do not add content there.
 
-Unofficial VR fixes for Elite Dangerous: Odyssey. Two proxy DLLs
-(`d3d11.dll` beside the game, `openvr_api.dll` in `Openvr\win64`), a
-config file, and an installer that carries all three.
+Unofficial VR fixes for Elite Dangerous: Odyssey. A proxy DLL
+(`d3d11.dll` beside the game) and EDVR's own OpenXR runtime for
+Elite (`openvr_api.dll` in `Openvr\win64`), a config file, and an
+installer that carries all three.
 
 The expensive resource on this project is not tokens, it is **test
 flights**. Every wrong hypothesis costs a build, an install, a headset
@@ -176,7 +177,8 @@ minutes after a flight finally reproduced the effect being chased.
 | Path | What |
 |---|---|
 | `src\d3d11\` | the graphics half: hooks, shader fixes, the draw census |
-| `src\openvr\` | the VR half: compositor and system hooks |
+| `src\openxr\` | the native OpenXR runtime: the OpenVR ABI Elite calls, translated to OpenXR |
+| `src\openvr\compat\` | the OpenVR ABI header |
 | `src\installer\` | the self-contained installer and its log bundler |
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |

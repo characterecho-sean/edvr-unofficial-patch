@@ -75,7 +75,7 @@ body:
     id: headset
     attributes:
       label: Headset and runtime
-      description: Which headset, and what it runs through — SteamVR, OpenComposite (Virtual Desktop's VDXR, PiOpenXR), Oculus, Oasis, WMR. A Quest over Link is a different path from a Quest over Steam Link, so say which.
+      description: Which headset, and the OpenXR runtime selected in Windows — SteamVR, Meta/Oculus, Virtual Desktop's VDXR, PiOpenXR/Pimax, Varjo, Oasis, WMR. A Quest over Link is a different path from a Quest over Steam Link, so say which.
       placeholder: HP Reverb G2 via the Oasis driver
     validations:
       required: true

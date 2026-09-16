@@ -21,63 +21,6 @@ public:
     ShutdownPresentCensus(const ShutdownPresentCensus&) = delete;
     ShutdownPresentCensus& operator=(const ShutdownPresentCensus&) = delete;
 
-    // The caller supplies the current enable/readiness gate. Rejected calls
-    // leave the active and completed window state untouched.
-    std::uint64_t begin(std::uint32_t version, bool enabledAndReady) noexcept {
-        if (version != kShutdownCensusVersion || !enabledAndReady ||
-            activeToken_.load(std::memory_order_acquire) != 0)
-            return 0;
-
-        AcquireSRWLockExclusive(&lock_);
-        if (activeToken_.load(std::memory_order_relaxed) != 0 ||
-            acceptedWindows_ >= kMaxWindows) {
-            ReleaseSRWLockExclusive(&lock_);
-            return 0;
-        }
-        const std::uint64_t token = nextToken_++;
-        if (token == 0) {
-            ReleaseSRWLockExclusive(&lock_);
-            return 0;
-        }
-        ShutdownCensusSnapshot snapshot{};
-        snapshot.size = sizeof(snapshot);
-        snapshot.version = kShutdownCensusVersion;
-        snapshot.token = token;
-        pollOwnerLocked();
-        LARGE_INTEGER qpc{};
-        QueryPerformanceCounter(&qpc); // ordered with all state under the lock
-        snapshot.beginQpc = qpc.QuadPart;
-        snapshot.renderBegin = render_;
-        active_ = snapshot;
-        ++acceptedWindows_;
-        activeToken_.store(token, std::memory_order_release);
-        ReleaseSRWLockExclusive(&lock_);
-        return token;
-    }
-
-    BOOL end(std::uint64_t token, ShutdownCensusSnapshot* result) noexcept {
-        if (!result || result->size != sizeof(ShutdownCensusSnapshot) ||
-            result->version != kShutdownCensusVersion || token == 0 ||
-            activeToken_.load(std::memory_order_acquire) != token)
-            return FALSE;
-
-        AcquireSRWLockExclusive(&lock_);
-        if (activeToken_.load(std::memory_order_relaxed) != token) {
-            ReleaseSRWLockExclusive(&lock_);
-            return FALSE;
-        }
-        pollOwnerLocked();
-        LARGE_INTEGER qpc{};
-        QueryPerformanceCounter(&qpc); // ordered with the last sample under lock
-        active_.endQpc = qpc.QuadPart;
-        active_.renderEnd = render_;
-        *result = active_;
-        active_ = {};
-        activeToken_.store(0, std::memory_order_release);
-        ReleaseSRWLockExclusive(&lock_);
-        return TRUE;
-    }
-
     // Whole-Present activity is cumulative and deliberately includes failed
     // and TEST Presents. The hook gates these calls on census enablement.
     void enterPresent() noexcept {

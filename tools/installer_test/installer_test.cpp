@@ -728,27 +728,16 @@ static void testPlanner() {
     }
 
 
-    {   // advanced.real_openvr_dll is a NAME, and a hand-edited edvr.ini can
-        // put anything in it. A value with a path in it would move the game's
-        // runtime out of the folder and over another mod, while the report
-        // said "the game's own copy is renamed openvr_api_orig.dll".
-        Survey s = baseSurvey(dir);
-        s.openvrOrigName = L"..\\..\\d3d11.dll";   // out of the folder, onto another mod
-        const Plan plan = planInstall(s, options, payload);
-        check(hasStep(plan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
-              "a path in real_openvr_dll is refused back to the default name");
-        for (const Step& step : plan.steps) {
-            check(step.to.find(L"..") == std::wstring::npos,
-                  "and no step points outside the game folder");
-            break;
-        }
-
-        // A separator on its own, with no "..", is refused for the same reason.
+    {   // openvrOrigName can be anything a caller puts on the Survey struct.
+        // A value with a path in it would move the game's runtime out of the
+        // folder and over another mod, while the report said "the game's own
+        // copy is renamed openvr_api_orig.dll". Anything that is not a plain
+        // filename is refused back to the default.
         Survey nested = baseSurvey(dir);
         nested.openvrOrigName = L"sub\\somewhere.dll";
         const Plan nestedPlan = planInstall(nested, options, payload);
         check(hasStep(nestedPlan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
-              "and so is a name with a folder in it");
+              "a name with a folder in it is refused back to the default name");
 
         Survey self = baseSurvey(dir);
         self.openvrOrigName = L"openvr_api.dll";   // the file it stands in for

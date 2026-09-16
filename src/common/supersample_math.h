@@ -1,8 +1,10 @@
 // The supersample resolve's arithmetic, header-only and pure, shared by the
-// openvr half (which decides), the d3d11 half (which filters) and the test
-// that pins both (tools/supersample_test) -- the SubmitPairLatch precedent
-// in frame_flag.h: one definition, every consumer, nothing to keep in step
-// by hand.
+// d3d11 half (which filters) and the test that pins it (tools/supersample_test)
+// -- the SubmitPairLatch precedent in frame_flag.h: one definition, every
+// consumer, nothing to keep in step by hand. The openvr half used to decide
+// the kernel and width from edvr.ini; that half was the legacy OpenVR proxy,
+// retired 2026-09-16 along with the two ini keys below, so both constants
+// are currently reached only with whatever a caller hardcodes.
 //
 // docs/anti-aliasing.md, Feature A. When the game submits an eye image
 // larger than the runtime asked for (Elite's HMD Quality above 1.0 is the
@@ -26,10 +28,12 @@
 
 namespace edvr {
 
-// The two kernels, by the names edvr.ini uses (experimental.supersample_filter).
+// The two kernels, by the names edvr.ini used to (experimental.supersample_filter,
+// retired 2026-09-16 with the legacy OpenVR proxy that read it).
 enum SupersampleFilter : int { kSupersampleCalm = 0, kSupersampleCrisp = 1 };
 
-// The radius the ini accepts (experimental.supersample_width), in output pixels.
+// The radius the ini used to accept (experimental.supersample_width, retired
+// alongside supersample_filter above), in output pixels.
 constexpr float kSupersampleWidthMin = 0.5f;
 constexpr float kSupersampleWidthMax = 3.0f;
 

@@ -26,17 +26,11 @@ constexpr uint64_t kRemeasureMs = 1000;
 // near the top of the log where a reader looks.
 constexpr uint64_t kAnnounceMs = 10000;
 
-// Our openvr_api.dll is told from anyone else's by an export, not by a path.
-// The whole failure this file exists for was a CORRECT path: the file was
-// exactly where it belonged and the game had loaded a different back end
-// entirely. A path answers "what is on disk", and the question here is "what is
-// in this process".
-//
-// This export has been on the openvr half since it was written, so it
-// identifies old EDVR builds as ours too -- which is right. "Ours but silent"
-// is a different diagnosis from "not ours", and version skew belongs in the
-// first of those, not the second.
-constexpr char kOursExport[] = "edvr_selftest_system_hook";
+// Ours is told from anyone else's by an export pair, not by a path. The whole
+// failure this file exists for was a CORRECT path: the file was exactly where
+// it belonged and the game had loaded a different back end entirely. A path
+// answers "what is on disk", and the question here is "what is in this
+// process".
 constexpr char kNativeConfigureExport[] = "edvrConfigureNativeRuntime";
 constexpr char kNativeStatusExport[] = "edvrGetNativeRuntimeStatus";
 
@@ -46,11 +40,11 @@ struct State {
 
     VrRuntime verdict = VrRuntime::NoneLoaded;
     uint64_t  measuredMs = 0;   // 0 = never measured
-    bool      settled = false;  // EdvrOpenvr, which cannot turn into anything else
+    bool      settled = false;  // NativeOpenXR, which cannot turn into anything else
 
     // Evidence, so every sentence below quotes something that was actually
     // seen rather than asserting a state of the world.
-    char foreignPath[MAX_PATH] = {};   // the openvr_api.dll that is not ours
+    char foreignPath[MAX_PATH] = {};   // the openvr_api.dll that is not EDVR's
     char oculusModule[64] = {};        // LibOVRRT64_1.dll, or whichever matched
     bool oculusAlsoLoaded = false;     // both an openvr_api.dll AND LibOVR
 
@@ -102,45 +96,25 @@ void buildWhy(State& s) {
         case VrRuntime::OculusNative:
             snprintf(s.whyBuf, sizeof(s.whyBuf),
                      "This session is on Elite's NATIVE OCULUS back end -- %s is loaded in this "
-                     "process and no openvr_api.dll is loaded at all. Elite ships two VR back ends "
-                     "and prefers Oculus whenever the Meta PC runtime is driving the headset, and on "
-                     "that path it never opens openvr_api.dll, so EDVR's openvr half cannot run "
-                     "here whatever is installed beside the game. THIS IS NOT AN INSTALL FAULT and "
-                     "reinstalling will not change it: to get these fixes you have to reach the game "
-                     "through OpenVR instead -- Steam Link, or Virtual Desktop in SteamVR mode or "
-                     "with OpenComposite. See \"Headsets and VR runtimes\" in the README.",
+                     "process and no openvr_api.dll is loaded at all. EDVR's native build normally "
+                     "routes Elite away from that back end at startup; look for the \"oculus "
+                     "route:\" line in this log to see why it did not here (an unknown game "
+                     "revision, or the route refused). Reinstalling will not change it. See "
+                     "\"Headsets and VR runtimes\" in the README.",
                      s.oculusModule[0] ? s.oculusModule : "an Oculus runtime module");
             break;
         case VrRuntime::ForeignOpenvr:
             snprintf(s.whyBuf, sizeof(s.whyBuf),
                      "The openvr_api.dll this process loaded is NOT EDVR's -- it is %s, which does "
-                     "not export %s. So EDVR's openvr half is genuinely not installed in the folder "
-                     "the game loads from, or something has replaced it. Install it from the openvr "
-                     "folder in the download: rename the game's own openvr_api.dll to "
-                     "openvr_api_orig.dll and put EDVR's in its place, in whichever Openvr folder "
-                     "holds the file. The installer does this for you.",
-                     s.foreignPath[0] ? s.foreignPath : "another copy", kOursExport);
+                     "not carry EDVR's native-runtime exports. So EDVR's runtime is genuinely not "
+                     "installed in the folder the game loads from, or something has replaced it (a "
+                     "game update puts the stock file back). Reinstall: the installer renames the "
+                     "game's own openvr_api.dll to openvr_api_orig.dll and puts EDVR's in its place.",
+                     s.foreignPath[0] ? s.foreignPath : "another copy");
             break;
         case VrRuntime::NativeOpenXR:
             snprintf(s.whyBuf, sizeof(s.whyBuf),
-                     "EDVR's experimental native OpenXR OpenVR facade is loaded. Its session and "
-                     "submission path is still being integrated, so EDVR's established OpenVR "
-                     "AA, crop and compositor effects are not promised on this backend yet.");
-            break;
-        case VrRuntime::EdvrOpenvr:
-            snprintf(s.whyBuf, sizeof(s.whyBuf),
-                     "EDVR's own openvr_api.dll IS loaded here, and has not announced a validated "
-                     "compositor hook -- so this is not a missing file. Read edvr_vr_*.log beside "
-                     "this one: it will say whether the compositor version was one it does not know, "
-                     "whether the hook was refused, or whether it is a build older than this "
-                     "d3d11.dll (mismatched halves share no state by design, and behave exactly like "
-                     "a session with no openvr proxy). %s",
-                     s.oculusAlsoLoaded
-                         ? "An Oculus runtime module is loaded in this process as well, so it is "
-                           "also possible the game opened openvr_api.dll and then chose its Oculus "
-                           "back end to render through."
-                         : "If there is no vr log at all, the file is loaded but its startup did not "
-                           "reach the point of writing one -- report that log.");
+                     "EDVR's native OpenXR runtime is loaded and is driving this session.");
             break;
         case VrRuntime::NoneLoaded:
         default:
@@ -169,7 +143,6 @@ void measureLocked(State& s) {
     size_t n = needed / sizeof(HMODULE);
     if (n > sizeof(mods) / sizeof(mods[0])) n = sizeof(mods) / sizeof(mods[0]);
 
-    HMODULE openvrOurs = nullptr;
     HMODULE openvrNative = nullptr;
     HMODULE openvrForeign = nullptr;
     char    oculus[64] = {};
@@ -179,13 +152,11 @@ void measureLocked(State& s) {
         if (!GetModuleBaseNameA(GetCurrentProcess(), mods[i], name, sizeof(name))) continue;
         if (nameIs(name, "openvr_api.dll")) {
             // Two modules CAN share a base name if each was loaded by full
-            // path from a different folder. Ours wins the verdict if it is
-            // there at all, because ours is the one that would be acting.
-            if (GetProcAddress(mods[i], kNativeConfigureExport) &&
+            // path from a different folder. Native wins the verdict if it is
+            // there at all, because that is the one that would be acting.
+            if (!openvrNative && GetProcAddress(mods[i], kNativeConfigureExport) &&
                 GetProcAddress(mods[i], kNativeStatusExport)) {
                 openvrNative = mods[i];
-            } else if (GetProcAddress(mods[i], kOursExport)) {
-                openvrOurs = mods[i];
             } else if (!openvrForeign) {
                 openvrForeign = mods[i];
             }
@@ -199,10 +170,6 @@ void measureLocked(State& s) {
 
     if (openvrNative) {
         s.verdict = VrRuntime::NativeOpenXR;
-        s.settled = true;
-        s.foreignPath[0] = 0;
-    } else if (openvrOurs) {
-        s.verdict = VrRuntime::EdvrOpenvr;
         s.settled = true;
         s.foreignPath[0] = 0;
     } else if (openvrForeign) {
@@ -236,10 +203,8 @@ void refresh(State& s) {
 
 const char* shortWhyOf(VrRuntime v) {
     switch (v) {
-        case VrRuntime::EdvrOpenvr:
-            return "EDVR's openvr half is loaded but has not validated its compositor hook";
         case VrRuntime::NativeOpenXR:
-            return "EDVR's experimental native OpenXR backend is loaded; submission effects are still being integrated";
+            return "EDVR's native OpenXR runtime is loaded";
         case VrRuntime::ForeignOpenvr:
             return "the openvr_api.dll loaded here is not EDVR's";
         case VrRuntime::OculusNative:
@@ -253,8 +218,7 @@ const char* shortWhyOf(VrRuntime v) {
 
 const char* nameOf(VrRuntime v) {
     switch (v) {
-        case VrRuntime::EdvrOpenvr:    return "OpenVR, through EDVR's own openvr_api.dll";
-        case VrRuntime::NativeOpenXR:  return "EDVR's experimental native OpenXR backend";
+        case VrRuntime::NativeOpenXR:  return "EDVR's native OpenXR runtime";
         case VrRuntime::ForeignOpenvr: return "OpenVR, through an openvr_api.dll that is not EDVR's";
         case VrRuntime::OculusNative:  return "Elite's native Oculus back end";
         case VrRuntime::NoneLoaded:
@@ -314,7 +278,7 @@ void vrRuntimeTick() {
     if (s.firstTickMs == 0) s.firstTickMs = now;
     refresh(s);
     const VrRuntime v = s.verdict;
-    const bool due = (v == VrRuntime::EdvrOpenvr) || (v == VrRuntime::NativeOpenXR) ||
+    const bool due = (v == VrRuntime::NativeOpenXR) ||
                      (now - s.firstTickMs >= kAnnounceMs);
     const bool speak = !s.announced && due;
     // The one correction: a launch slow enough to be announced as something
@@ -322,11 +286,11 @@ void vrRuntimeTick() {
     // towards the terminal verdict -- this must not become a thing that
     // narrates a flapping module list.
     const bool correct = s.announced && !s.corrected &&
-                         (v == VrRuntime::EdvrOpenvr || v == VrRuntime::NativeOpenXR) &&
+                         v == VrRuntime::NativeOpenXR &&
                          s.announcedAs != v;
     char oculus[64];
     snprintf(oculus, sizeof(oculus), "%s", s.oculusModule);
-    const bool both = s.oculusAlsoLoaded && v == VrRuntime::EdvrOpenvr;
+    const bool both = s.oculusAlsoLoaded && v == VrRuntime::NativeOpenXR;
     if (speak) {
         s.announced = true;
         s.announcedAs = v;
@@ -345,10 +309,7 @@ void vrRuntimeTick() {
             v == VrRuntime::OculusNative
                 ? " EDVR's openvr half cannot run on this back end, so the fixes that live in it "
                   "are inert this session; see \"Headsets and VR runtimes\" in the README."
-                : v == VrRuntime::NativeOpenXR
-                    ? " This experimental native OpenXR backend is still integrating submission; "
-                      "the established OpenVR AA, crop and compositor effects are not promised yet."
-                    : "",
+                : "",
             both ? " (An Oculus runtime module is loaded as well.)" : "");
     }
     if (correct) {

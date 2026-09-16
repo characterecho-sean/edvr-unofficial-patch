@@ -291,14 +291,14 @@ float    g_lastWidth = 0.0f;
 
 // Said once, after enough samples to mean something: the price the design
 // asks for (docs/anti-aliasing.md Phase 0 item 6), quoted the way the
-// guard quotes its margins -- the number, and the key that moves it.
+// guard quotes its margins -- the number, and the kernel and radius it ran.
 void maybeLogTiming() {
     if (g_timeLogged || g_timeCount < 120) return;
     g_timeLogged = true;
     Log::get().note(
         "supersample resolve: measured %.2f ms per eye on average (max "
         "%.2f) resolving %ux%u to %ux%u -- two dispatches, %s kernel at "
-        "radius %.2f px (supersample_width moves it, live). That is Phase 0 "
+        "radius %.2f px. That is Phase 0 "
         "item 6's price in docs\\anti-aliasing.md, measured; its softness "
         "half still wants the held-view comparison.",
         g_timeSum / static_cast<double>(g_timeCount), g_timeMax,
@@ -842,21 +842,18 @@ void supersamplePassTick(ID3D11DeviceContext* ctx) {
                 "first resolved eye pays no compile.");
         }
     }
-    // The other half's absence, said from this side: the resolve runs in
-    // the openvr half's Submit hook, and if none has announced itself half
-    // a minute in, there is none -- openvr_api.dll not installed, or every
-    // feature that needs its hook was off when the game started, which is
-    // how the setting can be flipped on live and do nothing.
-    if (!g_noHookNoted && !glitchConsumerPresent() &&
-        elapsedMs(g_firstTickMs, kNoHookNoteMs)) {
+    // Said once, from this side: the resolve's caller lived in the legacy
+    // OpenVR proxy's Submit hook (retired 2026-09-16), and the native
+    // runtime does not call the export yet, so a setting flipped on does
+    // nothing. Half a minute in, so the line lands after the startup noise.
+    if (!g_noHookNoted && elapsedMs(g_firstTickMs, kNoHookNoteMs)) {
         g_noHookNoted = true;
         Log::get().note(
-            "supersample resolve: experimental.supersample_resolve is %s, but no "
-            "compositor hook has announced itself after %llu s. The resolve "
-            "runs inside the openvr_api.dll half's Submit hook -- install "
-            "that file, or restart the game with the setting on so the hook "
-            "installs for it. Nothing is resolved until then.",
-            g_mode, static_cast<unsigned long long>(kNoHookNoteMs / 1000));
+            "supersample resolve: experimental.supersample_resolve is %s, but "
+            "nothing calls the resolve on the native OpenXR runtime yet -- it "
+            "waits to be ported (docs\\openxr-port.md, deferred features). "
+            "Nothing is resolved.",
+            g_mode);
     }
 }
 

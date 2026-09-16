@@ -122,7 +122,8 @@ int main(int argc, char** argv) {
     // The opening [fix] and [hotkey] blocks.
     expectStr("fix.temporal_aa_model", "k", "DLSS preset ships as K on the Performance page");
     expectStr("experimental.supersample_resolve", "off", "experimental supersample resolve ships off");
-    expectStr("experimental.supersample_filter", "calm", "supersample kernel lives under experimental");
+    expectStr("experimental.supersample_filter", "<unset>",
+              "the retired supersample_filter key is still absent");
     expectBool("fix.night_vision_stability", true, "night vision pulse stability remains a standard enabled fix");
     expectBool("experimental.night_vision_realistic", false, "Realistic nightvision ships disabled under Experimental");
     expectFloat("experimental.night_vision_brightness", 8.0f, "night vision appearance brightness lives under Experimental");

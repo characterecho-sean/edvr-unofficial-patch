@@ -45,7 +45,7 @@ body:
     id: headset
     attributes:
       label: Headset and runtime (optional)
-      description: Which headset, and what it runs through — SteamVR, OpenComposite (Virtual Desktop, PiOpenXR), Oculus. Some things depend on it; a Quest over Link is not on the same path as a Quest over Steam Link.
+      description: Which headset, and the OpenXR runtime selected in Windows — SteamVR, Meta/Oculus, Virtual Desktop's VDXR, PiOpenXR/Pimax, Varjo. Some things depend on it; a Quest over Link is not on the same path as a Quest over Steam Link.
       placeholder: Pimax Crystal Super via SteamVR
 
   - type: textarea

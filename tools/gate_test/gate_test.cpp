@@ -4,10 +4,8 @@
 //
 // The gate decides whether to move the viewpoint of a headset somebody is
 // wearing, and its failure class is "the offset applied in the cockpit". It had
-// no automated coverage at all: pose_test covers six lines of arithmetic and
-// openvr_smoke covers the transport, while the ~500-line decision machine
-// between them was only ever exercised by flying the game and reading a log
-// afterwards.
+// no automated coverage at all: the ~500-line decision machine was only ever
+// exercised by flying the game and reading a log afterwards.
 //
 // Six defects in it were found that way, at roughly one test flight each, and
 // two more were found by a code review that the flights had already passed.

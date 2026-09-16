@@ -30,13 +30,9 @@
 #include "oculus_route.h"
 #include "shutdown_census.h"
 
-#ifndef EDVR_NATIVE_OPENXR_BUILD
-#define EDVR_NATIVE_OPENXR_BUILD 0
-#endif
-
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
     sizeof(EdvrNativeStartupRouting), EDVR_NATIVE_STARTUP_VERSION_1,
-    EDVR_NATIVE_OPENXR_BUILD ? EDVR_NATIVE_STARTUP_ROUTE_OCULUS : 0u, 0u};
+    EDVR_NATIVE_STARTUP_ROUTE_OCULUS, 0u};
 
 extern "C" {
 extern void* edvr_realProcs_d3d11[];
@@ -603,22 +599,6 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDeviceAndSwapChain(
     return hr;
 }
 
-// Versioned CPU-only census handshake. In particular do not call
-// ensureInitialised here: a pose wait must not initialize graphics or a chain.
-extern "C" BOOL WINAPI edvrCensusBeginVr(unsigned protocol) {
-    return protocol == 1 && edvr::vrCensusBeginVr() ? TRUE : FALSE;
-}
-
-extern "C" std::uint64_t WINAPI edvrCensusBeginShutdown(std::uint32_t version) {
-    const bool enabled = edvr::vrCensusEnabled() && edvr::Log::get().isOpen();
-    return edvr::shutdownPresentCensus().begin(version, enabled);
-}
-
-extern "C" BOOL WINAPI edvrCensusEndShutdown(
-    std::uint64_t token, edvr::ShutdownCensusSnapshot* result) {
-    return edvr::shutdownPresentCensus().end(token, result);
-}
-
 // CPU-only diagnostic query. It must not trigger normal initialization: the
 // first relevant loader call can precede the first D3D export.
 extern "C" BOOL WINAPI edvrQueryOculusRouting(uint32_t version, uint32_t size,
@@ -639,8 +619,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             DisableThreadLibraryCalls(module);
             // Native routing is a build capability, available before Elite's
             // first VR probe. No configuration or logging under loader lock.
-            edvr::oculusRouteInstallEarly(EDVR_NATIVE_OPENXR_BUILD != 0);
-            if (EDVR_NATIVE_OPENXR_BUILD != 0 && !edvr::oculusRouteProcessAttachAllowed())
+            edvr::oculusRouteInstallEarly(true);
+            if (!edvr::oculusRouteProcessAttachAllowed())
                 return FALSE;
             loaderPhase();
             edvr::inputGateInstallEarly();

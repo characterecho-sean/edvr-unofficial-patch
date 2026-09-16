@@ -128,8 +128,7 @@ struct Cand {
 // lookup below (camera keyboard, camera gamepad, menu slots) -- this walk
 // was mirrored by hand in two functions with a "a selection-rule fix must
 // land in both" warning, and a third consumer is where a hand mirror
-// drifts. The camera fixtures in openvr_smoke pin its answers across the
-// move.
+// drifts.
 //
 // Preset names come from StartPreset.4.start (one per bind context in
 // current builds) or the older StartPreset.start; no preset file means no

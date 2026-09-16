@@ -1029,7 +1029,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const float hz = !native && s.haveSample && s.lastSample.displayHz > 0.0f ? s.lastSample.displayHz : 0.0f;
     const float budget = hz > 0.0f ? 1000.0f / hz : 11.1f;
     const float windowS = ps.count ? ps.count * ps.avgMs / 1000.0f : 0.0f;
-    const char* noTiming = native ? "native OpenXR timing unavailable" : runtimeKind() == 2 ? "OpenComposite: unavailable" :
+    const char* noTiming = native ? "native OpenXR timing unavailable" :
                            glitchConsumerPresent() ? "no compositor timing" : "no openvr half";
 
     // Row 1: the frame, as fpsVR reports it. Both come from Valve's own

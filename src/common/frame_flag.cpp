@@ -195,15 +195,13 @@ struct Shared {
     // The settings menu (docs/settings-menu.md): the anchor pose the panel
     // was summoned at (d3d11 -> openvr, headPose's layout, seq as presence
     // and change stamp), the per-frame visibility heartbeat with the fade
-    // alpha in per-mille (d3d11 -> openvr), the drawn counter the keyboard
-    // gate follows (openvr's draw, bumped by the d3d11 export), and the
-    // runtime kind for the Status page (openvr -> d3d11).
+    // alpha in per-mille (d3d11 -> openvr), and the drawn counter the
+    // keyboard gate follows (openvr's draw, bumped by the d3d11 export).
     volatile LONG menuAnchorSeq;
     float         menuAnchorM[12];
     volatile LONG menuAlphaMille;
     volatile LONG menuVisibleStamp;
     volatile LONG menuDrawn;
-    volatile LONG runtimeKind;
     // The compositor's frame timing (openvr -> d3d11), for the monitor:
     // a seqlock -- perfSeq is odd while a write is in flight, and a reader
     // that sees it odd, or sees it change across its copy, tries again.
@@ -244,6 +242,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v32 because runtimeKind left the layout -- its only writer was the
+// legacy openvr proxy's launch_centre.cpp, deleted with that proxy, and
+// nothing native replaced it.
 // _v31 because the runtime's hidden-area-mesh triangle counts joined
 // (runtimeMaskTri), for fix.eye_mask's auto mode (frame_flag.h).
 // _v30 because the detector's verdict on a jump crosses to the openvr half
@@ -300,7 +301,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v31_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v32_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -778,17 +779,6 @@ void bumpMenuDrawn() {
 uint32_t menuDrawnValue() {
     Shared* s = map();
     return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->menuDrawn, 0, 0)) : 0;
-}
-
-void announceRuntimeKind(uint32_t kind) {
-    Shared* s = map();
-    if (!s || kind > 2) return;
-    InterlockedExchange(&s->runtimeKind, static_cast<LONG>(kind));
-}
-
-uint32_t runtimeKind() {
-    Shared* s = map();
-    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->runtimeKind, 0, 0)) : 0;
 }
 
 void setMenuHeadLock(bool on, float yawDeg, float pitchDeg) {

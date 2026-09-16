@@ -116,15 +116,14 @@ get wrong.
 ### Checking it worked
 
 Logs appear in `edvr_logs\` next to the game. There are two of them; the
-second, with `vr` in the name, says `compositor hook installed on
-IVRCompositor_014`. If it reports an unknown compositor version instead, the
-fix is off, the game runs normally, and that version string is worth reporting.
-**If there is no second log at all**, the game is not on its OpenVR path and
-half the patch never loaded — see [Headsets and VR
-runtimes](#headsets-and-vr-runtimes). If you see a flash anyway, press
-**Pause** straight after and send the logs — that writes the last ten seconds
-of viewpoint history, which separates "detected and let through" from "never
-detected".
+second, with `vr` in the name, says `runtime,<name>,<version>` once the native
+OpenXR path is up, naming the runtime it reached. An `error,` line there
+instead means that startup step failed. **If there is no second log at all**,
+the game is not on its OpenVR path and half the patch never loaded — see
+[Headsets and VR runtimes](#headsets-and-vr-runtimes). If you see a flash
+anyway, press **Pause** straight after and send the logs — that writes the last
+ten seconds of viewpoint history, which separates "detected and let through"
+from "never detected".
 
 ### Reporting a problem
 
@@ -254,9 +253,9 @@ afterwards.
 EDVR is two files that must be from the same build: the graphics half
 (`d3d11.dll`) and the VR half (`openvr_api.dll`). They agree on the size of a
 message the VR half sends at startup, and a half-updated install — one file
-new, the other old — fails that check on purpose rather than running at a
-size it did not ask for. Elite then reports `VRInitError_Init_Internal` and
-the native log (`edvr_logs\edvr_openxr_*.log`) carries
+new, the other old — fails that check on purpose rather than running at a size
+it did not ask for. Elite then reports `VRInitError_Init_Internal` and the
+native log (`edvr_logs\edvr_openxr_*.log`) carries
 `result,native_render_settings_query,-1` with no `openxr_render_size` lines
 after it. That `-1` says one side is stale, not which.
 
@@ -580,19 +579,19 @@ is not a fault, it has simply uninstalled EDVR. Copy the file back.
 ## What it does and does not do
 
 It loads alongside the game as a `d3d11.dll` proxy, forwarding every call to
-Windows' real `d3d11.dll`; the `openvr_api.dll` proxy forwards every call to
-the game's own copy.
+Windows' real `d3d11.dll`; `openvr_api.dll` is EDVR's own OpenXR runtime,
+implementing the OpenVR interfaces Elite calls and speaking OpenXR itself.
 
 **Most of the fixes never touch the game.** They change how frames are drawn
 from outside it: four small copies per frame so both eyes share an exposure
 value, one substituted argument to a screen-clearing call, one substituted copy
 of the panel's position if you change the distance, and — for the transition
 flash — reading a constant buffer the game has already filled and, on the rare
-frame drawn from the wrong place, not forwarding one call to SteamVR. That read
-is camera state, not gameplay state; it never writes to the buffer it reads,
-and the only action it can take is to not forward a call — or to hand SteamVR
-the game's own previous frame in its place: a copy EDVR keeps of the last frame
-it forwarded, always the game's content, never EDVR's.
+frame drawn from the wrong place, not submitting that frame to the OpenXR
+runtime. That read is camera state, not gameplay state; it never writes to the
+buffer it reads, and the only action it can take is to not submit a frame — or
+to hand the runtime the game's own previous frame in its place: a copy EDVR
+keeps of the last frame it submitted, always the game's content, never EDVR's.
 
 **The supersample resolve** is experimental and off by default: when the game
 submits a larger frame than the headset asked for, one GPU filter pass shrinks

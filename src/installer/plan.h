@@ -75,9 +75,9 @@ struct Survey {
     bool    haveOpenvrDir = false;
     DllInfo openvrCurrent;  // <openvr>\openvr_api.dll
     DllInfo openvrOrig;     // the renamed original, whatever it is called
-    // Normally openvr_api_orig.dll, but advanced.real_openvr_dll lets a manual
-    // install choose any name, and a folder set up that way must not be read
-    // as one where the original was lost.
+    // Always openvr_api_orig.dll; advanced.real_openvr_dll, which used to let
+    // a manual install choose another name, was retired with the forwarding
+    // proxy it configured for.
     std::wstring openvrOrigName;
 
     // A genuine OpenVR runtime found in one of our own backup folders, newest

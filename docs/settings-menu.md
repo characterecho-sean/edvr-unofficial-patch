@@ -257,12 +257,12 @@ choice of key that causes it.
 
 ### Fail-open, in five rules
 
-1. **The gate follows the draw.** The flag may be set only while the openvr
-   half has drawn the panel within the last few frames (the export bumps a
-   stamp; the d3d11 half checks it before setting the flag). A menu that
-   cannot be seen never takes the keyboard. If the openvr half is absent,
-   mismatched or not calling the door, the menu refuses to open and logs
-   once why.
+1. **The gate follows the draw.** The flag may be set only while the
+   native runtime has drawn the panel within the last few frames (the
+   export bumps a stamp; the d3d11 half checks it before setting the
+   flag). A menu that cannot be seen never takes the keyboard. If the
+   native runtime is absent, mismatched or not calling the door, the
+   menu refuses to open and logs once why.
 2. **Every thunk is budgeted.** A fault inside a door drops that door to
    pass-through for the session (the `guardedBudget` pattern), and the menu
    footer and the Status page say "keys shared with the game" from then on.
@@ -528,10 +528,11 @@ counts a press the game never saw. And `inputGatePrivate()`'s blind spot
 for the FIXED keys on a retired door: they keep acting on the flag alone,
 as before; only the adopted keys ask the stricter question.
 
-**Head-aim.** The head ray (from `headPose()`, the raw pose the openvr half
-publishes every frame) is intersected with the panel in its anchor frame;
-the row under it highlights, with hitboxes one full row pitch tall and a
-hysteresis before the highlight moves, so a resting head never flickers it.
+**Head-aim.** The head ray (from `headPose()`, the raw pose the native
+runtime publishes every frame) is intersected with the panel in its
+anchor frame; the row under it highlights, with hitboxes one full row
+pitch tall and a hysteresis before the highlight moves, so a resting
+head never flickers it.
 After a key press head-aim is parked until the ray leaves the highlighted
 row's hitbox by more than one row. `menu.aim = keys | head | both`.
 **Flown 2026-09-07: `both` fought the keys** -- a head that drifts back to
@@ -664,7 +665,8 @@ they were there (flown 2026-09-07).
    NVIDIA's pass per eye, the sharpen's timestamp pair, the pixel fraction
    under scale.
    UI/smoke depth and station motion follow the AA mode automatically.
-   Supersample filtering is on the Experimental page and its resolve defaults off.
+   Supersample resolve is on the Experimental page, off by default; it
+   has no effect yet on the native OpenXR runtime.
    At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
    its `ui:` line tagged `menu performance`), so the extra pages can be
    turned on from inside the headset; flipping it rebuilds the pages, and
@@ -679,15 +681,11 @@ they were there (flown 2026-09-07).
    - frame rate, frame time, the 1% low (the 99th-percentile frame time)
      and the max, over the last ten seconds, from EDVR's own
      Present-to-Present clock, ringed every frame;
-   - the app's GPU time and the compositor's, the CPU frame interval,
-     dropped frames (the last ten seconds and since launch) and the
-     reprojected and motion-smoothed shares, from **the compositor's own
-     frame timing** -- `IVRCompositor::GetFrameTiming`, slot 8 of every
-     generation this build knows, read once a frame at the WaitGetPoses
-     boundary by the openvr half (`src/openvr/frame_timing.cpp`) and
-     published on the channel; the first answer is validated before any
-     is believed, OpenComposite's refusal is recognised, and
-     `advanced.compositor_timing = off` turns the read off;
+   - the app's GPU time, the CPU frame interval and dropped frames (the
+     last ten seconds and since launch), from **the native OpenXR timing
+     source** -- read once a frame at the render-to-submit boundary and
+     published on the channel; `advanced.app_gpu_timing = on` by default
+     gates the read;
    - the display's rate and frame budget, and the eye size;
    - CPU load (system and Elite's share), RAM, VRAM through
      `IDXGIAdapter3::QueryVideoMemoryInfo`, and GPU load and temperature
@@ -799,8 +797,8 @@ they were there (flown 2026-09-07).
    here now and not on Status.
 4. **Status.** Read-only, the README's "checking it worked" as a live
    panel, and the page a support thread will ask for: EDVR's version and
-   the game build; the runtime under the proxy (Valve's SteamVR,
-   OpenComposite, or unknown, by the launch centre's export test); eye
+   the game build; the native OpenXR runtime's name, read from the
+   runtime's own instance properties; eye
    texture size and tangents; guard stage; temporal mode and whether
    NVIDIA's library loaded; the gate's state (which doors are armed, which
    the game has reached, keys private or shared); the **Elite keys** row
@@ -823,7 +821,7 @@ carries what EDVR did in it and what it cost, and the page and the log
 read the two together:
 
 - **Events**, ORed into the frame from wherever they happen, both halves
-  (`PerfEvent` in `perf_monitor.h`, the openvr half's crossing on the
+  (`PerfEvent` in `perf_monitor.h`, the native runtime's crossing on the
   channel): a reload with its duration, an ini write, a shader compile
   with its duration (every `shaderSwapCompile*`), NVIDIA's feature
   creation with its duration, a withhold, a resubmit, a census request, a
@@ -836,7 +834,7 @@ read the two together:
   the hook. Two clock reads per draw on a sample frame, one branch on the
   other fifteen.
 - **EDVR's GPU time at the door**: a timestamp pair per eye around every
-  pass the door runs (`edvrDoorGpuBegin` / `End`, exports the openvr half
+  pass the door runs (`edvrDoorGpuBegin` / `End`, exports the native runtime
   calls), never awaited, polled on later calls. This is the mod's whole
   submit-side GPU price in one number, beside the compositor's app GPU
   figure. What it does not cover: the ui_depth second draws and the
@@ -878,8 +876,7 @@ only by editing the file): a single-line readout with frames per second over
 the last second, then concise GPU and CPU labels averaged over 0.2 seconds.
 Native OpenXR uses application GPU segments and producer-thread CPU wall
 intervals, excluding known runtime and transfer waits. Missing measurements
-show `--`. The retained legacy path also shows dropped frames when available;
-its `thread` label identifies the CPU fallback when app stamps are absent.
+show `--`.
 The fixed reference raster preserves apparent size across eye resolutions,
 and `menu.text_degrees` controls its angular text size. See the
 [layout checks](performance-overlay-sizing-2026-09-15.md) and
@@ -967,14 +964,14 @@ Sean's addition, made a first-class mechanism rather than a badge:
   values of every restart key (the generated table says which). Any later
   parse -- a menu write, a hand edit, the installer -- diffs against that
   snapshot; a difference is a pending change. This also gives the config
-  audit a line it has always lacked: `edvr.ini: advanced.projection_edit
+  audit a line it has always lacked: `edvr.ini: <advanced key>
   changed on disk but is read at launch; the running value is still on`.
   That line ships with this work whether or not the menu is open.
 
 ## Placement and rendering
 
 **Anchor.** On summon, the d3d11 half reads the current raw head pose
-(`headPose()`, published by the openvr half before any EDVR offset touches
+(`headPose()`, published by the native runtime before any EDVR offset touches
 it), takes its look direction's yaw and pitch and builds the anchor from
 those with **no roll** -- upright in the world, so the panel's edges are
 level whatever tilt the head had at the summon (the first build latched
@@ -982,14 +979,14 @@ the whole pose, roll included, and a head cocked at F8 got a cocked menu;
 flown 2026-09-07) -- and publishes it on the channel; the panel sits
 `menu.distance` metres (default 1.4) along the anchor's forward, upright
 in the anchor frame, and does not move until recentred or re-summoned. At
-the door, the openvr half computes the per-eye transform exactly as
+the door, the native runtime computes the per-eye transform exactly as
 `theaterXform` does -- current-head vectors into anchor space, then the
 eye's ray origin with the eye's real lateral offset from
 `GetEyeToHeadTransform` rather than the theater's constant -- and hands it
 to the export. Unlike the theater, the game is fed the LIVE pose
 throughout, so the compositor's reprojection is correct for the panel and
 the frame alike; nothing here needs the theater's world-lock reasoning
-because nothing here lies to the runtime. Under `pose_hold` or the retired
+because nothing here lies to the runtime. Under the retired `pose_hold` or
 `shimmer_rest`, whatever pose the submit carries is the pose the export is
 given (gate G7).
 
@@ -1174,7 +1171,7 @@ way in stock) for anyone who prefers a chord.
   current panel and toast onto `outTex`. Bumps the "drawn" stamp the gate
   checks.
 
-**openvr half** (`compositor_hook.cpp`, the door lambda): reads the
+**native runtime** (EDVR's OpenXR runtime, the door lambda): reads the
 channel's menu flag and anchor, takes the shadow copy if the outgoing
 texture is the game's, computes `xf` per eye as the theater does with the
 real eye offset, calls the export, submits what came back. Publishes one

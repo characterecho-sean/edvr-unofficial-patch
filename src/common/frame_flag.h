@@ -403,12 +403,6 @@ bool menuVisible(float* alpha, uint32_t* stamp);
 void bumpMenuDrawn();
 uint32_t menuDrawnValue();
 
-// The runtime under the openvr proxy, for the Status page: 0 unknown or
-// unpublished, 1 Valve's SteamVR, 2 OpenComposite. Published once by the
-// openvr half after its launch-centre identification.
-void announceRuntimeKind(uint32_t kind);
-uint32_t runtimeKind();
-
 // THE COMPOSITOR'S FRAME TIMING (docs/settings-menu.md, the Monitor page):
 // what the runtime itself measured for a SETTLED frame -- the one two
 // compositor frames back, whose GPU timestamps have resolved (the most
