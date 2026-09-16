@@ -1552,6 +1552,11 @@ static void testLogBundle(const std::wstring& scratch) {
     writeAll(joinPath(logs, L"edvr_gfx_20260827_140000.log"), "the session that matters");
     writeAll(joinPath(logs, L"edvr_vr_20260827_140003.log"), "the session that matters");
     writeAll(joinPath(logs, L"edvr_openxr_20260827_140004_123_4567.log"), "the native session that matters");
+    // A second gfx log opened in the same second as another takes the native
+    // trace's _mmm_pid suffix. Its stamp must still be read off its name: by
+    // write time it would be the newest log by weeks, alone in its session,
+    // and the three above would be left out.
+    writeAll(joinPath(logs, L"edvr_gfx_20260827_140000_500_9.log"), "a second process, same second");
 
     const LogBundle bundle = collectLogs(dir, scratch);
     check(bundle.ok, "the bundle is written", bundle.error);
@@ -1563,6 +1568,8 @@ static void testLogBundle(const std::wstring& scratch) {
     check(bundleHas(names, "edvr_gfx_20260827_140000.log"), "the newest session's gfx log is in");
     check(bundleHas(names, "edvr_vr_20260827_140003.log"), "and its vr log");
     check(bundleHas(names, "edvr_openxr_20260827_140004_123_4567.log"), "and its native OpenXR log");
+    check(bundleHas(names, "edvr_gfx_20260827_140000_500_9.log"),
+          "and the same-second gfx log, dated by its name not its write time");
     check(!bundleHas(names, "edvr_gfx_20260101_100000.log"),
           "the previous session is left out");
     check(bundleHas(names, "edvr_breadcrumbs.txt"), "the breadcrumbs are in");

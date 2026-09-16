@@ -4,6 +4,7 @@
 #include "../../src/openxr/native_menu_client.h"
 #include "../../src/openxr/eye_capture.h"
 #include "../../src/openxr/immediate_executor.h"
+#include "../../src/common/system_d3d11.h"
 #include <openxr/openxr.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -25,23 +26,6 @@ class InlineExecutor final : public edvr::openxr::ImmediateExecutor {
 };
 
 namespace edvr { void perfMonitorNoteEvent(unsigned, double) {} }
-
-// The exe runs from build\ beside EDVR's own d3d11.dll, which an imported
-// D3D11CreateDevice would resolve to first: take the system module by full
-// path instead, so this rig never runs the proxy. Kept mapped for the whole
-// process.
-static decltype(&D3D11CreateDevice) systemCreateDevice() {
-    static const auto create = []() -> decltype(&D3D11CreateDevice) {
-        wchar_t dir[MAX_PATH]{};
-        const UINT length = GetSystemDirectoryW(dir, MAX_PATH);
-        if (!length || length >= MAX_PATH) return nullptr;
-        const HMODULE module = LoadLibraryW((std::wstring(dir) + L"\\d3d11.dll").c_str());
-        if (!module) return nullptr;
-        return reinterpret_cast<decltype(&D3D11CreateDevice)>(
-            GetProcAddress(module, "D3D11CreateDevice"));
-    }();
-    return create;
-}
 
 static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,
                        ID3D11Texture2D* src, std::vector<UINT>& out) {
@@ -102,7 +86,8 @@ int wmain(int argc, wchar_t** argv) {
     auto check = [&](bool ok, const char* name) {
         ++checks; if (!ok) { ++fails; std::printf("FAIL: %s\n", name); }
     };
-    const auto createDevice = systemCreateDevice();
+    // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto createDevice = edvr::systemD3D11CreateDevice();
     check(createDevice != nullptr, "system d3d11.dll");
     if (!createDevice) return 1;
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context; D3D_FEATURE_LEVEL feature{};

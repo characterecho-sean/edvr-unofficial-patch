@@ -2,6 +2,7 @@
 #include "../../src/d3d11/native_timing.h"
 #include "../../src/common/gpu_frame_protocol.h"
 #include "../../src/common/config.h"
+#include "../../src/common/system_d3d11.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -44,10 +45,8 @@ int wmain(int argc,wchar_t** argv){
     if(argc!=2)return 2;if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_timing_test: dry-run (no WARP device)");return 0;}if(std::wcscmp(argv[1],L"--self-test"))return 2;
     SetErrorMode(3);
     Checks c;ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>dc;D3D_FEATURE_LEVEL fl{};
-    wchar_t system[MAX_PATH]{};const auto len=GetSystemDirectoryW(system,MAX_PATH);
-    if(!len||len>=MAX_PATH)return 1;
-    const auto module=LoadLibraryW((std::wstring(system)+L"\\d3d11.dll").c_str());
-    const auto create=module?reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice")):nullptr;
+    const auto create=edvr::systemD3D11CreateDevice();
+    c.check(create!=nullptr,"System32 D3D11CreateDevice");if(!create)return 1;
     c.check(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,&fl,&dc)),"WARP device");if(!d)return 1;
     EdvrNativeTimingRequest r{sizeof(r)-1,EDVR_NATIVE_TIMING_VERSION_3,d.Get(),1};EdvrNativeTimingTable bad{sizeof(bad),EDVR_NATIVE_TIMING_VERSION_3};c.check(edvrAcquireNativeTiming(&r,&bad)==E_INVALIDARG,"wrong request size");
     r={sizeof(r),EDVR_NATIVE_TIMING_VERSION_3+1,d.Get(),1};c.check(edvrAcquireNativeTiming(&r,&bad)==E_INVALIDARG,"wrong request version");r={sizeof(r),EDVR_NATIVE_TIMING_VERSION_3,d.Get(),1};bad={sizeof(bad)-1,EDVR_NATIVE_TIMING_VERSION_3};c.check(edvrAcquireNativeTiming(&r,&bad)==E_INVALIDARG,"wrong table size");bad={sizeof(bad),EDVR_NATIVE_TIMING_VERSION_3+1};c.check(edvrAcquireNativeTiming(&r,&bad)==E_INVALIDARG,"wrong table version");

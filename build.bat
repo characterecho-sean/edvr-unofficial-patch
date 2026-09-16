@@ -614,32 +614,30 @@ REM launches and is printed last, so the tail of the log names it.
 REM build\rig_times.json remembers each rig's duration so the longest start
 REM first next time; delete it freely.
 REM
-REM PROXY_LOADERS (--serial) are the rigs whose test exe loads a proxy DLL out
-REM of build\ -- on purpose, or (openxr_native_tests) through an imported
-REM D3D11CreateDevice, which an exe in build\ resolves to build\d3d11.dll
-REM before System32's. Every such process logs to build\edvr_logs, where the
-REM proxy keeps its crash sentinels (<hook>.armed, created at hook install and
-REM deleted once the hook has proven itself): a proxy that finds another
-REM process's sentinel still armed takes it for its own crash, stands down, and
-REM that rig fails. So these run one at a time among themselves, beside
-REM everything else. A rig that only wants a D3D11 device must not import
-REM D3D11CreateDevice but take the export from System32's d3d11.dll by full
-REM path and link without d3d11.lib, as the WARP rigs do. A rig belongs in the
-REM pool only if its exes, run by hand, never put a *.armed file in
-REM build\edvr_logs; a log file is not the test, the stereo rig leaves none.
+REM Every process a rig runs -- its test exes, and the proxy DLLs some of them
+REM load out of build\ on purpose -- logs under build\edvr_logs\<label>, a
+REM directory of the rig's own: --exe-dir has the runner hand each child
+REM EDVR_LOG_DIR (src\common\config.cpp), and a proxy keeps its crash
+REM sentinels (<hook>.armed, created at hook install and deleted once the hook
+REM has proven itself) in its log directory. Before that every proxy a rig
+REM loaded logged to build\edvr_logs, a proxy that found another rig's
+REM sentinel still armed took it for its own crash and stood down, and the
+REM proxy-loading rigs had to run one at a time (run_jobs.py --serial, kept
+REM for a rig whose processes share state --exe-dir cannot separate; none
+REM does now). A rig that only wants a D3D11 device takes System32's export
+REM through src\common\system_d3d11.h and links without d3d11.lib: an
+REM imported D3D11CreateDevice resolves, for an exe in build\, to
+REM build\d3d11.dll before System32's, and the test runs under EDVR's hooks by
+REM accident.
 REM The --quiet rigs hold wall-clock intervals to tight bounds; they run alone,
-REM after the rest, with the whole machine.
-REM Only a rig's test runs need the restriction, so every rig in either group
-REM is split (see the rig area below): its compiles run in the pool like any
-REM other rig's and only its runs wait their turn.
-set "PROXY_LOADERS=native_device_test,openxr_binding_test,openxr_proxy_state_test,openxr_present_test"
-set "PROXY_LOADERS=%PROXY_LOADERS%,openxr_shutdown_test,openxr_module_test,openvr_smoke"
-set "PROXY_LOADERS=%PROXY_LOADERS%,openxr_native_tests"
+REM after the rest, with the whole machine. Only their test runs need that, so
+REM each is split (see the rig area below): its compiles run in the pool like
+REM any other rig's and only its runs wait their turn.
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
-    --serial %PROXY_LOADERS% --quiet native_timing_test,gpu_timing_test,vtable_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,vtable_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
 echo [edvr] === config contract ===
@@ -694,7 +692,7 @@ REM  same time as one another, so a rig must not depend on another rig's
 REM  output, must not share an obj directory, and must not write a file
 REM  another rig reads. The DLLs a rig copies are the main flow's, above.
 REM
-REM  A rig named in --serial or --quiet (see PROXY_LOADERS above) is written
+REM  A rig named in --quiet (or --serial, see tools\run_jobs.py) is written
 REM  in two steps so that only its test runs are held back:
 REM      :rig_<label>
 REM      if "%EDVR_RIG_STEP%"=="run" goto <label>_run
@@ -825,7 +823,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & exit /b 1 )
 "%BUILD%\native_frame_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_frame_test.exe" --self-test || exit /b 1
@@ -838,7 +836,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_fss\\" /Fe"%BUILD%\native_fss_test.exe" ^
     "tools\native_fss_test\native_fss_test.cpp" "src\d3d11\native_fss.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native FSS provider test build failed & exit /b 1 )
 "%BUILD%\native_fss_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_fss_test.exe" --self-test || exit /b 1
@@ -851,7 +849,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_fss_gpu\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
     "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\d3d11\fss_heal.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib d3dcompiler.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit /b 1 )
 "%BUILD%\native_fss_gpu_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_fss_gpu_test.exe" --self-test || exit /b 1
@@ -876,7 +874,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
     "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native temporal test build failed & exit /b 1 )
 "%BUILD%\native_temporal_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_temporal_test.exe" --self-test || exit /b 1
@@ -897,7 +895,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_sharpen_test\\" /Fe"%BUILD%\native_sharpen_test.exe" ^
     "tools\native_sharpen_test\native_sharpen_test.cpp" "src\d3d11\native_sharpen.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native sharpen contract test build failed & exit /b 1 )
 "%BUILD%\native_sharpen_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_sharpen_test.exe" --self-test || exit /b 1
@@ -931,7 +929,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_timing_test.exe" ^
     "tools\native_timing_test\native_timing_test.cpp" "src\d3d11\native_timing.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native timing contract test build failed & exit /b 1 )
 
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
@@ -954,7 +952,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_device_gpu_test.exe" ^
     "tools\native_device_gpu_test\native_device_gpu_test.cpp" ^
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO kernel32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native device GPU test build failed & exit /b 1 )
 if "%EDVR_RIG_STEP%"=="build" exit /b 0
 :native_timing_test_run
@@ -1456,11 +1454,10 @@ for %%T in (session projection geometry head gate frame pose origin reference sp
 exit /b 0
 
 :rig_openxr_native_tests
-if "%EDVR_RIG_STEP%"=="run" goto openxr_native_tests_run
 REM Standalone native-session harness and fake-XR/WARP stereo renderer.
 REM The build runs only desktop fixtures; real headset sessions are explicit.
-REM Both exes import D3D11CreateDevice, so run from build\ they load the proxy
-REM and arm its sentinel (PROXY_LOADERS above): the runs wait for --serial.
+REM Both take System32's d3d11 through src\common\system_d3d11.h rather than
+REM importing D3D11CreateDevice, which from build\ would load the proxy.
 if not exist "%OBJ%\openxr_native_tests" mkdir "%OBJ%\openxr_native_tests"
 for %%T in (native stereo) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
@@ -1472,11 +1469,9 @@ for %%T in (native stereo) do (
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
         "src\common\frame_flag.cpp" ^
-        /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+        /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
     if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_native_tests_run
 for %%T in (native stereo) do (
     "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
     "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
@@ -1508,21 +1503,17 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR skybox capture test build failed & e
 exit /b 0
 
 :rig_native_device_test
-if "%EDVR_RIG_STEP%"=="run" goto native_device_test_run
 if not exist "%OBJ%\native_device_test" mkdir "%OBJ%\native_device_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\native_device_test\\" /Fe"%BUILD%\native_device_test.exe" ^
     "tools\openxr_native_test\native_device_test.cpp" /link /INCREMENTAL:NO d3d11.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native device test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:native_device_test_run
 "%BUILD%\native_device_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_device_test.exe" --self-test || exit /b 1
 python tools\run_openxr_native.py --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_binding_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_binding_test_run
 if not exist "%OBJ%\openxr_binding_test" mkdir "%OBJ%\openxr_binding_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_binding_test\\" /Fe"%BUILD%\openxr_binding_test.exe" ^
@@ -1530,8 +1521,6 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     "src\openxr\published_session.cpp" "src\common\frame_flag.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR binding test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_binding_test_run
 "%BUILD%\openxr_binding_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --self-test || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --published-proxy "%BUILD%\d3d11.dll" || exit /b 1
@@ -1576,7 +1565,6 @@ if errorlevel 1 ( echo [edvr] ERROR: Elite Oculus profile test build failed & ex
 exit /b 0
 
 :rig_openxr_proxy_state_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_proxy_state_test_run
 if not exist "%OBJ%\openxr_proxy_state_test" mkdir "%OBJ%\openxr_proxy_state_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_proxy_state_test\\" /Fe"%BUILD%\openxr_proxy_state_test.exe" ^
@@ -1585,14 +1573,11 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     "src\openxr\shared_texture_transfer.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR proxy state test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_proxy_state_test_run
 "%BUILD%\openxr_proxy_state_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_proxy_state_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_present_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_present_test_run
 if not exist "%OBJ%\openxr_present_test" mkdir "%OBJ%\openxr_present_test"
 REM Actual owned-swapchain Present hook, foreign Init caller and private work.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
@@ -1600,8 +1585,6 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     "tools\openxr_present_test\openxr_present_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR Present test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_present_test_run
 "%BUILD%\openxr_present_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_present_test.exe" --self-test || exit /b 1
 python "tools\test_openxr_transport.py" --self-test || exit /b 1
@@ -1610,7 +1593,6 @@ python "tools\test_openxr_transport.py" || exit /b 1
 exit /b 0
 
 :rig_openxr_shutdown_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_shutdown_test_run
 if not exist "%OBJ%\openxr_shutdown_test" mkdir "%OBJ%\openxr_shutdown_test"
 REM Stopped application Present: real graphics callback and native stop coordinator.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
@@ -1618,8 +1600,6 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     "tools\openxr_shutdown_test\openxr_shutdown_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR stopped-Present shutdown test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_shutdown_test_run
 "%BUILD%\openxr_shutdown_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_shutdown_test.exe" --self-test || exit /b 1
 exit /b 0
@@ -1698,15 +1678,12 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR export test build failed & exit /b 1
 exit /b 0
 
 :rig_openxr_module_test
-if "%EDVR_RIG_STEP%"=="run" goto openxr_module_test_run
 if not exist "%OBJ%\openxr_module_test" mkdir "%OBJ%\openxr_module_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\openxr_module_test\\" /Fe"%BUILD%\openxr_module_test.exe" ^
     "tools\openxr_module_test\openxr_module_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module test build failed & exit /b 1 )
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openxr_module_test_run
 "%BUILD%\openxr_module_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test-bootstrap || exit /b 1
@@ -1795,7 +1772,6 @@ if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & 
 exit /b 0
 
 :rig_openvr_smoke
-if "%EDVR_RIG_STEP%"=="run" goto openvr_smoke_run
 if not exist "%OBJ%\openvrsmoke" mkdir "%OBJ%\openvrsmoke"
 REM Links the shared guard, and what guard.cpp needs, because the harness now
 REM also exercises the crash sentinel -- shared code whose two bugs were a
@@ -1813,8 +1789,6 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib d3d11.lib
 if errorlevel 1 ( echo [edvr] ERROR: openvr_smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\openvr_smoke.exe
-if "%EDVR_RIG_STEP%"=="build" exit /b 0
-:openvr_smoke_run
 
 REM Run it. A startup test nothing runs is a startup test that rots -- the
 REM fakechain harness exists because the loader-lock crash shipped once, and the

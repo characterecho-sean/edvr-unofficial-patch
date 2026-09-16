@@ -10,6 +10,7 @@
 #include "../../src/d3d11/gpu_disjoint_d3d11.h"
 #include "../../src/d3d11/game_query_probe.h"
 #include "../../src/d3d11/game_exit_probe.h"
+#include "../../src/common/system_d3d11.h"
 #include <thread>
 
 using Microsoft::WRL::ComPtr;
@@ -25,24 +26,8 @@ void check(bool ok, const char* why) {
 void hr(HRESULT value) { check(value == S_OK, "D3D operation failed"); }
 
 struct Runtime {
-    HMODULE module = nullptr;
-    decltype(&D3D11CreateDevice) create = nullptr;
-    Runtime() {
-        wchar_t systemDir[MAX_PATH]{};
-        const UINT length = GetSystemDirectoryW(systemDir, MAX_PATH);
-        check(length && length < MAX_PATH, "System32 path");
-        const std::wstring path = std::wstring(systemDir) + L"\\d3d11.dll";
-        module = LoadLibraryW(path.c_str());
-        check(module != nullptr, "absolute System32 d3d11.dll");
-        create = reinterpret_cast<decltype(create)>(
-            GetProcAddress(module, "D3D11CreateDevice"));
-        if (!create) {
-            FreeLibrary(module);
-            module = nullptr;
-            throw std::runtime_error("typed D3D11CreateDevice export");
-        }
-    }
-    ~Runtime() { if (module) FreeLibrary(module); }
+    decltype(&D3D11CreateDevice) create = systemD3D11CreateDevice();
+    Runtime() { check(create != nullptr, "System32 D3D11CreateDevice"); }
 };
 
 struct Device {

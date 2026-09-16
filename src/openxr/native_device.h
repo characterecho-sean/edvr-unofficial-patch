@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 #include <vector>
 #include <string>
+#include "../common/system_d3d11.h"
 
 namespace edvr::openxr {
 class NativeDevice {
@@ -27,8 +28,11 @@ class NativeDevice {
     if(!matchesLuid(desc.AdapterLuid,required)||device->GetFeatureLevel()<minimum)return E_FAIL;
     return device->GetDeviceRemovedReason();
   }
+  // The default create function is System32's, never an import: naming
+  // D3D11CreateDevice here would bind every host of this header to whichever
+  // d3d11.dll sits beside it, and beside the game that is EDVR's own proxy.
   HRESULT initialize(const LUID& required,D3D_FEATURE_LEVEL minimum,
-                     decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice) {
+                     decltype(&D3D11CreateDevice) createDevice=systemD3D11CreateDevice()) {
     reset();if(!createDevice)return E_INVALIDARG;
     auto levels=featureLevels(minimum);if(levels.empty())return E_INVALIDARG;
     Microsoft::WRL::ComPtr<IDXGIFactory1> factory;HRESULT hr=CreateDXGIFactory1(IID_PPV_ARGS(&factory));if(FAILED(hr))return hr;
@@ -61,38 +65,25 @@ class NativeDevice {
     device_=device;feature_=device->GetFeatureLevel();return S_OK;
   }
   // Bypass the application's proxy export when creating the XR-owned device.
-  // Take the System32 module that is already mapped, found by full path with
-  // GetModuleHandleExW rather than LoadLibraryExW: another d3d11 mod chained
-  // behind EDVR (3Dmigoto/EDHM with load_library_redirect=2) hooks
-  // LoadLibraryExW and answers the System32 path with its own game-directory
-  // proxy, which the identity check below then rightly rejects and no XR device
-  // is ever created. The game's d3d11 proxy keeps the genuine module mapped for
-  // the life of the process, so the load fallback only serves bare test rigs.
-  // Keep this explicit System32 module reference through device/context release.
+  // openSystemD3D11 (common/system_d3d11.h) takes the System32 module that is
+  // already mapped, found by full path with GetModuleHandleExW rather than
+  // LoadLibraryExW: another d3d11 mod chained behind EDVR (3Dmigoto/EDHM with
+  // load_library_redirect=2) hooks LoadLibraryExW and answers the System32
+  // path with its own game-directory proxy, which the identity check then
+  // rightly rejects and no XR device is ever created. The game's d3d11 proxy
+  // keeps the genuine module mapped for the life of the process, so the load
+  // fallback only serves bare test rigs. Keep this explicit System32 module
+  // reference through device/context release.
   HRESULT initializeSeparate(const LUID& required,D3D_FEATURE_LEVEL minimum) {
     separateRoute_="none";separateModule_.clear();
-    wchar_t directory[MAX_PATH]{};
-    const UINT length=GetSystemDirectoryW(directory,MAX_PATH);
-    if(!length||length>=MAX_PATH)return E_FAIL;
-    const std::wstring path=std::wstring(directory,length)+L"\\d3d11.dll";
     struct ModuleReference {
       HMODULE value=nullptr;
       ~ModuleReference(){if(value)FreeLibrary(value);}
     } module;
-    // Flags 0 (not UNCHANGED_REFCOUNT) adds a reference, balanced by FreeLibrary.
-    if(GetModuleHandleExW(0,path.c_str(),&module.value)&&module.value) {
-      separateRoute_="mapped";
-    } else {
-      module.value=LoadLibraryExW(path.c_str(),nullptr,
-          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-      if(!module.value)return HRESULT_FROM_WIN32(GetLastError());
-      separateRoute_="loaded";
-    }
-    wchar_t loaded[MAX_PATH]{};
-    const DWORD actual=GetModuleFileNameW(module.value,loaded,MAX_PATH);
-    if(!actual||actual>=MAX_PATH)return E_ACCESSDENIED;
-    separateModule_=utf8(loaded,actual);
-    if(_wcsicmp(loaded,path.c_str()))return E_ACCESSDENIED;
+    const SystemD3D11 system=openSystemD3D11();
+    module.value=system.module;separateRoute_=system.route;
+    if(!system.path.empty())separateModule_=utf8(system.path.c_str(),system.path.size());
+    if(FAILED(system.result))return system.result;
     const auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module.value,"D3D11CreateDevice"));
     const HRESULT result=initialize(required,minimum,create);
     if(FAILED(result))return result;

@@ -9,15 +9,23 @@ is held until it finishes and printed in one piece under a banner, so the log
 still reads as if the rigs had run one after another.
 
   python tools\\run_jobs.py --script build.bat [--jobs N] [--mp N]
-                           [--serial a,b,c]... [--quiet d,e]
+                           [--exe-dir build] [--serial a,b,c]... [--quiet d,e]
                            [--times build\\rig_times.json] [--dry-run]
   python tools\\run_jobs.py --self-test
 
+--exe-dir is the directory the rigs' test exes are built into. Every process
+a rig starts from there is told, through EDVR_LOG_DIR and EDVR_LOG_DIR_FOR
+(src\\common\\config.cpp), to log under <exe-dir>\\edvr_logs\\<label> instead
+of <exe-dir>\\edvr_logs: the proxy DLLs a test loads keep their logs and
+crash sentinels there, so two rigs' proxies never read each other's sentinels
+and stand down. A child a rig stages in a private directory keeps its own
+default, which the rigs that read such a child's log rely on.
+
 --serial names rigs that must not run at the same time as one another, though
-any of them may run beside the rest: rigs whose test processes load the same
-proxy DLL from the same directory, say, and so share its crash sentinels. Each
---serial is one such group; the group is scheduled as a chain, started early
-because its members can only follow one another.
+any of them may run beside the rest: rigs whose test processes share state
+that --exe-dir cannot separate. Each --serial is one such group; the group is
+scheduled as a chain, started early because its members can only follow one
+another.
 
 --quiet names rigs that must not share the machine with anything: timing tests
 that compare wall-clock intervals against tight bounds. They run one at a time
@@ -193,15 +201,31 @@ def child_command(script, label):
     return 'cmd.exe /d /c ""%s" --rig %s"' % (script, label)
 
 
-def child_env(env, job):
-    """The child's environment: the runner's, plus the step for a split rig."""
-    return env if job.step is None else dict(env, EDVR_RIG_STEP=job.step)
+def log_dir(exe_dir, job):
+    """Where the processes a rig starts from exe_dir log: a directory of the
+    rig's own, so no two rigs' proxies share crash sentinels."""
+    return os.path.join(exe_dir, "edvr_logs", job.rig.label)
 
 
-def spawner(script, root, env):
+def child_env(env, job, exe_dir=None):
+    """The child's environment: the runner's, plus the step for a split rig
+    and, given --exe-dir, the log directory for the rig's processes there."""
+    child = dict(env)
+    if job.step is not None:
+        child["EDVR_RIG_STEP"] = job.step
+    if exe_dir is not None:
+        child["EDVR_LOG_DIR"] = log_dir(exe_dir, job)
+        child["EDVR_LOG_DIR_FOR"] = exe_dir
+    return child
+
+
+def spawner(script, root, env, exe_dir=None):
     def spawn(job):
+        if exe_dir is not None:
+            # Log::open and the sentinel create one level; this is two.
+            os.makedirs(log_dir(exe_dir, job), exist_ok=True)
         completed = subprocess.run(child_command(script, job.rig.label), cwd=str(root),
-                                   env=child_env(env, job), stdin=subprocess.DEVNULL,
+                                   env=child_env(env, job, exe_dir), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         return completed.returncode, completed.stdout
     return spawn
@@ -321,7 +345,7 @@ def describe(pool, quiet, times, serial=()):
 
 
 def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=time.monotonic,
-        serial=()):
+        serial=(), exe_dir=None):
     text = script.read_text(encoding="utf-8", errors="replace")
     rigs = parse_rigs(text)
     times = load_times(times_path)
@@ -330,6 +354,8 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
     emit(out, "[edvr] %d rigs from %s: %d jobs in the pool, %d at a time (CL=%s), %d quiet\n"
          % (len(rigs), script.name, len(pool), jobs, mp_flag, len(later)))
     emit(out, describe(pool, later, times, serial))
+    if exe_dir is not None:
+        emit(out, "[edvr] each rig's processes log under %s\n" % os.path.join(exe_dir, "edvr_logs", "<rig>"))
     out.flush()
     if dry_run:
         emit(out, "[edvr] dry run: wrote nothing.\n")
@@ -339,9 +365,9 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
     if spawn is None:
         env = dict(os.environ)
         env["CL"] = mp_flag
-        spawn = spawner(script, script.parent, env)
+        spawn = spawner(script, script.parent, env, exe_dir)
         # A quiet rig has the machine to itself, so its compiles may use every core.
-        quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"))
+        quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"), exe_dir)
     started = clock()
     results, failures = run_group(pool, jobs, spawn, out, clock)
     pool_seconds = clock() - started
@@ -488,6 +514,15 @@ def self_test():
     check(child_env(env, Job(beta, "run")) == {"CL": "/MP4", "EDVR_RIG_STEP": "run"}
           and child_env(env, Job(beta, "build"))["EDVR_RIG_STEP"] == "build",
           "a step's child is told which step it is")
+    exe_dir = os.path.join("C:" + os.sep, "repo", "build")
+    with_logs = child_env(env, Job(beta, "run"), exe_dir)
+    check(with_logs["EDVR_LOG_DIR"] == os.path.join(exe_dir, "edvr_logs", "beta")
+          and with_logs["EDVR_LOG_DIR_FOR"] == exe_dir and with_logs["EDVR_RIG_STEP"] == "run"
+          and "EDVR_LOG_DIR" not in child_env(env, Job(beta, "run")),
+          "given --exe-dir, a child's processes there get the rig's own log directory: %r" % with_logs)
+    check(child_env(env, Job(alpha), exe_dir)["EDVR_LOG_DIR"] == os.path.join(exe_dir, "edvr_logs", "alpha")
+          and "EDVR_RIG_STEP" not in child_env(env, Job(alpha), exe_dir),
+          "a whole rig's child gets the log directory too, and still no step")
 
     # plan() marks the rigs with their serial groups; the direct run_group
     # tests below want none.
@@ -567,6 +602,15 @@ def self_test():
               "dry run plans without writing: %r" % out.getvalue())
         check(b"gamma~5s alpha~3s beta~3s" in out.getvalue(), "dry run prints the plan: %r" % out.getvalue())
         out = io.BytesIO()
+        code = run(script, 3, 2, ["timing"], times, True, out, exe_dir=scratch)
+        check(code == 0 and not os.path.exists(os.path.join(scratch, "edvr_logs"))
+              and os.path.join(scratch, "edvr_logs", "<rig>").encode() in out.getvalue(),
+              "a dry run names the rigs' log directories and makes none: %r" % out.getvalue())
+        if os.name == "nt":
+            spawner(script, script.parent, dict(os.environ), scratch)(Job(timing))
+            check(os.path.isdir(os.path.join(scratch, "edvr_logs", "timing")),
+                  "a spawn makes the rig's log directory, both levels of it")
+        out = io.BytesIO()
         code = run(script, 3, 2, ["timing"], times, True, out, serial=[["beta", "gamma"]])
         check(code == 0 and not times.exists()
               and b"one at a time among themselves: beta(run) gamma" in out.getvalue()
@@ -636,6 +680,10 @@ def main(argv=None):
                         help="the /MP count each parallel rig's compiles get (default: 4, so "
                              "--jobs rigs start at most four compilers each; every core when "
                              "--jobs is 1). A --quiet rig runs alone and always gets every core.")
+    parser.add_argument("--exe-dir", type=Path, default=None, metavar="DIR",
+                        help="the directory the test exes are built into; each rig's processes "
+                             "from there log under DIR\\edvr_logs\\<rig> (EDVR_LOG_DIR and "
+                             "EDVR_LOG_DIR_FOR, read by src\\common\\config.cpp)")
     parser.add_argument("--serial", action="append", default=[], metavar="LABELS",
                         help="comma-separated rigs that never run at the same time as one "
                              "another (repeat for another such group)")
@@ -653,9 +701,16 @@ def main(argv=None):
     mp = args.mp if args.mp is not None else (0 if args.jobs == 1 else 4)
     quiet = [label for label in args.quiet.split(",") if label]
     serial = [[label for label in group.split(",") if label] for group in args.serial]
+    exe_dir = None
+    if args.exe_dir is not None:
+        if not args.exe_dir.is_dir():
+            parser.error("--exe-dir must name an existing directory")
+        # Absolute but not resolved: the exes compare it with the path they
+        # were started by, and a junction resolved away would never match.
+        exe_dir = os.path.abspath(str(args.exe_dir))
     try:
         return run(args.script.resolve(), args.jobs, mp, quiet, args.times, args.dry_run,
-                   sys.stdout.buffer, serial=serial)
+                   sys.stdout.buffer, serial=serial, exe_dir=exe_dir)
     except ValueError as error:
         print("[edvr] ERROR: %s" % error)
         return 1

@@ -10,6 +10,7 @@
 #include "../../src/common/native_sharpen.h"
 #include "../../src/common/config.h"
 #include "../../src/openxr/native_sharpen_client.h"
+#include "../../src/common/system_d3d11.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeSharpen")
 using Microsoft::WRL::ComPtr;
 unsigned checks=0, failures=0, calls=0, lastEye=0;
@@ -28,11 +29,8 @@ struct Device {
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   Device() {
-    wchar_t system[MAX_PATH]{};
-    require(GetSystemDirectoryW(system,MAX_PATH)!=0,"system directory");
-    auto module=LoadLibraryW((std::wstring(system)+L"\\d3d11.dll").c_str());
-    require(module!=nullptr,"system D3D11 loads");
-    auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(module,"D3D11CreateDevice"));
+    auto create=edvr::systemD3D11CreateDevice();
+    require(create!=nullptr,"system D3D11 loads");
     D3D_FEATURE_LEVEL level{};
     require(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,
         D3D11_SDK_VERSION,&device,&level,&context)),"WARP device");

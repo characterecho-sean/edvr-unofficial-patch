@@ -10,6 +10,7 @@
 #include <vector>
 #include "../../src/d3d11/gpu_span_d3d11.h"
 #include "../../src/d3d11/gpu_disjoint_d3d11.h"
+#include "../../src/common/system_d3d11.h"
 using Microsoft::WRL::ComPtr;
 using namespace edvr;
 namespace {
@@ -17,17 +18,8 @@ unsigned checks=0;
 void check(bool ok,const char* why){++checks;if(!ok)throw std::runtime_error(why);}
 void hr(HRESULT result){check(result==S_OK,"D3D operation failed");}
 struct Runtime {
-    HMODULE module=nullptr;
-    decltype(&D3D11CreateDevice) create=nullptr;
-    Runtime(){
-        wchar_t dir[MAX_PATH]{};const UINT n=GetSystemDirectoryW(dir,MAX_PATH);
-        check(n&&n<MAX_PATH,"system directory");
-        const std::wstring path=std::wstring(dir)+L"\\d3d11.dll";
-        module=LoadLibraryW(path.c_str());check(module!=nullptr,"system D3D11 module");
-        create=reinterpret_cast<decltype(create)>(GetProcAddress(module,"D3D11CreateDevice"));
-        check(create!=nullptr,"typed D3D11CreateDevice");
-    }
-    ~Runtime(){if(module)FreeLibrary(module);}
+    decltype(&D3D11CreateDevice) create=systemD3D11CreateDevice();
+    Runtime(){check(create!=nullptr,"System32 D3D11CreateDevice");}
 };
 struct Device {
     ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> ctx;

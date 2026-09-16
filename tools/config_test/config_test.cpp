@@ -24,6 +24,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <string>
 
 #include "../../src/common/config.h"
@@ -265,6 +266,56 @@ int main(int argc, char** argv) {
                       "a real old-line choice still follows the move");
         }
         Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+
+        // --- the log directory, and the environment's say over it ----------
+        //
+        // build.bat's test runner gives each rig's proxies their own log
+        // directory through EDVR_LOG_DIR, scoped by EDVR_LOG_DIR_FOR to the
+        // exes in build\, so two rigs' proxies never share crash sentinels.
+        // The scope matters: rigs that stage children in private directories
+        // read those children's exe-relative logs, and the runner's variables
+        // reach the children too. This process runs under those variables
+        // itself, so each case sets both and the originals are put back.
+        {
+            const std::wstring exeDir = executableDirectory();
+            const std::wstring exeDefault = exeDir + L"\\edvr_logs";
+            const std::wstring moved = scratch + L"\\moved_logs";
+            wchar_t savedDir[MAX_PATH]{}, savedFor[MAX_PATH]{};
+            const bool hadDir = GetEnvironmentVariableW(L"EDVR_LOG_DIR", savedDir, MAX_PATH) != 0;
+            const bool hadFor = GetEnvironmentVariableW(L"EDVR_LOG_DIR_FOR", savedFor, MAX_PATH) != 0;
+            auto expectLogDir = [&](const wchar_t* dir, const wchar_t* onlyFor,
+                                    const std::wstring& want, const char* what) {
+                SetEnvironmentVariableW(L"EDVR_LOG_DIR", dir);
+                SetEnvironmentVariableW(L"EDVR_LOG_DIR_FOR", onlyFor);
+                Config::get().init(scratch);
+                const std::wstring& got = Config::get().logDir();
+                if (_wcsicmp(got.c_str(), want.c_str()) == 0) { ok(what); return; }
+                std::string detail = "log dir is ";
+                for (wchar_t c : got) detail.push_back(static_cast<char>(c));
+                fail(what, detail);
+            };
+            std::wstring upperExeDir = exeDir;
+            for (wchar_t& c : upperExeDir) c = static_cast<wchar_t>(towupper(c));
+            if (!writeIni(scratch, "[fix]\r\nblack_void = 1\r\n")) {
+                fail("log dir scratch ini", "could not write it");
+            } else {
+                expectLogDir(nullptr, nullptr, exeDefault, "without log.dir the log goes beside the exe");
+                expectLogDir(moved.c_str(), nullptr, moved, "EDVR_LOG_DIR alone moves the default anywhere");
+                expectLogDir(moved.c_str(), scratch.c_str(), exeDefault,
+                             "EDVR_LOG_DIR_FOR naming another directory leaves this exe's default alone");
+                expectLogDir(moved.c_str(), upperExeDir.c_str(), moved,
+                             "EDVR_LOG_DIR_FOR naming the exe's directory, any case, moves it");
+                expectLogDir(L"", upperExeDir.c_str(), exeDefault, "an empty EDVR_LOG_DIR moves nothing");
+            }
+            if (!writeIni(scratch, "[log]\r\ndir = C:\\elsewhere\\logs\r\n")) {
+                fail("log.dir scratch ini", "could not write it");
+            } else {
+                expectLogDir(moved.c_str(), nullptr, L"C:\\elsewhere\\logs",
+                             "an explicit log.dir wins over the environment");
+            }
+            SetEnvironmentVariableW(L"EDVR_LOG_DIR", hadDir ? savedDir : nullptr);
+            SetEnvironmentVariableW(L"EDVR_LOG_DIR_FOR", hadFor ? savedFor : nullptr);
+        }
     }
 
     // --- the log's buffer, and that a lost line SAYS it was lost -----------

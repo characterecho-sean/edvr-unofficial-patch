@@ -1557,7 +1557,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;
     startupSteps.instance=stepMs(step);step=StepClock::now();
-    decltype(&D3D11CreateDevice) createDevice=&D3D11CreateDevice;
+    // Without a provider or proxy (bare test rigs) the device comes from
+    // System32's d3d11, never from an import, which beside the game or in
+    // build\ would bind to EDVR's own proxy.
+    decltype(&D3D11CreateDevice) createDevice=systemD3D11CreateDevice();
     if(options.graphicsProvider || !options.graphicsProxy.empty()) {
       if(options.graphicsProvider && !externalDevice)
         return result("paired_graphics_device_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
