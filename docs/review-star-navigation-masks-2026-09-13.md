@@ -2,52 +2,50 @@
 
 ## Status
 
-Updated 2026-09-16 (evening) on taking the arc over from the Codex worktree
-c009, after reading the newest Steam flight and its eye dump. The three-file
-format-9/11 change was built as `v0.17.0-rc.2-39-ge4b923a-dirty` (PE
-`6AAAEE18`), installed to Steam and flown at 13:37 (gfx log
-`edvr_gfx_20260916_133757.log`). It got past the format-9 refusal; the route
-was refused 6 ms later by the next exact contract, `panel vertex buffer
-contract changed`, on the same 8121/A296 draw (13:47:35.683), and latched off
-before eye dump `134857` (frame 18586, DLSS Performance 1695x1614 to
-3390x3228). That is the tenth narrow blocker in four days, and the active
-route has still never rendered a target label in the headset.
+Updated 2026-09-16 (night). Sean chose A. The mask's rule is fixed on branch
+claude/star-corona-ui-smearing-d1d2ae, built clean, and installed to Steam
+for a confirmation flight (numbers and the brief in the night entry).
 
-Where the mask comes from, measured on dumps `131013` and `134857` at the
-label (output pixels, luma 0..255; method and tables in the evening entry):
-- the raw frame handed to NVIDIA (the C crops) has no darkening at the label;
-- NVIDIA's output before EDVR's UI resolve (`DlssBeforeUi`) has no polygon
-  either: it sits +3..+5 luma above raw uniformly around the label;
-- the final frame is -4.2 luma below `DlssBeforeUi` inside one footprint and
-  -0.1 outside it, so EDVR's post-DLSS UI resolve adds the mask;
-- that footprint is the alpha channel of `UiPrevious`/`UiNext` (Jaccard 0.77
-  and 0.78 on 131013, 0.73 on 134857), not `UiEdits` (0.00) and not any fixed
-  dilation of the class-1 coverage (0.40 at best); their RGB is zero there.
-The dark band on the star's limb is a separate effect: it is already present
-in `DlssBeforeUi`, on the class-3 (smoke) region the corona is filed under.
+What was measured (Steam dumps 131013 and 134857, no flight):
+- a numpy port of `kUiResolve` reproduces `L0` to 0.076/255 and 0.002/255
+  mean, bit-exact on inactive texels, and `UiNext.a` to 99.7% and 99.9%;
+- NVIDIA's output leaves the 2x2 raw range on clean corona pixels by a
+  median 6/255 and a 99th percentile 12..16/255 (max over rgb), and the
+  label footprint's distribution is the same, so it held no ghost;
+- with the bound widened by 12/255 the footprint's dimming goes from -3.6
+  to -0.1 luma on both dumps, the rim around the text from -1.4/-1.6 to
+  -0.2/-0.3, and a real ghost is still cut to 12/255;
+- a second effect, a box the size of the label while its distance ticks
+  (-1.8 luma on the label's background, 70% of it moved): the edited branch
+  rebuilt every edited texel from the raw cubic; rebuilding only where the
+  cubic disagrees beyond the tolerance leaves +0.2 with 13% moved.
 
-Ruled out today: the game drawing a dark backing (raw crops clean); NVIDIA
-producing the label mask (`DlssBeforeUi` clean); the mask lying where the UI
-content changed (`UiEdits` overlap 0.00); the format-9 change ending the
-latch-off (refused on the next contract in flight).
+The change: `src/d3d11/ui_resolve.h` widens the clamp by a tolerance
+carried in a b1 constant buffer and gates the edited rebuild on it;
+`advanced.ui_ghost_tolerance` (default 12, in 8-bit colour steps, live)
+sets it, and 0 restores the old shader to the bit; rig cases in
+`tools/ui_depth_test` cover both sides of the tolerance and the edited
+branch; all gates green (25150 ui_depth checks, config contract 262/262).
 
-The rule that does it is `kUiResolve` (src/d3d11/ui_resolve.h): every active
-output pixel is clamped to the min/max of the 2x2 raw texels under it (line
-75), and a pixel stays active for up to 32 frames after the label leaves,
-decaying only while that clamp still changes it by more than 1/255 (line
-111). NVIDIA's output sits 3..5 luma above the raw range on the corona, so
-there the clamp bites every frame: the footprint dims to the raw level and
-outlives the label for 32 frames, transported along the motion vectors. Over
-dark space the clamp never bites and the footprint expires at once, which is
-why the mask is corona-specific.
+Ruled out on the way (details in the journal): the game drawing a dark
+backing; NVIDIA producing the label mask; the mask lying where the UI
+content changed; the format-9 change ending the deferred route's latch-off;
+a higher `stale` threshold alone (it shortens the trail, but the clamp still
+dims every active corona pixel each frame); a tolerance relative to the raw
+level (a fraction of the red channel passes a ghost at near half strength).
 
-Decision for Sean: (A) fix that rule in the fallback path, which is what
-ships, or (B) keep peeling the deferred route's contracts. Recommended: A.
-Its first step needs no flight: re-implement the shader in Python over the
-dump (`DlssBeforeUi`, raw C00, `UI`, `UiPrevious`, `MV`, `UiEdits`) until it
-reproduces `L0` in the label crops, then test the candidate change on the
-same data: a stale threshold or bound tolerance that a reconstruction offset
-of a few luma cannot cross but a departed glyph does.
+Next flight (a confirmation, not a search): a label over the corona while
+the distance ticks, then sweeping across it. Expect no polygon, no box, no
+trail, clean digits. `python tools\edvr_log.py --target steam
+--expect-build HEAD` must name the build; take an INSERT eye dump on the
+label. If anything remains: `ui_ghost_tolerance = 0` in the Steam ini is
+the old rule live, 16 removes the last speckle; report which looked right.
+
+The deferred UI route (src/d3d11/ui_deferred.cpp) is untouched by this. It
+was refused for the tenth time on 2026-09-16 13:47 (`panel vertex buffer
+contract changed`) and has never rendered a label in the headset; its
+format-9/11 change was carried into this branch (1b3d864), and the Codex
+worktree c009 itself is still dirty with the same diff.
 
 
 ## Investigation
@@ -2933,3 +2931,113 @@ luma) and below a departed glyph (tens), and a bound tolerance of the same
 size; keep whichever leaves the footprint's final-dlss at 0 while the
 changed-digit pixels still clean up. Build only after that, and the first
 flight is a confirmation, not a search.
+
+
+### The fix: widen the bound to the measured envelope, 2026-09-16 night
+
+Sean chose A. Everything below was done on the two Steam dumps without a
+flight; the confirmation flight is briefed at the end.
+
+**The port.** `resolve_repro.py` (a session scratch script) is `kUiResolve`
+in numpy over `DlssBeforeUi`, raw C00, `UI`, `UiEdits`, `UiPrevious` and
+`MV`, run on the label crops (131013 at output 3150,2320 480x360; 134857 at
+1900,1350 480x360) with a search over the jitter square. It reproduces `L0`:
+131013 at jit (-0.370, -0.060) mean |diff| 0.076/255, 99.2% of pixels within
+1/255 and all within 2; 134857 at jit (-0.440, +0.390) mean 0.002/255, all
+within 1. Pixels of inactive texels match bit-exactly in both, so nothing
+edits the frame after this shader. Its `Next.a` agrees with the recorded
+`UiNext.a` on 99.68% and 99.94% of texels; every disagreement is a decayed
+value within 1/255 of zero. The port is the shader; the numbers below are
+what the shader does.
+
+**The envelope.** How far NVIDIA's output leaves the 2x2 raw range under an
+output pixel, on pixels with no UI influence at all (not within a texel of
+class 1/2, `UiPrevious.a` 0, `UiEdits` 0), in 1/255, max over rgb:
+
+| set | n | p50 | p90 | p99 | p99.9 | max |
+|---|---|---|---|---|---|---|
+| 131013 clean, whole window | 7.35 M | 0 | 5 | 13 | 18 | 166 |
+| 131013 clean, raw luma 8..32 (the corona) | 619 k | 6 | 13 | 16 | 20 | 139 |
+| 131013 footprint (`UiPrevious.a` > 0, not here) | 115 k | 8 | 13 | 17 | 29 | 108 |
+| 134857 clean, whole window | 7.50 M | 0 | 4 | 12 | 31 | 199 |
+| 134857 clean, raw luma 8..32 | 1.18 M | 1 | 10 | 14 | 31 | 199 |
+| 134857 footprint | 38 k | 5 | 12 | 15 | 26 | 130 |
+
+Two readings. The offset is not the 3..5 luma the crop means suggested but a
+broad distribution: a median of 6 and a 99th percentile of 12..16 on the
+corona. And the footprint's distribution is the clean corona's, so the
+footprint held no ghost to remove: the clamp was paying a 30 px polygon for
+nothing.
+
+**The sweep.** The port with the bound widened by t (`lo -= t`, `hi += t`,
+the `stale` test unchanged), over the crops. dL is output minus
+`DlssBeforeUi` in luma; the footprint is `UiPrevious.a` > 0 and not `here`;
+the here band is `here` and not edited; alive is texels outside `here` with
+`Next.a` > 0 after the frame.
+
+| dump | t | footprint dL | % over 1.5 | here band dL | edited dL | alive |
+|---|---|---|---|---|---|---|
+| 131013 | 0 | -3.57 | 80.8 | -1.36 | -1.13 | 12221 |
+| | 4 | -1.42 | 42.4 | -0.59 | -1.27 | 10227 |
+| | 8 | -0.56 | 9.2 | -0.37 | -1.28 | 7928 |
+| | 12 | -0.11 | 0.5 | -0.24 | -1.28 | 4324 |
+| | 16 | -0.01 | 0.1 | -0.18 | -1.28 | 372 |
+| 134857 | 0 | -3.61 | 82.1 | -1.62 | +0.60 | 6060 |
+| | 4 | -1.34 | 39.4 | -0.72 | +0.36 | 5057 |
+| | 8 | -0.50 | 7.4 | -0.44 | +0.31 | 3968 |
+| | 12 | -0.09 | 0.1 | -0.29 | +0.31 | 1637 |
+| | 16 | -0.01 | 0.1 | -0.20 | +0.32 | 33 |
+
+At 12 the polygon is gone (under 0.1 luma, no band of pixels above 1.5), the
+rim around the text clears with it, and a real ghost is still cut to 12/255
+(under 5% brightness) and still marks its texel stale. 8 leaves a third of
+the footprint nudged by more than half a luma; 16 removes the last speckle.
+Default 12. A contact sheet of `DlssBeforeUi`, the old rule and t 12 on the
+131013 crop shows the polygon in the middle tile only.
+
+**The edited branch's box.** The same port showed a second effect the sweep
+cannot touch: edited texels (`UiEdits` > 0) are rebuilt from the raw cubic
+regardless of t, and while the distance readout ticks the whole label is
+edited (32,864 output pixels of the 131013 crop). The raw sits below
+NVIDIA's level on the corona, so the label's own background became a box: at
+t 12 the label's background pixels (raw luma under 40) were -1.83 luma with
+70% of them moved by more than 1.5, ink +0.05. Rebuilding only where the
+cubic disagrees with the temporal output by more than the tolerance gives
+background +0.17 with 13% over 1.5, ink +0.31, and 29% of the edited pixels
+rebuilt instead of 99%; on 134857 (952 edited pixels, digits only) the
+background goes from -0.61 to +1.08. A changed digit still differs from the
+temporal blend by far more than 12/255 at every ink pixel, so it is still
+rebuilt; a stale residual is bounded by the same 12/255 as a ghost anywhere
+else. Both rules are switched by the one tolerance: at 0 the shader is the
+old one to the bit.
+
+**The change** (branch claude/star-corona-ui-smearing-d1d2ae):
+- `src/d3d11/ui_resolve.h`: a second constant buffer `R` at b1 carrying the
+  tolerance; `lo -= resolve.x; hi += resolve.x` before the clamp; the edited
+  branch rebuilds only where the cubic disagrees beyond it. An unbound b1
+  reads zero, which is the old rule; that is what the rigs get unless a case
+  binds one.
+- `advanced.ui_ghost_tolerance` (default 12, in 8-bit colour steps, 0..64,
+  live; read beside `ui_depth_reactive` in ui_depth.cpp, written to b1 at the
+  dispatch in temporal_pass.cpp; documented commented-out in edvr.ini).
+- `tools/ui_depth_test`: cases for an offset inside the tolerance (left
+  alone, footprint expires), a ghost beyond it (cut to it, footprint kept),
+  tolerance zero (the exact clamp), and the edited branch on both sides of
+  it. `ui_colour_layer_test` compiles the shader unchanged with b1 unbound.
+
+Not chosen: a higher `stale` threshold alone, because it only shortens the
+trail; the clamp still dims every active pixel on the corona each frame (the
+here band by 1.4..1.6 luma, the first-frame footprint by 3.6). Not chosen: a
+tolerance relative to the raw level, because on the red corona a fraction of
+the red channel is tens of /255, wide enough to pass a glyph's ghost at near
+half strength, while the measured offset is 12..16 at the 99th percentile.
+
+**Confirmation flight.** The build named in the Status block is installed to
+Steam. Target a signal source or a ship whose label sits over the star's
+corona and hold it there while the distance ticks; then let the label sweep
+across the corona. Expect no dark polygon at the label, no box behind it, no
+trail when it moves, and digits still clean. `python tools\edvr_log.py
+--target steam --expect-build HEAD` must name this build. Take an INSERT eye
+dump with the label on the corona. If anything remains, set
+`ui_ghost_tolerance = 0` in the Steam ini for a live side-by-side with the
+old rule, and 16 to remove the last speckle; report which value looked right.

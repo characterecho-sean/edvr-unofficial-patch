@@ -1176,6 +1176,7 @@ ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
 ID3D11ComputeShader*       g_csUiResolve = nullptr;
 bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
+ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tolerance/255,0,0,0}
 bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
@@ -2611,6 +2612,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // Not fatal: the fovea path checks g_foveaCb and stands down to
             // full-frame DLAA if it is null. The main pass runs regardless.
             g_foveaCb = nullptr;
+        }
+    }
+    if (ok && !g_uiResolveTolCb) {
+        // One float4: the UI-resolve clamp's bound tolerance (b1), so an
+        // ordinary DLSS reconstruction offset does not trip it (issue 36).
+        // Created here beside g_cb. Not fatal if it fails: the dispatch
+        // site leaves b1 unbound, which the shader reads as zero -- the
+        // old exact clamp -- so the resolve pass still runs correctly.
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 16;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (!SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_uiResolveTolCb))) {
+            g_uiResolveTolCb = nullptr;
         }
     }
     if (ok && !g_downCb) {
@@ -4296,7 +4312,25 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,9,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
                         // NGX may change compute bindings, including b0.
                         ctx->CSSetConstantBuffers(0,1,&g_cb);
+                        // b1: the clamp's bound tolerance (issue 36). Save whatever
+                        // NGX left there, bind ours for the dispatch, then restore
+                        // it so nothing downstream sees EDVR's own buffer.
+                        ID3D11Buffer* savedCb1=nullptr;
+                        ctx->CSGetConstantBuffers(1,1,&savedCb1);
+                        ID3D11Buffer* tolCb=nullptr;
+                        if (g_uiResolveTolCb) {
+                            D3D11_MAPPED_SUBRESOURCE tm{};
+                            if (SUCCEEDED(ctx->Map(g_uiResolveTolCb,0,D3D11_MAP_WRITE_DISCARD,0,&tm)) && tm.pData) {
+                                const float resolveData[4]={uiDepthGhostTolerance()/255.0f,0,0,0};
+                                memcpy(tm.pData,resolveData,sizeof(resolveData));
+                                ctx->Unmap(g_uiResolveTolCb,0);
+                                tolCb=g_uiResolveTolCb;
+                            }
+                        }
+                        ctx->CSSetConstantBuffers(1,1,&tolCb);
                         ctx->Dispatch((w+7)/8,(h+7)/8,1);
+                        ctx->CSSetConstantBuffers(1,1,&savedCb1);
+                        if (savedCb1) savedCb1->Release();
                         ctx->CSSetShaderResources(0,17,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
                         endRegion(qs, Region::Ui, ctx);
                         uiEvidenceWritten=uiResolveWritten=true;
@@ -5835,6 +5869,7 @@ void temporalPassShutdown() {
     if (g_csFovea) { g_csFovea->Release(); g_csFovea = nullptr; }
     if (g_csUiResolve) { g_csUiResolve->Release(); g_csUiResolve=nullptr; }
     g_csUiResolveTried=g_uiResolveNoted=false;
+    if (g_uiResolveTolCb) { g_uiResolveTolCb->Release(); g_uiResolveTolCb=nullptr; }
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
     if (g_downCb) { g_downCb->Release(); g_downCb = nullptr; }
