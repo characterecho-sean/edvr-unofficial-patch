@@ -19,7 +19,8 @@ not new evidence — update it whenever this doc changes.*
 - **Open:**
   - Features C and D: still unbuilt design sketches.
   - DLSS/FSR 2 as default engines behind the door (Phasing step 6): not
-    phased in, only proof-of-concept flights so far.
+    phased in; the every-vendor engine's design is
+    fsr-upscaler-design-2026-09-16.md (AMD has no D3D11 backend).
   - Whether the 2026-09-04 far-warp/darkness review's four fixes and
     that evening's five-lever cleanup hold up in flight — "Unflown as
     of the commit."
