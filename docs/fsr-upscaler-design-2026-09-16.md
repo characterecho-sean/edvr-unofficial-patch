@@ -215,7 +215,15 @@ gfx log.
   becomes: colour copy, the `mvCs` dispatch, then `dlaaEvaluate` or
   `fsr3Evaluate`, then the `dlSubmit` copy, the timing ring and the price
   line, all shared. The R8G8B8A8-family refusal (temporal_pass.cpp:
-  3947-3953) applies to both external engines and names the engine.
+  3947-3953) applies to both external engines and names the engine. NGX's
+  other refusal, a render size outside every DLSS mode's range for the
+  output (flight 4 of the trim, 2026-09-16: 1711x1425 against 3422x3394 at
+  HMD Quality 0.5, since sized by the ask the frame in hand was rendered
+  for, be05124, which feeds both engines alike), should have no FSR
+  counterpart: believed, the context bounds only the maximum render size
+  and the quality ratios are helpers, so `fsr` would keep treating through
+  a trim rebuild where `dlss` drops to the pass's own history. The rig in
+  3.5 checks that ratio.
 - The readers: temporal_mode.h gains `temporalExternalEngine(mode)` (true
   for dlaa, dlss, fsr) and `temporalModeEnabled` accepts `fsr`; the seven
   literal-string readers in section 1 switch to the helper, so `fsr`
@@ -296,8 +304,10 @@ gfx log.
    table over jitter sign {as_is, flip_x, flip_y, flip_both} x motion sign
    {+, -} picks exactly one zero-bias combination (this is how NGX's
    convention was settled; it is re-run for FSR, not assumed equal); reset
-   clears the history; a size change recreates cleanly; VRAM per context is
-   logged. cs_5_0 DXBC runs on WARP, so the whole engine runs on the desk.
+   clears the history; a size change recreates cleanly, including
+   1711x1425 into 3422x3394 (the ratio NGX refused in flight 4 of the
+   trim); VRAM per context is logged. cs_5_0 DXBC runs on WARP, so the
+   whole engine runs on the desk.
 4. The seam refactor, the helper, the readers, the ini text, the contract
    check, the panel and the settings view; `dlss`'s refusal line gains the
    hint.
@@ -396,4 +406,6 @@ class of upscaler): that is route 2's go/no-go.
 
 - 2026-09-16: written from three mapping passes (the DLSS internals, the
   build, installer, rigs and docs, and the FidelityFX SDK's current state).
-  No code.
+  No code. File and line pointers are as of ff88cd1; the four commits that
+  landed on main the same afternoon (be05124 to e4b923a) touched none of
+  the cited files.
