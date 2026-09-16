@@ -20,24 +20,30 @@
 namespace edvr { namespace {
 template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 thread_local bool inside=false;
+thread_local bool routeHandledThisDraw=false;
 struct Scope { bool before=inside; Scope(){inside=true;} ~Scope(){inside=before;} };
 bool enabled=false;
 bool failed=false,resetPending[2]{};
+constexpr uint64_t kToneVsConstantExposure=0x642017A6FEDAE0E8ull;
+constexpr uint64_t kPostToneVs=0x20F383BBAC05C031ull,kPostTonePs=0xDED8796049C7BB4Aull;
+constexpr uint64_t kTailVs=0xA888D51024D9798Eull,kTailPs=0x015EF9349EC097E8ull;
+constexpr size_t kTailDrawLimit=8;
 Ptr<ID3D11DeviceContext> recorder;
 struct Surface {
     Ptr<ID3D11Texture2D> tex;
     Ptr<ID3D11ShaderResourceView> srv;
     Ptr<ID3D11RenderTargetView> rtv;
     Ptr<ID3D11UnorderedAccessView> uav;
-    bool ensure(ID3D11Device* dev,UINT w,UINT h,DXGI_FORMAT format,bool compute=false) {
+    bool ensure(ID3D11Device* dev,UINT w,UINT h,DXGI_FORMAT format,bool compute=false,bool render=false) {
         D3D11_TEXTURE2D_DESC d{};if(tex)tex->GetDesc(&d);
-        if(tex && srv && (compute?bool(uav):bool(rtv)) && d.Width==w && d.Height==h && d.Format==format && bool(uav)==compute)return true;
+        const bool needRtv=!compute || render;
+        if(tex && srv && (!compute || uav) && (!needRtv || rtv) && d.Width==w && d.Height==h && d.Format==format && bool(uav)==compute)return true;
         *this={};d={};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;
-        d.Format=format;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|(compute?D3D11_BIND_UNORDERED_ACCESS:D3D11_BIND_RENDER_TARGET);
+        d.Format=format;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|(compute?D3D11_BIND_UNORDERED_ACCESS:0)|(needRtv?D3D11_BIND_RENDER_TARGET:0);
         return SUCCEEDED(dev->CreateTexture2D(&d,nullptr,&tex)) &&
             SUCCEEDED(dev->CreateShaderResourceView(tex.Get(),nullptr,&srv)) &&
-            (compute?SUCCEEDED(dev->CreateUnorderedAccessView(tex.Get(),nullptr,&uav)):
-                     SUCCEEDED(dev->CreateRenderTargetView(tex.Get(),nullptr,&rtv)));
+            (!compute || SUCCEEDED(dev->CreateUnorderedAccessView(tex.Get(),nullptr,&uav))) &&
+            (!needRtv || SUCCEEDED(dev->CreateRenderTargetView(tex.Get(),nullptr,&rtv)));
     }
 };
 struct DepthCopy {
@@ -98,8 +104,9 @@ struct Eye {
     Ptr<ID3D11Texture2D> hdr;
     Ptr<ID3D11RenderTargetView> hdrTarget;
     DepthCopy depth;
-    Surface cleanHdr,cleanLdr;
-    UiDeferredDraw tone;
+    Surface cleanHdr,cleanLdr,cleanFinal;
+    UiDeferredDraw tone,postTone;
+    std::vector<std::unique_ptr<UiDeferredDraw>> tails;
     std::vector<std::unique_ptr<Draw>> draws;
     std::vector<Ptr<ID3D11Resource>> aliases;
     Ptr<ID3D11CommandList> output;
@@ -119,10 +126,12 @@ bool noted=false,routeNoted=false;
 struct DiagnosticCounters {
     uint64_t captures=0,toneObservations=0,toneAliases=0,aliasRemovals=0,prepares=0;
     uint64_t postToneCandidates=0,lateCompositeCandidates=0,boundaries=0;
+    uint64_t postToneCaptures=0,tailCaptures=0;
 } diagnostic;
 uint64_t generation=1;
 uint64_t diagnosticUntilGeneration=0;
 unsigned toneReports=0,aliasReports=0,prepareReports=0,postToneReports=0,lateCompositeReports=0,boundaryReports=0;
+unsigned routeCaptureReports=0;
 static bool diagnosticWindow(){return diagnosticUntilGeneration && generation<=diagnosticUntilGeneration;}
 
 // The sampled blit immediately after tone mapping is a draw, not a resource
@@ -299,15 +308,16 @@ size_t material(ID3D11Device* dev,ID3D11PixelShader* ps,ID3D11BlendState* blend,
 }
 
 struct Renderer {
-    Surface hdr,transmission,base,ui,composite;
+    Surface hdr,transmission,mappedTransmission,base,ui,mappedBase,mappedUi,composite;
     edvr_deferred_depth::Seeder depth;
     bool depthReady=false,shaderTried=false;
     Ptr<ID3D11VertexShader> vs;
     Ptr<ID3D11PixelShader> seed;
     Ptr<ID3D11ComputeShader> combine;
     Ptr<ID3D11SamplerState> sampler;
+    Ptr<ID3D11DepthStencilState> colourOnly;
     Ptr<ID3D11Buffer> params;
-    bool ensure(ID3D11DeviceContext* ctx,UINT w,UINT h,DXGI_FORMAT fmt) {
+    bool ensure(ID3D11DeviceContext* ctx,UINT w,UINT h,DXGI_FORMAT fmt,bool sampled,bool tails) {
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         if(!shaderTried){shaderTried=true;vs.Attach(shaderSwapCompileVs(ctx,kDeferredSeed,sizeof(kDeferredSeed)-1,"vs","UI seed",nullptr,"Deferred UI"));
             seed.Attach(shaderSwapCompilePs(ctx,kDeferredSeed,sizeof(kDeferredSeed)-1,"ps","UI seed",nullptr,"Deferred UI"));
@@ -316,10 +326,13 @@ struct Renderer {
         if(!sampler){D3D11_SAMPLER_DESC d{};d.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;d.AddressU=d.AddressV=d.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;d.MaxLOD=D3D11_FLOAT32_MAX;
             if(FAILED(dev->CreateSamplerState(&d,&sampler)))return false;}
         if(!params){D3D11_BUFFER_DESC d{};d.ByteWidth=16;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;if(FAILED(dev->CreateBuffer(&d,nullptr,&params)))return false;}
+        if(!colourOnly){D3D11_DEPTH_STENCIL_DESC d{};d.DepthEnable=FALSE;d.StencilEnable=FALSE;if(FAILED(dev->CreateDepthStencilState(&d,&colourOnly)))return false;}
         if(!depthReady){depth.init(dev.Get());depthReady=true;}
-        return depth.ensure(dev.Get(),w,h,fmt) && hdr.ensure(dev.Get(),w,h,DXGI_FORMAT_R11G11B10_FLOAT) &&
+        const bool common=depth.ensure(dev.Get(),w,h,fmt) && hdr.ensure(dev.Get(),w,h,DXGI_FORMAT_R11G11B10_FLOAT) &&
             transmission.ensure(dev.Get(),w,h,DXGI_FORMAT_R32_FLOAT) && base.ensure(dev.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM) &&
-            ui.ensure(dev.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM) && composite.ensure(dev.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM,true);
+            ui.ensure(dev.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM) && composite.ensure(dev.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM,true,tails);
+        return common && (!sampled || (mappedBase.ensure(dev.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM) &&
+            mappedUi.ensure(dev.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM) && mappedTransmission.ensure(dev.Get(),w,h,DXGI_FORMAT_R32_FLOAT)));
     }
 } renderer;
 } // namespace
@@ -452,6 +465,7 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
     return true;
 }
 bool uiDeferredBegin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
+    if(routeHandledThisDraw){routeHandledThisDraw=false;return true;}
     bool ok=false;
     try { ok=begin(ctx,eye,kind,count,instances,start,base,first); }
     catch(...) {
@@ -471,7 +485,8 @@ void uiDeferredEnd(ID3D11DeviceContext* ctx) {
 
 static void beforeTone(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
     if(inside)return;
-    if(bindingShaderHash(BindSlot::Vs)!=EyeTonemapSnapshot::kVs || bindingShaderHash(BindSlot::Ps)!=EyeTonemapSnapshot::kPs)return;
+    const auto vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
+    if((vs!=EyeTonemapSnapshot::kVs && vs!=kToneVsConstantExposure) || ps!=EyeTonemapSnapshot::kPs)return;
     const bool observe=eyes[0].count || eyes[1].count || diagnosticWindow();
     const bool report=observe && toneReports<8;
     if(!enabled && !report){if(observe)++diagnostic.toneObservations;return;}
@@ -525,17 +540,17 @@ static ID3D11ShaderResourceView* prepare(ID3D11DeviceContext* ctx,ID3D11Texture2
     if(!enabled || inside || eye<0 || eye>1 || !submitted || !output || !sceneDepth)return nullptr;
     ++diagnostic.prepares;
     if((eyes[0].count || eyes[1].count || eyes[0].complete || eyes[1].complete) && prepareReports++<8)
-        Log::get().note("Deferred UI: prepare enabled=%u gen=%llu eye=%d submitted=%p output=%p; eye0 gen=%llu HDR=%p tone=%p, eye1 gen=%llu HDR=%p tone=%p; VS=%016llX PS=%016llX.",
+        Log::get().note("Deferred UI: prepare enabled=%u gen=%llu eye=%d submitted=%p output=%p; eye0 gen=%llu HDR=%p tone=%p sampled=%u tails=%u, eye1 gen=%llu HDR=%p tone=%p sampled=%u tails=%u; VS=%016llX PS=%016llX.",
             unsigned(enabled),static_cast<unsigned long long>(generation),eye,submitted,output,
             static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),
-            eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),
+            eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),unsigned(eyes[0].postTone.ready()),unsigned(eyes[0].tails.size()),
             static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),
-            eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get(),
+            eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get(),unsigned(eyes[1].postTone.ready()),unsigned(eyes[1].tails.size()),
             bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
     Eye* match=nullptr;
     for(auto& e:eyes)if(e.complete && e.w==w && e.h==h)for(const auto& alias:e.aliases)if(sameIdentity(alias.Get(),submitted)){if(match && match!=&e)return nullptr;match=&e;break;}
     if(!match){if(!routeNoted && (eyes[0].count || eyes[1].count)){routeNoted=true;Log::get().note("Deferred UI: submit route not matched: submitted=%p tone0=%p tone1=%p; original frame retained.",submitted,eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get());decline(eyes[eye],"submitted colour has no complete matching replay");}return nullptr;}
-    auto& e=*match;Scope scope;
+    auto& e=*match;Scope scope;const bool sampled=e.postTone.ready();
     UINT stencilRead=0;bool needsDepth=false;
     for(UINT i=0;i<e.count;++i){D3D11_DEPTH_STENCIL_DESC dd{};e.draws[i]->packet.depthState()->GetDesc(&dd);needsDepth=needsDepth || dd.DepthEnable;
         if(dd.StencilEnable && (dd.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || dd.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS))stencilRead|=dd.StencilReadMask;}
@@ -546,7 +561,13 @@ static ID3D11ShaderResourceView* prepare(ID3D11DeviceContext* ctx,ID3D11Texture2
                 decline(e,"UI changes a stencil bit needed by another UI draw");return nullptr;}
         }}
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);D3D11_TEXTURE2D_DESC od{};output->GetDesc(&od);
-    if(!renderer.ensure(ctx,od.Width,od.Height,e.depth.format)){decline(e,"native output resources unavailable");return nullptr;}
+    auto scaledProjection=[&](const UiDeferredDraw& packet,bool removeJitter,D3D11_VIEWPORT& scaled,D3D11_RECT& sc){
+        const float sx=float(od.Width)/e.w,sy=float(od.Height)/e.h;
+        const float ox=removeJitter?-jx*sx:0,oy=removeJitter?-jy*sy:0;
+        scaled=packet.originalViewport();scaled.TopLeftX=scaled.TopLeftX*sx+ox;scaled.TopLeftY=scaled.TopLeftY*sy+oy;scaled.Width*=sx;scaled.Height*=sy;
+        sc=packet.originalScissor();sc.left=LONG(std::floor(sc.left*sx+ox));sc.right=LONG(std::ceil(sc.right*sx+ox));sc.top=LONG(std::floor(sc.top*sy+oy));sc.bottom=LONG(std::ceil(sc.bottom*sy+oy));
+    };
+    if(!renderer.ensure(ctx,od.Width,od.Height,e.depth.format,sampled,!e.tails.empty())){decline(e,"native output resources unavailable");return nullptr;}
     D3D11_SHADER_RESOURCE_VIEW_DESC sv{};sv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sv.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;
     Ptr<ID3D11ShaderResourceView> world;if(FAILED(dev->CreateShaderResourceView(output,&sv,&world)))return nullptr;
     auto* c=recorder.Get();c->ClearState();
@@ -568,11 +589,19 @@ static ID3D11ShaderResourceView* prepare(ID3D11DeviceContext* ctx,ID3D11Texture2
     }
     c->ClearState();if(!e.tone.bind(c,e.tone.originalPixelShader(),renderer.ui.rtv.Get(),nullptr,nullptr,vp))return nullptr;
     c->PSSetShaderResources(1,1,renderer.hdr.srv.GetAddressOf());e.tone.draw(c);
-    c->ClearState();ID3D11ShaderResourceView* views[4]={world.Get(),renderer.base.srv.Get(),renderer.ui.srv.Get(),renderer.transmission.srv.Get()};
+    ID3D11ShaderResourceView* base=renderer.base.srv.Get();ID3D11ShaderResourceView* ui=renderer.ui.srv.Get();ID3D11ShaderResourceView* transmission=renderer.transmission.srv.Get();
+    if(sampled){
+        D3D11_VIEWPORT mappedVp{};D3D11_RECT mappedSc{};scaledProjection(e.postTone,false,mappedVp,mappedSc);
+        const struct Mapping { Surface* source;Surface* target; } mappings[]={{&renderer.base,&renderer.mappedBase},{&renderer.ui,&renderer.mappedUi},{&renderer.transmission,&renderer.mappedTransmission}};
+        for(const auto& mapping:mappings){c->ClearState();if(!e.postTone.bind(c,e.postTone.originalPixelShader(),mapping.target->rtv.Get(),nullptr,nullptr,mappedVp,&mappedSc)){decline(e,"native sampled mapping bind failed");return nullptr;}auto* source=mapping.source->srv.Get();c->PSSetShaderResources(0,1,&source);e.postTone.draw(c);}
+        base=renderer.mappedBase.srv.Get();ui=renderer.mappedUi.srv.Get();transmission=renderer.mappedTransmission.srv.Get();
+    }
+    c->ClearState();ID3D11ShaderResourceView* views[4]={world.Get(),base,ui,transmission};
     c->CSSetShader(renderer.combine.Get(),nullptr,0);c->CSSetShaderResources(0,4,views);c->CSSetUnorderedAccessViews(0,1,renderer.composite.uav.GetAddressOf(),nullptr);c->CSSetConstantBuffers(0,1,renderer.params.GetAddressOf());c->Dispatch((od.Width+7)/8,(od.Height+7)/8,1);
+    for(const auto& tail:e.tails){c->ClearState();D3D11_VIEWPORT tailVp{};D3D11_RECT tailSc{};scaledProjection(*tail,true,tailVp,tailSc);if(!tail->bind(c,tail->originalPixelShader(),renderer.composite.rtv.Get(),nullptr,nullptr,tailVp,&tailSc)){decline(e,"native terminal canvas bind failed");return nullptr;}c->OMSetDepthStencilState(renderer.colourOnly.Get(),0);tail->draw(c);}
     c->ClearState();c->CopyResource(output,renderer.composite.tex.Get());
     if(!finish(eyes[eye].output))return nullptr;
-    return e.cleanLdr.srv.Get();
+    return sampled?e.cleanFinal.srv.Get():e.cleanLdr.srv.Get();
 }
 ID3D11ShaderResourceView* uiDeferredPrepare(ID3D11DeviceContext* ctx,ID3D11Texture2D* submitted,
     ID3D11ShaderResourceView* sceneDepth,ID3D11Texture2D* output,int eye,UINT w,UINT h,float jx,float jy) {
@@ -621,13 +650,105 @@ void uiDeferredCopyRegion(ID3D11Resource* dst,UINT dstSub,UINT x,UINT y,UINT z,I
     if(box && (box->left || box->top || box->front || box->right!=s.Width || box->bottom!=s.Height || box->back!=1))return;
     uiDeferredCopy(dst,src,true);
 }
-void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx) {
+static Eye* aliasEye(ID3D11Resource* resource) {
+    Eye* match=nullptr;
+    for(auto& e:eyes)if(e.complete)for(const auto& alias:e.aliases)if(sameIdentity(alias.Get(),resource)){
+        if(match && match!=&e)return nullptr;match=&e;break;
+    }
+    return match;
+}
+static bool ldrTarget(ID3D11RenderTargetView* target,ID3D11Texture2D* texture,UINT w,UINT h) {
+    if(!target || !texture)return false;
+    D3D11_RENDER_TARGET_VIEW_DESC rd{};target->GetDesc(&rd);
+    D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);
+    return rd.Format==DXGI_FORMAT_R8G8B8A8_UNORM && rd.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D && !rd.Texture2D.MipSlice &&
+        (td.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || td.Format==DXGI_FORMAT_R8G8B8A8_UNORM) &&
+        td.Width==w && td.Height==h && td.MipLevels==1 && td.ArraySize==1 && td.SampleDesc.Count==1;
+}
+static bool unormTexture2d(ID3D11ShaderResourceView* view) {
+    if(!view)return false;D3D11_SHADER_RESOURCE_VIEW_DESC d{};view->GetDesc(&d);
+    return d.Format==DXGI_FORMAT_R8G8B8A8_UNORM && d.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D && !d.Texture2D.MostDetailedMip && d.Texture2D.MipLevels==1;
+}
+static bool fullViewport(ID3D11DeviceContext* ctx,UINT w,UINT h) {
+    D3D11_VIEWPORT vp{};UINT n=1;ctx->RSGetViewports(&n,&vp);
+    return n==1 && vp.TopLeftX==0 && vp.TopLeftY==0 && vp.Width==w && vp.Height==h;
+}
+static bool postToneState(ID3D11DeviceContext* ctx) {
+    D3D11_PRIMITIVE_TOPOLOGY topology{};ctx->IAGetPrimitiveTopology(&topology);
+    Ptr<ID3D11DepthStencilState> depth;UINT stencil=0;ctx->OMGetDepthStencilState(&depth,&stencil);
+    D3D11_DEPTH_STENCIL_DESC dd{};if(depth)depth->GetDesc(&dd);else dd.DepthEnable=TRUE;
+    Ptr<ID3D11BlendState> blend;UINT sampleMask=0;ctx->OMGetBlendState(&blend,nullptr,&sampleMask);D3D11_BLEND_DESC bd{};if(blend)blend->GetDesc(&bd);
+    Ptr<ID3D11BlendState1> blend1;if(blend)blend.As(&blend1);D3D11_BLEND_DESC1 bd1{};if(blend1)blend1->GetDesc1(&bd1);
+    Ptr<ID3D11RasterizerState> raster;ctx->RSGetState(&raster);D3D11_RASTERIZER_DESC rd{};if(raster)raster->GetDesc(&rd);else rd.FillMode=D3D11_FILL_SOLID;
+    return topology==D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && !dd.DepthEnable && !dd.StencilEnable &&
+        !bd.AlphaToCoverageEnable && sampleMask==~0u && (!blend1 || !bd1.RenderTarget[0].LogicOpEnable) && rd.FillMode==D3D11_FILL_SOLID && !rd.ScissorEnable &&
+        (!blend || (!bd.RenderTarget[0].BlendEnable && bd.RenderTarget[0].RenderTargetWriteMask==15));
+}
+static bool tailState(ID3D11DeviceContext* ctx,ID3D11DepthStencilView* view) {
+    D3D11_PRIMITIVE_TOPOLOGY topology{};ctx->IAGetPrimitiveTopology(&topology);
+    Ptr<ID3D11DepthStencilState> depth;UINT stencil=0;ctx->OMGetDepthStencilState(&depth,&stencil);if(!depth || !view)return false;
+    D3D11_DEPTH_STENCIL_DESC dd{};depth->GetDesc(&dd);D3D11_DEPTH_STENCIL_VIEW_DESC vd{};view->GetDesc(&vd);
+    Ptr<ID3D11BlendState> blend;UINT sampleMask=0;ctx->OMGetBlendState(&blend,nullptr,&sampleMask);if(!blend)return false;D3D11_BLEND_DESC bd{};blend->GetDesc(&bd);const auto& b=bd.RenderTarget[0];
+    Ptr<ID3D11BlendState1> blend1;blend.As(&blend1);D3D11_BLEND_DESC1 bd1{};if(blend1)blend1->GetDesc1(&bd1);
+    const auto stencilFace=[](const D3D11_DEPTH_STENCILOP_DESC& f){return f.StencilFailOp==D3D11_STENCIL_OP_KEEP && f.StencilDepthFailOp==D3D11_STENCIL_OP_KEEP && f.StencilPassOp==D3D11_STENCIL_OP_REPLACE && f.StencilFunc==D3D11_COMPARISON_ALWAYS;};
+    return topology==D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST && !dd.DepthEnable && dd.StencilEnable && dd.StencilReadMask==0 && dd.StencilWriteMask==4 && stencil==4 &&
+        stencilFace(dd.FrontFace) && stencilFace(dd.BackFace) && vd.Format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT && !vd.Flags && vd.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2D && !vd.Texture2D.MipSlice &&
+        !bd.AlphaToCoverageEnable && sampleMask==~0u && (!blend1 || !bd1.RenderTarget[0].LogicOpEnable) && b.BlendEnable && b.SrcBlend==D3D11_BLEND_ONE && b.DestBlend==D3D11_BLEND_INV_SRC_ALPHA && b.BlendOp==D3D11_BLEND_OP_ADD &&
+        b.SrcBlendAlpha==D3D11_BLEND_ONE && b.DestBlendAlpha==D3D11_BLEND_INV_SRC_ALPHA && b.BlendOpAlpha==D3D11_BLEND_OP_ADD && b.RenderTargetWriteMask==7;
+}
+static int captureRouteDrawImpl(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
+    const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
+    const bool post=vs==kPostToneVs && ps==kPostTonePs,tail=vs==kTailVs && ps==kTailPs;
+    if(!enabled || (!post && !tail))return 0;
+    Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;Ptr<ID3D11Texture2D> tex;
+    if(!target(ctx,rt,ds,tex))return 0;
+    Ptr<ID3D11ShaderResourceView> v0,v1;ctx->PSGetShaderResources(0,1,&v0);ctx->PSGetShaderResources(1,1,&v1);
+    Ptr<ID3D11Resource> targetResource,s0,s1;rt->GetResource(&targetResource);if(v0)v0->GetResource(&s0);if(v1)v1->GetResource(&s1);
+    Eye* e=post?aliasEye(s0.Get()):aliasEye(targetResource.Get());if(!e)return 0;
+    auto reject=[&](const char* why){restore(ctx,*e);decline(*e,why);return -1;};
+    if(sameIdentity(targetResource.Get(),s0.Get()) || (tail && sameIdentity(targetResource.Get(),s1.Get())))return reject("native route samples its render target");
+    if(!ldrTarget(rt.Get(),tex.Get(),e->w,e->h) || !fullViewport(ctx,e->w,e->h))return reject(post?"post-tone target or viewport unsupported":"terminal canvas target or viewport unsupported");
+    Scope scope;const auto* reflected=reflect(ctx);if(!reflected)return reject(post?"post-tone shader inputs unavailable":"terminal canvas shader inputs unavailable");
+    if(post) {
+        if(e->postTone.ready())return reject("second post-tone sampled draw unsupported");
+        if(kind!='N' || count!=4 || instances!=1 || ds || !unormTexture2d(v0.Get()) || !postToneState(ctx))return reject("post-tone draw state unsupported");
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);if(!e->cleanFinal.ensure(dev.Get(),e->w,e->h,DXGI_FORMAT_R8G8B8A8_UNORM))return reject("clean post-tone target unavailable");
+        UiDeferredCaptureMask mask=*reflected;mask.postTone=true;e->postTone=UiDeferredDraw{};
+        if(!e->postTone.capture(ctx,snapshots,kind,count,instances,start,base,first,mask))return reject("post-tone draw capture failed");
+        recorder->ClearState();auto scissor=e->postTone.originalScissor();
+        bool valid=e->postTone.bind(recorder.Get(),e->postTone.originalPixelShader(),e->cleanFinal.rtv.Get(),nullptr,nullptr,e->postTone.originalViewport(),&scissor);
+        auto* clean=e->cleanLdr.srv.Get();recorder->PSSetShaderResources(0,1,&clean);e->postTone.draw(recorder.Get());
+        Ptr<ID3D11CommandList> list;valid=valid && finish(list);if(!valid)return reject("clean post-tone replay failed");
+        std::vector<Ptr<ID3D11Resource>> nextAliases;nextAliases.push_back(targetResource);execute(ctx,list.Get());
+        snapshots.written(targetResource.Get());e->aliases.swap(nextAliases);++diagnostic.postToneCaptures;
+        if(routeCaptureReports++<12)Log::get().note("Deferred UI: retained post-tone sampled draw gen=%llu eye=%u source=%p target=%p tails=%u.",static_cast<unsigned long long>(generation),unsigned(e-eyes),s0.Get(),targetResource.Get(),unsigned(e->tails.size()));
+    } else {
+        if(!e->postTone.ready())return reject("terminal canvas arrived before retained post-tone draw");
+        if(kind!='X' || count!=6 || instances!=1 || !tailState(ctx,ds.Get()))return reject("terminal canvas draw state unsupported");
+        if(e->tails.size()>=kTailDrawLimit)return reject("terminal canvas draw limit exceeded");
+        UiDeferredCaptureMask mask=*reflected;mask.allowVolatileUavSrv=true;
+        auto packet=std::make_unique<UiDeferredDraw>();if(!packet->capture(ctx,snapshots,kind,count,instances,start,base,first,mask))return reject("terminal canvas draw capture failed");
+        e->tails.push_back(std::move(packet));snapshots.written(targetResource.Get());Ptr<ID3D11Resource> depthResource;ds->GetResource(&depthResource);snapshots.written(depthResource.Get());++diagnostic.tailCaptures;
+        if(routeCaptureReports++<12)Log::get().note("Deferred UI: retained terminal canvas gen=%llu eye=%u target=%p tail=%u/%u.",static_cast<unsigned long long>(generation),unsigned(e-eyes),targetResource.Get(),unsigned(e->tails.size()),unsigned(kTailDrawLimit));
+    }
+    routeHandledThisDraw=true;return 1;
+}
+static int captureRouteDraw(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) noexcept {
+    try { return captureRouteDrawImpl(ctx,kind,count,instances,start,base,first); }
+    catch(...) {
+        routeHandledThisDraw=false;
+        for(auto& e:eyes)if(e.complete && !e.aborted){restore(ctx,e);decline(e,"native route capture allocation failed");}
+        return -1;
+    }
+}
+void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instances,UINT start,INT base,UINT first,uint32_t verdict) {
+    routeHandledThisDraw=false;
     if(inside)return;
     const bool active=eyes[0].count || eyes[1].count;
     if(!active && !diagnosticWindow())return;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
-    const bool postTone=vs==0x20F383BBAC05C031ull && ps==0xDED8796049C7BB4Aull;
-    const bool lateComposite=vs==0xA888D51024D9798Eull && ps==0x015EF9349EC097E8ull;
+    const bool postTone=vs==kPostToneVs && ps==kPostTonePs;
+    const bool lateComposite=vs==kTailVs && ps==kTailPs;
     auto& reports=postTone?postToneReports:lateCompositeReports;
     const bool diagnosticCandidate=postTone || lateComposite;
     const bool report=diagnosticCandidate && reports<8;
@@ -636,7 +757,8 @@ void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx) {
         if(lateComposite)++diagnostic.lateCompositeCandidates;
         return;
     }
-    ID3D11RenderTargetView* views[8]{};Ptr<ID3D11DepthStencilView> depth;ctx->OMGetRenderTargets(8,views,&depth);
+    ID3D11RenderTargetView* rawViews[8]{};Ptr<ID3D11DepthStencilView> depth;ctx->OMGetRenderTargets(8,rawViews,&depth);
+    std::array<Ptr<ID3D11RenderTargetView>,8> views;for(UINT i=0;i<8;++i)views[i].Attach(rawViews[i]);
     if(postTone || lateComposite) {
         auto& observations=postTone?diagnostic.postToneCandidates:diagnostic.lateCompositeCandidates;
         ++observations;
@@ -645,17 +767,20 @@ void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx) {
             if(views[0])views[0]->GetResource(&target);
             ctx->PSGetShaderResources(0,1,&v0);ctx->PSGetShaderResources(1,1,&v1);
             if(v0)v0->GetResource(&s0);if(v1)v1->GetResource(&s1);
-            ++reports;Log::get().note("Deferred UI: %s candidate enabled=%u gen=%llu target=%p t0=%p t1=%p; eye0 gen=%llu HDR=%p tone=%p draws=%u, eye1 gen=%llu HDR=%p tone=%p draws=%u; VS=%016llX PS=%016llX.",
-            postTone?"post-tone copy":"late composite",unsigned(enabled),static_cast<unsigned long long>(generation),target.Get(),s0.Get(),s1.Get(),
+            ++reports;Log::get().note("Deferred UI: %s candidate enabled=%u gen=%llu verdict=%u target=%p t0=%p t1=%p; eye0 gen=%llu HDR=%p tone=%p draws=%u, eye1 gen=%llu HDR=%p tone=%p draws=%u; VS=%016llX PS=%016llX.",
+            postTone?"post-tone copy":"late composite",unsigned(enabled),static_cast<unsigned long long>(generation),verdict,target.Get(),s0.Get(),s1.Get(),
             static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),eyes[0].count,
             static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get(),eyes[1].count,
             vs,ps);if(postTone)reportProducer(s0.Get());}
     }
-    if(!enabled){for(auto* v:views)if(v)v->Release();return;}
+    if(!enabled)return;
+    if(verdict && diagnosticCandidate && routeCaptureReports++<12)Log::get().note("Deferred UI: %s route capture refused gen=%llu verdict=%u; original fallback retained.",postTone?"post-tone":"terminal canvas",static_cast<unsigned long long>(generation),verdict);
+    const int route=!verdict?captureRouteDraw(ctx,kind,count,instances,start,base,first):0;
+    if(route)return;
     if(depth){Ptr<ID3D11Resource> r;depth->GetResource(&r);snapshots.written(r.Get());}
-    for(auto* v:views)if(v){Ptr<ID3D11Resource> r;v->GetResource(&r);snapshots.written(r.Get());
+    for(auto& v:views)if(v){Ptr<ID3D11Resource> r;v->GetResource(&r);snapshots.written(r.Get());
         for(auto& e:eyes)removeAlias(ctx,e,r.Get(),"draw-target");
-        v->Release();}
+    }
 }
 void uiDeferredBeforeDispatch(ID3D11DeviceContext* ctx) {
     if(inside || !enabled || (!eyes[0].count && !eyes[1].count))return;
@@ -672,11 +797,11 @@ void uiDeferredFrameBoundary(ID3D11DeviceContext* ctx) {
             unsigned(enabled),static_cast<unsigned long long>(generation),static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),eyes[0].count,unsigned(eyes[0].complete),unsigned(eyes[0].aliases.size()),unsigned(eyes[0].restored),unsigned(eyes[0].aborted),
             static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),eyes[1].count,unsigned(eyes[1].complete),unsigned(eyes[1].aliases.size()),unsigned(eyes[1].restored),unsigned(eyes[1].aborted));
     }
-    for(auto& e:eyes){if(e.count && !e.restored)restore(ctx,e);for(UINT i=0;i<e.count;++i){e.draws[i]->packet=UiDeferredDraw{};}e.tone=UiDeferredDraw{};e.count=e.changedStencil=0;e.bytes=0;e.complete=e.restored=e.aborted=false;e.aliases.clear();e.output.Reset();}
+    for(auto& e:eyes){if(e.count && !e.restored)restore(ctx,e);for(UINT i=0;i<e.count;++i){e.draws[i]->packet=UiDeferredDraw{};}e.tone=UiDeferredDraw{};e.postTone=UiDeferredDraw{};e.tails.clear();e.count=e.changedStencil=0;e.bytes=0;e.complete=e.restored=e.aborted=false;e.aliases.clear();e.output.Reset();}
     snapshots.frameBoundary();
     ++generation;
     writerTraceOrdinal=0;writerTracePending=-1;
     if(!enabled && !diagnosticWindow())clearWriterTrace();
 }
-void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
+void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=routeHandledThisDraw=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=routeCaptureReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
 }

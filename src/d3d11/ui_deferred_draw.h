@@ -15,6 +15,8 @@ struct UiDeferredCaptureMask {
     uint32_t cbVs=0,cbPs=0;
     std::array<bool,128> srvVs{},srvPs{};
     bool tone=false;
+    bool postTone=false;
+    bool allowVolatileUavSrv=false;
 };
 // Reflect actual shader inputs; stale unused bindings are not draw inputs.
 inline bool uiDeferredReflect(ID3D11DeviceChild* shader,uint32_t& cb,std::array<bool,128>& srv) {
@@ -41,7 +43,7 @@ inline bool uiDeferredReflect(ID3D11DeviceChild* shader,uint32_t& cb,std::array<
 // recycled only after the frame ends. There is no readback, wait or flush.
 class UiDeferredSnapshots {
     template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
-    struct Copy { Ptr<ID3D11Resource> resource;uint64_t frame=0,version=0;size_t bytes=0; };
+    struct Copy { Ptr<ID3D11Resource> resource;uint64_t frame=0,version=0;size_t bytes=0;bool volatileSrv=false; };
     struct Source { Ptr<ID3D11Resource> original;uint64_t version=0,lastFrame=0;std::vector<Copy> copies; };
     std::unordered_map<ID3D11Resource*,Source> sources_;
     uint64_t frame_=1;
@@ -87,13 +89,14 @@ public:
     }
     size_t copiedBytes()const{return copied_;}
     size_t allocatedBytes()const{return allocated_;}
-    bool capture(ID3D11DeviceContext* ctx,ID3D11Resource* r,Ptr<ID3D11Resource>& out) {
+    bool capture(ID3D11DeviceContext* ctx,ID3D11Resource* r,Ptr<ID3D11Resource>& out,bool reflectedSrv=false,bool allowVolatileUavSrv=false) {
         out.Reset();if(!r)return true;
         D3D11_RESOURCE_DIMENSION kind{};r->GetType(&kind);
         D3D11_BUFFER_DESC bd{};D3D11_TEXTURE2D_DESC td{};D3D11_TEXTURE3D_DESC vd{};
-        D3D11_USAGE usage=D3D11_USAGE_STAGING;size_t bytes=0;
+        D3D11_USAGE usage=D3D11_USAGE_STAGING;size_t bytes=0;bool freshSnapshot=false;
         if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){static_cast<ID3D11Buffer*>(r)->GetDesc(&bd);usage=bd.Usage;bytes=bd.ByteWidth;
-            if(bd.BindFlags&(D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_STREAM_OUTPUT))return false;
+            if((bd.BindFlags&D3D11_BIND_STREAM_OUTPUT) || ((bd.BindFlags&D3D11_BIND_UNORDERED_ACCESS) && (!reflectedSrv || !allowVolatileUavSrv)))return false;
+            freshSnapshot=reflectedSrv && allowVolatileUavSrv && (bd.BindFlags&D3D11_BIND_UNORDERED_ACCESS);
         } else if(kind==D3D11_RESOURCE_DIMENSION_TEXTURE2D){static_cast<ID3D11Texture2D*>(r)->GetDesc(&td);usage=td.Usage;
             if(td.SampleDesc.Count!=1)return false;bytes=imageSize(td.Width,td.Height,1,td.MipLevels,td.Format)*td.ArraySize;
         } else if(kind==D3D11_RESOURCE_DIMENSION_TEXTURE3D){static_cast<ID3D11Texture3D*>(r)->GetDesc(&vd);usage=vd.Usage;bytes=imageSize(vd.Width,vd.Height,vd.Depth,vd.MipLevels,vd.Format);
@@ -101,15 +104,15 @@ public:
         if(usage==D3D11_USAGE_IMMUTABLE){out=r;return true;}
         if(!bytes || bytes>budget_ || usage==D3D11_USAGE_STAGING)return false;
         auto& entry=sources_[r];entry.original=r;entry.lastFrame=frame_;
-        for(auto& c:entry.copies)if(c.frame==frame_ && c.version==entry.version){out=c.resource;return true;}
-        Copy* copy=nullptr;for(auto& c:entry.copies)if(c.frame!=frame_){copy=&c;break;}
+        if(!freshSnapshot)for(auto& c:entry.copies)if(!c.volatileSrv && c.frame==frame_ && c.version==entry.version){out=c.resource;return true;}
+        Copy* copy=nullptr;for(auto& c:entry.copies)if(c.frame!=frame_ && c.volatileSrv==freshSnapshot){copy=&c;break;}
         if(!copy) {
             if(bytes>budget_-allocated_)return false;
             Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);Ptr<ID3D11Resource> resource;
-            if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){bd.Usage=D3D11_USAGE_DEFAULT;bd.CPUAccessFlags=0;Ptr<ID3D11Buffer> b;if(FAILED(dev->CreateBuffer(&bd,nullptr,&b)))return false;resource=b;}
+            if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){bd.Usage=D3D11_USAGE_DEFAULT;bd.CPUAccessFlags=0;if(freshSnapshot)bd.BindFlags&=~D3D11_BIND_UNORDERED_ACCESS;Ptr<ID3D11Buffer> b;if(FAILED(dev->CreateBuffer(&bd,nullptr,&b)))return false;resource=b;}
             else if(kind==D3D11_RESOURCE_DIMENSION_TEXTURE2D){td.Usage=D3D11_USAGE_DEFAULT;td.CPUAccessFlags=0;td.MiscFlags&=D3D11_RESOURCE_MISC_TEXTURECUBE;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;Ptr<ID3D11Texture2D> t;if(FAILED(dev->CreateTexture2D(&td,nullptr,&t)))return false;resource=t;}
             else {vd.Usage=D3D11_USAGE_DEFAULT;vd.CPUAccessFlags=vd.MiscFlags=0;vd.BindFlags=D3D11_BIND_SHADER_RESOURCE;Ptr<ID3D11Texture3D> t;if(FAILED(dev->CreateTexture3D(&vd,nullptr,&t)))return false;resource=t;}
-            entry.copies.push_back({resource,0,0,bytes});copy=&entry.copies.back();allocated_+=bytes;
+            entry.copies.push_back({resource,0,0,bytes,freshSnapshot});copy=&entry.copies.back();allocated_+=bytes;
         }
         ctx->CopyResource(copy->resource.Get(),r);copied_+=bytes;copy->frame=frame_;copy->version=entry.version;out=copy->resource;return true;
     }
@@ -139,8 +142,8 @@ class UiDeferredDraw {
     static bool copyBuffer(ID3D11DeviceContext* ctx,UiDeferredSnapshots& pool,ID3D11Buffer* b,Ptr<ID3D11Buffer>& out) {
         out.Reset();if(!b)return true;Ptr<ID3D11Resource> r;return pool.capture(ctx,b,r) && SUCCEEDED(r.As(&out));
     }
-    static bool copyView(ID3D11DeviceContext* ctx,UiDeferredSnapshots& pool,ID3D11ShaderResourceView* v,Ptr<ID3D11ShaderResourceView>& out) {
-        out.Reset();if(!v)return true;Ptr<ID3D11Resource> source,copy;v->GetResource(&source);if(!pool.capture(ctx,source.Get(),copy))return false;
+    static bool copyView(ID3D11DeviceContext* ctx,UiDeferredSnapshots& pool,ID3D11ShaderResourceView* v,Ptr<ID3D11ShaderResourceView>& out,bool allowVolatileUavSrv) {
+        out.Reset();if(!v)return true;Ptr<ID3D11Resource> source,copy;v->GetResource(&source);if(!pool.capture(ctx,source.Get(),copy,true,allowVolatileUavSrv))return false;
         if(source==copy){out=v;return true;}
         D3D11_SHADER_RESOURCE_VIEW_DESC d{};v->GetDesc(&d);Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         return SUCCEEDED(dev->CreateShaderResourceView(copy.Get(),&d,&out));
@@ -177,8 +180,8 @@ public:
             bool good=true;for(UINT i=0;i<14;++i){Ptr<ID3D11Buffer> original;original.Attach(b[i]);if(good && (bits&(1u<<i)))good=original && copyBuffer(c,pool,original.Get(),output[i]);}return good;};
         if(!constants(true,mask.cbVs,vcb_) || !constants(false,mask.cbPs,pcb_))return false;
         for(UINT i=0;i<128;++i){
-            if(mask.srvVs[i]){Ptr<ID3D11ShaderResourceView> v;c->VSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),vsr_[i]))return false;}
-            if(mask.srvPs[i] && !(mask.tone && i==1)){Ptr<ID3D11ShaderResourceView> v;c->PSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),psr_[i]))return false;}
+            if(mask.srvVs[i]){Ptr<ID3D11ShaderResourceView> v;c->VSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),vsr_[i],mask.allowVolatileUavSrv))return false;}
+            if(mask.srvPs[i] && !(mask.tone && i==1) && !(mask.postTone && i==0)){Ptr<ID3D11ShaderResourceView> v;c->PSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),psr_[i],mask.allowVolatileUavSrv))return false;}
         }
         ID3D11SamplerState* vss[16]{},*pss[16]{};c->VSGetSamplers(0,16,vss);c->PSGetSamplers(0,16,pss);for(UINT i=0;i<16;++i){vss_[i].Attach(vss[i]);pss_[i].Attach(pss[i]);}
         kind_=kind;count_=count;instances_=instances;start_=start;first_=first;base_=base;return true;

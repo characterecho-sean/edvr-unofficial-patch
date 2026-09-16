@@ -2,45 +2,43 @@
 
 ## Status
 
-Updated 2026-09-15 after Steam eye run `174541`: targeting text and
-circles still leave dark shapes against the corona. Root inspected the
-overview and T15. The installed diagnostic package and DLL hashes match
-the validated 3b6715a source; its precommit stamp is
-`v0.17.0-rc.1-2-geeb1928-dirty`, graphics PE `6AA9C287`. A literal HEAD
-version comparison differs because the source was committed after the
-build, not because the installed binary is stale.
+Updated 2026-09-15 after Steam eye run `183301`: the evidenced route fix
+is implemented and validated on top of b12122a. The capture's fc32749
+package was verified by stamp, PE and both DLL hashes after checking the
+expected precommit HEAD-version difference.
 
 Pimax OpenXR / Crystal Super uses 4068x4016 per-eye output and 2644x2610
 scene input with preset K. The verified installed package carries DLSS
 310.7.0.0.
 
-Generation 8583 captures eleven holo draws per eye. Both sampled
-post-tone copies and both late LDR composites occur before prepare.
-Prepare then fails with both tone aliases empty; the frame boundary is
-later. No expected-tone observation or alias addition/removal occurs,
-including in the following generation while diagnostics remain live.
-Native submission is direct on the render thread, not Present-queued.
-The later eye dump retains two tone-map snapshots with zero declines.
+The old controller rejected the initial tone producer's VS
+`642017A6FEDAE0E8` despite the correct PS `99C21CEB7A699821`, then
+latched off before later 2D78 tone frames. It now captures either exact
+pair with its own exposure state, replays the sampled copy and terminal
+canvases, and keeps those canvases out of DLSS's clean world input.
 
-Ruled out: early submit before the final image passes or a preceding
-Present-boundary clear caused this failure, because the trace orders the
-copies/composites before prepare and the boundary after it. Ruled out:
-alias invalidation after a recognized tone pass, because no tone
-observation or alias creation occurs. See "Missing tone hook, 174541"
-below; older rejected hypotheses remain in the dated journal.
+Ruled out: a wrapper skipped this producer or changed its shader between
+entry and BeforeTone, because both stages name the same actual pair and
+original-issued is true. The prior submission-order and alias
+invalidation exclusions remain under "Missing tone hook, 174541".
+Current evidence is under "Observed tone variant, 183301" below.
 
-Open: determine why the live UI hook misses the tone pair captured by
-the draw snapshot. Audit original versus overridden shader state and
-hook control flow. The known sampled-copy and later panel steps still
-need proper replay handling once tone capture works; do not merely
-retain an alias across unclassified writes. The additional diagnostic
-records observed source draws and preserves pre-capture tone ordering;
-production source is reviewed and 1,620 checks pass on WARP and
-hardware. Full build and live NVIDIA NGX validation passed. The new
-candidate is `v0.17.0-rc.1-3-g3b6715a-dirty`; provenance is recorded
-below. Next flight: normal launch and one eye dump near the affected
-text, with no AA reset needed. This is diagnostic-only; no rendering
-correction is claimed yet.
+The terminal canvas's measured Halton jitter is removed during native
+replay. Its 8,388,624-byte SRV/UAV buffer receives a fresh private
+snapshot per capture. Native replay takes precedence over the legacy
+input/resolve and resets history when ownership changes. Shared corona,
+ring and other world-motion resources remain enabled. Exact unsupported
+state falls back to intact original game colour.
+
+Focused validation passes 2,040 checks on WARP and RTX 5090. The
+synthetic sampled-copy/tail route measures 0.5589 ms GPU and 0.0501 ms
+prepare CPU per eye at the current input/output size (20 samples). This
+excludes DLSS, game rendering, pre-tone work and real materials. The
+full build, live NGX smoke and final hardware check passed. Candidate
+version is `v0.17.0-rc.2-dirty`, built before the source commit,
+graphics PE `6AA9EC43` and runtime PE `6AA9ECE2`. Next headset check:
+confirm target text/corona behavior with this verified Steam package.
+Visual improvement is not yet confirmed in-game.
 
 Build setup: prepend bundled Python, pass Steam's original OpenVR DLL
 using `--openvr`, and set `EDVR_NGX_SDK` to
@@ -2015,3 +2013,182 @@ Validation logs under `build/review_motion/issue36/` are
 `controller-hardware-producer-174541.log`. The next flight must use the
 new producer evidence to resolve the missing tone path before changing
 rendering behavior.
+
+## Observed tone variant, 183301 — 2026-09-15
+
+Steam run `edvr_gfx_20260915_183004.log` and the native OpenXR log
+`edvr_openxr_20260915_183005_354_5428.log` identify the tested fc32749
+package. The expected HEAD/precommit version difference was checked
+first, then resolved against the exact stamp, PE and hashes recorded
+above; installer verification passed. This is the same Pimax OpenXR /
+Crystal Super, 2644x2610 input and 4068x4016 output, preset K, DLSS
+310.7.0.0 environment. Native submission uses the direct route; shutdown
+reports `graphics_wrong_thread=0`.
+
+At 18:32:15.693, generation 5797, the sampled-copy report identifies
+ordinal 540 as the observed original-issued producer of eye 0's source
+`0000012D814306A0`. Entry, actual entry, BeforeTone and actual
+BeforeTone all name VS `642017A6FEDAE0E8` / PS `99C21CEB7A699821`,
+N3/i1, verdict 0. Eye 1 repeats this at ordinal 545 for
+`0000012D81435920`. Both have `before-tone=1` and `original-issued=1`.
+Generation 5798 repeats the same pair at ordinals 565 and 570. The
+controller's exact VS gate only accepts `2D78DC3FD2C0C543`, so it
+rejects the producer before capturing the tone pass. The submitted final
+targets are `0000012D81448D20` and `0000012D814487A0`, after the known
+sampled blit and terminal GUI.
+
+Ruled out: a same-draw wrapper changes or skips the tone producer,
+because actual and shadow shaders agree at both observation points,
+BeforeTone is reached, and the original draw is issued in both frames.
+
+Independent shader inspection finds identical geometry and input/output
+signatures for the two tone vertex shaders. Exposure differs: VS 642
+reads CB2[2].y, while VS 2D78 samples VS t0/s0. The shared pixel shader
+consumes that scalar. Exact-pair recognition must retain each original
+shader and its reflected resources, not substitute one exposure path for
+the other.
+
+The later frame 9859 census has two unique tone draws (#261 and #263)
+using the already-known 2D78 variant. Their HDR inputs and LDR outputs
+match the same eye resources; the tone snapshots correspond to that
+later instance. They do not contradict or supply the exposure state for
+the earlier 642 producer. Startup failure latches the old controller off
+before this later valid variant is reached.
+
+The implementation review covers all three evidenced stages together:
+variant-specific tone capture, exact sampled-blit replay, and bounded
+native replay of terminal GUI canvases. The clean DLSS input must remain
+world-only. Unsupported state must preserve original game colour. No new
+flight is requested to rediscover the already-recorded copy or
+terminal-canvas rejection.
+
+The 20F/DED copy has N4/i1 triangle-strip geometry, an 80-byte vertex
+buffer at stride 20, same-size typeless RGBA8 textures viewed as UNORM,
+full viewport, no DSV, depth/stencil/blend off, and all RGBA channels
+writable. Its shaders pass through UV and sample t0/s0. Exact live
+geometry and sampler state must be replayed; an identity CopyResource is
+not established by the retained shader alone.
+
+The A888/015 terminal canvas is X6/i1 with per-eye/per-frame changing
+startInstance and constant buffers. It uses premultiplied ONE /
+INV_SRC_ALPHA blending, RGB-only writes, disabled depth and stencil
+ALWAYS / REPLACE with ref 4, read mask 0 and write mask 4. Its live
+packet must preserve geometry, CBs, structured resources and samplers.
+The latest census identifies DSVs @1479/@1490 as resource fmt 19, view
+fmt 20: R32G8X24_TYPELESS / D32_FLOAT_S8X24_UINT. A D32_FLOAT-only
+validation would reject this observed route. The original game draw
+retains its stencil side effects; native replay does not need a DSV
+because this verified terminal draw cannot test depth or stencil. An
+all-zero retained t1 does not prove invisibility: the shader also uses
+t0 and material state. The retained files lack enough of those inputs
+for a faithful complete offline replay of this actual draw.
+
+Ruled out: the terminal LDR projection is unjittered, because its
+retained VS CB0 offsets across frames 9859-9873 follow the exact
+eight-frame Halton cycle. The measured deltas are +2*jx/2644 in x and
+-2*jy/2610 in y. Draw 9859 matches temporal frame 9858's (+0.25,
+-0.3888889), yielding (+0.00018911, +0.00029800); the diagnostic frame
+labels are offset by one. Scaling the viewport alone would scale the
+jitter into native output. Tail replay needs the same viewport
+translation as the established HDR UI replay: -jx*outWidth/inWidth and
+-jy*outHeight/inHeight, with consistent scissor placement. Keep the
+captured matrices themselves intact.
+
+The final resource audit finds another deterministic rejection before
+any flight: the terminal VS t38 is census @51 / resource
+`0000012D81301220`. Its complete descriptor in `panels_183301.bin` is
+`[8388624,0,136,0,64,48]`: 8,388,624 bytes, SRV|UAV bind flags 0x88,
+structured flag and stride 48. The snapshot pool currently rejects every
+UAV-capable buffer. Terminal t33 (@50) instead has descriptor
+`[688128,2,8,65536,64,336]` and is already supported. The new route must
+snapshot t38 into a private SRV-only structured buffer, preserving
+stride and contents. A UAV-capable source needs a fresh copy per capture
+because tracked compute dispatches do not prove that all possible
+graphics UAV writes were observed. Keep the 256 MiB snapshot budget and
+reject stream-output resources.
+
+The active-route integration audit finds a second handoff conflict in
+`temporal_pass.cpp`. On the later 2D78 tone frames, legacy separation
+and deferred replay can both complete. Existing code chooses the legacy
+separated colour for NGX even after copying the more complete deferred
+world image into dlColour. It then runs legacy UI resolve into dlSubmit,
+which the recorded deferred command list samples as its world input.
+Thus the legacy result can contaminate the deferred composition.
+Successful deferred preparation must exclusively own the clean input and
+final UI output; failure must retain the existing legacy path. Ownership
+changes also need a history reset: a single boolean saying "some
+separation is active" cannot distinguish the two clean images. Do not
+advance legacy UI influence history while deferred replay owns the
+output, or enable the old adaptive colour work by accidentally treating
+skipped legacy resolve as unavailable resolve.
+
+Before final validation, origin/main advanced to b12122a. The worktree
+fast-forwarded without conflicts, retaining unrelated uncommitted
+landing-HUD notes. The final build must include its native-device
+loading fix and build/shader-cache updates as well as this UI work.
+
+Implementation review preserved the direct tone-only route and added
+only the evidenced sampled-copy/terminal route. The sampled packet maps
+native tone-base, tone-with-UI and scalar transmission consistently;
+terminal canvases are drawn after their combination with reconstructed
+world colour. Composite storage supports RTV and UAV together, avoiding
+an additional full-frame copy for the terminal pass. Mapped resources
+are allocated only when that route is used. Tail capture is bounded to
+eight packets per eye; the existing 256 MiB snapshot budget remains.
+
+The original wrapper must have verdict kNone for these new route draws.
+A per-draw handled token suppresses the old UI-depth reissue without
+skipping its cleanup. Snapshot/allocation exceptions, unsupported state,
+duplicate sampled copies and tail-cap failures retain original colour.
+Captured packets and aliases reset at each frame boundary. UAV-capable
+tail SRVs use fresh copies, preserve structured stride and remove only
+the UAV bind flag from the private buffer; ordinary snapshots retain
+their original bind capabilities.
+
+Focused validation passes 2,040 checks on WARP and NVIDIA hardware,
+including both tone-pair gates, unknown-variant rejection, a nonidentity
+sampled mapping, transmission placement, jitter-free native tail pixels,
+original-image preservation, mutated CB/texture/structured-buffer
+contents, verdict refusal, the tail cap and existing direct-route
+fallback tests. The exact-size 8 MiB structured-buffer test mutates its
+float value to 10.0 through a UAV after capture, which would visibly
+shift geometry by 0.5 NDC if replay used the changed data. A separate
+readback test verifies two fresh snapshots without write-hook evidence.
+
+The RTX 5090 synthetic sampled/tail benchmark at 2644x2610 input and
+4068x4016 output measures 0.5723 ms GPU and 0.0450 ms prepare CPU per
+eye over 20 samples, with 9.00 MiB of synthetic snapshot storage. It
+uses one HDR UI draw, one sampled mapping and one terminal canvas. It
+excludes DLSS, game rendering, pre-tone work and the actual game
+materials, so it does not establish total flight cost or headset visual
+quality.
+
+Final validation passed the absolute full build with SDK 310.7.0
+verified, the Steam original OpenVR fixture rebuilt (nine thunks, five
+wrapped), DLSS runtime CARRIED and every gate passed. Live NVIDIA smoke
+against the final graphics binary passed without runtime skips and
+exercised DLAA, DLSS and the convention rig: the shipped pairing scored
+17.54 versus 19.43 for the runner-up. The final hardware controller
+passed 2,040 checks. These are GPU/controller checks, not a headset
+flight or D3D debug-layer validation.
+
+The final RTX 5090 route benchmark measured 0.5589 ms GPU and 0.0501 ms
+prepare CPU per eye over 20 samples, with the same synthetic workload
+and exclusions stated above. Logs under `build/review_motion/issue36/`:
+`build-route-183301.log`, `smoke-route-183301.log`,
+`controller-hardware-route-183301.log`, `benchmark-route-183301.log`.
+
+Candidate version `v0.17.0-rc.2-dirty` was built on b12122a before the
+subsequent source commit. Graphics PE `6AA9EC43` links at 2026-09-16
+01:09:23 UTC; runtime PE `6AA9ECE2` at 01:12:02 UTC. SHA-256:
+
+- Graphics (d3d11.dll and edvr_openxr_graphics.dll):
+  `C1E5996F4AA4963813E572E5342D694AEF7E55B8FBB6B91C3F1DB510BC0A1F0F`
+- Runtime (openvr_api.dll and edvr_openxr_runtime.dll):
+  `D32AE9111AE2FF4E6171C0734AF429EE625E815804E6773BA9BE069894EBB9B4`
+
+The sanctioned Steam install dry run passed and wrote nothing. It
+selected the native OpenXR pair, loader and available DLSS payload,
+confirmed Elite was stopped, and retained the existing INI. The
+pre-install INI hash is
+`BDF474BB2A929773FE66AADC790549FA59714830EB9A9FEE5EB4CDD06F45BF9B4`.

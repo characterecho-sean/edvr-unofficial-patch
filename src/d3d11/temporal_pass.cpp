@@ -337,6 +337,7 @@ struct EyeState {
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
     bool                      uiResolvedHistory = false;
     bool                      uiSeparatedHistory = false;
+    bool                      uiDeferredHistory = false;
     bool                      screenHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
@@ -467,6 +468,7 @@ void releaseDl(EyeState& e) {
     if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
     e.uiResolvedHistory = false;
     e.uiSeparatedHistory = false;
+    e.uiDeferredHistory = false;
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
     e.dlHaveHistory = false;
@@ -3603,12 +3605,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         g_csUiResolve=shaderSwapCompileCs(ctx,kUiResolve,sizeof(kUiResolve)-1,"main","UI resolve",nullptr,"UI resolve");
                     }
                     const bool uiResolve=uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaint;
-                    // Removing UI from the input is safe only when the matching
-                    // current-frame composite is available at the output.
-                    const bool separated=uiResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
                     ID3D11ShaderResourceView* deferredInput=nullptr;
                     if(!debugPaint && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
                         deferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
+                    // Deferred replay owns both clean input and final native UI
+                    // when it succeeds. The older separation/resolve path stays
+                    // available as the fallback, but must not replace that clean
+                    // input or modify dlSubmit before uiDeferredApply reads it.
+                    const bool applyLegacyResolve=uiResolve && !deferredInput;
+                    const bool separated=applyLegacyResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
                     // The colour, typed, whichever way the source came.
                     D3D11_BOX box{};
                     box.left = viaCopy ? 0 : region[0];
@@ -3630,11 +3635,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
-                    const bool currentSeparated=separated || deferredInput;
+                    const bool currentDeferred=deferredInput!=nullptr;
+                    const bool currentSeparated=separated || currentDeferred;
                     const bool deferredFallbackReset=uiDeferredFallbackReset(eye);
-                    const bool separationChanged=currentSeparated!=e.uiSeparatedHistory || deferredFallbackReset;
+                    const bool separationChanged=currentSeparated!=e.uiSeparatedHistory || currentDeferred!=e.uiDeferredHistory || deferredFallbackReset;
                     if(separationChanged){e.dlHaveHistory=false;e.uiHistoryValid=false;e.zPrevValid=false;}
                     e.uiSeparatedHistory=currentSeparated;
+                    e.uiDeferredHistory=currentDeferred;
+                    if(currentDeferred)e.uiHistoryValid=false;
                     // The eye run's raw frame (g_eyeRawStaging says why).
                     if (eye == 0 && g_eyeRunLeft > 0) captureEyeRunRaw(ctx, e.dlColour);
                     if(deferredInput){Microsoft::WRL::ComPtr<ID3D11Resource> clean;deferredInput->GetResource(&clean);ctx->CopyResource(e.dlColour,clean.Get());}
@@ -3682,7 +3690,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Modern DLSS presets ignore the bias mask. The final UI
                     // resolve writes its own influence history below; avoid
                     // the ineffective adaptive colour work in the MV shader.
-                    if(uiResolve) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
+                    if(uiResolve || deferredInput) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[17] = {};
@@ -3697,12 +3705,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           uiBound ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
-                                                          uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
+                                                          uiTrack && !deferredInput && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1]};
                     ID3D11UnorderedAccessView* uavsM[7] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
-                                                           uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
+                                                            uiTrack && !uiResolve && !deferredInput ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
                     ctx->CSSetShaderResources(0, 17, srvsM);
@@ -3713,7 +3721,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
-                    if (uiTrack && !uiResolve) uiEvidenceWritten = true;
+                    if (uiTrack && !uiResolve && !deferredInput) uiEvidenceWritten = true;
                     if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],separated?&separatedCandidate:nullptr);
                     if(deferredInput && eye==0 && g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame){stageEyeRun(ctx,e.dlColour,g_eyeInputs,16);g_eyeInputsUiFlags|=64u;}
                     // What NVIDIA is handed: the union when the mover mask
@@ -3833,7 +3841,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if(usedDlaa && captureResolve)stageEyeRun(ctx,e.dlOut,g_eyeInputs,13);
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
-                    if (usedDlaa && uiResolve) {
+                    if (usedDlaa && applyLegacyResolve) {
                         ctx->CSSetShaderResources(0,17,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
                         auto* resolveScreen=screenSrv;
                         if(screenSrv && (p.region[0]!=int32_t(region[0]) || p.region[1]!=int32_t(region[1]))) {
