@@ -199,6 +199,22 @@ class NativeCullGuard final {
     return {roundRecommendedDim(float(runtime_[eye].width)*maxFactorW_),
             roundRecommendedDim(float(runtime_[eye].height)*maxFactorH_)};
   }
+  // What the frame now in hand was rendered for. While a rebuild is awaited
+  // that is the ask the baseline pair was built for (until that pair is
+  // seen, what the game was told as the wait began), never the new ask: the
+  // temporal pass sizes its output by it, and a frame the game rendered at
+  // half of the previous ask, measured against the new one, falls outside
+  // NGX's render range (flight 4, 2026-09-16, HMD quality 0.5: "outside
+  // every DLSS mode's render range", own history for 14 s). The game itself
+  // is still told recommended().
+  NativeCullDimensions treatedFor(unsigned eye) const noexcept {
+    if (eye >= 2) return {};
+    if (stage_ == NativeCullStage::Adopting) {
+      const auto& ask = baselineReady_ ? baselineAsk_[eye] : pendingAsk_[eye];
+      if (ask.width && ask.height) return ask;
+    }
+    return recommended(eye);
+  }
   NativeCullFrustum gameFrustum(unsigned eye) const noexcept {
     return eye < 2 && stage_ == NativeCullStage::Live ? lied_[eye] : (eye < 2 ? true_[eye] : NativeCullFrustum{});
   }

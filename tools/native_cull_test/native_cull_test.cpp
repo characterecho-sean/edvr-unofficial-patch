@@ -308,11 +308,15 @@ int main(int argc,char** argv) {
   flight.trimOuterDeg=5;
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&flightGuard.changed());
   CHECK(flightGuard.recommended(0).width==3566&&flightGuard.recommended(0).height==2754);
+  // The frame in hand was rendered for the previous ask: the temporal pass is
+  // sized by that until the rebuild lands, while the game is told the new one.
+  CHECK(flightGuard.treatedFor(0).width==3246&&flightGuard.treatedFor(0).height==2754);
   // The first pair after the change is still the old target, rendered for
   // the old ask: that is the baseline, and its ask is the old one.
   pair(flightGuard,ask1);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
   CHECK(flightGuard.baselineAsk(0).width==3246&&flightGuard.baselineAsk(0).height==2754);
+  CHECK(flightGuard.treatedFor(0).width==3246&&flightGuard.treatedFor(0).height==2754);
   pair(flightGuard,ask1);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting); // unchanged is never evidence
   const auto ask2=q(flightGuard.recommended(0));
@@ -320,6 +324,7 @@ int main(int argc,char** argv) {
   pair(flightGuard,ask2);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
   CHECK(std::fabs(flightGuard.appliedOuterDeg(0)-5.f)<.001f&&std::fabs(flightGuard.appliedVerticalDeg(0)-10.f)<.001f);
+  CHECK(flightGuard.treatedFor(0).width==3566&&flightGuard.treatedFor(0).height==2754); // live: the new ask
   CHECK(flightGuard.adoptingFrames()<10);
   // Back to no trim at all, then a trim again: the baseline for the second
   // adoption is rendered for the runtime's own size, which the game was
@@ -331,6 +336,7 @@ int main(int argc,char** argv) {
   pair(flightGuard,true65);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
   CHECK(flightGuard.baselineAsk(0).width==3964&&flightGuard.baselineAsk(0).height==3914);
+  CHECK(flightGuard.treatedFor(0).width==3964&&flightGuard.treatedFor(0).height==3914);
   pair(flightGuard,ask2);
   CHECK(flightGuard.beginFrame(flight,crystal,crystalDims,true,1)==NativeCullStage::Live);
 

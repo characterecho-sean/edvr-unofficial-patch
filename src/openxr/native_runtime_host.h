@@ -812,6 +812,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
     }
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
+    // The temporal pass is sized by what the frame it is handed was rendered
+    // for, which while a rebuild is awaited is the previous ask and not the
+    // one the game is told now (NativeCullGuard::treatedFor). The frusta are
+    // the game-facing ones either way.
+    auto treatedGeometry=gameGeometry;
+    if(features.acquired()&&locatedValid) for(unsigned e=0;e<2;++e) {
+      const auto dims=cullGuard.treatedFor(e);
+      treatedGeometry.width[e]=dims.width;treatedGeometry.height[e]=dims.height;
+    }
     for(unsigned eye=0;eye<2;++eye) {
       const auto& fov=gameGeometry.views[eye].fov;
       timingFrame.gameFov[eye][0]=fov.angleLeft;
@@ -823,7 +832,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     timingFrame.featureEpoch=featureChanges;
     if(temporal.acquired()&&locatedValid&&frame.shouldRender) {
-      const auto begun=temporal.begin(gameGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking);
+      const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking);
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
       ++temporalFrames;
     } else invalidateEyeTreatments();
