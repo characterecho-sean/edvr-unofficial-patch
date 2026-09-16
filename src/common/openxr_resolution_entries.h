@@ -1,18 +1,23 @@
-// Per-headset OpenXR render width: the grammar of fix.openxr_resolution, the
-// sanitiser both DLLs key on, and the matching rule. Header-only, with no
-// Config or Log dependency, so the graphics DLL (which resolves), the F8 menu
-// (which writes), the native host (which traces the key) and the self-tests
-// share one implementation and cannot disagree byte for byte
+// Per-headset settings: the grammar of a headset-keyed list, the sanitiser
+// both DLLs key on, and the matching rule. Header-only, with no Config or Log
+// dependency, so the graphics DLL (which resolves), the F8 menu (which
+// writes), the native host (which traces the key) and the self-tests share one
+// implementation and cannot disagree byte for byte
 // (docs/openxr-resolution-per-headset-2026-09-14.md, "The shared header").
 //
-// An entry is `runtime[/system]:width`; entries are comma-separated, at most
+// An entry is `runtime[/system]:value`; entries are comma-separated, at most
 // eight. Both halves of the key are what headsetToken() makes of the raw
 // runtime and system names, and an entry's own halves go through the same
 // function before comparison, so a hand-typed `Oculus/Meta-Quest-3:3283`
 // matches. The split rule is fixed: the runtime half ends at the FIRST '/',
-// the width begins after the LAST ':'. A width is an integer in 1..16384; a
-// bare number on its own (180, 3283, the older 1.8) names no headset and is
-// a malformed token, which the graphics log names once.
+// the value begins after the LAST ':'.
+//
+// Each key names the range its own values live in: a render width in
+// 1..16384 for fix.openxr_resolution, degrees in 0..30 for the field-of-view
+// trims. A bare number on its own (180, 3283, 5, or the older 1.8) names no
+// headset and is a malformed token, which the graphics log names once. The
+// Resolution* names below are the width-ranged wrappers, so every call site
+// that predates the second user reads exactly as it did.
 #pragma once
 
 #include <stdint.h>
@@ -32,8 +37,13 @@ namespace edvr::native_render {
 // 30+1+30 = 61 bytes for a full key, under the Status page's 63-byte line and
 // under Log::note's 1200-byte buffer for eight entries with prose around them.
 constexpr size_t kHeadsetTokenMax = 30;
-constexpr size_t kResolutionEntryMax = 8;
+constexpr size_t kHeadsetEntryMax = 8;
+constexpr size_t kResolutionEntryMax = kHeadsetEntryMax;
+// The legal values of the two keys that use this grammar: a render width in
+// pixels per eye, and degrees taken off one edge of the field of view.
+constexpr uint32_t kResolutionWidthMin = 1;
 constexpr uint32_t kResolutionWidthMax = 16384;
+constexpr uint32_t kTrimDegreesMax = 30;
 
 // The sanitiser. Bytes up to the first NUL (at most maxBytes); ASCII letters
 // lowercased; letters and digits kept; every run of anything else (space,
@@ -71,10 +81,13 @@ inline std::string headsetKey(const std::string& runtimeToken,
     return runtimeToken + "/" + systemToken;
 }
 
-struct ResolutionEntry {
+struct HeadsetEntry {
     std::string runtime, system;  // sanitised; system empty = runtime-only
-    uint32_t width = 0;
+    uint32_t value = 0;
 };
+// The width-ranged reading of the same entry; one type, so a list written by
+// the menu and a list read by the DLL cannot drift apart.
+using ResolutionEntry = HeadsetEntry;
 
 inline std::string trimSpaces(const std::string& text) {
     size_t begin = 0, end = text.size();
@@ -83,25 +96,29 @@ inline std::string trimSpaces(const std::string& text) {
     return text.substr(begin, end - begin);
 }
 
-// One comma-separated piece. False for anything the grammar refuses: no ':',
-// a width that is not an integer in 1..16384, an empty runtime half, or a
-// '/' with nothing (or only punctuation) after it.
-inline bool parseResolutionEntry(const std::string& piece, ResolutionEntry* out) {
+// One comma-separated piece, against the key's own value range. False for
+// anything the grammar refuses: no ':', a value that is not an integer within
+// [min, max], an empty runtime half, or a '/' with nothing (or only
+// punctuation) after it. At most five digits whatever the range, and a value
+// of 0 is legal only where min is 0 -- a hand-typed `key:0` on a trim parses
+// (and means no trim), while `key:0` on a width does not.
+inline bool parseHeadsetEntry(const std::string& piece, HeadsetEntry* out,
+                              uint32_t min, uint32_t max) {
     if (!out) return false;
     const std::string text = trimSpaces(piece);
     const size_t colon = text.rfind(':');
     if (colon == std::string::npos) return false;
     const std::string digits = trimSpaces(text.substr(colon + 1));
     if (digits.empty() || digits.size() > 5) return false;
-    uint32_t width = 0;
+    uint32_t value = 0;
     for (char c : digits) {
         if (c < '0' || c > '9') return false;
-        width = width * 10 + static_cast<uint32_t>(c - '0');
+        value = value * 10 + static_cast<uint32_t>(c - '0');
     }
-    if (width < 1 || width > kResolutionWidthMax) return false;
+    if (value < min || value > max) return false;
     const std::string head = text.substr(0, colon);
     const size_t slash = head.find('/');
-    ResolutionEntry entry;
+    HeadsetEntry entry;
     if (slash == std::string::npos) {
         entry.runtime = headsetToken(trimSpaces(head));
     } else {
@@ -110,18 +127,19 @@ inline bool parseResolutionEntry(const std::string& piece, ResolutionEntry* out)
         if (entry.system.empty()) return false;
     }
     if (entry.runtime.empty()) return false;
-    entry.width = width;
+    entry.value = value;
     *out = entry;
     return true;
 }
 
-// Parses the ini value into at most kResolutionEntryMax entries, in order,
+// Parses the ini value into at most kHeadsetEntryMax entries, in order,
 // duplicates kept (resolve takes the first; merge drops the later ones).
 // Every refused piece, and every well-formed entry past the eighth, is
 // appended to `skipped` (trimmed, as typed) so the caller can name it.
-inline size_t parseResolutionEntries(const char* value,
-                                     ResolutionEntry out[kResolutionEntryMax],
-                                     std::vector<std::string>* skipped) {
+inline size_t parseHeadsetEntries(const char* value,
+                                  HeadsetEntry out[kHeadsetEntryMax],
+                                  std::vector<std::string>* skipped,
+                                  uint32_t min, uint32_t max) {
     size_t count = 0;
     if (!value || !out) return 0;
     const std::string whole(value);
@@ -132,8 +150,8 @@ inline size_t parseResolutionEntries(const char* value,
         const std::string piece = trimSpaces(whole.substr(begin, end - begin));
         begin = end + 1;
         if (piece.empty()) continue;
-        ResolutionEntry entry;
-        if (!parseResolutionEntry(piece, &entry) || count >= kResolutionEntryMax) {
+        HeadsetEntry entry;
+        if (!parseHeadsetEntry(piece, &entry, min, max) || count >= kHeadsetEntryMax) {
             if (skipped) skipped->push_back(piece);
             continue;
         }
@@ -144,29 +162,47 @@ inline size_t parseResolutionEntries(const char* value,
 
 // The matching rule: the first runtime/system entry equal to the worn pair
 // (matched 1), else the first runtime-only entry for the worn runtime
-// (matched 2), else nothing (matched 0, returns 0: 100% of the runtime's
-// recommendation). A runtime/system entry whose system differs is never
-// used, and with an empty worn system token only rule 2 can match.
-inline uint32_t resolveResolutionWidth(const ResolutionEntry* entries, size_t count,
-                                       const std::string& rt, const std::string& sys,
-                                       uint32_t* matched) {
+// (matched 2), else nothing (matched 0, returns 0: no entry, which the width
+// reads as 100% of the runtime's recommendation and a trim as no trim). A
+// runtime/system entry whose system differs is never used, and with an empty
+// worn system token only rule 2 can match.
+inline uint32_t resolveHeadsetValue(const HeadsetEntry* entries, size_t count,
+                                    const std::string& rt, const std::string& sys,
+                                    uint32_t* matched) {
     if (matched) *matched = 0;
     if (!entries || rt.empty()) return 0;
     if (!sys.empty()) {
         for (size_t i = 0; i < count; ++i) {
             if (entries[i].runtime == rt && entries[i].system == sys) {
                 if (matched) *matched = 1;
-                return entries[i].width;
+                return entries[i].value;
             }
         }
     }
     for (size_t i = 0; i < count; ++i) {
         if (entries[i].runtime == rt && entries[i].system.empty()) {
             if (matched) *matched = 2;
-            return entries[i].width;
+            return entries[i].value;
         }
     }
     return 0;
+}
+
+inline bool parseResolutionEntry(const std::string& piece, ResolutionEntry* out) {
+    return parseHeadsetEntry(piece, out, kResolutionWidthMin, kResolutionWidthMax);
+}
+
+inline size_t parseResolutionEntries(const char* value,
+                                     ResolutionEntry out[kResolutionEntryMax],
+                                     std::vector<std::string>* skipped) {
+    return parseHeadsetEntries(value, out, skipped, kResolutionWidthMin,
+                               kResolutionWidthMax);
+}
+
+inline uint32_t resolveResolutionWidth(const ResolutionEntry* entries, size_t count,
+                                       const std::string& rt, const std::string& sys,
+                                       uint32_t* matched) {
+    return resolveHeadsetValue(entries, count, rt, sys, matched);
 }
 
 // width / recommended, 1.0 when either is 0. The host clamps it (0.25..2.0)
@@ -176,19 +212,19 @@ inline float widthToScale(uint32_t width, uint32_t recommendedWidth) noexcept {
     return static_cast<float>(width) / static_cast<float>(recommendedWidth);
 }
 
-inline std::string formatResolutionEntry(const ResolutionEntry& entry) {
+inline std::string formatHeadsetEntry(const HeadsetEntry& entry) {
     char digits[16];
-    snprintf(digits, sizeof(digits), "%u", entry.width);
+    snprintf(digits, sizeof(digits), "%u", entry.value);
     return headsetKey(entry.runtime, entry.system) + ":" + digits;
 }
 
-// Canonical spacing: `rt/sys:W, rt/sys:W`.
-inline std::string formatResolutionEntries(const ResolutionEntry* entries, size_t count) {
+// Canonical spacing: `rt/sys:V, rt/sys:V`.
+inline std::string formatHeadsetEntries(const HeadsetEntry* entries, size_t count) {
     std::string out;
     if (!entries) return out;
     for (size_t i = 0; i < count; ++i) {
         if (i) out += ", ";
-        out += formatResolutionEntry(entries[i]);
+        out += formatHeadsetEntry(entries[i]);
     }
     return out;
 }
@@ -196,49 +232,69 @@ inline std::string formatResolutionEntries(const ResolutionEntry* entries, size_
 // Rewrites the first entry keyed rt/sys in place, drops any later duplicate
 // of that key, appends when absent, keeps every other well-formed entry in
 // its order and drops malformed tokens. False, writing nothing, for an empty
-// runtime token, a width outside 1..16384, or a ninth key.
-inline bool mergeResolutionEntry(const std::string& list, const std::string& rt,
-                                 const std::string& sys, uint32_t width,
-                                 std::string* out) {
-    if (!out || rt.empty() || width < 1 || width > kResolutionWidthMax) return false;
-    ResolutionEntry entries[kResolutionEntryMax];
-    const size_t count = parseResolutionEntries(list.c_str(), entries, nullptr);
-    ResolutionEntry kept[kResolutionEntryMax + 1];
+// runtime token, a value outside [min, max], or a ninth key.
+inline bool mergeHeadsetEntry(const std::string& list, const std::string& rt,
+                              const std::string& sys, uint32_t value,
+                              std::string* out, uint32_t min, uint32_t max) {
+    if (!out || rt.empty() || value < min || value > max) return false;
+    HeadsetEntry entries[kHeadsetEntryMax];
+    const size_t count = parseHeadsetEntries(list.c_str(), entries, nullptr, min, max);
+    HeadsetEntry kept[kHeadsetEntryMax + 1];
     size_t keptCount = 0;
     bool placed = false;
     for (size_t i = 0; i < count; ++i) {
         if (entries[i].runtime == rt && entries[i].system == sys) {
             if (placed) continue;
             kept[keptCount] = entries[i];
-            kept[keptCount++].width = width;
+            kept[keptCount++].value = value;
             placed = true;
         } else {
             kept[keptCount++] = entries[i];
         }
     }
     if (!placed) {
-        if (keptCount >= kResolutionEntryMax) return false;
+        if (keptCount >= kHeadsetEntryMax) return false;
         kept[keptCount].runtime = rt;
         kept[keptCount].system = sys;
-        kept[keptCount++].width = width;
+        kept[keptCount++].value = value;
     }
-    *out = formatResolutionEntries(kept, keptCount);
+    *out = formatHeadsetEntries(kept, keptCount);
     return true;
 }
 
 // Removes every entry keyed exactly rt/sys. A runtime-only entry the headset
 // would then fall back to is left alone.
-inline std::string removeResolutionEntry(const std::string& list, const std::string& rt,
-                                         const std::string& sys) {
-    ResolutionEntry entries[kResolutionEntryMax];
-    const size_t count = parseResolutionEntries(list.c_str(), entries, nullptr);
-    ResolutionEntry kept[kResolutionEntryMax];
+inline std::string removeHeadsetEntry(const std::string& list, const std::string& rt,
+                                      const std::string& sys, uint32_t min, uint32_t max) {
+    HeadsetEntry entries[kHeadsetEntryMax];
+    const size_t count = parseHeadsetEntries(list.c_str(), entries, nullptr, min, max);
+    HeadsetEntry kept[kHeadsetEntryMax];
     size_t keptCount = 0;
     for (size_t i = 0; i < count; ++i) {
         if (entries[i].runtime == rt && entries[i].system == sys) continue;
         kept[keptCount++] = entries[i];
     }
-    return formatResolutionEntries(kept, keptCount);
+    return formatHeadsetEntries(kept, keptCount);
+}
+
+inline std::string formatResolutionEntry(const ResolutionEntry& entry) {
+    return formatHeadsetEntry(entry);
+}
+
+inline std::string formatResolutionEntries(const ResolutionEntry* entries, size_t count) {
+    return formatHeadsetEntries(entries, count);
+}
+
+inline bool mergeResolutionEntry(const std::string& list, const std::string& rt,
+                                 const std::string& sys, uint32_t width,
+                                 std::string* out) {
+    return mergeHeadsetEntry(list, rt, sys, width, out, kResolutionWidthMin,
+                             kResolutionWidthMax);
+}
+
+inline std::string removeResolutionEntry(const std::string& list, const std::string& rt,
+                                         const std::string& sys) {
+    return removeHeadsetEntry(list, rt, sys, kResolutionWidthMin, kResolutionWidthMax);
 }
 
 // The widest eye-0 width the host can actually build: effectiveScale takes

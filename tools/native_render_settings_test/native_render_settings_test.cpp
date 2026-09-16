@@ -297,11 +297,11 @@ int wmain(int argc,wchar_t** argv) {
     // Malformed tokens and the split rule.
     {
         ResolutionEntry entries[kResolutionEntryMax]; std::vector<std::string> skipped;
-        check(parse("abc, oculus/meta-quest-3:3283",entries,&skipped)==1 && entries[0].width==3283 &&
+        check(parse("abc, oculus/meta-quest-3:3283",entries,&skipped)==1 && entries[0].value==3283 &&
               skipped.size()==1 && skipped[0]=="abc","abc is skipped and the entry after it kept");
         check(queryGives(kQ3Oculus,"abc, oculus/meta-quest-3:3283",3283,3542,1,1),"a skipped token does not spoil the list");
         skipped.clear();
-        check(parse("oculus/meta-quest-3:62,5",entries,&skipped)==1 && entries[0].width==62 &&
+        check(parse("oculus/meta-quest-3:62,5",entries,&skipped)==1 && entries[0].value==62 &&
               skipped.size()==1 && skipped[0]=="5","62 is a width and 5 a malformed token (no decimal comma)");
         for(const char* bad:{"oculus/meta-quest-3:0",":3283","oculus/:3283","oculus/meta-quest-3:20000",
                              "oculus/meta-quest-3:1824x1968","oculus/---:3283","oculus","3283","oculus/meta-quest-3:"}) {
@@ -316,7 +316,7 @@ int wmain(int argc,wchar_t** argv) {
             check(queryGives(*f,"SteamVR/OpenXR/Pimax Crystal Super:4980",f->w,f->h,0,1),
                   "the hand-typed raw name matches no fixture (copy the key from the log)");
         check(parse(" a:1 , b / c : 2 ,, d:3, ",entries)==3 && entries[0].runtime=="a" && entries[1].runtime=="b" &&
-              entries[1].system=="c" && entries[1].width==2 && entries[2].runtime=="d","whitespace around / : and , is allowed");
+              entries[1].system=="c" && entries[1].value==2 && entries[2].runtime=="d","whitespace around / : and , is allowed");
         skipped.clear();
         check(parse("a:1,b:2,c:3,d:4,e:5,f:6,g:7,h:8,i:9",entries,&skipped)==8 && entries[7].runtime=="h" &&
               skipped.size()==1 && skipped[0]=="i:9","nine entries -> eight kept, the ninth named");
@@ -517,6 +517,36 @@ int wmain(int argc,wchar_t** argv) {
               resolveResolutionWidth(entries,n,"pimax-openxr","other",&matched)==0 && matched==0 &&
               resolveResolutionWidth(entries,n,"","meta-quest-3",&matched)==0 && matched==0,
               "resolve: runtime/system beats runtime-only beats none");
+    }
+    // The same grammar under a second range: the field-of-view trims are
+    // degrees 0..30, where 0 is a value a user may type and a width's floor of
+    // 1 is not. One implementation, two ranges, so the menu that writes a list
+    // and the DLL that reads it cannot disagree about what a value may be.
+    {
+        HeadsetEntry trims[kHeadsetEntryMax]; std::vector<std::string> skipped;
+        const char* list="pimax-openxr/pimax-crystal-super:10, virtualdesktopxr/meta-quest-3:0, oculus:31, 5";
+        const size_t n=parseHeadsetEntries(list,trims,&skipped,0,kTrimDegreesMax);
+        check(n==2 && trims[0].value==10 && trims[1].value==0 && skipped.size()==2 &&
+              skipped[0]=="oculus:31" && skipped[1]=="5",
+              "0 degrees parses at min 0, 31 is refused at max 30, a bare number names no headset");
+        check(parseHeadsetEntries("oculus:0",trims,nullptr,kResolutionWidthMin,kResolutionWidthMax)==0,
+              "the same 0 is malformed where the range starts at 1");
+        uint32_t matched=9;
+        const size_t kept=parseHeadsetEntries(list,trims,nullptr,0,kTrimDegreesMax);
+        check(resolveHeadsetValue(trims,kept,"virtualdesktopxr","meta-quest-3",&matched)==0 && matched==1,
+              "an entry of 0 degrees matches its headset and resolves to 0");
+        std::string out;
+        check(mergeHeadsetEntry("pimax-openxr/pimax-crystal-super:10, virtualdesktopxr/meta-quest-3:5",
+                                "virtualdesktopxr","meta-quest-3",7,&out,0,kTrimDegreesMax) &&
+              out=="pimax-openxr/pimax-crystal-super:10, virtualdesktopxr/meta-quest-3:7",
+              "merging one headset's trim keeps every other headset's");
+        check(!mergeHeadsetEntry("","pimax-openxr","pimax-crystal-super",31,&out,0,kTrimDegreesMax),
+              "merge refuses 31 degrees");
+        check(mergeHeadsetEntry("","pimax-openxr","pimax-crystal-super",0,&out,0,kTrimDegreesMax) &&
+              out=="pimax-openxr/pimax-crystal-super:0","merge accepts 0 where the range starts at 0");
+        check(removeHeadsetEntry("pimax-openxr/pimax-crystal-super:10, virtualdesktopxr/meta-quest-3:5",
+                                 "virtualdesktopxr","meta-quest-3",0,kTrimDegreesMax)==
+              "pimax-openxr/pimax-crystal-super:10","removing one headset's trim keeps every other headset's");
     }
 
     // ---- sizing v1, unchanged ---------------------------------------------

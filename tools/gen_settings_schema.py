@@ -65,6 +65,16 @@ when it takes effect is a build error (as for the window); a developer-tier
 key that does not say is a WARNING, listed, and the row wears a "?" badge
 until the sentence is written.
 
+A `headset` token says the value is a PER-HEADSET LIST -- `runtime/system:value`
+entries separated by commas, as fix.openxr_resolution and the field-of-view
+trims carry -- so `range` on the same line bounds one entry's value rather than
+the string. The in-headset menu shows and edits the entry for the headset being
+worn, and this window edits the raw list as text, because on the desktop nothing
+knows which headset that is:
+
+    # ui: Trim view, top and bottom | range 0..30 | headset | live | menu performance
+    fov_trim_vertical =
+
 Usage:
   python tools/gen_settings_schema.py --root <repo> --out <gen dir>
   python tools/gen_settings_schema.py --root <repo> --check    (no output written)
@@ -227,6 +237,7 @@ class Setting(object):
         self.applies = None   # 'live' or 'restart'
         self.group = ''
         self.percent = False
+        self.headset = False
         self.hidden = False
         self.annotated = False
         self.line = 0
@@ -410,6 +421,14 @@ def apply_annotation(setting, text):
             # and reading it as "0.3 of something" is a puzzle nobody should
             # have to solve in a settings list.
             setting.percent = True
+        elif lower == 'headset':
+            # The value is a per-headset list -- `runtime/system:value`
+            # entries, one per headset, as fix.openxr_resolution and the
+            # field-of-view trims are. `range` bounds ONE entry's value; the
+            # in-headset menu shows and edits the entry for the headset being
+            # worn, and the installer's window edits the raw list as text,
+            # because on the desktop nothing knows which headset that is.
+            setting.headset = True
         elif lower == 'restart':
             setting.applies = 'restart'
         elif lower == 'live':
@@ -720,7 +739,7 @@ def run(root, out, check):
             kind = 'choice'
         applies = when_it_applies(s)
         menuOut.append(
-            '    {%s, %s, %s, %s,\n     %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %d,\n'
+            '    {%s, %s, %s, %s,\n     %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %s, %d,\n'
             '     MenuTier::%s, %s, %s},' % (
                 c_string(s.section), c_string(s.key),
                 c_string(s.label if s.annotated else s.key),
@@ -731,6 +750,7 @@ def run(root, out, check):
                 c_string(s.value), c_string(lo or ''), c_string(hi or ''), precision,
                 c_string('|'.join(choices)),
                 'true' if s.percent else 'false',
+                'true' if s.headset else 'false',
                 {None: 0, 'live': 1, 'restart': 2}[applies],
                 tier, c_string(page), c_string(s.group)))
     os.makedirs(out, exist_ok=True)
@@ -770,7 +790,7 @@ def run(root, out, check):
         recommended = s.recommended if s.recommended is not None else shipped
         rows.append(
             '    {%s, %s, %s, %s, %s,\n     SettingKind::%s, %s, %s,\n'
-            '     %s, %s, %d, %s, %s, %s, %s, %s},' % (
+            '     %s, %s, %d, %s, %s, %s, %s, %s, %s},' % (
                 c_string(s.section), c_string(s.key), c_string(s.label),
                 c_string(summarise(s.description)), c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
@@ -781,6 +801,7 @@ def run(root, out, check):
                 'true' if s.live else 'false',
                 'true' if when_it_applies(s) == 'restart' else 'false',
                 'true' if s.percent else 'false',
+                'true' if s.headset else 'false',
                 c_string(s.group)))
 
     os.makedirs(out, exist_ok=True)
@@ -943,10 +964,25 @@ def self_test():
                         '# ui: OpenXR resolution | restart | menu performance\n'
                         'openxr_resolution =\n'),
                  {'a.cpp': 'const std::string v = cfg.getString("fix.openxr_resolution", "");\n'}, 0)
-    expect_in(name, wrote, 'MenuKind::Text, "", "", "", 2, "", false, 2,')
+    expect_in(name, wrote, 'MenuKind::Text, "", "", "", 2, "", false, false, 2,')
     expect_in(name, wrote, 'MenuTier::Fix, "performance"')
     expect_in(name, wrote, '"' + first + '",')
     expect_in(name, wrote, 'SettingKind::Text, "", "",')
+    expect_not_in(name, wrote, 'MenuKind::Number')
+
+    # The field-of-view trims' shape: the same empty live text key, plus a
+    # `headset` token and a range. The range must reach both rows as ONE
+    # entry's bounds -- the flag beside it is what says so -- and the kind must
+    # stay Text, because the value is a list and a number box cannot hold one.
+    name = 'headset-range'
+    wrote = case(name, ('[fix]\n'
+                        '# Take degrees off the top and the bottom edge of each eye, per\n'
+                        '# headset. Live.\n'
+                        '# ui: Trim view, top and bottom | range 0..30 | headset | live | menu performance\n'
+                        'fov_trim_vertical =\n'),
+                 {'a.cpp': 'const std::string v = cfg.getString("fix.fov_trim_vertical", "");\n'}, 0)
+    expect_in(name, wrote, 'MenuKind::Text, "", "0", "30", 2, "", false, true, 1,')
+    expect_in(name, wrote, 'SettingKind::Text, "", "",\n     "0", "30", 2, "", true, false, false, true,')
     expect_not_in(name, wrote, 'MenuKind::Number')
 
     # `# retired-default: X` is the installer merge's annotation, not prose.

@@ -44,6 +44,12 @@ struct SettingDef {
     // thirty percent of a full circle; "0.3" in a list is a puzzle, and "0 to
     // 1" beside it reads as a switch.
     bool        percent;
+    // A per-headset list (`# ui: ... | headset`): the value is
+    // `runtime/system:value` entries, one per headset, which this window edits
+    // as the text it is. The in-headset menu shows and edits only the headset
+    // being worn -- this one cannot know which that is -- so lo and hi bound
+    // ONE entry's value here, not the string.
+    bool        headset;
     // The heading this setting sits under, taken from edvr.ini's own headings
     // so the file and the window group things the same way.
     const char* group;

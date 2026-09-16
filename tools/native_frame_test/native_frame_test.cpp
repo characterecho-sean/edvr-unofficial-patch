@@ -1,6 +1,7 @@
 #include "../../src/common/native_frame.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/config.h"
+#include "../../src/common/native_render_settings.h"
 #include "../../src/common/system_d3d11.h"
 
 #include <d3d11.h>
@@ -86,9 +87,25 @@ int wmain(int argc, wchar_t** argv) {
                             "94x99, 120x130junk, 95X84, 10x20, 95x84 ");
     edvr::Config::get().set("fix.transition_flash", "1");
     edvr::Config::get().set("advanced.transition_flash_resubmit", "0");
-    edvr::Config::get().set("fix.fov_trim_outer", "7");
-    edvr::Config::get().set("fix.fov_trim_nasal", "44");   // clamped to 30
-    edvr::Config::get().set("fix.fov_trim_vertical", "-3"); // clamped to 0
+    // The three field-of-view trims are per-headset lists keyed like
+    // fix.openxr_resolution, resolved against the headset the last v2
+    // render-settings query saw. Drive that query first, exactly as the host
+    // does (tools/native_render_settings_test drives the same export), so the
+    // labels the provider matches on are valid: "Oculus" + "Meta Quest 3"
+    // sanitise to oculus/meta-quest-3.
+    EdvrNativeRenderViewBounds renderBounds[2];
+    renderBounds[0] = {1824, 1968, 16384, 16384};
+    renderBounds[1] = {1824, 1968, 16384, 16384};
+    EdvrNativeRenderSettings renderSettings =
+        edvr::native_render::buildRenderSettingsRequest(renderBounds, "Oculus", "Meta Quest 3");
+    check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
+                                        sizeof(renderSettings), &renderSettings) == TRUE,
+          "the render settings query publishes this headset's labels");
+    edvr::Config::get().set("fix.fov_trim_outer", "oculus/meta-quest-3:7");
+    // 44 is outside 0..30, so the entry is refused rather than clamped, and
+    // a bare 5 (the form this key used to take) names no headset at all.
+    edvr::Config::get().set("fix.fov_trim_nasal", "oculus/meta-quest-3:44");
+    edvr::Config::get().set("fix.fov_trim_vertical", "5");
 
     EdvrNativeFrameRequest request{
         sizeof(request), EDVR_NATIVE_FRAME_VERSION_1, device.Get(), 41};
@@ -148,9 +165,9 @@ int wmain(int argc, wchar_t** argv) {
               firstOutput.size == sizeof(firstOutput),
           "version 2 answered in kind");
     check(firstOutput.trimOuterDeg == 7.0f &&
-              firstOutput.trimNasalDeg == 30.0f &&
+              firstOutput.trimNasalDeg == 0.0f &&
               firstOutput.trimVerticalDeg == 0.0f,
-          "field of view trim clamps to 0..30 degrees");
+          "the worn headset's trim entry applies; out of range and a bare number do not");
     check(firstDecision.withhold && firstDecision.jumpOnly,
           "marked frame is withheld as jump-only");
 
@@ -265,6 +282,19 @@ int wmain(int argc, wchar_t** argv) {
     check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_1 + 3 * sizeof(float) ==
               sizeof(EdvrNativeFrameOutput),
           "version 2 adds exactly the three trims");
+
+    // A runtime-only entry applies to any headset on that runtime with no
+    // entry of its own; a key with no entry for the worn headset is no trim,
+    // including one keyed on a headset that is not being worn.
+    edvr::Config::get().set("fix.fov_trim_vertical", "oculus:3");
+    edvr::Config::get().set("fix.fov_trim_outer", "");
+    edvr::Config::get().set("fix.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
+    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameInput trimFrame = input(41, 7, 10);
+    check(table.beginFrame(table.context, &trimFrame, &trimOutput) == S_OK &&
+              trimOutput.trimVerticalDeg == 3.0f && trimOutput.trimOuterDeg == 0.0f &&
+              trimOutput.trimNasalDeg == 0.0f,
+          "a runtime-only trim entry applies; an empty list and another headset's entry do not");
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");

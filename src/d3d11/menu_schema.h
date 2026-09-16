@@ -36,6 +36,11 @@ struct MenuRowDef {
     int         precision; // decimals for a number
     const char* choices;   // "a|b=Label|c", empty for other kinds
     bool        percent;   // shown as a percentage, stored as a fraction
+    // A per-headset list (`# ui: ... | headset`): the value is
+    // `runtime/system:value` entries, of which the row shows and edits only
+    // the worn headset's, and `lo`/`hi` bound one entry's value rather than
+    // the whole string. fix.openxr_resolution and the field-of-view trims.
+    bool        headset;
     int         applies;   // 0 not documented, 1 live, 2 needs a game restart
     MenuTier    tier;
     const char* page;      // "performance" | "fixes" | the section for developer rows

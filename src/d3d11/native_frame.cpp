@@ -3,13 +3,17 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "../common/openxr_resolution_entries.h"
+#include "native_render_labels.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr unsigned kPoolSize = 16;
@@ -166,6 +170,134 @@ float clampFraction(float value) {
     return value > 1.0f ? 1.0f : value;
 }
 
+// ---------------------------------------------------------------------------
+// The field-of-view trim, per headset.
+//
+// fix.fov_trim_vertical / _outer / _nasal are per-headset lists keyed exactly
+// like fix.openxr_resolution -- `runtime[/system]:degrees`, degrees 0..30, at
+// most eight entries -- resolved against the worn headset's tokens as the last
+// v2 render-settings query saw them (nativeRenderLabels). A trim tuned on one
+// headset is wrong on another, so a headset with no entry of its own gets no
+// trim rather than somebody else's.
+//
+// beginFrame runs on every frame, and three lists a frame is waste: the lists
+// are parsed only when a key's text or the worn headset changes, the resolved
+// triple is cached, and the log line goes out once per change of it.
+constexpr size_t kTrimCount = 3;
+const char* const kTrimKeys[kTrimCount] = {
+    "fix.fov_trim_vertical", "fix.fov_trim_outer", "fix.fov_trim_nasal"};
+const char* const kTrimNames[kTrimCount] = {"vertical", "outer", "nasal"};
+// Enough distinct malformed tokens to name a hand-edited file's worth and
+// stop; past that the log would repeat itself on every edit.
+constexpr size_t kTrimNamedMax = 32;
+
+struct TrimState {
+    bool        resolved = false;            // the cache below has been filled
+    std::string values[kTrimCount];          // the ini text it was filled from
+    std::string rt, sys;                     // the worn tokens it was filled from
+    bool        headset = false;
+    uint32_t    degrees[kTrimCount] = {0, 0, 0};
+    // What the log has already said, so a note goes out once per change of the
+    // resolved triple rather than once per frame.
+    bool        headsetNoted = false;
+    bool        noHeadsetNoted = false;
+    std::string notedKey;
+    uint32_t    notedDegrees[kTrimCount] = {0, 0, 0};
+    // "<key>|<token>" for every malformed token already named.
+    std::vector<std::string> named;
+};
+// Guarded by g_mutex: every reader is inside beginFrame, which holds it.
+TrimState g_trim;
+
+void resolveTrim(uint32_t out[kTrimCount]) {
+    using namespace edvr::native_render;
+    NativeRenderLabels labels{};
+    const bool haveHeadset = nativeRenderLabels(&labels);
+    const std::string rt = haveHeadset ? std::string(labels.runtimeToken) : std::string();
+    const std::string sys = haveHeadset ? std::string(labels.systemToken) : std::string();
+    // Read literally, one call per key: the config contract and the settings
+    // schema both find a key by the string in the call that reads it.
+    const std::string values[kTrimCount] = {
+        edvr::Config::get().getString("fix.fov_trim_vertical", ""),
+        edvr::Config::get().getString("fix.fov_trim_outer", ""),
+        edvr::Config::get().getString("fix.fov_trim_nasal", "")};
+    if (g_trim.resolved && g_trim.headset == haveHeadset && g_trim.rt == rt &&
+        g_trim.sys == sys && g_trim.values[0] == values[0] &&
+        g_trim.values[1] == values[1] && g_trim.values[2] == values[2]) {
+        for (size_t i = 0; i < kTrimCount; ++i) out[i] = g_trim.degrees[i];
+        return;
+    }
+
+    HeadsetEntry entries[kTrimCount][kHeadsetEntryMax];
+    size_t counts[kTrimCount] = {0, 0, 0};
+    uint32_t degrees[kTrimCount] = {0, 0, 0};
+    bool anyEntry = false;
+    for (size_t i = 0; i < kTrimCount; ++i) {
+        std::vector<std::string> skipped;
+        counts[i] = parseHeadsetEntries(values[i].c_str(), entries[i], &skipped,
+                                        0, kTrimDegreesMax);
+        if (counts[i]) anyEntry = true;
+        degrees[i] = haveHeadset
+            ? resolveHeadsetValue(entries[i], counts[i], rt, sys, nullptr) : 0u;
+        for (const std::string& token : skipped) {
+            const std::string seen = std::string(kTrimKeys[i]) + "|" + token;
+            if (g_trim.named.size() >= kTrimNamedMax ||
+                std::find(g_trim.named.begin(), g_trim.named.end(), seen) !=
+                    g_trim.named.end()) {
+                continue;
+            }
+            g_trim.named.push_back(seen);
+            // The old shipped form was a bare `5`, which names no headset:
+            // say so once per distinct token per key, with the shape of an
+            // entry, rather than silently dropping it.
+            edvr::Log::get().note("fov trim: ignored \"%s\" in %s (entries look like "
+                                  "pimax-openxr/pimax-crystal-super:5)",
+                                  token.c_str(), kTrimKeys[i]);
+        }
+    }
+
+    const std::string key = haveHeadset ? headsetKey(rt, sys) : std::string();
+    if (haveHeadset) {
+        const bool changed = !g_trim.headsetNoted || g_trim.notedKey != key ||
+                             g_trim.notedDegrees[0] != degrees[0] ||
+                             g_trim.notedDegrees[1] != degrees[1] ||
+                             g_trim.notedDegrees[2] != degrees[2];
+        if (changed) {
+            std::string saved;
+            for (size_t i = 0; i < kTrimCount; ++i) {
+                if (i) saved += "; ";
+                saved += kTrimNames[i];
+                saved += " ";
+                saved += counts[i] ? formatHeadsetEntries(entries[i], counts[i])
+                                   : std::string("none");
+            }
+            edvr::Log::get().note("fov trim: this headset is %s; vertical %u, outer %u, "
+                                  "nasal %u degrees (entries: %s).", key.c_str(),
+                                  degrees[0], degrees[1], degrees[2], saved.c_str());
+            g_trim.headsetNoted = true;
+            g_trim.noHeadsetNoted = false;
+            g_trim.notedKey = key;
+            for (size_t i = 0; i < kTrimCount; ++i) g_trim.notedDegrees[i] = degrees[i];
+        }
+    } else if (anyEntry && !g_trim.noHeadsetNoted) {
+        // Entries are saved but nothing has published a headset: on SteamVR or
+        // OpenComposite nothing ever will, and the keys are inert.
+        edvr::Log::get().note("fov trim: no headset is known yet, so no trim applies.");
+        g_trim.noHeadsetNoted = true;
+        g_trim.headsetNoted = false;
+    }
+
+    g_trim.resolved = true;
+    g_trim.headset = haveHeadset;
+    g_trim.rt = rt;
+    g_trim.sys = sys;
+    for (size_t i = 0; i < kTrimCount; ++i) {
+        g_trim.values[i] = values[i];
+        g_trim.degrees[i] = degrees[i];
+        out[i] = degrees[i];
+    }
+}
+
 HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -223,12 +355,13 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.cullVerticalFraction = clampFraction(edvr::Config::get().getFloat(
         "fix.cull_guard_fraction_v", 1.0f));
     readSignatures(edvr::Config::get().getString("fix.cull_guard_headsets", ""), &result);
-    result.trimOuterDeg = static_cast<float>(edvr::Config::get().getIntInRange(
-        "fix.fov_trim_outer", 0, 0, 30));
-    result.trimNasalDeg = static_cast<float>(edvr::Config::get().getIntInRange(
-        "fix.fov_trim_nasal", 0, 0, 30));
-    result.trimVerticalDeg = static_cast<float>(edvr::Config::get().getIntInRange(
-        "fix.fov_trim_vertical", 0, 0, 30));
+    // The worn headset's entry in each of the three lists, resolved from the
+    // last render-settings query's labels and cached between changes.
+    uint32_t trim[kTrimCount] = {0, 0, 0};
+    resolveTrim(trim);
+    result.trimVerticalDeg = static_cast<float>(trim[0]);
+    result.trimOuterDeg = static_cast<float>(trim[1]);
+    result.trimNasalDeg = static_cast<float>(trim[2]);
     result.sceneReady = edvr::sceneArrived() &&
                         sameDevice(state->device, edvr::gameDevice()) ? 1u : 0u;
     result.transitionEnabled = edvr::Config::get().getBool(

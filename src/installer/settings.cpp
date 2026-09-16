@@ -165,6 +165,10 @@ std::wstring SettingRow::helper() const {
     text += *def->shipped ? showValue(*def, def->shipped) : std::wstring(L"(empty)");
     if (*def->lo && *def->hi) {
         text += L"  \x00b7  " + showValue(*def, def->lo) + L" to " + showValue(*def, def->hi);
+        // On a per-headset list the bounds are one entry's, and a bare number
+        // in the box names no headset and is ignored. Say which it bounds
+        // rather than inviting somebody to type the bound itself.
+        if (def->headset) text += L" per headset";
     }
     return text;
 }
