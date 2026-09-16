@@ -789,6 +789,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
             cullGuard.factorWidth(),cullGuard.factorHeight(),cullGuard.recommended(0).width,cullGuard.recommended(0).height,
             cullGuard.appliedOuterDeg(0),cullGuard.appliedNasalDeg(0),cullGuard.appliedVerticalDeg(0),
             target.left,target.right,target.down,target.up,place.left,place.top,place.right,place.bottom);
+          // Once per entry into Adopting: what the guard decided about the
+          // game's own rebuild (NativeCullGuard::startNudge and the
+          // NativeCullNudge names). `told` is the height the game reads from
+          // here on, `asked` the height before any nudge, `floor` the lowest
+          // height told since the rebuild last seen. `started` expects
+          // stage=3 within seconds without an apply; `taller` and `capped`
+          // expect it only at the next apply.
+          if(cullGuard.nudge()!=NativeCullNudge::None)
+            nativeTracePrintf("native_cull_nudge,%s,told=%u,asked=%u,floor=%u\n",nativeCullNudgeName(cullGuard.nudge()),
+              cullGuard.recommended(0).height,cullGuard.trueRecommended(0).height,cullGuard.nudgeFloor());
         }
         // While a rebuild is awaited, say what is waited for, so a stall
         // reads as numbers rather than as a stage 2 line with no stage 3

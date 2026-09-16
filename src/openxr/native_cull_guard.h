@@ -48,6 +48,31 @@ constexpr float kNativeCullMinSpanDeg = 20.0f;
 // the flight of 2026-09-16), and then no ratio ever matches; the lie is a
 // projection, which any target size carries correctly. Three seconds at 90 Hz.
 constexpr uint32_t kNativeCullAdoptGraceFrames = 270;
+// The nudge (NativeCullGuard::startNudge): rows taken off the lowest height
+// the game has been told since its last rebuild, so that it rebuilds for a
+// change it would otherwise ignore, and how many rows under the true ask
+// the told height may fall before the ask is told as it is.
+constexpr uint32_t kNativeCullNudgePx = 2;
+constexpr uint32_t kNativeCullNudgeMaxPx = 40;
+// What startNudge decided as a frame entered Adopting. First: no rebuild has
+// been seen since the scene began, nothing to measure against. Same: the
+// size did not move, only the angles, and the pair in hand already fits.
+// Shrink: the height fell under the floor, the game rebuilds by itself.
+// Taller: more rows than were told before, never nudged, the next apply
+// builds them. Capped: the dip would cost more than kNativeCullNudgeMaxPx
+// rows. Started: the game is told the dipped height from this frame on.
+enum class NativeCullNudge : uint32_t { None, First, Same, Shrink, Taller, Capped, Started };
+inline const char* nativeCullNudgeName(NativeCullNudge n) noexcept {
+  switch (n) {
+    case NativeCullNudge::First: return "first";
+    case NativeCullNudge::Same: return "same";
+    case NativeCullNudge::Shrink: return "shrink";
+    case NativeCullNudge::Taller: return "taller";
+    case NativeCullNudge::Capped: return "capped";
+    case NativeCullNudge::Started: return "started";
+    default: return "none";
+  }
+}
 constexpr float kNativeCullPi = 3.1415926535f;
 
 inline float nativeCullDegrees(float tangent) noexcept {
@@ -72,12 +97,18 @@ class NativeCullGuard final {
       const NativeCullFrustum (&trueFrusta)[2],
       const NativeCullDimensions (&runtimeDims)[2], bool sceneReady,
       uint64_t referenceGeneration) noexcept {
-    changed_ = false;
+    changed_ = false; nudge_ = NativeCullNudge::None;
     const bool standDown=pendingStandDown_;pendingStandDown_=false;
     // Every exit records what the game is told from here on, so the next
     // adoption knows what size the pair that seeds its baseline was rendered
-    // for.
-    const auto finish=[this]{told_[0]=recommended(0);told_[1]=recommended(1);return stage_;};
+    // for, and the lowest height told since the last rebuild seen, which the
+    // nudge dips under (startNudge).
+    const auto finish=[this]{
+      for(unsigned e=0;e<2;++e){told_[e]=recommended(e);trueTold_[e]=trueRecommended(e);}
+      if(stage_==NativeCullStage::Adopting||stage_==NativeCullStage::Live){
+        const uint32_t h=told_[0].height; if(h&&(!floor_||h<floor_)){floor_=h;floorAsk_=trueTold_[0].height;}
+      }
+      return stage_;};
     const bool valid = validSettings(settings) && validInputs(trueFrusta, runtimeDims);
     // A trim alone is reason enough to run: it tells the game a different
     // projection and a different size, which is the whole of what the stage
@@ -131,14 +162,18 @@ class NativeCullGuard final {
           moved = moved || changedSize(e);
         }
         if (!promote && moved && adoptingFrames_ > kNativeCullAdoptGraceFrames) promote = true;
-        if (promote) { adopted_[0]=submitted_[0]; adopted_[1]=submitted_[1]; adoptedReady_=true; stage_ = NativeCullStage::Live; changed_ = true; }
+        // The pair reached the ask: the game holds targets for exactly what it
+        // is told now, and the nudge's floor starts over from there.
+        if (promote) { adopted_[0]=submitted_[0]; adopted_[1]=submitted_[1]; adoptedReady_=true; stage_ = NativeCullStage::Live; changed_ = true; floor_ = 0; }
       }
       submittedReady_ = false; submittedMask_ = 0;
     }
     if (stage_ == NativeCullStage::Inert && forcedInert_) return finish();
     if (stage_ == NativeCullStage::Off || stage_ == NativeCullStage::WaitingScene ||
         stage_ == NativeCullStage::Inert) {
-      if (!sceneReady) { stage_ = NativeCullStage::WaitingScene; return finish(); }
+      // The floor outlives the scene as it outlives the guard going off: the
+      // game's targets are the graphics settings', not the scene's.
+      if (!sceneReady) { stage_ = NativeCullStage::WaitingScene; nudgeHeight_ = 0; return finish(); }
       if (!computeWidened()) { stage_ = NativeCullStage::Inert; forcedInert_=true; changed_ = true; return finish(); }
       stage_ = NativeCullStage::Adopting; changed_ = true;
       submittedReady_ = false; submittedMask_ = 0; adoptingFrames_ = 0;
@@ -147,6 +182,7 @@ class NativeCullGuard final {
       // run, for the runtime's own size.
       if (!baselineReady_) for (unsigned e=0;e<2;++e)
         pendingAsk_[e] = told_[e].width && told_[e].height ? told_[e] : gameFacingDimensions(runtime_[e]);
+      startNudge();
     }
     return finish();
   }
@@ -192,13 +228,29 @@ class NativeCullGuard final {
     return false;
   }
   NativeCullFrustum runtimeFrustum(unsigned eye) const noexcept { return eye<2?true_[eye]:NativeCullFrustum{}; }
-  NativeCullDimensions recommended(unsigned eye) const noexcept {
+  // The size the game is asked to render before any nudge: the runtime's own
+  // outside an adoption, the widened or trimmed one inside.
+  NativeCullDimensions trueRecommended(unsigned eye) const noexcept {
     if (eye >= 2) return {};
     if (stage_ != NativeCullStage::Adopting && stage_ != NativeCullStage::Live)
       return gameFacingDimensions(runtime_[eye]);
     return {roundRecommendedDim(float(runtime_[eye].width)*maxFactorW_),
             roundRecommendedDim(float(runtime_[eye].height)*maxFactorH_)};
   }
+  // What the game is told: trueRecommended(), shorter by the nudge from the
+  // change that started one until the next change (startNudge). It stays
+  // shorter once live, so the temporal output and the target the game built
+  // agree to the pixel.
+  NativeCullDimensions recommended(unsigned eye) const noexcept {
+    auto d=trueRecommended(eye);
+    if(nudgeHeight_&&d.height>nudgeHeight_&&(stage_==NativeCullStage::Adopting||stage_==NativeCullStage::Live))d.height=nudgeHeight_;
+    return d;
+  }
+  // The nudge decision taken as this frame entered Adopting, for the trace
+  // (None on any other frame), with the floor it was measured against: the
+  // lowest height the game has been told since the rebuild last seen.
+  NativeCullNudge nudge() const noexcept { return nudge_; }
+  uint32_t nudgeFloor() const noexcept { return nudgeFloor_; }
   // What the frame now in hand was rendered for. While a rebuild is awaited
   // that is the ask the baseline pair was built for (until that pair is
   // seen, what the game was told as the wait began), never the new ask: the
@@ -297,7 +349,35 @@ class NativeCullGuard final {
   bool sameDims(const NativeCullDimensions (&d)[2]) const noexcept { return d[0].width==runtime_[0].width&&d[0].height==runtime_[0].height&&d[1].width==runtime_[1].width&&d[1].height==runtime_[1].height; }
   static void copy(const NativeCullFrustum (&a)[2],NativeCullFrustum (&b)[2]) noexcept {b[0]=a[0];b[1]=a[1];}
   static void copy(const NativeCullDimensions (&a)[2],NativeCullDimensions (&b)[2]) noexcept {b[0]=a[0];b[1]=a[1];}
-  void clear() noexcept { resetAdoption(); baselineReady_=false; }
+  // The floor survives the guard going off: the game keeps the targets it
+  // has through a taller ask, so the next trim is measured against them.
+  void clear() noexcept { resetAdoption(); baselineReady_=false; nudgeHeight_=0; }
+  // Flights 4 and 5 (2026-09-16): Elite rebuilds its eye targets on its own
+  // only when the height it reads is smaller than the one they were built
+  // for (every such change landed in about two seconds); a change on the
+  // width alone, or a taller ask, waited for a Graphics-settings apply, 52 s
+  // and counting. So a change that leaves the height where it was, or does
+  // not lower it under the floor (the lowest height told since the rebuild
+  // last seen, re-based at each promotion), is told a height two pixels
+  // under that floor, for good: the game rebuilds at once, both axes at the
+  // current ask, and what it builds is what the temporal pass is sized by.
+  // Each such change costs two more rows until a genuine shrink or an apply
+  // re-bases the floor; past kNativeCullNudgeMaxPx the ask is told as it is
+  // and the trace says so. An ask taller than the one the floor was told
+  // for is never nudged: the rows asked for are the point of it, a dip would
+  // quietly drop them, and the game builds them at the next apply. Only the
+  // left eye's height is measured; both eyes are told the dip.
+  void startNudge() noexcept {
+    nudgeHeight_=0; nudgeFloor_=floor_;
+    const auto want=trueRecommended(0); const auto before=trueTold_[0];
+    if(!floor_||!want.height||!before.height){nudge_=NativeCullNudge::First;return;}
+    if(want.width==before.width&&want.height==before.height){nudge_=NativeCullNudge::Same;return;}
+    if(want.height<floor_){nudge_=NativeCullNudge::Shrink;return;}
+    if(want.height>floorAsk_){nudge_=NativeCullNudge::Taller;return;}
+    const uint32_t dip=floor_>kNativeCullNudgePx?floor_-kNativeCullNudgePx:0;
+    if(dip<16||want.height-dip>kNativeCullNudgeMaxPx){nudge_=NativeCullNudge::Capped;return;}
+    nudgeHeight_=dip;nudge_=NativeCullNudge::Started;
+  }
   void clearApplied() noexcept { for(unsigned e=0;e<2;++e) appliedOuter_[e]=appliedNasal_[e]=appliedVertical_[e]=0; }
   void resetAdoption(bool keepBaseline=false) noexcept {
     if(!keepBaseline) baselineReady_=false;
@@ -397,7 +477,12 @@ class NativeCullGuard final {
   // baselineAsk_ is what the baseline pair was rendered for, pendingAsk_ the
   // same for the pair about to seed one, told_ what the game was told at the
   // end of the previous frame.
-  NativeCullDimensions baselineAsk_[2]{},pendingAsk_[2]{},told_[2]{}; uint32_t adoptingFrames_=0;
+  NativeCullDimensions baselineAsk_[2]{},pendingAsk_[2]{},told_[2]{},trueTold_[2]{}; uint32_t adoptingFrames_=0;
+  // The nudge: the lowest height told since the rebuild last seen and the
+  // height it stood for before any dip, the height told while a nudge is on
+  // (0 = none), and the decision taken as the frame entered Adopting with
+  // the floor it saw.
+  uint32_t floor_=0,floorAsk_=0,nudgeHeight_=0,nudgeFloor_=0; NativeCullNudge nudge_=NativeCullNudge::None;
   float factorW_[2]{1,1},factorH_[2]{1,1},widenW_[2]{1,1},widenH_[2]{1,1},maxFactorW_=1,maxFactorH_=1,maxWidenW_=1,maxWidenH_=1;
   float appliedOuter_[2]{0,0},appliedNasal_[2]{0,0},appliedVertical_[2]{0,0};
   uint64_t referenceGeneration_=0; uint32_t submittedMask_=0; NativeCullStage stage_=NativeCullStage::Off; bool baselineReady_=false,submittedReady_=false,adoptedReady_=false,forcedInert_=false,pendingStandDown_=false,changed_=false;
