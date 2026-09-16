@@ -109,7 +109,8 @@ class UiDeferredSnapshots {
         case DXGI_FORMAT_R8G8B8A8_TYPELESS:case DXGI_FORMAT_R8G8B8A8_UNORM:case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
         case DXGI_FORMAT_B8G8R8A8_TYPELESS:case DXGI_FORMAT_B8G8R8A8_UNORM:case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
         case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R16G16_UNORM:return 4;
-        case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:case DXGI_FORMAT_R32G32_FLOAT:case DXGI_FORMAT_R16G16B16A16_FLOAT:return 8;
+        case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:case DXGI_FORMAT_R32G32_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:case DXGI_FORMAT_R16G16B16A16_FLOAT:case DXGI_FORMAT_R16G16B16A16_UNORM:return 8;
         case DXGI_FORMAT_R32G32B32A32_FLOAT:return 16;
         default:return 0;
         }
@@ -202,7 +203,7 @@ class UiDeferredDraw {
     D3D11_VIEWPORT viewport_{};D3D11_RECT scissor_{};UINT scissorCount_=0;
     D3D11_PRIMITIVE_TOPOLOGY topology_=D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
     char kind_=0;UINT count_=0,instances_=0,start_=0,first_=0;INT base_=0;
-    const char* failure_=nullptr;
+    const char* failure_=nullptr;int failureSlot_=-1;char failureStage_=0;
     bool fail(const char* why){failure_=why;return false;}
     static const GUID& panelLayoutKey(){static const GUID g={0x0db0ca71,0x6a19,0x4ca8,{0x9b,0x44,0x51,0x22,0x17,0x0e,0x4e,0x91}};return g;}
     static bool panelLayout(ID3D11InputLayout* layout) {
@@ -255,6 +256,8 @@ class UiDeferredDraw {
 public:
     bool ready()const{return kind_!=0;}
     const char* failureReason()const{return failure_?failure_:"unspecified capture failure";}
+    int failureResourceSlot()const{return failureSlot_;}
+    char failureResourceStage()const{return failureStage_;}
     ID3D11VertexShader* originalVertexShader()const{return vs_.Get();}
     ID3D11PixelShader* originalPixelShader()const{return ps_.Get();}
     ID3D11BlendState* blendState()const{return blend_.Get();}
@@ -290,8 +293,8 @@ public:
             bool good=true;for(UINT i=0;i<14;++i){Ptr<ID3D11Buffer> original;original.Attach(b[i]);if(good && (bits&(1u<<i)))good=original && copyBuffer(c,pool,original.Get(),output[i]);}return good;};
         if(!constants(true,mask.cbVs,vcb_) || !constants(false,mask.cbPs,pcb_))return fail("constant buffer snapshot unavailable");
         for(UINT i=0;i<128;++i){
-            if(mask.srvVs[i]){Ptr<ID3D11ShaderResourceView> v;c->VSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),vsr_[i],mask.allowVolatileUavSrv,mask.compactPanelIa && i==38))return fail(mask.compactPanelIa && i==38?"panel t38 descriptor or tracked snapshot unsupported":"vertex shader resource snapshot unavailable");}
-            if(mask.srvPs[i] && !(mask.tone && i==1) && !(mask.postTone && i==0)){Ptr<ID3D11ShaderResourceView> v;c->PSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),psr_[i],mask.allowVolatileUavSrv))return fail("pixel shader resource snapshot unavailable");}
+            if(mask.srvVs[i]){Ptr<ID3D11ShaderResourceView> v;c->VSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),vsr_[i],mask.allowVolatileUavSrv,mask.compactPanelIa && i==38)){failureStage_='V';failureSlot_=int(i);return fail(mask.compactPanelIa && i==38?"panel t38 descriptor or tracked snapshot unsupported":"vertex shader resource snapshot unavailable");}}
+            if(mask.srvPs[i] && !(mask.tone && i==1) && !(mask.postTone && i==0)){Ptr<ID3D11ShaderResourceView> v;c->PSGetShaderResources(i,1,&v);if(!copyView(c,pool,v.Get(),psr_[i],mask.allowVolatileUavSrv)){failureStage_='P';failureSlot_=int(i);return fail("pixel shader resource snapshot unavailable");}}
         }
         ID3D11SamplerState* vss[16]{},*pss[16]{};c->VSGetSamplers(0,16,vss);c->PSGetSamplers(0,16,pss);for(UINT i=0;i<16;++i){vss_[i].Attach(vss[i]);pss_[i].Attach(pss[i]);}
         kind_=kind;count_=count;instances_=instances;failure_=nullptr;return true;

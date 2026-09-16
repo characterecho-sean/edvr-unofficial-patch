@@ -317,3 +317,52 @@ A NVIDIA shader-only measurement at 2268x2240 is 0.032--0.043 ms per eye
 with a synthetic source UI mask, versus 0.026--0.029 ms without the
 mask. This measures screen reprojection, not the mask clear, original
 GUI shader reissues, post-resolve work or total in-game overhead.
+
+## HUD resolution follow-up
+
+The user confirms that the on-foot target UI looks good after dcdcf41.
+The remaining request is clarity of the vertical flight HUD and the
+cockpit HUD generally. This is a resolution/compositing investigation;
+the working source-screen motion correction should remain separate.
+
+The captured landing HUD is the E508648660A352B2 sprite sampling the
+742x742 GUI surface. Its captured vertices, instance and projection
+place that surface across approximately 748x648 input pixels, or
+1496x1296 output pixels at the captured 2x reconstruction ratio. It is
+therefore roughly native to the input grid and magnified at the output
+grid. The sprite pixel shader samples the GUI once, transforms its
+colour and passes its alpha; the cockpit holo material's eight-tap glow
+is not part of this sprite shader.
+
+The GUI glyph draw uses a 2048x2048 A8 atlas and pixel shader
+DE0E1C56AAE678C5. Its disassembly confirms ordinary sampled coverage and
+colour operations, without distance-field edge reconstruction. Across
+132 glyph quads in the 143911 source capture, the median atlas rectangle
+is 12x14 texels, rasterised into about 10x14 GUI pixels and projected to
+about 18x27 final eye pixels. These are quad bounds, including glyph
+padding, rather than measurements of ink thickness. Raising only the
+surface allocation cannot make the font renderer bake larger glyphs.
+
+The present post-DLSS UI resolve also reconstructs changed strokes from
+the input eye raster. This removes stale content but cannot provide new
+output-resolution samples. Surface resolution, glyph baking, final eye
+rasterisation and separation from moving background content are distinct
+parts of the clarity problem.
+
+Recommended next prototype: replay the landing HUD at the output eye
+resolution with spatial edge antialiasing, then compare its actual
+projected strokes and motion against the existing input-resolution path.
+For text, separately test increasing the game's GUI layout/glyph-bake
+resolution; enlarging an existing atlas is not that test. Scale only the
+UI to the required output density, rather than oversizing every surface
+without accounting for minification.
+
+The larger implementation needs a distinct HUD colour/coverage layer or
+an earlier temporal injection point. The older crisp-ui-handoff design
+already established why a simple final overlay is incomplete: cockpit
+HUD draws are depth-tested in HDR before tone mapping and bloom. A
+prototype must preserve scene occlusion, exposure, tint and glow, and
+exclude HUD colour from scene history before compositing it back. Merely
+drawing the same HUD a second time over the existing post-HUD DLSS image
+would retain the old blurry copy underneath. These rendering changes are
+recommendations, not implemented or flight-validated fixes.

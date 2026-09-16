@@ -2,41 +2,53 @@
 
 ## Status
 
-Updated 2026-09-16 after full build, live NVIDIA NGX smoke, and Steam install
-verification for the accepted declaration-input fix. The gfx run `055441` and
-eye dump `055630` remain the flight provenance; no HMD flight has verified the
-fix. The next check is a loading-cockpit run with DLSS enabled, without a full
-smear flight.
+Updated 2026-09-16 (evening) on taking the arc over from the Codex worktree
+c009, after reading the newest Steam flight and its eye dump. The three-file
+format-9/11 change was built as `v0.17.0-rc.2-39-ge4b923a-dirty` (PE
+`6AAAEE18`), installed to Steam and flown at 13:37 (gfx log
+`edvr_gfx_20260916_133757.log`). It got past the format-9 refusal; the route
+was refused 6 ms later by the next exact contract, `panel vertex buffer
+contract changed`, on the same 8121/A296 draw (13:47:35.683), and latched off
+before eye dump `134857` (frame 18586, DLSS Performance 1695x1614 to
+3390x3228). That is the tenth narrow blocker in four days, and the active
+route has still never rendered a target label in the headset.
 
-The final literal is `v0.17.0-rc.2-15-g9d30ac6-dirty`. Full build, all 65 rigs,
-three quiet gates, 256/256 config checks, SDK `310.7.0`, carried runtime, and
-actual installer-resource checks passed. Live NGX smoke passed with native
-NVIDIA exercises, zero drops, and no runtime skips. Source hash rows remained
-unchanged. Graphics SHA-256 is
-`9714E5DD320FFAAB6793A45666870716198A332FEEE561BB7FB3797849DC00BE`; runtime
-SHA-256 is `DCE75E4E6D26275374782CB2B9211EFFEC4C07EE6AD25F644DF620C04EEC4A1D`;
-installer SHA-256 is
-`85FBE587D549F65D2E1FA0ED79260E9E704CE3D3BF08B96BFCAC7472B45E86E0`.
+Where the mask comes from, measured on dumps `131013` and `134857` at the
+label (output pixels, luma 0..255; method and tables in the evening entry):
+- the raw frame handed to NVIDIA (the C crops) has no darkening at the label;
+- NVIDIA's output before EDVR's UI resolve (`DlssBeforeUi`) has no polygon
+  either: it sits +3..+5 luma above raw uniformly around the label;
+- the final frame is -4.2 luma below `DlssBeforeUi` inside one footprint and
+  -0.1 outside it, so EDVR's post-DLSS UI resolve adds the mask;
+- that footprint is the alpha channel of `UiPrevious`/`UiNext` (Jaccard 0.77
+  and 0.78 on 131013, 0.73 on 134857), not `UiEdits` (0.00) and not any fixed
+  dilation of the class-1 coverage (0.40 at best); their RGB is zero there.
+The dark band on the star's limb is a separate effect: it is already present
+in `DlssBeforeUi`, on the class-3 (smoke) region the corona is filed under.
 
-The Steam sanctioned dry run and actual `--all` install exited 0, followed by a
-separate `--all --verify-only` exit 0. The game was closed. `edvr.ini` stayed
-144,372 bytes with SHA-256
-`BDF474BB2A929773FE66AADC790549FA59714830EB9A9FEE5EB4CDD06F45BF9B`. Receipt:
-`edvr_native_receipt.json.pre-9d30ac6-20260916-063210.bak`.
+Ruled out today: the game drawing a dark backing (raw crops clean); NVIDIA
+producing the label mask (`DlssBeforeUi` clean); the mask lying where the UI
+content changed (`UiEdits` overlap 0.00); the format-9 change ending the
+latch-off (refused on the next contract in flight).
 
-Environment: Pimax OpenXR Crystal Super, `2644x2610` scene input to `4068x4016`
-per eye, preset K, DLSS `310.7.0.0`. Elite's retained shaders lack RDEF;
-D3DReflect succeeds with zero resources. Missing exposure, CB, and LUT inputs
-made the private tone output black; executable declarations now supply those
-inputs.
+The rule that does it is `kUiResolve` (src/d3d11/ui_resolve.h): every active
+output pixel is clamped to the min/max of the 2x2 raw texels under it (line
+75), and a pixel stays active for up to 32 frames after the label leaves,
+decaying only while that clamp still changes it by more than 1/255 (line
+111). NVIDIA's output sits 3..5 luma above the raw range on the corona, so
+there the clamp bites every frame: the footprint dims to the raw level and
+outlives the label for 32 frames, transported along the motion vectors. Over
+dark space the clamp never bites and the footprint expires at once, which is
+why the mask is corona-specific.
 
-The synthetic controller regression passes 2,375 WARP and 2,375 hardware
-checks. Separately, the actual `055630` packet replays nonblack on both WARP
-and hardware; the production black-path and restored-resource evidence are in
-the preceding entry.
+Decision for Sean: (A) fix that rule in the fallback path, which is what
+ships, or (B) keep peeling the deferred route's contracts. Recommended: A.
+Its first step needs no flight: re-implement the shader in Python over the
+dump (`DlssBeforeUi`, raw C00, `UI`, `UiPrevious`, `MV`, `UiEdits`) until it
+reproduces `L0` in the label crops, then test the candidate change on the
+same data: a stale threshold or bound tolerance that a reconstruction offset
+of a few luma cannot cross but a departed glyph does.
 
-Open: loading-cockpit behavior with DLSS enabled. No additional full smear
-flight is needed for the black-path check.
 
 ## Investigation
 
@@ -2694,3 +2706,230 @@ preserved receipt is
 
 This validates build, smoke, and installed bytes; it does not claim HMD-flight
 verification. The next check is loading cockpit with DLSS enabled.
+
+### User confirms black fixed; target-smear flight 131013, 2026-09-16
+
+The user confirmed the black cockpit is fixed and resumed checking smear around
+target text. The latest verified gfx log is
+`edvr_logs/edvr_gfx_20260916_130708.log`, version
+`v0.17.0-rc.2-15-g9d30ac6-dirty`, PE `6AAA8B25`; current HEAD is `2c6e820`. The
+literal is known precommit provenance reconciled by exact recorded installed
+hashes and fresh Steam `--all --verify-only`. The OpenXR log records Pimax
+OpenXR / Crystal Super, output `5424x5356` per eye.
+
+The eye/offscreen census requested at 13:10:13.719 wrote eye stamp `131013`,
+scene frame `14111`. Eye inputs are `2712x2678`; `DlssBeforeUi` is `5424x5356`.
+The route-specific sequence is 13:08:30.189: `Deferred UI: captured X draw,
+gen=6669 VS=B7790CBFC6554097 PS=8DEF46452FA459F5 eye=0 3525x3481
+HDR=000001D702D1A560; depth=1/0 stencil=0 read=FF write=FF ref=0 front=8/1/1/1
+back=8/1/1/1.` At 13:08:30.195, the next draw latched the route off: `original
+frame retained: UI state, resources or allocation unsupported (draws=1,
+VS=81216C77F90DEDD6 PS=A2965EC2931A39C8)`. The shader snapshot was unavailable.
+Deferred totals through 13:08:28 were `captured=0 applied=0 declined=0`; the
+log has no later totals summary. No active-route capture/evaluation occurred
+for this eye dump, so it records fallback smear only.
+
+The input files written include MV, Z, UI, Bias, SceneZ, HoloCoverage, UiEdits,
+MeshCoverage, PrevZ, DlssBeforeUi, UiPrevious, and UiNext. Motion CSV, paired
+raw/treated crops, and mesh/holo motion records were written. Snapshot reports
+show zero declines, readback/capture failures, failed copies, capped draws, or
+missing shaders for panels, tone-map, drawstate, eye mesh, GUI, and
+target-color artifacts. Target-color snapshots contain six exact draws and six
+completed before/after pairs.
+
+Around the eye capture (13:10:15.669–19.875), both eyes are nonblack at game;
+DLSS output/final track game, while clean_hdr and dlss_in are unsampled. At
+13:10:21.910/.932 and 13:10:23.934/.966 both eyes read all-zero at game, with
+DLSS output/final zero and Deferred UI inactive. First-black-stage lines name
+game at startup 13:07:14.328/.389 and again at 13:10:21.910/.932.
+
+The user-described black fix remains visually confirmed, but this flight does
+not test the active Deferred UI path. The user's overview shows black trails
+above UNIDENTIFIED SIGNAL SOURCE near the corona. Investigation is underway on
+exact resource formats, budget, and state. The discriminating records are PS
+t0/t1/t2 descriptor and imageSize, cumulative snapshot budget, and actual
+captured fields; no cause or new fix is established yet.
+
+### First rejected PS input identified, 2026-09-16
+
+The retained target-smear run used gfx log `edvr_gfx_20260916_130708.log`,
+literal `v0.17.0-rc.2-15-g9d30ac6-dirty`, PE `6AAA8B25`; its latest eye dump is
+`131013`, frame `14111`. Root has fast-forwarded the branch to `ff88cd1`;
+flight provenance remains the verified precommit binary.
+
+Panels artifact `panels_131013.bin`, draw 0 (PS hash A296), identifies the
+first PS t0 input descriptor as resource format `R16G16B16A16_TYPELESS` (enum
+9), SRV format `R16G16B16A16_UNORM` (enum 11),
+`1536x512`, default usage, one sample, bind flags `0x88` (SRV|UAV),
+`6,291,456` bytes. The current `formatSize` table does not recognize resource
+enum 9, making `imageSize` return zero and causing capture rejection before
+budget or allocation checks. This rules out snapshot budget as the reason for
+this specific rejection; it does not rule out later memory-footprint limits.
+
+Other first-PS inputs are supported. Review is checking remaining descriptors,
+frame footprint, and state. A narrow typeless/UNORM 8-byte support change with
+exact-descriptor replay and version tests is underway; it is not validated yet.
+
+### Independent retained-resource footprint audit, 2026-09-16
+
+Independent review validates all 12 retained A296 draws and their input
+resource descriptors. For A296 PS t0, storage is format 9 typeless and the SRV
+is format 11 UNORM, fixed at 6 MiB (`1536x512`, 8 bytes per pixel). PS t1 is
+supported BC1 typeless at 174,776 bytes. Five PS t2 inputs are RGBA8, totaling
+12.3047 MiB. VS t33 is 688,128 bytes and t38 is 8,388,624 bytes.
+
+The unique retained full-input footprint is 30.50 MiB for one eye. A
+conservative stereo estimate without sharing is 61 MiB at Performance input
+`2712x2678`. The first rejection occurred earlier on Quality input `3525x3481`;
+startup B779 descriptors were unavailable, so no complete startup-route
+footprint or total budget conclusion is established. The prior `051237` 186.5
+MiB figure is not a valid complete-input ceiling because that build did not
+contain the executable-declaration parser. Snapshot budget is ruled out only as
+the cause of the format-9-specific `imageSize=0` rejection before allocation;
+later memory limits remain open.
+
+### Focused descriptor-support validation, 2026-09-16
+
+Root fast-forwarded to `e4b923a` before the full build, including native-frame
+sizing and per-headset trimming. The three-file `ui_deferred.cpp`, header, and
+controller-test change supports 8-byte formats 9 and 11. The 256 MiB capture
+cap remains unchanged. Refusal diagnostics now include stage/slot and
+allocated/copied byte counts through the existing maximum-32-entry ledger.
+
+Root and Sol reviewer reported no findings. The focused controller suite passes
+2,407 WARP and 2,407 hardware checks. Tests cover the exact descriptor and 6
+MiB resource, replay against two immutable version descriptions, and an
+unsupported PS t5 diagnostic. Full build and live NGX smoke are still underway
+under the GPU-owner's control; these focused passes do not replace those gates.
+
+### Takeover review: flight 133757, dump 134857, stage attribution, 2026-09-16 evening
+
+Build and flight. The three-file change above was built from `e4b923a` with
+the dirty tree as `v0.17.0-rc.2-39-ge4b923a-dirty` (build `6AAAEE18`, linked
+19:29:28 UTC), installed to Steam and flown; the gfx log is
+`edvr_gfx_20260916_133757.log`. The change itself was carried into the
+`claude/star-corona-ui-smearing-d1d2ae` worktree with this entry.
+
+Deferred UI on that flight. Totals stayed `captured=0 applied=0 declined=0`
+from 13:38 to 13:47. At 13:47:35.677 ui depth compiled the flight-HUD family
+(B779/8DEF) and at .682 the interface-coverage family (8121/A296); at .678 the
+route captured the X draw of B779/8DEF (gen 11297, 2535x2503) and at .683
+refused the 8121/A296 draw: `panel vertex buffer contract changed
+(allocated=26192756 copied=26192756)`, then `disabled until AA is switched Off
+and back on`. The contract (`capturePanelIa`, ui_deferred_draw.h) requires
+vertex buffer 1 to be exactly 130,023,424 bytes and buffer 0 exactly 32,768
+bytes; the flight's buffer was not. So the format-9 change worked as far as
+it went and the next exact-match contract took over. Sean was changing the
+per-headset fov trims during this flight (13:47:37 to 13:47:47) and the frame
+shrank to 1695x1614 at 13:47:58; NVIDIA kept evaluating throughout (dlaa
+totals rose about 175 eye-frames a second through 13:48:38), so dump `134857`
+(13:48:57, frame 18586, `DlssBeforeUi` 3390x3228) is a DLSS Performance dump
+like `131013`.
+
+Dump reading, method. Session scripts (eye_view.py, probe.py, stage_diff.py,
+footprint.py) decoded the `EDVRTEX1` inputs and aligned the crops: C crops are
+1400x1400 about the input's centre, T crops 2800x2800 about the output's
+centre, `L0` the whole treated eye, and `DlssBeforeUi` carries the same frame
+id as T00 (14111 and 18586). Regions are 480x360 output pixels around the
+label: 131013 at (3150, 2320), UNIDENTIFIED SIGNAL SOURCE at 2.00 Ls; 134857
+at (1900, 1350), GRAF LED ZEPPELIN GPL VNY-99Z at 6.53 Ls. Bands are the
+class-1 coverage from `UI.bin` dilated by 10, 30 and 60 output pixels; class 3
+(the star limb the corona is filed under as smoke) is kept apart. Luma is
+0..255 of the 8-bit frames; raw is C00 bilinearly upscaled.
+
+131013, mean luma per band (n, raw, dlss, final, dlss-raw, final-dlss):
+class-1 coverage 30696, 47.0, 48.1, 47.0, +1.10, -1.11; ring 1-10 px 19168,
+15.1, 17.1, 15.4, +2.03, -1.70; ring 11-30 px 29944, 16.2, 19.8, 17.7, +3.56,
+-2.10; ring 31-60 px 30828, 20.1, 24.8, 23.2, +4.72, -1.58; beyond 60 px
+39156, 29.5, 33.0, 31.8, +3.52, -1.22; class 3 23008, 123.1, 121.7, 121.7,
+-1.39, 0.00.
+
+134857, the same: class-1 coverage 16912, 46.9, 49.0, 47.4, +2.14, -1.58;
+ring 1-10 px 14892, 18.9, 21.7, 19.6, +2.77, -2.08; ring 11-30 px 22620,
+19.9, 24.6, 22.6, +4.70, -2.02; ring 31-60 px 36664, 21.3, 25.4, 24.9, +4.07,
+-0.49; beyond 60 px 68340, 15.0, 18.1, 18.1, +3.17, -0.05; class 3 13372,
+147.0, 144.3, 144.3, -2.77, 0.00.
+
+Reading: NVIDIA's output is a few luma above raw everywhere near the label
+with no differential by distance, so the polygon is not in `DlssBeforeUi`;
+the resolve stage then lowers pixels near the label and none beyond 60 px.
+The pixels more than 6 luma below raw outside the coverage (1,635 and 2,343
+in the two crops) are already that dark in `DlssBeforeUi` and lie mostly on
+the class-3 limb (846 and 2,057): that band is the limb lagging under its
+private depth, not the label mask.
+
+Footprint. F = pixels outside classes 1 and 3 where final-dlss < -1.5: 43,388
+px on 131013 (mean -4.21 inside, -0.12 outside), 22,362 on 134857 (-4.16,
+-0.04). Jaccard of F with `UiPrevious.a > 0`: 0.772 and 0.734; with
+`UiNext.a > 0`: 0.784 and 0.728; with `UiEdits > 0`: 0.000 and 0.000; with the
+class-1 coverage dilated by 5..50 px: at best 0.349 (r=50) and 0.402 (r=30).
+`UiPrevious`/`UiNext` RGB is zero throughout both crops; their alpha is the
+field. A column through the 131013 footprint (crop x=229) reads -5.5 to -7.4
+luma from y=60 to y=156, above the text rows, i.e. the trail up and right of
+the label where it had been, and 0.0 beyond the field.
+
+Inputs to NVIDIA at the label (input pixels, probe.py). `UI.bin` holds only
+0, 1 and 3: 1 is the label's dilated coverage (7,674 px in the 131013 crop),
+3 the limb region (5,752). `Bias.bin` is zero in both dumps. `Z` differs from
+`SceneZ` on every class-1 pixel and most class-3 pixels (11,659) and on no
+class-0 pixel. Inside the coverage the motion vector is the label's own
+(0.29, -1.50 px/frame on 131013) against the scene's (0.78, -2.06); a one- to
+two-pixel ring of class-0 pixels around every coverage island carries the
+sentinel vector equal to the output size, (5424, 5356) on 131013 and (3390,
+3228) on 134857 (1,206 px in the 134857 crop). None of these produce the
+polygon, by the stage numbers above; they are recorded for the limb band and
+for the text-swim work.
+
+ruled out: the game draws a dark backing behind the label, because the raw C
+crops of both dumps carry no darkening around it.
+ruled out: NVIDIA's reconstruction produces the label mask, because
+`DlssBeforeUi` has no polygon and sits uniformly above raw around the label.
+ruled out: the mask lies where the UI content changed, because `UiEdits`
+overlaps the footprint at 0.00 in both dumps.
+ruled out: the format-9/11 change ends the latch-off, because the 13:37 flight
+passed format 9 and was refused 6 ms later by the vertex-buffer contract.
+
+Assessment of the deferred route. Since c27fe74 (2026-09-14) it has taken
+nine commits, about 21 flights and 28 dump stamps, and ten blockers, each an
+exact-match contract allowlisted after a flight: destination-alpha blend, the
+tone VS variant, the terminal canvas, the UAV buffer, the SINCOS opcode,
+dual-source glass, the missing RDEF, format 9, and now the vertex-buffer byte
+width; the B779 startup descriptors are still unmeasured. The refusal latches
+the route off for the session, so one odd draw ends the experiment before the
+dump. Nothing in the design bounds the number of contracts left, and no flight
+has yet shown the active route on a target label. Meanwhile the shipping
+path's own resolve is the measured source of the mask.
+
+The rule, from the source (src/d3d11/ui_resolve.h, `kUiResolve`, dispatched
+from temporal_pass.cpp when DLSS ran and the legacy resolve applies). Inputs:
+`Raw` t0 is the colour NVIDIA consumed, `Trained` t1 NVIDIA's output,
+`Coverage` t2 the UI mask, `Previous` t3 last frame's influence, `Motion` t4
+the motion vectors, `Edits` t5 the content changes. Per input texel: `here` =
+class 1 or 2 in the 3x3 around it (line 28-35; class 3 is excluded by
+`marked`, line 21); `remaining` = `Previous.a`, and when not `here` also the
+bilinear `Previous.a` fetched through the motion vector (lines 44-56);
+`active = here || edited || remaining > 0` (line 57). For every output pixel
+of an active texel, `Trained` is clamped to the min/max of the 2x2 raw texels
+under it and `stale` is set if that moved it by more than 1/255 (lines 68-75);
+edited texels are instead rebuilt by a 4x4 cubic of `Raw` (lines 76-85). Then
+`Next.a = here ? 1 : stale ? max(remaining - 1/32, 0) : 0` (line 111).
+
+Why the corona and not the sky: NVIDIA's output is 3..5 luma above the raw
+2x2 range on the glow (the dlss-raw column above), so the clamp bites on every
+active pixel there, `stale` holds, and the footprint decays over 32 frames
+while being transported along the motion vectors. Over dark space the clamp
+does nothing, `stale` is false, and the footprint drops to zero the frame the
+label leaves. The dimming inside the footprint is the clamp pulling NVIDIA's
+value down to the raw range, which is what the final-dlss column measures.
+`Bias.bin` being zero is the shipped state (advanced.ui_depth_reactive = 0,
+movers off); the transformer presets ignore that NGX input anyway.
+
+Next, if Sean chooses A: write `kUiResolve` in Python over `DlssBeforeUi`,
+raw C00, `UI`, `UiPrevious`, `MV` and `UiEdits` and check that it reproduces
+`L0` in these crops (the jitter `jit.xy` is not in the dump; search the
+half-pixel square for the best match). Then, on the same data, test the
+candidates: a `stale` threshold well above a reconstruction offset (a few
+luma) and below a departed glyph (tens), and a bound tolerance of the same
+size; keep whichever leaves the footprint's final-dlss at 0 while the
+changed-digit pixels still clean up. Build only after that, and the first
+flight is a confirmation, not a search.

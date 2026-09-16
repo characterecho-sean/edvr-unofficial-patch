@@ -140,7 +140,7 @@ uint64_t generation=1;
 uint64_t diagnosticUntilGeneration=0;
 unsigned toneReports=0,aliasReports=0,prepareReports=0,postToneReports=0,lateCompositeReports=0,boundaryReports=0;
 unsigned routeCaptureReports=0;
-struct CaptureFailure { uint64_t vs=0,ps=0;std::string reason; };
+struct CaptureFailure { uint64_t vs=0,ps=0;std::string reason;char stage=0;int slot=-1; };
 std::vector<CaptureFailure> captureFailures;
 static bool diagnosticWindow(){return diagnosticUntilGeneration && generation<=diagnosticUntilGeneration;}
 
@@ -515,8 +515,11 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
     const auto* mask=reflect(ctx);if(!mask)return false;
     if(!d.packet.capture(ctx,snapshots,kind,count,instances,start,base,first,*mask)){
         const auto vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);const char* why=d.packet.failureReason();bool seen=false;
-        for(const auto& f:captureFailures)seen=seen || (f.vs==vs && f.ps==ps && f.reason==why);
-        if(!seen && captureFailures.size()<32){captureFailures.push_back({vs,ps,why});Log::get().note("Deferred UI: draw capture refused VS=%016llX PS=%016llX: %s.",vs,ps,why);}
+        const int slot=d.packet.failureResourceSlot();const char stage=d.packet.failureResourceStage();
+        for(const auto& f:captureFailures)seen=seen || (f.vs==vs && f.ps==ps && f.reason==why && f.stage==stage && f.slot==slot);
+        if(!seen && captureFailures.size()<32){captureFailures.push_back({vs,ps,why,stage,slot});
+            if(slot>=0)Log::get().note("Deferred UI: draw capture refused VS=%016llX PS=%016llX: %s (stage=%c slot=%d allocated=%llu copied=%llu).",vs,ps,why,stage,slot,static_cast<unsigned long long>(snapshots.allocatedBytes()),static_cast<unsigned long long>(snapshots.copiedBytes()));
+            else Log::get().note("Deferred UI: draw capture refused VS=%016llX PS=%016llX: %s (allocated=%llu copied=%llu).",vs,ps,why,static_cast<unsigned long long>(snapshots.allocatedBytes()),static_cast<unsigned long long>(snapshots.copiedBytes()));}
         return false;
     }
     D3D11_DEPTH_STENCIL_DESC depthState{};
