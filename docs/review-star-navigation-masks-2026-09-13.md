@@ -2,48 +2,45 @@
 
 ## Status
 
-Updated 2026-09-15 after Steam eye run `154217`: targeting label
-smearing persists. The tested eeb1928 correction ran: installed package
-verification and graphics SHA-256 match the previous validation. The
-binary is stamped `v0.17.0-rc.1-1-ga44ae48-dirty`, PE `6AA98CD6`, linked
-18:22:14 UTC; eeb1928 is the subsequent source commit. A literal HEAD
-version comparison therefore differs; the exact binary provenance is
-verified, not stale. DLSS 310.7.0.0 preset K uses 2644x2610 input,
-4068x4016 output per eye.
+Updated 2026-09-15 after Steam eye run `174541`: targeting text and
+circles still leave dark shapes against the corona. Root inspected the
+overview and T15. The installed diagnostic package and DLL hashes match
+the validated 3b6715a source; its precommit stamp is
+`v0.17.0-rc.1-2-geeb1928-dirty`, graphics PE `6AA9C287`. A literal HEAD
+version comparison differs because the source was committed after the
+build, not because the installed binary is stale.
 
-Replay again disabled itself before the capture. At 15:41:18.579 it
-captured eleven 8121/A296 holo draws per eye. At 15:41:18.584 both tone
-alias lists were empty and the submitted texture had no complete
-matching replay. The failure shader pair is
-DEF19B035D5EDEDC/831DF02EBA8AE814. No successful `Deferred UI: active`
-line appears. The eye dump was taken at 15:42:17 (scene frame 15054),
-after fallback resumed.
+Pimax OpenXR / Crystal Super uses 4068x4016 per-eye output and 2644x2610
+scene input with preset K. The verified installed package carries DLSS
+310.7.0.0.
 
-Ruled out: fixing the destination-alpha material rejection alone makes
-the replay path usable in this flight, because it reaches a separate
-tone/submit routing failure before any successful composition. The same
-visual symptom is still not evidence about native UI replay's output.
-The previous blend evidence and validation remain under "Captured replay
-rejection, 113532"; older rejected hypotheses remain in the dated
-journal.
+Generation 8583 captures eleven holo draws per eye. Both sampled
+post-tone copies and both late LDR composites occur before prepare.
+Prepare then fails with both tone aliases empty; the frame boundary is
+later. No expected-tone observation or alias addition/removal occurs,
+including in the following generation while diagnostics remain live.
+Native submission is direct on the render thread, not Present-queued.
+The later eye dump retains two tone-map snapshots with zero declines.
 
-Open: trace why both tone aliases are empty at the first scene submit.
-Discriminate a missed tone hook, HDR source mismatch, invalidated
-aliases, and early submit ordering before changing rendering behavior.
-The later dump retains two valid tone-map snapshots, but is not the
-startup frame. See "Empty tone route, 154217" below. Existing tests
-exercise the controller separately from the complete hooked draw/submit
-sequence. The later frame confirms an untracked sampled blit after tone
-mapping and further panel writes; these must be handled together. A
-bounded tone/alias/submission trace is implemented to resolve the
-startup failure without changing rendering. Its isolated controller
-tests pass 1,320 checks on WARP and hardware; the native harness passes
-622 checks. Full build and live NVIDIA NGX validation passed. The
-diagnostic candidate is stamped `v0.17.0-rc.1-2-geeb1928-dirty`; hashes
-and validation are below. Next flight: normal launch and one eye dump
-near the affected targeting label. No AA reset is needed: the bounded
-trace records startup automatically. Sean confirmed Elite is closed, so
-the earlier optional in-flight AA reset comparison was not available.
+Ruled out: early submit before the final image passes or a preceding
+Present-boundary clear caused this failure, because the trace orders the
+copies/composites before prepare and the boundary after it. Ruled out:
+alias invalidation after a recognized tone pass, because no tone
+observation or alias creation occurs. See "Missing tone hook, 174541"
+below; older rejected hypotheses remain in the dated journal.
+
+Open: determine why the live UI hook misses the tone pair captured by
+the draw snapshot. Audit original versus overridden shader state and
+hook control flow. The known sampled-copy and later panel steps still
+need proper replay handling once tone capture works; do not merely
+retain an alias across unclassified writes. The additional diagnostic
+records observed source draws and preserves pre-capture tone ordering;
+production source is reviewed and 1,620 checks pass on WARP and
+hardware. Full build and live NVIDIA NGX validation passed. The new
+candidate is `v0.17.0-rc.1-3-g3b6715a-dirty`; provenance is recorded
+below. Next flight: normal launch and one eye dump near the affected
+text, with no AA reset needed. This is diagnostic-only; no rendering
+correction is claimed yet.
 
 Build setup: prepend bundled Python, pass Steam's original OpenVR DLL
 using `--openvr`, and set `EDVR_NGX_SDK` to
@@ -1901,3 +1898,120 @@ Validation logs are under `build/review_motion/issue36/`:
 `controller-ui-route-154217-hardware.log`. This build only adds
 diagnostics; the next flight must establish the tone/submission ordering
 before a rendering correction is proposed.
+
+## Missing tone hook, 174541 (2026-09-15)
+
+The diagnostic build ran: Steam package verification and both DLL hashes
+match the candidate recorded above. GFX log
+`edvr_gfx_20260915_174305.log` carries PE `6AA9C287` and exact version
+`v0.17.0-rc.1-2-geeb1928-dirty`; the matching native log is
+`edvr_openxr_20260915_174307_292_21772.log`. HEAD comparison was checked
+first, then the known precommit stamp and installed hashes resolved the
+expected mismatch. No stale-DLL inference is used.
+
+At 17:44:38.314/.316 generation 8583 captures eleven 8121/A296 draws per
+eye into HDR resources `00000283852A0060` and `00000283852A6BA0`. At
+.318 the exact 20F/DED sampled blits read `00000283852A0320` and
+`00000283852A73E0` and write final resources `000002838529E7A0` and
+`000002838529ADE0`. Both A888/015 composites follow into those same
+final resources. At .319 prepare receives `000002838529E7A0`, with both
+tone aliases empty, and disables replay. Only at .320 does the frame
+boundary clear the pending captures. Generation 8584 still emits both
+candidate families before the diagnostic window expires.
+
+Neither generation emits an expected-tone observation, alias addition,
+or alias removal. This distinguishes failure to enter tone processing
+from failure after a successful tone capture. The later dump's
+`tonemap_174541.bin` has two draws, zero declines and zero failures,
+matching frame 14108. A recorded tone pass later in the flight alone
+cannot reconstruct startup, but the missing hook observation now has a
+specific code path to investigate.
+
+The native trace reports `path=direct`, caller/render thread 20812 and
+XR owner thread 25348; no queued submission path is reported. Shutdown
+reports `graphics_wrong_thread=0`.
+
+Ruled out: early submit or a preceding Present clear caused the empty
+tone aliases in this run, because final copies/composites precede
+prepare and the frame boundary follows it on the direct route.
+
+Ruled out: a recognized tone alias was erased by a later draw, because
+there is no tone observation or alias creation before rejection or in
+the following diagnostic frame.
+
+Root inspected converted overview, T15 and C15. T15 has dark shapes
+above the target circle and label against the corona; the raw C15 image
+does not have those same broad shapes. This confirms the reported
+temporal artifact while replay remains inactive, not a defect in the
+as-yet-unused native UI composition. Review PNGs are under
+`build/review_motion/issue36/eye_174541_*_review.png`.
+
+Code audit found no ordinary same-draw shader replacement for the known
+2D78/99C2 tone pair between the draw snapshot and BeforeTone. The FSS
+dump handler's tone case does not alter bindings; the terrain original
+shader helper only matches its named terrain shader. Earlier wrapper
+returns remain a possibility, and a later snapshot is not proof that the
+same producer ran during startup.
+
+The remaining diagnostic blind spot is the actual writer of the sampled
+source. The current expected-tone observation is silent before any UI
+capture unless the post-failure diagnostic window is active. Record a
+bounded resource writer history and forward-path outcome so one trace
+can distinguish an alternate producer, an earlier-generation source, a
+tone before UI capture, and an original draw skipped by a wrapper. Do
+not infer any of these solely from an unobserved tone pair.
+
+The added diagnostic keeps 24 draw records with retained resource and
+shader identities. Each records generation, draw ordinal, original
+shape/verdict, shadow and actual shaders at entry and before BeforeTone,
+and whether the original draw was issued. It rolls silently before UI
+capture, so an early tone is not lost merely because no UI was pending.
+The existing sampled-blit report identifies the newest observed attempt
+and newest observed issued draw separately. Known resource-write hooks
+invalidate matching older records; unobserved writes remain a
+limitation, so the log deliberately describes observed draws, not a
+guaranteed last writer of every possible resource operation.
+
+Cached eye-target/format/depth information filters candidates before
+direct context queries. The observer accepts the game's typeless RGBA
+resource viewed through an UNORM RTV; it performs no GPU readback. After
+failure and the following diagnostic frame, records are cleared and
+target/shader queries stop. Up to eight unique producer stage/hash pairs
+can be saved from existing shader-private bytecode into the log
+directory's `shaders` folder. Existing, missing and failed exports are
+reported explicitly. This is diagnostic-only; the unsupported sampled
+copy and terminal canvas route is not silently accepted or bypassed.
+
+Focused validation passes 1,620 controller checks on WARP and NVIDIA.
+Tests include pre-capture tone history, actual-versus-shadow shader
+fields, skipped and issued draw outcomes, known-write invalidation,
+history eviction, typeless resources with UNORM views, diagnostic query
+expiry, byte-exact producer shader export, repeat/cap behavior, and
+missing-bytecode reporting. Shader tests create and remove their own
+scratch files. The synthetic harness verifies the controller's staged
+calls and real D3D resources; it does not instantiate the whole game
+classification pipeline. Production draw-wrapper callsites were reviewed
+separately.
+
+Final validation passed the absolute full build with SDK 310.7.0
+verified, the Steam original OpenVR fixture rebuilt, DLSS runtime
+CARRIED, and all gates passed. Live NVIDIA NGX smoke against the final
+graphics DLL exercised DLAA and DLSS, including the convention rig
+(17.54 error for the shipped pairing versus 19.43 runner-up), and passed
+without runtime skips. The final hardware controller passed 1,620
+checks. This is not a headset or D3D debug-layer validation.
+
+Candidate version is `v0.17.0-rc.1-3-g3b6715a-dirty`, built before the
+subsequent source commit. Graphics PE `6AA9DFA6` links at 2026-09-16
+00:15:34 UTC; runtime PE `6AA9E097` at 00:19:35 UTC. SHA-256:
+
+- Graphics:
+  `6A705C8B748E4EE24923D4A160B7F924D3B893EA49B01830484CE2CF2142B1F9`
+- Runtime:
+  `9B293B6DF29ACFD21E179A080C112299129B5983A685E17A77EC999FF02171D7`
+
+Validation logs under `build/review_motion/issue36/` are
+`build-producer-174541.log`, `smoke-producer-174541.log`, and
+`controller-hardware-producer-174541.log`. The next flight must use the
+new producer evidence to resolve the missing tone path before changing
+rendering behavior.

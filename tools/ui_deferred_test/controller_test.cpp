@@ -7,9 +7,13 @@
 #include <cstdarg>
 #include <chrono>
 #include <fstream>
+#include <unordered_map>
 using Microsoft::WRL::ComPtr;
 static unsigned checks=0;
 static uint64_t vsHash=0,psHash=0;
+static void* bindings[static_cast<unsigned>(edvr::BindSlot::Count)]{};
+static uint32_t bindingGens[static_cast<unsigned>(edvr::BindSlot::Count)]{};
+static std::unordered_map<void*,uint64_t> shaderHashes;
 static void check(bool x,const char* why){++checks;if(!x){fprintf(stderr,"FAIL: %s\n",why);exit(1);}}
 static void hr(HRESULT h){if(FAILED(h))fprintf(stderr,"HRESULT %08x\n",unsigned(h));check(SUCCEEDED(h),"D3D operation");}
 static ComPtr<ID3DBlob> compile(const char*s,size_t n,const char*entry,const char*profile){ComPtr<ID3DBlob>b,e;auto h=D3DCompile(s,n,nullptr,nullptr,nullptr,entry,profile,D3DCOMPILE_ENABLE_STRICTNESS,0,&b,&e);if(FAILED(h)&&e)fprintf(stderr,"%s",(char*)e->GetBufferPointer());hr(h);return b;}
@@ -17,8 +21,13 @@ namespace edvr {
 Log& Log::get(){static Log l;return l;} Log::~Log()=default;
 void Log::note(const char*,...){}
 std::string Config::getString(const char*,const char*)const{return "dlss";}
-float Config::getFloat(const char*,float def)const{return def;}
-uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?vsHash:psHash;}
+ float Config::getFloat(const char*,float def)const{return def;}
+ uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?vsHash:psHash;}
+ void* bindingGet(BindSlot s){return bindings[static_cast<unsigned>(s)];}
+ uint32_t bindingGeneration(BindSlot s){return bindingGens[static_cast<unsigned>(s)];}
+ bool bindingResolve(void* view,ResourceInfo*out){if(!view||!out)return false;*out={};ComPtr<ID3D11Resource>r;static_cast<ID3D11View*>(view)->GetResource(&r);ComPtr<ID3D11Texture2D>t;if(FAILED(r.As(&t)))return false;D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);out->isTexture2D=true;out->a=d.Width;out->b=d.Height;out->fmt=d.Format;out->resource=r.Get();return true;}
+ bool vScreenIsEyeSized(uint32_t w,uint32_t h){return w==h && w>=8;}
+ uint64_t lookupShaderHash(void* shader){auto i=shaderHashes.find(shader);return i==shaderHashes.end()?0:i->second;}
 void vScreenExecuteCommandListRaw(ID3D11DeviceContext*c,ID3D11CommandList*l,int r){c->ExecuteCommandList(l,r);}
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext*c,uint32_t n,ID3D11RenderTargetView*const*r,ID3D11DepthStencilView*d){c->OMSetRenderTargets(n,r,d);}
 ID3D11VertexShader* shaderSwapCompileVs(ID3D11DeviceContext*c,const char*s,size_t n,const char*e,const char*,const SwapMacro*,const char*){auto b=compile(s,n,e,"vs_5_0");ComPtr<ID3D11Device>d;c->GetDevice(&d);ID3D11VertexShader*v=nullptr;hr(d->CreateVertexShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&v));return v;}
@@ -26,6 +35,7 @@ ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext*c,const char*s,size_t
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext*c,const char*s,size_t n,const char*e,const char*,const SwapMacro*,const char*){auto b=compile(s,n,e,"cs_5_0");ComPtr<ID3D11Device>d;c->GetDevice(&d);ID3D11ComputeShader*v=nullptr;hr(d->CreateComputeShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&v));return v;}
 }
 static std::vector<BYTE> read(ID3D11Device*d,ID3D11DeviceContext*c,ID3D11Texture2D*t){D3D11_TEXTURE2D_DESC td{};t->GetDesc(&td);td.Usage=D3D11_USAGE_STAGING;td.BindFlags=td.MiscFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D>s;hr(d->CreateTexture2D(&td,nullptr,&s));c->CopyResource(s.Get(),t);D3D11_MAPPED_SUBRESOURCE m{};hr(c->Map(s.Get(),0,D3D11_MAP_READ,0,&m));std::vector<BYTE> b(size_t(td.Width)*td.Height*4);for(UINT y=0;y<td.Height;++y)memcpy(b.data()+size_t(y)*td.Width*4,(BYTE*)m.pData+y*m.RowPitch,td.Width*4);c->Unmap(s.Get(),0);return b;}
+static std::vector<BYTE> readFile(const wchar_t*path){FILE*f=nullptr;if(_wfopen_s(&f,path,L"rb")||!f)return {};fseek(f,0,SEEK_END);const long n=ftell(f);fseek(f,0,SEEK_SET);std::vector<BYTE>b(n>0?size_t(n):0);if(!b.empty()&&fread(b.data(),1,b.size(),f)!=b.size())b.clear();fclose(f);return b;}
 static edvr::Surface surf(ID3D11Device*d,UINT w,UINT h,DXGI_FORMAT f){edvr::Surface s;check(s.ensure(d,w,h,f),"surface created");return s;}
 struct Harness {
  ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>c;
@@ -48,7 +58,7 @@ struct Harness {
   const char*t="Texture2D<float3> H:register(t1);SamplerState S:register(s0);float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target{float3 h=H.SampleLevel(S,uv,0);return float4(h/(1+h),1);}";
   b=compile(t,strlen(t),"main","ps_5_0");hr(d->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&tone));edvr::uiDeferredRemember(tone.Get(),b->GetBufferPointer(),b->GetBufferSize(),false);
   const char*post="Texture2D<float4> T:register(t0);SamplerState S:register(s0);float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target{return T.Sample(S,uv);}";
-  b=compile(post,strlen(post),"main","ps_5_0");hr(d->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&postTone));edvr::uiDeferredRemember(postTone.Get(),b->GetBufferPointer(),b->GetBufferSize(),false);
+  b=compile(post,strlen(post),"main","ps_5_0");hr(d->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&postTone));edvr::uiDeferredRemember(postTone.Get(),b->GetBufferPointer(),b->GetBufferSize(),false);shaderHashes[vs.Get()]=0x111;shaderHashes[ui.Get()]=0x222;shaderHashes[tone.Get()]=0x333;shaderHashes[postTone.Get()]=0x444;
   D3D11_BUFFER_DESC bd{};bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;hr(d->CreateBuffer(&bd,nullptr,&cb));
   D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthFunc=D3D11_COMPARISON_ALWAYS;hr(d->CreateDepthStencilState(&dd,&noDepth));dd.StencilEnable=TRUE;dd.StencilReadMask=1;dd.StencilWriteMask=5;dd.FrontFace=dd.BackFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_EQUAL};hr(d->CreateDepthStencilState(&dd,&uiDepth));
   D3D11_BLEND_DESC blend{};auto&r=blend.RenderTarget[0];r.BlendEnable=TRUE;r.SrcBlend=r.SrcBlendAlpha=D3D11_BLEND_ONE;r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=15;hr(d->CreateBlendState(&blend,&over));r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_ONE;hr(d->CreateBlendState(&blend,&add));r.DestBlend=r.DestBlendAlpha=D3D11_BLEND_DEST_ALPHA;hr(d->CreateBlendState(&blend,&destAlpha));r.SrcBlend=D3D11_BLEND_DEST_COLOR;hr(d->CreateBlendState(&blend,&unsupported));
@@ -58,11 +68,11 @@ struct Harness {
   D3D11_TEXTURE2D_DESC zd{};zd.Width=zd.Height=input;zd.MipLevels=zd.ArraySize=zd.SampleDesc.Count=1;zd.Format=DXGI_FORMAT_R24G8_TYPELESS;zd.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;hr(d->CreateTexture2D(&zd,nullptr,&z));D3D11_DEPTH_STENCIL_VIEW_DESC dv{};dv.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;dv.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;hr(d->CreateDepthStencilView(z.Get(),&dv,&dsv));D3D11_SHADER_RESOURCE_VIEW_DESC sv{};sv.Format=DXGI_FORMAT_R24_UNORM_X8_TYPELESS;sv.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;hr(d->CreateShaderResourceView(z.Get(),&sv,&zSrv));edvr::enabled=true;
  }
  void constants(float jx,float jy,float alpha=.5){float values[8]={.3f,.12f,.03f,alpha,jx/inW,jy/inH,.25f,.75f};edvr::uiDeferredResourceWrite(c.Get(),cb.Get());c->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);}
- void setup(edvr::Surface&s,UINT w,UINT h,ID3D11PixelShader*p,ID3D11BlendState*b,ID3D11DepthStencilView*depth){c->ClearState();c->RSSetState(rs.Get());D3D11_VIEWPORT vp{0,0,float(w),float(h),0,1};c->RSSetViewports(1,&vp);c->OMSetRenderTargets(1,s.rtv.GetAddressOf(),depth);c->OMSetBlendState(b,nullptr,~0u);c->OMSetDepthStencilState(depth?uiDepth.Get():noDepth.Get(),15);c->VSSetShader(vs.Get(),nullptr,0);c->PSSetShader(p,nullptr,0);c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);c->VSSetConstantBuffers(0,1,cb.GetAddressOf());c->PSSetConstantBuffers(0,1,cb.GetAddressOf());c->PSSetSamplers(0,1,sampler.GetAddressOf());}
+ void setup(edvr::Surface&s,UINT w,UINT h,ID3D11PixelShader*p,ID3D11BlendState*b,ID3D11DepthStencilView*depth){c->ClearState();c->RSSetState(rs.Get());D3D11_VIEWPORT vp{0,0,float(w),float(h),0,1};c->RSSetViewports(1,&vp);c->OMSetRenderTargets(1,s.rtv.GetAddressOf(),depth);bindings[unsigned(edvr::BindSlot::Rtv0)]=s.rtv.Get();bindings[unsigned(edvr::BindSlot::Dsv0)]=depth;++bindingGens[unsigned(edvr::BindSlot::Rtv0)];++bindingGens[unsigned(edvr::BindSlot::Dsv0)];c->OMSetBlendState(b,nullptr,~0u);c->OMSetDepthStencilState(depth?uiDepth.Get():noDepth.Get(),15);c->VSSetShader(vs.Get(),nullptr,0);c->PSSetShader(p,nullptr,0);c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);c->VSSetConstantBuffers(0,1,cb.GetAddressOf());c->PSSetConstantBuffers(0,1,cb.GetAddressOf());c->PSSetSamplers(0,1,sampler.GetAddressOf());}
  void start(){edvr::uiDeferredFrameBoundary(c.Get());edvr::enabled=true;edvr::failed=edvr::routeNoted=false;edvr::resetPending[0]=edvr::resetPending[1]=false;vsHash=psHash=0;c->ClearState();c->ClearRenderTargetView(hdr.rtv.Get(),bg);c->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.6f,1);}
- void uiDraw(float jx,float jy,ID3D11BlendState*blend,bool defer){constants(jx,jy);setup(hdr,inW,inH,ui.Get(),blend,dsv.Get());edvr::uiDeferredBeforeDraw(c.Get());bool captured=defer&&edvr::uiDeferredBegin(c.Get(),0,'N',3,1,0,0,0);check(!defer||captured,"recognized UI captured");c->DrawInstanced(3,1,0,0);if(captured)edvr::uiDeferredEnd(c.Get());}
- void toneDraw(bool defer){constants(0,0);setup(ldr,inW,inH,tone.Get(),nullptr,nullptr);c->PSSetShaderResources(1,1,hdr.srv.GetAddressOf());vsHash=edvr::EyeTonemapSnapshot::kVs;psHash=edvr::EyeTonemapSnapshot::kPs;edvr::uiDeferredBeforeDraw(c.Get());if(defer){edvr::uiDeferredBeforeTone(c.Get(),'N',3,1,0,0,0);check(!edvr::uiDeferredBegin(c.Get(),-1,'N',3,1,0,0,0),"full wrapper tone has no later world mirror");}c->DrawInstanced(3,1,0,0);if(defer)edvr::uiDeferredEnd(c.Get());}
- void candidateDraw(edvr::Surface&target,ID3D11ShaderResourceView*source,uint64_t vh,uint64_t ph){constants(0,0);setup(target,inW,inH,postTone.Get(),nullptr,nullptr);c->PSSetShaderResources(0,1,&source);vsHash=vh;psHash=ph;edvr::uiDeferredBeforeDraw(c.Get());c->DrawInstanced(3,1,0,0);edvr::uiDeferredEnd(c.Get());}
+ void uiDraw(float jx,float jy,ID3D11BlendState*blend,bool defer){constants(jx,jy);setup(hdr,inW,inH,ui.Get(),blend,dsv.Get());edvr::uiDeferredTraceDrawEnter(c.Get(),true,'N',3,1,0,vsHash,psHash);edvr::uiDeferredBeforeDraw(c.Get());bool captured=defer&&edvr::uiDeferredBegin(c.Get(),0,'N',3,1,0,0,0);check(!defer||captured,"recognized UI captured");c->DrawInstanced(3,1,0,0);edvr::uiDeferredTraceOriginalIssued();if(captured)edvr::uiDeferredEnd(c.Get());}
+ void toneDraw(bool defer){constants(0,0);setup(ldr,inW,inH,tone.Get(),nullptr,nullptr);c->PSSetShaderResources(1,1,hdr.srv.GetAddressOf());vsHash=edvr::EyeTonemapSnapshot::kVs;psHash=edvr::EyeTonemapSnapshot::kPs;edvr::uiDeferredTraceDrawEnter(c.Get(),true,'N',3,1,0,vsHash,psHash);edvr::uiDeferredBeforeDraw(c.Get());if(defer){edvr::uiDeferredTraceBeforeTone(c.Get());edvr::uiDeferredBeforeTone(c.Get(),'N',3,1,0,0,0);check(!edvr::uiDeferredBegin(c.Get(),-1,'N',3,1,0,0,0),"full wrapper tone has no later world mirror");}c->DrawInstanced(3,1,0,0);edvr::uiDeferredTraceOriginalIssued();if(defer)edvr::uiDeferredEnd(c.Get());}
+ void candidateDraw(edvr::Surface&target,ID3D11ShaderResourceView*source,uint64_t vh,uint64_t ph){constants(0,0);setup(target,inW,inH,postTone.Get(),nullptr,nullptr);c->PSSetShaderResources(0,1,&source);vsHash=vh;psHash=ph;edvr::uiDeferredTraceDrawEnter(c.Get(),true,'N',3,1,0,vh,ph);edvr::uiDeferredBeforeDraw(c.Get());edvr::uiDeferredTraceBeforeTone(c.Get());c->DrawInstanced(3,1,0,0);edvr::uiDeferredTraceOriginalIssued();edvr::uiDeferredEnd(c.Get());}
  void postToneDraw(edvr::Surface&target,ID3D11ShaderResourceView*source){candidateDraw(target,source,0x20F383BBAC05C031ull,0xDED8796049C7BB4Aull);}
  void baselineNative(ID3D11BlendState*b){constants(0,0);c->ClearRenderTargetView(expectedHdr.rtv.Get(),bg);setup(expectedHdr,outW,outH,ui.Get(),b,nullptr);c->DrawInstanced(3,1,0,0);setup(expected,outW,outH,tone.Get(),nullptr,nullptr);c->PSSetShaderResources(1,1,expectedHdr.srv.GetAddressOf());c->DrawInstanced(3,1,0,0);}
  ~Harness(){edvr::uiDeferredShutdown();c->ClearState();}
@@ -86,6 +96,33 @@ int main(int argc,char**argv){
  bool hardware=argc>1&&strcmp(argv[1],"--hardware")==0;
  for(UINT scale:{1u,2u})for(float j:{0.f,.25f,-.25f}){
   Harness h(hardware,8,8*scale);auto*d=h.d.Get();auto*c=h.c.Get();
+  {
+   wchar_t scratch[MAX_PATH],shaderPath[MAX_PATH],missingPath[MAX_PATH];_snwprintf_s(scratch,_TRUNCATE,L"build\\obj\\uideferredtest\\producer_shader_%lu",GetCurrentProcessId());CreateDirectoryW(scratch,nullptr);edvr::writerShaderDir=scratch;edvr::writerShaderKeys={};edvr::writerShaderCount=edvr::writerShaderReports=0;
+   UINT shaderBytes=0;h.vs->GetPrivateData(edvr::kDeferredBytes,&shaderBytes,nullptr);std::vector<BYTE> expectedShader(shaderBytes);hr(h.vs->GetPrivateData(edvr::kDeferredBytes,&shaderBytes,expectedShader.data()));
+   edvr::writeProducerShader(L"vs",0x1234,h.vs.Get());_snwprintf_s(shaderPath,_TRUNCATE,L"%s\\vs_%016llX.dxbc",scratch,0x1234ull);check(readFile(shaderPath)==expectedShader && edvr::writerShaderCount==1,"retained producer shader is exported byte for byte");
+   {HANDLE f=CreateFileW(shaderPath,GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);check(f!=INVALID_HANDLE_VALUE,"shader repeat sentinel opened");BYTE sentinel=0x5a;DWORD written=0;check(WriteFile(f,&sentinel,1,&written,nullptr)&&written==1,"shader repeat sentinel written");CloseHandle(f);}edvr::writeProducerShader(L"vs",0x1234,h.vs.Get());check(readFile(shaderPath)==std::vector<BYTE>{0x5a} && edvr::writerShaderCount==1,"repeat stage/hash is neither rewritten nor recounted");
+   const char*rawSource="float4 main():SV_Target{return 1;}";auto rawBytes=compile(rawSource,strlen(rawSource),"main","ps_5_0");ComPtr<ID3D11PixelShader>rawShader;hr(d->CreatePixelShader(rawBytes->GetBufferPointer(),rawBytes->GetBufferSize(),nullptr,&rawShader));const auto reports=edvr::writerShaderReports;edvr::writeProducerShader(L"ps",0x2345,rawShader.Get());_snwprintf_s(missingPath,_TRUNCATE,L"%s\\ps_%016llX.dxbc",scratch,0x2345ull);check(GetFileAttributesW(missingPath)==INVALID_FILE_ATTRIBUTES && edvr::writerShaderCount==2 && edvr::writerShaderReports==reports+1,"missing producer bytecode is explicit and creates no file");
+   for(unsigned i=0;i<6;++i)edvr::writeProducerShader(L"vs",0x3000+i,h.vs.Get());const auto cappedReports=edvr::writerShaderReports;edvr::writeProducerShader(L"vs",0x4000,h.vs.Get());check(edvr::writerShaderCount==8 && edvr::writerShaderReports==cappedReports+1,"producer shader export cap is explicit");
+   WIN32_FIND_DATAW fd{};wchar_t pattern[MAX_PATH];_snwprintf_s(pattern,_TRUNCATE,L"%s\\*",scratch);HANDLE find=FindFirstFileW(pattern,&fd);if(find!=INVALID_HANDLE_VALUE){do{if(wcscmp(fd.cFileName,L".")&&wcscmp(fd.cFileName,L"..")){wchar_t file[MAX_PATH];_snwprintf_s(file,_TRUNCATE,L"%s\\%s",scratch,fd.cFileName);DeleteFileW(file);}}while(FindNextFileW(find,&fd));FindClose(find);}RemoveDirectoryW(scratch);edvr::writerShaderDir.clear();edvr::writerShaderKeys={};edvr::writerShaderCount=edvr::writerShaderReports=0;
+  }
+  {
+   edvr::clearWriterTrace();h.start();h.toneDraw(true);h.uiDraw(j,-j,h.over.Get(),true);auto post=surf(d,8,8,DXGI_FORMAT_R8G8B8A8_UNORM);h.postToneDraw(post,h.ldr.srv.Get());
+   check(edvr::lastProducer.target.Get()==h.ldr.tex.Get() && edvr::lastProducer.entryVs==edvr::EyeTonemapSnapshot::kVs && edvr::lastProducer.entryPs==edvr::EyeTonemapSnapshot::kPs,"early pre-capture tone is retained as sampled-blit writer");
+   check(edvr::lastProducer.reachedBeforeTone && edvr::lastProducer.originalIssued && edvr::lastIssuedProducer.serial==edvr::lastProducer.serial,"tone wrapper entry, pre-tone reach and original issue are connected");
+   check(edvr::lastProducer.actualEntryVs==0x111 && edvr::lastProducer.actualEntryPs==0x333 && edvr::lastProducer.actualBeforeVs==0x111 && edvr::lastProducer.actualBeforePs==0x333,"actual entry and pre-tone shader hashes are retained");
+   edvr::clearWriterTrace();h.setup(h.ldr,8,8,h.postTone.Get(),nullptr,nullptr);vsHash=0xabc;psHash=0xdef;edvr::uiDeferredTraceDrawEnter(c,true,'X',6,2,7,vsHash,psHash);edvr::uiDeferredTraceBeforeTone(c);edvr::reportProducer(h.ldr.tex.Get());
+   check(edvr::lastProducer.entryVs==0xabc && edvr::lastProducer.entryPs==0xdef && !edvr::lastProducer.originalIssued && !edvr::lastIssuedProducer.target,"alternate skipped attempt is reported without being called a producer");
+   check(edvr::lastProducer.actualEntryVs==0x111 && edvr::lastProducer.actualEntryPs==0x444 && edvr::lastProducer.actualBeforeVs==0x111 && edvr::lastProducer.actualBeforePs==0x444,"actual hashes expose shadow divergence at entry and pre-tone");
+   c->DrawInstanced(3,1,0,0);edvr::uiDeferredTraceOriginalIssued();edvr::reportProducer(h.ldr.tex.Get());
+   check(edvr::lastIssuedProducer.serial==edvr::lastProducer.serial,"issued alternative producer is distinguished from skipped attempt");
+   edvr::uiDeferredResourceWrite(c,h.ldr.tex.Get());check(!edvr::producerFor(h.ldr.tex.Get()),"known resource write invalidates older observed draws");
+   edvr::clearWriterTrace();std::vector<edvr::Surface> history;history.reserve(edvr::kWriterTraceCount+1);
+   for(size_t i=0;i<=edvr::kWriterTraceCount;++i){history.push_back(surf(d,8,8,DXGI_FORMAT_R8G8B8A8_UNORM));h.candidateDraw(history.back(),h.hdr.srv.Get(),0x500+i,0x600+i);}
+   check(!edvr::producerFor(history.front().tex.Get()) && edvr::producerFor(history.back().tex.Get()),"24-slot history evicts oldest resource identity without stale match");
+   D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=8;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;edvr::Surface typeless;hr(d->CreateTexture2D(&td,nullptr,&typeless.tex));D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;hr(d->CreateRenderTargetView(typeless.tex.Get(),&rd,&typeless.rtv));D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;hr(d->CreateShaderResourceView(typeless.tex.Get(),&sd,&typeless.srv));
+   h.candidateDraw(typeless,h.hdr.srv.Get(),0x777,0x888);check(edvr::producerFor(typeless.tex.Get())!=nullptr,"typeless eye resource with UNORM RTV is retained");
+   const auto tq=edvr::writerTargetQueries,sq=edvr::writerShaderQueries;edvr::enabled=false;edvr::diagnosticUntilGeneration=0;h.setup(h.ldr,8,8,h.tone.Get(),nullptr,nullptr);edvr::uiDeferredTraceDrawEnter(c,true,'N',3,1,0,1,2);edvr::uiDeferredTraceBeforeTone(c);check(edvr::writerTargetQueries==tq && edvr::writerShaderQueries==sq,"expired diagnostic performs no target or shader queries");edvr::enabled=true;
+  }
   {
    const auto before=edvr::diagnostic;h.start();h.uiDraw(j,-j,h.over.Get(),true);auto submitted=surf(d,8,8,DXGI_FORMAT_R8G8B8A8_UNORM);
    check(!edvr::uiDeferredPrepare(c,submitted.tex.Get(),h.zSrv.Get(),h.output.tex.Get(),0,8,8,j,-j),"prepare before tone reproduces route failure");

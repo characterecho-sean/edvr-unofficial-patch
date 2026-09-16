@@ -3127,7 +3127,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         case 'X':g_state->realDrawIndexedInstanced(self,count,instances,args.start,args.base,args.startInstance);break;
         }
     };
-    if(self==g_state->ownerCtx)uiDeferredBeforeDraw(self);
+    if(self==g_state->ownerCtx){
+        uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,static_cast<uint32_t>(v),
+            bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
+        uiDeferredBeforeDraw(self);
+    }
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;
         ~EffectCaptureScope(){if(ctx)objectProbeSourceDrawEnd(ctx);}
@@ -3164,7 +3168,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                                   g_state->qsStartInstance)) {
             return;
         }
-        draw();
+        if(draw() && self==g_state->ownerCtx)uiDeferredTraceOriginalIssued();
         return;
     }
     if (v == DrawVerdict::kQuadSkip) {
@@ -3287,10 +3291,12 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     const bool terrainOriginal=self==g_state->ownerCtx &&
         celestialMotionBeginOriginal(self,bindingShaderHash(BindSlot::Vs));
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
-    if(self==g_state->ownerCtx)uiDeferredBeforeTone(self,kind,count,instances,args.start,args.base,args.startInstance);
+    if(self==g_state->ownerCtx){uiDeferredTraceBeforeTone(self);uiDeferredBeforeTone(self,kind,count,instances,args.start,args.base,args.startInstance);}
     const bool deferred=self==g_state->ownerCtx && uiDeferredBegin(self,uiDepthDeferredEye(),kind,count,instances,args.start,args.base,args.startInstance);
+    bool originalIssued=false;
     { struct OriginalDrawScope { bool previous=t_colourOriginal; OriginalDrawScope(){t_colourOriginal=true;} ~OriginalDrawScope(){t_colourOriginal=previous;} } original;
-      draw(); }
+      originalIssued=draw(); }
+    if(originalIssued && self==g_state->ownerCtx)uiDeferredTraceOriginalIssued();
     if(self==g_state->ownerCtx)uiDeferredEnd(self);
     if(self==g_state->ownerCtx && uiSeparationToneBegin(self,kind,count,instances)) {
         pureDraw();uiSeparationToneEnd(self);
@@ -3677,6 +3683,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         g_state->realDraw(self, count, start);
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
+        return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3704,6 +3711,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
+        return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3740,6 +3748,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                    startInstance);
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
+        return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3813,6 +3822,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
+        return !attached;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);

@@ -14,6 +14,15 @@ void uiDeferredConfigure(Config&);
 void uiDeferredRemember(ID3D11DeviceChild*,const void*,size_t,bool linked);
 void uiDeferredBeforeDraw(ID3D11DeviceContext*);
 void uiDeferredBeforeDispatch(ID3D11DeviceContext*);
+// Bounded diagnostic for the real draw wrapper. It retains a rolling history
+// of eye-sized LDR targets so a sampled post-tone draw can name the draw that
+// last produced its source. `verdict` is the wrapper's opaque DrawVerdict
+// value; no rendering decision is made here.
+void uiDeferredTraceDrawEnter(ID3D11DeviceContext*, bool eyeSizedTarget,
+                              char kind, uint32_t count, uint32_t instances, uint32_t verdict,
+                              uint64_t originalVs, uint64_t originalPs);
+void uiDeferredTraceBeforeTone(ID3D11DeviceContext*);
+void uiDeferredTraceOriginalIssued();
 // Captures supported UI for native replay, or mirrors an interleaved world
 // draw into the clean image. Original colour/depth/stencil remain intact.
 // End must follow every Begin, including world draws returning false.

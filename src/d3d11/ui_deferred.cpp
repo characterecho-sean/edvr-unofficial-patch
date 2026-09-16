@@ -5,12 +5,14 @@
 #include "dxbc_fanout.h"
 #include "binding_shadow.h"
 #include "eye_tonemap_snapshot.h"
+#include "exposure_fix.h"
 #include "shader_swap.h"
 #include "vscreen.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include <d3d11_1.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -122,6 +124,103 @@ uint64_t generation=1;
 uint64_t diagnosticUntilGeneration=0;
 unsigned toneReports=0,aliasReports=0,prepareReports=0,postToneReports=0,lateCompositeReports=0,boundaryReports=0;
 static bool diagnosticWindow(){return diagnosticUntilGeneration && generation<=diagnosticUntilGeneration;}
+
+// The sampled blit immediately after tone mapping is a draw, not a resource
+// copy, so the alias tracker cannot say what produced its t0. Keep the last
+// few eye-sized LDR draw targets alive and attach draw-wrapper facts to them.
+// This is a rolling diagnostic only: no alias or replay state is changed.
+struct WriterTrace {
+    Ptr<ID3D11Resource> target;
+    Ptr<ID3D11VertexShader> entryVsObject;
+    Ptr<ID3D11PixelShader> entryPsObject;
+    Ptr<ID3D11VertexShader> beforeVsObject;
+    Ptr<ID3D11PixelShader> beforePsObject;
+    uint64_t serial=0,frame=0;
+    uint64_t entryVs=0,entryPs=0,actualEntryVs=0,actualEntryPs=0;
+    uint64_t beforeVs=0,beforePs=0,actualBeforeVs=0,actualBeforePs=0;
+    uint32_t ordinal=0,count=0,instances=0,verdict=0;
+    char kind=0;
+    bool reachedBeforeTone=false,originalIssued=false;
+};
+constexpr size_t kWriterTraceCount=24;
+std::array<WriterTrace,kWriterTraceCount> writerTrace;
+size_t writerTraceNext=0;
+int writerTracePending=-1;
+uint64_t writerTraceSerial=0;
+uint32_t writerTraceOrdinal=0;
+WriterTrace lastProducer;
+WriterTrace lastIssuedProducer;
+uint64_t producerMatches=0,producerMisses=0,writerTargetQueries=0,writerShaderQueries=0;
+struct WriterTargetCache {
+    uint32_t rtvGeneration=UINT32_MAX,dsvGeneration=UINT32_MAX;
+    void* shadowRtv=nullptr;
+    Ptr<ID3D11Resource> resource;
+    bool candidate=false;
+} writerTargetCache;
+std::wstring writerShaderDir;
+struct WriterShaderKey { uint64_t hash=0;wchar_t stage=0; };
+std::array<WriterShaderKey,8> writerShaderKeys;
+unsigned writerShaderCount=0,writerShaderReports=0;
+bool sameIdentity(IUnknown*,IUnknown*);
+
+void clearWriterTrace() {
+    for(auto& w:writerTrace)w=WriterTrace{};
+    writerTraceNext=0;writerTracePending=-1;writerTraceOrdinal=0;
+    lastProducer=WriterTrace{};lastIssuedProducer=WriterTrace{};writerTargetCache=WriterTargetCache{};
+}
+void actualShaderHashes(ID3D11DeviceContext* ctx,WriterTrace& w,bool before) {
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    ++writerShaderQueries;
+    ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+    const uint64_t vh=vs?lookupShaderHash(vs.Get()):0,ph=ps?lookupShaderHash(ps.Get()):0;
+    if(before){w.beforeVs=bindingShaderHash(BindSlot::Vs);w.beforePs=bindingShaderHash(BindSlot::Ps);w.actualBeforeVs=vh;w.actualBeforePs=ph;w.beforeVsObject=vs;w.beforePsObject=ps;}
+    else {w.entryVsObject=vs;w.entryPsObject=ps;w.actualEntryVs=vh;w.actualEntryPs=ph;}
+}
+const WriterTrace* producerFor(ID3D11Resource* source,bool issuedOnly=false) {
+    const WriterTrace* found=nullptr;
+    for(const auto& w:writerTrace)if(w.target && source && (!issuedOnly || w.originalIssued) && sameIdentity(w.target.Get(),source) && (!found || w.serial>found->serial))found=&w;
+    return found;
+}
+void writeProducerShader(const wchar_t* prefix,uint64_t hash,ID3D11DeviceChild* shader) noexcept {
+    if(!hash || !shader || writerShaderDir.empty())return;const wchar_t stage=prefix[0];
+    for(unsigned i=0;i<writerShaderCount;++i)if(writerShaderKeys[i].hash==hash && writerShaderKeys[i].stage==stage)return;
+    if(writerShaderCount>=writerShaderKeys.size()){if(writerShaderReports++<12)Log::get().note("Deferred UI: retained producer shader export cap reached (%u files).",unsigned(writerShaderKeys.size()));return;}
+    writerShaderKeys[writerShaderCount++]={hash,stage};
+    try {
+        UINT bytes=0;const HRESULT sized=shader->GetPrivateData(kDeferredBytes,&bytes,nullptr);
+        if(FAILED(sized) || !bytes || bytes>1024*1024){if(writerShaderReports++<12)Log::get().note("Deferred UI: retained producer %ls %016llX bytecode unavailable (%08X, %u bytes).",prefix,static_cast<unsigned long long>(hash),unsigned(sized),bytes);return;}
+        std::vector<uint8_t> data(bytes);const HRESULT read=shader->GetPrivateData(kDeferredBytes,&bytes,data.data());
+        if(FAILED(read)){if(writerShaderReports++<12)Log::get().note("Deferred UI: retained producer %ls %016llX bytecode read failed (%08X).",prefix,static_cast<unsigned long long>(hash),unsigned(read));return;}
+        CreateDirectoryW(writerShaderDir.c_str(),nullptr);wchar_t path[MAX_PATH];
+        _snwprintf_s(path,_TRUNCATE,L"%s\\%s_%016llX.dxbc",writerShaderDir.c_str(),prefix,static_cast<unsigned long long>(hash));
+        HANDLE file=CreateFileW(path,GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(file==INVALID_HANDLE_VALUE){const DWORD error=GetLastError();if(writerShaderReports++<12)Log::get().note("Deferred UI: retained producer shader %ls (%s, error %lu).",path,error==ERROR_FILE_EXISTS?"already present":"write open failed",error);return;}
+        DWORD written=0;const bool ok=WriteFile(file,data.data(),bytes,&written,nullptr) && written==bytes;const DWORD error=ok?ERROR_SUCCESS:GetLastError();CloseHandle(file);
+        if(writerShaderReports++<12)Log::get().note("Deferred UI: retained producer shader %ls (%s, %u/%u bytes, error %lu).",path,ok?"written":"write failed",written,bytes,error);
+    } catch(...) {if(writerShaderReports++<12)Log::get().note("Deferred UI: retained producer %ls %016llX shader export allocation failed.",prefix,static_cast<unsigned long long>(hash));}
+}
+void writeProducerShaders(const WriterTrace* w) {
+    if(!w)return;
+    writeProducerShader(L"vs",w->actualEntryVs,w->entryVsObject.Get());
+    writeProducerShader(L"ps",w->actualEntryPs,w->entryPsObject.Get());
+    writeProducerShader(L"vs",w->actualBeforeVs,w->beforeVsObject.Get());
+    writeProducerShader(L"ps",w->actualBeforePs,w->beforePsObject.Get());
+}
+void reportProducer(ID3D11Resource* source) {
+    const auto* w=producerFor(source);const auto* issued=producerFor(source,true);
+    if(!w){++producerMisses;lastProducer=WriterTrace{};lastIssuedProducer=WriterTrace{};Log::get().note(
+        "Deferred UI: post-tone t0 producer not retained gen=%llu source=%p history=%u.",
+        static_cast<unsigned long long>(generation),source,unsigned(kWriterTraceCount));return;}
+    ++producerMatches;lastProducer=*w;lastIssuedProducer=issued?*issued:WriterTrace{};
+    Log::get().note(
+        "Deferred UI: post-tone t0 last observed draw attempt gen=%llu ordinal=%u target=%p entry=%016llX/%016llX actual=%016llX/%016llX before-tone=%u %016llX/%016llX actual=%016llX/%016llX draw=%c/%u/%u verdict=%u original-issued=%u; latest observed original-issued draw=%s gen=%llu ordinal=%u entry=%016llX/%016llX actual=%016llX/%016llX.",
+        static_cast<unsigned long long>(w->frame),w->ordinal,w->target.Get(),
+        w->entryVs,w->entryPs,w->actualEntryVs,w->actualEntryPs,unsigned(w->reachedBeforeTone),
+        w->beforeVs,w->beforePs,w->actualBeforeVs,w->actualBeforePs,w->kind,w->count,w->instances,w->verdict,unsigned(w->originalIssued),
+        issued?"retained":"none",static_cast<unsigned long long>(issued?issued->frame:0),issued?issued->ordinal:0,
+        issued?issued->entryVs:0,issued?issued->entryPs:0,issued?issued->actualEntryVs:0,issued?issued->actualEntryPs:0);
+    writeProducerShaders(w);if(issued!=w)writeProducerShaders(issued);
+}
 bool sameIdentity(IUnknown* a,IUnknown* b) {
     if(a==b)return true;if(!a || !b)return false;
     Ptr<IUnknown> x,y;return SUCCEEDED(a->QueryInterface(IID_PPV_ARGS(&x))) && SUCCEEDED(b->QueryInterface(IID_PPV_ARGS(&y))) && x==y;
@@ -235,6 +334,49 @@ void uiDeferredConfigure(Config& cfg) {
     const bool requested=(_stricmp(m.c_str(),"dlss")==0 || _stricmp(m.c_str(),"dlaa")==0);
     if(!requested){failed=false;routeNoted=false;}
     enabled=requested && !failed && cfg.getFloat("advanced.temporal_aa_fovea",0)==0;
+    writerShaderDir=cfg.logDir()+L"\\shaders";
+}
+void uiDeferredTraceDrawEnter(ID3D11DeviceContext* ctx,bool eyeSizedTarget,char kind,uint32_t count,uint32_t instances,
+    uint32_t verdict,uint64_t originalVs,uint64_t originalPs) {
+    writerTracePending=-1;
+    if(!ctx || inside || (!enabled && !diagnosticWindow()))return;
+    const uint32_t ordinal=++writerTraceOrdinal;
+    if(!eyeSizedTarget)return;
+    const uint32_t rg=bindingGeneration(BindSlot::Rtv0),dg=bindingGeneration(BindSlot::Dsv0);
+    if(writerTargetCache.rtvGeneration!=rg || writerTargetCache.dsvGeneration!=dg) {
+        writerTargetCache=WriterTargetCache{};writerTargetCache.rtvGeneration=rg;writerTargetCache.dsvGeneration=dg;
+        writerTargetCache.shadowRtv=bindingGet(BindSlot::Rtv0);
+        ResourceInfo info;
+        if(writerTargetCache.shadowRtv && !bindingGet(BindSlot::Dsv0) && bindingResolve(writerTargetCache.shadowRtv,&info) &&
+           info.isTexture2D && vScreenIsEyeSized(info.a,info.b) &&
+           (info.fmt==DXGI_FORMAT_R8G8B8A8_TYPELESS || info.fmt==DXGI_FORMAT_R8G8B8A8_UNORM)) {
+            ++writerTargetQueries;ID3D11RenderTargetView* raw[2]{};Ptr<ID3D11DepthStencilView> depth;
+            ctx->OMGetRenderTargets(2,raw,&depth);Ptr<ID3D11RenderTargetView> target0,target1;
+            target0.Attach(raw[0]);target1.Attach(raw[1]);
+            D3D11_RENDER_TARGET_VIEW_DESC view{};if(target0)target0->GetDesc(&view);
+            Ptr<ID3D11Resource> resource;if(target0)target0->GetResource(&resource);Ptr<ID3D11Texture2D> texture;
+            if(target0 && !target1 && !depth && view.Format==DXGI_FORMAT_R8G8B8A8_UNORM &&
+               view.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D && !view.Texture2D.MipSlice && resource && SUCCEEDED(resource.As(&texture))) {
+                D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);
+                if(td.ArraySize==1 && td.MipLevels==1 && td.SampleDesc.Count==1 &&
+                   (td.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || td.Format==DXGI_FORMAT_R8G8B8A8_UNORM)) {
+                    writerTargetCache.resource=resource;writerTargetCache.candidate=true;
+                }
+            }
+        }
+    }
+    if(!writerTargetCache.candidate || !writerTargetCache.resource)return;
+    const size_t slot=writerTraceNext++%writerTrace.size();auto& w=writerTrace[slot];w=WriterTrace{};
+    w.target=writerTargetCache.resource;w.serial=++writerTraceSerial;w.frame=generation;w.ordinal=ordinal;
+    w.entryVs=originalVs;w.entryPs=originalPs;w.kind=kind;w.count=count;w.instances=instances;w.verdict=verdict;
+    actualShaderHashes(ctx,w,false);writerTracePending=static_cast<int>(slot);
+}
+void uiDeferredTraceBeforeTone(ID3D11DeviceContext* ctx) {
+    if(!ctx || writerTracePending<0)return;auto& w=writerTrace[static_cast<size_t>(writerTracePending)];
+    w.reachedBeforeTone=true;actualShaderHashes(ctx,w,true);
+}
+void uiDeferredTraceOriginalIssued() {
+    if(writerTracePending>=0)writerTrace[static_cast<size_t>(writerTracePending)].originalIssued=true;
 }
 bool uiDeferredFallbackReset(int eye){if(eye<0 || eye>1)return false;bool reset=resetPending[eye];resetPending[eye]=false;return reset;}
 static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
@@ -454,7 +596,9 @@ static void removeAlias(ID3D11DeviceContext*,Eye& e,ID3D11Resource* r,const char
     e.complete=!e.aliases.empty();
 }
 void uiDeferredResourceWrite(ID3D11DeviceContext* ctx,ID3D11Resource* r) {
-    if(inside || !enabled || !r)return;
+    if(inside || !r)return;
+    if(enabled || diagnosticWindow())for(size_t i=0;i<writerTrace.size();++i)if(writerTrace[i].target.Get()==r){writerTrace[i]=WriterTrace{};if(writerTracePending==static_cast<int>(i))writerTracePending=-1;}
+    if(!enabled)return;
     snapshots.written(r);
     for(auto& e:eyes){
         if(!e.restored && e.count && (e.hdr.Get()==r || e.depth.source.Get()==r)){restore(ctx,e);decline(e,"scene overwritten before deferred replay");}
@@ -505,7 +649,7 @@ void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx) {
             postTone?"post-tone copy":"late composite",unsigned(enabled),static_cast<unsigned long long>(generation),target.Get(),s0.Get(),s1.Get(),
             static_cast<unsigned long long>(eyes[0].generation),eyes[0].hdr.Get(),eyes[0].aliases.empty()?nullptr:eyes[0].aliases.front().Get(),eyes[0].count,
             static_cast<unsigned long long>(eyes[1].generation),eyes[1].hdr.Get(),eyes[1].aliases.empty()?nullptr:eyes[1].aliases.front().Get(),eyes[1].count,
-            vs,ps);}
+            vs,ps);if(postTone)reportProducer(s0.Get());}
     }
     if(!enabled){for(auto* v:views)if(v)v->Release();return;}
     if(depth){Ptr<ID3D11Resource> r;depth->GetResource(&r);snapshots.written(r.Get());}
@@ -531,6 +675,8 @@ void uiDeferredFrameBoundary(ID3D11DeviceContext* ctx) {
     for(auto& e:eyes){if(e.count && !e.restored)restore(ctx,e);for(UINT i=0;i<e.count;++i){e.draws[i]->packet=UiDeferredDraw{};}e.tone=UiDeferredDraw{};e.count=e.changedStencil=0;e.bytes=0;e.complete=e.restored=e.aborted=false;e.aliases.clear();e.output.Reset();}
     snapshots.frameBoundary();
     ++generation;
+    writerTraceOrdinal=0;writerTracePending=-1;
+    if(!enabled && !diagnosticWindow())clearWriterTrace();
 }
-void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=0;}
+void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=false;captured=applied=declined=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
 }
