@@ -5,8 +5,8 @@
 - **State (2026-09-15, 19:52, Stage 0 FLOWN):** one A/B/A flight in the
   FRONTIER install, Pimax Crystal Super on Pimax OpenXR, 2576x2544 per eye
   in, 3964x3913 out, 90 Hz, temporal_aa = dlss model k, log
-  edvr_gfx_20260915_195200.log on build v0.17.0-rc.2-5-g749a4e9 (= main
-  749a4e9, `--expect-build HEAD` matched). The whole-frame gate PASSED
+  edvr_gfx_20260915_195200.log on build v0.17.0-rc.2-5-g749a4e9 (on main;
+  read it with `--expect-build 749a4e9`). The whole-frame gate PASSED
   against the A arm before it: fovea 40 deg with the steady periphery at
   0.5 took the native benchmark gpu p50 from 8.84-9.10 ms (A, three
   windows) to 7.95-8.13 ms (B, four windows), 0.76-1.02 ms and 8-11% off,
