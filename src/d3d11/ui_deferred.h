@@ -40,6 +40,14 @@ ID3D11ShaderResourceView* uiDeferredPrepare(ID3D11DeviceContext*, ID3D11Texture2
     uint32_t width, uint32_t height, float jitterX, float jitterY);
 void uiDeferredApply(ID3D11DeviceContext*, int eye);
 bool uiDeferredFallbackReset(int eye);
+// A read-only snapshot of one eye's capture state, for the luma probe's
+// report line: whether the feature is on, whether this eye has captured
+// a post-tone draw at all (sampled), how many render targets it has had
+// to alias onto the clean surfaces, how many draws are recorded, and
+// whether its command list is complete (ready to replay). Never mutates
+// anything; safe to call every frame regardless of capture state.
+struct UiDeferredEyeState { bool enabled; bool sampled; unsigned aliases; unsigned draws; bool complete; };
+UiDeferredEyeState uiDeferredEyeState(int eye);
 void uiDeferredResourceWrite(ID3D11DeviceContext*, ID3D11Resource*);
 void uiDeferredViewWrite(ID3D11DeviceContext*, ID3D11View*);
 void uiDeferredCopy(ID3D11Resource* destination, ID3D11Resource* source, bool complete);

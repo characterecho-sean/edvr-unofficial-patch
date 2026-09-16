@@ -1,4 +1,5 @@
 #include "ui_deferred.h"
+#include "luma_probe.h"
 #include "ui_deferred_draw.h"
 #include "ui_deferred_depth.h"
 #include "ui_deferred_shaders.h"
@@ -397,6 +398,11 @@ void uiDeferredTraceOriginalIssued() {
     if(writerTracePending>=0)writerTrace[static_cast<size_t>(writerTracePending)].originalIssued=true;
 }
 bool uiDeferredFallbackReset(int eye){if(eye<0 || eye>1)return false;bool reset=resetPending[eye];resetPending[eye]=false;return reset;}
+UiDeferredEyeState uiDeferredEyeState(int eye){
+    if(eye<0 || eye>1)return UiDeferredEyeState{false,false,0,0,false};
+    const Eye& e=eyes[eye];
+    return UiDeferredEyeState{enabled,e.postTone.ready(),static_cast<unsigned>(e.aliases.size()),e.count,e.complete};
+}
 static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) {
     if(!enabled || inside || eye>1 || colourMuted)return false;
     if(eye<0) {
@@ -444,6 +450,7 @@ static bool begin(ID3D11DeviceContext* ctx,int eye,char kind,UINT count,UINT ins
     if(!e.count){
         if(!e.cleanHdr.ensure(dev.Get(),td.Width,td.Height,td.Format) || !e.cleanLdr.ensure(dev.Get(),td.Width,td.Height,DXGI_FORMAT_R8G8B8A8_UNORM) || !e.depth.seed(dev.Get(),ctx,ds.Get()))return false;
         e.hdr=tex;e.hdrTarget=rt;e.w=td.Width;e.h=td.Height;ctx->CopyResource(e.cleanHdr.tex.Get(),tex.Get());
+        lumaProbeSample(ctx,e.cleanHdr.tex.Get(),eye,1);
     }else {Ptr<ID3D11Resource> depth;if(ds)ds->GetResource(&depth);if(e.hdr.Get()!=tex.Get() || !sameIdentity(e.depth.source.Get(),depth.Get()))return false;}
     if(e.count>=64)return false;
     if(e.draws.size()==e.count)e.draws.push_back(std::make_unique<Draw>());
@@ -746,6 +753,18 @@ static int captureRouteDrawImpl(ID3D11DeviceContext* ctx,char kind,UINT count,UI
     }
     routeHandledThisDraw=true;return 1;
 }
+// The post-tone pixel shader under a vertex shader this file does not
+// recognise (seen with EDHM chained, docs/edhm-black-cockpit-2026-09-15.md):
+// the copy is never captured, so the post-tone mapping never joins the
+// replay. Once per distinct vertex shader, four at most.
+static void notePostToneVsMismatch(uint64_t vs,uint64_t ps) {
+    static uint64_t seen[4]{};static int seenCount=0;
+    for(int i=0;i<seenCount;++i)if(seen[i]==vs)return;
+    if(seenCount>=4)return;
+    seen[seenCount++]=vs;
+    Log::get().note("Deferred UI: post-tone pixel shader %016llX bound with an unrecognised vertex shader %016llX; the post-tone copy is not captured, so DLSS receives the unmapped world colour.",
+        static_cast<unsigned long long>(ps),static_cast<unsigned long long>(vs));
+}
 static int captureRouteDraw(ID3D11DeviceContext* ctx,char kind,UINT count,UINT instances,UINT start,INT base,UINT first) noexcept {
     try { return captureRouteDrawImpl(ctx,kind,count,instances,start,base,first); }
     catch(...) {
@@ -763,6 +782,7 @@ void uiDeferredBeforeDraw(ID3D11DeviceContext* ctx,char kind,UINT count,UINT ins
     const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
     const bool postTone=vs==kPostToneVs && ps==kPostTonePs;
     const bool lateComposite=vs==kTailVs && ps==kTailPs;
+    if(enabled && ps==kPostTonePs && vs!=kPostToneVs)notePostToneVsMismatch(vs,ps);
     auto& reports=postTone?postToneReports:lateCompositeReports;
     const bool diagnosticCandidate=postTone || lateComposite;
     const bool report=diagnosticCandidate && reports<8;

@@ -24,6 +24,7 @@
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
+#include "luma_probe.h"
 #include "dlaa.h"
 #include "object_probe.h"   // objectMotionGet: the dominant body's own motion, for the body's path (tier 2)
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
@@ -2477,6 +2478,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* headTransSwapped, float nearZ, float farZ,
                     float headDeg, int motion, float blend, float clampSigma,
                     unsigned outW, unsigned outH, unsigned flags) {
+    lumaProbeBegin(eye);
     TemporalHistoryScope history(eye,flags,jxNow,jyNow);
     auto& trace=history.entry;
     ID3D11Texture2D* src = nullptr;
@@ -3929,6 +3931,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         bool usedDlaa = false;
+        // The luma probe's applied flag needs deferredInput's truth value at
+        // the pass's true end, below, but deferredInput itself (declared
+        // further down) falls out of scope well before that point -- this
+        // mirrors it at the same scope as usedDlaa, set once deferredInput
+        // is computed.
+        bool deferredActive = false;
         // Tier 1's depth carry: true once a dispatch this frame wrote ZC into
         // e.dlDepth with a depth bound and a twin to swap it with, so the
         // frame's end can make it last frame's.
@@ -4013,9 +4021,24 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         g_csUiResolve=shaderSwapCompileCs(ctx,kUiResolve,sizeof(kUiResolve)-1,"main","UI resolve",nullptr,"UI resolve");
                     }
                     const bool uiResolve=uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaint;
+                    // luma probe stage 0: the texture the game submits, right
+                    // before it is offered to the deferred UI's own snapshot.
+                    lumaProbeSample(ctx,src,eye,0);
                     ID3D11ShaderResourceView* deferredInput=nullptr;
                     if(!debugPaint && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
                         deferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
+                    deferredActive=deferredInput!=nullptr;
+                    // luma probe stage 2: what DLSS receives -- deferredInput's
+                    // own resource when the deferred route is live, else absent.
+                    if(deferredInput){
+                        Microsoft::WRL::ComPtr<ID3D11Resource> lumaDiRes;
+                        deferredInput->GetResource(&lumaDiRes);
+                        Microsoft::WRL::ComPtr<ID3D11Texture2D> lumaDiTex;
+                        lumaDiRes.As(&lumaDiTex);
+                        lumaProbeSample(ctx,lumaDiTex.Get(),eye,2);
+                    } else {
+                        lumaProbeSample(ctx,nullptr,eye,2);
+                    }
                     // Deferred replay owns both clean input and final native UI
                     // when it succeeds. The older separation/resolve path stays
                     // available as the fallback, but must not replace that clean
@@ -4281,6 +4304,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if(captureResolve)stageEyeRun(ctx,e.uiHistory[1-e.uiHistoryRead],g_eyeInputs,15);
                         if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");}
                     } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    // luma probe stage 3: DLSS output before the UI replay --
+                    // e.dlSubmit already holds it here on every usedDlaa path,
+                    // legacy-resolved or copied straight from e.dlOut above.
+                    lumaProbeSample(ctx, usedDlaa ? e.dlSubmit : nullptr, eye, 3);
                     // "ui" for the deferred route instead: the replay of the
                     // captured UI onto the submit. Exclusive with the legacy
                     // resolve above (applyLegacyResolve is uiResolve without a
@@ -4838,6 +4865,23 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         } else {
             failOnce("the parameter buffer could not be written");
         }
+        // luma probe stage 4 and the end-of-round report: `result` is the
+        // true texture handed to the VR half (e.dlSubmit on the trained
+        // path, the own pass's or the fovea composite's output otherwise,
+        // or null on the failure branch just above) -- not literally the
+        // line-4288 apply, which only covers the trained-and-deferred case
+        // and precedes two more branches that can still change what goes
+        // out. No submit-affecting write and no early return happens
+        // between there and here, so this is the last safe moment.
+        UiDeferredEyeState lumaUiState = uiDeferredEyeState(eye);
+        LumaProbeState lumaState{};
+        lumaState.deferredEnabled = lumaUiState.enabled;
+        lumaState.sampled = lumaUiState.sampled;
+        lumaState.aliases = lumaUiState.aliases;
+        lumaState.draws = lumaUiState.draws;
+        lumaState.applied = usedDlaa && deferredActive;
+        lumaProbeSample(ctx, static_cast<ID3D11Texture2D*>(result), eye, 4);
+        lumaProbeEnd(ctx, eye, lumaState);
     }
 
     // The eye dump, armed by its key or the menu: this treated eye, as it goes

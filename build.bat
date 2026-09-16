@@ -429,6 +429,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\mesh_motion.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
+    "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\foveation.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
@@ -1149,7 +1150,19 @@ exit /b 0
 :rig_native_deferred_ui
 echo [edvr] === native deferred UI regression ===
 if not exist "%OBJ%\uideferredtest" mkdir "%OBJ%\uideferredtest"
-for %%T in (controller_test depth_test draw_test) do (
+rem controller_test alone unity-builds ui_deferred.cpp (tools\ui_deferred_test\controller_test.cpp),
+rem which now calls into luma_probe.cpp's real implementation; depth_test/draw_test only
+rem exercise ui_deferred_depth.h/ui_deferred_draw.h and never reach it, so they stay in the
+rem shared loop below without it (and without its own Log::get() requirement).
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uideferredtest\\" /Fe"%OBJ%\uideferredtest\controller_test.exe" ^
+    "tools\ui_deferred_test\controller_test.cpp" ^
+    "src\d3d11\luma_probe.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: deferred UI controller_test build failed & exit /b 1 )
+"%OBJ%\uideferredtest\controller_test.exe" --self-test || exit /b 1
+for %%T in (depth_test draw_test) do (
     cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
         /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
         /Fo"%OBJ%\uideferredtest\\" /Fe"%OBJ%\uideferredtest\%%T.exe" ^
