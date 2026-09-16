@@ -908,9 +908,14 @@ near 0.4.
 
 **Next.** No build: Sean sets fix.eye_mask = lens and raises eye_mask_trim
 in the performance menu until the black edge sits where DLSS may stop, and
-reports the trim. The build in the Frontier install (the FSS session's,
-rc.3-based: the 17:09 gfx log names v0.17.0-rc.3-3-g0522215-dirty) carries
-the ring, the trim and the price instrument; do not reinstall over it.
+reports the trim. The Frontier install carries the FSS session's build:
+its 17:09 gfx log names v0.17.0-rc.3-3-g0522215-dirty, and both DLLs were
+replaced again at 17:16, after that flight, by the same session (10705da
+by its memory note; the installer's state.ini still says v0.15.0 from
+2026-09-11 and is no guide). Both are rc.3-based and carry the ring, the
+trim and the price instrument (git merge-base checked); do not reinstall
+over it, and read any flight with --expect-build set to whatever version
+line its log prints.
 Then the fork: black outside means the FOV trim is the tool and this arc
 stops at Stage 4; periphery visible means the one Stage 1 build is
 temporal_aa_periphery = off (the raw render, de-jittered, bicubic) plus
