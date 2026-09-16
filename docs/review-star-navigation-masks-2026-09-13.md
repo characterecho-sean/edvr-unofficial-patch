@@ -3,8 +3,9 @@
 ## Status
 
 Updated 2026-09-16 (night). Sean chose A. The mask's rule is fixed on branch
-claude/star-corona-ui-smearing-d1d2ae, built clean as
-v0.17.0-rc.3-3-ga50dfc6 and pushed to main. The Steam install is pending:
+claude/star-corona-ui-smearing-d1d2ae (code commit a50dfc6), built clean
+and pushed to main; the build to install is stamped with main's head, so
+`--expect-build HEAD` is the check. The Steam install is pending:
 at 15:20 the game was running and install_edvr.py refused to stage. After
 quitting: `python tools\install_edvr.py --target steam`, then
 `--verify-only`, then the confirmation flight (numbers and the brief in the
@@ -3036,7 +3037,8 @@ tolerance relative to the raw level, because on the red corona a fraction of
 the red channel is tens of /255, wide enough to pass a glyph's ghost at near
 half strength, while the measured offset is 12..16 at the 99th percentile.
 
-**Confirmation flight.** The build is v0.17.0-rc.3-3-ga50dfc6, on main.
+**Confirmation flight.** The code is commit a50dfc6 on main; the build to
+install is stamped with main's head after the doc commits that followed.
 Install it with `python tools\install_edvr.py --target steam` once the game
 is closed (the installer refuses to stage while it runs, as it did at
 15:20), then `--verify-only`. Target a signal source or a ship whose label
