@@ -19,22 +19,59 @@ struct UiDeferredCaptureMask {
     bool allowVolatileUavSrv=false;
     bool compactPanelIa=false;
 };
+inline uint32_t uiDeferredWord(const std::vector<uint8_t>& bytes,size_t offset) {
+    uint32_t value=0;if(offset>bytes.size() || bytes.size()-offset<sizeof(value))return 0;std::memcpy(&value,bytes.data()+offset,sizeof(value));return value;
+}
+// Elite's shipped shaders commonly omit RDEF. D3DReflect still succeeds on
+// those containers, but reports zero bound resources. Read the authoritative
+// SM5 declarations, and accept only the immediate, fixed-slot forms
+// that UiDeferredDraw knows how to snapshot and bind.
+inline bool uiDeferredDeclaredInputs(const std::vector<uint8_t>& bytes,uint32_t& cb,std::array<bool,128>& srv) {
+    if(bytes.size()<36 || std::memcmp(bytes.data(),"DXBC",4) || uiDeferredWord(bytes,24)!=bytes.size())return false;
+    const uint32_t chunks=uiDeferredWord(bytes,28);if(!chunks || chunks>128 || size_t(32)+size_t(chunks)*4>bytes.size())return false;
+    bool found=false;
+    for(uint32_t i=0;i<chunks;++i) {
+        const uint32_t offset=uiDeferredWord(bytes,32+size_t(i)*4);if(offset>bytes.size() || bytes.size()-offset<8)return false;
+        const uint32_t tag=uiDeferredWord(bytes,offset),size=uiDeferredWord(bytes,offset+4);if(size>bytes.size()-(offset+8))return false;
+        if(tag!=0x58454853u && tag!=0x52444853u)continue;
+        if(found || size<8 || (size&3))return false;found=true;
+        const size_t begin=offset+8,words=size/4;const uint32_t version=uiDeferredWord(bytes,begin);
+        if((version&0xffffu)!=0x50u || (version>>16)>1 || uiDeferredWord(bytes,begin+4)!=words)return false;
+        for(size_t p=2;p<words;) {
+            const uint32_t token=uiDeferredWord(bytes,begin+p*4),op=token&0x7ffu;
+            uint32_t length=(token>>24)&0x7fu;if(op==53){if(p+1>=words || (token>>11)!=3)return false;length=uiDeferredWord(bytes,begin+(p+1)*4);if(length<2 || (length-2)%4)return false;}
+            if(!length || length>words-p)return false;
+            auto wordAt=[&](size_t n){return uiDeferredWord(bytes,begin+(p+n)*4);};
+            if(op==88 || op==161 || op==162) {
+                const uint32_t expected=op==161?3u:4u;if((token&0x80000000u) || length!=expected || wordAt(1)!=0x00107000u)return false;
+                const uint32_t slot=wordAt(2);if(slot>=srv.size() || (op==162 && !wordAt(3)))return false;srv[slot]=true;
+            } else if(op==89) {
+                if((token&0x80000000u) || length!=4 || wordAt(1)!=0x00208e46u)return false;
+                const uint32_t slot=wordAt(2),constants=wordAt(3);if(slot>=14 || constants>4096)return false;cb|=1u<<slot;
+            } else if(op==90) {
+                if((token&0x80000000u) || length!=3 || wordAt(1)!=0x00106000u || wordAt(2)>=16)return false;
+            } else if(op==120 || (op>=144 && op<=146) || (op>=156 && op<=158))return false;
+            p+=length;
+        }
+    }
+    return found;
+}
 // Reflect actual shader inputs; stale unused bindings are not draw inputs.
 inline bool uiDeferredReflect(ID3D11DeviceChild* shader,uint32_t& cb,std::array<bool,128>& srv) {
     cb=0;srv={};UINT n=0;shader->GetPrivateData(kDeferredBytes,&n,nullptr);
     if(!n || n>1024*1024)return false;
     std::vector<uint8_t> bytes(n);
     if(FAILED(shader->GetPrivateData(kDeferredBytes,&n,bytes.data())))return false;
+    if(!uiDeferredDeclaredInputs(bytes,cb,srv))return false;
     Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
     if(FAILED(D3DReflect(bytes.data(),n,IID_PPV_ARGS(&reflection))))return false;
     D3D11_SHADER_DESC d{};if(FAILED(reflection->GetDesc(&d)))return false;
     for(UINT i=0;i<d.BoundResources;++i) {
         D3D11_SHADER_INPUT_BIND_DESC r{};if(FAILED(reflection->GetResourceBindingDesc(i,&r)))return false;
         if(r.Type==D3D_SIT_SAMPLER){if(r.BindPoint+r.BindCount>16)return false;continue;}
-        if(r.Type==D3D_SIT_CBUFFER){if(r.BindPoint+r.BindCount>14)return false;for(UINT j=0;j<r.BindCount;++j)cb|=1u<<(r.BindPoint+j);continue;}
+        if(r.Type==D3D_SIT_CBUFFER){if(r.BindPoint+r.BindCount>14)return false;continue;}
         if(r.Type!=D3D_SIT_TEXTURE && r.Type!=D3D_SIT_STRUCTURED && r.Type!=D3D_SIT_BYTEADDRESS && r.Type!=D3D_SIT_TBUFFER)return false;
         if(r.BindPoint+r.BindCount>srv.size())return false;
-        for(UINT j=0;j<r.BindCount;++j)srv[r.BindPoint+j]=true;
     }
     return true;
 }
