@@ -12,8 +12,7 @@
   0.26 ms drift inside A; p95 9.91-10.37 -> 9.22-9.55). The pass went
   4.10 -> 2.61 ms per stereo pair (full 3.35 -> centre 0.60 + periphery
   0.99 + reduce 0.09 + compose 0.25; prep 0.50 -> 0.68; ui 0.25 -> 0.00),
-  drop counters zero after the first minute. The trailing A ran 25 s: price
-  lines equal to the leading A, no benchmark window. Verbatim: journal.
+  drop counters zero after the first minute. Verbatim: journal.
 - **Settled by the flight and Sean's verdict:** H1 CONFIRMED (1.5 ms and
   36% on the pass, 0.8-1.0 ms and 8-11% on the frame). ruled out: H2
   (reduce + periphery + compose eat most of the crop's saving), because at
@@ -21,45 +20,46 @@
   saves over full-frame NGX, 48%, and the pass still nets 1.5 ms. H3 (the
   seam pulses) unjudged. COVERAGE FAILED at the paying angle (Sean,
   2026-09-16): "40 still looks like a smallish circle in the middle of my
-  screen, does not cover my total eye area at all", as performance.md
-  found on 2026-09-05 (covering where the eyes might look takes 60 deg and
-  more). Centre cost 0.60 ms at 40 deg (8.2% of the output), 0.71 at 49,
-  1.73 at 80, where the frame gain was gone (p50 8.99 vs 9.05-9.10): the
-  angle that pays is too small and the angle that covers does not pay, at
+  screen, does not cover my total eye area at all". Centre cost 0.60 ms at
+  40 deg, 0.71 at 49, 1.73 at 80, where the frame gain was gone: the angle
+  that pays is too small and the angle that covers does not pay, at
   periphery 0.5.
-- **UI parity is the first Stage 1 item, field-confirmed:** the fovea
-  branch of temporalInner runs neither the UI resolve nor the deferred
-  replay (both live in the full-frame block only), so `ui` reads 0.00 under
-  the fovea by construction and B's UI was the half-size periphery DLAA
-  upscaled bicubically. Parity pays the 0.25 ms back (net about 1.25 ms on
-  the pass); until then B prices a different feature, as "UI and failure
-  behavior" warned.
+- **UI parity, in the 2026-09-17 build:** the fovea branch ran neither the
+  UI resolve nor the deferred replay, so `ui` read 0.00 under the fovea
+  and B's UI was the periphery DLAA upscaled bicubically. Now the crop
+  path runs the legacy resolve (Sean's route) on the composite, from the
+  current raster alone: the UI history stays the periphery's (journal).
 - **Ruled out, do not re-run:** the eye-tracked crop, structural under
   upscaling and off the plan after Sean's own objections (performance.md,
   2026-09-05: eyes jump where heads stream, so every large look starts on
   the post-saccade resolve); gaze stays Stage 3 and optional. The pooled
   "NVIDIA ms/eye" figure mixes eyes and roles; do not compare. H2, above.
-- **Not yet built (Stage 1):** the UI resolve / deferred replay and the
-  reactive mask on the crop path (above); the crop-policy unit test (cropOf
-  is a lambda inside temporalInner and must be extracted first); history
-  committed only after a successful evaluation (foveaHaveHistory and
-  prHaveHistory are set unconditionally each frame); the crop branch's
-  unconditional ensureNative, diagnostic motion shader and per-frame stats
-  readback (the 0.2 ms CPU candidate), which Stage 0 timed, not removed.
-- **Next (no build; the FRONTIER install carries an rc.3-based build with
-  the price instrument, the eye mask ring and the FOV trim: do not
-  reinstall):** Sean sizes the circle with the ring, fix.eye_mask = lens
-  and eye_mask_trim raised live in the performance menu until the black
-  edge sits where DLSS may stop; that circle is temporal_aa_fovea =
-  2 x (51.8 - trim) deg with his Pimax trims on (journal, 2026-09-16, eye
-  mask). Then the fork. Black outside: the FOV trim already gives NVIDIA
-  that rectangle and shrinks the render too (ruled out: the masked circle
-  as a DLSS region), so this arc stops at Stage 4. Periphery visible: the
-  one Stage 1 build is a periphery-free crop (temporal_aa_periphery = off,
-  the raw render de-jittered and upscaled in the compose) plus the UI
-  route, worth 1.25 ms per pair on the pass at 80 deg and 0.7 at 90 by the
-  model against 0.05 and none with the 0.5 periphery; flown A/B/A, read
-  with `--expect-build <the installed hash>`.
+- **Stage 1 leftovers, not in the 2026-09-17 build:** the reactive mask on
+  the crop path; history committed only after a successful evaluation
+  (foveaHaveHistory and prHaveHistory are set unconditionally each frame);
+  the crop branch's unconditional ensureNative, diagnostic motion shader
+  and per-frame stats readback (the 0.2 ms CPU candidate).
+- **Decision (2026-09-17, Sean):** "20 for the top, 25 for the outer and 7
+  for inner. Inside that rectangle should be DLSS and outside of it should
+  be TAA." Taken as degrees off the headset's field, the FOV trim's
+  convention (his nasal FOV trim is 7, so DLSS reaches the nasal edge);
+  TAA = EDVR's own resolve, temporal_aa_periphery = sharp. BUILT and
+  merged with main (bb0eb7a, 7d12d9b, 188c10b, 6461eeb, merge c4c1490):
+  temporal_aa_fovea = edges with temporal_aa_fovea_vertical/outer/nasal
+  (plain degrees, live), the own resolve's interior skip (INACTIVE under
+  dlss upscale, so the flight prices the unskipped resolve, an upper
+  bound), UI parity, a region self-test in smoke. Forecast: NGX 2.42 ->
+  1.18 ms per pair, periphery about 0.4-0.7, compose 0.25: pass about
+  0.6, frame 0.3-0.4, a coin toss the flight decides. Product shape once
+  it works (Sean): the eye mask toggle and trim give way to a DLSS
+  rectangle with wide/narrow presets and one per-headset size value; gaze
+  later where the headset publishes it. fix.eye_mask keys stay until then.
+- **Next: the flight, FRONTIER, installed 2026-09-17 (the build of this
+  entry's commit, v0.17.0-rc.3-65; Sean authorised the install).** Set
+  temporal_aa = dlss first (the ini says fsr). Arms by editing the live
+  ini, 75 s each: A = temporal_aa_fovea 0; B = edges, _vertical 20, _outer
+  25, _nasal 7, temporal_aa_periphery sharp, _shape square; A. Read with
+  `--expect-build <hash>`; columns centre, periphery, compose, ui.
 
 ## Investigation (2026-09-14)
 
@@ -920,3 +920,166 @@ Then the fork: black outside means the FOV trim is the tool and this arc
 stops at Stage 4; periphery visible means the one Stage 1 build is
 temporal_aa_periphery = off (the raw render, de-jittered, bicubic) plus
 the UI route on the crop path, flown A/B/A at 2 (R0 - trim) degrees.
+
+### 2026-09-17: Sean's decision: the 20/25/7 rectangle, DLSS inside, TAA outside
+
+Sean, on the entry above: "Let's go with 20 for the top, 25 for the outer
+and 7 for inner. Inside that rectangle should be DLSS and out side of it
+should be TAA."
+
+**Reading the numbers.** Three edges named the way fix.fov_trim_vertical,
+_outer and _nasal are, so they are taken in that key's convention: degrees
+off the headset's field at each edge, top and bottom both for the vertical
+one. His nasal FOV trim is already 7, so "7 for inner" puts DLSS out to the
+nasal edge of the frame with no periphery strip on the nose side, the
+reading that makes the number a choice rather than a coincidence. Had he
+meant degrees off the rendered frame's edges, the same intent is 15/20/0
+under his 5/5/7 trims; the keys take either, only the numbers change.
+"TAA" is EDVR's own temporal resolve (temporal_aa = on), which the fovea
+path already offers as temporal_aa_periphery = sharp.
+
+**The region.** On the Crystal Super (outer 56.8, nasal 45.9, vertical
+51.7 degrees) the rectangle's edges sit at outer 31.8, nasal 38.9,
+vertical 31.7 degrees: 1.43 by 1.24 in tangent units against the field's
+2.56 by 2.53, 27% of the untrimmed field's area and 40% of the frame his
+5/5/7 trims leave (2.08 by 2.12). Against the circles flown, it reaches as
+far as a 64 degree disc up, down and out and as far as a 78 degree one
+toward the nose. At the Stage 0 output density (1548 px per unit tangent)
+it is about 2210 x 1910 output pixels per eye, 4.2 MP.
+
+**Why a TAA periphery can pay where the DLAA one could not.** DLAA is an
+NVIDIA feature priced by its rectangle and cannot skip the middle (the 80
+degree crop's 1.33 ms per pair, above). The own resolve is EDVR's compute
+pass: it can leave the interior to the compose, so its cost scales with
+the periphery's area, at render size (the compose upscales it bicubically
+under temporal_aa = dlss, as it does the steady one). Cost model per
+stereo pair on his trimmed frame at balanced (render 68% of 2576x2544 per
+eye, 4.4 MP; output 10.6 MP): NGX full frame 2.42 -> rectangle 1.18, a
+saving of 1.24; the own resolve over the outer 60% of the render, at the
+0.077 ms per MP the "TAA costs the same as DLSS" measurement implies (2.4
+ms per pair over 31 MP with the registration instrument compiled in),
+0.41; compose 0.25; the UI route 0.25 either way. Net about 0.6 ms per
+pair on the pass and 0.3-0.4 on the frame: under the 0.5 ms frame gate on
+paper, with the periphery's own cost the number nobody has measured (the
+lean resolve on the parity branch, if it halves it, puts the frame near
+0.6). Without the FOV trims the same rectangle nets about 1.2 on the pass.
+The flight decides; the model's error is the size of the answer.
+
+**Known quality risk.** The 2026-09-05 flights: the sharp periphery blurs
+while the head moves and re-sharpens when it stops, and against a fovea
+that does neither the boundary showed as a pulsing outline;
+temporal_aa_periphery_calm (0.4) eases the history toward the edge. With
+the boundary at 32-39 degrees instead of 20 it is further from where the
+eyes rest. Sean judges.
+
+**Design, building on this branch.**
+- temporal_aa_fovea = edges, with temporal_aa_fovea_vertical, _outer and
+  _nasal in plain degrees (0..45, live, not per-headset lists yet); the
+  region is the field trimmed by them, reduced per edge by whatever
+  fix.fov_trim already took, since the temporal pass sees only the trimmed
+  frustum and native_frame.cpp lends the requested trims. Width mode is
+  untouched and bit-identical. temporal_aa_fovea_shape and _edge apply
+  (square = the rectangle; round = the inscribed ellipse); _distance is
+  not applied in edges mode.
+- The region computation leaves the cropOf lambda for a pure function with
+  a desk self-test (edvrFoveaRegionSelftest, run by tools/smoke): the 40
+  degree width case unchanged, the 20/25/7 case at 31.8/38.9/31.7 degrees,
+  the eyes mirrored, the fallback to full-frame.
+- The own resolve, as the fovea's periphery, skips the interior where the
+  compose weight is 1 (a skip rectangle in its cbuffer: the crop shrunk by
+  the band, or the inner ellipse's inscribed rectangle), only once every
+  per-pixel state it writes there is shown to be never read or handed off
+  by the compose; timed under the price line's periphery role, so centre +
+  periphery + compose + ui is the whole fovea pass.
+- UI parity: the deferred UI route allowed under the fovea, the UI resolve
+  and the deferred replay run on the composed output (second and third
+  commits). Which route is Sean's, from the Stage 0 log: the deferred
+  route never engaged ("Deferred UI: totals captured=0" on every totals
+  line) and the legacy UI resolve did ("UI resolve: current-raster bounds
+  applied after DLSS", 19:52:05.707), so the 0.25 ms `ui` in arm A is the
+  resolve, and the fovea path runs it from the composite with the same
+  helper the full frame uses.
+- ui_deferred.cpp no longer stands the deferred route down when a fovea is
+  configured: the crop path runs the same capture and replay, so the route
+  is enabled whenever it is requested and has not failed.
+
+**Product direction (Sean, 2026-09-17, for after the fixed piece works).**
+"Ideally we replace the eye mask toggle and trim with a DLSS foveated
+square/rectangle, maybe have some presets like wide (rectangle) or narrow
+(square). And then a single value which allows the user to size the area
+(maintaining its aspect ratio). This setting should be tracked per headset
+as well. Additionally once we get the fixed piece working, I want to
+optionally enable eye tracking for headsets that support it." So the
+Stage 2 pilot's shape is: one preset key (off / wide / narrow) and one
+per-headset size value (runtime/system:value lists, the fov_trim parser),
+on the Performance page where the eye mask's row is now; the three edge
+keys of this build stay the underlying, advanced form. Open for Stage 2,
+Sean's call after the flight: the presets' aspect ratios (his 20/25/7
+rectangle is 1.15:1 and off-centre, the nasal edge 7 degrees further out
+than the outer, and the nose side is the cheap side to cover, so "wide"
+may mean "to the nasal edge" rather than a symmetric ratio); whether the
+size is degrees of vertical half-angle or a fraction of the field; and
+what becomes of fix.eye_mask / eye_mask_trim (a different mechanism, a
+raster-only saving on lenses without a hidden-area mesh: their menu row
+goes, whether the code stays is a separate question to ask before
+removing anything). Stage 3, optional, per headset: the same rectangle
+following gaze where the runtime publishes it, with the post-saccade
+resolve caveat of 2026-09-05 (the crop's history restarts where it lands)
+and a TAA periphery under it, so what the eyes land on is at least
+anti-aliased at full resolution while NVIDIA's history rebuilds.
+
+**Flight brief (FRONTIER; ask Sean before installing, other sessions'
+builds live there).** Arms by editing the live ini, never the menu (a menu
+open or close restarts the benchmark scope), each held 75 s: A =
+temporal_aa_fovea 0; B = temporal_aa_fovea edges, _vertical 20, _outer 25,
+_nasal 7, temporal_aa_periphery sharp, temporal_aa_fovea_shape square; A
+again. Evidence: the version line names the build (--expect-build <hash>);
+the creation log line names the region per eye and the trims it was
+reduced by; the "temporal aa price" line shows centre near 0.6 per eye,
+periphery (the own resolve) with its first measured number, compose, ui
+above 0 (parity), drops near zero; the native benchmark gpu p50/p95 per
+arm. Gates as before: 0.5 ms and 5% on the frame, no p95 rise over 2%, and
+Sean's verdict on the seam and the periphery. Then the fork: pays and
+looks right -> Stage 2 pilot (defaults, per-headset entries, the Stage 1
+leftovers); pays and the periphery pulses -> the steady periphery at a
+small scale as the A/B; does not pay -> ruled out, Stage 4.
+
+**Built, merged, installed (2026-09-17, evening).** Four commits on the
+branch, reviewed diff by diff: bb0eb7a (edges mode, the region function
+and its self-test, the interior skip, the periphery timing), 7d12d9b (the
+deferred route no longer stands down; capture and replay on the crop
+path), 188c10b (the legacy UI resolve on the composite, one helper shared
+with the trained path), 6461eeb (that resolve runs from the current raster
+alone on the crop path: the UI history texture has one writer per frame
+by design, the own resolve's periphery pass, so a second writer there
+would have invalidated the periphery's history each frame). Then main
+merged in as c4c1490: the lean own resolve (the periphery now runs the
+lean shader unless advanced.temporal_aa_diagnostics = 1, so the 0.41 ms
+per pair forecast, taken from the instrumented shader, is the ceiling),
+the fsr engine (the fovea keys are NVIDIA-only and fsr runs the full
+frame; the warm-up and the treat both say so), the corona-smear hold
+(carried into the shared UI resolve helper, so both routes get it) and
+the supersample retirement. Two things the flight should be read with:
+- The interior skip is INACTIVE in Sean's configuration. The compose
+  hands its colour back into the own resolve's history only at 1:1, so
+  under temporal_aa = dlss (an upscale) a skipped interior's history would
+  go stale with nothing to refresh it; and with the movers on, the
+  resolve's depth carry is read back next frame over the whole frame.
+  Either alone disables the skip. The ENGAGED (edges) line prints "the
+  own resolve does not skip the interior (NVIDIA is upscaling)", and the
+  periphery column prices the resolve over the whole render frame (about
+  0.68 ms per pair at the instrumented shader's rate, not 0.41). A
+  render-size history hand-off under upscale, and the carry limited to
+  the periphery, are the next levers if the frame gate is missed narrowly.
+- The UI resolve on the crop path reads no UI history (the treatment
+  string on the ENGAGED line says so). The full-frame route blends the
+  current raster with the previous frame's UI history; the crop path's
+  UI text is therefore resolved from one raster, which is what the
+  Stage 0 periphery-only picture also was for text. If B's HUD text
+  reads worse than A's, this gap is the first suspect, before the crop.
+Build v0.17.0-rc.3-64-gc4c1490 (green, smoke PASSED including the region
+self-test), rebuilt clean-stamped on this entry's commit and installed
+into FRONTIER with tools/install_edvr.py (dry run, install, verify);
+Frontier's ini still says temporal_aa = fsr from the FSR session, so the
+flight starts by setting dlss. The version line Sean should expect is
+v0.17.0-rc.3-65-g<this commit>, read with `--expect-build <hash>`.
