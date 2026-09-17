@@ -70,6 +70,7 @@
 #include "ui_deferred.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
+#include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "intro_panel.h"
 #include "intro_skip.h"
 #include "intro_upscale.h"
@@ -2882,7 +2883,12 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     }
     meshMotionBeforeMap(res);
     if(type!=D3D11_MAP_READ)uiDeferredResourceWrite(self,res);
+    // Timed, not touched: the wait inside the runtime's Map is the game's
+    // stall on the GPU, and the native timing line reports it (map_wait.h).
+    LARGE_INTEGER mapT0{}; QueryPerformanceCounter(&mapT0);
     const HRESULT hr = s->realMap(self, res, sub, type, flags, mapped);
+    LARGE_INTEGER mapT1{}; QueryPerformanceCounter(&mapT1);
+    edvr::mapWaitNote(type, mapT1.QuadPart > mapT0.QuadPart ? static_cast<uint64_t>(mapT1.QuadPart - mapT0.QuadPart) : 0u);
     // The census CB watch's half of the tee: while a census runs, it needs
     // the mapped pointer of any buffer it is watching. One bool call when no
     // census runs, two pointer compares inside when one does.

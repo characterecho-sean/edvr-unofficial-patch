@@ -6175,8 +6175,13 @@ void temporalPassConfigure(Config& cfg) {
         g_dlaaFailNoted = false;
         g_fsrFailNoted = false;
     }
-    celestialMotionConfigure(g_wanted);
-    meshMotionConfigure(g_wanted);
+    // The two per-draw hooks inside the game's own passes can be stood down
+    // on their own while the mode stays on, so one flight can price them
+    // against the frame (the terrain frame-time arc, 2026-09-17). Off leaves
+    // the camera's motion on their pixels, which ghosts on a moving body,
+    // which is the point: a lever, not a setting to fly with.
+    celestialMotionConfigure(g_wanted && cfg.getBool("advanced.terrain_motion", true));
+    meshMotionConfigure(g_wanted && cfg.getBool("advanced.mesh_motion", true));
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);

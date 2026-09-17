@@ -420,6 +420,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
     "src\d3d11\native_timing.cpp" ^
+    "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
@@ -839,7 +840,7 @@ if not exist "%OBJ%\native_timing" mkdir "%OBJ%\native_timing"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_timing_test.exe" ^
-    "tools\native_timing_test\native_timing_test.cpp" "src\d3d11\native_timing.cpp" ^
+    "tools\native_timing_test\native_timing_test.cpp" "src\d3d11\native_timing.cpp" "src\d3d11\map_wait.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native timing contract test build failed & exit /b 1 )
@@ -852,7 +853,7 @@ if errorlevel 1 ( echo [edvr] ERROR: native perf history test build failed & exi
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_timing_gpu_test.exe" ^
-    "tools\native_timing_test\native_timing_gpu_test.cpp" "src\d3d11\native_timing.cpp" ^
+    "tools\native_timing_test\native_timing_gpu_test.cpp" "src\d3d11\native_timing.cpp" "src\d3d11\map_wait.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
