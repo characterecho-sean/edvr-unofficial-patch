@@ -148,6 +148,14 @@ float uiDepthReactive();
 // like uiDepthReactive() when the pass is off or stood down.
 float uiDepthGhostTolerance();
 
+// The corona-smear hold's brightness limit (advanced.corona_smear_level),
+// normalised to [0,1] (0 = off / fix.corona_smear = off). The post-DLSS UI
+// resolve holds faint, flat, non-UI pixels within one step of the raw 2x2
+// range up to this brightness, the way uiDepthGhostTolerance() already
+// holds UI pixels near the frame's own colours (issue 36). Zero like
+// uiDepthGhostTolerance() when the pass is off or stood down.
+float uiDepthCoronaHold();
+
 // Once per frame: the masks cleared, the engage line, the totals every 20 s.
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx);
 

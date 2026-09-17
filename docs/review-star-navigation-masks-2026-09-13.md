@@ -2,12 +2,12 @@
 
 ## Status
 
-Updated 2026-09-16 (evening) after flight 173929 (Pimax Crystal Super, DLSS
+Updated 2026-09-16 (night) after flight 173929 (Pimax Crystal Super, DLSS
 quality preset K, `advanced.ui_ghost_tolerance` = 12 throughout; four INSERT
 dumps 174233/174253/174317/174334, each with a target label over the M
-dwarf's faint outer glow). Sean, while I read them: the smear only shows
-when moving relatively fast around the star, and the orbit lines carry it
-too.
+dwarf's faint outer glow) and the build of the hold that follows from it.
+Sean: the smear only shows when moving relatively fast around the star, for
+a few seconds per pass, and the orbit lines carry it too.
 
 Effect 1 (EDVR's resolve footprint) is gone at 12: final-dlss is +0.00 in
 every ring around all four labels; the resolve's only change is the digits'
@@ -26,29 +26,33 @@ sees, longer the faster he moves, and invisible on a saturated white star.
 Tables in the evening entry (`halo.py`, `noise.py`, `drift.py` in that
 session's scratchpad). Effect 2 (the game's panel body) stands as recorded.
 
+Built for the next flight (night entry), on main, default off, live:
+`fix.corona_smear` ("Corona smear fix", Performance page) holds faint, flat,
+non-UI output pixels within a step of their raw 2x2 range in the post-DLSS
+resolve, the rule HUD text already follows; `advanced.corona_smear_level`
+(default 64/255) is the brightness limit, with fades toward it and toward
+texture. A once-only "corona smear:" log note proves it ran; rig cases in
+`tools/ui_depth_test`. NOT FLOWN.
+
 Ruled out (details in the journal): the game drawing a dark backing at the
 label (raw at or above the field around every label); EDVR's resolve at
 tolerance 12 (final-dlss +0.00 everywhere); the HUD's motion vectors or
 depth, and so the deferred UI route as the fix (the cockpit strut with
-correct depth and motion carries the same deficit); EDVR's bias mask (zero
-on every pixel); an EDVR history reset behind the lift's collapse (dlHistory
-1, jumped 0 on every stored frame); the format-9 change ending the deferred
-route's latch-off; a higher `stale` threshold alone; a tolerance relative to
-the raw level; the panel body as Sean's smear.
+correct depth and motion carries the same deficit; the route did not engage
+in the dumps anyway); EDVR's bias mask (zero, and ignored by presets
+J/K/L/M); an EDVR history reset behind the lift's collapse (flags 2,
+dlHistory 1 on every stored frame); EDVR processing of the colour (a plain
+copy in, NGX's output out); the format-9 change ending the deferred
+route's latch-off; a higher `stale` threshold alone; a tolerance relative
+to the raw level; the panel body as Sean's smear.
 
-Next, in this order:
-1. No build: on the M dwarf, moving fast with a label over the glow, A/B
-   `temporal_aa_model` k -> j, l, m from the Performance page (live, rebuilds
-   NVIDIA history). If one preset does not lift the glow, that is the fix.
-2. Build, behind a live knob with a log counter of the pixels covered: hold
-   faint flat non-UI output pixels within a small tolerance of the raw 2x2
-   range in the resolve, the way UI pixels already are, so the field cannot
-   drift away from the fresh zones. One flight A/Bs the knob with a dump at
-   each value; `halo.py`'s field lift and text rings judge it. The
-   classifier must take only flat faint pixels, not dark textured content
-   (planet night sides), or DLSS's anti-aliasing there is lost. The NGX
-   bias-current-colour mask is not a lever: only preset F honours it
-   (dlaa.cpp's comment), and the transformer presets ignore it.
+Next flight, the dumps as the judge (INSERT mid-pass, moving fast, a label
+over the M dwarf's glow): preset K fix off, preset K fix on, preset J fix
+off, then L and M if time allows; one dump each. `halo.py`'s field lift
+and text rings per dump; a preset without the lift, or the hold levelling
+the rings with the field, is the answer. The log must carry the "corona
+smear:" note for the knob-on pass and `--expect-build <installed hash>`
+must name the build.
 
 The deferred UI route (src/d3d11/ui_deferred.cpp) is untouched: refused
 ten times, never a label in the headset, and now measured not to be the
@@ -3281,3 +3285,60 @@ on the levers:
   shows the same deficit.
 ruled out: the bias-current-colour mask as a lever under presets J/K/L/M,
 because NVIDIA ignores it there (only preset F honours it).
+
+### The hold: fix.corona_smear, built for the A/B flight, 2026-09-16 night
+
+Sean's go, after the preset A/B was judged impractical by eye (the smear
+shows for a few seconds per fast pass): the same flight can carry knob-off
+and knob-on dumps at preset K as well as one dump per alternative preset,
+with the dumps as the judge.
+
+What was built (all on main, default off, live):
+- `fix.corona_smear = off|on` (Performance page, "Corona smear fix"): with
+  `on`, the post-DLSS UI resolve (`src/d3d11/ui_resolve.h`) holds every
+  non-UI output pixel whose 3x3 raw neighbourhood is faint and flat within
+  one 8-bit step of its raw 2x2 range, the rule the UI pixels already
+  follow with the ghost tolerance. The weight is the product of two
+  fades: faintness, 1 at three quarters of the brightness limit and 0 at
+  the limit (the 3x3 luma maximum), and flatness, 1 at a 3x3 luma spread
+  of 8/255 and 0 at 16/255. Carried in the same b1 constant buffer as the
+  ghost tolerance (`resolve.y`, 0 = off; an unbound b1 still reads zero,
+  so the rigs and the old shader are unchanged).
+- `advanced.corona_smear_level = 64` (8-bit steps, 1..255): the brightness
+  limit; 64 covers the measured glow (raw 2..22 luma around the labels)
+  with margin.
+- Plumbing mirrors the ghost tolerance: `g_coronaSmear` and
+  `g_coronaSmearLevel` in ui_depth.cpp, `uiDepthCoronaHold()` feeding
+  `resolve.y` at the dispatch in temporal_pass.cpp; a once-only log note,
+  "corona smear: the UI resolve holds faint flat glow within a step of the
+  frame's own level, up to N/255", printed at the first dispatch with the
+  hold on, so a log without it means the hold never ran.
+- Rig cases in `tools/ui_depth_test`: a flat faint region lifted by 3 steps
+  is pulled to within a step of the raw (hold on) and left alone (hold
+  off); a flat bright region is untouched; a textured faint region is
+  untouched; a UI pixel keeps the ghost-tolerance rule. The rig's b1 bind
+  guard now binds when either the tolerance or the hold is non-zero (it
+  bound on the tolerance alone, so a hold-only call would have read zero).
+
+Why a hold and not NVIDIA's own knob: the bias-current-colour mask is
+honoured only by preset F (dlaa.cpp's comment; struck above), and the
+accumulation gains nothing over a flat field (the residual noise after
+DLSS is no lower than the raw's), so holding those pixels costs nothing
+visible while removing the lift that makes the fresh zones read dark.
+Risks the flight watches for: a seam where held glow meets brighter or
+textured glow (the fades are meant to prevent it; `corona_smear_level`
+moves the boundary), and any ripple around stars (a star's own texel is
+texture and never held; the hold begins two texels out).
+
+Flight brief (Pimax or Quest 3, the M dwarf, a label over the outer glow,
+each pass fast enough to smear, INSERT pressed mid-pass so the stored 15
+frames are in motion):
+1. preset K, Corona smear fix off: one pass, one dump;
+2. preset K, Corona smear fix on (menu, live): one pass, one dump;
+3. preset J, fix off: one pass, one dump; L and M if time allows.
+Reading: `halo.py`'s field lift and text rings per dump; with the fix on,
+`stage_diff.py`'s final-dlss over the glow field must show the hold
+(negative, the lift's size) and the rings must sit level with the field
+in `final`. The log must carry the "corona smear:" note once for the
+knob-on pass, and `python tools\edvr_log.py --target steam --expect-build
+<the installed hash>` must name the build.

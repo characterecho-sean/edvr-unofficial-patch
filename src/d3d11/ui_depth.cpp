@@ -174,6 +174,8 @@ Microsoft::WRL::ComPtr<ID3D11Buffer> g_holoDump;
 unsigned g_holoDumpCount=0;
 float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
 float    g_ghostTolerance = 12.0f; // advanced.ui_ghost_tolerance: the UI-resolve clamp's bound tolerance, 8-bit colour steps (0..64)
+bool     g_coronaSmear = false;      // fix.corona_smear
+float    g_coronaSmearLevel = 64.0f; // advanced.corona_smear_level: the corona-smear hold's brightness limit, 8-bit colour steps (1..255)
 bool     g_scaleNoted = false;
 constexpr uint32_t kMaxViewports = 16;
 D3D11_VIEWPORT g_savedVps[kMaxViewports];
@@ -1538,6 +1540,14 @@ void uiDepthConfigure(Config& cfg) {
         if (t > 64.0f) t = 64.0f;
         g_ghostTolerance = t;
     }
+    g_coronaSmear = cfg.getBool("fix.corona_smear", false);
+    {
+        float lvl = cfg.getFloat("advanced.corona_smear_level", 64.0f);
+        if (!std::isfinite(lvl)) lvl = 64.0f;
+        if (lvl < 1.0f) lvl = 1.0f;
+        if (lvl > 255.0f) lvl = 255.0f;
+        g_coronaSmearLevel = lvl;
+    }
     const std::string eyes = cfg.getString("advanced.ui_depth_eyes", "as_is");
     const bool swapped = eyes == "swapped";
     if (swapped != g_eyesSwapped) {
@@ -1607,6 +1617,8 @@ bool uiDepthWantsDraws() { return g_on && !g_stoodDown; }
 float uiDepthReactive() { return g_on && !g_stoodDown ? g_reactive : 0.0f; }
 
 float uiDepthGhostTolerance() { return g_on && !g_stoodDown ? g_ghostTolerance : 0.0f; }
+
+float uiDepthCoronaHold() { return g_on && !g_stoodDown && g_coronaSmear ? g_coronaSmearLevel / 255.0f : 0.0f; }
 
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     if (!g_on || g_stoodDown) return;
