@@ -35,12 +35,19 @@ read 2026-09-16) unless marked believed.
   build.bat block, the WARP rig `tools\fsr3_engine_test` (31 checks; the
   jitter and motion signs settled at the engine's defaults, journal). No
   install to any game directory without Sean's approval.
-- **Next:** the adversarial review is done and its findings are fixed
-  (journal); the branch waits on Sean's go for an install, then flight 1
-  (section 4).
+- **Next:** flight 1 (section 4). The branch at e70a44e was built green
+  and INSTALLED to the Frontier directory on 2026-09-17 05:58 on Sean's
+  go (`install_edvr.py --verify-only` clean), NOT FLOWN. Read its log with
+  `--expect-build e70a44e` (later doc commits move HEAD past the installed
+  build).
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
-  history, which is what an AMD user gets today. CLOSED by Track A: the
+  history, which is what an AMD user gets today; and a cosmetic nit seen
+  in the build's export listing: the port's static libraries carry
+  `dllexport` attributes, so EDVR's d3d11.dll now exports nineteen `ffx*`
+  symbols (inert: nothing imports them; fix in the fetch tool by building
+  the port without its export macro, with `--verify` checking for it).
+  CLOSED by Track A: the
   build recipe (CMake, `/MT` forced, the upscaler-only targets) and the
   d3d11-import stop of 3.5 (neither library imports d3d11, dxgi or
   d3dcompiler by name). DECIDED (D6): the port's prebuilt shader compiler
