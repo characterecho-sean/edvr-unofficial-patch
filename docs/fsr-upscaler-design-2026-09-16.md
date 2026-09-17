@@ -331,13 +331,20 @@ gfx log.
 ## 4. Flights, in order
 
 Read each with `python tools\edvr_log.py --target <t> --expect-build <sha>
---grep "temporal aa"`.
+--grep "fsr3|temporal aa"`.
 
 - **Flight 1: Sean, RTX 5090, Pimax at the eye-mask flights' resolution,
-  `temporal_aa = fsr`, HMD Quality 1.0, reactive off.** Must show
-  `temporal aa: fsr 3.1.2 (d3d11 port <sha>) contexts made for both eyes,
-  WxH -> WxH, flags <list>, +N MB, create X ms`; the price line naming
-  `fsr`; no "The pass's own history runs instead"; no FFX message lines.
+  `temporal_aa = fsr`, HMD Quality 1.0, reactive off.** Must show, in this
+  order (the engine's own lines as built): `fsr3: first asked for on
+  <adapter>, AMD's port version fsr 3.1.2.`; `fsr3: the DX11 backend
+  initialised in N ms on device ...`; `fsr3: the context is created for
+  eye 0 at WxH -> WxH; VRAM ...; the history starts here (made in N ms).`
+  and the same for eye 1; `temporal aa: fsr 3.1.2 engaged -- AMD's
+  history takes the WxH frame ...`; the price line naming `fsr 3.1.2`.
+  Must NOT show: `fsr3: refused`, `fsr3: eye N is stood down`, "The
+  pass's own history runs instead", or any `fsr3: <message>` line carrying
+  the port's own text (its debug checking is off unless
+  `advanced.temporal_aa_diagnostics` is on).
   Judged against `on` and `dlss` in the same session on the known cases:
   cockpit text swim, the distant-station shimmer, the rolling ship's leading
   edge (the `temporal_aa_light` ghost). Answers: does it run, what it costs
