@@ -2,19 +2,19 @@
 
 ## Status
 
-- **State (2026-09-17 13:05: the head lead INSTALLED in FRONTIER as
-  v0.17.0-rc.3-93-g17fc607 = main, NOT FLOWN; the performance gate NOT
-  MET on the frame):** three Stage 1 flights on the earlier builds,
-  all in the journal. 09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms
-  per pair. 09:38 (1947c90, performance): a live sweep 20/25/7 -> 5/5;
-  ~1.0 ms per pair at 43%; both trims at 5 = a 99.9% crop, stood down
-  silently by the 90% ceiling (a log note since 9eab046). 10:55 (9eab046,
-  quality 2646x2206 in, frame 8.9 ms): both levers confirmed (prep 0.57
-  vs 0.53 full, the periphery 0.22-0.36 with the skip); pass per pair vs
-  full-frame 3.87: 81% 3.93, 67% 3.63, 56% 3.32, 79% 3.91; frame p50 8.9
-  -> 8.57 at 56%; the game at 90 fps flat with the CPU waiting 7 ms a
-  frame, so nothing could show as frame rate. Sean's ini now: edges,
-  vertical 5, outer 20, nasal 7 (79%), edge 0, periphery sharp.
+- **State (2026-09-17 14:00: the head lead FLOWN 13:15 in Frontier as
+  v0.17.0-rc.3-93-g17fc607; it engages and slides as designed, but the
+  crop's picture jitters 1 px at every slide -- scaleTo's even-floor of
+  the output base, measured in eye run 131504 -- quantum fix IN PROGRESS;
+  the performance gate NOT MET on the frame):** four flights, journal.
+  09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms per pair. 09:38
+  (1947c90, performance): a live sweep 20/25/7 -> 5/5, ~1.0 ms per pair
+  at 43%; 5/5 = a 99.9% crop, stood down silently by the 90% ceiling (a
+  log note since 9eab046). 10:55 (9eab046, quality, frame 8.9 ms): both
+  levers confirmed (prep 0.57 vs 0.53 full, periphery 0.22-0.36 with the
+  skip); pass per pair vs full-frame 3.87: 81% 3.93, 67% 3.63, 56% 3.32,
+  79% 3.91; frame p50 8.9 -> 8.57 at 56%; the game at 90 fps flat, CPU
+  waiting 7 ms a frame, so nothing could show as frame rate.
 - **Cost model, holding across all three flights:** NVIDIA's price
   follows the rectangle's area (10:55: 2.96 at 100%, 2.53 at 81%, 2.18
   at 67%, 1.7 at 56%; about 0.2 + 2.75 x share); the fovea path's fixed
@@ -51,15 +51,15 @@
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle, wide/narrow presets, one per-headset size;
   gaze later where the headset publishes it; fix.eye_mask keys stay.
-- **Next: fly the head lead** (temporal_aa_fovea_lead = 6 is in the
-  Frontier ini; design, evidence and failure signatures in the journal's
-  two head-lead entries): a rectangle small enough to see the seam
-  (15/20/7 or 20/25/7), head turns at several speeds and a ship turn,
-  then lead 0 flipped live for the comparison; Sean's picture verdict on
-  the leading edge; the log's lead line ("motion vectors offset on N
-  frames", N > 0 while turning) and no feature re-creation during turns.
-  Performance stands as measured: ~1.1 ms per pair at 43%, visible only
-  GPU-bound. Owed: retire temporal_aa_fovea_vertical; Stage 2 (ship).
+- **Next: the quantum build** (spec in the 13:15 journal entry: the base
+  slides 26 render = 40 output px at a time, placement error constant,
+  bases and placeErr in the eye trace), reviewed, installed to Frontier;
+  then the same hangar yaw with lead 6 against 0 flipped live: the
+  shimmer gone, the band's 1 deg steps judged in the periphery, a dump's
+  placeErrX/Y columns constant; then the leading-edge verdict the lead
+  was built for. Performance stands as measured: ~1.1 ms per pair at
+  43%, visible only GPU-bound. Owed: retire temporal_aa_fovea_vertical;
+  Stage 2 (ship).
 
 ## Investigation (2026-09-14)
 
@@ -1664,3 +1664,56 @@ history's raw refresh, known). In the log: the "head lead is on" note,
 ENGAGED with "head lead 6 frames", the per-window lead line with peak
 degrees and "motion vectors offset on N frames" (N > 0 while turning),
 no "feature is created" lines during turns.
+
+### 2026-09-17 13:15: first lead flight -- "the centre shimmers" -- diagnosed offline
+
+**The flight.** Log edvr_gfx_20260917_131324 (v0.17.0-rc.3-93-g17fc607,
+the right build). Main-menu hangar, head yawing. Fovea edges 5/5/20/7 then
+10/10/20/7 and 10/10/10/7 (79 -> 67 -> 77%), periphery NVIDIA's on a 25%
+copy, lead 6. The lead engaged as built: peaks 5.9/6.9 deg (108/126 px),
+"motion vectors offset on 96-252 frames" per window, no feature
+re-creation during turns, one eye's rectangle at its nasal edge so each
+yaw direction moves one eye and holds the other ("held at the frame's
+edge" in the hundreds). Sean: "the center of my field of view shimmers
+noticeably"; eye run 131504 taken while yawing (16 treated crops of the
+centre at 2155x2154, 16 raw, the motion trace).
+
+**What the run shows** (tools/eye_run_shimmer.py, eye_run_fit.py and two
+scratch scripts): the treated centre is steady by that tool's scale
+(2-5% change per frame, 3-6% std) EXCEPT two frames, 9->10 and 14->15,
+where the whole picture jumped VERTICALLY by 0.91 and 1.07 px and stayed
+there in between (hub residual after alignment -0.91 then +1.07; the
+region under the hull p99 27 levels against 7 on other pairs; horizontal
+edges only). The X motion against the head's own (from the trace's head
+rows) shows +-1 px hiccups on other frames. The head moved ~27 output px
+over the run, the raw crops move with it (17 render px), nothing stalled.
+
+**Ruled out: NGX mis-registration, because** the slide's sign matches
+upstream's derivation exactly ("previousLocal = currentLocal +
+sceneMotion + currentOrigin - previousOrigin", crop_motion.hpp:13-14), and
+a history error decays over frames where this jump held for five and
+reversed cleanly. **Ruled out: the game or the tracker stalling, because**
+the raw run advances 17 render px like the treated one.
+
+**Found: the output base's rounding.** `scaleTo(v) = (v * to / from) &
+~1` -- floor, then even. A 2 px render step moves the crop's content
+3.078 output px (4072/2646) but the output base (NGX's output subrect,
+the compose's fc[0..3]) by 2 or 4, so the composed crop lands 0.92 or
+1.08 px off its previous place at every step, alternating: for fcx 544,
+542, 540, 538 the error is -1.18, -0.10, -1.02, -1.94. The Y flip 176 <->
+178/174 predicts 1.08 / 0.92 px -- the measured 1.07 and 0.91. Before the
+lead the base never moved, so the constant error was invisible (a 1 px
+offset against a blurred periphery). With it, every base move jitters the
+whole rectangle's picture by a pixel, at up to 90 Hz during a turn, in
+the fovea only: "the centre shimmers".
+
+**Fix (spec in the journal's next entry when built): slide only by a
+commensurate quantum.** The smallest even render step whose output step
+is an even whole number within 0.1 px: 26 render px = 40 output px here
+(about 1 deg; 2/2 at 1:1, 4/6 at NGX's own 1.5, 2/4 at 2.0), the output
+base = scaleTo(unshifted) + k x 40, so the placement error is constant to
+0.05 px over the lead's range; k rounded with a 0.2-quantum hysteresis
+and clamped in BOTH spaces so the extents never change. The eye trace
+gains the bases and the placement error per frame so the next run proves
+it constant. The cost: the band steps in 1 deg jumps in the periphery
+instead of gliding; the flight judges that.
