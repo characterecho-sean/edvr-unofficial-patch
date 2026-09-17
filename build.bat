@@ -100,6 +100,20 @@ if not exist "%BUILD%" mkdir "%BUILD%"
 if not exist "%GEN%" mkdir "%GEN%"
 if not exist "%OBJ%" mkdir "%OBJ%"
 
+REM A rig (or a child it stages) that ever creates its own per-instance
+REM directory straight under %BUILD% -- own copy of d3d11.dll, own edvr.ini --
+REM outlives the build that made it: nothing else ever deletes it, so a rig
+REM removed from this file after making one leaves it forever. Found on
+REM 2026-09-17 as 204 such directories (three families, all from rigs long
+REM gone -- tools\vr_census_bridge_test, tools\openvr_export_census_test,
+REM tools\openvr_smoke -- removed in 1a54e9e with the legacy OpenVR proxy
+REM they tested), each holding its own build\d3d11.dll copy, and each of
+REM those copies a separate Defender quarantine entry once flagged. Swept by
+REM shape alone (tools\run_jobs.py's stale_exe_dirs), not by rig label, so
+REM debris from a rig deleted since is still found; run first, before
+REM anything below can fail and skip it.
+python tools\run_jobs.py --sweep-exe-dir "%BUILD%" || exit /b 1
+
 REM Dependency cache survives --clean. Never discover a loader in SteamVR.
 python tools\fetch_openxr_loader.py --verify || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\openxr_loader.dll" "%BUILD%\openxr_loader.dll" >nul || exit /b 1
