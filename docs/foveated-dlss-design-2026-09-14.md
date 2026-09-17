@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State (2026-09-17 midday: the lever build + the stand-down note
-  INSTALLED in FRONTIER, NOT FLOWN; gate NOT MET yet):** two Stage 1
+- **State (2026-09-17 midday: lever build + stand-down note INSTALLED
+  in FRONTIER as v0.17.0-rc.3-76-g9eab046, NOT FLOWN; gate NOT MET):** two Stage 1
   flights on the previous build 1947c90, both in the journal. 09:15, DLSS
   quality (3461x2884 in): 20/25/7 engaged on both eyes (43%), parity
   holds, zero drops; pass per pair 4.07 -> 3.71 (0.36 ms); frame p50
