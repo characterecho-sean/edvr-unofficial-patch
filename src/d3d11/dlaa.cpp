@@ -14,6 +14,7 @@
 #include "../common/log.h"
 #include "perf_monitor.h"   // the feature's creation is an event with a duration
 #include "gpu_timing.h"
+#include "gpu_adapter_name.h"  // adapterName -- shared with fsr3_engine.cpp
 
 #ifdef EDVR_HAVE_NGX
 // NVIDIA's SDK, as shipped: nvsdk_ngx.h declares the D3D11 entry points,
@@ -82,38 +83,12 @@ NVSDK_NGX_Parameter* g_caps = nullptr;
 bool                 g_optimalFailNoted = false;
 
 // Stage 0 price report (docs/foveated-dlss-design-2026-09-14.md): the
-// environment stamp's one new fact. Read once, at the first ask, and kept
-// as a static return so a later call (there is no reason to ask the
-// adapter twice in a session) is free. Driver version and the DLSS
-// runtime's own version/hash are not read here; the OpenXR startup lines
-// already name the runtime and headset, so those are not repeated either.
-const char* adapterName(ID3D11Device* dev) {
-    static char name[128] = "unknown (no device)";
-    static bool tried = false;
-    if (tried || !dev) return name;
-    tried = true;
-    IDXGIDevice* dxgiDev = nullptr;
-    if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev))) &&
-        dxgiDev) {
-        IDXGIAdapter* adapter = nullptr;
-        if (SUCCEEDED(dxgiDev->GetAdapter(&adapter)) && adapter) {
-            DXGI_ADAPTER_DESC desc{};
-            if (SUCCEEDED(adapter->GetDesc(&desc))) {
-                WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof(name), nullptr,
-                                    nullptr);
-            } else {
-                snprintf(name, sizeof(name), "unknown (adapter desc refused)");
-            }
-            adapter->Release();
-        } else {
-            snprintf(name, sizeof(name), "unknown (no adapter)");
-        }
-        dxgiDev->Release();
-    } else {
-        snprintf(name, sizeof(name), "unknown (device is not a DXGI device)");
-    }
-    return name;
-}
+// environment stamp's one new fact, off adapterName (gpu_adapter_name.h,
+// shared with fsr3_engine.cpp -- there is no reason to ask the adapter
+// twice in a session, whichever engine asks first). Driver version and the
+// DLSS runtime's own version/hash are not read here; the OpenXR startup
+// lines already name the runtime and headset, so those are not repeated
+// either.
 
 struct EyeFeature {
     NVSDK_NGX_Handle* handle = nullptr;

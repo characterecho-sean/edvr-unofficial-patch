@@ -104,6 +104,7 @@ enum PerfEvent : uint32_t {
     kEvBinds    = 1u << 7,   // Elite's bindings were re-read
     kEvNgx      = 1u << 8,   // NVIDIA's DLSS feature was (re)created
     kEvMenu     = 1u << 9,   // the menu opened or closed
+    kEvFsr      = 1u << 10,  // AMD's FSR context was (re)created
 };
 // Note an event in the frame in progress; `ms` is the event's own duration
 // where one is known (a compile, a reload), 0 otherwise. Any thread.

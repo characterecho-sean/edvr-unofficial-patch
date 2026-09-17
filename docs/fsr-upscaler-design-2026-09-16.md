@@ -476,3 +476,78 @@ class of upscaler): that is route 2's go/no-go.
   an open menu. Merge with main (2c7c21e): main's lean variant (651ddb4)
   and the engine field met in `temporal_pass.cpp`'s Slot, WindowKey and
   treatmentName; both kept; green.
+- 2026-09-16 night, Track C (uncommitted while its rig is finished): the
+  engine body under `EDVR_HAVE_FSR3` in `src\d3d11\fsr3_engine.cpp`, the
+  build.bat block (after the NGX block; `EDVR_FFX_DX11=none` builds without
+  the port on purpose; both builds green), `fetch_ffx_dx11.py --self-test`
+  in the python gate, the `kEvFsr` perf event, the perf tile and the panel
+  reading `fsr3Totals` under `fsr`, and the WARP rig
+  `tools\fsr3_engine_test`. Settled facts:
+  - **Two defects in the port, both handled.** (a) `RegisterResourceDX11`
+    calls `CreateShaderResourceView` on every registered texture, the
+    write-only output included, with no bind-flag check; (b) its `TIF`
+    helper answers any failed D3D11 call with a bare `throw 1`, an untyped
+    C++ exception escaping an otherwise all-`FfxErrorCode` C API. Together
+    they crashed the rig (`STATUS_STACK_BUFFER_OVERRUN` from the uncaught
+    throw) on a UAV-only output. The pass's own `dlOut` already carries the
+    SRV bind flag, so the field never saw this; the engine now wraps create
+    and dispatch in try/catch and turns a throw into its normal false-plus-
+    reason answer. A dispatch that throws mid-way may leave compute-stage
+    bindings on the context; known, not handled (the pass restores its own
+    state around the seam).
+  - **Feature level.** The port's luma-pyramid shader declares 64 compute
+    UAV slots, a D3D11.1 feature: a device negotiated at 11_0 fails context
+    creation with `FFX_ERROR_BACKEND_API_ERROR` (seen on WARP when the rig
+    passed no feature-level array). The rig now asks for 11_1. The game's
+    own device is feature level 12_0 (`featureLevel=0xC000` in the gfx log
+    of 2026-09-16 20:26), so the field is unaffected; `fsr3Available` gates
+    on 11_1 with a reason for older devices.
+  - **Near/far under DEPTH_INVERTED.** The core's
+    `setupDeviceDepthToViewSpaceDepthParams` takes the min and max of the
+    pair whatever the order, its own comment saying so; the swap silences
+    only the debug check.
+  - **VRAM line.** WARP answers `QueryVideoMemoryInfo` with zero bytes; the
+    "not reported" branch is exercised nowhere yet.
+  - **Registration table, first run: NOT settled.** Jitter `as_is` won its
+    axis by a real margin, but the motion-vector sign tied exactly for every
+    jitter variant and the best error (38/255) was ten times the at-rest
+    error (3.6/255): the motion input had no effect in any variant, and no
+    history registered. The scene (the smoke pattern's 3.5 to 5 px periods
+    under a 1 degree yaw, about one period per frame) cannot separate a sign
+    error either. Escalated: instrument the motion field, prove the texture
+    reaches the port, rebuild the test on a pure translation of a
+    low-frequency hard-edged scene with per-axis motion flips, assert the
+    minimum sits near the at-rest error. Result in the next entry.
+- 2026-09-16 night, the escalated rig: **the motion vectors never reached
+  the port.** A probe that dispatched the same static scene with zero
+  motion and with a uniform 40 px vector got byte-identical output. Cause:
+  FSR 3.1 moved three working surfaces into the dispatch description for
+  the CALLER to allocate (`dilatedDepth`, `dilatedMotionVectors`,
+  `reconstructedPrevNearestDepth`, so a frame-interpolation host can share
+  them); the engine left them null, the port's `RegisterResourceDX11` maps
+  a null pointer to its NULL resource, the dilate pass wrote its vectors
+  into nothing and the reprojection read zeros back, every frame, with
+  FFX_OK. Fix: each eye's context owns the three, made from
+  `ffxFsr3UpscalerGetSharedResourceDescriptions` (asked, not hard-coded),
+  released on rekey; about 12 bytes per render pixel, 55 MB per eye at
+  Quest 3 sizes. Possible saving, unproven: one set for both eyes, since
+  nothing reads them across dispatches. The port's own source, quoted in
+  the engine: the scale constant is `motionVectorScale / renderSize`
+  (render-pixel vectors with a scale of 1 are exact, as for DLSS), history
+  is sampled at `uv + mv` (vectors point current to previous, as `dlMv`
+  does) and the unjittered position is `pos - jitter` (content sits at
+  +jitter, `dlaa.h`'s convention). **Table, rebuilt** on a pure 3 px/frame
+  translation (x then y) of a band-limited two-scale pattern against the
+  unjittered point sample, jitter {as_is, flip_x, flip_y, flip_both} x
+  motion {as_is, flip_x, flip_y, flip_both}: winner `as_is/as_is` at
+  1.38/255 against a 0.93 at-rest floor; runner-up (jitter flip_x) 2.52;
+  a single-axis motion flip 6.9 to 7.3; both 12.8. Assertions: exactly one
+  minimum, inside twice the floor with every other cell outside, each
+  single-axis motion flip at least twice the winner, and EDVR's own
+  reprojected yaw field 8.06 settled against 28.36 flipped. A hard-edged
+  scene was tried first and discriminated worse (the 1:1 resolve's residual
+  at a discontinuity is large for every variant). **The engine's constants
+  stay 1, 1, 1, 1.** The rig was traced by sabotage: with
+  `dilatedMotionVectors` pointed at null again it fails six checks; the
+  first rig passed that state. `fsr3Available` gates on feature level 11_1.
+  31 checks, 20 s in the pool (wall-clock unchanged), build green.

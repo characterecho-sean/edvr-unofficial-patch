@@ -318,7 +318,61 @@ if defined NGX (
     if exist "%BUILD%\nvngx_dlss.dll" del /q "%BUILD%\nvngx_dlss.dll"
     if exist "%BUILD%\NVIDIA-DLSS-LICENSE.txt" del /q "%BUILD%\NVIDIA-DLSS-LICENSE.txt"
 )
-cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
+
+REM AMD's FSR 3.1 upscaler, the community Direct3D 11 port (the optiscaler
+REM FidelityFX-SDK-DX11 fork; tools\fetch_ffx_dx11.py; design doc section
+REM 3.2). EDVR_FFX_DX11 names a copy explicitly, or forces the no-SDK path
+REM with the literal value "none" -- proving fix.temporal_aa=fsr's runtime
+REM refusal even on a machine that already has the SDK staged; else the
+REM checkout's own third_party\ffx-dx11; else the machine's copy under
+REM %LOCALAPPDATA%\EDVR\ffx-dx11, which is where tools\fetch_ffx_dx11.py
+REM puts it (one build every checkout and worktree shares). The d3d11 half
+REM is then built with the FSR3 calls in and the two static libraries
+REM linked. The copy is VERIFIED first -- the staged files, and each
+REM library's CRT and imports, against tools\fetch_ffx_dx11.py's own
+REM checks -- and a mismatch fails the build. Without any SDK the build
+REM still succeeds, since the code compiles either way, but fix.temporal_aa
+REM = fsr then refuses at runtime with "this build was made without AMD's
+REM upscaler" (no DLL is shipped either way -- FFX links in statically).
+set FFX=
+set FSR_NONE=
+if /i "%EDVR_FFX_DX11%"=="none" set FSR_NONE=1
+if not defined FSR_NONE if defined EDVR_FFX_DX11 set FFX=%EDVR_FFX_DX11%
+if not defined FSR_NONE if not defined FFX if exist "%ROOT%\third_party\ffx-dx11\include\FidelityFX\host\ffx_fsr3upscaler.h" set FFX=%ROOT%\third_party\ffx-dx11
+if not defined FSR_NONE if not defined FFX if exist "%LOCALAPPDATA%\EDVR\ffx-dx11\include\FidelityFX\host\ffx_fsr3upscaler.h" set FFX=%LOCALAPPDATA%\EDVR\ffx-dx11
+set FSRFLAGS=
+set FSRLIB=
+if defined FFX (
+    python "tools\fetch_ffx_dx11.py" --verify "%FFX%" || (
+        echo [edvr] ERROR: the FSR3 D3D11 port at %FFX% is not the pinned one. tools\fetch_ffx_dx11.py
+        echo        names the commit; fetch it again, or update the pin on purpose.
+        exit /b 1
+    )
+    set FSRFLAGS=/DEDVR_HAVE_FSR3=1 /I"%FFX%\include"
+    set FSRLIB="%FFX%\lib\ffx_fsr3upscaler_x64.lib" "%FFX%\lib\ffx_backend_dx11_x64.lib"
+    echo [edvr] FSR3 D3D11 port: %FFX%
+) else (
+    if defined FSR_NONE (
+        echo [edvr] EDVR_FFX_DX11=none: building without AMD's FSR upscaler on purpose,
+        echo [edvr] to prove the no-SDK path. fix.temporal_aa=fsr will refuse at runtime.
+    ) else (
+        echo [edvr] ==================================================================
+        echo [edvr] NO FSR3 SDK. This build has no AMD upscaler; fix.temporal_aa=fsr
+        echo [edvr] refuses at runtime. Fine for development; NOT a release. Looked for
+        echo [edvr] include\FidelityFX\host\ffx_fsr3upscaler.h in these three places,
+        echo [edvr] in this order:
+        if defined EDVR_FFX_DX11 (
+            echo [edvr]   EDVR_FFX_DX11  = %EDVR_FFX_DX11%
+        ) else (
+            echo [edvr]   EDVR_FFX_DX11  = ^(not set^)
+        )
+        echo [edvr]   the checkout    = %ROOT%\third_party\ffx-dx11
+        echo [edvr]   this machine    = %LOCALAPPDATA%\EDVR\ffx-dx11
+        echo [edvr] To fetch the pinned SDK once for this machine:  python tools\fetch_ffx_dx11.py
+        echo [edvr] ==================================================================
+    )
+)
+cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
@@ -400,7 +454,7 @@ rc.exe /nologo /fo "%OBJ%\d3d11\dxbc_notice.res" "third_party\dxbc_hash\notice.r
 if errorlevel 1 ( echo [edvr] ERROR: DXBC notice resource failed & exit /b 1 )
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
@@ -1367,6 +1421,31 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & e
 "%BUILD%\openxr_shared_texture_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_fsr3_engine_test
+REM AMD's FSR3 engine (src\d3d11\fsr3_engine.cpp) on WARP: availability, two
+REM contexts, DEBUG_CHECKING silence, an at-rest convergence check, the
+REM jitter/motion-vector sign registration table (design doc 3.5 item 3),
+REM reset, a size change, and the VRAM query -- Track C's own desk test,
+REM modeled on :rig_openxr_shared_texture_test above. Skips cleanly (still
+REM green) when this build has no FSR3 SDK: there is no engine body to
+REM test, the same reason nothing tests NGX's stub half either.
+if not defined FSRFLAGS (
+    echo [edvr] fsr3_engine_test: no FSR3 SDK in this build ^(EDVR_FFX_DX11^) -- skipping.
+    exit /b 0
+)
+if not exist "%OBJ%\fsr3_engine_test" mkdir "%OBJ%\fsr3_engine_test"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX %FSRFLAGS% ^
+    /Fo"%OBJ%\fsr3_engine_test\\" /Fe"%BUILD%\fsr3_engine_test.exe" ^
+    "tools\fsr3_engine_test\fsr3_engine_test.cpp" "src\d3d11\fsr3_engine.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO %FSRLIB% dxgi.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSR3 engine test build failed & exit /b 1 )
+"%BUILD%\fsr3_engine_test.exe" --dry-run || exit /b 1
+"%BUILD%\fsr3_engine_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_openxr_system_test
 if not exist "%OBJ%\openxr_system_test" mkdir "%OBJ%\openxr_system_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
@@ -1572,6 +1651,7 @@ python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 
 python tools\openxr_pe.py --graphics "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
 python tools\elite_oculus.py --self-test || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1
+python tools\fetch_ffx_dx11.py --self-test || exit /b 1
 
 REM Do the code, edvr.ini and the log messages agree about setting names?
 REM

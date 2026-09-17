@@ -6150,6 +6150,7 @@ bool temporalPassPriceWindow(double regionMedianMs[7], double* otherMedianMs,
 void temporalPassShutdown() {
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     dlaaShutdown();
+    fsr3Shutdown();
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
     if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }

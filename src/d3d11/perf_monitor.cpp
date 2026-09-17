@@ -24,6 +24,7 @@
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 #include "gpu_timing.h"
+#include "fsr3_engine.h"  // fsr3Totals/fsr3VersionLabel: the EDVR PASSES tile shows AMD's price when it, not NVIDIA's, ran
 #include "native_menu.h"
 #include "native_timing.h"
 #include "native_perf_history.h"
@@ -238,6 +239,7 @@ const char* eventName(uint32_t bit) {
         case kEvBinds: return "binds re-read";
         case kEvNgx: return "DLSS feature";
         case kEvMenu: return "menu open/close";
+        case kEvFsr: return "FSR context";
         default: return "?";
     }
 }
@@ -251,9 +253,10 @@ void eventList(uint16_t events, float ms, char* buf, size_t n) {
         return;
     }
     size_t len = 0;
-    for (uint32_t bit = 1; bit <= kEvMenu && len + 1 < n; bit <<= 1) {
+    for (uint32_t bit = 1; bit <= kEvFsr && len + 1 < n; bit <<= 1) {
         if (!(events & bit)) continue;
-        const bool timed = ms > 0.0f && (bit == kEvCompile || bit == kEvReload || bit == kEvNgx);
+        const bool timed =
+            ms > 0.0f && (bit == kEvCompile || bit == kEvReload || bit == kEvNgx || bit == kEvFsr);
         const int w = timed ? snprintf(buf + len, n - len, "%s%s (%.0f ms)", len ? ", " : "", eventName(bit),
                                        static_cast<double>(ms))
                             : snprintf(buf + len, n - len, "%s%s", len ? ", " : "", eventName(bit));
@@ -870,7 +873,7 @@ void perfMonitorNoteEvent(uint32_t bits, double ms) {
     // the middle of a benchmark window. Advance a cheap epoch immediately;
     // the next monitor tick hashes it into the scope and aborts the window.
     constexpr uint32_t kBenchmarkScopeEvents = kEvReload | kEvIniWrite |
-        kEvBinds | kEvNgx | kEvMenu;
+        kEvBinds | kEvNgx | kEvFsr | kEvMenu;
     if (bits & kBenchmarkScopeEvents)
         s.nativeBenchmarkSettingsEpoch.fetch_add(1, std::memory_order_relaxed);
     if (ms > 0.0) {
@@ -1239,25 +1242,38 @@ int perfMonitorTiles(PerfTile* out, int max) {
         double avg = 0.0, mx = 0.0, rej = 0.0, clip = 0.0;
         double temporal = -1.0, sharpen = -1.0;
         bool trained = false;
+        // Whichever trained engine actually ran this session carries a
+        // nonzero count of its own (dlaaTotals/fsr3Totals both answer false
+        // with nothing recorded) -- so trying NVIDIA's totals then AMD's
+        // and taking whichever answers picks the right one with no engine
+        // check of its own, the same way menu.cpp's status line (already
+        // shipped) does.
+        const char* engineWord = "NVIDIA";
         if (temporalPassDlaaTotals(&t, &avg, &mx, &resets) && t) {
             temporal = avg;
             trained = true;
+        } else if (fsr3Totals(&t, &avg, &mx, &resets) && t) {
+            temporal = avg;
+            trained = true;
+            engineWord = fsr3VersionLabel();
         } else if (temporalPassTotals(&t, &avg, &mx, &rej, &clip) && t) {
             temporal = avg;
         }
         if (sharpenPassTotals(&t, &avg, &mx) && t) sharpen = avg;
         if (temporal >= 0.0 && sharpen >= 0.0) {
             snprintf(v, sizeof(v), "%.1f+%.1f", temporal, sharpen);
-            // The NVIDIA figure here is a pooled average over every call
-            // (any role, either eye), not one eye's price -- say so rather
-            // than mislabel it "ms/eye" alongside the sharpen pass, which
-            // genuinely is per eye.
-            snprintf(sub, sizeof(sub), trained ? "ms NVIDIA/call + sharpen/eye"
-                                               : "ms/eye temporal + sharpen");
+            // The trained-engine figure here is a pooled average over every
+            // call (any role, either eye), not one eye's price -- say so
+            // rather than mislabel it "ms/eye" alongside the sharpen pass,
+            // which genuinely is per eye. trained's format has one %s; the
+            // untrained one has none and simply ignores the extra argument.
+            snprintf(sub, sizeof(sub),
+                     trained ? "ms %s/call + sharpen/eye" : "ms/eye temporal + sharpen",
+                     engineWord);
         } else if (temporal >= 0.0) {
             snprintf(v, sizeof(v), "%.2f", temporal);
-            snprintf(sub, sizeof(sub), trained ? "ms/call, NVIDIA's pass"
-                                               : "ms/eye, temporal pass");
+            snprintf(sub, sizeof(sub), trained ? "ms/call, %s's pass" : "ms/eye, temporal pass",
+                     engineWord);
         } else if (sharpen >= 0.0) {
             snprintf(v, sizeof(v), "%.2f", sharpen);
             snprintf(sub, sizeof(sub), "ms/eye, sharpen");

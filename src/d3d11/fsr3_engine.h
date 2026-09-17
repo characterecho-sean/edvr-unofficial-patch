@@ -49,6 +49,19 @@ bool fsr3Warm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW,
 // change needed: temporal_pass.cpp's temporalInner already has tanNow in
 // scope where dlaaEvaluate is called, design doc 3.3's cameraFovAngleVertical
 // = atan(t) + atan(b)). False on any refusal, with why.
+//
+// out MUST carry BOTH D3D11_BIND_UNORDERED_ACCESS and D3D11_BIND_SHADER_
+// RESOURCE, even though FSR only ever writes it. AMD's DX11 port's own
+// RegisterResourceDX11 unconditionally creates a shader resource view for
+// every texture it registers, output included, with no bind-flag check the
+// way its UAV path has; a UAV-only texture makes that CreateShaderResource
+// View call fail, and this port's answer to any failed D3D11 call mid-
+// dispatch is an untyped `throw 1` (ffx_dx11.cpp's TIF helper) -- a bare
+// C++ exception with no place in this otherwise all-FfxErrorCode C API,
+// fatal if nothing up the call stack happens to catch it. temporal_pass.cpp's
+// own e.dlOut already carries both flags (it is DLAA's output too); a new
+// caller that hands FSR a write-only target will not build a clean
+// FfxErrorCode failure out of this -- it will crash the process outright.
 bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* reactive,
                   ID3D11Texture2D* out, uint32_t w, uint32_t h, uint32_t outW,
