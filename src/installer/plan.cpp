@@ -135,23 +135,12 @@ Survey surveyTarget(const GameInstall& game) {
         s.openxrLicense=surveyText(L"OPENXR-LOADER-LICENSE.txt");
         s.openvrCurrent = probeDll(joinPath(s.game.openvrDir, kOpenvr));
 
-        // What the original was renamed to. openvr_api_orig.dll is what the
-        // README says and what this installer writes, but advanced.
-        // real_openvr_dll accepts any name, and somebody who installed by hand
-        // may have used one. Looking only for the default name would read that
-        // folder as "the original is missing" -- the one diagnosis that sends
-        // people to verify their game files for no reason.
-        //
-        // It is a NAME, and this checks that, because the value ends up as a
-        // rename destination. A value with a path in it -- "..\\..\\d3d11.dll",
-        // by accident or otherwise -- would move the game's runtime out of the
-        // folder and over another mod, and the report would call it "the game's
-        // own copy is renamed openvr_api_orig.dll" while it happened. Anything
-        // that is not a plain filename is refused back to the default.
-        s.openvrOrigName = safeSiblingName(fromUtf8(iniValue(s.iniText,
-                                                             "advanced.real_openvr_dll")),
-                                           kOpenvr);
-        if (s.openvrOrigName.empty()) s.openvrOrigName = kOpenvrOrig;
+        // The original is always renamed to openvr_api_orig.dll: the name the
+        // README documents and this installer writes. (Before 2026-09-16 a
+        // hand-edited advanced.real_openvr_dll could choose a different name,
+        // for the forwarding proxy's chaining; native OpenXR never chains, so
+        // that key is retired and the name is no longer configurable.)
+        s.openvrOrigName = kOpenvrOrig;
         s.openvrOrig = probeDll(joinPath(s.game.openvrDir, s.openvrOrigName));
     }
 

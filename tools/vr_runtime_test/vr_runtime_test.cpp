@@ -9,14 +9,19 @@
 // spent three rounds on his install. See src/d3d11/vr_runtime.h.
 //
 // So the thing worth testing is the one claim that replaced the assertion:
-// ours-versus-theirs, decided by an export on a module that is really loaded.
-// That is checkable without a headset, a game or a runtime -- load the real
-// artifacts this build just produced and ask.
+// native-versus-anything-else, decided by an export pair on a module that is
+// really loaded, not by its path. That is checkable without a headset, a game
+// or a runtime -- load the real artifacts this build just produced and ask.
 //
-//   build\openvr_api.dll   is ours; it exports edvr_selftest_system_hook
-//   build\fakevr.dll       is the stand-in for the game's own runtime, and
-//                          copied under the name openvr_api.dll it is exactly
-//                          what a foreign one looks like from here
+//   build\vrnative\openvr_api.dll   is EDVR's native runtime DLL, copied under
+//                                   the name the game actually loads; it
+//                                   exports edvrConfigureNativeRuntime and
+//                                   edvrGetNativeRuntimeStatus
+//   build\vrforeign\openvr_api.dll  is tools\fakechain's stand-in for some
+//                                   other proxy, or the stock Valve file a
+//                                   game update restores: a real
+//                                   openvr_api.dll that carries neither
+//                                   native export
 //
 // Two more properties get checked while a real Log is open, because both have
 // already been shipped wrong once in this codebase:
@@ -27,7 +32,7 @@
 //     bytes and glitch_frame.cpp carries a comment about a sentence that
 //     truncated to "(do", which reads as a crash.
 //
-// Usage: vr_runtime_test.exe <scratch-dir> <ours|foreign> <dll-to-load>
+// Usage: vr_runtime_test.exe <scratch-dir> <native|foreign> <dll-to-load>
 
 #include <windows.h>
 
@@ -52,7 +57,7 @@ void ok(bool cond, const char* what) {
 
 const char* verdictName(VrRuntime v) {
     switch (v) {
-        case VrRuntime::EdvrOpenvr:    return "EdvrOpenvr";
+        case VrRuntime::NativeOpenXR:  return "NativeOpenXR";
         case VrRuntime::ForeignOpenvr: return "ForeignOpenvr";
         case VrRuntime::OculusNative:  return "OculusNative";
         case VrRuntime::NoneLoaded:    return "NoneLoaded";
@@ -122,11 +127,11 @@ size_t countOccurrences(const std::string& hay, const char* needle) {
 
 int main(int argc, char** argv) {
     if (argc < 4) {
-        printf("usage: %s <scratch-dir> <ours|foreign> <dll-to-load>\n", argv[0]);
+        printf("usage: %s <scratch-dir> <native|foreign> <dll-to-load>\n", argv[0]);
         return 2;
     }
     const std::wstring scratch = widen(argv[1]);
-    const bool wantOurs = strcmp(argv[2], "ours") == 0;
+    const bool wantNative = strcmp(argv[2], "native") == 0;
     const std::wstring dll = widen(argv[3]);
 
     printf("\n[edvr] vr runtime test -- %s\n", argv[2]);
@@ -174,12 +179,12 @@ int main(int argc, char** argv) {
     // door into the module.
     Sleep(1200);
 
-    const VrRuntime want = wantOurs ? VrRuntime::EdvrOpenvr : VrRuntime::ForeignOpenvr;
+    const VrRuntime want = wantNative ? VrRuntime::NativeOpenXR : VrRuntime::ForeignOpenvr;
     expectVerdict(edvr::vrRuntime(), want, "after the DLL is loaded");
     expectMentions(edvr::vrRuntimeShortWhy(),
-                   wantOurs ? "compositor hook" : "not EDVR's",
-                   wantOurs ? "ours is recognised by its export, not its path"
-                            : "a foreign openvr_api.dll is not claimed as ours");
+                   wantNative ? "native OpenXR" : "not EDVR's",
+                   wantNative ? "native is recognised by its export pair, not its path"
+                              : "a foreign openvr_api.dll is not claimed as native");
 
     // Three more asks at the new verdict: one further line, because the
     // verdict moved, and then silence.
@@ -201,12 +206,12 @@ int main(int argc, char** argv) {
        "no line it writes reaches the log's 1200-byte buffer");
 
     // The paragraph has to carry the ACTIONABLE part, not just the verdict.
-    if (wantOurs) {
-        ok(text.find("edvr_vr_") != std::string::npos,
-           "the ours-but-silent paragraph points at the vr log");
+    if (wantNative) {
+        ok(text.find("is driving this session") != std::string::npos,
+           "the native paragraph says it is the one actually running the session");
     } else {
         ok(text.find("openvr_api_orig.dll") != std::string::npos,
-           "the foreign paragraph says how to install ours");
+           "the foreign paragraph says how to install EDVR's own file");
     }
     // And it must never again tell somebody their installed file is missing.
     ok(text.find("is NOT installed") == std::string::npos &&

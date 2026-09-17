@@ -41,9 +41,6 @@ inline void nativeBuiltContractCases(Check check, const std::wstring& root) {
     check(validateNativePayloadBytes(graphics.data(),graphics.size(),NativeImageKind::Graphics),"built native graphics marker/providers accepted");
     check(validateNativePayloadBytes(runtime.data(),runtime.size(),NativeImageKind::Runtime),"built native runtime exact export contract accepted");
     check(validateNativePayloadBytes(loader.data(),loader.size(),NativeImageKind::Loader),"bundled x64 Khronos loader accepted");
-    const auto legacy=bytes(L"legacy_d3d11_fixture.dll");
-    check(!legacy.empty(),"legacy rejection fixture exists");
-    check(!validateNativePayloadBytes(legacy.data(),legacy.size(),NativeImageKind::Graphics),"legacy graphics fixture rejected as release payload");
     check(probeDll(root+L"\\build\\edvr_openxr_runtime.dll").kind==DllKind::Edvr,"native runtime is identified as EDVR, never as an original to preserve");
     if(graphics.empty())return;
     // Mutate the actual built PE using the export ordinal table, so a marker

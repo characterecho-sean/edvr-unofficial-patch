@@ -17,5 +17,11 @@ build - Copy/
 # keeps it out of the tree: not stand-alone, not under an open source licence.
 third_party/ngx/
 
+# The community FidelityFX DX11 port's fetched checkout and build output
+# (tools/fetch_ffx_dx11.py --dest third_party/ffx-dx11 puts it here; the
+# default is one copy per machine under %LOCALAPPDATA%\EDVR\ffx-dx11). MIT
+# licensed, but built, not authored here -- same reasoning as third_party/ngx.
+third_party/ffx-dx11/
+
 # Pinned Khronos loader binary, fetched by tools/fetch_openxr_loader.py.
 third_party/openxr/loader/

@@ -47,7 +47,16 @@ bool family(uint64_t vs) {
            // Its instance 135 shares the arms' attachment origin. Unlike
            // the late GUI, its original VS subtracts camera[275] from t33,
            // so it needs the same correction as the surrounding geometry.
-           vs==0x88DCF1164C640EC3ull;
+           vs==0x88DCF1164C640EC3ull ||
+           // 2026-09-17 Steam dumps 064839/064854/064906: the Takada laser
+           // rifle's two cyan glow strips are three late lit-pass draws
+           // (BB31244E30265F2D) reading the rifle's own rigid records 23,
+           // 10 and 67 through the ORIGINAL pool, so they sat ~5 cm beside
+           // the corrected receiver while strafing and sank into it moving
+           // forward. CFCA8FFC6B058630 is a single skinned triangle at the
+           // arms root drawn between body draws; the 2026-09-11 rig had
+           // filed it as a full-screen pass because it is three indices.
+           vs==0xBB31244E30265F2Dull || vs==0xCFCA8FFC6B058630ull;
 }
 bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11ShaderResourceView* bonesView,
               ID3D11Buffer* pool,ID3D11Buffer* bones,ID3D11Buffer* camera,unsigned bytes,bool writeSample=true) {

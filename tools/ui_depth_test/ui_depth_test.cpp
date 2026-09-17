@@ -33,6 +33,7 @@ void* bindingGet(BindSlot) { std::abort(); }
 uint32_t bindingGeneration(BindSlot) { std::abort(); }
 uint64_t bindingShaderHash(BindSlot) { std::abort(); }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
+bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }
 bool depthProbeIsSceneDepth(const void*) { std::abort(); }
 uint64_t lookupShaderHash(void*) { std::abort(); }
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx, const char* source, size_t,
@@ -805,7 +806,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             std::vector<unsigned char> edit(w*h,0);
             std::vector<float> screenPixels((w+4)*(h+6)*4,0);
             for(UINT i=0;i<ow*oh;++i){model[4*i]=static_cast<unsigned char>(64+i%100);model[4*i+3]=127;}
-            auto run=[&](bool haveHistory,float tolerance=0.0f){
+            auto run=[&](bool haveHistory,float tolerance=0.0f,float hold=0.0f){
                 ctx->UpdateSubresource(raw.Get(),0,nullptr,colour.data(),w*4,0);ctx->UpdateSubresource(mask.Get(),0,nullptr,mark.data(),w,0);
                 ctx->UpdateSubresource(previous.Get(),0,nullptr,old.data(),w*4,0);ctx->UpdateSubresource(trained.Get(),0,nullptr,model.data(),ow*4,0);
                 ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);
@@ -817,8 +818,8 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 const float poison[4]={1,1,1,1};ctx->ClearUnorderedAccessViewFloat(outputU.Get(),poison);
                 ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,7,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
                 ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
-                if(tolerance!=0.0f){
-                    const float t[4]={tolerance,0,0,0};ctx->UpdateSubresource(tolCb.Get(),0,nullptr,t,0,0);
+                if(tolerance!=0.0f||hold!=0.0f){
+                    const float t[4]={tolerance,hold,0,0};ctx->UpdateSubresource(tolCb.Get(),0,nullptr,t,0,0);
                     ctx->CSSetConstantBuffers(1,1,tolCb.GetAddressOf());
                 }
                 ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
@@ -942,6 +943,58 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 // Restore the resting state (raw 0, nothing edited) that the
                 // tests below assume without re-asserting it themselves.
                 colour.assign(w*h*4,0);edit.assign(w*h,0);
+            }
+            // The corona-smear hold (advanced.corona_smear_level, issue 36): faint,
+            // flat, non-UI pixels are pulled back within one step of the raw
+            // 2x2 range, the way UI pixels already are above. jit is zero
+            // and ow==w/oh==h here, so corner==centre==(ox,oy) at the cell,
+            // as in the tolerance checks above.
+            if(ow==w&&oh==h) {
+                const UINT cell=4*w+4;
+                // (f) A flat faint raw region: the hold pulls a trained
+                // sample lifted above it back to within a step of raw.
+                colour.assign(w*h*4,5);old.assign(w*h*4,0);mark.assign(w*h,0);
+                motion.assign(w*h*2,0);edit.assign(w*h,0);
+                model.assign(ow*oh*4,8);   // raw 5/255, trained lifted to 8/255
+                resolvedValues=run(true,0.0f,64.0f/255.0f);
+                check(std::fabs(resolvedValues[cell]-5.0f/255.0f)<=1.0f/255.0f+1e-4f,
+                      "a flat faint region is held within a step of its raw level");
+
+                // (g) Hold zero is bit-exact old behaviour: no hold at all.
+                resolvedValues=run(true,0.0f,0.0f);
+                check(std::fabs(resolvedValues[cell]-8.0f/255.0f)<1e-6f,
+                      "hold zero leaves the trained output exactly as it was");
+
+                // (h) A flat BRIGHT region sits above the brightness limit:
+                // untouched, however far its trained sample lifts above it.
+                colour.assign(w*h*4,200);model.assign(ow*oh*4,203);
+                resolvedValues=run(true,0.0f,64.0f/255.0f);
+                check(std::fabs(resolvedValues[cell]-203.0f/255.0f)<1e-6f,
+                      "a bright flat region above the brightness limit is left untouched");
+
+                // (i) A textured faint region: a checker of 5/255 and 40/255
+                // gives the 3x3 window a 35-step spread, past the 16-step
+                // texture cutoff, so a lifted trained sample is untouched.
+                for(UINT i=0;i<w*h;++i){
+                    const UINT x=i%w,y=i/w;
+                    const unsigned char v=((x+y)%2==0)?5:40;
+                    colour[4*i]=colour[4*i+1]=colour[4*i+2]=v;colour[4*i+3]=0;
+                }
+                model.assign(ow*oh*4,8);   // raw at the cell is 5/255 (even), trained = raw+3
+                resolvedValues=run(true,0.0f,64.0f/255.0f);
+                check(std::fabs(resolvedValues[cell]-8.0f/255.0f)<1e-6f,
+                      "a textured neighbourhood past the texture cutoff is left untouched by the hold");
+
+                // (j) A marked UI pixel keeps the ghost-tolerance rule; the
+                // hold never applies where active is true.
+                colour.assign(w*h*4,5);model.assign(ow*oh*4,8);mark[cell]=1;
+                resolvedValues=run(true,12.0f/255.0f,64.0f/255.0f);
+                check(std::fabs(resolvedValues[cell]-8.0f/255.0f)<1.0f/255.0f,
+                      "a marked UI pixel keeps the ghost-tolerance rule, not the corona hold");
+
+                // Restore the resting state (raw 0, nothing marked) that the
+                // tests below assume without re-asserting it themselves.
+                colour.assign(w*h*4,0);mark.assign(w*h,0);
             }
             // Invalid/off-screen motion cannot smear border UI inward.
             old.assign(w*h*4,0);motion.assign(w*h*2,0);mark.assign(w*h,0);

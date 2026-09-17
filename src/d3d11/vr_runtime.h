@@ -34,30 +34,31 @@
 //     (ordinary, not a fault, and the old text called it a WARNING);
 //   - the game is on Elite's native Oculus back end, where our openvr half
 //     cannot be loaded by anything we do (the case above);
-//   - an openvr_api.dll IS loaded but is not ours, so EDVR's openvr half is
-//     genuinely absent from the folder the game loaded from -- the only one of
-//     the four the old text was right about;
-//   - ours is loaded and silent, which is a hook that has not validated or a
-//     build older than this d3d11.dll, and is a question for edvr_vr_*.log.
+//   - an openvr_api.dll IS loaded but does not carry EDVR's native-runtime
+//     exports, so EDVR's runtime is genuinely not installed in the folder
+//     the game loads from, or something has replaced it -- a game update
+//     restoring the stock file is a recorded field failure;
+//   - EDVR's native runtime is loaded and is driving the session, which is
+//     terminal: the only one of the four this file ever settles on.
 //
 // The module list separates all four, cheaply and without asking the game
-// anything. Ours-versus-theirs is settled by the edvr_selftest_system_hook
-// export rather than by path, because a path proves where a file sits and not
-// what is in it -- and the whole failure above was a correct path.
+// anything. Native-versus-anything-else is settled by the
+// edvrConfigureNativeRuntime/edvrGetNativeRuntimeStatus export pair rather
+// than by path, because a path proves where a file sits and not what is in
+// it -- and the whole failure above was a correct path.
 #pragma once
 
 namespace edvr {
 
 enum class VrRuntime {
     NoneLoaded,     // no VR runtime library in this process
-    EdvrOpenvr,     // an openvr_api.dll is loaded, and it is ours
     NativeOpenXR,   // EDVR's native OpenXR openvr facade is loaded
-    ForeignOpenvr,  // an openvr_api.dll is loaded, and it is not ours
+    ForeignOpenvr,  // an openvr_api.dll is loaded, and it is not EDVR's
     OculusNative,   // no openvr_api.dll, and Oculus' LibOVR runtime is loaded
 };
 
 // The verdict. Re-measured from the process module list at most once a second,
-// and never cached as final except for EdvrOpenvr, because every other state
+// and never cached as final except for NativeOpenXR, because every other state
 // can still turn into it seconds into a launch: on the field rig the D3D11
 // device is created 1.20 s before openvr_api.dll is first called.
 VrRuntime vrRuntime();
@@ -89,9 +90,9 @@ const char* vrRuntimeName();
 
 // One "vr runtime:" line, said once, from the frame boundary. Held back for
 // ten seconds so a launch that has not reached its runtime yet is not reported
-// as having none; said immediately once the verdict is EdvrOpenvr, since that
-// one is terminal and worth having early. If the verdict improves after the
-// line was said, exactly one correction follows it.
+// as having none; said immediately once the verdict is NativeOpenXR, since
+// that one is terminal and worth having early. If the verdict improves after
+// the line was said, exactly one correction follows it.
 void vrRuntimeTick();
 
 }  // namespace edvr

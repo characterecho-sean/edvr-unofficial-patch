@@ -49,6 +49,17 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 // coverage depth; the caller reissues it after the original draw.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 
+// At the scanner's screen composite, which the chrome tracker
+// (vscreen.cpp, beginPanelOverride) recognises before uiDepthOnEyeDraw
+// sees the draw: the chrome surface the composite samples at PS slot 1
+// (view and its resource, both alive for the call) is learned as an
+// interface surface if the offscreen learner had not, and held for the
+// frame so an eye run staged this frame carries a copy of it
+// (eye_<stamp>_Chrome<i>.bin). Each outcome is said once. vs is the
+// composite's vertex shader, for the note. True when the surface was new.
+bool uiDepthLearnScannerChrome(ID3D11DeviceContext* ctx, uint64_t vs,
+                               ID3D11ShaderResourceView* view, ID3D11Resource* chrome);
+
 // Colour separation hook: the owner sets this after routing a recognized
 // target-sprite draw out of the clean colour stream and before the matching
 // coverage reissue.  The flag is per-draw and is cleared by uiDepthEnd().
@@ -147,6 +158,15 @@ float uiDepthReactive();
 // beyond the tolerance is still pulled back to within it (issue 36). Zero
 // like uiDepthReactive() when the pass is off or stood down.
 float uiDepthGhostTolerance();
+
+// The corona-smear hold's brightness limit (advanced.corona_smear_level),
+// normalised to [0,1], 0 = off; always on under the temporal pass,
+// advanced.corona_smear_level = 0 turns it off. The post-DLSS UI
+// resolve holds faint, flat, non-UI pixels within one step of the raw 2x2
+// range up to this brightness, the way uiDepthGhostTolerance() already
+// holds UI pixels near the frame's own colours (issue 36). Zero like
+// uiDepthGhostTolerance() when the pass is off or stood down.
+float uiDepthCoronaHold();
 
 // Once per frame: the masks cleared, the engage line, the totals every 20 s.
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx);

@@ -30,7 +30,7 @@
 // item 3.
 //
 // Runs FIRST at the door: on the game's texture, at render size, wide under
-// the cull guard, before the crop and the supersample resolve. Everything
+// the cull guard, before the crop and the sharpen. Everything
 // downstream sees a temporally settled frame. Off by default; every refusal
 // stands the pass down for the session with one line.
 #pragma once
@@ -87,6 +87,13 @@ void temporalPassFrameBoundary();
 // default; advanced.eye_run_paired=0 keeps the older single-run selection.
 void temporalPassArmEyeDump();
 
+// The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)
+// running whenever it is on: the FSS's interface takes the head's path
+// while the scanner's screen is up (docs/fss-scanner.md, 2026-09-16), and
+// the tracker's stamp is how the pass knows the screen is up. The heal
+// gates the tracker too, but a rig with the heal off still needs the path.
+bool temporalPassWantsFssChrome();
+
 // The eye's offset from the head as the runtime last handed it to the pass
 // (metres, x toward the right), for the foveation's nasal shift. False
 // until a frame has been treated with a head delta and an offset: the
@@ -136,6 +143,18 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
 // frame, each size change, each withhold). False when it never ran.
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
                             uint32_t* resets);
+
+// The trained totals of whichever engine fix.temporal_aa names RIGHT NOW,
+// with the word a display should print for it ("NVIDIA", or "fsr 3.1.2"),
+// and whether that engine is AMD's -- the per-role figures below are
+// NVIDIA-only, so a display hides them under fsr. engineLabel and amd are
+// written whatever the return value; the return says only whether that
+// engine has a measured price yet. Every readout of the trained price goes
+// through this rather than trying one engine's totals and falling through
+// to the other's: neither total is cleared on a live engine switch, so
+// "whichever has a count" answers with the engine that ran FIRST.
+bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
+                               const char** engineLabel, bool* amd);
 
 // The same price, split by which of the three independent NGX features
 // paid it (the full frame, the fovea's centre crop, the steady periphery)
@@ -211,8 +230,13 @@ extern "C" {
 //            zero or equal for DLAA. Ignored by the pass's own history.
 // flags:     bit 0 -- reset the history before this frame (a withheld frame
 //            broke continuity; the first frame after an engage); bit 1 --
-//            NVIDIA's history (DLAA) instead of the pass's own, when the
-//            runtime is there; the pass says so once either way.
+//            an external, trained history (NVIDIA's or AMD's) instead of
+//            the pass's own, when the runtime is there; the pass says so
+//            either way. bit 6 -- with bit 1 set, the external engine is
+//            AMD's FSR rather than NVIDIA's DLAA/DLSS; ignored when bit 1
+//            is clear. Bits 2-5 are reset's own sub-reasons, read by the
+//            pass's own diagnostics; native_temporal.cpp's treat() (the
+//            ABI's one caller) never sets them.
 //
 // Returns the treated texture (EDVR-owned, per eye, the source's own format
 // family, region-sized, full-span content), or null: the pass refused or

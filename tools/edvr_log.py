@@ -271,7 +271,8 @@ def main(argv=None):
                     help="read this log directory directly, ignoring --target")
     ap.add_argument("--file", default=None, help="read exactly this log file")
     ap.add_argument("--tag", default="gfx",
-                    help="gfx (d3d11), vr (OpenVR), openxr (native OpenXR), or all")
+                    help="gfx (d3d11), vr (legacy OpenVR proxy, retired 2026-09-16), "
+                         "openxr (native OpenXR), or all")
     ap.add_argument("--nth", type=int, default=0,
                     help="0 is the newest log, 1 the one before it")
     ap.add_argument("--list", action="store_true",

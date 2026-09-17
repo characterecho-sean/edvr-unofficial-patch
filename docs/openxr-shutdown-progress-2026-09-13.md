@@ -1,5 +1,15 @@
 # Frontier shutdown Present progress
 
+## Status
+
+Closed 2026-09-16. The instrument below (`ShutdownPresentCensus`, its
+`edvrCensusBeginShutdown`/`edvrCensusEndShutdown` exports and the four hook
+calls in `hookedPresent`) was retired with the legacy OpenVR proxy: the proxy
+was its only opener, and the native runtime has no forwarded shutdown to peer
+around. It observes the render caller in-band instead (`shutdown_trace.h`,
+`present_quiescence.h`, `render_shutdown_coordinator.h`). The Frontier
+measurements recorded here stand as archived evidence.
+
 This records the first probe and its Frontier result. The subsequent
 [render-caller lifetime checkpoint](openxr-shutdown-lifetime-2026-09-13.md)
 extends it with retained thread identity and whole-Present activity. That

@@ -3,6 +3,39 @@
 Scope: weapon judder while walking/running. HUD resolution work is
 paused. Preserve runtime reprojection; do not substitute Turbo mode.
 
+## Status
+
+State, 2026-09-17: `fix.weapon_stability` (default on) pins the arms
+root to the source camera in hip fire and corrects the ADS timing
+disagreement; every source pass that reads the instance pool the
+standard way (t33 stride 336 minus b1[275]) and whose vertex shader is
+in `family()` in `src/d3d11/weapon_stability.cpp` draws from the
+corrected pool. The 2026-09-17 Steam dumps found two passes still
+outside that list: `BB31244E30265F2D` (the Takada laser rifle's two
+cyan glow strips) and `CFCA8FFC6B058630` (a single skinned triangle at
+the arms root). Both are added to `family()`, to the eye dump's
+`sourceMesh()` capture list and to the rig's shared-pool loop. BUILT,
+NOT FLOWN. Entry: "Laser rifle glow strips" below.
+
+Kept outside on purpose: the late UI labels `B10B032BDFD46700`,
+`C4B4B334B26E81A9` and the panel shader `A888D51024D9798E` (ammo and
+magazine readouts). Their placement is already camera-relative; the
+2026-09-17 measurement put them within 3.5-9.4 source pixels of the
+corrected body across 16 strafing frames.
+
+Ruled out: see the "Ruled out" lines of each dated entry; the
+2026-09-17 entry closes the ammo panels, the HUD polyline shader
+`B7790CBFC6554097` and the 2026-09-11 "full-screen triangle" label on
+`CFCA8FFC6B058630`.
+
+Next flight (Steam, Takada laser rifle): strafe both ways, then walk
+forward, with the new build; the glow strips must stay in their grooves
+on the receiver. Verify the build first with
+`python tools\edvr_log.py --target steam --expect-build HEAD`. An eye
+dump taken while strafing now records the strip draws in the drawstate
+(ordinal UINT32_MAX-1, VS `BB31244E30265F2D`), so a failure can be
+projected the same way as the 2026-09-17 evidence.
+
 ## Evidence from 17:09:53
 
 Steam flight `edvr_gfx_20260911_170632.log`, VR log
@@ -335,3 +368,65 @@ independently reconstructed correction. The source-effect capture
 regression verifies late-run geometry, original input-layout metadata,
 bounded copies, unused index-buffer exclusion, source-only gating, and
 C++/Python format agreement.
+
+## Laser rifle glow strips, 2026-09-17 Steam dumps
+
+The user reports that on a Takada laser rifle two faint cyan light
+strips on top of the receiver lag sideways off the weapon while
+strafing, and also misbehave walking forward. Three Steam eye dumps:
+064839, 064854 and 064906, gfx log `edvr_gfx_20260917_063945.log`,
+version `v0.17.0-rc.3-42-g2ebed2d-dirty`. HEAD `eefcb09` changes no
+weapon, screen-motion or vscreen file after `2ebed2d`, so the dumps are
+evidence for this build's weapon code. Weapon stability was on and
+matched throughout (hip fire, near 0.0675, 3 matching roots).
+
+The draw census of frame 49148 (drawstate frame 48601) has the rifle's
+opaque body under the known families. Three late draws in the lit pass
+(RTV `@216`, the body's DSV `@138`) use VS `BB31244E30265F2D` / PS
+`7A4B460994E410B4` with 1068, 576 and 984 indices; their VB0 instance
+entries (startInstance 507, 505, 514) select pool records 23, 10 and
+67, the same rigid records the corrected body draws read, 0.33-0.44 m
+from the camera. The VS is the standard template: t33 at stride 336,
+position minus b1[275], bones at t38. Because the shader was not in
+`family()`, the draws read the game's pool, and the strips rendered at
+the game's lagging arms transform.
+
+The arms lag: the timing trace for frames 49128-49148 holds the arms
+root 0.048-0.052 m along the camera's right vector while the camera
+moves 0.030 m per frame to the left, so the arms trail the camera by
+about 1.6 frames. The correction for frame 48601 is T = cb1[275] minus
+record 249 = (0.0427, -0.0202, -0.0007) m, 4.73 cm. Projecting records
+10 and 67 through the captured camera puts their uncorrected origins in
+the gap beside the receiver, where the floating strips are, and their
+corrected origins (+T) on the scope housing rim, 392 px left and 73 px
+up on the 5120x2880 source. The three runs agree with that geometry:
+standing still (064854) the glow sits inside its groove on the
+receiver, 0 px off; strafing left (064839) the strips float 300-400 px
+to the right; walking forward (064906) the groove is mostly dark, the
+strips pushed along the view axis into the receiver and hidden by its
+depth.
+
+A second miss: VS `CFCA8FFC6B058630` / PS `8A08FF781272C5F6`, one
+skinned triangle drawn between body draws in the G-buffer pass, reads
+record 252, whose position is bit-identical to the arms root 249. The
+2026-09-11 rig listed it with the full-screen triangle passes because
+it has three indices; it binds t33 and t38 and sits at the root, so it
+belongs with `88DCF1164C640EC3`.
+
+Ruled out: the ammo and magazine panels (`A888D51024D9798E`, PS
+`015EF9349EC097E8`), because the user confirmed they are not the
+symptom and masked cross-correlation over the 16 raw frames of each
+run keeps them within 3.5-9.4 source pixels of the body, at most
+1.4 mm at their depth. Ruled out: `B7790CBFC6554097` as the strips,
+because two of its three draws have 67 and 131 indices, not triangle
+lists, and it binds no pool: HUD polylines. Ruled out: a temporal or
+compositor origin, because the displacement is already in the raw
+source frames before reconstruction and the treated frames show the
+same offset without smear.
+
+Fix: `BB31244E30265F2D` and `CFCA8FFC6B058630` added to `family()`
+and to the eye dump's `sourceMesh()` capture list; the rig's
+shared-corrected-pool loop covers both and no longer asserts that
+`CFCA8FFC6B058630` stays original. The correction magnitude, the
+attachment detection and the ADS path are unchanged. Not flown; the
+Status block carries the flight brief.

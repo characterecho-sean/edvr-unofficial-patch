@@ -39,27 +39,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # A reader is listed here once it is the sole source of a setting that changes
 # what the player sees. The cost of being wrong is a feature that silently does
 # nothing, which is the hardest failure to attribute from a log.
+#
+# Until 2026-09-16 every reader here named src/openvr/compositor_hook.cpp; that
+# file went with the legacy OpenVR proxy. The d3d11 half's readers with the
+# same shape -- called from the reload poll in vscreen.cpp AND from its install
+# path -- take their place.
 READERS = [
-    ('headOffsetConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
-    # The cull guard's mode and margin (fix.cull_guard*): tuned from inside a
-    # headset, so the reload call is the feature; the install call is the
-    # lesson above. Its OWN install site is in system_hook.cpp, which this
-    # checker cannot see across files -- the compositor-install call stands
-    # in, and is a real read.
-    ('systemHookConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
-    # The supersample resolve's mode, kernel and width (experimental.supersample_*):
-    # all three live, and the mode decides whether frames are treated at
-    # all -- the exact shape of the head-offset failure above.
-    ('supersampleResolveConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
-    # The temporal pass's mode, jitter, weight, clip and motion source.
-    ('temporalAaConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
-    # The render sharpening's strength (fix.render_sharpness): one number,
-    # live, and zero means the pass never runs.
-    ('sharpenConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
-    # The compositor timing read for the menu's Monitor page
-    # (advanced.compositor_timing): live, and off means the page loses its
-    # compositor columns.
-    ('frameTimingConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
+    # The head-offset gate (fix.head_offset_gate): the very reader whose
+    # reload-only call site shipped the do-nothing release described above,
+    # now on the d3d11 side.
+    ('headOffsetGateConfigure', os.path.join('src', 'd3d11', 'vscreen.cpp')),
 ]
 
 
@@ -123,9 +112,11 @@ def main():
             bad += 1
             continue
         text = open(path, encoding='utf-8', errors='replace').read()
-        # Definitions and declarations are not calls.
-        calls = [m.start() for m in re.finditer(r'(?<![\w:])%s\s*\(\s*\)\s*;' % reader,
-                                                text)]
+        # Definitions and declarations are not calls. A call may pass the
+        # config object (headOffsetGateConfigure(cfg)); a declaration's
+        # parameter list has a type in it, which a name-only argument does not.
+        calls = [m.start() for m in re.finditer(
+            r'(?<![\w:])%s\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)\s*;' % reader, text)]
         if not calls:
             print('  FAIL  %s() is never called in %s' % (reader, rel))
             bad += 1

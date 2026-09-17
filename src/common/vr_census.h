@@ -29,19 +29,6 @@ inline void vrCensusConfigure() {
         "frame-event kind and 16 per GPU-command kind, separately for startup and VR. QPC joins gfx/vr logs; "
         "ordinals are local to each DLL. Missing observations are not proof of absence.");
 }
-// Called only from normal API entry points, never DllMain. This does not load
-// a DLL, initialize the graphics proxy, touch a device or issue GPU work.
-inline bool vrCensusBeginVr() {
-    if (!vrCensusEnabled()) return false;
-    if (g_vrCensusBudget.beginVr()) {
-        LARGE_INTEGER qpc{};
-        QueryPerformanceCounter(&qpc);
-        Log::get().note("VR order census phase: vr qpc=%lld thread=%lu; independent "
-                        "budgets selected once; startup counts retained.",
-                        qpc.QuadPart, GetCurrentThreadId());
-    }
-    return true; // Acknowledge enabled, including an already-selected VR bank.
-}
 inline void vrCensusNote(VrCensusEvent event, const void* subject = nullptr,
                          int detail = 0, uint32_t frame = 0) {
     if (!vrCensusEnabled()) return;

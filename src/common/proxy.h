@@ -19,16 +19,6 @@ namespace edvr {
 HMODULE loadRealModule(const std::wstring& moduleDir, const std::string& configuredPath,
                        const wchar_t* systemFallback, const wchar_t* what);
 
-// Reads one dotted key (e.g. "d3d11.real_dll") from <moduleDir>\<iniName>
-// before Config exists to read it. Loader-lock safe: raw CreateFile/ReadFile
-// into a fixed stack buffer, no dynamic growth, no map of every key -- just
-// the one value a proxy needs before it can pick which real DLL to load.
-// Mirrors Config::parse's section-qualified "[s]\nk = v" and bare "s.k = v"
-// flattening, so a value read here and the same value read later through
-// Config agree. Returns empty if the file, section+key, or value is absent.
-std::string readConfigStringEarly(const std::wstring& moduleDir, const wchar_t* iniName,
-                                  const char* dottedKey);
-
 // Fills procs[i] with GetProcAddress(real, names[i]), substituting
 // unresolvedStub for anything missing so a stale export list degrades to a
 // no-op return rather than a jump through null.

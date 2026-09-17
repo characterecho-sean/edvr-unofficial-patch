@@ -24,6 +24,9 @@
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 #include "gpu_timing.h"
+// fsr3_engine.h is deliberately NOT included: the EDVR PASSES tile reaches
+// AMD's price through temporal_pass.h's temporalPassTrainedTotals, which
+// answers for the engine fix.temporal_aa names right now (F6).
 #include "native_menu.h"
 #include "native_timing.h"
 #include "native_perf_history.h"
@@ -238,6 +241,7 @@ const char* eventName(uint32_t bit) {
         case kEvBinds: return "binds re-read";
         case kEvNgx: return "DLSS feature";
         case kEvMenu: return "menu open/close";
+        case kEvFsr: return "FSR context";
         default: return "?";
     }
 }
@@ -251,9 +255,10 @@ void eventList(uint16_t events, float ms, char* buf, size_t n) {
         return;
     }
     size_t len = 0;
-    for (uint32_t bit = 1; bit <= kEvMenu && len + 1 < n; bit <<= 1) {
+    for (uint32_t bit = 1; bit <= kEvFsr && len + 1 < n; bit <<= 1) {
         if (!(events & bit)) continue;
-        const bool timed = ms > 0.0f && (bit == kEvCompile || bit == kEvReload || bit == kEvNgx);
+        const bool timed =
+            ms > 0.0f && (bit == kEvCompile || bit == kEvReload || bit == kEvNgx || bit == kEvFsr);
         const int w = timed ? snprintf(buf + len, n - len, "%s%s (%.0f ms)", len ? ", " : "", eventName(bit),
                                        static_cast<double>(ms))
                             : snprintf(buf + len, n - len, "%s%s", len ? ", " : "", eventName(bit));
@@ -870,7 +875,7 @@ void perfMonitorNoteEvent(uint32_t bits, double ms) {
     // the middle of a benchmark window. Advance a cheap epoch immediately;
     // the next monitor tick hashes it into the scope and aborts the window.
     constexpr uint32_t kBenchmarkScopeEvents = kEvReload | kEvIniWrite |
-        kEvBinds | kEvNgx | kEvMenu;
+        kEvBinds | kEvNgx | kEvFsr | kEvMenu;
     if (bits & kBenchmarkScopeEvents)
         s.nativeBenchmarkSettingsEpoch.fetch_add(1, std::memory_order_relaxed);
     if (ms > 0.0) {
@@ -1029,7 +1034,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const float hz = !native && s.haveSample && s.lastSample.displayHz > 0.0f ? s.lastSample.displayHz : 0.0f;
     const float budget = hz > 0.0f ? 1000.0f / hz : 11.1f;
     const float windowS = ps.count ? ps.count * ps.avgMs / 1000.0f : 0.0f;
-    const char* noTiming = native ? "native OpenXR timing unavailable" : runtimeKind() == 2 ? "OpenComposite: unavailable" :
+    const char* noTiming = native ? "native OpenXR timing unavailable" :
                            glitchConsumerPresent() ? "no compositor timing" : "no openvr half";
 
     // Row 1: the frame, as fpsVR reports it. Both come from Valve's own
@@ -1239,7 +1244,15 @@ int perfMonitorTiles(PerfTile* out, int max) {
         double avg = 0.0, mx = 0.0, rej = 0.0, clip = 0.0;
         double temporal = -1.0, sharpen = -1.0;
         bool trained = false;
-        if (temporalPassDlaaTotals(&t, &avg, &mx, &resets) && t) {
+        // The engine fix.temporal_aa names RIGHT NOW, and its own word for
+        // the tile. Trying NVIDIA's totals first and falling through to
+        // AMD's read the engine that ran FIRST: neither total is cleared on
+        // a live switch, so after a dlss -> fsr A/B this tile kept printing
+        // "ms NVIDIA/call" beside a price line that said fsr (the review of
+        // 2026-09-16, F6). temporalPassTrainedTotals answers for the current
+        // engine and writes the word whatever it answers.
+        const char* engineWord = "NVIDIA";
+        if (temporalPassTrainedTotals(&t, &avg, &mx, &resets, &engineWord, nullptr) && t) {
             temporal = avg;
             trained = true;
         } else if (temporalPassTotals(&t, &avg, &mx, &rej, &clip) && t) {
@@ -1248,16 +1261,18 @@ int perfMonitorTiles(PerfTile* out, int max) {
         if (sharpenPassTotals(&t, &avg, &mx) && t) sharpen = avg;
         if (temporal >= 0.0 && sharpen >= 0.0) {
             snprintf(v, sizeof(v), "%.1f+%.1f", temporal, sharpen);
-            // The NVIDIA figure here is a pooled average over every call
-            // (any role, either eye), not one eye's price -- say so rather
-            // than mislabel it "ms/eye" alongside the sharpen pass, which
-            // genuinely is per eye.
-            snprintf(sub, sizeof(sub), trained ? "ms NVIDIA/call + sharpen/eye"
-                                               : "ms/eye temporal + sharpen");
+            // The trained-engine figure here is a pooled average over every
+            // call (any role, either eye), not one eye's price -- say so
+            // rather than mislabel it "ms/eye" alongside the sharpen pass,
+            // which genuinely is per eye. trained's format has one %s; the
+            // untrained one has none and simply ignores the extra argument.
+            snprintf(sub, sizeof(sub),
+                     trained ? "ms %s/call + sharpen/eye" : "ms/eye temporal + sharpen",
+                     engineWord);
         } else if (temporal >= 0.0) {
             snprintf(v, sizeof(v), "%.2f", temporal);
-            snprintf(sub, sizeof(sub), trained ? "ms/call, NVIDIA's pass"
-                                               : "ms/eye, temporal pass");
+            snprintf(sub, sizeof(sub), trained ? "ms/call, %s's pass" : "ms/eye, temporal pass",
+                     engineWord);
         } else if (sharpen >= 0.0) {
             snprintf(v, sizeof(v), "%.2f", sharpen);
             snprintf(sub, sizeof(sub), "ms/eye, sharpen");

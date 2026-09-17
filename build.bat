@@ -10,10 +10,8 @@ REM    build\openxr_loader.dll   pinned Khronos loader; Windows selects runtime
 REM
 REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
-REM  --openvr supplies an original runtime only for legacy ABI regression tests;
-REM  it is never a dependency of the native release or installed runtime.
 REM
-REM  Usage:  build.bat [--openvr <path-to-openvr_api.dll>] [--clean] [--jobs N]
+REM  Usage:  build.bat [--clean] [--jobs N]
 REM
 REM  Once the DLLs are built, the test rigs run concurrently, --jobs at a time
 REM  (default: one per logical core), through tools\run_jobs.py. Each rig is a
@@ -35,19 +33,12 @@ set "EDVR_RIG="
 :parse_args
 if "%~1"=="" goto args_done
 if /I "%~1"=="--clean" goto arg_clean
-if /I "%~1"=="--openvr" goto arg_openvr
 if /I "%~1"=="--jobs" goto arg_jobs
 if /I "%~1"=="--rig" goto arg_rig
 echo [edvr] unknown argument: %~1
 exit /b 1
 :arg_clean
 set "DO_CLEAN=1"
-shift
-goto parse_args
-:arg_openvr
-set "OPENVR_SRC=%~2"
-set "OPENVR_EXPLICIT=1"
-shift
 shift
 goto parse_args
 :arg_jobs
@@ -62,40 +53,6 @@ shift
 goto parse_args
 :args_done
 if defined EDVR_RIG goto run_rig
-
-REM A path given explicitly must exist. The fallback below is for finding the
-REM game's copy automatically; applying it to a typo'd --openvr instead built the
-REM export table from a DIFFERENT openvr build, and every export the two did not
-REM share then resolved to the do-nothing stub at runtime -- a silent wrong
-REM answer in the one case where the user had been specific.
-if defined OPENVR_EXPLICIT (
-    if not exist "%OPENVR_SRC%" (
-        echo [edvr] ERROR: --openvr path does not exist: %OPENVR_SRC%
-        exit /b 1
-    )
-)
-
-REM Where the game keeps its own copy, if --openvr was not given.
-REM
-REM The RENAMED ORIGINAL first: on an installed rig, Openvr\win64\
-REM openvr_api.dll IS the EDVR proxy from the last install, and generating
-REM the export table from our own proxy builds a proxy of a proxy -- the
-REM .def names our extra exports twice and the linker aliases one to a
-REM forwarding thunk (measured 2026-08-18; gen_exports.py now refuses such
-REM a source outright). openvr_api_orig.dll is the true runtime whenever
-REM the install steps have run, and absent before them, where the unrenamed
-REM openvr_api.dll is still genuine.
-if not defined OPENVR_SRC (
-    set "OPENVR_GAMEDIR=%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64"
-    if exist "!OPENVR_GAMEDIR!\openvr_api_orig.dll" (
-        set "OPENVR_SRC=!OPENVR_GAMEDIR!\openvr_api_orig.dll"
-    ) else (
-        set "OPENVR_SRC=!OPENVR_GAMEDIR!\openvr_api.dll"
-    )
-)
-if not exist "%OPENVR_SRC%" (
-    if exist "%ROOT%\reference\openvr_api.dll" set "OPENVR_SRC=%ROOT%\reference\openvr_api.dll"
-)
 
 if defined DO_CLEAN (
     echo [edvr] cleaning
@@ -199,7 +156,17 @@ REM and tools\run_jobs.py gives each of those CL=/MP4 instead, so eight rigs
 REM cannot start sixty-four compiler processes between them.
 set CL=/MP
 
-set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHsc /W4 /GR- ^
+REM /EHs, not /EHsc, for the whole d3d11 half. /EHc is "assume an extern "C"
+REM function never throws", and AMD's FSR3 D3D11 port breaks that assumption
+REM on purpose: its TIF helper (ffx_dx11.cpp) answers a failed D3D11 call
+REM inside ffxFsr3UpscalerContextCreate/Dispatch -- both extern "C" -- with a
+REM bare `throw 1`. Under /EHsc the try/catch in src\d3d11\fsr3_engine.cpp is
+REM not required to run and the process fail-fasts instead (the review of
+REM 2026-09-16, F2; the STATUS_STACK_BUFFER_OVERRUN signature in the design
+REM doc's journal is that fail-fast). The flag covers every object in this
+REM compile, not just fsr3_engine.cpp; the cost is unwind tables around
+REM extern "C" calls.
+set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- ^
  /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
  /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
  /I"%GEN%"
@@ -273,7 +240,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^
-    --extra-export edvrSupersampleResolve ^
     --extra-export edvrTemporalAa ^
     --extra-export edvrEyeCaptureUntreated ^
     --extra-export edvrEyeCaptureArm ^
@@ -291,9 +257,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
-    --extra-export edvrCensusBeginVr ^
-    --extra-export edvrCensusBeginShutdown ^
-    --extra-export edvrCensusEndShutdown ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
     --extra-export edvrQueryNativeRenderSettings ^
@@ -365,7 +328,68 @@ if defined NGX (
     if exist "%BUILD%\nvngx_dlss.dll" del /q "%BUILD%\nvngx_dlss.dll"
     if exist "%BUILD%\NVIDIA-DLSS-LICENSE.txt" del /q "%BUILD%\NVIDIA-DLSS-LICENSE.txt"
 )
-cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
+
+REM AMD's FSR 3.1 upscaler, the community Direct3D 11 port (the optiscaler
+REM FidelityFX-SDK-DX11 fork; tools\fetch_ffx_dx11.py; design doc section
+REM 3.2). EDVR_FFX_DX11 names a copy explicitly, or forces the no-SDK path
+REM with the literal value "none" -- proving fix.temporal_aa=fsr's runtime
+REM refusal even on a machine that already has the SDK staged; else the
+REM checkout's own third_party\ffx-dx11; else the machine's copy under
+REM %LOCALAPPDATA%\EDVR\ffx-dx11, which is where tools\fetch_ffx_dx11.py
+REM puts it (one build every checkout and worktree shares). The d3d11 half
+REM is then built with the FSR3 calls in and the two static libraries
+REM linked. The copy is VERIFIED first -- the staged files, and each
+REM library's CRT and imports, against tools\fetch_ffx_dx11.py's own
+REM checks -- and a mismatch fails the build. Without any SDK the build
+REM still succeeds, since the code compiles either way, but fix.temporal_aa
+REM = fsr then refuses at runtime with "this build was made without AMD's
+REM upscaler" (no DLL is shipped either way -- FFX links in statically).
+set FFX=
+set FSR_NONE=
+if /i "%EDVR_FFX_DX11%"=="none" set FSR_NONE=1
+if not defined FSR_NONE if defined EDVR_FFX_DX11 set FFX=%EDVR_FFX_DX11%
+if not defined FSR_NONE if not defined FFX if exist "%ROOT%\third_party\ffx-dx11\include\FidelityFX\host\ffx_fsr3upscaler.h" set FFX=%ROOT%\third_party\ffx-dx11
+if not defined FSR_NONE if not defined FFX if exist "%LOCALAPPDATA%\EDVR\ffx-dx11\include\FidelityFX\host\ffx_fsr3upscaler.h" set FFX=%LOCALAPPDATA%\EDVR\ffx-dx11
+set FSRFLAGS=
+set FSRLIB=
+if defined FFX (
+    python "tools\fetch_ffx_dx11.py" --verify "%FFX%" || (
+        echo [edvr] ERROR: the FSR3 D3D11 port at %FFX% is not the pinned one. tools\fetch_ffx_dx11.py
+        echo        names the commit; fetch it again, or update the pin on purpose.
+        exit /b 1
+    )
+    set FSRFLAGS=/DEDVR_HAVE_FSR3=1 /I"%FFX%\include"
+    set FSRLIB="%FFX%\lib\ffx_fsr3upscaler_x64.lib" "%FFX%\lib\ffx_backend_dx11_x64.lib"
+    echo [edvr] FSR3 D3D11 port: %FFX%
+    REM The port's MIT notice, exactly as NGX's licence is handled above. It
+    REM ships because the port is COMPILED INTO the d3d11.dll we distribute --
+    REM it has no DLL of its own -- so MIT's notice requirement applies to the
+    REM release. tools\package_native.py carries it into the zip when it is
+    REM here, and the no-port path below deletes it so a stale one cannot.
+    copy /Y "%FFX%\LICENSE.txt" "%BUILD%\FIDELITYFX-SDK-DX11-LICENSE.txt" >nul
+) else (
+    if exist "%BUILD%\FIDELITYFX-SDK-DX11-LICENSE.txt" del /q "%BUILD%\FIDELITYFX-SDK-DX11-LICENSE.txt"
+    if defined FSR_NONE (
+        echo [edvr] EDVR_FFX_DX11=none: building without AMD's FSR upscaler on purpose,
+        echo [edvr] to prove the no-SDK path. fix.temporal_aa=fsr will refuse at runtime.
+    ) else (
+        echo [edvr] ==================================================================
+        echo [edvr] NO FSR3 SDK. This build has no AMD upscaler; fix.temporal_aa=fsr
+        echo [edvr] refuses at runtime. Fine for development; NOT a release. Looked for
+        echo [edvr] include\FidelityFX\host\ffx_fsr3upscaler.h in these three places,
+        echo [edvr] in this order:
+        if defined EDVR_FFX_DX11 (
+            echo [edvr]   EDVR_FFX_DX11  = %EDVR_FFX_DX11%
+        ) else (
+            echo [edvr]   EDVR_FFX_DX11  = ^(not set^)
+        )
+        echo [edvr]   the checkout    = %ROOT%\third_party\ffx-dx11
+        echo [edvr]   this machine    = %LOCALAPPDATA%\EDVR\ffx-dx11
+        echo [edvr] To fetch the pinned SDK once for this machine:  python tools\fetch_ffx_dx11.py
+        echo [edvr] ==================================================================
+    )
+)
+cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
@@ -424,13 +448,13 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_panel.cpp" ^
     "src\d3d11\intro_skip.cpp" ^
     "src\d3d11\intro_upscale.cpp" ^
-    "src\d3d11\supersample_pass.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\mesh_motion.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
+    "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\foveation.cpp" ^
     "src\d3d11\eye_mask.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
@@ -447,115 +471,12 @@ rc.exe /nologo /fo "%OBJ%\d3d11\dxbc_notice.res" "third_party\dxbc_hash\notice.r
 if errorlevel 1 ( echo [edvr] ERROR: DXBC notice resource failed & exit /b 1 )
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
-copy /y "%BUILD%\d3d11.dll" "%BUILD%\legacy_d3d11_fixture.dll" >nul || exit /b 1
-
-REM The migration build owns automatic LibOVR routing at process attach.
-REM Reuse the exact graphics objects, replacing only the immutable startup
-REM capability in the proxy entry object. Keep the older proxy as a separate
-REM regression fixture only; the completed build's standard outputs are native.
-echo [edvr] === edvr_openxr_graphics.dll ===
-if not exist "%OBJ%\native_graphics" mkdir "%OBJ%\native_graphics"
-cl.exe %CFLAGS% %NGXFLAGS% /DEDVR_NATIVE_OPENXR_BUILD=1 ^
-    /Fo"%OBJ%\native_graphics\d3d11_proxy.obj" "src\d3d11\d3d11_proxy.cpp"
-if errorlevel 1 ( echo [edvr] ERROR: native graphics entry compile failed & exit /b 1 )
-type nul > "%OBJ%\native_graphics\objects.rsp"
-for %%O in ("%OBJ%\d3d11\*.obj") do (
-    if /I not "%%~nxO"=="d3d11_proxy.obj" echo "%%~fO">> "%OBJ%\native_graphics\objects.rsp"
-)
-link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
-    /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\edvr_openxr_graphics.dll" ^
-    "%OBJ%\native_graphics\d3d11_proxy.obj" @"%OBJ%\native_graphics\objects.rsp" ^
-    "%OBJ%\d3d11\dxbc_notice.res" ^
-    kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB%
-if errorlevel 1 ( echo [edvr] ERROR: native graphics link failed & exit /b 1 )
+copy /y "%BUILD%\d3d11.dll" "%BUILD%\edvr_openxr_graphics.dll" >nul || exit /b 1
 echo [edvr] built %BUILD%\edvr_openxr_graphics.dll
-
-echo.
-echo [edvr] === openvr_api.dll ===
-if not exist "%OPENVR_SRC%" goto no_openvr
-
-REM --lazy: this proxy must not load its real module from DllMain. The d3d11
-REM side can, because the system d3d11.dll is already mapped and the call only
-REM bumps a refcount; openvr_api_orig.dll is mapped by nothing, so loading it
-REM there runs its DllMain under the loader lock.
-python "tools\gen_exports.py" --source "%OPENVR_SRC%" ^
-    --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy ^
-    --wrap VR_InitInternal --wrap VR_ShutdownInternal ^
-    --wrap VR_IsInterfaceVersionValid --wrap VR_GetInitToken ^
-    --extra-export edvr_selftest_system_hook ^
-    --extra-export edvr_selftest_cull_guard ^
-    --extra-export edvr_selftest_cull_adopt ^
-    --extra-export edvr_selftest_render_tangents
-if errorlevel 1 ( echo [edvr] ERROR: openvr export generation failed & exit /b 1 )
-
-REM The lazy shim MUST carry unwind info.
-REM
-REM It moves rsp by 128 and then calls. x64 exception handling walks the stack
-REM with the .pdata tables, and a function with no entry is assumed to be a leaf
-REM whose return address sits at [rsp] -- so an unwinder would read it out of the
-REM shim's own shadow space and every SEH handler above would be skipped. That
-REM shipped once, with thunks.obj contributing no .pdata at all.
-REM
-REM Asserted here rather than at runtime because the runtime paths that would
-REM expose it are not reachable from a test: a faulting DllMain is caught inside
-REM LoadLibrary and never propagates. Checking the generated source is exact.
-findstr /C:".ENDPROLOG" "%GEN%\edvr_thunks_openvr.asm" >nul
-if errorlevel 1 (
-    echo [edvr] ERROR: the lazy openvr shim has no unwind directives.
-    echo        A fault inside it would be uncatchable. See ASM_LAZY_HEAD in
-    echo        tools\gen_exports.py.
-    exit /b 1
-)
-
-if not exist "%OBJ%\openvr" mkdir "%OBJ%\openvr"
-del /q "%OBJ%\openvr\*.obj" 2>nul
-ml64.exe /nologo /c /Fo"%OBJ%\openvr\thunks.obj" "%GEN%\edvr_thunks_openvr.asm" >nul
-if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for openvr & exit /b 1 )
-
-REM Hand-written, unlike the generated thunks above: the two IVRSystem_012
-REM slots that return structs by value, observed by register-preserving
-REM tail-jump thunks because no C signature can receive both calling
-REM conventions (see system_thunks.asm). No rsp movement, so the unwind-info
-REM assertion on the generated shim deliberately does not apply here.
-ml64.exe /nologo /c /Fo"%OBJ%\openvr\systhunks.obj" "src\openvr\system_thunks.asm" >nul
-if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for system_thunks & exit /b 1 )
-
-cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
-    "src\common\log.cpp" "src\common\config.cpp" ^
-    "src\common\config_audit.cpp" ^
-    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
-    "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
-    "src\common\frame_flag.cpp" ^
-    "src\openvr\openvr_proxy.cpp" "src\openvr\compositor_hook.cpp" ^
-    "src\openvr\head_offset.cpp" "src\openvr\resubmit_shadow.cpp" ^
-    "src\openvr\system_hook.cpp" "src\openvr\guard_crop.cpp" ^
-    "src\openvr\supersample_resolve.cpp" ^
-    "src\openvr\temporal_aa.cpp" ^
-    "src\openvr\sharpen.cpp" "src\openvr\menu_door.cpp" "src\openvr\frame_timing.cpp" ^
-    "src\openvr\launch_centre.cpp" ^
-    "src\openvr\gaze_probe.cpp" ^
-    "src\openvr\call_census.cpp" ^
-    "src\d3d11\elite_binds.cpp"
-if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
-
-link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
-    /DEF:"%GEN%\edvr_openvr.def" /OUT:"%BUILD%\openvr_api.dll" ^
-    "%OBJ%\openvr\*.obj" kernel32.lib user32.lib version.lib
-if errorlevel 1 ( echo [edvr] ERROR: openvr link failed & exit /b 1 )
-
-echo [edvr] built %BUILD%\openvr_api.dll
-goto openvr_done
-
-:no_openvr
-echo [edvr] SKIPPED: no openvr_api.dll to generate exports from.
-echo        Looked for the game's copy, and reference\openvr_api.dll.
-echo        Pass --openvr ^<path^> to build the legacy ABI test fixture.
-echo        The native release does not require that fixture.
-:openvr_done
 
 echo.
 REM Gated with `||`, not `if errorlevel 1`.
@@ -583,14 +504,6 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     "src\common\frame_flag.cpp" ^
     /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
-
-echo.
-echo [edvr] === fakevr.dll ===
-if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
-    /Fo"%OBJ%\fakevr\\" /Fe"%BUILD%\fakevr.dll" ^
-    "tools\fakevr\fakevr.cpp" /link /INCREMENTAL:NO kernel32.lib
-if errorlevel 1 ( echo [edvr] ERROR: fakevr build failed & exit /b 1 )
 
 REM Shared by the installer and installer_test rigs below.
 set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
@@ -652,8 +565,7 @@ if errorlevel 1 (
 )
 
 
-REM All legacy regression tests above have finished. Standard outputs are native.
-copy /y "%BUILD%\edvr_openxr_graphics.dll" "%BUILD%\d3d11.dll" >nul || exit /b 1
+REM The native OpenXR build is the only build; nothing above ran a legacy path.
 copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
 python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
 python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
@@ -686,7 +598,7 @@ REM ===========================================================================
 REM  Test rigs. Each is a subroutine that tools\run_jobs.py runs in its own
 REM  "build.bat --rig <label>" child, several at a time, once the DLLs above
 REM  are built. A child jumps here from :args_done with the parent's
-REM  environment: ROOT, BUILD, OBJ, GEN, CFLAGS, EDVR_VER, OPENVR_SRC, the
+REM  environment: ROOT, BUILD, OBJ, GEN, CFLAGS, EDVR_VER, the
 REM  INSTALLER_* lists and the compiler on PATH. Rigs run in any order and at the
 REM  same time as one another, so a rig must not depend on another rig's
 REM  output, must not share an obj directory, and must not write a file
@@ -757,39 +669,6 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 :vtable_test_run
 "%BUILD%\vtable_test.exe" || (
     echo [edvr] ERROR: vtable hooking does not compose with object wrappers
-    exit /b 1
-)
-exit /b 0
-
-:rig_menu_test
-echo [edvr] === menu_test.exe ===
-REM The settings menu's pure parts (docs\settings-menu.md): the keyboard
-REM gate's filter policies (zeroed state, ups kept and downs dropped, the
-REM summon swallow, the scan-code map), the panel's ray intersection flat
-REM and curved, the door's eye transform against a hand-worked pose, the
-REM one-value ini write's merge, and the key rules (menu_keys.cpp: the
-REM swallow-until-release tracker, which Elite panel keys are adopted and
-REM why not, and a footer measured against the real GDI face) -- each one
-REM a place a wrong sign or an off-by-one would otherwise be found in a
-REM headset.
-if not exist "%OBJ%\menutest" mkdir "%OBJ%\menutest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
-    /DEDVR_MENU_TEST /Fo"%OBJ%\menutest"\ /Fe"%BUILD%\menu_test.exe" ^
-    "tools\menu_test\menu_test.cpp" ^
-    "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
-    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\menu_keys.cpp" ^
-    "src\openvr\menu_door.cpp" "src\d3d11\shader_swap.cpp" ^
-    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
-    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
-    "src\common\config.cpp" "src\common\log.cpp" ^
-    "src\common\guard.cpp" "src\common\frame_flag.cpp" ^
-    "src\common\proxy.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib gdi32.lib version.lib d3d11.lib
-if errorlevel 1 ( echo [edvr] ERROR: menu_test build failed & exit /b 1 )
-"%BUILD%\menu_test.exe" || (
-    echo [edvr] ERROR: the settings menu's arithmetic or gate policy is wrong
     exit /b 1
 )
 exit /b 0
@@ -1057,28 +936,12 @@ if errorlevel 1 ( echo [edvr] ERROR: glitch_test build failed & exit /b 1 )
 )
 exit /b 0
 
-:rig_pose_test
-echo [edvr] === pose_test.exe ===
-if not exist "%OBJ%\posetest" mkdir "%OBJ%\posetest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\posetest"\ ^
-    /Fe"%BUILD%\pose_test.exe" "tools\pose_test\pose_test.cpp" ^
-    /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: pose_test build failed & exit /b 1 )
-"%BUILD%\pose_test.exe" || (
-    echo [edvr] ERROR: the head pose arithmetic is wrong
-    exit /b 1
-)
-exit /b 0
-
 :rig_supersample_test
 echo [edvr] === supersample_test.exe ===
-REM The supersample resolve's arithmetic (src\common\supersample_math.h):
-REM the arm/disarm verdict from sizes, the eye region from Submit bounds
-REM (double-wide and flipped), and both kernels' weights -- table-tested,
-REM header-only, linking nothing from src\ at all. The HLSL in
-REM supersample_pass.cpp transcribes the same functions; this pins the
-REM reference they are transcribed from.
+REM The eye-region rule (src\common\supersample_math.h): which pixels are one
+REM eye's, from the Submit bounds (double-wide and flipped) -- table-tested,
+REM header-only, linking nothing from src\ at all. Every pass at the door
+REM reads through it, so a drift here is a drift in all of them.
 if not exist "%OBJ%\sstest" mkdir "%OBJ%\sstest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\sstest"\ ^
@@ -1087,7 +950,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: supersample_test build failed & exit /b 1 )
 "%BUILD%\supersample_test.exe" || (
-    echo [edvr] ERROR: the supersample resolve's arithmetic is wrong
+    echo [edvr] ERROR: the eye-region rule is wrong
     exit /b 1
 )
 exit /b 0
@@ -1378,23 +1241,6 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 "%OBJ%\gputiming\gpu_timing_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_vr_census_bridge_test
-REM Drive the actual paired proxies through startup exhaustion and a first
-REM compositor wait, on a hidden WARP swapchain with an inert fake runtime.
-if not exist "%OBJ%\vrcensusbridge" mkdir "%OBJ%\vrcensusbridge"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /Fo"%OBJ%\vrcensusbridge\\" /Fe"%BUILD%\vr_census_fakevr.dll" ^
-    "tools\vr_census_bridge_test\fakevr.cpp" /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: VR census fake runtime build failed & exit /b 1 )
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /Fo"%OBJ%\vrcensusbridge\\" /Fe"%BUILD%\vr_census_bridge_test.exe" ^
-    "tools\vr_census_bridge_test\vr_census_bridge_test.cpp" /link /INCREMENTAL:NO user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: VR census bridge test build failed & exit /b 1 )
-if exist "%BUILD%\openvr_api.dll" (
-    "%BUILD%\vr_census_bridge_test.exe" --self-test "%BUILD%" || exit /b 1
-)
-exit /b 0
-
 :rig_openvr_abi_test
 if not exist "%OBJ%\openvr_abi" mkdir "%OBJ%\openvr_abi"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
@@ -1402,30 +1248,6 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     "tools\openvr_abi_test\openvr_abi_test.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: OpenVR ABI test build failed & exit /b 1 )
 "%BUILD%\openvr_abi_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_openvr_export_census_test
-REM Real-proxy lifecycle census tests use separate processes and fake runtimes;
-REM no installed headset/runtime or game files are touched.
-if not exist "%OBJ%\openvr_exports" mkdir "%OBJ%\openvr_exports"
-for %%F in (fakevr missing reentry) do (
-    REM Source names below are mapped explicitly to keep fixture DLL names unique.
-    set "EXPORT_FIXTURE=fakevr"
-    if "%%F"=="missing" set "EXPORT_FIXTURE=fakevr_missing"
-    if "%%F"=="reentry" set "EXPORT_FIXTURE=fakevr_reentry"
-    cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-        /Fo"%OBJ%\openvr_exports\\" /Fe"%BUILD%\export_census_%%F.dll" ^
-        "tools\openvr_export_census_test\!EXPORT_FIXTURE!.cpp" /link /INCREMENTAL:NO
-    if errorlevel 1 ( echo [edvr] ERROR: export census fixture build failed & exit /b 1 )
-)
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /Fo"%OBJ%\openvr_exports\\" /Fe"%BUILD%\openvr_export_census_test.exe" ^
-    "tools\openvr_export_census_test\openvr_export_census_test.cpp" /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: export census test build failed & exit /b 1 )
-if exist "%BUILD%\openvr_api.dll" (
-    "%BUILD%\openvr_export_census_test.exe" --self-test "%BUILD%" --dry-run || exit /b 1
-    "%BUILD%\openvr_export_census_test.exe" --self-test "%BUILD%" || exit /b 1
-)
 exit /b 0
 
 :rig_openxr_probe
@@ -1524,20 +1346,18 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR binding test build failed & exit /b 1 )
 "%BUILD%\openxr_binding_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --self-test || exit /b 1
-"%BUILD%\openxr_binding_test.exe" --published-proxy "%BUILD%\d3d11.dll" || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --published-proxy "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
 exit /b 0
 
 :rig_native_startup_test
 REM Inspect actual startup behavior without creating a headset runtime. The
-REM fixture is intentionally not Elite: both variants must leave its IAT alone.
+REM fixture is intentionally not Elite: it must leave its IAT alone.
 if not exist "%OBJ%\native_startup" mkdir "%OBJ%\native_startup"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_startup\\" /Fe"%BUILD%\native_startup_test.exe" ^
     "tools\native_startup_test\native_startup_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native startup test build failed & exit /b 1 )
 "%BUILD%\native_startup_test.exe" --dry-run || exit /b 1
-"%BUILD%\native_startup_test.exe" --self-test "%BUILD%\d3d11.dll" legacy || exit /b 1
 "%BUILD%\native_startup_test.exe" --self-test "%BUILD%\edvr_openxr_graphics.dll" native || exit /b 1
 exit /b 0
 
@@ -1616,6 +1436,35 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & exit /b 1 )
 "%BUILD%\openxr_shared_texture_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_shared_texture_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_fsr3_engine_test
+REM AMD's FSR3 engine (src\d3d11\fsr3_engine.cpp) on WARP: availability, two
+REM contexts, DEBUG_CHECKING silence, an at-rest convergence check, the
+REM jitter/motion-vector sign registration table (design doc 3.5 item 3),
+REM reset, a size change, and the VRAM query -- Track C's own desk test,
+REM modeled on :rig_openxr_shared_texture_test above. Skips cleanly (still
+REM green) when this build has no FSR3 SDK: there is no engine body to
+REM test, the same reason nothing tests NGX's stub half either.
+if not defined FSRFLAGS (
+    echo [edvr] fsr3_engine_test: no FSR3 SDK in this build ^(EDVR_FFX_DX11^) -- skipping.
+    exit /b 0
+)
+if not exist "%OBJ%\fsr3_engine_test" mkdir "%OBJ%\fsr3_engine_test"
+REM /EHs, matching CFLAGS above (and for the same reason): this rig compiles
+REM fsr3_engine.cpp itself, and one of its cases proves that the catch around
+REM AMD's extern "C" dispatch really does catch the port's `throw 1`. Under
+REM /EHsc that case would fail-fast instead of failing.
+cl.exe /nologo /W4 /O2 /EHs /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX %FSRFLAGS% ^
+    /Fo"%OBJ%\fsr3_engine_test\\" /Fe"%BUILD%\fsr3_engine_test.exe" ^
+    "tools\fsr3_engine_test\fsr3_engine_test.cpp" "src\d3d11\fsr3_engine.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO %FSRLIB% dxgi.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSR3 engine test build failed & exit /b 1 )
+"%BUILD%\fsr3_engine_test.exe" --dry-run || exit /b 1
+"%BUILD%\fsr3_engine_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_system_test
@@ -1772,47 +1621,12 @@ if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & 
 "%BUILD%\native_render_settings_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_openvr_smoke
-if not exist "%OBJ%\openvrsmoke" mkdir "%OBJ%\openvrsmoke"
-REM Links the shared guard, and what guard.cpp needs, because the harness now
-REM also exercises the crash sentinel -- shared code whose two bugs were a
-REM silent arm failure and a permanent lockout, neither of which shows up as a
-REM crash or a wrong pixel.
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\openvrsmoke\\" /Fe"%BUILD%\openvr_smoke.exe" ^
-    "tools\openvr_smoke\openvr_smoke.cpp" ^
-    "src\common\guard.cpp" "src\common\log.cpp" ^
-    "src\common\config.cpp" "src\common\proxy.cpp" ^
-    "src\common\frame_flag.cpp" "src\common\hotkey.cpp" ^
-    "src\openvr\resubmit_shadow.cpp" "src\openvr\guard_crop.cpp" ^
-    "src\d3d11\elite_binds.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib d3d11.lib
-if errorlevel 1 ( echo [edvr] ERROR: openvr_smoke build failed & exit /b 1 )
-echo [edvr] built %BUILD%\openvr_smoke.exe
-
-REM Run it. A startup test nothing runs is a startup test that rots -- the
-REM fakechain harness exists because the loader-lock crash shipped once, and the
-REM openvr side then recreated the same hazard with no equivalent check.
-REM Skipped when the openvr proxy was not built.
-if exist "%BUILD%\openvr_api.dll" (
-    if not exist "%BUILD%\vrtest" mkdir "%BUILD%\vrtest"
-    copy /Y "%BUILD%\openvr_api.dll" "%BUILD%\vrtest\openvr_api.dll" >nul
-    copy /Y "%BUILD%\fakevr.dll" "%BUILD%\vrtest\openvr_api_orig.dll" >nul
-    "%BUILD%\openvr_smoke.exe" "%BUILD%\vrtest" || (
-        echo [edvr] ERROR: openvr startup test failed or crashed
-        exit /b 1
-    )
-)
-exit /b 0
-
 :rig_vr_runtime_test
 echo [edvr] === vr_runtime_test.exe ===
-REM Which VR back end the process is REALLY on, checked against the real DLLs
+REM Which VR back end the process is REALLY on, checked against the real DLL
 REM this build just made. Guards the failure that made the module exist: a
 REM perfect install the game never opened, and eight log lines telling its
-REM owner the file was missing. Skipped when the openvr proxy was not built,
-REM because ours-versus-theirs needs one of ours to point at.
+REM owner the file was missing.
 if not exist "%OBJ%\vrruntimetest" mkdir "%OBJ%\vrruntimetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrruntimetest"\ ^
@@ -1821,21 +1635,34 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\common\config.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: vr_runtime_test build failed & exit /b 1 )
-if exist "%BUILD%\openvr_api.dll" (
-    if not exist "%BUILD%\vrscratch_ours" mkdir "%BUILD%\vrscratch_ours"
-    if not exist "%BUILD%\vrscratch_foreign" mkdir "%BUILD%\vrscratch_foreign"
-    REM fakevr.dll under the name openvr_api.dll IS what a foreign one looks
-    REM like from here: right name, no edvr_selftest_system_hook export.
-    if not exist "%BUILD%\vrforeign" mkdir "%BUILD%\vrforeign"
-    copy /Y "%BUILD%\fakevr.dll" "%BUILD%\vrforeign\openvr_api.dll" >nul
-    "%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_ours" ours "%BUILD%\openvr_api.dll" || (
-        echo [edvr] ERROR: the VR runtime verdict is wrong for our own openvr_api.dll
-        exit /b 1
-    )
-    "%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_foreign" foreign "%BUILD%\vrforeign\openvr_api.dll" || (
-        echo [edvr] ERROR: the VR runtime verdict is wrong for a foreign openvr_api.dll
-        exit /b 1
-    )
+if not exist "%BUILD%\vrscratch_native" mkdir "%BUILD%\vrscratch_native"
+REM The native runtime DLL under the name openvr_api.dll IS what the game
+REM loads; the module-list check keys on that exact base name.
+if not exist "%BUILD%\vrnative" mkdir "%BUILD%\vrnative"
+copy /Y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\vrnative\openvr_api.dll" >nul
+"%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_native" native "%BUILD%\vrnative\openvr_api.dll" || (
+    echo [edvr] ERROR: the VR runtime verdict is wrong for EDVR's own openvr_api.dll
+    exit /b 1
+)
+
+REM A foreign openvr_api.dll -- a real DLL that is not EDVR's -- is exactly
+REM tools\fakechain\fakechain.cpp copied under that name: it exports only
+REM D3D11CreateDevice, so it carries neither native-runtime export. Built
+REM fresh into this rig's own obj directory rather than trusted from
+REM :rig_fakechain's %BUILD%\fakechain.dll, because run_jobs.py runs rigs
+REM concurrently and gives no ordering, and no shared-write guarantee,
+REM between two rig labels.
+if not exist "%OBJ%\vrruntimetest_fakechain" mkdir "%OBJ%\vrruntimetest_fakechain"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
+    /Fo"%OBJ%\vrruntimetest_fakechain\\" /Fe"%OBJ%\vrruntimetest_fakechain\fakechain.dll" ^
+    "tools\fakechain\fakechain.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr_runtime_test's own fakechain build failed & exit /b 1 )
+if not exist "%BUILD%\vrscratch_foreign" mkdir "%BUILD%\vrscratch_foreign"
+if not exist "%BUILD%\vrforeign" mkdir "%BUILD%\vrforeign"
+copy /Y "%OBJ%\vrruntimetest_fakechain\fakechain.dll" "%BUILD%\vrforeign\openvr_api.dll" >nul
+"%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_foreign" foreign "%BUILD%\vrforeign\openvr_api.dll" || (
+    echo [edvr] ERROR: the VR runtime verdict is wrong for a foreign openvr_api.dll
+    exit /b 1
 )
 exit /b 0
 
@@ -1845,6 +1672,7 @@ python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 
 python tools\openxr_pe.py --graphics "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
 python tools\elite_oculus.py --self-test || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1
+python tools\fetch_ffx_dx11.py --self-test || exit /b 1
 
 REM Do the code, edvr.ini and the log messages agree about setting names?
 REM

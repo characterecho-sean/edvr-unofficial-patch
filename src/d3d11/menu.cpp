@@ -37,6 +37,9 @@
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
+// fsr3_engine.h is deliberately NOT included: the Temporal AA status line
+// reaches AMD's price and its name through temporal_pass.h's
+// temporalPassTrainedTotals, which answers for the engine in force (F6).
 
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unknown"
@@ -557,11 +560,11 @@ std::string openxrResolutionValue(const ResolutionView& v) {
 
 // Why the row has no headset to key on. On the native path the host has
 // not published its sizing yet (the per-tick refresh picks it up within a
-// second of VR init, so "a moment" is honest); on SteamVR or OpenComposite
-// no query ever runs and the key is inert for the whole session, which is
-// said plainly so nobody on those runtimes waits, retries or hunts for a
-// publish that never comes. nativeMenuActive() is the predicate the Status
-// page's Runtime line already uses.
+// second of VR init, so "a moment" is honest); off the native path no
+// query ever runs and the key is inert for the whole session, which is
+// said plainly so nobody there waits, retries or hunts for a publish that
+// never comes. nativeMenuActive() is the predicate the Status page's
+// Runtime line already uses.
 constexpr const char* kNoHeadsetSizing = "No headset sizing published yet; try again in a moment.";
 constexpr const char* kNotNativeWrite = "not written: native OpenXR only";
 const char* noHeadsetWriteText() { return nativeMenuActive() ? kNoHeadsetSizing : kNotNativeWrite; }
@@ -1261,6 +1264,16 @@ void addSettingRows(Page& p, MenuTier tier, const char* page, bool grouped) {
         const MenuRowDef& d = kMenuRows[i];
         if (d.tier != tier) continue;
         if (page && _stricmp(d.page, page) != 0) continue;
+        // fix.temporal_aa_model is NVIDIA's preset row; fsr ignores it
+        // (design doc 3.1), so it stays off the list while fsr is selected.
+        // The row reappears the next time the pages rebuild (developer
+        // switch toggle, or the menu reopening) after a mode change, the
+        // same timing the developer-tier pages themselves already use.
+        if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0 &&
+            temporalEngineFor(Config::get().getString("fix.temporal_aa", "off")) ==
+                TemporalEngine::Amd) {
+            continue;
+        }
         if (grouped && d.group[0] && (!lastGroup || strcmp(lastGroup, d.group) != 0)) {
             Entry h;
             h.kind = EntryKind::Heading;
@@ -1405,17 +1418,14 @@ void buildStatus(MenuContent& c) {
     char buf[200];
     snprintf(buf, sizeof(buf), "%s / game build %s", EDVR_VERSION_STRING, gameBuildVersion().c_str());
     statusLine(c, "EDVR", buf);
-    const uint32_t rk = runtimeKind();
     statusLine(c, "Runtime",
                nativeMenuActive() ? "native OpenXR (experimental)"
-               : rk == 1 ? "SteamVR (Valve's own)"
-               : rk == 2 ? "OpenComposite"
                : (glitchConsumerPresent() ? "not identified" : "no compositor consumer"));
     if (!nativeMenuActive()) {
-        // SteamVR and OpenComposite never run the v2 query, so the three
-        // lines below would read `unknown` for the whole session and the
-        // row's refusals would promise a publish that never comes; one
-        // line says why instead.
+        // Nothing else publishes a runtime kind now that the legacy OpenVR
+        // proxy is gone, so the three lines below would read `unknown` for
+        // the whole session and the row's refusals would promise a publish
+        // that never comes; one line says why instead.
         statusLine(c, "Headset", "native OpenXR only (not in use on this runtime)");
     } else {
         // The worn headset as the native host named it: the raw names for
@@ -1480,7 +1490,15 @@ void buildStatus(MenuContent& c) {
                                 temporalPassDlaaCentreTotals(1, &rn, &centreR, &rmx);
         const bool havePeriph = temporalPassDlaaPeripheryTotals(0, &rn, &periphL, &rmx) &&
                                 temporalPassDlaaPeripheryTotals(1, &rn, &periphR, &rmx);
-        if (haveFull || haveCentre || havePeriph) {
+        // The current engine, not whichever one has a count (F6). The three
+        // per-role figures above are NGX's alone, and they keep answering
+        // after a live switch to fsr -- so they are shown only while NVIDIA
+        // is the engine in force.
+        const char* engineWord = "NVIDIA";
+        bool amdEngine = false;
+        const bool haveTrained =
+            temporalPassTrainedTotals(&n, &avg, &mx, &resets, &engineWord, &amdEngine) && n;
+        if (!amdEngine && (haveFull || haveCentre || havePeriph)) {
             // Per role, per eye: the pooled figure below mixed roles and eyes
             // into one number and called it "ms/eye", which it was not.
             size_t len = static_cast<size_t>(snprintf(buf, sizeof(buf), "%s, NVIDIA", mode.c_str()));
@@ -1500,8 +1518,8 @@ void buildStatus(MenuContent& c) {
                                                     " periphery L %.2f R %.2f ms", periphL, periphR));
                 if (len >= sizeof(buf)) len = sizeof(buf) - 1;
             }
-        } else if (temporalPassDlaaTotals(&n, &avg, &mx, &resets) && n) {
-            snprintf(buf, sizeof(buf), "%s, NVIDIA %.2f ms/eye", mode.c_str(), avg);
+        } else if (haveTrained) {
+            snprintf(buf, sizeof(buf), "%s, %s %.2f ms/eye", mode.c_str(), engineWord, avg);
         } else if (temporalPassTotals(&n, &avg, &mx, &rej, &clip) && n) {
             snprintf(buf, sizeof(buf), "%s, %.2f ms/eye", mode.c_str(), avg);
         } else {

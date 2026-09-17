@@ -116,15 +116,14 @@ get wrong.
 ### Checking it worked
 
 Logs appear in `edvr_logs\` next to the game. There are two of them; the
-second, with `vr` in the name, says `compositor hook installed on
-IVRCompositor_014`. If it reports an unknown compositor version instead, the
-fix is off, the game runs normally, and that version string is worth reporting.
-**If there is no second log at all**, the game is not on its OpenVR path and
-half the patch never loaded — see [Headsets and VR
-runtimes](#headsets-and-vr-runtimes). If you see a flash anyway, press
-**Pause** straight after and send the logs — that writes the last ten seconds
-of viewpoint history, which separates "detected and let through" from "never
-detected".
+second, with `vr` in the name, says `runtime,<name>,<version>` once the native
+OpenXR path is up, naming the runtime it reached. An `error,` line there
+instead means that startup step failed. **If there is no second log at all**,
+the game is not on its OpenVR path and half the patch never loaded — see
+[Headsets and VR runtimes](#headsets-and-vr-runtimes). If you see a flash
+anyway, press **Pause** straight after and send the logs — that writes the last
+ten seconds of viewpoint history, which separates "detected and let through"
+from "never detected".
 
 ### Reporting a problem
 
@@ -254,9 +253,9 @@ afterwards.
 EDVR is two files that must be from the same build: the graphics half
 (`d3d11.dll`) and the VR half (`openvr_api.dll`). They agree on the size of a
 message the VR half sends at startup, and a half-updated install — one file
-new, the other old — fails that check on purpose rather than running at a
-size it did not ask for. Elite then reports `VRInitError_Init_Internal` and
-the native log (`edvr_logs\edvr_openxr_*.log`) carries
+new, the other old — fails that check on purpose rather than running at a size
+it did not ask for. Elite then reports `VRInitError_Init_Internal` and the
+native log (`edvr_logs\edvr_openxr_*.log`) carries
 `result,native_render_settings_query,-1` with no `openxr_render_size` lines
 after it. That `-1` says one side is stale, not which.
 
@@ -300,8 +299,7 @@ standing in the world, or sized for a screen you are not looking at.
 - **Shimmer and sharpness.** Temporal anti-aliasing, with DLAA and DLSS on RTX
   cards, includes UI and smoke depth and rotating-station motion automatically.
   Choose it and the **DLSS preset** (default K) on Performance; AA remains off
-  by default. RCAS sharpening is available separately. Supersample filtering is
-  experimental and off by default.
+  by default. RCAS sharpening is available separately.
 - **The terrain missing at the edges of view** over planets — Elite culls
   against a narrower frustum than it renders, so squares of ground go undrawn.
   Off by default; it costs about 6% GPU at the tested values.
@@ -580,29 +578,27 @@ is not a fault, it has simply uninstalled EDVR. Copy the file back.
 ## What it does and does not do
 
 It loads alongside the game as a `d3d11.dll` proxy, forwarding every call to
-Windows' real `d3d11.dll`; the `openvr_api.dll` proxy forwards every call to
-the game's own copy.
+Windows' real `d3d11.dll`; `openvr_api.dll` is EDVR's own OpenXR runtime,
+implementing the OpenVR interfaces Elite calls and speaking OpenXR itself.
 
 **Most of the fixes never touch the game.** They change how frames are drawn
 from outside it: four small copies per frame so both eyes share an exposure
 value, one substituted argument to a screen-clearing call, one substituted copy
 of the panel's position if you change the distance, and — for the transition
 flash — reading a constant buffer the game has already filled and, on the rare
-frame drawn from the wrong place, not forwarding one call to SteamVR. That read
-is camera state, not gameplay state; it never writes to the buffer it reads,
-and the only action it can take is to not forward a call — or to hand SteamVR
-the game's own previous frame in its place: a copy EDVR keeps of the last frame
-it forwarded, always the game's content, never EDVR's.
+frame drawn from the wrong place, not submitting that frame to the OpenXR
+runtime. That read is camera state, not gameplay state; it never writes to the
+buffer it reads, and the only action it can take is to not submit a frame — or
+to hand the runtime the game's own previous frame in its place: a copy EDVR
+keeps of the last frame it submitted, always the game's content, never EDVR's.
 
-**The supersample resolve** is experimental and off by default: when the game
-submits a larger frame than the headset asked for, one GPU filter pass shrinks
-the game's frame into a texture EDVR owns, and that copy is what SteamVR
-receives — the game's texture is read, never written, no answer the game asks
-for changes, and nothing is read from memory. The temporal pass and the
-sharpening (`temporal_aa`, `render_sharpness`, both off by default) are two
-more passes of exactly that kind, except that the temporal pass also shifts the
-projection the game is told by a fraction of a pixel each frame, the way the
-terrain fix shifts it by a margin.
+**The temporal pass and the sharpening** (`temporal_aa`, `render_sharpness`,
+both off by default) are each one GPU pass over the game's finished frame,
+into a texture EDVR owns, and that copy is what the runtime receives —
+the game's texture is read, never written, no answer the game asks for
+changes, and nothing is read from memory. The temporal pass also shifts
+the projection the game is told by a fraction of a pixel each frame,
+the way the terrain fix shifts it by a margin.
 
 **Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam
@@ -699,7 +695,10 @@ here so you can read exactly what it does and build it yourself.
 MIT — see [LICENSE](LICENSE). One file the installer carries is not: NVIDIA's
 DLSS runtime, `nvngx_dlss.dll`, is NVIDIA's software under the NVIDIA RTX SDKs
 licence, distributed unmodified as part of this application as that licence
-allows, and only placed on machines with an NVIDIA card.
+allows, and only placed on machines with an NVIDIA card. The `fsr` engine is
+AMD's FidelityFX Super Resolution 3.1 upscaler through its community Direct3D
+11 port (the optiscaler project's FidelityFX-SDK-DX11, MIT), compiled into
+`d3d11.dll`; its notice ships as `FIDELITYFX-SDK-DX11-LICENSE.txt`.
 
 Not affiliated with, endorsed by, or supported by Frontier Developments plc or
 Valve Corporation. Elite Dangerous is a trademark of Frontier Developments plc.

@@ -56,7 +56,6 @@
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
 #include "menu.h"              // the settings menu's reload: its keys, then the row diff
 #include "perf_monitor.h"      // the draw hooks' sampled cost, and the reload as an event
-#include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "fov_probe.h"
 #include "glitch_frame.h"
@@ -1499,8 +1498,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // arrival-mono trigger needs "the player is in the scanner" at the
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
-    // free.
-    if ((s->fssHealOn || s->censusFssJump || s->fssTheaterOn) &&
+    // free. The temporal pass asks too (temporalPassWantsFssChrome): the
+    // scanner's interface takes the head's path while the screen is up,
+    // and the stamp this tracker bumps is how the pass knows it is.
+    if ((s->fssHealOn || s->censusFssJump || s->fssTheaterOn ||
+         temporalPassWantsFssChrome()) &&
         kind == 'X' && count == 6) {
         bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {
@@ -1518,24 +1520,32 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (!srv) return;
             ID3D11Resource* res = nullptr;
             srv->GetResource(&res);
-            srv->Release();
-            if (!res) return;
+            if (!res) {
+                srv->Release();
+                return;
+            }
             ID3D11Texture2D* tex = nullptr;
             res->QueryInterface(__uuidof(ID3D11Texture2D),
                                 reinterpret_cast<void**>(&tex));
-            res->Release();
-            if (!tex) return;
             D3D11_TEXTURE2D_DESC td{};
-            tex->GetDesc(&td);
-            tex->Release();
-            if (td.Width >= 2000 && td.Height >= 1000 &&
+            if (tex) {
+                tex->GetDesc(&td);
+                tex->Release();
+            }
+            if (tex && td.Width >= 2000 && td.Height >= 1000 &&
                 td.Height < td.Width) {
                 chromeMatched = true;
                 if (s->fssChromeFrame != s->frameNo) {
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
                 }
+                // The chrome surface, handed to ui_depth with the view
+                // and resource still held (ui_depth.h says what for),
+                // before uiDepthOnEyeDraw sees this same draw.
+                if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h, srv, res);
             }
+            res->Release();
+            srv->Release();
         });
         // The theater's per-draw pipeline (round 45f): every matched
         // composite is handed to the rect deriver with its own draw args
@@ -4380,7 +4390,6 @@ void vScreenRefreshConfig() {
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
     uiDeferredConfigure(cfg);
-    temporalPassConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -4390,7 +4399,7 @@ void vScreenRefreshConfig() {
     introSkipConfigure(cfg);
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
-    supersamplePassConfigure(cfg);
+    temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
     nightVisionConfigure(cfg);
@@ -4573,12 +4582,8 @@ void vScreenFrameBoundary() {
         weaponStabilityFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
         meshMotionFrameBoundary(g_state->ownerCtx);
-        // The supersample resolve's warm compile, once a frame,
-        // unconditionally -- not nested under any other feature's gate,
-        // so a session with every FSS feature off still reaches it. A flag
-        // test when the resolve is off.
-        supersamplePassTick(g_state->ownerCtx);
-        // The sharpening's warm compile and missing-hook note, likewise.
+        // The sharpening's warm compile and missing-hook note, once a frame,
+        // unconditionally -- not nested under any other feature's gate.
         sharpenPassTick(g_state->ownerCtx);
         // The temporal pass: its warm compile, and this frame's camera
         // rows becoming last frame's.
@@ -5241,25 +5246,9 @@ void vScreenFrameBoundary() {
                 held, s->hookFrames, s->hookConceded);
         }
 
-        // The supersample resolve's count and price, while they move. The
-        // decision lives in the openvr half's Submit hook but the pass and
-        // its timestamp queries live here, and this is the only totals
-        // line a closing game ever prints (see above).
-        {
-            static uint32_t lastResolveTreats = 0;
-            uint32_t treated = 0;
-            double avgMs = 0.0, maxMs = 0.0;
-            if (supersamplePassTotals(&treated, &avgMs, &maxMs) &&
-                treated != lastResolveTreats) {
-                lastResolveTreats = treated;
-                Log::get().note(
-                    "supersample resolve totals: %u eye-submits resolved this "
-                    "session, %.2f ms per eye on average (max %.2f).",
-                    treated, avgMs, maxMs);
-            }
-        }
-        // The temporal pass's, the same way -- with the history's
-        // acceptance, which is the field's test of the reprojection.
+        // The temporal pass's count and price, while they move -- with
+        // the history's acceptance, which is the field's test of the
+        // reprojection.
         {
             static uint32_t lastTemporalTreats = 0;
             static uint64_t lastTemporalMs = 0;
@@ -5281,12 +5270,21 @@ void vScreenFrameBoundary() {
                 }
                 lastTemporalTreats = treated;
                 lastTemporalMs = nowMs;
-                Log::get().note(
-                    "temporal aa totals: %u eye-submits treated this session, "
-                    "%.2f ms per eye on average (max %.2f); history rejected "
-                    "for %.1f%% of pixels and clipped for %.1f%%; %.0f frames "
-                    "per second over the last interval.",
-                    treated, avgMs, maxMs, rejectPct, clipPct, fps);
+                if (rejectPct < 0.0) {
+                    Log::get().note(
+                        "temporal aa totals: %u eye-submits treated this session, "
+                        "%.2f ms per eye on average (max %.2f); history rejection "
+                        "and clipping not counted (lean own shader, or NVIDIA's "
+                        "history); %.0f frames per second over the last interval.",
+                        treated, avgMs, maxMs, fps);
+                } else {
+                    Log::get().note(
+                        "temporal aa totals: %u eye-submits treated this session, "
+                        "%.2f ms per eye on average (max %.2f); history rejected "
+                        "for %.1f%% of pixels and clipped for %.1f%%; %.0f frames "
+                        "per second over the last interval.",
+                        treated, avgMs, maxMs, rejectPct, clipPct, fps);
+                }
                 // The registration instrument's verdict so far, its own
                 // line: which candidate delta the history lands best with.
                 char reg[1150];
@@ -5539,7 +5537,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
     uiDeferredConfigure(cfg);
-    temporalPassConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -5549,7 +5546,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     introSkipConfigure(cfg);
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
-    supersamplePassConfigure(cfg);
+    temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
     nightVisionConfigure(cfg);
@@ -5926,7 +5923,6 @@ void shutdownVScreenFixes() {
     introPanelShutdown();
     introUpscaleShutdown();
     introSkipShutdown();
-    supersamplePassShutdown();
     temporalPassShutdown();
     depthProbeShutdown();
     sharpenPassShutdown();

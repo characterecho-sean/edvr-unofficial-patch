@@ -8,7 +8,10 @@ read 2026-09-16) unless marked believed.
 
 ## Status
 
-- **State (2026-09-16): DESIGN, nothing built.** The ask reframes on one
+- **State (2026-09-17): route 1 MERGED TO MAIN** after flights 1 to 3 on
+  Sean's rigs (Pimax and Quest 3, both clean; the VRAM figure fixed
+  first, c752ca3). `fix.temporal_aa = fsr` ships in the next release; the
+  "works on AMD" note waits on flight 4. The ask reframes on one
   finding: AMD ships no Direct3D 11 backend for the FSR 3.1 upscaler on any
   FidelityFX SDK tag (vendor-stated: `sdk/src/backends` holds dx12, shared
   and vk only, at v1.1.4 and after; issue #58 "Porting to DX11" has been
@@ -23,14 +26,48 @@ read 2026-09-16) unless marked believed.
   engine at the seam where the pass already chooses between NVIDIA's history
   and its own (section 3); route 2 as a fourth engine (section 5) once route
   1 has flown on both rigs and an AMD supporter has reported.
-- **Next:** Sean's decisions D1-D5 (section 6); then Phase 0 on the desk
-  (fetch and build the port, the link gate, the convention rig) before any
-  flight. Flights in section 4.
-- **Open:** the port's build recipe (CMake plus the SDK's own shader compiler
-  at `cs_5_0`; no CRT setting in its CMake, so `/MT` must be forced); whether
-  its libraries import d3d11.dll by name (a stop, 3.5); the reactive mask
-  under FSR; the jitter phase count above 1:1; and FSR 3.1's quality in VR
-  against the pass's own history, which is what an AMD user gets today.
+- **Route 1 IN PROGRESS (2026-09-16 evening) on branch
+  `claude/fsr3-amd-nvidia-upscaling-00b69f`, kept separate from main until
+  ready.** Sean took D1-D5 as recommended. Phase 0 landed as Track A
+  (`tools\fetch_ffx_dx11.py`, 4d0a5fb: fetch, build, stage and verify the
+  port) and Track B (b8cd3b2: the `fsr` value, the engine enum and helpers,
+  the seven readers, the seam, the ini text, the panel, and a stub engine
+  that refuses without the SDK), merged with main at 2c7c21e and green.
+  Track C landed as 6294f1f: the engine body under `EDVR_HAVE_FSR3`, the
+  build.bat block, the WARP rig `tools\fsr3_engine_test` (31 checks; the
+  jitter and motion signs settled at the engine's defaults, journal). No
+  install to any game directory without Sean's approval.
+- **Flight 1 FLOWN 2026-09-17 06:00 (e70a44e, Pimax, RTX 5090):** FSR
+  ran cleanly, on the upscale path (HMD Quality below 1: 2646x2206 and
+  3461x2884 into 4072x3394), contexts made in 2 to 4 ms, remade cleanly
+  on every size change, released on a live switch to `on`, remade on the
+  switch back; no refusal, no port messages. Price per stereo pair, full
+  region, median: fsr 1.6 to 2.1 ms against NGX's 2.9 to 3.6 at the same
+  sizes; 83 to 89 fps. Sean's verdict: slightly better than the pass's own
+  history, not as good as DLSS, as expected for FSR 3.1. Journal.
+- **Flights 2 and 3 answered the same morning (06:07, Quest 3 through
+  VirtualDesktopXR, same build):** FSR ran cleanly at 2611x2774 into
+  3072x3264 and later 3017x2160 into 3550x2542, 1.1 to 1.4 ms per stereo
+  pair, 86 to 90 fps, no refusal; Sean: the UI looks fine without the
+  reactive mask, so D3's default (off) stands and the mask stays a live
+  advanced key. Journal.
+- **Next:** flight 4, an AMD supporter's log (the gate for a "works on
+  AMD" release note); the exported-symbols nit in the fetch tool (Open);
+  route 2 (FSR 4.1 through a D3D12 sidecar, section 5) only if DLSS-class
+  quality on RDNA3/RDNA4 is wanted, which is Sean's call after flight 4.
+- **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
+  phase count above 1:1; FSR 3.1's quality in VR against the pass's own
+  history, which is what an AMD user gets today; and a cosmetic nit seen
+  in the build's export listing: the port's static libraries carry
+  `dllexport` attributes, so EDVR's d3d11.dll now exports nineteen `ffx*`
+  symbols (inert: nothing imports them; fix in the fetch tool by building
+  the port without its export macro, with `--verify` checking for it);
+  and the create's VRAM figure, meaningless in the field (flight 1
+  journal). CLOSED by Track A: the
+  build recipe (CMake, `/MT` forced, the upscaler-only targets) and the
+  d3d11-import stop of 3.5 (neither library imports d3d11, dxgi or
+  d3dcompiler by name). DECIDED (D6): the port's prebuilt shader compiler
+  is accepted as a build-time-only tool.
 - **Ruled out (2026-09-16, vendor-stated):** an official AMD D3D11 backend
   (none exists); FSR 4 on D3D11 (D3D12-only signed DLLs, RDNA3/RDNA4 only);
   reaching FSR 4 through the driver's FSR 3.1-to-4 override (D3D12 ffx-api
@@ -317,13 +354,20 @@ gfx log.
 ## 4. Flights, in order
 
 Read each with `python tools\edvr_log.py --target <t> --expect-build <sha>
---grep "temporal aa"`.
+--grep "fsr3|temporal aa"`.
 
 - **Flight 1: Sean, RTX 5090, Pimax at the eye-mask flights' resolution,
-  `temporal_aa = fsr`, HMD Quality 1.0, reactive off.** Must show
-  `temporal aa: fsr 3.1.2 (d3d11 port <sha>) contexts made for both eyes,
-  WxH -> WxH, flags <list>, +N MB, create X ms`; the price line naming
-  `fsr`; no "The pass's own history runs instead"; no FFX message lines.
+  `temporal_aa = fsr`, HMD Quality 1.0, reactive off.** Must show, in this
+  order (the engine's own lines as built): `fsr3: first asked for on
+  <adapter>, AMD's port version fsr 3.1.2.`; `fsr3: the DX11 backend
+  initialised in N ms on device ...`; `fsr3: the context is created for
+  eye 0 at WxH -> WxH; VRAM ...; the history starts here (made in N ms).`
+  and the same for eye 1; `temporal aa: fsr 3.1.2 engaged -- AMD's
+  history takes the WxH frame ...`; the price line naming `fsr 3.1.2`.
+  Must NOT show: `fsr3: refused`, `fsr3: eye N is stood down`, "The
+  pass's own history runs instead", or any `fsr3: <message>` line carrying
+  the port's own text (its debug checking is off unless
+  `advanced.temporal_aa_diagnostics` is on).
   Judged against `on` and `dlss` in the same session on the known cases:
   cockpit text swim, the distant-station shimmer, the rolling ship's leading
   edge (the `temporal_aa_light` ghost). Answers: does it run, what it costs
@@ -388,6 +432,11 @@ class of upscaler): that is route 2's go/no-go.
   shader changes), not now.
 - **D5** A build without the port's SDK warns, and `fsr` refuses with the
   reason, as NGX does. Recommended.
+- **D6** (taken 2026-09-16 night) The port's prebuilt shader compiler is
+  accepted as a build-time-only tool: it runs once at fetch time on the
+  developer's machine, never ships, and cannot be built from source here
+  without the VS ATL component (journal). Its hash sits in the staged
+  VERSION.txt.
 
 ## 7. Considered and declined
 
@@ -409,3 +458,214 @@ class of upscaler): that is route 2's go/no-go.
   No code. File and line pointers are as of ff88cd1; the four commits that
   landed on main the same afternoon (be05124 to e4b923a) touched none of
   the cited files.
+- 2026-09-16 evening, Track A (4d0a5fb): `tools\fetch_ffx_dx11.py` pins
+  optiscaler/FidelityFX-SDK-DX11 at 9b04fa49 (FSR 3.1.2), shallow sparse
+  clone into `%LOCALAPPDATA%\EDVR\ffx-dx11\src`, CMake on `sdk\CMakeLists.txt`
+  with `-DFFX_API_DX11=ON -DFFX_FSR=ON -DFFX_FSR3UPSCALER=ON` (not
+  `-DFFX_FSR3=ON`, which also builds the frame-generation wrapper), VS2022,
+  static libraries, `/MT` forced; stages the headers, `ffx_fsr3upscaler_x64.lib`
+  (94,604 bytes), `ffx_backend_dx11_x64.lib` (9,808,892 bytes), the licence
+  and a VERSION.txt. `--verify` checks the headers, the LIBCMT directive
+  and that neither library imports d3d11, dxgi or d3dcompiler by name (it
+  does not: the backend takes the device it is handed). No CMake on PATH or
+  in VS here; pip's `cmake` package is the tool's third fallback.
+  - Two API-contract findings from a standalone WARP smoke (feature level
+    11_1, 1280x720 to 1920x1080, create and dispatch FFX_OK, scratch for two
+    contexts 2,788,632 bytes): (a) `ffx_dx11.h` declares
+    `ffxGetResourceDX11_Fsr31` `extern "C"` with a `const ID3D11Resource*`,
+    but `ffx_dx11.cpp` defines it non-const with C++ linkage, so a caller
+    of the declared symbol fails to link (LNK2019); the engine carries a
+    local declaration of the real signature. (b) Under DEPTH_INVERTED the
+    port's debug check warns unless cameraNear > cameraFar numerically; the
+    engine passes the pair swapped.
+  - Shader compiler provenance: the fork's prebuilt `FidelityFX_SC.exe`
+    (SHA-256 30f9df14..., 283,136 bytes) is not byte-identical to AMD's
+    v1.1.4 binary (75480f22..., 474,624 bytes). It runs once, at fetch-build
+    time, on the developer's machine, and never ships; only the libraries
+    it produced link in. Its source is in the fork
+    (`sdk\tools\ffx_shader_compiler\`); against AMD's v1.1.4 the Xbox GDK
+    backends and the debug/PDB parameter are gone and FXC's include handling
+    is a deduped set seeded with the shader's own directory; the
+    `D3DCompile` call is unchanged and d3dcompiler_47 is loaded dynamically.
+    Building it from source here fails: `pch.hpp` includes `atlcomcli.h`
+    and this VS2022 Community install has no ATL component (the vendored
+    tiny-process-library also needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5.0`
+    under CMake 4.4). Sean's call, the same night: the prebuilt is fine.
+    Accepted as a build-time-only tool (D6); the fetch tool records its
+    hash in VERSION.txt so a change would show.
+- 2026-09-16 evening, Track B (b8cd3b2): the `fsr` value; `TemporalEngine`
+  {Own, Nvidia, Amd} with `temporalEngineFor`, `temporalExternalEngine` and
+  `temporalEngineLabel` in `src\common\temporal_mode.h`; the seven readers
+  routed through them; flags bit 6 carries "the external engine is AMD's"
+  across the ABI; fovY computed at the seam from the eye's tangents;
+  `src\d3d11\fsr3_engine.h/.cpp` as a stub that refuses without
+  `EDVR_HAVE_FSR3`; the ini paragraph and the two advanced keys; the menu
+  and the settings panel hide the NVIDIA preset row under `fsr`. Found and
+  fixed a warm-up log line that said "NVIDIA" whatever the engine. Nits
+  handed to Track C: the refusal once-flag is shared across engines, the
+  warm-up is 1:1 only (as NGX's), the version label is a placeholder, the
+  totals need a timestamp-query ring, the menu row hide is not live within
+  an open menu. Merge with main (2c7c21e): main's lean variant (651ddb4)
+  and the engine field met in `temporal_pass.cpp`'s Slot, WindowKey and
+  treatmentName; both kept; green.
+- 2026-09-16 night, Track C (uncommitted while its rig is finished): the
+  engine body under `EDVR_HAVE_FSR3` in `src\d3d11\fsr3_engine.cpp`, the
+  build.bat block (after the NGX block; `EDVR_FFX_DX11=none` builds without
+  the port on purpose; both builds green), `fetch_ffx_dx11.py --self-test`
+  in the python gate, the `kEvFsr` perf event, the perf tile and the panel
+  reading `fsr3Totals` under `fsr`, and the WARP rig
+  `tools\fsr3_engine_test`. Settled facts:
+  - **Two defects in the port, both handled.** (a) `RegisterResourceDX11`
+    calls `CreateShaderResourceView` on every registered texture, the
+    write-only output included, with no bind-flag check; (b) its `TIF`
+    helper answers any failed D3D11 call with a bare `throw 1`, an untyped
+    C++ exception escaping an otherwise all-`FfxErrorCode` C API. Together
+    they crashed the rig (`STATUS_STACK_BUFFER_OVERRUN` from the uncaught
+    throw) on a UAV-only output. The pass's own `dlOut` already carries the
+    SRV bind flag, so the field never saw this; the engine now wraps create
+    and dispatch in try/catch and turns a throw into its normal false-plus-
+    reason answer. A dispatch that throws mid-way may leave compute-stage
+    bindings on the context; known, not handled (the pass restores its own
+    state around the seam).
+  - **Feature level.** The port's luma-pyramid shader declares 64 compute
+    UAV slots, a D3D11.1 feature: a device negotiated at 11_0 fails context
+    creation with `FFX_ERROR_BACKEND_API_ERROR` (seen on WARP when the rig
+    passed no feature-level array). The rig now asks for 11_1. The game's
+    own device is feature level 12_0 (`featureLevel=0xC000` in the gfx log
+    of 2026-09-16 20:26), so the field is unaffected; `fsr3Available` gates
+    on 11_1 with a reason for older devices.
+  - **Near/far under DEPTH_INVERTED.** The core's
+    `setupDeviceDepthToViewSpaceDepthParams` takes the min and max of the
+    pair whatever the order, its own comment saying so; the swap silences
+    only the debug check.
+  - **VRAM line.** WARP answers `QueryVideoMemoryInfo` with zero bytes; the
+    "not reported" branch is exercised nowhere yet.
+  - **Registration table, first run: NOT settled.** Jitter `as_is` won its
+    axis by a real margin, but the motion-vector sign tied exactly for every
+    jitter variant and the best error (38/255) was ten times the at-rest
+    error (3.6/255): the motion input had no effect in any variant, and no
+    history registered. The scene (the smoke pattern's 3.5 to 5 px periods
+    under a 1 degree yaw, about one period per frame) cannot separate a sign
+    error either. Escalated: instrument the motion field, prove the texture
+    reaches the port, rebuild the test on a pure translation of a
+    low-frequency hard-edged scene with per-axis motion flips, assert the
+    minimum sits near the at-rest error. Result in the next entry.
+- 2026-09-16 night, the escalated rig: **the motion vectors never reached
+  the port.** A probe that dispatched the same static scene with zero
+  motion and with a uniform 40 px vector got byte-identical output. Cause:
+  FSR 3.1 moved three working surfaces into the dispatch description for
+  the CALLER to allocate (`dilatedDepth`, `dilatedMotionVectors`,
+  `reconstructedPrevNearestDepth`, so a frame-interpolation host can share
+  them); the engine left them null, the port's `RegisterResourceDX11` maps
+  a null pointer to its NULL resource, the dilate pass wrote its vectors
+  into nothing and the reprojection read zeros back, every frame, with
+  FFX_OK. Fix: each eye's context owns the three, made from
+  `ffxFsr3UpscalerGetSharedResourceDescriptions` (asked, not hard-coded),
+  released on rekey; about 12 bytes per render pixel, 55 MB per eye at
+  Quest 3 sizes. Possible saving, unproven: one set for both eyes, since
+  nothing reads them across dispatches. The port's own source, quoted in
+  the engine: the scale constant is `motionVectorScale / renderSize`
+  (render-pixel vectors with a scale of 1 are exact, as for DLSS), history
+  is sampled at `uv + mv` (vectors point current to previous, as `dlMv`
+  does) and the unjittered position is `pos - jitter` (content sits at
+  +jitter, `dlaa.h`'s convention). **Table, rebuilt** on a pure 3 px/frame
+  translation (x then y) of a band-limited two-scale pattern against the
+  unjittered point sample, jitter {as_is, flip_x, flip_y, flip_both} x
+  motion {as_is, flip_x, flip_y, flip_both}: winner `as_is/as_is` at
+  1.38/255 against a 0.93 at-rest floor; runner-up (jitter flip_x) 2.52;
+  a single-axis motion flip 6.9 to 7.3; both 12.8. Assertions: exactly one
+  minimum, inside twice the floor with every other cell outside, each
+  single-axis motion flip at least twice the winner, and EDVR's own
+  reprojected yaw field 8.06 settled against 28.36 flipped. A hard-edged
+  scene was tried first and discriminated worse (the 1:1 resolve's residual
+  at a discontinuity is large for every variant). **The engine's constants
+  stay 1, 1, 1, 1.** The rig was traced by sabotage: with
+  `dilatedMotionVectors` pointed at null again it fails six checks; the
+  first rig passed that state. `fsr3Available` gates on feature level 11_1.
+  31 checks, 20 s in the pool (wall-clock unchanged), build green.
+- 2026-09-16 night, the adversarial review of the branch (6294f1f against
+  main) and its fixes, all on the branch, both builds green, 59 rig checks:
+  - **Refusal once-flag** was shared across engines and never cleared: a
+    DLSS refusal, then a switch to `fsr` that also refused, logged nothing.
+    Now one flag per engine, both cleared on an engine change; NGX's hint
+    to try `fsr` prints only when the build has the port.
+  - **The try/catch around the port's C API was compiled under `/EHsc`**,
+    which tells the compiler `extern "C"` functions never throw, so the
+    catch could be skipped and the throw a crash. Now `/EHs` for the d3d11
+    half and the rig, and the engine checks every texture's bind flags
+    before registering (SRV on all, UAV on the output and the three
+    surfaces) and refuses with a reason naming the texture, so the port's
+    throw is never the expected path. The rig proves both: a UAV-only
+    output is refused by the check, and with the check bypassed (a
+    test-only hook) the port's own throw comes back as false plus reason.
+  - **The upscale case had never run**: every rig dispatch was 1:1, while
+    any HMD Quality below 1 (every Quest 3 flight) starts in it. The rig
+    now runs 1376x1472 into 2064x2208 with the sign table at that ratio
+    (winner 2.06 against a 2.05 floor; a wrong motion sign 13.6 or worse)
+    and a real 1711x1425 into 3422x3394 create and dispatch. The table's
+    "nothing else inside twice the floor" rule fails at a ratio (the floor
+    carries the reconstruction residual), replaced by a scale-free bar:
+    the winner's distance above the floor at most a quarter of the
+    runner-up's.
+  - **The warm-up is 1:1** and the first upscaled frame pays a create:
+    kept, because the render size is not knowable at warm time (only the
+    output size is; Elite's render fraction is the launch-time multiplier
+    the pass already cross-checks at the seam); the log line says so.
+  - A create that throws or fails now latches for that key (one line, no
+    retry every frame; the half-made context leaks, named in the comment).
+  - The perf tile and the panel status followed whichever engine ran
+    first; now one accessor answers for the current engine.
+  - `fsr3ReleaseFeatures` had no caller; the treat now releases AMD's
+    contexts on the render thread when it first sees the engine change
+    (NVIDIA has no per-feature release, left as it was).
+  - `advanced.temporal_aa_diagnostics` is part of the context key, so a
+    live flip recreates; unknown frame time is a nominal 11.1 ms; the
+    90-degree fovY fallback logs once; the message callback's buffer is
+    initialised.
+  - **The port's MIT notice ships**: `FIDELITYFX-SDK-DX11-LICENSE.txt` in
+    `build\` and the release zip beside NVIDIA's, deleted on the no-port
+    path. The fetch tool's `--verify` now fails on a stale stage (commit
+    pin and the recorded compiler hash read back from VERSION.txt).
+  - Sound and left alone: `resetHist` on a switch, the compute-state
+    save/restore around the seam, the reactive mask's shape, the shared
+    output and copy-out, the seven readers, `texture_lod_bias = auto`
+    (keys on the mode, not the vendor), the build wiring, the rekey.
+- 2026-09-17 06:00, flight 1 (e70a44e, Frontier, Pimax, RTX 5090; log
+  `edvr_gfx_20260917_060039`, right build). The session started under
+  `dlss` at 2665x2632 into 4100x4050; the live switch to `fsr` printed
+  `fsr3: first asked for on NVIDIA GeForce RTX 5090, AMD's port version
+  fsr 3.1.2.`, the backend initialised (0 ms), the two contexts (3 and 4
+  ms) and `temporal aa: fsr 3.1.2 engaged -- AMD's history takes the
+  2665x2632 frame, its depth and the pass's own motion vectors ...`. The
+  sizes then moved three times (the trim to 4072x3394; the render size to
+  2646x2206, later 3461x2884) and every rekey printed its reason and
+  remade both contexts in 2 to 6 ms; a switch to `on` released AMD's
+  contexts and surfaces on the render thread, a switch to `dlss` and back
+  remade them. Zero refusals, zero stood-down eyes, zero lines carrying
+  the port's own text. **Price**, full region, median per stereo pair:
+  `fsr 3.1.2` 1.6 to 2.1 ms (p95 2.0 to 2.8); `full-frame ngx` 2.9 to 3.0
+  at 4072x3394 and 3.6 at 4100x4050; the pass's own history 0.5 to 1.0 ms
+  in `other`; 83 to 89 fps throughout. **Sean's verdict: slightly better
+  than TAA, not as good as DLSS**, which is the expected standing of FSR
+  3.1 against DLSS 3.x; route 1's value is the AMD user, who has no DLSS.
+  So flight 1 answers all three of its questions: it runs, it costs about
+  two thirds of NGX at these sizes on this card, and it beats the pass's
+  own history. Two nits: the create's VRAM delta prints -202, -56, -31,
+  -12 or +0 MB (`QueryVideoMemoryInfo` does not move at create time;
+  replace with a computed estimate from the surface descriptions, or drop
+  it); and the flight ran the upscale path, which the plan had reserved
+  for flight 2, so flight 2's remaining question is only the reactive
+  mask. Ruled out: nothing.
+- 2026-09-17 06:07, flights 2 and 3 in one session (e70a44e, Frontier,
+  Quest 3 through VirtualDesktopXR at 100% = 3072x3264 per eye, RTX 5090;
+  log `edvr_gfx_20260917_060732`, right build). The warm-up made the 1:1
+  contexts at 3072x3264 (3 ms each) and the first treated frame rekeyed
+  to 2611x2774 into 3072x3264, as the flight 1 review predicted; the
+  trims later moved the key to 3017x2160 into 3550x2542. Price, full
+  region, median per stereo pair: 1.1 to 1.4 ms (p95 1.3 to 1.5); the
+  native benchmark's GPU p50 2.7 to 3.4 ms a frame; 86 to 90 fps. Zero
+  refusals, zero port messages. **Sean's verdict: the UI looks fine
+  without the reactive mask**, on the Quest 3 as on the Pimax, so D3
+  stands: `advanced.temporal_aa_fsr_reactive` stays off by default and
+  live. Ruled out: the reactive mask as a needed input for Elite's HUD
+  under FSR 3.1, because both headsets read fine without it.

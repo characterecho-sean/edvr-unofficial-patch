@@ -1,5 +1,13 @@
 # Frontier render-caller lifetime at shutdown
 
+## Status
+
+Closed 2026-09-16. The retained-handle observer and whole-Present activity
+counts described here were retired with the legacy OpenVR proxy, together
+with the rest of `ShutdownPresentCensus` (see the [progress
+checkpoint](openxr-shutdown-progress-2026-09-13.md)'s Status). The Frontier
+result below stands as archived evidence for the native teardown design.
+
 The [previous Frontier flight](openxr-shutdown-progress-2026-09-13.md) looked
 normal and measured zero successful owned Presents reaching the native callback
 service point during the 51.8276 ms forwarded shutdown. That result rules out

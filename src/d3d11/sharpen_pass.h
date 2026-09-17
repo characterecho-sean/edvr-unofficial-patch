@@ -6,9 +6,9 @@
 // src/d3d11/fsr/ and already carried by the intro upscale) over the eye's
 // region, into an EDVR-owned texture of the region's size in the source's
 // own format, which the openvr half forwards with full bounds. It exists
-// for the two passes ahead of it: the supersample resolve's calm kernel
-// and the temporal pass's history each trade a little edge contrast for
-// calm, and this hands some of it back at the player's chosen strength --
+// for the pass ahead of it: the temporal pass's history trades a little
+// edge contrast for calm, and this hands some of it back at the
+// player's chosen strength --
 // docs/anti-aliasing.md's "sharpen" in the order at the door, and the seam
 // the resolve left marked for exactly this. Built 2026-09-03, after the
 // temporal pass's first flight found text a little soft.
@@ -19,10 +19,12 @@
 // zero D3D answers for a load off the texture. Nothing here changes size,
 // format or orientation.
 //
-// The openvr half owns the decision (src/openvr/sharpen.cpp); this half
-// owns the pass, behind one export it resolves by GetProcAddress and stands
-// down without in the theater's "mismatched pair?" voice. Null from the
-// export means "forward what you had", and every refusal says why once.
+// native_sharpen.cpp now owns the decision (fix.render_sharpness), not the
+// openvr half -- src/openvr/sharpen.cpp used to decide, before it was
+// retired with the legacy OpenVR proxy. This half owns the pass, behind one
+// export it resolves by GetProcAddress and stands down without in the
+// theater's "mismatched pair?" voice. Null from the export means "forward
+// what you had", and every refusal says why once.
 #pragma once
 
 #include <cstdint>
