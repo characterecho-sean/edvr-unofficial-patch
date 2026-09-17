@@ -163,7 +163,10 @@ namespace {
 // harmlessly on anything already taken. Committed read-write, not
 // read-write-execute: the trampoline is built into it after allocation, and
 // CodeHook::install makes it executable only once that write is finished, so
-// this process never holds a page that is both writable and executable.
+// a trampoline page is never writable and executable at the same time. (The
+// target's own page is the deliberate exception: the patch is written while
+// other threads may be running it, so that page keeps execute during the
+// store.)
 uint8_t* allocateNear(void* anchor, size_t bytes) {
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
@@ -317,8 +320,8 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
 
     // The trampoline is never written again once it is live, so it is not
     // left writable once it is live either: flip it to executable-only here,
-    // before the target is touched, so no window exists where a page in this
-    // process is both writable and executable.
+    // before the target is touched. Nothing below writes into it; uninstall
+    // only restores the target's eight bytes and releases the block.
     DWORD trampOldProtect = 0;
     if (!VirtualProtect(tramp, trampolineBytes, PAGE_EXECUTE_READ, &trampOldProtect)) {
         Log::get().note(
