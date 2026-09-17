@@ -156,7 +156,17 @@ REM and tools\run_jobs.py gives each of those CL=/MP4 instead, so eight rigs
 REM cannot start sixty-four compiler processes between them.
 set CL=/MP
 
-set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHsc /W4 /GR- ^
+REM /EHs, not /EHsc, for the whole d3d11 half. /EHc is "assume an extern "C"
+REM function never throws", and AMD's FSR3 D3D11 port breaks that assumption
+REM on purpose: its TIF helper (ffx_dx11.cpp) answers a failed D3D11 call
+REM inside ffxFsr3UpscalerContextCreate/Dispatch -- both extern "C" -- with a
+REM bare `throw 1`. Under /EHsc the try/catch in src\d3d11\fsr3_engine.cpp is
+REM not required to run and the process fail-fasts instead (the review of
+REM 2026-09-16, F2; the STATUS_STACK_BUFFER_OVERRUN signature in the design
+REM doc's journal is that fail-fast). The flag covers every object in this
+REM compile, not just fsr3_engine.cpp; the cost is unwind tables around
+REM extern "C" calls.
+set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- ^
  /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
  /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
  /I"%GEN%"
@@ -351,7 +361,14 @@ if defined FFX (
     set FSRFLAGS=/DEDVR_HAVE_FSR3=1 /I"%FFX%\include"
     set FSRLIB="%FFX%\lib\ffx_fsr3upscaler_x64.lib" "%FFX%\lib\ffx_backend_dx11_x64.lib"
     echo [edvr] FSR3 D3D11 port: %FFX%
+    REM The port's MIT notice, exactly as NGX's licence is handled above. It
+    REM ships because the port is COMPILED INTO the d3d11.dll we distribute --
+    REM it has no DLL of its own -- so MIT's notice requirement applies to the
+    REM release. tools\package_native.py carries it into the zip when it is
+    REM here, and the no-port path below deletes it so a stale one cannot.
+    copy /Y "%FFX%\LICENSE.txt" "%BUILD%\FIDELITYFX-SDK-DX11-LICENSE.txt" >nul
 ) else (
+    if exist "%BUILD%\FIDELITYFX-SDK-DX11-LICENSE.txt" del /q "%BUILD%\FIDELITYFX-SDK-DX11-LICENSE.txt"
     if defined FSR_NONE (
         echo [edvr] EDVR_FFX_DX11=none: building without AMD's FSR upscaler on purpose,
         echo [edvr] to prove the no-SDK path. fix.temporal_aa=fsr will refuse at runtime.
@@ -1434,7 +1451,11 @@ if not defined FSRFLAGS (
     exit /b 0
 )
 if not exist "%OBJ%\fsr3_engine_test" mkdir "%OBJ%\fsr3_engine_test"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+REM /EHs, matching CFLAGS above (and for the same reason): this rig compiles
+REM fsr3_engine.cpp itself, and one of its cases proves that the catch around
+REM AMD's extern "C" dispatch really does catch the port's `throw 1`. Under
+REM /EHsc that case would fail-fast instead of failing.
+cl.exe /nologo /W4 /O2 /EHs /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX %FSRFLAGS% ^
     /Fo"%OBJ%\fsr3_engine_test\\" /Fe"%BUILD%\fsr3_engine_test.exe" ^
     "tools\fsr3_engine_test\fsr3_engine_test.cpp" "src\d3d11\fsr3_engine.cpp" ^

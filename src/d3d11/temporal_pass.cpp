@@ -1253,7 +1253,16 @@ ID3D11Buffer*              g_downCb = nullptr;    // its sizes
 bool                       g_periphWholeNoted = false;   // "the periphery would be the whole frame", once
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
-bool                       g_dlaaFailNoted = false;
+// The refusal line, ONE PER ENGINE. It was a single session-lifetime flag,
+// and the hint NVIDIA's refusal now carries ("Set temporal_aa = fsr ...")
+// walks the commander straight into the hole that made: NGX refuses and says
+// so, he edits the live ini to fsr, AMD refuses too -- and the flag was
+// already spent, so the log said NOTHING at all and the flight was flown
+// with no reason string (the review of 2026-09-16, F1). Both are cleared in
+// temporalPassConfigure when the engine changes, so every engine that
+// refuses puts its reason in the log at least once per session.
+bool                       g_dlaaFailNoted = false;   // NVIDIA's (dlaa, dlss)
+bool                       g_fsrFailNoted = false;    // AMD's (fsr)
 bool                       g_trainedNoted = false;   // the first trained frame's line
 // "the fovea keys are NVIDIA-only; fsr runs the full frame", once: AMD's
 // engine never runs the fovea/periphery crop (design doc 3.1), so this
@@ -1327,6 +1336,15 @@ bool        g_trainedWanted = false;   // fix.temporal_aa = dlaa | dlss | fsr (a
 // (temporalPassConfigure): Own when g_trainedWanted is false. warmTrainedOnce
 // reads this to choose dlaaWarm or fsr3Warm and to word its log correctly.
 edvr::TemporalEngine g_temporalEngine = edvr::TemporalEngine::Own;
+// The engine the TREAT last ran under, as opposed to the one configure last
+// read. Set on the render thread, inside the treat, and compared there so the
+// pass notices a live switch at the first frame that carries the new engine's
+// flag -- which is the only place it is safe to free the engine being left
+// (the review of 2026-09-16, F7: fsr3ReleaseFeatures had no caller, so a
+// dlss -> fsr A/B kept both footprints allocated, on a headset whose per-eye
+// output is 3422x3394). temporalPassConfigure runs on whatever thread reloads
+// the config, so it must NOT do this.
+edvr::TemporalEngine g_engineRan = edvr::TemporalEngine::Own;
 bool        g_warmOn = true;           // advanced.temporal_aa_warm
 bool        g_warmOffNoted = false;
 const char* g_warmWhy = "no frame boundary reached the warm-up: the tick never ran";
@@ -4114,12 +4132,40 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // e.dlDepth with a depth bound and a twin to swap it with, so the
         // frame's end can make it last frame's.
         bool zcWritten = false;
+        // Which engine THIS frame asks for, declared once for the whole
+        // trained path below (bit 1 = an external engine at all, bit 6 =
+        // AMD's rather than NVIDIA's; temporal_pass.h documents both).
+        const bool amdEngine = (flags & 64u) != 0;
+        const edvr::TemporalEngine engineNow = (flags & 2u) == 0
+                                                   ? edvr::TemporalEngine::Own
+                                                   : (amdEngine ? edvr::TemporalEngine::Amd
+                                                                : edvr::TemporalEngine::Nvidia);
+        // A live engine switch, seen on the render thread at the first treat
+        // that carries the new engine (F7). The engine being LEFT is freed
+        // here; nothing else ever did, so an A/B kept both allocated.
+        // NVIDIA's side is deliberately untouched: dlaa.cpp has no
+        // per-feature release, only dlaaShutdown (which would drop NGX
+        // whole), so leaving fsr keeps NGX's two features exactly as they
+        // were before this change.
+        if (engineNow != g_engineRan) {
+            if (g_engineRan == edvr::TemporalEngine::Amd) {
+                edvr::fsr3ReleaseFeatures();
+                Log::get().note(
+                    "temporal aa: the engine changed to %s, so AMD's two contexts and their six "
+                    "working surfaces are released here, on the render thread.",
+                    engineNow == edvr::TemporalEngine::Nvidia ? "NVIDIA's"
+                                                              : "the pass's own history");
+            }
+            g_engineRan = engineNow;
+        }
+        // The refusal line's once-flag, this engine's own (F1).
+        bool& engineFailNoted = amdEngine ? g_fsrFailNoted : g_dlaaFailNoted;
         // The trained path copies the colour into R8G8B8A8_UNORM, which is
         // only legal within that family (the review of 2026-09-04, F9): any
         // other family runs the pass's own history and says so once.
-        if ((flags & 2u) != 0 && fmtIndex != 0 && !g_dlaaFailNoted) {
-            g_dlaaFailNoted = true;
-            if (flags & 64u) {
+        if ((flags & 2u) != 0 && fmtIndex != 0 && !engineFailNoted) {
+            engineFailNoted = true;
+            if (amdEngine) {
                 Log::get().note(
                     "temporal aa: fsr was asked for, but the game submits %s and AMD is "
                     "handed R8G8B8A8, a different family. The pass's own history runs instead.",
@@ -4133,7 +4179,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         if ((flags & 2u) != 0 && fmtIndex == 0 && !foveaMode) {
             warmNoteFirstTreat();   // before NGX's first ask, below
-            const bool amdEngine = (flags & 64u) != 0;
             // advanced.temporal_aa_fsr_reactive/_debug (design doc 3.1); read
             // once here rather than on every NVIDIA frame, since only fsr uses
             // them (fsr3ReadConfig is also called from fsr3Available's own
@@ -4143,19 +4188,25 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             const bool engineAvailable = amdEngine ? edvr::fsr3Available(dev, &why)
                                                    : dlaaAvailable(dev, &why);
             if (!engineAvailable) {
-                if (!g_dlaaFailNoted) {
-                    g_dlaaFailNoted = true;
+                if (!engineFailNoted) {
+                    engineFailNoted = true;
                     if (amdEngine) {
                         Log::get().note(
                             "temporal aa: fsr was asked for, but %s. The pass's own "
                             "history runs instead.",
                             why);
                     } else {
+                        // The hint only when this build HAS AMD's port: a
+                        // build made without it would send the commander to
+                        // fsr for a second refusal (fsr3BuiltIn is a
+                        // compile-time answer and initialises nothing).
                         Log::get().note(
                             "temporal aa: dlaa was asked for, but %s. The pass's own "
-                            "history runs instead. Set temporal_aa = fsr for AMD's "
-                            "upscaler, which runs on any GPU.",
-                            why);
+                            "history runs instead.%s",
+                            why,
+                            edvr::fsr3BuiltIn() ? " Set temporal_aa = fsr for AMD's upscaler, "
+                                                  "which runs on any GPU."
+                                                : "");
                     }
                 }
             } else {
@@ -4493,8 +4544,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         endRegion(qs, Region::Full, ctx);
                         e.dlHaveHistory = false;
-                        if (!g_dlaaFailNoted) {
-                            g_dlaaFailNoted = true;
+                        if (!engineFailNoted) {
+                            engineFailNoted = true;
                             if (amdEngine) {
                                 Log::get().note(
                                     "temporal aa: fsr was asked for, but %s. The pass's own "
@@ -4503,9 +4554,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             } else {
                                 Log::get().note(
                                     "temporal aa: dlaa was asked for, but %s. The pass's own "
-                                    "history runs instead. Set temporal_aa = fsr for AMD's "
-                                    "upscaler, which runs on any GPU.",
-                                    why);
+                                    "history runs instead.%s",
+                                    why,
+                                    edvr::fsr3BuiltIn()
+                                        ? " Set temporal_aa = fsr for AMD's upscaler, which runs "
+                                          "on any GPU."
+                                        : "");
                             }
                         }
                     }
@@ -5224,7 +5278,18 @@ void temporalPassConfigure(Config& cfg) {
     // at the treat): only an external engine (dlaa, dlss, fsr) touches NGX
     // or FSR, so only they warm one.
     g_trainedWanted = temporalExternalEngine(mode);
+    const edvr::TemporalEngine engineBefore = g_temporalEngine;
     g_temporalEngine = temporalEngineFor(mode);
+    if (g_temporalEngine != engineBefore) {
+        // Both, not just the one being switched to: whichever engine the
+        // commander lands on must be able to say why it refuses, and a
+        // refusal already printed under the old engine must not be trusted
+        // to describe the new one (the review of 2026-09-16, F1). Freeing
+        // the engine being LEFT is NOT done here -- this runs on whatever
+        // thread reloaded the config; the treat does it (g_engineRan).
+        g_dlaaFailNoted = false;
+        g_fsrFailNoted = false;
+    }
     celestialMotionConfigure(g_wanted);
     meshMotionConfigure(g_wanted);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
@@ -5509,6 +5574,21 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
     const int64_t t0 = qpcNow();
     const bool survived = guardedBudget(g_budget, [&] {
         if (amdEngine) {
+            // 1:1, and it cannot be anything else here. FSR keys its context
+            // on all four sizes, and at this moment only ONE of them is
+            // known: w x h is the runtime's recommended per-eye size, which
+            // is exactly the OUTPUT size the treat will ask for (native_
+            // temporal.cpp's outW/outH are s->recW/recH). The RENDER size is
+            // Elite's own HMD Quality applied to that, and the game has not
+            // submitted a frame yet, so nothing here has it. (The launch-time
+            // figure deviceHookAutoBiasSource reports is Elite's
+            // HMDRenderTargetMultiplier, not a measured size: the pass's own
+            // check at the first engaged frame exists precisely because the
+            // two can disagree, and a key wrong by one pixel costs the same
+            // rebuild as no warm-up at all, plus the VRAM.) So under an
+            // upscale the first submitted frame remakes both contexts, and
+            // the log says so at both ends -- here, and in fsr3_engine.cpp's
+            // "the context for eye N is remade" line.
             ok = edvr::fsr3Warm(ctx, w, h, w, h, &initMs, &why);
         } else {
             ok = dlaaWarm(ctx, w, h, features, &initMs, createMs, &why);
@@ -5533,8 +5613,12 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
         if (amdEngine) {
             Log::get().note(
                 "temporal aa: AMD's FSR warmed before the first submitted frame -- %.0f ms at "
-                "%ux%u -> %ux%u; the first submitted frame finds it made, so 'native timing "
-                "CPU: seq' should show temporal well under 150 ms.",
+                "%ux%u -> %ux%u. That key is 1:1 because the render size is not known until the "
+                "game submits: at HMD Quality 1 the first submitted frame finds this context "
+                "made and 'native timing CPU: seq' should show temporal well under 150 ms, and "
+                "BELOW HMD Quality 1 it does not -- the first upscaled frame remakes both "
+                "contexts at the real key and says so ('the context for eye N is remade'), so "
+                "that frame still pays for a create.",
                 initMs, w, h, w, h);
         } else if (features) {
             Log::get().note(
@@ -6113,6 +6197,24 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
     if (frames) *frames = g_dlaaTreats;
     if (resets) *resets = rs;
     return true;
+}
+
+bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
+                               const char** engineLabel, bool* amd) {
+    // The CURRENT engine's price, not "whichever one has a count". Both
+    // displays used to try NVIDIA's totals and fall through to AMD's only
+    // when NVIDIA's count was zero, and neither total is reset on a live
+    // switch -- so after a dlss -> fsr A/B the tile in the headset kept
+    // printing NVIDIA's average beside a price line that said fsr, and the
+    // wrong one was the one on Sean's face (the review of 2026-09-16, F6).
+    // The label and `amd` are written whatever the answer, so a caller can
+    // word itself (and hide the NVIDIA-only per-role figures) even when
+    // nothing has run yet.
+    const bool amdEngine = g_temporalEngine == edvr::TemporalEngine::Amd;
+    if (amd) *amd = amdEngine;
+    if (engineLabel) *engineLabel = amdEngine ? edvr::fsr3VersionLabel() : "NVIDIA";
+    if (amdEngine) return edvr::fsr3Totals(frames, avgMs, maxMs, resets);
+    return temporalPassDlaaTotals(frames, avgMs, maxMs, resets);
 }
 
 // The same price, split by role and eye, straight from dlaa.cpp: unlike

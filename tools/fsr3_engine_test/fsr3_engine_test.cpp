@@ -80,8 +80,13 @@
 using Microsoft::WRL::ComPtr;
 
 // Test-only, NOT part of fsr3_engine.h's contract (its own comment there
-// says so): how many fpMessage lines this session has relayed to the log.
-namespace edvr { uint32_t fsr3TestMessageCount(); }
+// says so): how many fpMessage lines this session has relayed to the log,
+// and the switch that turns fsr3Evaluate's bind-flag front stop off so the
+// catch behind it can be proved to work.
+namespace edvr {
+uint32_t fsr3TestMessageCount();
+void fsr3TestSkipBindCheck(bool on);
+}
 
 // perf_monitor.cpp is deliberately not linked here -- it pulls in
 // device_hook.cpp and the rest of the live hooking machinery, which a desk
@@ -431,7 +436,11 @@ void testContextCreateAndSilence(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     check(ok1, "(b) eye 1 dispatched FFX_OK at 2064x2208");
     std::printf("info: (b) fpMessage count before=%u after=%u (advanced.temporal_aa_diagnostics on)\n",
                 before, after);
-    check(after == before, "(b) DEBUG_CHECKING stayed silent on well-formed input");
+    // `made` is in the test on purpose: with no textures, nothing dispatches,
+    // before and after are both 0, and this printed as a clean pass while
+    // measuring nothing at all (the delegated rig review, 2026-09-16).
+    check(made && ok0 && ok1 && after == before,
+          "(b) DEBUG_CHECKING stayed silent on two well-formed dispatches");
     if (colour) colour->Release();
     if (depth) depth->Release();
     if (mv) mv->Release();
@@ -990,17 +999,30 @@ void testReset(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
 // (f)
 void testSizeChange(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
-    struct Size { UINT w, h; };
-    const Size sizes[2] = {{1711, 1425}, {3422, 3394}};
+    // Three keys in a row on the same eye, so each one rekeys the previous:
+    // 1:1 at the Pimax Crystal Super's half-quality render size, 1:1 at its
+    // full per-eye output, and then the upscale BETWEEN them. The design doc
+    // claimed 1711x1425 -> 3422x3394 was exercised; it was not -- both of
+    // those were 1:1 dispatches at two different sizes (the review of
+    // 2026-09-16, F3). The third row below is the claim made real. Its axes
+    // scale differently (x doubles, y does not), which FSR allows and Elite
+    // would not produce: what it proves is that renderSize and upscaleSize
+    // are carried independently all the way through, at the largest output
+    // this rig ever asks for.
+    struct Size { UINT w, h, oW, oH; };
+    const Size sizes[3] = {{1711, 1425, 1711, 1425},
+                           {3422, 3394, 3422, 3394},
+                           {1711, 1425, 3422, 3394}};
     for (const Size& s : sizes) {
         ID3D11Texture2D* colour = makeTexture(dev, s.w, s.h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
         ID3D11Texture2D* depth  = makeTexture(dev, s.w, s.h, DXGI_FORMAT_R32_FLOAT,      D3D11_BIND_SHADER_RESOURCE);
         ID3D11Texture2D* mv     = makeTexture(dev, s.w, s.h, DXGI_FORMAT_R16G16_FLOAT,   D3D11_BIND_SHADER_RESOURCE);
-        ID3D11Texture2D* out    = makeTexture(dev, s.w, s.h, DXGI_FORMAT_R8G8B8A8_UNORM,
+        ID3D11Texture2D* out    = makeTexture(dev, s.oW, s.oH, DXGI_FORMAT_R8G8B8A8_UNORM,
                                               D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
         const bool made = colour && depth && mv && out;
-        char label[64];
-        snprintf(label, sizeof(label), "(f) %ux%u textures were created", s.w, s.h);
+        char label[80];
+        snprintf(label, sizeof(label), "(f) %ux%u -> %ux%u textures were created", s.w, s.h, s.oW,
+                 s.oH);
         check(made, label);
         bool ok = false;
         if (made) {
@@ -1008,17 +1030,480 @@ void testSizeChange(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             fillDepthConstant(ctx, depth, s.w, s.h, 0.3f);
             fillZeroMotion(ctx, mv, s.w, s.h);
             const char* why = nullptr;
-            ok = edvr::fsr3Evaluate(ctx, 1, colour, depth, mv, nullptr, out, s.w, s.h, s.w, s.h, 0.0f, 0.0f,
-                                    true, 11.1f, 0.1f, 10000.0f, kFovY, &why);
-            if (!ok && why) std::printf("info: (f) %ux%u refused: %s\n", s.w, s.h, why);
+            ok = edvr::fsr3Evaluate(ctx, 1, colour, depth, mv, nullptr, out, s.w, s.h, s.oW, s.oH,
+                                    0.0f, 0.0f, true, 11.1f, 0.1f, 10000.0f, kFovY, &why);
+            if (!ok && why) {
+                std::printf("info: (f) %ux%u -> %ux%u refused: %s\n", s.w, s.h, s.oW, s.oH, why);
+            }
         }
-        snprintf(label, sizeof(label), "(f) %ux%u dispatched FFX_OK", s.w, s.h);
+        snprintf(label, sizeof(label), "(f) %ux%u -> %ux%u dispatched FFX_OK", s.w, s.h, s.oW, s.oH);
         check(ok, label);
         if (colour) colour->Release();
         if (depth) depth->Release();
         if (mv) mv->Release();
         if (out) out->Release();
     }
+}
+
+// The upscale case (the review of 2026-09-16, F3). Until now EVERY
+// fsr3Evaluate in this rig passed outW = w: the whole point of fix.temporal_aa
+// = fsr -- native_temporal.cpp sets s.upscale for it -- had never run
+// anywhere, and anyone at HMD Quality below 1 (the Quest 3, and every
+// FOV-trim configuration) meets that path on frame 1 of flight 1.
+//
+// Two sizes, for two different questions:
+//   (h)  the Quest 3's own numbers, 1376x1472 -> 2064x2208 (two thirds):
+//        does a context at a real VR upscale ratio create and dispatch, and
+//        does anything structured come out of it?
+//   (h2) the registration table's scene at the SAME ratio, 400x304 ->
+//        600x456 (exactly 1.5x on both axes, as 2064/1376 and 2208/1472 are):
+//        are the engine's shipped jitter and motion-vector signs still the
+//        unique minimum once the output grid is no longer the render grid?
+//        The Quest 3's own frame is not used for this: 4.5 MP x 8 frames x 7
+//        sign cells on a software rasteriser does not fit the rig's budget,
+//        and the convention is a property of the RATIO, not of the size.
+constexpr UINT kUpRenderW = 400, kUpRenderH = 304;
+constexpr UINT kUpOutW = 600, kUpOutH = 456;
+constexpr UINT kUpErrX = 150, kUpErrY = 120, kUpErrW = 300, kUpErrH = 225;
+
+// The truth at OUTPUT size: the same continuous scene, sampled where each
+// output pixel's centre lands in render-pixel coordinates. That is what
+// AMD's upsample converges to -- it reconstructs the signal its jittered
+// render-size samples came from and evaluates it at (pixel + 0.5) - jitter,
+// so an output pixel X reads the signal at (X + 0.5) * w/oW - 0.5 render
+// pixels. Anything else here would measure the mapping, not the signs.
+void renderSceneUpscaledTruth(int k, float sx, float sy, UINT w, UINT h, UINT oW, UINT oH,
+                              std::vector<unsigned char>& img) {
+    const float rx = static_cast<float>(w) / static_cast<float>(oW);
+    const float ry = static_cast<float>(h) / static_cast<float>(oH);
+    img.resize(static_cast<size_t>(oW) * oH * 4);
+    for (UINT y = 0; y < oH; ++y) {
+        for (UINT x = 0; x < oW; ++x) {
+            const float fx = (static_cast<float>(x) + 0.5f) * rx - 0.5f;
+            const float fy = (static_cast<float>(y) + 0.5f) * ry - 0.5f;
+            const float g = scenePattern(fx - static_cast<float>(k) * sx,
+                                         fy - static_cast<float>(k) * sy);
+            const unsigned char c = static_cast<unsigned char>(g * 255.0f + 0.5f);
+            unsigned char* px = &img[(static_cast<size_t>(y) * oW + x) * 4];
+            px[0] = c; px[1] = c; px[2] = c; px[3] = 255;
+        }
+    }
+}
+
+// runSequence's upscaling twin: render-size inputs, an output-size target,
+// and the error measured over an output-size region against an output-size
+// truth. Kept separate rather than bolted onto runSequence with five more
+// parameters, so the 1:1 table that settled the shipped signs is not
+// disturbed by this.
+bool runUpscaleSequence(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* colour,
+                        ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* out,
+                        const std::vector<std::vector<unsigned char>>& frames,
+                        const std::vector<uint16_t>& mvHalf, float jsx, float jsy, const char* who,
+                        const std::vector<std::vector<unsigned char>>& truth, double* errOut) {
+    ctx->UpdateSubresource(mv, 0, nullptr, mvHalf.data(), kUpRenderW * 4, 0);
+    std::vector<unsigned char> rb;
+    double sum = 0.0;
+    long n = 0;
+    for (int k = 0; k < kRegFrames; ++k) {
+        float jx = 0.0f, jy = 0.0f;
+        edvr::temporalJitter(static_cast<uint32_t>(k), &jx, &jy);
+        ctx->UpdateSubresource(colour, 0, nullptr, frames[static_cast<size_t>(k)].data(),
+                               kUpRenderW * 4, 0);
+        const char* why = nullptr;
+        if (!edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, out, kUpRenderW, kUpRenderH,
+                                kUpOutW, kUpOutH, jsx * jx, jsy * jy, k == 0, 11.1f, 0.1f, 10000.0f,
+                                kFovY, &why)) {
+            std::printf("info: %s frame %d refused: %s\n", who, k, why ? why : "?");
+            return false;
+        }
+        if (k < kRegFrames - 3) continue;
+        if (!readRegion(dev, ctx, out, kUpErrX, kUpErrY, kUpErrW, kUpErrH, rb)) {
+            std::printf("info: %s frame %d could not be read back\n", who, k);
+            return false;
+        }
+        sum += regionError(rb, truth[static_cast<size_t>(k)], kUpOutW, kUpErrX, kUpErrY, kUpErrW,
+                           kUpErrH) *
+               (static_cast<double>(kUpErrW) * kUpErrH);
+        n += static_cast<long>(kUpErrW) * kUpErrH;
+    }
+    if (errOut) *errOut = n ? sum / n : 1e9;
+    return true;
+}
+
+// (h)
+void testUpscaleQuest3(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    const UINT w = 1376, h = 1472, oW = 2064, oH = 2208;   // Quest 3, HMD Quality 2/3
+    ID3D11Texture2D* colour = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* depth  = makeTexture(dev, w, h, DXGI_FORMAT_R32_FLOAT,      D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* mv     = makeTexture(dev, w, h, DXGI_FORMAT_R16G16_FLOAT,   D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* out    = makeTexture(dev, oW, oH, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+    const bool made = colour && depth && mv && out;
+    check(made, "(h) the 1376x1472 -> 2064x2208 textures were created");
+    bool ok = false;
+    bool structured = false;
+    if (made) {
+        // A real image, not a constant: a flat input upscales to a flat
+        // output, which would pass a "not blank" test while proving nothing.
+        std::vector<unsigned char> img;
+        renderScene(0, 0.0f, 0.0f, 0.0f, 0.0f, w, h, img);
+        ctx->UpdateSubresource(colour, 0, nullptr, img.data(), w * 4, 0);
+        fillDepthConstant(ctx, depth, w, h, 0.3f);
+        fillZeroMotion(ctx, mv, w, h);
+        const char* why = nullptr;
+        ok = true;
+        for (int k = 0; k < 3 && ok; ++k) {
+            float jx = 0.0f, jy = 0.0f;
+            edvr::temporalJitter(static_cast<uint32_t>(k), &jx, &jy);
+            ok = edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, out, w, h, oW, oH, jx, jy,
+                                    k == 0, 11.1f, 0.1f, 10000.0f, kFovY, &why);
+            if (!ok) std::printf("info: (h) frame %d refused: %s\n", k, why ? why : "?");
+        }
+        std::vector<unsigned char> rb;
+        if (ok && readRegion(dev, ctx, out, oW / 4, oH / 4, 64, 64, rb)) {
+            int lo = 255, hi = 0;
+            double sum = 0.0;
+            for (size_t i = 0; i < rb.size(); i += 4) {
+                const int v = rb[i];
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+                sum += v;
+            }
+            const double mean = sum / (static_cast<double>(rb.size()) / 4.0);
+            std::printf("info: (h) a 64x64 patch of the 2064x2208 output: min %d max %d mean %.1f\n",
+                        lo, hi, mean);
+            // The scene's own contrast is the coarse chequer's +-0.40 plus
+            // the ripple, so a correctly upscaled patch spans well over 20
+            // levels. Blank (all one value) or black (mean near 0) fails.
+            structured = (hi - lo) > 20 && mean > 20.0 && mean < 235.0;
+        }
+    }
+    check(ok, "(h) the Quest 3 upscale dispatched FFX_OK at 1376x1472 -> 2064x2208");
+    check(structured, "(h) its 2064x2208 output carries the scene, not a blank or black frame");
+    if (colour) colour->Release();
+    if (depth) depth->Release();
+    if (mv) mv->Release();
+    if (out) out->Release();
+}
+
+// (h2)
+void testUpscaleRegistration(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    // Seven cells, not sixteen: the 1:1 table (d) already measured all
+    // sixteen and put every two-axis-wrong combination far outside the band,
+    // and each convention is priced independently here, so what the ratio
+    // could plausibly disturb is a SINGLE axis of either. One diagonal scene
+    // instead of (d)'s two, because a diagonal moves in x and y at once and
+    // so sees both motion axes in one run -- which (d)'s x-only and y-only
+    // pair cannot do, and which halves a table that costs 2.25x as many
+    // pixels per dispatch as (d)'s does.
+    struct Cell { const char* name; float jsx, jsy, msx, msy; };
+    static const Cell kCells[7] = {
+        {"jitter as_is,     motion as_is    ",  1.0f,  1.0f,  1.0f,  1.0f},
+        {"jitter flip_x,    motion as_is    ", -1.0f,  1.0f,  1.0f,  1.0f},
+        {"jitter flip_y,    motion as_is    ",  1.0f, -1.0f,  1.0f,  1.0f},
+        {"jitter flip_both, motion as_is    ", -1.0f, -1.0f,  1.0f,  1.0f},
+        {"jitter as_is,     motion flip_x   ",  1.0f,  1.0f, -1.0f,  1.0f},
+        {"jitter as_is,     motion flip_y   ",  1.0f,  1.0f,  1.0f, -1.0f},
+        {"jitter as_is,     motion flip_both",  1.0f,  1.0f, -1.0f, -1.0f},
+    };
+    const int kShipped = 0;   // fsr3_engine.cpp's kFsrJitterScale*/kFsrMotionVectorScale* = +1
+
+    ID3D11Texture2D* colour = makeTexture(dev, kUpRenderW, kUpRenderH, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                          D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* depth  = makeTexture(dev, kUpRenderW, kUpRenderH, DXGI_FORMAT_R32_FLOAT,
+                                          D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* mv     = makeTexture(dev, kUpRenderW, kUpRenderH, DXGI_FORMAT_R16G16_FLOAT,
+                                          D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* out    = makeTexture(dev, kUpOutW, kUpOutH, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+    const bool made = colour && depth && mv && out;
+    check(made, "(h2) the 400x304 -> 600x456 registration textures were created");
+    if (!made) {
+        if (colour) colour->Release();
+        if (depth) depth->Release();
+        if (mv) mv->Release();
+        if (out) out->Release();
+        return;
+    }
+    fillDepthConstant(ctx, depth, kUpRenderW, kUpRenderH, 0.3f);
+
+    std::vector<std::vector<unsigned char>> frames(static_cast<size_t>(kRegFrames));
+    std::vector<std::vector<unsigned char>> truth(static_cast<size_t>(kRegFrames));
+    std::vector<std::vector<unsigned char>> restFrames(static_cast<size_t>(kRegFrames));
+    std::vector<std::vector<unsigned char>> restTruth(static_cast<size_t>(kRegFrames));
+    for (int k = 0; k < kRegFrames; ++k) {
+        float jx = 0.0f, jy = 0.0f;
+        edvr::temporalJitter(static_cast<uint32_t>(k), &jx, &jy);
+        renderScene(k, kShiftPx, kShiftPx, jx, jy, kUpRenderW, kUpRenderH,
+                    frames[static_cast<size_t>(k)]);
+        renderSceneUpscaledTruth(k, kShiftPx, kShiftPx, kUpRenderW, kUpRenderH, kUpOutW, kUpOutH,
+                                 truth[static_cast<size_t>(k)]);
+        renderScene(0, 0.0f, 0.0f, jx, jy, kUpRenderW, kUpRenderH,
+                    restFrames[static_cast<size_t>(k)]);
+        renderSceneUpscaledTruth(0, 0.0f, 0.0f, kUpRenderW, kUpRenderH, kUpOutW, kUpOutH,
+                                 restTruth[static_cast<size_t>(k)]);
+    }
+
+    // The floor at THIS ratio, with nothing moving and a zero motion field,
+    // under the shipped jitter signs. It is a different number from (d)'s: an
+    // upscale cannot reconstruct what the render grid never sampled, so the
+    // band below is measured here rather than borrowed from the 1:1 table.
+    std::vector<uint16_t> mvHalf(static_cast<size_t>(kUpRenderW) * kUpRenderH * 2, 0);
+    double atRest = 0.0;
+    bool rigOk = runUpscaleSequence(dev, ctx, colour, depth, mv, out, restFrames, mvHalf,
+                                    kCells[kShipped].jsx, kCells[kShipped].jsy,
+                                    "(h2) scene at rest", restTruth, &atRest);
+    check(rigOk, "(h2) the scene's at-rest floor was measured at the upscale ratio");
+
+    double err[7] = {};
+    for (int ci = 0; ci < 7 && rigOk; ++ci) {
+        // The content moves +(kShiftPx, kShiftPx) render pixels a frame, so
+        // the motion vector current -> previous is -(kShiftPx, kShiftPx),
+        // in RENDER pixels: the port divides motionVectorScale by the render
+        // size itself, which is what makes a scale of 1 right at any ratio
+        // (fsr3_engine.cpp's own note on kFsrMotionVectorScaleX).
+        const float mvx = kCells[ci].msx * -kShiftPx;
+        const float mvy = kCells[ci].msy * -kShiftPx;
+        for (size_t i = 0; i < mvHalf.size(); i += 2) {
+            mvHalf[i] = probeHalf(mvx);
+            mvHalf[i + 1] = probeHalf(mvy);
+        }
+        rigOk = runUpscaleSequence(dev, ctx, colour, depth, mv, out, frames, mvHalf, kCells[ci].jsx,
+                                   kCells[ci].jsy, kCells[ci].name, truth, &err[ci]);
+    }
+    check(rigOk, "(h2) every upscaled registration dispatch and readback succeeded");
+    if (rigOk) {
+        int best = 0;
+        for (int ci = 1; ci < 7; ++ci) if (err[ci] < err[best]) best = ci;
+        int tied = 0;
+        double runnerUp = 1e18;
+        for (int ci = 0; ci < 7; ++ci) {
+            if (err[ci] <= err[best]) ++tied;
+            if (ci != best && err[ci] < runnerUp) runnerUp = err[ci];
+        }
+        for (int ci = 0; ci < 7; ++ci) {
+            std::printf("info: (h2) %s error %6.2f%s\n", kCells[ci].name, err[ci],
+                        ci == best ? "  <- least" : "");
+        }
+        std::printf("info: (h2) at 400x304 -> 600x456: least %.2f, runner-up %.2f, at-rest floor "
+                    "%.2f, the band %.2f; above the floor: least %+.2f, runner-up %+.2f\n",
+                    err[best], runnerUp, atRest, 2.0 * atRest, err[best] - atRest,
+                    runnerUp - atRest);
+        check(tied == 1, "(h2) exactly one sign combination is the least-error one at the upscale ratio");
+        check(best == kShipped,
+              "(h2) the shipped signs still converge best when the output grid is not the render grid");
+        // (d)'s band -- twice the floor this same scene reaches with nothing
+        // to register -- still holds for the WINNER, and is kept here.
+        check(err[best] <= 2.0 * atRest,
+              "(h2) the winning combination converges to within twice the upscaled at-rest floor");
+        // (d)'s other half, "and nothing else is inside that band", CANNOT be
+        // reused at an upscale ratio, and this is measured, not assumed. The
+        // floor itself is what changes: at 1:1 it was 0.93/255 and a wrong
+        // jitter sign cost 2.52, nearly three times it; at 3:2 the floor is
+        // 2.05 -- it now carries the upscaler's own reconstruction residual,
+        // which no sign can improve -- and a wrong jitter sign costs 3.38,
+        // well inside twice 2.05. A band of 2x the floor admits it. What
+        // separates the conventions at this ratio is the DISTANCE ABOVE the
+        // floor: the winner is +0.01 (it lands on the floor -- once the
+        // registration is right, moving content costs nothing the resolve was
+        // not already paying), and the next best is +1.33. So the bar is that
+        // the winner is far nearer the floor than the runner-up is, which is
+        // scale-free and had a factor of about thirty in hand when it was
+        // measured here.
+        check(err[best] - atRest <= 0.25 * (runnerUp - atRest),
+              "(h2) the winner sits on the upscaled at-rest floor and every other combination is "
+              "well above it");
+    }
+    colour->Release();
+    depth->Release();
+    mv->Release();
+    out->Release();
+}
+
+// (i) fsr3Warm, which nothing exercised: the loading-screen path that
+// temporal_pass.cpp calls before the first submitted frame. Measured through
+// createMs rather than by scraping the log -- a warm that MADE a context
+// reports the time it took, and one that found it already made reports zero.
+// The same instrument proves the two things the engine now promises about
+// the context key: a live advanced.temporal_aa_diagnostics flip remakes it
+// (F8), and fsr3ReleaseFeatures really frees it (F7).
+void testWarmAndRelease(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    const UINT w = 960, h = 800, oW = 1440, oH = 1200;   // a key no other case uses
+    double ms = -1.0;
+    const char* why = nullptr;
+    const bool warmed = edvr::fsr3Warm(ctx, w, h, oW, oH, &ms, &why);
+    if (!warmed && why) std::printf("info: (i) fsr3Warm refused: %s\n", why);
+    check(warmed, "(i) fsr3Warm made both eyes' contexts at 960x800 -> 1440x1200");
+    std::printf("info: (i) the warm-up's own create cost %.0f ms for the pair\n", ms);
+    check(warmed && ms > 0.0, "(i) the warm-up reports the time its creates took");
+
+    double again = -1.0;
+    const bool second = edvr::fsr3Warm(ctx, w, h, oW, oH, &again, &why);
+    check(second && again == 0.0, "(i) a second warm at the same key creates nothing");
+
+    // What the warm-up is FOR: the first evaluate at that key finds the
+    // context made. It must succeed, and a warm straight after it must still
+    // cost nothing -- which is what says the evaluate used the warmed context
+    // rather than quietly rekeying over it.
+    {
+        ID3D11Texture2D* colour = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
+        ID3D11Texture2D* depth  = makeTexture(dev, w, h, DXGI_FORMAT_R32_FLOAT,      D3D11_BIND_SHADER_RESOURCE);
+        ID3D11Texture2D* mv     = makeTexture(dev, w, h, DXGI_FORMAT_R16G16_FLOAT,   D3D11_BIND_SHADER_RESOURCE);
+        ID3D11Texture2D* out    = makeTexture(dev, oW, oH, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                              D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+        const bool made = colour && depth && mv && out;
+        check(made, "(i) the textures for a dispatch at the warmed key were created");
+        bool ok = false, stillWarm = false;
+        if (made) {
+            fillConstant(ctx, colour, w, h, 128);
+            fillDepthConstant(ctx, depth, w, h, 0.3f);
+            fillZeroMotion(ctx, mv, w, h);
+            const char* whyEval = nullptr;
+            ok = edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, out, w, h, oW, oH, 0.0f,
+                                    0.0f, true, 11.1f, 0.1f, 10000.0f, kFovY, &whyEval);
+            if (!ok && whyEval) std::printf("info: (i) the warmed-key dispatch refused: %s\n", whyEval);
+            double after = -1.0;
+            stillWarm = edvr::fsr3Warm(ctx, w, h, oW, oH, &after, &why) && after == 0.0;
+        }
+        check(ok, "(i) a dispatch at the warmed key succeeded");
+        check(stillWarm, "(i) and it found the warm-up's own context, creating nothing");
+        if (colour) colour->Release();
+        if (depth) depth->Release();
+        if (mv) mv->Release();
+        if (out) out->Release();
+    }
+
+    // advanced.temporal_aa_diagnostics is part of the key now: flipping it
+    // live must remake the context instead of doing nothing until a size
+    // moves. The rig runs with it ON (run(), below), so turn it off here and
+    // put it back afterwards.
+    edvr::Config::get().set("advanced.temporal_aa_diagnostics", "0");
+    double flipped = -1.0;
+    const bool afterFlip = edvr::fsr3Warm(ctx, w, h, oW, oH, &flipped, &why);
+    edvr::Config::get().set("advanced.temporal_aa_diagnostics", "1");
+    std::printf("info: (i) after flipping advanced.temporal_aa_diagnostics the warm cost %.0f ms\n",
+                flipped);
+    check(afterFlip && flipped > 0.0,
+          "(i) flipping advanced.temporal_aa_diagnostics live remakes the context");
+
+    double back = -1.0;
+    const bool restored = edvr::fsr3Warm(ctx, w, h, oW, oH, &back, &why);
+    check(restored && back > 0.0, "(i) flipping it back remakes the context again");
+
+    edvr::fsr3ReleaseFeatures();
+    double afterRelease = -1.0;
+    const bool remade = edvr::fsr3Warm(ctx, w, h, oW, oH, &afterRelease, &why);
+    std::printf("info: (i) after fsr3ReleaseFeatures the same key cost %.0f ms again\n",
+                afterRelease);
+    check(remade && afterRelease > 0.0,
+          "(i) fsr3ReleaseFeatures frees the contexts, so the same key is made afresh");
+    edvr::fsr3ReleaseFeatures();
+}
+
+// (j) The reactive mask, null at every call site until now, so
+// advanced.temporal_aa_fsr_reactive was untested end to end. The seam hands
+// FSR an R8_UNORM mask at render size (temporal_pass.cpp's e.dlMask); the
+// shape is what is checked here, not the picture.
+void testReactiveMask(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    const UINT w = kRegW, h = kRegH;
+    ID3D11Texture2D* colour = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* depth  = makeTexture(dev, w, h, DXGI_FORMAT_R32_FLOAT,      D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* mv     = makeTexture(dev, w, h, DXGI_FORMAT_R16G16_FLOAT,   D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* mask   = makeTexture(dev, w, h, DXGI_FORMAT_R8_UNORM,       D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* out    = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+    const bool made = colour && depth && mv && mask && out;
+    check(made, "(j) the reactive-mask textures were created");
+    bool ok = false;
+    if (made) {
+        std::vector<unsigned char> img;
+        renderScene(0, 0.0f, 0.0f, 0.0f, 0.0f, w, h, img);
+        ctx->UpdateSubresource(colour, 0, nullptr, img.data(), w * 4, 0);
+        fillDepthConstant(ctx, depth, w, h, 0.3f);
+        fillZeroMotion(ctx, mv, w, h);
+        // Half the frame reactive, half not: a uniform mask could be ignored
+        // wholesale without changing the answer.
+        std::vector<unsigned char> m(static_cast<size_t>(w) * h, 0);
+        for (UINT y = 0; y < h; ++y) {
+            for (UINT x = w / 2; x < w; ++x) m[static_cast<size_t>(y) * w + x] = 200;
+        }
+        ctx->UpdateSubresource(mask, 0, nullptr, m.data(), w, 0);
+        const char* why = nullptr;
+        ok = true;
+        for (int k = 0; k < 3 && ok; ++k) {
+            float jx = 0.0f, jy = 0.0f;
+            edvr::temporalJitter(static_cast<uint32_t>(k), &jx, &jy);
+            ok = edvr::fsr3Evaluate(ctx, 1, colour, depth, mv, mask, out, w, h, w, h, jx, jy,
+                                    k == 0, 11.1f, 0.1f, 10000.0f, kFovY, &why);
+            if (!ok) std::printf("info: (j) frame %d refused: %s\n", k, why ? why : "?");
+        }
+    }
+    check(ok, "(j) a dispatch with an R8_UNORM reactive mask succeeded");
+    if (colour) colour->Release();
+    if (depth) depth->Release();
+    if (mv) mv->Release();
+    if (mask) mask->Release();
+    if (out) out->Release();
+}
+
+// (k) The bind-flag contract, both halves (the review of 2026-09-16, F2):
+//   k1  fsr3Evaluate REFUSES a write-only output before registering
+//       anything, with a reason naming the texture and the flag.
+//   k2  and behind that front stop, the catch really does catch: with the
+//       check switched off (a test-only hook), the same texture reaches
+//       AMD's RegisterResourceDX11, its CreateShaderResourceView fails, its
+//       TIF helper throws `1` out of an extern "C" function -- and this must
+//       come back as false plus a reason rather than taking the process
+//       down. That is only true because build.bat compiles both this rig and
+//       the d3d11 half with /EHs; under /EHsc the compiler is entitled to
+//       assume that exception cannot exist.
+void testBindFlagContract(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    const UINT w = 512, h = 384;   // a key no other case uses
+    ID3D11Texture2D* colour = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* depth  = makeTexture(dev, w, h, DXGI_FORMAT_R32_FLOAT,      D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* mv     = makeTexture(dev, w, h, DXGI_FORMAT_R16G16_FLOAT,   D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* uavOnly = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                           D3D11_BIND_UNORDERED_ACCESS);
+    const bool made = colour && depth && mv && uavOnly;
+    check(made, "(k) the write-only-output textures were created");
+    if (made) {
+        fillConstant(ctx, colour, w, h, 128);
+        fillDepthConstant(ctx, depth, w, h, 0.3f);
+        fillZeroMotion(ctx, mv, w, h);
+
+        const char* why = nullptr;
+        const bool refused = !edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, uavOnly, w, h,
+                                                 w, h, 0.0f, 0.0f, true, 11.1f, 0.1f, 10000.0f,
+                                                 kFovY, &why);
+        std::printf("info: (k1) a UAV-only output was refused with: %s\n", why ? why : "(no reason)");
+        check(refused, "(k1) fsr3Evaluate refuses a write-only output instead of registering it");
+        check(refused && why && std::strstr(why, "D3D11_BIND_SHADER_RESOURCE") != nullptr &&
+                  std::strstr(why, "output") != nullptr,
+              "(k1) and its reason names the output texture and the missing flag");
+
+        // k2: the same call with the front stop off. A throw that escaped
+        // would take this process down, so reaching the line after it at all
+        // is half the result; the other half is that it came back false.
+        edvr::fsr3TestSkipBindCheck(true);
+        const char* why2 = nullptr;
+        const bool threwCleanly = !edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, uavOnly, w,
+                                                      h, w, h, 0.0f, 0.0f, true, 11.1f, 0.1f,
+                                                      10000.0f, kFovY, &why2);
+        edvr::fsr3TestSkipBindCheck(false);
+        std::printf("info: (k2) with the check off, AMD's port answered: %s\n",
+                    why2 ? why2 : "(no reason)");
+        check(threwCleanly,
+              "(k2) the port's own failure on that texture comes back as false, not as a crash");
+        check(threwCleanly && why2 && std::strstr(why2, "dispatch") != nullptr,
+              "(k2) and it is reported as a failed dispatch with a reason");
+        // Whatever state that half-run dispatch left in the context, it is
+        // not to be measured by anything after this.
+        edvr::fsr3ReleaseFeatures();
+    }
+    if (colour) colour->Release();
+    if (depth) depth->Release();
+    if (mv) mv->Release();
+    if (uavOnly) uavOnly->Release();
 }
 
 // (g)
@@ -1074,6 +1559,15 @@ int run() {
         testRegistrationTable(device.Get(), context.Get());
         testReset(device.Get(), context.Get());
         testSizeChange(device.Get(), context.Get());
+        testUpscaleQuest3(device.Get(), context.Get());
+        testUpscaleRegistration(device.Get(), context.Get());
+        testWarmAndRelease(device.Get(), context.Get());
+        testReactiveMask(device.Get(), context.Get());
+        // Last of the dispatching cases: (k2) deliberately drives AMD's port
+        // into its own throw, and nothing after it should be measuring a
+        // context that went through that.
+        testBindFlagContract(device.Get(), context.Get());
+        dumpDebugMessages(device.Get(), "after (k)");
         testVramQuery(device.Get());
         edvr::fsr3Shutdown();
     }
@@ -1095,7 +1589,10 @@ int main(int argc, char** argv) {
         std::puts(
             "Would test AMD's FSR3 engine on a WARP device: availability, context creation, "
             "DEBUG_CHECKING silence, the jitter/motion-vector sign registration table, reset, a "
-            "size change, and the VRAM query; no devices or files.");
+            "size change, the Quest 3's own upscale and the sign table at that ratio, the "
+            "loading-screen warm-up and the release that frees it, a reactive mask, the "
+            "bind-flag refusal and the caught throw behind it, and the VRAM query; no devices "
+            "or files.");
         return 0;
     }
     if (argc != 2 || std::strcmp(argv[1], "--self-test")) return 2;

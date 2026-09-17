@@ -31,11 +31,13 @@ read 2026-09-16) unless marked believed.
   port) and Track B (b8cd3b2: the `fsr` value, the engine enum and helpers,
   the seven readers, the seam, the ini text, the panel, and a stub engine
   that refuses without the SDK), merged with main at 2c7c21e and green.
-  Track C (the engine body under `EDVR_HAVE_FSR3`, the build.bat block, the
-  WARP rig `tools\fsr3_engine_test`) is in progress. No install to any game
-  directory without Sean's approval.
-- **Next:** Track C's diff reviewed and committed; an adversarial review of
-  the branch; then Sean's go for an install; then flight 1 (section 4).
+  Track C landed as 6294f1f: the engine body under `EDVR_HAVE_FSR3`, the
+  build.bat block, the WARP rig `tools\fsr3_engine_test` (31 checks; the
+  jitter and motion signs settled at the engine's defaults, journal). No
+  install to any game directory without Sean's approval.
+- **Next:** the adversarial review is done and its findings are fixed
+  (journal); the branch waits on Sean's go for an install, then flight 1
+  (section 4).
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
   history, which is what an AMD user gets today. CLOSED by Track A: the
@@ -551,3 +553,50 @@ class of upscaler): that is route 2's go/no-go.
   `dilatedMotionVectors` pointed at null again it fails six checks; the
   first rig passed that state. `fsr3Available` gates on feature level 11_1.
   31 checks, 20 s in the pool (wall-clock unchanged), build green.
+- 2026-09-16 night, the adversarial review of the branch (6294f1f against
+  main) and its fixes, all on the branch, both builds green, 59 rig checks:
+  - **Refusal once-flag** was shared across engines and never cleared: a
+    DLSS refusal, then a switch to `fsr` that also refused, logged nothing.
+    Now one flag per engine, both cleared on an engine change; NGX's hint
+    to try `fsr` prints only when the build has the port.
+  - **The try/catch around the port's C API was compiled under `/EHsc`**,
+    which tells the compiler `extern "C"` functions never throw, so the
+    catch could be skipped and the throw a crash. Now `/EHs` for the d3d11
+    half and the rig, and the engine checks every texture's bind flags
+    before registering (SRV on all, UAV on the output and the three
+    surfaces) and refuses with a reason naming the texture, so the port's
+    throw is never the expected path. The rig proves both: a UAV-only
+    output is refused by the check, and with the check bypassed (a
+    test-only hook) the port's own throw comes back as false plus reason.
+  - **The upscale case had never run**: every rig dispatch was 1:1, while
+    any HMD Quality below 1 (every Quest 3 flight) starts in it. The rig
+    now runs 1376x1472 into 2064x2208 with the sign table at that ratio
+    (winner 2.06 against a 2.05 floor; a wrong motion sign 13.6 or worse)
+    and a real 1711x1425 into 3422x3394 create and dispatch. The table's
+    "nothing else inside twice the floor" rule fails at a ratio (the floor
+    carries the reconstruction residual), replaced by a scale-free bar:
+    the winner's distance above the floor at most a quarter of the
+    runner-up's.
+  - **The warm-up is 1:1** and the first upscaled frame pays a create:
+    kept, because the render size is not knowable at warm time (only the
+    output size is; Elite's render fraction is the launch-time multiplier
+    the pass already cross-checks at the seam); the log line says so.
+  - A create that throws or fails now latches for that key (one line, no
+    retry every frame; the half-made context leaks, named in the comment).
+  - The perf tile and the panel status followed whichever engine ran
+    first; now one accessor answers for the current engine.
+  - `fsr3ReleaseFeatures` had no caller; the treat now releases AMD's
+    contexts on the render thread when it first sees the engine change
+    (NVIDIA has no per-feature release, left as it was).
+  - `advanced.temporal_aa_diagnostics` is part of the context key, so a
+    live flip recreates; unknown frame time is a nominal 11.1 ms; the
+    90-degree fovY fallback logs once; the message callback's buffer is
+    initialised.
+  - **The port's MIT notice ships**: `FIDELITYFX-SDK-DX11-LICENSE.txt` in
+    `build\` and the release zip beside NVIDIA's, deleted on the no-port
+    path. The fetch tool's `--verify` now fails on a stale stage (commit
+    pin and the recorded compiler hash read back from VERSION.txt).
+  - Sound and left alone: `resetHist` on a switch, the compute-state
+    save/restore around the seam, the reactive mask's shape, the shared
+    output and copy-out, the seven readers, `texture_lod_bias = auto`
+    (keys on the mode, not the vendor), the build wiring, the rekey.

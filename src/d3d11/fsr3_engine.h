@@ -51,17 +51,19 @@ bool fsr3Warm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW,
 // = atan(t) + atan(b)). False on any refusal, with why.
 //
 // out MUST carry BOTH D3D11_BIND_UNORDERED_ACCESS and D3D11_BIND_SHADER_
-// RESOURCE, even though FSR only ever writes it. AMD's DX11 port's own
+// RESOURCE, even though FSR only ever writes it, and colour, depth, mv and
+// reactive must carry D3D11_BIND_SHADER_RESOURCE. AMD's DX11 port's own
 // RegisterResourceDX11 unconditionally creates a shader resource view for
 // every texture it registers, output included, with no bind-flag check the
 // way its UAV path has; a UAV-only texture makes that CreateShaderResource
 // View call fail, and this port's answer to any failed D3D11 call mid-
 // dispatch is an untyped `throw 1` (ffx_dx11.cpp's TIF helper) -- a bare
-// C++ exception with no place in this otherwise all-FfxErrorCode C API,
-// fatal if nothing up the call stack happens to catch it. temporal_pass.cpp's
-// own e.dlOut already carries both flags (it is DLAA's output too); a new
-// caller that hands FSR a write-only target will not build a clean
-// FfxErrorCode failure out of this -- it will crash the process outright.
+// C++ exception with no place in this otherwise all-FfxErrorCode C API.
+// temporal_pass.cpp's own e.dlOut already carries both flags (it is DLAA's
+// output too). Since the review of 2026-09-16 this is CHECKED here before
+// anything is registered: a texture missing a flag is a plain false with a
+// why naming the texture and the flag, not a throw to be caught -- the
+// catch stays as the backstop for a failure nobody foresaw.
 bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* reactive,
                   ID3D11Texture2D* out, uint32_t w, uint32_t h, uint32_t outW,
@@ -72,10 +74,21 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
 // full port shutdown below -- for a size or engine change mid-session, the
 // same reason dlaa's ensureFeature recreates on a size change, but as an
 // explicit call because FSR's context key includes the output size, which
-// this build's own trim and HMD Quality can change live.
+// this build's own trim and HMD Quality can change live. Called from the
+// render thread only (the pass calls it at the treat where it first sees the
+// engine change), and it also clears any create-failure latch, so the next
+// evaluate at a stood-down key is allowed to try again.
 void fsr3ReleaseFeatures();
 
 void fsr3Shutdown();
+
+// Was AMD's port compiled into this build at all (EDVR_HAVE_FSR3)? A
+// compile-time answer, with none of fsr3Available's cost: it initialises
+// nothing, so a log line on NVIDIA's path may ask it without dragging AMD's
+// backend and scratch into a session that never uses them. The one caller
+// is the NGX refusal's "Set temporal_aa = fsr" hint, which must not be
+// offered by a build that has no port to offer.
+bool fsr3BuiltIn();
 
 // "fsr 3.1.2" once the port is linked; the stub returns "fsr" -- what the
 // price line and the perf tile print in place of "full-frame ngx"/"NVIDIA"

@@ -24,7 +24,9 @@
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 #include "gpu_timing.h"
-#include "fsr3_engine.h"  // fsr3Totals/fsr3VersionLabel: the EDVR PASSES tile shows AMD's price when it, not NVIDIA's, ran
+// fsr3_engine.h is deliberately NOT included: the EDVR PASSES tile reaches
+// AMD's price through temporal_pass.h's temporalPassTrainedTotals, which
+// answers for the engine fix.temporal_aa names right now (F6).
 #include "native_menu.h"
 #include "native_timing.h"
 #include "native_perf_history.h"
@@ -1242,20 +1244,17 @@ int perfMonitorTiles(PerfTile* out, int max) {
         double avg = 0.0, mx = 0.0, rej = 0.0, clip = 0.0;
         double temporal = -1.0, sharpen = -1.0;
         bool trained = false;
-        // Whichever trained engine actually ran this session carries a
-        // nonzero count of its own (dlaaTotals/fsr3Totals both answer false
-        // with nothing recorded) -- so trying NVIDIA's totals then AMD's
-        // and taking whichever answers picks the right one with no engine
-        // check of its own, the same way menu.cpp's status line (already
-        // shipped) does.
+        // The engine fix.temporal_aa names RIGHT NOW, and its own word for
+        // the tile. Trying NVIDIA's totals first and falling through to
+        // AMD's read the engine that ran FIRST: neither total is cleared on
+        // a live switch, so after a dlss -> fsr A/B this tile kept printing
+        // "ms NVIDIA/call" beside a price line that said fsr (the review of
+        // 2026-09-16, F6). temporalPassTrainedTotals answers for the current
+        // engine and writes the word whatever it answers.
         const char* engineWord = "NVIDIA";
-        if (temporalPassDlaaTotals(&t, &avg, &mx, &resets) && t) {
+        if (temporalPassTrainedTotals(&t, &avg, &mx, &resets, &engineWord, nullptr) && t) {
             temporal = avg;
             trained = true;
-        } else if (fsr3Totals(&t, &avg, &mx, &resets) && t) {
-            temporal = avg;
-            trained = true;
-            engineWord = fsr3VersionLabel();
         } else if (temporalPassTotals(&t, &avg, &mx, &rej, &clip) && t) {
             temporal = avg;
         }

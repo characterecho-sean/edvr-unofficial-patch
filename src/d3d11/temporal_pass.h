@@ -144,6 +144,18 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
                             uint32_t* resets);
 
+// The trained totals of whichever engine fix.temporal_aa names RIGHT NOW,
+// with the word a display should print for it ("NVIDIA", or "fsr 3.1.2"),
+// and whether that engine is AMD's -- the per-role figures below are
+// NVIDIA-only, so a display hides them under fsr. engineLabel and amd are
+// written whatever the return value; the return says only whether that
+// engine has a measured price yet. Every readout of the trained price goes
+// through this rather than trying one engine's totals and falling through
+// to the other's: neither total is cleared on a live engine switch, so
+// "whichever has a count" answers with the engine that ran FIRST.
+bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
+                               const char** engineLabel, bool* amd);
+
 // The same price, split by which of the three independent NGX features
 // paid it (the full frame, the fovea's centre crop, the steady periphery)
 // and by eye (0 left, 1 right), so a display can show a real per-eye

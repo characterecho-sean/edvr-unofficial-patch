@@ -695,7 +695,10 @@ here so you can read exactly what it does and build it yourself.
 MIT — see [LICENSE](LICENSE). One file the installer carries is not: NVIDIA's
 DLSS runtime, `nvngx_dlss.dll`, is NVIDIA's software under the NVIDIA RTX SDKs
 licence, distributed unmodified as part of this application as that licence
-allows, and only placed on machines with an NVIDIA card.
+allows, and only placed on machines with an NVIDIA card. The `fsr` engine is
+AMD's FidelityFX Super Resolution 3.1 upscaler through its community Direct3D
+11 port (the optiscaler project's FidelityFX-SDK-DX11, MIT), compiled into
+`d3d11.dll`; its notice ships as `FIDELITYFX-SDK-DX11-LICENSE.txt`.
 
 Not affiliated with, endorsed by, or supported by Frontier Developments plc or
 Valve Corporation. Elite Dangerous is a trademark of Frontier Developments plc.

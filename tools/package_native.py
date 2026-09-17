@@ -41,6 +41,15 @@ def _files(root, no_dlss):
         result.append((build / "NVIDIA-DLSS-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt"))
     result.extend([(root / "edvr.ini", "edvr.ini"), (root / "LICENSE", "LICENSE.txt")])
     result.append((root / "third_party" / "dxbc_hash" / "LICENSE.TXT", "DXBC-HASH-LICENSE.txt"))
+    # AMD's FSR3 D3D11 port (MIT). Unlike NVIDIA's runtime it ships no DLL --
+    # it is statically linked into d3d11.dll -- so its presence in a build is
+    # exactly this notice, which build.bat copies beside the binaries when it
+    # links the port and deletes on every no-port path. MIT's notice
+    # requirement applies to the release because the code is in the binary we
+    # distribute (the review of 2026-09-16, F10).
+    ffx_notice = build / "FIDELITYFX-SDK-DX11-LICENSE.txt"
+    if ffx_notice.is_file():
+        result.append((ffx_notice, "FIDELITYFX-SDK-DX11-LICENSE.txt"))
     return result
 
 
@@ -233,6 +242,21 @@ def self_test():
                 raise AssertionError("empty DLSS notice accepted")
             except ValueError:
                 pass
+            # AMD's FSR3 port notice: absent from every archive above (no
+            # such file in the fixture build), carried when build.bat has put
+            # one there. The port links statically, so this notice IS the
+            # release's only trace of it.
+            notice.write_bytes(b"NVIDIA runtime notice")
+            ffx = root / "build" / "FIDELITYFX-SDK-DX11-LICENSE.txt"
+            assert not ffx.exists()
+            ffx.write_bytes(b"MIT, FidelityFX SDK DX11 port")
+            assert package(root, "1.2.6", no_dlss=True) == 0
+            with zipfile.ZipFile(root / "dist" / "edvr-1.2.6.zip") as archive:
+                assert archive.read("FIDELITYFX-SDK-DX11-LICENSE.txt") == ffx.read_bytes()
+            ffx.unlink()
+            assert package(root, "1.2.7", no_dlss=True) == 0
+            with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
+                assert "FIDELITYFX-SDK-DX11-LICENSE.txt" not in set(archive.namelist())
         finally:
             openxr_pe.native_exports, openxr_pe.native_graphics_exports = old_native, old_graphics
             fetch_openxr_loader.verify = old_verify

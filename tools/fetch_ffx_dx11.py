@@ -92,9 +92,20 @@ LIBS = ["ffx_fsr3upscaler_x64.lib", "ffx_backend_dx11_x64.lib"]
 # having extended the compiler for DX11/cs_5_0, which stock AMD SDK tags
 # never target.
 SHADER_COMPILER_REL = os.path.join("sdk", "tools", "binary_store", "FidelityFX_SC.exe")
+# The hash that binary has at COMMIT, so --verify can say whether a staged
+# tree came from the pin or from something else. Being a committed binary in
+# the fork, it moves only when the pin moves: bump both together, on purpose.
+SHADER_COMPILER_SHA256 = "30f9df1412742b7dcd5a8655c309ebfdb2210b070f9e6c1b09290a127c7d6dd7"
 
 LICENCE = "LICENSE.txt"
 VERSION_FILE = "VERSION.txt"
+# VERSION.txt's own field names, written by stage() and read back by
+# verify(). Neither is decoration: without reading the commit back, a tree
+# staged from an OLDER pin verifies green forever -- a pin bump plus a failed
+# rebuild, which never reaches stage(), leaves the old commit's libraries in
+# place and build.bat then defines EDVR_HAVE_FSR3 over them silently.
+VERSION_COMMIT_KEY = "commit:"
+VERSION_COMPILER_MARK = "SHA-256:"
 
 # sdk/CMakeLists.txt sets no CRT; BuildFidelityFXDX11.bat's own flags plus the
 # one that turns the FSR3 upscaler component on (see the module docstring and
@@ -378,6 +389,23 @@ def crt_of(directives_text):
     return "unknown"
 
 
+def version_facts(text):
+    """(commit, shader-compiler SHA-256) read back out of a staged VERSION.txt.
+    Either is None when the file does not carry it -- an old or hand-edited
+    stage, which verify() treats as a problem rather than as a pass."""
+    commit = None
+    compiler = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(VERSION_COMMIT_KEY):
+            m = re.search(r"[0-9a-f]{40}", stripped)
+            commit = m.group(0) if m else None
+        elif VERSION_COMPILER_MARK in stripped:
+            m = re.search(r"[0-9a-f]{64}", stripped)
+            compiler = m.group(0) if m else None
+    return commit, compiler
+
+
 def imports_in(symbols_text):
     return sorted(set(re.findall(r"__imp_[A-Za-z0-9_]+", symbols_text)))
 
@@ -423,6 +451,33 @@ def verify(dest, run_directives=None, run_symbols=None, quiet=False):
     for name in (LICENCE, VERSION_FILE):
         if not os.path.isfile(os.path.join(dest, name)):
             problems.append("missing: %s" % os.path.join(dest, name))
+
+    # Is this stage the PIN's? The files above only prove that something was
+    # staged; VERSION.txt is where stage() recorded what. A tree left behind
+    # by an older commit (or by a pin bump whose rebuild failed before
+    # stage()) is otherwise indistinguishable from a current one, and
+    # build.bat defines EDVR_HAVE_FSR3 over whatever it verifies.
+    version_path = os.path.join(dest, VERSION_FILE)
+    if os.path.isfile(version_path):
+        commit, compiler = version_facts(
+            Path(version_path).read_text(encoding="utf-8", errors="replace"))
+        if commit is None:
+            problems.append("%s carries no '%s <40-hex sha>' line -- restage with "
+                             "tools\\fetch_ffx_dx11.py" % (version_path, VERSION_COMMIT_KEY))
+        elif commit != COMMIT:
+            problems.append("staged from commit %s, but the pin is %s -- restage, or move the pin "
+                             "on purpose" % (commit[:12], COMMIT[:12]))
+        else:
+            summary.append("commit: %s (the pin)" % commit[:12])
+        if compiler is None:
+            problems.append("%s records no shader-compiler SHA-256 -- restage with "
+                             "tools\\fetch_ffx_dx11.py" % version_path)
+        elif compiler != SHADER_COMPILER_SHA256:
+            problems.append("the shader compiler this tree was built with hashes %s, not the "
+                             "expected %s -- the fork's prebuilt FidelityFX_SC.exe is not the "
+                             "pinned one" % (compiler[:12], SHADER_COMPILER_SHA256[:12]))
+        else:
+            summary.append("shader compiler: %s (build-time only)" % compiler[:12])
 
     header_path = os.path.join(dest, HEADER_DEST, "ffx_fsr3upscaler.h")
     version = None
@@ -535,7 +590,20 @@ def _write_synthetic_tree(dest):
     for name in LIBS:
         Path(os.path.join(lib_dir, name)).write_bytes(b"synthetic-lib-not-a-real-coff-archive")
     Path(os.path.join(dest, LICENCE)).write_text("MIT\n", encoding="utf-8")
-    Path(os.path.join(dest, VERSION_FILE)).write_text("commit: 0\n", encoding="utf-8")
+    write_synthetic_version(dest, COMMIT, SHADER_COMPILER_SHA256)
+
+
+def write_synthetic_version(dest, commit, compiler_sha):
+    """A VERSION.txt in stage()'s own shape, so the self-test reads back what
+    a real stage writes rather than a form invented here."""
+    Path(os.path.join(dest, VERSION_FILE)).write_text(
+        "commit: %s\n"
+        "FSR: %s\n"
+        "CRT: static (LIBCMT)\n"
+        "toolset: synthetic\n"
+        "shader compiler (sdk\\tools\\binary_store\\FidelityFX_SC.exe) SHA-256: %s"
+        " -- build-time only, never staged or shipped\n" % (commit, FSR_VERSION, compiler_sha),
+        encoding="utf-8")
 
 
 def self_test():
@@ -628,6 +696,42 @@ def self_test():
         os.remove(os.path.join(dest, HEADER_DEST, "ffx_error.h"))
         problems = verify(dest, run_directives=ok_dir, run_symbols=ok_sym, quiet=True)
         assert any("ffx_error.h" in p for p in problems), "a missing header was not caught"
+        checks += 1
+
+    # VERSION.txt, read back: a tree staged from a DIFFERENT commit, and one
+    # built with a shader compiler that is not the pinned binary. Both used to
+    # verify green forever (the delegated fetch-tool review, 2026-09-16).
+    with tempfile.TemporaryDirectory(prefix="edvr-ffx-dx11-") as scratch:
+        dest = os.path.join(scratch, "staged")
+        _write_synthetic_tree(dest)
+
+        text = Path(os.path.join(dest, VERSION_FILE)).read_text(encoding="utf-8")
+        commit, compiler = version_facts(text)
+        assert commit == COMMIT and compiler == SHADER_COMPILER_SHA256, \
+            "version_facts did not read stage()'s own format back"
+        checks += 1
+
+        write_synthetic_version(dest, "a" * 40, SHADER_COMPILER_SHA256)
+        problems = verify(dest, run_directives=ok_dir, run_symbols=ok_sym, quiet=True)
+        assert any("the pin is" in p for p in problems), \
+            "a tree staged from another commit was not caught: %r" % problems
+        checks += 1
+
+        write_synthetic_version(dest, COMMIT, "b" * 64)
+        problems = verify(dest, run_directives=ok_dir, run_symbols=ok_sym, quiet=True)
+        assert any("shader compiler" in p for p in problems), \
+            "a foreign shader compiler was not caught: %r" % problems
+        checks += 1
+
+        Path(os.path.join(dest, VERSION_FILE)).write_text("FSR: 3.1.2\n", encoding="utf-8")
+        problems = verify(dest, run_directives=ok_dir, run_symbols=ok_sym, quiet=True)
+        assert len([p for p in problems if "restage" in p]) == 2, \
+            "a VERSION.txt with neither fact was not caught twice: %r" % problems
+        checks += 1
+
+        write_synthetic_version(dest, COMMIT, SHADER_COMPILER_SHA256)
+        problems = verify(dest, run_directives=ok_dir, run_symbols=ok_sym, quiet=True)
+        assert problems == [], "a restaged tree still reported problems: %r" % problems
         checks += 1
 
     # --dry-run's own property test above also covers "writes nothing"; confirm

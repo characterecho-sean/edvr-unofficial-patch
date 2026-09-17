@@ -37,7 +37,9 @@
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
-#include "fsr3_engine.h"
+// fsr3_engine.h is deliberately NOT included: the Temporal AA status line
+// reaches AMD's price and its name through temporal_pass.h's
+// temporalPassTrainedTotals, which answers for the engine in force (F6).
 
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unknown"
@@ -1488,7 +1490,15 @@ void buildStatus(MenuContent& c) {
                                 temporalPassDlaaCentreTotals(1, &rn, &centreR, &rmx);
         const bool havePeriph = temporalPassDlaaPeripheryTotals(0, &rn, &periphL, &rmx) &&
                                 temporalPassDlaaPeripheryTotals(1, &rn, &periphR, &rmx);
-        if (haveFull || haveCentre || havePeriph) {
+        // The current engine, not whichever one has a count (F6). The three
+        // per-role figures above are NGX's alone, and they keep answering
+        // after a live switch to fsr -- so they are shown only while NVIDIA
+        // is the engine in force.
+        const char* engineWord = "NVIDIA";
+        bool amdEngine = false;
+        const bool haveTrained =
+            temporalPassTrainedTotals(&n, &avg, &mx, &resets, &engineWord, &amdEngine) && n;
+        if (!amdEngine && (haveFull || haveCentre || havePeriph)) {
             // Per role, per eye: the pooled figure below mixed roles and eyes
             // into one number and called it "ms/eye", which it was not.
             size_t len = static_cast<size_t>(snprintf(buf, sizeof(buf), "%s, NVIDIA", mode.c_str()));
@@ -1508,10 +1518,8 @@ void buildStatus(MenuContent& c) {
                                                     " periphery L %.2f R %.2f ms", periphL, periphR));
                 if (len >= sizeof(buf)) len = sizeof(buf) - 1;
             }
-        } else if (temporalPassDlaaTotals(&n, &avg, &mx, &resets) && n) {
-            snprintf(buf, sizeof(buf), "%s, NVIDIA %.2f ms/eye", mode.c_str(), avg);
-        } else if (fsr3Totals(&n, &avg, &mx, &resets) && n) {
-            snprintf(buf, sizeof(buf), "%s, %s %.2f ms/eye", mode.c_str(), fsr3VersionLabel(), avg);
+        } else if (haveTrained) {
+            snprintf(buf, sizeof(buf), "%s, %s %.2f ms/eye", mode.c_str(), engineWord, avg);
         } else if (temporalPassTotals(&n, &avg, &mx, &rej, &clip) && n) {
             snprintf(buf, sizeof(buf), "%s, %.2f ms/eye", mode.c_str(), avg);
         } else {

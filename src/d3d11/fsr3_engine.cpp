@@ -150,6 +150,25 @@ struct EyeCtx {
     ID3D11Texture2D* dilatedDepth = nullptr;
     ID3D11Texture2D* dilatedMv = nullptr;
     ID3D11Texture2D* prevNearestDepth = nullptr;
+    // AMD's own debug checking, read from advanced.temporal_aa_diagnostics at
+    // creation and part of the key below, so flipping that setting live
+    // remakes the context instead of doing nothing until a size moves (the
+    // review of 2026-09-16, F8). Sean's documented A/B habit for the temporal
+    // work is to flip exactly this key mid-session.
+    bool diagnostics = false;
+    // The create-failure latch (the same review, F5). A create that fails --
+    // or, worse, one that throws out of AMD's port halfway -- used to be
+    // retried on EVERY treated frame: ~90 half-creates a second, each one
+    // consuming a context slot out of the two the backend's scratch was sized
+    // for, while the seam's once-per-session refusal line said nothing more.
+    // Latched per KEY, not per session: the key that failed is refused with
+    // its stored reason and no retry, and a different size (or an explicit
+    // fsr3ReleaseFeatures) re-arms it, mirroring temporal_pass.cpp's own
+    // g_foveaFailed.
+    bool     failed = false;
+    uint32_t failW = 0, failH = 0, failOutW = 0, failOutH = 0;
+    bool     failDiagnostics = false;
+    char     failWhy[256] = {};
 };
 // One per eye, keyed on (w, h, outW, outH) exactly as dlaa.cpp's
 // ensureFeature keys NGX (design doc 3.2): recreate on a key change,
@@ -237,9 +256,21 @@ void FsrMessage(FfxMsgType type, const wchar_t* message) {
         }
         return;
     }
-    char narrow[256];
-    WideCharToMultiByte(CP_UTF8, 0, message ? message : L"", -1, narrow, sizeof(narrow), nullptr,
-                        nullptr);
+    // Zero-initialised AND checked: WideCharToMultiByte returns 0 without
+    // writing a terminator when the UTF-8 form does not fit (a message over
+    // 255 bytes: ERROR_INSUFFICIENT_BUFFER), and the note below would then
+    // have read past the end of an uninitialised stack buffer. The zeroing
+    // makes the truncation case an empty string rather than stack noise; the
+    // return check turns it into a sentence that says what happened.
+    char narrow[256] = {};
+    const int written = WideCharToMultiByte(CP_UTF8, 0, message ? message : L"", -1, narrow,
+                                            static_cast<int>(sizeof(narrow)), nullptr, nullptr);
+    if (written <= 0) {
+        Log::get().note("fsr3: a message from AMD's port was too long for this log line (over %u "
+                        "bytes) or could not be converted.",
+                        static_cast<unsigned>(sizeof(narrow) - 1));
+        return;
+    }
     Log::get().note("fsr3: %s", narrow);
 }
 
@@ -324,6 +355,59 @@ void releaseEyeSurfaces(EyeCtx& e) {
     if (e.prevNearestDepth) { e.prevNearestDepth->Release(); e.prevNearestDepth = nullptr; }
 }
 
+// Latch this key's failure on the eye and answer with its stored reason from
+// now on (EyeCtx::failed). The struct is zeroed FIRST: on the throwing path
+// the caller must not destroy the context, so forgetting it whole is all
+// that is safe. One log line here, where the latch is set, so the reason is
+// in the log even when the seam's own once-per-session refusal line has
+// already been spent on something else.
+void latchCreateFailure(EyeCtx& e, unsigned eye, uint32_t w, uint32_t h, uint32_t outW,
+                        uint32_t outH, bool diagnostics, const char* reason) {
+    e = EyeCtx{};
+    e.failed = true;
+    e.failW = w; e.failH = h; e.failOutW = outW; e.failOutH = outH;
+    e.failDiagnostics = diagnostics;
+    snprintf(e.failWhy, sizeof(e.failWhy), "%s", reason ? reason : "no reason given");
+    Log::get().note("fsr3: eye %u is stood down at %ux%u -> %ux%u for the rest of this session (a "
+                    "different size, or a switch away and back, tries again): %s",
+                    eye, w, h, outW, outH, e.failWhy);
+}
+
+// AMD's port registers every texture handed to a dispatch through its own
+// RegisterResourceDX11, which creates a shader-resource view for EVERY one
+// of them unconditionally -- and answers a failed D3D11 call with a bare
+// `throw 1` out of an extern "C" function (fsr3_engine.h's own contract note
+// says so). The catch around the dispatch is the backstop; this is the
+// front stop, because a refusal that names the texture and the flag is worth
+// more than a caught exception with a generic reason, and because relying on
+// the catch for a case we can see coming is exactly what the review of
+// 2026-09-16 (F2) objected to. Returns the missing flag's name, or null when
+// the texture carries everything the port will ask of it.
+const char* missingBindFlag(ID3D11Texture2D* tex, bool needUav) {
+    if (!tex) return nullptr;   // a null resource is the port's own NULL index, not a bad texture
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    if (!(td.BindFlags & D3D11_BIND_SHADER_RESOURCE)) return "D3D11_BIND_SHADER_RESOURCE";
+    if (needUav && !(td.BindFlags & D3D11_BIND_UNORDERED_ACCESS)) {
+        return "D3D11_BIND_UNORDERED_ACCESS";
+    }
+    return nullptr;
+}
+
+// Test-only (fsr3TestSkipBindCheck, at the foot of this file): lets
+// tools\fsr3_engine_test hand the port a texture the check above would have
+// refused, so the rig can prove that the try/catch really does turn AMD's
+// `throw 1` into this file's false-plus-reason under /EHs. Never set outside
+// that rig -- the shipped path always checks.
+bool g_testSkipBindCheck = false;
+
+// The 90-degree cameraFovAngleVertical stand-in, noted once when it is used
+// (the review of 2026-09-16, F11): the real value is computed at the seam
+// from the eye's tangents, and a trim or a lied frustum that ever drove it
+// to zero would otherwise run AMD's reprojection at the wrong field of view
+// with nothing in the log to say so.
+bool g_fovFallbackNoted = false;
+
 // The per-eye context: made when missing or its key (the sizes) has moved,
 // left alone otherwise. The ONE block fsr3Evaluate and fsr3Warm share, so
 // what the warm-up makes on the loading screen is exactly what the first
@@ -335,23 +419,51 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         if (why) *why = "eye must be 0 or 1";
         return false;
     }
-    EyeCtx& e = g_ctx[eye];
-    if (e.valid && e.w == w && e.h == h && e.outW == outW && e.outH == outH) return true;
-    if (e.valid) {
-        ffxFsr3UpscalerContextDestroy(&e.ctx);
-        releaseEyeSurfaces(e);
-        e = EyeCtx{};
-    }
-
     // advanced.temporal_aa_diagnostics is a context-creation-time flag (the
     // debug checks it enables run only inside ContextDispatch, but the flag
     // itself is baked in at create), so it is read here rather than through
     // Fsr3Settings/fsr3ReadConfig, which cover the two live per-DISPATCH
     // keys (advanced.temporal_aa_fsr_reactive, advanced.temporal_aa_fsr_debug).
-    // NOT folded into the context key above: a live toggle only takes effect
-    // on the next size-driven recreation, the same scope dlaa.cpp's own
-    // preset generation gets an explicit bump for and this does not.
+    // It IS part of the key below (the review of 2026-09-16, F8): flipping it
+    // live is Sean's documented A/B for this pass, and keying on it is what
+    // makes that flip reach AMD's context instead of waiting for a size to
+    // move -- the same scope dlaa.cpp's own preset generation bump gets.
     const bool diagnostics = Config::get().getBool("advanced.temporal_aa_diagnostics", false);
+
+    EyeCtx& e = g_ctx[eye];
+    if (e.valid && e.w == w && e.h == h && e.outW == outW && e.outH == outH &&
+        e.diagnostics == diagnostics) {
+        return true;
+    }
+    // This key already failed: refuse with the stored reason, silently and
+    // without touching AMD's port again (F5). Another key re-arms it.
+    if (e.failed && e.failW == w && e.failH == h && e.failOutW == outW && e.failOutH == outH &&
+        e.failDiagnostics == diagnostics) {
+        if (why) *why = e.failWhy;
+        return false;
+    }
+    if (e.valid) {
+        // The rekey, named. The warm-up makes its contexts 1:1 (the render
+        // size is not knowable before the first submitted frame -- see
+        // temporal_pass.cpp's warmTrainedOnce), so under an upscale the
+        // first submitted frame lands here; this line is what tells that
+        // apart in the log from a live diagnostics flip or an HMD Quality
+        // change, and from a context that was never made at all.
+        Log::get().note(
+            "fsr3: the context for eye %u is remade -- %s (%ux%u -> %ux%u, AMD's debug checking "
+            "%s, becomes %ux%u -> %ux%u, debug checking %s). Its history starts again.",
+            eye,
+            (e.w != w || e.h != h || e.outW != outW || e.outH != outH)
+                ? "the sizes moved"
+                : "advanced.temporal_aa_diagnostics was flipped",
+            e.w, e.h, e.outW, e.outH, e.diagnostics ? "on" : "off", w, h, outW, outH,
+            diagnostics ? "on" : "off");
+        ffxFsr3UpscalerContextDestroy(&e.ctx);
+        releaseEyeSurfaces(e);
+    }
+    // One reset for both paths, so a latch left by a DIFFERENT key is cleared
+    // here too rather than surviving into the context about to be made.
+    e = EyeCtx{};
 
     FfxFsr3UpscalerContextDescription desc{};
     desc.flags = FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED;
@@ -395,7 +507,18 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                  "FfxErrorCode",
                  eye, w, h, outW, outH);
         g_reason = g_reasonBuf;
-        if (why) *why = g_reason;
+        // NO ffxFsr3UpscalerContextDestroy here, on purpose. The port threw
+        // from inside its own create, so e.ctx holds whatever it had built
+        // when the stack unwound, and the port offers no way to tell a
+        // half-made context from an unmade one; destroying one is not safe.
+        // WHAT LEAKS: whatever D3D11 objects that create had already made,
+        // and the one context slot it took out of the two the backend's
+        // scratch was sized for (ffxGetScratchMemorySizeDX11(2) in
+        // fsr3Available). Bounded because the failure is latched below and
+        // never retried at this key; released only by fsr3Shutdown, which
+        // drops the whole backend and its scratch.
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+        if (why) *why = e.failWhy;
         return false;
     }
     if (cr != FFX_OK) {
@@ -403,7 +526,11 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                  "AMD's context would not be created for eye %u at %ux%u -> %ux%u: %s (0x%08X)",
                  eye, w, h, outW, outH, ffxErrorName(cr), static_cast<unsigned>(cr));
         g_reason = g_reasonBuf;
-        if (why) *why = g_reason;
+        // A clean FfxErrorCode: the port unwound its own create, so there is
+        // nothing here to destroy. Latched all the same -- a create costs
+        // tens of milliseconds and this one runs on every treated frame.
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+        if (why) *why = e.failWhy;
         return false;
     }
     // The three caller-owned working surfaces (EyeCtx). Made here, with the
@@ -416,7 +543,6 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         !makeSharedSurface(shared.reconstructedPrevNearestDepth, &e.prevNearestDepth)) {
         releaseEyeSurfaces(e);
         ffxFsr3UpscalerContextDestroy(&e.ctx);
-        e = EyeCtx{};
         snprintf(g_reasonBuf, sizeof(g_reasonBuf),
                  "AMD's three caller-owned working surfaces would not be made for eye %u at "
                  "%ux%u (dilated depth, dilated motion vectors, reconstructed previous nearest "
@@ -425,12 +551,40 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                  sr != FFX_OK ? "the port would not describe them" : "this device would not "
                                                                      "create one of them");
         g_reason = g_reasonBuf;
-        if (why) *why = g_reason;
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+        if (why) *why = e.failWhy;
         return false;
+    }
+    // The three are made here with both bind flags (makeSharedSurface), and
+    // every dispatch registers all three: the check is the same front stop
+    // fsr3Evaluate puts on the caller's textures, so that an edit to
+    // makeSharedSurface can never quietly hand the port a surface whose SRV
+    // creation would throw out of the dispatch instead.
+    {
+        const struct { ID3D11Texture2D* tex; const char* name; } surfaces[3] = {
+            {e.dilatedDepth, "dilated depth"},
+            {e.dilatedMv, "dilated motion vectors"},
+            {e.prevNearestDepth, "reconstructed previous nearest depth"},
+        };
+        for (const auto& s : surfaces) {
+            const char* missing = missingBindFlag(s.tex, true);
+            if (!missing) continue;
+            releaseEyeSurfaces(e);
+            ffxFsr3UpscalerContextDestroy(&e.ctx);
+            snprintf(g_reasonBuf, sizeof(g_reasonBuf),
+                     "AMD's own \"%s\" working surface for eye %u was made without %s, which its "
+                     "port needs to register it",
+                     s.name, eye, missing);
+            g_reason = g_reasonBuf;
+            latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+            if (why) *why = e.failWhy;
+            return false;
+        }
     }
 
     e.valid = true;
     e.w = w; e.h = h; e.outW = outW; e.outH = outH;
+    e.diagnostics = diagnostics;
 
     uint64_t vramAfter = 0;
     const bool haveVramAfter = queryVideoMemoryUsage(g_device, &vramAfter);
@@ -602,6 +756,34 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
         if (why) *why = g_available ? "a missing input" : g_reason;
         return false;
     }
+    // Every texture, before a single one is registered (the review of
+    // 2026-09-16, F2). The port creates a shader-resource view for all of
+    // them and a UAV for the ones it writes; a missing flag is a failed
+    // D3D11 call inside AMD's port, which its TIF helper answers with a bare
+    // `throw 1`. The catch below is the backstop for a failure nobody
+    // foresaw -- this is the front stop for the one that is documented, and
+    // it names the texture and the flag instead of a generic "it threw".
+    if (!g_testSkipBindCheck) {
+        const struct { ID3D11Texture2D* tex; const char* name; bool uav; } inputs[5] = {
+            {colour, "colour", false},
+            {depth, "depth", false},
+            {mv, "motion vector", false},
+            {reactive, "reactive mask", false},
+            {out, "output", true},
+        };
+        for (const auto& in : inputs) {
+            const char* missing = missingBindFlag(in.tex, in.uav);
+            if (!missing) continue;
+            snprintf(g_reasonBuf, sizeof(g_reasonBuf),
+                     "the %s texture was made without %s, which AMD's port needs to register it "
+                     "(its RegisterResourceDX11 makes a shader-resource view for every texture, "
+                     "the write-only output included)",
+                     in.name, missing);
+            g_reason = g_reasonBuf;
+            if (why) *why = g_reason;
+            return false;
+        }
+    }
     pollTimingRing(ctx);
     if (!outW || !outH) {
         outW = w;
@@ -677,11 +859,29 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
     dd.upscaleSize = FfxDimensions2D{outW, outH};
     dd.enableSharpening = false;
     dd.sharpness = 0.0f;
-    dd.frameTimeDelta = frameMs < 0.1f ? 0.1f : frameMs > 100.0f ? 100.0f : frameMs;
+    // The seam hands 0 for "unknown" (a reset frame, or an interval outside
+    // [1, 100] ms it refuses to believe). Clamping that UP to 0.1 ms asserted
+    // 10,000 fps and maximum history accumulation -- the extreme, not a
+    // stand-in, and after a stall over 100 ms it arrived with reset false,
+    // which reads in the field as "FSR ghosts" (the review of 2026-09-16,
+    // F9). An unknown interval is now a nominal 90 Hz frame; a real value
+    // keeps the clamp that stops a hitch or a debugger break reaching AMD's
+    // history weighting.
+    constexpr float kFsrNominalFrameMs = 11.1f;
+    dd.frameTimeDelta = frameMs <= 0.0f ? kFsrNominalFrameMs
+                                        : (frameMs < 0.1f ? 0.1f
+                                                          : (frameMs > 100.0f ? 100.0f : frameMs));
     dd.preExposure = 1.0f;
     dd.reset = reset;
     dd.cameraNear = camNear;
     dd.cameraFar = camFar;
+    if (fovY <= 0.0f && !g_fovFallbackNoted) {
+        g_fovFallbackNoted = true;
+        Log::get().note(
+            "fsr3: no vertical field of view reached the engine (the seam computes it from the "
+            "eye's tangents), so AMD's reprojection runs at the documented 90-degree stand-in. "
+            "Every frame it is missing takes the same value; this line prints once.");
+    }
     dd.cameraFovAngleVertical = fovY > 0.0f ? fovY : kFsrDefaultFovYRadians;
     dd.viewSpaceToMetersFactor = 1.0f;
     dd.flags = settings.debug ? FFX_FSR3UPSCALER_DISPATCH_DRAW_DEBUG_VIEW : 0u;
@@ -729,8 +929,13 @@ void fsr3ReleaseFeatures() {
         if (e.valid) {
             ffxFsr3UpscalerContextDestroy(&e.ctx);
             releaseEyeSurfaces(e);
-            e = EyeCtx{};
         }
+        // Zeroed whether or not it was valid, so a create-failure latch
+        // (EyeCtx::failed) is cleared too: an explicit release is the caller
+        // saying "start again", and the next evaluate at that key must be
+        // allowed to try. A context whose create THREW is only ever zeroed,
+        // never destroyed -- see latchCreateFailure's own note on what leaks.
+        e = EyeCtx{};
     }
 #endif
 }
@@ -753,6 +958,17 @@ void fsr3Shutdown() {
     }
     g_tried = false;
     g_available = false;
+#if EDVR_HAVE_FSR3
+    g_fovFallbackNoted = false;   // a re-initialised session says it again
+#endif
+}
+
+bool fsr3BuiltIn() {
+#if EDVR_HAVE_FSR3
+    return true;
+#else
+    return false;
+#endif
 }
 
 const char* fsr3VersionLabel() {
@@ -793,6 +1009,16 @@ Fsr3Settings fsr3ReadConfig() {
 // itself; it is deliberately absent from the header everything else
 // includes.
 uint32_t fsr3TestMessageCount() { return g_msgCount; }
+
+// Test-only, NOT part of fsr3_engine.h's contract either: turns off
+// fsr3Evaluate's bind-flag front stop so tools\fsr3_engine_test can hand the
+// port a texture whose shader-resource view it MUST fail to create, and so
+// prove that the try/catch around its extern "C" dispatch really does catch
+// the resulting `throw 1` -- which is only true because build.bat compiles
+// this file with /EHs rather than /EHsc (under /EHc the compiler is told an
+// extern "C" function never throws, and the catch is not required to run).
+// The shipped path never calls this; the flag is false unless a rig sets it.
+void fsr3TestSkipBindCheck(bool on) { g_testSkipBindCheck = on; }
 #endif
 
 }  // namespace edvr
