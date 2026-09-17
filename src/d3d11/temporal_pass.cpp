@@ -4934,7 +4934,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             };
             if (foveaMode) {
-                ID3D11ComputeShader* mvCs = motionShader(ctx, true);
+                // The lean variant unless diagnostics are asked for, exactly
+                // as the full-frame path above: this dispatch leaves u2 (the
+                // stats buffer) unbound anyway (see its own comment below),
+                // so the instrumented entry's counters were dropped here in
+                // any case, and nothing else it binds is instrumented-only.
+                ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
                 bool made = mvCs != nullptr;
                 if (made && (!e.dlOut || !e.dlColourSrv || !e.dlDepthSrv || !e.dlMvSrv ||
                              e.dlW != w || e.dlH != h || e.dlOutW != foW || e.dlOutH != foH)) {
@@ -5239,34 +5244,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // when no trained set exists; u3/u5 stay unbound (MV and the
                 // mask are NVIDIA's inputs, and writes to a null UAV drop).
                 const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
-                // The periphery's own resolve can skip the crop's interior
-                // when the compose is certain to run and overwrite it at
-                // weight 1 this frame: the fovea on, the centre crop
-                // evaluated, the composite parameters ready, and no DLSS
-                // upscale -- the colour-history hand-off just below (mode.y)
-                // is only ever on at 1:1 (perW == foW), so under an upscale
-                // the own history in the interior would go stale with
-                // nothing to refresh it. Left at all zeros (no skip)
-                // whenever either of the two OTHER per-pixel UAVs this
-                // dispatch can write is in play this call: the UI evidence
-                // history (UN/u6, uiTrack) is read back next frame at a
-                // reprojected position by adaptiveUiReactive with no
-                // hand-off from the compose, and the mover mask's depth
-                // carry (ZC/u4, carry) is read back next frame as ZP the
-                // same way, also with no hand-off. Report has the full
-                // enumeration.
+                // The periphery's own resolve skips the crop's interior's
+                // COLOUR RESOLVE whenever the compose is certain to run and
+                // overwrite that rectangle at weight 1 this frame: the fovea
+                // on, the centre crop evaluated, the composite parameters
+                // ready. That is the whole gate now. The contract the shader
+                // holds up in there (temporal_shader_source.h, the sibling
+                // branch after the resolve): the three writes the NEXT frame
+                // reads back all still happen -- the UI evidence history
+                // (UN/u6, uiTrack), which adaptiveUiReactive reads back at a
+                // reprojected position, and the mover mask's depth carry
+                // (ZC/u4, carry), which comes back as ZP -- and the colour
+                // history (N/u1) is refreshed from the RAW current frame
+                // there. So none of the three can go stale, and the three
+                // conditions that used to stand the skip down (an upscale,
+                // uiTrack, carry) no longer have anything to protect. The
+                // compose's own 1:1 hand-off into that history (mode.y,
+                // fc[13]) still overwrites the interior with the composite
+                // afterwards when it is on, which is at 1:1 only; under an
+                // upscale it is off and the raw frame is what the interior's
+                // history keeps, which is what a pass-through resolve would
+                // have left there anyway. Only the colour resolve is saved.
                 p.skip[0] = p.skip[1] = p.skip[2] = p.skip[3] = 0.0f;
-                // The edges mode ENGAGED line reports whether the skip below
-                // applies and, when it does not, which of the three reasons
-                // -- captured here at the same conditions that gate it,
-                // without changing what they gate.
                 if (foveaMode && foveaEvalOk && compositeReady) {
-                    if (upscale) foveaSkipNote = "does not skip the interior (NVIDIA is upscaling)";
-                    else if (uiTrack) foveaSkipNote = "does not skip the interior (the UI evidence history reads it back next frame)";
-                    else if (carry) foveaSkipNote = "does not skip the interior (the mover mask's depth carry reads it back next frame)";
-                }
-                if (foveaMode && foveaEvalOk && compositeReady && !upscale &&
-                    !uiTrack && !carry) {
                     float band = g_foveaEdgeDeg *
                                  (static_cast<float>(w) / (tanNow[1] - tanNow[0])) *
                                  0.01745329252f;
@@ -5310,7 +5310,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     if (sx1 > sx0 + 1.0f && sy1 > sy0 + 1.0f) {
                         p.skip[0] = sx0; p.skip[1] = sy0; p.skip[2] = sx1; p.skip[3] = sy1;
-                        foveaSkipNote = "skips the interior";
+                        foveaSkipNote = "skips the interior's colour resolve (history refreshed from the raw frame there)";
                     } else {
                         foveaSkipNote = "does not skip the interior (the crop is too small for the band's margin)";
                     }
