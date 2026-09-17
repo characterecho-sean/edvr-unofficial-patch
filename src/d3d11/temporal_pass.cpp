@@ -339,7 +339,7 @@ struct EyeState {
     ID3D11Texture2D*           dlOut = nullptr;
     ID3D11UnorderedAccessView* dlOutUav = nullptr;   // the debug motion view paints here
     ID3D11ShaderResourceView*  dlOutSrv = nullptr;   // the fovea composite reads NVIDIA's crop through this
-    ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out. The fovea composite writes here too (sized foW x foH, the same value as oW x oH), so the UI resolve and the deferred replay below run unchanged on either path
+    ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out. The fovea path's UI resolve/deferred replay (below, sharing the trained block's own logic) write the composite's finished frame in here too, sized foW x foH, the same value as oW x oH
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
     bool                      uiResolvedHistory = false;
     bool                      uiSeparatedHistory = false;
@@ -398,9 +398,19 @@ struct EyeState {
     ID3D11ShaderResourceView*  outSrv = nullptr;    // the fovea composite reads the own-history periphery through this
 
     // The fovea composite (docs/performance.md feature 6): the full frame
-    // with NVIDIA's crop blended over the own-history periphery, written
-    // into dlSubmit above (see its own comment). The crop's own NVIDIA
-    // history flag.
+    // with NVIDIA's crop blended over the own-history periphery, in the
+    // game's own format. Its own texture, not dlSubmit: the compose needs
+    // an SRV to hand the shared UI resolve helper in NVIDIA's-output's
+    // role (dlSubmit is a submit-only target, never bound as an SRV), and
+    // a same-resource SRV+UAV bind is never safe within one dispatch.
+    // dlSubmit above holds the FINAL frame once the resolve or the
+    // deferred replay has run on this texture; when neither runs, this
+    // texture is itself what goes out.
+    ID3D11Texture2D*           foveaOut = nullptr;
+    ID3D11UnorderedAccessView* foveaOutUav = nullptr;
+    ID3D11ShaderResourceView*  foveaOutSrv = nullptr;   // the shared UI resolve helper reads the composite through this, standing in for NVIDIA's output
+    uint32_t                   foveaW = 0, foveaH = 0;
+    // The crop's own NVIDIA history flag.
     bool                       foveaHaveHistory = false;
     // The steady periphery (feature 6): NVIDIA's DLAA on a reduced copy of
     // the frame. The reduced colour, depth and motion (only when the
@@ -498,6 +508,10 @@ void releaseNative(EyeState& e) {
 }
 void releaseOwned(EyeState& e) {
     releaseNative(e);
+    if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
+    if (e.foveaOutSrv) { e.foveaOutSrv->Release(); e.foveaOutSrv = nullptr; }
+    if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
+    e.foveaW = e.foveaH = 0;
     e.foveaHaveHistory = false;
     releasePeriph(e);
     e.w = e.h = 0;
@@ -3912,6 +3926,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // mode ENGAGED line. Default covers the frame the own resolve does
         // not run at all (the steady periphery covers the whole output).
         const char* foveaSkipNote = "did not run this frame (the steady periphery covered it)";
+        // What actually goes out once the compose has run: the composite
+        // itself (e.foveaOut) until the shared UI resolve or the deferred
+        // replay writes the finished frame into e.dlSubmit instead -- read
+        // by result= below and reported on the edges mode ENGAGED line.
+        ID3D11Texture2D* foveaSubmit = nullptr;
+        const char* foveaUiTreatment = "no UI treatment (ui_depth off)";
         // The steady periphery (feature 6): NVIDIA's DLAA around the fovea
         // too, on a reduced copy of the frame, so both sides of the seam are
         // NVIDIA's and neither breathes under head motion the way the own
@@ -4099,6 +4119,103 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 "handed R8G8B8A8, a different family. The pass's own history runs instead.",
                 formatName(sd.Format));
         }
+        // The legacy UI resolve (g_csUiResolve), shared by the trained
+        // full-frame path and the fovea path (docs/performance.md feature 6
+        // UI parity): parameterised by nvidiaOutput, whichever SRV plays
+        // "NVIDIA's output" this call (the trained path's own e.dlOutSrv,
+        // or the fovea composite's e.foveaOutSrv) -- every other input is
+        // read from state already shared between the two paths, so it is
+        // identical by construction rather than by two call sites agreeing:
+        // uiTrack (outer scope), e.dlSubmitUav/g_csUiResolve/the lazy
+        // compile, deferredActive (already set by whichever path ran this
+        // call, before this would be reached), p.probe[2] for the UI mask
+        // (already set fresh by either the trained block's own preamble or
+        // the own-path preamble that runs ahead of the fovea block), and
+        // e.uiHistoryValid/e.uiHistoryRead. Returns whether it actually
+        // dispatched, so the caller knows whether e.dlSubmit now holds the
+        // resolved frame or must fall back (the copy-through on the trained
+        // path, the composite itself on the fovea path).
+        //
+        // allowSeparated is false on the fovea call: the separated
+        // candidate is the raw eye texture's own crop machinery (a second,
+        // independent capture of the source texture), which the fovea path
+        // -- already reading the source through NVIDIA's own crop -- has no
+        // cheap analogue for it. The fovea call always takes the plain,
+        // non-separated inputs instead.
+        auto applyUiResolve = [&](ID3D11ShaderResourceView* nvidiaOutput, bool allowSeparated) -> bool {
+            if (uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
+                g_csUiResolveTried = true;
+                g_csUiResolve = shaderSwapCompileCs(ctx, kUiResolve, sizeof(kUiResolve) - 1, "main", "UI resolve", nullptr, "UI resolve");
+            }
+            const bool debugPaintHere = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 || g_debugMode == 5;
+            const bool uiResolveHere = uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaintHere;
+            if (!uiResolveHere || deferredActive) return false;
+            const bool separated = allowSeparated && separatedCandidate.colour &&
+                                    region[0] == 0 && region[1] == 0 && w == sd.Width && h == sd.Height;
+            const bool uiBoundHere = p.probe[2] != 0.0f;
+            // "ui": the UI resolve dispatch, after DLAA/DLSS/the compose.
+            beginRegion(qs, Region::Ui, dev, ctx);
+            ID3D11ShaderResourceView* nullSrvR[17] = {};
+            ID3D11UnorderedAccessView* nullUavR[7] = {};
+            ctx->CSSetShaderResources(0, 17, nullSrvR);
+            ctx->CSSetUnorderedAccessViews(0, 7, nullUavR, nullptr);
+            auto* resolveScreen = screenSrv;
+            if (screenSrv && (p.region[0] != int32_t(region[0]) || p.region[1] != int32_t(region[1]))) {
+                // Raw colour is cropped, but the screen map is in
+                // the original eye texture even on the copy path.
+                PassParams resolveParams = p;
+                for (int i = 0; i < 4; ++i) resolveParams.region[i] = int32_t(region[i]);
+                if (!setParams(ctx, resolveParams)) resolveScreen = nullptr;
+            }
+            ID3D11ShaderResourceView* srvs[9] = {
+                separated ? separatedCandidate.colourView : e.dlColourSrv,
+                nvidiaOutput,
+                uiBoundHere ? e.uiMaskSrv : nullptr,
+                e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
+                e.dlMvSrv,
+                separated ? separatedCandidate.edits : uiDepthContentChanges(w, h, eye),
+                resolveScreen,
+                separated ? e.dlColourSrv : nullptr,
+                separated ? separatedCandidate.influence : nullptr};
+            ID3D11UnorderedAccessView* uavs[2] = {e.dlSubmitUav, e.uiHistoryUav[1 - e.uiHistoryRead]};
+            ctx->CSSetShader(g_csUiResolve, nullptr, 0);
+            ctx->CSSetShaderResources(0, 9, srvs);
+            ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+            // NGX may change compute bindings, including b0.
+            ctx->CSSetConstantBuffers(0, 1, &g_cb);
+            // b1: the clamp's bound tolerance (issue 36). Save whatever
+            // NGX left there, bind ours for the dispatch, then restore
+            // it so nothing downstream sees EDVR's own buffer.
+            ID3D11Buffer* savedCb1 = nullptr;
+            ctx->CSGetConstantBuffers(1, 1, &savedCb1);
+            ID3D11Buffer* tolCb = nullptr;
+            if (g_uiResolveTolCb) {
+                D3D11_MAPPED_SUBRESOURCE tm{};
+                if (SUCCEEDED(ctx->Map(g_uiResolveTolCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &tm)) && tm.pData) {
+                    const float resolveData[4] = {uiDepthGhostTolerance() / 255.0f, 0, 0, 0};
+                    memcpy(tm.pData, resolveData, sizeof(resolveData));
+                    ctx->Unmap(g_uiResolveTolCb, 0);
+                    tolCb = g_uiResolveTolCb;
+                }
+            }
+            ctx->CSSetConstantBuffers(1, 1, &tolCb);
+            ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+            ctx->CSSetConstantBuffers(1, 1, &savedCb1);
+            if (savedCb1) savedCb1->Release();
+            ctx->CSSetShaderResources(0, 17, nullSrvR);
+            ctx->CSSetUnorderedAccessViews(0, 7, nullUavR, nullptr);
+            endRegion(qs, Region::Ui, ctx);
+            uiEvidenceWritten = uiResolveWritten = true;
+            if (separated) uiSeparationEvaluated();
+            const bool captureResolve = eye == 0 && g_eyeRunLeft > 0 && g_eyeRunTaken == 0 &&
+                                         g_eyeInputs[0] && g_eyeInputsFrame == g_rowsFrame && !g_eyeInputs[13];
+            if (captureResolve) stageEyeRun(ctx, e.uiHistory[1 - e.uiHistoryRead], g_eyeInputs, 15);
+            if (!g_uiResolveNoted) {
+                g_uiResolveNoted = true;
+                Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");
+            }
+            return true;
+        };
         if ((flags & 2u) != 0 && fmtIndex == 0 && !foveaMode) {
             warmNoteFirstTreat();   // before NGX's first ask, below
             const char* why = "";
@@ -4427,49 +4544,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if(usedDlaa && captureResolve)stageEyeRun(ctx,e.dlOut,g_eyeInputs,13);
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
-                    if (usedDlaa && applyLegacyResolve) {
-                        // "ui": the UI resolve dispatch, after DLAA/DLSS.
-                        beginRegion(qs, Region::Ui, dev, ctx);
-                        ctx->CSSetShaderResources(0,17,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
-                        auto* resolveScreen=screenSrv;
-                        if(screenSrv && (p.region[0]!=int32_t(region[0]) || p.region[1]!=int32_t(region[1]))) {
-                            // Raw colour is cropped, but the screen map is in
-                            // the original eye texture even on the copy path.
-                            PassParams resolveParams=p;
-                            for(int i=0;i<4;++i)resolveParams.region[i]=int32_t(region[i]);
-                            if(!setParams(ctx,resolveParams))resolveScreen=nullptr;
-                        }
-                        ID3D11ShaderResourceView* srvs[9]={separated?separatedCandidate.colourView:e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv,separated?separatedCandidate.edits:uiDepthContentChanges(w,h,eye),resolveScreen,separated?e.dlColourSrv:nullptr,separated?separatedCandidate.influence:nullptr};
-                        ID3D11UnorderedAccessView* uavs[2]={e.dlSubmitUav,e.uiHistoryUav[1-e.uiHistoryRead]};
-                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,9,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
-                        // NGX may change compute bindings, including b0.
-                        ctx->CSSetConstantBuffers(0,1,&g_cb);
-                        // b1: the clamp's bound tolerance (issue 36). Save whatever
-                        // NGX left there, bind ours for the dispatch, then restore
-                        // it so nothing downstream sees EDVR's own buffer.
-                        ID3D11Buffer* savedCb1=nullptr;
-                        ctx->CSGetConstantBuffers(1,1,&savedCb1);
-                        ID3D11Buffer* tolCb=nullptr;
-                        if (g_uiResolveTolCb) {
-                            D3D11_MAPPED_SUBRESOURCE tm{};
-                            if (SUCCEEDED(ctx->Map(g_uiResolveTolCb,0,D3D11_MAP_WRITE_DISCARD,0,&tm)) && tm.pData) {
-                                const float resolveData[4]={uiDepthGhostTolerance()/255.0f,0,0,0};
-                                memcpy(tm.pData,resolveData,sizeof(resolveData));
-                                ctx->Unmap(g_uiResolveTolCb,0);
-                                tolCb=g_uiResolveTolCb;
-                            }
-                        }
-                        ctx->CSSetConstantBuffers(1,1,&tolCb);
-                        ctx->Dispatch((w+7)/8,(h+7)/8,1);
-                        ctx->CSSetConstantBuffers(1,1,&savedCb1);
-                        if (savedCb1) savedCb1->Release();
-                        ctx->CSSetShaderResources(0,17,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
-                        endRegion(qs, Region::Ui, ctx);
-                        uiEvidenceWritten=uiResolveWritten=true;
-                        if(separated)uiSeparationEvaluated();
-                        if(captureResolve)stageEyeRun(ctx,e.uiHistory[1-e.uiHistoryRead],g_eyeInputs,15);
-                        if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");}
-                    } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    // applyUiResolve (shared with the fovea path, above) folds
+                    // uiResolve/applyLegacyResolve/separated and the dispatch
+                    // itself into one call: it returns false exactly when the
+                    // old `else` branch used to run, so the copy-through below
+                    // is unchanged.
+                    if (usedDlaa && !applyUiResolve(e.dlOutSrv, true)) ctx->CopyResource(e.dlSubmit, e.dlOut);
                     // luma probe stage 3: DLSS output before the UI replay --
                     // e.dlSubmit already holds it here on every usedDlaa path,
                     // legacy-resolved or copied straight from e.dlOut above.
@@ -4569,14 +4649,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 } else if (made && (haveDepth || g_moversOn) && (!e.zPrev || (g_moversOn && !e.dlMask))) {
                     ensureMoverPair(dev, e, w, h, g_moversOn);
                 }
-                // The composite's target is e.dlSubmit -- the same texture
-                // the full-frame trained block above submits, in the game's
-                // own format (that field's own comment says why) -- so its
-                // UI resolve and deferred replay run unchanged on this path
-                // too. Built with the identical conditional format/UAV
-                // logic as that block's own dlSubmit creation, at foW x foH
-                // (== oW x oH there always: both are outW/outH under an
-                // upscale, w/h otherwise).
+                // Built ahead of the compose, in the game's own format
+                // (that field's own comment says why). NOT the compose's
+                // own UAV target -- that is e.foveaOut, next block, kept
+                // separate so the shared UI resolve helper below has an SRV
+                // to read the finished composite from while it writes here.
+                // Mirrors the full-frame trained block's own dlSubmit
+                // creation above: identical conditional format/UAV logic,
+                // at foW x foH (== oW x oH there always: both are outW/outH
+                // under an upscale, w/h otherwise).
                 if (made && (!e.dlSubmit || e.dlOutW != foW || e.dlOutH != foH)) {
                     if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
                     if (e.dlSubmit) { e.dlSubmit->Release(); e.dlSubmit = nullptr; }
@@ -4585,6 +4666,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                    D3D11_BIND_SHADER_RESOURCE | ((sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? D3D11_BIND_UNORDERED_ACCESS : 0),
                                    &e.dlSubmit, nullptr,
                                    (sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? &e.dlSubmitUav : nullptr);
+                }
+                // The composite's own texture: the compose dispatch's UAV
+                // target, with an SRV so the shared UI resolve helper below
+                // can bind it in NVIDIA's-output's role. Kept apart from
+                // dlSubmit (above) on purpose -- the resolve reads this SRV
+                // and writes dlSubmit's UAV in the same dispatch, and a
+                // resource can never be bound as both at once.
+                if (made && (!e.foveaOut || e.foveaW != foW || e.foveaH != foH)) {
+                    if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
+                    if (e.foveaOutSrv) { e.foveaOutSrv->Release(); e.foveaOutSrv = nullptr; }
+                    if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
+                    made = makeTex(dev, foW, foH, sd.Format, viewFmt,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.foveaOut, &e.foveaOutSrv, &e.foveaOutUav);
+                    if (made) { e.foveaW = foW; e.foveaH = foH; }
                 }
                 // The steady periphery's textures: NVIDIA's reduced output
                 // always; the reduced inputs only when the reduction is real.
@@ -4614,13 +4710,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 p.holoJitter[3] = haveDepth && e.zPrevValid && e.zPrevSrv && useTanPrev && haveDelta && p.holoJitter[2] != 0 ? 1.0f : 0.0f;
                 if (made && e.outSrv && e.dlOutSrv && setParams(ctx,p)) {
                     // The deferred UI capture (ui_deferred.cpp), recorded now
-                    // against e.dlSubmit as its future "world colour": the
-                    // same texture the compose writes below, once this frame's
-                    // resolve/replay run on it (that field's own comment says
-                    // why the read happens at command-list execution time, not
-                    // here at record time). Gated exactly as the full-frame
-                    // trained block gates its own call; debugPaint is omitted
-                    // because foveaWanted already requires g_debugMode==0.
+                    // against e.dlSubmit as its future "world colour": not
+                    // written until after the compose, when the deferred
+                    // replay branch below copies the finished composite into
+                    // it before uiDeferredApply reads it (that field's own
+                    // comment says why the read happens at command-list
+                    // execution time, not here at record time). Gated
+                    // exactly as the full-frame trained block gates its own
+                    // call; debugPaint is omitted because foveaWanted
+                    // already requires g_debugMode==0.
                     if (region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
                         foveaDeferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
                     deferredActive=foveaDeferredInput!=nullptr;
@@ -4954,11 +5052,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ID3D11ShaderResourceView* csrv[2] = {periphOk ? e.prOutSrv : e.outSrv, e.dlOutSrv};
                 // u1 is the own history being written this frame, for the
                 // hand-off (the shader writes it only when mode.y says so).
-                // u0 is e.dlSubmit -- the same texture the full-frame trained
-                // block's UI resolve and deferred replay target, so both
-                // stages below run unchanged on this path too.
+                // u0 is e.foveaOutUav, the composite's own texture -- never
+                // dlSubmit, which the UI resolve helper below binds as an
+                // SRV+UAV pair with THIS texture (never itself: see its own
+                // comment on the struct field).
                 ID3D11UnorderedAccessView* cuav[2] = {
-                    e.dlSubmitUav, (!periphOk && !upscale) ? e.histUav[writeIdx] : nullptr};
+                    e.foveaOutUav, (!periphOk && !upscale) ? e.histUav[writeIdx] : nullptr};
                 ID3D11ShaderResourceView* nullC2[2] = {};
                 ID3D11UnorderedAccessView* nullCu[2] = {};
                 ID3D11SamplerState* smpC = g_samp;
@@ -4974,14 +5073,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ctx->CSSetUnorderedAccessViews(0, 2, nullCu, nullptr);
                 endRegion(qs, Region::Compose, ctx);
                 foveaComposited = true;
-                // UI parity with the full-frame trained path: the deferred
-                // replay onto e.dlSubmit, now that the compose holds this
-                // frame's finished image there (mirrors that block's own
-                // "ui" region around the same call).
-                if (foveaDeferredInput) {
+                // UI parity with the full-frame trained path: the same
+                // three-way choice it makes (legacy resolve, else deferred
+                // replay, else neither), sharing applyUiResolve above so
+                // the two paths can never drift. e.foveaOutSrv stands in
+                // for "NVIDIA's output" -- the compose already blended
+                // NVIDIA's crop into the composite, so the resolve reads
+                // the FINISHED frame here, not the bare crop.
+                if (applyUiResolve(e.foveaOutSrv, false)) {
+                    foveaSubmit = e.dlSubmit;
+                    foveaUiTreatment = "the UI resolve";
+                } else if (foveaDeferredInput) {
                     beginRegion(qs, Region::Ui, dev, ctx);
+                    // dlSubmit needs the composite's content before the
+                    // replay reads it as "world colour" (mirrors the
+                    // trained path's own CopyResource fallback above).
+                    ctx->CopyResource(e.dlSubmit, e.foveaOut);
                     uiDeferredApply(ctx, eye);
                     endRegion(qs, Region::Ui, ctx);
+                    foveaSubmit = e.dlSubmit;
+                    foveaUiTreatment = "the deferred replay";
+                } else {
+                    foveaSubmit = e.foveaOut;
+                    foveaUiTreatment = "no UI treatment (ui_depth off)";
                 }
                 ++g_foveaTreats;
                 if ((!g_foveaEdges && !g_foveaNoted) ||
@@ -5019,15 +5133,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             "temporal aa: DLSS where you look ENGAGED (edges) -- eye %d requested "
                             "vertical %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV trim's "
                             "%u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
-                            "periphery is %s; the own resolve %s. NVIDIA's price is in the DLAA "
-                            "totals.",
+                            "periphery is %s; the own resolve %s; UI treatment: %s. NVIDIA's price "
+                            "is in the DLAA totals.",
                             eye, static_cast<double>(g_foveaVerticalDeg),
                             static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
                             fovTrim[0], fovTrim[1], fovTrim[2], focx, focy, focx + focw, focy + foch,
                             foW, foH,
                             100.0 * static_cast<double>(focw) * foch /
                                 (static_cast<double>(foW) * foH),
-                            per, foveaSkipNote);
+                            per, foveaSkipNote, foveaUiTreatment);
                     }
                 }
             }
@@ -5149,13 +5263,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 e.haveHistory = false;
             }
             e.dlHaveHistory = false;   // NVIDIA's FULL-frame history did not see this frame
-            // The fovea composite, when it ran, is what goes out: e.dlSubmit,
-            // the same texture (and, now, the same post-UI-resolve/replay
-            // state) the full-frame trained branch submits. The own history
-            // is still the periphery it was blended over, so its ping-pong
-            // above stands. NVIDIA's crop history lives in the fovea feature
-            // (e.foveaHaveHistory), kept apart from both.
-            result = foveaComposited ? e.dlSubmit : e.outTex;
+            // The fovea composite, when it ran, is what goes out: foveaSubmit
+            // -- e.dlSubmit once the shared UI resolve or the deferred
+            // replay has run on it (the same post-resolve state the full-
+            // frame trained branch submits), or the bare composite when
+            // neither applied. The own history is still the periphery it
+            // was blended over, so its ping-pong above stands. NVIDIA's
+            // crop history lives in the fovea feature (e.foveaHaveHistory),
+            // kept apart from both.
+            result = foveaComposited ? foveaSubmit : e.outTex;
             ++g_treats;
             if (foveaComposited) ++g_dlaaTreats;
             g_lastW = w;
