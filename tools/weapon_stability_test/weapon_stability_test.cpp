@@ -547,6 +547,50 @@ void sustainedAimingTest(){
         sample(.024f,true,.024f); // reversal follows the current step, no smoothing
         sample(0,false,0);sample(0,false,0);
         sample(.032f,false,0);sample(-.022f,false,0); // stock phase survives reversals
+        // 2026-09-17 (Steam dump 102403): a strafe start ramps through
+        // sub-millimetre steps and a reversal passes through one. The lag
+        // is known, so those steps correct too; only the camera-only first
+        // step out of rest stays ambiguous with an aiming adjustment.
+        sample(0,false,0);sample(0,false,0);sample(0,false,0);
+        sample(.00015f,true,0); // camera-only first step out of rest, within tolerance: left alone
+        sample(.00048f,true,.00048f); // the arms' 0.15 mm step is the previous camera step: corrected
+        sample(.0048f,true,.0048f);sample(.0143f,true,.0143f);sample(.025f,true,.025f);
+        sample(.0087f,true,.0087f);sample(.0011f,true,.0011f);
+        sample(.00026f,true,0); // below the 0.3 mm match tolerance: synchronized, left alone
+        sample(-.00148f,true,-.00148f); // reversal through a 0.26 mm arms step
+        sample(-.00416f,true,-.00416f);sample(-.0184f,true,-.0184f);
+        // An arms step the lag cannot explain (a recoil kick) keeps the
+        // calibration: the next lag frame corrects at once, not three later.
+        sample(-.025f,true,0,.006f);
+        sample(-.022f,true,-.022f);sample(-.024f,true,-.024f);
+        if(axis==0){
+            // An aim turn during the lag: the arms carry the previous frame's
+            // whole camera transform, so the known offset matches in the
+            // previous basis and the correction continues through the turn.
+            const float o[3]={.014f,.021f,-.130f},scale=camera[270][0];float angle=0;
+            for(float next:{.01f,.02f,.03f}){
+                const float step=-.023f,c=std::cos(angle),s=std::sin(angle);
+                previous=x;x+=step;
+                const float arm[3]={previous-(c*o[0]+s*o[2]),-o[1],s*o[0]-c*o[2]};
+                for(unsigned i:{12u,90u})position(pool[i],arm[0],arm[1],arm[2]);
+                position(pool[52],arm[0]+.1f,arm[1]+.2f,arm[2]+.4f);
+                camera[270][0]=scale*std::cos(next);camera[272][0]=-scale*std::sin(next);camera[270][3]=std::sin(next);camera[272][3]=std::cos(next);
+                camera[275][0]=x;camera[275][1]=camera[275][2]=0;
+                h.ctx->UpdateSubresource(h.pool.Get(),0,nullptr,pool.data(),0,0);weaponStabilityResourceWritten(h.pool.Get());
+                h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,camera,0,0);weaponStabilityResourceWritten(h.camera.Get());h.screen();check(h.run(),"turning ADS draw forwarded");
+                auto bytes=h.read(g.fixed.Get());const auto* actual=reinterpret_cast<const Instance*>(bytes.data());
+                auto a=h.read(g.anchor.Get());auto* anchor=reinterpret_cast<const float*>(a.data());
+                const unsigned flags=unsigned(anchor[(kWeaponTraceBase+(g.frame%kWeaponTraceFrames)*kWeaponTraceRows)*4+2]);
+                if(std::fabs(anchor[0]-step)>1e-6f || anchor[8]!=4)
+                    printf("turn to %.2f rad frame %u: correction %.7f %.7f %.7f status %.0f flags %04X; expected %.7f\n",next,g.frame,anchor[0],anchor[1],anchor[2],anchor[8],flags,step);
+                for(unsigned i=0;i<128;++i)for(unsigned w=0;w<84;++w){
+                    if((i==12 || i==90 || i==52) && w==4)check(std::fabs(getFloat(actual[i],w)-(getFloat(pool[i],w)+step))<1e-6,"aim turn keeps the one-frame translation correction");
+                    else check(actual[i].words[w]==pool[i].words[w],"aim turn alters nothing but the timing translation");
+                }
+                check(anchor[8]==4 && (flags&4096u) && (flags&256u),"turning lag is recognised through the previous basis");
+                weaponStabilityFrameBoundary(h.ctx.Get());angle=next;
+            }
+        }
         h.clean();
     }
 }
