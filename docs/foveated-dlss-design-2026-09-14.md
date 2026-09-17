@@ -20,26 +20,24 @@
   eye); the periphery cost 0.72 not 0.41 because the interior skip is
   inactive under upscale, so the lean resolve ran the whole render frame
   (0.036 ms per MP, about half the instrumented rate); prep rose 0.16 on
-  the crop path, as it did in Stage 0 (0.50 -> 0.68) and left out of the
-  forecast; compose 0.23 as forecast. On paper the skip (-0.31) and the
-  prep (-0.16) take the pass saving to about 0.83 ms per pair, 7.5% of
-  this frame, past both numeric gates if the frame then shows it.
-- **Settled before this flight:** Stage 0 (2026-09-15, 749a4e9): H1
-  confirmed, H2 ruled out (reduce + periphery + compose cost 48% of the
-  crop's saving at 40 deg / 0.5), 40 deg did not cover Sean's eyes and 80
-  deg saved nothing. The masked eye-mask circle ruled out 2026-09-16:
-  NVIDIA prices the bounding rectangle, which the FOV trim already sets.
+  the crop path (Stage 0 too): its motion-vector dispatch is pinned to the
+  instrumented shader by a literal `true` (found 2026-09-17, journal);
+  compose 0.23 as forecast. On paper the skip (-0.31) and the prep (-0.16)
+  take the pass saving to about 0.83 ms per pair, 7.5% of this frame.
+- **Settled before this flight:** Stage 0 (749a4e9): H1 confirmed, H2
+  ruled out (reduce + periphery + compose ate 48% of the crop's saving at
+  40 deg / 0.5); 40 deg missed Sean's eyes, 80 saved nothing. The masked
+  eye-mask circle: NVIDIA prices the bounding rectangle = the FOV trim.
 - **Ruled out, do not re-run:** the eye-tracked crop, structural under
-  upscaling and off the plan after Sean's own objections (performance.md,
-  2026-09-05: eyes jump where heads stream, so every large look starts on
-  the post-saccade resolve); gaze stays Stage 3 and optional. The pooled
+  upscaling and against Sean's own objection (performance.md, 2026-09-05:
+  eyes jump where heads stream); gaze stays Stage 3, optional. The pooled
   "NVIDIA ms/eye" figure mixes eyes and roles; do not compare. H2, above.
 - **Stage 1 leftovers, not in the build:** the reactive mask on the crop
   path; history committed only after a successful evaluation
   (foveaHaveHistory and prHaveHistory are set unconditionally each frame);
-  the crop branch's unconditional ensureNative, diagnostic motion shader
-  and per-frame stats readback (CPU); the +0.16 ms GPU prep on the crop
-  path, unattributed; the luma probe's stage taps dark on the crop path.
+  the crop branch's unconditional ensureNative and its CPU-side stats
+  readback (no readback sits inside the timed prep, the reader found);
+  the luma probe's stage taps dark on the crop path.
 - **Decision (2026-09-17, Sean):** "20 for the top, 25 for the outer and 7
   for inner. Inside that rectangle should be DLSS and outside of it should
   be TAA." Taken as degrees off the headset's field, the FOV trim's
@@ -48,18 +46,20 @@
   main (bb0eb7a, 7d12d9b, 188c10b, 6461eeb, merge c4c1490, doc 1947c90):
   temporal_aa_fovea = edges with temporal_aa_fovea_vertical/outer/nasal
   (plain degrees, live), the interior skip (inactive under upscale), UI
-  parity from the current raster alone, a region self-test in smoke.
+  parity from the current raster alone, a region self-test in smoke; then
+  temporal_aa_fovea_top/_bottom (`same` follows vertical; 7cd0b5d, the
+  inverted edge mapping caught and fixed in 8e99777, journal).
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle with wide/narrow presets and one per-headset
   size value; gaze later where the headset publishes it. fix.eye_mask
   keys stay until then.
-- **Next:** Sean's picture verdict on B (the seam, the periphery while the
-  head moves, HUD text) is the other half of the gate. If it passes: one
-  build for the two levers (the skip under upscale, with NGX's crop handed
-  into the own history's interior at render size and the carry and
-  UI-evidence writes kept there; the crop path's prep), then A-B-A in
-  FRONTIER, 75 s each, the trailing A held before quitting. Periphery
-  objected to: the steady periphery at a small scale is the A/B.
+- **Next (Sean, 2026-09-17: "optimized and shipped"):** the lever build is
+  in progress on the branch: the fovea prep's motion-vector shader back on
+  the lean variant, and the partial interior skip (the colour resolve
+  skipped inside the rectangle, the depth carry and UI-evidence writes
+  kept, the history there refreshed from the raw frame). Then A-B-A in
+  FRONTIER, 75 s each, the trailing A held. His picture verdict on B is
+  still owed. Ship list (Stage 2) in the journal's 2026-09-17 plan entry.
 
 ## Investigation (2026-09-14)
 
@@ -1185,3 +1185,86 @@ resolve. Asked.
 **Leftover found:** the luma probe's stage taps print "-" for game,
 clean_hdr, dlss_in and dlss_out on the crop path (final only) and come
 back when the fovea is off. A diagnostics gap, not a fault.
+
+### 2026-09-17: the plan to ship, the four-edge keys, and an inverted edge caught on the desk
+
+**Sean, after the flight:** "I'd really like to get this optimized and
+shipped, also can you provide the ability to tweak nasal/outer/top/bottom
+values for the fovea size?" Then two design questions, answered in the
+chat and recorded here because they will come back. Radial blur instead
+of TAA outside the rectangle: cheaper (about 0.15 ms per pair against the
+own resolve's 0.72 unskipped, about 0.41 skipped) and worse, because with
+DLSS on the game's raw frame is jittered and un-antialiased, and the
+periphery of the eye is flicker- and motion-sensitive and resolution
+blind: a blur lowers the contrast of twinkling stars and crawling lines
+but cannot remove them, a temporal filter can. What survives of the idea
+is a radial softening blended over the TAA periphery in the compose (a
+few taps) as a seam and pulse hider, to be added only if the flight shows
+the seam or the sharp periphery's pulse bothers him; and a
+temporal_aa_periphery = soft arm (de-jittered raw + the reduced copy) if
+he wants to judge by eye. "Only run TAA on the periphery": that is the
+interior skip, already built, standing down under upscale; the build
+below makes it run.
+
+**The plan.** (1) This build: the four-edge keys; the prep fix; the
+partial skip. (2) One A-B-A flight in FRONTIER, 75 s per arm, the
+trailing A held before quitting, gates as before plus his picture
+verdict. (3) Ship, Stage 2: per-headset lists for the edge keys (the
+fov_trim form), Performance-page menu rows for the mode and the four
+edges, user docs and release notes, an rc.4 pre-release with full-frame
+DLSS still the default; the fix.eye_mask / eye_mask_trim question quoted
+and asked before any removal; the presets and the single size value
+after he has tuned the edges by hand, since the tuning is what defines
+"wide" and "narrow". (4) Gaze, per headset, optional, after all of it.
+
+**The reader's report on the two levers** (a read-only pass over
+temporalInner and the shader, exact lines in its report, the design
+consequence here). Prep: the fovea path's prep block is the same copy
+and the same motion-vector dispatch at the same size as the full-frame
+path's, but it picks its shader with `motionShader(ctx, true)`, a literal
+true, so it always runs the instrumented motion-vector shader (the
+registration probe, a groupshared counter array, an atomics path whose
+u2 target is not even bound), where the full-frame path passes the
+shared `diagnostics` bool and runs the lean one. No readback in either
+timed block. That is the +0.16 ms, seen in Stage 0 as well. Skip: the
+three writes next frame reads back (UN, the UI evidence; N, the colour
+history; ZC, the depth carry) all sit inside the one block under the
+single `!inSkip` test with the colour work, and the two cheap ones are a
+single sample and a store each. So the partial skip is a sibling branch
+for skipped pixels: UN and ZC written as today, N refreshed from the raw
+current frame (one load, one store), no colour work, no O write; the
+existing block untouched. Hand-off: the compose's HIST write covers the
+interior only at 1:1; under upscale the own history is render size and
+the composite output size, so a proper hand-off would be a down()-shaped
+resample of NVIDIA's crop into the history, confined to the crop. The
+raw-frame refresh is taken first as the simplest safe option: the only
+readers of the interior history are band pixels whose motion points
+inward, and the resolve's neighbourhood clip bounds a raw sample's
+effect. The resample is the upgrade if the seam misbehaves in motion.
+
+**The four-edge keys (7cd0b5d, then 8e99777).** temporal_aa_fovea_top
+and _bottom, read as strings with the default `same` (also blank), which
+follows temporal_aa_fovea_vertical; any other value is degrees 0..45,
+parsed and capped like the others, reduced against fix.fov_trim_vertical
+for both edges (that trim is symmetric). temporal_aa_fovea_vertical
+stays: removing a key is Sean's call, asked in chat. The ENGAGED line
+prints top, bottom, outer, nasal. Self-test bit 16 covers the split.
+
+**Caught on the desk, would have cost a flight.** The first commit wired
+"top" to the third tangent and "bottom" to the fourth, following
+computeFoveaRegion's parameter names t and b, and the implementer
+flagged that the arithmetic then made the top key move y+h. The names
+were OpenVR's raw naming, where the negative value is called top;
+EDVR's frusta are native_temporal.h's {left, right, down, up}
+(projection_math.h fills them as tan(angleLeft), tan(angleRight),
+tan(angleDown), tan(angleUp)), and temporalInner's own pixel projection
+puts row 0 at the up tangent. So the third tangent is the DOWN edge and
+bounds the bottom row, the fourth is UP and bounds row 0. Every flight
+so far trimmed top and bottom equally, so nothing could have shown it.
+8e99777 renames the parameters down/up, states the order above the
+function, fixes a mislabeled comment on the FSR fovY sum that repeated
+the old naming, and asserts in the self-test that the bottom key moves
+only y+h and the top key only y (three cases, hand-derived from
+tan(atan(E) - D) = (E - tan D) / (1 + E tan D); unmoved 784,522
+1792x1498; bottom at 30: y 522 held, h 1254; top at 30: y 766, y+h 2020
+held). Reviewed diff by diff before the skip work started on top.

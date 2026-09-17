@@ -20,7 +20,12 @@ Restates the journal below; update it whenever this doc changes.*
   that flight). Of that, eye 0's create is <= 58 ms; the ~760 ms before
   it is UNSPLIT between NGX init, five 16-MP history textures and the
   runtime UI-resolve compile -- the new per-stage ms lines split it
-  (first 2026-09-15 entry).
+  (first 2026-09-15 entry). (4) 2026-09-17: a SKIPPED intro left the
+  panel and resample armed all session, and the on-foot HUD passed for
+  the movie -- the composite sampled the 8192x4608 resample instead of
+  the panel, which killed `fix.panel_distance`/curvature on foot and cost
+  three passes a frame. FIXED by retiring at the first rendered scene
+  unconditionally (last entry); built green, NOT FLOWN; flight brief there.
 - **Open:** whether the movie reaches the headset earlier once the
   warm-up flies, or the game just absorbs the stall (section 9, first
   2026-09-15 entry); ident-open -> first-composite latency, never
@@ -42,6 +47,8 @@ Restates the journal below; update it whenever this doc changes.*
   - Phase A = 6.4 s as a native number: that was an OpenComposite
     reading; natively the first frame reaches the headset ~5.0 s after
     the device.
+  - The on-foot panel going flat and far as a vscreen regression: the
+    intro panel's own false match (last entry).
 - **Next flight:** Steam, `fix.intro_video = screen`,
   `advanced.intro_probe = 1`, reading `intro probe: watching the movie's
   open`, `intro probe: the game opened <file> at +X.XXX s after the
@@ -1095,3 +1102,69 @@ pairs to shrink `VR_InitInternal`'s ~443 ms shader stretch; an EDVR
 holding layer during the ~2.2 s between `runtime_startup` and the first
 Submit (the first pre-game `xrEndFrame` layer on third-party runtimes).
 Both wait on the warm-up's own measurement landing first.
+
+## 2026-09-17: a skipped intro left the panel armed, and the on-foot HUD passed for the movie
+
+Sean, after the 09:47 Steam flight (v0.17.0-rc.3-69-g00c27ed, weapon-light
+work, on foot from the first minute): "the virtual panel is set further
+away than what's in the ini and it is no longer curved", and the frame
+slower. Nothing in vscreen had changed; the panel fixes died because the
+composite they key on stopped reading the panel.
+
+**What the log said** (08:08 and 09:47 flights, identical shape):
+`vScreen: panel distance x0.700 applied` at the first on-foot composite,
+then 0.4 s later `intro video upscale: FSR (AMD's EASU) -- 5120x2880 to
+8192x4608, ... and the composite samples ours`, then `intro video size:
+the panel's constants do not read as a screen-space placement` every
+frame (1094 lines in 09:47), `panel distance applied` climbing ~29 per
+20 s instead of ~2 per frame, and `the panel's transform buffer has gone
+600 frames unused` three times (the cap). The intro was skipped in every
+flight (`intro skip: WORKED ... the movie never drew`).
+
+**Cause.** `introPanelTick` retired the panel at the first rendered scene
+only if it had matched a draw first (`g_slotCount || g_applied`, from
+2850ccf). A skipped intro matches nothing, so the fill signature (a
+four-vertex draw with PS slots 1 and 2 bound into a Texture2D) and the
+composite signature (six vertices, one instance, SRV0 the fill's size)
+stayed armed all session. The on-foot HUD satisfies both -- a
+four-vertex draw into the 5120x2880 panel, then the panel's own
+composite -- so from the first on-foot frame the resample chain
+substituted its 8192x4608 output for the panel at the composite.
+`beginPanelOverride` recognises that composite by SRV0 being the panel
+(`srv0IsPanelSized`), so distance and curvature stopped applying, and
+the chain's deband + EASU + RCAS ran at 8192x4608 every frame on top.
+The on-foot eye-draw count sits under `kSceneEyeDraws` (100), so no
+later frame retired it either (08:08 retired at 08:11:55, a frame that
+crossed 100; 09:47 never did).
+
+**Why it never showed before.** Ship-first sessions (06:39 same day,
+2026-09-16 17:39) made the same false match in the ship at 06:41:39 --
+`intro video upscale: the movie's frame could not be viewed unconverted`
+(an R8G8B8A8 view refused on that target) failed the chain for the
+session, and with a scene on screen the panel retired the same frame,
+"It resized 0 draw(s)". Luck, not design.
+
+- ruled out: a vscreen regression, because vscreen.cpp, intro_panel.cpp
+  and intro_upscale.cpp are unchanged across 2ebed2d..eefcb09, and the
+  06:39 flight (2ebed2d-dirty) shows the same false match surviving only
+  by the view failure.
+- ruled out: the performance drop as this alone, because Sean also
+  raised `fix.openxr_resolution` 3900 -> 4100 at 08:08:58 (+10.6 %
+  pixels, DLSS 1.93 -> 2.25 ms per pair); the chain's three passes at
+  8192x4608 per frame come on top of that.
+
+**Fix (this entry's commit):** retire at the first rendered scene
+unconditionally, the rule the header and `loader_panel.h` state; the
+skipped case logs `intro video: a rendered scene arrived and the movie's
+panel was never seen ... stand down for the session`. The movie case is
+unchanged: it matches during the movie and retires at the scene after
+it. Built green, NOT FLOWN.
+
+**Next flight (Steam, skip armed, go on foot):** the new line at the
+first rendered scene (~20 s after launch, before LoadGame); no `intro
+video upscale: FSR (AMD's EASU) -- 5120x2880` line on foot; no
+`constants do not read` lines; `panel distance applied` climbing ~2 per
+frame in every `vScreen totals` line while on foot; no `600 frames
+unused` while the panel is visible; and the panel back at 0.7 m, curved.
+If the new line is missing the tick never saw a scene frame -- the
+`intro skip: WORKED` line shares that boundary and would be missing too.

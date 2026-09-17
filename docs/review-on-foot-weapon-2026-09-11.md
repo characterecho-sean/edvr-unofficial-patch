@@ -18,16 +18,29 @@ the arms root). Both are added to `family()`, to the eye dump's
 (cd1577a). FLOWN 2026-09-17 08:08 on Steam and CONFIRMED ("that fixed
 the rifle cyan lines"). Entry: "Laser rifle glow strips" below.
 
-Open, 2026-09-17: the point-light glow of every gun (the laser rifle's
-rear-ring core, Sean: "any gun with lights") shifts while moving. The
+Solved, 2026-09-17: the point-light glow of every gun (the laser rifle's
+rear-ring core, Sean: "any gun with lights") shifted while moving. The
 light path (`lightDraw` / `applyLights`) runs and passes its gates, but
 it read `Anchor[0]`, the LAST `findAnchor` result of the frame, and
 Elite reruns that kernel under the WORLD camera rows (the body pass)
 after the arms, so in hip fire the lights got no correction. Fix: the
 frame's applied mesh correction is kept in its own stamped rows
 (`kWeaponAppliedRow`) and the lights read those; the light dispatch
-records the near plane it saw for the status line. BUILT, NOT FLOWN.
-Entry: "Point lights read a rerun anchor" below.
+records the near plane it saw for the status line. FLOWN 2026-09-17
+09:47 (v0.17.0-rc.3-69-g00c27ed) and CONFIRMED: Sean "Looks good"; the
+log's `weapon stability: lights: ... 39 lights, arms correction fresh
+at that draw, mesh camera near 0.0250000 then` names the body-pass
+rerun as the clobbering one, as predicted. Entry: "Point lights read a
+rerun anchor" below. The same flight's "panel further away and no longer
+curved" is NOT this fix: it is the intro panel's false match on the
+on-foot HUD (docs/intro-video.md, 2026-09-17 entry), and "performance
+worse" is Sean's own `fix.openxr_resolution` 3900 -> 4100 at 08:08:58
+plus that resample chain running on foot.
+
+Open: nothing on the arms or lights. Spot lights (VS
+`963B52C73B4143AC`, per-light data in a VS structured buffer t0, stride
+112) have no correction path; if a gun's glow still shifts after this,
+that is where to look.
 
 Kept outside on purpose: the late UI labels `B10B032BDFD46700`,
 `C4B4B334B26E81A9` and the panel shader `A888D51024D9798E` (ammo and
@@ -40,10 +53,10 @@ Ruled out: see the "Ruled out" lines of each dated entry; the
 `B7790CBFC6554097` and the 2026-09-11 "full-screen triangle" label on
 `CFCA8FFC6B058630`.
 
-Next flight (Steam, any gun with a light; the laser rifle's rear ring
-is the known case): stand still, then strafe both ways and walk
-forward; the light glow must stay put on the weapon exactly as the
-mesh does. Verify the build first with
+Flown 09:47 (the brief below was read against it and every line came
+out as predicted; kept for the next regression): stand still, then
+strafe both ways and walk forward; the light glow must stay put on the
+weapon exactly as the mesh does. Verify the build first with
 `python tools\edvr_log.py --target steam --expect-build HEAD`. Then
 read the new status line `weapon stability: lights: ...` (every 1800
 frames): `arms correction fresh` with `5+ lights` proves the light

@@ -1168,12 +1168,13 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 #endif
     uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     // The fovea's compose overwrites this rectangle every pixel at weight 1
-    // (temporal_pass.cpp only ever sets skip when it has verified that); an
-    // in-skip pixel is treated exactly like an out-of-bounds one below, so
-    // every thread in the group still reaches the SAME barriers at the tail
-    // -- never a `return` here, which would make that divergent within a
-    // group. skip.zw both zero (the default) means no skip, so this never
-    // fires when the fovea is off.
+    // (temporal_pass.cpp only ever sets skip when it has verified that), so
+    // an in-skip pixel skips the colour resolve below and takes the short
+    // branch after it instead, which still makes the three writes the next
+    // frame reads back. Neither branch ever `return`s, so every thread in
+    // the group reaches the SAME barriers at the tail -- a return here would
+    // make that divergent within a group. skip.zw both zero (the default)
+    // means no skip, so this never fires when the fovea is off.
     const bool inSkip = skip.z > skip.x && skip.w > skip.y &&
                         id.x >= (uint)skip.x && id.x < (uint)skip.z &&
                         id.y >= (uint)skip.y && id.y < (uint)skip.w;
@@ -1463,6 +1464,25 @@ R"HLSL(
             }
         }
         O[id.xy] = float4(o, cur.a);
+    }
+    // The skipped interior: only the colour RESOLVE above is skipped there,
+    // never the three writes the NEXT frame reads back. The UI evidence
+    // (UN/u6) and the mover mask's depth carry (ZC/u4) are written under the
+    // same two tests as above, and the colour history is refreshed from the
+    // RAW current frame -- the resolve's own centre tap, stored the way the
+    // resolve stores a pure pass-through (saturate of the RGB it loaded), so
+    // it is the history's own encoding and nothing here can go stale. No O
+    // write: the compose overwrites this rectangle at weight 1, so it never
+    // reads the periphery inside it, and the composite is what is submitted
+    // whenever temporal_pass.cpp arms the skip. Sibling of the block above,
+    // not nested in it, and barrier-free: every thread in the group still
+    // reaches the SAME tail barriers whichever branch it took.
+    if (inSkip && id.x < (uint)size.x && id.y < (uint)size.y) {
+        int2 ci = int2(id.xy);
+        if ((uint(probe.w + 0.5) & 4u) != 0u) UN[id.xy] = uiEvidence(ci);
+        float4 cur = S.Load(int3(region.xy + ci, 0));
+        N[id.xy] = float4(saturate(cur.rgb), 1.0);
+        if (movers.w != 0.0) ZC[id.xy] = zAt(region.xy + ci);
     }
     // One atomic per group per counter, not per pixel -- and none at all
     // for a counter that did not move, which is most of them in most

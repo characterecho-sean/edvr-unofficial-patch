@@ -653,12 +653,43 @@ void introPanelEndDraw(ID3D11DeviceContext* ctx) {
 void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
     ++g_frame;
     introUpscaleFrameEnd();
-    if (sceneFrame && !g_retired && (g_slotCount || g_applied)) {
+    // A rendered scene means the intro is over: stand down for the session
+    // whether or not the movie's panel was ever seen -- the scope rule
+    // loader_panel.h states, and the one the header above promises.
+    //
+    // This used to wait for a matched draw first (g_slotCount || g_applied),
+    // so a SKIPPED intro, which has nothing to match, left the fill and
+    // composite signatures armed for the whole session. Both are shape
+    // tests, and the on-foot HUD satisfies them: a four-vertex draw with
+    // three planes bound into the 5120x2880 panel, then the panel's own
+    // six-vertex composite reading a surface of that size. From the first
+    // on-foot frame every frame was the movie's as far as this file could
+    // tell: the composite sampled the resample chain's 8192x4608 output
+    // instead of the panel, which unmatched the panel distance and curvature
+    // fixes (vscreen recognises the panel's composite by that source), and
+    // the chain's three passes ran at that size every frame -- the panel
+    // flat and far, and the frame slower (Steam flights 2026-09-17 08:08 and
+    // 09:47, on foot from the first minute). A ship-first session escaped
+    // only by luck: its first false match was a target the raw view
+    // refused, which failed the chain and, with a scene on screen, retired
+    // the panel on the spot. On foot the eye-draw count sits under
+    // kSceneEyeDraws, so nothing retired it there.
+    if (sceneFrame && !g_retired) {
         g_retired = true;
-        Log::get().note(
-            "intro video size: a rendered scene arrived -- the intro is over "
-            "and this stands down for the session. It resized %u draw(s).",
-            g_applied);
+        if (g_slotCount || g_applied) {
+            Log::get().note(
+                "intro video size: a rendered scene arrived -- the intro is "
+                "over and this stands down for the session. It resized %u "
+                "draw(s).",
+                g_applied);
+        } else {
+            Log::get().note(
+                "intro video: a rendered scene arrived and the movie's panel "
+                "was never seen (skipped, or it played unmatched) -- the "
+                "intro is over and the panel fixes and the resample stand "
+                "down for the session, so no in-game draw can be taken for "
+                "the movie's.");
+        }
         introPanelShutdown();
         // And the resample chain with it.
         //
