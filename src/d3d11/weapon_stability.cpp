@@ -66,11 +66,11 @@ bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11
         g.find.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"findAnchor","weapon anchor",nullptr,"weapon stability"));
         g.apply.Attach(shaderSwapCompileCs(ctx,kWeaponStabilityCs,sizeof(kWeaponStabilityCs)-1,"applyAnchor","weapon attach",nullptr,"weapon stability"));
         if(!g.find || !g.apply)return false;
-        constexpr unsigned rows=kWeaponTraceBase+kWeaponTraceFrames*kWeaponTraceRows;
+        constexpr unsigned rows=kWeaponTraceBase+kWeaponTraceFrames*kWeaponTraceRows+kWeaponAppliedRows;
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=rows*16;bd.StructureByteStride=16;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
         float zeros[rows*4]{};D3D11_SUBRESOURCE_DATA initial{zeros,0,0};
         if(FAILED(dev->CreateBuffer(&bd,&initial,&g.anchor)) || FAILED(dev->CreateUnorderedAccessView(g.anchor.Get(),nullptr,&g.anchorUav)))return false;
-        bd.ByteWidth=48;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        bd.ByteWidth=112;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.stage)))return false;
         bd.ByteWidth=16;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;bd.Usage=D3D11_USAGE_DEFAULT;bd.CPUAccessFlags=0;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&g.sample)))return false;
@@ -97,7 +97,12 @@ bool generate(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* poolView,ID3D11
     ID3D11ShaderResourceView* nullSrv[2]{};ctx->CSSetShaderResources(0,2,nullSrv);
     ctx->CSSetShaderResources(0,2,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->CSSetConstantBuffers(3,1,sample.GetAddressOf());ctx->CSSetShader(saved.Get(),classes,nc);
     for(auto* p:srvs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
-    if(!g.pending && g.frame>=g.nextReport){D3D11_BOX box{0,0,0,48,1,1};ctx->CopySubresourceRegion(g.stage.Get(),0,0,0,0,g.anchor.Get(),0,&box);g.pending=true;g.pendingFrame=g.frame;g.nextReport=g.frame+1800;}
+    if(!g.pending && g.frame>=g.nextReport){
+        D3D11_BOX box{0,0,0,48,1,1};ctx->CopySubresourceRegion(g.stage.Get(),0,0,0,0,g.anchor.Get(),0,&box);
+        D3D11_BOX applied{kWeaponAppliedRow*16,0,0,(kWeaponAppliedRow+kWeaponAppliedRows)*16,1,1};
+        ctx->CopySubresourceRegion(g.stage.Get(),0,48,0,0,g.anchor.Get(),0,&applied);
+        g.pending=true;g.pendingFrame=g.frame;g.nextReport=g.frame+1800;
+    }
     g.pool=pool;g.bones=bones;g.camera=camera;g.poolView=poolView;g.bonesView=bonesView;
     g.preparedWrite=writeSample;g.prepared=g.sourceFrame=g.frame;return true;
 }
@@ -162,13 +167,16 @@ bool lightDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,uns
     }
     D3D11_BOX box{UINT(begin),0,0,UINT(begin+bytes),1,1};ctx->CopySubresourceRegion(g.lightVertices.Get(),0,0,0,0,vertices.Get(),0,&box);
     Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->CSGetShader(&saved,classes,&nc);
-    ID3D11Buffer* cbs[3]{};ctx->CSGetConstantBuffers(0,3,cbs);
+    ID3D11Buffer* cbs[4]{};ctx->CSGetConstantBuffers(0,4,cbs);
     ID3D11UnorderedAccessView* uavs[3]{};ctx->CSGetUnorderedAccessViews(1,3,uavs);
-    ID3D11Buffer* inputs[3]={g.camera.Get(),cbs[1],lightCamera.Get()};ID3D11UnorderedAccessView* outputs[3]={g.anchorUav.Get(),uavs[1],g.lightUav.Get()};
-    ctx->CSSetConstantBuffers(0,3,inputs);ctx->CSSetUnorderedAccessViews(1,3,outputs,nullptr);
+    // The light dispatch needs the frame stamp to match the applied rows
+    // findAnchor wrote for the mesh draws of this same frame.
+    const unsigned stamp[4]={g.frame,g.sampleEpoch,0,instances};ctx->UpdateSubresource(g.sample.Get(),0,nullptr,stamp,0,0);
+    ID3D11Buffer* inputs[4]={g.camera.Get(),cbs[1],lightCamera.Get(),g.sample.Get()};ID3D11UnorderedAccessView* outputs[3]={g.anchorUav.Get(),uavs[1],g.lightUav.Get()};
+    ctx->CSSetConstantBuffers(0,4,inputs);ctx->CSSetUnorderedAccessViews(1,3,outputs,nullptr);
     ctx->CSSetShader(g.lightShader.Get(),nullptr,0);ctx->Dispatch((instances+63)/64,1,1);
     ID3D11UnorderedAccessView* nulls[3]{};ctx->CSSetUnorderedAccessViews(1,3,nulls,nullptr);
-    ctx->CSSetConstantBuffers(0,3,cbs);ctx->CSSetUnorderedAccessViews(1,3,uavs,nullptr);ctx->CSSetShader(saved.Get(),classes,nc);
+    ctx->CSSetConstantBuffers(0,4,cbs);ctx->CSSetUnorderedAccessViews(1,3,uavs,nullptr);ctx->CSSetShader(saved.Get(),classes,nc);
     for(auto* p:cbs)if(p)p->Release();for(auto* p:uavs)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
     // Nonzero starts are declined at the draw gate, preserving all draw
     // arguments and SV_InstanceID while using a zero-origin private stream.
@@ -274,6 +282,16 @@ void weaponStabilityFrameBoundary(ID3D11DeviceContext* ctx) {
             const auto* p=static_cast<const float*>(m.pData);
             const char* status=p[8]==4?"ADS one-frame timing corrected, aiming offset retained":p[8]==3?"ADS timing corrected, aiming offset retained":p[8]==2?"ADS synchronized, game aiming pose retained":p[3]>0?"matched":p[8]>0?"projection preserves game aiming pose":"unavailable (stock)";
             Log::get().note("weapon stability: source attachment %s, offset %.6f %.6f %.6f m, %.0f matching roots; %u-byte private pool, projection near %.7f. Original animation and compositor timing retained.",status,p[0],p[1],p[2],p[7],g.bytes,p[9]);
+            // The applied rows: what the mesh camera buffer held at the last
+            // point-light draw, whether that draw saw a fresh arms correction,
+            // and the mesh correction it actually read (see applyLights).
+            unsigned appliedFrame=0,lightFrame=0;
+            std::memcpy(&appliedFrame,&p[15],4);std::memcpy(&lightFrame,&p[27],4);
+            if(lightFrame)
+                Log::get().note("weapon stability: lights: last point-light batch frame %u (%d frames before this sample), %.0f lights, arms correction %s at that draw, mesh camera near %.7f then; applied mesh correction frame %u near %.7f offset %.6f %.6f %.6f m.",
+                    lightFrame,int(g.pendingFrame-lightFrame),p[26],p[25]>0?"fresh":"STALE",p[24],appliedFrame,p[19],p[12],p[13],p[14]);
+            else
+                Log::get().note("weapon stability: lights: no point-light batch yet.");
             ctx->Unmap(g.stage.Get(),0);g.pending=false;
         } else if(g.frame-g.pendingFrame>60)g.pending=false;
     }

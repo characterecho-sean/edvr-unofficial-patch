@@ -272,8 +272,60 @@ void lightTest(){
     };
     run(true);auto* allocation=g.lightVertices.Get();run(true);check(allocation==g.lightVertices.Get(),"repeated light batches reuse allocation");
     cam[273][2]=.025f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
-    run(false); // ADS must not detach a light by retaining the hip-fire delta.
+    // Elite rewrites this buffer with the WORLD rows for the body and world
+    // props drawn between the arms and the deferred light pass (2026-09-17
+    // Steam dumps: 11 anchor reruns a frame, the body's 7B0DC42D383F694C
+    // draws at near .025); the lights follow the arms' correction of this
+    // frame, not the last rerun's projection.
+    run(true);
+    {
+        // End-to-end check of the instrument: the applied-rows still hold
+        // the last REAL mesh dispatch's correction (the hip-fire draw at
+        // line 242 above), byte-identical across this world rewrite, and
+        // the light diagnostic row records this draw's own near plane and
+        // a fresh arms correction.
+        auto anchor=h.read(g.anchor.Get());const auto* a=reinterpret_cast<const float*>(anchor.data());
+        unsigned shiftFrame=0,lightFrame=0;
+        memcpy(&shiftFrame,&a[kWeaponAppliedRow*4+3],4);
+        memcpy(&lightFrame,&a[(kWeaponAppliedRow+3)*4+3],4);
+        check(std::fabs(a[kWeaponAppliedRow*4+0]-(-getFloat(p[12],4)))<1e-6f &&
+              std::fabs(a[kWeaponAppliedRow*4+1]-(-getFloat(p[12],5)))<1e-6f &&
+              std::fabs(a[kWeaponAppliedRow*4+2]-(-getFloat(p[12],6)))<1e-6f &&
+              shiftFrame==g.frame,
+              "light instrument keeps the applied mesh shift from the last real mesh draw");
+        check(a[(kWeaponAppliedRow+3)*4+0]==.025f && a[(kWeaponAppliedRow+3)*4+1]==1 &&
+              a[(kWeaponAppliedRow+3)*4+2]==5 && lightFrame==g.frame,
+              "light instrument records the near plane and a fresh arms correction");
+    }
     cam[273][2]=.0675f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());run(true);
+    // A genuine ADS frame: the arms themselves take the aiming projection,
+    // with no timing history yet established, so the mesh applies nothing.
+    // The deferred lights must see that same frame's applied state (none),
+    // not a stale "fresh" correction left over from an earlier frame.
+    cam[273][2]=.025f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
+    weaponStabilityFrameBoundary(h.ctx.Get());h.screen();
+    h.ctx->VSSetConstantBuffers(1,1,h.camera.GetAddressOf());
+    check(h.run(),"ADS arms drawn");
+    {
+        ID3D11Buffer* n=nullptr;h.ctx->VSSetConstantBuffers(1,1,&n); // unbound VS camera remains unbound, as run() expects
+    }
+    // A frame whose ARMS took the aiming projection applied nothing (no
+    // timing history), so its lights stay stock.
+    run(false);
+    {
+        auto anchor=h.read(g.anchor.Get());const auto* a=reinterpret_cast<const float*>(anchor.data());
+        unsigned lightFrame=0;memcpy(&lightFrame,&a[(kWeaponAppliedRow+3)*4+3],4);
+        check(a[(kWeaponAppliedRow+3)*4+1]==0 && lightFrame==g.frame,
+              "light instrument marks a historyless ADS frame's correction as stale");
+    }
+    cam[273][2]=.0675f;h.ctx->UpdateSubresource(h.camera.Get(),0,nullptr,cam,0,0);weaponStabilityResourceWritten(h.camera.Get());
+    weaponStabilityFrameBoundary(h.ctx.Get());h.screen();
+    h.ctx->VSSetConstantBuffers(1,1,h.camera.GetAddressOf());
+    check(h.run(),"hip-fire arms drawn again");
+    {
+        ID3D11Buffer* n=nullptr;h.ctx->VSSetConstantBuffers(1,1,&n);
+    }
+    run(true);
     lc[6][3]=.01f;run(false);lc[6][3]=0;
     lc[12][3]=.0675f;run(false);lc[12][3]=.025f;
     lc[2][0]=2;run(false);lc[2][0]=1;

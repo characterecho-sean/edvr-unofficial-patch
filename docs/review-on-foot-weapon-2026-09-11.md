@@ -14,8 +14,20 @@ corrected pool. The 2026-09-17 Steam dumps found two passes still
 outside that list: `BB31244E30265F2D` (the Takada laser rifle's two
 cyan glow strips) and `CFCA8FFC6B058630` (a single skinned triangle at
 the arms root). Both are added to `family()`, to the eye dump's
-`sourceMesh()` capture list and to the rig's shared-pool loop. BUILT,
-NOT FLOWN. Entry: "Laser rifle glow strips" below.
+`sourceMesh()` capture list and to the rig's shared-pool loop
+(cd1577a). FLOWN 2026-09-17 08:08 on Steam and CONFIRMED ("that fixed
+the rifle cyan lines"). Entry: "Laser rifle glow strips" below.
+
+Open, 2026-09-17: the point-light glow of every gun (the laser rifle's
+rear-ring core, Sean: "any gun with lights") shifts while moving. The
+light path (`lightDraw` / `applyLights`) runs and passes its gates, but
+it read `Anchor[0]`, the LAST `findAnchor` result of the frame, and
+Elite reruns that kernel under the WORLD camera rows (the body pass)
+after the arms, so in hip fire the lights got no correction. Fix: the
+frame's applied mesh correction is kept in its own stamped rows
+(`kWeaponAppliedRow`) and the lights read those; the light dispatch
+records the near plane it saw for the status line. BUILT, NOT FLOWN.
+Entry: "Point lights read a rerun anchor" below.
 
 Kept outside on purpose: the late UI labels `B10B032BDFD46700`,
 `C4B4B334B26E81A9` and the panel shader `A888D51024D9798E` (ammo and
@@ -28,13 +40,23 @@ Ruled out: see the "Ruled out" lines of each dated entry; the
 `B7790CBFC6554097` and the 2026-09-11 "full-screen triangle" label on
 `CFCA8FFC6B058630`.
 
-Next flight (Steam, Takada laser rifle): strafe both ways, then walk
-forward, with the new build; the glow strips must stay in their grooves
-on the receiver. Verify the build first with
-`python tools\edvr_log.py --target steam --expect-build HEAD`. An eye
-dump taken while strafing now records the strip draws in the drawstate
-(ordinal UINT32_MAX-1, VS `BB31244E30265F2D`), so a failure can be
-projected the same way as the 2026-09-17 evidence.
+Next flight (Steam, any gun with a light; the laser rifle's rear ring
+is the known case): stand still, then strafe both ways and walk
+forward; the light glow must stay put on the weapon exactly as the
+mesh does. Verify the build first with
+`python tools\edvr_log.py --target steam --expect-build HEAD`. Then
+read the new status line `weapon stability: lights: ...` (every 1800
+frames): `arms correction fresh` with `5+ lights` proves the light
+dispatch found this frame's applied correction; `mesh camera near
+0.0250000 then` proves the camera buffer held the world rows at the
+light draw (the rerun that clobbered `Anchor[0]`), `0.0675000` means
+the clobbering rerun happened earlier in the frame instead. `STALE`
+with the glow still shifting means the arms were not applied in that
+frame at all and the hunt moves to `findAnchor`. If the glow still
+shifts with `fresh`, take an eye dump: the point-light draw is captured
+in the drawstate (ordinal UINT32_MAX-2, VS `0357BBB2DEE43C1F`, its
+light stream in `streams[1]`), and the per-frame method is in the
+"Point lights read a rerun anchor" entry.
 
 ## Evidence from 17:09:53
 
@@ -428,5 +450,73 @@ Fix: `BB31244E30265F2D` and `CFCA8FFC6B058630` added to `family()`
 and to the eye dump's `sourceMesh()` capture list; the rig's
 shared-corrected-pool loop covers both and no longer asserts that
 `CFCA8FFC6B058630` stays original. The correction magnitude, the
-attachment detection and the ADS path are unchanged. Not flown; the
+attachment detection and the ADS path are unchanged. Flown 2026-09-17
+08:08 on Steam (the DLL is named `eefcb09-dirty`, linked before the
+commit existed; same code) and confirmed by Sean.
+
+## Point lights read a rerun anchor, 2026-09-17 Steam dumps
+
+After the strips fix Sean reports the blue core glow in the laser
+rifle's rear ring shifting while moving, then: "this seems to happen on
+any gun with lights". Three Steam eye dumps 081113, 081119 and 081148,
+gfx log `edvr_gfx_20260917_080829.log`, drawstate frames 16243-16261,
+16754-16772 and 19288-19306. In 081113 the glow spills from the bore in
+the first raw frame only and the bore is dark in the rest; the ring's
+static trim is pixel-identical across the frames.
+
+The light path itself is sound on these draws. The point-light batch
+(VS `0357BBB2DEE43C1F` / PS `81812EF97FB4A361`, 14 indices, 39 lights,
+RTV `@200`, `ia=0,0,0`) binds VB slot 1 at stride 32 offset 0 and its
+b2 eye equals the mesh cb1[275] to 1.2e-7 m, so every `lightDraw` gate
+passes, and the "weapon lights" kernel compiled at 08:09:52, which only
+happens after those gates. Two lights sit on the weapon: 37 (0.167 m
+from the root, radius 0.9 cm) and 38 (0.120 m, radius 2.6 cm); both
+pass every `applyLights` gate in all 19 frames.
+
+The glow tracks the UNCORRECTED arms: the anchor offset T is 0.4 cm in
+frame 16243 (glow visible) and 2.0 cm in every later frame (bore dark)
+with the camera still to 0.1 mm per frame, and the light-to-root vector
+is constant, so a corrected light would have been rigid to the ring. A
+2 cm miss carries a 2.6 cm light out of the bore.
+
+Why the correction is missing: `applyLights` read `Anchor[0]`, the
+result of the LAST `findAnchor` run, and the timing trace shows 11 runs
+a frame (`calls=11`) because Elite rewrites the one mesh camera buffer
+before most material batches. Resolving every family draw of frame
+16243 through the drawstate's VB0 and t33 captures, in draw order: the
+arms and rifle (records 2-61 and 260-263, 0.3-0.5 m, cb1 near 0.0675),
+then 26 world props under `4435F2E50020E7F3` at 44-438 m with cb1 near
+0.0250, then the player's own body under the family VS
+`7B0DC42D383F694C` (records 248-258, 1.68 m, near 0.0250), then one
+viewmodel draw `114AF608F86D9ED8`, the post passes, the light batch,
+and the late lit passes at near 0.0675. Every family draw under the
+world rows reruns `findAnchor` on the aiming projection, which in hip
+fire applies nothing, so `Anchor[0]` is whatever the rerun nearest the
+light batch produced. The rig encoded this as intended (near 0.025 in
+that buffer read as "ADS must not detach a light"), but mid-frame it
+just means the buffer holds the world rows.
+
+Ruled out: the ammo/magazine panels and the strips (fixed above).
+Ruled out: the `lightDraw` C++ gates, because the stride, offset,
+window, PS hash and start arguments pass on the captured draws and the
+kernel compiled. Ruled out: a command-list invalidation between the
+arms and the lights, because the census shows no execute event between
+draws #418 and #603. Ruled out: the sprite passes `F8FA801F2CB1E27C`
+and `7E38A6AA1269C901` as the glow, because both pass POSITION through
+without a camera (full-screen passes). Not settled: whether the rerun
+that clobbers `Anchor[0]` is the body pass or a later rewrite before
+the light batch; the spot-light batch `963B52C73B4143AC` (84 indices,
+29 lights from a VS structured buffer t0 at stride 112, not captured by
+the drawstate) is not handled by any path and may carry other guns'
+glows. The new status line answers the first; a still-shifting glow
+with `fresh` points at the second.
+
+Fix: `findAnchor` writes the frame's applied mesh correction (shift,
+root, eye, frame stamp; mesh dispatches only) to `kWeaponAppliedRow`,
+and `applyLights` uses those rows, stamped to the current frame, in
+place of `Anchor[0]`/`Anchor[1]`/b0[275]; the light dispatch binds the
+sample stamp at b3 with its batch size and records (near plane seen,
+fresh flag, lights, frame) for the status line. The rig's ADS light
+case is split into the world-rewrite case (lights still corrected) and
+a true ADS frame (arms applied nothing, lights stock). Not flown; the
 Status block carries the flight brief.
