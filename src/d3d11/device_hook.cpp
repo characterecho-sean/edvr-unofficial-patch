@@ -2508,6 +2508,32 @@ void hookDevice(ID3D11Device* device) {
     hookFactoryForDevice(device);
 }
 
+// The game's window sometimes ends up behind the launcher, Steam, or
+// whatever else had focus while Elite was loading. A plain
+// SetForegroundWindow is refused by Windows' focus-stealing guard once
+// this process is no longer the one that last received input; borrowing
+// the current foreground window's input queue for the call is the
+// standard way around that guard.
+void forceWindowForeground(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return;
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+
+    HWND fg = GetForegroundWindow();
+    if (fg == hwnd) return;
+
+    const DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+    const DWORD thisThread = GetCurrentThreadId();
+    const bool attached =
+        fg && fgThread != thisThread && AttachThreadInput(thisThread, fgThread, TRUE);
+
+    BringWindowToTop(hwnd);
+    const bool ok = SetForegroundWindow(hwnd) != 0;
+
+    if (attached) AttachThreadInput(thisThread, fgThread, FALSE);
+
+    Log::get().note("window: focus-on-launch %s", ok ? "applied" : "refused by Windows");
+}
+
 void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!swapChain) return;
     State& s = ensureState();
@@ -2527,6 +2553,13 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     }
     s.swapChain = swapChain;
     Log::get().note("Present hook installed");
+
+    if (Config::get().getBool("d3d11.focus_on_launch", true)) {
+        DXGI_SWAP_CHAIN_DESC desc{};
+        if (SUCCEEDED(swapChain->GetDesc(&desc)) && desc.OutputWindow) {
+            forceWindowForeground(desc.OutputWindow);
+        }
+    }
 }
 
 void hookFactoryForDevice(ID3D11Device* device) {
