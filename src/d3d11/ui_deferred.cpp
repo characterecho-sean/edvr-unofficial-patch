@@ -11,6 +11,7 @@
 #include "vscreen.h"
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../common/temporal_mode.h"
 #include <d3d11_1.h>
 #include <algorithm>
 #include <array>
@@ -354,7 +355,7 @@ void uiDeferredRemember(ID3D11DeviceChild* shader,const void* data,size_t size,b
 }
 void uiDeferredConfigure(Config& cfg) {
     const auto m=cfg.getString("fix.temporal_aa","off");
-    const bool requested=(_stricmp(m.c_str(),"dlss")==0 || _stricmp(m.c_str(),"dlaa")==0);
+    const bool requested=temporalExternalEngine(m);
     if(!requested){failed=false;routeNoted=false;}
     enabled=requested && !failed && cfg.getFloat("advanced.temporal_aa_fovea",0)==0;
     writerShaderDir=cfg.logDir()+L"\\shaders";

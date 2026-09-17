@@ -385,6 +385,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
+    "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\foveation.cpp" ^
     "src\d3d11\eye_mask.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^

@@ -144,8 +144,19 @@ void rebuildItems(List* list) {
                     presetIndexFor(effectiveValue(rows[list->resWidthRow]),
                                    effectiveValue(rows[list->resHeightRow])) < 0);
 
+    // fsr ignores fix.temporal_aa_model (NVIDIA's preset row): found fresh
+    // each rebuild, the same as the resolution pair above.
+    bool hideAaPreset = false;
+    for (const SettingRow& r : rows) {
+        if (isVscreenKey(*r.def, "temporal_aa")) {
+            hideAaPreset = _stricmp(effectiveValue(r).c_str(), "fsr") == 0;
+            break;
+        }
+    }
+
     for (size_t i = 0; i < rows.size(); ++i) {
         if (!matches(rows[i], needle)) continue;
+        if (hideAaPreset && isVscreenKey(*rows[i].def, "temporal_aa_model")) continue;
         const std::wstring wanted = headingFor(*rows[i].def);
         if (!haveHeading || wanted != heading) {
             heading = wanted;

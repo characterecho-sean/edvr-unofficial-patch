@@ -37,6 +37,7 @@
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
+#include "fsr3_engine.h"
 
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unknown"
@@ -1261,6 +1262,16 @@ void addSettingRows(Page& p, MenuTier tier, const char* page, bool grouped) {
         const MenuRowDef& d = kMenuRows[i];
         if (d.tier != tier) continue;
         if (page && _stricmp(d.page, page) != 0) continue;
+        // fix.temporal_aa_model is NVIDIA's preset row; fsr ignores it
+        // (design doc 3.1), so it stays off the list while fsr is selected.
+        // The row reappears the next time the pages rebuild (developer
+        // switch toggle, or the menu reopening) after a mode change, the
+        // same timing the developer-tier pages themselves already use.
+        if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0 &&
+            temporalEngineFor(Config::get().getString("fix.temporal_aa", "off")) ==
+                TemporalEngine::Amd) {
+            continue;
+        }
         if (grouped && d.group[0] && (!lastGroup || strcmp(lastGroup, d.group) != 0)) {
             Entry h;
             h.kind = EntryKind::Heading;
@@ -1499,6 +1510,8 @@ void buildStatus(MenuContent& c) {
             }
         } else if (temporalPassDlaaTotals(&n, &avg, &mx, &resets) && n) {
             snprintf(buf, sizeof(buf), "%s, NVIDIA %.2f ms/eye", mode.c_str(), avg);
+        } else if (fsr3Totals(&n, &avg, &mx, &resets) && n) {
+            snprintf(buf, sizeof(buf), "%s, %s %.2f ms/eye", mode.c_str(), fsr3VersionLabel(), avg);
         } else if (temporalPassTotals(&n, &avg, &mx, &rej, &clip) && n) {
             snprintf(buf, sizeof(buf), "%s, %.2f ms/eye", mode.c_str(), avg);
         } else {

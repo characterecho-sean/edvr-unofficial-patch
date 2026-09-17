@@ -4,6 +4,7 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
+#include "../common/temporal_mode.h"
 #include "../common/supersample_math.h"
 #include "../common/log.h"
 
@@ -30,6 +31,11 @@ struct History {
 struct Settings {
   bool on=false,dlaa=false,upscale=false,jitter=true,lag=false; int motion=3,signX=1,signY=1;
   float blend=.90f,clamp=1.f;
+  // dlaa means "an external, trained engine" (NVIDIA's or AMD's), kept under
+  // its original name since flags bit 1 (edvrTemporalAa) still means exactly
+  // that; engine says WHICH one, for mode()'s "fsr" and the new flags bit
+  // that tells the pass it is AMD's rather than NVIDIA's history.
+  edvr::TemporalEngine engine=edvr::TemporalEngine::Own;
 };
 
 struct State {
@@ -94,9 +100,13 @@ bool sameDevice(ID3D11Device* expected, ID3D11Texture2D* source) {
 }
 Settings readConfig() {
   Settings s; auto& c=edvr::Config::get(); const auto mode=c.getString("fix.temporal_aa","off");
-  const bool known=_stricmp(mode.c_str(),"on")==0||_stricmp(mode.c_str(),"dlaa")==0||_stricmp(mode.c_str(),"dlss")==0;
-  s.on=known; s.dlaa=_stricmp(mode.c_str(),"dlaa")==0||_stricmp(mode.c_str(),"dlss")==0;
-  s.upscale=_stricmp(mode.c_str(),"dlss")==0;
+  s.on=edvr::temporalModeEnabled(mode);
+  s.engine=edvr::temporalEngineFor(mode);
+  s.dlaa=edvr::temporalExternalEngine(mode);
+  // fsr takes the same sizes dlss does (design doc 3.1): 1:1 at the
+  // runtime's size, an upscale when the game renders smaller. "dlaa" stays
+  // pinned to 1:1 on purpose (menu.cpp's "DLAA, even below HMD Quality 1").
+  s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0;
   s.jitter=_stricmp(c.getString("experimental.temporal_aa_jitter","on").c_str(),"off")!=0;
   s.blend=c.getFloat("experimental.temporal_aa_blend",.90f); if(!std::isfinite(s.blend))s.blend=.90f;
   s.clamp=c.getFloat("experimental.temporal_aa_clamp",1.f); if(!std::isfinite(s.clamp))s.clamp=1.f;
@@ -113,10 +123,18 @@ void reset(State& s) {
   for(unsigned e=0;e<2;++e){s.continuity[e]=0;s.verdictPending[e]=false;s.verdictWaits[e]=0;}
 }
 bool sameHistorySettings(const Settings& a,const Settings& b) {
+  // engine is compared explicitly: dlss and fsr read identically on
+  // (dlaa=true, upscale=true), the only pair this struct cannot otherwise
+  // tell apart, and the two engines keep unrelated history -- a live
+  // switch between them must reset, same as any other settings change.
   return a.on==b.on&&a.dlaa==b.dlaa&&a.upscale==b.upscale&&a.jitter==b.jitter&&
-      a.motion==b.motion&&a.signX==b.signX&&a.signY==b.signY&&a.lag==b.lag;
+      a.motion==b.motion&&a.signX==b.signX&&a.signY==b.signY&&a.lag==b.lag&&a.engine==b.engine;
 }
-const char* mode(const Settings& s) { return !s.on?"off":s.upscale?"dlss":s.dlaa?"dlaa":"on"; }
+const char* mode(const Settings& s) {
+  if (!s.on) return "off";
+  if (s.engine==edvr::TemporalEngine::Amd) return "fsr";
+  return s.upscale?"dlss":s.dlaa?"dlaa":"on";
+}
 
 HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporalProjection* out) {
   std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
@@ -220,7 +238,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     float headDelta[9];edvr::temporalHeadDelta(hst.head,s->head,headDelta);headDegrees=edvr::temporalRotationAngleDeg(headDelta);
     pd=delta;pt=trans;pto=transOther;
   }
-  const unsigned flags=(resetHistory?1u:0u)|(s->currentSettings.dlaa?2u:0u);float prev[4];std::memcpy(prev,s->history[eye].valid?s->history[eye].frustum:s->frusta[eye],16);
+  // bit 6 (temporal_pass.h's own comment): the external engine (bit 1) is
+  // AMD's FSR rather than NVIDIA's. Bits 2-5 are the reset's own sub-reasons
+  // (g_dlResetsHeld/Returned/Unjudged/NoDelta, temporal_pass.cpp) that this,
+  // the ABI's one caller, has never set; left alone rather than reused.
+  const unsigned flags=(resetHistory?1u:0u)|(s->currentSettings.dlaa?2u:0u)|
+      (s->currentSettings.engine==edvr::TemporalEngine::Amd?64u:0u);float prev[4];std::memcpy(prev,s->history[eye].valid?s->history[eye].frustum:s->frusta[eye],16);
   const float outJx=s->shift[eye][0],outJy=s->shift[eye][1]; float px=0,py=0;
   if(w){px=-outJx*float(w)/(s->frusta[eye][1]-s->frusta[eye][0]);} if(h){py=outJy*float(h)/(s->frusta[eye][3]-s->frusta[eye][2]);}
   s->renderedJitter[eye][0]=px;s->renderedJitter[eye][1]=py;

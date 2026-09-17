@@ -218,8 +218,13 @@ extern "C" {
 //            zero or equal for DLAA. Ignored by the pass's own history.
 // flags:     bit 0 -- reset the history before this frame (a withheld frame
 //            broke continuity; the first frame after an engage); bit 1 --
-//            NVIDIA's history (DLAA) instead of the pass's own, when the
-//            runtime is there; the pass says so once either way.
+//            an external, trained history (NVIDIA's or AMD's) instead of
+//            the pass's own, when the runtime is there; the pass says so
+//            either way. bit 6 -- with bit 1 set, the external engine is
+//            AMD's FSR rather than NVIDIA's DLAA/DLSS; ignored when bit 1
+//            is clear. Bits 2-5 are reset's own sub-reasons, read by the
+//            pass's own diagnostics; native_temporal.cpp's treat() (the
+//            ABI's one caller) never sets them.
 //
 // Returns the treated texture (EDVR-owned, per eye, the source's own format
 // family, region-sized, full-span content), or null: the pass refused or

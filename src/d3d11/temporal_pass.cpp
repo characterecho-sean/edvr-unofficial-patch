@@ -27,6 +27,7 @@
 #include "depth_probe.h"
 #include "luma_probe.h"
 #include "dlaa.h"
+#include "fsr3_engine.h"
 #include "object_probe.h"   // objectMotionGet: the dominant body's own motion, for the body's path (tier 2)
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "ui_resolve.h"
@@ -576,6 +577,10 @@ struct Slot {
     int           eye = -1;
     uint32_t      frame = 0;
     Treatment     treatment = Treatment::None;
+    // Which engine FullFrame actually was (Own when treatment is not
+    // FullFrame): the price line's treatmentName cannot otherwise tell an
+    // AMD full-frame run from an NVIDIA one, both Treatment::FullFrame.
+    edvr::TemporalEngine engine = edvr::TemporalEngine::Own;
     uint32_t      outW = 0, outH = 0;
     uint32_t      fmt = 0;
     uint32_t      configGen = 0;
@@ -667,12 +672,13 @@ void endRegion(int qs, Region r, ID3D11DeviceContext* ctx) {
 // no separate "recreated" flag is tracked.
 struct WindowKey {
     Treatment treatment = Treatment::None;
+    edvr::TemporalEngine engine = edvr::TemporalEngine::Own;
     uint32_t  outW = 0, outH = 0;
     uint32_t  fmt = 0;
     uint32_t  configGen = 0;
     bool operator==(const WindowKey& o) const {
-        return treatment == o.treatment && outW == o.outW && outH == o.outH &&
-               fmt == o.fmt && configGen == o.configGen;
+        return treatment == o.treatment && engine == o.engine && outW == o.outW &&
+               outH == o.outH && fmt == o.fmt && configGen == o.configGen;
     }
     bool operator!=(const WindowKey& o) const { return !(*this == o); }
 };
@@ -713,10 +719,17 @@ double windowPercentile(double* v, int n, double frac) {
     return v[lo] * (1.0 - t) + v[hi] * t;
 }
 
-const char* treatmentName(Treatment t) {
+// engine is only meaningful for FullFrame (Fovea is NVIDIA-only, design
+// doc 3.1/3.2's "the fovea keys are NVIDIA-only", so it is always Nvidia
+// there; None is always Own). Today's two names are unchanged; AMD's run
+// prints fsr3VersionLabel() ("fsr", or "fsr 3.1.2" once the port is linked)
+// in place of "full-frame ngx", which is NVIDIA's brand name, not AMD's.
+const char* treatmentName(Treatment t, edvr::TemporalEngine engine) {
     switch (t) {
         case Treatment::Fovea:     return "foveated ngx";
-        case Treatment::FullFrame: return "full-frame ngx";
+        case Treatment::FullFrame: return engine == edvr::TemporalEngine::Amd
+                                       ? edvr::fsr3VersionLabel()
+                                       : "full-frame ngx";
         default:                   return "own history (no ngx)";
     }
 }
@@ -752,7 +765,7 @@ void flushWindow(const char* reason) {
     char line[1100];
     int len = snprintf(line, sizeof(line),
         "temporal aa price: %s, %ux%u, %d stereo pairs (%s), ms per pair "
-        "median/p95:", treatmentName(g_windowKey.treatment), g_windowKey.outW,
+        "median/p95:", treatmentName(g_windowKey.treatment, g_windowKey.engine), g_windowKey.outW,
         g_windowKey.outH, n, reason);
     for (int ri = 0; ri < kRegionCount && len > 0 && len < static_cast<int>(sizeof(line)); ++ri) {
         len += snprintf(line + len, sizeof(line) - len, " %s %.2f/%.2f",
@@ -855,7 +868,7 @@ void finalizePending(PendingPair& p) {
 
 void priceSlot(const Slot& q) {
     if (q.eye != 0 && q.eye != 1) return;   // an eye index this report cannot place
-    const WindowKey key{q.treatment, q.outW, q.outH, q.fmt, q.configGen};
+    const WindowKey key{q.treatment, q.engine, q.outW, q.outH, q.fmt, q.configGen};
     int idx = -1;
     for (int i = 0; i < kPendingCap; ++i) {
         if (g_pending[i].used && g_pending[i].frame == q.frame) { idx = i; break; }
@@ -1205,6 +1218,16 @@ bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 bool                       g_dlaaFailNoted = false;
 bool                       g_trainedNoted = false;   // the first trained frame's line
+// "the fovea keys are NVIDIA-only; fsr runs the full frame", once: AMD's
+// engine never runs the fovea/periphery crop (design doc 3.1), so this
+// notes the one case where g_foveaDeg > 0 asked for it anyway.
+bool                       g_fsrFoveaNoted = false;
+// The AMD engaged/upscale-engaged lines, separate from g_dlaaNoted/
+// g_dlssNoted: those are session-lifetime "once" flags, and a live switch
+// from dlss to fsr (or back) must still print its own engine's line rather
+// than finding the other engine's flag already set.
+bool                       g_fsrNoted = false;
+bool                       g_fsrUpscaleNoted = false;
 uint32_t                   g_dlaaTreats = 0;
 ID3D11Buffer*              g_cb = nullptr;
 ID3D11SamplerState*        g_samp = nullptr;
@@ -1262,7 +1285,11 @@ int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motio
 // from a gate that never opened from a switch that was off.
 enum class WarmState { Pending, Off, Done, Failed, Late };
 WarmState   g_warmState = WarmState::Pending;
-bool        g_trainedWanted = false;   // fix.temporal_aa = dlaa | dlss (the modes that touch NGX)
+bool        g_trainedWanted = false;   // fix.temporal_aa = dlaa | dlss | fsr (an external engine)
+// Which external engine g_trainedWanted means, set alongside it
+// (temporalPassConfigure): Own when g_trainedWanted is false. warmTrainedOnce
+// reads this to choose dlaaWarm or fsr3Warm and to word its log correctly.
+edvr::TemporalEngine g_temporalEngine = edvr::TemporalEngine::Own;
 bool        g_warmOn = true;           // advanced.temporal_aa_warm
 bool        g_warmOffNoted = false;
 const char* g_warmWhy = "no frame boundary reached the warm-up: the tick never ran";
@@ -3856,8 +3883,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // retried every frame (F3).
         // A failed crop re-arms when the render or output size changes (F4).
         if (g_foveaFailed && (w != g_foveaFailW || foW != g_foveaFailFoW)) g_foveaFailed = false;
-        const bool foveaWanted = (flags & 2u) != 0 && fmtIndex == 0 && g_foveaDeg > 0.0f &&
+        // The fovea/periphery crop is NVIDIA's NGX subrect path (dlaa.cpp)
+        // and has no AMD counterpart (design doc 3.1): with bit 6 set, fsr
+        // always runs the full frame, whatever advanced.temporal_aa_fovea
+        // says.
+        const bool amdWanted = (flags & 2u) != 0 && (flags & 64u) != 0;
+        const bool foveaWanted = (flags & 2u) != 0 && !amdWanted && fmtIndex == 0 && g_foveaDeg > 0.0f &&
                                  g_foveaCb != nullptr && g_debugMode == 0 && !g_foveaFailed;
+        if (amdWanted && fmtIndex == 0 && g_foveaDeg > 0.0f && g_debugMode == 0 && !g_fsrFoveaNoted) {
+            g_fsrFoveaNoted = true;
+            Log::get().note(
+                "temporal aa: the fovea keys are NVIDIA-only; fsr runs the full frame.");
+        }
         uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;      // INPUT crop, in the render (w x h) space
         uint32_t focx = 0, focy = 0, focw = 0, foch = 0;  // OUTPUT crop, in the native (foW x foH) space
         bool foveaMode = false;
@@ -4037,21 +4074,44 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // other family runs the pass's own history and says so once.
         if ((flags & 2u) != 0 && fmtIndex != 0 && !g_dlaaFailNoted) {
             g_dlaaFailNoted = true;
-            Log::get().note(
-                "temporal aa: dlaa was asked for, but the game submits %s and NVIDIA is "
-                "handed R8G8B8A8, a different family. The pass's own history runs instead.",
-                formatName(sd.Format));
+            if (flags & 64u) {
+                Log::get().note(
+                    "temporal aa: fsr was asked for, but the game submits %s and AMD is "
+                    "handed R8G8B8A8, a different family. The pass's own history runs instead.",
+                    formatName(sd.Format));
+            } else {
+                Log::get().note(
+                    "temporal aa: dlaa was asked for, but the game submits %s and NVIDIA is "
+                    "handed R8G8B8A8, a different family. The pass's own history runs instead.",
+                    formatName(sd.Format));
+            }
         }
         if ((flags & 2u) != 0 && fmtIndex == 0 && !foveaMode) {
             warmNoteFirstTreat();   // before NGX's first ask, below
+            const bool amdEngine = (flags & 64u) != 0;
+            // advanced.temporal_aa_fsr_reactive/_debug (design doc 3.1); read
+            // once here rather than on every NVIDIA frame, since only fsr uses
+            // them (fsr3ReadConfig is also called from fsr3Available's own
+            // stub, so a build with no AMD SDK still exercises the read).
+            const edvr::Fsr3Settings fsrSettings = amdEngine ? edvr::fsr3ReadConfig() : edvr::Fsr3Settings{};
             const char* why = "";
-            if (!dlaaAvailable(dev, &why)) {
+            const bool engineAvailable = amdEngine ? edvr::fsr3Available(dev, &why)
+                                                   : dlaaAvailable(dev, &why);
+            if (!engineAvailable) {
                 if (!g_dlaaFailNoted) {
                     g_dlaaFailNoted = true;
-                    Log::get().note(
-                        "temporal aa: dlaa was asked for, but %s. The pass's own "
-                        "history runs instead.",
-                        why);
+                    if (amdEngine) {
+                        Log::get().note(
+                            "temporal aa: fsr was asked for, but %s. The pass's own "
+                            "history runs instead.",
+                            why);
+                    } else {
+                        Log::get().note(
+                            "temporal aa: dlaa was asked for, but %s. The pass's own "
+                            "history runs instead. Set temporal_aa = fsr for AMD's "
+                            "upscaler, which runs on any GPU.",
+                            why);
+                    }
                 }
             } else {
                 ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
@@ -4284,6 +4344,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (frameMs < 1.0f || frameMs > 100.0f) frameMs = 0.0f;
                     }
                     e.dlLastQpc = qNow.QuadPart;
+                    // FSR's vertical field of view, in radians (design doc
+                    // 3.3: cameraFovAngleVertical = atan(t) + atan(b)).
+                    // tanNow is temporalInner's own parameter, already in
+                    // scope here -- no ABI change needed to reach it. Sign
+                    // convention matches native_temporal.cpp's own top/
+                    // bottom (top = -frusta[2], bottom = frusta[3]):
+                    // tanNow[2] is the negative "up" tangent, tanNow[3] the
+                    // positive "down" one.
+                    const float fovY = amdEngine
+                                           ? std::atan(-tanNow[2]) + std::atan(tanNow[3])
+                                           : 0.0f;
                     if (debugPaint) {
                         trace.events |= 32u;
                         // The motion, depth and mover views: the mv entry
@@ -4292,13 +4363,34 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         usedDlaa = true;
                         e.dlHaveHistory = false;
                     } else if ((beginRegion(qs, Region::Full, dev, ctx),
-                                dlaaEvaluate(ctx, eye, separated?separatedCandidate.colour:e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
-                                            biasMask, w, h,
-                                            oW, oH, jxNow, jyNow, resetHist, frameMs, &why))) {
+                                amdEngine
+                                    ? edvr::fsr3Evaluate(ctx, static_cast<unsigned>(eye),
+                                                        separated?separatedCandidate.colour:e.dlColour,
+                                                        e.dlDepth, e.dlMv,
+                                                        fsrSettings.reactive ? biasMask : nullptr, e.dlOut,
+                                                        w, h, oW, oH, jxNow, jyNow, resetHist, frameMs,
+                                                        nearZ, farZ, fovY, &why)
+                                    : dlaaEvaluate(ctx, eye, separated?separatedCandidate.colour:e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
+                                                  biasMask, w, h,
+                                                  oW, oH, jxNow, jyNow, resetHist, frameMs, &why))) {
                         endRegion(qs, Region::Full, ctx);
                         usedDlaa = true;
                         e.dlHaveHistory = true;
-                        if (!g_dlaaNoted || (oW != w && !g_dlssNoted)) {
+                        if (amdEngine) {
+                            if (!g_fsrNoted || (oW != w && !g_fsrUpscaleNoted)) {
+                                g_fsrNoted = true;
+                                if (oW != w) g_fsrUpscaleNoted = true;
+                                Log::get().note(
+                                    "temporal aa: %s engaged -- AMD's history takes the "
+                                    "%ux%u frame, its depth%s and the pass's own motion "
+                                    "vectors, jittered as before%s; the pass's history and "
+                                    "clip stand aside. Its price prints in the totals.",
+                                    edvr::fsr3VersionLabel(), w, h,
+                                    depthSrv ? "" : " (none in hand yet: no depth until the "
+                                                    "probe finds it)",
+                                    oW != w ? " and brings it back to the unit-quality size" : "");
+                            }
+                        } else if (!g_dlaaNoted || (oW != w && !g_dlssNoted)) {
                             g_dlaaNoted = true;
                             if (oW != w) g_dlssNoted = true;
                             Log::get().note(
@@ -4314,7 +4406,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             // before a frame existed, from Elite's own
                             // multiplier. This is the first moment the REAL
                             // fraction is known, so check the two against each
-                            // other while there is something to compare.
+                            // other while there is something to compare. NVIDIA
+                            // only: AMD's own render-fraction agreement is not
+                            // instrumented here (out of scope for Track B).
                             float autoMult = 0.0f, autoBias = 0.0f;
                             if (deviceHookAutoBiasSource(&autoMult, &autoBias) && autoMult > 0.0f) {
                                 // ONLY when NVIDIA is actually upscaling. Under
@@ -4356,10 +4450,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         e.dlHaveHistory = false;
                         if (!g_dlaaFailNoted) {
                             g_dlaaFailNoted = true;
-                            Log::get().note(
-                                "temporal aa: dlaa was asked for, but %s. The pass's own "
-                                "history runs instead.",
-                                why);
+                            if (amdEngine) {
+                                Log::get().note(
+                                    "temporal aa: fsr was asked for, but %s. The pass's own "
+                                    "history runs instead.",
+                                    why);
+                            } else {
+                                Log::get().note(
+                                    "temporal aa: dlaa was asked for, but %s. The pass's own "
+                                    "history runs instead. Set temporal_aa = fsr for AMD's "
+                                    "upscaler, which runs on any GPU.",
+                                    why);
+                            }
                         }
                     }
                     // One requested first-eye capture, after NGX and before
@@ -4855,6 +4957,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             g_slots[qs].treatment = foveaComposited ? Treatment::Fovea
                                     : usedDlaa       ? Treatment::FullFrame
                                                      : Treatment::None;
+            // Fovea is always NVIDIA's (foveaComposited implies dlaaEvaluate
+            // ran the crop); a full frame is whichever engine flags bit 6
+            // asked for; nothing else ran means Own, same as treatment.
+            g_slots[qs].engine = foveaComposited ? edvr::TemporalEngine::Nvidia
+                                 : !usedDlaa      ? edvr::TemporalEngine::Own
+                                 : (flags & 64u)   ? edvr::TemporalEngine::Amd
+                                                    : edvr::TemporalEngine::Nvidia;
             g_slots[qs].outW = foW;
             g_slots[qs].outH = foH;
             g_slots[qs].fmt = static_cast<uint32_t>(sd.Format);
@@ -5056,9 +5165,11 @@ void temporalPassConfigure(Config& cfg) {
     ++g_configGeneration;
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     g_wanted = temporalModeEnabled(mode);
-    // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 2
-    // at the treat): only these two modes touch NGX, so only they warm it.
-    g_trainedWanted = _stricmp(mode.c_str(), "dlaa") == 0 || _stricmp(mode.c_str(), "dlss") == 0;
+    // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 1
+    // at the treat): only an external engine (dlaa, dlss, fsr) touches NGX
+    // or FSR, so only they warm one.
+    g_trainedWanted = temporalExternalEngine(mode);
+    g_temporalEngine = temporalEngineFor(mode);
     celestialMotionConfigure(g_wanted);
     meshMotionConfigure(g_wanted);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
@@ -5208,17 +5319,19 @@ void temporalPassConfigure(Config& cfg) {
 // itself, as it always did, and warmNoteFirstTreat says why the warm-up
 // never got there. Off, Done, Failed and Late are terminal for the session.
 void warmFailNote(double ms) {   // L-FAIL: one string, whichever gate or refusal it was
+    const bool amdEngine = g_temporalEngine == edvr::TemporalEngine::Amd;
     Log::get().note(
-        "temporal aa: NVIDIA warm-up did not complete after %.0f ms -- %s. The first submitted "
-        "frame runs as before: a refusal by NVIDIA is remembered for the session and the 'dlaa "
+        "temporal aa: %s warm-up did not complete after %.0f ms -- %s. The first submitted "
+        "frame runs as before: a refusal by %s is remembered for the session and the '%s "
         "was asked for, but' line repeats why, while a failed feature create is retried there.",
-        ms, g_warmWhy);
+        amdEngine ? "AMD" : "NVIDIA", ms, g_warmWhy, amdEngine ? "AMD" : "NVIDIA",
+        amdEngine ? "fsr" : "dlaa");
 }
 void warmTrainedOnce(ID3D11DeviceContext* ctx) {
     if (g_warmState != WarmState::Pending || !ctx) return;                              // G1
     if (!g_trainedWanted) {                                                             // G2
-        g_warmWhy = "fix.temporal_aa was not dlaa or dlss when the warm-up first ran; a reload "
-                    "does not re-arm it";
+        g_warmWhy = "fix.temporal_aa was not an external engine (dlaa, dlss or fsr) when the "
+                    "warm-up first ran; a reload does not re-arm it";
         g_warmState = WarmState::Off;
         return;
     }
@@ -5227,9 +5340,11 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
         g_warmState = WarmState::Off;
         if (!g_warmOffNoted) {
             g_warmOffNoted = true;
+            const bool amdEngine = g_temporalEngine == edvr::TemporalEngine::Amd;
             Log::get().note(
-                "temporal aa: NVIDIA warm-up is off (advanced.temporal_aa_warm = 0); the first "
-                "submitted frame initialises NVIDIA itself, as before.");
+                "temporal aa: %s warm-up is off (advanced.temporal_aa_warm = 0); the first "
+                "submitted frame initialises %s itself, as before.",
+                amdEngine ? "AMD" : "NVIDIA", amdEngine ? "AMD" : "NVIDIA");
         }
         return;
     }
@@ -5308,12 +5423,24 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
     // a whole success. G11 (no SDK in the build, NGX refusing, a create
     // refusing) is dlaaWarm's own reason.
     g_warmState = WarmState::Failed;
-    const bool features = g_foveaDeg <= 0.0f;   // the fovea makes its own crop features at the treat
-    Log::get().note(
-        "temporal aa: warming NVIDIA before the first submitted frame -- %ux%u in and out (DLAA) "
-        "for both eyes on the render thread%s. If this is the log's last line the warm-up hung: "
-        "set advanced.temporal_aa_warm = 0 and report this log.",
-        w, h, features ? "" : ", initialisation only: advanced.temporal_aa_fovea is on");
+    const bool amdEngine = g_temporalEngine == edvr::TemporalEngine::Amd;
+    // The fovea makes its own crop features at the treat -- but it is
+    // NVIDIA-only (design doc 3.1), so under fsr there is no crop to defer
+    // and the full warm always runs.
+    const bool features = amdEngine || g_foveaDeg <= 0.0f;
+    if (amdEngine) {
+        Log::get().note(
+            "temporal aa: warming AMD's FSR before the first submitted frame -- %ux%u in and "
+            "out for both eyes on the render thread. If this is the log's last line the "
+            "warm-up hung: set advanced.temporal_aa_warm = 0 and report this log.",
+            w, h);
+    } else {
+        Log::get().note(
+            "temporal aa: warming NVIDIA before the first submitted frame -- %ux%u in and out (DLAA) "
+            "for both eyes on the render thread%s. If this is the log's last line the warm-up hung: "
+            "set advanced.temporal_aa_warm = 0 and report this log.",
+            w, h, features ? "" : ", initialisation only: advanced.temporal_aa_fovea is on");
+    }
     bool ok = false;
     double initMs = 0.0;
     double createMs[2] = {0.0, 0.0};
@@ -5326,7 +5453,11 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
     const bool budgetAlreadySpent = !g_budget.shouldRun();
     const int64_t t0 = qpcNow();
     const bool survived = guardedBudget(g_budget, [&] {
-        ok = dlaaWarm(ctx, w, h, features, &initMs, createMs, &why);
+        if (amdEngine) {
+            ok = edvr::fsr3Warm(ctx, w, h, w, h, &initMs, &why);
+        } else {
+            ok = dlaaWarm(ctx, w, h, features, &initMs, createMs, &why);
+        }
     });
     const double totalMs = qpcFrequency() > 0
                                ? static_cast<double>(qpcNow() - t0) * 1000.0 /
@@ -5344,7 +5475,13 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
     }
     if (survived && ok) {
         g_warmState = WarmState::Done;
-        if (features) {
+        if (amdEngine) {
+            Log::get().note(
+                "temporal aa: AMD's FSR warmed before the first submitted frame -- %.0f ms at "
+                "%ux%u -> %ux%u; the first submitted frame finds it made, so 'native timing "
+                "CPU: seq' should show temporal well under 150 ms.",
+                initMs, w, h, w, h);
+        } else if (features) {
             Log::get().note(
                 "temporal aa: NVIDIA warmed before the first submitted frame -- initialisation "
                 "%.0f ms, the feature for eye 0 %.0f ms and eye 1 %.0f ms at %ux%u -> %ux%u, "
@@ -5359,24 +5496,27 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
                 initMs);
         }
     } else if (survived) {
-        g_warmWhy = (why && *why) ? why : "dlaaWarm refused without a reason";
+        g_warmWhy = (why && *why) ? why : (amdEngine ? "fsr3Warm refused without a reason"
+                                                      : "dlaaWarm refused without a reason");
         warmFailNote(totalMs);
     } else if (budgetAlreadySpent) {
         g_warmWhy = "not attempted: the pass's fault budget was already spent";
         Log::get().note(
-            "temporal aa: NVIDIA warm-up not attempted -- the pass's fault budget (%s) was "
+            "temporal aa: %s warm-up not attempted -- the pass's fault budget (%s) was "
             "already spent by something else this session. The first submitted frame runs as "
-            "before: a refusal by NVIDIA is remembered for the session and the 'dlaa was asked "
+            "before: a refusal by %s is remembered for the session and the '%s was asked "
             "for, but' line repeats why, while a failed feature create is retried there.",
-            g_budget.name());
+            amdEngine ? "AMD" : "NVIDIA", g_budget.name(), amdEngine ? "AMD" : "NVIDIA",
+            amdEngine ? "fsr" : "dlaa");
     } else {
         g_warmWhy = "the warm-up faulted; see the fault report";
         Log::get().note(
-            "temporal aa: NVIDIA warm-up faulted after %.0f ms and is not retried. The first "
-            "submitted frame runs as before: a refusal by NVIDIA is remembered for the session "
-            "and the 'dlaa was asked for, but' line repeats why, while a failed feature create "
+            "temporal aa: %s warm-up faulted after %.0f ms and is not retried. The first "
+            "submitted frame runs as before: a refusal by %s is remembered for the session "
+            "and the '%s was asked for, but' line repeats why, while a failed feature create "
             "is retried there. Please report this log.",
-            totalMs);
+            amdEngine ? "AMD" : "NVIDIA", totalMs, amdEngine ? "AMD" : "NVIDIA",
+            amdEngine ? "fsr" : "dlaa");
     }
 }
 

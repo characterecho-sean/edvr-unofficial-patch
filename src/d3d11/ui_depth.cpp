@@ -1446,8 +1446,8 @@ void uiDepthConfigure(Config& cfg) {
     g_passOn = temporalModeEnabled(aa);
     g_keyOn = g_passOn;
     // The legacy fixed bias is NVIDIA-only. Coverage and adaptive history
-    // are used by both native TAA and NVIDIA modes.
-    g_trained = _stricmp(aa.c_str(), "dlaa") == 0 || _stricmp(aa.c_str(), "dlss") == 0;
+    // are used by every external, trained engine (NVIDIA's or AMD's).
+    g_trained = temporalExternalEngine(aa);
     // The direct list: the flight HUD built in, the ini's additions after.
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;

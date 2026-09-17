@@ -6,6 +6,7 @@
 #include "eye_tonemap_snapshot.h"
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../common/temporal_mode.h"
 #include <vector>
 
 namespace edvr { namespace {
@@ -67,7 +68,7 @@ void uiSeparationRemember(ID3D11PixelShader* ps,const void* data,size_t n,bool l
 }
 void uiSeparationConfigure(Config& cfg) {
     const auto m=cfg.getString("fix.temporal_aa","off");
-    enabled=_stricmp(m.c_str(),"dlss")==0 || _stricmp(m.c_str(),"dlaa")==0;
+    enabled=temporalExternalEngine(m);
 }
 bool uiSeparationBegin(ID3D11DeviceContext* ctx) {
     if(!enabled || failed || internal || active>=0 || !ctx)return false;
