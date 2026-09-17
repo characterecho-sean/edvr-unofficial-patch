@@ -37,7 +37,27 @@ on-foot HUD (docs/intro-video.md, 2026-09-17 entry), and "performance
 worse" is Sean's own `fix.openxr_resolution` 3900 -> 4100 at 08:08:58
 plus that resample chain running on foot.
 
-Open: nothing on the arms or lights. Spot lights (VS
+Built 2026-09-17 (NOT FLOWN): ADS acquisition. Sean, after the panel
+fix: "moving side to side while ADS, there's still some ghosting of the
+sights ... an artifact of the judder and the fix not acquiring on rapid
+movement changes". The 102403 trace shows the correction exact through
+a steady strafe but waiting at every start (arms step under 1 mm),
+reversal through a near-stop, aim turn (`steady`) and after any
+unexplained frame (calibration reset). Fix in `aimingTranslation`:
+correct on a sub-millimetre arms step that equals the previous camera
+step, match the known offset in the previous frame's basis (the arms
+carry the previous camera transform, rotation included -- proved by
+the 112905 mouse-turn dump), retain a calibrated offset through
+unexplained frames (a new one replaces it after three constant frames),
+tolerance 0.3 mm. The correction itself is unchanged (the camera step,
+or the status-3 residual); the ADS offset is never substituted. Entry:
+"ADS ghosting of the sights" below, with the flight brief.
+
+Open: mouse turns in ADS judder because the game draws the arms with
+the previous frame's ROTATION (1 degree behind at 1 degree per frame);
+a translation cannot fix it, and the instance record carries no
+orientation to rotate -- the per-instance rotation source has to be
+found in the VS first (entry below, "Mouse turns"). Spot lights (VS
 `963B52C73B4143AC`, per-light data in a VS structured buffer t0, stride
 112) have no correction path; if a gun's glow still shifts after this,
 that is where to look.
@@ -533,3 +553,198 @@ fresh flag, lights, frame) for the status line. The rig's ADS light
 case is split into the world-rewrite case (lights still corrected) and
 a true ADS frame (arms applied nothing, lights stock). Not flown; the
 Status block carries the flight brief.
+
+## ADS "ghosting of the sights", 2026-09-17 Steam dump 102403
+
+Sean, after the panel fix flew (10:22 flight, DLL built from the
+8fb4b6a source before its commit, so the version line reads
+`00c27ed-dirty`): "moving side to side while ADS, there's still some
+ghosting of the sights". Pistol with the holographic sight, strafing on
+the ground beside the ship. Dump: `eye_102403_*` (paired run, 16 raw
+C and 16 treated T crops of the left eye, frames 10962-10977, plus the
+frame-10962 inputs) and `drawstate_102403.bin` (19 frames 10963-10981),
+and the 128-frame `weapon timing` trace printed at the dump (10834-10961,
+BEFORE the dump's own hitch).
+
+**What the trace says about the correction (the 1.4 s in which Sean saw
+it):** stationary until 10866, a strafe from 10867 through a reversal at
+10930 to 10961. From 10870 on, status 4 every frame with `correction ==
+dc` (this frame's camera step) and `dp_k == dc_{k-1}` exactly: in
+steady 92-fps play the game's ADS arms use the PREVIOUS frame's camera
+position, and the correction restores camera lock to 0.1 mm. Status 1
+(nothing applied) on three frames at the strafe start (camera steps
+0.15/0.48/4.8 mm, the arms 0.15 and 0.48 mm behind and then 4.8 mm)
+and one at the reversal (10930: 1.5 mm behind). The camera basis did
+not change in the whole window (`steady` on every frame). The dump's
+own stall is handled: 10959 (camera step 0, arms +17.1 mm, synchronized)
+and the 10960 catch-up (status 3 pins the residual 15.8 mm exactly).
+
+- ruled out: the ADS timing correction as the ghost of a STEADY strafe,
+  because the trace is exact through the strafe and its gentle reversal.
+  Its acquisition is what fails on rapid changes; see below.
+
+**What the drawstate says:** after the hitch (10965-10979, camera steps
+20-30 mm) the arms are SYNCHRONIZED with the camera (`p - c` constant to
+the micrometre, root `rec 301` projecting to (2915.62, 1799.9) panel px
+every frame) -- the other regime the shader's comments describe; the
+correction correctly went to 0 (the raw crops move ~1 px/frame, whole
+weapon, body and sight together; the DLSS jitter is +-0.44 px of that).
+So the game's arms alternate between "previous camera" (steady frames)
+and "this camera" (after a long frame), and both are handled; each
+regime flip costs 1-3 frames of ~17 mm (about 2 degrees at the sight).
+Not what a steady strafe shows.
+
+**What the treated crops say:** the housing is crisp in T04-T15 (edges
+anti-aliased, no second copy); the reticle dot's glow is symmetric in
+the raw C and skewed 5 px leftward (against the terrain's motion) in
+T04/T06 only.
+
+**The defect the inputs DO show (frame 10962, ScreenMotion.bin):** the
+glass interior (r < 140 px about the dot) is `w=1` with motion
+(2.12, -0.25) px = the terrain's (2.67, -0.49); the housing ring gets
+its own (0.82, 0.22) via WeaponMotion (with 18 % of the ring `w=2`,
+rejected). The reticle dot, the two lens-reflection arcs and the three
+indicator dots inside the glass are camera-locked but transparent: they
+write no stencil bit 16, so `kScreenMotionPs` takes the world path for
+them (`attached` is false) and DLSS reprojects their history along the
+ground behind the glass. That is a trail proportional to the world
+motion behind the sight -- 2 px/frame here with the ground metres away,
+far more against a near wall. Hip fire shows no reticle, which fits.
+
+That glass trail is a separate, smaller defect, not this ghost: Sean's
+answer (below) puts the ghost in the mesh, at movement changes. If it
+is ever chased: a coverage the weapon-motion pass writes for the
+transparent family draws (`025B4B9FF54622ED` reticle, `7F9B650EC1A1E570`
+glass) with their own motion, read by the screen motion PS without the
+stencil/depth gates; the see-through ground inside the glass then pays
+with the opposite error, so the reticle quad's alpha decides which.
+Probes: scratchpad `ads_lag_probe.py`, `ads_reruns_probe.py`,
+`eye_track.py`, `glass_probe.py`, `dot_profile.py`, `timing_flags.py`
+(the per-frame gate table of a `weapon timing` trace).
+
+**Sean's answer:** the whole sight housing doubles (a faint second copy
+offset sideways) while strafing, and in his words "this is an artifact
+of the judder and the fix not acquiring on rapid movement changes". So
+the target is the acquisition latency of `aimingTranslation`
+(`src/d3d11/weapon_stability.h`), and the trace above shows exactly
+where it waits: every start, every reversal that passes through a
+sub-millimetre step, any aim turn, and every reacquisition after a frame
+the exact tests could not explain.
+
+**What the old gates cost, read off the 102403 trace with
+`timing_flags.py`:**
+
+- Strafe start: the known-lag branch required the arms' own step to
+  exceed 1 mm (`lp>.001`), so with the game ramping (arms steps 0,
+  0.15, 0.48 mm) the correction started on the fourth moving frame;
+  the third was 4.8 mm behind (about 1 degree at the sight, one frame).
+  With a harder acceleration the uncorrected step is whatever the camera
+  moved by the time the arms' step passed 1 mm.
+- Reversal through a near-stop: 10930 had an arms step of 0.26 mm, so
+  the same gate left it 1.5 mm behind.
+- Aim turn: `knownLag` required `steady` (basis unchanged to 1e-5), so
+  the whole of any aim adjustment while moving ran uncorrected (17 mm,
+  about 4 degrees, every frame), and afterwards the calibration had been
+  reset (status 1 sets `learned=local`, confidence 1), so re-acquisition
+  needed three more varying-speed frames. Not in this window (Sean held
+  his aim), but the same code.
+- Any unexplained arms frame (a recoil kick, a hitch pattern the pin
+  does not cover) reset the calibration the same way: three frames of
+  the full lag after every one.
+
+Each of those is a one-frame (or few-frame) sideways displacement of
+the whole sight of 1.5-17 mm at the moment of a movement change, which
+DLSS blends with its history into a faint second copy -- Sean's
+description.
+
+**The fix (this commit), all inside `aimingTranslation`; the ADS offset
+itself is never touched, the correction stays the camera step `dc` or
+the status-3 residual, exactly as before (the 2026-09-13 sight-alignment
+bug came from removing the offset; nothing here can):**
+
+1. A known lag corrects on a sub-millimetre arms step when that step is
+   exactly the previous camera step (`lagStep`: `lp>.0001` and
+   `dp == previous dc` to 0.3 mm). A camera-only change with the arms at
+   rest still waits one frame (ambiguous with an intentional aiming
+   adjustment; the rig's "camera-only restart stays conservative" and
+   "intentional stationary aiming offset change" cases keep their
+   expectations). Trace flag 1024 marks a correction on a sub-millimetre
+   step: the frames the old gate would have left behind.
+2. `knownLag` no longer needs `steady`; the known offset is also tried in
+   the PREVIOUS frame's basis (`lagLocalPrevious`), the arms carrying the
+   previous frame's whole camera transform (confirmed offline by the
+   112905 mouse-turn dump, below, before this was built). Flag 4096 =
+   matched only in the previous basis.
+3. A calibrated offset is retained through frames it cannot explain
+   (`learned=Anchor[prev+2]`, confidence 3, instead of `local`, 1). The
+   exact tests cannot pass on a stale value by accident, and the status-3
+   pin's agreement test (`corr'+dc-dp == residual`) fails on one, so a
+   stale offset can only delay, never misplace. A genuinely new offset
+   replaces it after three frames of constancy (`fresh` count in bank
+   row 7.w; flag 2048).
+4. Match tolerance 0.1 -> 0.3 mm (`kAimTolerance`; the paired-root
+   precision is 0.1 mm, the measured lag exactness 0.01 mm). The
+   lag-mode "varying step" test stays at 0.1 mm so a synchronized
+   frame (`dc == dp` exactly) can never count as a varying lag frame.
+
+Rig (`tools/weapon_stability_test`, 2866790 checks): the 102403 ramp
+and reversal in millimetres, a recoil kick during the lag followed by an
+immediate correction, an aim turn through three basis rotations with
+the correction continuing (flags 4096 and 256 asserted), on top of
+every previous case unchanged. Trace flags now: valid=1 history=2
+synchronized=4 steady=8 bounded-step=16 camera-ahead=32 calibrated=64
+short-overshoot=128 lag-applied=256 known-lag=512
+sub-millimetre-step=1024 fresh-offset=2048 previous-basis=4096; the
+`confidence=a/b` field became `confidence=a fresh=b`.
+
+- ruled out (by construction, kept for the record): the fix substituting
+  a universal or stale sight offset, because the correction is only ever
+  `dc` (status 4) or the residual to the offset the arms themselves held
+  the frame before (status 3, gated by the agreement test).
+
+**Mouse turns, dump 112905 (Sean, same build, 11:29: "ADS also judders
+with mouse movement"):** standing still (camera step 0.00 mm on all 128
+frames) and turning the aim with the mouse in four bursts (basis change
+up to 0.017 rad per frame). On every turning frame the old code gave
+status 1 (`steady` failed) and the calibration was reset after the
+first one (flags 0D3 then 093). The arms moved 0.2-1.3 mm per frame
+with the camera still: `turn_model.py` (scratchpad) tests three models
+against the calibrated offset (0.0035, -0.0035, 0.0800) and the arms
+sit EXACTLY (0.00 mm) at the previous camera position with the offset
+in the PREVIOUS frame's basis on all 30 turning frames, against 0.2-1.3
+mm for the current basis or a synchronized arms. So the game's ADS arms
+carry the previous frame's whole camera transform, rotation included:
+during a turn the sight is drawn one frame behind the aim, about 1
+degree behind at 1 degree per frame, and the per-frame mouse steps vary
+(0.001-0.017 rad), which is the judder Sean sees. Item 2 above is that
+model, now confirmed. What the shipped correction can do about it: at a
+standstill nothing (the camera step is zero, the lag is pure rotation);
+while moving it restores the translation and leaves the rotation. A
+translation of the root alone would only reduce the sight's error from
+about 1 degree to 0.7 (the sight sits 0.17 m beyond the root), so it is
+not added.
+
+- ruled out: the instance record as the place to rotate the arms,
+  because it carries no orientation: through the 19 turning frames of
+  drawstate 112905 only the position words (4-6, and their copy at
+  73-75) of the root (record 247) and the nearest rigid part (record
+  96) change, every other word is zero or constant. The orientation
+  lives in a VS SRV the drawstate does not capture or in the bone
+  palette. A rotation correction (rotate every arms record and its
+  skinned bones about the camera by this frame's rotation over the last)
+  needs that path found first: disassemble `vs_7B0DC42D383F694C.dxbc`
+  (in the pool directory since 11:29) for the per-instance rotation
+  source. Separate workstream if Sean wants the mouse judder gone.
+
+**Flight brief:** ADS with the pistol, on the ground. Strafe left-right
+with quick taps and hard reversals, then strafe while adjusting the aim
+slightly, then fire a few shots while strafing; take an eye dump right
+after a burst of quick reversals. Read the `weapon timing` trace with
+`timing_flags.py` (scratchpad) or by eye: moving frames (`|dc|` above 2
+mm) must be status 4 apart from the single camera-only first step out
+of rest; count the flag-1024 lines (each is a frame the old code left
+behind) and, on the aim-adjust pass, flag-4096 lines with status 4 (the
+previous-basis model at work). Mouse turns at a standstill will still
+judder (rotation lag, above); that is the next arc, not a regression.
+Verify the build first: `python tools\edvr_log.py --target steam
+--expect-build HEAD`.
