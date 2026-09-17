@@ -357,7 +357,10 @@ void uiDeferredConfigure(Config& cfg) {
     const auto m=cfg.getString("fix.temporal_aa","off");
     const bool requested=temporalExternalEngine(m);
     if(!requested){failed=false;routeNoted=false;}
-    enabled=requested && !failed && cfg.getFloat("advanced.temporal_aa_fovea",0)==0;
+    // The fovea path (temporal_pass.cpp) now runs this same capture/replay
+    // route too -- its own compose writes the texture this route reads and
+    // replays into, so there is nothing here to stand down for a fovea.
+    enabled=requested && !failed;
     writerShaderDir=cfg.logDir()+L"\\shaders";
 }
 void uiDeferredTraceDrawEnter(ID3D11DeviceContext* ctx,bool eyeSizedTarget,char kind,uint32_t count,uint32_t instances,

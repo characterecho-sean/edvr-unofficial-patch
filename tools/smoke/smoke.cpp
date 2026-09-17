@@ -669,6 +669,32 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The fovea's own crop geometry (temporal_pass.cpp): pure, no device --
+    // width mode against a hand-verified rectangle, the edges mode's
+    // reduced-trim arithmetic, the two eyes' mirror symmetry, and the
+    // extreme-trim floor that stands the crop down.
+    {
+        typedef unsigned (*PFN_FoveaRegion)();
+        PFN_FoveaRegion foveaRegion =
+            reinterpret_cast<PFN_FoveaRegion>(GetProcAddress(mod, "edvrFoveaRegionSelftest"));
+        if (!foveaRegion) {
+            printf("  FAIL  edvrFoveaRegionSelftest is not exported\n");
+            rc = 1;
+        } else {
+            const unsigned bits = foveaRegion();
+            if (bits == 15u) {
+                printf("  ok    fovea region: width mode matches cropOf's own crop, "
+                       "the edges mode's reduced-trim arithmetic holds, the two eyes "
+                       "mirror each other, and an extreme trim stands the crop down\n");
+            } else {
+                printf("  FAIL  fovea region self-test returned %u (want 15: 1 width "
+                       "mode, 2 edge trim arithmetic, 4 eye mirror, 8 extreme trim "
+                       "floor)\n", bits);
+                rc = 1;
+            }
+        }
+    }
+
     // The trained pass (fix.temporal_aa = dlaa), through the temporal
     // export with its DLAA bit: on a machine with the SDK built in, the
     // runtime beside this harness and an RTX GPU, a steady solid colour
