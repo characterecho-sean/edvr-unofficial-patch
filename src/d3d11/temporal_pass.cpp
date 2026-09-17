@@ -1250,6 +1250,7 @@ bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
 bool                       g_foveaEdgesNoted[2] = {false, false};   // edges mode's own line, per eye
+bool                       g_foveaSizeNoted[2] = {false, false};    // the crop's size stood it down, per eye
 bool                       g_foveaFailNoted = false;
 // Latched when the fovea's NGX create or eval fails, so it is not retried
 // every frame (a create costs tens to hundreds of ms -- a stutter storm).
@@ -2221,6 +2222,8 @@ bool ensureUiMaskSrv(ID3D11Device* dev, EyeState& e, ID3D11Texture2D* mask) {
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 bool     g_foveaEdges = false;     // advanced.temporal_aa_fovea = "edges": the crop is placed by its own edges (below) instead of a width
 float    g_foveaVerticalDeg = 0.0f; // advanced.temporal_aa_fovea_vertical: edges mode, degrees off the top AND the bottom
+float    g_foveaTopDeg = 0.0f;      // advanced.temporal_aa_fovea_top: edges mode, "same" (default) follows temporal_aa_fovea_vertical, else its own degrees off the top edge
+float    g_foveaBottomDeg = 0.0f;   // advanced.temporal_aa_fovea_bottom: edges mode, "same" (default) follows temporal_aa_fovea_vertical, else its own degrees off the bottom edge
 float    g_foveaOuterDeg = 0.0f;    // advanced.temporal_aa_fovea_outer: edges mode, degrees off each eye's temple-side edge
 float    g_foveaNasalDeg = 0.0f;    // advanced.temporal_aa_fovea_nasal: edges mode, degrees off each eye's nose-side edge
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
@@ -2648,7 +2651,8 @@ struct FoveaRegionMode {
     bool  edges = false;
     float widthDeg = 0.0f;
     float tcx = 0.0f, tcy = 0.0f;
-    float verticalTrimDeg = 0.0f;
+    float topTrimDeg = 0.0f;
+    float bottomTrimDeg = 0.0f;
     float outerTrimDeg = 0.0f;
     float nasalTrimDeg = 0.0f;
 };
@@ -2658,16 +2662,19 @@ struct FoveaRegion {
     bool     ok = false;   // false: under minPx, or the mode is off -- run full-frame
 };
 
-// l,r,t,b: this eye's four frame tangents (tanNow[0..3] -- t is the DOWN
-// tangent, negative; b is UP, positive: this file's own naming, not "top"/
-// "bottom"). fw,fh: the frame those tangents describe, in pixels. eyeIndex:
-// 0 the left eye (its outer edge is the left/l tangent, its nasal edge the
-// right/r), 1 the right eye (the reverse) -- confirmed by foveation.cpp's
-// own mirrored tangent build (*l = eye==0 ? -outer : -inner, *r = eye==0 ?
-// inner : outer) and frame_flag.h's "0 left, 1 right". minPx: the smallest
-// crop worth NVIDIA's seam (128 today, cropOf's own floor); under it, ok is
-// false and the caller runs full-frame -- same as an unreachable r<=l or
-// b<=t frame, and the same as the mode being off (widthDeg <= 0 and not
+// Frusta order is native_temporal.h:21's own {left,right,down,up}
+// (tanNow[0..3]): down is negative, up positive, and row 0 of the
+// rendered frame sits at the up edge (temporalInner's own "py" projection).
+//
+// l,r,down,up: this eye's four frame tangents. fw,fh: the frame those
+// tangents describe, in pixels. eyeIndex: 0 the left eye (its outer edge
+// is the left/l tangent, its nasal edge the right/r), 1 the right eye (the
+// reverse) -- confirmed by foveation.cpp's own mirrored tangent build (*l
+// = eye==0 ? -outer : -inner, *r = eye==0 ? inner : outer) and
+// frame_flag.h's "0 left, 1 right". minPx: the smallest crop worth
+// NVIDIA's seam (128 today, cropOf's own floor); under it, ok is false and
+// the caller runs full-frame -- same as an unreachable r<=l or up<=down
+// frame, and the same as the mode being off (widthDeg <= 0 and not
 // edges).
 //
 // Width mode's arithmetic (cx, cy, halfa, hwp, hhp and the four ints) is
@@ -2677,20 +2684,20 @@ struct FoveaRegion {
 // floor cropOf always applied -- the caller's own 90%-of-the-frame check
 // (a different rule, against the OUTPUT crop after scaling) is unchanged
 // and still runs on whichever mode produced fcw/fch.
-FoveaRegion computeFoveaRegion(float l, float r, float t, float b,
+FoveaRegion computeFoveaRegion(float l, float r, float down, float up,
                                uint32_t fw, uint32_t fh, int eyeIndex,
                                const FoveaRegionMode& mode, uint32_t minPx) {
     FoveaRegion out;
-    if (!(r > l) || !(b > t) || fw == 0 || fh == 0) return out;
+    if (!(r > l) || !(up > down) || fw == 0 || fh == 0) return out;
     const float fwf = static_cast<float>(fw), fhf = static_cast<float>(fh);
     int x0, y0, x1, y1;
     if (!mode.edges) {
         if (!(mode.widthDeg > 0.0f)) return out;
         const float cx = ((mode.tcx - l) / (r - l)) * fwf;
-        const float cy = ((b - mode.tcy) / (b - t)) * fhf;
+        const float cy = ((up - mode.tcy) / (up - down)) * fhf;
         const float halfa = tanf(mode.widthDeg * 0.5f * 0.01745329252f);
         const float hwp = halfa * fwf / (r - l);
-        const float hhp = halfa * fhf / (b - t);
+        const float hhp = halfa * fhf / (up - down);
         x0 = static_cast<int>(cx - hwp);
         y0 = static_cast<int>(cy - hhp);
         x1 = static_cast<int>(cx + hwp + 0.5f);
@@ -2701,13 +2708,16 @@ FoveaRegion computeFoveaRegion(float l, float r, float t, float b,
         constexpr float kDegToRad = 0.01745329252f;
         const float lo = -tanf(foveaEdgeRegionDeg(l, leftTrim) * kDegToRad);
         const float ro = tanf(foveaEdgeRegionDeg(r, rightTrim) * kDegToRad);
-        const float to = -tanf(foveaEdgeRegionDeg(t, mode.verticalTrimDeg) * kDegToRad);
-        const float bo = tanf(foveaEdgeRegionDeg(b, mode.verticalTrimDeg) * kDegToRad);
+        // down bounds y1 (the bottom row) -> bottomTrimDeg; up bounds y0
+        // (row 0, the top row) -> topTrimDeg. See the frusta-order comment
+        // above the function.
+        const float to = -tanf(foveaEdgeRegionDeg(down, mode.bottomTrimDeg) * kDegToRad);
+        const float bo = tanf(foveaEdgeRegionDeg(up, mode.topTrimDeg) * kDegToRad);
         if (!(ro > lo) || !(bo > to)) return out;
         x0 = static_cast<int>(((lo - l) / (r - l)) * fwf);
-        y0 = static_cast<int>(((b - bo) / (b - t)) * fhf);
+        y0 = static_cast<int>(((up - bo) / (up - down)) * fhf);
         x1 = static_cast<int>(((ro - l) / (r - l)) * fwf + 0.5f);
-        y1 = static_cast<int>(((b - to) / (b - t)) * fhf + 0.5f);
+        y1 = static_cast<int>(((up - to) / (up - down)) * fhf + 0.5f);
     }
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -4168,7 +4178,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                   uint32_t& ow, uint32_t& oh) -> bool {
                     FoveaRegionMode mode;
                     if (g_foveaEdges) {
-                        // vertical, outer, nasal -- kTrimNames' own order.
+                        // vertical, outer, nasal -- kTrimNames' own order. Top
+                        // and bottom both reduce against fovTrim[0]: fix.fov_
+                        // trim_vertical trims the top and bottom equally, so
+                        // there is only the one FOV number for either edge.
                         uint32_t fovTrim[3] = {0, 0, 0};
                         nativeFrameFovTrimDegrees(fovTrim);
                         auto reduced = [](float foveaTrimDeg, uint32_t fovTrimDeg) {
@@ -4176,7 +4189,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             return d > 0.0f ? d : 0.0f;
                         };
                         mode.edges = true;
-                        mode.verticalTrimDeg = reduced(g_foveaVerticalDeg, fovTrim[0]);
+                        mode.topTrimDeg = reduced(g_foveaTopDeg, fovTrim[0]);
+                        mode.bottomTrimDeg = reduced(g_foveaBottomDeg, fovTrim[0]);
                         mode.outerTrimDeg = reduced(g_foveaOuterDeg, fovTrim[1]);
                         mode.nasalTrimDeg = reduced(g_foveaNasalDeg, fovTrim[2]);
                     } else {
@@ -4210,6 +4224,39 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 bool sizesOk = fcw >= 128 && focw >= 128 && foch >= 128 &&
                                static_cast<uint64_t>(focw) * foch <=
                                    static_cast<uint64_t>(foW) * foH * 9 / 10;
+                if (!sizesOk && eye >= 0 && eye < 2 && !g_foveaSizeNoted[eye]) {
+                    // Said out loud since 2026-09-17: trims of 5/5 against a
+                    // 5/5/7 FOV trim put the rectangle at 99.9% of the frame,
+                    // and a flight ran a minute of full-frame DLSS with
+                    // nothing in the log but the price line's label. Once
+                    // per eye per config load, like the ENGAGED line.
+                    g_foveaSizeNoted[eye] = true;
+                    const double share = (foW && foH)
+                        ? 100.0 * static_cast<double>(focw) * foch / (static_cast<double>(foW) * foH)
+                        : 0.0;
+                    const char* why = (fcw >= 128 && focw >= 128 && foch >= 128)
+                        ? "above the 90% ceiling, where a periphery could not pay for itself"
+                        : "under the 128 px NVIDIA's crop needs each way";
+                    if (g_foveaEdges) {
+                        uint32_t fovTrim[3] = {0, 0, 0};
+                        nativeFrameFovTrimDegrees(fovTrim);
+                        Log::get().note(
+                            "temporal aa: DLSS where you look (edges) is asked for, but eye %d's "
+                            "rectangle at top %.0f, bottom %.0f, outer %.0f, nasal %.0f deg (reduced "
+                            "by the FOV trim's %u/%u/%u) is %ux%u of the %ux%u output, %.1f%% of the "
+                            "frame: %s. Full-frame DLSS runs instead (the price line says so). "
+                            "Larger trims make a smaller rectangle; 20/25/7 was 43%%.",
+                            eye, static_cast<double>(g_foveaTopDeg), static_cast<double>(g_foveaBottomDeg),
+                            static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
+                            fovTrim[0], fovTrim[1], fovTrim[2], focw, foch, foW, foH, share, why);
+                    } else {
+                        Log::get().note(
+                            "temporal aa: DLSS where you look is asked for at %.0f deg, but the crop "
+                            "is %ux%u of the %ux%u output, %.1f%% of the frame: %s. Full-frame DLSS "
+                            "runs instead (the price line says so).",
+                            static_cast<double>(g_foveaDeg), focw, foch, foW, foH, share, why);
+                    }
+                }
                 if (sizesOk && g_periphSteady) {
                     // The periphery's size: the output scaled, even, at least
                     // 128 each way, never above the render.
@@ -4715,8 +4762,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // scope here -- no ABI change needed to reach it. Sign
                     // convention matches native_temporal.cpp's own top/
                     // bottom (top = -frusta[2], bottom = frusta[3]):
-                    // tanNow[2] is the negative "up" tangent, tanNow[3] the
-                    // positive "down" one.
+                    // tanNow[2] is the negative down tangent, tanNow[3] the
+                    // positive up one.
                     const float fovY = amdEngine
                                            ? std::atan(-tanNow[2]) + std::atan(tanNow[3])
                                            : 0.0f;
@@ -4921,7 +4968,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             };
             if (foveaMode) {
-                ID3D11ComputeShader* mvCs = motionShader(ctx, true);
+                // The lean variant unless diagnostics are asked for, exactly
+                // as the full-frame path above: this dispatch leaves u2 (the
+                // stats buffer) unbound anyway (see its own comment below),
+                // so the instrumented entry's counters were dropped here in
+                // any case, and nothing else it binds is instrumented-only.
+                ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
                 bool made = mvCs != nullptr;
                 if (made && (!e.dlOut || !e.dlColourSrv || !e.dlDepthSrv || !e.dlMvSrv ||
                              e.dlW != w || e.dlH != h || e.dlOutW != foW || e.dlOutH != foH)) {
@@ -5226,34 +5278,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // when no trained set exists; u3/u5 stay unbound (MV and the
                 // mask are NVIDIA's inputs, and writes to a null UAV drop).
                 const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
-                // The periphery's own resolve can skip the crop's interior
-                // when the compose is certain to run and overwrite it at
-                // weight 1 this frame: the fovea on, the centre crop
-                // evaluated, the composite parameters ready, and no DLSS
-                // upscale -- the colour-history hand-off just below (mode.y)
-                // is only ever on at 1:1 (perW == foW), so under an upscale
-                // the own history in the interior would go stale with
-                // nothing to refresh it. Left at all zeros (no skip)
-                // whenever either of the two OTHER per-pixel UAVs this
-                // dispatch can write is in play this call: the UI evidence
-                // history (UN/u6, uiTrack) is read back next frame at a
-                // reprojected position by adaptiveUiReactive with no
-                // hand-off from the compose, and the mover mask's depth
-                // carry (ZC/u4, carry) is read back next frame as ZP the
-                // same way, also with no hand-off. Report has the full
-                // enumeration.
+                // The periphery's own resolve skips the crop's interior's
+                // COLOUR RESOLVE whenever the compose is certain to run and
+                // overwrite that rectangle at weight 1 this frame: the fovea
+                // on, the centre crop evaluated, the composite parameters
+                // ready. That is the whole gate now. The contract the shader
+                // holds up in there (temporal_shader_source.h, the sibling
+                // branch after the resolve): the three writes the NEXT frame
+                // reads back all still happen -- the UI evidence history
+                // (UN/u6, uiTrack), which adaptiveUiReactive reads back at a
+                // reprojected position, and the mover mask's depth carry
+                // (ZC/u4, carry), which comes back as ZP -- and the colour
+                // history (N/u1) is refreshed from the RAW current frame
+                // there. So none of the three can go stale, and the three
+                // conditions that used to stand the skip down (an upscale,
+                // uiTrack, carry) no longer have anything to protect. The
+                // compose's own 1:1 hand-off into that history (mode.y,
+                // fc[13]) still overwrites the interior with the composite
+                // afterwards when it is on, which is at 1:1 only; under an
+                // upscale it is off and the raw frame is what the interior's
+                // history keeps, which is what a pass-through resolve would
+                // have left there anyway. Only the colour resolve is saved.
                 p.skip[0] = p.skip[1] = p.skip[2] = p.skip[3] = 0.0f;
-                // The edges mode ENGAGED line reports whether the skip below
-                // applies and, when it does not, which of the three reasons
-                // -- captured here at the same conditions that gate it,
-                // without changing what they gate.
                 if (foveaMode && foveaEvalOk && compositeReady) {
-                    if (upscale) foveaSkipNote = "does not skip the interior (NVIDIA is upscaling)";
-                    else if (uiTrack) foveaSkipNote = "does not skip the interior (the UI evidence history reads it back next frame)";
-                    else if (carry) foveaSkipNote = "does not skip the interior (the mover mask's depth carry reads it back next frame)";
-                }
-                if (foveaMode && foveaEvalOk && compositeReady && !upscale &&
-                    !uiTrack && !carry) {
                     float band = g_foveaEdgeDeg *
                                  (static_cast<float>(w) / (tanNow[1] - tanNow[0])) *
                                  0.01745329252f;
@@ -5297,7 +5344,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     if (sx1 > sx0 + 1.0f && sy1 > sy0 + 1.0f) {
                         p.skip[0] = sx0; p.skip[1] = sy0; p.skip[2] = sx1; p.skip[3] = sy1;
-                        foveaSkipNote = "skips the interior";
+                        foveaSkipNote = "skips the interior's colour resolve (history refreshed from the raw frame there)";
                     } else {
                         foveaSkipNote = "does not skip the interior (the crop is too small for the band's margin)";
                     }
@@ -5437,11 +5484,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         nativeFrameFovTrimDegrees(fovTrim);
                         Log::get().note(
                             "temporal aa: DLSS where you look ENGAGED (edges) -- eye %d requested "
-                            "vertical %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV trim's "
-                            "%u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
+                            "top %.0f, bottom %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV "
+                            "trim's %u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
                             "periphery is %s; the own resolve %s; UI treatment: %s. NVIDIA's price "
                             "is in the DLAA totals.",
-                            eye, static_cast<double>(g_foveaVerticalDeg),
+                            eye, static_cast<double>(g_foveaTopDeg), static_cast<double>(g_foveaBottomDeg),
                             static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
                             fovTrim[0], fovTrim[1], fovTrim[2], focx, focy, focx + focw, focy + foch,
                             foW, foH,
@@ -5786,6 +5833,7 @@ void temporalPassConfigure(Config& cfg) {
     // latches only ever mean "already logged", never "already engaged".
     g_foveaNoted = false;
     g_foveaEdgesNoted[0] = g_foveaEdgesNoted[1] = false;
+    g_foveaSizeNoted[0] = g_foveaSizeNoted[1] = false;
     // Edges mode's three trims: plain degrees (not a per-headset list, unlike
     // fix.fov_trim_vertical/_outer/_nasal, which this reduces against -- see
     // cropOf/computeFoveaRegion in temporal_pass.cpp). 0..45, default 0.
@@ -5793,6 +5841,21 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(vertTrim) || vertTrim < 0.0f) vertTrim = 0.0f;
     if (vertTrim > 45.0f) vertTrim = 45.0f;
     g_foveaVerticalDeg = vertTrim;
+    // advanced.temporal_aa_fovea_top/_bottom: "same" (or empty) means this
+    // edge follows temporal_aa_fovea_vertical above; any other value is
+    // plain degrees, parsed and floored/capped exactly like vertical/outer/
+    // nasal. Splits the combined vertical trim so the two edges can differ;
+    // temporal_aa_fovea_vertical alone still sets both when neither is set.
+    auto sameOrDegrees = [&](const std::string& s) {
+        if (s.empty() || _stricmp(s.c_str(), "same") == 0) return g_foveaVerticalDeg;
+        char* end = nullptr;
+        float parsed = strtof(s.c_str(), &end);
+        if (!std::isfinite(parsed) || parsed < 0.0f) parsed = 0.0f;
+        if (parsed > 45.0f) parsed = 45.0f;
+        return parsed;
+    };
+    g_foveaTopDeg = sameOrDegrees(cfg.getString("advanced.temporal_aa_fovea_top", "same"));
+    g_foveaBottomDeg = sameOrDegrees(cfg.getString("advanced.temporal_aa_fovea_bottom", "same"));
     float outerTrim = cfg.getFloat("advanced.temporal_aa_fovea_outer", 0.0f);
     if (!std::isfinite(outerTrim) || outerTrim < 0.0f) outerTrim = 0.0f;
     if (outerTrim > 45.0f) outerTrim = 45.0f;
@@ -6871,7 +6934,7 @@ extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7
 }
 
 // tools/smoke wires this in next to edvrEyeMaskSelftest, same pattern: pure
-// geometry, no device, one bit per independent check, 15 (all four) is pass.
+// geometry, no device, one bit per independent check, 31 (all five) is pass.
 // Bit 1: width mode against a rectangle hand-derived from cropOf's own
 // arithmetic before this extraction, checked twice independently -- not
 // the design note's "1128px" figure, which neither derivation reproduced;
@@ -6889,20 +6952,35 @@ extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7
 // inverting the rectangle; the surviving centre square is real but under
 // minPx, so this exercises the ok=false path the caller falls back to
 // full-frame on.
+// Bit 16: temporal_aa_fovea_top and _bottom split apart -- the 20/25/7
+// case's own reduced trims (outer 20, nasal 0, vertical 20 reduced by the
+// 5/5/7 FOV trim to top=bottom=15), then bottom alone re-asked at 30
+// (reduced to 25) with top left at 15, then top alone re-asked at 30
+// (reduced to 25) with bottom left at 15. Expected x/y/w/h are hand-derived
+// on paper from this file's own tan(A-B) identity, not read off the code:
+// tan(atan(E) - D) = (E - tanD) / (1 + E*tanD) for each edge's tangent
+// magnitude E and reduced trim D, then the same pixel, clamp and
+// even-round arithmetic as computeFoveaRegion. native_temporal.h:21's
+// {left,right,down,up} order puts row 0 at the up edge, so mode.topTrimDeg
+// (feeding "bo", the up tangent) bounds y; mode.bottomTrimDeg (feeding
+// "to", the down tangent) bounds y+h. Moving bottom alone must hold y and
+// move y+h; moving top alone must hold y+h (equal to the unmoved case) and
+// move y; x/w (outer/nasal) are untouched throughout.
 extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
     using namespace edvr;
     unsigned bits = 0;
 
     // Crystal Super-shaped tangents, the same worked example eye_mask.cpp
-    // uses; fw/fh a plausible per-eye render size for it.
-    const float l = -1.529f, r = 1.032f, t = -1.265f, b = 1.265f;
+    // uses; fw/fh a plausible per-eye render size for it. down/up match
+    // native_temporal.h:21's {left,right,down,up} frusta order.
+    const float l = -1.529f, r = 1.032f, down = -1.265f, up = 1.265f;
     const uint32_t fw = 2576, fh = 2544;
 
     {
         FoveaRegionMode mode;
         mode.edges = false;
         mode.widthDeg = 40.0f;
-        const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
         if (g.ok && g.x == 1170 && g.y == 906 && g.w == 734 && g.h == 732) bits |= 1u;
     }
 
@@ -6922,9 +7000,10 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         mode.edges = true;
         mode.outerTrimDeg = 10.0f;
         mode.nasalTrimDeg = 5.0f;
-        mode.verticalTrimDeg = 8.0f;
-        const FoveaRegion g0 = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
-        const FoveaRegion g1 = computeFoveaRegion(-r, -l, t, b, fw, fh, 1, mode, 128);
+        mode.topTrimDeg = 8.0f;
+        mode.bottomTrimDeg = 8.0f;
+        const FoveaRegion g0 = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
+        const FoveaRegion g1 = computeFoveaRegion(-r, -l, down, up, fw, fh, 1, mode, 128);
         const bool yMatch = g0.ok && g1.ok && g0.y == g1.y && g0.h == g1.h;
         const int mirrorX0 = static_cast<int>(fw) - static_cast<int>(g0.x) - static_cast<int>(g0.w);
         const int mirrorX1 = static_cast<int>(fw) - static_cast<int>(g0.x);
@@ -6938,9 +7017,95 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         mode.edges = true;
         mode.outerTrimDeg = 100.0f;
         mode.nasalTrimDeg = 100.0f;
-        mode.verticalTrimDeg = 100.0f;
-        const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        mode.topTrimDeg = 100.0f;
+        mode.bottomTrimDeg = 100.0f;
+        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
         if (!g.ok) bits |= 8u;
+    }
+
+    {
+        // The 20/25/7 case (bit 2's own scenario) split into top and bottom:
+        // outer reduced to 20 (25 - 5), nasal reduced to 0 (7 - 7, floored),
+        // vertical reduced to 15 (20 - 5) -- set on BOTH edges first (matches
+        // today's single-vertical-trim behaviour bit-for-bit); then bottom
+        // alone re-asked at 30 raw (reduced to 25) with top left at 20/15;
+        // then top alone re-asked at 30 raw (reduced to 25) with bottom left
+        // at 20/15.
+        //
+        // computeFoveaRegion's "bo" (built from the up tangent) is gated by
+        // mode.topTrimDeg and bounds y0 (row 0, native_temporal.h:21's up
+        // edge); "to" (built from the down tangent) is gated by
+        // mode.bottomTrimDeg and bounds y1 = y+h. So the bottom key alone
+        // must hold y and move y+h; the top key alone must hold y+h and
+        // move y -- re-derived here on paper, not assumed from either key's
+        // name or mirrored from a previous (wrong) wiring.
+        //
+        // Hand derivation (l=-1.529, r=1.032, down=-1.265, up=1.265,
+        // fw=2576, fh=2544, eye 0 so leftTrim=outer=20, rightTrim=nasal=0):
+        // tan(atan(E) - D) = (E - tanD) / (1 + E*tanD), tan15=0.2679492,
+        // tan20=0.3639702, tan25=0.4663077.
+        //   left  (E=1.529, D=20): lo = -0.7484882
+        //   right (E=1.032, D=0):  ro =  1.032 (unchanged, D=0)
+        //   trim=15 (E=1.265): tangent  0.7446480
+        //   trim=25 (E=1.265): tangent  0.5023604
+        // x0=int(((lo-l)/(r-l))*fw)=int(785.08)=785 -> &~1 -> 784
+        // x1=int(((ro-l)/(r-l))*fw+0.5)=int(2576.5)=2576 -> &~1 -> 2576, w=1792
+        // (x/w are the same in all three cases: outer/nasal never change.)
+        //
+        // unmoved (top=bottom=15): bo=+0.7446480 (topTrimDeg=15),
+        //   to=-0.7446480 (bottomTrimDeg=15)
+        //   y0=int(((up-bo)/(up-down))*fh)=int(523.23)=523 -> &~1 -> 522
+        //   y1=int(((up-to)/(up-down))*fh+0.5)=int(2021.27)=2021 -> &~1 -> 2020
+        //   h=2020-522=1498
+        // bottom moved (top=15, bottom=25): bo UNCHANGED (topTrimDeg still
+        //   15) -> y0=522 unchanged; to=-0.5023604 (bottomTrimDeg=25) ->
+        //   y1=int(((1.265+0.5023604)/2.530)*2544+0.5)=int(1777.64)=1777
+        //   -> &~1 -> 1776, h=1776-522=1254
+        // top moved (top=25, bottom=15): to UNCHANGED (bottomTrimDeg still
+        //   15) -> y1=2020 unchanged; bo=+0.5023604 (topTrimDeg=25) ->
+        //   y0=int(((1.265-0.5023604)/2.530)*2544)=int(766.86)=766
+        //   -> &~1 -> 766, h=2020-766=1254
+        FoveaRegionMode mode;
+        mode.edges = true;
+        mode.outerTrimDeg = 20.0f;
+        mode.nasalTrimDeg = 0.0f;
+        mode.topTrimDeg = 15.0f;
+        mode.bottomTrimDeg = 15.0f;
+        const FoveaRegion gUnmoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
+        mode.bottomTrimDeg = 25.0f;
+        const FoveaRegion gBottomMoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
+        mode.bottomTrimDeg = 15.0f;
+        mode.topTrimDeg = 25.0f;
+        const FoveaRegion gTopMoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
+        // Not named "near": windef.h's legacy near/far macros expand to
+        // nothing and turn "const auto near = ..." into invalid syntax.
+        const auto withinTol = [](uint32_t v, int want) {
+            const int d = static_cast<int>(v) - want;
+            return d >= -2 && d <= 2;
+        };
+        const bool unmovedOk = gUnmoved.ok && withinTol(gUnmoved.x, 784) && withinTol(gUnmoved.y, 522) &&
+                               withinTol(gUnmoved.w, 1792) && withinTol(gUnmoved.h, 1498);
+        const bool bottomMovedOk = gBottomMoved.ok && withinTol(gBottomMoved.x, 784) &&
+                                  withinTol(gBottomMoved.y, 522) && withinTol(gBottomMoved.w, 1792) &&
+                                  withinTol(gBottomMoved.h, 1254);
+        const bool topMovedOk = gTopMoved.ok && withinTol(gTopMoved.x, 784) &&
+                                withinTol(gTopMoved.y, 766) && withinTol(gTopMoved.w, 1792) &&
+                                withinTol(gTopMoved.h, 1254);
+        // Bottom key alone: x/w untouched, y bit-identical, only y+h (the
+        // bottom row) moves.
+        const bool bottomMovesOnlyBottom =
+            gUnmoved.x == gBottomMoved.x && gUnmoved.w == gBottomMoved.w &&
+            gUnmoved.y == gBottomMoved.y &&
+            (gUnmoved.y + gUnmoved.h) != (gBottomMoved.y + gBottomMoved.h);
+        // Top key alone: x/w untouched, y+h bit-identical to the unmoved
+        // case, only y (the top row) moves.
+        const bool topMovesOnlyTop =
+            gUnmoved.x == gTopMoved.x && gUnmoved.w == gTopMoved.w &&
+            (gUnmoved.y + gUnmoved.h) == (gTopMoved.y + gTopMoved.h) &&
+            gUnmoved.y != gTopMoved.y;
+        if (unmovedOk && bottomMovedOk && topMovedOk && bottomMovesOnlyBottom && topMovesOnlyTop) {
+            bits |= 16u;
+        }
     }
 
     return bits;
