@@ -21,6 +21,12 @@ void weaponStabilityShutdown();
 
 constexpr unsigned kWeaponTraceBase=23,kWeaponTraceFrames=128,kWeaponTraceRows=16;
 
+// The frame's APPLIED arms correction, kept apart from Anchor[0] (see
+// findAnchor); four rows after the trace. The HLSL spells the row as a
+// literal.
+constexpr unsigned kWeaponAppliedRow=kWeaponTraceBase+kWeaponTraceFrames*kWeaponTraceRows,kWeaponAppliedRows=4;
+static_assert(kWeaponAppliedRow==2071,"update the 2071..2074 literals in kWeaponStabilityCs");
+
 constexpr char kWeaponStabilityCs[]=R"HLSL(
 struct Instance {uint4 row[21];};
 struct Bone {float4 x,y,z;};
@@ -29,7 +35,7 @@ StructuredBuffer<Bone> Bones:register(t1);
 cbuffer Camera:register(b0){float4 camera[276];}
 cbuffer Emitter:register(b1){float4 emitter[13];}
 cbuffer LightCamera:register(b2){float4 lightCamera[14];}
-cbuffer Sample:register(b3){uint sampleFrame,sampleEpoch,sampleWrite,sampleUnused;}
+cbuffer Sample:register(b3){uint sampleFrame,sampleEpoch,sampleWrite,sampleLights;}
 RWStructuredBuffer<Instance> Fixed:register(u0);
 RWStructuredBuffer<float4> Anchor:register(u1);
 RWStructuredBuffer<float4> EmitterFixed:register(u2);
@@ -199,9 +205,23 @@ float3 aimingTranslation(float3 p,bool valid,out float status) {
         float status;
         float3 timing=aimingTranslation(p,valid && aimingProjection,status);
         bool apply=valid && (attachmentProjection || (aimingProjection && (status==3 || status==4) && any(timing!=0)));
-        Anchor[0]=float4(apply?(attachmentProjection?camera[275].xyz-p:timing):0,apply?1:0);
+        float3 shift=apply?(attachmentProjection?camera[275].xyz-p:timing):0;
+        Anchor[0]=float4(shift,apply?1:0);
         Anchor[1]=float4(p,valid?partners+1:0);
         Anchor[2]=float4(projection && !attachmentProjection?(aimingProjection?status:1):0,camera[273].z,0,0);
+        // Elite rewrites this camera buffer many times a frame: the player's body
+        // and the world props are drawn by the same vertex shaders with the WORLD
+        // rows (near 0.025) after the arms, and every rewrite reruns this kernel.
+        // A hip-fire rerun under the world rows applies nothing, so Anchor[0] at
+        // the deferred light pass held whatever the last rerun produced (2026-09-17
+        // Steam dumps 081113/081119/081148: every gun's light glow lagged). The
+        // lights read the frame's applied MESH correction from these rows instead,
+        // written only by mesh dispatches and stamped with the frame.
+        if(apply && sampleWrite!=0) {
+            Anchor[2071]=float4(shift,asfloat(sampleFrame));
+            Anchor[2072]=float4(p,camera[273].z);
+            Anchor[2073]=float4(camera[275].xyz,1);
+        }
     }
 }
 [numthreads(64,1,1)]void applyAnchor(uint id:SV_DispatchThreadID) {
@@ -257,15 +277,22 @@ groupshared uint emitterPartMatched;
     uint bytes;LightFixed.GetDimensions(bytes);if(id>=bytes/32)return;
     float4 p=asfloat(LightFixed.Load4(id*32));
     float3 eye=float3(lightCamera[6].w,lightCamera[7].w,lightCamera[8].w);
-    float3 d=p.xyz-Anchor[1].xyz;
-    bool valid=Anchor[0].w>0 && all(isfinite(p)) && all(isfinite(eye)) &&
-        all(abs(eye-camera[275].xyz)<1e-5) &&
+    // The arms' correction of THIS frame, not the last rerun's projection.
+    bool applied=asuint(Anchor[2071].w)==sampleFrame;
+    float3 shift=Anchor[2071].xyz,rootPos=Anchor[2072].xyz,meshEye=Anchor[2073].xyz;
+    float3 d=p.xyz-rootPos;
+    bool valid=applied && all(isfinite(p)) && all(isfinite(eye)) &&
+        all(abs(eye-meshEye)<1e-5) &&
         abs(lightCamera[12].w-.025)<1e-7 &&
         all(abs(float3(dot(lightCamera[2].xyz,lightCamera[2].xyz),dot(lightCamera[3].xyz,lightCamera[3].xyz),dot(lightCamera[4].xyz,lightCamera[4].xyz))-1)<.001) &&
         all(abs(float3(dot(lightCamera[2].xyz,lightCamera[3].xyz),dot(lightCamera[2].xyz,lightCamera[4].xyz),dot(lightCamera[3].xyz,lightCamera[4].xyz)))<.001) &&
         dot(cross(lightCamera[2].xyz,lightCamera[3].xyz),lightCamera[4].xyz)>.999 &&
         dot(d,d)<1 && p.w>0 && p.w<=.1;
-    if(valid)LightFixed.Store3(id*32,asuint(p.xyz+Anchor[0].xyz));
+    if(valid)LightFixed.Store3(id*32,asuint(p.xyz+shift));
+    // Instrument for the flight log: the near plane the mesh camera buffer
+    // held at this light draw, whether the arms' correction was fresh, the
+    // batch size and the frame (reported by weaponStabilityFrameBoundary).
+    if(id==0)Anchor[2074]=float4(camera[273].z,applied?1:0,float(sampleLights),asfloat(sampleFrame));
 }
 )HLSL";
 }
