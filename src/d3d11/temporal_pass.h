@@ -93,6 +93,12 @@ void temporalPassArmEyeDump();
 // caller keeps its own default.
 bool temporalPassEyeOffset(int eye, float out[3]);
 
+// True when advanced.temporal_aa_fovea is configured on, in EITHER mode (a
+// width in degrees, or "edges"): ui_deferred.cpp's own reason to stand its
+// route down, without it reading (and re-parsing) the key a second time.
+// Reflects the last temporalPassConfigure call.
+bool temporalAaFoveaConfigured();
+
 // For the periodic totals line: eye-submits treated, the measured price,
 // and the share of pixels whose history was rejected (off the image or
 // none yet) or clipped (pulled to the neighbourhood). False when nothing

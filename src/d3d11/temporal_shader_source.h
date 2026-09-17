@@ -102,6 +102,7 @@ cbuffer P : register(b0) {
     float4 shParts[256];   // per ship kObjectShipParts of its parts' positions (xyz, this frame's frame), shBox0[i].w of them: the ship's claim is the space within objects.z (a reach, squared) of one
     float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; empty when a corner is behind the eye), for the claim's counters
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
+    float4 skip;        // the fovea's own-resolve early-out: x0 y0 x1 y1 in THIS render, all zero = no skip
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -1153,7 +1154,17 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     GroupMemoryBarrierWithGroupSync();
 #endif
     uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    if (id.x < (uint)size.x && id.y < (uint)size.y) {
+    // The fovea's compose overwrites this rectangle every pixel at weight 1
+    // (temporal_pass.cpp only ever sets skip when it has verified that); an
+    // in-skip pixel is treated exactly like an out-of-bounds one below, so
+    // every thread in the group still reaches the SAME barriers at the tail
+    // -- never a `return` here, which would make that divergent within a
+    // group. skip.zw both zero (the default) means no skip, so this never
+    // fires when the fovea is off.
+    const bool inSkip = skip.z > skip.x && skip.w > skip.y &&
+                        id.x >= (uint)skip.x && id.x < (uint)skip.z &&
+                        id.y >= (uint)skip.y && id.y < (uint)skip.w;
+    if (id.x < (uint)size.x && id.y < (uint)size.y && !inSkip) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
         if ((uint(probe.w + 0.5) & 4u) != 0u) UN[id.xy] = uiEvidence(ci);

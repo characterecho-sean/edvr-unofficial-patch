@@ -5,6 +5,7 @@
 #include <algorithm>  // std::sort, the price report's median/p95
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>   // strtof, advanced.temporal_aa_fovea's "edges" vs a width
 #include <cstring>
 #include <utility>   // std::swap, for the depth carry's pointer swap
 #include <vector>    // the eye dump's row buffer
@@ -21,6 +22,7 @@
 #include "../common/log.h"
 #include "device_hook.h"   // the auto mip bias's source, to check against a real frame
 #include "../common/native_render_settings.h"   // the published per-eye render size, for the NGX warm-up
+#include "../common/native_frame.h"   // nativeFrameFovTrimDegrees: the FOV trim, for edges-mode fovea
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
@@ -250,8 +252,9 @@ struct PassParams {
     float   shParts[kObjectShipsMax * kObjectShipParts][4];   // its parts' positions, shBox0[i].w of them
     float   shRect[kObjectShipsMax][4];    // its box's footprint on the image, pixels
     float   holoJitter[4]; // xy raster delta, z consecutive frames, w valid DLSS depth history
+    float   skip[4];    // the periphery's own-resolve early-out, x0 y0 x1 y1 in RENDER pixels (this eye's w x h); all zero = no skip
 };
-static_assert(sizeof(PassParams) == 6624, "the cbuffer is 414 16-byte rows");
+static_assert(sizeof(PassParams) == 6640, "the cbuffer is 415 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1180,6 +1183,7 @@ ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tole
 bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
+bool                       g_foveaEdgesNoted[2] = {false, false};   // edges mode's own line, per eye
 bool                       g_foveaFailNoted = false;
 // Latched when the fovea's NGX create or eval fails, so it is not retried
 // every frame (a create costs tens to hundreds of ms -- a stutter storm).
@@ -2081,12 +2085,19 @@ bool ensureUiMaskSrv(ID3D11Device* dev, EyeState& e, ID3D11Texture2D* mask) {
     return false;
 }
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
+bool     g_foveaEdges = false;     // advanced.temporal_aa_fovea = "edges": the crop is placed by its own edges (below) instead of a width
+float    g_foveaVerticalDeg = 0.0f; // advanced.temporal_aa_fovea_vertical: edges mode, degrees off the top AND the bottom
+float    g_foveaOuterDeg = 0.0f;    // advanced.temporal_aa_fovea_outer: edges mode, degrees off each eye's temple-side edge
+float    g_foveaNasalDeg = 0.0f;    // advanced.temporal_aa_fovea_nasal: edges mode, degrees off each eye's nose-side edge
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
 float    g_peripheryCalm = 0.4f;   // advanced.temporal_aa_periphery_calm: how much the own history is eased toward the periphery (0 uniform, 1 max), the sharp periphery only
 bool     g_periphSteady = true;    // advanced.temporal_aa_periphery: steady (NVIDIA's DLAA on a reduced copy) or sharp (the own history at full size)
 float    g_periphScale = 0.5f;     // advanced.temporal_aa_periphery_scale: the steady periphery's size as a fraction of the output each way
 bool     g_foveaRound = true;      // advanced.temporal_aa_fovea_shape: round (a disc) or square (the crop)
-float    g_foveaDistance = 0.0f;   // advanced.temporal_aa_fovea_distance: where the two eyes' discs meet in depth, metres (0 = infinity: the straight-ahead point)
+float    g_foveaDistance = 0.0f;   // advanced.temporal_aa_fovea_distance: where the two eyes' discs meet in depth, metres (0 = infinity: the straight-ahead point); NOT read in edges mode
+// True when the fovea is configured on, in EITHER mode -- the gate every
+// call site used to spell g_foveaDeg > 0.0f, before edges mode existed.
+inline bool foveaConfigured() { return g_foveaDeg > 0.0f || g_foveaEdges; }
 int      g_rowsFollow = 0;         // bound populated scene: trusted; auxiliary chain: head-follow score, needs >= 0
 bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
@@ -2471,6 +2482,112 @@ bool ensureNative(ID3D11Device* dev, EyeState& e, DXGI_FORMAT viewFmt) {
     }
     if (!made) { releaseNative(e); failOnce("the native history or output textures could not be created"); }
     return made;
+}
+
+// DLSS where you look (docs/performance.md feature 6), the crop's geometry:
+// pure, no D3D11, no globals -- cropOf below (temporalInner) is its only
+// caller in the pass, and tools\smoke's edvrFoveaRegionSelftest exercises
+// it directly with no device.
+//
+// An edge's own half-angle in the RENDERED frame is atan(|tangent|); the
+// region's half-angle at that edge is the frame's own angle there minus
+// reducedTrimDeg -- the caller has already reduced the fovea's edge trim by
+// however much the FOV trim (fix.fov_trim_vertical/_outer/_nasal) already
+// cut that same edge -- floored at 2 degrees so a trim cannot close or
+// invert an edge. A trim that reaches (or passes) the frame's own angle
+// leaves the region sitting AT that edge: no periphery strip there.
+float foveaEdgeRegionDeg(float edgeTan, float reducedTrimDeg) {
+    if (!(reducedTrimDeg > 0.0f)) reducedTrimDeg = 0.0f;
+    constexpr float kRadToDeg = 57.295779513082321f;
+    const float edgeDeg = atanf(fabsf(edgeTan)) * kRadToDeg;
+    float regionDeg = edgeDeg - reducedTrimDeg;
+    if (regionDeg < 2.0f) regionDeg = 2.0f;
+    return regionDeg;
+}
+
+// Either the width mode's inputs (today's crop: a width in degrees, and the
+// fixation-distance centre offset in tangent units) or the edges mode's
+// (the three edge trims, ALREADY reduced by the FOV trim -- see
+// foveaEdgeRegionDeg above). temporal_aa_fovea_distance (tcx/tcy) is not
+// read in edges mode: the rectangle there is placed by its own edges.
+struct FoveaRegionMode {
+    bool  edges = false;
+    float widthDeg = 0.0f;
+    float tcx = 0.0f, tcy = 0.0f;
+    float verticalTrimDeg = 0.0f;
+    float outerTrimDeg = 0.0f;
+    float nasalTrimDeg = 0.0f;
+};
+
+struct FoveaRegion {
+    uint32_t x = 0, y = 0, w = 0, h = 0;
+    bool     ok = false;   // false: under minPx, or the mode is off -- run full-frame
+};
+
+// l,r,t,b: this eye's four frame tangents (tanNow[0..3] -- t is the DOWN
+// tangent, negative; b is UP, positive: this file's own naming, not "top"/
+// "bottom"). fw,fh: the frame those tangents describe, in pixels. eyeIndex:
+// 0 the left eye (its outer edge is the left/l tangent, its nasal edge the
+// right/r), 1 the right eye (the reverse) -- confirmed by foveation.cpp's
+// own mirrored tangent build (*l = eye==0 ? -outer : -inner, *r = eye==0 ?
+// inner : outer) and frame_flag.h's "0 left, 1 right". minPx: the smallest
+// crop worth NVIDIA's seam (128 today, cropOf's own floor); under it, ok is
+// false and the caller runs full-frame -- same as an unreachable r<=l or
+// b<=t frame, and the same as the mode being off (widthDeg <= 0 and not
+// edges).
+//
+// Width mode's arithmetic (cx, cy, halfa, hwp, hhp and the four ints) is
+// copied verbatim from cropOf as it stood before this extraction, in the
+// same order, so its output does not move by a bit; edges mode is new.
+// Either way the four ints then get the SAME clamp, even-round and minPx
+// floor cropOf always applied -- the caller's own 90%-of-the-frame check
+// (a different rule, against the OUTPUT crop after scaling) is unchanged
+// and still runs on whichever mode produced fcw/fch.
+FoveaRegion computeFoveaRegion(float l, float r, float t, float b,
+                               uint32_t fw, uint32_t fh, int eyeIndex,
+                               const FoveaRegionMode& mode, uint32_t minPx) {
+    FoveaRegion out;
+    if (!(r > l) || !(b > t) || fw == 0 || fh == 0) return out;
+    const float fwf = static_cast<float>(fw), fhf = static_cast<float>(fh);
+    int x0, y0, x1, y1;
+    if (!mode.edges) {
+        if (!(mode.widthDeg > 0.0f)) return out;
+        const float cx = ((mode.tcx - l) / (r - l)) * fwf;
+        const float cy = ((b - mode.tcy) / (b - t)) * fhf;
+        const float halfa = tanf(mode.widthDeg * 0.5f * 0.01745329252f);
+        const float hwp = halfa * fwf / (r - l);
+        const float hhp = halfa * fhf / (b - t);
+        x0 = static_cast<int>(cx - hwp);
+        y0 = static_cast<int>(cy - hhp);
+        x1 = static_cast<int>(cx + hwp + 0.5f);
+        y1 = static_cast<int>(cy + hhp + 0.5f);
+    } else {
+        const float leftTrim = (eyeIndex == 0) ? mode.outerTrimDeg : mode.nasalTrimDeg;
+        const float rightTrim = (eyeIndex == 0) ? mode.nasalTrimDeg : mode.outerTrimDeg;
+        constexpr float kDegToRad = 0.01745329252f;
+        const float lo = -tanf(foveaEdgeRegionDeg(l, leftTrim) * kDegToRad);
+        const float ro = tanf(foveaEdgeRegionDeg(r, rightTrim) * kDegToRad);
+        const float to = -tanf(foveaEdgeRegionDeg(t, mode.verticalTrimDeg) * kDegToRad);
+        const float bo = tanf(foveaEdgeRegionDeg(b, mode.verticalTrimDeg) * kDegToRad);
+        if (!(ro > lo) || !(bo > to)) return out;
+        x0 = static_cast<int>(((lo - l) / (r - l)) * fwf);
+        y0 = static_cast<int>(((b - bo) / (b - t)) * fhf);
+        x1 = static_cast<int>(((ro - l) / (r - l)) * fwf + 0.5f);
+        y1 = static_cast<int>(((b - to) / (b - t)) * fhf + 0.5f);
+    }
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > static_cast<int>(fw)) x1 = static_cast<int>(fw);
+    if (y1 > static_cast<int>(fh)) y1 = static_cast<int>(fh);
+    x0 &= ~1; y0 &= ~1; x1 &= ~1; y1 &= ~1;
+    const int cw = x1 - x0, ch = y1 - y0;
+    if (cw < static_cast<int>(minPx) || ch < static_cast<int>(minPx)) return out;
+    out.x = static_cast<uint32_t>(x0);
+    out.y = static_cast<uint32_t>(y0);
+    out.w = static_cast<uint32_t>(cw);
+    out.h = static_cast<uint32_t>(ch);
+    out.ok = true;
+    return out;
 }
 
 void* temporalInner(void* srcTex, int eye, const float* bounds,
@@ -3101,7 +3218,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // review of 2026-09-05, F4): its motion vectors want last frustum too.
         const bool useTanPrev =
             useHistory ||
-            (trainedWanted && (e.dlHaveHistory || (g_foveaDeg > 0.0f && (e.foveaHaveHistory || e.prHaveHistory))) &&
+            (trainedWanted && (e.dlHaveHistory || (foveaConfigured() && (e.foveaHaveHistory || e.prHaveHistory))) &&
              haveDelta && tanPrev);
         memcpy(p.tanPrev, useTanPrev ? tanPrev : tanNow, sizeof(p.tanPrev));
         p.jit[0] = jxNow;
@@ -3725,7 +3842,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // Keep periodic cost measurements without full-rate readbacks. Captures
         // and explicit diagnostics retain all statistics and registration probes.
         const bool diagnostics = g_diagnostics || g_debugMode != 0 || g_eyeRunLeft > 0 || g_eyeRunReady;
-        const bool statsWritten = diagnostics || (flags & 2u) == 0 || g_foveaDeg > 0.0f;
+        const bool statsWritten = diagnostics || (flags & 2u) == 0 || foveaConfigured();
         const bool timingOwner = gpuTimingBind(dev, ctx) && gpuTimingAccepts(ctx);
         // Stage 0 price report: sample every call the timing owner accepts,
         // not just the stats-written 1-in-32 (fovea already ran every call;
@@ -3781,7 +3898,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // retried every frame (F3).
         // A failed crop re-arms when the render or output size changes (F4).
         if (g_foveaFailed && (w != g_foveaFailW || foW != g_foveaFailFoW)) g_foveaFailed = false;
-        const bool foveaWanted = (flags & 2u) != 0 && fmtIndex == 0 && g_foveaDeg > 0.0f &&
+        const bool foveaWanted = (flags & 2u) != 0 && fmtIndex == 0 && foveaConfigured() &&
                                  g_foveaCb != nullptr && g_debugMode == 0 && !g_foveaFailed;
         uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;      // INPUT crop, in the render (w x h) space
         uint32_t focx = 0, focy = 0, focw = 0, foch = 0;  // OUTPUT crop, in the native (foW x foH) space
@@ -3835,29 +3952,37 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // The eye offset is the runtime's eye-to-head translation,
                 // noted per treat; it persists across a frame without a head
                 // delta, so the centre never flickers back to infinity.
+                // Not applied in edges mode: the rectangle there is placed by
+                // its own edges, not a centre and a half-extent.
                 float tcx = 0.0f, tcy = 0.0f;
-                if (g_foveaDistance > 0.0f && (e.eyeOff[0] != 0.0f || e.eyeOff[1] != 0.0f)) {
+                if (!g_foveaEdges && g_foveaDistance > 0.0f &&
+                    (e.eyeOff[0] != 0.0f || e.eyeOff[1] != 0.0f)) {
                     tcx = -e.eyeOff[0] / g_foveaDistance;
                     tcy = -e.eyeOff[1] / g_foveaDistance;
                 }
                 auto cropOf = [&](uint32_t fw, uint32_t fh, uint32_t& ox, uint32_t& oy,
                                   uint32_t& ow, uint32_t& oh) -> bool {
-                    const float cx = ((tcx - l) / (r - l)) * static_cast<float>(fw);
-                    const float cy = ((b - tcy) / (b - t)) * static_cast<float>(fh);
-                    const float halfa = tanf(g_foveaDeg * 0.5f * 0.01745329252f);
-                    const float hwp = halfa * static_cast<float>(fw) / (r - l);
-                    const float hhp = halfa * static_cast<float>(fh) / (b - t);
-                    int x0 = static_cast<int>(cx - hwp), y0 = static_cast<int>(cy - hhp);
-                    int x1 = static_cast<int>(cx + hwp + 0.5f), y1 = static_cast<int>(cy + hhp + 0.5f);
-                    if (x0 < 0) x0 = 0;
-                    if (y0 < 0) y0 = 0;
-                    if (x1 > static_cast<int>(fw)) x1 = static_cast<int>(fw);
-                    if (y1 > static_cast<int>(fh)) y1 = static_cast<int>(fh);
-                    x0 &= ~1; y0 &= ~1; x1 &= ~1; y1 &= ~1;
-                    const int cw = x1 - x0, ch = y1 - y0;
-                    if (cw < 128 || ch < 128) return false;
-                    ox = static_cast<uint32_t>(x0); oy = static_cast<uint32_t>(y0);
-                    ow = static_cast<uint32_t>(cw); oh = static_cast<uint32_t>(ch);
+                    FoveaRegionMode mode;
+                    if (g_foveaEdges) {
+                        // vertical, outer, nasal -- kTrimNames' own order.
+                        uint32_t fovTrim[3] = {0, 0, 0};
+                        nativeFrameFovTrimDegrees(fovTrim);
+                        auto reduced = [](float foveaTrimDeg, uint32_t fovTrimDeg) {
+                            const float d = foveaTrimDeg - static_cast<float>(fovTrimDeg);
+                            return d > 0.0f ? d : 0.0f;
+                        };
+                        mode.edges = true;
+                        mode.verticalTrimDeg = reduced(g_foveaVerticalDeg, fovTrim[0]);
+                        mode.outerTrimDeg = reduced(g_foveaOuterDeg, fovTrim[1]);
+                        mode.nasalTrimDeg = reduced(g_foveaNasalDeg, fovTrim[2]);
+                    } else {
+                        mode.widthDeg = g_foveaDeg;
+                        mode.tcx = tcx;
+                        mode.tcy = tcy;
+                    }
+                    const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, eye, mode, 128);
+                    if (!g.ok) return false;
+                    ox = g.x; oy = g.y; ow = g.w; oh = g.h;
                     return true;
                 };
                 // The OUTPUT crop is the input crop scaled exactly to the
@@ -4669,6 +4794,71 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // when no trained set exists; u3/u5 stay unbound (MV and the
                 // mask are NVIDIA's inputs, and writes to a null UAV drop).
                 const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
+                // The periphery's own resolve can skip the crop's interior
+                // when the compose is certain to run and overwrite it at
+                // weight 1 this frame: the fovea on, the centre crop
+                // evaluated, the composite parameters ready, and no DLSS
+                // upscale -- the colour-history hand-off just below (mode.y)
+                // is only ever on at 1:1 (perW == foW), so under an upscale
+                // the own history in the interior would go stale with
+                // nothing to refresh it. Left at all zeros (no skip)
+                // whenever either of the two OTHER per-pixel UAVs this
+                // dispatch can write is in play this call: the UI evidence
+                // history (UN/u6, uiTrack) is read back next frame at a
+                // reprojected position by adaptiveUiReactive with no
+                // hand-off from the compose, and the mover mask's depth
+                // carry (ZC/u4, carry) is read back next frame as ZP the
+                // same way, also with no hand-off. Report has the full
+                // enumeration.
+                p.skip[0] = p.skip[1] = p.skip[2] = p.skip[3] = 0.0f;
+                if (foveaMode && foveaEvalOk && compositeReady && !upscale &&
+                    !uiTrack && !carry) {
+                    float band = g_foveaEdgeDeg *
+                                 (static_cast<float>(w) / (tanNow[1] - tanNow[0])) *
+                                 0.01745329252f;
+                    const float maxBand = 0.5f * static_cast<float>(fcw < fch ? fcw : fch);
+                    if (band > maxBand) band = maxBand;
+                    if (band < 1.0f) band = 1.0f;
+                    // A whole extra pixel past the band, since the compose's
+                    // weight only reaches exactly 1 AT the band's edge and
+                    // this is GPU-side floating point recomputing the same
+                    // boundary a second way; costs at most another pixel or
+                    // two of the own resolve's work.
+                    const float margin = band + 1.0f;
+                    float sx0 = 0.0f, sy0 = 0.0f, sx1 = 0.0f, sy1 = 0.0f;
+                    if (g_foveaRound) {
+                        // The compose's TRUE weight-1 region (fovea() in
+                        // kFoveaCsHlsl): d = (1-length(n))*min(rz,rw), so the
+                        // level set d=band is an ellipse scaled by k = 1 -
+                        // margin/min(rz,rw) on BOTH semi-axes -- not "each
+                        // axis minus the band" independently, which is not a
+                        // SUBSET of the true region when the crop is not
+                        // square (routine in edges mode) and would make the
+                        // skip unsafe there. The inscribed axis-aligned
+                        // rectangle of that true ellipse is exactly safe.
+                        const float rz = 0.5f * static_cast<float>(fcw);
+                        const float rw = 0.5f * static_cast<float>(fch);
+                        const float m = rz < rw ? rz : rw;
+                        const float k = 1.0f - margin / m;
+                        if (k > 0.0f) {
+                            const float halfX = rz * k * 0.70710678f;
+                            const float halfY = rw * k * 0.70710678f;
+                            const float ccx = static_cast<float>(fcx) + rz;
+                            const float ccy = static_cast<float>(fcy) + rw;
+                            sx0 = ccx - halfX; sy0 = ccy - halfY;
+                            sx1 = ccx + halfX; sy1 = ccy + halfY;
+                        }
+                    } else {
+                        sx0 = static_cast<float>(fcx) + margin;
+                        sy0 = static_cast<float>(fcy) + margin;
+                        sx1 = static_cast<float>(fcx + fcw) - margin;
+                        sy1 = static_cast<float>(fcy + fch) - margin;
+                    }
+                    if (sx1 > sx0 + 1.0f && sy1 > sy0 + 1.0f) {
+                        p.skip[0] = sx0; p.skip[1] = sy0; p.skip[2] = sx1; p.skip[3] = sy1;
+                    }
+                }
+                setParams(ctx, p);
                 ID3D11ShaderResourceView* nullSrv[17] = {};
                 ID3D11UnorderedAccessView* nullUav[7] = {};
                 ctx->CSSetShaderResources(0, 17, nullSrv);
@@ -4691,7 +4881,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
                 ctx->CSSetConstantBuffers(0, 1, &cb);
                 ctx->CSSetSamplers(0, 1, &smp);
+                // Untimed (falls into the price report's "other") when the
+                // fovea is off -- ordinary, non-fovea TAA's own resolve
+                // always ran this dispatch and was never charged to a named
+                // region; that is unchanged. With the fovea on, this
+                // dispatch IS the periphery whenever it runs (steady's own
+                // NGX role failed, or sharp mode, where it always runs) --
+                // "periphery" is the region name the price line already
+                // prints for that role.
+                if (foveaMode) beginRegion(qs, Region::Periphery, dev, ctx);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                if (foveaMode) endRegion(qs, Region::Periphery, ctx);
                 ctx->CSSetShaderResources(0, 17, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 if (carry) zcWritten = true;
@@ -4723,8 +4923,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 endRegion(qs, Region::Compose, ctx);
                 foveaComposited = true;
                 ++g_foveaTreats;
-                if (!g_foveaNoted) {
-                    g_foveaNoted = true;
+                if ((!g_foveaEdges && !g_foveaNoted) ||
+                    (g_foveaEdges && eye >= 0 && eye < 2 && !g_foveaEdgesNoted[eye])) {
                     char per[200];
                     if (periphOk) {
                         snprintf(per, sizeof(per),
@@ -4735,19 +4935,38 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         snprintf(per, sizeof(per), "the pass's own history (%ux%u render%s)", w, h,
                                  upscale ? ", upscaled bicubically to the output" : "");
                     }
-                    Log::get().note(
-                        "temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a %ux%u->%ux%u "
-                        "crop (%s, %.0f deg, %s) around the %s at (%u, %u) of the "
-                        "%ux%u output, %.1f%% of its pixels; the periphery is %s; blended over "
-                        "%.0f deg (%.0f px). NVIDIA's price is in the DLAA totals.",
-                        fcw, fch, focw, foch, upscale ? "DLSS" : "DLAA",
-                        static_cast<double>(g_foveaDeg), g_foveaRound ? "round" : "square",
-                        g_foveaDistance > 0.0f ? "fixation point (the discs meet at the set depth)"
-                                               : "straight-ahead point (the discs meet at infinity)",
-                        focx + focw / 2, focy + foch / 2, foW, foH,
-                        100.0 * static_cast<double>(focw) * foch /
-                            (static_cast<double>(foW) * foH),
-                        per, static_cast<double>(g_foveaEdgeDeg), static_cast<double>(bandPx));
+                    if (!g_foveaEdges) {
+                        g_foveaNoted = true;
+                        Log::get().note(
+                            "temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a %ux%u->%ux%u "
+                            "crop (%s, %.0f deg, %s) around the %s at (%u, %u) of the "
+                            "%ux%u output, %.1f%% of its pixels; the periphery is %s; blended over "
+                            "%.0f deg (%.0f px). NVIDIA's price is in the DLAA totals.",
+                            fcw, fch, focw, foch, upscale ? "DLSS" : "DLAA",
+                            static_cast<double>(g_foveaDeg), g_foveaRound ? "round" : "square",
+                            g_foveaDistance > 0.0f ? "fixation point (the discs meet at the set depth)"
+                                                   : "straight-ahead point (the discs meet at infinity)",
+                            focx + focw / 2, focy + foch / 2, foW, foH,
+                            100.0 * static_cast<double>(focw) * foch /
+                                (static_cast<double>(foW) * foH),
+                            per, static_cast<double>(g_foveaEdgeDeg), static_cast<double>(bandPx));
+                    } else {
+                        g_foveaEdgesNoted[eye] = true;
+                        uint32_t fovTrim[3] = {0, 0, 0};   // vertical, outer, nasal
+                        nativeFrameFovTrimDegrees(fovTrim);
+                        Log::get().note(
+                            "temporal aa: DLSS where you look ENGAGED (edges) -- eye %d requested "
+                            "vertical %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV trim's "
+                            "%u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
+                            "periphery is %s. NVIDIA's price is in the DLAA totals.",
+                            eye, static_cast<double>(g_foveaVerticalDeg),
+                            static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
+                            fovTrim[0], fovTrim[1], fovTrim[2], focx, focy, focx + focw, focy + foch,
+                            foW, foH,
+                            100.0 * static_cast<double>(focw) * foch /
+                                (static_cast<double>(foW) * foH),
+                            per);
+                    }
                 }
             }
         }
@@ -5037,16 +5256,40 @@ void temporalPassConfigure(Config& cfg) {
     if (strength < 0.0f) strength = 0.0f;
     if (strength > 1.0f) strength = 1.0f;
     g_moversStrength = strength;
-    // DLSS where you look (docs/performance.md feature 6). The crop's width
-    // in degrees of visual angle; 0 is the whole frame, today's behaviour.
-    // Bounded below by a size worth cropping (a crop wider than the frame is
-    // the whole frame) and above at a full hemisphere. Live: the branch
-    // reads g_foveaDeg each frame, so it can be tuned from inside a headset.
-    float fov = cfg.getFloat("advanced.temporal_aa_fovea", 0.0f);
-    if (!std::isfinite(fov) || fov < 0.0f) fov = 0.0f;
+    // DLSS where you look (docs/performance.md feature 6). Either a width in
+    // degrees of visual angle (0 is the whole frame, today's behaviour;
+    // bounded below by a size worth cropping and above at a full
+    // hemisphere), or the word "edges": the crop is then the headset's own
+    // field of view trimmed on each side by the three keys below instead of
+    // a width. A non-numeric value other than "edges" is off, same as 0.
+    // Live either way: the branch reads g_foveaDeg/g_foveaEdges each frame.
+    const std::string foveaStr = cfg.getString("advanced.temporal_aa_fovea", "0");
+    const bool foveaEdges = _stricmp(foveaStr.c_str(), "edges") == 0;
+    float fov = 0.0f;
+    if (!foveaEdges) {
+        char* foveaEnd = nullptr;
+        const float parsed = strtof(foveaStr.c_str(), &foveaEnd);
+        if (foveaEnd != foveaStr.c_str() && std::isfinite(parsed) && parsed > 0.0f) fov = parsed;
+    }
     if (fov > 0.0f && fov < 10.0f) fov = 10.0f;   // below this the fovea is not worth the seam
     if (fov > 120.0f) fov = 120.0f;
-    g_foveaDeg = fov;
+    g_foveaEdges = foveaEdges;
+    g_foveaDeg = foveaEdges ? 0.0f : fov;
+    // Edges mode's three trims: plain degrees (not a per-headset list, unlike
+    // fix.fov_trim_vertical/_outer/_nasal, which this reduces against -- see
+    // cropOf/computeFoveaRegion in temporal_pass.cpp). 0..45, default 0.
+    float vertTrim = cfg.getFloat("advanced.temporal_aa_fovea_vertical", 0.0f);
+    if (!std::isfinite(vertTrim) || vertTrim < 0.0f) vertTrim = 0.0f;
+    if (vertTrim > 45.0f) vertTrim = 45.0f;
+    g_foveaVerticalDeg = vertTrim;
+    float outerTrim = cfg.getFloat("advanced.temporal_aa_fovea_outer", 0.0f);
+    if (!std::isfinite(outerTrim) || outerTrim < 0.0f) outerTrim = 0.0f;
+    if (outerTrim > 45.0f) outerTrim = 45.0f;
+    g_foveaOuterDeg = outerTrim;
+    float nasalTrim = cfg.getFloat("advanced.temporal_aa_fovea_nasal", 0.0f);
+    if (!std::isfinite(nasalTrim) || nasalTrim < 0.0f) nasalTrim = 0.0f;
+    if (nasalTrim > 45.0f) nasalTrim = 45.0f;
+    g_foveaNasalDeg = nasalTrim;
     float edge = cfg.getFloat("advanced.temporal_aa_fovea_edge", 6.0f);
     // Floored at 1 deg when the fovea is on: DLSS treats the crop's edge as the
     // image edge (clamped taps, no history beyond it), so a hard seam lets its
@@ -5233,7 +5476,7 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
     // a whole success. G11 (no SDK in the build, NGX refusing, a create
     // refusing) is dlaaWarm's own reason.
     g_warmState = WarmState::Failed;
-    const bool features = g_foveaDeg <= 0.0f;   // the fovea makes its own crop features at the treat
+    const bool features = !foveaConfigured();   // the fovea makes its own crop features at the treat
     Log::get().note(
         "temporal aa: warming NVIDIA before the first submitted frame -- %ux%u in and out (DLAA) "
         "for both eyes on the render thread%s. If this is the log's last line the warm-up hung: "
@@ -5920,6 +6163,8 @@ bool temporalPassEyeOffset(int eye, float out[3]) {
     return true;
 }
 
+bool temporalAaFoveaConfigured() { return foveaConfigured(); }
+
 }  // namespace edvr
 
 namespace edvr {
@@ -6028,4 +6273,80 @@ extern "C" __declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const floa
 extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7, double* other,
                                                                 unsigned* pairs, unsigned* dropped) {
     edvr::temporalPassPriceWindow(medians7, other, pairs, dropped);
+}
+
+// tools/smoke wires this in next to edvrEyeMaskSelftest, same pattern: pure
+// geometry, no device, one bit per independent check, 15 (all four) is pass.
+// Bit 1: width mode against a rectangle hand-derived from cropOf's own
+// arithmetic before this extraction, checked twice independently -- not
+// the design note's "1128px" figure, which neither derivation reproduced;
+// the figure asserted here is the one this file's own formula produces.
+// Bit 2: foveaEdgeRegionDeg's reduced-trim arithmetic, directly, on three
+// edges that do not hit the 2 degree floor.
+// Bit 4: edges mode's left/right trim-role swap between the two eyes
+// (eye 0 = left, outer edge at its l tangent -- foveation.cpp:924-925)
+// produces a mirror image of the same physical crop. y is untouched by
+// the swap and comes out bit-identical; x is checked with a small pixel
+// tolerance (two independent tangent-to-pixel paths land ~2px apart at
+// this frame size, confirmed numerically before writing this tolerance).
+// Bit 8: trims well past both the ini's 0..45 range and this frame's own
+// edge angles floor each edge at 2 degrees rather than closing or
+// inverting the rectangle; the surviving centre square is real but under
+// minPx, so this exercises the ok=false path the caller falls back to
+// full-frame on.
+extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
+    using namespace edvr;
+    unsigned bits = 0;
+
+    // Crystal Super-shaped tangents, the same worked example eye_mask.cpp
+    // uses; fw/fh a plausible per-eye render size for it.
+    const float l = -1.529f, r = 1.032f, t = -1.265f, b = 1.265f;
+    const uint32_t fw = 2576, fh = 2544;
+
+    {
+        FoveaRegionMode mode;
+        mode.edges = false;
+        mode.widthDeg = 40.0f;
+        const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        if (g.ok && g.x == 1170 && g.y == 906 && g.w == 734 && g.h == 732) bits |= 1u;
+    }
+
+    {
+        constexpr float kDegToRad = 0.01745329252f;
+        const float outer = foveaEdgeRegionDeg(tanf(51.8f * kDegToRad), 20.0f);
+        const float nasal = foveaEdgeRegionDeg(tanf(38.9f * kDegToRad), 0.0f);
+        const float vertical = foveaEdgeRegionDeg(tanf(46.7f * kDegToRad), 15.0f);
+        if (fabsf(outer - 31.8f) < 0.05f && fabsf(nasal - 38.9f) < 0.05f &&
+            fabsf(vertical - 31.7f) < 0.05f) {
+            bits |= 2u;
+        }
+    }
+
+    {
+        FoveaRegionMode mode;
+        mode.edges = true;
+        mode.outerTrimDeg = 10.0f;
+        mode.nasalTrimDeg = 5.0f;
+        mode.verticalTrimDeg = 8.0f;
+        const FoveaRegion g0 = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        const FoveaRegion g1 = computeFoveaRegion(-r, -l, t, b, fw, fh, 1, mode, 128);
+        const bool yMatch = g0.ok && g1.ok && g0.y == g1.y && g0.h == g1.h;
+        const int mirrorX0 = static_cast<int>(fw) - static_cast<int>(g0.x) - static_cast<int>(g0.w);
+        const int mirrorX1 = static_cast<int>(fw) - static_cast<int>(g0.x);
+        const int dx0 = mirrorX0 - static_cast<int>(g1.x);
+        const int dx1 = mirrorX1 - static_cast<int>(g1.x) - static_cast<int>(g1.w);
+        if (yMatch && dx0 >= -4 && dx0 <= 4 && dx1 >= -4 && dx1 <= 4) bits |= 4u;
+    }
+
+    {
+        FoveaRegionMode mode;
+        mode.edges = true;
+        mode.outerTrimDeg = 100.0f;
+        mode.nasalTrimDeg = 100.0f;
+        mode.verticalTrimDeg = 100.0f;
+        const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        if (!g.ok) bits |= 8u;
+    }
+
+    return bits;
 }

@@ -4379,6 +4379,7 @@ void vScreenRefreshConfig() {
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
+    temporalPassConfigure(cfg);
     uiDeferredConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
@@ -4390,7 +4391,6 @@ void vScreenRefreshConfig() {
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
-    temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
     nightVisionConfigure(cfg);
@@ -5538,6 +5538,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
+    temporalPassConfigure(cfg);
     uiDeferredConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
@@ -5549,7 +5550,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
-    temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
     weaponStabilityConfigure(cfg);
     nightVisionConfigure(cfg);

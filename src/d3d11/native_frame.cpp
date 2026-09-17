@@ -491,6 +491,22 @@ HRESULT WINAPI close(void* context) {
 
 } // namespace
 
+namespace edvr {
+
+// For temporal_pass.cpp's edges-mode fovea (same DLL, no table needed):
+// the cached triple beginFrame already resolved above, vertical/outer/
+// nasal degrees in kTrimNames' own order. Zero in every slot until a
+// beginFrame has resolved a headset.
+void nativeFrameFovTrimDegrees(uint32_t out[3]) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    out[0] = out[1] = out[2] = 0;
+    if (g_trim.resolved) {
+        for (size_t i = 0; i < kTrimCount; ++i) out[i] = g_trim.degrees[i];
+    }
+}
+
+}  // namespace edvr
+
 extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     const EdvrNativeFrameRequest* request, EdvrNativeFrameTable* table) {
     if (!table || table->size != sizeof(*table) ||

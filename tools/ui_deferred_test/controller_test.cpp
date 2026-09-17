@@ -24,6 +24,12 @@ Log& Log::get(){static Log l;return l;} Log::~Log()=default;
 void Log::note(const char*,...){}
 std::string Config::getString(const char*,const char*)const{return "dlss";}
  float Config::getFloat(const char*,float def)const{return def;}
+ // temporal_pass.cpp is not part of this rig's link; the fovea is always
+ // off here (this harness exercises game classification and shader
+ // creation/logging, per the top of this file, not the fovea's own
+ // interaction with the deferred route -- ui_deferred_workstream's own
+ // rig-level test would be the place for that).
+ bool temporalAaFoveaConfigured(){return false;}
  uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?vsHash:psHash;}
  void* bindingGet(BindSlot s){return bindings[static_cast<unsigned>(s)];}
  uint32_t bindingGeneration(BindSlot s){return bindingGens[static_cast<unsigned>(s)];}

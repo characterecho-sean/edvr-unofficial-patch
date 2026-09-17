@@ -82,3 +82,16 @@ struct EdvrNativeFrameTable {
 
 extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     const EdvrNativeFrameRequest*, EdvrNativeFrameTable*);
+
+namespace edvr {
+
+// The worn headset's fix.fov_trim_vertical/_outer/_nasal, resolved and
+// cached by this DLL's own beginFrame (the same triple it hands the openvr
+// half above): vertical, outer, nasal degrees, in that order. Takes
+// native_frame.cpp's own g_mutex; zero in every slot until a beginFrame has
+// resolved a headset (or when none is worn, e.g. under SteamVR/
+// OpenComposite). For temporal_pass.cpp's fovea, which needs the same
+// numbers in-process rather than across the DLL boundary above.
+void nativeFrameFovTrimDegrees(uint32_t out[3]);
+
+}  // namespace edvr
