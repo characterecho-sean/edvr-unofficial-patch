@@ -160,7 +160,8 @@ float uiDepthReactive();
 float uiDepthGhostTolerance();
 
 // The corona-smear hold's brightness limit (advanced.corona_smear_level),
-// normalised to [0,1] (0 = off / fix.corona_smear = off). The post-DLSS UI
+// normalised to [0,1], 0 = off; always on under the temporal pass,
+// advanced.corona_smear_level = 0 turns it off. The post-DLSS UI
 // resolve holds faint, flat, non-UI pixels within one step of the raw 2x2
 // range up to this brightness, the way uiDepthGhostTolerance() already
 // holds UI pixels near the frame's own colours (issue 36). Zero like

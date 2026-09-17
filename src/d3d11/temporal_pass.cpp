@@ -1216,7 +1216,7 @@ ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature
 ID3D11ComputeShader*       g_csUiResolve = nullptr;
 bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
 ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tolerance/255, corona hold, 0, 0}
-static bool                g_coronaHoldNoted = false;    // fix.corona_smear: said once, only when the hold written is > 0
+static bool                g_coronaHoldNoted = false;    // corona-smear hold: said once, only when the hold written is > 0
 bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
@@ -4444,7 +4444,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 tolCb=g_uiResolveTolCb;
                                 if (!g_coronaHoldNoted && resolveData[1] > 0.0f) {
                                     g_coronaHoldNoted = true;
-                                    Log::get().note("corona smear: the UI resolve holds faint flat glow within a step of the frame's own level, up to %d/255 (fix.corona_smear = on; advanced.corona_smear_level). Said once.",
+                                    Log::get().note("corona smear: the UI resolve holds faint flat glow within a step of the frame's own level, up to %d/255 (advanced.corona_smear_level; 0 turns it off). Said once.",
                                                     static_cast<int>(resolveData[1] * 255.0f + 0.5f));
                                 }
                             }

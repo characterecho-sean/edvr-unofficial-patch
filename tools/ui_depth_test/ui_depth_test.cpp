@@ -944,7 +944,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 // tests below assume without re-asserting it themselves.
                 colour.assign(w*h*4,0);edit.assign(w*h,0);
             }
-            // The corona-smear hold (fix.corona_smear, issue 36): faint,
+            // The corona-smear hold (advanced.corona_smear_level, issue 36): faint,
             // flat, non-UI pixels are pulled back within one step of the raw
             // 2x2 range, the way UI pixels already are above. jit is zero
             // and ow==w/oh==h here, so corner==centre==(ox,oy) at the cell,
