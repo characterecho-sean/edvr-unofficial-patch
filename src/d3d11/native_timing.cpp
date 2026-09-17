@@ -1,4 +1,5 @@
 #include "native_timing.h"
+#include "map_wait.h"
 #include "../common/gpu_frame_protocol.h"
 #include "../common/config.h"
 #include "../common/log.h"
@@ -315,13 +316,25 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
     queueCompletion(*c, frame->sequence, false);
     if (++c->publishedCount == 1 || !c->lastLogMs || snapshot.capturedAtMs - c->lastLogMs >= 5000) {
         c->lastLogMs = snapshot.capturedAtMs;
+        // The game's time inside Map since the last line, per published
+        // frame (map_wait.h): a stall on the GPU that the benchmark's CPU
+        // figure carries and no EDVR bracket does.
+        static uint64_t mapFramesSeen = 0;
+        const uint64_t mapFrames = c->publishedCount > mapFramesSeen ? c->publishedCount - mapFramesSeen : 1u;
+        mapFramesSeen = c->publishedCount;
+        const edvr::MapWaitTotals mw = edvr::mapWaitTake();
         edvr::Log::get().note("native timing CPU: seq %llu, wait %.3f ms, submits %.3f ms, "
             "temporal %.3f menu %.3f transfer %.3f compose %.3f ms; wall elapsed includes waits, "
-            "not exclusive CPU or GPU; valid waits %llu invalid waits %llu.",
+            "not exclusive CPU or GPU; valid waits %llu invalid waits %llu. Game Map over %llu frames: "
+            "reads %llu calls %.3f ms/frame, writes %llu calls %.3f ms/frame, longest %.3f ms, %llu past 0.1 ms.",
             (unsigned long long)frame->sequence,snapshot.waitMs,frame->submitMs[0]+frame->submitMs[1],
             frame->temporalMs[0]+frame->temporalMs[1],frame->menuMs[0]+frame->menuMs[1],
             frame->transferMs[0]+frame->transferMs[1],frame->composeMs,
-            (unsigned long long)c->validCount,(unsigned long long)c->invalidCount);
+            (unsigned long long)c->validCount,(unsigned long long)c->invalidCount,
+            (unsigned long long)mapFrames,
+            (unsigned long long)mw.readCalls, edvr::mapWaitMs(mw.readTicks) / double(mapFrames),
+            (unsigned long long)mw.writeCalls, edvr::mapWaitMs(mw.writeTicks) / double(mapFrames),
+            edvr::mapWaitMs(mw.longestTicks), (unsigned long long)mw.slowCalls);
     }
     return S_OK;
 }

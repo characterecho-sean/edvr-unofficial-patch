@@ -140,12 +140,29 @@ GpuIntervals<16> g_gpu;
 unsigned g_costFrames=0,g_costDraws=0,g_originalDraws=0;
 GpuIntervals<16> g_buildGpu;
 unsigned g_buildBatches=0;
+// The hook's own CPU, wall time inside begin() past its first test and
+// inside celestialMotionEnd(), so a flight can set the render thread's
+// time in this hook against the benchmark's CPU figure (the terrain
+// frame-time arc, 2026-09-17). Two counter reads per terrain draw.
+uint64_t g_hookCpuTicks=0, g_hookCpuCalls=0;
+uint64_t hookCpuFrequency() {
+    static const uint64_t f=[]{ LARGE_INTEGER q{}; QueryPerformanceFrequency(&q); return q.QuadPart>0?static_cast<uint64_t>(q.QuadPart):1u; }();
+    return f;
+}
+struct HookCpu {
+    LARGE_INTEGER t0{};
+    HookCpu(){ QueryPerformanceCounter(&t0); }
+    ~HookCpu(){ LARGE_INTEGER t1{}; QueryPerformanceCounter(&t1); if(t1.QuadPart>t0.QuadPart) g_hookCpuTicks+=static_cast<uint64_t>(t1.QuadPart-t0.QuadPart); ++g_hookCpuCalls; }
+};
 void reportCost() {
     const auto& t=g_gpu.totals; const auto& b=g_buildGpu.totals;
+    const double hookUs=static_cast<double>(g_hookCpuTicks)*1e6/static_cast<double>(hookCpuFrequency());
     if(g_costDraws || t.samples || t.invalid || t.skipped || g_buildBatches || b.samples || b.invalid || b.skipped)
-        Log::get().note("terrain motion GPU: %u patches (%u original draws, %u reissues) in %u frames; completed=%u skipped=%u invalid=%u, %.3f us/patch bracket (copies, the coverage draw and restore; no dispatch; every 64th draw; no wait/flush; separate from EDVR-at-door GPU). Batched build: %u batches, %.3f us/eye (%u samples, %u skipped).",
+        Log::get().note("terrain motion GPU: %u patches (%u original draws, %u reissues) in %u frames; completed=%u skipped=%u invalid=%u, %.3f us/patch bracket (copies, the coverage draw and restore; no dispatch; every 64th draw; no wait/flush; separate from EDVR-at-door GPU). Batched build: %u batches, %.3f us/eye (%u samples, %u skipped). Hook CPU: %.2f us/call over %llu calls, %.3f ms/frame.",
             g_costDraws,g_originalDraws,g_costDraws-g_originalDraws,g_costFrames,t.samples,t.skipped,t.invalid,t.samples?t.ms*1000/t.samples:0.0,
-            g_buildBatches,b.samples?b.ms*1000/b.samples:0.0,b.samples,b.skipped);
+            g_buildBatches,b.samples?b.ms*1000/b.samples:0.0,b.samples,b.skipped,
+            g_hookCpuCalls?hookUs/static_cast<double>(g_hookCpuCalls):0.0,static_cast<unsigned long long>(g_hookCpuCalls),
+            g_costFrames?hookUs/1000.0/static_cast<double>(g_costFrames):0.0);
 }
 struct Saved {
     ID3D11RenderTargetView* rt[8]{};
@@ -238,6 +255,7 @@ void celestialMotionConfigure(bool enabled) {
 }
 static bool begin(ID3D11DeviceContext* ctx, uint64_t vs, bool original) {
     if (!g_enabled || g_failed || vs!=kTerrainDepth || g_saved.active) return false;
+    HookCpu cpu;
     if (original) {
         // The observed prepass has no PS: adding colour outputs cannot
         // replace game shading/discard/depth export. Keep its actual DSV,
@@ -352,6 +370,7 @@ bool celestialMotionBegin(ID3D11DeviceContext* ctx,uint64_t vs) { return begin(c
 bool celestialMotionBeginOriginal(ID3D11DeviceContext* ctx,uint64_t vs) { return begin(ctx,vs,true); }
 void celestialMotionEnd(ID3D11DeviceContext* ctx) {
     if (!g_saved.active) return;
+    HookCpu cpu;
     vScreenSetRenderTargetsRaw(ctx,8,g_saved.rt,g_saved.ds);
     ctx->PSSetShader(g_saved.ps.Get(),g_saved.classes,g_saved.classCount);
     ctx->PSSetConstantBuffers(13,1,g_saved.cb.GetAddressOf());
