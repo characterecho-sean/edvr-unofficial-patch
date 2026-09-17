@@ -2,27 +2,26 @@
 
 ## Status
 
-- **State (2026-09-17 midday: lever build + stand-down note INSTALLED
-  in FRONTIER as v0.17.0-rc.3-76-g9eab046, NOT FLOWN; gate NOT MET):** two Stage 1
-  flights on the previous build 1947c90, both in the journal. 09:15, DLSS
-  quality (3461x2884 in): 20/25/7 engaged on both eyes (43%), parity
-  holds, zero drops; pass per pair 4.07 -> 3.71 (0.36 ms); frame p50
-  inconclusive (no trailing A). 09:38, DLSS PERFORMANCE (2036x1697 in,
-  frame 7-8 ms), Sean's live size sweep 20/25/7 -> 5/5: at 20/25/7 the
-  pass saved about 1.0 ms per pair and the frame ran 0.7-1.0 ms (9-13%)
-  under full-frame, same session but not A-B-A; at vertical 10 / outer 5
-  (84%) nothing saved; with both at 5 the crop is 99.9% of the frame and
-  the 90% size ceiling stood the fovea down SILENTLY (full-frame DLSS, no
-  line): his last 63 s, and the 5/7/7 his ini holds now, were full-frame.
-  That stand-down is a log note since this build.
-- **Cost model, holding across both flights:** DLSS's price follows the
-  rectangle's area (0.18 + 0.097 ms per output MP at quality: the centre
-  1.55 at 43%, 2.95 at 84%); the periphery and the compose are a fixed
-  ~0.55 (0.72 + 0.23 unskipped at quality, 0.31-0.53 + 0.23 at
-  performance); the fovea prep carried +0.16 from a pinned instrumented
-  shader. The saving is the rectangle's complement minus ~0.55, gone
-  near 80%; the two levers built today (the partial skip, the prep) take
-  the pass at 20/25/7 to about 0.8 ms per pair at quality on paper.
+- **State (2026-09-17 11:00, the lever build v0.17.0-rc.3-76-g9eab046
+  FLOWN in FRONTIER; gate NOT MET on the frame):** three Stage 1 flights,
+  all in the journal. 09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms
+  per pair. 09:38 (1947c90, performance): a live sweep 20/25/7 -> 5/5;
+  ~1.0 ms per pair at 43%; both trims at 5 = a 99.9% crop, stood down
+  silently by the 90% ceiling (a log note since 9eab046). 10:55 (9eab046,
+  quality 2646x2206 in, frame 8.9 ms): both levers confirmed (prep 0.57
+  vs 0.53 full, the periphery 0.22-0.36 with the skip); pass per pair vs
+  full-frame 3.87: 81% 3.93, 67% 3.63, 56% 3.32, 79% 3.91; frame p50 8.9
+  -> 8.57 at 56%; the game at 90 fps flat with the CPU waiting 7 ms a
+  frame, so nothing could show as frame rate. Sean's ini now: edges,
+  vertical 5, outer 20, nasal 7 (79%), edge 0, periphery sharp.
+- **Cost model, holding across all three flights:** NVIDIA's price
+  follows the rectangle's area (10:55: 2.96 at 100%, 2.53 at 81%, 2.18
+  at 67%, 1.7 at 56%; about 0.2 + 2.75 x share); the fovea path's fixed
+  costs (periphery + compose + prep's extra) are ~0.55 with the skip. So
+  81% saves nothing, 67% 0.24, 56% 0.55, and 43% (20/25/7, unflown on
+  this build) about 1.1 ms per pair, 12% of the 8.9 ms frame. The bound:
+  DLSS is 3.0 of the 8.9 ms; the game's own 5.9 ms is out of reach. Soft
+  periphery costs MORE than sharp and overloads the price timers.
 - **Settled before this flight:** Stage 0 (749a4e9): H1 confirmed, H2
   ruled out (reduce + periphery + compose ate 48% of the crop's saving at
   40 deg / 0.5); 40 deg missed Sean's eyes, 80 saved nothing. The masked
@@ -51,15 +50,15 @@
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle, wide/narrow presets, one per-headset size;
   gaze later where the headset publishes it; fix.eye_mask keys stay.
-- **Next: ONE flight in FRONTIER on the installed build, A-B-A.** Set
-  temporal_aa_fovea = 0 and the trims back to 20/25/7 (top/bottom = same)
-  BEFORE launching (the ini is at edges 5/7/7 = full-frame); 75 s at 0,
-  live-edit to edges, 75 s, back to 0, 75 s held, then quit. Read: the
-  ENGAGED note "skips the interior's colour resolve", prep near 0.2
-  (performance) or 0.5 (quality), the periphery about half its earlier
-  figure, frame gpu p50 A-B-A. Owed by Sean: whether 5/5 was the picture
-  (periphery or seam worse than DLSS) or a sweep; the soft-periphery arm
-  yes/no; retire temporal_aa_fovea_vertical yes/no; his DLSS mode now.
+- **Next (Sean's call, asked 2026-09-17 11:30):** the feature pays only
+  when the GPU is the limit and the rectangle is small; a 43% rectangle
+  is worth ~1.1 ms per pair here, invisible at 90 fps with 2 ms spare. If
+  he wants it shown: A-B-A at 20/25/7 from temporal_aa_fovea = 0 with the
+  GPU loaded (a higher HMD quality or a station). His head catch-up
+  observation (journal, third flight): the blend band back to 6-10 deg;
+  the head-lead build (slide the rectangle toward the turn, motion
+  vectors compensated) offered, not started. Still owed: retire
+  temporal_aa_fovea_vertical yes/no; whether Stage 2 (ship) goes ahead.
 
 ## Investigation (2026-09-14)
 
@@ -1411,3 +1410,90 @@ oversize rectangle; the log signature is the note itself.
 DLSS, so he wanted DLSS everywhere) or a sweep; and whether the
 performance mode is now his setting. Ruled out: nothing new; the
 ceiling is a design choice, not a fault.
+
+### 2026-09-17: the third flight (10:55), on the lever build: both levers work, the rectangles were too big, and the frame was under budget
+
+**Sean:** "Ran it, still not seeing much of a performance gain and I'm
+not understanding why." Then: the DLSS area takes a noticeable time to
+catch up when he moves his head; could the fovea move with the head's
+direction?
+
+**Evidence:** edvr_gfx_20260917_105526.log, 10:55:26 to 11:00:07,
+build v0.17.0-rc.3-76-g9eab046 (right; `--expect-build 9eab046`). DLSS
+quality, 2646x2206 in / 4072x3394 out, preset K, 90 Hz, the same
+scene load in every window (17-18k particle draws per 10 s, 750-780
+draws per frame). Zero faults. The stand-down note fired at launch
+(his ini at edges 5/7/7: 96% of the frame) and again after his
+edges -> 0 -> edges, so the first 80 s ran full-frame DLSS; then he
+swept live: vertical 10 (81%), periphery soft, periphery scale 0,
+outer 20 (67%), periphery sharp, vertical 15 (56%), vertical 10 (67%),
+edge 0, vertical 5 (79%). No return to 0 after 10:56:32, so the only
+full-frame windows are the first 80 s after launch.
+
+**Pass per stereo pair, ms, medians of the price lines per window:**
+
+| rectangle (top/outer/nasal) | periphery | prep | periphery | centre | compose | ui | total | vs full |
+|---|---|---|---|---|---|---|---|---|
+| full-frame (W1, W2) | - | 0.53 | - | full 2.96 | - | 0.37 | 3.87 | - |
+| 81% (10/7/7) | sharp | 0.56 | 0.26 | 2.53 | 0.22 | 0.36 | 3.93 | +0.06 |
+| 81% (10/7/7) | soft, 50% then 25% copy | 0.34 | 0.92 / 0.55 (+0.1 reduce) | 2.75 | 0.23 | 0.39 | 4.7 / 4.3 | +0.8 / +0.4 (partial, below) |
+| 67% (10/20/7) | sharp | 0.57 | 0.27-0.32 | 2.18 | 0.22 | 0.37 | 3.63 | -0.24 |
+| 56% (15/20/7) | sharp | 0.57 | 0.36 | 1.6-1.8 | 0.22 | 0.37 | 3.32 | -0.55 |
+| 79% (5/20/7) | sharp | 0.57 | 0.22 | 2.52 | 0.22 | 0.37 | 3.91 | -0 |
+
+Frame gpu p50/p95 (native benchmark windows): full-frame 8.89-8.94 /
+9.4-9.5; 81% sharp 9.09-9.14; 81% soft 9.5-9.9; 67% 8.73-8.87 / 9.23;
+56% 8.55-8.60 / 9.02-9.11; 79% 8.87-9.05. CPU p50 2.8 ms in every
+window, the render thread's submits 0.7-0.8, and the runtime wait
+6.5-7.5 ms per frame; the game reported 90 fps flat in every foveated
+window (85-88 in the launch windows, with load-in long frames).
+
+**Both levers confirmed.** Prep 0.57 on the crop path against 0.53
+full-frame: the +0.16 is gone (0.67 before). Periphery 0.22-0.36 with
+the skip note on every ENGAGED line, where the unskipped lean resolve
+over this 5.8 MP render would be about 0.42 and was 0.72 at 09:15 over
+10 MP; less than proportional to the skipped area because the sibling
+branch still stores three writes per skipped pixel and the band
+pixels do the whole resolve. Compose 0.22 as always.
+
+**Why he saw nothing, three reasons, all in the numbers.** (1) The
+rectangles were 56-81% of the frame. NVIDIA's price follows the area
+(2.96 at 100%, 2.53 at 81%, 2.18 at 67%, 1.7 at 56%: about 0.2 + 2.75
+x share), and the fovea path's fixed costs, periphery + compose +
+prep's extra, are about 0.55; so 81% saves nothing, 67% saves 0.24,
+56% saves 0.55. At 20/25/7 (43%) the fit gives a centre of 1.38 and a
+pass of about 2.8, a saving of 1.1 ms per pair, 12% of this frame,
+past both numeric gates; he did not fly that size. (2) The bound:
+DLSS is 3.0 of the 8.9 ms frame. The other 5.9 ms is the game's own
+rendering, which the fovea cannot touch; removing DLSS entirely would
+save 3 ms, a 43% rectangle about 1.1. (3) The frame was under budget:
+8.9 ms against 11.1 at 90 Hz, the CPU waiting 7 ms a frame for the
+runtime, 90 fps flat either way. A saving here is headroom, not frame
+rate; it only shows as frame rate when the GPU is the limit (a heavier
+scene, a higher HMD quality). The gate (0.5 ms and 5% on frame p50) is
+met on the pass at 56% and not on the frame (0.33 ms, 3.7%).
+
+**The soft periphery costs more than sharp** (NVIDIA's DLAA on the
+copy, 0.55-0.92 plus the reduce) and its windows lost the price
+report's timer leases ("dropped 200 unmeasured pairs, 0 region
+leases", the centre reading 2.75 against 2.53 sharp for the same
+crop): leftover, the price report's lease budget does not cover the
+soft mode's extra regions, so its numbers are partial. Sharp stays.
+
+**The catch-up at the leading edge (his second observation).** NGX's
+history is crop-local: whatever enters the rectangle from the
+periphery during a head turn has no DLSS history and is soft or
+aliased for its first 4-8 frames (45-90 ms at 90 Hz). Full-frame DLSS
+has the same band at the frame's edge, out of sight; the rectangle
+puts it 20-30 degrees off-axis, where the eyes are during a turn (the
+eyes reach the target before the head). His edge = 0 made the step a
+hard line. Options given in chat: the blend band back (6-10 deg); his
+idea, a head lead (slide the rectangle toward the turn by head speed,
+capped at a few degrees, back when the head stops; same area; the
+crop offset is already a per-frame evaluate parameter in dlaa.cpp, and
+the slide is added to the motion vectors NGX reads so its history
+stays registered; sign wrong = a doubled image during turns, the
+picture's own signature); a hidden DLSS halo (costs area); not the
+eye-tracked crop. The trade is structural: the saving needs a small
+rectangle, the band wants a big one; the lead moves the band, it does
+not remove it. His call.
