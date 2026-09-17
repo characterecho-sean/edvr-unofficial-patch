@@ -23,9 +23,14 @@ read 2026-09-16) unless marked believed.
   engine at the seam where the pass already chooses between NVIDIA's history
   and its own (section 3); route 2 as a fourth engine (section 5) once route
   1 has flown on both rigs and an AMD supporter has reported.
-- **Next:** Sean's decisions D1-D5 (section 6); then Phase 0 on the desk
-  (fetch and build the port, the link gate, the convention rig) before any
-  flight. Flights in section 4.
+- **Route 1 IN PROGRESS (2026-09-16 evening) on branch
+  `claude/fsr3-amd-nvidia-upscaling-00b69f`, kept separate from main until
+  ready.** Sean took D1-D5 as recommended. Phase 0 runs as two tracks: the
+  SDK fetch-and-build tool, and the setting, seam, readers, ini and stub
+  engine (buildable without the SDK); the engine body and its rig follow.
+  No install to any game directory without Sean's approval.
+- **Next:** Phase 0 on the desk (fetch and build the port, the link gate,
+  the convention rig) before any flight. Flights in section 4.
 - **Open:** the port's build recipe (CMake plus the SDK's own shader compiler
   at `cs_5_0`; no CRT setting in its CMake, so `/MT` must be forced); whether
   its libraries import d3d11.dll by name (a stop, 3.5); the reactive mask
