@@ -2,18 +2,19 @@
 
 ## Status
 
-- **State (2026-09-17 11:00, the lever build v0.17.0-rc.3-76-g9eab046
-  FLOWN in FRONTIER; gate NOT MET on the frame):** three Stage 1 flights,
-  all in the journal. 09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms
-  per pair. 09:38 (1947c90, performance): a live sweep 20/25/7 -> 5/5;
-  ~1.0 ms per pair at 43%; both trims at 5 = a 99.9% crop, stood down
-  silently by the 90% ceiling (a log note since 9eab046). 10:55 (9eab046,
-  quality 2646x2206 in, frame 8.9 ms): both levers confirmed (prep 0.57
-  vs 0.53 full, the periphery 0.22-0.36 with the skip); pass per pair vs
-  full-frame 3.87: 81% 3.93, 67% 3.63, 56% 3.32, 79% 3.91; frame p50 8.9
-  -> 8.57 at 56%; the game at 90 fps flat with the CPU waiting 7 ms a
-  frame, so nothing could show as frame rate. Sean's ini now: edges,
-  vertical 5, outer 20, nasal 7 (79%), edge 0, periphery sharp.
+- **State (2026-09-17 15:00, PAUSED by Sean: the head lead FLOWN 13:15 on
+  v0.17.0-rc.3-93-g17fc607 slides as designed but jitters the crop 1 px
+  per slide (scaleTo's even-floor of the output base, eye run 131504);
+  the quantum fix 2101149 is BUILT and reviewed ON THE BRANCH, not merged
+  or installed; performance gate NOT MET):** four flights, journal.
+  09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms per pair. 09:38
+  (1947c90, performance): a live sweep 20/25/7 -> 5/5, ~1.0 ms per pair
+  at 43%; 5/5 = a 99.9% crop, stood down silently by the 90% ceiling (a
+  log note since 9eab046). 10:55 (9eab046, quality, frame 8.9 ms): both
+  levers confirmed (prep 0.57 vs 0.53 full, periphery 0.22-0.36 with the
+  skip); pass per pair vs full-frame 3.87: 81% 3.93, 67% 3.63, 56% 3.32,
+  79% 3.91; frame p50 8.9 -> 8.57 at 56%; the game at 90 fps flat, CPU
+  waiting 7 ms a frame, so nothing could show as frame rate.
 - **Cost model, holding across all three flights:** NVIDIA's price
   follows the rectangle's area (10:55: 2.96 at 100%, 2.53 at 81%, 2.18
   at 67%, 1.7 at 56%; about 0.2 + 2.75 x share); the fovea path's fixed
@@ -50,15 +51,15 @@
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle, wide/narrow presets, one per-headset size;
   gaze later where the headset publishes it; fix.eye_mask keys stay.
-- **Next (Sean's call, asked 2026-09-17 11:30):** the feature pays only
-  when the GPU is the limit and the rectangle is small; a 43% rectangle
-  is worth ~1.1 ms per pair here, invisible at 90 fps with 2 ms spare. If
-  he wants it shown: A-B-A at 20/25/7 from temporal_aa_fovea = 0 with the
-  GPU loaded (a higher HMD quality or a station). His head catch-up
-  observation (journal, third flight): the blend band back to 6-10 deg;
-  the head-lead build (slide the rectangle toward the turn, motion
-  vectors compensated) offered, not started. Still owed: retire
-  temporal_aa_fovea_vertical yes/no; whether Stage 2 (ship) goes ahead.
+- **Next, on resume (journal, the PAUSED entry):** merge origin/main into
+  the branch, build, smoke, install 2101149 to Frontier, push HEAD:main;
+  then the same hangar yaw with lead 6 against 0 flipped live: the
+  shimmer gone, the band's 1.4 deg steps judged in the periphery, a
+  dump's placeErrX/Y columns constant; then the leading-edge verdict the
+  lead was built for. Meanwhile Frontier's 17fc607 jitters with lead 6
+  (lead 0 avoids it). Performance stands as measured: ~1.1 ms per pair
+  at 43%, visible only GPU-bound. Owed: retire temporal_aa_fovea_vertical;
+  Stage 2 (ship).
 
 ## Investigation (2026-09-14)
 
@@ -1497,3 +1498,261 @@ picture's own signature); a hidden DLSS halo (costs area); not the
 eye-tracked crop. The trade is structural: the saving needs a small
 rectangle, the band wants a big one; the lead moves the band, it does
 not remove it. His call.
+
+### 2026-09-17: CheekyFoveatedDLSS re-read against this week's three findings
+
+**Sean:** "Is there anything useful in this repo for our own solution?"
+(the local clone at projects\CheekyFoveatedDLSS, HEAD 16 commits past
+a830c74, the version inspected on the 14th; all 16 are on their UEVR
+frame-warp arc, five touch region/history logic, none changes the
+answers below). A sonnet reader answered seven questions with
+file:line citations; its report is condensed here.
+
+**Useful, one thing, and it is the head lead's recipe (finding b).**
+Their crop moves every frame with the gaze and the DLSS feature is
+never rebuilt for a move: the re-create key is size, quality, flags
+and presets only (d3d11_backend.cpp:360-382, 501-511). History
+survives the move because a compute shader adds the crop's per-frame
+delta to the motion vectors NGX reads, into a private buffer:
+offset = (currentOrigin - previousOrigin) / MV.Scale, "previousLocal =
+currentLocal + sceneMotion + currentOrigin - previousOrigin"
+(crop_motion.hpp:13-29, crop_motion_shader.hpp:16-22, wired at
+d3d11_backend.cpp:1043-1098). They fall back to Reset = 1 on a large
+jump, max(64 px, 12.5% of the crop's dimension) (gaze_policy.cpp:
+178-220), on a size change, or on a lost tracker. The 14th's table
+had already named the mechanism; the lines are now on record. For
+EDVR it is simpler still: the crop's motion vectors are our own, so the
+offset is one cbuffer value in the fovea prep, and a head lead slides
+smoothly, so no reset policy is needed beyond the size-change one we
+have.
+
+**Not there: a fix for the fresh leading edge.** Nothing predicts
+("Late observation only; never predict a future eye", hooks.cpp:250);
+the "next jump" feature draws a debug outline of the next gaze cell
+and pre-renders nothing; there is no halo, no warm-up, no doc or
+comment about convergence, catch-up or edge ghosting. Their
+eye-tracked crop meets the same fresh band at every saccade, which is
+Sean's own objection to gaze from the 5th. So a head lead would be new
+ground, not a rediscovery.
+
+**Nothing for the bound (finding a) or the periphery (finding c).**
+Their periphery is NVIDIA's DLAA on a 0.75 copy (peripheral_dlaa.cpp:
+773-787, 916-1017): the soft mode we measured on the 10:55 flight and
+rejected (0.55-0.92 ms plus the reduce, against 0.22-0.36 for our own
+resolve with the skip). Their one performance figure, "20%+ with DLSS
+Performance", comes with no GPU, resolution or breakdown (README.md:3)
+and with their default region of 0.55 x 0.45 = 25% of the frame
+(settings.hpp:59-67), which is the arithmetic we have: only a small
+region pays, and a small screen-fixed rectangle is what shows the
+fresh edge. Their seam is ours in other clothes (a smoothstep feather,
+4% of the frame by default, rectangle-to-ellipse by a roundness
+lerp, d3d11_composite_shader.hpp:39-50, 163-171). They floor the
+region at 20% per dimension (settings.cpp:244-245, restored in
+29d146d after a try at 10%) and have no ceiling like our 90%.
+
+**Taken:** the MV-offset recipe and the reset threshold, for the head
+lead if Sean wants it. **Ruled out again:** the DLAA periphery, because
+we measured it; gaze, unchanged.
+
+### 2026-09-17: the head lead, designed and briefed (Sean: "Let's build the head lead")
+
+**What it does.** The rectangle slides toward a head turn by N frames'
+worth of head motion, so the strip of freshly entered content at its
+leading edge (no DLSS history for its first several frames) sits
+further out, ahead of where the eyes are during the turn. It does not
+remove the strip; it moves it. One key, `advanced.temporal_aa_fovea_lead`
+= frames (0 off, default; 6 the first value to fly; 0..12; live).
+Frames, not seconds, because DLSS converges in frames.
+
+**Design, as briefed to the implementer (opus).**
+- Lead in render pixels = N x MV_centre, where MV_centre is the far
+  (rotation-only) motion vector at the frame's centre in the same
+  convention and units the MV shader writes for NGX (previous = current
+  + MV, render pixels; NGX reads them at scale 1). Computed on the CPU
+  from the same per-eye camera data the shader's cbuffer gets, by the
+  shader's own formula. Turning right: content moves left, the centre's
+  content WAS to the right, MV_centre.x > 0, the rectangle moves right.
+  Pitching up: content moves down the screen (row 0 is the UP tangent),
+  MV_centre.y < 0, the rectangle moves up. No separate sign reasoning.
+- The rectangle's EXTENTS never change: computeFoveaRegion gives the
+  unshifted rectangle, the lead is an integer offset to the base only,
+  rounded to even pixels, clamped so the rectangle stays in the frame
+  (at the edge, whatever fits). A size change would re-create NGX's
+  feature (tens of ms); upstream's key excludes position for the same
+  reason. Smoothed per eye by a one-pole filter (0.25 per frame) against
+  tracker noise times N. Reset when the fovea is off or the config
+  reloads.
+- NGX's history stays registered because the crop's per-frame
+  displacement, delta = base_now - base_prev, is added to every motion
+  vector NGX reads (MV_crop = MV + delta), through the MV shader's
+  cbuffer on the fovea prep's dispatch only; (0,0) everywhere else, so
+  the full-frame path is untouched. If anything besides NGX reads the
+  crop's MV texture, the offset goes into a second texture instead.
+  Jitter untouched; no reset for a smooth slide.
+- The compose parameters and the interior skip rectangle are computed
+  per frame from the crop, so they follow; the brief asks for a check
+  that nothing caches the base across frames.
+
+**Evidence, before flying.** The ENGAGED line carries "head lead N
+frames"; a per-window line prints the eye's peak lead in degrees and
+pixels, the mean, the frames held at the frame's edge and the frames
+with a motion-vector offset (zeros when the head never moved, absent
+when the key is 0). Self-test bit 32: the base offset's rounding and
+clamping, and the direction from a hand case (MV +10 px, N 6: +60).
+**Failure signatures for the flight:** a doubled or smeared image
+INSIDE the rectangle during turns = the offset's sign or scale (the
+picture, not the log); "feature is created" lines during turns = the
+extents changed (rounding); the seam jumping = the smoothing; a soft
+strip at the TRAILING edge as the rectangle slides back = the own
+history's raw refresh under the skip (known; a watch item). **What
+would show if it never ran:** the lead line absent with the key set,
+or peak 0 while the head moved.
+
+### 2026-09-17: the head lead built, reviewed, installed (v0.17.0-rc.3-93-g17fc607)
+
+**ec76291 (opus), reviewed line by line, then 9af4349 for the two
+review changes.** As designed, with these particulars worth knowing:
+- The crop's motion-vector texture has three other readers (the steady
+  periphery's reduction, its DLAA at 1:1, the UI resolve), so the
+  offset goes into a second texture, ML at u7 (R16G16_FLOAT, render
+  size, about 23 MB per eye at 2646x2206), written by the same motion
+  dispatch as `written + lead.xy`, bound only on the fovea prep's
+  dispatch, and handed to the crop evaluate in dlMv's place. dlMv is
+  untouched. Made only while the key is on; released when it goes off.
+- The cbuffer grew one row (`lead`, after `skip`; 416 rows both sides);
+  the rigs size the buffer from the declaration and stayed green.
+- The base moves only when the previous applied base is known at the
+  same crop size and the offset texture existed on that frame; so the
+  first engaged frame holds still, and NGX is never told a slide it
+  did not get. The delta is base_now - base_prev from the APPLIED
+  bases, so clamping and smoothing cannot mis-register anything.
+- Nothing caches the base: compose parameters, the skip rectangle and
+  the calming centre are recomputed per frame, and evaluateCrop keys
+  the NGX feature on sizes and the preset only, never on the bases.
+- Review change 1: the centre's motion is taken with the rows the
+  motion shader itself uses for a far centre pixel this frame (the
+  camera's rows, head and ship together, when the world path is on;
+  the head's otherwise; the scanner-screen term stands in by the
+  frame-wide flag), so a ship turn leads too. A mid-turn stand-down of
+  the world path steps the target; the one-pole absorbs it.
+- Review change 2: the per-window lead line prints only for a window
+  the crop ran in; a still head then prints zeros, full-frame prints
+  nothing.
+- Self-test bit 32 (ten assertions, smoke expects 63) covers the base
+  offset's rounding and clamps, the direction from a hand case, and the
+  centre-motion mirror with explicit 2 degree yaw and pitch rows.
+
+**Merged origin/main (14ec395) as 17fc607; build green (contract 247
+keys), smoke passed; INSTALLED to FRONTIER 13:04 (dry run, install,
+verify-only) as v0.17.0-rc.3-93-g17fc607 = origin/main.** The Frontier
+ini gets `temporal_aa_fovea_lead = 6` under `temporal_aa_fovea_edge`
+(which Sean has back at 6), by the Edit tool with a snapshot and a
+diff. The rest of his ini stands as he left it: temporal_aa_fovea = 0
+(OFF) and outer 7 since the 12:51 flight, which was another session's
+build (v0.17.0-rc.3-88-g0721523-dirty, not this workstream); the lead
+flight needs edges and a real trim set put back first.
+
+**Flight brief, the lead.** Read with `--expect-build 17fc607`. Fly a
+rectangle small enough to see the seam (15/20/7 or 20/25/7), edges on,
+lead 6; turn the head left and right at several speeds, pitch up and
+down, then a ship turn with the head still; then flip the lead to 0
+live and repeat. Look for: the fresh strip further out during turns
+(the effect), a doubled or smeared image inside the rectangle during
+turns (sign or scale, stop and report), a jumping seam (smoothing), a
+soft strip at the trailing edge as the rectangle slides back (the own
+history's raw refresh, known). In the log: the "head lead is on" note,
+ENGAGED with "head lead 6 frames", the per-window lead line with peak
+degrees and "motion vectors offset on N frames" (N > 0 while turning),
+no "feature is created" lines during turns.
+
+### 2026-09-17 13:15: first lead flight -- "the centre shimmers" -- diagnosed offline
+
+**The flight.** Log edvr_gfx_20260917_131324 (v0.17.0-rc.3-93-g17fc607,
+the right build). Main-menu hangar, head yawing. Fovea edges 5/5/20/7 then
+10/10/20/7 and 10/10/10/7 (79 -> 67 -> 77%), periphery NVIDIA's on a 25%
+copy, lead 6. The lead engaged as built: peaks 5.9/6.9 deg (108/126 px),
+"motion vectors offset on 96-252 frames" per window, no feature
+re-creation during turns, one eye's rectangle at its nasal edge so each
+yaw direction moves one eye and holds the other ("held at the frame's
+edge" in the hundreds). Sean: "the center of my field of view shimmers
+noticeably"; eye run 131504 taken while yawing (16 treated crops of the
+centre at 2155x2154, 16 raw, the motion trace).
+
+**What the run shows** (tools/eye_run_shimmer.py, eye_run_fit.py and two
+scratch scripts): the treated centre is steady by that tool's scale
+(2-5% change per frame, 3-6% std) EXCEPT two frames, 9->10 and 14->15,
+where the whole picture jumped VERTICALLY by 0.91 and 1.07 px and stayed
+there in between (hub residual after alignment -0.91 then +1.07; the
+region under the hull p99 27 levels against 7 on other pairs; horizontal
+edges only). The X motion against the head's own (from the trace's head
+rows) shows +-1 px hiccups on other frames. The head moved ~27 output px
+over the run, the raw crops move with it (17 render px), nothing stalled.
+
+**Ruled out: NGX mis-registration, because** the slide's sign matches
+upstream's derivation exactly ("previousLocal = currentLocal +
+sceneMotion + currentOrigin - previousOrigin", crop_motion.hpp:13-14), and
+a history error decays over frames where this jump held for five and
+reversed cleanly. **Ruled out: the game or the tracker stalling, because**
+the raw run advances 17 render px like the treated one.
+
+**Found: the output base's rounding.** `scaleTo(v) = (v * to / from) &
+~1` -- floor, then even. A 2 px render step moves the crop's content
+3.078 output px (4072/2646) but the output base (NGX's output subrect,
+the compose's fc[0..3]) by 2 or 4, so the composed crop lands 0.92 or
+1.08 px off its previous place at every step, alternating: for fcx 544,
+542, 540, 538 the error is -1.18, -0.10, -1.02, -1.94. The Y flip 176 <->
+178/174 predicts 1.08 / 0.92 px -- the measured 1.07 and 0.91. Before the
+lead the base never moved, so the constant error was invisible (a 1 px
+offset against a blurred periphery). With it, every base move jitters the
+whole rectangle's picture by a pixel, at up to 90 Hz during a turn, in
+the fovea only: "the centre shimmers".
+
+**Fix (spec in the journal's next entry when built): slide only by a
+commensurate quantum.** The smallest even render step whose output step
+is an even whole number within 0.1 px: 26 render px = 40 output px here
+(about 1 deg; 2/2 at 1:1, 4/6 at NGX's own 1.5, 2/4 at 2.0), the output
+base = scaleTo(unshifted) + k x 40, so the placement error is constant to
+0.05 px over the lead's range; k rounded with a 0.2-quantum hysteresis
+and clamped in BOTH spaces so the extents never change. The eye trace
+gains the bases and the placement error per frame so the next run proves
+it constant. The cost: the band steps in 1 deg jumps in the periphery
+instead of gliding; the flight judges that.
+
+### 2026-09-17: the quantum build (2101149) reviewed; PAUSED on the branch
+
+**Built (opus) as specified.** `foveaLeadQuantum(from, to)`: the smallest
+even render step in 2..64 whose scaled length is within 0.1 px of an even
+output step, cached on the sizes: 26 -> 40 at 2646->4072 and at
+2206->3394, 4 -> 6 at 2715->4072, 2 -> 2 at 1:1, 2 -> 4 at 2x, all exact.
+`foveaLeadPlace`: both bases moved together by k quanta, a 0.2-quantum
+hysteresis, clamped in BOTH frames (`foveaLeadBase` removed). The block
+takes the unshifted output crop first and the lead moves the pair; the
+extents never move. The once-per-load note names the step ("slides in
+steps of 26 render px (40 output px, about 1.4 deg)"). The eye trace
+gains foveaInX/Y, foveaOutX/Y, leadDX/DY (the offset from the unshifted
+base, render px), leadKX/KY and placeErrX/Y, filled on every frame the
+crop runs. Self-test bit 32 grew to 19 assertions, among them placeErr
+steady across three steps (0.0018 px drift). Build green (247 keys),
+smoke 63. Lead off is bit-identical: the scaleTo calls moved earlier with
+nothing between them and the old site.
+
+**Review (main session): nothing blocking.** Checked the lead-off path;
+that k resets to 0 on a non-live frame, so the first live frame may apply
+the whole smoothed lead in one step (as before); that the clamp window
+always contains 0; that the trace fill matches the last record's frame
+and eye; the degrees in the note from the eye's own tangents. Nits left:
+smoke.cpp's ok text still names only the old three lead properties; the
+commit trailer reads "Claude Opus 5 (1M context)".
+
+**PAUSED by Sean ("Let's pause on this work after the agent
+finishes").** 2101149 stays on the branch (pushed as the branch), NOT
+merged, NOT on main, NOT installed. Frontier still runs 17fc607, whose
+lead jitters the crop 1 px per slide; his ini has lead 6 -- lead 0 avoids
+the jitter until the fix is in. Main has moved meanwhile (a17c793, the
+terrain history work in temporal_pass.cpp), so the resume merge touches
+the same file. **To resume:** fetch, merge origin/main into the branch,
+build, smoke, install to Frontier (dry run, install, verify-only), push
+HEAD:main; then the hangar yaw with lead 6 against 0 flipped live, a
+dump: placeErrX/Y constant, the band's 1.4 deg steps judged in the
+periphery; then the leading-edge verdict.
+

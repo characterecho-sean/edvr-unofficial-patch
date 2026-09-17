@@ -226,6 +226,11 @@ struct Shared {
     // openvr -> d3d11, gaze's packing (presence bit, two biased fields): see
     // announceRuntimeMaskTriangles in frame_flag.h.
     volatile LONG     runtimeMaskTri;
+    // introRecentre  d3d11 -> openvr, requestIntroRecentre's one-shot ask:
+    //                nonzero means "recentre the seated origin to the
+    //                current head pose", taken (cleared) by the vr half's
+    //                own poll. See frame_flag.h.
+    volatile LONG     introRecentre;
 };
 
 // Per PROCESS, not per logon session.
@@ -242,6 +247,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v33 because the intro panel's recentre request joined (introRecentre),
+// for the seated-origin fix in docs/intro-video.md, 2026-09-17.
 // _v32 because runtimeKind left the layout -- its only writer was the
 // legacy openvr proxy's launch_centre.cpp, deleted with that proxy, and
 // nothing native replaced it.
@@ -301,7 +308,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v32_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v33_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -877,6 +884,22 @@ bool takeSubmitHoldFrame() {
     if (n <= 0) return false;
     InterlockedDecrement(&s->holdFrames);
     return true;
+}
+
+void requestIntroRecentre() {
+    Shared* s = map();
+    if (!s) return;
+    InterlockedExchange(&s->introRecentre, 1);
+}
+
+bool introRecentreRequested() {
+    Shared* s = map();
+    return s && InterlockedCompareExchange(&s->introRecentre, 0, 0) != 0;
+}
+
+void clearIntroRecentreRequest() {
+    Shared* s = map();
+    if (s) InterlockedExchange(&s->introRecentre, 0);
 }
 
 bool externalCameraEverPublished() {

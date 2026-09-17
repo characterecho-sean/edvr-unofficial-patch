@@ -711,6 +711,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed||!seated.space()||!changes.active())
       return vr::VRCompositorError_InvalidTexture;
+    // No frame of ours is open yet at this point in WaitGetPoses, which is
+    // exactly what applyIntroRecentre requires. Cleared only on success, so
+    // a poll that cannot act this frame (a frame happens to be open, or the
+    // reset-event queue has no room) sees the request again next frame.
+    // Returning here rather than falling through: the reset just bumped the
+    // generation the rest of this function would otherwise read, the same
+    // reason centreAtStartup's own caller restarts its loop instead of
+    // continuing past one. Sacrificing this one frame's pose update is the
+    // same outcome every other early return below already takes.
+    if(introRecentreRequested()) {
+      if(applyIntroRecentre())clearIntroRecentreRequest();
+      return vr::VRCompositorError_InvalidTexture;
+    }
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
     timingApplicationSequence.store(timingSequence,std::memory_order_release);
@@ -1474,6 +1487,24 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       lastResetResult=XR_ERROR_LIMIT_REACHED;return false;
     }
     ++recenters;return true;
+  }
+  // intro_panel.cpp's one-shot ask (frame_flag.h, requestIntroRecentre):
+  // recentre the seated origin to the CURRENT head pose the moment the
+  // player can first see the launch movie or the splash after it, instead
+  // of leaving "the game's forward" wherever centreAtStartup's own
+  // one-shot centre put it from whatever the head was doing near the
+  // very first tracked pose, long before either is visible
+  // (docs/intro-video.md, 2026-09-17). Called between frames only, same
+  // as centreAtStartup; the caller clears the request only when this
+  // returns true, so a poll that cannot act right now (a frame happens
+  // to be open, or the reset-event queue has no room) sees the request
+  // again next frame rather than losing it.
+  bool applyIntroRecentre() {
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen()||!seated.space()||!changes.active())return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow);
+    if(lastResetResult!=XR_SUCCESS)return false;
+    return applySeatedReset(head,"intro_recentre",true);
   }
   bool centreAtStartup(bool& refresh) {
     refresh=false;

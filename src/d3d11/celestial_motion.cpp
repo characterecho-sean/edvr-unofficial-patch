@@ -22,11 +22,14 @@ constexpr unsigned kRecordBytes = 17 * 16;
 // A missing/ambiguous key (including a LOD change) declines for that frame.
 constexpr char kBuildHlsl[] = R"HLSL(
 struct Record { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
-cbuffer Model : register(b0) { float4 model[13]; }
-cbuffer Scene : register(b1) { float4 scene[280]; }
-cbuffer Terrain : register(b2) { float4 patch[18]; }
-cbuffer Draw : register(b3) { uint4 info; uint4 texKey[2]; }
+// Per-draw snapshot, 26 float4's per record. In is a typed Buffer, not a
+// StructuredBuffer (see createRecords for why), so there is no struct to
+// declare here -- just the layout: model = In[index*26+0 .. +7] (8),
+// scene = In[index*26+8 .. +11] (4), patch = In[index*26+12 .. +25] (14).
+cbuffer Batch : register(b0) { uint4 batch; }
 StructuredBuffer<Record> Previous : register(t0);
+Buffer<float4> In : register(t1);
+Buffer<uint4> Keys : register(t2);
 RWStructuredBuffer<Record> Current : register(u0);
 float3 rotate(float4 q, float3 v) { return v + 2 * cross(q.xyz, cross(q.xyz,v) + q.w*v); }
 float4 multiply(float4 a, float4 b) {
@@ -37,26 +40,27 @@ float4 multiply(float4 a, float4 b) {
 // Search independent predecessors in parallel, retaining exact full keys
 // and the unique-match rule (including duplicates in different lanes).
 groupshared uint matchCounts[64],matchIndices[64];
-[numthreads(64,1,1)] void main(uint lane : SV_GroupIndex) {
+[numthreads(64,1,1)] void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex) {
+    const uint index = batch.x + gid.x; const uint base = index*26;
     Record n = (Record)0;
-    n.key[0] = asuint(patch[0]);
-    [unroll] for (uint k=0;k<5;++k) n.key[k+1] = asuint(patch[k+3]);
-    [unroll] for (uint k=0;k<4;++k) n.key[k+6] = asuint(patch[k+10]);
-    n.key[10] = texKey[0]; n.key[11] = texKey[1];
-    n.q = normalize(patch[8]); n.t = float4(patch[1].xyz,0);
+    n.key[0] = asuint(In[base+12]);
+    [unroll] for (uint k=0;k<5;++k) n.key[k+1] = asuint(In[base+15+k]);
+    [unroll] for (uint k=0;k<4;++k) n.key[k+6] = asuint(In[base+22+k]);
+    n.key[10] = Keys[index*2]; n.key[11] = Keys[index*2+1];
+    n.q = normalize(In[base+20]); n.t = float4(In[base+13].xyz,0);
     // Confirm this shader's local-to-clip chain still reduces to view-space
     // perspective: scene[270..273] * model[9..11] == model[4..7].
     bool valid = all(isfinite(n.q)) && all(isfinite(n.t)) &&
-        abs(dot(patch[8],patch[8])-1) < 0.002 && model[6].w > 0 &&
-        abs(model[7].z-1) < 0.0001 && abs(model[6].z) < 0.0001;
+        abs(dot(In[base+20],In[base+20])-1) < 0.002 && In[base+2].w > 0 &&
+        abs(In[base+3].z-1) < 0.0001 && abs(In[base+2].z) < 0.0001;
     [unroll] for (uint c=0;c<4;++c) {
-        float4 col = scene[270]*model[9][c] + scene[271]*model[10][c] +
-                     scene[272]*model[11][c] + (c==3 ? scene[273] : 0);
-        float4 expected = float4(model[4][c],model[5][c],model[6][c],model[7][c]);
+        float4 col = In[base+8]*In[base+5][c] + In[base+9]*In[base+6][c] +
+                     In[base+10]*In[base+7][c] + (c==3 ? In[base+11] : 0);
+        float4 expected = float4(In[base+0][c],In[base+1][c],In[base+2][c],In[base+3][c]);
         valid = valid && all(abs(col-expected) < 0.0002);
     }
     uint found=0, match=0;
-    [loop] for (uint i=lane;i<info.y;i+=64) {
+    [loop] for (uint i=lane;i<batch.y;i+=64) {
         bool same=true;
         [unroll] for (uint k=0;k<12;++k) same = same && all(n.key[k]==Previous[i].key[k]);
         if (same) { ++found; match=i; }
@@ -84,7 +88,7 @@ groupshared uint matchCounts[64],matchIndices[64];
     }
     // Invalid current geometry must not become a valid predecessor.
     if (!valid) n.q=0;
-    Current[info.x]=n;
+    Current[index]=n;
 }
 )HLSL";
 constexpr char kIndexHlsl[] = R"HLSL(
@@ -101,7 +105,14 @@ struct Records {
     ComPtr<ID3D11ShaderResourceView> srv;
     ComPtr<ID3D11UnorderedAccessView> uav;
     ComPtr<ID3D11ShaderResourceView> sources[kRecords][4];
-    unsigned count=0;
+    // Per-draw snapshot of the live VS constants (416 B/record) and the
+    // four SRV pointer keys, consumed by flush()'s batched build dispatch.
+    ComPtr<ID3D11Buffer> inputs;
+    ComPtr<ID3D11ShaderResourceView> inputsSrv;
+    ComPtr<ID3D11Buffer> keys;
+    ComPtr<ID3D11ShaderResourceView> keysSrv;
+    UINT keyData[kRecords][8];
+    unsigned count=0, built=0;
 };
 struct Eye {
     ComPtr<ID3D11Texture2D> scene, index, depth;
@@ -120,17 +131,21 @@ bool g_enabled=false, g_failed=false, g_noted=false, g_capNoted=false;
 ComPtr<ID3D11ComputeShader> g_build;
 ComPtr<ID3D11PixelShader> g_index, g_indexOriginal;
 ComPtr<ID3D11Buffer> g_draw;
+ComPtr<ID3D11Buffer> g_batch;
 ComPtr<ID3D11BlendState> g_blend;
 ComPtr<ID3D11DepthStencilState> g_depth;
 ComPtr<ID3D11Buffer> g_dump;
 unsigned g_dumpCount=0;
 GpuIntervals<16> g_gpu;
 unsigned g_costFrames=0,g_costDraws=0,g_originalDraws=0;
+GpuIntervals<16> g_buildGpu;
+unsigned g_buildBatches=0;
 void reportCost() {
-    const auto& t=g_gpu.totals;
-    if(g_costDraws || t.samples || t.invalid || t.skipped)
-        Log::get().note("terrain motion GPU: %u patches (%u original draws, %u reissues) in %u frames; completed=%u skipped=%u invalid=%u, %.3f us/patch bracket (includes game's terrain draw for original capture; every 64th draw; no wait/flush; separate from EDVR-at-door GPU).",
-            g_costDraws,g_originalDraws,g_costDraws-g_originalDraws,g_costFrames,t.samples,t.skipped,t.invalid,t.samples?t.ms*1000/t.samples:0.0);
+    const auto& t=g_gpu.totals; const auto& b=g_buildGpu.totals;
+    if(g_costDraws || t.samples || t.invalid || t.skipped || g_buildBatches || b.samples || b.invalid || b.skipped)
+        Log::get().note("terrain motion GPU: %u patches (%u original draws, %u reissues) in %u frames; completed=%u skipped=%u invalid=%u, %.3f us/patch bracket (copies, the coverage draw and restore; no dispatch; every 64th draw; no wait/flush; separate from EDVR-at-door GPU). Batched build: %u batches, %.3f us/eye (%u samples, %u skipped).",
+            g_costDraws,g_originalDraws,g_costDraws-g_originalDraws,g_costFrames,t.samples,t.skipped,t.invalid,t.samples?t.ms*1000/t.samples:0.0,
+            g_buildBatches,b.samples?b.ms*1000/b.samples:0.0,b.samples,b.skipped);
 }
 struct Saved {
     ID3D11RenderTargetView* rt[8]{};
@@ -150,9 +165,29 @@ bool createRecords(ID3D11Device* dev, Records& r) {
     bd.ByteWidth=kRecords*kRecordBytes; bd.StructureByteStride=kRecordBytes;
     bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     bd.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
-    return SUCCEEDED(dev->CreateBuffer(&bd,nullptr,&r.buffer)) &&
-        SUCCEEDED(dev->CreateShaderResourceView(r.buffer.Get(),nullptr,&r.srv)) &&
-        SUCCEEDED(dev->CreateUnorderedAccessView(r.buffer.Get(),nullptr,&r.uav));
+    if (!SUCCEEDED(dev->CreateBuffer(&bd,nullptr,&r.buffer)) ||
+        !SUCCEEDED(dev->CreateShaderResourceView(r.buffer.Get(),nullptr,&r.srv)) ||
+        !SUCCEEDED(dev->CreateUnorderedAccessView(r.buffer.Get(),nullptr,&r.uav))) return false;
+    // Draw-time snapshot the batched build reads instead of the game's
+    // now-overwritten live constants. A boxed CopySubresourceRegion into a
+    // MISC_BUFFER_STRUCTURED destination silently drops its data under
+    // WARP (no debug-layer message either); a plain buffer with an
+    // explicit typed SRV is the shape a boxed GPU-to-GPU copy actually
+    // lands in, confirmed against a plain-buffer A/B.
+    D3D11_BUFFER_DESC id{};
+    id.ByteWidth=kRecords*416; id.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    if (!SUCCEEDED(dev->CreateBuffer(&id,nullptr,&r.inputs))) return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC isd{};
+    isd.Format=DXGI_FORMAT_R32G32B32A32_FLOAT; isd.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;
+    isd.Buffer.FirstElement=0; isd.Buffer.NumElements=kRecords*26;
+    if (!SUCCEEDED(dev->CreateShaderResourceView(r.inputs.Get(),&isd,&r.inputsSrv))) return false;
+    D3D11_BUFFER_DESC kd{};
+    kd.ByteWidth=kRecords*2*16; kd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    if (!SUCCEEDED(dev->CreateBuffer(&kd,nullptr,&r.keys))) return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC ksd{};
+    ksd.Format=DXGI_FORMAT_R32G32B32A32_UINT; ksd.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;
+    ksd.Buffer.FirstElement=0; ksd.Buffer.NumElements=kRecords*2;
+    return SUCCEEDED(dev->CreateShaderResourceView(r.keys.Get(),&ksd,&r.keysSrv));
 }
 bool createEye(ID3D11Device* dev, ID3D11Texture2D* scene, Eye& e) {
     D3D11_TEXTURE2D_DESC src{}; scene->GetDesc(&src);
@@ -178,15 +213,17 @@ bool createPrivateDepth(ID3D11Device* dev,Eye& e) {
         SUCCEEDED(dev->CreateShaderResourceView(e.depth.Get(),&sd,&e.depthSrv));
 }
 bool ensure(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
-    if (g_build && g_index && g_indexOriginal && g_draw && g_blend && g_depth) return true;
+    if (g_build && g_index && g_indexOriginal && g_draw && g_batch && g_blend && g_depth) return true;
     g_build.Attach(shaderSwapCompileCs(ctx,kBuildHlsl,sizeof(kBuildHlsl)-1,"main","terrain motion",nullptr,"terrain motion"));
     g_index.Attach(shaderSwapCompilePs(ctx,kIndexHlsl,sizeof(kIndexHlsl)-1,"main","terrain coverage",nullptr,"terrain motion"));
     g_indexOriginal.Attach(shaderSwapCompilePs(ctx,kIndexHlsl,sizeof(kIndexHlsl)-1,"original","terrain original coverage",nullptr,"terrain motion"));
     D3D11_BUFFER_DESC bd{}; bd.ByteWidth=48; bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_BUFFER_DESC bbd{}; bbd.ByteWidth=16; bbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     D3D11_BLEND_DESC blend{}; blend.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;
     D3D11_DEPTH_STENCIL_DESC depth{}; depth.DepthEnable=TRUE;
     depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL; depth.DepthFunc=D3D11_COMPARISON_GREATER_EQUAL;
     return g_build && g_index && g_indexOriginal && SUCCEEDED(dev->CreateBuffer(&bd,nullptr,&g_draw)) &&
+        SUCCEEDED(dev->CreateBuffer(&bbd,nullptr,&g_batch)) &&
         SUCCEEDED(dev->CreateBlendState(&blend,&g_blend)) && SUCCEEDED(dev->CreateDepthStencilState(&depth,&g_depth));
 }
 void fail() {
@@ -257,30 +294,30 @@ static bool begin(ID3D11DeviceContext* ctx, uint64_t vs, bool original) {
     if((++g_costDraws&63u)==0)g_saved.timed=g_gpu.begin(ctx);
     if(original)++g_originalDraws;
     ID3D11ShaderResourceView* sources[4]{}; ctx->VSGetShaderResources(0,4,sources);
-    UINT data[12]={now.count,prev.count,0,0};
+    const unsigned rec=now.count;
+    UINT data[12]={rec,prev.count,0,0};
+    ctx->UpdateSubresource(g_draw.Get(),0,nullptr,data,0,0);
     for (int i=0;i<4;++i) {
         const auto key=reinterpret_cast<uint64_t>(sources[i]);
-        data[4+i*2]=static_cast<UINT>(key); data[5+i*2]=static_cast<UINT>(key>>32);
-        now.sources[now.count][i].Attach(sources[i]);
+        now.keyData[rec][i*2]=static_cast<UINT>(key); now.keyData[rec][i*2+1]=static_cast<UINT>(key>>32);
+        now.sources[rec][i].Attach(sources[i]);
     }
-    ctx->UpdateSubresource(g_draw.Get(),0,nullptr,data,0,0);
-    // Preserve every touched compute binding, including dynamic linkage.
-    ComPtr<ID3D11ComputeShader> cs; ID3D11ClassInstance* classes[256]{}; UINT nc=256;
-    ID3D11Buffer* savedCb[4]{}; ComPtr<ID3D11ShaderResourceView> srv;
-    ComPtr<ID3D11UnorderedAccessView> uav;
-    ctx->CSGetShader(&cs,classes,&nc); ctx->CSGetConstantBuffers(0,4,savedCb);
-    ctx->CSGetShaderResources(0,1,&srv); ctx->CSGetUnorderedAccessViews(0,1,&uav);
-    ID3D11Buffer* buildCb[4]={cb[0],cb[1],cb[2],g_draw.Get()};
-    ctx->CSSetShader(g_build.Get(),nullptr,0); ctx->CSSetConstantBuffers(0,4,buildCb);
-    ctx->CSSetShaderResources(0,1,prev.srv.GetAddressOf());
-    ctx->CSSetUnorderedAccessViews(0,1,now.uav.GetAddressOf(),nullptr);
-    ctx->Dispatch(1,1,1);
-    ID3D11UnorderedAccessView* nullUav=nullptr; ID3D11ShaderResourceView* nullSrv=nullptr;
-    ctx->CSSetUnorderedAccessViews(0,1,&nullUav,nullptr); ctx->CSSetShaderResources(0,1,&nullSrv);
-    ctx->CSSetShaderResources(0,1,srv.GetAddressOf()); ctx->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);
-    ctx->CSSetConstantBuffers(0,4,savedCb); ctx->CSSetShader(cs.Get(),classes,nc);
-    for (UINT i=0;i<nc;++i) classes[i]->Release();
-    for (auto* b:savedCb) if (b) b->Release();
+    // The game rewrites b0/b2 every patch; a deferred build cannot read
+    // them live, so copy the draw-time bytes now. Previous state must
+    // remain the draw-time state on the GPU, not its end-of-frame
+    // contents (asserted by the regression rig).
+    {
+        const D3D11_BOX box{64,0,0,192,1,1};
+        ctx->CopySubresourceRegion(now.inputs.Get(),0,rec*416u,0,0,cb[0],0,&box);
+    }
+    {
+        const D3D11_BOX box{4320,0,0,4384,1,1};
+        ctx->CopySubresourceRegion(now.inputs.Get(),0,rec*416u+128,0,0,cb[1],0,&box);
+    }
+    {
+        const D3D11_BOX box{0,0,0,224,1,1};
+        ctx->CopySubresourceRegion(now.inputs.Get(),0,rec*416u+192,0,0,cb[2],0,&box);
+    }
     for (auto* b:cb) b->Release();
     ++now.count;
     if (!e.cleared) {
@@ -326,35 +363,74 @@ void celestialMotionEnd(ID3D11DeviceContext* ctx) {
     if(g_saved.timed)g_gpu.end(ctx);
     g_saved=Saved{};
 }
+// Batch the still-pending [built,count) records of one eye into a single
+// dispatch, the same shape as mesh_motion's flushCapture: the per-draw
+// hook only ever snapshots and swaps render targets, and the actual GPU
+// work happens once, here, on demand.
+static void flush(ID3D11DeviceContext* ctx, Eye& e) {
+    Records& now=e.records[e.write]; Records& prev=e.records[1-e.write];
+    if (now.count<=now.built) return;
+    const unsigned built=now.built, count=now.count;
+    // Preserve every touched compute binding, including dynamic linkage.
+    ComPtr<ID3D11ComputeShader> cs; ID3D11ClassInstance* classes[256]{}; UINT nc=256;
+    ComPtr<ID3D11Buffer> savedCb; ID3D11ShaderResourceView* savedSrv[3]{};
+    ComPtr<ID3D11UnorderedAccessView> savedUav;
+    ctx->CSGetShader(&cs,classes,&nc); ctx->CSGetConstantBuffers(0,1,&savedCb);
+    ctx->CSGetShaderResources(0,3,savedSrv); ctx->CSGetUnorderedAccessViews(0,1,&savedUav);
+    const bool timed=g_buildGpu.begin(ctx);
+    const D3D11_BOX keyBox{built*32u,0,0,count*32u,1,1};
+    ctx->UpdateSubresource(now.keys.Get(),0,&keyBox,&now.keyData[built][0],0,0);
+    UINT batchData[4]={built,prev.count,0,0};
+    ctx->UpdateSubresource(g_batch.Get(),0,nullptr,batchData,0,0);
+    ctx->CSSetShader(g_build.Get(),nullptr,0); ctx->CSSetConstantBuffers(0,1,g_batch.GetAddressOf());
+    ID3D11ShaderResourceView* srvs[3]={prev.srv.Get(),now.inputsSrv.Get(),now.keysSrv.Get()};
+    ctx->CSSetShaderResources(0,3,srvs);
+    ctx->CSSetUnorderedAccessViews(0,1,now.uav.GetAddressOf(),nullptr);
+    ctx->Dispatch(count-built,1,1);
+    ++g_buildBatches;
+    if(timed)g_buildGpu.end(ctx);
+    ID3D11UnorderedAccessView* nullUav=nullptr; ID3D11ShaderResourceView* nullSrvs[3]{};
+    ctx->CSSetUnorderedAccessViews(0,1,&nullUav,nullptr); ctx->CSSetShaderResources(0,3,nullSrvs);
+    ctx->CSSetShaderResources(0,3,savedSrv); ctx->CSSetUnorderedAccessViews(0,1,savedUav.GetAddressOf(),nullptr);
+    ctx->CSSetConstantBuffers(0,1,savedCb.GetAddressOf()); ctx->CSSetShader(cs.Get(),classes,nc);
+    for (UINT i=0;i<nc;++i) classes[i]->Release();
+    for (auto* s:savedSrv) if (s) s->Release();
+    now.built=count;
+}
 void celestialMotionFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_enabled) return;
-    if(ctx)g_gpu.poll(ctx);
+    // Build any eye the temporal pass never consumed this frame, so next
+    // frame's "previous" table is complete before write swaps under it.
+    if(ctx) { g_gpu.poll(ctx); g_buildGpu.poll(ctx); for (auto& e:g_eyes) flush(ctx,e); }
     if(++g_costFrames%1800==0)reportCost();
     for (auto& e:g_eyes) {
         e.write=1-e.write; Records& next=e.records[e.write];
         for (unsigned i=0;i<next.count;++i) for (auto& view:next.sources[i]) view.Reset();
-        next.count=0; e.cleared=false;
+        next.count=0; next.built=0; e.cleared=false;
     }
 }
-void celestialMotionViews(ID3D11Texture2D* scene, ID3D11ShaderResourceView** views) {
+void celestialMotionViews(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views) {
     views[0]=views[1]=views[2]=nullptr;
     if (!g_enabled || g_failed || !scene) return;
     for (auto& e:g_eyes) if (e.scene.Get()==scene && e.cleared && e.records[e.write].count) {
+        if (ctx) flush(ctx,e);
         views[0]=e.indexSrv.Get(); views[1]=e.original?e.originalDepthSrv.Get():e.depthSrv.Get(); views[2]=e.records[e.write].srv.Get();
         return;
     }
 }
 void celestialMotionShutdown() {
     for (auto& e:g_eyes) e=Eye{};
-    g_build.Reset(); g_index.Reset(); g_indexOriginal.Reset(); g_draw.Reset(); g_blend.Reset(); g_depth.Reset();
+    g_build.Reset(); g_index.Reset(); g_indexOriginal.Reset(); g_draw.Reset(); g_batch.Reset(); g_blend.Reset(); g_depth.Reset();
     g_dump.Reset(); g_dumpCount=0;
     g_gpu.reset();g_costFrames=g_costDraws=g_originalDraws=0;
+    g_buildGpu.reset();g_buildBatches=0;
     g_failed=g_noted=g_capNoted=false;
 }
 void celestialMotionStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
     g_dump.Reset(); g_dumpCount=0;
     if (!g_enabled || g_failed) return;
     for (auto& e:g_eyes) if (e.scene.Get()==scene && e.cleared) {
+        flush(ctx,e);
         const auto& r=e.records[e.write];
         if (!r.count) return;
         D3D11_BUFFER_DESC bd{}; bd.ByteWidth=kRecords*kRecordBytes;

@@ -42,6 +42,7 @@ Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
+RWTexture2D<float2> ML : register(u7);   // the fovea crop's own copy of MV, plus lead.xy (the head lead): bound ONLY on the fovea prep's dispatch, and read only by NVIDIA's crop
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -103,6 +104,7 @@ cbuffer P : register(b0) {
     float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; empty when a corner is behind the eye), for the claim's counters
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
     float4 skip;        // the fovea's own-resolve early-out: x0 y0 x1 y1 in THIS render, all zero = no skip
+    float4 lead;        // xy: how far the fovea crop's base slid THIS frame (render pixels, base_now - base_prev), added to the vectors written to ML for NVIDIA's crop alone; zero on every other dispatch. zw unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -484,12 +486,29 @@ bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
     pp=(before.xy/before.z*float2(.5,-.5)+.5)*r.meta.yz-.5-region.xy+holoJitter.xy-offset;
     zp=before.z;return all(isfinite(pp));
 }
+// The mv pass's tile of this frame's scene depth: the group's 8x8 with a
+// two-texel apron, filled at the top of mv() and read by the pixel's own
+// dilation and by backgroundHistoryHidden's footprint below.
+groupshared float mvDepthTile[144];
+// This frame's nearest depth about the pixel, over the previous footprint's
+// image in this raster: the 3x3 widened by one texel per axis toward the
+// side the rounding of pp moved it (e = round(pp) - pp, in [-0.5, 0.5]).
+// The eye run of 2026-09-17 11:48 measured the directed 4x4 against the
+// 5x5 on a still scene: 0.0003% against 0.0002% of the eye left marked,
+// where the plain 3x3 left 0.35%, all of it the rounding.
+float nearestDepthNow(int2 local,float2 e) {
+    int x0=local.x+(e.x<0?0:1),y0=local.y+(e.y<0?0:1); // tile offsets: -2 or -1 from the pixel
+    float nearest=0;
+    [unroll]for(int y=0;y<4;++y) [unroll]for(int x=0;x<4;++x)
+        nearest=max(nearest,mvDepthTile[(y0+y)*12+x0+x]-knobs.x);
+    return nearest;
+}
 // A background vector can land on last frame's moving hull. Modern DLSS
 // presets ignore the reactive mask and otherwise carry that bright edge
 // into the sky on each roll. Reject this hidden history explicitly. The
 // three-pixel footprint includes filtered colour at a silhouette; the
 // relative depth margin keeps ordinary surface rounding out of the test.
-bool backgroundHistoryHidden(float2 p,float2 motion,float zraw,float zPred) {
+bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float zPred) {
     if(holoJitter.w==0 || holoJitter.z==0) return false;
     float2 pp=p+motion-holoJitter.xy; // ZP uses last frame's raw raster
     if(!all(isfinite(pp)) || any(pp<0) || any(pp>float2(size)-1)) return false;
@@ -497,6 +516,17 @@ bool backgroundHistoryHidden(float2 p,float2 motion,float zraw,float zPred) {
     float nearest=0;
     [unroll]for(int y=-1;y<=1;++y) [unroll]for(int x=-1;x<=1;++x)
         nearest=max(nearest,ZP.Load(int3(clamp(q+int2(x,y),int2(0,0),size-1),0))-knobs.x);
+    // A nearer surface still beside the pixel NOW -- a rock beside the
+    // terrain, a crater rim beside the sky, the camera still -- hid
+    // nothing: the history's filtered colour at pp holds it exactly as
+    // this frame's own footprint at p does. Only an occluder that has
+    // left the neighbourhood hid this history (the hull the sky rolls
+    // past). The camera path had this by construction, reprojecting the
+    // 3x3-dilated depth; the terrain path's exact depth met the dilated
+    // footprint at every terrain edge instead, 5.3% of the terrain's
+    // pixels a frame walking with the jitter -- the shimmer of the eye
+    // run of 2026-09-17 11:48 (docs/terrain-history-shimmer-2026-09-17.md).
+    if(nearest<=nearestDepthNow(local,float2(q)-pp)*1.03) return false;
     // Use this pixel's depth validity, not the foreground depth used by
     // the camera fallback's 3x3 dilation beside the hull.
     if(zraw<=knobs.x) return nearest>0;
@@ -792,6 +822,9 @@ void paintDebug(uint2 idx, int2 sz, float3 c) {
         }
     }
 }
+)HLSL"
+// (adjacent literals: MSVC caps one at 16 KB)
+R"HLSL(
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -801,13 +834,12 @@ void paintDebug(uint2 idx, int2 sz, float3 c) {
 // it (reversed-Z, told to the runtime as such). The world/ship split is
 // the history fetch's, transcribed, and the counts feed the registration
 // line the way main's do.
-groupshared float mvDepthTile[100];
 [numthreads(8, 8, 1)]
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     int2 local = int2(gi & 7u, gi >> 3u);
     int2 origin = int2(id.xy) - local;
-    for (uint k = gi; k < 100; k += 64) {
-        int2 q = clamp(origin + int2(k % 10, k / 10) - 1, int2(0,0), size - 1);
+    for (uint k = gi; k < 144; k += 64) {
+        int2 q = clamp(origin + int2(k % 12, k / 12) - 2, int2(0,0), size - 1);
         mvDepthTile[k] = zSceneAt(region.xy + q);
     }
     GroupMemoryBarrierWithGroupSync();
@@ -829,7 +861,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
         d.z = -1.0;
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
-        float zraw = mvDepthTile[(local.y + 1) * 10 + local.x + 1];
+        float zraw = mvDepthTile[(local.y + 2) * 12 + local.x + 2];
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
         float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
@@ -839,7 +871,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
                 [unroll] for (int ox = -1; ox <= 1; ++ox) {
-                    float zs = mvDepthTile[(local.y + 1 + oy) * 10 + local.x + 1 + ox];
+                    float zs = mvDepthTile[(local.y + 2 + oy) * 12 + local.x + 2 + ox];
                     zr = max(zr, zs);
                     if (zs > 0.0) ++depthN;
                 }
@@ -990,10 +1022,20 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float ui = (kind == 3u || (uint(probe.w + 0.5) & 1u) != 0u) ? float(mark >> 2u)/63.0 : 0.0;
         float adaptive = adaptiveUiReactive(int2(id.xy), p + motion - holoJitter.xy);
         bool uiHere = kind == 1u || kind == 2u;
-        bool hidden = !trackedForeground && !uiHere && backgroundHistoryHidden(p,motion,zraw,zPred);
+        bool hidden = !trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred);
         // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
         // history lookup is invalidated, as with new source-screen pixels.
-        MV[id.xy] = hidden ? float2(size)*2 : motion;
+        float2 written = hidden ? float2(size)*2 : motion;
+        MV[id.xy] = written;
+        // The fovea's head lead: NVIDIA's crop history is CROP-LOCAL, so a
+        // crop whose base slid by lead.xy since the frame that history came
+        // from must have that slide added to every vector it reads
+        // (previous = current + mv, so crop-local previous = mv + base_now -
+        // base_prev). ML is a second texture, not this one: the periphery's
+        // reduction, its DLAA and the UI resolve all read MV whole and must
+        // see the unshifted vectors. Unbound (and lead zero) on every other
+        // dispatch, where the store is dropped.
+        ML[id.xy] = written + lead.xy;
         MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output

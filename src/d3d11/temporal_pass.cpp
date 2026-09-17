@@ -255,8 +255,9 @@ struct PassParams {
     float   shRect[kObjectShipsMax][4];    // its box's footprint on the image, pixels
     float   holoJitter[4]; // xy raster delta, z consecutive frames, w valid DLSS depth history
     float   skip[4];    // the periphery's own-resolve early-out, x0 y0 x1 y1 in RENDER pixels (this eye's w x h); all zero = no skip
+    float   lead[4];    // xy the fovea crop's base slide this frame in RENDER pixels (advanced.temporal_aa_fovea_lead), added to the vectors ML carries for NVIDIA's crop; zero on every dispatch but the fovea prep's
 };
-static_assert(sizeof(PassParams) == 6640, "the cbuffer is 415 16-byte rows");
+static_assert(sizeof(PassParams) == 6656, "the cbuffer is 416 16-byte rows");
 
 // The format allowlist -- typeless and UNORM families read and written
 // through the family's plain typed view, the source's own format kept on
@@ -334,6 +335,15 @@ struct EyeState {
     ID3D11Texture2D*           dlMv = nullptr;
     ID3D11UnorderedAccessView* dlMvUav = nullptr;
     ID3D11ShaderResourceView*  dlMvSrv = nullptr;
+    // The fovea's head lead (advanced.temporal_aa_fovea_lead): the SAME
+    // vectors plus this frame's base slide, written beside dlMv by the same
+    // dispatch (ML/u7) and handed to NVIDIA's crop in dlMv's place. A second
+    // texture because dlMv has three other readers -- the steady periphery's
+    // reduction, its DLAA at 1:1 and the UI resolve -- and none of them may
+    // see the crop's slide. Made only while the key is on, released with the
+    // rest of the dl set.
+    ID3D11Texture2D*           dlMvLead = nullptr;
+    ID3D11UnorderedAccessView* dlMvLeadUav = nullptr;
     ID3D11Texture2D*           dlDepth = nullptr;
     ID3D11UnorderedAccessView* dlDepthUav = nullptr;
     ID3D11ShaderResourceView*  dlDepthSrv = nullptr;
@@ -472,9 +482,11 @@ void releaseDl(EyeState& e) {
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
+    if (e.dlMvLeadUav) { e.dlMvLeadUav->Release(); e.dlMvLeadUav = nullptr; }
     if (e.dlDepthUav) { e.dlDepthUav->Release(); e.dlDepthUav = nullptr; }
     if (e.dlColour) { e.dlColour->Release(); e.dlColour = nullptr; }
     if (e.dlMv) { e.dlMv->Release(); e.dlMv = nullptr; }
+    if (e.dlMvLead) { e.dlMvLead->Release(); e.dlMvLead = nullptr; }
     if (e.dlDepth) { e.dlDepth->Release(); e.dlDepth = nullptr; }
     if (e.dlOutUav) { e.dlOutUav->Release(); e.dlOutUav = nullptr; }
     if (e.dlOutSrv) { e.dlOutSrv->Release(); e.dlOutSrv = nullptr; }
@@ -717,6 +729,51 @@ bool      g_lastWindowValid = false;
 // close time after which the running counters reset for the next window.
 uint32_t  g_lastWindowDropped = 0;
 
+// THE HEAD LEAD (advanced.temporal_aa_fovea_lead). NVIDIA's crop history is
+// crop-local, so content entering the rectangle at its leading edge has no
+// history there and is soft for its first frames. The lead slides the
+// rectangle into a turn of the head or the ship by this many FRAMES of the
+// motion the frame's centre is under -- whichever rows the motion pass
+// itself uses for far content there, so the two always agree -- and adds
+// the slide to the vectors the crop reads, so the history it does have
+// stays registered. The gaze is on the leading side of either turn, and
+// the fresh strip is a fact about the content, not about the head.
+//
+// Declared up here, well above the rest of the fovea's settings (g_foveaDeg
+// and friends below), because flushWindow -- the price report, right after
+// this -- prints the window's lead line and resets its counters.
+float g_foveaLeadFrames = 0.0f;   // the key: 0 = off, clamped to 0..12
+bool  g_foveaLeadNoted = false;   // the "the head lead is on" line, once per config load
+struct FoveaLeadState {
+    float    px[2] = {0.0f, 0.0f};   // the smoothed lead, render pixels (one-pole, 0.25)
+    int32_t  base[2] = {0, 0};       // the base the crop last RAN at, render pixels
+    uint32_t cropW = 0, cropH = 0;   // ...and the crop size it ran at
+    bool     valid = false;          // base/cropW/H describe a frame the crop really ran
+    bool     ready = false;          // ...and the offset vectors' texture existed on it
+    // The price window's counters (flushWindow prints and clears them).
+    float    peakPx = 0.0f;          // the largest slide applied this window
+    float    peakDeg = 0.0f;
+    double   sumDeg = 0.0;
+    uint32_t frames = 0;             // frames the lead was computed on
+    uint32_t held = 0;               // ...of those, frames the frame's edge held it short
+    uint32_t moved = 0;              // ...and frames whose vectors were offset
+};
+FoveaLeadState g_foveaLead[2];
+// Forgotten whenever the crop is not running: a re-engagement starts from
+// the unshifted base with no delta, because a base kept across a gap would
+// slide the rectangle against a frame NVIDIA's history never saw. The
+// window's counters survive -- they belong to the price report, not to one
+// engagement.
+void foveaLeadForget(int eye) {
+    if (eye < 0 || eye > 1) return;
+    FoveaLeadState& st = g_foveaLead[eye];
+    st.px[0] = st.px[1] = 0.0f;
+    st.base[0] = st.base[1] = 0;
+    st.cropW = st.cropH = 0;
+    st.valid = false;
+    st.ready = false;
+}
+
 // Sorts v[0..n) in place and reads off one percentile by linear
 // interpolation between the two bracketing order statistics -- the usual
 // definition, and the one tools\edvr_log.py's own reader (if it ever
@@ -802,6 +859,30 @@ void flushWindow(const char* reason) {
                  g_droppedUnmeasured, g_droppedLone, g_droppedNoSlot, g_regionBeginFailed);
     }
     Log::get().note("%s", line);
+
+    // The head lead's own line, once per window per eye while the key is on
+    // AND the lead ran at least once in the window (st.frames). A still head
+    // with the crop engaged prints zeros -- which is the evidence that the
+    // lead was live and measured nothing -- while a window the crop never
+    // ran in prints nothing at all, the price line above having already said
+    // so by its treatment. The counters reset either way, so a window's
+    // figures are never another window's.
+    if (g_foveaLeadFrames > 0.0f) {
+        for (int eyeIdx = 0; eyeIdx < 2; ++eyeIdx) {
+            FoveaLeadState& st = g_foveaLead[eyeIdx];
+            if (st.frames > 0) {
+                const double mean = st.sumDeg / static_cast<double>(st.frames);
+                Log::get().note(
+                    "temporal aa fovea lead: eye %d peak %.1f deg (%d px) this window, mean %.2f "
+                    "deg, held at the frame's edge on %u frames, motion vectors offset on %u frames",
+                    eyeIdx, static_cast<double>(st.peakDeg),
+                    static_cast<int>(st.peakPx + 0.5f), mean, st.held, st.moved);
+            }
+            st.peakPx = st.peakDeg = 0.0f;
+            st.sumDeg = 0.0;
+            st.frames = st.held = st.moved = 0;
+        }
+    }
 
     for (int ri = 0; ri < kRegionCount; ++ri) {
         g_lastWindowMedian[ri] = regionMed[ri];
@@ -1829,7 +1910,7 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
         if(mesh[0]){Microsoft::WRL::ComPtr<ID3D11Resource> r;mesh[0]->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[11]));}
     }
     if(textures[4]) {
-        ID3D11ShaderResourceView* terrain[3]{}; celestialMotionViews(textures[4],terrain);
+        ID3D11ShaderResourceView* terrain[3]{}; celestialMotionViews(ctx,textures[4],terrain);
         for(int k=0;k<2;++k)if(terrain[k]) {
             ID3D11Resource* res=nullptr;terrain[k]->GetResource(&res);
             if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[k+5]));res->Release();}
@@ -1888,6 +1969,28 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
                 for(uint32_t y=0;y<d.Height && ok;++y)ok=fwrite(static_cast<const char*>(map.pData)+y*map.RowPitch,1,d.Width*bytes,f)==d.Width*bytes;
                 fclose(f);
                 Log::get().note("eye capture: %ls input %ls %ux%u format %u, scene frame %u: %s.",g_eyeRunStamp,kEyeInputNames[k],d.Width,d.Height,static_cast<unsigned>(d.Format),g_eyeInputsFrame,ok?"written":"write failed");
+            }
+            // The MV input's census of the history the pass invalidated
+            // (backgroundHistoryHidden's size*2 sentinel), so a dump says in
+            // the log how much of the eye NVIDIA was told to start afresh.
+            // A still scene reads near zero; the eye run of 2026-09-17 11:48
+            // read 1.81% (5.3% of the terrain) before the footprint guard,
+            // and that was the terrain's shimmer.
+            if(k==0 && d.Format==DXGI_FORMAT_R16G16_FLOAT) {
+                uint32_t hidden=0;
+                for(uint32_t y=0;y<d.Height;++y) {
+                    const uint16_t* row=reinterpret_cast<const uint16_t*>(static_cast<const char*>(map.pData)+y*map.RowPitch);
+                    for(uint32_t x=0;x<d.Width;++x) {
+                        const uint16_t h=row[x*2];
+                        const uint32_t e=(h>>10)&0x1Fu,m=h&0x3FFu;
+                        // The sentinel is 2 * width, positive and normal.
+                        const float v=(h&0x8000u)||e==0||e==31?0.0f:std::ldexp(1.0f+static_cast<float>(m)/1024.0f,static_cast<int>(e)-15);
+                        if(v>static_cast<float>(d.Width))++hidden;
+                    }
+                }
+                const double total=static_cast<double>(d.Width)*d.Height;
+                Log::get().note("eye capture: %ls history hidden -- NVIDIA's lookup invalidated at %u of %.0f pixels (%.3f%% of the eye) on scene frame %u; a still scene reads near zero.",
+                                g_eyeRunStamp,hidden,total,total>0?100.0*hidden/total:0.0,g_eyeInputsFrame);
             }
             ctx->Unmap(texture,0);
         }
@@ -2227,6 +2330,8 @@ float    g_foveaBottomDeg = 0.0f;   // advanced.temporal_aa_fovea_bottom: edges 
 float    g_foveaOuterDeg = 0.0f;    // advanced.temporal_aa_fovea_outer: edges mode, degrees off each eye's temple-side edge
 float    g_foveaNasalDeg = 0.0f;    // advanced.temporal_aa_fovea_nasal: edges mode, degrees off each eye's nose-side edge
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
+// advanced.temporal_aa_fovea_lead is g_foveaLeadFrames, declared far above
+// with its own state and the price report that prints it (THE HEAD LEAD).
 float    g_peripheryCalm = 0.4f;   // advanced.temporal_aa_periphery_calm: how much the own history is eased toward the periphery (0 uniform, 1 max), the sharp periphery only
 bool     g_periphSteady = true;    // advanced.temporal_aa_periphery: steady (NVIDIA's DLAA on a reduced copy) or sharp (the own history at full size)
 float    g_periphScale = 0.5f;     // advanced.temporal_aa_periphery_scale: the steady periphery's size as a fraction of the output each way
@@ -2734,6 +2839,120 @@ FoveaRegion computeFoveaRegion(float l, float r, float down, float up,
     return out;
 }
 
+// THE HEAD LEAD's geometry (advanced.temporal_aa_fovea_lead, the state and
+// the "why" are up at g_foveaLead): three pure functions, no D3D11 and no
+// globals, exercised by edvrFoveaRegionSelftest's bit 32.
+//
+// A far point's motion at the frame's CENTRE, in render pixels, in exactly
+// the convention the motion-vector shader writes and NGX reads
+// (InMVScaleX/Y = 1, so previous = current + mv). This is the mv entry of
+// temporal_shader_source.h transcribed: its direction build (d.x/d.y/d.z
+// from tanNow, "d.z = -1.0"), its rotation of that direction into last
+// frame's view (dp = the chosen rows times d, taken with NO depth -- the far
+// plane's rotation-only case), and its projection through tanPrev to a
+// previous pixel, then motion = pp - p. r0/r1/r2 are whichever rotation rows
+// a far pixel at the centre would take this frame -- the head's delta
+// (dR0..dR2) or the camera's (c2R0..c2R2, the head and the ship together),
+// the caller mirrors the shader's own choice -- each being the rotation
+// taking THIS frame's view directions to last frame's.
+//
+// Sign, which the whole feature hangs off: turning right moves world content
+// left on screen, so the centre's content WAS to the right last frame,
+// pp.x > p.x and mv.x > 0. Row 0 of the frame sits at the UP tangent (the
+// frusta-order comment above computeFoveaRegion), so pitching up moves
+// content DOWN the rows and mv.y < 0.
+bool foveaCentreMotion(const float tanNow[4], const float tanPrev[4], const float r0[3],
+                       const float r1[3], const float r2[3], uint32_t fw, uint32_t fh,
+                       float* mvX, float* mvY) {
+    if (mvX) *mvX = 0.0f;
+    if (mvY) *mvY = 0.0f;
+    if (!tanNow || !tanPrev || !r0 || !r1 || !r2 || fw == 0 || fh == 0) return false;
+    if (!(tanNow[1] > tanNow[0]) || !(tanNow[3] > tanNow[2])) return false;
+    if (!(tanPrev[1] > tanPrev[0]) || !(tanPrev[3] > tanPrev[2])) return false;
+    // The frame's exact centre: the pixel index whose sample point (p + 0.5)
+    // lands at half the frame, so d is the mean of the two tangents each way.
+    const float px = 0.5f * static_cast<float>(fw) - 0.5f;
+    const float py = 0.5f * static_cast<float>(fh) - 0.5f;
+    const float d[3] = {
+        tanNow[0] + ((px + 0.5f) / static_cast<float>(fw)) * (tanNow[1] - tanNow[0]),
+        tanNow[3] - ((py + 0.5f) / static_cast<float>(fh)) * (tanNow[3] - tanNow[2]),
+        -1.0f};
+    const float dp[3] = {r0[0] * d[0] + r0[1] * d[1] + r0[2] * d[2],
+                         r1[0] * d[0] + r1[1] * d[1] + r1[2] * d[2],
+                         r2[0] * d[0] + r2[1] * d[1] + r2[2] * d[2]};
+    if (dp[2] >= -1e-6f) return false;   // behind the eye: the shader's own guard
+    const float xt = dp[0] / -dp[2];
+    const float yt = dp[1] / -dp[2];
+    const float ppx = (xt - tanPrev[0]) / (tanPrev[1] - tanPrev[0]) * static_cast<float>(fw) - 0.5f;
+    const float ppy = (tanPrev[3] - yt) / (tanPrev[3] - tanPrev[2]) * static_cast<float>(fh) - 0.5f;
+    if (!std::isfinite(ppx) || !std::isfinite(ppy)) return false;
+    if (mvX) *mvX = ppx - px;
+    if (mvY) *mvY = ppy - py;
+    return true;
+}
+
+// The lead in render pixels: that many frames of the centre's motion.
+struct FoveaLead {
+    float x = 0.0f, y = 0.0f;
+};
+FoveaLead foveaLeadPixels(float mvCentreX, float mvCentreY, float frames) {
+    FoveaLead out;
+    if (!std::isfinite(mvCentreX) || !std::isfinite(mvCentreY) || !std::isfinite(frames) ||
+        frames <= 0.0f) {
+        return out;
+    }
+    out.x = mvCentreX * frames;
+    out.y = mvCentreY * frames;
+    return out;
+}
+
+// A pixel distance as an angle, through this eye's own tangent span.
+float foveaLeadDegrees(float px, float l, float r, uint32_t fw) {
+    if (fw == 0 || !(r > l) || !std::isfinite(px)) return 0.0f;
+    constexpr float kRadToDeg = 57.295779513082321f;
+    return atanf(fabsf(px) * (r - l) / static_cast<float>(fw)) * kRadToDeg;
+}
+
+// The crop's base with the lead applied. The EXTENTS never move: NGX
+// re-creates the crop feature when the crop's SIZE changes (tens of ms), so
+// the lead is an integer offset to the base alone, taken after
+// computeFoveaRegion -- never by shifting the edge tangents into it, where
+// rounding would change w/h by a pixel between frames. Even pixels (NGX
+// prefers them, and every base here is even today), and clamped so the
+// rectangle stays wholly inside the frame: at the edge the applied offset is
+// whatever fitted, and clamped says so.
+struct FoveaLeadBase {
+    uint32_t x = 0, y = 0;         // the base after the lead
+    int32_t  dx = 0, dy = 0;       // what was actually applied, render pixels, even
+    bool     clamped = false;      // the frame's edge held the lead short
+};
+FoveaLeadBase foveaLeadBase(const FoveaRegion& g, float leadX, float leadY, uint32_t fw,
+                            uint32_t fh) {
+    FoveaLeadBase out;
+    out.x = g.x;
+    out.y = g.y;
+    if (!g.ok || g.w > fw || g.h > fh) return out;
+    auto axis = [](uint32_t base, uint32_t extent, uint32_t frame, float lead, int32_t* applied,
+                   bool* clamped) -> uint32_t {
+        if (!std::isfinite(lead)) lead = 0.0f;
+        const float half = lead * 0.5f;
+        const int32_t steps = static_cast<int32_t>(
+            half >= 0.0f ? floorf(half + 0.5f) : -floorf(-half + 0.5f));
+        const int32_t off = steps * 2;                       // even pixels
+        const int32_t room = static_cast<int32_t>(frame - extent) & ~1;
+        int32_t want = static_cast<int32_t>(base) + off;
+        if (want < 0) want = 0;
+        if (want > room) want = room;
+        if (want < 0) want = 0;                              // a frame smaller than the crop
+        if (want != static_cast<int32_t>(base) + off) *clamped = true;
+        *applied = want - static_cast<int32_t>(base);
+        return static_cast<uint32_t>(want);
+    };
+    out.x = axis(g.x, g.w, fw, leadX, &out.dx, &out.clamped);
+    out.y = axis(g.y, g.h, fh, leadY, &out.dy, &out.clamped);
+    return out;
+}
+
 void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* tanNow, const float* tanPrev, float jxNow,
                     float jyNow, const float* deltaHead, const float* headTrans,
@@ -3060,7 +3279,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         if (scene) {
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
-            celestialMotionViews(scene, terrainSrvs);
+            celestialMotionViews(ctx, scene, terrainSrvs);
             uiDepthHoloMotion(eye,scene,holoSrvs);
             uiSeparationInputs(src,scene,eye,sd.Width,sd.Height,separatedCandidate);
             meshMotionViews(ctx,scene,meshSrvs);
@@ -4097,6 +4316,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 "temporal aa: the fovea keys are NVIDIA-only; fsr runs the full frame.");
         }
         uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;      // INPUT crop, in the render (w x h) space
+        // The head lead's slide since the frame NVIDIA's crop history came
+        // from, render pixels (base_now - base_prev): handed to the motion
+        // pass below as p.lead, which adds it to the vectors the crop reads.
+        // Zero unless the lead is on AND the previous applied base is known.
+        int32_t foveaLeadDelta[2] = {0, 0};
         uint32_t focx = 0, focy = 0, focw = 0, foch = 0;  // OUTPUT crop, in the native (foW x foH) space
         bool foveaMode = false;
         bool foveaComposited = false;
@@ -4214,6 +4438,97 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     return static_cast<uint32_t>((static_cast<uint64_t>(v) * to / from) & ~1ull);
                 };
                 if (cropOf(w, h, fcx, fcy, fcw, fch)) {
+                    // THE HEAD LEAD (advanced.temporal_aa_fovea_lead): the
+                    // rectangle slides into a turn of the head or the ship by
+                    // this many frames of the frame centre's own motion, so the
+                    // strip entering at its leading edge -- which has no
+                    // crop-local NVIDIA history and is soft for its first
+                    // frames -- lands further out. The BASE alone moves
+                    // (foveaLeadBase says why the extents may not), and the
+                    // slide is handed to the motion pass so the history that IS
+                    // there stays registered.
+                    if (g_foveaLeadFrames > 0.0f && eye >= 0 && eye < 2) {
+                        FoveaLeadState& st = g_foveaLead[eye];
+                        float mvx = 0.0f, mvy = 0.0f;
+                        // Which rows a FAR pixel at the centre would take THIS
+                        // frame, so MV_centre is the vector the shader actually
+                        // writes there: the mv entry's own selection
+                        // (temporal_shader_source.h:836 the head's delta rows,
+                        // :862 the camera's -- the head and the ship together)
+                        // under its own condition, :843 knobs.y != 0 (a depth
+                        // is bound; the whole branch sits inside it) and :857
+                        // and :860 (tvCam.w, the world path is on; split.x, a
+                        // ship split is set; and a far pixel always satisfies
+                        // "far || z > split.x"). Its last term, scannerUi at
+                        // :859, is a per-pixel uiCovered() read the CPU cannot
+                        // make; the frame-wide flag that feeds it (probe.w bit
+                        // 128, fssInterfaceLive) stands in, so while the
+                        // scanner's screen is up the whole frame takes the
+                        // head's rows -- the right way to be wrong there, the
+                        // panel sitting in front of the seat and following the
+                        // head.
+                        //
+                        // A mid-turn stand-down of the world path (the draw
+                        // floor, a lost camera row) steps the target between
+                        // the two readings; the one-pole below absorbs that,
+                        // and the slide handed to NVIDIA is base_now -
+                        // base_prev either way, so nothing is mis-registered
+                        // by the switch.
+                        const bool centreWorldRows = p.knobs[1] != 0.0f && p.tvCam[3] != 0.0f &&
+                                                     p.split[0] > 0.0f && !fssInterfaceLive();
+                        const float* row0 = centreWorldRows ? p.cand[2][0] : p.dR0;
+                        const float* row1 = centreWorldRows ? p.cand[2][1] : p.dR1;
+                        const float* row2 = centreWorldRows ? p.cand[2][2] : p.dR2;
+                        foveaCentreMotion(p.tanNow, p.tanPrev, row0, row1, row2, w, h, &mvx, &mvy);
+                        const FoveaLead want = foveaLeadPixels(mvx, mvy, g_foveaLeadFrames);
+                        // One pole at a quarter: a tracker's own noise times N
+                        // frames would otherwise jitter the seam every frame.
+                        st.px[0] += 0.25f * (want.x - st.px[0]);
+                        st.px[1] += 0.25f * (want.y - st.px[1]);
+                        // The base only moves when the previous APPLIED base is
+                        // known and the offset vectors' texture was in hand on
+                        // that frame: the slide NVIDIA is told has to be the
+                        // truth, so a frame that cannot deliver one holds the
+                        // rectangle still. That is the first engaged frame, a
+                        // crop-size change (which recreates the feature and
+                        // resets its history anyway), and any frame the crop
+                        // did not run.
+                        const bool live = st.valid && st.ready && st.cropW == fcw && st.cropH == fch;
+                        FoveaRegion unshifted;
+                        unshifted.x = fcx;
+                        unshifted.y = fcy;
+                        unshifted.w = fcw;
+                        unshifted.h = fch;
+                        unshifted.ok = true;
+                        const FoveaLeadBase moved = foveaLeadBase(
+                            unshifted, live ? st.px[0] : 0.0f, live ? st.px[1] : 0.0f, w, h);
+                        fcx = moved.x;
+                        fcy = moved.y;
+                        if (live) {
+                            foveaLeadDelta[0] = static_cast<int32_t>(fcx) - st.base[0];
+                            foveaLeadDelta[1] = static_cast<int32_t>(fcy) - st.base[1];
+                        }
+                        // Re-earned below by a crop that actually evaluates:
+                        // if this frame's does not (no textures, a refused
+                        // periphery, a failed eval), the next one finds no
+                        // previous base and holds the rectangle still rather
+                        // than sliding against a frame NVIDIA never saw.
+                        st.valid = false;
+                        // The window's figures: how far the rectangle sits from
+                        // where it would have been, in pixels and as an angle
+                        // through this eye's own tangent span.
+                        const float slideX = static_cast<float>(moved.dx);
+                        const float slideY = static_cast<float>(moved.dy);
+                        const float slidePx = sqrtf(slideX * slideX + slideY * slideY);
+                        const float slideDeg = foveaLeadDegrees(slidePx, l, r, w);
+                        ++st.frames;
+                        st.sumDeg += slideDeg;
+                        if (slidePx > st.peakPx) {
+                            st.peakPx = slidePx;
+                            st.peakDeg = slideDeg;
+                        }
+                        if (moved.clamped) ++st.held;
+                    }
                     focx = scaleTo(fcx, w, foW);
                     focw = scaleTo(fcw, w, foW);
                     focy = scaleTo(fcy, h, foH);
@@ -4319,6 +4634,23 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         p.fovea1[3] = 1.0f;   // the fovea is on: modulate
                     }
                 }
+            }
+        }
+
+        // The head lead's state is forgotten on any frame the crop is not
+        // running at all -- the fovea off, stood down, refused for its size,
+        // or this eye's geometry unusable. foveaLeadForget says why a base
+        // may not be kept across such a gap.
+        if (!foveaMode) {
+            foveaLeadForget(eye);
+            // ...and its vector texture goes back in the two states that can
+            // never flicker frame to frame: the fovea not asked for at all,
+            // and the latched stand-down. A crop merely refused this frame
+            // keeps it, so a flicker could not cost a render-sized create.
+            if ((!foveaConfigured() || g_foveaFailed) && e.dlMvLead) {
+                if (e.dlMvLeadUav) { e.dlMvLeadUav->Release(); e.dlMvLeadUav = nullptr; }
+                e.dlMvLead->Release();
+                e.dlMvLead = nullptr;
             }
         }
 
@@ -4958,6 +5290,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 g_foveaFailed = true;
                 g_foveaFailW = w;
                 g_foveaFailFoW = foW;
+                foveaLeadForget(eye);   // no crop ran: this frame's base is not a base to slide from
                 if (!g_foveaFailNoted) {
                     g_foveaFailNoted = true;
                     Log::get().note(
@@ -4997,6 +5330,37 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 } else if (made && (haveDepth || g_moversOn) && (!e.zPrev || (g_moversOn && !e.dlMask))) {
                     ensureMoverPair(dev, e, w, h, g_moversOn);
+                }
+                // The head lead's own vector texture (the field's comment says
+                // why it cannot be dlMv itself), made only while the key is on
+                // and given straight back when it goes off: it is another
+                // render-sized R16G16 per eye. A failure to make it is not a
+                // stand-down -- the lead simply never goes live, because the
+                // base is held still until the texture is in hand (the lead
+                // block above), and the window's lead line then says the
+                // vectors were offset on no frames.
+                if (made && g_foveaLeadFrames > 0.0f && !e.dlMvLead) {
+                    if (!makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                 &e.dlMvLead, nullptr, &e.dlMvLeadUav)) {
+                        if (e.dlMvLeadUav) { e.dlMvLeadUav->Release(); e.dlMvLeadUav = nullptr; }
+                        if (e.dlMvLead) { e.dlMvLead->Release(); e.dlMvLead = nullptr; }
+                    } else if (!g_foveaLeadNoted) {
+                        g_foveaLeadNoted = true;
+                        Log::get().note(
+                            "temporal aa: the fovea's head lead is on at %g frames "
+                            "(advanced.temporal_aa_fovea_lead) -- the crop slides into a turn of "
+                            "the head or the ship, and NVIDIA's crop reads its own copy of the "
+                            "motion vectors with that slide added, %.0f MB more resident per eye "
+                            "at %ux%u. The price report's own lead line says how far it actually "
+                            "moved.",
+                            static_cast<double>(g_foveaLeadFrames),
+                            static_cast<double>(w) * h * 4.0 / 1048576.0, w, h);
+                    }
+                } else if (g_foveaLeadFrames <= 0.0f && e.dlMvLead) {
+                    if (e.dlMvLeadUav) { e.dlMvLeadUav->Release(); e.dlMvLeadUav = nullptr; }
+                    e.dlMvLead->Release();
+                    e.dlMvLead = nullptr;
                 }
                 // Built ahead of the compose, in the game's own format
                 // (that field's own comment says why). NOT the compose's
@@ -5057,6 +5421,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 }
                 p.holoJitter[3] = haveDepth && e.zPrevValid && e.zPrevSrv && useTanPrev && haveDelta && p.holoJitter[2] != 0 ? 1.0f : 0.0f;
+                // The head lead's slide for the motion pass below: NVIDIA's
+                // crop is the only reader (through e.dlMvLead/ML), so it is
+                // zero unless that texture is bound on this dispatch. Zeroed
+                // again straight after it, so no later dispatch on this frame
+                // -- the own resolve's, in particular -- can see it.
+                const bool leadBound = e.dlMvLeadUav != nullptr;
+                p.lead[0] = leadBound ? static_cast<float>(foveaLeadDelta[0]) : 0.0f;
+                p.lead[1] = leadBound ? static_cast<float>(foveaLeadDelta[1]) : 0.0f;
                 if (made && e.outSrv && e.dlOutSrv && setParams(ctx,p)) {
                     // The deferred UI capture (ui_deferred.cpp), recorded now
                     // against e.dlSubmit as its future "world colour": not
@@ -5105,10 +5477,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // reads them whole). The mover mask is computed here too
                     // (t3, u5) but only the own periphery pass applies it:
                     // the crop and periphery evaluations are not handed it.
+                    //
+                    // Eight UAVs here, not seven: u7 (ML) is the head lead's
+                    // own copy of the vectors, and this is the ONE dispatch
+                    // that binds it -- everywhere else the slot stays null and
+                    // the shader's store there is dropped.
                     ID3D11ShaderResourceView* nullSrvM[17] = {};
-                    ID3D11UnorderedAccessView* nullUavM[7] = {};
+                    ID3D11UnorderedAccessView* nullUavM[8] = {};
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[17] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
@@ -5122,19 +5499,31 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // the same slots (15-17), so binding it would double them
                     // (the review of 2026-09-05, F5). Atomics on a null UAV
                     // are dropped.
-                    ID3D11UnorderedAccessView* uavsM[7] = {nullptr, nullptr, nullptr,
+                    ID3D11UnorderedAccessView* uavsM[8] = {nullptr, nullptr, nullptr,
                                                            e.dlMvUav, e.dlDepthUav, e.dlMaskUav,
-                                                           uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
+                                                           uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
+                                                           e.dlMvLeadUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
                     ctx->CSSetShaderResources(0, 17, srvsM);
-                    ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
+                    ctx->CSSetUnorderedAccessViews(0, 8, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
                     endRegion(qs, Region::Prep, ctx);
+                    // The vectors NVIDIA's crop will read carried the slide on
+                    // this frame: counted here, at the dispatch that wrote
+                    // them, not where the slide was decided -- a frame that
+                    // never dispatched must not be counted as offset.
+                    if (leadBound && (p.lead[0] != 0.0f || p.lead[1] != 0.0f) &&
+                        eye >= 0 && eye < 2) {
+                        ++g_foveaLead[eye].moved;
+                    }
+                    // ...and the field goes back to zero, so the own resolve's
+                    // own setParams below cannot ship a stale slide.
+                    p.lead[0] = p.lead[1] = 0.0f;
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack) uiEvidenceWritten = true;
 
@@ -5212,13 +5601,31 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // composited over just failed (the latch has it).
                     if (!steady || periphOk) {
                         const bool resetHist = (flags & 1u) != 0 || !e.foveaHaveHistory;
+                        // The vectors NVIDIA's crop reads: its own copy with
+                        // this frame's slide in them when the head lead is
+                        // live, the shared ones otherwise. Nothing else ever
+                        // reads e.dlMvLead, and e.dlMv is untouched either way.
+                        ID3D11Texture2D* cropMv = e.dlMvLead ? e.dlMvLead : e.dlMv;
                         // "centre": the fovea crop's own NGX role.
                         if ((beginRegion(qs, Region::Centre, dev, ctx),
-                             dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
+                             dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, cropMv, e.dlOut, w, h,
                                               foW, foH, fcx, fcy, fcw, fch, focx, focy, focw, foch,
                                               jxNow, jyNow, resetHist, frameMs, &whyF))) {
                             endRegion(qs, Region::Centre, ctx);
                             foveaEvalOk = true;   // e.foveaHaveHistory is set from this at frame end
+                            // The head lead's carry: the base NVIDIA's crop
+                            // history now belongs to, the size it ran at, and
+                            // whether the offset vectors were there to make the
+                            // next frame's slide deliverable.
+                            if (eye >= 0 && eye < 2) {
+                                FoveaLeadState& st = g_foveaLead[eye];
+                                st.base[0] = static_cast<int32_t>(fcx);
+                                st.base[1] = static_cast<int32_t>(fcy);
+                                st.cropW = fcw;
+                                st.cropH = fch;
+                                st.valid = true;
+                                st.ready = e.dlMvLeadUav != nullptr;
+                            }
                         } else {
                             endRegion(qs, Region::Centre, ctx);
                             standDown(whyF);
@@ -5482,19 +5889,31 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         g_foveaEdgesNoted[eye] = true;
                         uint32_t fovTrim[3] = {0, 0, 0};   // vertical, outer, nasal
                         nativeFrameFovTrimDegrees(fovTrim);
+                        // The region printed is this frame's, head lead and
+                        // all: the line is latched per eye per config load, so
+                        // it is a sample of where the rectangle sat, not a
+                        // fixed place -- the lead line in the price report is
+                        // what says how far it moves.
+                        char leadTxt[64];
+                        if (g_foveaLeadFrames > 0.0f) {
+                            snprintf(leadTxt, sizeof(leadTxt), "head lead %g frames",
+                                     static_cast<double>(g_foveaLeadFrames));
+                        } else {
+                            snprintf(leadTxt, sizeof(leadTxt), "no head lead");
+                        }
                         Log::get().note(
                             "temporal aa: DLSS where you look ENGAGED (edges) -- eye %d requested "
                             "top %.0f, bottom %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV "
                             "trim's %u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
-                            "periphery is %s; the own resolve %s; UI treatment: %s. NVIDIA's price "
-                            "is in the DLAA totals.",
+                            "periphery is %s; the own resolve %s; UI treatment: %s; %s. NVIDIA's "
+                            "price is in the DLAA totals.",
                             eye, static_cast<double>(g_foveaTopDeg), static_cast<double>(g_foveaBottomDeg),
                             static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
                             fovTrim[0], fovTrim[1], fovTrim[2], focx, focy, focx + focw, focy + foch,
                             foW, foH,
                             100.0 * static_cast<double>(focw) * foch /
                                 (static_cast<double>(foW) * foH),
-                            per, foveaSkipNote, foveaUiTreatment);
+                            per, foveaSkipNote, foveaUiTreatment, leadTxt);
                     }
                 }
             }
@@ -5871,6 +6290,21 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(edge) || edge < 1.0f) edge = 1.0f;
     if (edge > 30.0f) edge = 30.0f;
     g_foveaEdgeDeg = edge;
+    // THE HEAD LEAD: how many FRAMES of the centre's own motion the crop leads
+    // a turn of the head or the ship by, so the strip entering at its leading
+    // edge -- with no crop-local NVIDIA history, and soft for its first frames
+    // -- sits further out. Frames, not seconds, because that is the unit DLSS
+    // converges in. 0 is off; above a dozen frames the rectangle would be
+    // somewhere the pilot is not looking. Live, and a change forgets the
+    // slide's state (the crop must never slide against a base from the old
+    // setting).
+    float lead = cfg.getFloat("advanced.temporal_aa_fovea_lead", 0.0f);
+    if (!std::isfinite(lead) || lead < 0.0f) lead = 0.0f;
+    if (lead > 12.0f) lead = 12.0f;
+    g_foveaLeadFrames = lead;
+    g_foveaLeadNoted = false;
+    foveaLeadForget(0);
+    foveaLeadForget(1);
     float calm = cfg.getFloat("advanced.temporal_aa_periphery_calm", 0.4f);
     if (!std::isfinite(calm) || calm < 0.0f) calm = 0.0f;
     if (calm > 1.0f) calm = 1.0f;
@@ -6934,7 +7368,7 @@ extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7
 }
 
 // tools/smoke wires this in next to edvrEyeMaskSelftest, same pattern: pure
-// geometry, no device, one bit per independent check, 31 (all five) is pass.
+// geometry, no device, one bit per independent check, 63 (all six) is pass.
 // Bit 1: width mode against a rectangle hand-derived from cropOf's own
 // arithmetic before this extraction, checked twice independently -- not
 // the design note's "1128px" figure, which neither derivation reproduced;
@@ -6966,6 +7400,11 @@ extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7
 // "to", the down tangent) bounds y+h. Moving bottom alone must hold y and
 // move y+h; moving top alone must hold y+h (equal to the unmoved case) and
 // move y; x/w (outer/nasal) are untouched throughout.
+// Bit 32: the head lead (advanced.temporal_aa_fovea_lead) -- the base offset
+// with its even rounding and its two clamps, the lead's direction from a
+// hand case, and the centre motion's own mirror of the shader's convention
+// (no rotation is no motion; a yaw right is mv.x > 0; a pitch up is
+// mv.y < 0). The case's own comment carries the derivations.
 extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
     using namespace edvr;
     unsigned bits = 0;
@@ -7105,6 +7544,95 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
             gUnmoved.y != gTopMoved.y;
         if (unmovedOk && bottomMovedOk && topMovedOk && bottomMovesOnlyBottom && topMovesOnlyTop) {
             bits |= 16u;
+        }
+    }
+
+    {
+        // Bit 32: THE HEAD LEAD's pure parts (foveaCentreMotion,
+        // foveaLeadPixels, foveaLeadBase).
+        //
+        // The base offset: zero leaves the rectangle exactly where
+        // computeFoveaRegion put it; a lead with room moves the base by the
+        // even-rounded amount and NEVER changes w/h (a size change would
+        // recreate NVIDIA's feature); an odd lead rounds to even; a lead past
+        // the frame's edge stops at it and says it was held; a negative lead
+        // stops at 0.
+        //
+        // The direction, hand-derived from the shader's convention (previous =
+        // current + mv, render pixels): mv = (+10, 0) px with 6 frames is a
+        // +60 px move, to the RIGHT, which is where the head was turning when
+        // the content at the centre came from the right; mv = (0, -10) is -60,
+        // UP the rows, row 0 being the up edge.
+        //
+        // And the mirror itself: with equal frusta and no rotation there is no
+        // motion at all; a 2-degree yaw to the right gives mv.x > 0; a
+        // 2-degree pitch up gives mv.y < 0. The rotation rows are built the
+        // way the cbuffer's dR0..dR2 are -- the rotation taking THIS frame's
+        // view directions to last frame's -- so a yaw right puts the current
+        // forward (0,0,-1) at (sin a, 0, -cos a) in last frame's frame.
+        FoveaRegionMode mode;
+        mode.edges = false;
+        mode.widthDeg = 40.0f;
+        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
+        const int32_t room = static_cast<int32_t>(fw - g.w);   // 2576 - 734 = 1842
+
+        const FoveaLeadBase none = foveaLeadBase(g, 0.0f, 0.0f, fw, fh);
+        const bool zeroHolds = g.ok && none.x == g.x && none.y == g.y && none.dx == 0 &&
+                               none.dy == 0 && !none.clamped;
+
+        const FoveaLeadBase right = foveaLeadBase(g, 60.0f, 0.0f, fw, fh);
+        const bool movesRight = right.x == g.x + 60 && right.y == g.y && right.dx == 60 &&
+                                right.dy == 0 && !right.clamped;
+
+        const FoveaLeadBase odd = foveaLeadBase(g, 61.0f, -3.0f, fw, fh);
+        const bool evenRounded = (odd.dx % 2) == 0 && (odd.dy % 2) == 0 && odd.dx == 62 &&
+                                 odd.dy == -4;
+
+        const FoveaLeadBase far_ = foveaLeadBase(g, 5000.0f, 5000.0f, fw, fh);
+        const bool heldAtEdge = far_.clamped && far_.x == static_cast<uint32_t>(room) &&
+                                far_.y == static_cast<uint32_t>(fh - g.h) &&
+                                far_.x + g.w <= fw && far_.y + g.h <= fh;
+
+        const FoveaLeadBase back = foveaLeadBase(g, -5000.0f, -5000.0f, fw, fh);
+        const bool heldAtZero = back.clamped && back.x == 0 && back.y == 0 &&
+                                back.dx == -static_cast<int32_t>(g.x) &&
+                                back.dy == -static_cast<int32_t>(g.y);
+
+        const FoveaLead sideways = foveaLeadPixels(10.0f, 0.0f, 6.0f);
+        const FoveaLead upward = foveaLeadPixels(0.0f, -10.0f, 6.0f);
+        const FoveaLeadBase bySide = foveaLeadBase(g, sideways.x, sideways.y, fw, fh);
+        const FoveaLeadBase byUp = foveaLeadBase(g, upward.x, upward.y, fw, fh);
+        const bool directionOk = bySide.dx == 60 && bySide.dy == 0 && byUp.dx == 0 &&
+                                 byUp.dy == -60 && bySide.x == g.x + 60 && byUp.y == g.y - 60;
+
+        // w/h are never touched by any of the above.
+        const bool sizeHeld = g.ok && right.x + g.w <= fw && odd.x + g.w <= fw &&
+                              bySide.x + g.w <= fw && byUp.y + g.h <= fh;
+
+        const float tanSym[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
+        const float ident[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        float mvx = 1.0f, mvy = 1.0f;
+        const bool still = foveaCentreMotion(tanSym, tanSym, ident[0], ident[1], ident[2], 1000,
+                                             1000, &mvx, &mvy) &&
+                           fabsf(mvx) < 1e-3f && fabsf(mvy) < 1e-3f;
+        constexpr float kDegToRadSelf = 0.01745329252f;
+        const float a = 2.0f * kDegToRadSelf;
+        const float yaw[3][3] = {{cosf(a), 0.0f, -sinf(a)}, {0.0f, 1.0f, 0.0f},
+                                 {sinf(a), 0.0f, cosf(a)}};
+        float yawX = 0.0f, yawY = 0.0f;
+        const bool yawRight = foveaCentreMotion(tanSym, tanSym, yaw[0], yaw[1], yaw[2], 1000, 1000,
+                                                &yawX, &yawY) &&
+                              yawX > 1.0f && fabsf(yawY) < 1e-2f;
+        const float pitch[3][3] = {{1.0f, 0.0f, 0.0f}, {0.0f, cosf(a), -sinf(a)},
+                                   {0.0f, sinf(a), cosf(a)}};
+        float pitchX = 0.0f, pitchY = 0.0f;
+        const bool pitchUp = foveaCentreMotion(tanSym, tanSym, pitch[0], pitch[1], pitch[2], 1000,
+                                               1000, &pitchX, &pitchY) &&
+                             pitchY < -1.0f && fabsf(pitchX) < 1e-2f;
+
+        if (zeroHolds && movesRight && evenRounded && heldAtEdge && heldAtZero && directionOk &&
+            sizeHeld && still && yawRight && pitchUp) {
+            bits |= 32u;
         }
     }
 

@@ -101,6 +101,9 @@ int main(int argc,char** argv) {
         ComPtr<ID3D11DepthStencilView> afterDepth; ctx->OMGetRenderTargets(0,nullptr,&afterDepth); check(afterDepth.Get()==depth.Get(),"DSV restored");
         ComPtr<ID3D11Buffer> afterCb; ctx->PSGetConstantBuffers(13,1,&afterCb); check(afterCb.Get()==cb[0].Get(),"PS constants restored");
         ctx->CSGetConstantBuffers(1,1,afterCb.ReleaseAndGetAddressOf()); check(afterCb.Get()==cb[1].Get(),"CS constants restored");
+        // Records are now built on demand; ask for the views so the batched
+        // dispatch runs before the record buffer is read back below.
+        ID3D11ShaderResourceView* v[3]{}; celestialMotionViews(ctx.Get(),scene.Get(),v);
         return readBuffer(dev.Get(),ctx.Get(),g_eyes[testEye].records[g_eyes[testEye].write].buffer.Get());
     };
     celestialMotionConfigure(true); ctx->ClearDepthStencilView(depth.Get(),D3D11_CLEAR_DEPTH,.00025f,0);
@@ -117,7 +120,7 @@ int main(int argc,char** argv) {
     D3D11_MAPPED_SUBRESOURCE dumpMap{}; hr(ctx->Map(g_dump.Get(),0,D3D11_MAP_READ,0,&dumpMap)); ctx->Unmap(g_dump.Get(),0);
     celestialMotionWriteDump(ctx.Get(),L"build\\obj\\terrainmotion",L"fixture");
     for (float z:readTexture(dev.Get(),ctx.Get(),scene.Get())) check(z==.00025f,"game scene depth unchanged");
-    ID3D11ShaderResourceView* views[3]{}; celestialMotionViews(scene.Get(),views);
+    ID3D11ShaderResourceView* views[3]{}; celestialMotionViews(ctx.Get(),scene.Get(),views);
     check(views[0] && views[1] && views[2],"complete terrain inputs published");
     // Compile the actual temporal consumer and run it over the private
     // index/depth plus a final scene depth, then test foreground rejection.
@@ -145,7 +148,7 @@ int main(int argc,char** argv) {
     check(std::fabs(motion[4*27]-(4*(-12.5f+2)/110+.5f))<1e-5f,"motion in input pixels, correct sign and view handedness");
     ctx->ClearDepthStencilView(depth.Get(),D3D11_CLEAR_DEPTH,.1f,0); motion=consume();
     check(motion[4*27+3]==0,"nearer final scene rejects old terrain coverage");
-    celestialMotionFrameBoundary(); celestialMotionViews(scene.Get(),views);
+    celestialMotionFrameBoundary(); celestialMotionViews(ctx.Get(),scene.Get(),views);
     check(!views[0] && !views[1] && !views[2],"missing draw cannot reuse a stale layer");
     patch[3][0]=10; values=run(); check(values[55]==0,"changed LOD/patch bounds decline history");
     celestialMotionFrameBoundary(); run(); run(); celestialMotionFrameBoundary();
@@ -171,7 +174,11 @@ int main(int argc,char** argv) {
         std::fill(searchHistory.begin(),searchHistory.end(),0.f);
         for(unsigned slot:slots)std::memcpy(searchHistory.data()+slot*68,values.data(),kRecordBytes);
         ctx->UpdateSubresource(previous.buffer.Get(),0,nullptr,searchHistory.data(),0,0);previous.count=kRecords;
-        searchEye.records[searchEye.write].count=0;
+        // Mirror celestialMotionFrameBoundary's paired reset: built tracks
+        // how far flush() has consumed count, so resetting count alone
+        // leaves built>=count and flush() skips the dispatch below,
+        // re-serving the previous iteration's stale Current[0].
+        searchEye.records[searchEye.write].count=0; searchEye.records[searchEye.write].built=0;
         auto result=run();check((result[55]==1)==matched,label);
     };
     for(unsigned slot:{0u,63u,64u,511u})search({slot},"unique history matches across every search stride",true);
@@ -247,7 +254,7 @@ int main(int argc,char** argv) {
         ComPtr<ID3D11DepthStencilState> restored;UINT restoredRef=0;ctx->OMGetDepthStencilState(&restored,&restoredRef);
         check(restored.Get()==gameDepth.Get() && restoredRef==ref,"game stencil/depth state restored");
         UINT restoredMask=0;ctx->OMGetBlendState(nullptr,nullptr,&restoredMask);check(restoredMask==mask,"original sample mask preserved");
-        celestialMotionViews(scene.Get(),views);check(views[1]==g_eyes[0].originalDepthSrv.Get(),"original draw depth published");
+        celestialMotionViews(ctx.Get(),scene.Get(),views);check(views[1]==g_eyes[0].originalDepthSrv.Get(),"original draw depth published");
         auto z=readTexture(dev.Get(),ctx.Get(),g_eyes[0].originalDepth.Get());
         auto ix=readTexture(dev.Get(),ctx.Get(),g_eyes[0].index.Get());
         check(z[27]==(mode==0 || mode>=4?fused[27*2]:0.f),"coverage depth follows visibility, raster bias and viewport depth");
