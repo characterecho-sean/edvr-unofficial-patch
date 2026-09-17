@@ -2,8 +2,9 @@
 
 ## Status
 
-- **State (2026-09-17 11:00, the lever build v0.17.0-rc.3-76-g9eab046
-  FLOWN in FRONTIER; gate NOT MET on the frame):** three Stage 1 flights,
+- **State (2026-09-17 13:05: the head lead INSTALLED in FRONTIER as
+  v0.17.0-rc.3-93-g17fc607 = main, NOT FLOWN; the performance gate NOT
+  MET on the frame):** three Stage 1 flights on the earlier builds,
   all in the journal. 09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms
   per pair. 09:38 (1947c90, performance): a live sweep 20/25/7 -> 5/5;
   ~1.0 ms per pair at 43%; both trims at 5 = a 99.9% crop, stood down
@@ -50,15 +51,15 @@
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle, wide/narrow presets, one per-headset size;
   gaze later where the headset publishes it; fix.eye_mask keys stay.
-- **Next: the head lead (Sean, 2026-09-17 12:00: "Let's build the head
-  lead"), IN PROGRESS on the branch:** temporal_aa_fovea_lead = frames of
-  head motion the rectangle slides toward a turn (design + evidence +
-  failure signatures in the journal's head-lead entry; upstream's
-  crop_motion.hpp MV offset is the recipe). Then a flight: 20/25/7 or
-  15/20/7, lead 6 against 0 flipped live, the blend band back to 6-10
-  deg, head turns at several speeds; his picture verdict on the leading
-  edge. Performance stands as measured: ~1.1 ms per pair at 43%,
-  visible only GPU-bound. Owed: retire temporal_aa_fovea_vertical; Stage 2.
+- **Next: fly the head lead** (temporal_aa_fovea_lead = 6 is in the
+  Frontier ini; design, evidence and failure signatures in the journal's
+  two head-lead entries): a rectangle small enough to see the seam
+  (15/20/7 or 20/25/7), head turns at several speeds and a ship turn,
+  then lead 0 flipped live for the comparison; Sean's picture verdict on
+  the leading edge; the log's lead line ("motion vectors offset on N
+  frames", N > 0 while turning) and no feature re-creation during turns.
+  Performance stands as measured: ~1.1 ms per pair at 43%, visible only
+  GPU-bound. Owed: retire temporal_aa_fovea_vertical; Stage 2 (ship).
 
 ## Investigation (2026-09-14)
 
@@ -1606,3 +1607,60 @@ strip at the TRAILING edge as the rectangle slides back = the own
 history's raw refresh under the skip (known; a watch item). **What
 would show if it never ran:** the lead line absent with the key set,
 or peak 0 while the head moved.
+
+### 2026-09-17: the head lead built, reviewed, installed (v0.17.0-rc.3-93-g17fc607)
+
+**ec76291 (opus), reviewed line by line, then 9af4349 for the two
+review changes.** As designed, with these particulars worth knowing:
+- The crop's motion-vector texture has three other readers (the steady
+  periphery's reduction, its DLAA at 1:1, the UI resolve), so the
+  offset goes into a second texture, ML at u7 (R16G16_FLOAT, render
+  size, about 23 MB per eye at 2646x2206), written by the same motion
+  dispatch as `written + lead.xy`, bound only on the fovea prep's
+  dispatch, and handed to the crop evaluate in dlMv's place. dlMv is
+  untouched. Made only while the key is on; released when it goes off.
+- The cbuffer grew one row (`lead`, after `skip`; 416 rows both sides);
+  the rigs size the buffer from the declaration and stayed green.
+- The base moves only when the previous applied base is known at the
+  same crop size and the offset texture existed on that frame; so the
+  first engaged frame holds still, and NGX is never told a slide it
+  did not get. The delta is base_now - base_prev from the APPLIED
+  bases, so clamping and smoothing cannot mis-register anything.
+- Nothing caches the base: compose parameters, the skip rectangle and
+  the calming centre are recomputed per frame, and evaluateCrop keys
+  the NGX feature on sizes and the preset only, never on the bases.
+- Review change 1: the centre's motion is taken with the rows the
+  motion shader itself uses for a far centre pixel this frame (the
+  camera's rows, head and ship together, when the world path is on;
+  the head's otherwise; the scanner-screen term stands in by the
+  frame-wide flag), so a ship turn leads too. A mid-turn stand-down of
+  the world path steps the target; the one-pole absorbs it.
+- Review change 2: the per-window lead line prints only for a window
+  the crop ran in; a still head then prints zeros, full-frame prints
+  nothing.
+- Self-test bit 32 (ten assertions, smoke expects 63) covers the base
+  offset's rounding and clamps, the direction from a hand case, and the
+  centre-motion mirror with explicit 2 degree yaw and pitch rows.
+
+**Merged origin/main (14ec395) as 17fc607; build green (contract 247
+keys), smoke passed; INSTALLED to FRONTIER 13:04 (dry run, install,
+verify-only) as v0.17.0-rc.3-93-g17fc607 = origin/main.** The Frontier
+ini gets `temporal_aa_fovea_lead = 6` under `temporal_aa_fovea_edge`
+(which Sean has back at 6), by the Edit tool with a snapshot and a
+diff. The rest of his ini stands as he left it: temporal_aa_fovea = 0
+(OFF) and outer 7 since the 12:51 flight, which was another session's
+build (v0.17.0-rc.3-88-g0721523-dirty, not this workstream); the lead
+flight needs edges and a real trim set put back first.
+
+**Flight brief, the lead.** Read with `--expect-build 17fc607`. Fly a
+rectangle small enough to see the seam (15/20/7 or 20/25/7), edges on,
+lead 6; turn the head left and right at several speeds, pitch up and
+down, then a ship turn with the head still; then flip the lead to 0
+live and repeat. Look for: the fresh strip further out during turns
+(the effect), a doubled or smeared image inside the rectangle during
+turns (sign or scale, stop and report), a jumping seam (smoothing), a
+soft strip at the trailing edge as the rectangle slides back (the own
+history's raw refresh, known). In the log: the "head lead is on" note,
+ENGAGED with "head lead 6 frames", the per-window lead line with peak
+degrees and "motion vectors offset on N frames" (N > 0 while turning),
+no "feature is created" lines during turns.
