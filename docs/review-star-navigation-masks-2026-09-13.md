@@ -40,14 +40,15 @@ Next, in this order:
 1. No build: on the M dwarf, moving fast with a label over the glow, A/B
    `temporal_aa_model` k -> j, l, m from the Performance page (live, rebuilds
    NVIDIA history). If one preset does not lift the glow, that is the fix.
-2. Build, behind a live knob, both ways of keeping NVIDIA from accumulating
-   over faint smooth glow, with a log counter of the pixels covered: hand
-   NGX a bias-current-colour mask over them (the mask is plumbed, zero
-   today), and, as the exact fallback, hold those pixels within a small
-   tolerance of the raw 2x2 range in the resolve. One flight A/Bs the knob
-   with a dump at each value; `halo.py`'s field lift and text rings judge it.
-   The classifier must not catch dark textured content (planet night sides),
-   only flat faint pixels, or DLSS's anti-aliasing there is lost.
+2. Build, behind a live knob with a log counter of the pixels covered: hold
+   faint flat non-UI output pixels within a small tolerance of the raw 2x2
+   range in the resolve, the way UI pixels already are, so the field cannot
+   drift away from the fresh zones. One flight A/Bs the knob with a dump at
+   each value; `halo.py`'s field lift and text rings judge it. The
+   classifier must take only flat faint pixels, not dark textured content
+   (planet night sides), or DLSS's anti-aliasing there is lost. The NGX
+   bias-current-colour mask is not a lever: only preset F honours it
+   (dlaa.cpp's comment), and the transformer presets ignore it.
 
 The deferred UI route (src/d3d11/ui_deferred.cpp) is untouched: refused
 ten times, never a label in the headset, and now measured not to be the
@@ -3254,3 +3255,29 @@ so either costs nothing visible there; the classifier must take only flat
 faint pixels, or DLSS's anti-aliasing of dark textured content (a planet's
 night side) is lost with it. The deferred UI route would not help: the
 strut, with correct depth and motion, shows the same deficit.
+
+**Addendum, from the code trace (a subagent's reading of temporal_pass.cpp,
+dlaa.cpp, ui_deferred.cpp, ui_depth.cpp at 479bd23).** Four facts that bear
+on the levers:
+- NVIDIA's colour input in these dumps was the game's frame with the HUD in
+  it. The deferred UI route would overwrite `e.dlColour` with a HUD-free
+  reconstruction when it engages, but it did not engage here: the dumps'
+  uiFlags word is 0x10 (bit 64, the route's mark, clear) and the labels are
+  in `DlssBeforeUi`. So the C crop is what NGX saw.
+- The stored frames carry flags = 2 (the DLAA bit alone; the reset bit
+  clear) as well as dlHistory = 1, so NGX was never told to reset around
+  the k3 collapse; EDVR asks for a reset only on the first frame, a scene
+  change, a dropped sequence number, a size change or the camera-jump
+  verdict, none of which fired.
+- The bias-current-colour mask handed to the evaluate is honoured only by
+  preset F (dlaa.cpp's comment at the binding); presets J/K/L/M ignore it.
+  It is not a lever for the lift, and it is why the mask being zero did not
+  matter. Struck from the options above: what is left is the preset A/B and
+  the raw hold in the resolve.
+- HUD pixels reach NVIDIA with EDVR-synthesised motion (the pixel reprojected
+  at a synthetic depth of one metre by the head's rotation, ui_depth.cpp)
+  and that depth, which is the right motion for a cockpit-attached panel;
+  consistent with the strut, which has the game's own depth and motion and
+  shows the same deficit.
+ruled out: the bias-current-colour mask as a lever under presets J/K/L/M,
+because NVIDIA ignores it there (only preset F honours it).
