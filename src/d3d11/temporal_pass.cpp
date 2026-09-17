@@ -2221,6 +2221,8 @@ bool ensureUiMaskSrv(ID3D11Device* dev, EyeState& e, ID3D11Texture2D* mask) {
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 bool     g_foveaEdges = false;     // advanced.temporal_aa_fovea = "edges": the crop is placed by its own edges (below) instead of a width
 float    g_foveaVerticalDeg = 0.0f; // advanced.temporal_aa_fovea_vertical: edges mode, degrees off the top AND the bottom
+float    g_foveaTopDeg = 0.0f;      // advanced.temporal_aa_fovea_top: edges mode, "same" (default) follows temporal_aa_fovea_vertical, else its own degrees off the top edge
+float    g_foveaBottomDeg = 0.0f;   // advanced.temporal_aa_fovea_bottom: edges mode, "same" (default) follows temporal_aa_fovea_vertical, else its own degrees off the bottom edge
 float    g_foveaOuterDeg = 0.0f;    // advanced.temporal_aa_fovea_outer: edges mode, degrees off each eye's temple-side edge
 float    g_foveaNasalDeg = 0.0f;    // advanced.temporal_aa_fovea_nasal: edges mode, degrees off each eye's nose-side edge
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
@@ -2648,7 +2650,8 @@ struct FoveaRegionMode {
     bool  edges = false;
     float widthDeg = 0.0f;
     float tcx = 0.0f, tcy = 0.0f;
-    float verticalTrimDeg = 0.0f;
+    float topTrimDeg = 0.0f;
+    float bottomTrimDeg = 0.0f;
     float outerTrimDeg = 0.0f;
     float nasalTrimDeg = 0.0f;
 };
@@ -2701,8 +2704,8 @@ FoveaRegion computeFoveaRegion(float l, float r, float t, float b,
         constexpr float kDegToRad = 0.01745329252f;
         const float lo = -tanf(foveaEdgeRegionDeg(l, leftTrim) * kDegToRad);
         const float ro = tanf(foveaEdgeRegionDeg(r, rightTrim) * kDegToRad);
-        const float to = -tanf(foveaEdgeRegionDeg(t, mode.verticalTrimDeg) * kDegToRad);
-        const float bo = tanf(foveaEdgeRegionDeg(b, mode.verticalTrimDeg) * kDegToRad);
+        const float to = -tanf(foveaEdgeRegionDeg(t, mode.topTrimDeg) * kDegToRad);
+        const float bo = tanf(foveaEdgeRegionDeg(b, mode.bottomTrimDeg) * kDegToRad);
         if (!(ro > lo) || !(bo > to)) return out;
         x0 = static_cast<int>(((lo - l) / (r - l)) * fwf);
         y0 = static_cast<int>(((b - bo) / (b - t)) * fhf);
@@ -4168,7 +4171,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                   uint32_t& ow, uint32_t& oh) -> bool {
                     FoveaRegionMode mode;
                     if (g_foveaEdges) {
-                        // vertical, outer, nasal -- kTrimNames' own order.
+                        // vertical, outer, nasal -- kTrimNames' own order. Top
+                        // and bottom both reduce against fovTrim[0]: fix.fov_
+                        // trim_vertical trims the top and bottom equally, so
+                        // there is only the one FOV number for either edge.
                         uint32_t fovTrim[3] = {0, 0, 0};
                         nativeFrameFovTrimDegrees(fovTrim);
                         auto reduced = [](float foveaTrimDeg, uint32_t fovTrimDeg) {
@@ -4176,7 +4182,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             return d > 0.0f ? d : 0.0f;
                         };
                         mode.edges = true;
-                        mode.verticalTrimDeg = reduced(g_foveaVerticalDeg, fovTrim[0]);
+                        mode.topTrimDeg = reduced(g_foveaTopDeg, fovTrim[0]);
+                        mode.bottomTrimDeg = reduced(g_foveaBottomDeg, fovTrim[0]);
                         mode.outerTrimDeg = reduced(g_foveaOuterDeg, fovTrim[1]);
                         mode.nasalTrimDeg = reduced(g_foveaNasalDeg, fovTrim[2]);
                     } else {
@@ -5437,11 +5444,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         nativeFrameFovTrimDegrees(fovTrim);
                         Log::get().note(
                             "temporal aa: DLSS where you look ENGAGED (edges) -- eye %d requested "
-                            "vertical %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV trim's "
-                            "%u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
+                            "top %.0f, bottom %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV "
+                            "trim's %u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
                             "periphery is %s; the own resolve %s; UI treatment: %s. NVIDIA's price "
                             "is in the DLAA totals.",
-                            eye, static_cast<double>(g_foveaVerticalDeg),
+                            eye, static_cast<double>(g_foveaTopDeg), static_cast<double>(g_foveaBottomDeg),
                             static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
                             fovTrim[0], fovTrim[1], fovTrim[2], focx, focy, focx + focw, focy + foch,
                             foW, foH,
@@ -5793,6 +5800,21 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(vertTrim) || vertTrim < 0.0f) vertTrim = 0.0f;
     if (vertTrim > 45.0f) vertTrim = 45.0f;
     g_foveaVerticalDeg = vertTrim;
+    // advanced.temporal_aa_fovea_top/_bottom: "same" (or empty) means this
+    // edge follows temporal_aa_fovea_vertical above; any other value is
+    // plain degrees, parsed and floored/capped exactly like vertical/outer/
+    // nasal. Splits the combined vertical trim so the two edges can differ;
+    // temporal_aa_fovea_vertical alone still sets both when neither is set.
+    auto sameOrDegrees = [&](const std::string& s) {
+        if (s.empty() || _stricmp(s.c_str(), "same") == 0) return g_foveaVerticalDeg;
+        char* end = nullptr;
+        float parsed = strtof(s.c_str(), &end);
+        if (!std::isfinite(parsed) || parsed < 0.0f) parsed = 0.0f;
+        if (parsed > 45.0f) parsed = 45.0f;
+        return parsed;
+    };
+    g_foveaTopDeg = sameOrDegrees(cfg.getString("advanced.temporal_aa_fovea_top", "same"));
+    g_foveaBottomDeg = sameOrDegrees(cfg.getString("advanced.temporal_aa_fovea_bottom", "same"));
     float outerTrim = cfg.getFloat("advanced.temporal_aa_fovea_outer", 0.0f);
     if (!std::isfinite(outerTrim) || outerTrim < 0.0f) outerTrim = 0.0f;
     if (outerTrim > 45.0f) outerTrim = 45.0f;
@@ -6871,7 +6893,7 @@ extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7
 }
 
 // tools/smoke wires this in next to edvrEyeMaskSelftest, same pattern: pure
-// geometry, no device, one bit per independent check, 15 (all four) is pass.
+// geometry, no device, one bit per independent check, 31 (all five) is pass.
 // Bit 1: width mode against a rectangle hand-derived from cropOf's own
 // arithmetic before this extraction, checked twice independently -- not
 // the design note's "1128px" figure, which neither derivation reproduced;
@@ -6889,6 +6911,18 @@ extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7
 // inverting the rectangle; the surviving centre square is real but under
 // minPx, so this exercises the ok=false path the caller falls back to
 // full-frame on.
+// Bit 16: temporal_aa_fovea_top and _bottom split apart -- the 20/25/7
+// case's own reduced trims (outer 20, nasal 0, vertical 20 reduced by the
+// 5/5/7 FOV trim to top=bottom=15) against the same split with bottom
+// re-asked at 30 (reduced to 25), top left alone. Expected x/y/w/h are
+// hand-derived on paper from this file's own tan(A-B) identity, not read
+// off the code: tan(atan(E) - D) = (E - tanD) / (1 + E*tanD) for each
+// edge's tangent magnitude E and reduced trim D, then the same pixel,
+// clamp and even-round arithmetic as computeFoveaRegion. x/w (outer/nasal)
+// are unchanged between the two; the edge topTrimDeg controls (y+h, since
+// it feeds "to" which bounds y1) is bit-identical between them; only the
+// edge bottomTrimDeg controls (y, since it feeds "bo" which bounds y0)
+// moves.
 extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
     using namespace edvr;
     unsigned bits = 0;
@@ -6922,7 +6956,8 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         mode.edges = true;
         mode.outerTrimDeg = 10.0f;
         mode.nasalTrimDeg = 5.0f;
-        mode.verticalTrimDeg = 8.0f;
+        mode.topTrimDeg = 8.0f;
+        mode.bottomTrimDeg = 8.0f;
         const FoveaRegion g0 = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
         const FoveaRegion g1 = computeFoveaRegion(-r, -l, t, b, fw, fh, 1, mode, 128);
         const bool yMatch = g0.ok && g1.ok && g0.y == g1.y && g0.h == g1.h;
@@ -6938,9 +6973,59 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         mode.edges = true;
         mode.outerTrimDeg = 100.0f;
         mode.nasalTrimDeg = 100.0f;
-        mode.verticalTrimDeg = 100.0f;
+        mode.topTrimDeg = 100.0f;
+        mode.bottomTrimDeg = 100.0f;
         const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
         if (!g.ok) bits |= 8u;
+    }
+
+    {
+        // The 20/25/7 case (bit 2's own scenario) split into top and bottom:
+        // outer reduced to 20 (25 - 5), nasal reduced to 0 (7 - 7, floored),
+        // vertical reduced to 15 (20 - 5) -- set on BOTH edges first (matches
+        // today's single-vertical-trim behaviour bit-for-bit), then bottom
+        // alone re-asked at 30 raw (reduced to 25), top left at 20/15.
+        //
+        // Hand derivation (l=-1.529, r=1.032, t=-1.265, b=1.265, fw=2576,
+        // fh=2544, eye 0 so leftTrim=outer=20, rightTrim=nasal=0):
+        // tan(atan(E) - D) = (E - tanD) / (1 + E*tanD), tan15=0.2679492,
+        // tan20=0.3639702, tan25=0.4663077.
+        //   left  (E=1.529, D=20): lo = -0.7484882
+        //   right (E=1.032, D=0):  ro =  1.032 (unchanged, D=0)
+        //   top/bottom-unmoved (E=1.265, D=15): to = -0.7446480, bo=+0.7446480
+        //   bottom-moved (E=1.265, D=25): bo = +0.5023604
+        // x0=int(((lo-l)/(r-l))*fw)=int(785.08)=785 -> &~1 -> 784
+        // x1=int(((ro-l)/(r-l))*fw+0.5)=int(2576.5)=2576 -> &~1 -> 2576, w=1792
+        // unmoved y0=int(((b-bo)/(b-t))*fh)=int(523.23)=523 -> &~1 -> 522
+        // moved   y0=int(((b-bo)/(b-t))*fh)=int(766.86)=766 -> &~1 -> 766
+        // both    y1=int(((b-to)/(b-t))*fh+0.5)=int(2021.27)=2021 -> &~1 -> 2020
+        // unmoved h=2020-522=1498; moved h=2020-766=1254.
+        FoveaRegionMode mode;
+        mode.edges = true;
+        mode.outerTrimDeg = 20.0f;
+        mode.nasalTrimDeg = 0.0f;
+        mode.topTrimDeg = 15.0f;
+        mode.bottomTrimDeg = 15.0f;
+        const FoveaRegion gUnmoved = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        mode.bottomTrimDeg = 25.0f;
+        const FoveaRegion gMoved = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        // Not named "near": windef.h's legacy near/far macros expand to
+        // nothing and turn "const auto near = ..." into invalid syntax.
+        const auto withinTol = [](uint32_t v, int want) {
+            const int d = static_cast<int>(v) - want;
+            return d >= -2 && d <= 2;
+        };
+        const bool unmovedOk = gUnmoved.ok && withinTol(gUnmoved.x, 784) && withinTol(gUnmoved.y, 522) &&
+                               withinTol(gUnmoved.w, 1792) && withinTol(gUnmoved.h, 1498);
+        const bool movedOk = gMoved.ok && withinTol(gMoved.x, 784) && withinTol(gMoved.y, 766) &&
+                             withinTol(gMoved.w, 1792) && withinTol(gMoved.h, 1254);
+        // Only the bottom-controlled edge (y, and so h) may move; the
+        // top-controlled edge (y+h) and the untouched outer/nasal edges
+        // (x, w) must be bit-identical between the two.
+        const bool topEdgeFixed = (gUnmoved.y + gUnmoved.h) == (gMoved.y + gMoved.h);
+        const bool onlyBottomMoved = gUnmoved.x == gMoved.x && gUnmoved.w == gMoved.w &&
+                                     gUnmoved.y != gMoved.y;
+        if (unmovedOk && movedOk && topEdgeFixed && onlyBottomMoved) bits |= 16u;
     }
 
     return bits;

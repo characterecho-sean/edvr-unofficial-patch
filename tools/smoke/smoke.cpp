@@ -671,8 +671,9 @@ int main(int argc, char** argv) {
 
     // The fovea's own crop geometry (temporal_pass.cpp): pure, no device --
     // width mode against a hand-verified rectangle, the edges mode's
-    // reduced-trim arithmetic, the two eyes' mirror symmetry, and the
-    // extreme-trim floor that stands the crop down.
+    // reduced-trim arithmetic, the two eyes' mirror symmetry, the
+    // extreme-trim floor that stands the crop down, and the top/bottom
+    // trim split moving only the edge it names.
     {
         typedef unsigned (*PFN_FoveaRegion)();
         PFN_FoveaRegion foveaRegion =
@@ -682,14 +683,15 @@ int main(int argc, char** argv) {
             rc = 1;
         } else {
             const unsigned bits = foveaRegion();
-            if (bits == 15u) {
+            if (bits == 31u) {
                 printf("  ok    fovea region: width mode matches cropOf's own crop, "
                        "the edges mode's reduced-trim arithmetic holds, the two eyes "
-                       "mirror each other, and an extreme trim stands the crop down\n");
+                       "mirror each other, an extreme trim stands the crop down, and "
+                       "the top/bottom split moves only the bottom edge\n");
             } else {
-                printf("  FAIL  fovea region self-test returned %u (want 15: 1 width "
+                printf("  FAIL  fovea region self-test returned %u (want 31: 1 width "
                        "mode, 2 edge trim arithmetic, 4 eye mirror, 8 extreme trim "
-                       "floor)\n", bits);
+                       "floor, 16 top/bottom split)\n", bits);
                 rc = 1;
             }
         }
