@@ -17,11 +17,13 @@
 // what the compositor's own sampler does with an sRGB view, so this is the
 // same operation with a better kernel, not a different one.
 //
-// The openvr half owns the decision (src/openvr/supersample_resolve.cpp);
-// this half owns the pass, behind one export it resolves by GetProcAddress
-// and stands down without in the theater's "mismatched pair?" voice. Null
-// from the export means "forward the game's own frame", and every refusal
-// says why once.
+// Nothing on the native path calls this export yet: the decision side lived
+// in the legacy OpenVR proxy (src/openvr/supersample_resolve.cpp, retired
+// 2026-09-16) and waits to be ported (docs/openxr-port.md lists the resolve
+// among the deferred features). This half owns the pass, behind one export,
+// and reads experimental.supersample_resolve only to warm the shader and to
+// say once that the setting is on but unreachable. Null from the export means
+// "forward the game's own frame", and every refusal says why once.
 #pragma once
 
 #include <cstdint>

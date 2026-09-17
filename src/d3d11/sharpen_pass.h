@@ -19,10 +19,12 @@
 // zero D3D answers for a load off the texture. Nothing here changes size,
 // format or orientation.
 //
-// The openvr half owns the decision (src/openvr/sharpen.cpp); this half
-// owns the pass, behind one export it resolves by GetProcAddress and stands
-// down without in the theater's "mismatched pair?" voice. Null from the
-// export means "forward what you had", and every refusal says why once.
+// native_sharpen.cpp now owns the decision (fix.render_sharpness), not the
+// openvr half -- src/openvr/sharpen.cpp used to decide, before it was
+// retired with the legacy OpenVR proxy. This half owns the pass, behind one
+// export it resolves by GetProcAddress and stands down without in the
+// theater's "mismatched pair?" voice. Null from the export means "forward
+// what you had", and every refusal says why once.
 #pragma once
 
 #include <cstdint>

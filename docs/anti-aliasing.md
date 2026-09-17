@@ -237,7 +237,7 @@ rendering more of them and resolving them well.
 The reason both real features are tractable:
 
 - **The size answer.** `hookedGetRecommendedRenderTargetSize`
-  (`src/openvr/system_hook.cpp`) multiplies the size handed to the game,
+  (EDVR's native runtime) multiplies the size handed to the game,
   and the game rebuilds its targets as for any supersampling change
   (measured; the cull guard's stage 1). Feature A's render half is this
   hook with a factor above 1.0 — performance.md's `render_scale`, the
@@ -247,17 +247,17 @@ The reason both real features are tractable:
   ~1080 calls a second each), and the cull guard already edits both
   consistently — tangents in the raw thunk, the four tangent-carrying
   matrix elements in the member-shaped receiver, switched only at the
-  frame boundary (`system_hook.cpp`). A sub-pixel jitter is the same edit
+  frame boundary (EDVR's native runtime). A sub-pixel jitter is the same edit
   with a *shift* instead of a widening: `l`, `r`, `t`, `b` all moved by one
   small delta, and the matrix's `m02`/`m12` following from the shifted
   tangents exactly as they follow from the lied ones today. This is what
   makes feature B a real TAA rather than a temporal smoother.
-- **The submit door.** `hookedSubmit` (`src/openvr/compositor_hook.cpp`)
+- **The submit door.** `hookedSubmit` (EDVR's native runtime)
   already substitutes an EDVR-owned texture for the game's on three paths,
   with `applyCullGuard`'s discipline — one lambda, every forwarding path,
   no path ships an untreated frame. Both features are one more treatment
   inside that lambda.
-- **Both sizes, in one DLL.** The openvr half holds the size the runtime
+- **Both sizes, in one DLL.** EDVR holds the size the runtime
   recommended (`trueSizeW/H`) and the size the game actually submitted per
   eye (`noteEyeTextureSize`, re-read every six seconds). Their ratio is
   the supersampling factor in force, whoever set it — Elite's HMD Quality
@@ -302,9 +302,10 @@ already relies on for the upscale direction), which at a factor of 2.0 is a
 2×2 box and at 1.4 skips texels and aliases; its *Advanced Supersample
 Filtering* option applies a better kernel, "less aliasing at the cost of a
 slightly softer image", and by its own description needs a high resolution
-value to notice (vendor-stated, the setting's text). OpenComposite
-installs get whatever the runtime underneath does, which nobody here has
-measured. EDVR's resolve is the same filter on every stack, its kernel is a
+value to notice (vendor-stated, the setting's text). Other OpenXR
+runtimes get whatever filtering they do internally, which nobody here
+has measured. EDVR's resolve is the same filter on every stack, its
+kernel is a
 setting rather than a fixed choice, the sharpen composes after it, and the
 crop for the cull guard fuses with it — the argument feature 1 of
 performance.md makes for the upscale direction, made for the downscale one.
@@ -327,8 +328,8 @@ performance.md makes for the upscale direction, made for the downscale one.
    frames forward untouched until both eyes submit at the new size.
 
 The kernel: a separable Gaussian in output-pixel units by default (calm,
-never rings on the HUD's hairlines), a Mitchell/Lanczos option for players
-who prefer crisp over calm, width as a setting. RCAS after it, at
+never rings on the HUD's hairlines), with a Mitchell/Lanczos option for
+players who prefer crisp over calm. RCAS after it, at
 `render_sharpness`, recovers what the Gaussian softens. Both the crop and
 the resolve take an input sub-rectangle, so guard+resolve is one dispatch
 once the edge-tap subtlety performance.md already lists is settled.
@@ -351,9 +352,6 @@ supersample_resolve = off    ; off (default) | auto | on. auto engages when
                              ; for, however that came about, and stays
                              ; quiet otherwise; on is the same and says so
                              ; when it finds nothing to do. Live.
-supersample_filter  = calm   ; calm (gaussian) | crisp (mitchell). Live.
-supersample_width   = 1.0    ; kernel radius in output pixels, 0.5..3.0;
-                             ; wider is calmer and softer. Live.
 ```
 
 Pixel cost quoted the way performance.md quotes it: HMD Quality 1.4
@@ -800,8 +798,8 @@ pitch because Latin text is mostly vertical stems, which a horizontal
 shift aliases and a vertical one barely touches, with a small extra
 parallax term for yaw from the eye's lever arm about the head; and the
 softness is the resolve's calm kernel, chosen for a session WITHOUT a
-temporal filter -- with one, the resolve can be crisp (`supersample_filter
-= crisp`, live) because the temporal box has already band-limited the
+temporal filter -- with one, the resolve can be crisp because the
+temporal box has already band-limited the
 frame, and `render_sharpness` can go to 1.0.
 
 **The fifth flight (2026-09-03, the main menu, the resolve now crisp).**
@@ -1696,8 +1694,9 @@ NVIDIA's pass measured 2.7 ms per eye on the Pimax at HMD Quality 1.0,
 scaling with output size, and running it on a crop around the gaze point
 recovers most of that. It is designed as performance.md's feature 6, DLSS
 where you look, with the runtime's sub-rectangle inputs, and the gaze
-probe that decides which headsets can drive it is built
-(`advanced.gaze_probe`, 2026-09-04).
+probe that decides which headsets can drive it was built
+(`advanced.gaze_probe`, 2026-09-04) but has no native-path
+implementation — deferred from parity, not abandoned.
 
 ## Considered and declined
 
@@ -1826,9 +1825,10 @@ could not engage on the headset that needed it most: the Quest 3's
 tracking floors at 1.9 arcminutes a frame against a 0.6 threshold, held
 zero of 15,569 frames, and raising the threshold produced a jerkiness
 worse than the shimmer. The key, its two thresholds, the pose half and the
-compositor half are gone; `advanced.pose_hold`, the instrument that proved
-the mechanism, stays. The measurements above stand as the record of what
-the tracker does.
+compositor half are gone; `advanced.pose_hold`, the instrument that
+proved the mechanism, is retired too as of 2026-09-16, with the rest of
+the legacy OpenVR backend. The measurements above stand as the record
+of what the tracker does.
 
 ## Guidance for players now
 

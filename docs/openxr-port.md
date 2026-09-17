@@ -3,18 +3,19 @@
 ## Status
 
 *Written 2026-09-15 from the entries dated 2026-09-14 ("Current scope",
-"Release destination", "Approval boundary") and the 2026-09-11 review
-note. Restates the journal below; not new evidence. Update it whenever
-this doc changes.*
+"Release destination", "Approval boundary") and the 2026-09-11 review note.
+Restates the journal below; not new evidence. Update it whenever this doc
+changes.*
 
-- **State:** Reviewed against source 2026-09-11 (then: transport and
-  GPU instrument not implemented; inventory below already historical).
-  By 2026-09-14 (latest): Luna agents implement under parent review, a
-  native metric-presentation flight has passed, and work continues on
-  named submission features while supersample resolve, FSS theater,
-  gaze foveation and `[experimental]` features are deferred. Destination:
-  native OpenXR for every user, retiring the forwarding proxy after
-  acceptance gates. This doc is the spec, not a build tracker;
+- **State:** Reviewed against source 2026-09-11 (then: transport and GPU
+  instrument not implemented; inventory below already historical). By
+  2026-09-14 (latest): Luna agents implement under parent review, a native
+  metric-presentation flight has passed, and work continues on named submission
+  features while supersample resolve, FSS theater, gaze foveation and
+  `[experimental]` features are deferred. Destination: native OpenXR for every
+  user, retiring the forwarding proxy after acceptance gates. By 2026-09-16:
+  the forwarding proxy is retired — `src/openvr` removed with its 23 keys; see
+  the closing entry below. This doc is the spec, not a build tracker;
   completion is tracked in openxr-implementation-status.md.
 - **Open:**
   - LibOVR/Oculus-path routing: "required completion work," remaining
@@ -39,27 +40,26 @@ this doc changes.*
   - Supersample resolve, FSS theater, gaze foveation,
     `[experimental]` features: deferred from parity, not abandoned.
 - **Next flight:** Per "Approval boundary" (2026-09-14): desktop checks
-  continue while Sean is away; individual headset checks no longer gate
-  each step, though "passing desktop tests does not establish a
-  successful flight." One consolidated headset retest follows on his
-  return, covering "Phasing and acceptance"'s full list.
-- **Environment:** First backend: D3D11, primary stereo, opaque blend
-  only (`XR_KHR_D3D11_enable` required). Runtimes to qualify: SteamVR
-  OpenXR, VDXR, the installed Pimax runtime (PiOpenXR vs. PimaxXR are
-  distinct), Varjo, Meta OpenXR. Latest recommended sizes: Steam/Valve
-  4536x4480/eye; Frontier/OpenComposite 5424x5356/eye. Planes seen:
-  0.025..50000 (scene), 0.1..1000 (elsewhere). Format family: 8-bit
-  RGBA/BGRA (typeless, UNORM, sRGB).
+  continue while Sean is away; individual headset checks no longer gate each
+  step, though "passing desktop tests does not establish a successful flight."
+  One consolidated headset retest follows on his return, covering "Phasing and
+  acceptance"'s full list.
+- **Environment:** First backend: D3D11, primary stereo, opaque blend only
+  (`XR_KHR_D3D11_enable` required). Runtimes to qualify: SteamVR OpenXR, VDXR,
+  the installed Pimax runtime (PiOpenXR vs. PimaxXR are distinct), Varjo, Meta
+  OpenXR. Latest recommended sizes: Steam/Valve 4536x4480/eye;
+  Frontier/OpenComposite 5424x5356/eye. Planes seen: 0.025..50000 (scene),
+  0.1..1000 (elsewhere). Format family: 8-bit RGBA/BGRA (typeless, UNORM,
+  sRGB).
 - **Detail:** "What Elite needs from openvr_api.dll" has the measured
-  export/interface inventory (2026-09-11). "The layer, specified enough
-  to implement" and its subsections are the full spec. "Migration
-  decisions" has the settings table; "Phase 0" and "Phasing and
-  acceptance" are the evidence/gate checklist. Linked:
-  openxr-native-only-2026-09-14.md (release policy),
-  openxr-implementation-status.md (completion tracking, not here),
+  export/interface inventory (2026-09-11). "The layer, specified enough to
+  implement" and its subsections are the full spec. "Migration decisions" has
+  the settings table; "Phase 0" and "Phasing and acceptance" are the
+  evidence/gate checklist. Linked: openxr-native-only-2026-09-14.md (release
+  policy), openxr-implementation-status.md (completion tracking, not here),
   openxr-flight-2026-09-11.md (census flight),
-  openxr-oculus-selection-2026-09-14.md (LibOVR routing),
-  canted-projection.md (matrix-fold proposal).
+  openxr-oculus-selection-2026-09-14.md (LibOVR routing), canted-projection.md
+  (matrix-fold proposal).
 
 ## The ask
 
@@ -688,12 +688,12 @@ misleading percentage. Preserve unavailable values when there is no source.
 
 | Existing key | Current behaviour | Proposed OpenXR treatment |
 |---|---|---|
-| `advanced.real_openvr_dll` | Chooses the forwarded DLL | Proxy-only during migration; retire with proxy |
-| `advanced.suppress_interfaces` | Refuses configured interface prefixes before reaching the runtime | Keep proxy behaviour; owned backend has a fixed supported-interface table |
-| `advanced.compositor_timing` | Enables existing compositor timing collection | Define separate measured-source behaviour before changing this switch; never make local queries depend accidentally on a legacy timing decoder |
+| `advanced.real_openvr_dll` | Chooses the forwarded DLL | **Retired 2026-09-16** with the forwarding proxy — no DLL left to choose once EDVR never forwards |
+| `advanced.suppress_interfaces` | Refuses configured interface prefixes before reaching the runtime | **Retired 2026-09-16** with the forwarding proxy; the owned backend's fixed supported-interface table replaces it |
+| `advanced.compositor_timing` | Enables existing compositor timing collection | **Retired 2026-09-16** with the forwarding proxy; the Monitor page's columns now come from the native timing source (`advanced.app_gpu_timing`) |
 | `advanced.app_gpu_timing` | Enables the local render-to-submit instrument independently; source and age appear alongside SteamVR | Reuse the owner/frame policy with validated OpenXR boundary publication |
 | `fix.vr_handover` | `early` submitted a 1x1 texture before the game's compositor calls; `stock` did not | **Removed 2026-09-13** ahead of its replacement (`early_session.cpp` gone with it); the channel's game-device field it introduced stays for the cull guard's presence test; replacement recorded in docs/intro-video.md (2026-09-15 entry): the native session needs no handover, and the first-Submit NGX warm-up moved to loading |
-| `fix.launch_centre` | Legacy OpenVR: `auto` is OpenComposite-only; `on`/`off` explicit | Native always centers at startup, without a toggle, as approved 2026-09-14 |
+| `fix.launch_centre` | Legacy OpenVR: `auto` is OpenComposite-only; `on`/`off` explicit | Native always centers at startup, without a toggle, as approved 2026-09-14; **key retired 2026-09-16** |
 
 The OpenXR loader/SDK and OpenVR declarations must retain their upstream
 license notices. Forking OpenComposite would be a different project and
@@ -801,3 +801,22 @@ existing exit-path checks. The parent reviews resource lifetimes, frame/pose
 semantics and claimed test coverage before integration. If a gate needs a
 flight, prepare the exact instrumented build and capture instructions and
 report that remaining requirement explicitly.
+
+## 2026-09-16: the forwarding proxy removed
+
+The forwarding proxy (`src/openvr`) and its rigs/fixtures were removed on
+branch `claude/remove-openvr-opencomposite-f10bcc`, together with the 24 keys
+only it read (`fix.launch_centre` and its launch-centre sub-keys, the
+gaze-probe keys, `advanced.compositor_timing`, `advanced.suppress_interfaces`,
+`advanced.real_openvr_dll`, the pose/handover/submit/waitgetposes/cull-guard
+instruments, the FSS-theater and supersample-filter sub-keys,
+`experimental.submit_snapshot` — full list in the removal commit). This
+executes Migration decision 1.
+
+Supersample resolve, FSS theater and gaze foveation keep their parent keys and
+d3d11-side halves; they are unreachable until each is ported to the native
+transport — deferred from parity, not abandoned, per "Ruled out" above.
+
+The installer's `openvr_api_orig.dll` recovery is unchanged: the game's
+original file is still preserved for uninstall, and native EDVR still never
+loads it.

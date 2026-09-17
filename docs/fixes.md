@@ -113,12 +113,10 @@ experimental appearance, off by default
 under Experimental too. Disabling that appearance keeps pulse stability.
 
 **Supersample filtering.** Experimental and off by default
-(`experimental.supersample_resolve = off`): when enabled, EDVR can filter an
-eye larger than the headset recommendation down to that size, using
-`experimental.supersample_filter = calm` (Gaussian) or `crisp` (Mitchell).
-Feedback reports softness and unstable fine detail, so the compositor handles
-downsampling by default; these controls are under Experimental and do not
-activate with TAA/DLSS or change the render scale.
+(`experimental.supersample_resolve = off`). On the legacy OpenVR path this
+filtered an eye larger than the headset recommendation down to that size;
+it has no implementation yet on the native OpenXR runtime — deferred from
+parity, not abandoned — so the switch currently does nothing.
 *[anti-aliasing.md](anti-aliasing.md).*
 
 **Temporal anti-aliasing.** Select TAA or DLSS on Performance
@@ -232,12 +230,6 @@ exactly while a dialog is up. The dialog's own box, border and text are
 untouched. Intro only — it retires for the session the moment a rendered scene
 arrives. `fix.loading_dim = screen`.
 *[loading-panel-handoff.md](loading-panel-handoff.md).*
-
-**Your play space in the wrong place, on OpenComposite.** OpenComposite puts the
-seated origin somewhere different each launch — sometimes in front of you,
-sometimes beside you, sometimes behind. `auto` recentres on OpenComposite and
-leaves SteamVR alone; EDVR identifies which runtime is under it by its exports.
-`fix.launch_centre = auto`.
 
 ---
 

@@ -557,11 +557,11 @@ std::string openxrResolutionValue(const ResolutionView& v) {
 
 // Why the row has no headset to key on. On the native path the host has
 // not published its sizing yet (the per-tick refresh picks it up within a
-// second of VR init, so "a moment" is honest); on SteamVR or OpenComposite
-// no query ever runs and the key is inert for the whole session, which is
-// said plainly so nobody on those runtimes waits, retries or hunts for a
-// publish that never comes. nativeMenuActive() is the predicate the Status
-// page's Runtime line already uses.
+// second of VR init, so "a moment" is honest); off the native path no
+// query ever runs and the key is inert for the whole session, which is
+// said plainly so nobody there waits, retries or hunts for a publish that
+// never comes. nativeMenuActive() is the predicate the Status page's
+// Runtime line already uses.
 constexpr const char* kNoHeadsetSizing = "No headset sizing published yet; try again in a moment.";
 constexpr const char* kNotNativeWrite = "not written: native OpenXR only";
 const char* noHeadsetWriteText() { return nativeMenuActive() ? kNoHeadsetSizing : kNotNativeWrite; }
@@ -1405,17 +1405,14 @@ void buildStatus(MenuContent& c) {
     char buf[200];
     snprintf(buf, sizeof(buf), "%s / game build %s", EDVR_VERSION_STRING, gameBuildVersion().c_str());
     statusLine(c, "EDVR", buf);
-    const uint32_t rk = runtimeKind();
     statusLine(c, "Runtime",
                nativeMenuActive() ? "native OpenXR (experimental)"
-               : rk == 1 ? "SteamVR (Valve's own)"
-               : rk == 2 ? "OpenComposite"
                : (glitchConsumerPresent() ? "not identified" : "no compositor consumer"));
     if (!nativeMenuActive()) {
-        // SteamVR and OpenComposite never run the v2 query, so the three
-        // lines below would read `unknown` for the whole session and the
-        // row's refusals would promise a publish that never comes; one
-        // line says why instead.
+        // Nothing else publishes a runtime kind now that the legacy OpenVR
+        // proxy is gone, so the three lines below would read `unknown` for
+        // the whole session and the row's refusals would promise a publish
+        // that never comes; one line says why instead.
         statusLine(c, "Headset", "native OpenXR only (not in use on this runtime)");
     } else {
         // The worn headset as the native host named it: the raw names for

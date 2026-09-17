@@ -152,97 +152,6 @@ ASM_THUNK = """PUBLIC {sym}
 
 """
 
-# --- lazy variant -----------------------------------------------------------
-#
-# Same thunk, plus a check that the table has been filled, and a slow path that
-# fills it on the first call.
-#
-# This exists so a proxy does not have to load the real DLL from DllMain.
-# LoadLibrary of a module nothing else has mapped runs that module's own DllMain
-# under the loader lock, re-entrantly, which Windows does not support -- it is
-# what crashed the game for a user running ReShade 6.8.0 with EDHM. The d3d11
-# side was rebuilt to defer for that reason; the openvr side could not, because
-# its exports are bare `jmp [slot]` and something has to fill the slot before
-# the first call. This is that something.
-#
-# The first call happens on an ordinary call stack with no loader lock held,
-# which is the whole point.
-
-ASM_LAZY_HEAD = """.DATA
-
-; Non-zero once the export table has been filled. Written by C, read by every
-; thunk below. Byte-sized so the check is one compare against memory.
-PUBLIC edvr_ready_{tag}
-edvr_ready_{tag} BYTE 0
-
-.CODE
-
-EXTERN edvr_lazyInit_{tag}:PROC
-
-; Calls the C initialiser without disturbing anything the real function will
-; expect to find.
-;
-; A thunk is transparent: it must not change the arguments, and on x64 the first
-; four live in rcx/rdx/r8/r9 and xmm0-xmm3, all of which a call is free to
-; clobber. So they are saved around it. Arguments five and up sit above the
-; return address and are untouched, because rsp is restored exactly.
-;
-; Stack: a thunk entry has rsp = 8 (mod 16). The call into here makes it 0, and
-; 128 is a multiple of 16, so rsp stays 0 (mod 16) -- correct for the call, and
-; correct for the 16-byte movaps slots at rsp+64 and above. 32 bytes at the
-; bottom are the shadow space the callee is entitled to.
-; PROC FRAME, and the prologue annotated, so this function has unwind info.
-;
-; It did not, and that is not cosmetic. x64 exception handling walks the stack
-; with the .pdata/.xdata tables; a function with no entry is assumed to be a leaf
-; and its return address is read from [rsp]. This one moves rsp by 128 and then
-; CALLS, so an unwinder would have taken the return address out of the middle of
-; the shadow space below -- and every SEH handler above, including the game's,
-; would fail to run. A fault in the initialiser became an uncatchable process
-; kill rather than the degrade-to-vanilla this project promises.
-;
-; Confirmed by dumpbin: without these, thunks.obj contributes no .pdata at all.
-edvr_lazyShim_{tag} PROC FRAME
-    sub     rsp, 128
-    .ALLOCSTACK 128
-    .ENDPROLOG
-    mov     QWORD PTR [rsp+32], rcx
-    mov     QWORD PTR [rsp+40], rdx
-    mov     QWORD PTR [rsp+48], r8
-    mov     QWORD PTR [rsp+56], r9
-    movaps  XMMWORD PTR [rsp+64], xmm0
-    movaps  XMMWORD PTR [rsp+80], xmm1
-    movaps  XMMWORD PTR [rsp+96], xmm2
-    movaps  XMMWORD PTR [rsp+112], xmm3
-    call    edvr_lazyInit_{tag}
-    movaps  xmm3, XMMWORD PTR [rsp+112]
-    movaps  xmm2, XMMWORD PTR [rsp+96]
-    movaps  xmm1, XMMWORD PTR [rsp+80]
-    movaps  xmm0, XMMWORD PTR [rsp+64]
-    mov     r9,  QWORD PTR [rsp+56]
-    mov     r8,  QWORD PTR [rsp+48]
-    mov     rdx, QWORD PTR [rsp+40]
-    mov     rcx, QWORD PTR [rsp+32]
-    add     rsp, 128
-    ret
-edvr_lazyShim_{tag} ENDP
-
-"""
-
-# The thunk itself needs no unwind info: it never moves rsp, so unwinding its
-# frame as a leaf reads the return address from the right place. Only the shim,
-# which allocates, needs a real entry.
-ASM_LAZY_THUNK = """PUBLIC {sym}
-{sym} PROC
-    cmp BYTE PTR [edvr_ready_{tag}], 0
-    jne @F
-    call edvr_lazyShim_{tag}
-@@:
-    jmp QWORD PTR [edvr_realProcs_{tag} + {offset}]
-{sym} ENDP
-
-"""
-
 ASM_TEMPLATE_TAIL = """END
 """
 
@@ -266,12 +175,6 @@ def main() -> int:
              "build-check hooks the real DLL does not have; additive, so nothing that "
              "imports the real exports is affected",
     )
-    ap.add_argument(
-        "--lazy",
-        action="store_true",
-        help="fill the export table on the first call instead of from DllMain, "
-             "so the real module is never loaded under the loader lock",
-    )
     args = ap.parse_args()
 
     try:
@@ -291,17 +194,15 @@ def main() -> int:
     # DLL's, the .def then names them twice, and the linker's "first
     # specification wins" quietly aliases a C++ implementation to a
     # forwarding thunk -- measured 2026-08-18, when a rebuild after an
-    # install picked up the installed proxy as its source and the smoke
-    # test's selftest export answered with the do-nothing stub. The fix is
-    # the source, not the symptom: point --openvr at the game's renamed
-    # original (openvr_api_orig.dll), which build.bat now prefers by itself.
+    # install picked up an installed proxy as its source and a selftest
+    # export answered with the do-nothing stub. The fix is the source, not
+    # the symptom: pass --source pointing at the real, original DLL.
     ours = sorted(n for (n, _, _) in named if n.startswith("edvr_"))
     if ours:
         print(
             "gen_exports: ERROR: %s exports %s -- that is an EDVR proxy, not "
-            "the real DLL. Use the game's renamed original "
-            "(openvr_api_orig.dll), or pass --openvr with the true runtime "
-            "DLL." % (args.source, ", ".join(ours)),
+            "the real DLL. Pass --source pointing at the true original DLL."
+            % (args.source, ", ".join(ours)),
             file=sys.stderr,
         )
         return 1
@@ -332,9 +233,7 @@ def main() -> int:
                 count=max(len(thunked), 1),
             )
         )
-        if args.lazy:
-            f.write(ASM_LAZY_HEAD.format(tag=tag))
-        template = ASM_LAZY_THUNK if args.lazy else ASM_THUNK
+        template = ASM_THUNK
         for i, (name, _ordinal, _fwd) in enumerate(thunked):
             f.write(
                 template.format(sym="edvr_%s_thunk_%d" % (tag, i), tag=tag, offset=i * 8)
