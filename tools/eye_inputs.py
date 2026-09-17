@@ -24,6 +24,9 @@ UI-flags bit 64 means target UI was separated before DLSS. In that case
 DlssColour is the world-only tone-mapped input, UiInfluence is its signed
 R32 target influence, and UiDepth is the clean private depth. HoloCoverage
 and UiEdits contain the clean maps actually consumed by reconstruction.
+Chrome0/Chrome1 (only when the scanner's screen was up) are the scanner's
+persistent chrome surfaces as its screen composite sampled them, RGBA8 at
+the chrome's own size; their frame, eye, UI-bound and UI-flags are zero.
 """
 from pathlib import Path
 import json

@@ -33,6 +33,7 @@ void* bindingGet(BindSlot) { std::abort(); }
 uint32_t bindingGeneration(BindSlot) { std::abort(); }
 uint64_t bindingShaderHash(BindSlot) { std::abort(); }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
+bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }
 bool depthProbeIsSceneDepth(const void*) { std::abort(); }
 uint64_t lookupShaderHash(void*) { std::abort(); }
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx, const char* source, size_t,

@@ -172,6 +172,14 @@ UINT g_savedOrbitalClassCount=0;
 bool g_orbitalBound=false,g_stellarNoted[2]{};
 Microsoft::WRL::ComPtr<ID3D11Buffer> g_holoDump;
 unsigned g_holoDumpCount=0;
+// The scanner's chrome surfaces the tracker matched this frame, held for
+// the frame (a reference each, released at the boundary) so an eye run
+// staged at the pass can copy them; the copies go out with the run as
+// Chrome0/Chrome1 (uiDepthLearnScannerChrome says why they are wanted).
+ID3D11Resource* g_chromeHeld[2] = {};
+uint32_t g_chromeHeldCount = 0;
+Microsoft::WRL::ComPtr<ID3D11Texture2D> g_chromeDump[2];
+uint32_t g_chromeDumpCount = 0;
 float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
 float    g_ghostTolerance = 12.0f; // advanced.ui_ghost_tolerance: the UI-resolve clamp's bound tolerance, 8-bit colour steps (0..64)
 bool     g_scaleNoted = false;
@@ -1608,29 +1616,67 @@ bool uiDepthWantsDraws() { return g_on && !g_stoodDown; }
 // surfaces updated damage-style, a draw or two a frame across four
 // families of which one is the GUI renderer's, composited into the eye
 // by the general world-quad pipeline sampling them at PS slot 1. The
-// offscreen learner above asks a new target's vertex shader sixty-four
-// times and the label text is drawn once, so the graph's stratum went
-// unlearned, its composite unclassified, and its text -- "FILTERED
-// SPECTRAL ANALYSIS", static on the panel, no depth -- took the panning
-// camera's path at the far plane and smeared (eye dump 184002,
-// docs/fss-scanner.md). The chrome tracker (vscreen.cpp) recognises the
-// composite by content hash and the surface's size before this module
-// sees the draw; it hands the surface over here, and the composite is a
-// composite of a learned surface from that draw on.
-bool g_chromeNoted = false;
-bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs) {
-    if (!g_on || g_stoodDown) return false;
-    const void* view = bindingGet(BindSlot::PsSrv1);
+// chrome tracker (vscreen.cpp) recognises the composite by content hash
+// and the surface's size before this module sees the draw, and hands the
+// surface over here: learned if the offscreen learner above had not
+// (it asks a new target's vertex shader sixty-four times, and the graph's
+// labels are drawn once), and held for the frame either way.
+//
+// The flight of b43e3ce (eye dump 190129, docs/fss-scanner.md) found the
+// learn idle: both strata were already learned, both composites
+// classified and reissued, and what left the graph's strokes and its
+// "FILTERED SPECTRAL ANALYSIS" unmasked was the alpha floor -- in two
+// dumps the mask is a clean threshold on the composite's brightness
+// (luma 80 and up masked, under 60 never), the signature of clip(a -
+// floor) on a stratum drawn dim. So this says which way it went, once
+// per outcome, distinguishable from a learn; and the surfaces go out
+// with an eye run (Chrome0/Chrome1) so the strokes' alpha is read off
+// the chrome itself rather than inferred through the composite.
+uint32_t g_chromeSaid = 0;   // outcome bits, each said once
+bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs,
+                               ID3D11ShaderResourceView* view, ID3D11Resource* chrome) {
+    if (!g_on || g_stoodDown || !chrome) return false;
+    // Held for the frame: an eye run staged at the pass copies what is held.
+    if (g_chromeHeldCount < 2 && g_chromeHeld[0] != chrome && g_chromeHeld[1] != chrome) {
+        chrome->AddRef();
+        g_chromeHeld[g_chromeHeldCount++] = chrome;
+    }
     ResourceInfo info;
-    if (!view || !bindingResolve(const_cast<void*>(view), &info) || !info.isTexture2D) return false;
-    if (info.a < 2000 || info.b < 1000 || info.b >= info.a) return false;
-    if (surfaceMatches(info)) return false;
+    if (!bindingResolveResource(chrome, &info) || !info.isTexture2D) {
+        if (!(g_chromeSaid & 1u)) {
+            g_chromeSaid |= 1u;
+            Log::get().note("ui depth: the scanner tracker's chrome surface could not be "
+                            "described (vs %016llX); not learned here. Said once.",
+                            static_cast<unsigned long long>(vs));
+        }
+        return false;
+    }
+    if (info.a < 2000 || info.b < 1000 || info.b >= info.a) {
+        if (!(g_chromeSaid & 2u)) {
+            g_chromeSaid |= 2u;
+            Log::get().note("ui depth: the scanner tracker's chrome surface is %ux%u, not the "
+                            "chrome's size; not learned here. Said once.", info.a, info.b);
+        }
+        return false;
+    }
+    if (surfaceMatches(info)) {
+        if (!(g_chromeSaid & 4u)) {
+            g_chromeSaid |= 4u;
+            Log::get().note("ui depth: the scanner's chrome surface (%ux%u, DXGI format %u) was "
+                            "already learned when the tracker offered it (%u surfaces known): "
+                            "the composite (vs %016llX) is classified by the ordinary route and "
+                            "what its strokes get is the alpha floor's call (%.3f). Said once.",
+                            info.a, info.b, info.fmt, g_surfaceCount,
+                            static_cast<unsigned long long>(vs), static_cast<double>(g_alphaFloor));
+        }
+        return false;
+    }
     addSurface(info.resource, info.a, info.b, info.fmt);
     // The view may have been judged "not a surface" this frame or last;
     // the memo answers viewIsSurface for a hundred frames, so overwrite it.
-    g_viewMemo.put(view, g_frame, 1u);
-    if (!g_chromeNoted) {
-        g_chromeNoted = true;
+    if (view) g_viewMemo.put(view, g_frame, 1u);
+    if (!(g_chromeSaid & 8u)) {
+        g_chromeSaid |= 8u;
         Log::get().note("ui depth: the scanner's chrome surface (%ux%u, DXGI format %u) is "
                         "learned from the screen's composite (vs %016llX), which the scanner "
                         "tracker recognised; its strata write depth and the mask from this "
@@ -2493,7 +2539,36 @@ void uiDepthMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64
     for(auto& motion:g_holoMotion) motion.resourceWritten(resource,first,end);
 }
 
+// The scanner's chrome surfaces held this frame, copied whole into staging
+// for the eye run being staged; written by uiDepthHoloWriteDump. A frame
+// without the scanner holds nothing and nothing is written.
+void stageChromeDump(ID3D11DeviceContext* ctx) {
+    for(auto& d:g_chromeDump) d.Reset();
+    g_chromeDumpCount=0;
+    if(g_chromeHeldCount==0) {
+        // Said so the absence of Chrome files reads as "not held", never as
+        // an instrument that did not run.
+        Log::get().note("eye capture: no scanner chrome was held on the run's first frame (the tracker matched no composite before the pass); no Chrome files this run.");
+        return;
+    }
+    Microsoft::WRL::ComPtr<ID3D11Device> dev; ctx->GetDevice(&dev);
+    if(!dev) return;
+    for(uint32_t i=0;i<g_chromeHeldCount;++i) {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+        if(FAILED(g_chromeHeld[i]->QueryInterface(IID_PPV_ARGS(&tex)))) continue;
+        D3D11_TEXTURE2D_DESC td{}; tex->GetDesc(&td);
+        td.Usage=D3D11_USAGE_STAGING; td.BindFlags=0; td.MiscFlags=0;
+        td.CPUAccessFlags=D3D11_CPU_ACCESS_READ; td.MipLevels=1; td.ArraySize=1;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
+        if(FAILED(dev->CreateTexture2D(&td,nullptr,&copy))) continue;
+        // Mip 0, array 0 of the chrome; a mipped or arrayed surface would
+        // fail CopyResource's like-for-like rule, hence the subresource copy.
+        ctx->CopySubresourceRegion(copy.Get(),0,0,0,0,tex.Get(),0,nullptr);
+        g_chromeDump[g_chromeDumpCount++]=copy;
+    }
+}
 void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
+    stageChromeDump(ctx);
     g_holoDump.Reset(); g_holoDumpCount=0;
     ID3D11ShaderResourceView* views[2]{}; uiDepthHoloMotion(0,scene,views); if(!views[1]) return;
     Microsoft::WRL::ComPtr<ID3D11Resource> resource; views[1]->GetResource(&resource);
@@ -2505,7 +2580,37 @@ void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
         ctx->CopyResource(g_holoDump.Get(),buffer.Get()); g_holoDumpCount=g_holoMotion[0].recordCount();
     }
 }
+// The staged chrome copies, in the eye run's own texture format (EDVRTEX1:
+// nine uint32 after the magic -- 1, width, height, DXGI format, row bytes,
+// then zeros; four bytes a pixel, the chrome's RGBA8 -- eye_<stamp>_Chrome<i>.bin).
+void writeChromeDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const wchar_t* stamp) {
+    for(uint32_t i=0;i<g_chromeDumpCount;++i) {
+        auto& copy=g_chromeDump[i]; if(!copy) continue;
+        D3D11_TEXTURE2D_DESC d{}; copy->GetDesc(&d);
+        const uint32_t bytes=(d.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || d.Format==DXGI_FORMAT_R8G8B8A8_UNORM ||
+                              d.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || d.Format==DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                              d.Format==DXGI_FORMAT_B8G8R8A8_UNORM || d.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)?4u:0u;
+        D3D11_MAPPED_SUBRESOURCE map{};
+        if(!bytes || FAILED(ctx->Map(copy.Get(),0,D3D11_MAP_READ,0,&map))) {
+            Log::get().note("eye capture: %ls chrome %u (%ux%u, DXGI format %u) not written: %s.",stamp,i,d.Width,d.Height,unsigned(d.Format),bytes?"readback failed":"not a four-byte format");
+            copy.Reset(); continue;
+        }
+        wchar_t path[MAX_PATH]; _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_Chrome%u.bin",directory,stamp,i);
+        FILE* f=nullptr; _wfopen_s(&f,path,L"wb"); bool ok=false;
+        if(f) {
+            const uint32_t header[9]={1,d.Width,d.Height,static_cast<uint32_t>(d.Format),d.Width*bytes,0,0,0,0};
+            ok=fwrite("EDVRTEX1",1,8,f)==8 && fwrite(header,sizeof(header),1,f)==1;
+            for(uint32_t y=0;y<d.Height && ok;++y) ok=fwrite(static_cast<const char*>(map.pData)+y*map.RowPitch,1,d.Width*bytes,f)==d.Width*bytes;
+            if(fclose(f)!=0) ok=false;
+        }
+        ctx->Unmap(copy.Get(),0);
+        Log::get().note("eye capture: %ls chrome %u -- the scanner's chrome surface %ux%u DXGI format %u, as sampled by the screen's composite this run: %s.",stamp,i,d.Width,d.Height,unsigned(d.Format),ok?"written":"write failed");
+        copy.Reset();
+    }
+    g_chromeDumpCount=0;
+}
 void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const wchar_t* stamp) {
+    writeChromeDump(ctx,directory,stamp);
     if(!g_holoDump) { Log::get().note("holo motion: eye run %ls has no records.",stamp); return; }
     D3D11_MAPPED_SUBRESOURCE map{}; HRESULT result=ctx->Map(g_holoDump.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&map);
     if(SUCCEEDED(result)) {
@@ -2520,8 +2625,14 @@ void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,cons
     g_holoDump.Reset(); g_holoDumpCount=0;
 }
 
+void releaseChromeHeld() {
+    for(uint32_t i=0;i<g_chromeHeldCount;++i) { g_chromeHeld[i]->Release(); g_chromeHeld[i]=nullptr; }
+    g_chromeHeldCount=0;
+}
+
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
+    releaseChromeHeld();   // the pass, which stages an eye run, has run for the frame
     g_uiContent.retire(g_frame);
     if(ctx)g_uiContent.gpu.poll(ctx);
     if(ctx) for(auto& sample:g_stellarGpu) sample.poll(ctx);
@@ -2604,6 +2715,9 @@ void uiDepthShutdown() {
     for(auto& sample:g_stellarGpu) sample.reset();
     g_stellarCpuActive=-1;
     g_holoDump.Reset(); g_holoDumpCount=0;
+    releaseChromeHeld();
+    for(auto& d:g_chromeDump) d.Reset();
+    g_chromeDumpCount=0;
     for(auto& motion:g_holoMotion) motion=HoloMotion{};
     if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }
     g_holoBound=g_holoNoted=false;
