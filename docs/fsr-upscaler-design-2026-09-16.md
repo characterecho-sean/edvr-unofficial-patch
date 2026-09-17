@@ -8,8 +8,10 @@ read 2026-09-16) unless marked believed.
 
 ## Status
 
-- **State (2026-09-16 night): route 1 BUILDING on the branch, not flown,
-  not on main.** The ask reframes on one
+- **State (2026-09-17): route 1 MERGED TO MAIN** after flights 1 to 3 on
+  Sean's rigs (Pimax and Quest 3, both clean; the VRAM figure fixed
+  first, c752ca3). `fix.temporal_aa = fsr` ships in the next release; the
+  "works on AMD" note waits on flight 4. The ask reframes on one
   finding: AMD ships no Direct3D 11 backend for the FSR 3.1 upscaler on any
   FidelityFX SDK tag (vendor-stated: `sdk/src/backends` holds dx12, shared
   and vk only, at v1.1.4 and after; issue #58 "Porting to DX11" has been
@@ -49,11 +51,10 @@ read 2026-09-16) unless marked believed.
   pair, 86 to 90 fps, no refusal; Sean: the UI looks fine without the
   reactive mask, so D3's default (off) stands and the mask stays a live
   advanced key. Journal.
-- **Next:** Sean's call on merging route 1 to main (an additive engine;
-  the default is unchanged; AMD users gain a real upscaler); flight 4 (an
-  AMD supporter) is the gate for a "works on AMD" release note, not for
-  the merge. DLSS-class quality on AMD is route 2's question (FSR 4.1,
-  RDNA3/RDNA4), section 5.
+- **Next:** flight 4, an AMD supporter's log (the gate for a "works on
+  AMD" release note); the exported-symbols nit in the fetch tool (Open);
+  route 2 (FSR 4.1 through a D3D12 sidecar, section 5) only if DLSS-class
+  quality on RDNA3/RDNA4 is wanted, which is Sean's call after flight 4.
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
   history, which is what an AMD user gets today; and a cosmetic nit seen
