@@ -1538,6 +1538,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
                 }
+                // The chrome surface is an interface surface ui_depth's
+                // own learner never meets (ui_depth.h says why); told
+                // here, before uiDepthOnEyeDraw sees this same draw.
+                if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h);
             }
         });
         // The theater's per-draw pipeline (round 45f): every matched
