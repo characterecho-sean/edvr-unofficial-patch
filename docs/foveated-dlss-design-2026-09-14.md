@@ -50,15 +50,15 @@
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle, wide/narrow presets, one per-headset size;
   gaze later where the headset publishes it; fix.eye_mask keys stay.
-- **Next (Sean's call, asked 2026-09-17 11:30):** the feature pays only
-  when the GPU is the limit and the rectangle is small; a 43% rectangle
-  is worth ~1.1 ms per pair here, invisible at 90 fps with 2 ms spare. If
-  he wants it shown: A-B-A at 20/25/7 from temporal_aa_fovea = 0 with the
-  GPU loaded (a higher HMD quality or a station). His head catch-up
-  observation (journal, third flight): the blend band back to 6-10 deg;
-  the head-lead build offered, not started (upstream's crop_motion.hpp
-  MV offset is the recipe; journal, the re-read). Still owed: retire
-  temporal_aa_fovea_vertical yes/no; whether Stage 2 (ship) goes ahead.
+- **Next: the head lead (Sean, 2026-09-17 12:00: "Let's build the head
+  lead"), IN PROGRESS on the branch:** temporal_aa_fovea_lead = frames of
+  head motion the rectangle slides toward a turn (design + evidence +
+  failure signatures in the journal's head-lead entry; upstream's
+  crop_motion.hpp MV offset is the recipe). Then a flight: 20/25/7 or
+  15/20/7, lead 6 against 0 flipped live, the blend band back to 6-10
+  deg, head turns at several speeds; his picture verdict on the leading
+  edge. Performance stands as measured: ~1.1 ms per pair at 43%,
+  visible only GPU-bound. Owed: retire temporal_aa_fovea_vertical; Stage 2.
 
 ## Investigation (2026-09-14)
 
@@ -1552,3 +1552,57 @@ region at 20% per dimension (settings.cpp:244-245, restored in
 **Taken:** the MV-offset recipe and the reset threshold, for the head
 lead if Sean wants it. **Ruled out again:** the DLAA periphery, because
 we measured it; gaze, unchanged.
+
+### 2026-09-17: the head lead, designed and briefed (Sean: "Let's build the head lead")
+
+**What it does.** The rectangle slides toward a head turn by N frames'
+worth of head motion, so the strip of freshly entered content at its
+leading edge (no DLSS history for its first several frames) sits
+further out, ahead of where the eyes are during the turn. It does not
+remove the strip; it moves it. One key, `advanced.temporal_aa_fovea_lead`
+= frames (0 off, default; 6 the first value to fly; 0..12; live).
+Frames, not seconds, because DLSS converges in frames.
+
+**Design, as briefed to the implementer (opus).**
+- Lead in render pixels = N x MV_centre, where MV_centre is the far
+  (rotation-only) motion vector at the frame's centre in the same
+  convention and units the MV shader writes for NGX (previous = current
+  + MV, render pixels; NGX reads them at scale 1). Computed on the CPU
+  from the same per-eye camera data the shader's cbuffer gets, by the
+  shader's own formula. Turning right: content moves left, the centre's
+  content WAS to the right, MV_centre.x > 0, the rectangle moves right.
+  Pitching up: content moves down the screen (row 0 is the UP tangent),
+  MV_centre.y < 0, the rectangle moves up. No separate sign reasoning.
+- The rectangle's EXTENTS never change: computeFoveaRegion gives the
+  unshifted rectangle, the lead is an integer offset to the base only,
+  rounded to even pixels, clamped so the rectangle stays in the frame
+  (at the edge, whatever fits). A size change would re-create NGX's
+  feature (tens of ms); upstream's key excludes position for the same
+  reason. Smoothed per eye by a one-pole filter (0.25 per frame) against
+  tracker noise times N. Reset when the fovea is off or the config
+  reloads.
+- NGX's history stays registered because the crop's per-frame
+  displacement, delta = base_now - base_prev, is added to every motion
+  vector NGX reads (MV_crop = MV + delta), through the MV shader's
+  cbuffer on the fovea prep's dispatch only; (0,0) everywhere else, so
+  the full-frame path is untouched. If anything besides NGX reads the
+  crop's MV texture, the offset goes into a second texture instead.
+  Jitter untouched; no reset for a smooth slide.
+- The compose parameters and the interior skip rectangle are computed
+  per frame from the crop, so they follow; the brief asks for a check
+  that nothing caches the base across frames.
+
+**Evidence, before flying.** The ENGAGED line carries "head lead N
+frames"; a per-window line prints the eye's peak lead in degrees and
+pixels, the mean, the frames held at the frame's edge and the frames
+with a motion-vector offset (zeros when the head never moved, absent
+when the key is 0). Self-test bit 32: the base offset's rounding and
+clamping, and the direction from a hand case (MV +10 px, N 6: +60).
+**Failure signatures for the flight:** a doubled or smeared image
+INSIDE the rectangle during turns = the offset's sign or scale (the
+picture, not the log); "feature is created" lines during turns = the
+extents changed (rounding); the seam jumping = the smoothing; a soft
+strip at the TRAILING edge as the rectangle slides back = the own
+history's raw refresh under the skip (known; a watch item). **What
+would show if it never ran:** the lead line absent with the key set,
+or peak 0 while the head moved.
