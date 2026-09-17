@@ -30,7 +30,7 @@
 // item 3.
 //
 // Runs FIRST at the door: on the game's texture, at render size, wide under
-// the cull guard, before the crop and the supersample resolve. Everything
+// the cull guard, before the crop and the sharpen. Everything
 // downstream sees a temporally settled frame. Off by default; every refusal
 // stands the pass down for the session with one line.
 #pragma once

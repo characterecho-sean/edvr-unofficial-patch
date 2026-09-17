@@ -665,8 +665,6 @@ they were there (flown 2026-09-07).
    measured: the temporal pass's own timing, NVIDIA's pass per eye, the
    sharpen's timestamp pair, the pixel fraction under scale.
    UI/smoke depth and station motion follow the AA mode automatically.
-   Supersample resolve is on the Experimental page, off by default; it
-   has no effect yet on the native OpenXR runtime.
    At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
    its `ui:` line tagged `menu performance`), so the extra pages can be
    turned on from inside the headset; flipping it rebuilds the pages, and

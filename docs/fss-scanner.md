@@ -60,11 +60,55 @@ changes.*
     24.1% world-path pixels in the scanner against 94.8% twenty
     seconds later), and the treated crops show the grid and dots smeared
     against the raw. Journal entry "2026-09-16: the scanner's sky at 49
-    draws". FIX BUILT, NOT FLOWN: the floor is 8 (`kTemporalSceneDrawFloor`,
-    shared by the world path, the camera follow score and the menu
-    depth); receipt on the registration line's second half: `the world
-    path stood down on the scene's draw floor alone on N eye-frames
-    (last count K, floor 8)`.
+    draws". The floor is 8 now (`kTemporalSceneDrawFloor`, shared by the
+    world path, the camera follow score and the menu depth; 79b1879 /
+    main cc10e79) and FLEW 2026-09-16 18:40 (dump 184002): `w 1` on
+    every frame at 35-36 draws, the sky at -7 px under the pan, the bar
+    at -0.10 px, its text crisp. Sean: "still blurred" -- and the dump
+    shows what: "FILTERED SPECTRAL ANALYSIS" and the graph's strokes,
+    which are NOT in the interface mask (94% zero at the text), read no
+    depth, and so take the world path's far-plane pan (-5.04 px) while
+    they stand still in the raw (0-1 px): a 3-4 copy smear in every
+    treated crop. Journal entry "2026-09-16: the spectral graph is not
+    interface". The "unlearned stratum" cause (b43e3ce: the tracker
+    hands the surface to `uiDepthLearnScannerChrome`) FLEW 2026-09-16
+    19:00 (dump 190129) and was WRONG: no learn note, the strokes still
+    unmasked at +2.06 px, and the mask in both dumps is a clean
+    threshold on the composite's brightness (luma 80+ masked, under 60
+    never) -- the alpha floor, not classification. CAUSE, as far as two
+    dumps can say: both strata are learned and reissued, and the graph
+    is drawn DIM, below `advanced.ui_depth_alpha` = 0.5, so
+    `clip(a - floor)` drops its strokes and its label. Journal entry
+    "2026-09-16: the graph is under the alpha floor". CONFIRMED by the
+    instrument build's flight (653671d, 19:40, `edvr_gfx_20260916_
+    193918.log`, dump 194158, ini at 0.004): `already learned when the
+    tracker offered it (9 surfaces known)`, `Chrome0` (2479x1394)
+    written, the label and every stroke in the mask (493/493 bright px
+    at 129, MV = the head's path) and crisp in the treated crops; the
+    chrome itself reads alpha 51-77 at the dim strokes, 166+ at the
+    labels, zero everywhere else (97.7%; nothing translucent). Sean:
+    "mostly fixed, it only slightly shimmers when both moving the panel
+    via the controls and moving my head". FIXED (3277ba6, on main):
+    the scanner's chrome writes depth down to one alpha step while the
+    tracker holds its surface (`kChromeFloorSlot`,
+    `samplesScannerChrome`); the general floor is untouched and the
+    Frontier ini is back at `#ui_depth_alpha = 0.5`. FLOWN 2026-09-16
+    20:26 (`edvr_gfx_20260916_202609.log`, dump 202857, ini at its
+    defaults): both family lines say `the scanner's chrome; ...
+    down to one alpha step`, the whole chrome is in the mask at the 0.5
+    general floor (label, ticks, bar, cursor, brackets, markers, the
+    right-hand texts) with the grid and stars out of it, and Sean:
+    "while head still it was crisp". Journal entries "2026-09-16: the
+    chrome at one alpha step" and "...: the one-step floor flown".
+    Under a head turn: dump 194158 had the label moving 3-6% LESS than
+    the head path (+0.23..+0.84 px/frame), which read as "the screen
+    follows the head"; dump 202857 does NOT reproduce it -- the label
+    and the bar's text follow the head path within +-0.3 px/frame (mean
+    ~0) at 0.25-0.5 deg/frame, and the treated crops at 3x show them as
+    crisp as the raw. What 202857 does show is the SKY moving ~+0.4
+    px/frame MORE than the camera rows predict (the grid and stars
+    slightly soft under the turn; not the UI). Nothing owed on the
+    strokes; the sky's 0.4 px is unexplained and small.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -115,21 +159,21 @@ changes.*
 - **Next flight:** none owed for the ghost: flight 3 (2026-09-16
   17:05, `edvr_gfx_20260916_170514.log`, the pre-commit build of
   10705da, version string `0522215-dirty`) confirmed the same-frame
-  donor and it is on main (e08e899). The head path for the interface
-  flew 2026-09-16 18:20 and did what it said (receipts under Open).
-  Owed: one flight on the 8-draw floor, Quest 3, DLSS, the same sparse
-  system's initial FSS screen, pan with the head still, eye dump
-  mid-pan. Receipts: `motion.csv` `cameraTv3` (w) 1 on every frame and
-  `sceneDraws` still 49; the sky's `MV` carrying the pan (~5 px at 0.2
-  deg/frame, ~40 at 1.5) while the bar's pixels stay ~0; the treated
-  crops' grid and signal dots as crisp as the raw's; the registration
-  line's world-path share in the scanner in the nineties, not 24%; and
-  no `stood down on the scene's draw floor` clause on its second half
-  (that clause with `last count 49` means the floor is still in the
-  way; with a count under 8 it is the main menu, as intended). Watch
-  the main menu's hangar wall under head sway for a detach -- the floor
-  is now 8, and the menu's backdrop was measured at one or two draws.
-  The Toolkit-ON confirmation under Open still stands.
+  donor and it is on main (e08e899). The head path (18:20) and the
+  8-draw floor (18:40) both flew and did what they said; the learn
+  (19:00) flew and was idle; the instrument build (19:40) flew and
+  confirmed the floor; the one-step build (20:26) flew and did what it
+  said (receipts under Open). None owed for the scanner's UI. Known
+  and not fixed: the ~220 m remap under head sway (194158 says it is
+  NOT what moves the label: a panel at 1 m would move MORE than the
+  head's rotation); the "scanner is up" bit and the one-step floor
+  also fire on the loading screen's panel (same composite family) --
+  nothing translucent is in that surface under `loading_dim = screen`,
+  where the scrim is withheld, and under a stock scrim the ship model
+  beneath it takes interface depth for that dialog's duration; and the
+  sky's ~+0.4 px/frame against the camera rows under a head turn in
+  202857 (not seen in 194158). The Toolkit-ON confirmation under Open
+  still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
@@ -1195,6 +1239,278 @@ the way from a menu. temporal_test checks 49 is a scene and 2 is not.
   system's body count (64 in 170752's system, 49 here). If a system
   ever draws under 8, the floor is in the way again and the counter
   says so.
+
+## 2026-09-16: the spectral graph is not interface
+
+Flight on cc10e79 (`edvr_gfx_20260916_183753.log`, right build), eye
+dump 184002, the initial FSS screen, panning with the head still. Sean:
+"still blurred".
+
+The floor did its job: `sceneDraws` 35-36 this time (a third system),
+`cameraTv3` 1 on all 16 frames, the sky's `MV` p50 -7.09 px under a
+0.29 deg/frame pan (the camera at 0.25-2.10 deg/frame, the head at
+0.014-0.056), the bar's solid pixels at -0.10 px and its text at
+0.94-0.99 of the raw's edge gradient in the treated crops. And the
+"scene camera accepted" note came 13 s after the scanner opened instead
+of 36.
+
+What still blurs, from the star-dense window the sky script picked
+(input x 1215-1375, y 1329-1429): the "FILTERED SPECTRAL ANALYSIS"
+label and the graph's strokes, crisp in the raw and a three-to-four
+copy smear in every treated crop (`ui_sky_184002.png`). At the text
+(x 1180-1400, y 1318-1350, 181 bright pixels): the interface mask is
+zero on 94% of them (the 6% at 129 are the bar's edge), `Z`, `SceneZ`,
+`HoloCoverage` and `PrevZ` all zero (the far plane), `UiEdits` zero,
+`MV` -5.04 px on every one -- the world path's far-plane pan -- while
+the raw crops move the window's content by 0 to 1 px (jitter). So the
+label is static on the panel, unmarked, depthless, and reprojected as
+sky. Before the floor fix it happened to be still on four frames in
+five; before the head path it was doubled with the bar. It was the
+visible part of the original complaint all along.
+
+Why unmarked. docs/fss-panel.md has the anatomy: the chrome is two
+persistent 3408x1917 surfaces updated damage-style, a draw or two a
+frame across four families (`1012E00B3CB44469`, `666EF0C4C616F67E`,
+`A3E5D3FCBC1165F8` = the GUI icons family, `019E81F4EECFB371`), and
+composited by the general world-quad pipeline (vs A888D51024D9798E, the
+menu panel's) sampling them at PS slot 1; B018D143700AB803 is the
+position-only depth prepass of the same quad, and is on ui_depth's
+built-in exclude list for its own reason. ui_depth's offscreen learner
+asks a newly bound target's vertex shader sixty-four times for a GUI
+family and then leaves it alone for 600 frames; the graph's stratum is
+drawn by the other three families and its labels once, so it is never
+learned, its composite is never a "composite of a learned surface", and
+nothing is logged because nothing was declined (the `ui depth totals`
+line's "left alone" counters read 0.0 through the scanner). The bar's
+stratum IS learned (its text changes, the GUI renderer draws into it),
+which is why the bar is marked at 129 and ~220 m through the interface-
+projection remap (family line `vs A888... ps 015EF9349EC097E8:
+interface projection; alpha-aware depth`, 18:39:52).
+
+The fix, built, not flown: the chrome tracker in `beginPanelOverride`
+already recognises the composite by content hash and the slot-1
+surface's size, before `uiDepthOnEyeDraw` sees the same draw; it now
+hands the surface to `uiDepthLearnScannerChrome` (ui_depth.cpp), which
+adds it to the learned set and overwrites the view memo (which would
+otherwise answer "not a surface" for a hundred frames). From that draw
+on the composite is classified like the bar's: the A888 family's
+transcription reads t1, so a pixel shader this build has no name for
+stands in by slot. The label and the strokes then carry the mask, my
+scanner exemption gives them the head's path, and the remap's ~220 m
+is harmless under a still or turning head.
+
+- Ruled out: the world path's own vectors (right at the sky and the
+  bar), the head path (right at the bar), the UI resolve (`UiEdits` 0
+  at the text -- it never touches an unmarked pixel).
+- Known, not fixed: the ~220 m remap under head SWAY (above, Next
+  flight).
+
+## 2026-09-16: the graph is under the alpha floor
+
+Flight on 90553bc (`edvr_gfx_20260916_185845.log`, right build), eye
+dump 190129, the initial FSS screen, panning with the head still.
+Sean: "still blurred".
+
+Everything the previous builds fixed held (`uiFlags` 0x91 on every
+frame, `w 1` at 41 draws, the bar's solid pixels at +0.09 px, the sky
+at +2.9 px under the pan), and the learn note never came. What the
+dump says about the graph, at the same window as before (input x
+1180-1400, y 1318-1350, which this time holds the graph's bars, its
+frame lines and a bright cursor line rather than the label):
+`ui_stroke_probe.py` finds 845 blue stroke pixels of which 833 are
+unmasked and carry the pan (+2.06 px); the 66 masked pixels in the
+window are the cursor line, at +0.05 px and ~225 m. And the mask is
+a THRESHOLD, not a per-element verdict: `ui_thresh.py` on 190129
+gives luma 20-60 masked 0.0% (2499 px), 60-80 44%, 80+ 100%; on
+184002 (the label's window) 20-60 0.0% (1334 px), 60-80 0.6%, 80-100
+83%, 100+ 100%. The masked pixels of the label were its brightest
+glyph cores. A composite that was never classified would mask nothing
+at all; a composite reissued through `kPanelDepthHlsl` masks exactly
+the pixels whose surface alpha clears `advanced.ui_depth_alpha` (0.5),
+and over a black sky the composite's brightness IS that alpha times
+the stroke's colour. So both strata were learned and reissued all
+along, and the graph -- its bars, its frame, its label -- is drawn
+dim, under the floor that exists so the loader's 40% scrim over the
+ship model writes no depth. The bar's strokes and labels are bright
+and clear it; the cursor line clears it; nothing else in the graph
+does.
+
+Why the learn was silent, in hindsight: the only silent early return
+in `uiDepthLearnScannerChrome` was "already learned"; the other three
+(no view in the shadow, not a texture, wrong size) are ruled out by
+the census lines of the same frame (`s=@652,@653` and `s=@652,@663`
+on both A888 composites, read off the same shadow slot). The
+19:01:17 family line for the tinted composite is the FSS opening
+(the orbital-line note is 19:01:04), not a late learn.
+
+The next build is instruments, not a fix, since the floor's role is
+inferred through the composite and the fix wants a number: the learn
+says its outcome once, four distinguishable lines; and an eye run
+staged while the tracker holds the chrome writes both surfaces whole
+as `eye_<stamp>_Chrome0.bin` / `Chrome1.bin` (EDVRTEX1, RGBA8,
+3408x1917 expected; `tools/eye_inputs.py` reads them). The tracker
+now hands ui_depth the view and the resource it already resolved,
+held for the frame (a reference each, released at the frame
+boundary), and the copies are taken at the pass. The Frontier ini
+carries `ui_depth_alpha = 0.004` for this one flight -- the knob is
+live and the same in effect, on the scanner, as the fix candidate (a
+scanner-scoped floor of one alpha step, the precedent being the screen
+composites' `min(floor, 1/255)` for the comms panel's inactive
+icons); what it also does is put depth under the graph's translucent
+box, so the stars seen through it ride the head's path and ghost
+under the pan, and the loader's scrim moves the ship model with the
+dialog. Both are the flight's to judge, with the chrome's alpha
+histogram in hand for a floor between the box and the strokes if one
+exists.
+
+- Ruled out: the graph's chrome stratum unlearned (b43e3ce's premise),
+  because the learn had nothing to add and the mask follows a
+  brightness threshold inside one composite.
+- Ruled out: the composite declined after classification, because
+  every classified draw wrote (`22.8 wrote = 17.7 composites + 5.1
+  direct`, "left alone" 0.0 through the scanner).
+- Noticed, not fixed: the "scanner is up" stamp fires on the loading
+  screen (18:59:53 this log, 13-16 fps, the loader's panel is the same
+  world-quad family with a big slot-1 surface); the head's path is
+  right there too, so it is harmless, but the note's wording dates the
+  loader, not the scanner.
+
+## 2026-09-16: the chrome at one alpha step
+
+Flight on 653671d (`edvr_gfx_20260916_193918.log`, right build), eye
+dump 194158, the initial FSS screen, panning WITH the head moving
+(0.3-0.7 deg/frame of yaw in the dump), the Frontier ini at
+`ui_depth_alpha = 0.004`. Sean: "mostly fixed, it only slightly
+shimmers when both moving the panel via the controls and moving my
+head at the same time".
+
+The floor was the cause. The learn said the expected line (`the
+scanner's chrome surface (2479x1394, DXGI format 27) was already
+learned when the tracker offered it (9 surfaces known)`), the run
+wrote `Chrome0` (2479x1394 this session; the 3408x1917 of the earlier
+census was another session's size, and only one surface was held this
+run), and at the label's window (input x 1520-1830, y 1255-1290)
+`ui_stroke_probe.py` finds every bright pixel masked (493/493 at 129)
+with the head path's vector, the graph's strokes, frame lines, ticks
+and cursor likewise, and the box's dark background NOT masked -- the
+feared trade-off (stars through a translucent box riding the head's
+path) does not arise, because there is no translucent box. The chrome
+itself says why, in one histogram (`ui_chrome.py`): 97.7% of the
+surface is alpha 0; the dim strokes (luma 20-40) sit at alpha 51-77 of
+255, the mid tones (40-80) at 78-221, the labels (140+) at 166-254;
+colour never exceeds alpha (premultiplied); no pixel is translucent
+fill. Under the 0.5 floor the dim strokes and the graph's label were
+clipped and took the sky's path; at one step everything drawn is a
+stroke and writes.
+
+The fix, built on this branch and NOT flown: a fifth floor buffer
+(`kChromeFloorSlot`) at `min(advanced.ui_depth_alpha, 1/255)` and the
+interface proper's floating parity, selected for a composite whose
+surface resolves to one the scanner tracker holds this frame
+(`samplesScannerChrome`: identity through the view's resource against
+`g_chromeHeld`, released at the frame boundary; both eyes and both
+strata; zero cost on a frame the tracker matched nothing). The general
+floor stays 0.5 for the loader's scrim, and the Frontier ini is back
+at `#ui_depth_alpha = 0.5` (the "put back" owed since 19:32). Receipts
+are in the Status block's next-flight brief.
+
+The residual, measured in the same dump with `ui_parallax.py` (the
+window's content correlated between consecutive raw crops at quarter
+pixels, this frame's jitter delta removed -- sign calibrated on the
+still-head dump 190129 to <=0.1 px -- against the shift the head rows
+predict for a world-fixed point at infinity, 1 m and 220 m):
+
+- The sky (x 900-1900, y 450-690, predicted from the camera rows)
+  matches the camera's rotation to +-0.2 px on every frame: the
+  projection, the tangents and the rotation are exact.
+- The label moves LESS than the head's rotation predicts by
+  +0.23..+0.84 px/frame (mean +0.4) at 0.3-0.7 deg/frame of yaw -- a
+  3-6% shortfall. A world-fixed panel at 1 m would move MORE than the
+  rotation (parallax adds; a flipped translation sign was argued
+  against -- `headTv` and `cameraTv` both carry +x for a right turn --
+  not proven), so this is not the 220 m remap. The reading at the
+  time: the screen itself follows the head a little (a damped follow,
+  as Elite's map screens do), which the head path (a world-fixed
+  panel) cannot know. Effect: <=1 px/frame of vector error at the
+  strokes while the head turns, seen in crop 6 as ~1-2 output px of
+  horizontal softening of the moving text; nothing with the head
+  still. WITHDRAWN the same evening: the next flight's dump (202857)
+  has the label following the head path within +-0.3 px/frame -- see
+  "2026-09-16: the one-step floor flown".
+- A root-cause fix, had the follow been real, would take the screen's
+  own per-frame motion off its composite draw (the post-VS
+  screen-motion machinery) instead of the head's delta. Not started,
+  and not owed on 202857's reading.
+
+- Ruled out: the projection or rotation scale as the residual, because
+  the sky matches the camera rows to +-0.2 px in the same frames.
+- Ruled out: the 220 m remap as the residual (in its naive form),
+  because a nearer world-fixed panel moves MORE than the rotation and
+  the label moves less.
+- Ruled out (again, by the chrome itself): the graph's stratum
+  unlearned, and the composite declined -- both composites are
+  classified and the strokes' alpha is simply under 0.5.
+- Noticed: `cameraTv` z (+0.35 mm) and `headTv` z (-0.23 mm) carry
+  opposite signs in the same frame; not chased, the residual is a
+  rotation-scale effect.
+- Noticed, not fixed: the one-step floor rides the tracker, so it
+  also reaches the loading screen's panel (see the Status brief).
+
+## 2026-09-16: the one-step floor flown
+
+Flight on 3277ba6 (`edvr_gfx_20260916_202609.log`, right build), the
+Frontier ini at its defaults (general floor 0.50 in the ON line), eye
+dump 202857 taken while turning the head (0.25-0.5 deg/frame of yaw
+after a 4 deg/frame flick at the start) and panning. Sean: "while head
+still it was crisp".
+
+Receipts, all present: at 20:27:59 the chrome was learned FROM the
+tracker this time (`is learned from the screen's composite ... down to
+one alpha step while the surface is held`; the offscreen learner had
+not reached it yet, 17 surfaces known by the second offer, which said
+`already learned ... one alpha step rather than the general floor
+(0.500)`), and both composites got the new family line -- vs A888 with
+ps 9107E72CB016CC02 and with the tinted 015EF9349EC097E8: `interface
+projection, the scanner's chrome; alpha-aware depth down to one alpha
+step into private scene copy for AA`. `Chrome0` (2479x1394) written
+with the dump.
+
+The mask, at the general floor: `ui_stroke_probe.py 202857 900 1900
+850 1160` shows every element of the chrome masked -- "FILTERED
+SPECTRAL ANALYSIS", the spectral bar, its ticks, "HIGH", the cursor
+line, the target brackets, the signal marker's ring, "NAV BEACON" and
+its icon, "SIGNAL ANALYSIS / HIGH METAL CONTENT WORLD", "FSS SCANNER"
+-- and the grid, the stars and the bar's translucent band out of it
+(the band is not in the chrome's alpha: an eye-level layer, like the
+loader's backing). The treated crops at 3x (`ui_zoomk.py 202857 6
+1760 1560 360 70`, and crop 12) show the ticks and the label as crisp
+as the raw while the head turns at ~10 px/frame; the star beside them
+is slightly softer (world path).
+
+The head-turn residual, re-measured with `ui_parallax.py` on this
+dump: the graph's label (x 1010-1185, y 965-995) against the head
+rows reads measured minus predicted of +0.16, +1.07, +0.01, -0.30,
+-0.12, -0.17, +0.01, -0.34, +0.24, +0.06, +0.20, -0.21 px (mean ~0);
+the bar's text (x 1000-1300, y 1150-1195) -0.46..+0.38 with one +2.0
+at the end of the flick's deceleration. So the 3-6% shortfall of
+194158 (+0.23..+0.84 px/frame, all one sign) is NOT reproduced: in
+202857 the panel follows the head path to the measurement's noise,
+and "the screen follows the head" is withdrawn as a mechanism -- two
+dumps disagree, and the smaller reading is the later one. Meanwhile
+the SKY here (x 900-1900, y 1250-1450, camera rows) moves +0.3..+0.57
+px/frame MORE than predicted on eleven consecutive frames at corr
+0.95-0.98, where 194158 had it exact to +-0.2. Both effects are under
+half a pixel a frame and change between dumps; a pose-timing offset
+between the rows and the render would do that. Not chased: the UI's
+strokes, the complaint, are within noise of the head path.
+
+- Confirmed: the alpha floor was the cause; at one step the whole
+  chrome writes and the graph is crisp with the head still.
+- Withdrawn: "the screen follows the head" (194158's label shortfall)
+  as an established mechanism, because 202857's label and bar text
+  follow the head path within +-0.3 px/frame.
+- Noticed, not chased: the sky against the camera rows, +0.4 px/frame
+  in 202857 under a head turn, exact in 194158.
 
 ## Open
 

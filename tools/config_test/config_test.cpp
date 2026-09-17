@@ -121,7 +121,8 @@ int main(int argc, char** argv) {
     //
     // The opening [fix] and [hotkey] blocks.
     expectStr("fix.temporal_aa_model", "k", "DLSS preset ships as K on the Performance page");
-    expectStr("experimental.supersample_resolve", "off", "experimental supersample resolve ships off");
+    expectStr("experimental.supersample_resolve", "<unset>",
+              "the retired supersample_resolve key is still absent");
     expectStr("experimental.supersample_filter", "<unset>",
               "the retired supersample_filter key is still absent");
     expectBool("fix.night_vision_stability", true, "night vision pulse stability remains a standard enabled fix");

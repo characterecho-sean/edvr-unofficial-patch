@@ -4,18 +4,24 @@
 
 *Written 2026-09-15 from the entries dated 2026-09-10, 2026-09-08,
 2026-09-06 and 2026-09-02 through 09-04. Restates the journal below;
-not new evidence — update it whenever this doc changes.*
+not new evidence — update it whenever this doc changes.
+Updated 2026-09-16 for Feature A's retirement.*
 
 - **State:** Per "Current defaults" (2026-09-10): TAA/DLSS includes
-  UI/smoke depth and station motion automatically. Feature A's
-  resolve defaults `off` (`auto` shipped 2026-09-03, 06430da, until
-  6d22901 flipped it 2026-09-10 in v0.15.0, bundling per-object motion
-  into `temporal_aa` the same commit; `off` is current). Feature A is
-  built, field-verified on both rigs. Feature B (temporal AA,
+  UI/smoke depth and station motion automatically. Feature A (the
+  supersample resolve) is RETIRED 2026-09-16: built and field-verified on
+  both rigs on the legacy OpenVR proxy (`auto` shipped 2026-09-03,
+  `off` from 6d22901 in v0.15.0), never called on the native OpenXR
+  runtime after the 2026-09-14 port, removed with its key rather
+  than ported; the eye-region rule it introduced stays in
+  `supersample_math.h`. Feature B (temporal AA,
   DLAA/DLSS) is built, flown almost daily 2026-09-02 to 09-08, but
   "is on its branch" per "Guidance for players now"; a 2026-09-06
   pass cut its cost 2.80 -> 2.02 ms/eye. C and D remain unbuilt
   sketches. The rest lock shipped 09-03, retired 09-04.
+  2026-09-16: TAA's own resolve was shipping with the registration
+  instrument compiled in; a lean variant is BUILT, NOT FLOWN (see the
+  2026-09-16 entry at the end).
 - **Open:**
   - Features C and D: still unbuilt design sketches.
   - DLSS/FSR 2 as default engines behind the door (Phasing step 6): not
@@ -30,6 +36,8 @@ not new evidence — update it whenever this doc changes.*
   - Whether `shimmer_rest_still`/`_moving` can be raised past the Quest
     3's tracker-noise floor was left as "the next flight's question" at
     retirement; not answered later here.
+  - The lean own shader's price: one flight, toggle
+    `advanced.temporal_aa_diagnostics` live.
 - **Ruled out:**
   - MSAA from outside a deferred renderer: structurally unreachable
     (views, shading and every downstream pass would need rewriting).
@@ -43,6 +51,9 @@ not new evidence — update it whenever this doc changes.*
     distance, the `camera` motion source, the transposed-reading A/B.
   - Full per-object motion-vector matrices: declined — the neighbourhood
     clamp already handles unmatched motion (unbuilt; per-object-motion.md).
+  - Feature A on the native runtime: retired 2026-09-16, not ported — the
+    native submit blit minifies an oversize eye with one bilinear tap
+    (`src/openxr/d3d11_stereo.cpp`), and the resolve had no caller there.
 - **Environment:** Native SteamVR is measured; under OpenComposite the
   game-side half "works regardless" but reaching the OpenXR layer is
   unverified. Two rigs disagree sharply: Pimax Crystal Super (~42
@@ -68,8 +79,9 @@ about the game, runtimes and SDKs are labelled measured (established in this
 repo's field logs or code), vendor-stated (their documentation or release
 notes), or believed; what can only be settled at implementation time or in a
 live session is collected under Phase 0. Feature A's passive mode was built
-on 2026-09-02, field-verified on both rigs by 2026-09-03 and ships as `auto`
-by default — its section records what was built and measured; everything
+on 2026-09-02, field-verified on both rigs by 2026-09-03 on the legacy OpenVR
+proxy, shipped `auto` then `off`, and was retired on 2026-09-16 — its
+section is the record of what was built and measured; everything
 else here is design.*
 
 ## The ask
@@ -288,6 +300,15 @@ The reason both real features are tractable:
   mechanism with a different replacement.
 
 ## Feature A — supersample resolve at the door
+
+*Retired 2026-09-16.* The legacy OpenVR proxy that called the resolve at
+submit was removed that day (1a54e9e), and the native OpenXR runtime that
+replaced it on 2026-09-14 never called it — the key had been inert since
+the port. Rather than port it, the key, the pass (`supersample_pass.cpp`),
+the export and the kernel arithmetic were removed;
+`supersampleRegionFromBounds` in `supersample_math.h` stays as the
+eye-region rule every door pass reads. What follows is the record of
+what was built and measured.
 
 **What it is.** When the game submits an eye image larger than the runtime
 asked for, EDVR filters it down to exactly the recommended size itself, with
@@ -1752,9 +1773,9 @@ if the guard is live) → **crop** (the guard) → **scale** (EASU up for
 native-size outgoing frame. Fusions come later, in the order their edge-tap
 questions are answered; v1 may run them sequentially, since each already
 exists or is one dispatch. Built so far (2026-09-03): temporal AA, the
-crop, the supersample resolve and the sharpen, sequential, each its own
-pass on the texture the one before produced; the fusions are noted in the
-code as future work.
+crop, the supersample resolve (retired 2026-09-16) and the sharpen,
+sequential, each its own pass on the texture the one before produced;
+the fusions are noted in the code as future work.
 
 ## The tracker never rests: the rest lock (shipped 2026-09-03, retired 2026-09-04)
 
@@ -1981,3 +2002,38 @@ also solve -- but at 0.3 ms an eye they are no longer the place to look.
 The wider lesson is the one the foveation arc kept relearning: measure the
 frame before optimising a part of it. A diagnostic in a per-pixel shader is
 part of the frame.
+
+## The own resolve ships instrumented (2026-09-16)
+
+A supporter's flight (v0.17.0-rc.3, RTX 4080 SUPER, SteamVR/OpenXR Meta
+compatibility, 2160x2290 per eye, HMD Quality 1.0) priced the own history
+at 2.26-2.75 ms per stereo pair (median) against DLSS-as-DLAA's ~3.0 (prep
+0.55-0.75, NGX 2.1-2.3, ui 0.25) -- it should have beaten that by more.
+
+Cause: `main` (fix.temporal_aa = on) compiles with no macro, so
+temporal_shader_source.h's default `#define EDVR_TEMPORAL_DIAGNOSTICS 1`
+always applies. Its candidate loop is gated only by `candMask`; unlike
+`mv` (motionShader), it had no fast/diagnostic pair. Every frame paid for
+four extra candidate reprojections per pixel ("counted and not used"), a
+5x5 SAD probe every 64 pixels, and 48 per-thread counters flushed through
+groupshared atomics -- none touching an output pixel.
+
+| main (cs_5_0) | instr | sample_l | ld | atomics | temps |
+|---|---|---|---|---|---|
+| macro=1 (shipped) | ~3966 | 64 | 264 | 39 | 51 |
+| macro=0 (guarded) | ~1950 | 28 | 129 | 0 | 30 |
+
+Fix: tools/temporal_shader_build compiles temporal_aa_fast_cs (macro=0)
+beside the instrumented temporal_aa_cs; temporal_pass.cpp's ownShader()
+mirrors motionShader() and picks by advanced.temporal_aa_diagnostics; the
+two blocks above are now #if EDVR_TEMPORAL_DIAGNOSTICS. Price-window
+labels say "own history (no ngx, lean)" or "(..., instrumented)"; the
+totals line says plainly when rejection/clipping went uncounted rather
+than print a false 0%. No output pixel changes by construction.
+
+Built, not flown. Flight: fly fix.temporal_aa = on, read the "lean" price
+line, then flip advanced.temporal_aa_diagnostics to 1 live and read the
+"instrumented" one, same scene. Hypothesis: ~2.4 ms per pair drops toward
+1.2-1.6. If so, the next candidates -- only after this measurement -- are
+the 27-load three-source depth dilation, the 9-tap Catmull-Rom history,
+and the UI history read/write.

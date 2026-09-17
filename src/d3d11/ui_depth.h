@@ -49,6 +49,17 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 // coverage depth; the caller reissues it after the original draw.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 
+// At the scanner's screen composite, which the chrome tracker
+// (vscreen.cpp, beginPanelOverride) recognises before uiDepthOnEyeDraw
+// sees the draw: the chrome surface the composite samples at PS slot 1
+// (view and its resource, both alive for the call) is learned as an
+// interface surface if the offscreen learner had not, and held for the
+// frame so an eye run staged this frame carries a copy of it
+// (eye_<stamp>_Chrome<i>.bin). Each outcome is said once. vs is the
+// composite's vertex shader, for the note. True when the surface was new.
+bool uiDepthLearnScannerChrome(ID3D11DeviceContext* ctx, uint64_t vs,
+                               ID3D11ShaderResourceView* view, ID3D11Resource* chrome);
+
 // Colour separation hook: the owner sets this after routing a recognized
 // target-sprite draw out of the clean colour stream and before the matching
 // coverage reissue.  The flag is per-draw and is cleared by uiDepthEnd().
