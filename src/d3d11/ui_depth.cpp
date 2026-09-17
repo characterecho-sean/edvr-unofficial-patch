@@ -1604,6 +1604,43 @@ void uiDepthConfigure(Config& cfg) {
 
 bool uiDepthWantsDraws() { return g_on && !g_stoodDown; }
 
+// The scanner's chrome (docs/fss-panel.md): two persistent 3408x1917
+// surfaces updated damage-style, a draw or two a frame across four
+// families of which one is the GUI renderer's, composited into the eye
+// by the general world-quad pipeline sampling them at PS slot 1. The
+// offscreen learner above asks a new target's vertex shader sixty-four
+// times and the label text is drawn once, so the graph's stratum went
+// unlearned, its composite unclassified, and its text -- "FILTERED
+// SPECTRAL ANALYSIS", static on the panel, no depth -- took the panning
+// camera's path at the far plane and smeared (eye dump 184002,
+// docs/fss-scanner.md). The chrome tracker (vscreen.cpp) recognises the
+// composite by content hash and the surface's size before this module
+// sees the draw; it hands the surface over here, and the composite is a
+// composite of a learned surface from that draw on.
+bool g_chromeNoted = false;
+bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs) {
+    if (!g_on || g_stoodDown) return false;
+    const void* view = bindingGet(BindSlot::PsSrv1);
+    ResourceInfo info;
+    if (!view || !bindingResolve(const_cast<void*>(view), &info) || !info.isTexture2D) return false;
+    if (info.a < 2000 || info.b < 1000 || info.b >= info.a) return false;
+    if (surfaceMatches(info)) return false;
+    addSurface(info.resource, info.a, info.b, info.fmt);
+    // The view may have been judged "not a surface" this frame or last;
+    // the memo answers viewIsSurface for a hundred frames, so overwrite it.
+    g_viewMemo.put(view, g_frame, 1u);
+    if (!g_chromeNoted) {
+        g_chromeNoted = true;
+        Log::get().note("ui depth: the scanner's chrome surface (%ux%u, DXGI format %u) is "
+                        "learned from the screen's composite (vs %016llX), which the scanner "
+                        "tracker recognised; its strata write depth and the mask from this "
+                        "draw on, and the temporal pass keeps them on the head's path while "
+                        "the scanner is up. Said once; a second surface is learned silently.",
+                        info.a, info.b, info.fmt, static_cast<unsigned long long>(vs));
+    }
+    return true;
+}
+
 float uiDepthReactive() { return g_on && !g_stoodDown ? g_reactive : 0.0f; }
 
 float uiDepthGhostTolerance() { return g_on && !g_stoodDown ? g_ghostTolerance : 0.0f; }

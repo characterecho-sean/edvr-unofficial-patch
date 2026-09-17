@@ -112,13 +112,6 @@ experimental appearance, off by default
 (`experimental.night_vision_realistic = 0`), with its brightness control
 under Experimental too. Disabling that appearance keeps pulse stability.
 
-**Supersample filtering.** Experimental and off by default
-(`experimental.supersample_resolve = off`). On the legacy OpenVR path this
-filtered an eye larger than the headset recommendation down to that size;
-it has no implementation yet on the native OpenXR runtime — deferred from
-parity, not abandoned — so the switch currently does nothing.
-*[anti-aliasing.md](anti-aliasing.md).*
-
 **Temporal anti-aliasing.** Select TAA or DLSS on Performance
 (`fix.temporal_aa = off` by default); both include UI and smoke depth, adaptive
 UI history and rotating-station motion automatically. On an RTX card, the

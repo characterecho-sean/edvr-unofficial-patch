@@ -230,7 +230,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^
-    --extra-export edvrSupersampleResolve ^
     --extra-export edvrTemporalAa ^
     --extra-export edvrEyeCaptureUntreated ^
     --extra-export edvrEyeCaptureArm ^
@@ -378,7 +377,6 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_panel.cpp" ^
     "src\d3d11\intro_skip.cpp" ^
     "src\d3d11\intro_upscale.cpp" ^
-    "src\d3d11\supersample_pass.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\mesh_motion.cpp" ^
@@ -869,12 +867,10 @@ exit /b 0
 
 :rig_supersample_test
 echo [edvr] === supersample_test.exe ===
-REM The supersample resolve's arithmetic (src\common\supersample_math.h):
-REM the arm/disarm verdict from sizes, the eye region from Submit bounds
-REM (double-wide and flipped), and both kernels' weights -- table-tested,
-REM header-only, linking nothing from src\ at all. The HLSL in
-REM supersample_pass.cpp transcribes the same functions; this pins the
-REM reference they are transcribed from.
+REM The eye-region rule (src\common\supersample_math.h): which pixels are one
+REM eye's, from the Submit bounds (double-wide and flipped) -- table-tested,
+REM header-only, linking nothing from src\ at all. Every pass at the door
+REM reads through it, so a drift here is a drift in all of them.
 if not exist "%OBJ%\sstest" mkdir "%OBJ%\sstest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\sstest"\ ^
@@ -883,7 +879,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: supersample_test build failed & exit /b 1 )
 "%BUILD%\supersample_test.exe" || (
-    echo [edvr] ERROR: the supersample resolve's arithmetic is wrong
+    echo [edvr] ERROR: the eye-region rule is wrong
     exit /b 1
 )
 exit /b 0

@@ -299,8 +299,7 @@ standing in the world, or sized for a screen you are not looking at.
 - **Shimmer and sharpness.** Temporal anti-aliasing, with DLAA and DLSS on RTX
   cards, includes UI and smoke depth and rotating-station motion automatically.
   Choose it and the **DLSS preset** (default K) on Performance; AA remains off
-  by default. RCAS sharpening is available separately. Supersample filtering is
-  experimental and off by default.
+  by default. RCAS sharpening is available separately.
 - **The terrain missing at the edges of view** over planets — Elite culls
   against a narrower frustum than it renders, so squares of ground go undrawn.
   Off by default; it costs about 6% GPU at the tested values.
@@ -593,15 +592,13 @@ buffer it reads, and the only action it can take is to not submit a frame — or
 to hand the runtime the game's own previous frame in its place: a copy EDVR
 keeps of the last frame it submitted, always the game's content, never EDVR's.
 
-**The supersample resolve** is experimental and off by default: when the game
-submits a larger frame than the headset asked for, one GPU filter pass shrinks
-the game's frame into a texture EDVR owns, and that copy is what SteamVR
-receives — the game's texture is read, never written, no answer the game asks
-for changes, and nothing is read from memory. The temporal pass and the
-sharpening (`temporal_aa`, `render_sharpness`, both off by default) are two
-more passes of exactly that kind, except that the temporal pass also shifts the
-projection the game is told by a fraction of a pixel each frame, the way the
-terrain fix shifts it by a margin.
+**The temporal pass and the sharpening** (`temporal_aa`, `render_sharpness`,
+both off by default) are each one GPU pass over the game's finished frame,
+into a texture EDVR owns, and that copy is what the runtime receives —
+the game's texture is read, never written, no answer the game asks for
+changes, and nothing is read from memory. The temporal pass also shifts
+the projection the game is told by a fraction of a pixel each frame,
+the way the terrain fix shifts it by a margin.
 
 **Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam

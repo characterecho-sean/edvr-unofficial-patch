@@ -60,11 +60,23 @@ changes.*
     24.1% world-path pixels in the scanner against 94.8% twenty
     seconds later), and the treated crops show the grid and dots smeared
     against the raw. Journal entry "2026-09-16: the scanner's sky at 49
-    draws". FIX BUILT, NOT FLOWN: the floor is 8 (`kTemporalSceneDrawFloor`,
-    shared by the world path, the camera follow score and the menu
-    depth); receipt on the registration line's second half: `the world
-    path stood down on the scene's draw floor alone on N eye-frames
-    (last count K, floor 8)`.
+    draws". The floor is 8 now (`kTemporalSceneDrawFloor`, shared by the
+    world path, the camera follow score and the menu depth; 79b1879 /
+    main cc10e79) and FLEW 2026-09-16 18:40 (dump 184002): `w 1` on
+    every frame at 35-36 draws, the sky at -7 px under the pan, the bar
+    at -0.10 px, its text crisp. Sean: "still blurred" -- and the dump
+    shows what: "FILTERED SPECTRAL ANALYSIS" and the graph's strokes,
+    which are NOT in the interface mask (94% zero at the text), read no
+    depth, and so take the world path's far-plane pan (-5.04 px) while
+    they stand still in the raw (0-1 px): a 3-4 copy smear in every
+    treated crop. Journal entry "2026-09-16: the spectral graph is not
+    interface". CAUSE: ui_depth's offscreen learner never learns the
+    graph's chrome stratum (its families are not the GUI renderer's and
+    the labels are drawn once), so its composite is never classified.
+    FIX BUILT, NOT FLOWN: the chrome tracker hands the slot-1 surface
+    to `uiDepthLearnScannerChrome` at the composite it recognises;
+    receipt `ui depth: the scanner's chrome surface (3408x1917, DXGI
+    format 27) is learned from the screen's composite (vs ...)`.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -115,21 +127,27 @@ changes.*
 - **Next flight:** none owed for the ghost: flight 3 (2026-09-16
   17:05, `edvr_gfx_20260916_170514.log`, the pre-commit build of
   10705da, version string `0522215-dirty`) confirmed the same-frame
-  donor and it is on main (e08e899). The head path for the interface
-  flew 2026-09-16 18:20 and did what it said (receipts under Open).
-  Owed: one flight on the 8-draw floor, Quest 3, DLSS, the same sparse
-  system's initial FSS screen, pan with the head still, eye dump
-  mid-pan. Receipts: `motion.csv` `cameraTv3` (w) 1 on every frame and
-  `sceneDraws` still 49; the sky's `MV` carrying the pan (~5 px at 0.2
-  deg/frame, ~40 at 1.5) while the bar's pixels stay ~0; the treated
-  crops' grid and signal dots as crisp as the raw's; the registration
-  line's world-path share in the scanner in the nineties, not 24%; and
-  no `stood down on the scene's draw floor` clause on its second half
-  (that clause with `last count 49` means the floor is still in the
-  way; with a count under 8 it is the main menu, as intended). Watch
-  the main menu's hangar wall under head sway for a detach -- the floor
-  is now 8, and the menu's backdrop was measured at one or two draws.
-  The Toolkit-ON confirmation under Open still stands.
+  donor and it is on main (e08e899). The head path (18:20) and the
+  8-draw floor (18:40) both flew and did what they said (receipts under
+  Open). Owed: one flight on the chrome-surface build, Quest 3, DLSS,
+  the initial FSS screen, pan with the head still, eye dump mid-pan.
+  Receipts: `ui depth: the scanner's chrome surface (3408x1917 ...) is
+  learned from the screen's composite (vs A888...)` within a second of
+  the scanner opening, then either a family line for that composite's
+  pixel shader or `ps ... is a variant of the A888D51024D9798E family`;
+  in the dump, the "FILTERED SPECTRAL ANALYSIS" pixels IN the mask
+  (value 129, ~220 m) with `MV` ~0 px while the sky beside them keeps
+  the pan, and the text crisp in the treated crops (`ui_text_probe.py`
+  at input x 1180-1400 y 1318-1350 read 94% unmasked, -5.04 px on
+  184002). No learn note = the tracker did not run (its gate) or the
+  surface is not at slot 1 any more; note but text still unmasked =
+  the composite was declined, and the `ui depth totals` line's "left
+  alone" counters say why. Watch the main menu's hangar wall under
+  head sway for a detach (the floor is 8 now). Known and not fixed:
+  the scanner's interface is marked at ~220 m through the interface-
+  projection remap while the panel sits ~1 m off, so head SWAY (not a
+  turn) will move it wrong by up to ~14 px; a separate item. The
+  Toolkit-ON confirmation under Open still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
@@ -1195,6 +1213,71 @@ the way from a menu. temporal_test checks 49 is a scene and 2 is not.
   system's body count (64 in 170752's system, 49 here). If a system
   ever draws under 8, the floor is in the way again and the counter
   says so.
+
+## 2026-09-16: the spectral graph is not interface
+
+Flight on cc10e79 (`edvr_gfx_20260916_183753.log`, right build), eye
+dump 184002, the initial FSS screen, panning with the head still. Sean:
+"still blurred".
+
+The floor did its job: `sceneDraws` 35-36 this time (a third system),
+`cameraTv3` 1 on all 16 frames, the sky's `MV` p50 -7.09 px under a
+0.29 deg/frame pan (the camera at 0.25-2.10 deg/frame, the head at
+0.014-0.056), the bar's solid pixels at -0.10 px and its text at
+0.94-0.99 of the raw's edge gradient in the treated crops. And the
+"scene camera accepted" note came 13 s after the scanner opened instead
+of 36.
+
+What still blurs, from the star-dense window the sky script picked
+(input x 1215-1375, y 1329-1429): the "FILTERED SPECTRAL ANALYSIS"
+label and the graph's strokes, crisp in the raw and a three-to-four
+copy smear in every treated crop (`ui_sky_184002.png`). At the text
+(x 1180-1400, y 1318-1350, 181 bright pixels): the interface mask is
+zero on 94% of them (the 6% at 129 are the bar's edge), `Z`, `SceneZ`,
+`HoloCoverage` and `PrevZ` all zero (the far plane), `UiEdits` zero,
+`MV` -5.04 px on every one -- the world path's far-plane pan -- while
+the raw crops move the window's content by 0 to 1 px (jitter). So the
+label is static on the panel, unmarked, depthless, and reprojected as
+sky. Before the floor fix it happened to be still on four frames in
+five; before the head path it was doubled with the bar. It was the
+visible part of the original complaint all along.
+
+Why unmarked. docs/fss-panel.md has the anatomy: the chrome is two
+persistent 3408x1917 surfaces updated damage-style, a draw or two a
+frame across four families (`1012E00B3CB44469`, `666EF0C4C616F67E`,
+`A3E5D3FCBC1165F8` = the GUI icons family, `019E81F4EECFB371`), and
+composited by the general world-quad pipeline (vs A888D51024D9798E, the
+menu panel's) sampling them at PS slot 1; B018D143700AB803 is the
+position-only depth prepass of the same quad, and is on ui_depth's
+built-in exclude list for its own reason. ui_depth's offscreen learner
+asks a newly bound target's vertex shader sixty-four times for a GUI
+family and then leaves it alone for 600 frames; the graph's stratum is
+drawn by the other three families and its labels once, so it is never
+learned, its composite is never a "composite of a learned surface", and
+nothing is logged because nothing was declined (the `ui depth totals`
+line's "left alone" counters read 0.0 through the scanner). The bar's
+stratum IS learned (its text changes, the GUI renderer draws into it),
+which is why the bar is marked at 129 and ~220 m through the interface-
+projection remap (family line `vs A888... ps 015EF9349EC097E8:
+interface projection; alpha-aware depth`, 18:39:52).
+
+The fix, built, not flown: the chrome tracker in `beginPanelOverride`
+already recognises the composite by content hash and the slot-1
+surface's size, before `uiDepthOnEyeDraw` sees the same draw; it now
+hands the surface to `uiDepthLearnScannerChrome` (ui_depth.cpp), which
+adds it to the learned set and overwrites the view memo (which would
+otherwise answer "not a surface" for a hundred frames). From that draw
+on the composite is classified like the bar's: the A888 family's
+transcription reads t1, so a pixel shader this build has no name for
+stands in by slot. The label and the strokes then carry the mask, my
+scanner exemption gives them the head's path, and the remap's ~220 m
+is harmless under a still or turning head.
+
+- Ruled out: the world path's own vectors (right at the sky and the
+  bar), the head path (right at the bar), the UI resolve (`UiEdits` 0
+  at the text -- it never touches an unmarked pixel).
+- Known, not fixed: the ~220 m remap under head SWAY (above, Next
+  flight).
 
 ## Open
 
