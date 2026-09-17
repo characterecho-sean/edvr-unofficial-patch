@@ -28,7 +28,6 @@
 #include "input_gate.h"
 #include "intro_probe.h"   // the device stamp the intro probe's clock reads
 #include "oculus_route.h"
-#include "shutdown_census.h"
 
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
     sizeof(EdvrNativeStartupRouting), EDVR_NATIVE_STARTUP_VERSION_1,
@@ -389,14 +388,6 @@ void reportLoopOnce() {
 }  // namespace
 
 namespace edvr {
-
-namespace {
-ShutdownPresentCensus g_shutdownPresentCensus;
-}
-
-ShutdownPresentCensus& shutdownPresentCensus() noexcept {
-    return g_shutdownPresentCensus;
-}
 
 // The mechanism decision, made from the fact that actually settles safety:
 // whose CODE implements this context's methods?
