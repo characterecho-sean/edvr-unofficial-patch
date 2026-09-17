@@ -2,57 +2,58 @@
 
 ## Status
 
-Updated 2026-09-16 (late evening) after the confirmation flight (Quest 3,
-DLSS quality mode, preset K; dumps 164010 at tolerance 12 and 164455 at
-tolerance 1, the menu having moved the knob 12 -> 0 -> 1 in flight). Sean:
-still smears, only on an M dwarf, not an A-type star. He pointed at the
-soft, non-rectangular halo around the target label "BINET'S FOLLY" in dump
-164455, over the star's faint outer glow (raw 6..8 luma).
+Updated 2026-09-16 (evening) after flight 173929 (Pimax Crystal Super, DLSS
+quality preset K, `advanced.ui_ghost_tolerance` = 12 throughout; four INSERT
+dumps 174233/174253/174317/174334, each with a target label over the M
+dwarf's faint outer glow). Sean, while I read them: the smear only shows
+when moving relatively fast around the star, and the orbit lines carry it
+too.
 
-That halo is the resolve's transported footprint at the old rule: NVIDIA
-brightens the faint glow by 1..2 luma there, the clamp at tolerance 1 bites
-on every frame, and the footprint dims a blob above-left of the label that
-is present only in final-dlss (raw and `DlssBeforeUi` are clean; sheet
-stage_1950_1250 of 164455, tables in the late-evening entry). It is effect
-1 below, captured at tolerance 1; at tolerance 12 (dump 164010) the resolve
-adds 0.00 around its label. The Steam ini was left at 1 by the menu.
+Effect 1 (EDVR's resolve footprint) is gone at 12: final-dlss is +0.00 in
+every ring around all four labels; the resolve's only change is the digits'
+rebuild. Fixed on main (a50dfc6, `advanced.ui_ghost_tolerance`, default 12).
 
-Two effects, then:
-- effect 1, EDVR's: the resolve's polygon and trail (Pimax performance:
-  -3.6 luma; Quest 3 quality over faint glow: -0.3..-0.6 on a 6..8 luma
-  background), fixed on main by the bound tolerance (a50dfc6,
-  `advanced.ui_ghost_tolerance`, default 12, 0 = the old rule); the flight
-  did not confirm it because the knob sat at 0 and 1 while Sean looked;
-- effect 2, the game's: the body of the comms panel and of the info
-  notification beside the target label, a dark translucent fill drawn over
-  the star before DLSS (raw, `DlssBeforeUi`, `L0` and all 16 stored pairs
-  identical; a solid element in `HoloCoverage`). Not what Sean means.
-
-The change on main: `src/d3d11/ui_resolve.h` widens the clamp by a
-tolerance carried in a b1 constant buffer and gates the edited rebuild on
-it; a numpy port of the shader matched `L0` to 0.076/255 on the Pimax dumps
-and sized the tolerance (NVIDIA's offset there: median 6/255, 99th
-percentile 12..16/255; the footprint held no ghost); rig cases in
-`tools/ui_depth_test`; installed to Steam as the build of main's head.
+What remains is NVIDIA's, and it is a lift of the field, not a darkening of
+the halo. After a stretch of motion DLSS's accumulated history over faint,
+smooth, non-black glow (raw 2..5 luma) sits 2..3.5 luma above the raw frame
+(+0.5 within a dozen frames of a 20-30 px jump; black stays black; the
+accumulation smooths nothing there). Wherever the history is fresh --
+beside the screen-locked HUD text, beside the orbit lines, and beside the
+cockpit strut alike -- the output stays at the raw level, 1..2.5 luma under
+the field, decaying over 30..60 output pixels. With the background streaming
+past the text that fresh zone is dragged along the motion: the wake Sean
+sees, longer the faster he moves, and invisible on a saturated white star.
+Tables in the evening entry (`halo.py`, `noise.py`, `drift.py` in that
+session's scratchpad). Effect 2 (the game's panel body) stands as recorded.
 
 Ruled out (details in the journal): the game drawing a dark backing at the
-label (raw clean at every label); NVIDIA producing the halo (`DlssBeforeUi`
-clean); the mask lying where the UI content changed; the format-9 change
-ending the deferred route's latch-off; a higher `stale` threshold alone; a
-tolerance relative to the raw level; the panel body as Sean's smear (he
-pointed at the label's halo).
+label (raw at or above the field around every label); EDVR's resolve at
+tolerance 12 (final-dlss +0.00 everywhere); the HUD's motion vectors or
+depth, and so the deferred UI route as the fix (the cockpit strut with
+correct depth and motion carries the same deficit); EDVR's bias mask (zero
+on every pixel); an EDVR history reset behind the lift's collapse (dlHistory
+1, jumped 0 on every stored frame); the format-9 change ending the deferred
+route's latch-off; a higher `stale` threshold alone; a tolerance relative to
+the raw level; the panel body as Sean's smear.
 
-Next flight: set `ui_ghost_tolerance = 12` in the Steam ini (or delete the
-line; the menu left it at 1), target something whose label sits over the M
-dwarf's outer glow, let it move, and take an INSERT dump there. Expect no
-halo and no trail; `python tools\edvr_log.py --target steam --expect-build
-HEAD` must name the build. If a halo remains at 12, the dump says whether
-it is in `DlssBeforeUi` (NVIDIA's) or in final-dlss (the resolve's).
+Next, in this order:
+1. No build: on the M dwarf, moving fast with a label over the glow, A/B
+   `temporal_aa_model` k -> j, l, m from the Performance page (live, rebuilds
+   NVIDIA history). If one preset does not lift the glow, that is the fix.
+2. Build, behind a live knob with a log counter of the pixels covered: hold
+   faint flat non-UI output pixels within a small tolerance of the raw 2x2
+   range in the resolve, the way UI pixels already are, so the field cannot
+   drift away from the fresh zones. One flight A/Bs the knob with a dump at
+   each value; `halo.py`'s field lift and text rings judge it. The
+   classifier must take only flat faint pixels, not dark textured content
+   (planet night sides), or DLSS's anti-aliasing there is lost. The NGX
+   bias-current-colour mask is not a lever: only preset F honours it
+   (dlaa.cpp's comment), and the transformer presets ignore it.
 
 The deferred UI route (src/d3d11/ui_deferred.cpp) is untouched: refused
-ten times, never a label in the headset; its format-9/11 change is on this
-branch (1b3d864); the Codex worktree c009 is still dirty with the same diff.
-
+ten times, never a label in the headset, and now measured not to be the
+answer; its format-9/11 change is on this branch (1b3d864); the Codex
+worktree c009 is still dirty with the same diff.
 
 ## Investigation
 
@@ -3145,3 +3146,138 @@ ruled out: the panel body as Sean's smear, because he pointed at the
 label's halo, which is in final-dlss only.
 Next: the Steam ini was left at 1; set 12, a label over the M dwarf's
 outer glow, an INSERT dump there, the log read with `--expect-build HEAD`.
+
+### Flight 173929 (Pimax, DLSS quality, tolerance 12): the resolve is clean, the halo is NVIDIA's history lift, 2026-09-16 evening
+
+Build v0.17.0-rc.3-19-g479bd23 (log `edvr_gfx_20260916_173929.log`, checked
+with `--expect-build HEAD`), Pimax Crystal Super, DLSS quality mode preset K,
+2203x2098 in, 3390x3228 out. Sean set `advanced.ui_ghost_tolerance` 1 -> 12
+from the menu at 17:41:14 and took four INSERT dumps with a target label over
+the M dwarf's faint outer glow: 174233 (NAV BEACON, frame 20014), 174253
+(UNIDENTIFIED SIGNAL SOURCE, 21672), 174317 (JIUSHAO'S FOLLY, 23390), 174334
+(NAV BEACON, 24598). His note while I read them: the smear only shows when
+moving relatively fast around the star, and the orbit lines seem to carry a
+halo too.
+
+**The resolve adds nothing at 12.** `stage_diff.py` around each label
+(rings in output pixels from the class-1 text; luma 0..255):
+
+| dump | band | raw | dlss | final | dlss-raw | final-dlss |
+|---|---|---|---|---|---|---|
+| 174233 | ring 1-10 / 11-30 / 31-60 / beyond | 6.5 / 6.9 / 7.1 / 9.6 | 8.3 / 9.8 / 9.9 / 12.1 | same as dlss | +1.80 / +2.91 / +2.86 / +2.53 | +0.00 in every ring |
+| 174253 | same | 22.1 / 18.5 / 15.6 / 17.0 | 23.5 / 21.3 / 19.1 / 20.3 | same | +1.32 / +2.78 / +3.54 / +3.26 | +0.00 |
+| 174317 | same | 5.6 / 3.6 / 5.1 / 5.0 | 6.2 / 4.5 / 6.1 / 6.4 | same | +0.51 / +0.92 / +1.04 / +1.37 | -0.01 / +0.00 / +0.00 / +0.00 |
+| 174334 | same | 8.9 / 13.4 / 14.8 / 6.4 | 9.5 / 14.7 / 16.4 / 8.4 | same | +0.60 / +1.23 / +1.60 / +2.00 | +0.00 |
+
+The final-dlss sheets are flat grey outside the text; the only change the
+resolve makes is the edited rebuild of the ticking digits. Effect 1 is gone
+at 12 in every dump. Nothing in the raw frame is dark around the labels
+either: the raw ring nearest the text sits at or above the field level in
+all four (the label's own edge bleed), so there is no halo in the game's
+frame for DLSS to retain.
+
+**What remains is in `DlssBeforeUi`, and it is a lift of the field, not a
+darkening of the halo.** `halo.py` takes treated minus raw per stored frame
+(T_k against C_k, k = 0 the dumped frame, 1..15 the frames after it), flattens
+it, and reads ring bands relative to the field beyond 60 px:
+
+| dump, frames | field lift (beyond 60 px) | text ring 1-10 / 11-30 / 31-60, relative to the field | orbit-line ring 1-10 / 11-30 | strut ring 11-30 / 31-60 |
+|---|---|---|---|---|
+| 174253 k0-2 (before a 20-30 px jump at k3) | +2.85 .. +2.98 | -2.4 / -1.1 / -0.4 | - | - |
+| 174253 k4-15 (after the jump, motion 0-3 px) | +0.31 .. +0.65 | -0.1..-0.6 / +0.1..+0.4 / 0.0 | - | - |
+| 174334 k0-15 (steady, background 0-9 px/frame) | +1.88 .. +2.40 | -1.0..-2.1 / -0.8..-1.5 / -0.4..-0.7 | - | - |
+| 174317 k0-2 | +1.60 .. +1.77 | -1.1 / -0.4..-0.7 / -0.1..+0.3 | -2.0..-2.5 / -1.6..-1.8 | -1.2..-1.3 / -0.45..-0.8 (region 1840,2240) |
+| 174317 k6-15 | +0.53 .. +0.60 | 0.0..-0.3 / 0.0 / 0.0 | -0.2..-1.4 / -0.5 | 0.0..-0.3 / 0.0..-0.3 |
+
+The jump at k3 is the dump's own hitch (frame k2 took 20-24 ms in three of
+the four dumps); `motion.csv` shows no reset (dlHistory 1, jumped 0 on every
+stored frame), so the collapse of the lift there is NVIDIA's reaction to a
+20-30 px move in one frame. Flat patches of glow with no HUD (`noise.py`):
+
+| dump, patch | raw luma | DLSS luma | lift | residual std raw -> DLSS | levels raw -> DLSS |
+|---|---|---|---|---|---|
+| 174253 2640,1560 k0-2 | 5.0 | 8.1 | +3.1 | 1.4 -> 1.6 | 15 -> 22 |
+| 174253 2560,1720 k0-2 / k3 | 4.9 / 5.2 | 8.3 / 5.9 | +3.4 / +0.65 | 0.5 -> 0.7 | 12 -> 14 |
+| 174334 2440,1560 k0-3 | 2.0 | 4.0 | +2.0 | 0.35 -> 0.57 | 7 -> 11 |
+| 174317 2560,1760 (black space) | 0.01 | 0.01 | 0.00 | - | - |
+
+So: over the faint, smooth, non-black glow NVIDIA's accumulated history sits
+2..3.5 luma above the raw frame after a stretch of motion (60..100% of a
+2..5 luma field), about +0.5 within a dozen frames of a break, and black
+stays black. The accumulation smooths nothing there (the residual noise is
+no lower than the raw's). Wherever the history is fresh -- beside the
+screen-locked HUD text, beside the orbit lines, and beside the cockpit strut
+alike -- the output stays at the raw level, and that zone reads as a dark
+halo 1..2.5 luma under the field, decaying over 30..60 output pixels. When
+the background streams past the text, the fresh zone is dragged along the
+motion and becomes the wake Sean sees; the further it streams per frame,
+the longer the wake, which is his "only when moving relatively fast". On a
+white A-type star the field is saturated and a 3-luma lift has nowhere to
+go, which is why it is an M-dwarf effect. The Bias mask handed to NGX is zero
+on every pixel of every dump, so no EDVR bias is involved.
+
+Sean's reading was that a halo in the game's frame is retained by the DLSS
+history; the dumps say the reverse: the game's frame has no halo, the
+history lifts the glow, and the halo is where the history is fresh. His
+question about the orbit lines: yes, the same, 1.6..2.5 luma under the field
+beside the lines during the lifted phase, 0.5..1.4 at rest.
+
+ruled out: EDVR's resolve as the halo at tolerance 12, because final-dlss is
++0.00 in every ring around all four labels.
+ruled out: a halo in the game's frame retained by DLSS, because the raw ring
+nearest the text is at or above the field level around every label.
+ruled out: the HUD's motion vectors or depth as the cause, and so the
+deferred UI route as the fix, because the cockpit strut, real geometry with
+correct depth and motion, carries the same deficit (-1.2 luma at 11-30 px in
+174317 during the lifted phase, 0.0 after the lift collapses).
+ruled out: EDVR's bias-current-colour mask as a cause, because Bias.bin is
+zero on every pixel of every dump.
+ruled out: an EDVR history reset behind the k3 collapse, because dlHistory
+is 1 and jumped is 0 on every stored frame.
+ruled out: EDVR's own processing of the colour as the lift, because the
+colour NVIDIA is handed is a plain copy of the game's frame
+(`temporal_pass.cpp` CopySubresourceRegion into `e.dlColour`, ~4139) and
+`DlssBeforeUi` is `e.dlOut` staged right after the evaluate, "after NGX and
+before UI bounds" (~4345), with nothing of EDVR's in between; the bias mask
+handed to the evaluate (`biasMask`, ~4236: the mover/interface union or the
+interface's reactive mask) is zero in every dump.
+
+**What this leaves.** The lift is inside NVIDIA's accumulation and only
+shows on faint red glow under sustained motion, so the levers are: the
+preset (`temporal_aa_model` k/j/l/m, live, a change rebuilds the history;
+free to A/B in flight), and keeping NVIDIA from accumulating over faint
+flat glow at all -- either a bias-current-colour mask over those pixels
+(the mask is plumbed and handed to the evaluate, zero today) or, exactly,
+holding those output pixels within a small tolerance of the raw 2x2 range in
+the resolve, the way the UI pixels already are. The accumulation gains
+nothing over that content (the residual noise is no lower than the raw's),
+so either costs nothing visible there; the classifier must take only flat
+faint pixels, or DLSS's anti-aliasing of dark textured content (a planet's
+night side) is lost with it. The deferred UI route would not help: the
+strut, with correct depth and motion, shows the same deficit.
+
+**Addendum, from the code trace (a subagent's reading of temporal_pass.cpp,
+dlaa.cpp, ui_deferred.cpp, ui_depth.cpp at 479bd23).** Four facts that bear
+on the levers:
+- NVIDIA's colour input in these dumps was the game's frame with the HUD in
+  it. The deferred UI route would overwrite `e.dlColour` with a HUD-free
+  reconstruction when it engages, but it did not engage here: the dumps'
+  uiFlags word is 0x10 (bit 64, the route's mark, clear) and the labels are
+  in `DlssBeforeUi`. So the C crop is what NGX saw.
+- The stored frames carry flags = 2 (the DLAA bit alone; the reset bit
+  clear) as well as dlHistory = 1, so NGX was never told to reset around
+  the k3 collapse; EDVR asks for a reset only on the first frame, a scene
+  change, a dropped sequence number, a size change or the camera-jump
+  verdict, none of which fired.
+- The bias-current-colour mask handed to the evaluate is honoured only by
+  preset F (dlaa.cpp's comment at the binding); presets J/K/L/M ignore it.
+  It is not a lever for the lift, and it is why the mask being zero did not
+  matter. Struck from the options above: what is left is the preset A/B and
+  the raw hold in the resolve.
+- HUD pixels reach NVIDIA with EDVR-synthesised motion (the pixel reprojected
+  at a synthetic depth of one metre by the head's rotation, ui_depth.cpp)
+  and that depth, which is the right motion for a cockpit-attached panel;
+  consistent with the strut, which has the game's own depth and motion and
+  shows the same deficit.
+ruled out: the bias-current-colour mask as a lever under presets J/K/L/M,
+because NVIDIA ignores it there (only preset F honours it).

@@ -34,13 +34,20 @@
 
 namespace edvr {
 
+// A populated scene, by the draws into the scene pair's lesser target a
+// frame: the main menu's pre-rendered backdrop takes one or two, a scene
+// tens to hundreds. Fifty until 2026-09-16, when the scanner's initial
+// screen in a sparse system took 49 on four frames in five and the world
+// path stood down under the pan (docs/fss-scanner.md).
+constexpr uint32_t kTemporalSceneDrawFloor = 8u;
+
 // A scene camera includes both ship and head rotation. Opposing turns can
 // cancel, so a small camera delta does not prove a menu/stale camera.
 // Trust continuous rows from the bound scene block in a populated scene;
 // retain the head-follow detector only for ambiguous auxiliary chains.
 inline int temporalCameraFollowScore(int score, uint32_t sceneDraws, bool boundRows,
                                      float headDeg, float rowsDeg) {
-    if (sceneDraws >= 50u && boundRows) return 30;
+    if (sceneDraws >= kTemporalSceneDrawFloor && boundRows) return 30;
     if (headDeg > 0.1f) score += rowsDeg < 0.3f * headDeg ? -4 : 1;
     return score < -30 ? -30 : score > 30 ? 30 : score;
 }
