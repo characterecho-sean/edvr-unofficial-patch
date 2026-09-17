@@ -35,19 +35,27 @@ read 2026-09-16) unless marked believed.
   build.bat block, the WARP rig `tools\fsr3_engine_test` (31 checks; the
   jitter and motion signs settled at the engine's defaults, journal). No
   install to any game directory without Sean's approval.
-- **Next:** flight 1 (section 4). The branch at e70a44e was built green
-  and INSTALLED to the Frontier directory on 2026-09-17 05:58 on Sean's
-  go (`install_edvr.py --verify-only` clean), NOT FLOWN. Read its log with
-  `--expect-build e70a44e` (later doc commits move HEAD past the installed
-  build).
+- **Flight 1 FLOWN 2026-09-17 06:00 (e70a44e, Pimax, RTX 5090):** FSR
+  ran cleanly, on the upscale path (HMD Quality below 1: 2646x2206 and
+  3461x2884 into 4072x3394), contexts made in 2 to 4 ms, remade cleanly
+  on every size change, released on a live switch to `on`, remade on the
+  switch back; no refusal, no port messages. Price per stereo pair, full
+  region, median: fsr 1.6 to 2.1 ms against NGX's 2.9 to 3.6 at the same
+  sizes; 83 to 89 fps. Sean's verdict: slightly better than the pass's own
+  history, not as good as DLSS, as expected for FSR 3.1. Journal.
+- **Next:** Sean's call: merge route 1 to main now (an additive engine;
+  the default is unchanged; AMD users gain a real upscaler), or flight 2
+  first (the reactive mask, live) and flight 3 (Quest 3). DLSS-class
+  quality on AMD is route 2's question (FSR 4.1, RDNA3/RDNA4), section 5.
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
   history, which is what an AMD user gets today; and a cosmetic nit seen
   in the build's export listing: the port's static libraries carry
   `dllexport` attributes, so EDVR's d3d11.dll now exports nineteen `ffx*`
   symbols (inert: nothing imports them; fix in the fetch tool by building
-  the port without its export macro, with `--verify` checking for it).
-  CLOSED by Track A: the
+  the port without its export macro, with `--verify` checking for it);
+  and the create's VRAM figure, meaningless in the field (flight 1
+  journal). CLOSED by Track A: the
   build recipe (CMake, `/MT` forced, the upscaler-only targets) and the
   d3d11-import stop of 3.5 (neither library imports d3d11, dxgi or
   d3dcompiler by name). DECIDED (D6): the port's prebuilt shader compiler
@@ -614,3 +622,29 @@ class of upscaler): that is route 2's go/no-go.
     save/restore around the seam, the reactive mask's shape, the shared
     output and copy-out, the seven readers, `texture_lod_bias = auto`
     (keys on the mode, not the vendor), the build wiring, the rekey.
+- 2026-09-17 06:00, flight 1 (e70a44e, Frontier, Pimax, RTX 5090; log
+  `edvr_gfx_20260917_060039`, right build). The session started under
+  `dlss` at 2665x2632 into 4100x4050; the live switch to `fsr` printed
+  `fsr3: first asked for on NVIDIA GeForce RTX 5090, AMD's port version
+  fsr 3.1.2.`, the backend initialised (0 ms), the two contexts (3 and 4
+  ms) and `temporal aa: fsr 3.1.2 engaged -- AMD's history takes the
+  2665x2632 frame, its depth and the pass's own motion vectors ...`. The
+  sizes then moved three times (the trim to 4072x3394; the render size to
+  2646x2206, later 3461x2884) and every rekey printed its reason and
+  remade both contexts in 2 to 6 ms; a switch to `on` released AMD's
+  contexts and surfaces on the render thread, a switch to `dlss` and back
+  remade them. Zero refusals, zero stood-down eyes, zero lines carrying
+  the port's own text. **Price**, full region, median per stereo pair:
+  `fsr 3.1.2` 1.6 to 2.1 ms (p95 2.0 to 2.8); `full-frame ngx` 2.9 to 3.0
+  at 4072x3394 and 3.6 at 4100x4050; the pass's own history 0.5 to 1.0 ms
+  in `other`; 83 to 89 fps throughout. **Sean's verdict: slightly better
+  than TAA, not as good as DLSS**, which is the expected standing of FSR
+  3.1 against DLSS 3.x; route 1's value is the AMD user, who has no DLSS.
+  So flight 1 answers all three of its questions: it runs, it costs about
+  two thirds of NGX at these sizes on this card, and it beats the pass's
+  own history. Two nits: the create's VRAM delta prints -202, -56, -31,
+  -12 or +0 MB (`QueryVideoMemoryInfo` does not move at create time;
+  replace with a computed estimate from the surface descriptions, or drop
+  it); and the flight ran the upscale path, which the plan had reserved
+  for flight 2, so flight 2's remaining question is only the reactive
+  mask. Ruled out: nothing.
