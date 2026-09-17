@@ -669,7 +669,15 @@ struct FloorCb {
 // (advanced.temporal_aa_smoke_reactive; 0 keeps the one-quantum mark).
 float g_smokeFloor = 0.08f;
 float g_smokeReactive = 0.0f;
-FloorCb g_floorCbs[4];   // [0] the interface proper, [1] the holo material and the sprite, [2] the flight HUD, [3] the smoke (g_reissueMaskSlot)
+// [4] the scanner's chrome: the interface proper at one alpha step. The
+// spectral graph and its labels are drawn DIM -- their strokes sit at alpha
+// 0.2-0.3 in the chrome (eye_194158_Chrome0: luma 20-40 at alpha 51-77 of
+// 255, premultiplied) -- and the chrome carries no translucent area at all
+// (97.7% alpha 0, the rest strokes), so under the general floor of 0.5 the
+// graph took the sky's far-plane pan (docs/fss-scanner.md, 2026-09-16) and
+// nothing is lost by writing down to one step while the scanner is up.
+FloorCb g_floorCbs[5];   // [0] the interface proper, [1] the holo material and the sprite, [2] the flight HUD, [3] the smoke, [4] the scanner's chrome (g_reissueMaskSlot)
+constexpr int kChromeFloorSlot = 4;
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
 ID3D11DepthStencilState* g_overlayDss = nullptr;   // visible interface overlays replace private depth
 bool          g_reissueDssFailedNoted = false;
@@ -1260,11 +1268,16 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
                                              : 0.0f;
     // Three families with different offsets draw in one frame; each keeps
     // its own buffer rather than trading one back and forth.
-    FloorCb& slot = g_floorCbs[slotIndex < 0 ? 0 : (slotIndex > 3 ? 3 : slotIndex)];
+    slotIndex = slotIndex < 0 ? 0 : (slotIndex > kChromeFloorSlot ? kChromeFloorSlot : slotIndex);
+    FloorCb& slot = g_floorCbs[slotIndex];
     const float nearDepth = temporalPassDepthAt(1.0f);
     const float depthAt2 = temporalPassDepthAt(2.0f);
     const bool smoke = slotIndex == 3;
-    if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth &&
+    // The scanner's chrome writes down to one alpha step (g_floorCbs says
+    // why); it is the interface proper otherwise, floating like slot 0.
+    const bool chrome = slotIndex == kChromeFloorSlot;
+    const float alphaFloor = chrome ? (g_alphaFloor < 1.0f / 255.0f ? g_alphaFloor : 1.0f / 255.0f) : g_alphaFloor;
+    if (slot.cb && slot.floor == alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth &&
         slot.cockpitMetres == g_cockpitMetres &&
         slot.depthAt2 == depthAt2 &&
         (!smoke || (slot.smokeFloor == g_smokeFloor && slot.smokeMax == g_smokeReactive))) {
@@ -1304,7 +1317,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     // known, and the smoke's shader falls back to the raster's z.
     const float projB = 2.0f * (nearDepth - depthAt2);
     const float projA = nearDepth - projB;
-    const float data[8] = {g_alphaFloor, slotIndex <= 0 ? flt : ride, smoke ? g_smokeFloor : nearDepth,
+    const float data[8] = {alphaFloor, (slotIndex <= 0 || chrome) ? flt : ride, smoke ? g_smokeFloor : nearDepth,
                            smoke ? g_smokeReactive : flt, projA, projB, g_cockpitMetres, 0.0f};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
@@ -1315,7 +1328,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     const HRESULT hr = dev->CreateBuffer(&bd, &sd, &slot.cb);
     dev->Release();
     if (FAILED(hr)) slot.cb = nullptr;
-    slot.floor = g_alphaFloor;
+    slot.floor = alphaFloor;
     slot.cockpitMetres = g_cockpitMetres;
     slot.strength = strength;
     slot.nearDepth = nearDepth;
@@ -1631,7 +1644,17 @@ bool uiDepthWantsDraws() { return g_on && !g_stoodDown; }
 // floor) on a stratum drawn dim. So this says which way it went, once
 // per outcome, distinguishable from a learn; and the surfaces go out
 // with an eye run (Chrome0/Chrome1) so the strokes' alpha is read off
-// the chrome itself rather than inferred through the composite.
+// the chrome itself rather than inferred through the composite. Read
+// (eye_194158_Chrome0): the dim strokes sit at alpha 51-77 of 255, the
+// labels at 166 and up, nothing else is non-zero -- hence the held
+// surface's composites take the one-step floor (kChromeFloorSlot).
+// The tracker also matches the loading screen's panel (same pipeline,
+// same size class), so a loader's dialog gets the one-step floor too:
+// under fix.loading_dim = screen (the default) the intro's scrim is
+// withheld and nothing translucent is in that surface; where the stock
+// scrim draws (loading_dim = stock, or a loader after the intro) its 40%
+// over the ship model writes depth for that dialog's duration -- the
+// case the general floor was set for, brief and head-locked here.
 uint32_t g_chromeSaid = 0;   // outcome bits, each said once
 bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs,
                                ID3D11ShaderResourceView* view, ID3D11Resource* chrome) {
@@ -1664,8 +1687,9 @@ bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs,
             g_chromeSaid |= 4u;
             Log::get().note("ui depth: the scanner's chrome surface (%ux%u, DXGI format %u) was "
                             "already learned when the tracker offered it (%u surfaces known): "
-                            "the composite (vs %016llX) is classified by the ordinary route and "
-                            "what its strokes get is the alpha floor's call (%.3f). Said once.",
+                            "the composite (vs %016llX) is classified by the ordinary route, and "
+                            "while this surface is held its strokes write depth down to one alpha "
+                            "step rather than the general floor (%.3f). Said once.",
                             info.a, info.b, info.fmt, g_surfaceCount,
                             static_cast<unsigned long long>(vs), static_cast<double>(g_alphaFloor));
         }
@@ -1680,11 +1704,29 @@ bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs,
         Log::get().note("ui depth: the scanner's chrome surface (%ux%u, DXGI format %u) is "
                         "learned from the screen's composite (vs %016llX), which the scanner "
                         "tracker recognised; its strata write depth and the mask from this "
-                        "draw on, and the temporal pass keeps them on the head's path while "
-                        "the scanner is up. Said once; a second surface is learned silently.",
+                        "draw on, down to one alpha step while the surface is held, and the "
+                        "temporal pass keeps them on the head's path while the scanner is up. "
+                        "Said once; a second surface is learned silently.",
                         info.a, info.b, info.fmt, static_cast<unsigned long long>(vs));
     }
     return true;
+}
+
+// Does the composite being classified sample a surface the scanner tracker
+// handed over this frame? Identity through the view's resource, against
+// what is held (released at the frame boundary), so it holds for every
+// composite of the chrome in the frame -- both eyes, both strata -- and
+// costs nothing on a frame the tracker matched nothing.
+bool samplesScannerChrome(int surfaceSlot) {
+    if (g_chromeHeldCount == 0 || surfaceSlot < 0) return false;
+    static const BindSlot kSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1,
+                                       BindSlot::PsSrv2, BindSlot::PsSrv3};
+    ResourceInfo info;
+    if (!bindingResolve(bindingGet(kSlots[surfaceSlot]), &info) || !info.isTexture2D) return false;
+    for (uint32_t i = 0; i < g_chromeHeldCount; ++i) {
+        if (info.resource == g_chromeHeld[i]) return true;
+    }
+    return false;
 }
 
 float uiDepthReactive() { return g_on && !g_stoodDown ? g_reactive : 0.0f; }
@@ -1826,7 +1868,8 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         // The smoke is marked at one quantum -- odd, so it keeps the camera's
         // path at its own depth, and as good as unmarked to NVIDIA, since
         // its history is what smooths it.
-        g_reissueMaskSlot = h == kFlightHud ? 2 : h == kSmokeVs ? 3 : (hud ? 1 : 0);
+        g_reissueMaskSlot = h == kFlightHud ? 2 : h == kSmokeVs ? 3 : hud ? 1
+                          : samplesScannerChrome(surfaceSlot) ? kChromeFloorSlot : 0;
         g_reissueMaskOffset = h == kFlightHud ? -0.5f * g_reactive
                             : h == kSmokeVs ? (1.0f / 255.0f - g_reactive)
                             : (hud ? -3.0f / 255.0f : 0.0f);
@@ -1937,7 +1980,14 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     g_wantMask = g_drawEye >= 0;
     g_mode = Mode::kReissue;
     g_reissueShader = shader;
-    noteFamily(h, ph, "interface projection; alpha-aware depth into private scene copy for AA");
+    // The scanner's chrome takes one alpha step, not the general floor
+    // (g_floorCbs says why); its composites are recognised by the surface
+    // they sample, which the scanner tracker held for the frame.
+    const bool chrome = samplesScannerChrome(surfaceSlot);
+    if (chrome) g_reissueMaskSlot = kChromeFloorSlot;
+    noteFamily(h, ph, chrome ? "interface projection, the scanner's chrome; alpha-aware depth down "
+                               "to one alpha step into private scene copy for AA"
+                             : "interface projection; alpha-aware depth into private scene copy for AA");
     ++g_wComposite;
     return true;
 }
