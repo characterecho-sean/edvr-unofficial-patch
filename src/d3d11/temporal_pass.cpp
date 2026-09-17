@@ -1910,7 +1910,7 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
         if(mesh[0]){Microsoft::WRL::ComPtr<ID3D11Resource> r;mesh[0]->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[11]));}
     }
     if(textures[4]) {
-        ID3D11ShaderResourceView* terrain[3]{}; celestialMotionViews(textures[4],terrain);
+        ID3D11ShaderResourceView* terrain[3]{}; celestialMotionViews(ctx,textures[4],terrain);
         for(int k=0;k<2;++k)if(terrain[k]) {
             ID3D11Resource* res=nullptr;terrain[k]->GetResource(&res);
             if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[k+5]));res->Release();}
@@ -3279,7 +3279,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         if (scene) {
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
-            celestialMotionViews(scene, terrainSrvs);
+            celestialMotionViews(ctx, scene, terrainSrvs);
             uiDepthHoloMotion(eye,scene,holoSrvs);
             uiSeparationInputs(src,scene,eye,sd.Width,sd.Height,separatedCandidate);
             meshMotionViews(ctx,scene,meshSrvs);

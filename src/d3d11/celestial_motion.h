@@ -17,7 +17,10 @@ void celestialMotionEnd(ID3D11DeviceContext* ctx);
 void celestialMotionFrameBoundary(ID3D11DeviceContext* ctx=nullptr);
 void celestialMotionShutdown();
 // Borrowed views: index, depth, motion records. Null on a missing eye/frame.
-void celestialMotionViews(ID3D11Texture2D* scene, ID3D11ShaderResourceView** views);
+// Builds the eye's still-pending records first (one batched dispatch that
+// covers every draw since the last build), so the motion-record view is
+// always current with what has been drawn so far this frame.
+void celestialMotionViews(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views);
 // Explicit eye dump only: snapshot the current records, then write them
 // after the eye-run grace period. No normal-play readback or disk writes.
 void celestialMotionStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene);

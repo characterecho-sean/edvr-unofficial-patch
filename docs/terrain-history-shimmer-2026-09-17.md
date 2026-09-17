@@ -2,7 +2,12 @@
 
 ## Status
 
-- State: cause found offline from one eye dump; fix built, NOT FLOWN.
+- State: cause found offline from one eye dump; fix FLOWN 12:29 on the
+  Frontier install (log 122915, build dda993a-dirty = the guard, then
+  124139 on e06b549) and CONFIRMED by Sean: "That fixed the shimmering".
+  The roll-past-hull check (below) is still unflown. The same flight
+  raised the frame-time complaint, which is a separate cause with its own
+  doc: docs/terrain-motion-dispatch-cost-2026-09-17.md.
 - Report: Sean, Steam install, landed on an airless moon (38 Lyncis 4 F),
   "the terrain is shimmering and not upscaled". Eye dump `eye_114827`
   from `edvr_gfx_20260917_114326.log`, build v0.17.0-rc.3-86-gdda993a
@@ -45,10 +50,11 @@
   (x matches, +0.5), on cockpit and terrain alike. Either the applied y
   jitter differs from the recorded one or PrevZ carries a half-texel
   convention; global, so not the terrain's complaint. See journal.
-- Next flight (Frontier install, the same landed view): eye dump; the
-  `history hidden` line near zero; the terrain still to the eye. Then
-  a roll on the external camera past a hull tip against sky, which is
-  the case 7c6e9ef fixed: no stripes returning.
+- Flown: the terrain is still to Sean's eye on the Frontier flight (no eye
+  dump was taken, so the `history hidden` census is still unread; take
+  one on the next landed view for the record).
+- Next flight: a roll on the external camera past a hull tip against sky,
+  which is the case 7c6e9ef fixed: no stripes returning.
 
 ## Journal
 
