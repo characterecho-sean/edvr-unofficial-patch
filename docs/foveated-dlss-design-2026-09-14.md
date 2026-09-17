@@ -2,11 +2,11 @@
 
 ## Status
 
-- **State (2026-09-17 14:00: the head lead FLOWN 13:15 in Frontier as
-  v0.17.0-rc.3-93-g17fc607; it engages and slides as designed, but the
-  crop's picture jitters 1 px at every slide -- scaleTo's even-floor of
-  the output base, measured in eye run 131504 -- quantum fix IN PROGRESS;
-  the performance gate NOT MET on the frame):** four flights, journal.
+- **State (2026-09-17 15:00, PAUSED by Sean: the head lead FLOWN 13:15 on
+  v0.17.0-rc.3-93-g17fc607 slides as designed but jitters the crop 1 px
+  per slide (scaleTo's even-floor of the output base, eye run 131504);
+  the quantum fix 2101149 is BUILT and reviewed ON THE BRANCH, not merged
+  or installed; performance gate NOT MET):** four flights, journal.
   09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms per pair. 09:38
   (1947c90, performance): a live sweep 20/25/7 -> 5/5, ~1.0 ms per pair
   at 43%; 5/5 = a 99.9% crop, stood down silently by the 90% ceiling (a
@@ -51,14 +51,14 @@
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle, wide/narrow presets, one per-headset size;
   gaze later where the headset publishes it; fix.eye_mask keys stay.
-- **Next: the quantum build** (spec in the 13:15 journal entry: the base
-  slides 26 render = 40 output px at a time, placement error constant,
-  bases and placeErr in the eye trace), reviewed, installed to Frontier;
+- **Next, on resume (journal, the PAUSED entry):** merge origin/main into
+  the branch, build, smoke, install 2101149 to Frontier, push HEAD:main;
   then the same hangar yaw with lead 6 against 0 flipped live: the
-  shimmer gone, the band's 1 deg steps judged in the periphery, a dump's
-  placeErrX/Y columns constant; then the leading-edge verdict the lead
-  was built for. Performance stands as measured: ~1.1 ms per pair at
-  43%, visible only GPU-bound. Owed: retire temporal_aa_fovea_vertical;
+  shimmer gone, the band's 1.4 deg steps judged in the periphery, a
+  dump's placeErrX/Y columns constant; then the leading-edge verdict the
+  lead was built for. Meanwhile Frontier's 17fc607 jitters with lead 6
+  (lead 0 avoids it). Performance stands as measured: ~1.1 ms per pair
+  at 43%, visible only GPU-bound. Owed: retire temporal_aa_fovea_vertical;
   Stage 2 (ship).
 
 ## Investigation (2026-09-14)
@@ -1717,3 +1717,42 @@ and clamped in BOTH spaces so the extents never change. The eye trace
 gains the bases and the placement error per frame so the next run proves
 it constant. The cost: the band steps in 1 deg jumps in the periphery
 instead of gliding; the flight judges that.
+
+### 2026-09-17: the quantum build (2101149) reviewed; PAUSED on the branch
+
+**Built (opus) as specified.** `foveaLeadQuantum(from, to)`: the smallest
+even render step in 2..64 whose scaled length is within 0.1 px of an even
+output step, cached on the sizes: 26 -> 40 at 2646->4072 and at
+2206->3394, 4 -> 6 at 2715->4072, 2 -> 2 at 1:1, 2 -> 4 at 2x, all exact.
+`foveaLeadPlace`: both bases moved together by k quanta, a 0.2-quantum
+hysteresis, clamped in BOTH frames (`foveaLeadBase` removed). The block
+takes the unshifted output crop first and the lead moves the pair; the
+extents never move. The once-per-load note names the step ("slides in
+steps of 26 render px (40 output px, about 1.4 deg)"). The eye trace
+gains foveaInX/Y, foveaOutX/Y, leadDX/DY (the offset from the unshifted
+base, render px), leadKX/KY and placeErrX/Y, filled on every frame the
+crop runs. Self-test bit 32 grew to 19 assertions, among them placeErr
+steady across three steps (0.0018 px drift). Build green (247 keys),
+smoke 63. Lead off is bit-identical: the scaleTo calls moved earlier with
+nothing between them and the old site.
+
+**Review (main session): nothing blocking.** Checked the lead-off path;
+that k resets to 0 on a non-live frame, so the first live frame may apply
+the whole smoothed lead in one step (as before); that the clamp window
+always contains 0; that the trace fill matches the last record's frame
+and eye; the degrees in the note from the eye's own tangents. Nits left:
+smoke.cpp's ok text still names only the old three lead properties; the
+commit trailer reads "Claude Opus 5 (1M context)".
+
+**PAUSED by Sean ("Let's pause on this work after the agent
+finishes").** 2101149 stays on the branch (pushed as the branch), NOT
+merged, NOT on main, NOT installed. Frontier still runs 17fc607, whose
+lead jitters the crop 1 px per slide; his ini has lead 6 -- lead 0 avoids
+the jitter until the fix is in. Main has moved meanwhile (a17c793, the
+terrain history work in temporal_pass.cpp), so the resume merge touches
+the same file. **To resume:** fetch, merge origin/main into the branch,
+build, smoke, install to Frontier (dry run, install, verify-only), push
+HEAD:main; then the hangar yaw with lead 6 against 0 flipped live, a
+dump: placeErrX/Y constant, the band's 1.4 deg steps judged in the
+periphery; then the leading-edge verdict.
+
