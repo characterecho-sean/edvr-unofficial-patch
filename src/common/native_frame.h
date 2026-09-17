@@ -11,6 +11,11 @@
 // by hand all the time, so the provider answers either version and a
 // version 1 caller simply gets no trim.
 #define EDVR_NATIVE_FRAME_VERSION_2 2u
+// Version 3 adds deferredPacing to the END and nothing else. The same
+// hand-copied-DLLs rule applies: the provider answers whichever of the three
+// versions a caller's struct shape asks for, and a version 1 or 2 caller
+// simply never turbo-paces, exactly as it never got a trim before version 2.
+#define EDVR_NATIVE_FRAME_VERSION_3 3u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -46,6 +51,10 @@ struct EdvrNativeFrameOutput {
     // (nose) and vertical edges, 0..30, as a narrower projection and a
     // proportionally smaller render size.
     float trimOuterDeg, trimNasalDeg, trimVerticalDeg;
+    // Version 3 and later. 1: the runtime hands the game its poses without
+    // waiting for the compositor's frame and waits at Submit instead
+    // (experimental.turbo_mode); 0: the wait stays in WaitGetPoses.
+    uint32_t deferredPacing;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -53,6 +62,11 @@ struct EdvrNativeFrameOutput {
 // offset of the first version 2 field with no tail padding in play.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_1 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, trimOuterDeg))
+// The size the fields through trimVerticalDeg occupy, which is what a
+// version 2 caller's struct is: version 1's fields plus the three trims,
+// with no tail padding before deferredPacing.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, deferredPacing))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

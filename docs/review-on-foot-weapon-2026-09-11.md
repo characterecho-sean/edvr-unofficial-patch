@@ -62,6 +62,15 @@ found in the VS first (entry below, "Mouse turns"). Spot lights (VS
 112) have no correction path; if a gun's glow still shifts after this,
 that is where to look.
 
+Built 2026-09-17 (NOT FLOWN), experiment against that open item:
+`experimental.turbo_mode = on_foot` -- OpenXR Toolkit's Turbo mode in
+EDVR's own runtime, engaged from the journal's on-foot flag: the game's
+`WaitGetPoses` returns at once with a synthesized display time, the
+runtime's `xrWaitFrame` runs on a pacer thread and the game blocks at
+the second `Submit` instead. Default off. Entry: "Turbo mode on foot"
+at the end, with the toolkit's verified mechanics, the hypothesis and
+its two rivals, the log lines and the A/B brief.
+
 Kept outside on purpose: the late UI labels `B10B032BDFD46700`,
 `C4B4B334B26E81A9` and the panel shader `A888D51024D9798E` (ammo and
 magazine readouts). Their placement is already camera-relative; the
@@ -748,3 +757,109 @@ previous-basis model at work). Mouse turns at a standstill will still
 judder (rotation lag, above); that is the next arc, not a regression.
 Verify the build first: `python tools\edvr_log.py --target steam
 --expect-build HEAD`.
+
+## Turbo mode on foot, built 2026-09-17 (experiment, NOT FLOWN)
+
+Sean asked for OpenXR Toolkit's "Turbo mode", engaged only on foot, as
+an experimental lever against the weapon judder. The 2026-09-13 review
+declined it in favour of the targeted ADS correction and reprojection;
+that correction has since landed (entries above), and what is left --
+mouse turns in ADS, the arms carrying the previous frame's rotation --
+has no correction path until the VS rotation source is found. So the
+lever is now worth one flight. `docs\performance.md`'s "Turbo mode:
+No" row was about frame rate; this is not a frame-rate feature.
+
+**What the toolkit actually does** (read from its source in
+`C:\Users\seanm\projects\OpenXR-Toolkit`, main at 6b9ecb6, `layer.cpp`
+2094-2213, 2215-2243, 3243-3291): its `xrWaitFrame` never calls the
+runtime while a wait is in flight; it returns at once with
+`predictedDisplayTime` = the last real one plus the wall-clock time
+between the app's two `xrWaitFrame` calls (the real value if the async
+wait has already returned), the last real period, and `shouldRender`
+true. Its `xrBeginFrame` is a no-op in that state. Its `xrEndFrame`
+waits for the async `xrWaitFrame` (1 s bound), then calls the real
+`xrBeginFrame` and `xrEndFrame` back to back, then kicks the next async
+`xrWaitFrame` (`std::async`, one task per frame). It passes the app's
+own (extrapolated) displayTime through. Its menu warns that Turbo
+"prevents Motion Smoothing" on SteamVR, "prevents ASW" on Oculus.
+
+**EDVR's version** (`experimental.turbo_mode = off | on_foot | on`,
+default off, live): the d3d11 half decides per frame from the key and
+`journalOnFoot()` (Status.json Flags2, the same flag the head-offset
+gate uses) and hands the runtime a version-3 field
+(`EdvrNativeFrameOutput::deferredPacing`) across the native-frame
+bridge; a version-2 openvr_api.dll or d3d11.dll on the other side of
+that bridge gets or gives no field and runs as before. The runtime
+(`src\openxr\frame_pacer.h`, `frame_boundary.h`, `session_state.h`):
+`WaitGetPoses` with a deferred pacing kicks `xrWaitFrame` on a pacer
+thread (spec: `xrWaitFrame` is externally synchronized only against
+other `xrWaitFrame` calls) and hands the game a synthesized frame with
+NO `xrBeginFrame`. The synthesized time is the last real prediction
+plus the game's own wall-clock time since that prediction was obtained,
+clamped to one..two periods -- NOT the toolkit's entry-to-entry
+formula: EDVR's reference-change policy (`reference_changes.h`) retires,
+fatally, on a display time that goes backwards, and the toolkit's
+formula overshoots by the block time when turbo follows a long blocking
+wait, so the next real value would come back lower. Every time handed
+to the host is also clamped to never fall below the previous one (a
+no-op under runtime pacing, where real predictions already advance);
+`xrEndFrame` still gets the runtime's real time. The second eye's `Submit`
+blocks until that wait returns, calls the real `xrBeginFrame`, composes
+and ends the frame with the runtime's REAL predicted time as
+displayTime (deliberately not the toolkit's pass-through: the layer's
+view poses carry what the game rendered with, and a runtime that checks
+displayTime against its own prediction sees its own number), then
+kicks the next wait. A wait that has already returned by the time the
+game asks is taken as-is (no synthesis, the frame is then paced exactly
+as today). The mode of a frame comes from the PREVIOUS frame's
+features.begin, one frame of lag at each transition. The first turbo
+frame kicks and synthesizes at once. `ClearLastSubmittedFrame` and the
+next `WaitGetPoses` drain a deferred frame (wait, begin, empty end), and
+the STOPPING path and close() drain a dangling wait before
+`xrEndSession`/`xrDestroySession` and join the pacer thread. Nothing
+here touches `xrLocateViews`: the poses are located at the synthesized
+time, which is what makes the arms and the world share a moment.
+
+**Hypothesis, stated so the flight can refute it:** the arms' one-frame
+rotation lag is not a fixed pipeline offset but a race between Elite's
+update of the arms transform and the moment `WaitGetPoses` returns the
+frame's head pose; with the render thread no longer parked in
+`WaitGetPoses`, the update runs against the same pose the world is drawn
+with, and the ADS mouse-turn judder goes. The alternative reading is
+that turbo only regularises frame cadence and the lag stays but stops
+jittering. And the null: nothing changes, because the lag is a frame of
+the game's own pipelining that no pacing can move.
+
+**What the log shows.** Verify the build first (`python
+tools\edvr_log.py --target steam --expect-build HEAD`). The EDVR log's
+`native frame: begin ... pacing=turbo` line at each disembark and
+`pacing=runtime` at each embark (the d3d11 half's decision); if
+`turbo_mode = on_foot` is set and the journal watcher is off, the log
+says so once and turbo never engages. The runtime trace's
+`native_pacing,mode=deferred,...` and `mode=runtime` at the same
+transitions (the runtime acting on it; absent = the field never crossed
+the bridge, which is a mixed-version install). Per 30 s window,
+`native_submit_phases ... pacing=1 ... wait_frame=p50/p95/p99,
+pacer_block=...`: under turbo `wait_frame` must sit near 0 and
+`pacer_block` carry the wait the game used to sit in; under runtime
+pacing the reverse. `native_pacing_summary` at close counts deferred,
+synthesized, ready-at-wait (frames whose wait had already returned --
+many of these mean the game is slower than the display and turbo is
+buying nothing), kicks and drains. The performance overlay's "wait"
+number goes to ~0 on foot and its submit time grows by the same amount;
+that is the block moving, not a cost.
+
+**Flight brief (A/B in one session).** Set `turbo_mode = on_foot` under
+`[experimental]` in the live ini (it is live). Disembark. ADS and turn
+with the mouse at a steady rate, then strafe in ADS and walk forward,
+the same passes as the 09:47 and 102403 briefs. Then, still on foot,
+set `turbo_mode = off`, wait for the `pacing=runtime` line (the next
+frame after the ini reload), and repeat; then `on_foot` again. Watch
+SteamVR's frame timing graph for motion smoothing engaging or not. If
+the judder goes under turbo: take an eye dump of a mouse turn under
+turbo and read the arms' rotation against the camera's the way the
+112905 dump was read -- the lag either went (the race reading) or stayed
+while the judder went (the cadence reading), and that decides where the
+arc goes next. If it stays: ruled out, and the VS rotation source
+remains the only path; the key can then be deleted rather than left as
+a dead lever.

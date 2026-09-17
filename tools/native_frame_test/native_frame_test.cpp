@@ -126,7 +126,7 @@ int wmain(int argc, wchar_t** argv) {
     // a different XR-owner thread.  The provider must not use a producer-ID
     // gate for callbacks.
     EdvrNativeFrameOutput firstOutput{sizeof(firstOutput),
-                                      EDVR_NATIVE_FRAME_VERSION_2};
+                                      EDVR_NATIVE_FRAME_VERSION_3};
     HRESULT workerBegin = E_FAIL;
     HRESULT workerLatch = E_FAIL;
     EdvrNativeFrameDecision firstDecision{
@@ -161,9 +161,9 @@ int wmain(int argc, wchar_t** argv) {
     check(firstOutput.sceneReady && firstOutput.transitionEnabled &&
               !firstOutput.resubmitEnabled,
           "scene and transition outputs");
-    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_2 &&
+    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_3 &&
               firstOutput.size == sizeof(firstOutput),
-          "version 2 answered in kind");
+          "version 3 answered in kind");
     check(firstOutput.trimOuterDeg == 7.0f &&
               firstOutput.trimNasalDeg == 0.0f &&
               firstOutput.trimVerticalDeg == 0.0f,
@@ -189,7 +189,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput lost = input(41, 7, 2, false);
     lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
     EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
-                                     EDVR_NATIVE_FRAME_VERSION_2};
+                                     EDVR_NATIVE_FRAME_VERSION_3};
     check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK &&
               !lostOutput.offsetEnabled,
           "lost pose succeeds but disables offset gate");
@@ -201,7 +201,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput bad = input(41, 7, 3);
     bad.physicalHead[0] = 2.0f;
     EdvrNativeFrameOutput badOutput{sizeof(badOutput),
-                                    EDVR_NATIVE_FRAME_VERSION_2};
+                                    EDVR_NATIVE_FRAME_VERSION_3};
     check(table.beginFrame(table.context, &bad, &badOutput) == E_INVALIDARG,
           "non-rigid physical pose rejected");
 
@@ -280,8 +280,11 @@ int wmain(int argc, wchar_t** argv) {
               E_INVALIDARG,
           "a size that contradicts the version is refused");
     check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_1 + 3 * sizeof(float) ==
-              sizeof(EdvrNativeFrameOutput),
+              EDVR_NATIVE_FRAME_OUTPUT_SIZE_2,
           "version 2 adds exactly the three trims");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 + sizeof(uint32_t) ==
+              sizeof(EdvrNativeFrameOutput),
+          "version 3 adds exactly the pacing flag");
 
     // A runtime-only entry applies to any headset on that runtime with no
     // entry of its own; a key with no entry for the worn headset is no trim,
@@ -289,12 +292,65 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("fix.fov_trim_vertical", "oculus:3");
     edvr::Config::get().set("fix.fov_trim_outer", "");
     edvr::Config::get().set("fix.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
-    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_3};
     EdvrNativeFrameInput trimFrame = input(41, 7, 10);
     check(table.beginFrame(table.context, &trimFrame, &trimOutput) == S_OK &&
               trimOutput.trimVerticalDeg == 3.0f && trimOutput.trimOuterDeg == 0.0f &&
               trimOutput.trimNasalDeg == 0.0f,
           "a runtime-only trim entry applies; an empty list and another headset's entry do not");
+
+    // experimental.turbo_mode selects EdvrNativeFrameOutput::deferredPacing
+    // (version 3 only): on always defers, on_foot defers only once the
+    // journal watcher says the player is on foot, and off never does. This
+    // rig never starts the journal watcher, so on_foot reads as off here.
+    edvr::Config::get().set("experimental.turbo_mode", "on");
+    EdvrNativeFrameOutput turboOnOutput{sizeof(turboOnOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput turboOnFrame = input(41, 7, 11);
+    check(table.beginFrame(table.context, &turboOnFrame, &turboOnOutput) == S_OK &&
+              turboOnOutput.deferredPacing == 1,
+          "turbo_mode = on always defers pacing");
+
+    edvr::Config::get().set("experimental.turbo_mode", "off");
+    EdvrNativeFrameOutput turboOffOutput{sizeof(turboOffOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput turboOffFrame = input(41, 7, 12);
+    check(table.beginFrame(table.context, &turboOffFrame, &turboOffOutput) == S_OK &&
+              turboOffOutput.deferredPacing == 0,
+          "turbo_mode = off never defers pacing");
+
+    edvr::Config::get().set("experimental.turbo_mode", "on_foot");
+    EdvrNativeFrameOutput turboFootOutput{sizeof(turboFootOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput turboFootFrame = input(41, 7, 13);
+    check(table.beginFrame(table.context, &turboFootFrame, &turboFootOutput) == S_OK &&
+              turboFootOutput.deferredPacing == 0,
+          "turbo_mode = on_foot with no journal watcher never defers pacing");
+
+    edvr::Config::get().set("experimental.turbo_mode", "ON");
+    EdvrNativeFrameOutput turboUpperOutput{sizeof(turboUpperOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput turboUpperFrame = input(41, 7, 14);
+    check(table.beginFrame(table.context, &turboUpperFrame, &turboUpperOutput) == S_OK &&
+              turboUpperOutput.deferredPacing == 1,
+          "turbo_mode is matched case-insensitively");
+    edvr::Config::get().set("experimental.turbo_mode", "off");
+
+    // A version 2 caller is still answered in exactly its own shape, trims
+    // and all, with the pacing field never written into its (absent) tail.
+    EdvrNativeFrameOutput v2Output{EDVR_NATIVE_FRAME_OUTPUT_SIZE_2, EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameInput v2Frame = input(41, 7, 15);
+    check(table.beginFrame(table.context, &v2Frame, &v2Output) == S_OK &&
+              v2Output.version == EDVR_NATIVE_FRAME_VERSION_2 &&
+              v2Output.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 &&
+              v2Output.trimVerticalDeg == 3.0f && v2Output.trimOuterDeg == 0.0f &&
+              v2Output.trimNasalDeg == 0.0f,
+          "a version 2 caller is still answered in its own kind");
+
+    // A struct sized for version 3 that claims version 2 names a shape that
+    // does not exist and is refused, exactly like the version 1/2 mismatch
+    // above, never silently downgraded to the version its label asks for.
+    EdvrNativeFrameOutput v3SizeV2Version{sizeof(EdvrNativeFrameOutput), EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameInput v3MismatchFrame = input(41, 7, 16);
+    check(table.beginFrame(table.context, &v3MismatchFrame, &v3SizeV2Version) ==
+              E_INVALIDARG,
+          "a version 3 size claiming version 2 is refused");
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");

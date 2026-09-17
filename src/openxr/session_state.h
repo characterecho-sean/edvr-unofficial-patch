@@ -1,7 +1,12 @@
 #pragma once
 // Externally serialized policy for one borrowed session. The owner creates and
 // destroys handles, validates layers, and marshals game threads. No destructor
-// calls OpenXR. This component is not yet connected to either shipping DLL.
+// calls OpenXR. This is the frame policy behind openvr_api.dll's own
+// WaitGetPoses/Submit: waitAndBegin's blocking wait is the default pacing,
+// and openDeferred/beginDeferred split that wait from its xrBeginFrame so a
+// frame can be handed to the game before the runtime's own xrWaitFrame has
+// returned (turbo mode), with the real begin completed later, just before
+// the frame ends.
 #include <openxr/openxr.h>
 #include <atomic>
 #include <cstdint>
@@ -116,13 +121,85 @@ class SessionState {
     out = {};
     XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState fs{XR_TYPE_FRAME_STATE};
-    XrResult r = dispatch_.waitFrame(session_, &wi, &fs);
-    if (XR_FAILED(r)) { out.status = FrameStatus::Failed; return fail(r); }
-    if (r != XR_SUCCESS && r != XR_SESSION_LOSS_PENDING) return fail(XR_ERROR_RUNTIME_FAILURE);
+    const XrResult r = dispatch_.waitFrame(session_, &wi, &fs);
+    return beginFromWait(r, fs, out);
+  }
+
+  // The wait plus everything waitAndBegin does after it returns, for a caller
+  // that already has a completed wait's result (FrameBoundary, taking one
+  // from the FramePacer). Real time -- and possibly a session state change --
+  // may have passed since that wait was started, so the preconditions are
+  // re-checked here exactly as waitAndBegin checks them before its own wait.
+  XrResult beginWaited(XrResult waited, const XrFrameState& fs, Frame& out) {
+    if (hardFailure_) return lastResult_;
+    if (terminal_ || frameOpen_ || !running_ || state_ == XR_SESSION_STATE_STOPPING ||
+        state_ == XR_SESSION_STATE_IDLE) return XR_ERROR_CALL_ORDER_INVALID;
+    out = {};
+    return beginFromWait(waited, fs, out);
+  }
+
+  // Opens a frame WITHOUT calling xrBeginFrame, handing the game a predicted
+  // time synthesized by the caller while the real xrWaitFrame is still
+  // in flight on the pacer thread (turbo mode). beginDeferred performs the
+  // real begin later, just before the frame ends.
+  XrResult openDeferred(XrTime predictedTime, XrDuration period, Frame& out) {
+    if (hardFailure_) return lastResult_;
+    if (terminal_ || frameOpen_ || !running_ || state_ == XR_SESSION_STATE_STOPPING ||
+        state_ == XR_SESSION_STATE_IDLE) return XR_ERROR_CALL_ORDER_INVALID;
+    out = {};
+    frameOpen_ = true; deferred_ = true; frameTime_ = predictedTime;
+    frameShouldRender_ = true;
+    out.predictedDisplayTime = predictedTime;
+    out.predictedDisplayPeriod = period;
+    out.shouldRender = !terminal_;
+    out.status = terminal_ ? FrameStatus::SessionLossPending : FrameStatus::Open;
+    out.sequence = ++sequence_; out.generation = generation_; out.owner = owner_;
+    return lastResult_;
+  }
+
+  // The real xrBeginFrame for a frame openDeferred already handed to the
+  // game, once its xrWaitFrame has actually returned. Unlike beginFromWait,
+  // a failure here must explicitly reopen the frame as closed (clearFrame()):
+  // the frame token is already live with the game, but the runtime never
+  // received a matching xrBeginFrame, so nothing else may treat one as open.
+  XrResult beginDeferred(XrResult waited, const XrFrameState& fs) {
+    if (hardFailure_) return lastResult_;
+    if (!frameOpen_ || !deferred_) return XR_ERROR_CALL_ORDER_INVALID;
+    deferred_ = false;
+    if (XR_FAILED(waited)) { clearFrame(); return fail(waited); }
+    if (waited != XR_SUCCESS && waited != XR_SESSION_LOSS_PENDING) {
+      clearFrame(); return fail(XR_ERROR_RUNTIME_FAILURE);
+    }
+    note(waited);
+    XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
+    const XrResult r = dispatch_.beginFrame(session_, &bi);
+    if (XR_FAILED(r)) { clearFrame(); return fail(r); }
+    if (r != XR_SUCCESS && r != XR_FRAME_DISCARDED && r != XR_SESSION_LOSS_PENDING) {
+      clearFrame(); return fail(XR_ERROR_RUNTIME_FAILURE);
+    }
     note(r);
+    // The layer's view poses carry what the game rendered with (the
+    // synthesized time from openDeferred); displayTime given to xrEndFrame
+    // is frameTime_, now overwritten with what the runtime itself predicted.
+    // Deliberate: the runtime paced itself against its own prediction, not
+    // the game's guess of it.
+    frameTime_ = fs.predictedDisplayTime;
+    frameShouldRender_ = fs.shouldRender == XR_TRUE;
+    return lastResult_;
+  }
+
+ private:
+  // Everything waitAndBegin/beginWaited do once a wait's result is known:
+  // the failure/loss checks, xrBeginFrame, and the frame bookkeeping. No
+  // preconditions here -- both public callers already checked them against
+  // the state as of their own call.
+  XrResult beginFromWait(XrResult waited, const XrFrameState& fs, Frame& out) {
+    if (XR_FAILED(waited)) { out.status = FrameStatus::Failed; return fail(waited); }
+    if (waited != XR_SUCCESS && waited != XR_SESSION_LOSS_PENDING) return fail(XR_ERROR_RUNTIME_FAILURE);
+    note(waited);
     // Successful wait owns a begin obligation even when loss is pending.
     XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
-    r = dispatch_.beginFrame(session_, &bi);
+    const XrResult r = dispatch_.beginFrame(session_, &bi);
     if (XR_FAILED(r)) { out.status = FrameStatus::Failed; return fail(r); }
     if (r != XR_SUCCESS && r != XR_FRAME_DISCARDED && r != XR_SESSION_LOSS_PENDING)
       return fail(XR_ERROR_RUNTIME_FAILURE);
@@ -139,10 +216,16 @@ class SessionState {
     return lastResult_;
   }
 
+ public:
+
   XrResult end(Frame& frame, const XrFrameEndInfo& supplied, const RenderReady& ready = {}) {
     if (hardFailure_) return lastResult_;
     if (!frameOpen_ || frame.sequence != sequence_ || frame.generation != generation_ || frame.owner != owner_)
       return XR_ERROR_CALL_ORDER_INVALID;
+    // A deferred frame's real begin has not happened yet; ending it now would
+    // hand the runtime an end for a begin it never received. The caller must
+    // complete it with beginDeferred first.
+    if (deferred_) return XR_ERROR_CALL_ORDER_INVALID;
     // Only token fields are trusted from the public frame; timing and the
     // runtime's no-render decision come from the stored frame state.
     const bool layers = frameShouldRender_ && !terminal_ && state_ != XR_SESSION_STATE_STOPPING &&
@@ -158,6 +241,8 @@ class SessionState {
   XrResult stop() {
     if (hardFailure_) return lastResult_;
     if (state_ != XR_SESSION_STATE_STOPPING || !running_) return XR_ERROR_CALL_ORDER_INVALID;
+    // As in end(): a still-deferred frame has no real begin yet to close.
+    if (frameOpen_ && deferred_) return XR_ERROR_CALL_ORDER_INVALID;
     if (frameOpen_) {
       const XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
       const XrResult r = finish(empty, false);
@@ -177,12 +262,20 @@ class SessionState {
   bool terminal() const { return terminal_; }
   XrTime predictedDisplayTime() const { return frameTime_; }
   XrResult lastResult() const { return lastResult_; }
+  // True from openDeferred until beginDeferred (or a clear/drain) completes
+  // or discards the real begin it stands in for.
+  bool deferred() const { return deferred_; }
+  // The runtime's own shouldRender for the open frame -- fs.shouldRender for
+  // a normal wait, or true for a still-deferred frame until beginDeferred
+  // learns the real answer, matching the optimistic layers a turbo frame's
+  // caller must be ready to discard.
+  bool frameShouldRender() const { return frameShouldRender_; }
 
  private:
   void unhandled(const XrEventDataBuffer& buffer) {
     if (eventSink_) eventSink_(buffer, eventContext_);
   }
-  void clearFrame() { frameOpen_ = frameShouldRender_ = false; frameTime_ = 0; }
+  void clearFrame() { frameOpen_ = frameShouldRender_ = deferred_ = false; frameTime_ = 0; }
   void clear() {
     ++generation_; sequence_ = 0; clearFrame(); running_ = terminal_ = hardFailure_ = false;
     lifecycle_ = Lifecycle::Uninitialized; state_ = XR_SESSION_STATE_UNKNOWN; lastResult_ = XR_SUCCESS;
@@ -227,6 +320,7 @@ class SessionState {
   XrSessionState state_ = XR_SESSION_STATE_UNKNOWN;
   bool running_ = false, frameOpen_ = false, frameShouldRender_ = false;
   bool terminal_ = false, hardFailure_ = false;
+  bool deferred_ = false;
   XrTime frameTime_ = 0;
   std::uint64_t sequence_ = 0, generation_ = 0;
   XrResult lastResult_ = XR_SUCCESS;

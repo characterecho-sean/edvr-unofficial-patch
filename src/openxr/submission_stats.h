@@ -17,8 +17,13 @@ class SubmissionStats final {
     double producerDispatchMs=0, producerAcquireMs=0, producerFlushMs=0;
     double consumerAcquireMs=0, consumerFlushMs=0, receiveMs=0;
     double xrAcquireMs=0, xrWaitMs=0, xrDrawMs=0, xrReleaseMs=0, endFrameMs=0;
+    // Turbo pacing: how long waitAndBegin blocked (0 for a synthesized
+    // frame), how long finish()/clear() blocked taking the pacer's real
+    // result, and whether this frame was paced Deferred at all.
+    double waitFrameMs=0, pacerBlockMs=0;
     uint32_t width[2]{}, height[2]{};
     uint32_t outputWidth[2]{}, outputHeight[2]{}, treatments[2]{};
+    uint32_t deferred=0;
   };
   struct Distribution { double p50 = 0, p95 = 0, p99 = 0; };
   // In-progress windows are not truncated by the timer. Interrupted sequences
@@ -39,7 +44,8 @@ class SubmissionStats final {
         !sample.width[0] || !sample.width[1] || !sample.height[0] || !sample.height[1]) return false;
     for(double value:{sample.producerDispatchMs,sample.producerAcquireMs,sample.producerFlushMs,
         sample.consumerAcquireMs,sample.consumerFlushMs,sample.receiveMs,sample.xrAcquireMs,
-        sample.xrWaitMs,sample.xrDrawMs,sample.xrReleaseMs,sample.endFrameMs})
+        sample.xrWaitMs,sample.xrDrawMs,sample.xrReleaseMs,sample.endFrameMs,
+        sample.waitFrameMs,sample.pacerBlockMs})
       if(!std::isfinite(value)||value<0) return false;
     const bool gap=lastSequence_&&sample.sequence!=lastSequence_+1;
     lastSequence_ = sample.sequence;
@@ -48,8 +54,8 @@ class SubmissionStats final {
         sample.outputWidth[0]!=shape_.outputWidth[0]||sample.outputWidth[1]!=shape_.outputWidth[1]||
         sample.outputHeight[0]!=shape_.outputHeight[0]||sample.outputHeight[1]!=shape_.outputHeight[1]||
         sample.treatments[0]!=shape_.treatments[0]||sample.treatments[1]!=shape_.treatments[1]||
-        sample.featureEpoch!=shape_.featureEpoch||gap)) {
-      seen_ = count_ = 0; // never mix sizes, treatments or interrupted pairs
+        sample.featureEpoch!=shape_.featureEpoch||sample.deferred!=shape_.deferred||gap)) {
+      seen_ = count_ = 0; // never mix sizes, treatments, pacing or interrupted pairs
     }
     shape_ = sample;
     if (++seen_ <= warmup) return false;

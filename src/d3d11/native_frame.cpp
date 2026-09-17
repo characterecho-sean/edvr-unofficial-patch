@@ -4,6 +4,7 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
+#include "journal_watch.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -38,6 +39,8 @@ struct State {
     uint32_t lastTransitionEnabled = 0;
     uint32_t lastResubmitEnabled = 0;
     uint32_t lastCullMode = 0;
+    uint32_t lastDeferredPacing = 0;
+    bool pacingNoted = false;
     EdvrNativeFrameDecision cachedDecision{};
 };
 
@@ -302,26 +305,33 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1 caller is an openvr_api.dll from before the field-of-view
-    // trim existed. It gets exactly the fields it knows about, and the trim
-    // it cannot carry stays out of its struct entirely.
-    const bool wantsTrim = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
+    // A version 1 or 2 caller is an openvr_api.dll from before turbo pacing
+    // (or, for version 1, the field-of-view trim) existed. Each gets exactly
+    // the fields it knows about, and whatever it cannot carry stays out of
+    // its struct entirely.
+    const bool wantsPacing = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == sizeof(*output);
-    const bool legacy = output && !wantsTrim &&
+    const bool wantsTrim = output && !wantsPacing &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
+    const bool legacy = output && !wantsPacing && !wantsTrim &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsTrim && !legacy) ||
+        (!wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsTrim ? sizeof(result) : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsTrim ? EDVR_NATIVE_FRAME_VERSION_2
-                               : EDVR_NATIVE_FRAME_VERSION_1;
+    result.size = wantsPacing ? sizeof(result)
+                 : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
+                              : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
+    result.version = wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
+                    : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
+                                 : EDVR_NATIVE_FRAME_VERSION_1;
     result.headOffset[0] = boundedOffset(edvr::Config::get().getFloat(
         "openvr.head_offset_right", 0.0f));
     result.headOffset[1] = boundedOffset(edvr::Config::get().getFloat(
@@ -369,6 +379,33 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.resubmitEnabled = edvr::Config::get().getBool(
         "advanced.transition_flash_resubmit", true) ? 1u : 0u;
 
+    // experimental.turbo_mode: "on" always defers, "on_foot" only while the
+    // journal watcher says Status.json reports on foot, anything else (bad
+    // spelling included) reads as "off".
+    const std::string turboMode = edvr::Config::get().getString(
+        "experimental.turbo_mode", "off");
+    if (_stricmp(turboMode.c_str(), "on") == 0) {
+        result.deferredPacing = 1u;
+    } else if (_stricmp(turboMode.c_str(), "on_foot") == 0) {
+        result.deferredPacing =
+            (edvr::journalOnFootKnown() && edvr::journalOnFoot()) ? 1u : 0u;
+        if (!state->pacingNoted && !edvr::journalWatchActive()) {
+            edvr::Log::get().note(
+                "turbo mode: experimental.turbo_mode = on_foot needs the journal "
+                "watcher (d3d11.journal_watch) to say when you are on foot, and "
+                "it is off, so turbo never engages.");
+            state->pacingNoted = true;
+        }
+    } else {
+        result.deferredPacing = 0u;
+        if (!state->pacingNoted && _stricmp(turboMode.c_str(), "off") != 0) {
+            edvr::Log::get().note(
+                "turbo mode: experimental.turbo_mode = %s is not off, on_foot or "
+                "on; reading it as off.", turboMode.c_str());
+            state->pacingNoted = true;
+        }
+    }
+
     if (physicalValid) {
         edvr::publishHeadPose(input->physicalHead);
         const float denominator = input->physicalHead[10] < 0.05f
@@ -391,20 +428,23 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     if (!state->configNoted || state->lastOffsetEnabled != result.offsetEnabled ||
         state->lastTransitionEnabled != result.transitionEnabled ||
         state->lastResubmitEnabled != result.resubmitEnabled ||
-        state->lastCullMode != result.cullMode) {
+        state->lastCullMode != result.cullMode ||
+        state->lastDeferredPacing != result.deferredPacing) {
         edvr::Log::get().note(
             "native frame: begin #%u seq=%llu offsets=%s (%+.3f,%+.3f,%+.3f), "
-            "cull=%u, transition=%s, resubmit=%s.", state->beginCount,
+            "cull=%u, transition=%s, resubmit=%s, pacing=%s.", state->beginCount,
             static_cast<unsigned long long>(input->sequence),
             result.offsetEnabled ? "on" : "off", result.headOffset[0],
             result.headOffset[1], result.headOffset[2], result.cullMode,
             result.transitionEnabled ? "on" : "off",
-            result.resubmitEnabled ? "on" : "off");
+            result.resubmitEnabled ? "on" : "off",
+            result.deferredPacing ? "turbo" : "runtime");
         state->configNoted = true;
         state->lastOffsetEnabled = result.offsetEnabled;
         state->lastTransitionEnabled = result.transitionEnabled;
         state->lastResubmitEnabled = result.resubmitEnabled;
         state->lastCullMode = result.cullMode;
+        state->lastDeferredPacing = result.deferredPacing;
     }
     // Only as many bytes as the caller's own struct holds.
     std::memcpy(output, &result, result.size);

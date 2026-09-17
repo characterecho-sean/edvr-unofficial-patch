@@ -15,7 +15,11 @@
 
 using namespace edvr::openxr;
 namespace {
-unsigned checks = 0, failures = 0;
+// atomic: turboPacingTest's fixtures construct FrameBoundary on a worker
+// thread (its ownerThread() check requires every call on the thread that
+// constructed it, exactly like blockedRuntimeIntegrationTest's fixture
+// below) and check() runs there directly rather than only after a join.
+std::atomic<unsigned> checks{0}, failures{0};
 void check(bool value, const char* text) { ++checks; if (!value) { ++failures; std::printf("FAIL: %s\n", text); } }
 
 struct Fake {
@@ -27,11 +31,28 @@ struct Fake {
   bool shouldRender = true;
   bool readyPending = true;
   bool blockWait = false, waitEntered = false, releaseWait = false, waitTimedOut = false;
+  // Monotonic count of blocking entries, plus turboPacingTest's own bookmark
+  // of how much of it its awaitEntered() helper has consumed. waitEntered
+  // alone cannot tell a fixture's Nth kick apart from its (N-1)th: release()
+  // returning is not synchronized with the released Fake::wait call actually
+  // waking up and resetting waitEntered, so a caller's very next wait for
+  // "the next kick entered" can be satisfied by the previous kick's own
+  // flag, still sitting true. A count only turboPacingTest increments/reads
+  // has no such ambiguity: awaitEntered() waits for it to exceed what it has
+  // already consumed, which is true only once, on a genuinely new entry, no
+  // matter how the reset and the next kick happen to interleave.
+  unsigned enterGeneration = 0, consumedEnterGeneration = 0;
   std::mutex waitMutex;
   std::condition_variable waitCv;
   unsigned waitCalls = 0, beginCalls = 0, endCalls = 0, captureCalls = 0, composeCalls = 0;
   unsigned backgroundCalls = 0;
   XrTime displayTime = 100;
+  // How much each wait() advances displayTime, and the period it reports.
+  // Defaults reproduce the old hardcoded displayTime++ / 11 for every
+  // existing test; turboPacingTest sets step = period so real predictions
+  // advance by one period per wait, as an actual runtime's do.
+  XrTime step = 1;
+  XrDuration period = 11;
   bool lastHadLayers = false;
   XrTime lastDisplayTime = 0;
   static Fake* current;
@@ -50,17 +71,25 @@ struct Fake {
     current->trace.push_back('W');
     ++current->waitCalls;
     if (current->blockWait) {
-      std::unique_lock<std::mutex> lock(current->waitMutex); current->waitEntered = true; current->waitCv.notify_all();
+      std::unique_lock<std::mutex> lock(current->waitMutex);
+      current->waitEntered = true; ++current->enterGeneration; current->waitCv.notify_all();
       if (!current->waitCv.wait_for(lock, std::chrono::seconds(2), [] { return current->releaseWait; })) {
         current->waitTimedOut = true; return XR_ERROR_RUNTIME_FAILURE;
       }
+      // Consume this release so a second (and third...) blocked call -- the
+      // turbo pacer kicks and blocks repeatedly across one test -- waits for
+      // its own fresh signal instead of sailing through on the last one's.
+      // No existing single-use-per-Fake test ever reads these fields again
+      // after its one release, so this is invisible to every one of them.
+      current->waitEntered = false; current->releaseWait = false;
     }
-    *out = {XR_TYPE_FRAME_STATE}; out->predictedDisplayTime = current->displayTime++;
-    out->predictedDisplayPeriod = 11; out->shouldRender = current->shouldRender ? XR_TRUE : XR_FALSE;
+    *out = {XR_TYPE_FRAME_STATE}; out->predictedDisplayTime = current->displayTime;
+    current->displayTime += current->step;
+    out->predictedDisplayPeriod = current->period; out->shouldRender = current->shouldRender ? XR_TRUE : XR_FALSE;
     if (!current->waits.empty()) { const auto r = current->waits.front(); current->waits.erase(current->waits.begin()); return r; }
     return XR_SUCCESS;
   }
-  static XrResult beginFrame(XrSession, const XrFrameBeginInfo*) { return XR_SUCCESS; }
+  static XrResult beginFrame(XrSession, const XrFrameBeginInfo*) { current->trace.push_back('B'); return XR_SUCCESS; }
   static XrResult endFrame(XrSession, const XrFrameEndInfo* info) {
     current->trace.push_back('E');
     ++current->endCalls; current->lastHadLayers = info->layerCount != 0; current->lastDisplayTime = info->displayTime; return current->endResult;
@@ -274,7 +303,7 @@ void boundaryFailures() {
     check(b.submit(vr::EVREye(first^1),&t)==vr::VRCompositorError_None&&fake.lastHadLayers&&fake.lastDisplayTime==100,"either order retains frame metadata");
     check(b.clear()==XR_SUCCESS&&b.clear()==XR_SUCCESS&&fake.endCalls==1,"completed pair cannot end twice");
     check(b.waitAndBegin()==XR_SUCCESS&&b.waitAndBegin()==XR_SUCCESS&&fake.endCalls==2&&!fake.lastHadLayers&&
-      fake.trace==std::vector<char>({'W','E','W','E','W'}),"no submit ends empty before following wait");
+      fake.trace==std::vector<char>({'W','B','E','W','B','E','W','B'}),"no submit ends empty before following wait");
     b.setGeometryReady(false);
     check(b.submit(vr::Eye_Left,&t)==vr::VRCompositorError_None&&b.submit(vr::Eye_Right,&t)==vr::VRCompositorError_None&&
       !fake.lastHadLayers&&!sink.copies.back()&&fake.composeCalls==1,"invalid geometry validates but skips copies and compose");
@@ -303,11 +332,327 @@ void boundaryFailures() {
     fake.endCalls==1&&!fake.lastHadLayers&&!fake.composeCalls&&!sink.copies.back(),"pending loss honors begin/end without rendering");
   state.abandonAfterOwnerDestruction();
 }
+
+// Turbo mode (FramePacing::Deferred): waitAndBegin hands the game a
+// synthesized time immediately when the pacer's real xrWaitFrame has not
+// returned yet, and the real begin completes at finish()/clear() instead.
+// Fake::step/period are set to 11 here so a real prediction advances by one
+// period per wait, like an actual runtime's; every helper below is used
+// only through a FramePacer bound to that same Fake, never concurrently
+// with a different one, so reusing Fake's block/release machinery across
+// several kicks in one fixture (see the fix above) is safe.
+void turboPacingTest() {
+  const auto session = reinterpret_cast<XrSession>(2);
+  const auto track = [&](XrResult r, FrameBoundary& b, XrTime& lastSeen) {
+    if (!XR_FAILED(r)) {
+      check(b.frame().predictedDisplayTime >= lastSeen, "turbo: predictedDisplayTime never decreases within a session");
+      lastSeen = b.frame().predictedDisplayTime;
+    }
+    return r;
+  };
+  // Waits for the NEXT blocking entry this fixture has not already consumed
+  // (see Fake::enterGeneration/consumedEnterGeneration), not merely for
+  // waitEntered to read true -- a fixture with several sequential kicks
+  // calls this once per kick, and a plain boolean cannot tell a fresh entry
+  // from the previous kick's flag still sitting true from before release()
+  // woke it (release() returning is not synchronized with that wakeup).
+  const auto awaitEntered = [&](Fake& f) {
+    std::unique_lock<std::mutex> lock(f.waitMutex);
+    const bool ok = f.waitCv.wait_for(lock, std::chrono::seconds(2),
+        [&] { return f.enterGeneration > f.consumedEnterGeneration; });
+    if (ok) f.consumedEnterGeneration = f.enterGeneration;
+    return ok;
+  };
+  const auto release = [&](Fake& f) {
+    std::lock_guard<std::mutex> lock(f.waitMutex); f.releaseWait = true; f.waitCv.notify_all();
+  };
+  const auto pollReady = [&](FramePacer& p) {
+    for (int i = 0; i < 2000 && p.pending() && !p.ready(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return !p.pending() || p.ready();
+  };
+
+  // No pacer at all, and a pacer that exists but was never bound, must both
+  // fall back to exactly today's blocking wait: turbo mode is opt-in per
+  // object, never assumed. (Also proves waitAndBegin never dereferences an
+  // unbound/absent pacer: turbo_ is false, so the pacer_->kick() short
+  // circuit is never evaluated.)
+  {
+    Fake fake; SessionState state; check(start(state, fake), "turbo: no-pacer session starts");
+    Sink sink(fake); FrameBoundary b(state, sink);
+    XrTime lastSeen = 0;
+    check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS &&
+              !b.turbo() && !b.deferred() && fake.waitCalls == 1 && b.synthesized() == 0 && b.kicks() == 0,
+          "turbo: deferred pacing with no pacer object behaves exactly like runtime pacing");
+    state.abandonAfterOwnerDestruction();
+  }
+  {
+    Fake fake; SessionState state; check(start(state, fake), "turbo: unbound-pacer session starts");
+    Sink sink(fake); FramePacer pacer; FrameBoundary b(state, sink, &pacer);
+    check(!pacer.bound(), "turbo: a freshly constructed pacer starts unbound");
+    XrTime lastSeen = 0;
+    check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS &&
+              !b.turbo() && !b.deferred() && fake.waitCalls == 1 && b.synthesized() == 0,
+          "turbo: deferred pacing with an unbound pacer behaves exactly like runtime pacing");
+    state.abandonAfterOwnerDestruction();
+  }
+
+  // The main lifecycle. Bootstrap has nothing to synthesize from and waits
+  // synchronously; completing that pair kicks the next wait immediately;
+  // finding it still outstanding synthesizes from it (OpenXR Toolkit's
+  // formula, clamped to one-to-two periods -- the amendment covering
+  // ReferenceChanges::advance's monotonic requirement); the frame the game
+  // sees carries the synthesized time while the real xrEndFrame is paced
+  // against the runtime's own prediction; the same holds immediately after
+  // a deferred frame finishes (the amendment's steady case); and a later
+  // runtime-paced call consumes a pending result exactly rather than
+  // orphaning it.
+  //
+  // FrameBoundary (like SessionState, which it wraps) is single-owner-thread
+  // -- see frameBoundaryTest's "wrong thread" checks -- so, exactly as
+  // blockedRuntimeIntegrationTest does above, b is constructed and used
+  // entirely on one worker thread here; the main thread only ever touches
+  // fake's own mutex/condvar and pacer's thread-safe pending()/ready().
+  {
+    Fake fake; fake.step = 11;
+    SessionState state; check(start(state, fake), "turbo: main fixture session starts");
+    FramePacer pacer;
+    vr::Texture_t t{};
+    std::thread worker([&] {
+      Sink sink(fake); FrameBoundary b(state, sink, &pacer);
+      pacer.bind(&Fake::wait, session);
+      check(pacer.bound(), "turbo: pacer binds to the session's xrWaitFrame");
+      XrTime lastSeen = 0;
+
+      check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS &&
+                b.turbo() && !b.deferred() && b.synthesized() == 0 && b.kicks() == 0 && fake.waitCalls == 1,
+            "turbo: bootstrap has no reference to synthesize from and waits synchronously");
+      b.setGeometryReady(true);
+      check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None, "turbo: bootstrap first eye");
+      fake.blockWait = true;
+      check(b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None, "turbo: bootstrap pair completes");
+      check(fake.endCalls == 1 && b.kicks() == 1, "turbo: completing a turbo-paced pair kicks the next wait immediately");
+
+      check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS,
+            "turbo: finding the kicked wait still outstanding synthesizes instead of blocking");
+      check(b.deferred() && b.synthesized() == 1, "turbo: first synthesized frame");
+      const auto synth1 = b.frame().predictedDisplayTime;
+      check(synth1 >= 111 && synth1 <= 122, "turbo: synthesis is the last real time plus one to two periods (100 + [11,22])");
+      b.setGeometryReady(true);
+      // The second submit below blocks in finish() until the main thread
+      // releases the first kick (see the choreography after this thread).
+      check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+            "turbo: submitting a synthesized pair takes the pacer's real result and completes it");
+      check(!b.deferred() && b.deferredFrames() == 1 && fake.endCalls == 2,
+            "turbo: submitted pair is no longer deferred and closes exactly once");
+      check(fake.lastDisplayTime == 111,
+            "turbo: xrEndFrame is paced against the runtime's real prediction, not the synthesized one handed to the game");
+
+      check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS,
+            "turbo: steady case -- immediately after a deferred frame finishes, the next call synthesizes again");
+      check(b.deferred() && b.synthesized() == 2, "turbo: second synthesized frame");
+      const auto synth2 = b.frame().predictedDisplayTime;
+      check(synth2 >= 122 && synth2 <= 133, "turbo: steady-case synthesis is the new last real time plus one to two periods (111 + [11,22])");
+      b.setGeometryReady(true);
+      // Blocks until the main thread releases the second kick.
+      check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+            "turbo: second synthesized pair completes against its own real prediction");
+      check(!b.deferred() && b.deferredFrames() == 2 && fake.endCalls == 3 && fake.lastDisplayTime == 122,
+            "turbo: second synthesized pair took its own real result");
+
+      // The third kick (finish()'s tail again) settles once the main thread
+      // releases it; a runtime-paced call that finds a pending result just
+      // waits for it briefly, the same as take() always has.
+      check(track(b.waitAndBegin(FramePacing::Runtime), b, lastSeen) == XR_SUCCESS && !b.turbo() && !b.deferred(),
+            "turbo: switching back to runtime pacing consumes a ready pending result instead of orphaning it");
+      check(b.frame().predictedDisplayTime == 133, "turbo: a runtime-paced consume reports the pacer's real value exactly");
+      b.setGeometryReady(true);
+      check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+            "turbo: runtime-paced pair completes");
+      check(!pacer.pending(), "turbo: runtime pacing does not kick the next wait");
+    });
+
+    check(awaitEntered(fake), "turbo: the first kick reaches the runtime's xrWaitFrame");
+    check(pacer.pending() && !pacer.ready(), "turbo: the first kick is genuinely outstanding");
+    release(fake);
+    check(awaitEntered(fake), "turbo: the second kick reaches the runtime");
+    check(pacer.pending() && !pacer.ready(), "turbo: the second kick is genuinely outstanding");
+    release(fake);
+    check(awaitEntered(fake), "turbo: the third kick reaches the runtime");
+    check(pacer.pending() && !pacer.ready(), "turbo: the third kick is genuinely outstanding");
+    release(fake);
+    worker.join();
+
+    state.abandonAfterOwnerDestruction();
+    pacer.stop();
+    // Read the trace only now, with the worker joined (its wait pushed the
+    // 'W's). What a real runtime enforces: every end has its own begin after
+    // the previous end, and no begin ever precedes the wait it belongs to.
+    { unsigned begins = 0, ends = 0, waits = 0; bool ordered = true;
+      for (char c : fake.trace) {
+        if (c == 'W') ++waits;
+        else if (c == 'B') { if (begins != ends || begins >= waits) ordered = false; ++begins; }
+        else if (c == 'E') { if (begins != ends + 1) ordered = false; ++ends; }
+      }
+      check(ordered && ends == fake.endCalls && begins == ends,
+            "turbo: every frame's real begin sits between its wait and its end, deferred ones included"); }
+  }
+
+  // Stall case: a runtime-paced wait blocked well past the fake's period,
+  // then finished. The real time is learned only once the block ends
+  // (noteReal runs after the blocking call returns), so a synthesis right
+  // afterward measures elapsed time from there, not from when this frame's
+  // own wait was entered -- the whole point of the amendment. A formula
+  // that measured entry-to-entry would have inflated the result by the
+  // whole stall instead of clamping it to at most two periods.
+  {
+    Fake fake; fake.step = 11;
+    SessionState state; check(start(state, fake), "turbo: stall fixture session starts");
+    FramePacer pacer;
+    vr::Texture_t t{};
+    XrResult stalledResult = XR_ERROR_VALIDATION_FAILURE;
+    XrTime stalledFrameTime = 0, synthesizedAfterStall = 0;
+    std::thread worker([&] {
+      Sink sink(fake); FrameBoundary b(state, sink, &pacer);
+      pacer.bind(&Fake::wait, session);
+      XrTime lastSeen = 0;
+
+      stalledResult = track(b.waitAndBegin(FramePacing::Runtime), b, lastSeen);
+      check(stalledResult == XR_SUCCESS && !fake.waitTimedOut, "turbo: the stalled wait eventually returns");
+      stalledFrameTime = b.frame().predictedDisplayTime;
+      b.setGeometryReady(true);
+      check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+            "turbo: the stalled pair completes normally");
+
+      // Nothing was kicked by the stalled pair above (it was runtime-paced,
+      // not turbo), so this synthesizes via the explicit kick() branch and
+      // does not itself block -- only completing it below does.
+      check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS,
+            "turbo: a deferred call right after the stall synthesizes from the post-stall reference");
+      synthesizedAfterStall = b.frame().predictedDisplayTime;
+      b.setGeometryReady(true);
+      check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+            "turbo: the post-stall synthesized pair completes");
+    });
+
+    fake.blockWait = true;
+    check(awaitEntered(fake), "turbo: the stalled runtime-paced wait reaches the runtime");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // the stall: far larger than the 11 ns fake period
+    release(fake);
+    // The deferred call right after the stall kicks the next wait itself
+    // (the explicit kick() branch, since nothing was pending yet); release
+    // it so the post-stall pair's own take() can complete.
+    check(awaitEntered(fake), "turbo: the post-stall reference's own kick reaches the runtime");
+    release(fake);
+    worker.join();
+    // Completing the post-stall pair is itself turbo-paced, so it kicked
+    // once more before the worker thread returned; flush it here so
+    // pacer.stop() below does not wait out Fake::wait's own 2 s timeout for
+    // a release that would otherwise never come.
+    check(awaitEntered(fake), "turbo: the post-stall pair's own trailing kick reaches the runtime");
+    release(fake);
+
+    check(stalledFrameTime == 100, "turbo: the stalled wait still reports the real predicted time");
+    check(synthesizedAfterStall >= 111 && synthesizedAfterStall <= 122,
+          "turbo: the 50 ms stall never reaches the synthesized time -- it stays bounded to the last real time plus two periods");
+    state.abandonAfterOwnerDestruction();
+    pacer.stop();
+  }
+
+  // clear() (ClearLastSubmittedFrame's path) must close a still-outstanding
+  // synthesized frame exactly as submit() does, taking the pacer's real
+  // result first so the runtime's own xrWaitFrame/xrBeginFrame pairing
+  // never loses a begin it is owed.
+  {
+    Fake fake; fake.step = 11;
+    SessionState state; check(start(state, fake), "turbo: clear-deferred fixture session starts");
+    FramePacer pacer;
+    vr::Texture_t t{};
+    XrResult clearResult = XR_ERROR_VALIDATION_FAILURE;
+    bool openedDeferred = false;
+    uint64_t drainedFrames = 0;
+    std::thread worker([&] {
+      Sink sink(fake); FrameBoundary b(state, sink, &pacer);
+      pacer.bind(&Fake::wait, session);
+      XrTime lastSeen = 0;
+      check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS, "turbo: clear-deferred bootstrap");
+      b.setGeometryReady(true);
+      check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None, "turbo: clear-deferred bootstrap first eye");
+      fake.blockWait = true;
+      check(b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None, "turbo: clear-deferred bootstrap pair completes");
+      check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS && b.deferred(),
+            "turbo: clear-deferred fixture opens a synthesized frame while the wait is still outstanding");
+      openedDeferred = b.deferred();
+      // clear() below blocks in the same way finish() does until the main
+      // thread releases the outstanding kick.
+      clearResult = b.clear();
+      drainedFrames = b.drainedFrames();
+      check(clearResult == XR_SUCCESS && !b.deferred() && drainedFrames == 1,
+            "turbo: clear() closes a still-outstanding synthesized frame by taking its real result first");
+    });
+
+    check(awaitEntered(fake), "turbo: clear-deferred kick reaches the runtime");
+    release(fake);
+    worker.join();
+    check(openedDeferred, "turbo: clear-deferred fixture actually opened a synthesized frame before calling clear()");
+    state.abandonAfterOwnerDestruction();
+    pacer.stop();
+  }
+
+  // drain() (the STOPPING/close teardown path) must also reach for a wait
+  // that was only ever kicked -- finish()'s post-submit kick here, with no
+  // frame of this boundary's own left open -- so a worker thread is never
+  // left mid xrWaitFrame with nobody left to take its result.
+  {
+    Fake fake; fake.step = 11;
+    SessionState state; check(start(state, fake), "turbo: drain fixture session starts");
+    Sink sink(fake); FramePacer pacer; FrameBoundary b(state, sink, &pacer);
+    pacer.bind(&Fake::wait, session);
+    vr::Texture_t t{};
+    XrTime lastSeen = 0;
+    check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS, "turbo: drain fixture bootstrap");
+    b.setGeometryReady(true);
+    check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+          "turbo: drain fixture bootstrap pair completes and kicks the next wait");
+    check(!state.frameOpen(), "turbo: nothing is open on this boundary when drain() runs");
+    const auto endsBefore = fake.endCalls;
+    check(b.drain() == XR_SUCCESS && b.drainedWaits() == 1 && fake.endCalls == endsBefore + 1,
+          "turbo: drain() takes the outstanding kick and begins/ends it with zero layers");
+    check(!pacer.pending(), "turbo: drain() leaves nothing outstanding");
+    state.abandonAfterOwnerDestruction();
+    pacer.stop();
+  }
+
+  // readyAtWait(): a deferred-paced call that finds the pacer's result
+  // already sitting there (nothing artificially delaying it) consumes it
+  // synchronously rather than opening a synthesized frame, and counts it
+  // distinctly from a synthesis.
+  {
+    Fake fake; fake.step = 11;
+    SessionState state; check(start(state, fake), "turbo: ready-at-wait fixture session starts");
+    Sink sink(fake); FramePacer pacer; FrameBoundary b(state, sink, &pacer);
+    pacer.bind(&Fake::wait, session);
+    vr::Texture_t t{};
+    XrTime lastSeen = 0;
+    check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS, "turbo: ready-at-wait bootstrap");
+    b.setGeometryReady(true);
+    check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+          "turbo: ready-at-wait bootstrap pair completes and kicks the next wait");
+    check(pollReady(pacer), "turbo: with nothing blocking it, the kicked wait settles on its own");
+    check(track(b.waitAndBegin(FramePacing::Deferred), b, lastSeen) == XR_SUCCESS && !b.deferred(),
+          "turbo: a deferred call that finds the pacer already done consumes it instead of synthesizing");
+    check(b.readyAtWait() == 1 && b.synthesized() == 0, "turbo: ready-at-wait is counted distinctly from synthesis");
+    b.setGeometryReady(true);
+    check(b.submit(vr::Eye_Left, &t) == vr::VRCompositorError_None && b.submit(vr::Eye_Right, &t) == vr::VRCompositorError_None,
+          "turbo: ready-at-wait pair completes");
+    state.abandonAfterOwnerDestruction();
+    pacer.stop();
+  }
+}
 }
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) { std::puts("Would test injected OpenXR frame boundary; no runtime or files."); return 0; }
   if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();
-  std::printf("openxr_frame_test: %u checks, %u failures\n", checks, failures); return failures ? 1 : 0;
+  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();
+  std::printf("openxr_frame_test: %u checks, %u failures\n", checks.load(), failures.load()); return failures.load() ? 1 : 0;
 }

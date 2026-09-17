@@ -47,6 +47,7 @@
 #include "system_publication.h"
 #include "head_locator.h"
 #include "runtime_gate.h"
+#include "frame_pacer.h"
 #include "frame_boundary.h"
 #include "eye_capture.h"
 #include "skybox_capture.h"
@@ -177,7 +178,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeCullGuard cullGuard;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_2};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_3};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t offsetFrames=0,fssHealedEyes[2]{},featureChanges=0;
@@ -223,7 +224,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrResult lastResetResult=XR_SUCCESS;
   XrTime lastResetTime=0;
   float resetPositionError=0,resetYawError=0;
-  FrameBoundary boundary{state,*this};
+  // Declared before boundary: boundary's constructor stores its address, and
+  // it must already exist to be bound (native_frame's own reset() sequence
+  // below binds it once the session that owns its xrWaitFrame exists).
+  FramePacer pacer;
+  FrameBoundary boundary{state,*this,&pacer};
+  // The pacing decided for the frame in flight and how many times it has
+  // changed, traced as native_pacing at each transition. The flag comes from
+  // the PREVIOUS frame's features.begin (native_frame_client.h's begin() is
+  // called after this frame's boundary.waitAndBegin), a one-frame lag.
+  FramePacing lastPacing=FramePacing::Runtime; uint64_t pacingChanges=0;
   RuntimeGate gate; uint64_t runtimeGeneration=0;
   // frameViews is the projection the XR layer advertises: the located one,
   // always, so every runtime composes it the way it composes an untouched
@@ -567,7 +577,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return;
     }
     if(lifecycle==Lifecycle::Stopping&&state.running()) {
-      r=boundary.clear();
+      r=boundary.drain();
       if(r==XR_SUCCESS)r=state.stop();
       serviceStopped=r==XR_SUCCESS;
       if(XR_FAILED(r)||state.terminal())publishFatalFailure(r,"service_xrEndSession");
@@ -717,7 +727,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(boundary.failed())publishFatalFailure(boundary.lastResult(),"pose_boundary");
       if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
       return vr::VRCompositorError_InvalidTexture;};
-    lastCompositorResult=boundary.waitAndBegin();
+    const FramePacing pacing=featureFrameKnown&&featureFrame.deferredPacing?FramePacing::Deferred:FramePacing::Runtime;
+    if(pacing!=lastPacing){lastPacing=pacing;++pacingChanges;++featureChanges;
+      nativeTracePrintf("native_pacing,mode=%s,sequence=%llu,changes=%llu\n",
+        pacing==FramePacing::Deferred?"deferred":"runtime",
+        (unsigned long long)(frameSequenceOffset+compositorWaits),(unsigned long long)pacingChanges);}
+    lastCompositorResult=boundary.waitAndBegin(pacing);
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
     loading.sceneWaited();
@@ -756,7 +771,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_2};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_3};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -969,6 +984,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         submitSample.consumerAcquireMs=transferWall.consumerAcquire;
         submitSample.consumerFlushMs=transferWall.consumerFlush;
         submitSample.endFrameMs=boundary.endFrameMs();
+        submitSample.waitFrameMs=boundary.waitBlockMs();
+        submitSample.pacerBlockMs=boundary.pacerBlockMs();
+        submitSample.deferred=boundary.turbo()?1u:0u;
         if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
         timingRetire();
       }
@@ -1351,10 +1369,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     phase("xr_draw_submit",&SubmissionStats::Sample::xrDrawMs);
     phase("xr_release",&SubmissionStats::Sample::xrReleaseMs);
     phase("xr_end_frame",&SubmissionStats::Sample::endFrameMs);
-    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,separate=%u%s,percentiles=50/95/99,units=wall_ms,nested=1,gpu=0\n",
+    phase("wait_frame",&SubmissionStats::Sample::waitFrameMs);
+    phase("pacer_block",&SubmissionStats::Sample::pacerBlockMs);
+    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99,units=wall_ms,nested=1,gpu=0\n",
       (unsigned long long)submitStats.window(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
       last.outputWidth[0],last.outputHeight[0],last.outputWidth[1],last.outputHeight[1],last.treatments[0],last.treatments[1],
-      (unsigned long long)last.featureEpoch,unsigned(cullGuard.stage()),cullGuard.factorWidth(),cullGuard.factorHeight(),unsigned(separateGraphics()),phases);
+      (unsigned long long)last.featureEpoch,unsigned(cullGuard.stage()),cullGuard.factorWidth(),cullGuard.factorHeight(),
+      unsigned(last.deferred),unsigned(separateGraphics()),phases);
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
     LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
@@ -1548,6 +1569,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   bool close() {
+    // A pacer wait kicked by the last frame's finish() must not be left
+    // running past this point: stop() below joins the FramePacer thread, and
+    // a still-pending xrWaitFrame would otherwise hang it, or worse, race
+    // xrDestroySession. drain() also closes a frame this boundary still had
+    // open (a close() reached without ever going through STOPPING).
+    if(state.running()&&!state.terminal()&&GetCurrentThreadId()==ownerThread) {
+      const auto drained=boundary.drain();
+      if(drained!=XR_SUCCESS)nativeTracePrintf("native_pacing,drain_result=%d\n",int(drained));
+    }
     const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
     if(renderSettingsCaptured) {
       publishRenderSizing(false);
@@ -1566,6 +1596,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(tracing)nativeTracePrintf("native_features_summary,offset_frames=%llu,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
       (unsigned long long)offsetFrames,(unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
       (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(cullGuard.stage()));
+    if(tracing)nativeTracePrintf("native_pacing_summary,changes=%llu,deferred=%llu,synthesized=%llu,ready_at_wait=%llu,kicks=%llu,drained_frames=%llu,drained_waits=%llu\n",
+      (unsigned long long)pacingChanges,(unsigned long long)boundary.deferredFrames(),(unsigned long long)boundary.synthesized(),
+      (unsigned long long)boundary.readyAtWait(),(unsigned long long)boundary.kicks(),(unsigned long long)boundary.drainedFrames(),
+      (unsigned long long)boundary.drainedWaits());
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
@@ -1616,6 +1650,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // Normal exit ends a STOPPING session in the loop; failed/cancelled startup
     // may destroy directly, without an invalid xrEndSession in another state.
     ShutdownTrace bindingStage("host_binding_shutdown",tracing);
+    // Join the pacer's worker before xrDestroySession: an in-flight
+    // xrWaitFrame must return before the session handle it was given goes
+    // away, and stop() blocks exactly as long as that takes.
+    pacer.stop();
     const auto bindingResult=binding.shutdown();
     clean=result("destroy_binding",bindingResult)&&clean;bindingStage.end(bindingResult==XR_SUCCESS);
     view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
@@ -1834,6 +1872,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         (unsigned long)ownerThread,unsigned(externalDevice&&externalDevice!=graphics.device()));
     nativeTracePrintf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
+    pacer.bind(api.frames.waitFrame,session);
     if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
     state.setUnhandledEventSink(referenceEvent,this);
     runtimeGeneration=gate.beginGeneration();
