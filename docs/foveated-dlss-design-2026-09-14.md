@@ -56,8 +56,8 @@
   he wants it shown: A-B-A at 20/25/7 from temporal_aa_fovea = 0 with the
   GPU loaded (a higher HMD quality or a station). His head catch-up
   observation (journal, third flight): the blend band back to 6-10 deg;
-  the head-lead build (slide the rectangle toward the turn, motion
-  vectors compensated) offered, not started. Still owed: retire
+  the head-lead build offered, not started (upstream's crop_motion.hpp
+  MV offset is the recipe; journal, the re-read). Still owed: retire
   temporal_aa_fovea_vertical yes/no; whether Stage 2 (ship) goes ahead.
 
 ## Investigation (2026-09-14)
@@ -1497,3 +1497,58 @@ picture's own signature); a hidden DLSS halo (costs area); not the
 eye-tracked crop. The trade is structural: the saving needs a small
 rectangle, the band wants a big one; the lead moves the band, it does
 not remove it. His call.
+
+### 2026-09-17: CheekyFoveatedDLSS re-read against this week's three findings
+
+**Sean:** "Is there anything useful in this repo for our own solution?"
+(the local clone at projects\CheekyFoveatedDLSS, HEAD 16 commits past
+a830c74, the version inspected on the 14th; all 16 are on their UEVR
+frame-warp arc, five touch region/history logic, none changes the
+answers below). A sonnet reader answered seven questions with
+file:line citations; its report is condensed here.
+
+**Useful, one thing, and it is the head lead's recipe (finding b).**
+Their crop moves every frame with the gaze and the DLSS feature is
+never rebuilt for a move: the re-create key is size, quality, flags
+and presets only (d3d11_backend.cpp:360-382, 501-511). History
+survives the move because a compute shader adds the crop's per-frame
+delta to the motion vectors NGX reads, into a private buffer:
+offset = (currentOrigin - previousOrigin) / MV.Scale, "previousLocal =
+currentLocal + sceneMotion + currentOrigin - previousOrigin"
+(crop_motion.hpp:13-29, crop_motion_shader.hpp:16-22, wired at
+d3d11_backend.cpp:1043-1098). They fall back to Reset = 1 on a large
+jump, max(64 px, 12.5% of the crop's dimension) (gaze_policy.cpp:
+178-220), on a size change, or on a lost tracker. The 14th's table
+had already named the mechanism; the lines are now on record. For
+EDVR it is simpler still: the crop's motion vectors are our own, so the
+offset is one cbuffer value in the fovea prep, and a head lead slides
+smoothly, so no reset policy is needed beyond the size-change one we
+have.
+
+**Not there: a fix for the fresh leading edge.** Nothing predicts
+("Late observation only; never predict a future eye", hooks.cpp:250);
+the "next jump" feature draws a debug outline of the next gaze cell
+and pre-renders nothing; there is no halo, no warm-up, no doc or
+comment about convergence, catch-up or edge ghosting. Their
+eye-tracked crop meets the same fresh band at every saccade, which is
+Sean's own objection to gaze from the 5th. So a head lead would be new
+ground, not a rediscovery.
+
+**Nothing for the bound (finding a) or the periphery (finding c).**
+Their periphery is NVIDIA's DLAA on a 0.75 copy (peripheral_dlaa.cpp:
+773-787, 916-1017): the soft mode we measured on the 10:55 flight and
+rejected (0.55-0.92 ms plus the reduce, against 0.22-0.36 for our own
+resolve with the skip). Their one performance figure, "20%+ with DLSS
+Performance", comes with no GPU, resolution or breakdown (README.md:3)
+and with their default region of 0.55 x 0.45 = 25% of the frame
+(settings.hpp:59-67), which is the arithmetic we have: only a small
+region pays, and a small screen-fixed rectangle is what shows the
+fresh edge. Their seam is ours in other clothes (a smoothstep feather,
+4% of the frame by default, rectangle-to-ellipse by a roundness
+lerp, d3d11_composite_shader.hpp:39-50, 163-171). They floor the
+region at 20% per dimension (settings.cpp:244-245, restored in
+29d146d after a try at 10%) and have no ceiling like our 90%.
+
+**Taken:** the MV-offset recipe and the reset threshold, for the head
+lead if Sean wants it. **Ruled out again:** the DLAA periphery, because
+we measured it; gaze, unchanged.
