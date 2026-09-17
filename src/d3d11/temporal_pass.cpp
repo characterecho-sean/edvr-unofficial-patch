@@ -746,6 +746,7 @@ float g_foveaLeadFrames = 0.0f;   // the key: 0 = off, clamped to 0..12
 bool  g_foveaLeadNoted = false;   // the "the head lead is on" line, once per config load
 struct FoveaLeadState {
     float    px[2] = {0.0f, 0.0f};   // the smoothed lead, render pixels (one-pole, 0.25)
+    int32_t  k[2] = {0, 0};          // the lead in QUANTA, per axis, as last placed
     int32_t  base[2] = {0, 0};       // the base the crop last RAN at, render pixels
     uint32_t cropW = 0, cropH = 0;   // ...and the crop size it ran at
     bool     valid = false;          // base/cropW/H describe a frame the crop really ran
@@ -768,6 +769,7 @@ void foveaLeadForget(int eye) {
     if (eye < 0 || eye > 1) return;
     FoveaLeadState& st = g_foveaLead[eye];
     st.px[0] = st.px[1] = 0.0f;
+    st.k[0] = st.k[1] = 0;
     st.base[0] = st.base[1] = 0;
     st.cropW = st.cropH = 0;
     st.valid = false;
@@ -1593,6 +1595,16 @@ struct EyeMotionTrace {
     bool rowsBound;
     int rowsFollow;
     uint32_t sceneDraws;
+    // The fovea's placement this frame: the render-side base the crop ran
+    // at, the output-side base the finished crop was written and composed
+    // at, the head lead's applied offset in render px and in quanta, and
+    // the residual between the two bases (output px). placeErr is what the
+    // quantum fix is for: it must be CONSTANT across a run, where before it
+    // alternated by about a pixel at every step of the lead. All zero on a
+    // frame the fovea crop did not run.
+    uint32_t foveaInX, foveaInY, foveaOutX, foveaOutY;
+    int32_t  leadDX, leadDY, leadKX, leadKY;
+    float    placeErrX, placeErrY;
     float dtMs, prevRows[12], nowRows[12], shift[3], originStep[3];
     ObjectMotion body; // only scalar fields are written; grid pointer is never dereferenced
     PassParams params;
@@ -1616,6 +1628,8 @@ void writeEyeMotionTrace(const std::wstring& dir) {
     names("cameraR",12); names("cameraTv",4); names("boxLow",4); names("boxHigh",4);
     names("headR",12); names("headTv",4);
     fprintf(f, ",projectionA,projectionB,rowsBound,rowsFollow,sceneDraws");
+    fprintf(f, ",foveaInX,foveaInY,foveaOutX,foveaOutY,leadDX,leadDY,leadKX,leadKY"
+               ",placeErrX,placeErrY");
     fprintf(f, "\n");
     for (uint32_t i = 0; i < g_eyeMotionTraceCount; ++i) {
         const EyeMotionTrace& t = g_eyeMotionTrace[i];
@@ -1636,6 +1650,9 @@ void writeEyeMotionTrace(const std::wstring& dir) {
         values(p.tvCam,4); values(p.box0,4); values(p.box1,4);
         values(p.dR0,4); values(p.dR1,4); values(p.dR2,4); values(p.tvUsed,4);
         fprintf(f, ",%.9g,%.9g,%d,%d,%u", p.knobs[0], p.knobs[2], t.rowsBound, t.rowsFollow, t.sceneDraws);
+        fprintf(f, ",%u,%u,%u,%u,%d,%d,%d,%d,%.9g,%.9g", t.foveaInX, t.foveaInY, t.foveaOutX,
+                t.foveaOutY, t.leadDX, t.leadDY, t.leadKX, t.leadKY,
+                static_cast<double>(t.placeErrX), static_cast<double>(t.placeErrY));
         fprintf(f, "\n");
     }
     const bool wrote = !ferror(f);
@@ -2891,43 +2908,149 @@ float foveaLeadDegrees(float px, float l, float r, uint32_t fw) {
     return atanf(fabsf(px) * (r - l) / static_cast<float>(fw)) * kRadToDeg;
 }
 
-// The crop's base with the lead applied. The EXTENTS never move: NGX
-// re-creates the crop feature when the crop's SIZE changes (tens of ms), so
-// the lead is an integer offset to the base alone, taken after
-// computeFoveaRegion -- never by shifting the edge tangents into it, where
-// rounding would change w/h by a pixel between frames. Even pixels (NGX
-// prefers them, and every base here is even today), and clamped so the
-// rectangle stays wholly inside the frame: at the edge the applied offset is
-// whatever fitted, and clamped says so.
-struct FoveaLeadBase {
-    uint32_t x = 0, y = 0;         // the base after the lead
-    int32_t  dx = 0, dy = 0;       // what was actually applied, render pixels, even
-    bool     clamped = false;      // the frame's edge held the lead short
+// THE SLIDE'S QUANTUM, and why the lead may not slide by anything else.
+//
+// The lead moves the RENDER-side base; the OUTPUT-side base is that base
+// scaled into the native frame and floored to even (scaleTo, in the fovea
+// block below), because the two have to describe the same NDC region. At
+// Sean's sizes -- render 2646x2206 into output 4072x3394, ratio 1.5389 -- a
+// 2 px render step moves the crop's CONTENT by 3.078 output px while its
+// output base moves by 2 or 4, so the finished crop lands 0.92 or 1.08 px
+// from where it was, alternating, at every step. The 2026-09-17 13:15:04 eye
+// run measured exactly that: two vertical 1 px jumps of the whole crop (0.91
+// and 1.07 px) that persisted between them. NGX's own registration was fine
+// -- the slide is added to the vectors its crop reads, with the sign upstream
+// uses -- it was the PLACEMENT of the finished crop in the frame that
+// wobbled. Before the lead the base never moved, so that (constant) error
+// was invisible.
+//
+// So the lead slides only by a step that is a whole even number of pixels on
+// BOTH sides: the smallest even render step in 2..64 whose scaled length is
+// within a tenth of an output pixel of an even output step. 26 -> 40 at
+// Sean's sizes (0.012 px off, about 1.4 deg of his FOV), 4 -> 6 at NGX's own
+// quality ratio of 1.5, 2 -> 2 at 1:1, 2 -> 4 at 2x. When nothing in range
+// lands that well the closest step is taken and exact says so, for the
+// once-per-load note to admit it.
+struct FoveaLeadQuantum {
+    uint32_t in;      // the step in render px (even, 2..64)
+    uint32_t out;     // ...and in output px (even, never 0)
+    float    err;     // how far in * to / from is from out, output px
+    bool     exact;   // ...and whether that is within a tenth of a pixel
 };
-FoveaLeadBase foveaLeadBase(const FoveaRegion& g, float leadX, float leadY, uint32_t fw,
-                            uint32_t fh) {
-    FoveaLeadBase out;
-    out.x = g.x;
-    out.y = g.y;
-    if (!g.ok || g.w > fw || g.h > fh) return out;
-    auto axis = [](uint32_t base, uint32_t extent, uint32_t frame, float lead, int32_t* applied,
-                   bool* clamped) -> uint32_t {
+FoveaLeadQuantum foveaLeadQuantum(uint32_t from, uint32_t to) {
+    FoveaLeadQuantum out = {2u, 2u, 0.0f, false};
+    if (from == 0 || to == 0) return out;
+    // Keyed on the sizes: the search is cheap, but it is asked for once per
+    // eye per frame and the answer changes only when a frame's size does.
+    // Two pairs are live at a time (one per axis); four slots leave room for
+    // a resize without evicting the pair still in use.
+    struct Slot { uint32_t from, to; FoveaLeadQuantum q; };
+    static Slot s_cache[4] = {};
+    static int s_next = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (s_cache[i].from == from && s_cache[i].to == to) return s_cache[i].q;
+    }
+    double bestErr = 0.0;
+    bool haveBest = false;
+    for (uint32_t step = 2; step <= 64; step += 2) {
+        const double scaled =
+            static_cast<double>(step) * static_cast<double>(to) / static_cast<double>(from);
+        // The nearest EVEN output step, and never zero: a step the output
+        // base would not move by at all is the defect itself.
+        double even = floor(scaled * 0.5 + 0.5) * 2.0;
+        if (even < 2.0) even = 2.0;
+        const double err = fabs(scaled - even);
+        if (!haveBest || err < bestErr) {
+            bestErr = err;
+            haveBest = true;
+            out.in = step;
+            out.out = static_cast<uint32_t>(even);
+            out.err = static_cast<float>(err);
+            out.exact = err <= 0.1;
+        }
+        if (err <= 0.1) break;   // the SMALLEST exact step wins
+    }
+    s_cache[s_next].from = from;
+    s_cache[s_next].to = to;
+    s_cache[s_next].q = out;
+    s_next = (s_next + 1) & 3;
+    return out;
+}
+
+// The crop's placement with the lead applied: BOTH bases, moved together by
+// a whole number of quanta. The EXTENTS never move: NGX re-creates the crop
+// feature when the crop's SIZE changes (tens of ms), so the lead is an
+// integer offset to the bases alone, taken after computeFoveaRegion -- never
+// by shifting the edge tangents into it, where rounding would change w/h by
+// a pixel between frames. The lead is carried in QUANTA rather than pixels
+// because only at a whole quantum do the two bases describe the same picture
+// (foveaLeadQuantum says why), and both are clamped so the rectangle stays
+// wholly inside ITS OWN frame: at either frame's edge the applied step is
+// whatever fitted, and clamped says so.
+struct FoveaLeadPlace {
+    uint32_t inX, inY, outX, outY;   // the bases to use this frame
+    int32_t  kX, kY;                 // quanta applied (0 = unshifted)
+    int32_t  dxIn, dyIn;             // inX - unshifted x, etc. (render px)
+    bool     clamped;                // a frame's edge held the lead short
+};
+FoveaLeadPlace foveaLeadPlace(const FoveaRegion& unshifted, uint32_t outX0, uint32_t outY0,
+                              uint32_t outW, uint32_t outH, uint32_t fw, uint32_t fh,
+                              uint32_t foW, uint32_t foH, FoveaLeadQuantum qx,
+                              FoveaLeadQuantum qy, float leadX, float leadY, int32_t kPrevX,
+                              int32_t kPrevY) {
+    FoveaLeadPlace out = {unshifted.x, unshifted.y, outX0, outY0, 0, 0, 0, 0, false};
+    if (!unshifted.ok || unshifted.w > fw || unshifted.h > fh || outW > foW || outH > foH ||
+        qx.in == 0 || qx.out == 0 || qy.in == 0 || qy.out == 0) {
+        return out;
+    }
+    auto axis = [](uint32_t base, uint32_t extent, uint32_t frame, uint32_t oBase,
+                   uint32_t oExtent, uint32_t oFrame, const FoveaLeadQuantum& q, float lead,
+                   int32_t kPrev, uint32_t* placedIn, uint32_t* placedOut, int32_t* appliedK,
+                   int32_t* appliedPx, bool* clamped) {
         if (!std::isfinite(lead)) lead = 0.0f;
-        const float half = lead * 0.5f;
-        const int32_t steps = static_cast<int32_t>(
-            half >= 0.0f ? floorf(half + 0.5f) : -floorf(-half + 0.5f));
-        const int32_t off = steps * 2;                       // even pixels
-        const int32_t room = static_cast<int32_t>(frame - extent) & ~1;
-        int32_t want = static_cast<int32_t>(base) + off;
-        if (want < 0) want = 0;
-        if (want > room) want = room;
-        if (want < 0) want = 0;                              // a frame smaller than the crop
-        if (want != static_cast<int32_t>(base) + off) *clamped = true;
-        *applied = want - static_cast<int32_t>(base);
-        return static_cast<uint32_t>(want);
+        float t = lead / static_cast<float>(q.in);
+        // A lead this far out is held by either frame's edge many times over;
+        // the bound is here only so the cast below cannot overflow.
+        if (t > 1.0e6f) t = 1.0e6f;
+        if (t < -1.0e6f) t = -1.0e6f;
+        // Hysteresis of a fifth of a quantum. The step boundary sits at half
+        // a quantum, so the step being held only changes once the lead is 0.7
+        // of a quantum away from it: a lead hovering at a boundary then stays
+        // put instead of moving the rectangle back and forth every frame.
+        // Taken as reached AT 0.7 -- a lead of 0.3 quanta with one step held
+        // is exactly that far away -- with a millionth of a quantum of slack,
+        // so which side of the boundary a float lands on is not a behaviour.
+        int32_t k = kPrev;
+        if (fabsf(t - static_cast<float>(kPrev)) >= 0.7f - 1.0e-6f) {
+            k = static_cast<int32_t>(t >= 0.0f ? floorf(t + 0.5f) : -floorf(-t + 0.5f));
+        }
+        // Both frames hold the rectangle: the render crop inside the render
+        // frame AND its scaled twin inside the native one, whichever binds
+        // first. k = 0 is inside both by construction, so the window below is
+        // never empty and an unshifted crop is never reported clamped.
+        const int32_t kMinIn = -static_cast<int32_t>(base / q.in);
+        const int32_t kMaxIn =
+            (frame - extent >= base) ? static_cast<int32_t>((frame - extent - base) / q.in) : 0;
+        const int32_t kMinOut = -static_cast<int32_t>(oBase / q.out);
+        const int32_t kMaxOut = (oFrame - oExtent >= oBase)
+                                    ? static_cast<int32_t>((oFrame - oExtent - oBase) / q.out)
+                                    : 0;
+        const int32_t kMin = kMinIn > kMinOut ? kMinIn : kMinOut;
+        const int32_t kMax = kMaxIn < kMaxOut ? kMaxIn : kMaxOut;
+        int32_t held = k;
+        if (held > kMax) held = kMax;
+        if (held < kMin) held = kMin;
+        if (held != k) *clamped = true;
+        *appliedK = held;
+        *appliedPx = held * static_cast<int32_t>(q.in);
+        *placedIn = static_cast<uint32_t>(static_cast<int32_t>(base) + *appliedPx);
+        *placedOut = static_cast<uint32_t>(static_cast<int32_t>(oBase) +
+                                           held * static_cast<int32_t>(q.out));
     };
-    out.x = axis(g.x, g.w, fw, leadX, &out.dx, &out.clamped);
-    out.y = axis(g.y, g.h, fh, leadY, &out.dy, &out.clamped);
+    axis(unshifted.x, unshifted.w, fw, outX0, outW, foW, qx, leadX, kPrevX, &out.inX, &out.outX,
+         &out.kX, &out.dxIn, &out.clamped);
+    axis(unshifted.y, unshifted.h, fh, outY0, outH, foH, qy, leadY, kPrevY, &out.inY, &out.outY,
+         &out.kY, &out.dyIn, &out.clamped);
     return out;
 }
 
@@ -4416,15 +4539,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     return static_cast<uint32_t>((static_cast<uint64_t>(v) * to / from) & ~1ull);
                 };
                 if (cropOf(w, h, fcx, fcy, fcw, fch)) {
+                    // What the lead actually applied, for the eye dump's
+                    // placement columns below: render px and quanta per axis,
+                    // both zero when the lead is off or not live.
+                    int32_t leadApplied[2] = {0, 0};
+                    int32_t leadSteps[2] = {0, 0};
+                    // The UNSHIFTED output crop, taken before the lead: the
+                    // head lead has to move both bases together (its quantum's
+                    // own comment says why), so it is handed this pair and
+                    // gives back the pair to use. The EXTENTS it never moves.
+                    focx = scaleTo(fcx, w, foW);
+                    focw = scaleTo(fcw, w, foW);
+                    focy = scaleTo(fcy, h, foH);
+                    foch = scaleTo(fch, h, foH);
                     // THE HEAD LEAD (advanced.temporal_aa_fovea_lead): the
                     // rectangle slides into a turn of the head or the ship by
                     // this many frames of the frame centre's own motion, so the
                     // strip entering at its leading edge -- which has no
                     // crop-local NVIDIA history and is soft for its first
-                    // frames -- lands further out. The BASE alone moves
-                    // (foveaLeadBase says why the extents may not), and the
-                    // slide is handed to the motion pass so the history that IS
-                    // there stays registered.
+                    // frames -- lands further out. The two BASES alone move,
+                    // together and by a whole quantum (foveaLeadPlace says why
+                    // the extents may not and why the step is not a pixel),
+                    // and the slide is handed to the motion pass so the history
+                    // that IS there stays registered.
                     if (g_foveaLeadFrames > 0.0f && eye >= 0 && eye < 2) {
                         FoveaLeadState& st = g_foveaLead[eye];
                         float mvx = 0.0f, mvy = 0.0f;
@@ -4478,10 +4615,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         unshifted.w = fcw;
                         unshifted.h = fch;
                         unshifted.ok = true;
-                        const FoveaLeadBase moved = foveaLeadBase(
-                            unshifted, live ? st.px[0] : 0.0f, live ? st.px[1] : 0.0f, w, h);
-                        fcx = moved.x;
-                        fcy = moved.y;
+                        // Both bases, moved together by whole quanta: a step
+                        // that is an even number of pixels in the render frame
+                        // AND in the native one, so the finished crop lands on
+                        // the same picture at every step instead of wobbling
+                        // about a pixel each time (foveaLeadQuantum's comment
+                        // carries the measurement). The quantum depends only
+                        // on the two sizes, and is cached on them.
+                        const FoveaLeadQuantum qLeadX = foveaLeadQuantum(w, foW);
+                        const FoveaLeadQuantum qLeadY = foveaLeadQuantum(h, foH);
+                        const FoveaLeadPlace moved = foveaLeadPlace(
+                            unshifted, focx, focy, focw, foch, w, h, foW, foH, qLeadX, qLeadY,
+                            live ? st.px[0] : 0.0f, live ? st.px[1] : 0.0f,
+                            live ? st.k[0] : 0, live ? st.k[1] : 0);
+                        fcx = moved.inX;
+                        fcy = moved.inY;
+                        focx = moved.outX;
+                        focy = moved.outY;
+                        st.k[0] = moved.kX;
+                        st.k[1] = moved.kY;
+                        leadApplied[0] = moved.dxIn;
+                        leadApplied[1] = moved.dyIn;
+                        leadSteps[0] = moved.kX;
+                        leadSteps[1] = moved.kY;
                         if (live) {
                             foveaLeadDelta[0] = static_cast<int32_t>(fcx) - st.base[0];
                             foveaLeadDelta[1] = static_cast<int32_t>(fcy) - st.base[1];
@@ -4495,8 +4651,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         // The window's figures: how far the rectangle sits from
                         // where it would have been, in pixels and as an angle
                         // through this eye's own tangent span.
-                        const float slideX = static_cast<float>(moved.dx);
-                        const float slideY = static_cast<float>(moved.dy);
+                        const float slideX = static_cast<float>(moved.dxIn);
+                        const float slideY = static_cast<float>(moved.dyIn);
                         const float slidePx = sqrtf(slideX * slideX + slideY * slideY);
                         const float slideDeg = foveaLeadDegrees(slidePx, l, r, w);
                         ++st.frames;
@@ -4507,12 +4663,38 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         }
                         if (moved.clamped) ++st.held;
                     }
-                    focx = scaleTo(fcx, w, foW);
-                    focw = scaleTo(fcw, w, foW);
-                    focy = scaleTo(fcy, h, foH);
-                    foch = scaleTo(fch, h, foH);
+                    // A backstop only: the quantum's own clamp already keeps
+                    // both bases inside their frames, so neither of these can
+                    // fire from the lead. They cover the scaled extents alone.
                     if (focx + focw > foW) focw = (foW - focx) & ~1u;
                     if (focy + foch > foH) foch = (foH - focy) & ~1u;
+                    // The eye dump's placement columns, for the frame and eye
+                    // whose record the capture above appended (the last one).
+                    // Filled for every frame the crop ran, not only a led one:
+                    // with the lead off the offsets are zero but placeErr --
+                    // the residual between the two bases, the thing the
+                    // quantum exists to hold still -- is still the figure to
+                    // read, and a crop that never ran leaves the whole group
+                    // at zero rather than looking like a placement at 0.
+                    if (g_eyeMotionTraceCount > 0) {
+                        EyeMotionTrace& tr = g_eyeMotionTrace[g_eyeMotionTraceCount - 1];
+                        if (tr.frame == g_rowsFrame && tr.eye == static_cast<uint32_t>(eye)) {
+                            tr.foveaInX = fcx;
+                            tr.foveaInY = fcy;
+                            tr.foveaOutX = focx;
+                            tr.foveaOutY = focy;
+                            tr.leadDX = leadApplied[0];
+                            tr.leadDY = leadApplied[1];
+                            tr.leadKX = leadSteps[0];
+                            tr.leadKY = leadSteps[1];
+                            tr.placeErrX = static_cast<float>(
+                                static_cast<double>(focx) -
+                                static_cast<double>(fcx) * foW / static_cast<double>(w));
+                            tr.placeErrY = static_cast<float>(
+                                static_cast<double>(focy) -
+                                static_cast<double>(fcy) * foH / static_cast<double>(h));
+                        }
+                    }
                 }
                 bool sizesOk = fcw >= 128 && focw >= 128 && foch >= 128 &&
                                static_cast<uint64_t>(focw) * foch <=
@@ -5325,15 +5507,44 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (e.dlMvLead) { e.dlMvLead->Release(); e.dlMvLead = nullptr; }
                     } else if (!g_foveaLeadNoted) {
                         g_foveaLeadNoted = true;
+                        // The step it slides in, said out loud: the render
+                        // frame and the native one only agree on where the
+                        // finished crop goes at a whole quantum of each
+                        // (foveaLeadQuantum's comment carries the measurement
+                        // that made this necessary), so the slide is in those,
+                        // not in pixels. When neither axis found an exact step
+                        // the line admits how far off the nearest one is --
+                        // that residual is the placement wobble it could not
+                        // remove, and it is the worse of the two axes.
+                        const FoveaLeadQuantum qNoteX = foveaLeadQuantum(w, foW);
+                        const FoveaLeadQuantum qNoteY = foveaLeadQuantum(h, foH);
+                        char step[256];
+                        const double stepDeg = static_cast<double>(foveaLeadDegrees(
+                            static_cast<float>(qNoteX.in), tanNow[0], tanNow[1], w));
+                        if (qNoteX.exact && qNoteY.exact) {
+                            snprintf(step, sizeof(step),
+                                     "; it slides in steps of %u render px (%u output px, about "
+                                     "%.1f deg) so the crop lands on whole output pixels at every "
+                                     "step",
+                                     qNoteX.in, qNoteX.out, stepDeg);
+                        } else {
+                            snprintf(step, sizeof(step),
+                                     "; it slides in steps of %u render px (%u output px, about "
+                                     "%.1f deg) so the crop lands on whole output pixels at every "
+                                     "step (the nearest available, %.2f px off per step)",
+                                     qNoteX.in, qNoteX.out, stepDeg,
+                                     static_cast<double>(qNoteX.err > qNoteY.err ? qNoteX.err
+                                                                                 : qNoteY.err));
+                        }
                         Log::get().note(
                             "temporal aa: the fovea's head lead is on at %g frames "
                             "(advanced.temporal_aa_fovea_lead) -- the crop slides into a turn of "
                             "the head or the ship, and NVIDIA's crop reads its own copy of the "
                             "motion vectors with that slide added, %.0f MB more resident per eye "
-                            "at %ux%u. The price report's own lead line says how far it actually "
+                            "at %ux%u%s. The price report's own lead line says how far it actually "
                             "moved.",
                             static_cast<double>(g_foveaLeadFrames),
-                            static_cast<double>(w) * h * 4.0 / 1048576.0, w, h);
+                            static_cast<double>(w) * h * 4.0 / 1048576.0, w, h, step);
                     }
                 } else if (g_foveaLeadFrames <= 0.0f && e.dlMvLead) {
                     if (e.dlMvLeadUav) { e.dlMvLeadUav->Release(); e.dlMvLeadUav = nullptr; }
@@ -7527,14 +7738,18 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
 
     {
         // Bit 32: THE HEAD LEAD's pure parts (foveaCentreMotion,
-        // foveaLeadPixels, foveaLeadBase).
+        // foveaLeadPixels, foveaLeadQuantum, foveaLeadPlace).
         //
         // The base offset: zero leaves the rectangle exactly where
         // computeFoveaRegion put it; a lead with room moves the base by the
         // even-rounded amount and NEVER changes w/h (a size change would
         // recreate NVIDIA's feature); an odd lead rounds to even; a lead past
         // the frame's edge stops at it and says it was held; a negative lead
-        // stops at 0.
+        // stops at 0. Those five are asserted at the 1:1 quantum (2 render px
+        // to 2 output px), where a lead in pixels and a lead in quanta are
+        // the same number and their figures read as they always have; the
+        // quantum's own arithmetic is asserted below them at the sizes that
+        // provoked it.
         //
         // The direction, hand-derived from the shader's convention (previous =
         // current + mv, render pixels): mv = (+10, 0) px with 6 frames is a
@@ -7554,38 +7769,151 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
         const int32_t room = static_cast<int32_t>(fw - g.w);   // 2576 - 734 = 1842
 
-        const FoveaLeadBase none = foveaLeadBase(g, 0.0f, 0.0f, fw, fh);
-        const bool zeroHolds = g.ok && none.x == g.x && none.y == g.y && none.dx == 0 &&
-                               none.dy == 0 && !none.clamped;
+        // The 1:1 quantum, and the output frame the render frame itself --
+        // which is what DLAA asks for, and where the five assertions above
+        // keep their original numbers.
+        const FoveaLeadQuantum q11 = foveaLeadQuantum(fw, fw);
+        const bool oneToOne = q11.in == 2 && q11.out == 2 && q11.exact && q11.err == 0.0f;
+        auto place11 = [&](float lx, float ly, int32_t kpx, int32_t kpy) {
+            return foveaLeadPlace(g, g.x, g.y, g.w, g.h, fw, fh, fw, fh, q11, q11, lx, ly, kpx,
+                                  kpy);
+        };
 
-        const FoveaLeadBase right = foveaLeadBase(g, 60.0f, 0.0f, fw, fh);
-        const bool movesRight = right.x == g.x + 60 && right.y == g.y && right.dx == 60 &&
-                                right.dy == 0 && !right.clamped;
+        const FoveaLeadPlace none = place11(0.0f, 0.0f, 0, 0);
+        const bool zeroHolds = g.ok && none.inX == g.x && none.inY == g.y && none.dxIn == 0 &&
+                               none.dyIn == 0 && none.outX == g.x && none.outY == g.y &&
+                               none.kX == 0 && none.kY == 0 && !none.clamped;
 
-        const FoveaLeadBase odd = foveaLeadBase(g, 61.0f, -3.0f, fw, fh);
-        const bool evenRounded = (odd.dx % 2) == 0 && (odd.dy % 2) == 0 && odd.dx == 62 &&
-                                 odd.dy == -4;
+        const FoveaLeadPlace right = place11(60.0f, 0.0f, 0, 0);
+        const bool movesRight = right.inX == g.x + 60 && right.inY == g.y && right.dxIn == 60 &&
+                                right.dyIn == 0 && right.outX == g.x + 60 && !right.clamped;
 
-        const FoveaLeadBase far_ = foveaLeadBase(g, 5000.0f, 5000.0f, fw, fh);
-        const bool heldAtEdge = far_.clamped && far_.x == static_cast<uint32_t>(room) &&
-                                far_.y == static_cast<uint32_t>(fh - g.h) &&
-                                far_.x + g.w <= fw && far_.y + g.h <= fh;
+        const FoveaLeadPlace odd = place11(61.0f, -3.0f, 0, 0);
+        const bool evenRounded = (odd.dxIn % 2) == 0 && (odd.dyIn % 2) == 0 && odd.dxIn == 62 &&
+                                 odd.dyIn == -4;
 
-        const FoveaLeadBase back = foveaLeadBase(g, -5000.0f, -5000.0f, fw, fh);
-        const bool heldAtZero = back.clamped && back.x == 0 && back.y == 0 &&
-                                back.dx == -static_cast<int32_t>(g.x) &&
-                                back.dy == -static_cast<int32_t>(g.y);
+        const FoveaLeadPlace far_ = place11(5000.0f, 5000.0f, 0, 0);
+        const bool heldAtEdge = far_.clamped && far_.inX == static_cast<uint32_t>(room) &&
+                                far_.inY == static_cast<uint32_t>(fh - g.h) &&
+                                far_.inX + g.w <= fw && far_.inY + g.h <= fh;
+
+        const FoveaLeadPlace back = place11(-5000.0f, -5000.0f, 0, 0);
+        const bool heldAtZero = back.clamped && back.inX == 0 && back.inY == 0 &&
+                                back.dxIn == -static_cast<int32_t>(g.x) &&
+                                back.dyIn == -static_cast<int32_t>(g.y);
 
         const FoveaLead sideways = foveaLeadPixels(10.0f, 0.0f, 6.0f);
         const FoveaLead upward = foveaLeadPixels(0.0f, -10.0f, 6.0f);
-        const FoveaLeadBase bySide = foveaLeadBase(g, sideways.x, sideways.y, fw, fh);
-        const FoveaLeadBase byUp = foveaLeadBase(g, upward.x, upward.y, fw, fh);
-        const bool directionOk = bySide.dx == 60 && bySide.dy == 0 && byUp.dx == 0 &&
-                                 byUp.dy == -60 && bySide.x == g.x + 60 && byUp.y == g.y - 60;
+        const FoveaLeadPlace bySide = place11(sideways.x, sideways.y, 0, 0);
+        const FoveaLeadPlace byUp = place11(upward.x, upward.y, 0, 0);
+        const bool directionOk = bySide.dxIn == 60 && bySide.dyIn == 0 && byUp.dxIn == 0 &&
+                                 byUp.dyIn == -60 && bySide.inX == g.x + 60 &&
+                                 byUp.inY == g.y - 60;
 
         // w/h are never touched by any of the above.
-        const bool sizeHeld = g.ok && right.x + g.w <= fw && odd.x + g.w <= fw &&
-                              bySide.x + g.w <= fw && byUp.y + g.h <= fh;
+        const bool sizeHeld = g.ok && right.inX + g.w <= fw && odd.inX + g.w <= fw &&
+                              bySide.inX + g.w <= fw && byUp.inY + g.h <= fh;
+
+        // THE QUANTUM at the five ratios that matter: Sean's own render into
+        // his output on both axes (2646 -> 4072 and 2206 -> 3394, both 26
+        // render px to 40 output px, 0.012 and 0.002 px off), 1:1, NGX's own
+        // quality ratio of 1.5 (2715 -> 4072, 4 to 6), and a straight 2x
+        // (2036 -> 4072, 2 to 4). Every one of them exact, so no rig in this
+        // list has to slide on a fractional step.
+        const FoveaLeadQuantum qSeanX = foveaLeadQuantum(2646, 4072);
+        const FoveaLeadQuantum qSeanY = foveaLeadQuantum(2206, 3394);
+        const FoveaLeadQuantum qFlat = foveaLeadQuantum(2000, 2000);
+        const FoveaLeadQuantum qQuality = foveaLeadQuantum(2715, 4072);
+        const FoveaLeadQuantum qDouble = foveaLeadQuantum(2036, 4072);
+        const bool quantaOk = qSeanX.in == 26 && qSeanX.out == 40 && qSeanX.exact &&
+                              qSeanX.err > 0.011f && qSeanX.err < 0.013f &&
+                              qSeanY.in == 26 && qSeanY.out == 40 && qSeanY.exact &&
+                              qFlat.in == 2 && qFlat.out == 2 && qFlat.exact &&
+                              qQuality.in == 4 && qQuality.out == 6 && qQuality.exact &&
+                              qDouble.in == 2 && qDouble.out == 4 && qDouble.exact;
+
+        // Sean's own frame: render 2646x2206 into output 4072x3394, the
+        // rectangle at base (544, 176) with extents 2102x1852 -- (836, 270)
+        // and 3234x2848 once the fovea block's own scaleTo (floor, then floor
+        // to even) has them, which scaleToSelf re-derives here so this test
+        // and that block cannot drift apart. X sits flush against the render
+        // frame's right edge (544 + 2102 == 2646), which is exactly what a
+        // nasal trim of zero gives, so the lead can only slide X inward; Y has
+        // 178 px of room, six quanta of 26.
+        auto scaleToSelf = [](uint32_t v, uint32_t from, uint32_t to) -> uint32_t {
+            return static_cast<uint32_t>((static_cast<uint64_t>(v) * to / from) & ~1ull);
+        };
+        const uint32_t sOutX = 836, sOutY = 270, sOutW = 3234, sOutH = 2848;
+        const bool scaledAsBlock = scaleToSelf(544, 2646, 4072) == sOutX &&
+                                   scaleToSelf(176, 2206, 3394) == sOutY &&
+                                   scaleToSelf(2102, 2646, 4072) == sOutW &&
+                                   scaleToSelf(1852, 2206, 3394) == sOutH;
+        FoveaRegion seanG;
+        seanG.x = 544; seanG.y = 176; seanG.w = 2102; seanG.h = 1852; seanG.ok = true;
+        auto placeSean = [&](float lx, float ly, int32_t kpx, int32_t kpy) {
+            return foveaLeadPlace(seanG, sOutX, sOutY, sOutW, sOutH, 2646, 2206, 4072, 3394,
+                                  qSeanX, qSeanY, lx, ly, kpx, kpy);
+        };
+        // A lead of 61 render px is 2.35 quanta: two steps, 52 render px and
+        // 80 output px, with the extents untouched. Taken on Y, which has the
+        // room; the same 61 px inward on X moves by the same two steps the
+        // other way, and outward on X the frame's right edge holds it at none.
+        const FoveaLeadPlace up61 = placeSean(0.0f, 61.0f, 0, 0);
+        const bool leadY61 = up61.kY == 2 && up61.dyIn == 52 && up61.inY == 176 + 52 &&
+                             up61.outY == sOutY + 80 && up61.kX == 0 && up61.dxIn == 0 &&
+                             up61.inX == 544 && up61.outX == sOutX && !up61.clamped;
+        const FoveaLeadPlace in61 = placeSean(-61.0f, 0.0f, 0, 0);
+        const bool leadX61 = in61.kX == -2 && in61.dxIn == -52 && in61.inX == 544 - 52 &&
+                             in61.outX == sOutX - 80 && !in61.clamped;
+        const FoveaLeadPlace out61 = placeSean(61.0f, 0.0f, 0, 0);
+        const bool flushHeld = out61.clamped && out61.kX == 0 && out61.dxIn == 0 &&
+                               out61.inX == 544 && out61.outX == sOutX;
+        // THE WHOLE POINT: the residual between the two bases, in output px,
+        // is the same at every step. Before the quantum a 2 px render step
+        // swung it by 0.92 or 1.08 px, alternating, and the crop visibly
+        // jumped; here three consecutive steps stay inside 0.05 px (they
+        // differ by 0.0018 px each, the quantum's own 2206 -> 3394 residual).
+        auto placeErr = [](uint32_t outBase, uint32_t inBase, uint32_t from, uint32_t to) {
+            return static_cast<double>(outBase) - static_cast<double>(inBase) *
+                                                      static_cast<double>(to) /
+                                                      static_cast<double>(from);
+        };
+        const FoveaLeadPlace step0 = placeSean(0.0f, 0.0f, 0, 0);
+        const FoveaLeadPlace step1 = placeSean(0.0f, 26.0f, 0, 0);
+        const FoveaLeadPlace step2 = placeSean(0.0f, 52.0f, 0, 0);
+        const double err0 = placeErr(step0.outY, step0.inY, 2206, 3394);
+        const double err1 = placeErr(step1.outY, step1.inY, 2206, 3394);
+        const double err2 = placeErr(step2.outY, step2.inY, 2206, 3394);
+        const bool errSteady = step0.kY == 0 && step1.kY == 1 && step2.kY == 2 &&
+                               fabs(err1 - err0) < 0.05 && fabs(err2 - err0) < 0.05 &&
+                               fabs(err2 - err1) < 0.05;
+        // The hysteresis: the step boundary is at half a quantum, and the step
+        // being held only gives way 0.2 of a quantum past it, so a lead
+        // hovering at a boundary does not chatter the rectangle.
+        const float qy = static_cast<float>(qSeanY.in);
+        const bool hysteresisOk = placeSean(0.0f, 0.6f * qy, 0, 0).kY == 0 &&
+                                  placeSean(0.0f, 0.75f * qy, 0, 0).kY == 1 &&
+                                  placeSean(0.0f, 0.3f * qy, 0, 1).kY == 0 &&
+                                  placeSean(0.0f, 0.4f * qy, 0, 1).kY == 1;
+        // And the output side binding first: the same crop with its render
+        // base at 0 has 544 px of render room to its right, twenty quanta of
+        // 26, but an output base placed one quantum short of the native
+        // frame's edge has only one -- and one is what it gets. The crop must
+        // never be allowed out of the OUTPUT frame: NGX writes it at that
+        // base and the compose reads it from there.
+        FoveaRegion roomG;
+        roomG.x = 0; roomG.y = 176; roomG.w = 2102; roomG.h = 1852; roomG.ok = true;
+        const uint32_t tightOutX = 4072 - 3234 - 40;   // 798: one quantum of output room
+        const FoveaLeadPlace tight =
+            foveaLeadPlace(roomG, tightOutX, sOutY, sOutW, sOutH, 2646, 2206, 4072, 3394, qSeanX,
+                           qSeanY, 5000.0f, 0.0f, 0, 0);
+        const FoveaLeadPlace loose = foveaLeadPlace(roomG, 0, sOutY, sOutW, sOutH, 2646, 2206,
+                                                    4072, 3394, qSeanX, qSeanY, 5000.0f, 0.0f, 0,
+                                                    0);
+        const bool outputBinds = tight.clamped && tight.kX == 1 && tight.inX == 26 &&
+                                 tight.outX == tightOutX + 40 &&
+                                 tight.outX + sOutW <= 4072 && loose.kX == 20 &&
+                                 loose.outX + sOutW <= 4072;
 
         const float tanSym[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
         const float ident[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
@@ -7609,7 +7937,8 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
                              pitchY < -1.0f && fabsf(pitchX) < 1e-2f;
 
         if (zeroHolds && movesRight && evenRounded && heldAtEdge && heldAtZero && directionOk &&
-            sizeHeld && still && yawRight && pitchUp) {
+            sizeHeld && still && yawRight && pitchUp && oneToOne && quantaOk && scaledAsBlock &&
+            leadY61 && leadX61 && flushHeld && errSteady && hysteresisOk && outputBinds) {
             bits |= 32u;
         }
     }
