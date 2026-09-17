@@ -469,9 +469,27 @@ REM gdi32.lib: the settings menu's panel is rasterised with GDI (the game
 REM already imports GDI32, so the DLL adds no module to the process).
 rc.exe /nologo /fo "%OBJ%\d3d11\dxbc_notice.res" "third_party\dxbc_hash\notice.rc"
 if errorlevel 1 ( echo [edvr] ERROR: DXBC notice resource failed & exit /b 1 )
+
+REM Version resources for both shipped DLLs. Until now only the installer
+REM carried a VERSIONINFO; an unsigned DLL with no FileVersion, CompanyName or
+REM FileDescription looks less like a real build than one that has them, and
+REM this is the cheap, honest way to look like one: say who built it and what
+REM it is. Generated, like the installer's own block, so the version string
+REM stays git describe's and nothing here hand-maintains it.
+if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
+if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
+python "tools\gen_installer_rc.py" --version-rc graphics --version "%EDVR_VER%" --out "%GEN%"
+if errorlevel 1 ( echo [edvr] ERROR: graphics version resource generation failed & exit /b 1 )
+python "tools\gen_installer_rc.py" --version-rc runtime --version "%EDVR_VER%" --out "%GEN%"
+if errorlevel 1 ( echo [edvr] ERROR: runtime version resource generation failed & exit /b 1 )
+rc.exe /nologo /fo "%OBJ%\d3d11\version.res" "%GEN%\version_graphics.rc"
+if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the graphics version resource & exit /b 1 )
+rc.exe /nologo /fo "%OBJ%\openxr_module\version.res" "%GEN%\version_runtime.rc"
+if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resource & exit /b 1 )
+
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
@@ -502,7 +520,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     "src\common\frame_flag.cpp" ^
-    /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
 
 REM Shared by the installer and installer_test rigs below.

@@ -23,7 +23,9 @@ Usage:
 
 import argparse
 import os
+import re
 import struct
+import subprocess
 import sys
 
 # Resource ids, matched by src/installer/payload.h.
@@ -34,6 +36,140 @@ IDR_NGX = 104   # NVIDIA's DLSS runtime, when the build had the SDK
 IDR_LOADER = 105
 IDR_LOADER_NOTICE = 106
 RT_MANIFEST = 24
+
+
+def parse_version_tuple(describe):
+    """Parse a `git describe` string into a numeric (major, minor, patch,
+    commits) tuple for FILEVERSION/PRODUCTVERSION.
+
+    'v0.17.0-rc.2-16-g2c6e820' -> (0, 17, 0, 16): the trailing '-<n>-g<hash>'
+    `git describe` appends past the tag is the commit count since it; a
+    '-rc.N' pre-release suffix and a trailing '-dirty' are not fields
+    VERSIONINFO has room for and are dropped either way. A bare tag
+    ('v0.16.2', 'v0.17.0-rc.3') has no '-<n>-g<hash>' suffix and reads as
+    zero commits since it. Anything that does not start with a dotted
+    major.minor.patch -- 'unknown' (no repo) included -- is unparsable and
+    becomes the all-zero version Windows shows for "no version". Every field
+    is clamped to 0..65535, VERSIONINFO's numeric field width.
+    """
+    m = re.match(r'^v?(\d+)\.(\d+)\.(\d+)(?:-.*)?$', describe or '')
+    if not m:
+        return (0, 0, 0, 0)
+    major, minor, patch = (int(m.group(i)) for i in (1, 2, 3))
+    tail = re.search(r'-(\d+)-g[0-9a-f]+(?:-dirty)?$', describe)
+    commits = int(tail.group(1)) if tail else 0
+
+    def clamp(n):
+        return max(0, min(65535, n))
+    return tuple(clamp(n) for n in (major, minor, patch, commits))
+
+
+def origin_url_https():
+    """The origin remote as an https://github.com/... link with no trailing
+    .git, for a Comments string that gives someone skeptical of an unsigned
+    binary somewhere to check it. `git remote get-url origin` rather than a
+    hand-typed constant for the same reason EDVR_VER is `git describe`: a
+    repo that moves keeps a hand-typed URL that is quietly wrong. No git, no
+    repo, or no `origin` remote falls back to the project's known home rather
+    than failing a build over a Comments string.
+    """
+    fallback = 'https://github.com/characterecho-sean/edvr-unofficial-patch'
+    try:
+        url = subprocess.check_output(
+            ['git', 'remote', 'get-url', 'origin'],
+            stderr=subprocess.DEVNULL, timeout=10,
+        ).decode('utf-8', 'replace').strip()
+    except Exception:
+        return fallback
+    if url.endswith('.git'):
+        url = url[:-len('.git')]
+    m = re.match(r'^git@([^:]+):(.+)$', url)
+    if m:
+        return 'https://%s/%s' % (m.group(1), m.group(2))
+    return url if url.startswith('http://') or url.startswith('https://') else fallback
+
+
+def versioninfo_lines(version, file_description, internal_name, original_filename,
+                      file_type, comments):
+    """The VERSIONINFO block text, the single writer for it: every .rc file
+    this module produces -- the installer's payload.rc and, now, the two
+    DLLs' own standalone version_*.rc -- calls this rather than keeping its
+    own copy of the eleven lines of StringFileInfo boilerplate.
+    """
+    major, minor, patch, commits = parse_version_tuple(version)
+    return [
+        '1 VERSIONINFO',
+        'FILEVERSION %d,%d,%d,%d' % (major, minor, patch, commits),
+        'PRODUCTVERSION %d,%d,%d,%d' % (major, minor, patch, commits),
+        'FILEFLAGSMASK 0x3fL',
+        'FILEFLAGS 0x0L',
+        'FILEOS 0x40004L',
+        'FILETYPE %s' % file_type,
+        'FILESUBTYPE 0x0L',
+        'BEGIN',
+        '    BLOCK "StringFileInfo"',
+        '    BEGIN',
+        '        BLOCK "040904b0"',
+        '        BEGIN',
+        '            VALUE "CompanyName", "EDVR (unofficial)"',
+        '            VALUE "FileDescription", "%s"' % file_description,
+        '            VALUE "FileVersion", "%s"' % version,
+        '            VALUE "InternalName", "%s"' % internal_name,
+        '            VALUE "OriginalFilename", "%s"' % original_filename,
+        '            VALUE "ProductName", "EDVR unofficial patch"',
+        '            VALUE "ProductVersion", "%s"' % version,
+        '            VALUE "LegalCopyright", "Copyright (c) 2026 characterecho-sean. MIT License."',
+        '            VALUE "Comments", "%s"' % comments,
+        '        END',
+        '    END',
+        '    BLOCK "VarFileInfo"',
+        '    BEGIN',
+        '        VALUE "Translation", 0x409, 1200',
+        '    END',
+        'END',
+    ]
+
+
+def write_version_rc(which, version, out, dry_run):
+    """--version-rc graphics|runtime: a standalone .rc holding only a
+    VERSIONINFO, for the two DLLs that otherwise ship with no resource naming
+    them at all. No payload, no manifest, no icon, no --root/--build
+    validation -- those exist to make sure the installer never carries a
+    partial payload, and do not apply to a file that carries nothing but
+    version strings.
+    """
+    comments = 'Source and releases: %s' % origin_url_https()
+    if which == 'graphics':
+        lines = versioninfo_lines(
+            version,
+            file_description=('EDVR unofficial VR patch for Elite Dangerous: Direct3D 11 '
+                              'proxy (forwards to the system d3d11.dll)'),
+            internal_name='edvr_openxr_graphics',
+            original_filename='d3d11.dll',
+            file_type='0x2L',
+            comments=comments)
+        filename = 'version_graphics.rc'
+    else:
+        lines = versioninfo_lines(
+            version,
+            file_description=('EDVR unofficial VR patch for Elite Dangerous: OpenXR runtime '
+                              'speaking the OpenVR ABI'),
+            internal_name='edvr_openxr_runtime',
+            original_filename='openvr_api.dll',
+            file_type='0x2L',
+            comments=comments)
+        filename = 'version_runtime.rc'
+
+    if dry_run:
+        print('gen_installer_rc: dry run (%s); wrote nothing' % which)
+        return 0
+    os.makedirs(out, exist_ok=True)
+    out_path = os.path.join(out, filename)
+    header = ['// Generated by tools/gen_installer_rc.py. Do not edit; do not commit.', '']
+    with open(out_path, 'w', encoding='utf-8', newline='\r\n') as f:
+        f.write('\n'.join(header + lines + ['']))
+    print('gen_installer_rc: wrote %s' % out_path)
+    return 0
 
 
 def rc_path(path):
@@ -127,11 +263,18 @@ def main(argv=None):
     ap.add_argument('--build')
     ap.add_argument('--out')
     ap.add_argument('--version', default='unknown')
+    ap.add_argument('--version-rc', choices=('graphics', 'runtime'),
+                    help='write a standalone VERSIONINFO .rc for this DLL instead of '
+                         'the installer payload')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args(argv)
     if args.self_test:
         return self_test()
+    if args.version_rc:
+        if not args.out:
+            ap.error('--out is required with --version-rc')
+        return write_version_rc(args.version_rc, args.version, args.out, args.dry_run)
     if not args.root or not args.build or not args.out:
         ap.error('--root, --build, and --out are required')
 
@@ -204,38 +347,13 @@ def main(argv=None):
         lines.append("// NVIDIA's optional anti-aliasing runtime; native OpenXR remains complete.")
 
     version = args.version
-    lines += [
-        '',
-        '1 VERSIONINFO',
-        'FILEVERSION 0,0,0,0',
-        'PRODUCTVERSION 0,0,0,0',
-        'FILEFLAGSMASK 0x3fL',
-        'FILEFLAGS 0x0L',
-        'FILEOS 0x40004L',
-        'FILETYPE 0x1L',
-        'FILESUBTYPE 0x0L',
-        'BEGIN',
-        '    BLOCK "StringFileInfo"',
-        '    BEGIN',
-        '        BLOCK "040904b0"',
-        '        BEGIN',
-        '            VALUE "CompanyName", "EDVR (unofficial)"',
-        '            VALUE "FileDescription", "EDVR installer"',
-        '            VALUE "FileVersion", "%s"' % version,
-        '            VALUE "InternalName", "edvr-installer"',
-        '            VALUE "OriginalFilename", "edvr-installer.exe"',
-        '            VALUE "ProductName", "EDVR unofficial patch"',
-        '            VALUE "ProductVersion", "%s"' % version,
-        '            VALUE "Comments", "Carries %s"' % carried,
-        '        END',
-        '    END',
-        '    BLOCK "VarFileInfo"',
-        '    BEGIN',
-        '        VALUE "Translation", 0x409, 1200',
-        '    END',
-        'END',
-        '',
-    ]
+    lines += [''] + versioninfo_lines(
+        version,
+        file_description='EDVR installer',
+        internal_name='edvr-installer',
+        original_filename='edvr-installer.exe',
+        file_type='0x1L',
+        comments='Carries %s' % carried) + ['']
 
     out_path = os.path.join(args.out, 'payload.rc')
     with open(out_path, 'w', encoding='utf-8', newline='\r\n') as f:
@@ -246,6 +364,16 @@ def main(argv=None):
 
 def self_test():
     import tempfile
+
+    # The describe-string -> numeric-tuple parser, used for FILEVERSION and
+    # PRODUCTVERSION in every VERSIONINFO block this module writes.
+    assert parse_version_tuple('v0.17.0-rc.2-16-g2c6e820') == (0, 17, 0, 16)
+    assert parse_version_tuple('v0.16.2') == (0, 16, 2, 0)
+    assert parse_version_tuple('v0.17.0-rc.3') == (0, 17, 0, 0)
+    assert parse_version_tuple('unknown') == (0, 0, 0, 0)
+    assert parse_version_tuple('garbage') == (0, 0, 0, 0)
+    assert parse_version_tuple('v1.2.3-70000-gabcdef1') == (1, 2, 3, 65535)  # clamped
+
     with tempfile.TemporaryDirectory(prefix='edvr-rc-test-') as scratch:
         root = os.path.join(scratch, 'root'); build = os.path.join(root, 'build')
         out = os.path.join(root, 'generated'); os.makedirs(build)
@@ -269,6 +397,23 @@ def self_test():
         finally:
             openxr_pe.native_graphics_exports, openxr_pe.native_exports = old_g, old_r
             fetch_openxr_loader.verify = old_v
+
+        # --version-rc: a standalone VERSIONINFO .rc, no native payload involved.
+        rc_out = os.path.join(root, 'rc_out')
+        assert main(['--version-rc', 'graphics', '--version', 'v0.17.0-rc.2-16-g2c6e820',
+                     '--out', rc_out, '--dry-run']) == 0 and not os.path.exists(rc_out)
+        assert main(['--version-rc', 'graphics', '--version', 'v0.17.0-rc.2-16-g2c6e820',
+                     '--out', rc_out]) == 0
+        with open(os.path.join(rc_out, 'version_graphics.rc'), 'r', encoding='utf-8') as stream:
+            graphics_text = stream.read()
+        assert 'OriginalFilename", "d3d11.dll"' in graphics_text
+        assert 'FILEVERSION 0,17,0,16' in graphics_text
+
+        assert main(['--version-rc', 'runtime', '--version', 'v0.16.2', '--out', rc_out]) == 0
+        with open(os.path.join(rc_out, 'version_runtime.rc'), 'r', encoding='utf-8') as stream:
+            runtime_text = stream.read()
+        assert 'OriginalFilename", "openvr_api.dll"' in runtime_text
+        assert 'FILEVERSION 0,16,2,0' in runtime_text
     print('gen_installer_rc: self-test passed')
     return 0
 

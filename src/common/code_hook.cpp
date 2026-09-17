@@ -158,9 +158,12 @@ size_t codeInstructionLength(const uint8_t* code, size_t available,
 
 namespace {
 
-// Reserve executable memory within +/-2GB of `near`, so a 5-byte relative jump
-// can reach it. Walks outward from the target a page at a time; MEM_RESERVE
-// fails harmlessly on anything already taken.
+// Reserve memory within +/-2GB of `near`, so a 5-byte relative jump can reach
+// it. Walks outward from the target a page at a time; MEM_RESERVE fails
+// harmlessly on anything already taken. Committed read-write, not
+// read-write-execute: the trampoline is built into it after allocation, and
+// CodeHook::install makes it executable only once that write is finished, so
+// this process never holds a page that is both writable and executable.
 uint8_t* allocateNear(void* anchor, size_t bytes) {
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
@@ -179,7 +182,7 @@ uint8_t* allocateNear(void* anchor, size_t bytes) {
             if (direction == 0 && delta > at) continue;   // would wrap below zero
             void* const got = VirtualAlloc(
                 reinterpret_cast<void*>(candidate & ~(granularity - 1)), bytes,
-                MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
             if (got) return static_cast<uint8_t*>(got);
         }
     }
@@ -311,6 +314,21 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
         VirtualFree(tramp, 0, MEM_RELEASE);
         return false;
     }
+
+    // The trampoline is never written again once it is live, so it is not
+    // left writable once it is live either: flip it to executable-only here,
+    // before the target is touched, so no window exists where a page in this
+    // process is both writable and executable.
+    DWORD trampOldProtect = 0;
+    if (!VirtualProtect(tramp, trampolineBytes, PAGE_EXECUTE_READ, &trampOldProtect)) {
+        Log::get().note(
+            "CodeHook %s: could not make the trampoline at %p executable (err "
+            "%lu). Not hooked.",
+            label, tramp, GetLastError());
+        VirtualFree(tramp, 0, MEM_RELEASE);
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), tramp, trampolineBytes);
 
     // Build the replacement's eight bytes: E9 rel32, then whatever the original
     // held beyond the patch, so the store leaves the tail of the eight-byte
