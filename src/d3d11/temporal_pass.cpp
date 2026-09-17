@@ -1250,6 +1250,7 @@ bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
 bool                       g_foveaEdgesNoted[2] = {false, false};   // edges mode's own line, per eye
+bool                       g_foveaSizeNoted[2] = {false, false};    // the crop's size stood it down, per eye
 bool                       g_foveaFailNoted = false;
 // Latched when the fovea's NGX create or eval fails, so it is not retried
 // every frame (a create costs tens to hundreds of ms -- a stutter storm).
@@ -4223,6 +4224,39 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 bool sizesOk = fcw >= 128 && focw >= 128 && foch >= 128 &&
                                static_cast<uint64_t>(focw) * foch <=
                                    static_cast<uint64_t>(foW) * foH * 9 / 10;
+                if (!sizesOk && eye >= 0 && eye < 2 && !g_foveaSizeNoted[eye]) {
+                    // Said out loud since 2026-09-17: trims of 5/5 against a
+                    // 5/5/7 FOV trim put the rectangle at 99.9% of the frame,
+                    // and a flight ran a minute of full-frame DLSS with
+                    // nothing in the log but the price line's label. Once
+                    // per eye per config load, like the ENGAGED line.
+                    g_foveaSizeNoted[eye] = true;
+                    const double share = (foW && foH)
+                        ? 100.0 * static_cast<double>(focw) * foch / (static_cast<double>(foW) * foH)
+                        : 0.0;
+                    const char* why = (fcw >= 128 && focw >= 128 && foch >= 128)
+                        ? "above the 90% ceiling, where a periphery could not pay for itself"
+                        : "under the 128 px NVIDIA's crop needs each way";
+                    if (g_foveaEdges) {
+                        uint32_t fovTrim[3] = {0, 0, 0};
+                        nativeFrameFovTrimDegrees(fovTrim);
+                        Log::get().note(
+                            "temporal aa: DLSS where you look (edges) is asked for, but eye %d's "
+                            "rectangle at top %.0f, bottom %.0f, outer %.0f, nasal %.0f deg (reduced "
+                            "by the FOV trim's %u/%u/%u) is %ux%u of the %ux%u output, %.1f%% of the "
+                            "frame: %s. Full-frame DLSS runs instead (the price line says so). "
+                            "Larger trims make a smaller rectangle; 20/25/7 was 43%%.",
+                            eye, static_cast<double>(g_foveaTopDeg), static_cast<double>(g_foveaBottomDeg),
+                            static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
+                            fovTrim[0], fovTrim[1], fovTrim[2], focw, foch, foW, foH, share, why);
+                    } else {
+                        Log::get().note(
+                            "temporal aa: DLSS where you look is asked for at %.0f deg, but the crop "
+                            "is %ux%u of the %ux%u output, %.1f%% of the frame: %s. Full-frame DLSS "
+                            "runs instead (the price line says so).",
+                            static_cast<double>(g_foveaDeg), focw, foch, foW, foH, share, why);
+                    }
+                }
                 if (sizesOk && g_periphSteady) {
                     // The periphery's size: the output scaled, even, at least
                     // 128 each way, never above the render.
@@ -5799,6 +5833,7 @@ void temporalPassConfigure(Config& cfg) {
     // latches only ever mean "already logged", never "already engaged".
     g_foveaNoted = false;
     g_foveaEdgesNoted[0] = g_foveaEdgesNoted[1] = false;
+    g_foveaSizeNoted[0] = g_foveaSizeNoted[1] = false;
     // Edges mode's three trims: plain degrees (not a per-headset list, unlike
     // fix.fov_trim_vertical/_outer/_nasal, which this reduces against -- see
     // cropOf/computeFoveaRegion in temporal_pass.cpp). 0..45, default 0.
