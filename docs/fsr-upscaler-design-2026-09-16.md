@@ -8,7 +8,8 @@ read 2026-09-16) unless marked believed.
 
 ## Status
 
-- **State (2026-09-16): DESIGN, nothing built.** The ask reframes on one
+- **State (2026-09-16 night): route 1 BUILDING on the branch, not flown,
+  not on main.** The ask reframes on one
   finding: AMD ships no Direct3D 11 backend for the FSR 3.1 upscaler on any
   FidelityFX SDK tag (vendor-stated: `sdk/src/backends` holds dx12, shared
   and vk only, at v1.1.4 and after; issue #58 "Porting to DX11" has been
@@ -25,17 +26,25 @@ read 2026-09-16) unless marked believed.
   1 has flown on both rigs and an AMD supporter has reported.
 - **Route 1 IN PROGRESS (2026-09-16 evening) on branch
   `claude/fsr3-amd-nvidia-upscaling-00b69f`, kept separate from main until
-  ready.** Sean took D1-D5 as recommended. Phase 0 runs as two tracks: the
-  SDK fetch-and-build tool, and the setting, seam, readers, ini and stub
-  engine (buildable without the SDK); the engine body and its rig follow.
-  No install to any game directory without Sean's approval.
-- **Next:** Phase 0 on the desk (fetch and build the port, the link gate,
-  the convention rig) before any flight. Flights in section 4.
-- **Open:** the port's build recipe (CMake plus the SDK's own shader compiler
-  at `cs_5_0`; no CRT setting in its CMake, so `/MT` must be forced); whether
-  its libraries import d3d11.dll by name (a stop, 3.5); the reactive mask
-  under FSR; the jitter phase count above 1:1; and FSR 3.1's quality in VR
-  against the pass's own history, which is what an AMD user gets today.
+  ready.** Sean took D1-D5 as recommended. Phase 0 landed as Track A
+  (`tools\fetch_ffx_dx11.py`, 4d0a5fb: fetch, build, stage and verify the
+  port) and Track B (b8cd3b2: the `fsr` value, the engine enum and helpers,
+  the seven readers, the seam, the ini text, the panel, and a stub engine
+  that refuses without the SDK), merged with main at 2c7c21e and green.
+  Track C (the engine body under `EDVR_HAVE_FSR3`, the build.bat block, the
+  WARP rig `tools\fsr3_engine_test`) is in progress. No install to any game
+  directory without Sean's approval.
+- **Next:** Track C's diff reviewed and committed; an adversarial review of
+  the branch; then Sean's go for an install; then flight 1 (section 4).
+- **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
+  phase count above 1:1; FSR 3.1's quality in VR against the pass's own
+  history, which is what an AMD user gets today; and the port's prebuilt
+  shader compiler (journal): it runs only at fetch time on the developer's
+  machine and never ships, but building it from source here needs the VS
+  "C++ ATL" component, which this install lacks. CLOSED by Track A: the
+  build recipe (CMake, `/MT` forced, the upscaler-only targets) and the
+  d3d11-import stop of 3.5 (neither library imports d3d11, dxgi or
+  d3dcompiler by name).
 - **Ruled out (2026-09-16, vendor-stated):** an official AMD D3D11 backend
   (none exists); FSR 4 on D3D11 (D3D12-only signed DLLs, RDNA3/RDNA4 only);
   reaching FSR 4 through the driver's FSR 3.1-to-4 override (D3D12 ffx-api
@@ -414,3 +423,53 @@ class of upscaler): that is route 2's go/no-go.
   No code. File and line pointers are as of ff88cd1; the four commits that
   landed on main the same afternoon (be05124 to e4b923a) touched none of
   the cited files.
+- 2026-09-16 evening, Track A (4d0a5fb): `tools\fetch_ffx_dx11.py` pins
+  optiscaler/FidelityFX-SDK-DX11 at 9b04fa49 (FSR 3.1.2), shallow sparse
+  clone into `%LOCALAPPDATA%\EDVR\ffx-dx11\src`, CMake on `sdk\CMakeLists.txt`
+  with `-DFFX_API_DX11=ON -DFFX_FSR=ON -DFFX_FSR3UPSCALER=ON` (not
+  `-DFFX_FSR3=ON`, which also builds the frame-generation wrapper), VS2022,
+  static libraries, `/MT` forced; stages the headers, `ffx_fsr3upscaler_x64.lib`
+  (94,604 bytes), `ffx_backend_dx11_x64.lib` (9,808,892 bytes), the licence
+  and a VERSION.txt. `--verify` checks the headers, the LIBCMT directive
+  and that neither library imports d3d11, dxgi or d3dcompiler by name (it
+  does not: the backend takes the device it is handed). No CMake on PATH or
+  in VS here; pip's `cmake` package is the tool's third fallback.
+  - Two API-contract findings from a standalone WARP smoke (feature level
+    11_1, 1280x720 to 1920x1080, create and dispatch FFX_OK, scratch for two
+    contexts 2,788,632 bytes): (a) `ffx_dx11.h` declares
+    `ffxGetResourceDX11_Fsr31` `extern "C"` with a `const ID3D11Resource*`,
+    but `ffx_dx11.cpp` defines it non-const with C++ linkage, so a caller
+    of the declared symbol fails to link (LNK2019); the engine carries a
+    local declaration of the real signature. (b) Under DEPTH_INVERTED the
+    port's debug check warns unless cameraNear > cameraFar numerically; the
+    engine passes the pair swapped.
+  - Shader compiler provenance: the fork's prebuilt `FidelityFX_SC.exe`
+    (SHA-256 30f9df14..., 283,136 bytes) is not byte-identical to AMD's
+    v1.1.4 binary (75480f22..., 474,624 bytes). It runs once, at fetch-build
+    time, on the developer's machine, and never ships; only the libraries
+    it produced link in. Its source is in the fork
+    (`sdk\tools\ffx_shader_compiler\`); against AMD's v1.1.4 the Xbox GDK
+    backends and the debug/PDB parameter are gone and FXC's include handling
+    is a deduped set seeded with the shader's own directory; the
+    `D3DCompile` call is unchanged and d3dcompiler_47 is loaded dynamically.
+    Building it from source here fails: `pch.hpp` includes `atlcomcli.h`
+    and this VS2022 Community install has no ATL component (the vendored
+    tiny-process-library also needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5.0`
+    under CMake 4.4). Sean's call: install "C++ ATL for latest v143 build
+    tools" and make the tool build the compiler from source, or accept the
+    prebuilt as a build-time-only tool.
+- 2026-09-16 evening, Track B (b8cd3b2): the `fsr` value; `TemporalEngine`
+  {Own, Nvidia, Amd} with `temporalEngineFor`, `temporalExternalEngine` and
+  `temporalEngineLabel` in `src\common\temporal_mode.h`; the seven readers
+  routed through them; flags bit 6 carries "the external engine is AMD's"
+  across the ABI; fovY computed at the seam from the eye's tangents;
+  `src\d3d11\fsr3_engine.h/.cpp` as a stub that refuses without
+  `EDVR_HAVE_FSR3`; the ini paragraph and the two advanced keys; the menu
+  and the settings panel hide the NVIDIA preset row under `fsr`. Found and
+  fixed a warm-up log line that said "NVIDIA" whatever the engine. Nits
+  handed to Track C: the refusal once-flag is shared across engines, the
+  warm-up is 1:1 only (as NGX's), the version label is a placeholder, the
+  totals need a timestamp-query ring, the menu row hide is not live within
+  an open menu. Merge with main (2c7c21e): main's lean variant (651ddb4)
+  and the engine field met in `temporal_pass.cpp`'s Slot, WindowKey and
+  treatmentName; both kept; green.
