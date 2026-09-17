@@ -27,7 +27,6 @@
 // EDVR_HAVE_FSR3 block found it. Upscaler-only entry points: this header
 // alone (it pulls in ffx_interface.h/ffx_types.h/ffx_error.h itself), not
 // the combined ffxFsr3Context wrapper.
-#include <dxgi1_4.h>  // IDXGIAdapter3::QueryVideoMemoryInfo, the create's VRAM line
 #include <FidelityFX/host/ffx_fsr3upscaler.h>
 
 // backends\dx11\ffx_dx11.h is deliberately NOT included. Its declaration of
@@ -274,32 +273,36 @@ void FsrMessage(FfxMsgType type, const wchar_t* message) {
     Log::get().note("fsr3: %s", narrow);
 }
 
-// The adapter's current LOCAL video memory usage, for the create's VRAM
-// delta line: IDXGIAdapter3::QueryVideoMemoryInfo, which WARP (a software
-// rasteriser with no real budget) is not guaranteed to answer. A refusal is
-// reported as such, not treated as an error (design doc 3.4, 3.5 item g).
-bool queryVideoMemoryUsage(ID3D11Device* dev, uint64_t* bytes) {
-    if (!dev || !bytes) return false;
-    IDXGIDevice* dxgiDev = nullptr;
-    if (FAILED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev))) ||
-        !dxgiDev) {
-        return false;
+// The create line's memory figure is COMPUTED from the three caller-owned
+// working surfaces this engine makes (their D3D11 descriptions), not
+// measured. The first cut measured IDXGIAdapter3::QueryVideoMemoryInfo
+// before and after the create and printed the delta, and flights 1 to 3
+// (2026-09-17) printed -202, -56, -31, -12 and +0 MB for it: the driver's
+// usage counter does not move at create time (allocation is deferred), so
+// the number said nothing. The port's own internal history targets are not
+// counted here either; the line says so.
+uint32_t bytesPerPixel(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R8_UNORM: case DXGI_FORMAT_R8_UINT: return 1;
+        case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_R16_UNORM: case DXGI_FORMAT_R16_UINT:
+        case DXGI_FORMAT_R8G8_UNORM: return 2;
+        case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R16G16_FLOAT:
+        case DXGI_FORMAT_R16G16_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R11G11B10_FLOAT: case DXGI_FORMAT_R10G10B10A2_UNORM: return 4;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R32G32_FLOAT: return 8;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
+        default: return 0;  // "not counted": a format this table does not know
     }
-    IDXGIAdapter* adapter = nullptr;
-    const HRESULT ga = dxgiDev->GetAdapter(&adapter);
-    dxgiDev->Release();
-    if (FAILED(ga) || !adapter) return false;
-    IDXGIAdapter3* adapter3 = nullptr;
-    const HRESULT qi =
-        adapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3));
-    adapter->Release();
-    if (FAILED(qi) || !adapter3) return false;
-    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-    const HRESULT qv = adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info);
-    adapter3->Release();
-    if (FAILED(qv)) return false;
-    *bytes = info.CurrentUsage;
-    return true;
+}
+// The bytes one texture holds at mip 0, or 0 when the format is unknown to
+// bytesPerPixel (the caller says which surfaces went uncounted).
+uint64_t textureBytes(ID3D11Texture2D* tex, bool* counted) {
+    if (!tex) { if (counted) *counted = false; return 0; }
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    const uint32_t bpp = bytesPerPixel(d.Format);
+    if (counted) *counted = bpp != 0;
+    return static_cast<uint64_t>(bpp) * d.Width * d.Height;
 }
 
 // The typed-UAV-load formats AMD's port keeps its internal history and
@@ -473,9 +476,6 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
     desc.fpMessage = &FsrMessage;
     desc.backendInterface = g_backend;
 
-    uint64_t vramBefore = 0;
-    const bool haveVramBefore = queryVideoMemoryUsage(g_device, &vramBefore);
-
     const int64_t createT0 = qpcNow();
     // AMD's DX11 backend does not always fail through FfxErrorCode: its TIF
     // helper (ffx_dx11.cpp) answers a failed D3D11 call mid-create with a
@@ -586,20 +586,21 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
     e.w = w; e.h = h; e.outW = outW; e.outH = outH;
     e.diagnostics = diagnostics;
 
-    uint64_t vramAfter = 0;
-    const bool haveVramAfter = queryVideoMemoryUsage(g_device, &vramAfter);
-    char vramNote[48];
-    if (haveVramBefore && haveVramAfter) {
-        const double deltaMb = (static_cast<double>(vramAfter) - static_cast<double>(vramBefore)) /
-                               (1024.0 * 1024.0);
-        snprintf(vramNote, sizeof(vramNote), "%+.1f MB", deltaMb);
-    } else {
-        snprintf(vramNote, sizeof(vramNote), "not reported by this device");
-    }
+    // The figure is the three surfaces' own bytes (textureBytes), computed,
+    // never a measured delta: see bytesPerPixel's comment for the flights
+    // that showed the measured one was noise.
+    bool c0 = false, c1 = false, c2 = false;
+    const uint64_t surfaceBytes = textureBytes(e.dilatedDepth, &c0) +
+                                  textureBytes(e.dilatedMv, &c1) +
+                                  textureBytes(e.prevNearestDepth, &c2);
+    const int uncounted = (c0 ? 0 : 1) + (c1 ? 0 : 1) + (c2 ? 0 : 1);
     Log::get().note(
-        "fsr3: the context is created for eye %u at %ux%u -> %ux%u%s; VRAM %s; the history "
-        "starts here (made in %.0f ms).",
-        eye, w, h, outW, outH, diagnostics ? ", AMD's own debug checking on" : "", vramNote, ms);
+        "fsr3: the context is created for eye %u at %ux%u -> %ux%u%s; its three working "
+        "surfaces take %.1f MB%s (the port's own history targets are not counted); the "
+        "history starts here (made in %.0f ms).",
+        eye, w, h, outW, outH, diagnostics ? ", AMD's own debug checking on" : "",
+        static_cast<double>(surfaceBytes) / (1024.0 * 1024.0),
+        uncounted ? " plus surfaces of a format this build does not size" : "", ms);
     return true;
 }
 

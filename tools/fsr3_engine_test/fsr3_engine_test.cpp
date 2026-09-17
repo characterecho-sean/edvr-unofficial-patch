@@ -47,11 +47,11 @@
 //     reset=false carrying the old history forward.
 // (f) a size change (1711x1425 -> 3422x3394) recreates the context
 //     cleanly.
-// (g) the create's own VRAM-delta chain (IDXGIAdapter3::
-//     QueryVideoMemoryInfo), called directly against this rig's WARP
-//     device: WARP is a software rasteriser with no real memory budget
-//     and is not guaranteed to answer it, so this is reported, not
-//     asserted, either way.
+// (g) WARP's answer to IDXGIAdapter3::QueryVideoMemoryInfo, called
+//     directly against this rig's device and reported, not asserted. The
+//     engine's create line no longer uses that query (flights 1 to 3 of
+//     2026-09-17 showed a create-time delta is noise); it computes the
+//     bytes of its own three working surfaces instead.
 // WIN32_LEAN_AND_MEAN/NOMINMAX come from the rig's own cl.exe line
 // (build.bat's :rig_fsr3_engine_test), not a source-level #define here --
 // fsr3_engine.cpp, compiled alongside this file in the same invocation,
@@ -1520,14 +1520,18 @@ void testVramQuery(ID3D11Device* dev) {
         ok = SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info));
         if (ok) bytes = info.CurrentUsage;
     }
+    // Informational only. The engine's create line no longer measures this
+    // (flights 1 to 3 showed the create-time delta is noise); it computes
+    // its three surfaces' bytes instead. This probe stays so a future
+    // measured figure has WARP's answer on record.
     if (ok) {
-        std::printf("info: (g) IDXGIAdapter3::QueryVideoMemoryInfo answered on WARP: %llu bytes local usage\n",
+        std::printf("info: (g) IDXGIAdapter3::QueryVideoMemoryInfo answered on WARP: %llu bytes local "
+                    "usage (the engine does not use it: its create line computes its own surfaces' bytes)\n",
                     static_cast<unsigned long long>(bytes));
     } else {
         std::printf(
             "info: (g) IDXGIAdapter3::QueryVideoMemoryInfo is not available on WARP (expected for a "
-            "software adapter) -- fsr3_engine.cpp's own create-time VRAM line falls back to \"not "
-            "reported by this device\" the same way.\n");
+            "software adapter; the engine does not use it either).\n");
     }
 }
 
@@ -1591,7 +1595,8 @@ int main(int argc, char** argv) {
             "DEBUG_CHECKING silence, the jitter/motion-vector sign registration table, reset, a "
             "size change, the Quest 3's own upscale and the sign table at that ratio, the "
             "loading-screen warm-up and the release that frees it, a reactive mask, the "
-            "bind-flag refusal and the caught throw behind it, and the VRAM query; no devices "
+            "bind-flag refusal and the caught throw behind it, and WARP's answer to the video "
+            "memory query; no devices "
             "or files.");
         return 0;
     }
