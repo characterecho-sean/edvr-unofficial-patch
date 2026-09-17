@@ -118,6 +118,8 @@ public:
         case 0x61AE8EB05FDC18DDull:case 0x66DE2CADB1F4AE6Bull:
         case 0x174E8D76363BE337ull:case 0x025B4B9FF54622EDull:
         case 0x7F9B650EC1A1E570ull:
+        // The laser rifle's glow strips and the root triangle (2026-09-17).
+        case 0xBB31244E30265F2Dull:case 0xCFCA8FFC6B058630ull:
         case 0x88DCF1164C640EC3ull:return true;
         default:return false;
         }
