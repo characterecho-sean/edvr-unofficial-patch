@@ -2661,16 +2661,19 @@ struct FoveaRegion {
     bool     ok = false;   // false: under minPx, or the mode is off -- run full-frame
 };
 
-// l,r,t,b: this eye's four frame tangents (tanNow[0..3] -- t is the DOWN
-// tangent, negative; b is UP, positive: this file's own naming, not "top"/
-// "bottom"). fw,fh: the frame those tangents describe, in pixels. eyeIndex:
-// 0 the left eye (its outer edge is the left/l tangent, its nasal edge the
-// right/r), 1 the right eye (the reverse) -- confirmed by foveation.cpp's
-// own mirrored tangent build (*l = eye==0 ? -outer : -inner, *r = eye==0 ?
-// inner : outer) and frame_flag.h's "0 left, 1 right". minPx: the smallest
-// crop worth NVIDIA's seam (128 today, cropOf's own floor); under it, ok is
-// false and the caller runs full-frame -- same as an unreachable r<=l or
-// b<=t frame, and the same as the mode being off (widthDeg <= 0 and not
+// Frusta order is native_temporal.h:21's own {left,right,down,up}
+// (tanNow[0..3]): down is negative, up positive, and row 0 of the
+// rendered frame sits at the up edge (temporalInner's own "py" projection).
+//
+// l,r,down,up: this eye's four frame tangents. fw,fh: the frame those
+// tangents describe, in pixels. eyeIndex: 0 the left eye (its outer edge
+// is the left/l tangent, its nasal edge the right/r), 1 the right eye (the
+// reverse) -- confirmed by foveation.cpp's own mirrored tangent build (*l
+// = eye==0 ? -outer : -inner, *r = eye==0 ? inner : outer) and
+// frame_flag.h's "0 left, 1 right". minPx: the smallest crop worth
+// NVIDIA's seam (128 today, cropOf's own floor); under it, ok is false and
+// the caller runs full-frame -- same as an unreachable r<=l or up<=down
+// frame, and the same as the mode being off (widthDeg <= 0 and not
 // edges).
 //
 // Width mode's arithmetic (cx, cy, halfa, hwp, hhp and the four ints) is
@@ -2680,20 +2683,20 @@ struct FoveaRegion {
 // floor cropOf always applied -- the caller's own 90%-of-the-frame check
 // (a different rule, against the OUTPUT crop after scaling) is unchanged
 // and still runs on whichever mode produced fcw/fch.
-FoveaRegion computeFoveaRegion(float l, float r, float t, float b,
+FoveaRegion computeFoveaRegion(float l, float r, float down, float up,
                                uint32_t fw, uint32_t fh, int eyeIndex,
                                const FoveaRegionMode& mode, uint32_t minPx) {
     FoveaRegion out;
-    if (!(r > l) || !(b > t) || fw == 0 || fh == 0) return out;
+    if (!(r > l) || !(up > down) || fw == 0 || fh == 0) return out;
     const float fwf = static_cast<float>(fw), fhf = static_cast<float>(fh);
     int x0, y0, x1, y1;
     if (!mode.edges) {
         if (!(mode.widthDeg > 0.0f)) return out;
         const float cx = ((mode.tcx - l) / (r - l)) * fwf;
-        const float cy = ((b - mode.tcy) / (b - t)) * fhf;
+        const float cy = ((up - mode.tcy) / (up - down)) * fhf;
         const float halfa = tanf(mode.widthDeg * 0.5f * 0.01745329252f);
         const float hwp = halfa * fwf / (r - l);
-        const float hhp = halfa * fhf / (b - t);
+        const float hhp = halfa * fhf / (up - down);
         x0 = static_cast<int>(cx - hwp);
         y0 = static_cast<int>(cy - hhp);
         x1 = static_cast<int>(cx + hwp + 0.5f);
@@ -2704,13 +2707,16 @@ FoveaRegion computeFoveaRegion(float l, float r, float t, float b,
         constexpr float kDegToRad = 0.01745329252f;
         const float lo = -tanf(foveaEdgeRegionDeg(l, leftTrim) * kDegToRad);
         const float ro = tanf(foveaEdgeRegionDeg(r, rightTrim) * kDegToRad);
-        const float to = -tanf(foveaEdgeRegionDeg(t, mode.topTrimDeg) * kDegToRad);
-        const float bo = tanf(foveaEdgeRegionDeg(b, mode.bottomTrimDeg) * kDegToRad);
+        // down bounds y1 (the bottom row) -> bottomTrimDeg; up bounds y0
+        // (row 0, the top row) -> topTrimDeg. See the frusta-order comment
+        // above the function.
+        const float to = -tanf(foveaEdgeRegionDeg(down, mode.bottomTrimDeg) * kDegToRad);
+        const float bo = tanf(foveaEdgeRegionDeg(up, mode.topTrimDeg) * kDegToRad);
         if (!(ro > lo) || !(bo > to)) return out;
         x0 = static_cast<int>(((lo - l) / (r - l)) * fwf);
-        y0 = static_cast<int>(((b - bo) / (b - t)) * fhf);
+        y0 = static_cast<int>(((up - bo) / (up - down)) * fhf);
         x1 = static_cast<int>(((ro - l) / (r - l)) * fwf + 0.5f);
-        y1 = static_cast<int>(((b - to) / (b - t)) * fhf + 0.5f);
+        y1 = static_cast<int>(((up - to) / (up - down)) * fhf + 0.5f);
     }
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -4722,8 +4728,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // scope here -- no ABI change needed to reach it. Sign
                     // convention matches native_temporal.cpp's own top/
                     // bottom (top = -frusta[2], bottom = frusta[3]):
-                    // tanNow[2] is the negative "up" tangent, tanNow[3] the
-                    // positive "down" one.
+                    // tanNow[2] is the negative down tangent, tanNow[3] the
+                    // positive up one.
                     const float fovY = amdEngine
                                            ? std::atan(-tanNow[2]) + std::atan(tanNow[3])
                                            : 0.0f;
@@ -6913,30 +6919,33 @@ extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7
 // full-frame on.
 // Bit 16: temporal_aa_fovea_top and _bottom split apart -- the 20/25/7
 // case's own reduced trims (outer 20, nasal 0, vertical 20 reduced by the
-// 5/5/7 FOV trim to top=bottom=15) against the same split with bottom
-// re-asked at 30 (reduced to 25), top left alone. Expected x/y/w/h are
-// hand-derived on paper from this file's own tan(A-B) identity, not read
-// off the code: tan(atan(E) - D) = (E - tanD) / (1 + E*tanD) for each
-// edge's tangent magnitude E and reduced trim D, then the same pixel,
-// clamp and even-round arithmetic as computeFoveaRegion. x/w (outer/nasal)
-// are unchanged between the two; the edge topTrimDeg controls (y+h, since
-// it feeds "to" which bounds y1) is bit-identical between them; only the
-// edge bottomTrimDeg controls (y, since it feeds "bo" which bounds y0)
-// moves.
+// 5/5/7 FOV trim to top=bottom=15), then bottom alone re-asked at 30
+// (reduced to 25) with top left at 15, then top alone re-asked at 30
+// (reduced to 25) with bottom left at 15. Expected x/y/w/h are hand-derived
+// on paper from this file's own tan(A-B) identity, not read off the code:
+// tan(atan(E) - D) = (E - tanD) / (1 + E*tanD) for each edge's tangent
+// magnitude E and reduced trim D, then the same pixel, clamp and
+// even-round arithmetic as computeFoveaRegion. native_temporal.h:21's
+// {left,right,down,up} order puts row 0 at the up edge, so mode.topTrimDeg
+// (feeding "bo", the up tangent) bounds y; mode.bottomTrimDeg (feeding
+// "to", the down tangent) bounds y+h. Moving bottom alone must hold y and
+// move y+h; moving top alone must hold y+h (equal to the unmoved case) and
+// move y; x/w (outer/nasal) are untouched throughout.
 extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
     using namespace edvr;
     unsigned bits = 0;
 
     // Crystal Super-shaped tangents, the same worked example eye_mask.cpp
-    // uses; fw/fh a plausible per-eye render size for it.
-    const float l = -1.529f, r = 1.032f, t = -1.265f, b = 1.265f;
+    // uses; fw/fh a plausible per-eye render size for it. down/up match
+    // native_temporal.h:21's {left,right,down,up} frusta order.
+    const float l = -1.529f, r = 1.032f, down = -1.265f, up = 1.265f;
     const uint32_t fw = 2576, fh = 2544;
 
     {
         FoveaRegionMode mode;
         mode.edges = false;
         mode.widthDeg = 40.0f;
-        const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
         if (g.ok && g.x == 1170 && g.y == 906 && g.w == 734 && g.h == 732) bits |= 1u;
     }
 
@@ -6958,8 +6967,8 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         mode.nasalTrimDeg = 5.0f;
         mode.topTrimDeg = 8.0f;
         mode.bottomTrimDeg = 8.0f;
-        const FoveaRegion g0 = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
-        const FoveaRegion g1 = computeFoveaRegion(-r, -l, t, b, fw, fh, 1, mode, 128);
+        const FoveaRegion g0 = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
+        const FoveaRegion g1 = computeFoveaRegion(-r, -l, down, up, fw, fh, 1, mode, 128);
         const bool yMatch = g0.ok && g1.ok && g0.y == g1.y && g0.h == g1.h;
         const int mirrorX0 = static_cast<int>(fw) - static_cast<int>(g0.x) - static_cast<int>(g0.w);
         const int mirrorX1 = static_cast<int>(fw) - static_cast<int>(g0.x);
@@ -6975,7 +6984,7 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         mode.nasalTrimDeg = 100.0f;
         mode.topTrimDeg = 100.0f;
         mode.bottomTrimDeg = 100.0f;
-        const FoveaRegion g = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
         if (!g.ok) bits |= 8u;
     }
 
@@ -6983,32 +6992,56 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         // The 20/25/7 case (bit 2's own scenario) split into top and bottom:
         // outer reduced to 20 (25 - 5), nasal reduced to 0 (7 - 7, floored),
         // vertical reduced to 15 (20 - 5) -- set on BOTH edges first (matches
-        // today's single-vertical-trim behaviour bit-for-bit), then bottom
-        // alone re-asked at 30 raw (reduced to 25), top left at 20/15.
+        // today's single-vertical-trim behaviour bit-for-bit); then bottom
+        // alone re-asked at 30 raw (reduced to 25) with top left at 20/15;
+        // then top alone re-asked at 30 raw (reduced to 25) with bottom left
+        // at 20/15.
         //
-        // Hand derivation (l=-1.529, r=1.032, t=-1.265, b=1.265, fw=2576,
-        // fh=2544, eye 0 so leftTrim=outer=20, rightTrim=nasal=0):
+        // computeFoveaRegion's "bo" (built from the up tangent) is gated by
+        // mode.topTrimDeg and bounds y0 (row 0, native_temporal.h:21's up
+        // edge); "to" (built from the down tangent) is gated by
+        // mode.bottomTrimDeg and bounds y1 = y+h. So the bottom key alone
+        // must hold y and move y+h; the top key alone must hold y+h and
+        // move y -- re-derived here on paper, not assumed from either key's
+        // name or mirrored from a previous (wrong) wiring.
+        //
+        // Hand derivation (l=-1.529, r=1.032, down=-1.265, up=1.265,
+        // fw=2576, fh=2544, eye 0 so leftTrim=outer=20, rightTrim=nasal=0):
         // tan(atan(E) - D) = (E - tanD) / (1 + E*tanD), tan15=0.2679492,
         // tan20=0.3639702, tan25=0.4663077.
         //   left  (E=1.529, D=20): lo = -0.7484882
         //   right (E=1.032, D=0):  ro =  1.032 (unchanged, D=0)
-        //   top/bottom-unmoved (E=1.265, D=15): to = -0.7446480, bo=+0.7446480
-        //   bottom-moved (E=1.265, D=25): bo = +0.5023604
+        //   trim=15 (E=1.265): tangent  0.7446480
+        //   trim=25 (E=1.265): tangent  0.5023604
         // x0=int(((lo-l)/(r-l))*fw)=int(785.08)=785 -> &~1 -> 784
         // x1=int(((ro-l)/(r-l))*fw+0.5)=int(2576.5)=2576 -> &~1 -> 2576, w=1792
-        // unmoved y0=int(((b-bo)/(b-t))*fh)=int(523.23)=523 -> &~1 -> 522
-        // moved   y0=int(((b-bo)/(b-t))*fh)=int(766.86)=766 -> &~1 -> 766
-        // both    y1=int(((b-to)/(b-t))*fh+0.5)=int(2021.27)=2021 -> &~1 -> 2020
-        // unmoved h=2020-522=1498; moved h=2020-766=1254.
+        // (x/w are the same in all three cases: outer/nasal never change.)
+        //
+        // unmoved (top=bottom=15): bo=+0.7446480 (topTrimDeg=15),
+        //   to=-0.7446480 (bottomTrimDeg=15)
+        //   y0=int(((up-bo)/(up-down))*fh)=int(523.23)=523 -> &~1 -> 522
+        //   y1=int(((up-to)/(up-down))*fh+0.5)=int(2021.27)=2021 -> &~1 -> 2020
+        //   h=2020-522=1498
+        // bottom moved (top=15, bottom=25): bo UNCHANGED (topTrimDeg still
+        //   15) -> y0=522 unchanged; to=-0.5023604 (bottomTrimDeg=25) ->
+        //   y1=int(((1.265+0.5023604)/2.530)*2544+0.5)=int(1777.64)=1777
+        //   -> &~1 -> 1776, h=1776-522=1254
+        // top moved (top=25, bottom=15): to UNCHANGED (bottomTrimDeg still
+        //   15) -> y1=2020 unchanged; bo=+0.5023604 (topTrimDeg=25) ->
+        //   y0=int(((1.265-0.5023604)/2.530)*2544)=int(766.86)=766
+        //   -> &~1 -> 766, h=2020-766=1254
         FoveaRegionMode mode;
         mode.edges = true;
         mode.outerTrimDeg = 20.0f;
         mode.nasalTrimDeg = 0.0f;
         mode.topTrimDeg = 15.0f;
         mode.bottomTrimDeg = 15.0f;
-        const FoveaRegion gUnmoved = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        const FoveaRegion gUnmoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
         mode.bottomTrimDeg = 25.0f;
-        const FoveaRegion gMoved = computeFoveaRegion(l, r, t, b, fw, fh, 0, mode, 128);
+        const FoveaRegion gBottomMoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
+        mode.bottomTrimDeg = 15.0f;
+        mode.topTrimDeg = 25.0f;
+        const FoveaRegion gTopMoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
         // Not named "near": windef.h's legacy near/far macros expand to
         // nothing and turn "const auto near = ..." into invalid syntax.
         const auto withinTol = [](uint32_t v, int want) {
@@ -7017,15 +7050,27 @@ extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
         };
         const bool unmovedOk = gUnmoved.ok && withinTol(gUnmoved.x, 784) && withinTol(gUnmoved.y, 522) &&
                                withinTol(gUnmoved.w, 1792) && withinTol(gUnmoved.h, 1498);
-        const bool movedOk = gMoved.ok && withinTol(gMoved.x, 784) && withinTol(gMoved.y, 766) &&
-                             withinTol(gMoved.w, 1792) && withinTol(gMoved.h, 1254);
-        // Only the bottom-controlled edge (y, and so h) may move; the
-        // top-controlled edge (y+h) and the untouched outer/nasal edges
-        // (x, w) must be bit-identical between the two.
-        const bool topEdgeFixed = (gUnmoved.y + gUnmoved.h) == (gMoved.y + gMoved.h);
-        const bool onlyBottomMoved = gUnmoved.x == gMoved.x && gUnmoved.w == gMoved.w &&
-                                     gUnmoved.y != gMoved.y;
-        if (unmovedOk && movedOk && topEdgeFixed && onlyBottomMoved) bits |= 16u;
+        const bool bottomMovedOk = gBottomMoved.ok && withinTol(gBottomMoved.x, 784) &&
+                                  withinTol(gBottomMoved.y, 522) && withinTol(gBottomMoved.w, 1792) &&
+                                  withinTol(gBottomMoved.h, 1254);
+        const bool topMovedOk = gTopMoved.ok && withinTol(gTopMoved.x, 784) &&
+                                withinTol(gTopMoved.y, 766) && withinTol(gTopMoved.w, 1792) &&
+                                withinTol(gTopMoved.h, 1254);
+        // Bottom key alone: x/w untouched, y bit-identical, only y+h (the
+        // bottom row) moves.
+        const bool bottomMovesOnlyBottom =
+            gUnmoved.x == gBottomMoved.x && gUnmoved.w == gBottomMoved.w &&
+            gUnmoved.y == gBottomMoved.y &&
+            (gUnmoved.y + gUnmoved.h) != (gBottomMoved.y + gBottomMoved.h);
+        // Top key alone: x/w untouched, y+h bit-identical to the unmoved
+        // case, only y (the top row) moves.
+        const bool topMovesOnlyTop =
+            gUnmoved.x == gTopMoved.x && gUnmoved.w == gTopMoved.w &&
+            (gUnmoved.y + gUnmoved.h) == (gTopMoved.y + gTopMoved.h) &&
+            gUnmoved.y != gTopMoved.y;
+        if (unmovedOk && bottomMovedOk && topMovedOk && bottomMovesOnlyBottom && topMovesOnlyTop) {
+            bits |= 16u;
+        }
     }
 
     return bits;

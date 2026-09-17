@@ -687,7 +687,7 @@ int main(int argc, char** argv) {
                 printf("  ok    fovea region: width mode matches cropOf's own crop, "
                        "the edges mode's reduced-trim arithmetic holds, the two eyes "
                        "mirror each other, an extreme trim stands the crop down, and "
-                       "the top/bottom split moves only the bottom edge\n");
+                       "the top/bottom split moves only the edge each key names\n");
             } else {
                 printf("  FAIL  fovea region self-test returned %u (want 31: 1 width "
                        "mode, 2 edge trim arithmetic, 4 eye mirror, 8 extreme trim "
