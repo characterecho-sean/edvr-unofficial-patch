@@ -1,7 +1,6 @@
 ﻿#include "../common/vr_census.h"
 #include "device_hook.h"
 #include "game_exit_probe.h"
-#include "shutdown_census.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
 
@@ -909,16 +908,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // The Oculus probe may follow initial device creation. Drain changed
     // routing observations from ordinary execution, never from the loader.
     oculusRouteReport();
-    struct ShutdownCensusPresentScope final {
-        bool enabled;
-        explicit ShutdownCensusPresentScope(bool enabled_) noexcept : enabled(enabled_) {
-            if (enabled) edvr::shutdownPresentCensus().enterPresent();
-        }
-        ~ShutdownCensusPresentScope() noexcept {
-            if (enabled) edvr::shutdownPresentCensus().leavePresent();
-        }
-    } shutdownCensusPresent(vrCensusEnabled());
-
     // The time blocked in the real Present is the monitor's, with the time
     // blocked in WaitGetPoses: the frame period less the two is the render
     // thread's own busy time.
@@ -931,10 +920,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     gameExitProbePresent(hr,flags,g_state->frameCounter);
     // Bind the first successful owned, non-TEST Present thread even before
     // the paired consumer registers. Exclude registration from Present timing.
-    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST)) {
-        if (vrCensusEnabled()) shutdownPresentCensus().noteOwner();
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
         renderBoundaryNoteOwnedPresent(g_state->device);
-    }
     ID3D11DeviceContext* timingContext = nullptr;
     g_state->device->GetImmediateContext(&timingContext);
     if (timingContext) {
@@ -1468,12 +1455,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
                                              static_cast<double>(qpcFrequency()));
     }
-    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST)) {
-        // Observe native callback availability, after the real Present and all
-        // preceding frame work. This is not the timestamp of realPresent's return.
-        if (vrCensusEnabled()) edvr::shutdownPresentCensus().notePresent();
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
         renderBoundaryPresent(g_state->device);
-    }
     return hr;
 }
 
