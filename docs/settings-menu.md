@@ -659,12 +659,12 @@ off the edge -- the pages past it could not be seen, and nothing said
 they were there (flown 2026-09-07).
 
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
-   `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K), `render_sharpness`,
-   `foveation`, `foveation_centre`, and `render_scale` when its branch
-   lands. Costs where they are measured: the temporal pass's own timing,
-   NVIDIA's pass per eye, the sharpen's timestamp pair, the pixel fraction
-   under scale.
-   UI/smoke depth and station motion follow the AA mode automatically.
+   `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default
+   K), `render_sharpness`, `foveation`, `foveation_centre`, and
+   `render_scale` when its branch lands. Costs where they are measured:
+   the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
+   timestamp pair, the pixel fraction under scale. UI/smoke depth and
+   station motion follow the AA mode automatically.
    At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
    its `ui:` line tagged `menu performance`), so the extra pages can be
    turned on from inside the headset; flipping it rebuilds the pages, and

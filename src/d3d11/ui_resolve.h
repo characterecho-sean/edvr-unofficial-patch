@@ -18,7 +18,7 @@ Texture2D<float> UiInfluence:register(t8);
 RWTexture2D<float4> Output:register(u0);
 RWTexture2D<float4> Next:register(u1);
 cbuffer P:register(b0){int4 region;int2 size;int2 texSize;float4 tanNow;float4 tanPrev;float4 jit;}
-cbuffer R:register(b1){float4 resolve;}
+cbuffer R:register(b1){float4 resolve;} // b1 = {ghost tolerance, hold brightness limit (0 = off), 0, 0}
 bool marked(int2 p){uint k=uint(Coverage.Load(int3(clamp(p,0,size-1),0))*255+.5)&3u;return k==1u||k==2u;}
 float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2+1.5*t3,.5*t+2*t2-1.5*t3,-.5*t2+.5*t3);}
 [numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
@@ -109,6 +109,36 @@ float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2
                 fresh=clamp(fresh,lo,hi);
                 if(any(abs(fresh-v.rgb)>resolve.x))v.rgb=fresh;
             }
+        }
+        if(!active && resolve.y>0){
+            // NVIDIA's accumulated history lifts faint, smooth glow above the
+            // frame's own level after a stretch of motion (+2..3.5/255 on a
+            // 2..5/255 star glow, Steam eye dumps 174233..174334, 2026-09-16),
+            // while beside anything whose surroundings get fresh history --
+            // HUD text, orbit lines, the cockpit struts -- the output stays
+            // at the frame's level. The un-lifted zone reads as a dark halo
+            // and, with the background streaming past, a wake (issue 36).
+            // Hold faint flat pixels within one step of the raw 2x2 range, the
+            // way UI pixels are held above; the accumulation has nothing to
+            // add on a flat field (its residual noise there is no lower than
+            // the frame's). resolve.y is the brightness limit, 0 = off; the
+            // weight fades out toward it and toward texture, so the hold has
+            // no seam. Rigs that bind no b1 read zero: no hold.
+            float2 at=(float2(ox,oy)+.5)*float2(size)/float2(extent)-.5+jit.xy;
+            int2 corner=int2(floor(at));int2 centre=int2(round(at));
+            float3 lo=1e10,hi=-1e10;float lumaLo=1e10,lumaHi=-1e10;
+            [unroll] for(int ny=-1;ny<=1;++ny)[unroll] for(int nx=-1;nx<=1;++nx){
+                float3 c=Raw.Load(int3(clamp(centre+int2(nx,ny),0,size-1),0)).rgb;
+                float l=dot(c,float3(.299,.587,.114));lumaLo=min(lumaLo,l);lumaHi=max(lumaHi,l);
+            }
+            [unroll] for(int cy=0;cy<2;++cy)[unroll] for(int cx=0;cx<2;++cx){
+                float3 c=Raw.Load(int3(clamp(corner+int2(cx,cy),0,size-1),0)).rgb;
+                lo=min(lo,c);hi=max(hi,c);
+            }
+            float faint=1-smoothstep(resolve.y*.75,resolve.y,lumaHi);
+            float flat=1-smoothstep(8.0/255.0,16.0/255.0,lumaHi-lumaLo);
+            float w=faint*flat;
+            if(w>0){float3 held=clamp(v.rgb,lo-1.0/255.0,hi+1.0/255.0);v.rgb=lerp(v.rgb,held,w);}
         }
         uint fullW,fullH;FullCurrent.GetDimensions(fullW,fullH);
         if(fullW>0) {

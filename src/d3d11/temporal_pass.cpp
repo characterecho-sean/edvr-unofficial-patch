@@ -1232,7 +1232,8 @@ ID3D11ComputeShader* ownShader(ID3D11DeviceContext* ctx, bool diagnostics) {
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
 ID3D11ComputeShader*       g_csUiResolve = nullptr;
 bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
-ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tolerance/255,0,0,0}
+ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tolerance/255, corona hold, 0, 0}
+static bool                g_coronaHoldNoted = false;    // corona-smear hold: said once, only when the hold written is > 0
 bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
@@ -4597,10 +4598,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (g_uiResolveTolCb) {
                             D3D11_MAPPED_SUBRESOURCE tm{};
                             if (SUCCEEDED(ctx->Map(g_uiResolveTolCb,0,D3D11_MAP_WRITE_DISCARD,0,&tm)) && tm.pData) {
-                                const float resolveData[4]={uiDepthGhostTolerance()/255.0f,0,0,0};
+                                const float resolveData[4]={uiDepthGhostTolerance()/255.0f,uiDepthCoronaHold(),0,0};
                                 memcpy(tm.pData,resolveData,sizeof(resolveData));
                                 ctx->Unmap(g_uiResolveTolCb,0);
                                 tolCb=g_uiResolveTolCb;
+                                if (!g_coronaHoldNoted && resolveData[1] > 0.0f) {
+                                    g_coronaHoldNoted = true;
+                                    Log::get().note("corona smear: the UI resolve holds faint flat glow within a step of the frame's own level, up to %d/255 (advanced.corona_smear_level; 0 turns it off). Said once.",
+                                                    static_cast<int>(resolveData[1] * 255.0f + 0.5f));
+                                }
                             }
                         }
                         ctx->CSSetConstantBuffers(1,1,&tolCb);
@@ -6260,6 +6266,7 @@ void temporalPassShutdown() {
     if (g_csUiResolve) { g_csUiResolve->Release(); g_csUiResolve=nullptr; }
     g_csUiResolveTried=g_uiResolveNoted=false;
     if (g_uiResolveTolCb) { g_uiResolveTolCb->Release(); g_uiResolveTolCb=nullptr; }
+    g_coronaHoldNoted=false;
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
     if (g_downCb) { g_downCb->Release(); g_downCb = nullptr; }

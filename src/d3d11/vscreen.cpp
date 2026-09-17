@@ -1520,28 +1520,32 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (!srv) return;
             ID3D11Resource* res = nullptr;
             srv->GetResource(&res);
-            srv->Release();
-            if (!res) return;
+            if (!res) {
+                srv->Release();
+                return;
+            }
             ID3D11Texture2D* tex = nullptr;
             res->QueryInterface(__uuidof(ID3D11Texture2D),
                                 reinterpret_cast<void**>(&tex));
-            res->Release();
-            if (!tex) return;
             D3D11_TEXTURE2D_DESC td{};
-            tex->GetDesc(&td);
-            tex->Release();
-            if (td.Width >= 2000 && td.Height >= 1000 &&
+            if (tex) {
+                tex->GetDesc(&td);
+                tex->Release();
+            }
+            if (tex && td.Width >= 2000 && td.Height >= 1000 &&
                 td.Height < td.Width) {
                 chromeMatched = true;
                 if (s->fssChromeFrame != s->frameNo) {
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
                 }
-                // The chrome surface is an interface surface ui_depth's
-                // own learner never meets (ui_depth.h says why); told
-                // here, before uiDepthOnEyeDraw sees this same draw.
-                if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h);
+                // The chrome surface, handed to ui_depth with the view
+                // and resource still held (ui_depth.h says what for),
+                // before uiDepthOnEyeDraw sees this same draw.
+                if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h, srv, res);
             }
+            res->Release();
+            srv->Release();
         });
         // The theater's per-draw pipeline (round 45f): every matched
         // composite is handed to the rect deriver with its own draw args
