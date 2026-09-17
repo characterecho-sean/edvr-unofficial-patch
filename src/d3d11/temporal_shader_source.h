@@ -42,6 +42,7 @@ Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
+RWTexture2D<float2> ML : register(u7);   // the fovea crop's own copy of MV, plus lead.xy (the head lead): bound ONLY on the fovea prep's dispatch, and read only by NVIDIA's crop
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -103,6 +104,7 @@ cbuffer P : register(b0) {
     float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; empty when a corner is behind the eye), for the claim's counters
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
     float4 skip;        // the fovea's own-resolve early-out: x0 y0 x1 y1 in THIS render, all zero = no skip
+    float4 lead;        // xy: how far the fovea crop's base slid THIS frame (render pixels, base_now - base_prev), added to the vectors written to ML for NVIDIA's crop alone; zero on every other dispatch. zw unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -792,6 +794,9 @@ void paintDebug(uint2 idx, int2 sz, float3 c) {
         }
     }
 }
+)HLSL"
+// (adjacent literals: MSVC caps one at 16 KB)
+R"HLSL(
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -993,7 +998,17 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bool hidden = !trackedForeground && !uiHere && backgroundHistoryHidden(p,motion,zraw,zPred);
         // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
         // history lookup is invalidated, as with new source-screen pixels.
-        MV[id.xy] = hidden ? float2(size)*2 : motion;
+        float2 written = hidden ? float2(size)*2 : motion;
+        MV[id.xy] = written;
+        // The fovea's head lead: NVIDIA's crop history is CROP-LOCAL, so a
+        // crop whose base slid by lead.xy since the frame that history came
+        // from must have that slide added to every vector it reads
+        // (previous = current + mv, so crop-local previous = mv + base_now -
+        // base_prev). ML is a second texture, not this one: the periphery's
+        // reduction, its DLAA and the UI resolve all read MV whole and must
+        // see the unshifted vectors. Unbound (and lead zero) on every other
+        // dispatch, where the store is dropped.
+        ML[id.xy] = written + lead.xy;
         MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
