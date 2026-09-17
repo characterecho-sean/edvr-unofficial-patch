@@ -31,9 +31,7 @@ DEFAULT_SRC = os.path.join(REPO, "src", "d3d11", "sunglare_vs.h")
 DEFAULT_DEFINES = ["NOGATE", "ALLWORLD", "ALLFLAT"]
 
 # --target=cs_5_0 (or ps_5_0) desk-compiles a compute or pixel shader the
-# same way; the default is the vertex target the tool was written for. The
-# supersample resolve's filter (src/d3d11/supersample_pass.cpp) is the first
-# compute shader checked here.
+# same way; the default is the vertex target the tool was written for.
 ARGS = [a for a in sys.argv[1:] if not a.startswith("--target=")]
 TARGET = next((a[len("--target="):] for a in sys.argv[1:]
                if a.startswith("--target=")), "vs_5_0").encode()

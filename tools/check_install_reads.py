@@ -49,9 +49,6 @@ READERS = [
     # reload-only call site shipped the do-nothing release described above,
     # now on the d3d11 side.
     ('headOffsetGateConfigure', os.path.join('src', 'd3d11', 'vscreen.cpp')),
-    # The supersample resolve's mode (experimental.supersample_resolve): live,
-    # and the mode decides whether the shader is warmed at all.
-    ('supersamplePassConfigure', os.path.join('src', 'd3d11', 'vscreen.cpp')),
 ]
 
 
@@ -116,7 +113,7 @@ def main():
             continue
         text = open(path, encoding='utf-8', errors='replace').read()
         # Definitions and declarations are not calls. A call may pass the
-        # config object (supersamplePassConfigure(cfg)); a declaration's
+        # config object (headOffsetGateConfigure(cfg)); a declaration's
         # parameter list has a type in it, which a name-only argument does not.
         calls = [m.start() for m in re.finditer(
             r'(?<![\w:])%s\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)\s*;' % reader, text)]
