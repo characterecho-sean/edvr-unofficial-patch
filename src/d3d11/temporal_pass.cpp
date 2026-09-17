@@ -1970,6 +1970,28 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
                 fclose(f);
                 Log::get().note("eye capture: %ls input %ls %ux%u format %u, scene frame %u: %s.",g_eyeRunStamp,kEyeInputNames[k],d.Width,d.Height,static_cast<unsigned>(d.Format),g_eyeInputsFrame,ok?"written":"write failed");
             }
+            // The MV input's census of the history the pass invalidated
+            // (backgroundHistoryHidden's size*2 sentinel), so a dump says in
+            // the log how much of the eye NVIDIA was told to start afresh.
+            // A still scene reads near zero; the eye run of 2026-09-17 11:48
+            // read 1.81% (5.3% of the terrain) before the footprint guard,
+            // and that was the terrain's shimmer.
+            if(k==0 && d.Format==DXGI_FORMAT_R16G16_FLOAT) {
+                uint32_t hidden=0;
+                for(uint32_t y=0;y<d.Height;++y) {
+                    const uint16_t* row=reinterpret_cast<const uint16_t*>(static_cast<const char*>(map.pData)+y*map.RowPitch);
+                    for(uint32_t x=0;x<d.Width;++x) {
+                        const uint16_t h=row[x*2];
+                        const uint32_t e=(h>>10)&0x1Fu,m=h&0x3FFu;
+                        // The sentinel is 2 * width, positive and normal.
+                        const float v=(h&0x8000u)||e==0||e==31?0.0f:std::ldexp(1.0f+static_cast<float>(m)/1024.0f,static_cast<int>(e)-15);
+                        if(v>static_cast<float>(d.Width))++hidden;
+                    }
+                }
+                const double total=static_cast<double>(d.Width)*d.Height;
+                Log::get().note("eye capture: %ls history hidden -- NVIDIA's lookup invalidated at %u of %.0f pixels (%.3f%% of the eye) on scene frame %u; a still scene reads near zero.",
+                                g_eyeRunStamp,hidden,total,total>0?100.0*hidden/total:0.0,g_eyeInputsFrame);
+            }
             ctx->Unmap(texture,0);
         }
         texture->Release();g_eyeInputs[k]=nullptr;
