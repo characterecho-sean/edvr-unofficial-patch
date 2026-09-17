@@ -43,10 +43,17 @@ read 2026-09-16) unless marked believed.
   region, median: fsr 1.6 to 2.1 ms against NGX's 2.9 to 3.6 at the same
   sizes; 83 to 89 fps. Sean's verdict: slightly better than the pass's own
   history, not as good as DLSS, as expected for FSR 3.1. Journal.
-- **Next:** Sean's call: merge route 1 to main now (an additive engine;
-  the default is unchanged; AMD users gain a real upscaler), or flight 2
-  first (the reactive mask, live) and flight 3 (Quest 3). DLSS-class
-  quality on AMD is route 2's question (FSR 4.1, RDNA3/RDNA4), section 5.
+- **Flights 2 and 3 answered the same morning (06:07, Quest 3 through
+  VirtualDesktopXR, same build):** FSR ran cleanly at 2611x2774 into
+  3072x3264 and later 3017x2160 into 3550x2542, 1.1 to 1.4 ms per stereo
+  pair, 86 to 90 fps, no refusal; Sean: the UI looks fine without the
+  reactive mask, so D3's default (off) stands and the mask stays a live
+  advanced key. Journal.
+- **Next:** Sean's call on merging route 1 to main (an additive engine;
+  the default is unchanged; AMD users gain a real upscaler); flight 4 (an
+  AMD supporter) is the gate for a "works on AMD" release note, not for
+  the merge. DLSS-class quality on AMD is route 2's question (FSR 4.1,
+  RDNA3/RDNA4), section 5.
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
   history, which is what an AMD user gets today; and a cosmetic nit seen
@@ -648,3 +655,16 @@ class of upscaler): that is route 2's go/no-go.
   it); and the flight ran the upscale path, which the plan had reserved
   for flight 2, so flight 2's remaining question is only the reactive
   mask. Ruled out: nothing.
+- 2026-09-17 06:07, flights 2 and 3 in one session (e70a44e, Frontier,
+  Quest 3 through VirtualDesktopXR at 100% = 3072x3264 per eye, RTX 5090;
+  log `edvr_gfx_20260917_060732`, right build). The warm-up made the 1:1
+  contexts at 3072x3264 (3 ms each) and the first treated frame rekeyed
+  to 2611x2774 into 3072x3264, as the flight 1 review predicted; the
+  trims later moved the key to 3017x2160 into 3550x2542. Price, full
+  region, median per stereo pair: 1.1 to 1.4 ms (p95 1.3 to 1.5); the
+  native benchmark's GPU p50 2.7 to 3.4 ms a frame; 86 to 90 fps. Zero
+  refusals, zero port messages. **Sean's verdict: the UI looks fine
+  without the reactive mask**, on the Quest 3 as on the Pimax, so D3
+  stands: `advanced.temporal_aa_fsr_reactive` stays off by default and
+  live. Ruled out: the reactive mask as a needed input for Elite's HUD
+  under FSR 3.1, because both headsets read fine without it.
