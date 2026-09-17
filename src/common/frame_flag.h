@@ -242,6 +242,34 @@ void requestSubmitHold(uint32_t frames);
 // One frame of that hold, consumed by the reader. True while the hold is live.
 bool takeSubmitHoldFrame();
 
+// Ask the vr half to recentre the seated origin to the CURRENT head pose,
+// once: d3d11.dll's intro panel calls this the first time it sees the
+// screen composite that lifts the launch movie (or, if the movie is
+// skipped, the splash after it) into the eyes. Both anchor to "the game's
+// forward", which VR_InitInternal's own one-shot centre sets from whatever
+// the head is doing near the very first tracked pose -- unmeasured until
+// docs/intro-video.md, 2026-09-17 -- so by the time either becomes visible
+// the head may already have turned away from it. Recentring right as the
+// player can first see something to face gives them a fresh, meaningful
+// forward instead of an arbitrary one.
+//
+// NOT A DETECTION, same discipline as requestSubmitHold: d3d11.dll is the
+// only half that can see the composite, and openvr_api.dll is the only
+// half that can move the seated origin, so this is one half asking the
+// other to act, not inferring anything about what it should do.
+void requestIntroRecentre();
+
+// True from the request until clearIntroRecentreRequest() below. A peek,
+// not a take: the vr half's poll can only act between frames (no frame
+// open, room in its own event queue), and a poll that finds itself unable
+// to act right now must see the request again next frame rather than lose
+// it -- markGlitchFrame's split, not requestSubmitHold's countdown, for
+// that reason.
+bool introRecentreRequested();
+
+// Clears the request. Called only once it has actually been acted on.
+void clearIntroRecentreRequest();
+
 // The size of the texture the game hands the headset, as openvr_api.dll read it
 // off the Submit argument.
 //

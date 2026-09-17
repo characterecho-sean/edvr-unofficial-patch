@@ -30,8 +30,13 @@ Restates the journal below; update it whenever this doc changes.*
   warm-up flies, or the game just absorbs the stall (section 9, first
   2026-09-15 entry); ident-open -> first-composite latency, never
   measured natively; why the movie was visible only ~2 s in the 18:30
-  flight -- keypress or otherwise, unknown; facing the wrong way after
-  the cut, unmeasured, likely a separate fix.
+  flight -- keypress or otherwise, unknown. (5) 2026-09-17: facing the
+  wrong way after the cut -- MEASURED from ten flights' own logs, root
+  cause found (the one-shot seated-origin recentre at `VR_InitInternal`
+  start has no settle window and fires on the first tracked pose, whatever
+  direction that is); Sean's call was to recentre once the movie plays or
+  the splash is visible instead -- BUILT (14ec395's follow-up), NOT
+  FLOWN (last entry).
 - **Ruled out:**
   - `fix.panel_distance` moving the panel: the draw binds no constant buffer.
   - `fix.black_void` blackening the surround: a full-eye blit, not a clear.
@@ -1168,3 +1173,89 @@ frame in every `vScreen totals` line while on foot; no `600 frames
 unused` while the panel is visible; and the panel back at 0.7 m, curved.
 If the new line is missing the tick never saw a scene frame -- the
 `intro skip: WORKED` line shares that boundary and would be missing too.
+
+## 2026-09-17: the intro/splash "forward" is an unstable one-shot recentre
+
+Sean: not consistently facing the intro screen (movie or splash) at
+launch -- "sometimes I seem to have it show up to either the left or
+right of me". The panel's world-lock (`fix.intro_video_lock = world`,
+`intro_panel.cpp`) counter-moves against "the game's forward" -- the
+same forward the game's own splash anchors to, by design, so one
+recentre fixes both (the comment above `g_worldLock`). That forward is
+set once, by `NativeRuntimeHost::centreAtStartup`
+(`native_runtime_host.h:1457`), inside `VR_InitInternal`'s startup poll
+loop, the first time a valid+tracked, non-placeholder pose arrives
+(`LaunchCentrePolicy::consider`, `launch_centre_policy.h`) --
+`seatedOriginFromHead` takes that pose's yaw (levelled, position too)
+as the new seated origin. No settle window, no stillness check: whatever
+direction the head is pointed at that instant is what forward becomes.
+
+**Measured from existing logs, no new flight needed.** Ten of today's
+Frontier `edvr_openxr_*.log` files' `native_launch_centre,applying=1`
+lines, yaw recovered from the logged orientation quaternion the same
+way `seatedOriginFromHead` does (atan2 of the local -Z axis projected
+onto the XZ plane): -16.1, 54.1, 61.2, -2.8, 5.4, 13.9, 3.1, 11.8, -3.0,
+1.2 degrees -- a ~77 degree spread across sessions on the same
+headset, every one `flags=15` (fully valid and tracked, not the
+identity placeholder). Two of the ten took 9 poll samples (~90 ms
+apart) before the first usable pose; the rest fired on sample 1.
+
+The newest session's own `intro video lock: holding` line (the panel's
+bind-time diagnostic, `intro_panel.cpp:588`) reads "head yaw 73.6 deg
+at bind" -- by the time the panel actually appeared, about six seconds
+after that session's recentre (matching the doc's measured ~5 s to
+first movie draw), the head had already turned 73.6 degrees away from
+the forward the recentre had just set. The user cannot see anything
+to hold still for at recentre time, and nothing renders for several
+seconds after.
+
+**Why this is the "facing the wrong way after the cut" item, not new:**
+the 2026-08-28 entry measured a single fixed 180-degree offset on one
+rig and read it as a play-space peculiarity. Ten flights on the same
+rig today show the offset is not fixed -- it tracks whatever the head
+was doing near the very first tracked pose, plus however far it drifts
+before the movie or splash can be seen. Both are anchored to this one
+seated origin on purpose, so the fix belongs in the origin capture, not
+a panel transform -- "prefer root causes to compensation".
+
+- ruled out: nothing here -- a new finding, not a refutation.
+
+**Sean's call:** capture as late as practical -- recentre once the movie
+starts playing, or, if it is skipped, once the splash after it is
+visible -- rather than adding a settle window to the startup capture.
+
+**Built (14ec395's follow-up, NOT FLOWN).** A new cross-DLL channel,
+`requestIntroRecentre` / `introRecentreRequested` /
+`clearIntroRecentreRequest` (frame_flag.h/.cpp, mapping bumped to
+_v33): d3d11.dll asks, openvr_api.dll acts. `intro_panel.cpp`'s
+`introPanelOnComposite` fires it once, the first time it sees the
+composite's own shape (`kind=='X', count==6, instances==1`) while
+`!sceneArrived()` -- movie or, if skipped, splash, the same draw
+(`splash_dim.h`'s "same geometry... same draw call" holds for the
+detector too, not only the dim). Gated on `!sceneArrived()` rather than
+the movie's fill match specifically, on purpose: the fill never happens
+at all when the movie is skipped, and the on-foot HUD's own six-vertex
+composite (the 2026-09-17 false-match entry, same day) is excluded by
+the scene boundary instead, the already-hardened one `loaderPanelTick`
+and the panel's own retirement already rely on. `NativeRuntimeHost`
+polls the request at the top of `waitPoses`, between frames as
+`centreAtStartup` requires, and calls the SAME `applySeatedReset` the
+manual recentre hotkey uses (`notifyGame=true`, so Elite gets the usual
+recentre VREvent) -- reusing rather than duplicating the mechanism. A
+poll that cannot act this frame (a frame open, or the reset-event queue
+full) leaves the request set and retries next frame rather than losing
+it. Known gap: `fix.intro_video = stock` (world-lock AND upscale both
+off) never calls `introPanelOnComposite` at all -- its caller gates on
+`introPanelWants()` -- so stock-mode users keep today's behaviour; not
+folded in, since stock is an explicit opt-out of the whole treatment.
+
+**Next flight:** Frontier, default settings, watch for `intro video:
+first screen composite -- asking the vr half to recentre` (once) paired
+with a recenter taking effect -- no direct log line confirms the
+openvr-side apply succeeded; look for it in the SAME session's
+`edvr_openxr_*.log`, `native_launch_centre,applying=1` earlier and no
+`geometry_invalidated,reason=intro_recentre` missing right after the
+gfx line's timestamp. The real test is subjective: does the movie or
+splash now face you. Try it with the headset settled AND unsettled
+(mid-adjustment) at launch, across a few relaunches, to see whether the
+spread the ten flights showed is actually gone.

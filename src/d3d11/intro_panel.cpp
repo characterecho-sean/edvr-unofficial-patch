@@ -102,6 +102,7 @@ constexpr float kHalfIpd = 0.0315f;
 bool  g_worldLock = false;
 bool  g_anchored = false;   // the "holding" line has been said
 bool  g_lockRefusedNoted = false;
+bool  g_recentreRequested = false;   // requestIntroRecentre has been asked
 
 float g_screenDist = kScreenDistDefault;
 
@@ -466,6 +467,27 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (!introPanelWants() || !ctx) return false;
     // The composite's shape, from the census: a six-index instanced quad.
     if (kind != 'X' || count != 6 || instances != 1) return false;
+
+    // The FIRST such composite this session -- the movie's, or, if the
+    // movie is skipped, the splash's (same draw, splash_dim.h): ask the vr
+    // half to recentre the seated origin to the head's CURRENT pose right
+    // now, once. Both anchor to "the game's forward", which
+    // VR_InitInternal's own one-shot centre sets from whatever the head
+    // was doing near the very first tracked pose -- long before either of
+    // these can be seen (docs/intro-video.md, 2026-09-17). Gated on
+    // !sceneArrived() so a later, unrelated six-vertex composite (the
+    // on-foot HUD has one -- the 2026-09-17 false-match entry) cannot
+    // retrigger this after the intro is over; guarded to fire only once
+    // regardless.
+    if (!g_recentreRequested && !sceneArrived()) {
+        g_recentreRequested = true;
+        requestIntroRecentre();
+        Log::get().note(
+            "intro video: first screen composite -- asking the vr half to "
+            "recentre the seated origin to your current head pose. Said "
+            "once.");
+    }
+
     // ...sampling the surface the movie was converted into, THIS frame. The
     // fill draws before the composite in the same frame (census q ordering),
     // so a marker from this frame is the movie playing and nothing else.
