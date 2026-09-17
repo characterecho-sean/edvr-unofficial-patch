@@ -83,6 +83,12 @@ int main() {
         check(score == 30, "sustained cancellation cannot disable scene motion");
         check(temporalCameraFollowScore(0, 2, true, .25f, 0) == -4,
               "sparse menu backdrop still uses head-follow detector");
+        // The scanner's initial screen in a sparse system: 49 draws (eye
+        // dump 182049, 2026-09-16), a scene, not a menu.
+        check(temporalCameraFollowScore(-30, 49, true, 0, .25f) == 30,
+              "the scanner's sparse screen is a populated scene");
+        check(edvr::kTemporalSceneDrawFloor <= 49u && edvr::kTemporalSceneDrawFloor > 2u,
+              "the scene floor sits between the menu's draws and the scanner's");
         check(temporalCameraFollowScore(0, 1100, false, .25f, 0) == -4,
               "auxiliary camera chain still triggers resynchronization");
         check(temporalCameraFollowScore(-30, 1100, false, .25f, .25f) == -29,

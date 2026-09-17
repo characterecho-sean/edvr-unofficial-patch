@@ -1537,6 +1537,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
                 }
+                // The chrome surface is an interface surface ui_depth's
+                // own learner never meets (ui_depth.h says why); told
+                // here, before uiDepthOnEyeDraw sees this same draw.
+                if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h);
             }
         });
         // The theater's per-draw pipeline (round 45f): every matched
@@ -5262,12 +5266,21 @@ void vScreenFrameBoundary() {
                 }
                 lastTemporalTreats = treated;
                 lastTemporalMs = nowMs;
-                Log::get().note(
-                    "temporal aa totals: %u eye-submits treated this session, "
-                    "%.2f ms per eye on average (max %.2f); history rejected "
-                    "for %.1f%% of pixels and clipped for %.1f%%; %.0f frames "
-                    "per second over the last interval.",
-                    treated, avgMs, maxMs, rejectPct, clipPct, fps);
+                if (rejectPct < 0.0) {
+                    Log::get().note(
+                        "temporal aa totals: %u eye-submits treated this session, "
+                        "%.2f ms per eye on average (max %.2f); history rejection "
+                        "and clipping not counted (lean own shader, or NVIDIA's "
+                        "history); %.0f frames per second over the last interval.",
+                        treated, avgMs, maxMs, fps);
+                } else {
+                    Log::get().note(
+                        "temporal aa totals: %u eye-submits treated this session, "
+                        "%.2f ms per eye on average (max %.2f); history rejected "
+                        "for %.1f%% of pixels and clipped for %.1f%%; %.0f frames "
+                        "per second over the last interval.",
+                        treated, avgMs, maxMs, rejectPct, clipPct, fps);
+                }
                 // The registration instrument's verdict so far, its own
                 // line: which candidate delta the history lands best with.
                 char reg[1150];

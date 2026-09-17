@@ -19,6 +19,9 @@ Updated 2026-09-16 for Feature A's retirement.*
   "is on its branch" per "Guidance for players now"; a 2026-09-06
   pass cut its cost 2.80 -> 2.02 ms/eye. C and D remain unbuilt
   sketches. The rest lock shipped 09-03, retired 09-04.
+  2026-09-16: TAA's own resolve was shipping with the registration
+  instrument compiled in; a lean variant is BUILT, NOT FLOWN (see the
+  2026-09-16 entry at the end).
 - **Open:**
   - Features C and D: still unbuilt design sketches.
   - DLSS/FSR 2 as default engines behind the door (Phasing step 6): not
@@ -33,6 +36,8 @@ Updated 2026-09-16 for Feature A's retirement.*
   - Whether `shimmer_rest_still`/`_moving` can be raised past the Quest
     3's tracker-noise floor was left as "the next flight's question" at
     retirement; not answered later here.
+  - The lean own shader's price: one flight, toggle
+    `advanced.temporal_aa_diagnostics` live.
 - **Ruled out:**
   - MSAA from outside a deferred renderer: structurally unreachable
     (views, shading and every downstream pass would need rewriting).
@@ -1997,3 +2002,38 @@ also solve -- but at 0.3 ms an eye they are no longer the place to look.
 The wider lesson is the one the foveation arc kept relearning: measure the
 frame before optimising a part of it. A diagnostic in a per-pixel shader is
 part of the frame.
+
+## The own resolve ships instrumented (2026-09-16)
+
+A supporter's flight (v0.17.0-rc.3, RTX 4080 SUPER, SteamVR/OpenXR Meta
+compatibility, 2160x2290 per eye, HMD Quality 1.0) priced the own history
+at 2.26-2.75 ms per stereo pair (median) against DLSS-as-DLAA's ~3.0 (prep
+0.55-0.75, NGX 2.1-2.3, ui 0.25) -- it should have beaten that by more.
+
+Cause: `main` (fix.temporal_aa = on) compiles with no macro, so
+temporal_shader_source.h's default `#define EDVR_TEMPORAL_DIAGNOSTICS 1`
+always applies. Its candidate loop is gated only by `candMask`; unlike
+`mv` (motionShader), it had no fast/diagnostic pair. Every frame paid for
+four extra candidate reprojections per pixel ("counted and not used"), a
+5x5 SAD probe every 64 pixels, and 48 per-thread counters flushed through
+groupshared atomics -- none touching an output pixel.
+
+| main (cs_5_0) | instr | sample_l | ld | atomics | temps |
+|---|---|---|---|---|---|
+| macro=1 (shipped) | ~3966 | 64 | 264 | 39 | 51 |
+| macro=0 (guarded) | ~1950 | 28 | 129 | 0 | 30 |
+
+Fix: tools/temporal_shader_build compiles temporal_aa_fast_cs (macro=0)
+beside the instrumented temporal_aa_cs; temporal_pass.cpp's ownShader()
+mirrors motionShader() and picks by advanced.temporal_aa_diagnostics; the
+two blocks above are now #if EDVR_TEMPORAL_DIAGNOSTICS. Price-window
+labels say "own history (no ngx, lean)" or "(..., instrumented)"; the
+totals line says plainly when rejection/clipping went uncounted rather
+than print a false 0%. No output pixel changes by construction.
+
+Built, not flown. Flight: fly fix.temporal_aa = on, read the "lean" price
+line, then flip advanced.temporal_aa_diagnostics to 1 live and read the
+"instrumented" one, same scene. Hypothesis: ~2.4 ms per pair drops toward
+1.2-1.6. If so, the next candidates -- only after this measurement -- are
+the 27-load three-source depth dilation, the 9-tap Catmull-Rom history,
+and the UI history read/write.
