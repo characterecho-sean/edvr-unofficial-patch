@@ -88,20 +88,27 @@ changes.*
     chrome itself reads alpha 51-77 at the dim strokes, 166+ at the
     labels, zero everywhere else (97.7%; nothing translucent). Sean:
     "mostly fixed, it only slightly shimmers when both moving the panel
-    via the controls and moving my head". FIX BUILT, NOT FLOWN: the
-    scanner's chrome writes depth down to one alpha step while the
+    via the controls and moving my head". FIXED (3277ba6, on main):
+    the scanner's chrome writes depth down to one alpha step while the
     tracker holds its surface (`kChromeFloorSlot`,
     `samplesScannerChrome`); the general floor is untouched and the
-    Frontier ini is back at `#ui_depth_alpha = 0.5`. Journal entry
-    "2026-09-16: the chrome at one alpha step", which also measures the
-    residual: under a head turn the panel moves 3-6% LESS than a
-    world-fixed panel would (the label +0.23..+0.84 px/frame against
-    the head path at 0.3-0.7 deg/frame) while the sky matches the
-    camera's rotation to +-0.2 px -- the screen itself follows the head
-    a little, which the head path (a world-fixed panel) cannot know;
-    <=1 px/frame of vector error at the strokes under head motion. A
-    fix would read the screen's own motion off its composite draw. Not
-    started.
+    Frontier ini is back at `#ui_depth_alpha = 0.5`. FLOWN 2026-09-16
+    20:26 (`edvr_gfx_20260916_202609.log`, dump 202857, ini at its
+    defaults): both family lines say `the scanner's chrome; ...
+    down to one alpha step`, the whole chrome is in the mask at the 0.5
+    general floor (label, ticks, bar, cursor, brackets, markers, the
+    right-hand texts) with the grid and stars out of it, and Sean:
+    "while head still it was crisp". Journal entries "2026-09-16: the
+    chrome at one alpha step" and "...: the one-step floor flown".
+    Under a head turn: dump 194158 had the label moving 3-6% LESS than
+    the head path (+0.23..+0.84 px/frame), which read as "the screen
+    follows the head"; dump 202857 does NOT reproduce it -- the label
+    and the bar's text follow the head path within +-0.3 px/frame (mean
+    ~0) at 0.25-0.5 deg/frame, and the treated crops at 3x show them as
+    crisp as the raw. What 202857 does show is the SKY moving ~+0.4
+    px/frame MORE than the camera rows predict (the grid and stars
+    slightly soft under the turn; not the UI). Nothing owed on the
+    strokes; the sky's 0.4 px is unexplained and small.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -155,25 +162,18 @@ changes.*
   donor and it is on main (e08e899). The head path (18:20) and the
   8-draw floor (18:40) both flew and did what they said; the learn
   (19:00) flew and was idle; the instrument build (19:40) flew and
-  confirmed the floor (receipts under Open). Owed: one flight on the
-  one-step build, Quest 3, DLSS, the initial FSS screen, the Frontier
-  ini at its defaults. Expected: a family line `interface projection,
-  the scanner's chrome; alpha-aware depth down to one alpha step` (the
-  ordinary `interface projection; alpha-aware depth` line on that
-  composite instead = the identity check never matched, the floor is
-  0.5 again and the graph smears as in 184002), the learn's `already
-  learned` line ending `down to one alpha step rather than the general
-  floor (0.500)`, and the graph as crisp as the 0.004 flight with the
-  head still. The head+pan residual is expected to stay (measured, not
-  addressed). Known and not fixed: the ~220 m remap under head sway
-  (194158 says it is NOT the residual: a panel at 1 m would move MORE
-  than the head's rotation, and the label moves less); the "scanner is
-  up" bit and now the one-step floor also fire on the loading screen's
-  panel (same composite family) -- nothing translucent is in that
-  surface under `loading_dim = screen`, where the scrim is withheld,
-  and under a stock scrim the ship model beneath it takes interface
-  depth for that dialog's duration. The Toolkit-ON confirmation under
-  Open still stands.
+  confirmed the floor; the one-step build (20:26) flew and did what it
+  said (receipts under Open). None owed for the scanner's UI. Known
+  and not fixed: the ~220 m remap under head sway (194158 says it is
+  NOT what moves the label: a panel at 1 m would move MORE than the
+  head's rotation); the "scanner is up" bit and the one-step floor
+  also fire on the loading screen's panel (same composite family) --
+  nothing translucent is in that surface under `loading_dim = screen`,
+  where the scrim is withheld, and under a stock scrim the ship model
+  beneath it takes interface depth for that dialog's duration; and the
+  sky's ~+0.4 px/frame against the camera rows under a head turn in
+  202857 (not seen in 194158). The Toolkit-ON confirmation under Open
+  still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
@@ -1428,16 +1428,19 @@ predict for a world-fixed point at infinity, 1 m and 220 m):
   3-6% shortfall. A world-fixed panel at 1 m would move MORE than the
   rotation (parallax adds; a flipped translation sign was argued
   against -- `headTv` and `cameraTv` both carry +x for a right turn --
-  not proven), so this is not the 220 m remap. The screen
-  itself follows the head a little (a damped follow, as Elite's map
-  screens do); the head path assumes a world-fixed panel and cannot
-  know that. Effect: <=1 px/frame of vector error at the strokes
-  while the head turns, seen in crop 6 as ~1-2 output px of horizontal
-  softening of the moving text; nothing with the head still.
-- A root-cause fix would take the screen's own per-frame motion off
-  its composite draw (the post-VS screen-motion machinery) instead of
-  the head's delta. Not started; it is Sean's call whether the
-  head+pan case is worth that build.
+  not proven), so this is not the 220 m remap. The reading at the
+  time: the screen itself follows the head a little (a damped follow,
+  as Elite's map screens do), which the head path (a world-fixed
+  panel) cannot know. Effect: <=1 px/frame of vector error at the
+  strokes while the head turns, seen in crop 6 as ~1-2 output px of
+  horizontal softening of the moving text; nothing with the head
+  still. WITHDRAWN the same evening: the next flight's dump (202857)
+  has the label following the head path within +-0.3 px/frame -- see
+  "2026-09-16: the one-step floor flown".
+- A root-cause fix, had the follow been real, would take the screen's
+  own per-frame motion off its composite draw (the post-VS
+  screen-motion machinery) instead of the head's delta. Not started,
+  and not owed on 202857's reading.
 
 - Ruled out: the projection or rotation scale as the residual, because
   the sky matches the camera rows to +-0.2 px in the same frames.
@@ -1452,6 +1455,62 @@ predict for a world-fixed point at infinity, 1 m and 220 m):
   rotation-scale effect.
 - Noticed, not fixed: the one-step floor rides the tracker, so it
   also reaches the loading screen's panel (see the Status brief).
+
+## 2026-09-16: the one-step floor flown
+
+Flight on 3277ba6 (`edvr_gfx_20260916_202609.log`, right build), the
+Frontier ini at its defaults (general floor 0.50 in the ON line), eye
+dump 202857 taken while turning the head (0.25-0.5 deg/frame of yaw
+after a 4 deg/frame flick at the start) and panning. Sean: "while head
+still it was crisp".
+
+Receipts, all present: at 20:27:59 the chrome was learned FROM the
+tracker this time (`is learned from the screen's composite ... down to
+one alpha step while the surface is held`; the offscreen learner had
+not reached it yet, 17 surfaces known by the second offer, which said
+`already learned ... one alpha step rather than the general floor
+(0.500)`), and both composites got the new family line -- vs A888 with
+ps 9107E72CB016CC02 and with the tinted 015EF9349EC097E8: `interface
+projection, the scanner's chrome; alpha-aware depth down to one alpha
+step into private scene copy for AA`. `Chrome0` (2479x1394) written
+with the dump.
+
+The mask, at the general floor: `ui_stroke_probe.py 202857 900 1900
+850 1160` shows every element of the chrome masked -- "FILTERED
+SPECTRAL ANALYSIS", the spectral bar, its ticks, "HIGH", the cursor
+line, the target brackets, the signal marker's ring, "NAV BEACON" and
+its icon, "SIGNAL ANALYSIS / HIGH METAL CONTENT WORLD", "FSS SCANNER"
+-- and the grid, the stars and the bar's translucent band out of it
+(the band is not in the chrome's alpha: an eye-level layer, like the
+loader's backing). The treated crops at 3x (`ui_zoomk.py 202857 6
+1760 1560 360 70`, and crop 12) show the ticks and the label as crisp
+as the raw while the head turns at ~10 px/frame; the star beside them
+is slightly softer (world path).
+
+The head-turn residual, re-measured with `ui_parallax.py` on this
+dump: the graph's label (x 1010-1185, y 965-995) against the head
+rows reads measured minus predicted of +0.16, +1.07, +0.01, -0.30,
+-0.12, -0.17, +0.01, -0.34, +0.24, +0.06, +0.20, -0.21 px (mean ~0);
+the bar's text (x 1000-1300, y 1150-1195) -0.46..+0.38 with one +2.0
+at the end of the flick's deceleration. So the 3-6% shortfall of
+194158 (+0.23..+0.84 px/frame, all one sign) is NOT reproduced: in
+202857 the panel follows the head path to the measurement's noise,
+and "the screen follows the head" is withdrawn as a mechanism -- two
+dumps disagree, and the smaller reading is the later one. Meanwhile
+the SKY here (x 900-1900, y 1250-1450, camera rows) moves +0.3..+0.57
+px/frame MORE than predicted on eleven consecutive frames at corr
+0.95-0.98, where 194158 had it exact to +-0.2. Both effects are under
+half a pixel a frame and change between dumps; a pose-timing offset
+between the rows and the render would do that. Not chased: the UI's
+strokes, the complaint, are within noise of the head path.
+
+- Confirmed: the alpha floor was the cause; at one step the whole
+  chrome writes and the graph is crisp with the head still.
+- Withdrawn: "the screen follows the head" (194158's label shortfall)
+  as an established mechanism, because 202857's label and bar text
+  follow the head path within +-0.3 px/frame.
+- Noticed, not chased: the sky against the camera rows, +0.4 px/frame
+  in 202857 under a head turn, exact in 194158.
 
 ## Open
 
