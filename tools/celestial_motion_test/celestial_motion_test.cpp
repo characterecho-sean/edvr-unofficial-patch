@@ -13,6 +13,12 @@
 #include <algorithm>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
+// Consulted by upload() and buffer() (and nothing else writes cb[0..2] or
+// picks their D3D11_USAGE): Update calls the same CPU-shadow tees
+// vscreen.cpp's hooks would call around a plain UpdateSubresource; Map
+// simulates the real Map/tee/memcpy/tee/Unmap sequence on DYNAMIC
+// buffers; None calls no tee at all, exercising the GPU-copy fallback.
+enum class Mode { Update, Map, None };
 void check(bool ok,const char* why) { ++checks; if (!ok) { std::printf("FAIL: %s\n",why); std::exit(1); } }
 void hr(HRESULT result) { check(SUCCEEDED(result),"D3D operation"); }
 ComPtr<ID3DBlob> compile(const char* hlsl,const char* profile,const char* entry="main") {
@@ -66,6 +72,14 @@ int main(int argc,char** argv) {
     if (made==DXGI_ERROR_SDK_COMPONENT_MISSING) made=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&level,&ctx);
     hr(made); ComPtr<ID3D11InfoQueue> info; dev.As(&info);
     check(gpuTimingBind(dev.Get(),ctx.Get()),"bind canonical WARP timer owner");
+    // Run the whole suite three times: once with the CPU-shadow tees wired
+    // up around a plain UpdateSubresource as vscreen.cpp's hooks would call
+    // them, once with the tees wired around a real Map/Unmap, and once with
+    // no tees at all, so the shadow (from both write paths) and the
+    // GPU-copy fallback are all exercised end to end by every existing
+    // check below.
+    auto runPass=[&](Mode mode)->unsigned {
+    const unsigned checksBefore=checks;
     D3D11_TEXTURE2D_DESC td{}; td.Width=td.Height=8; td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R32_TYPELESS; td.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
     ComPtr<ID3D11Texture2D> scene; ComPtr<ID3D11DepthStencilView> depth;
@@ -78,9 +92,33 @@ int main(int argc,char** argv) {
     for (int i=0;i<4;++i) for (int j=0;j<4;++j) sc[270+i][j]=model[4+j][i];
     patch[8][3]=1; patch[1][2]=100;
     ComPtr<ID3D11Buffer> cb[3];
-    auto buffer=[&](unsigned bytes,ComPtr<ID3D11Buffer>& dst) { D3D11_BUFFER_DESC bd{}; bd.ByteWidth=bytes; bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER; hr(dev->CreateBuffer(&bd,nullptr,&dst)); };
+    auto buffer=[&](unsigned bytes,ComPtr<ID3D11Buffer>& dst) {
+        D3D11_BUFFER_DESC bd{}; bd.ByteWidth=bytes; bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        if (mode==Mode::Map) { bd.Usage=D3D11_USAGE_DYNAMIC; bd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE; }
+        hr(dev->CreateBuffer(&bd,nullptr,&dst));
+    };
     buffer(sizeof(model),cb[0]); buffer(sizeof(sc),cb[1]); buffer(sizeof(patch),cb[2]);
-    auto upload=[&] { ctx->UpdateSubresource(cb[0].Get(),0,nullptr,model,0,0); ctx->UpdateSubresource(cb[1].Get(),0,nullptr,sc,0,0); ctx->UpdateSubresource(cb[2].Get(),0,nullptr,patch,0,0); };
+    auto upload=[&] {
+        ID3D11Buffer* buffers[3]={cb[0].Get(),cb[1].Get(),cb[2].Get()};
+        const void* datas[3]={model,sc,patch};
+        const unsigned sizes[3]={static_cast<unsigned>(sizeof(model)),static_cast<unsigned>(sizeof(sc)),static_cast<unsigned>(sizeof(patch))};
+        for (int i=0;i<3;++i) {
+            if (mode==Mode::Map) {
+                // The real Map->tee->memcpy->tee->Unmap sequence: the tees
+                // see the mapped pointer and read the shadow back out of it,
+                // exactly as vscreen.cpp's hookedMap/hookedUnmap would.
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                hr(ctx->Map(buffers[i],0,D3D11_MAP_WRITE_DISCARD,0,&mapped));
+                celestialMotionConstantsMapped(buffers[i],mapped.pData);
+                std::memcpy(mapped.pData,datas[i],sizes[i]);
+                celestialMotionConstantsUnmapped(buffers[i]);
+                ctx->Unmap(buffers[i],0);
+            } else {
+                ctx->UpdateSubresource(buffers[i],0,nullptr,datas[i],0,0);
+                if (mode==Mode::Update) celestialMotionConstantsWritten(buffers[i],datas[i],nullptr);
+            }
+        }
+    };
     auto code=compile("float4 main(uint id:SV_VertexID):SV_Position{float2 p=float2((id<<1)&2,id&2);return float4(p*float2(2,-2)+float2(-1,1),.00025,1);}","vs_5_0");
     ComPtr<ID3D11VertexShader> vs; hr(dev->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs));
     auto psCode=compile("float4 main():SV_Target{return 1;}","ps_5_0");
@@ -108,12 +146,22 @@ int main(int argc,char** argv) {
     };
     celestialMotionConfigure(true); ctx->ClearDepthStencilView(depth.Get(),D3D11_CLEAR_DEPTH,.00025f,0);
     auto values=run(); check(values[55]==0,"first observation has no invented motion");
+    // Baseline after draw0, not before it: draw0 always re-watches all
+    // three slots and takes the GPU copy, so a snapshot taken any earlier
+    // would fold that contribution into the delta checked below.
+    unsigned baseCpu,baseGpu,baseRewatch; celestialMotionConstantsCensus(&baseCpu,&baseGpu,&baseRewatch);
     // Overwrite reused game constants after the draw: previous state must
     // remain the draw-time state on the GPU, not its end-of-frame contents.
     patch[1][2]=-999; upload(); celestialMotionFrameBoundary();
     patch[1][0]=-2; patch[1][1]=1; patch[1][2]=90;
     values=run(); check(values[55]==1,"consecutive patch history matches");
     check(std::fabs(values[59]-2)<1e-5f && std::fabs(values[63]+1)<1e-5f && std::fabs(values[67]-10)<1e-5f,"draw-time approach translation survives buffer overwrite");
+    {
+        unsigned cpuSlots,gpuSlots,rewatches; celestialMotionConstantsCensus(&cpuSlots,&gpuSlots,&rewatches);
+        if (mode!=Mode::None) check(cpuSlots>baseCpu,"consecutive draw captured constants from the CPU shadow");
+        else check(gpuSlots>baseGpu,"consecutive draw captured constants via the GPU copy fallback");
+        if (mode==Mode::Map) check(cpuSlots-baseCpu==3 && gpuSlots-baseGpu==0,"Map/Unmap leaves all three slots on the CPU shadow for the next draw");
+    }
     celestialMotionStageDump(ctx.Get(),scene.Get());
     // Blocking only in this fixture: production reads after the eye-run
     // grace period with DO_NOT_WAIT. Ensure that copy is complete here.
@@ -225,18 +273,18 @@ int main(int argc,char** argv) {
     state.FrontFace.StencilFailOp=D3D11_STENCIL_OP_INVERT;state.FrontFace.StencilDepthFailOp=D3D11_STENCIL_OP_INCR_SAT;
     state.FrontFace.StencilPassOp=D3D11_STENCIL_OP_REPLACE;state.BackFace=state.FrontFace;
     ComPtr<ID3D11DepthStencilState> gameDepth;hr(dev->CreateDepthStencilState(&state,&gameDepth));
-    for(unsigned mode=0;mode<6;++mode) {
-        const float clearZ=mode==1?.5f:0.f,clearColour[4]={.375f,0,0,0};
-        const UINT ref=mode==2?18:17,mask=mode==3?0:~0u;
+    for(unsigned variant=0;variant<6;++variant) {
+        const float clearZ=variant==1?.5f:0.f,clearColour[4]={.375f,0,0,0};
+        const UINT ref=variant==2?18:17,mask=variant==3?0:~0u;
         auto originalBind=[&] {
             upload();bind();ctx->PSSetShader(nullptr,nullptr,0);
             ctx->OMSetRenderTargets(1,colourRtv.GetAddressOf(),depth.Get());
             ctx->OMSetDepthStencilState(gameDepth.Get(),ref);ctx->OMSetBlendState(nullptr,nullptr,mask);
-            if(mode==4) {
+            if(variant==4) {
                 auto biased=rd;biased.DepthBias=500000;
                 ComPtr<ID3D11RasterizerState> b;hr(dev->CreateRasterizerState(&biased,&b));ctx->RSSetState(b.Get());
             }
-            if(mode==5) {D3D11_VIEWPORT vp{0,0,8,8,.2f,.8f};ctx->RSSetViewports(1,&vp);}
+            if(variant==5) {D3D11_VIEWPORT vp{0,0,8,8,.2f,.8f};ctx->RSSetViewports(1,&vp);}
             ctx->ClearRenderTargetView(colourRtv.Get(),clearColour);
             ctx->ClearDepthStencilView(depth.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,clearZ,17);
         };
@@ -257,14 +305,107 @@ int main(int argc,char** argv) {
         celestialMotionViews(ctx.Get(),scene.Get(),views);check(views[1]==g_eyes[0].originalDepthSrv.Get(),"original draw depth published");
         auto z=readTexture(dev.Get(),ctx.Get(),g_eyes[0].originalDepth.Get());
         auto ix=readTexture(dev.Get(),ctx.Get(),g_eyes[0].index.Get());
-        check(z[27]==(mode==0 || mode>=4?fused[27*2]:0.f),"coverage depth follows visibility, raster bias and viewport depth");
-        check(reinterpret_cast<unsigned*>(ix.data())[27]==(mode==0 || mode>=4?1u:0u),"coverage index follows original visibility");
+        check(z[27]==(variant==0 || variant>=4?fused[27*2]:0.f),"coverage depth follows visibility, raster bias and viewport depth");
+        check(reinterpret_cast<unsigned*>(ix.data())[27]==(variant==0 || variant>=4?1u:0u),"coverage index follows original visibility");
         // Mixed fallback modes cannot leave mismatched index and depth.
         check(!celestialMotionBegin(ctx.Get(),kTerrainDepth),"mixed original/reissue layer declines safely");
     }
     celestialMotionFrameBoundary();bind();
     check(!celestialMotionBeginOriginal(ctx.Get(),kTerrainDepth),"non-null game PS retains reissue path");
     check(celestialMotionBegin(ctx.Get(),kTerrainDepth),"non-null PS fallback remains available");celestialMotionEnd(ctx.Get());
+    if (mode==Mode::Update) {
+        // An UnknownWrite (a CopyResource/CopySubresourceRegion destination
+        // in production) invalidates just the one slot it names: the next
+        // draw must fall back to the GPU copy for that slot alone, while
+        // the other two still come from the CPU shadow.
+        celestialMotionFrameBoundary(); celestialMotionFrameBoundary();
+        values=run();
+        celestialMotionFrameBoundary();
+        unsigned preCpu,preGpu,preRewatch; celestialMotionConstantsCensus(&preCpu,&preGpu,&preRewatch);
+        upload(); bind();
+        celestialMotionConstantsUnknownWrite(cb[0].Get());
+        check(celestialMotionBegin(ctx.Get(),kTerrainDepth),"terrain pass begins after an unknown write to slot 0");
+        ctx->Draw(3,0); celestialMotionEnd(ctx.Get());
+        ID3D11ShaderResourceView* uv[3]{}; celestialMotionViews(ctx.Get(),scene.Get(),uv);
+        check(uv[0]&&uv[1]&&uv[2],"terrain inputs still published after an unknown write");
+        auto uvalues=readBuffer(dev.Get(),ctx.Get(),g_eyes[testEye].records[g_eyes[testEye].write].buffer.Get());
+        check(uvalues[55]==1,"record still reads correctly after an unknown write forces the GPU copy");
+        unsigned postCpu,postGpu,postRewatch; celestialMotionConstantsCensus(&postCpu,&postGpu,&postRewatch);
+        check(postGpu-preGpu==1,"unknown write to one slot sends exactly that slot through the GPU copy");
+        check(postCpu-preCpu==2,"the other two slots still come from the CPU shadow across that draw");
+        check(postRewatch==preRewatch,"unknown write does not force a re-watch");
+        // Three more paths through the segment-relative shadow, chained
+        // against one fixed predecessor without an intervening frame
+        // boundary, so rec advances 0,1,2 in the same record set and each
+        // draw is read back at its own row. Each pairs a real, full
+        // UpdateSubresource -- so the GPU-side data is always correct --
+        // with an explicit, possibly-boxed tee call that exercises the
+        // tee's own box-handling in isolation.
+        celestialMotionFrameBoundary(); celestialMotionFrameBoundary();
+        patch[1][0]=0; patch[1][1]=0; patch[1][2]=200;
+        run();
+        celestialMotionFrameBoundary();
+        // (a) A boxed sub-range write lands on a shadow that is already
+        // valid: only the bytes inside the box move, and it stays valid.
+        patch[1][0]=5; patch[1][1]=0; patch[1][2]=0;
+        ctx->UpdateSubresource(cb[2].Get(),0,nullptr,patch,0,0);
+        {
+            const D3D11_BOX box{16,0,0,32,1,1};
+            celestialMotionConstantsWritten(cb[2].Get(),patch[1],&box);
+        }
+        unsigned preBoxCpu,preBoxGpu,preBoxRewatch; celestialMotionConstantsCensus(&preBoxCpu,&preBoxGpu,&preBoxRewatch);
+        bind();
+        check(celestialMotionBegin(ctx.Get(),kTerrainDepth),"terrain pass begins for the boxed sub-range write");
+        ctx->Draw(3,0); celestialMotionEnd(ctx.Get());
+        {
+            ID3D11ShaderResourceView* av[3]{}; celestialMotionViews(ctx.Get(),scene.Get(),av);
+            auto avalues=readBuffer(dev.Get(),ctx.Get(),g_eyes[testEye].records[g_eyes[testEye].write].buffer.Get());
+            check(avalues[0*68+55]==1,"boxed sub-range write still matches the fixed predecessor");
+            check(std::fabs(avalues[0*68+59]+5)<1e-5f,"boxed sub-range write updates only the bytes inside the box");
+            unsigned postBoxCpu,postBoxGpu,postBoxRewatch; celestialMotionConstantsCensus(&postBoxCpu,&postBoxGpu,&postBoxRewatch);
+            check(postBoxCpu-preBoxCpu==3 && postBoxGpu-preBoxGpu==0,"a boxed sub-range write keeps all three slots on the CPU shadow");
+        }
+        // (b) A full-segment write (box=nullptr) after an unknown write
+        // revalidates the whole slot in one step.
+        celestialMotionConstantsUnknownWrite(cb[2].Get());
+        patch[1][0]=7; patch[1][1]=0; patch[1][2]=0;
+        ctx->UpdateSubresource(cb[2].Get(),0,nullptr,patch,0,0);
+        celestialMotionConstantsWritten(cb[2].Get(),patch,nullptr);
+        unsigned preFullCpu,preFullGpu,preFullRewatch; celestialMotionConstantsCensus(&preFullCpu,&preFullGpu,&preFullRewatch);
+        bind();
+        check(celestialMotionBegin(ctx.Get(),kTerrainDepth),"terrain pass begins for the full-segment write after an unknown write");
+        ctx->Draw(3,0); celestialMotionEnd(ctx.Get());
+        {
+            ID3D11ShaderResourceView* bv[3]{}; celestialMotionViews(ctx.Get(),scene.Get(),bv);
+            auto bvalues=readBuffer(dev.Get(),ctx.Get(),g_eyes[testEye].records[g_eyes[testEye].write].buffer.Get());
+            check(bvalues[1*68+55]==1,"full-segment write after an unknown write still matches the fixed predecessor");
+            check(std::fabs(bvalues[1*68+59]+7)<1e-5f,"a full-segment write after an unknown write reads back correctly");
+            unsigned postFullCpu,postFullGpu,postFullRewatch; celestialMotionConstantsCensus(&postFullCpu,&postFullGpu,&postFullRewatch);
+            check(postFullCpu-preFullCpu==3 && postFullGpu-preFullGpu==0,"a full-segment write revalidates the slot for the CPU shadow");
+        }
+        // (c) A boxed write covering only part of the segment after an
+        // unknown write cannot revalidate it: this draw alone falls back
+        // to the GPU copy for slot 2, while the other two stay on the
+        // CPU shadow.
+        celestialMotionConstantsUnknownWrite(cb[2].Get());
+        patch[1][0]=9; patch[1][1]=0; patch[1][2]=0;
+        ctx->UpdateSubresource(cb[2].Get(),0,nullptr,patch,0,0);
+        {
+            unsigned prePartCpu,prePartGpu,prePartRewatch; celestialMotionConstantsCensus(&prePartCpu,&prePartGpu,&prePartRewatch);
+            const D3D11_BOX box{16,0,0,32,1,1};
+            celestialMotionConstantsWritten(cb[2].Get(),patch[1],&box);
+            bind();
+            check(celestialMotionBegin(ctx.Get(),kTerrainDepth),"terrain pass begins for the partial-segment write after an unknown write");
+            ctx->Draw(3,0); celestialMotionEnd(ctx.Get());
+            ID3D11ShaderResourceView* cv[3]{}; celestialMotionViews(ctx.Get(),scene.Get(),cv);
+            auto cvalues=readBuffer(dev.Get(),ctx.Get(),g_eyes[testEye].records[g_eyes[testEye].write].buffer.Get());
+            check(cvalues[2*68+55]==1,"partial-segment write after an unknown write still matches the fixed predecessor");
+            check(std::fabs(cvalues[2*68+59]+9)<1e-5f,"a partial-segment write after an unknown write still reaches the GPU copy correctly");
+            unsigned postPartCpu,postPartGpu,postPartRewatch; celestialMotionConstantsCensus(&postPartCpu,&postPartGpu,&postPartRewatch);
+            check(postPartGpu-prePartGpu==1,"a partial-segment write cannot revalidate slot 2 alone, so it falls back to the GPU copy");
+            check(postPartCpu-prePartCpu==2,"the other two slots remain on the CPU shadow across that draw");
+        }
+    }
     celestialMotionConfigure(false);check(!celestialMotionBeginOriginal(ctx.Get(),kTerrainDepth),"AA off bypasses original capture too");
     // Both production temporal entries must compile with the added inputs.
     auto start=text.find("R\"HLSL(")+7;
@@ -278,12 +419,23 @@ int main(int argc,char** argv) {
         at=text.find("R\"HLSL(",close+6)+7;
     }
     compile(full.c_str(),"cs_5_0","main"); compile(full.c_str(),"cs_5_0","mv");
-    ctx->ClearState(); celestialMotionShutdown();
+    ctx->ClearState();
+    celestialMotionShutdown();
+    const char* label=mode==Mode::Update?"CPU shadow, UpdateSubresource":mode==Mode::Map?"CPU shadow, Map":"GPU copy";
+    std::printf("Terrain motion regression: %u checks passed (%s)\n",checks-checksBefore,label);
+    return checks-checksBefore;
+    };
+    runPass(Mode::Update);
+    celestialMotionShutdown();
+    celestialMotionConfigure(true);
+    runPass(Mode::Map);
+    celestialMotionShutdown();
+    celestialMotionConfigure(true);
+    runPass(Mode::None);
     check(gpuTimingShutdown(ctx.Get()),"explicit shared timer shutdown before WARP release");
     if (info) for (UINT64 i=0;i<info->GetNumStoredMessagesAllowedByRetrievalFilter();++i) {
         SIZE_T n=0; info->GetMessage(i,nullptr,&n); std::vector<char> bytes(n); auto* msg=reinterpret_cast<D3D11_MESSAGE*>(bytes.data()); hr(info->GetMessage(i,msg,&n));
         if (msg->Severity<=D3D11_MESSAGE_SEVERITY_WARNING) std::puts(msg->pDescription);
         check(msg->Severity>D3D11_MESSAGE_SEVERITY_WARNING,"no D3D debug warnings/errors");
     }
-    std::printf("Terrain motion regression: %u checks passed\n",checks);
 }

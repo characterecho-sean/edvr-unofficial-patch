@@ -2863,6 +2863,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
         uiDeferredUnknownWrite(self);
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
+        celestialMotionConstantsUnknownWrite(nullptr);
         glitchFrameInvalidatePool(nullptr);
     }
     s->realExecuteCommandList(self, list, restoreContextState);
@@ -2898,6 +2899,11 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // The reveal sync's shadow of the scene block, same tee, its own gate.
     if (fssRevealWantsDraws() && SUCCEEDED(hr) && mapped && mapped->pData) {
         fssRevealNoteMap(res, mapped->pData);
+    }
+    // Terrain-constants CPU shadow: capture the mapped pointer so the Unmap
+    // tee can memcpy the game's write without a GPU copy at draw time.
+    if (SUCCEEDED(hr) && mapped && mapped->pData && sub == 0 && type != D3D11_MAP_READ) {
+        celestialMotionConstantsMapped(res, mapped->pData);
     }
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
@@ -3061,6 +3067,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         return;
     }
     motionResourceWritten(res);
+    celestialMotionConstantsUnmapped(res);
     glitchFrameInvalidatePool(res);
     if(res==s->scenePoolResource && s->scenePoolData){
         guardedBudget(g_cameraBudget,[&]{glitchFrameObservePool(res,s->scenePoolData,s->scenePoolBytes);});
@@ -3427,7 +3434,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
-    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);glitchFrameInvalidatePool(dst);}
+    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -3551,6 +3558,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         if(box && box->right>=box->left)
             motionResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
         else motionResourceWritten(dst);
+        celestialMotionConstantsUnknownWrite(dst);
         uiSeparationResourceWrite(dst);
         uiDeferredResourceWrite(self,dst);
         uiDeferredCopyRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,box);
@@ -3581,6 +3589,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {
         if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
         else motionResourceWritten(dst);
+        celestialMotionConstantsWritten(dst, data, box);
         uiSeparationResourceWrite(dst);
         uiDeferredResourceWrite(self,dst);
         glitchFrameInvalidatePool(dst);

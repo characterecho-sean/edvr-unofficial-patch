@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 #include <utility>
 #include <cstdio>
+#include <cstring>
 
 namespace edvr {
 namespace {
@@ -112,6 +113,13 @@ struct Records {
     ComPtr<ID3D11Buffer> keys;
     ComPtr<ID3D11ShaderResourceView> keysSrv;
     UINT keyData[kRecords][8];
+    // CPU-shadow mirror of `inputs`: rowData holds the bytes a captured
+    // slot would otherwise have reached only via CopySubresourceRegion;
+    // rowCpu's bits 0/1/2 say which of the three segments came from the
+    // shadow this draw. flush() must not re-upload a segment whose bit is
+    // clear -- it was already written by the GPU copy at draw time.
+    uint8_t rowData[kRecords][416];
+    uint8_t rowCpu[kRecords];
     unsigned count=0, built=0;
 };
 struct Eye {
@@ -128,6 +136,30 @@ struct Eye {
 };
 Eye g_eyes[2];
 bool g_enabled=false, g_failed=false, g_noted=false, g_capNoted=false;
+// The three VS constant buffers (b0/b1/b2) only ever contribute these three
+// byte ranges to the terrain draw's per-row capture. begin(), flush() and
+// every tee below share this one table, so nothing ever shadows more than
+// what is actually read.
+constexpr struct { UINT srcOffset, rowOffset, length; } kSegment[3] = {
+    {64, 0, 128},
+    {4320, 128, 64},
+    {0, 192, 224},
+};
+// CPU shadow of the terrain draw's three watched constant buffers.
+// Identity only: no reference held (the game may destroy the buffer), so
+// `buffer` is compared but never dereferenced outside begin(). `shadow`
+// holds only slot i's own segment: kSegment[i].length bytes starting at
+// shadow offset 0, copied from source offset kSegment[i].srcOffset --
+// never the whole constant buffer.
+struct WatchedCb {
+    ID3D11Buffer* buffer=nullptr;
+    UINT bytes=0;
+    void* mapped=nullptr;
+    bool valid=false;
+    uint8_t shadow[224];
+};
+WatchedCb g_watched[3];
+unsigned g_cpuSlots=0, g_gpuSlots=0, g_rewatches=0;
 ComPtr<ID3D11ComputeShader> g_build;
 ComPtr<ID3D11PixelShader> g_index, g_indexOriginal;
 ComPtr<ID3D11Buffer> g_draw;
@@ -145,6 +177,10 @@ unsigned g_buildBatches=0;
 // time in this hook against the benchmark's CPU figure (the terrain
 // frame-time arc, 2026-09-17). Two counter reads per terrain draw.
 uint64_t g_hookCpuTicks=0, g_hookCpuCalls=0;
+// The CPU shadow's own memcpy cost: only the copy inside Unmapped/Written,
+// and only when it lands on a watched slot, so this measures exactly the
+// work the GPU-copy fallback would not have paid.
+uint64_t g_teeTicks=0, g_teeCalls=0;
 uint64_t hookCpuFrequency() {
     static const uint64_t f=[]{ LARGE_INTEGER q{}; QueryPerformanceFrequency(&q); return q.QuadPart>0?static_cast<uint64_t>(q.QuadPart):1u; }();
     return f;
@@ -157,12 +193,16 @@ struct HookCpu {
 void reportCost() {
     const auto& t=g_gpu.totals; const auto& b=g_buildGpu.totals;
     const double hookUs=static_cast<double>(g_hookCpuTicks)*1e6/static_cast<double>(hookCpuFrequency());
+    const double teeUs=static_cast<double>(g_teeTicks)*1e6/static_cast<double>(hookCpuFrequency());
     if(g_costDraws || t.samples || t.invalid || t.skipped || g_buildBatches || b.samples || b.invalid || b.skipped)
-        Log::get().note("terrain motion GPU: %u patches (%u original draws, %u reissues) in %u frames; completed=%u skipped=%u invalid=%u, %.3f us/patch bracket (copies, the coverage draw and restore; no dispatch; every 64th draw; no wait/flush; separate from EDVR-at-door GPU). Batched build: %u batches, %.3f us/eye (%u samples, %u skipped). Hook CPU: %.2f us/call over %llu calls, %.3f ms/frame.",
+        Log::get().note("terrain motion GPU: %u patches (%u original draws, %u reissues) in %u frames; completed=%u skipped=%u invalid=%u, %.3f us/patch bracket (copies, the coverage draw and restore; no dispatch; every 64th draw; no wait/flush; separate from EDVR-at-door GPU). Batched build: %u batches, %.3f us/eye (%u samples, %u skipped). Hook CPU: %.2f us/call over %llu calls, %.3f ms/frame. Constants: %u slots from the CPU shadow, %u by GPU copy, %u re-watches; tee copies %.2f us each over %llu writes, %.3f ms/frame.",
             g_costDraws,g_originalDraws,g_costDraws-g_originalDraws,g_costFrames,t.samples,t.skipped,t.invalid,t.samples?t.ms*1000/t.samples:0.0,
             g_buildBatches,b.samples?b.ms*1000/b.samples:0.0,b.samples,b.skipped,
             g_hookCpuCalls?hookUs/static_cast<double>(g_hookCpuCalls):0.0,static_cast<unsigned long long>(g_hookCpuCalls),
-            g_costFrames?hookUs/1000.0/static_cast<double>(g_costFrames):0.0);
+            g_costFrames?hookUs/1000.0/static_cast<double>(g_costFrames):0.0,
+            g_cpuSlots,g_gpuSlots,g_rewatches,
+            g_teeCalls?teeUs/static_cast<double>(g_teeCalls):0.0,static_cast<unsigned long long>(g_teeCalls),
+            g_costFrames?teeUs/1000.0/static_cast<double>(g_costFrames):0.0);
 }
 struct Saved {
     ID3D11RenderTargetView* rt[8]{};
@@ -304,11 +344,23 @@ static bool begin(ID3D11DeviceContext* ctx, uint64_t vs, bool original) {
     ID3D11Buffer* cb[3]{}; ctx->VSGetConstantBuffers(0,3,cb);
     bool enough=true;
     const UINT minimum[3]={13*16,280*16,18*16};
+    UINT byteWidth[3]{};
     for (int i=0;i<3;++i) {
         D3D11_BUFFER_DESC bd{}; if (cb[i]) cb[i]->GetDesc(&bd);
+        byteWidth[i]=bd.ByteWidth;
         enough=enough && bd.ByteWidth>=minimum[i];
     }
     if (!enough) { for (auto* b:cb) if (b) b->Release(); return false; }
+    // Re-watch a slot whenever its bound buffer pointer changed; the shadow
+    // cannot be trusted for a buffer we have not been tee'd on since it was
+    // (re)bound, so the first draw after a re-watch always takes the GPU copy.
+    for (int i=0;i<3;++i) {
+        if (cb[i]!=g_watched[i].buffer) {
+            g_watched[i].buffer=cb[i]; g_watched[i].bytes=byteWidth[i];
+            g_watched[i].valid=false; g_watched[i].mapped=nullptr;
+            ++g_rewatches;
+        }
+    }
     if((++g_costDraws&63u)==0)g_saved.timed=g_gpu.begin(ctx);
     if(original)++g_originalDraws;
     ID3D11ShaderResourceView* sources[4]{}; ctx->VSGetShaderResources(0,4,sources);
@@ -321,21 +373,24 @@ static bool begin(ID3D11DeviceContext* ctx, uint64_t vs, bool original) {
         now.sources[rec][i].Attach(sources[i]);
     }
     // The game rewrites b0/b2 every patch; a deferred build cannot read
-    // them live, so copy the draw-time bytes now. Previous state must
-    // remain the draw-time state on the GPU, not its end-of-frame
-    // contents (asserted by the regression rig).
-    {
-        const D3D11_BOX box{64,0,0,192,1,1};
-        ctx->CopySubresourceRegion(now.inputs.Get(),0,rec*416u,0,0,cb[0],0,&box);
+    // them live. Prefer the CPU shadow captured at the write (Map/Unmap or
+    // UpdateSubresource); fall back to the GPU copy for a slot whose
+    // shadow is not known to be current. Previous state must remain the
+    // draw-time state on the GPU, not its end-of-frame contents (asserted
+    // by the regression rig).
+    uint8_t cpuMask=0;
+    for (int i=0;i<3;++i) {
+        const auto& seg=kSegment[i];
+        if (g_watched[i].valid) {
+            memcpy(&now.rowData[rec][seg.rowOffset],g_watched[i].shadow,seg.length);
+            cpuMask|=static_cast<uint8_t>(1u<<i); ++g_cpuSlots;
+        } else {
+            const D3D11_BOX box{seg.srcOffset,0,0,seg.srcOffset+seg.length,1,1};
+            ctx->CopySubresourceRegion(now.inputs.Get(),0,rec*416u+seg.rowOffset,0,0,cb[i],0,&box);
+            ++g_gpuSlots;
+        }
     }
-    {
-        const D3D11_BOX box{4320,0,0,4384,1,1};
-        ctx->CopySubresourceRegion(now.inputs.Get(),0,rec*416u+128,0,0,cb[1],0,&box);
-    }
-    {
-        const D3D11_BOX box{0,0,0,224,1,1};
-        ctx->CopySubresourceRegion(now.inputs.Get(),0,rec*416u+192,0,0,cb[2],0,&box);
-    }
+    now.rowCpu[rec]=cpuMask;
     for (auto* b:cb) b->Release();
     ++now.count;
     if (!e.cleared) {
@@ -390,6 +445,27 @@ static void flush(ID3D11DeviceContext* ctx, Eye& e) {
     Records& now=e.records[e.write]; Records& prev=e.records[1-e.write];
     if (now.count<=now.built) return;
     const unsigned built=now.built, count=now.count;
+    // Upload the CPU-shadowed segments of [built,count) into `inputs`
+    // ahead of the dispatch. A segment whose bit is clear in rowCpu was
+    // already written by the GPU copy at draw time and must not be
+    // touched here -- flush() may run more than once per eye per frame
+    // with growing `built`, so this covers exactly the new rows.
+    {
+        bool allCpu=true;
+        for (unsigned i=built;i<count && allCpu;++i) allCpu=now.rowCpu[i]==7;
+        if (allCpu) {
+            const D3D11_BOX box{built*416u,0,0,count*416u,1,1};
+            ctx->UpdateSubresource(now.inputs.Get(),0,&box,&now.rowData[built][0],0,0);
+        } else {
+            for (unsigned i=built;i<count;++i) {
+                for (unsigned s=0;s<3;++s) if (now.rowCpu[i]&(1u<<s)) {
+                    const auto& seg=kSegment[s];
+                    const D3D11_BOX box{i*416u+seg.rowOffset,0,0,i*416u+seg.rowOffset+seg.length,1,1};
+                    ctx->UpdateSubresource(now.inputs.Get(),0,&box,&now.rowData[i][seg.rowOffset],0,0);
+                }
+            }
+        }
+    }
     // Preserve every touched compute binding, including dynamic linkage.
     ComPtr<ID3D11ComputeShader> cs; ID3D11ClassInstance* classes[256]{}; UINT nc=256;
     ComPtr<ID3D11Buffer> savedCb; ID3D11ShaderResourceView* savedSrv[3]{};
@@ -444,6 +520,62 @@ void celestialMotionShutdown() {
     g_gpu.reset();g_costFrames=g_costDraws=g_originalDraws=0;
     g_buildGpu.reset();g_buildBatches=0;
     g_failed=g_noted=g_capNoted=false;
+    for (auto& w:g_watched) { w.buffer=nullptr; w.valid=false; w.mapped=nullptr; }
+}
+// Hot: the game Maps roughly 1100 buffers a frame over terrain. Every tee
+// starts with the pointer compares below and returns immediately once
+// nothing further matches -- no GetDesc, no logging, no allocation.
+void celestialMotionConstantsMapped(ID3D11Resource* resource, void* data) {
+    for (auto& w:g_watched) if (resource==w.buffer) { w.mapped=data; return; }
+}
+void celestialMotionConstantsUnmapped(ID3D11Resource* resource) {
+    // D3D11_MAP_WRITE_DISCARD hands back a whole new allocation, but only
+    // this slot's own segment is ever copied out of it -- the same bytes
+    // begin() reads from the shadow, never the rest of the buffer.
+    for (int i=0;i<3;++i) if (resource==g_watched[i].buffer) {
+        WatchedCb& w=g_watched[i]; const auto& seg=kSegment[i];
+        if (w.mapped && w.bytes>=seg.srcOffset+seg.length) {
+            LARGE_INTEGER t0{}; QueryPerformanceCounter(&t0);
+            memcpy(w.shadow,static_cast<const uint8_t*>(w.mapped)+seg.srcOffset,seg.length);
+            LARGE_INTEGER t1{}; QueryPerformanceCounter(&t1);
+            if (t1.QuadPart>t0.QuadPart) g_teeTicks+=static_cast<uint64_t>(t1.QuadPart-t0.QuadPart);
+            ++g_teeCalls;
+            w.valid=true;
+        }
+        w.mapped=nullptr;
+        return;
+    }
+}
+void celestialMotionConstantsWritten(ID3D11Resource* resource, const void* data, const D3D11_BOX* box) {
+    if (!data) return;  // the runtime rejects the call; nothing was written
+    for (int i=0;i<3;++i) if (resource==g_watched[i].buffer) {
+        WatchedCb& w=g_watched[i]; const auto& seg=kSegment[i];
+        const UINT left=box?box->left:0u;
+        const UINT right=box?box->right:w.bytes;
+        if (right>w.bytes || left>right) return;
+        // Copy only the overlap between the write and this slot's segment.
+        const UINT s0=seg.srcOffset, s1=seg.srcOffset+seg.length;
+        const UINT lo=left>s0?left:s0, hi=right<s1?right:s1;
+        if (lo<hi) {
+            LARGE_INTEGER t0{}; QueryPerformanceCounter(&t0);
+            memcpy(w.shadow+(lo-s0),static_cast<const uint8_t*>(data)+(lo-left),hi-lo);
+            LARGE_INTEGER t1{}; QueryPerformanceCounter(&t1);
+            if (t1.QuadPart>t0.QuadPart) g_teeTicks+=static_cast<uint64_t>(t1.QuadPart-t0.QuadPart);
+            ++g_teeCalls;
+            // A partial write onto an invalid shadow leaves it invalid; only
+            // a write covering the whole segment can make it valid again.
+            if (lo==s0 && hi==s1) w.valid=true;
+        }
+        return;
+    }
+}
+void celestialMotionConstantsUnknownWrite(ID3D11Resource* resource) {
+    for (auto& w:g_watched) if (!resource || resource==w.buffer) { w.valid=false; w.mapped=nullptr; }
+}
+void celestialMotionConstantsCensus(unsigned* cpuSlots, unsigned* gpuSlots, unsigned* rewatches) {
+    if (cpuSlots) *cpuSlots=g_cpuSlots;
+    if (gpuSlots) *gpuSlots=g_gpuSlots;
+    if (rewatches) *rewatches=g_rewatches;
 }
 void celestialMotionStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
     g_dump.Reset(); g_dumpCount=0;

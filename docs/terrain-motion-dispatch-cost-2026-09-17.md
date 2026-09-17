@@ -15,36 +15,56 @@
   ~2 us each between real draws; the PS + 2 MRTs on the prepass cost 0.02-
   0.15 ms per 100 patches, the render-thread D3D11 calls 0.3 us a patch).
   The old dispatch cost about the same, which is why the flight read flat.
-- Open hypothesis (the instrument build, this branch): the game's own
-  `Map` stalling on the GPU. The benchmark's CPU rise scales with the GPU
-  frame (fsr +1.6 ms at 9.3 ms, dlss +2.0-2.4 at 11.0, orbit +0 at 5)
-  although the hook set is identical under fsr and dlss; EDVR's door CPU
-  (`native timing CPU` submits 0.6-0.9, temporal 0.1-0.2 ms) does not
-  move; the game polls its queries without waiting (`game query` probe).
-  Elite generates terrain on the GPU and reads heights back for physics;
-  a `Map(READ)` on that staging copy waits until the GPU reaches it, and
-  the door's 3.8 ms sits ahead of it in the queue. That wait is counted as
-  the game's CPU and the GPU then idles behind it: both symptoms, one
-  cause, terrain-only, in step with the GPU frame.
-- Instruments built (this branch, NOT FLOWN): (1) the `native timing CPU`
-  line ends with `Game Map over N frames: reads R calls X ms/frame, writes
-  W calls Y ms/frame, longest Z ms, S past 0.1 ms`; (2) the `terrain
-  motion GPU` line ends with `Hook CPU: A us/call over C calls, B
-  ms/frame`; (3) live levers `advanced.terrain_motion` and
-  `advanced.mesh_motion` (on/off, default on) so the hook's whole effect
-  can be priced against the frame in one flip.
-- Next flight (Frontier, low over terrain, ~15 s per state, log the
-  benchmark): dlss on -> `advanced.terrain_motion = off` -> on -> `fix.
-  temporal_aa = off` -> dlss. Readings: Map reads ms/frame ~2 under dlss
-  and ~0.3 under off = the stall is the carrier and the lever is the door's
-  GPU length, not the hooks; Hook CPU ms/frame ~1.5 = the hook after all
-  (its D3D11 calls through EDVR's own wrappers); terrain_motion off closing
-  most of the gap = the hook's GPU (copies) plus whatever it starves.
-- Fix candidates in order: (a) capture the three constant snapshots on the
-  CPU at the game's Map/UpdateSubresource of those buffers (mesh_motion's
-  write-hook shape) and upload once per eye -- removes ~0.6 ms/frame of GPU
-  either way; (b) if the Map stall carries it, only the door's GPU length
-  helps (foveated DLSS rectangle, docs/foveated-dlss-*.md).
+- ATTRIBUTED (flight 150849, instrument build 185ceee, parked on the
+  planet, eye dumps with the draw census under dlss AND off): the gap is
+  not one carrier but the SUM of EDVR's per-draw GPU syncs inside the
+  game's passes. The census diff (frames 1-2 of each, per frame, dlss
+  minus off): +306 `CopySubresourceRegion` + 102 `UpdateSubresource(48 B)`
+  (the terrain hook, 51 patches per eye), +37 `Dispatch(1,1,1)` of one
+  compute shader (the cockpit holo hook, per draw) + 10 of another (the
+  stellar ring hook: `stellar coverage GPU ... 0.189 ms/frame`), ~50
+  mesh/object-probe copies, +38 query `End`s (EDVR's timestamps); draw
+  counts equal. Priced offline on the 5090 with real fill between draws:
+  the terrain hook 0.7-0.78 ms per 100 patches, a `Dispatch(1,1,1)` with
+  CS churn 4.75 us, a timestamp pair 0.00 (free), a copy ~2 us. Sum
+  1.25-1.8 ms against a gap of 1.3-1.7 (benchmark gpu p50 dlss 10.2-10.6,
+  off 5.1, door 3.65 per pair); in situ the syncs run ~1.5-2x the
+  synthetic price (the mid-frame bracket read ~14 us per patch against 7).
+- ruled out (same flight): the game's `Map` stalling on the GPU --
+  `Game Map ... reads 4 calls 0.003 ms/frame, writes ~1100 calls 0.10-0.17
+  ms/frame` under dlss, 0.09-0.12 under off; the terrain hook's own CPU --
+  `Hook CPU: 0.62-0.68 us/call, 0.024-0.029 ms/frame`; EDVR's timestamp
+  brackets -- free in the benchmark. The benchmark's CPU rise (still
+  +1.6 ms at dlss over terrain) remains unexplained by any EDVR call the
+  probes time; it is not the terrain hook, not Map, not the door.
+- The optimisation pass, in order of size, all "remove the per-draw GPU
+  sync": (a) BUILT on this branch (journal, latest entry), NOT FLOWN: the
+  terrain hook captures the three constant segments on the CPU at the
+  game's own write (tees in vscreen.cpp on Map/Unmap and
+  UpdateSubresource; CopyResource/CopySubresourceRegion destinations,
+  executed command lists and CreateBuffer invalidate), memcpy per draw,
+  one UpdateSubresource per eye at the batched build; the GPU copy stays
+  as the fallback for a slot whose shadow is not current. Census tail
+  `Constants: N slots from the CPU shadow, M by GPU copy, R re-watches;
+  tee copies X us each over W writes, Y ms/frame`. The rig runs its suite
+  three times (UpdateSubresource tees, Map/Unmap tees, no tees). Expected:
+  -0.6..-0.9 ms/frame over terrain. (b) the holo hook's per-draw dispatch
+  batched like mesh/terrain (-0.2..-0.4). (c) the stellar ring hook's
+  per-draw dispatch batched (-0.19). What remains after those is NVIDIA's
+  own 2.9-3.1 ms per pair plus prep/ui 0.7, the foveated-DLSS arc's lever.
+- Instruments in the build: `native timing CPU ... Game Map over N frames:
+  ...`; `terrain motion GPU ... Hook CPU: ... Constants: ...`; live levers
+  `advanced.terrain_motion` / `advanced.mesh_motion` (on/off, default on,
+  ini edit; not on the menu).
+- Next flight: (a) installed on Frontier; the same parked A/B (dlss vs
+  off, an eye dump with the census in each state) plus, if an ini edit is
+  possible mid-flight, `advanced.terrain_motion = off` under dlss for the
+  residual. Read: benchmark gpu p50 under dlss down ~0.7 ms; `Constants:`
+  nearly all from the CPU shadow with few re-watches; `tee copies` well
+  under 1 us each (mapped memory read as cached) -- if it reads several
+  us each the mapped memory is write-combined and the next lever is to
+  hand the game a cached scratch pointer at Map and stream it to the
+  driver's at Unmap; the census diff showing the 306 copies gone.
 - Report: Sean, Frontier install, Pimax Crystal Super, after the terrain
   history fix (docs/terrain-history-shimmer-2026-09-17.md): "performance is
   now quite bad flying low to the surface" (log 122915, HMD quality 75%,
@@ -75,6 +95,105 @@
   compared), HMD quality 75% vs 65% (Sean's slider), outer trim 5 vs 10.
 
 ## Journal
+
+### 2026-09-17 (night) -- (a) built: the terrain constants captured on the CPU
+
+main (af203b1, the weapon-stability retirement) was fast-forwarded into
+the branch first; this is the last workstream before the release.
+
+What changed (celestial_motion.cpp, vscreen.cpp, device_hook.cpp, the
+rig): the three per-patch `CopySubresourceRegion` of the game's VS b0/b1/
+b2 into the build's input rows are gone from the common path. The hook
+watches the three buffers bound at the terrain draw by pointer (a
+re-watch whenever a slot's pointer changes; the first draw after one
+takes the GPU copy) and vscreen.cpp's hooks tee the game's own writes to
+them: `hookedMap` remembers the mapped pointer, `hookedUnmap` copies the
+slot's segment out of it BEFORE the real Unmap, `hookedUpdateSubresource`
+copies the overlap of the write's box with the segment (a write covering
+the whole segment validates the slot, a partial one onto an invalid slot
+leaves it invalid), `CopyResource` / `CopySubresourceRegion` destinations
+and an unknown `ExecuteCommandList` invalidate, and the device's
+`CreateBuffer` invalidates a matching address (a buffer destroyed and
+re-created at the same pointer with initial data would otherwise inherit
+the dead one's shadow). `begin()` memcpys each valid slot's segment into
+a CPU row and `flush()` uploads the new rows with one boxed
+`UpdateSubresource` per eye before the batched build (per segment when a
+row mixes paths, never over a GPU-copied segment).
+
+Only the segments are shadowed (128 + 64 + 224 bytes), never the whole
+buffer: the game writes these buffers through Map ~1100 times a frame
+and a mapped dynamic buffer is most likely write-combined memory, whose
+reads are uncached (~100 ns a line), so b1's 5376 bytes would have cost
+more than the 64 the build reads. Whether the reads are cheap is not
+known until flown, so the copy is timed: `tee copies X us each over W
+writes, Y ms/frame` on the census tail, alongside `Constants: N slots
+from the CPU shadow, M by GPU copy, R re-watches`. Stale DLL: no
+`Constants:` on the `terrain motion GPU` line. Tees never wired: every
+slot `by GPU copy`, none from the shadow. Working: nearly all slots from
+the shadow, re-watches in single digits, `tee copies` under 1 us.
+
+The rig (`celestial_motion_test`) runs its whole suite three times --
+tees around UpdateSubresource, tees around a real Map/Unmap on DYNAMIC
+buffers, no tees -- and adds: an unknown write to one slot sends exactly
+that slot through the GPU copy while the other two stay on the shadow; a
+boxed sub-range write onto a valid shadow updates just those bytes and
+keeps all three on the shadow; a full-segment write after an unknown
+write revalidates; a partial one does not (that slot falls back, the
+record still reads right); after a Map/Unmap the next draw takes all
+three from the shadow.
+
+Not this entry's evidence, only its expectation: -0.6..-0.9 ms a frame
+over terrain, the 306 copies gone from the census diff. The holo (b) and
+stellar-ring (c) dispatches are next, same pattern.
+
+### 2026-09-17 (evening) -- flight 150849 on 185ceee: the census diff attributes the gap
+
+Sean, Frontier, parked on the planet, an eye dump under dlss (15:10:43,
+census 1, frames 11475-11477) and one under off (15:11:03, census 2),
+`fix.temporal_aa` flipped on the menu between them. Benchmark: w10-w12
+dlss cpu 4.6-4.8 / gpu 10.2-10.6; w13 off 3.1 / 5.1. App render dlss
+10.0-10.4 (10.98 with the dump), off 4.35-5.36; price under dlss prep
+0.33-0.46 + full 2.62-3.13 + ui 0.36.
+
+The probes: `Game Map over 448 frames: reads 1864 calls 0.003 ms/frame,
+writes 464672 calls 0.142 ms/frame, longest 1.133 ms` (dlss, parked);
+`reads 1688 calls 0.002, writes 488929 calls 0.115` (off). `Hook CPU:
+0.62 us/call over 532470 calls, 0.029 ms/frame`. Both hypotheses of the
+morning entry are dead; the CPU rise stays unexplained (it is not in any
+call the probes time -- a candidate for a per-hook-family CPU accumulator
+if it ever matters on its own; the GPU is the bound).
+
+The census diff (scratch `census_diff.py`, frames 1 and 2 of each census,
+per frame, dlss minus off; frame 0 carries the dump's own copies):
+
+| per frame | dlss | off | what |
+|---|---|---|---|
+| copies | 2060 | 1568 | +306 terrain (3 x 102 patches), +50 mesh/probe (32 KB -> 1 MB pool, 96-stride pool), the rest unresolved ids |
+| UpdateSubresource | +102 into a 48 B buffer (terrain b13), +42 into the holo draw buffer | | |
+| dispatches | 109 | 59 | +37 `58CB11289E1263B3` (1,1,1) holo per draw, +10 `ED270307A4591BAA` (1,1,1) stellar ring, +2 each of the door's and the batched builds (n=51 terrain, n=19 mesh) |
+| query Begin/End | 142 | 82 | EDVR's timestamp brackets |
+| eye draws | 570 | 564 | equal |
+| offscreen draws | 640 | 650 | the same 2974x2602 HUD surfaces; off alone has a 256x256 mip chain (42 copies + 9 draws), which cuts the other way |
+
+Micro-benchmark 2 extended (256x256 grids, 100 patches, GPU ms per
+batch): depth-only 0.542; + a timestamp pair around EVERY draw 0.544; +
+a pair every 64th 0.544; + `Dispatch(1,1,1)` with CS churn per draw 1.017
+(4.75 us each); the a17c793 hook 1.239-1.322. So per frame over terrain:
+terrain hook 0.75 (x1.5-2 in situ), 47 dispatches 0.22-0.45, stellar
+0.19 (its own bracket), mesh/probe copies ~0.1: 1.25-1.8 ms, the gap.
+
+- ruled out: the game's Map waiting on the GPU, because the probe reads
+  0.003 ms/frame of READ maps and 0.10-0.17 ms of WRITE maps under dlss,
+  0.09-0.12 under off.
+- ruled out: the terrain hook's render-thread CPU (EDVR's wrappers
+  included), because `Hook CPU` reads 0.62-0.68 us a call, 0.03 ms/frame.
+- ruled out: EDVR's GPU timestamp brackets as a sync cost, because a pair
+  around every one of 100 real draws costs 0.002 ms per batch.
+
+Also read from the same dump, for the shimmer arc: `eye capture: 151043
+history hidden -- NVIDIA's lookup invalidated at 28 of 5837076 pixels
+(0.000% of the eye) on scene frame 11476` -- the guard's census, exactly
+the offline replica's 0.0003%.
 
 ### 2026-09-17 (later) -- a17c793 flown, the dispatch ruled out, the hook priced offline
 

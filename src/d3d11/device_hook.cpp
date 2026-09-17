@@ -52,6 +52,7 @@
 #include "vscreen.h"
 #include "glitch_frame.h"
 #include "vscreen_res.h"
+#include "celestial_motion.h"
 
 namespace edvr {
 namespace {
@@ -856,6 +857,9 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
                 g_createBufferBytes.fetch_add(static_cast<const D3D11_BUFFER_DESC*>(first)->ByteWidth,
                                               std::memory_order_relaxed);
             }
+            // A destroyed buffer's address can be reused by a fresh one; a
+            // watched slot would otherwise inherit that buffer's stale shadow.
+            if (out && *out) celestialMotionConstantsUnknownWrite(static_cast<ID3D11Buffer*>(*out));
         }
     }
     return hr;

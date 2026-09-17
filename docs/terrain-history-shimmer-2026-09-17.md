@@ -4,7 +4,8 @@
 
 - State: cause found offline from one eye dump; fix FLOWN 12:29 on the
   Frontier install (log 122915, build dda993a-dirty = the guard, then
-  124139 on e06b549) and CONFIRMED by Sean: "That fixed the shimmering".
+  124139 on e06b549) and CONFIRMED by Sean: "That fixed the shimmering";
+  the census confirmed it at 15:10 (0.000% of the eye, see Flown below).
   The roll-past-hull check (below) is still unflown. The same flight
   raised the frame-time complaint, which is a separate cause with its own
   doc: docs/terrain-motion-dispatch-cost-2026-09-17.md.
@@ -50,9 +51,12 @@
   (x matches, +0.5), on cockpit and terrain alike. Either the applied y
   jitter differs from the recorded one or PrevZ carries a half-texel
   convention; global, so not the terrain's complaint. See journal.
-- Flown: the terrain is still to Sean's eye on the Frontier flight (no eye
-  dump was taken, so the `history hidden` census is still unread; take
-  one on the next landed view for the record).
+- Flown and CENSUSED: the terrain is still to Sean's eye on the Frontier
+  flights, and the 15:10 eye dump (log 150849, build 185ceee, parked on
+  the planet under dlss) reads `eye capture: 151043 history hidden --
+  NVIDIA's lookup invalidated at 28 of 5837076 pixels (0.000% of the eye)
+  on scene frame 11476` -- the offline replica's 0.0003%, against 1.81%
+  before the guard. Confirmed by instrument as well as by eye.
 - Next flight: a roll on the external camera past a hull tip against sky,
   which is the case 7c6e9ef fixed: no stripes returning.
 
