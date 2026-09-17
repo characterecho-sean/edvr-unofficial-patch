@@ -38,13 +38,11 @@ read 2026-09-16) unless marked believed.
   the branch; then Sean's go for an install; then flight 1 (section 4).
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
-  history, which is what an AMD user gets today; and the port's prebuilt
-  shader compiler (journal): it runs only at fetch time on the developer's
-  machine and never ships, but building it from source here needs the VS
-  "C++ ATL" component, which this install lacks. CLOSED by Track A: the
+  history, which is what an AMD user gets today. CLOSED by Track A: the
   build recipe (CMake, `/MT` forced, the upscaler-only targets) and the
   d3d11-import stop of 3.5 (neither library imports d3d11, dxgi or
-  d3dcompiler by name).
+  d3dcompiler by name). DECIDED (D6): the port's prebuilt shader compiler
+  is accepted as a build-time-only tool.
 - **Ruled out (2026-09-16, vendor-stated):** an official AMD D3D11 backend
   (none exists); FSR 4 on D3D11 (D3D12-only signed DLLs, RDNA3/RDNA4 only);
   reaching FSR 4 through the driver's FSR 3.1-to-4 override (D3D12 ffx-api
@@ -402,6 +400,11 @@ class of upscaler): that is route 2's go/no-go.
   shader changes), not now.
 - **D5** A build without the port's SDK warns, and `fsr` refuses with the
   reason, as NGX does. Recommended.
+- **D6** (taken 2026-09-16 night) The port's prebuilt shader compiler is
+  accepted as a build-time-only tool: it runs once at fetch time on the
+  developer's machine, never ships, and cannot be built from source here
+  without the VS ATL component (journal). Its hash sits in the staged
+  VERSION.txt.
 
 ## 7. Considered and declined
 
@@ -455,9 +458,9 @@ class of upscaler): that is route 2's go/no-go.
     Building it from source here fails: `pch.hpp` includes `atlcomcli.h`
     and this VS2022 Community install has no ATL component (the vendored
     tiny-process-library also needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5.0`
-    under CMake 4.4). Sean's call: install "C++ ATL for latest v143 build
-    tools" and make the tool build the compiler from source, or accept the
-    prebuilt as a build-time-only tool.
+    under CMake 4.4). Sean's call, the same night: the prebuilt is fine.
+    Accepted as a build-time-only tool (D6); the fetch tool records its
+    hash in VERSION.txt so a change would show.
 - 2026-09-16 evening, Track B (b8cd3b2): the `fsr` value; `TemporalEngine`
   {Own, Nvidia, Amd} with `temporalEngineFor`, `temporalExternalEngine` and
   `temporalEngineLabel` in `src\common\temporal_mode.h`; the seven readers
