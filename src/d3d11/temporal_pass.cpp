@@ -913,6 +913,11 @@ double   g_camMoveSum = 0.0;        // metres: the camera's displacement a frame
 uint32_t g_camFrames = 0;
 uint32_t g_camDropRot = 0;          // frames whose camera delta was another camera's
 uint32_t g_camDropMove = 0;         // frames whose camera translation was a jump
+// The world path's scene floor (kTemporalSceneDrawFloor; the split's gate
+// says why): eye-frames it alone stood the path down, and the last count
+// it refused.
+uint32_t g_worldFloorRefused = 0;
+uint32_t g_worldFloorLast = 0;
 // The registration probes and the per-class clip shares, per interval
 // (the shader says what they are).
 int64_t     g_probeWorldDx = 0, g_probeWorldDy = 0;
@@ -3199,13 +3204,25 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // The world/ship split (the shader says what it is): under the
         // depth motion, with a depth bound and both frames' camera rows
         // read (view->world, the rows' measured convention).
-        // ...and only in a REAL scene: fifty draws into the scene pair a
+        // ...and only in a REAL scene, by the draws into the scene pair a
         // frame. The main menu's backdrop is a pre-rendered image at the far
         // plane drawn with one or two, and its camera does not follow the
         // head, so the world path detached its hangar wall (2026-09-04).
+        // The floor was fifty until 2026-09-16, when the scanner's initial
+        // screen in a sparse system took 49 draws on four frames in five
+        // (eye dump 182049: w 0 at 49, 1 at 50) and the world path stood
+        // down under a 0.2 deg/frame pan -- the whole scanner view was
+        // reprojected by the still head and smeared. The menu is one or
+        // two, a scene is tens to hundreds; the floor sits between.
+        const bool floorRefused = sceneDraws < kTemporalSceneDrawFloor;
         const bool worldOn = depthMotion && haveDepth && g_shipMetres > 0.0f &&
-                             candValid[2] && worldValid && sceneDraws >= 50u &&
+                             candValid[2] && worldValid && !floorRefused &&
                              g_rowsFollow >= 0;
+        if (floorRefused && depthMotion && haveDepth && g_shipMetres > 0.0f && candValid[2] &&
+            worldValid && g_rowsFollow >= 0) {
+            ++g_worldFloorRefused;
+            g_worldFloorLast = sceneDraws;
+        }
         for (int i = 0; i < 3; ++i) p.tvCam[i] = worldOn ? tvCam[i] : 0.0f;
         p.tvCam[3] = worldOn ? 1.0f : 0.0f;
         // Tier 2: the body's path, the camera's composed with the dominant
@@ -3640,7 +3657,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.split[0] = g_shipMetres;
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
-        p.split[3] = (haveDepth && sceneDraws < 50u) ? 1.0f : 0.0f;
+        // The menu's assumed depth for depthless pixels: a menu-like scene by
+        // the same floor as the world path (the scanner's sky at 49 draws
+        // was a wall a few metres off under head sway until 2026-09-16).
+        p.split[3] = (haveDepth && sceneDraws < kTemporalSceneDrawFloor) ? 1.0f : 0.0f;
         // Tier 1's mover mask (docs/per-object-motion.md): on only when last
         // frame's depth is in hand at this size AND the frustum and delta in
         // these constants describe that frame -- compared against any other
@@ -5620,6 +5640,12 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   "jump was carried on %u (zero by construction)",
                   g_camDropRot, g_camDropMove, g_camCarriedJump);
     }
+    if (g_worldFloorRefused) {
+        regAppend(buf, n, used,
+                  "; the world path stood down on the scene's draw floor alone on %u eye-frames "
+                  "(last count %u, floor %u)",
+                  g_worldFloorRefused, g_worldFloorLast, kTemporalSceneDrawFloor);
+    }
     if (g_classWorldPix || g_classShipPix) {
         regAppend(buf, n, used,
                   "; the used delta clipped %.1f%% of the world path's pixels and %.1f%% of the ship's",
@@ -5823,6 +5849,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_camFrames = 0;
     g_camDropRot = 0;
     g_camDropMove = 0;
+    g_worldFloorRefused = 0;
     g_rowsWritesSum = 0;
     g_rowsFramesSum = 0;
     g_candSumCount = 0;

@@ -43,13 +43,28 @@ changes.*
     follow; the "interface keeps the camera's path" rule
     (temporal_shader_source.h ~359) is right for a camera that is the
     head and wrong here. Journal entry "2026-09-16: the FSS UI under
-    DLSS". FIX BUILT, NOT FLOWN (journal entry "2026-09-16: the
-    scanner's interface on the head's path"): while the scanner's
-    screen is up (the chrome tracker's stamp moved this frame), every
-    interface-marked pixel takes the head's delta at whatever depth it
-    reads, in both copies of the world/ship split; `probe.w` bit 128;
-    the flight HUD's world-tracking families are untouched because the
-    gate is the scanner's screen, not the mask's kind.
+    DLSS". FIXED for the interface (journal entry "2026-09-16: the
+    scanner's interface on the head's path", 3799899 / main 36a9fa1):
+    while the scanner's screen is up (the chrome tracker's stamp moved
+    this frame), every interface-marked pixel takes the head's delta at
+    whatever depth it reads, in both copies of the world/ship split;
+    `probe.w` bit 128. FLOWN 2026-09-16 18:20 (`edvr_gfx_20260916_
+    181837.log`, eye dump 182049): the note fired, the header carries
+    0x91, the bar's pixels read +0.07/+0.13 px under a 0.2-1.6 deg/frame
+    pan with the head at 0.02 deg, and the text is as crisp as the raw
+    in all 16 treated crops. Sean: "still blurs with head still" -- and
+    the same dump names the blur: the SKY (the scanner's grid, the
+    signal dots, the stars) read +0.09 px too, because the world path
+    stood down on 4 frames in 5: `sceneDraws` 49 against the 50-draw
+    floor (50 on every 5th frame, `w 1`; the registration line said
+    24.1% world-path pixels in the scanner against 94.8% twenty
+    seconds later), and the treated crops show the grid and dots smeared
+    against the raw. Journal entry "2026-09-16: the scanner's sky at 49
+    draws". FIX BUILT, NOT FLOWN: the floor is 8 (`kTemporalSceneDrawFloor`,
+    shared by the world path, the camera follow score and the menu
+    depth); receipt on the registration line's second half: `the world
+    path stood down on the scene's draw floor alone on N eye-frames
+    (last count K, floor 8)`.
   - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
     far only Toolkit-off).
   - `fix.fss_res` stays opt-in; a default-on ship is a release-train
@@ -100,18 +115,21 @@ changes.*
 - **Next flight:** none owed for the ghost: flight 3 (2026-09-16
   17:05, `edvr_gfx_20260916_170514.log`, the pre-commit build of
   10705da, version string `0522215-dirty`) confirmed the same-frame
-  donor and it is on main (e08e899). Owed for the FSS UI shimmer: one
-  flight on the head-path build, Quest 3, DLSS, the initial FSS screen,
-  pan with the head still and take an eye dump mid-pan. Receipts: the
-  gfx log's once-note `temporal aa: the scanner's screen is up (frame
-  N), so its interface takes the head's path`; the dump's header
-  `uiFlags` (the ninth uint32 after `EDVRTEX1`) with bit 0x80 set;
-  the UI pixels' `MV` at the bar and a marker ~0 px while the sky
-  beside them carries the pan (before: -3.8 / -5.5 px with the sky);
-  and no doubled text in `DlssBeforeUi`. If the note is absent the
-  chrome tracker never fired (its gate is `fix.fss_eye_sync`, the
-  census jump, the theater, or the temporal pass being on). The
-  Toolkit-ON confirmation under Open still stands.
+  donor and it is on main (e08e899). The head path for the interface
+  flew 2026-09-16 18:20 and did what it said (receipts under Open).
+  Owed: one flight on the 8-draw floor, Quest 3, DLSS, the same sparse
+  system's initial FSS screen, pan with the head still, eye dump
+  mid-pan. Receipts: `motion.csv` `cameraTv3` (w) 1 on every frame and
+  `sceneDraws` still 49; the sky's `MV` carrying the pan (~5 px at 0.2
+  deg/frame, ~40 at 1.5) while the bar's pixels stay ~0; the treated
+  crops' grid and signal dots as crisp as the raw's; the registration
+  line's world-path share in the scanner in the nineties, not 24%; and
+  no `stood down on the scene's draw floor` clause on its second half
+  (that clause with `last count 49` means the floor is still in the
+  way; with a count under 8 it is the main menu, as intended). Watch
+  the main menu's hangar wall under head sway for a detach -- the floor
+  is now 8, and the menu's backdrop was measured at one or two draws.
+  The Toolkit-ON confirmation under Open still stands.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds until identified and excluded; the shipped
   fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
@@ -1122,6 +1140,61 @@ and the scanner's own screen is already tracked per frame.
   (`region.xy + p`), while every other `UM` read subtracts `region.xy`
   or uses the local index. Harmless where `region.xy` is 0 (the native
   path, a whole-texture submit), a one-region offset otherwise.
+
+## 2026-09-16: the scanner's sky at 49 draws
+
+Flight on 36a9fa1 (`edvr_gfx_20260916_181837.log`, right build), eye
+dump 182049 taken on the initial FSS screen while panning with the head
+still. Sean: "still blurs with head still".
+
+What the head path did: the once-note fired at frame 5633; the dump's
+header `uiFlags` reads 0x91 (bit 0x80 set, with the holo bit and
+ui_depth's bias bit); the interface mask holds 9,332 solid pixels (value 129,
+~220 m) and 131,022 faint ones (125, 0.7 m); the solid pixels' `MV` is
++0.07/+0.13 px (p10-p90 +0.06..+0.12) while `motion.csv` has the camera
+at 0.12-1.57 deg/frame and the head at 0.014-0.095 deg. The bar text
+("STEPPED ZOOM ?? |") in the 16 treated crops has 0.93-1.00 of the
+raw-upsampled crop's edge gradient and the same peak luma: not doubled,
+not blurred. The head path is right and is not what Sean sees.
+
+What blurs: the sky. The no-UI pixels' `MV` p50 is +0.09 px under the
+same pan (a 0.21 deg/frame pan is ~5 px at this width, 1.5 deg ~40
+px), because the world path was OFF on the dumped frame and on 12 of
+the 16: `cameraTv3` (the shader's `tvCam.w`) is 1 only on frames 12488,
+12492, 12497, 12502, and those are exactly the frames `sceneDraws`
+reads 50; the rest read 49, one under the `sceneDraws >= 50` floor that
+stood in for "a real scene, not the main menu's one-or-two-draw
+backdrop". Dump 170752 (the previous flight, another system) had 64
+draws on every frame and the world path on, which is why THAT dump
+showed the pan vector at the sky and the UI doubled by it. The
+registration line at 18:20:58 covers the scanner: "the world path took
+24.1% of pixels" (one frame in five); the next one, at 18:21:18, says
+94.8%. In the crops, a 160x100 sky window with 111 star-like
+points shows the treated grid lines and the orange signal dots smeared
+to near nothing against the raw's (`ui_sky_182049.png`): DLSS given
+zero motion for content moving 5-40 px a frame. The same floor also
+turned on the menu's assumed depth for the sky (`split.w`), a wall a
+few metres off under head sway, and `temporalCameraFollowScore`'s
+"trust the bound rows in a populated scene" short-circuit, which is
+why the log has 36 s of "the world path waits for the scene camera"
+right after the scanner opened (18:19:21 to 18:20:06).
+
+The fix, built, not flown: the floor is 8 (`kTemporalSceneDrawFloor`
+in temporal_math.h, used by the world path, the follow score and the
+menu depth). The menu was measured at one or two draws; a scene at 49
+in the sparsest system seen so far and hundreds in the cockpit; the
+floor sits between with margin on both sides. A counter on the
+registration line's second half says when the floor alone stood the
+path down and with what count, so the next log tells a floor still in
+the way from a menu. temporal_test checks 49 is a scene and 2 is not.
+
+- Ruled out: the interface's own path as this flight's blur (the
+  numbers above); the UI resolve (identical to `DlssBeforeUi` at the
+  bar, as before).
+- Not measured: whether the scanner's draw count varies with the
+  system's body count (64 in 170752's system, 49 here). If a system
+  ever draws under 8, the floor is in the way again and the counter
+  says so.
 
 ## Open
 
