@@ -4142,7 +4142,19 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // -- already reading the source through NVIDIA's own crop -- has no
         // cheap analogue for it. The fovea call always takes the plain,
         // non-separated inputs instead.
-        auto applyUiResolve = [&](ID3D11ShaderResourceView* nvidiaOutput, bool allowSeparated) -> bool {
+        //
+        // withHistory is false on the fovea call too: e.uiHistory[1-read] is
+        // ONE texture with ONE writer a frame by design -- on the trained path
+        // the motion pass writes it as UI evidence only when this resolve
+        // will not run (4412), and the own-path epilogue (4581) throws a
+        // resolve-written history away before the own resolve reads it as
+        // UP. On the fovea path the own resolve (sharp periphery) and the
+        // motion pass are that writer and reader, so the resolve here must
+        // neither read nor write it, nor mark uiResolveWritten: it runs on
+        // the composite from the current raster alone, and the periphery's
+        // evidence pipeline stays exactly as it was before UI parity.
+        auto applyUiResolve = [&](ID3D11ShaderResourceView* nvidiaOutput, bool allowSeparated,
+                                  bool withHistory) -> bool {
             if (uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
                 g_csUiResolveTried = true;
                 g_csUiResolve = shaderSwapCompileCs(ctx, kUiResolve, sizeof(kUiResolve) - 1, "main", "UI resolve", nullptr, "UI resolve");
@@ -4171,13 +4183,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 separated ? separatedCandidate.colourView : e.dlColourSrv,
                 nvidiaOutput,
                 uiBoundHere ? e.uiMaskSrv : nullptr,
-                e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
+                (withHistory && e.uiHistoryValid) ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                 e.dlMvSrv,
                 separated ? separatedCandidate.edits : uiDepthContentChanges(w, h, eye),
                 resolveScreen,
                 separated ? e.dlColourSrv : nullptr,
                 separated ? separatedCandidate.influence : nullptr};
-            ID3D11UnorderedAccessView* uavs[2] = {e.dlSubmitUav, e.uiHistoryUav[1 - e.uiHistoryRead]};
+            ID3D11UnorderedAccessView* uavs[2] = {
+                e.dlSubmitUav, withHistory ? e.uiHistoryUav[1 - e.uiHistoryRead] : nullptr};
             ctx->CSSetShader(g_csUiResolve, nullptr, 0);
             ctx->CSSetShaderResources(0, 9, srvs);
             ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
@@ -4205,9 +4218,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             ctx->CSSetShaderResources(0, 17, nullSrvR);
             ctx->CSSetUnorderedAccessViews(0, 7, nullUavR, nullptr);
             endRegion(qs, Region::Ui, ctx);
-            uiEvidenceWritten = uiResolveWritten = true;
+            if (withHistory) uiEvidenceWritten = uiResolveWritten = true;
             if (separated) uiSeparationEvaluated();
-            const bool captureResolve = eye == 0 && g_eyeRunLeft > 0 && g_eyeRunTaken == 0 &&
+            const bool captureResolve = withHistory && eye == 0 && g_eyeRunLeft > 0 && g_eyeRunTaken == 0 &&
                                          g_eyeInputs[0] && g_eyeInputsFrame == g_rowsFrame && !g_eyeInputs[13];
             if (captureResolve) stageEyeRun(ctx, e.uiHistory[1 - e.uiHistoryRead], g_eyeInputs, 15);
             if (!g_uiResolveNoted) {
@@ -4549,7 +4562,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // itself into one call: it returns false exactly when the
                     // old `else` branch used to run, so the copy-through below
                     // is unchanged.
-                    if (usedDlaa && !applyUiResolve(e.dlOutSrv, true)) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    if (usedDlaa && !applyUiResolve(e.dlOutSrv, true, true)) ctx->CopyResource(e.dlSubmit, e.dlOut);
                     // luma probe stage 3: DLSS output before the UI replay --
                     // e.dlSubmit already holds it here on every usedDlaa path,
                     // legacy-resolved or copied straight from e.dlOut above.
@@ -5080,9 +5093,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // for "NVIDIA's output" -- the compose already blended
                 // NVIDIA's crop into the composite, so the resolve reads
                 // the FINISHED frame here, not the bare crop.
-                if (applyUiResolve(e.foveaOutSrv, false)) {
+                if (applyUiResolve(e.foveaOutSrv, false, false)) {
                     foveaSubmit = e.dlSubmit;
-                    foveaUiTreatment = "the UI resolve";
+                    foveaUiTreatment = "the UI resolve (from the current raster alone: the UI history stays the periphery's)";
                 } else if (foveaDeferredInput) {
                     beginRegion(qs, Region::Ui, dev, ctx);
                     // dlSubmit needs the composite's content before the
