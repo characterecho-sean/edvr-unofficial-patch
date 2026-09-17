@@ -339,7 +339,7 @@ struct EyeState {
     ID3D11Texture2D*           dlOut = nullptr;
     ID3D11UnorderedAccessView* dlOutUav = nullptr;   // the debug motion view paints here
     ID3D11ShaderResourceView*  dlOutSrv = nullptr;   // the fovea composite reads NVIDIA's crop through this
-    ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out
+    ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out. The fovea composite writes here too (sized foW x foH, the same value as oW x oH), so the UI resolve and the deferred replay below run unchanged on either path
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
     bool                      uiResolvedHistory = false;
     bool                      uiSeparatedHistory = false;
@@ -398,11 +398,9 @@ struct EyeState {
     ID3D11ShaderResourceView*  outSrv = nullptr;    // the fovea composite reads the own-history periphery through this
 
     // The fovea composite (docs/performance.md feature 6): the full frame
-    // with NVIDIA's crop blended over the own-history periphery, in the
-    // game's own format, and the crop's own NVIDIA history flag.
-    ID3D11Texture2D*           foveaOut = nullptr;
-    ID3D11UnorderedAccessView* foveaOutUav = nullptr;
-    uint32_t                   foveaW = 0, foveaH = 0;
+    // with NVIDIA's crop blended over the own-history periphery, written
+    // into dlSubmit above (see its own comment). The crop's own NVIDIA
+    // history flag.
     bool                       foveaHaveHistory = false;
     // The steady periphery (feature 6): NVIDIA's DLAA on a reduced copy of
     // the frame. The reduced colour, depth and motion (only when the
@@ -500,9 +498,6 @@ void releaseNative(EyeState& e) {
 }
 void releaseOwned(EyeState& e) {
     releaseNative(e);
-    if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
-    if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
-    e.foveaW = e.foveaH = 0;
     e.foveaHaveHistory = false;
     releasePeriph(e);
     e.w = e.h = 0;
@@ -3905,6 +3900,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         bool foveaMode = false;
         bool foveaComposited = false;
         bool foveaEvalOk = false;   // the crop eval ran and NVIDIA accumulated: history is live
+        // UI parity on the fovea path: this path's own deferredInput (the
+        // full-frame trained block's own copy, below, falls out of scope
+        // before the compose runs). Non-null once uiDeferredPrepare has
+        // captured this frame's UI against e.dlSubmit, for uiDeferredApply
+        // to replay after the compose writes it. deferredActive (declared
+        // with usedDlaa below) is shared: the two paths are exclusive.
+        ID3D11ShaderResourceView* foveaDeferredInput = nullptr;
+        // Whether the own resolve's interior skip (p.skip below) applied
+        // this frame, and why not when it did not -- read by the edges
+        // mode ENGAGED line. Default covers the frame the own resolve does
+        // not run at all (the steady periphery covers the whole output).
+        const char* foveaSkipNote = "did not run this frame (the steady periphery covered it)";
         // The steady periphery (feature 6): NVIDIA's DLAA around the fovea
         // too, on a reduced copy of the frame, so both sides of the seam are
         // NVIDIA's and neither breathes under head motion the way the own
@@ -4562,13 +4569,22 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 } else if (made && (haveDepth || g_moversOn) && (!e.zPrev || (g_moversOn && !e.dlMask))) {
                     ensureMoverPair(dev, e, w, h, g_moversOn);
                 }
-                if (made && (!e.foveaOut || e.foveaW != foW || e.foveaH != foH)) {
-                    if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
-                    if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
-                    made = makeTex(dev, foW, foH, sd.Format, viewFmt,
-                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                   &e.foveaOut, nullptr, &e.foveaOutUav);
-                    if (made) { e.foveaW = foW; e.foveaH = foH; }
+                // The composite's target is e.dlSubmit -- the same texture
+                // the full-frame trained block above submits, in the game's
+                // own format (that field's own comment says why) -- so its
+                // UI resolve and deferred replay run unchanged on this path
+                // too. Built with the identical conditional format/UAV
+                // logic as that block's own dlSubmit creation, at foW x foH
+                // (== oW x oH there always: both are outW/outH under an
+                // upscale, w/h otherwise).
+                if (made && (!e.dlSubmit || e.dlOutW != foW || e.dlOutH != foH)) {
+                    if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
+                    if (e.dlSubmit) { e.dlSubmit->Release(); e.dlSubmit = nullptr; }
+                    made = makeTex(dev, foW, foH, sd.Format,
+                                   (sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? DXGI_FORMAT_R8G8B8A8_UNORM : viewFmt,
+                                   D3D11_BIND_SHADER_RESOURCE | ((sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? D3D11_BIND_UNORDERED_ACCESS : 0),
+                                   &e.dlSubmit, nullptr,
+                                   (sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? &e.dlSubmitUav : nullptr);
                 }
                 // The steady periphery's textures: NVIDIA's reduced output
                 // always; the reduced inputs only when the reduction is real.
@@ -4597,6 +4613,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
                 p.holoJitter[3] = haveDepth && e.zPrevValid && e.zPrevSrv && useTanPrev && haveDelta && p.holoJitter[2] != 0 ? 1.0f : 0.0f;
                 if (made && e.outSrv && e.dlOutSrv && setParams(ctx,p)) {
+                    // The deferred UI capture (ui_deferred.cpp), recorded now
+                    // against e.dlSubmit as its future "world colour": the
+                    // same texture the compose writes below, once this frame's
+                    // resolve/replay run on it (that field's own comment says
+                    // why the read happens at command-list execution time, not
+                    // here at record time). Gated exactly as the full-frame
+                    // trained block gates its own call; debugPaint is omitted
+                    // because foveaWanted already requires g_debugMode==0.
+                    if (region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
+                        foveaDeferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
+                    deferredActive=foveaDeferredInput!=nullptr;
                     // The colour, typed, whichever way the source came (the
                     // full path's copy logic).
                     D3D11_BOX box{};
@@ -4615,6 +4642,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, e.copyTex, 0, &box);
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
+                    }
+                    // The deferred route's clean input replaces the raw copy
+                    // above with the pre-UI frame the draw hooks captured, so
+                    // NVIDIA and the composite never see this frame's UI --
+                    // the replay reapplies it after the compose (mirrors the
+                    // full-frame trained block's own override).
+                    if (foveaDeferredInput) {
+                        Microsoft::WRL::ComPtr<ID3D11Resource> clean;
+                        foveaDeferredInput->GetResource(&clean);
+                        ctx->CopyResource(e.dlColour, clean.Get());
                     }
                     // Motion vectors and the depth copy, full frame (NVIDIA
                     // reads the crop's sub-rectangle of them; the reduction
@@ -4811,6 +4848,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // same way, also with no hand-off. Report has the full
                 // enumeration.
                 p.skip[0] = p.skip[1] = p.skip[2] = p.skip[3] = 0.0f;
+                // The edges mode ENGAGED line reports whether the skip below
+                // applies and, when it does not, which of the three reasons
+                // -- captured here at the same conditions that gate it,
+                // without changing what they gate.
+                if (foveaMode && foveaEvalOk && compositeReady) {
+                    if (upscale) foveaSkipNote = "does not skip the interior (NVIDIA is upscaling)";
+                    else if (uiTrack) foveaSkipNote = "does not skip the interior (the UI evidence history reads it back next frame)";
+                    else if (carry) foveaSkipNote = "does not skip the interior (the mover mask's depth carry reads it back next frame)";
+                }
                 if (foveaMode && foveaEvalOk && compositeReady && !upscale &&
                     !uiTrack && !carry) {
                     float band = g_foveaEdgeDeg *
@@ -4856,6 +4902,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     if (sx1 > sx0 + 1.0f && sy1 > sy0 + 1.0f) {
                         p.skip[0] = sx0; p.skip[1] = sy0; p.skip[2] = sx1; p.skip[3] = sy1;
+                        foveaSkipNote = "skips the interior";
+                    } else {
+                        foveaSkipNote = "does not skip the interior (the crop is too small for the band's margin)";
                     }
                 }
                 setParams(ctx, p);
@@ -4905,8 +4954,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ID3D11ShaderResourceView* csrv[2] = {periphOk ? e.prOutSrv : e.outSrv, e.dlOutSrv};
                 // u1 is the own history being written this frame, for the
                 // hand-off (the shader writes it only when mode.y says so).
+                // u0 is e.dlSubmit -- the same texture the full-frame trained
+                // block's UI resolve and deferred replay target, so both
+                // stages below run unchanged on this path too.
                 ID3D11UnorderedAccessView* cuav[2] = {
-                    e.foveaOutUav, (!periphOk && !upscale) ? e.histUav[writeIdx] : nullptr};
+                    e.dlSubmitUav, (!periphOk && !upscale) ? e.histUav[writeIdx] : nullptr};
                 ID3D11ShaderResourceView* nullC2[2] = {};
                 ID3D11UnorderedAccessView* nullCu[2] = {};
                 ID3D11SamplerState* smpC = g_samp;
@@ -4922,6 +4974,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ctx->CSSetUnorderedAccessViews(0, 2, nullCu, nullptr);
                 endRegion(qs, Region::Compose, ctx);
                 foveaComposited = true;
+                // UI parity with the full-frame trained path: the deferred
+                // replay onto e.dlSubmit, now that the compose holds this
+                // frame's finished image there (mirrors that block's own
+                // "ui" region around the same call).
+                if (foveaDeferredInput) {
+                    beginRegion(qs, Region::Ui, dev, ctx);
+                    uiDeferredApply(ctx, eye);
+                    endRegion(qs, Region::Ui, ctx);
+                }
                 ++g_foveaTreats;
                 if ((!g_foveaEdges && !g_foveaNoted) ||
                     (g_foveaEdges && eye >= 0 && eye < 2 && !g_foveaEdgesNoted[eye])) {
@@ -4958,14 +5019,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             "temporal aa: DLSS where you look ENGAGED (edges) -- eye %d requested "
                             "vertical %.0f, outer %.0f, nasal %.0f deg, reduced by the FOV trim's "
                             "%u/%u/%u; region %u,%u-%u,%u of %ux%u (%.1f%% of the frame); the "
-                            "periphery is %s. NVIDIA's price is in the DLAA totals.",
+                            "periphery is %s; the own resolve %s. NVIDIA's price is in the DLAA "
+                            "totals.",
                             eye, static_cast<double>(g_foveaVerticalDeg),
                             static_cast<double>(g_foveaOuterDeg), static_cast<double>(g_foveaNasalDeg),
                             fovTrim[0], fovTrim[1], fovTrim[2], focx, focy, focx + focw, focy + foch,
                             foW, foH,
                             100.0 * static_cast<double>(focw) * foch /
                                 (static_cast<double>(foW) * foH),
-                            per);
+                            per, foveaSkipNote);
                     }
                 }
             }
@@ -5087,11 +5149,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 e.haveHistory = false;
             }
             e.dlHaveHistory = false;   // NVIDIA's FULL-frame history did not see this frame
-            // The fovea composite, when it ran, is what goes out: the own
-            // history is still the periphery it was blended over, so its
-            // ping-pong above stands. NVIDIA's crop history lives in the fovea
-            // feature (e.foveaHaveHistory), kept apart from both.
-            result = foveaComposited ? e.foveaOut : e.outTex;
+            // The fovea composite, when it ran, is what goes out: e.dlSubmit,
+            // the same texture (and, now, the same post-UI-resolve/replay
+            // state) the full-frame trained branch submits. The own history
+            // is still the periphery it was blended over, so its ping-pong
+            // above stands. NVIDIA's crop history lives in the fovea feature
+            // (e.foveaHaveHistory), kept apart from both.
+            result = foveaComposited ? e.dlSubmit : e.outTex;
             ++g_treats;
             if (foveaComposited) ++g_dlaaTreats;
             g_lastW = w;
@@ -5132,7 +5196,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         lumaState.sampled = lumaUiState.sampled;
         lumaState.aliases = lumaUiState.aliases;
         lumaState.draws = lumaUiState.draws;
-        lumaState.applied = usedDlaa && deferredActive;
+        lumaState.applied = (usedDlaa || foveaComposited) && deferredActive;
         lumaProbeSample(ctx, static_cast<ID3D11Texture2D*>(result), eye, 4);
         lumaProbeEnd(ctx, eye, lumaState);
     }
@@ -5275,6 +5339,10 @@ void temporalPassConfigure(Config& cfg) {
     if (fov > 120.0f) fov = 120.0f;
     g_foveaEdges = foveaEdges;
     g_foveaDeg = foveaEdges ? 0.0f : fov;
+    // A live reload re-logs the ENGAGED line with the new numbers -- these
+    // latches only ever mean "already logged", never "already engaged".
+    g_foveaNoted = false;
+    g_foveaEdgesNoted[0] = g_foveaEdgesNoted[1] = false;
     // Edges mode's three trims: plain degrees (not a per-headset list, unlike
     // fix.fov_trim_vertical/_outer/_nasal, which this reduces against -- see
     // cropOf/computeFoveaRegion in temporal_pass.cpp). 0..45, default 0.
@@ -6162,8 +6230,6 @@ bool temporalPassEyeOffset(int eye, float out[3]) {
     memcpy(out, e.eyeOff, sizeof(e.eyeOff));
     return true;
 }
-
-bool temporalAaFoveaConfigured() { return foveaConfigured(); }
 
 }  // namespace edvr
 

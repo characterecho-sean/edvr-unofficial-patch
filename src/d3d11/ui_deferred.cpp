@@ -9,7 +9,6 @@
 #include "exposure_fix.h"
 #include "shader_swap.h"
 #include "vscreen.h"
-#include "temporal_pass.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include <d3d11_1.h>
@@ -357,11 +356,10 @@ void uiDeferredConfigure(Config& cfg) {
     const auto m=cfg.getString("fix.temporal_aa","off");
     const bool requested=(_stricmp(m.c_str(),"dlss")==0 || _stricmp(m.c_str(),"dlaa")==0);
     if(!requested){failed=false;routeNoted=false;}
-    // temporalAaFoveaConfigured() reflects temporalPassConfigure's OWN read
-    // of this same key (both modes, width or edges), which vscreen.cpp now
-    // calls before this one at both its sites -- so this is this cycle's
-    // value, not last cycle's.
-    enabled=requested && !failed && !temporalAaFoveaConfigured();
+    // The fovea path (temporal_pass.cpp) now runs this same capture/replay
+    // route too -- its own compose writes the texture this route reads and
+    // replays into, so there is nothing here to stand down for a fovea.
+    enabled=requested && !failed;
     writerShaderDir=cfg.logDir()+L"\\shaders";
 }
 void uiDeferredTraceDrawEnter(ID3D11DeviceContext* ctx,bool eyeSizedTarget,char kind,uint32_t count,uint32_t instances,
