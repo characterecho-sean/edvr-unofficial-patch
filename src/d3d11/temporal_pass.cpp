@@ -37,7 +37,6 @@
 #include "ui_deferred.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
-#include "weapon_stability.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
 #include "shader_swap.h"
@@ -7276,7 +7275,6 @@ void temporalPassArmEyeDump() {
     // census with Insert's eye run, including when temporal AA is disabled.
     drawCensusAutoRequest();
     Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
-    weaponStabilityArmTrace();
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
     _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),

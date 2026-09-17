@@ -1,104 +1,65 @@
 # On-foot weapon judder, 2026-09-11
 
-Scope: weapon judder while walking/running. HUD resolution work is
-paused. Preserve runtime reprojection; do not substitute Turbo mode.
+Scope: weapon judder while walking/running and on mouse turns. HUD
+resolution work is paused.
 
 ## Status
 
-State, 2026-09-17: `fix.weapon_stability` (default on) pins the arms
-root to the source camera in hip fire and corrects the ADS timing
-disagreement; every source pass that reads the instance pool the
-standard way (t33 stride 336 minus b1[275]) and whose vertex shader is
-in `family()` in `src/d3d11/weapon_stability.cpp` draws from the
-corrected pool. The 2026-09-17 Steam dumps found two passes still
-outside that list: `BB31244E30265F2D` (the Takada laser rifle's two
-cyan glow strips) and `CFCA8FFC6B058630` (a single skinned triangle at
-the arms root). Both are added to `family()`, to the eye dump's
-`sourceMesh()` capture list and to the rig's shared-pool loop
-(cd1577a). FLOWN 2026-09-17 08:08 on Steam and CONFIRMED ("that fixed
-the rifle cyan lines"). Entry: "Laser rifle glow strips" below.
+SOLVED and PROMOTED, 2026-09-17: `fix.weapon_stability` (default on,
+live, "Weapon stability" in the menu) now means deferred frame pacing
+while on foot -- OpenXR Toolkit's "Turbo mode" in EDVR's own runtime,
+engaged from the journal's Status.json on-foot flag: `WaitGetPoses`
+returns at once with a synthesized display time, `xrWaitFrame` runs on
+a pacer thread and the game blocks at the second `Submit` instead.
+Built as `experimental.turbo_mode = on_foot` (117348d), FLOWN
+2026-09-17 14:15 on Steam (Pimax OpenXR, Crystal Super, DLSS, 90 Hz)
+with the D3D11 correction switched OFF in the menu at 14:16:30, and
+CONFIRMED: Sean "That actually fixes the weapon stability issue nicely
+without any additional judders." So the pacing alone was the test, and
+it passed. Promoted the same day: the key drives the pacing, the
+`experimental.turbo_mode` key is gone, and the D3D11 arms correction
+(`src/d3d11/weapon_stability.{h,cpp}`, its rig, `family()`, the
+particle and light paths, the ADS acquisition) is DELETED; the
+mechanism the dated entries below describe is history. The weapon's
+temporal-AA motion vectors (`weapon_motion.{h,cpp}`) stay, hosted
+directly by `vscreen.cpp`'s DrawIndexedInstanced hook after the
+original draw (`weaponMotionWants`), still gated by the same key
+through `screen_motion.cpp`. Entry: "Turbo mode promoted" at the end.
 
-Solved, 2026-09-17: the point-light glow of every gun (the laser rifle's
-rear-ring core, Sean: "any gun with lights") shifted while moving. The
-light path (`lightDraw` / `applyLights`) runs and passes its gates, but
-it read `Anchor[0]`, the LAST `findAnchor` result of the frame, and
-Elite reruns that kernel under the WORLD camera rows (the body pass)
-after the arms, so in hip fire the lights got no correction. Fix: the
-frame's applied mesh correction is kept in its own stamped rows
-(`kWeaponAppliedRow`) and the lights read those; the light dispatch
-records the near plane it saw for the status line. FLOWN 2026-09-17
-09:47 (v0.17.0-rc.3-69-g00c27ed) and CONFIRMED: Sean "Looks good"; the
-log's `weapon stability: lights: ... 39 lights, arms correction fresh
-at that draw, mesh camera near 0.0250000 then` names the body-pass
-rerun as the clobbering one, as predicted. Entry: "Point lights read a
-rerun anchor" below. The same flight's "panel further away and no longer
-curved" is NOT this fix: it is the intro panel's false match on the
-on-foot HUD (docs/intro-video.md, 2026-09-17 entry), and "performance
-worse" is Sean's own `fix.openxr_resolution` 3900 -> 4100 at 08:08:58
-plus that resample chain running on foot.
+What the flight measured (entry at the end): under turbo the runtime's
+`wait_frame` phase went to 0 and `pacer_block` carried the same 5.9-7.3
+ms p50 the wait used to take; 8943 deferred frames, 37 whose wait had
+already returned, nothing drained. Sean A/B'd it in the menu at
+14:18:42 (off, `pacing=runtime`) and 14:18:45 (on_foot again).
 
-Built 2026-09-17 (NOT FLOWN): ADS acquisition. Sean, after the panel
-fix: "moving side to side while ADS, there's still some ghosting of the
-sights ... an artifact of the judder and the fix not acquiring on rapid
-movement changes". The 102403 trace shows the correction exact through
-a steady strafe but waiting at every start (arms step under 1 mm),
-reversal through a near-stop, aim turn (`steady`) and after any
-unexplained frame (calibration reset). Fix in `aimingTranslation`:
-correct on a sub-millimetre arms step that equals the previous camera
-step, match the known offset in the previous frame's basis (the arms
-carry the previous camera transform, rotation included -- proved by
-the 112905 mouse-turn dump), retain a calibrated offset through
-unexplained frames (a new one replaces it after three constant frames),
-tolerance 0.3 mm. The correction itself is unchanged (the camera step,
-or the status-3 residual); the ADS offset is never substituted. Entry:
-"ADS ghosting of the sights" below, with the flight brief.
+Which reading won is NOT settled: the flight confirms the symptom is
+gone, not the mechanism ("race" vs "cadence" in the turbo entry's
+hypothesis). The eye dump of a mouse turn under turbo that would decide
+it was not taken; the VS rotation-source hunt is closed as moot rather
+than answered.
 
-Open: mouse turns in ADS judder because the game draws the arms with
-the previous frame's ROTATION (1 degree behind at 1 degree per frame);
-a translation cannot fix it, and the instance record carries no
-orientation to rotate -- the per-instance rotation source has to be
-found in the VS first (entry below, "Mouse turns"). Spot lights (VS
-`963B52C73B4143AC`, per-light data in a VS structured buffer t0, stride
-112) have no correction path; if a gun's glow still shifts after this,
-that is where to look.
+What to watch: about one frame of extra latency on foot (the rotation
+part hidden by the headset's reprojection), and SteamVR motion
+smoothing / Oculus ASW cannot engage while the wait is deferred. Flown
+on ONE runtime and headset; other runtimes are unflown. With the
+journal watcher off the fix never engages and the log says so.
 
-Built 2026-09-17 (NOT FLOWN), experiment against that open item:
-`experimental.turbo_mode = on_foot` -- OpenXR Toolkit's Turbo mode in
-EDVR's own runtime, engaged from the journal's on-foot flag: the game's
-`WaitGetPoses` returns at once with a synthesized display time, the
-runtime's `xrWaitFrame` runs on a pacer thread and the game blocks at
-the second `Submit` instead. Default off. Entry: "Turbo mode on foot"
-at the end, with the toolkit's verified mechanics, the hypothesis and
-its two rivals, the log lines and the A/B brief.
+Log signatures: d3d11 log `weapon stability: on (live; the frame wait
+moves to the eye submit while on foot)` at configure and on each
+change; `native frame: begin #N ... pacing=turbo` on each engagement,
+`pacing=runtime` standing down; runtime trace
+`native_pacing,mode=deferred|runtime` at the frame it took effect,
+`pacing=1` with `wait_frame=0` and a non-zero `pacer_block` in
+`native_submit_phases`, `native_pacing_summary` at close.
 
-Kept outside on purpose: the late UI labels `B10B032BDFD46700`,
-`C4B4B334B26E81A9` and the panel shader `A888D51024D9798E` (ammo and
-magazine readouts). Their placement is already camera-relative; the
-2026-09-17 measurement put them within 3.5-9.4 source pixels of the
-corrected body across 16 strafing frames.
+Not flown: the promotion build itself (the correction removed, the key
+rewired). The 14:15 flight had the correction off and turbo on, which
+is the same state; the next on-foot session is the regression check.
 
 Ruled out: see the "Ruled out" lines of each dated entry; the
-2026-09-17 entry closes the ammo panels, the HUD polyline shader
+2026-09-17 entries close the ammo panels, the HUD polyline shader
 `B7790CBFC6554097` and the 2026-09-11 "full-screen triangle" label on
 `CFCA8FFC6B058630`.
-
-Flown 09:47 (the brief below was read against it and every line came
-out as predicted; kept for the next regression): stand still, then
-strafe both ways and walk forward; the light glow must stay put on the
-weapon exactly as the mesh does. Verify the build first with
-`python tools\edvr_log.py --target steam --expect-build HEAD`. Then
-read the new status line `weapon stability: lights: ...` (every 1800
-frames): `arms correction fresh` with `5+ lights` proves the light
-dispatch found this frame's applied correction; `mesh camera near
-0.0250000 then` proves the camera buffer held the world rows at the
-light draw (the rerun that clobbered `Anchor[0]`), `0.0675000` means
-the clobbering rerun happened earlier in the frame instead. `STALE`
-with the glow still shifting means the arms were not applied in that
-frame at all and the hunt moves to `findAnchor`. If the glow still
-shifts with `fresh`, take an eye dump: the point-light draw is captured
-in the drawstate (ordinal UINT32_MAX-2, VS `0357BBB2DEE43C1F`, its
-light stream in `streams[1]`), and the per-frame method is in the
-"Point lights read a rerun anchor" entry.
 
 ## Evidence from 17:09:53
 
@@ -758,7 +719,7 @@ judder (rotation lag, above); that is the next arc, not a regression.
 Verify the build first: `python tools\edvr_log.py --target steam
 --expect-build HEAD`.
 
-## Turbo mode on foot, built 2026-09-17 (experiment, NOT FLOWN)
+## Turbo mode on foot, built 2026-09-17 (experiment; FLOWN 14:15, CONFIRMED, PROMOTED -- next entry)
 
 Sean asked for OpenXR Toolkit's "Turbo mode", engaged only on foot, as
 an experimental lever against the weapon judder. The 2026-09-13 review
@@ -863,3 +824,53 @@ while the judder went (the cadence reading), and that decides where the
 arc goes next. If it stays: ruled out, and the VS rotation source
 remains the only path; the key can then be deleted rather than left as
 a dead lever.
+
+## Turbo mode promoted, 2026-09-17: fix.weapon_stability = deferred pacing on foot
+
+**The flight.** Steam, 14:15:57, `v0.17.0-rc.3-87-g117348d` (verified
+with `edvr_log.py --expect-build 117348d`), Pimax OpenXR on a Pimax
+Crystal Super, DLSS, 90 Hz, the game holding 83-90 fps. Sean switched
+the D3D11 correction OFF in the menu at 14:16:30 (`weapon stability:
+off`) before disembarking, so every on-foot frame of the session ran
+turbo alone. `pacing=turbo` / `native_pacing,mode=deferred,sequence=
+9941` at 14:17:58 (the disembark), then a menu A/B: `on_foot -> on ->
+off` at 14:18:42 (`mode=runtime`), `on_foot` again at 14:18:45
+(`mode=deferred`), `mode=runtime` at 14:19:42 (the embark), summary at
+close `deferred=8943, synthesized=8943, ready_at_wait=37, kicks=8982,
+drained_frames=0, drained_waits=0`. Per-window phases did exactly what
+the brief said they must: runtime pacing `wait_frame` p50 4.0-9.2 ms
+with `pacer_block` 0; turbo `wait_frame` 0 with `pacer_block` p50
+5.4-7.3 ms. Verdict, Sean: "That actually fixes the weapon stability
+issue nicely without any additional judders."
+
+**Promotion (this build).** `fix.weapon_stability = 1` now means
+deferred pacing while on foot: `src/d3d11/native_frame.cpp` derives
+`EdvrNativeFrameOutput::deferredPacing` from the key and the journal's
+on-foot flag (the runtime side is unchanged from 117348d), the
+`experimental.turbo_mode` key is deleted, and the D3D11 correction is
+deleted whole: `src/d3d11/weapon_stability.{h,cpp}`,
+`tools/weapon_stability_test`, the `family()` list, the particle and
+point-light paths, the ADS acquisition and the `weapon timing` eye-dump
+trace. What it had been hosting moves out: `weaponMotionDraw` (the
+weapon's temporal-AA motion vectors, `weapon_motion.{h,cpp}`, kept
+whole) is now called from `vscreen.cpp`'s DrawIndexedInstanced hook
+straight after the original draw behind a cheap `weaponMotionWants(vs
+hash)` gate, and the resource-written fan-out to weapon, mesh and
+UI-depth motion is a file-local `motionResourceWritten` there.
+`screen_motion.cpp` still gates the weapon motion vectors on the same
+key, as before. `native_frame_test` now stubs the journal functions and
+covers all four cases (watcher off, on foot, in a ship, key off).
+
+**Not decided by the flight:** which of the entry's two readings (race
+vs cadence) is true -- the symptom is gone either way, and the eye dump
+that would tell them apart was not taken. Ruled out: nothing new; the
+VS rotation-source hunt ("Mouse turns") is closed as moot, not
+answered. The correction's last full state is commit ec7edba and
+before, should a runtime turn up where deferred pacing cannot be used.
+
+**Caveats that ship with the default.** One frame of added latency on
+foot (rotation hidden by the headset's own reprojection); SteamVR
+motion smoothing and Oculus ASW cannot engage while the wait is
+deferred, so a rig that lives on reprojection on foot loses it there;
+flown on one runtime and headset. With `d3d11.journal_watch = 0` the
+fix never engages and the log says so once.

@@ -12,9 +12,12 @@ namespace edvr {
 void weaponMotionRememberShader(ID3D11VertexShader*,uint64_t,const void*,size_t);
 void weaponMotionConfigure(bool);
 void weaponMotionSource(ID3D11Texture2D*);
-// Call after the original opaque draw, before restoring its corrected pool.
+// Call after the original opaque draw, with the pool it read still bound at VS SRV 33.
 void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                        unsigned start,int base,unsigned startInstance);
+// The host's per-draw gate, cheap enough for every DrawIndexedInstanced:
+// on, the on-foot source depth seen this frame, and a weapon family VS.
+bool weaponMotionWants(uint64_t vsHash);
 ID3D11ShaderResourceView* weaponMotionView();
 void weaponMotionFrameBoundary();
 void weaponMotionResourceWritten(ID3D11Resource*);

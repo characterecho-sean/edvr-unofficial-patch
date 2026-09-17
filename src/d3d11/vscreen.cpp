@@ -31,7 +31,7 @@
 #include "cb_peek.h"
 #include "panel_curve.h"
 #include "screen_motion.h"
-#include "weapon_stability.h"
+#include "weapon_motion.h"
 #include "night_vision.h"
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
@@ -90,6 +90,14 @@
 
 namespace edvr {
 namespace {
+
+// nullptr invalidates every cached input (command-list execution); otherwise
+// only writes to a source instance, bone or camera buffer invalidate them.
+static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
+    weaponMotionResourceWritten(resource);
+    meshMotionResourceWritten(resource,first,end);
+    uiDepthMotionResourceWritten(resource,first,end);
+}
 
 // How often the totals line is written, and how long the starvation notice
 // waits before it will speak.
@@ -2853,7 +2861,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
         uiSeparationUnknownWrite();
         uiDeferredUnknownWrite(self);
         graphicsBridgeNoteUnknownExecution();
-        weaponStabilityResourceWritten(nullptr);
+        motionResourceWritten(nullptr);
         glitchFrameInvalidatePool(nullptr);
     }
     s->realExecuteCommandList(self, list, restoreContextState);
@@ -3046,7 +3054,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->realUnmap(self, res, sub);
         return;
     }
-    weaponStabilityResourceWritten(res);
+    motionResourceWritten(res);
     glitchFrameInvalidatePool(res);
     if(res==s->scenePoolResource && s->scenePoolData){
         guardedBudget(g_cameraBudget,[&]{glitchFrameObservePool(res,s->scenePoolData,s->scenePoolBytes);});
@@ -3413,7 +3421,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
-    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);weaponStabilityResourceWritten(dst);glitchFrameInvalidatePool(dst);}
+    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -3517,7 +3525,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
                                                 ID3D11Buffer* dst, UINT off,
                                                 ID3D11UnorderedAccessView* src) {
     gpuFrameCommand(self);
-    if(!foreignContext(self)){uiDeferredResourceWrite(self,dst);weaponStabilityResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
+    if(!foreignContext(self)){uiDeferredResourceWrite(self,dst);motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }
@@ -3535,8 +3543,8 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         // Buffer boxes are byte ranges. Keep the destination offset: a
         // small upload into the shared IB must not invalidate other meshes.
         if(box && box->right>=box->left)
-            weaponStabilityResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
-        else weaponStabilityResourceWritten(dst);
+            motionResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
+        else motionResourceWritten(dst);
         uiSeparationResourceWrite(dst);
         uiDeferredResourceWrite(self,dst);
         uiDeferredCopyRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,box);
@@ -3565,8 +3573,8 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
     if (!foreignContext(self)) {
-        if(box && box->right>=box->left)weaponStabilityResourceWritten(dst,box->left,box->right);
-        else weaponStabilityResourceWritten(dst);
+        if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
+        else motionResourceWritten(dst);
         uiSeparationResourceWrite(dst);
         uiDeferredResourceWrite(self,dst);
         glitchFrameInvalidatePool(dst);
@@ -3811,18 +3819,16 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
-    // Observe before forwardWithVerdict: curved-screen substitution can
-    // consume the composite without calling this lambda.
-    if (self == g_state->ownerCtx) weaponStabilityObserveScreen();
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        const bool attached = self == g_state->ownerCtx && !g_state->rtv0Eye &&
-            weaponStabilityDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,
-                                startIndex,baseVertex,startInstance,
-                                g_state->panelW?g_state->panelW:1920,g_state->panelH?g_state->panelH:1080);
-        if (!attached) g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                                        baseVertex, startInstance);
+        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                          baseVertex, startInstance);
+        // The weapon's temporal-AA motion vectors, from the pool the draw just read.
+        if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
+            weaponMotionWants(bindingShaderHash(BindSlot::Vs)))
+            weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
+                             startIndex, baseVertex, startInstance);
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
         if(self==g_state->ownerCtx) {
@@ -3852,7 +3858,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
-        return !attached;
+        return true;  // the original draw was issued
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
@@ -4401,7 +4407,6 @@ void vScreenRefreshConfig() {
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
-    weaponStabilityConfigure(cfg);
     nightVisionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
@@ -4579,7 +4584,6 @@ void vScreenFrameBoundary() {
         uiDeferredFrameBoundary(g_state->ownerCtx);
         uiDepthFrameBoundary(g_state->ownerCtx);
         screenMotionFrameBoundary();
-        weaponStabilityFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
         meshMotionFrameBoundary(g_state->ownerCtx);
         // The sharpening's warm compile and missing-hook note, once a frame,
@@ -5548,7 +5552,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     screenMotionConfigure(cfg);
-    weaponStabilityConfigure(cfg);
     nightVisionConfigure(cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
@@ -5893,7 +5896,6 @@ void shutdownVScreenFixes() {
     uiDeferredShutdown();
     uiDepthShutdown();
     screenMotionShutdown();
-    weaponStabilityShutdown();
     nightVisionShutdown();
     celestialMotionShutdown();
     meshMotionShutdown();

@@ -41,6 +41,8 @@ struct State {
     uint32_t lastCullMode = 0;
     uint32_t lastDeferredPacing = 0;
     bool pacingNoted = false;
+    bool weaponStabilityNoted = false;
+    bool lastWeaponStability = true;
     EdvrNativeFrameDecision cachedDecision{};
 };
 
@@ -379,31 +381,29 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.resubmitEnabled = edvr::Config::get().getBool(
         "advanced.transition_flash_resubmit", true) ? 1u : 0u;
 
-    // experimental.turbo_mode: "on" always defers, "on_foot" only while the
-    // journal watcher says Status.json reports on foot, anything else (bad
-    // spelling included) reads as "off".
-    const std::string turboMode = edvr::Config::get().getString(
-        "experimental.turbo_mode", "off");
-    if (_stricmp(turboMode.c_str(), "on") == 0) {
-        result.deferredPacing = 1u;
-    } else if (_stricmp(turboMode.c_str(), "on_foot") == 0) {
-        result.deferredPacing =
-            (edvr::journalOnFootKnown() && edvr::journalOnFoot()) ? 1u : 0u;
-        if (!state->pacingNoted && !edvr::journalWatchActive()) {
-            edvr::Log::get().note(
-                "turbo mode: experimental.turbo_mode = on_foot needs the journal "
-                "watcher (d3d11.journal_watch) to say when you are on foot, and "
-                "it is off, so turbo never engages.");
-            state->pacingNoted = true;
-        }
-    } else {
-        result.deferredPacing = 0u;
-        if (!state->pacingNoted && _stricmp(turboMode.c_str(), "off") != 0) {
-            edvr::Log::get().note(
-                "turbo mode: experimental.turbo_mode = %s is not off, on_foot or "
-                "on; reading it as off.", turboMode.c_str());
-            state->pacingNoted = true;
-        }
+    // fix.weapon_stability: while the journal watcher says Status.json
+    // reports on foot, the frame wait moves from WaitGetPoses to the second
+    // eye's Submit (deferred pacing, OpenXR Toolkit's "Turbo mode"), which
+    // is what holds the weapon steady on mouse turns. Off, in a ship, or
+    // with the watcher off, the wait stays in WaitGetPoses.
+    const bool weaponStability = edvr::Config::get().getBool(
+        "fix.weapon_stability", true);
+    result.deferredPacing =
+        (weaponStability && edvr::journalOnFootKnown() && edvr::journalOnFoot())
+            ? 1u : 0u;
+    if (!state->weaponStabilityNoted ||
+        state->lastWeaponStability != weaponStability) {
+        edvr::Log::get().note(
+            "weapon stability: %s (live; the frame wait moves to the eye "
+            "submit while on foot).", weaponStability ? "on" : "off");
+        state->weaponStabilityNoted = true;
+        state->lastWeaponStability = weaponStability;
+    }
+    if (weaponStability && !state->pacingNoted && !edvr::journalWatchActive()) {
+        edvr::Log::get().note(
+            "weapon stability: needs the journal watcher (d3d11.journal_watch) "
+            "to say when you are on foot, and it is off, so it never engages.");
+        state->pacingNoted = true;
     }
 
     if (physicalValid) {

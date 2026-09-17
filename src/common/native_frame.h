@@ -51,9 +51,9 @@ struct EdvrNativeFrameOutput {
     // (nose) and vertical edges, 0..30, as a narrower projection and a
     // proportionally smaller render size.
     float trimOuterDeg, trimNasalDeg, trimVerticalDeg;
-    // Version 3 and later. 1: the runtime hands the game its poses without
-    // waiting for the compositor's frame and waits at Submit instead
-    // (experimental.turbo_mode); 0: the wait stays in WaitGetPoses.
+    // Version 3 and later. 1: hold the frame wait for the second Submit
+    // (fix.weapon_stability while on foot); 0: the wait stays in
+    // WaitGetPoses.
     uint32_t deferredPacing;
 };
 

@@ -3,6 +3,7 @@
 #include "../../src/common/config.h"
 #include "../../src/common/native_render_settings.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/journal_watch.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -13,6 +14,14 @@
 #include <limits>
 #include <string>
 #include <thread>
+
+// The journal watcher is stubbed so the on-foot signal is the rig's to set.
+static bool g_journalActive = false, g_onFootKnown = false, g_onFoot = false;
+namespace edvr {
+bool journalWatchActive() { return g_journalActive; }
+bool journalOnFootKnown() { return g_onFootKnown; }
+bool journalOnFoot() { return g_onFoot; }
+}
 
 using Microsoft::WRL::ComPtr;
 
@@ -299,38 +308,40 @@ int wmain(int argc, wchar_t** argv) {
               trimOutput.trimNasalDeg == 0.0f,
           "a runtime-only trim entry applies; an empty list and another headset's entry do not");
 
-    // experimental.turbo_mode selects EdvrNativeFrameOutput::deferredPacing
-    // (version 3 only): on always defers, on_foot defers only once the
-    // journal watcher says the player is on foot, and off never does. This
-    // rig never starts the journal watcher, so on_foot reads as off here.
-    edvr::Config::get().set("experimental.turbo_mode", "on");
-    EdvrNativeFrameOutput turboOnOutput{sizeof(turboOnOutput), EDVR_NATIVE_FRAME_VERSION_3};
-    EdvrNativeFrameInput turboOnFrame = input(41, 7, 11);
-    check(table.beginFrame(table.context, &turboOnFrame, &turboOnOutput) == S_OK &&
-              turboOnOutput.deferredPacing == 1,
-          "turbo_mode = on always defers pacing");
+    // fix.weapon_stability && the journal watcher's on-foot signal select
+    // EdvrNativeFrameOutput::deferredPacing (version 3 only). The journal
+    // functions are stubbed above so this rig can drive that signal directly
+    // instead of needing a real journal file.
+    EdvrNativeFrameOutput defaultOutput{sizeof(defaultOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput defaultFrame = input(41, 7, 11);
+    check(table.beginFrame(table.context, &defaultFrame, &defaultOutput) == S_OK &&
+              defaultOutput.deferredPacing == 0,
+          "weapon stability without the journal watcher never defers pacing");
 
-    edvr::Config::get().set("experimental.turbo_mode", "off");
-    EdvrNativeFrameOutput turboOffOutput{sizeof(turboOffOutput), EDVR_NATIVE_FRAME_VERSION_3};
-    EdvrNativeFrameInput turboOffFrame = input(41, 7, 12);
-    check(table.beginFrame(table.context, &turboOffFrame, &turboOffOutput) == S_OK &&
-              turboOffOutput.deferredPacing == 0,
-          "turbo_mode = off never defers pacing");
+    g_journalActive = g_onFootKnown = g_onFoot = true;
+    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput onFootFrame = input(41, 7, 12);
+    check(table.beginFrame(table.context, &onFootFrame, &onFootOutput) == S_OK &&
+              onFootOutput.deferredPacing == 1,
+          "weapon stability on foot defers pacing (version 3)");
 
-    edvr::Config::get().set("experimental.turbo_mode", "on_foot");
-    EdvrNativeFrameOutput turboFootOutput{sizeof(turboFootOutput), EDVR_NATIVE_FRAME_VERSION_3};
-    EdvrNativeFrameInput turboFootFrame = input(41, 7, 13);
-    check(table.beginFrame(table.context, &turboFootFrame, &turboFootOutput) == S_OK &&
-              turboFootOutput.deferredPacing == 0,
-          "turbo_mode = on_foot with no journal watcher never defers pacing");
+    g_onFoot = false;
+    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput inShipFrame = input(41, 7, 13);
+    check(table.beginFrame(table.context, &inShipFrame, &inShipOutput) == S_OK &&
+              inShipOutput.deferredPacing == 0,
+          "weapon stability in a ship keeps the wait in WaitGetPoses");
 
-    edvr::Config::get().set("experimental.turbo_mode", "ON");
-    EdvrNativeFrameOutput turboUpperOutput{sizeof(turboUpperOutput), EDVR_NATIVE_FRAME_VERSION_3};
-    EdvrNativeFrameInput turboUpperFrame = input(41, 7, 14);
-    check(table.beginFrame(table.context, &turboUpperFrame, &turboUpperOutput) == S_OK &&
-              turboUpperOutput.deferredPacing == 1,
-          "turbo_mode is matched case-insensitively");
-    edvr::Config::get().set("experimental.turbo_mode", "off");
+    g_onFoot = true;
+    edvr::Config::get().set("fix.weapon_stability", "0");
+    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_3};
+    EdvrNativeFrameInput disabledFrame = input(41, 7, 14);
+    check(table.beginFrame(table.context, &disabledFrame, &disabledOutput) == S_OK &&
+              disabledOutput.deferredPacing == 0,
+          "fix.weapon_stability = 0 never defers pacing");
+
+    edvr::Config::get().set("fix.weapon_stability", "1");
+    g_journalActive = g_onFootKnown = g_onFoot = false;
 
     // A version 2 caller is still answered in exactly its own shape, trims
     // and all, with the pacing field never written into its (absent) tail.
