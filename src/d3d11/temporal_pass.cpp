@@ -576,6 +576,7 @@ struct Slot {
     int           eye = -1;
     uint32_t      frame = 0;
     Treatment     treatment = Treatment::None;
+    bool          lean = false;   // the own path's dispatch was the lean shader
     uint32_t      outW = 0, outH = 0;
     uint32_t      fmt = 0;
     uint32_t      configGen = 0;
@@ -670,9 +671,10 @@ struct WindowKey {
     uint32_t  outW = 0, outH = 0;
     uint32_t  fmt = 0;
     uint32_t  configGen = 0;
+    bool      lean = false;   // the own path ran the lean shader, not the instrumented one
     bool operator==(const WindowKey& o) const {
         return treatment == o.treatment && outW == o.outW && outH == o.outH &&
-               fmt == o.fmt && configGen == o.configGen;
+               fmt == o.fmt && configGen == o.configGen && lean == o.lean;
     }
     bool operator!=(const WindowKey& o) const { return !(*this == o); }
 };
@@ -713,11 +715,12 @@ double windowPercentile(double* v, int n, double frac) {
     return v[lo] * (1.0 - t) + v[hi] * t;
 }
 
-const char* treatmentName(Treatment t) {
+const char* treatmentName(Treatment t, bool lean) {
     switch (t) {
         case Treatment::Fovea:     return "foveated ngx";
         case Treatment::FullFrame: return "full-frame ngx";
-        default:                   return "own history (no ngx)";
+        default:                   return lean ? "own history (no ngx, lean)"
+                                               : "own history (no ngx, instrumented)";
     }
 }
 
@@ -752,7 +755,7 @@ void flushWindow(const char* reason) {
     char line[1100];
     int len = snprintf(line, sizeof(line),
         "temporal aa price: %s, %ux%u, %d stereo pairs (%s), ms per pair "
-        "median/p95:", treatmentName(g_windowKey.treatment), g_windowKey.outW,
+        "median/p95:", treatmentName(g_windowKey.treatment, g_windowKey.lean), g_windowKey.outW,
         g_windowKey.outH, n, reason);
     for (int ri = 0; ri < kRegionCount && len > 0 && len < static_cast<int>(sizeof(line)); ++ri) {
         len += snprintf(line + len, sizeof(line) - len, " %s %.2f/%.2f",
@@ -855,7 +858,7 @@ void finalizePending(PendingPair& p) {
 
 void priceSlot(const Slot& q) {
     if (q.eye != 0 && q.eye != 1) return;   // an eye index this report cannot place
-    const WindowKey key{q.treatment, q.outW, q.outH, q.fmt, q.configGen};
+    const WindowKey key{q.treatment, q.outW, q.outH, q.fmt, q.configGen, q.lean};
     int idx = -1;
     for (int i = 0; i < kPendingCap; ++i) {
         if (g_pending[i].used && g_pending[i].frame == q.frame) { idx = i; break; }
@@ -997,8 +1000,17 @@ int64_t  g_shipOutBoxDm = 0;     // the sum over 41 of the depth less the box ce
 uint64_t g_shipFootNoDepth = 0;  // in a footprint with no depth (45)
 
 void maybeLogPrice() {
-    if (g_priceLogged || g_timeCount < 120 || g_pixelsSeen == 0) return;
+    if (g_priceLogged || g_timeCount < 120) return;
     g_priceLogged = true;
+    if (g_pixelsSeen == 0) {
+        Log::get().note(
+            "temporal aa: measured %.2f ms per eye on average (max %.2f) at "
+            "the temporal work's GPU bracket. History rejection and clipping "
+            "were not counted (the lean own shader, or NVIDIA's history; "
+            "advanced.temporal_aa_diagnostics = 1 counts them).",
+            g_timeSum / static_cast<double>(g_timeCount), g_timeMax);
+        return;
+    }
     Log::get().note(
         "temporal aa: measured %.2f ms per eye on average (max %.2f) at "
         "the temporal work's GPU bracket. Diagnostic rejection %.1f%%, "
@@ -1156,6 +1168,10 @@ bool acceptPassDevice(ID3D11Device* dev) {
 
 ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
+ID3D11ComputeShader*       g_csFast = nullptr;
+bool                       g_csFastTried = false;
+bool                       g_leanFailNoted = false;   // the lean own shader could not be created, once
+bool                       g_leanNoted = false;       // the own path first ran the lean shader, once
 ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for DLAA
 bool                       g_csMvTried = false;
 ID3D11ComputeShader*       g_csMvFast = nullptr;
@@ -1171,6 +1187,24 @@ ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
             diagnostics ? kTemporalMvBytecode : kTemporalMvFastBytecode,
             diagnostics ? sizeof(kTemporalMvBytecode) : sizeof(kTemporalMvFastBytecode),
             diagnostics ? "temporal_mv_cs" : "temporal_mv_fast_cs", "temporal aa");
+    }
+    return shader;
+}
+// Mirrors motionShader for the pass's own resolve: the instrumented shader
+// (the registration instrument, its probes and its counters) when
+// diagnostics is asked for, otherwise the lean variant with that work
+// compiled out. g_cs is also created eagerly elsewhere (it doubles as the
+// availability check for the whole native path); this lazy create only
+// matters the first time the lean variant is wanted.
+ID3D11ComputeShader* ownShader(ID3D11DeviceContext* ctx, bool diagnostics) {
+    auto*& shader = diagnostics ? g_cs : g_csFast;
+    auto& tried = diagnostics ? g_csTried : g_csFastTried;
+    if (!shader && !tried) {
+        tried = true;
+        shader = shaderSwapCreateCs(ctx,
+            diagnostics ? kTemporalAaBytecode : kTemporalAaFastBytecode,
+            diagnostics ? sizeof(kTemporalAaBytecode) : sizeof(kTemporalAaFastBytecode),
+            diagnostics ? "temporal_aa_cs" : "temporal_aa_fast_cs", "temporal aa");
     }
     return shader;
 }
@@ -3780,7 +3814,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // Keep periodic cost measurements without full-rate readbacks. Captures
         // and explicit diagnostics retain all statistics and registration probes.
         const bool diagnostics = g_diagnostics || g_debugMode != 0 || g_eyeRunLeft > 0 || g_eyeRunReady;
-        const bool statsWritten = diagnostics || (flags & 2u) == 0 || g_foveaDeg > 0.0f;
+        ID3D11ComputeShader* ownCs = ownShader(ctx, diagnostics);
+        const bool leanOwn = !diagnostics && ownCs != nullptr && ownCs == g_csFast;
+        if (!ownCs) ownCs = g_cs;
+        if (!diagnostics && !g_csFast && !g_leanFailNoted) {
+            g_leanFailNoted = true;
+            Log::get().note("temporal aa: the lean own shader could not be created; the "
+                            "instrumented one runs instead (its registration counters stay on).");
+        }
+        const bool statsWritten = diagnostics || ((flags & 2u) == 0 && !leanOwn) || g_foveaDeg > 0.0f;
         const bool timingOwner = gpuTimingBind(dev, ctx) && gpuTimingAccepts(ctx);
         // Stage 0 price report: sample every call the timing owner accepts,
         // not just the stats-written 1-in-32 (fovea already ran every call;
@@ -4431,7 +4473,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         bool ran = usedDlaa || (ensureNative(dev, e, viewFmt) && setParams(ctx, p));
         // A native fallback also writes counters, even when the requested
         // trained path was running without diagnostics.
-        if (ran && !usedDlaa && !statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
+        if (ran && !usedDlaa && !leanOwn && !statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
         bool ownRan = false;
         if (ran && !usedDlaa) {
             // THE FOVEA (docs/performance.md feature 6), NVIDIA's part first:
@@ -4728,7 +4770,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ID3D11UnorderedAccessView* nullUav[7] = {};
                 ctx->CSSetShaderResources(0, 17, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
-                ctx->CSSetShader(g_cs, nullptr, 0);
+                ctx->CSSetShader(ownCs, nullptr, 0);
+                if (leanOwn && !g_leanNoted) {
+                    g_leanNoted = true;
+                    Log::get().note(
+                        "temporal aa: the pass's own history runs the lean shader -- the "
+                        "registration instrument (up to four candidate reprojections per "
+                        "pixel, counted and not used), its probes and its counters are "
+                        "compiled out; advanced.temporal_aa_diagnostics = 1 runs the "
+                        "instrumented one, live, and the price line names which ran.");
+                }
                 ID3D11ShaderResourceView* srvs[17] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
@@ -4810,10 +4861,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (g_slots[qs].timing && !g_slots[qs].timer.end(ctx)) {
                 g_slots[qs].timer.reset(ctx); g_slots[qs].timing=false;
             }
-            if (statsWritten || (ran && !usedDlaa)) ctx->CopyResource(g_slots[qs].staging, g_stats);
+            if (statsWritten || (ran && !usedDlaa && !leanOwn)) ctx->CopyResource(g_slots[qs].staging, g_stats);
             g_slots[qs].inUse = true;
             g_slots[qs].timeDone = !g_slots[qs].timing;
-            g_slots[qs].statsDone = !(statsWritten || (ran && !usedDlaa));
+            g_slots[qs].statsDone = !(statsWritten || (ran && !usedDlaa && !leanOwn));
             g_slots[qs].pixels = static_cast<uint64_t>(w) * h;
             g_slots[qs].hadHistory = useHistory;
             g_slots[qs].headDeg = headDeg;
@@ -4835,6 +4886,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             g_slots[qs].treatment = foveaComposited ? Treatment::Fovea
                                     : usedDlaa       ? Treatment::FullFrame
                                                      : Treatment::None;
+            g_slots[qs].lean = leanOwn;
             g_slots[qs].outW = foW;
             g_slots[qs].outH = foH;
             g_slots[qs].fmt = static_cast<uint32_t>(sd.Format);
@@ -5505,9 +5557,17 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
     if (treated) *treated = g_treats;
     if (avgMs) *avgMs = g_timeCount ? g_timeSum / static_cast<double>(g_timeCount) : 0.0;
     if (maxMs) *maxMs = g_timeMax;
-    const double px = g_pixelsSeen ? static_cast<double>(g_pixelsSeen) : 1.0;
-    if (rejectPct) *rejectPct = 100.0 * static_cast<double>(g_rejected) / px;
-    if (clipPct) *clipPct = 100.0 * static_cast<double>(g_clipped) / px;
+    if (g_pixelsSeen == 0) {
+        // Not counted: the lean own shader writes no Stats, and NVIDIA's
+        // history is never instrumented either. -1 tells callers to say so
+        // rather than print a spurious 0%.
+        if (rejectPct) *rejectPct = -1.0;
+        if (clipPct) *clipPct = -1.0;
+    } else {
+        const double px = static_cast<double>(g_pixelsSeen);
+        if (rejectPct) *rejectPct = 100.0 * static_cast<double>(g_rejected) / px;
+        if (clipPct) *clipPct = 100.0 * static_cast<double>(g_clipped) / px;
+    }
     return true;
 }
 
@@ -5967,6 +6027,7 @@ void temporalPassShutdown() {
     if (g_samp) { g_samp->Release(); g_samp = nullptr; }
     if (g_cb) { g_cb->Release(); g_cb = nullptr; }
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
+    if (g_csFast) { g_csFast->Release(); g_csFast = nullptr; }
 }
 
 bool temporalPassEyeOffset(int eye, float out[3]) {

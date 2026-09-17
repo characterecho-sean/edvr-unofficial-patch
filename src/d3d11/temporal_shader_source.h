@@ -1297,6 +1297,7 @@ R"HLSL(
                 outc = lerp(cur.rgb, ycocgToRgb(hc), blEff);
                 used = true;
             }
+#if EDVR_TEMPORAL_DIAGNOSTICS
             // The registration instrument: what each candidate would have
             // fetched, judged by the same clip, counted and not used. The
             // candidates: 0 the head's rotation alone, 2 the world path's
@@ -1333,7 +1334,9 @@ R"HLSL(
                     }
                 }
             }
+#endif
         }
+#if EDVR_TEMPORAL_DIAGNOSTICS
         // The registration probes: on a 64-pixel grid, where the frame has
         // texture, the history's best match within 4 px of the predicted
         // position by a 5x5 luma SAD. The mean offset per class -- the
@@ -1403,6 +1406,7 @@ R"HLSL(
 #endif
             }
         }
+#endif
         if (!used) count[0] = 1;
         float3 o = saturate(outc);
         N[id.xy] = float4(o, 1.0);
