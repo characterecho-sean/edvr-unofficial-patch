@@ -732,9 +732,12 @@ uint32_t  g_lastWindowDropped = 0;
 // THE HEAD LEAD (advanced.temporal_aa_fovea_lead). NVIDIA's crop history is
 // crop-local, so content entering the rectangle at its leading edge has no
 // history there and is soft for its first frames. The lead slides the
-// rectangle toward the head's turn by this many FRAMES of head motion, so
-// that fresh strip lands further out, and adds the slide to the vectors the
-// crop reads so the history it does have stays registered.
+// rectangle into a turn of the head or the ship by this many FRAMES of the
+// motion the frame's centre is under -- whichever rows the motion pass
+// itself uses for far content there, so the two always agree -- and adds
+// the slide to the vectors the crop reads, so the history it does have
+// stays registered. The gaze is on the leading side of either turn, and
+// the fresh strip is a fact about the content, not about the head.
 //
 // Declared up here, well above the rest of the fovea's settings (g_foveaDeg
 // and friends below), because flushWindow -- the price report, right after
@@ -858,17 +861,23 @@ void flushWindow(const char* reason) {
     Log::get().note("%s", line);
 
     // The head lead's own line, once per window per eye while the key is on
-    // -- zeros when the head never moved, which reads differently from the
-    // line being absent (the key off, or this build without it).
+    // AND the lead ran at least once in the window (st.frames). A still head
+    // with the crop engaged prints zeros -- which is the evidence that the
+    // lead was live and measured nothing -- while a window the crop never
+    // ran in prints nothing at all, the price line above having already said
+    // so by its treatment. The counters reset either way, so a window's
+    // figures are never another window's.
     if (g_foveaLeadFrames > 0.0f) {
         for (int eyeIdx = 0; eyeIdx < 2; ++eyeIdx) {
             FoveaLeadState& st = g_foveaLead[eyeIdx];
-            const double mean = st.frames > 0 ? st.sumDeg / static_cast<double>(st.frames) : 0.0;
-            Log::get().note(
-                "temporal aa fovea lead: eye %d peak %.1f deg (%d px) this window, mean %.2f deg, "
-                "held at the frame's edge on %u frames, motion vectors offset on %u frames",
-                eyeIdx, static_cast<double>(st.peakDeg),
-                static_cast<int>(st.peakPx + 0.5f), mean, st.held, st.moved);
+            if (st.frames > 0) {
+                const double mean = st.sumDeg / static_cast<double>(st.frames);
+                Log::get().note(
+                    "temporal aa fovea lead: eye %d peak %.1f deg (%d px) this window, mean %.2f "
+                    "deg, held at the frame's edge on %u frames, motion vectors offset on %u frames",
+                    eyeIdx, static_cast<double>(st.peakDeg),
+                    static_cast<int>(st.peakPx + 0.5f), mean, st.held, st.moved);
+            }
             st.peakPx = st.peakDeg = 0.0f;
             st.sumDeg = 0.0;
             st.frames = st.held = st.moved = 0;
@@ -2817,16 +2826,19 @@ FoveaRegion computeFoveaRegion(float l, float r, float down, float up,
 // (InMVScaleX/Y = 1, so previous = current + mv). This is the mv entry of
 // temporal_shader_source.h transcribed: its direction build (d.x/d.y/d.z
 // from tanNow, "d.z = -1.0"), its rotation of that direction into last
-// frame's view (dp = the delta rows times d, taken with NO depth -- the far
+// frame's view (dp = the chosen rows times d, taken with NO depth -- the far
 // plane's rotation-only case), and its projection through tanPrev to a
-// previous pixel, then motion = pp - p. r0/r1/r2 are the cbuffer's dR0..dR2
-// rows: the rotation taking THIS frame's view directions to last frame's.
+// previous pixel, then motion = pp - p. r0/r1/r2 are whichever rotation rows
+// a far pixel at the centre would take this frame -- the head's delta
+// (dR0..dR2) or the camera's (c2R0..c2R2, the head and the ship together),
+// the caller mirrors the shader's own choice -- each being the rotation
+// taking THIS frame's view directions to last frame's.
 //
-// Sign, which the whole feature hangs off: turning the head right moves
-// world content left on screen, so the centre's content WAS to the right
-// last frame, pp.x > p.x and mv.x > 0. Row 0 of the frame sits at the UP
-// tangent (the frusta-order comment above computeFoveaRegion), so pitching
-// up moves content DOWN the rows and mv.y < 0.
+// Sign, which the whole feature hangs off: turning right moves world content
+// left on screen, so the centre's content WAS to the right last frame,
+// pp.x > p.x and mv.x > 0. Row 0 of the frame sits at the UP tangent (the
+// frusta-order comment above computeFoveaRegion), so pitching up moves
+// content DOWN the rows and mv.y < 0.
 bool foveaCentreMotion(const float tanNow[4], const float tanPrev[4], const float r0[3],
                        const float r1[3], const float r2[3], uint32_t fw, uint32_t fh,
                        float* mvX, float* mvY) {
@@ -4405,18 +4417,47 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 };
                 if (cropOf(w, h, fcx, fcy, fcw, fch)) {
                     // THE HEAD LEAD (advanced.temporal_aa_fovea_lead): the
-                    // rectangle slides toward the head's turn by this many
-                    // frames of the frame centre's own motion, so the strip
-                    // entering at its leading edge -- which has no crop-local
-                    // NVIDIA history and is soft for its first frames -- lands
-                    // further out. The BASE alone moves (foveaLeadBase says
-                    // why the extents may not), and the slide is handed to the
-                    // motion pass so the history that IS there stays
-                    // registered.
+                    // rectangle slides into a turn of the head or the ship by
+                    // this many frames of the frame centre's own motion, so the
+                    // strip entering at its leading edge -- which has no
+                    // crop-local NVIDIA history and is soft for its first
+                    // frames -- lands further out. The BASE alone moves
+                    // (foveaLeadBase says why the extents may not), and the
+                    // slide is handed to the motion pass so the history that IS
+                    // there stays registered.
                     if (g_foveaLeadFrames > 0.0f && eye >= 0 && eye < 2) {
                         FoveaLeadState& st = g_foveaLead[eye];
                         float mvx = 0.0f, mvy = 0.0f;
-                        foveaCentreMotion(p.tanNow, p.tanPrev, p.dR0, p.dR1, p.dR2, w, h, &mvx, &mvy);
+                        // Which rows a FAR pixel at the centre would take THIS
+                        // frame, so MV_centre is the vector the shader actually
+                        // writes there: the mv entry's own selection
+                        // (temporal_shader_source.h:836 the head's delta rows,
+                        // :862 the camera's -- the head and the ship together)
+                        // under its own condition, :843 knobs.y != 0 (a depth
+                        // is bound; the whole branch sits inside it) and :857
+                        // and :860 (tvCam.w, the world path is on; split.x, a
+                        // ship split is set; and a far pixel always satisfies
+                        // "far || z > split.x"). Its last term, scannerUi at
+                        // :859, is a per-pixel uiCovered() read the CPU cannot
+                        // make; the frame-wide flag that feeds it (probe.w bit
+                        // 128, fssInterfaceLive) stands in, so while the
+                        // scanner's screen is up the whole frame takes the
+                        // head's rows -- the right way to be wrong there, the
+                        // panel sitting in front of the seat and following the
+                        // head.
+                        //
+                        // A mid-turn stand-down of the world path (the draw
+                        // floor, a lost camera row) steps the target between
+                        // the two readings; the one-pole below absorbs that,
+                        // and the slide handed to NVIDIA is base_now -
+                        // base_prev either way, so nothing is mis-registered
+                        // by the switch.
+                        const bool centreWorldRows = p.knobs[1] != 0.0f && p.tvCam[3] != 0.0f &&
+                                                     p.split[0] > 0.0f && !fssInterfaceLive();
+                        const float* row0 = centreWorldRows ? p.cand[2][0] : p.dR0;
+                        const float* row1 = centreWorldRows ? p.cand[2][1] : p.dR1;
+                        const float* row2 = centreWorldRows ? p.cand[2][2] : p.dR2;
+                        foveaCentreMotion(p.tanNow, p.tanPrev, row0, row1, row2, w, h, &mvx, &mvy);
                         const FoveaLead want = foveaLeadPixels(mvx, mvy, g_foveaLeadFrames);
                         // One pole at a quarter: a tracker's own noise times N
                         // frames would otherwise jitter the seam every frame.
@@ -5286,10 +5327,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         g_foveaLeadNoted = true;
                         Log::get().note(
                             "temporal aa: the fovea's head lead is on at %g frames "
-                            "(advanced.temporal_aa_fovea_lead) -- the crop slides toward a head "
-                            "turn and NVIDIA's crop reads its own copy of the motion vectors with "
-                            "that slide added, %.0f MB more resident per eye at %ux%u. The price "
-                            "report's own lead line says how far it actually moved.",
+                            "(advanced.temporal_aa_fovea_lead) -- the crop slides into a turn of "
+                            "the head or the ship, and NVIDIA's crop reads its own copy of the "
+                            "motion vectors with that slide added, %.0f MB more resident per eye "
+                            "at %ux%u. The price report's own lead line says how far it actually "
+                            "moved.",
                             static_cast<double>(g_foveaLeadFrames),
                             static_cast<double>(w) * h * 4.0 / 1048576.0, w, h);
                     }
@@ -6226,13 +6268,14 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(edge) || edge < 1.0f) edge = 1.0f;
     if (edge > 30.0f) edge = 30.0f;
     g_foveaEdgeDeg = edge;
-    // THE HEAD LEAD: how many FRAMES of head motion the crop leads the head's
-    // turn by, so the strip entering at its leading edge -- with no crop-local
-    // NVIDIA history, and soft for its first frames -- sits further out.
-    // Frames, not seconds, because that is the unit DLSS converges in. 0 is
-    // off; above a dozen frames the rectangle would be somewhere the head is
-    // not. Live, and a change forgets the slide's state (the crop must never
-    // slide against a base from the old setting).
+    // THE HEAD LEAD: how many FRAMES of the centre's own motion the crop leads
+    // a turn of the head or the ship by, so the strip entering at its leading
+    // edge -- with no crop-local NVIDIA history, and soft for its first frames
+    // -- sits further out. Frames, not seconds, because that is the unit DLSS
+    // converges in. 0 is off; above a dozen frames the rectangle would be
+    // somewhere the pilot is not looking. Live, and a change forgets the
+    // slide's state (the crop must never slide against a base from the old
+    // setting).
     float lead = cfg.getFloat("advanced.temporal_aa_fovea_lead", 0.0f);
     if (!std::isfinite(lead) || lead < 0.0f) lead = 0.0f;
     if (lead > 12.0f) lead = 12.0f;
