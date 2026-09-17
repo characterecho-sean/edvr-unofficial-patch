@@ -54,12 +54,12 @@
   it works (Sean): the eye mask toggle and trim give way to a DLSS
   rectangle with wide/narrow presets and one per-headset size value; gaze
   later where the headset publishes it. fix.eye_mask keys stay until then.
-- **Next: the flight, FRONTIER, installed 2026-09-17 (the build of this
-  entry's commit, v0.17.0-rc.3-65; Sean authorised the install).** Set
-  temporal_aa = dlss first (the ini says fsr). Arms by editing the live
-  ini, 75 s each: A = temporal_aa_fovea 0; B = edges, _vertical 20, _outer
-  25, _nasal 7, temporal_aa_periphery sharp, _shape square; A. Read with
-  `--expect-build <hash>`; columns centre, periphery, compose, ui.
+- **Next: the flight, FRONTIER, installed 2026-09-17 as
+  v0.17.0-rc.3-65-g1947c90 (Sean authorised the install).** Its ini now
+  carries dlss, the trims 20/25/7, shape square, periphery sharp (Edit
+  tool, diffed), so the arms are one key, edited live and held 75 s each:
+  temporal_aa_fovea 0 (A), edges (B), 0 (A). Never the menu. Read with
+  `--expect-build 1947c90`; columns centre, periphery, compose, ui.
 
 ## Investigation (2026-09-14)
 
@@ -1078,8 +1078,13 @@ the supersample retirement. Two things the flight should be read with:
   Stage 0 periphery-only picture also was for text. If B's HUD text
   reads worse than A's, this gap is the first suspect, before the crop.
 Build v0.17.0-rc.3-64-gc4c1490 (green, smoke PASSED including the region
-self-test), rebuilt clean-stamped on this entry's commit and installed
-into FRONTIER with tools/install_edvr.py (dry run, install, verify);
-Frontier's ini still says temporal_aa = fsr from the FSR session, so the
-flight starts by setting dlss. The version line Sean should expect is
-v0.17.0-rc.3-65-g<this commit>, read with `--expect-build <hash>`.
+self-test), rebuilt clean-stamped on the 1947c90 commit and installed
+into FRONTIER with tools/install_edvr.py (dry run, install, verify) as
+v0.17.0-rc.3-65-g1947c90, read with `--expect-build 1947c90`. On Sean's
+ask the Frontier ini was then edited (Edit tool, diffed against a
+snapshot, CRLF kept, four hunks): [fix] temporal_aa fsr -> dlss (the FSR
+session's setting; its flights are done), [advanced]
+temporal_aa_fovea_vertical 20, _outer 25 and _nasal 7 added under
+temporal_aa_fovea = 0, temporal_aa_fovea_shape = square and
+temporal_aa_periphery = sharp set. The arms are one key:
+temporal_aa_fovea 0, edges, 0.
