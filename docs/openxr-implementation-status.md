@@ -30,8 +30,9 @@ top and the standout findings; update it as entries are added.*
     named remaining qualification work, not yet done as one pass.
   - Matched-resolution performance/quality parity vs. the legacy path:
     named open at several checkpoints (VDXR, native timing, DLSS).
-  - `[experimental]` features (supersample resolve, FSS theater, gaze
-    foveation) are explicitly excluded from this parity work.
+  - `[experimental]` features (FSS theater, gaze foveation) are explicitly
+    excluded from this parity work; supersample resolve was retired
+    2026-09-16.
 - **Ruled out:**
   - The new outer GPU-timing instrument as the cause of head-movement
     shimmering — "rules out the new outer instrument as a necessary
@@ -139,8 +140,9 @@ retains its settings. The full build passed with 514 unchanged source hashes,
 hash-verified in Frontier; the startup-facing headset check is included in the
 combined retest above. Detailed qualification is recorded in that checkpoint.
 The user has excluded features listed under `[experimental]` from this parity
-work: supersample resolve, FSS theater and gaze foveation are deferred. This
-scope change does not remove existing settings or alter temporal AA already
+work: supersample resolve, FSS theater and gaze foveation are deferred
+(supersample resolve has since been retired, 2026-09-16). This scope
+change does not remove existing settings or alter temporal AA already
 implemented.
 
 The [VDXR startup investigation](openxr-vdxr-startup-2026-09-14.md) confirms

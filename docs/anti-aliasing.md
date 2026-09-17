@@ -4,14 +4,17 @@
 
 *Written 2026-09-15 from the entries dated 2026-09-10, 2026-09-08,
 2026-09-06 and 2026-09-02 through 09-04. Restates the journal below;
-not new evidence — update it whenever this doc changes.*
+not new evidence — update it whenever this doc changes.
+Updated 2026-09-16 for Feature A's retirement.*
 
 - **State:** Per "Current defaults" (2026-09-10): TAA/DLSS includes
-  UI/smoke depth and station motion automatically. Feature A's
-  resolve defaults `off` (`auto` shipped 2026-09-03, 06430da, until
-  6d22901 flipped it 2026-09-10 in v0.15.0, bundling per-object motion
-  into `temporal_aa` the same commit; `off` is current). Feature A is
-  built, field-verified on both rigs. Feature B (temporal AA,
+  UI/smoke depth and station motion automatically. Feature A (the
+  supersample resolve) is RETIRED 2026-09-16: built and field-verified on
+  both rigs on the legacy OpenVR proxy (`auto` shipped 2026-09-03,
+  `off` from 6d22901 in v0.15.0), never called on the native OpenXR
+  runtime after the 2026-09-14 port, removed with its key rather
+  than ported; the eye-region rule it introduced stays in
+  `supersample_math.h`. Feature B (temporal AA,
   DLAA/DLSS) is built, flown almost daily 2026-09-02 to 09-08, but
   "is on its branch" per "Guidance for players now"; a 2026-09-06
   pass cut its cost 2.80 -> 2.02 ms/eye. C and D remain unbuilt
@@ -43,6 +46,9 @@ not new evidence — update it whenever this doc changes.*
     distance, the `camera` motion source, the transposed-reading A/B.
   - Full per-object motion-vector matrices: declined — the neighbourhood
     clamp already handles unmatched motion (unbuilt; per-object-motion.md).
+  - Feature A on the native runtime: retired 2026-09-16, not ported — the
+    native submit blit minifies an oversize eye with one bilinear tap
+    (`src/openxr/d3d11_stereo.cpp`), and the resolve had no caller there.
 - **Environment:** Native SteamVR is measured; under OpenComposite the
   game-side half "works regardless" but reaching the OpenXR layer is
   unverified. Two rigs disagree sharply: Pimax Crystal Super (~42
@@ -68,8 +74,9 @@ about the game, runtimes and SDKs are labelled measured (established in this
 repo's field logs or code), vendor-stated (their documentation or release
 notes), or believed; what can only be settled at implementation time or in a
 live session is collected under Phase 0. Feature A's passive mode was built
-on 2026-09-02, field-verified on both rigs by 2026-09-03 and ships as `auto`
-by default — its section records what was built and measured; everything
+on 2026-09-02, field-verified on both rigs by 2026-09-03 on the legacy OpenVR
+proxy, shipped `auto` then `off`, and was retired on 2026-09-16 — its
+section is the record of what was built and measured; everything
 else here is design.*
 
 ## The ask
@@ -288,6 +295,15 @@ The reason both real features are tractable:
   mechanism with a different replacement.
 
 ## Feature A — supersample resolve at the door
+
+*Retired 2026-09-16.* The legacy OpenVR proxy that called the resolve at
+submit was removed that day (1a54e9e), and the native OpenXR runtime that
+replaced it on 2026-09-14 never called it — the key had been inert since
+the port. Rather than port it, the key, the pass (`supersample_pass.cpp`),
+the export and the kernel arithmetic were removed;
+`supersampleRegionFromBounds` in `supersample_math.h` stays as the
+eye-region rule every door pass reads. What follows is the record of
+what was built and measured.
 
 **What it is.** When the game submits an eye image larger than the runtime
 asked for, EDVR filters it down to exactly the recommended size itself, with
@@ -1752,9 +1768,9 @@ if the guard is live) → **crop** (the guard) → **scale** (EASU up for
 native-size outgoing frame. Fusions come later, in the order their edge-tap
 questions are answered; v1 may run them sequentially, since each already
 exists or is one dispatch. Built so far (2026-09-03): temporal AA, the
-crop, the supersample resolve and the sharpen, sequential, each its own
-pass on the texture the one before produced; the fusions are noted in the
-code as future work.
+crop, the supersample resolve (retired 2026-09-16) and the sharpen,
+sequential, each its own pass on the texture the one before produced;
+the fusions are noted in the code as future work.
 
 ## The tracker never rests: the rest lock (shipped 2026-09-03, retired 2026-09-04)
 

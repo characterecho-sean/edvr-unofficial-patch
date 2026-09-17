@@ -93,7 +93,7 @@ float stopsOf(float strength) {
     return 2.0f * (1.0f - strength);
 }
 
-// The format allowlist: the resolve's, for its reasons (supersample_pass.cpp)
+// The format allowlist, shared with the temporal pass (temporal_pass.cpp)
 // -- typeless and UNORM families read and written through the family's
 // plain typed view, the source's own format kept on the output, sRGB-typed
 // sources refused rather than guessed at. RCAS runs on the stored values,

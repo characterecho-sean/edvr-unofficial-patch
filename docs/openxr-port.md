@@ -15,8 +15,9 @@ changes.*
   `[experimental]` features are deferred. Destination: native OpenXR for every
   user, retiring the forwarding proxy after acceptance gates. By 2026-09-16:
   the forwarding proxy is retired — `src/openvr` removed with its 23 keys; see
-  the closing entry below. This doc is the spec, not a build tracker;
-  completion is tracked in openxr-implementation-status.md.
+  the closing entry below. The supersample resolve, never ported to the native
+  transport, is retired with its key the same day. This doc is the spec, not
+  a build tracker; completion is tracked in openxr-implementation-status.md.
 - **Open:**
   - LibOVR/Oculus-path routing: "required completion work," remaining
     live qualification in openxr-oculus-selection-2026-09-14.md.
@@ -37,8 +38,9 @@ changes.*
     graphics APIs, quad-view stereo: explicitly not promised.
   - Sidecar timing, PDH sampling, direct swapchain output, the PP-off
     fold, depth layers, the quad menu: excluded from initial parity.
-  - Supersample resolve, FSS theater, gaze foveation,
-    `[experimental]` features: deferred from parity, not abandoned.
+  - FSS theater, gaze foveation, `[experimental]` features: deferred from
+    parity, not abandoned. Supersample resolve: retired 2026-09-16 rather
+    than ported.
 - **Next flight:** Per "Approval boundary" (2026-09-14): desktop checks
   continue while Sean is away; individual headset checks no longer gate each
   step, though "passing desktop tests does not establish a successful flight."
@@ -133,7 +135,7 @@ writes, in the three newest VR logs across the two installs (Frontier
 | Tracking space | seated (the launch centre's reset reached it) |
 | Eye-to-head rotation | dropped by the game (docs/canted-projection.md) |
 | Submit shape | one texture per eye, null bounds, on both rigs now; one double-wide texture with per-eye bounds on a Quest 3 over Steam Link, 2026-08-17 (`noteEyeTextureSize`) |
-| Submit format support in EDVR | the 8-bit RGBA and BGRA family: typeless, UNORM and sRGB (`supersample_resolve.cpp`). Supported formats in code do not prove which formats each rig submits |
+| Submit format support in EDVR | the 8-bit RGBA and BGRA family: typeless, UNORM and sRGB (the legacy proxy's `supersample_resolve.cpp`, removed 2026-09-16). Supported formats in code do not prove which formats each rig submits |
 | Threads | Submit and Present on one thread (measured 2026-08-15); VR init off the render thread (measured 2026-08-29); WaitGetPoses' thread not yet logged |
 | The environment on the two installs, latest logs | Steam: Valve's DLL, 4536x4480 recommended per eye. Frontier: OpenComposite, 5424x5356 recommended per eye, and "the recentre DID NOT TAKE" |
 
@@ -813,9 +815,12 @@ instruments, the FSS-theater and supersample-filter sub-keys,
 `experimental.submit_snapshot` — full list in the removal commit). This
 executes Migration decision 1.
 
-Supersample resolve, FSS theater and gaze foveation keep their parent keys and
-d3d11-side halves; they are unreachable until each is ported to the native
-transport — deferred from parity, not abandoned, per "Ruled out" above.
+FSS theater and gaze foveation keep their parent keys and d3d11-side halves;
+they are unreachable until each is ported to the native transport — deferred
+from parity, not abandoned, per "Ruled out" above. The supersample resolve
+did not wait: never called on the native runtime, it was retired on
+2026-09-16 — key, pass, export and arithmetic removed — leaving only the
+eye-region rule in `supersample_math.h`, which every door pass still reads.
 
 The installer's `openvr_api_orig.dll` recovery is unchanged: the game's
 original file is still preserved for uninstall, and native EDVR still never

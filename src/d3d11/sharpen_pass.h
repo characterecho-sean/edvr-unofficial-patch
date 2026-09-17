@@ -6,9 +6,9 @@
 // src/d3d11/fsr/ and already carried by the intro upscale) over the eye's
 // region, into an EDVR-owned texture of the region's size in the source's
 // own format, which the openvr half forwards with full bounds. It exists
-// for the two passes ahead of it: the supersample resolve's calm kernel
-// and the temporal pass's history each trade a little edge contrast for
-// calm, and this hands some of it back at the player's chosen strength --
+// for the pass ahead of it: the temporal pass's history trades a little
+// edge contrast for calm, and this hands some of it back at the
+// player's chosen strength --
 // docs/anti-aliasing.md's "sharpen" in the order at the door, and the seam
 // the resolve left marked for exactly this. Built 2026-09-03, after the
 // temporal pass's first flight found text a little soft.

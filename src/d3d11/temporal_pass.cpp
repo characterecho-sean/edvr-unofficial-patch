@@ -254,8 +254,7 @@ struct PassParams {
 };
 static_assert(sizeof(PassParams) == 6624, "the cbuffer is 414 16-byte rows");
 
-// The format allowlist: the supersample resolve's, for its reasons
-// (supersample_pass.cpp) -- typeless and UNORM families read and written
+// The format allowlist -- typeless and UNORM families read and written
 // through the family's plain typed view, the source's own format kept on
 // the output, sRGB-typed sources refused.
 DXGI_FORMAT viewFormatOf(DXGI_FORMAT f, int* index) {
