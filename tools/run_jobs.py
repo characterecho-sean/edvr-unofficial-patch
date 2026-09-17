@@ -11,6 +11,7 @@ still reads as if the rigs had run one after another.
   python tools\\run_jobs.py --script build.bat [--jobs N] [--mp N]
                            [--exe-dir build] [--serial a,b,c]... [--quiet d,e]
                            [--times build\\rig_times.json] [--dry-run]
+  python tools\\run_jobs.py --sweep-exe-dir build [--dry-run]
   python tools\\run_jobs.py --self-test
 
 --exe-dir is the directory the rigs' test exes are built into. Every process
@@ -20,6 +21,29 @@ of <exe-dir>\\edvr_logs: the proxy DLLs a test loads keep their logs and
 crash sentinels there, so two rigs' proxies never read each other's sentinels
 and stand down. A child a rig stages in a private directory keeps its own
 default, which the rigs that read such a child's log rely on.
+
+A rig that stages such a private directory directly under --exe-dir itself
+(its own copy of a proxy DLL, its own edvr.ini, its own children), rather
+than under its log directory, should name it "<label>-" or "<label>_"
+followed by anything of its own choosing: the runner deletes every directory
+of a passing rig's own that matches, and keeps -- and names, in that rig's
+failure line -- every one that matches a failing rig's, so it can be
+diagnosed. No shipped rig does this today; the convention exists because one
+used to (tools\\vr_census_bridge_test, tools\\openvr_export_census_test,
+tools\\openvr_smoke -- all removed in 1a54e9e with the legacy OpenVR proxy
+they tested) and left its output -- build\\census-bridge-*, build\\
+export-census-*, build\\vrtest_census_* -- to accumulate forever, since
+nothing had ever deleted it. See --sweep-exe-dir for that existing debris,
+and for a future rig that forgets the convention or dies mid-run.
+
+--sweep-exe-dir removes stale per-instance directories left under a build
+directory by *any* earlier build, independent of --script and any rig
+label -- build\\<anything>-<pid>-<tick> or <anything>_<pid>_<tick>, matched
+by shape alone (see stale_exe_dirs), never a file, and never one of the
+build's own fixed outputs. Run once at the very start of build.bat, before
+the DLLs even compile, so a rig deleted since the last build still has its
+old output cleaned up. --dry-run lists what it would remove and removes
+nothing.
 
 --serial names rigs that must not run at the same time as one another, though
 any of them may run beside the rest: rigs whose test processes share state
@@ -63,6 +87,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -75,6 +100,23 @@ from pathlib import Path
 LABEL = re.compile(r"^:rig_([A-Za-z0-9_]+)(?:\s.*)?$")
 SOURCE = re.compile(r'\.cpp"')
 BUILD_GUARD = 'if "%EDVR_RIG_STEP%"=="build" exit /b 0'
+
+# A per-instance exe directory a rig (or a child it stages) made for itself:
+# "<anything>-<pid>-<tick>" or "<anything>_<pid>_<tick>", the shape every
+# family of debris found under build\ on 2026-09-17 shared regardless of the
+# label before it -- census-bridge-ready-6172-97754453,
+# export-census-missing-8748-143777687, vrtest_census_8916_151180000. Shape
+# alone, not a known label, because --sweep-exe-dir must still find one made
+# by a rig deleted since the build that made it.
+STALE_EXE_DIR = re.compile(r"^.+[-_]\d+[-_]\d+$")
+
+# Fixed build\ outputs that must never be swept even if a future one's name
+# happened to match STALE_EXE_DIR -- belt-and-suspenders alongside the shape
+# check and the directories-only, top-level-only rule in stale_exe_dirs.
+PROTECTED_EXE_DIR_ENTRIES = {
+    "d3d11.dll", "openvr_api.dll", "edvr-installer.exe", "gen", "obj",
+    "edvr_logs",
+}
 
 
 class Rig:
@@ -231,13 +273,103 @@ def spawner(script, root, env, exe_dir=None):
     return spawn
 
 
+def owns_exe_dir_entry(name, label, all_labels):
+    """True when name (a top-level entry directly under exe_dir) is label's
+    own private directory, by the "<label>-" / "<label>_" convention
+    (see job_exe_dirs), and no other rig's label is an equally valid but
+    longer match -- so a rig whose label happens to prefix another rig's
+    never claims that rig's directory."""
+    if not (name.startswith(label) and len(name) > len(label) and name[len(label)] in "-_"):
+        return False
+    return not any(other != label and len(other) > len(label) and name.startswith(other)
+                   and len(name) > len(other) and name[len(other)] in "-_"
+                   for other in all_labels)
+
+
+def job_exe_dirs(exe_dir, job, all_labels):
+    """Directories directly under exe_dir that job's rig staged for itself
+    there (its own copy of a proxy DLL, its own edvr.ini, its own children),
+    named by the "<label>-"/"<label>_" convention described in this module's
+    docstring. Never a file, and never a directory another rig's longer
+    label also matches."""
+    label = job.rig.label
+    try:
+        names = os.listdir(exe_dir)
+    except OSError:
+        return []
+    return sorted(os.path.join(exe_dir, name) for name in names
+                  if owns_exe_dir_entry(name, label, all_labels)
+                  and os.path.isdir(os.path.join(exe_dir, name)))
+
+
+def cleanup_job_exe_dirs(exe_dir, job, all_labels, passed):
+    """job_exe_dirs(exe_dir, job, all_labels): removed once the rig passes,
+    left in place -- and returned, to name in that rig's failure line --
+    once it fails, so the directory can be diagnosed."""
+    dirs = job_exe_dirs(exe_dir, job, all_labels)
+    if not passed:
+        return tuple(dirs)
+    for path in dirs:
+        shutil.rmtree(path, ignore_errors=True)
+    return ()
+
+
+def stale_exe_dirs(exe_dir):
+    """Per-instance exe directories left under exe_dir by any earlier build:
+    directories only, directly under exe_dir, matching STALE_EXE_DIR and not
+    in PROTECTED_EXE_DIR_ENTRIES. Matched by shape alone, not by any rig
+    label the current script defines, so debris from a rig removed since the
+    build that made it is still found. Returns an empty list, not an error,
+    when exe_dir does not exist."""
+    try:
+        names = os.listdir(exe_dir)
+    except OSError:
+        return []
+    stale = []
+    for name in names:
+        if name in PROTECTED_EXE_DIR_ENTRIES or not STALE_EXE_DIR.match(name):
+            continue
+        path = os.path.join(exe_dir, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            stale.append(path)
+    return sorted(stale)
+
+
+def sweep_exe_dir(exe_dir, dry_run, out):
+    """Remove stale_exe_dirs(exe_dir); --dry-run lists them and removes
+    nothing. Returns the number removed (or, under --dry-run, the number
+    that would be)."""
+    stale = stale_exe_dirs(exe_dir)
+    if not stale:
+        emit(out, "[edvr] no stale exe directories under %s\n" % exe_dir)
+        return 0
+    if dry_run:
+        emit(out, "[edvr] dry run: would remove %d stale exe director%s under %s:\n"
+             % (len(stale), "y" if len(stale) == 1 else "ies", exe_dir))
+        for path in stale:
+            emit(out, "    %s\n" % path)
+        return len(stale)
+    removed = 0
+    for path in stale:
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as error:
+            emit(out, "[edvr] NOTE: could not remove %s: %s\n" % (path, error))
+    emit(out, "[edvr] removed %d stale exe director%s under %s\n"
+         % (removed, "y" if removed == 1 else "ies", exe_dir))
+    return removed
+
+
 def emit(out, text):
     out.write(text.encode("utf-8", "replace"))
 
 
-def report(out, job, code, seconds, output):
-    emit(out, "[edvr] --- %s: %.1f s%s ---\n" % (job.title, seconds,
-                                                "" if code == 0 else ", exit code %d" % code))
+def report(out, job, code, seconds, output, kept=()):
+    extra = "" if code == 0 else ", exit code %d" % code
+    if kept:
+        extra += ", kept " + ", ".join(kept)
+    emit(out, "[edvr] --- %s: %.1f s%s ---\n" % (job.title, seconds, extra))
     out.write(output)
     if output and not output.endswith(b"\n"):
         out.write(b"\n")
@@ -253,19 +385,23 @@ def launchable(pending, busy):
     return None
 
 
-def run_group(order, jobs, spawn, out, clock=time.monotonic):
+def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, labels=()):
     """Start spawn(job) for the jobs in order, at most jobs at a time and
     never two held-back jobs of one serial group. A serial rig's run step is
     queued, at the front, the moment its build step succeeds. Each result is
     printed as it completes, except failures, which are held and printed
-    after the group drains. Returns (results, failures) where each entry is
-    (job, code, seconds, output) in completion order."""
+    after the group drains. Given exe_dir, each job's own job_exe_dirs are
+    cleaned up (cleanup_job_exe_dirs) the moment it finishes, pass or fail.
+    Returns (results, failures) where each entry is (job, code, seconds,
+    output, kept) in completion order; kept is empty except for a failed
+    job with a directory of its own."""
     done = queue.Queue()
 
     def worker(job):
         started = clock()
         code, output = spawn(job)
-        done.put((job, code, clock() - started, output))
+        kept = cleanup_job_exe_dirs(exe_dir, job, labels, code == 0) if exe_dir is not None else ()
+        done.put((job, code, clock() - started, output, kept))
 
     pending, running, busy, results, failures = list(order), 0, set(), [], []
     while pending or running:
@@ -280,20 +416,21 @@ def run_group(order, jobs, spawn, out, clock=time.monotonic):
             running += 1
         if not running:
             break
-        job, code, seconds, output = done.get()
+        job, code, seconds, output, kept = done.get()
         running -= 1
         if job.constrained:
             busy.discard(job.rig.group)
-        results.append((job, code, seconds, output))
+        results.append((job, code, seconds, output, kept))
         if code == 0:
             report(out, job, code, seconds, output)
             if job.step == "build" and job.rig.group is not None:
                 pending.insert(0, Job(job.rig, "run"))
             continue
-        failures.append((job, code, seconds, output))
+        failures.append((job, code, seconds, output, kept))
         if len(failures) == 1:
-            emit(out, "[edvr] %s failed (exit code %d); no more rigs start, %d still running\n"
-                 % (job.title, code, running))
+            note = "" if not kept else " (kept %s)" % ", ".join(kept)
+            emit(out, "[edvr] %s failed (exit code %d)%s; no more rigs start, %d still running\n"
+                 % (job.title, code, note, running))
             out.flush()
     for entry in failures:
         report(out, *entry)
@@ -312,7 +449,7 @@ def load_times(path):
 
 def save_times(path, times, results):
     merged = dict(times)
-    merged.update({job.key: round(seconds, 2) for job, code, seconds, _ in results if code == 0})
+    merged.update({job.key: round(seconds, 2) for job, code, seconds, *_ in results if code == 0})
     path.write_text(json.dumps(merged, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -348,6 +485,7 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
         serial=(), exe_dir=None):
     text = script.read_text(encoding="utf-8", errors="replace")
     rigs = parse_rigs(text)
+    labels = tuple(rig.label for rig in rigs)
     times = load_times(times_path)
     pool, later = plan(rigs, quiet, times, serial)
     mp_flag = "/MP%d" % mp if mp else "/MP"
@@ -369,13 +507,14 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
         # A quiet rig has the machine to itself, so its compiles may use every core.
         quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"), exe_dir)
     started = clock()
-    results, failures = run_group(pool, jobs, spawn, out, clock)
+    results, failures = run_group(pool, jobs, spawn, out, clock, exe_dir=exe_dir, labels=labels)
     pool_seconds = clock() - started
-    summed = sum(seconds for _, _, seconds, _ in results)
+    summed = sum(seconds for _, _, seconds, *_ in results)
     quiet_results, quiet_failures, quiet_seconds = [], [], 0.0
     if not failures:
         started = clock()
-        quiet_results, quiet_failures = run_group(later, 1, quiet_spawn, out, clock)
+        quiet_results, quiet_failures = run_group(later, 1, quiet_spawn, out, clock,
+                                                   exe_dir=exe_dir, labels=labels)
         quiet_seconds = clock() - started
     results += quiet_results
     failures += quiet_failures
@@ -394,7 +533,7 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
               "%d quiet took %.1f s\n" % (len(pool), pool_seconds, summed, jobs, len(later), quiet_seconds))
     longest = sorted(results, key=lambda entry: -entry[2])[:5]
     emit(out, "[edvr] longest: " + ", ".join("%s %.1f s" % (job.title, seconds)
-                                             for job, _, seconds, _ in longest) + "\n")
+                                             for job, _, seconds, *_ in longest) + "\n")
     out.flush()
     return 0
 
@@ -662,6 +801,90 @@ def self_test():
         check(code == 1 and "run" not in steps and b"ERROR: beta (build) failed" in out.getvalue(),
               "a failed build step never gets its run step: %r %r" % (steps, out.getvalue()))
 
+    # owns_exe_dir_entry / job_exe_dirs / cleanup_job_exe_dirs: the
+    # "<label>-" / "<label>_" convention documented for a rig that stages a
+    # private directory directly under --exe-dir. No shipped rig does this
+    # today (see the module docstring for the one that used to); these
+    # fixtures are the only exercise the convention gets.
+    check(owns_exe_dir_entry("beta-1-2", "beta", ["alpha", "beta"]), "hyphen convention")
+    check(owns_exe_dir_entry("beta_1_2", "beta", ["alpha", "beta"]), "underscore convention")
+    check(not owns_exe_dir_entry("betaextra-1-2", "beta", ["alpha", "beta"]),
+          "no separator right after the label is not a match")
+    check(not owns_exe_dir_entry("beta", "beta", ["beta"]), "the bare label with nothing after it is not a match")
+    check(not owns_exe_dir_entry("beta_extra_1_2", "beta", ["beta", "beta_extra"])
+          and owns_exe_dir_entry("beta_extra_1_2", "beta_extra", ["beta", "beta_extra"]),
+          "a directory goes to the longer, more specific label when one label prefixes another")
+
+    with tempfile.TemporaryDirectory() as exe_dir:
+        os.makedirs(os.path.join(exe_dir, "beta-1-2"))
+        os.makedirs(os.path.join(exe_dir, "gamma-5-6"))
+        Path(exe_dir, "beta-not-a-dir").write_text("x", encoding="utf-8")
+        found = job_exe_dirs(exe_dir, Job(beta), ["alpha", "beta", "gamma"])
+        check(found == [os.path.join(exe_dir, "beta-1-2")],
+              "job_exe_dirs finds only its own rig's directories, never a file: %r" % found)
+
+        kept = cleanup_job_exe_dirs(exe_dir, Job(beta), ["alpha", "beta", "gamma"], passed=False)
+        check(kept == (os.path.join(exe_dir, "beta-1-2"),) and os.path.isdir(kept[0]),
+              "a failed job's own directory is kept and returned: %r" % (kept,))
+        check(cleanup_job_exe_dirs(exe_dir, Job(beta), ["alpha", "beta", "gamma"], passed=True) == ()
+              and not os.path.exists(os.path.join(exe_dir, "beta-1-2")),
+              "a passed job's own directory is removed")
+        check(os.path.isdir(os.path.join(exe_dir, "gamma-5-6")), "another rig's directory is untouched")
+
+    # End to end through run_group: a fake spawn that stages its own rig's
+    # private directory, exercised both ways.
+    with tempfile.TemporaryDirectory() as exe_dir:
+        def staging_spawn(job):
+            os.makedirs(os.path.join(exe_dir, "%s-1-2" % job.rig.label))
+            return (0, b"ok") if job.rig.label != "alpha" else (3, b"alpha broke")
+
+        out = io.BytesIO()
+        _, failed = run_group([Job(beta)], 1, staging_spawn, out, exe_dir=exe_dir, labels=["beta"])
+        check(not failed and not os.path.exists(os.path.join(exe_dir, "beta-1-2")),
+              "run_group removes a passing job's own staged directory")
+
+        out = io.BytesIO()
+        _, failed = run_group([Job(alpha)], 1, staging_spawn, out, exe_dir=exe_dir, labels=["alpha"])
+        alpha_dir = os.path.join(exe_dir, "alpha-1-2")
+        check(len(failed) == 1 and failed[0][4] == (alpha_dir,) and os.path.isdir(alpha_dir),
+              "run_group keeps a failing job's own staged directory and returns its path: %r" % (failed,))
+        check(("kept " + alpha_dir).encode() in out.getvalue(),
+              "the failure line names the kept directory: %r" % out.getvalue())
+
+    # stale_exe_dirs / sweep_exe_dir: shape alone, no rig label involved --
+    # the debris a since-deleted rig leaves has no rig left to claim it by
+    # the label convention above, which is exactly why a separate,
+    # label-blind sweep exists.
+    with tempfile.TemporaryDirectory() as build_dir:
+        stale_names = ["census-bridge-ready-6172-97754453", "vrtest_census_8916_151180000"]
+        for name in stale_names:
+            os.makedirs(os.path.join(build_dir, name))
+        for name in ("edvr_logs", "obj", "gen", "vrtest_probe_matrix", "vrtest2"):
+            os.makedirs(os.path.join(build_dir, name))
+        Path(build_dir, "d3d11.dll").write_text("x", encoding="utf-8")
+        # Same shape as the stale directories, but a file: never a candidate.
+        Path(build_dir, "looks-like-1-2").write_text("x", encoding="utf-8")
+
+        stale = stale_exe_dirs(build_dir)
+        check(stale == sorted(os.path.join(build_dir, name) for name in stale_names),
+              "stale_exe_dirs matches the hyphen and underscore shapes and nothing else: %r" % stale)
+        check(stale_exe_dirs(os.path.join(build_dir, "missing")) == [],
+              "a missing exe_dir is not an error, just nothing stale")
+
+        out = io.BytesIO()
+        would_remove = sweep_exe_dir(build_dir, True, out)
+        check(would_remove == 2 and all(os.path.isdir(path) for path in stale)
+              and b"dry run" in out.getvalue(),
+              "--dry-run counts the stale directories and removes nothing: %r" % out.getvalue())
+
+        removed = sweep_exe_dir(build_dir, False, io.BytesIO())
+        check(removed == 2 and not any(os.path.exists(path) for path in stale)
+              and os.path.isdir(os.path.join(build_dir, "obj"))
+              and os.path.isfile(os.path.join(build_dir, "d3d11.dll"))
+              and os.path.isfile(os.path.join(build_dir, "looks-like-1-2")),
+              "a real sweep removes only the stale directories, leaving files and fixed outputs alone")
+        check(sweep_exe_dir(build_dir, False, io.BytesIO()) == 0, "a second sweep finds nothing left to remove")
+
     if failures:
         for why in failures:
             print("FAIL run_jobs: %s" % why)
@@ -689,11 +912,21 @@ def main(argv=None):
                              "another (repeat for another such group)")
     parser.add_argument("--quiet", default="", help="comma-separated rigs to run alone afterwards")
     parser.add_argument("--times", type=Path, default=None, help="where rig durations are recorded")
-    parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing "
+                                                                "(or, with --sweep-exe-dir, remove nothing)")
+    parser.add_argument("--sweep-exe-dir", type=Path, default=None, metavar="DIR",
+                        help="remove stale per-instance exe directories left under DIR by any "
+                             "earlier build (see stale_exe_dirs), then exit; independent of "
+                             "--script. --dry-run lists them and removes nothing")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
+    if args.sweep_exe_dir is not None:
+        if not args.sweep_exe_dir.is_dir():
+            parser.error("--sweep-exe-dir must name an existing directory")
+        sweep_exe_dir(os.path.abspath(str(args.sweep_exe_dir)), args.dry_run, sys.stdout.buffer)
+        return 0
     if args.script is None or not args.script.is_file():
         parser.error("--script must name an existing batch file")
     if args.jobs < 1:
