@@ -2,99 +2,142 @@
 
 ## Status
 
-- State: the per-patch dispatch was NOT the carrier. The batched build
-  (a17c793, on main) was flown 14:04 and 14:12 on Frontier at 65%: correct
-  (`Batched build: 1742 batches, 12.3 us/eye`, all 85,024 patches original
-  draws, 0 reissues) and the frame did not move (benchmark over terrain
-  gpu p50 11.1 / cpu 5.1 ms, app render 9.9-10.7, door 3.7-3.9 per pair:
-  the same ~2.2 ms outside every bracket). Sean: "performance does seem
-  to be somewhat improved" -- most likely the 65% vs 75% HMD quality of
-  the 12:29 flight. Two offline GPU micro-benchmarks on the RTX 5090
-  (scratch, journal below) price the whole hook: about 0.65 ms a frame at
-  97 patches, nearly all of it the three `CopySubresourceRegion`s (a fixed
-  ~2 us each between real draws; the PS + 2 MRTs on the prepass cost 0.02-
-  0.15 ms per 100 patches, the render-thread D3D11 calls 0.3 us a patch).
-  The old dispatch cost about the same, which is why the flight read flat.
-- ATTRIBUTED (flight 150849, instrument build 185ceee, parked on the
-  planet, eye dumps with the draw census under dlss AND off): the gap is
-  not one carrier but the SUM of EDVR's per-draw GPU syncs inside the
-  game's passes. The census diff (frames 1-2 of each, per frame, dlss
-  minus off): +306 `CopySubresourceRegion` + 102 `UpdateSubresource(48 B)`
-  (the terrain hook, 51 patches per eye), +37 `Dispatch(1,1,1)` of one
-  compute shader (the cockpit holo hook, per draw) + 10 of another (the
-  stellar ring hook: `stellar coverage GPU ... 0.189 ms/frame`), ~50
-  mesh/object-probe copies, +38 query `End`s (EDVR's timestamps); draw
-  counts equal. Priced offline on the 5090 with real fill between draws:
-  the terrain hook 0.7-0.78 ms per 100 patches, a `Dispatch(1,1,1)` with
-  CS churn 4.75 us, a timestamp pair 0.00 (free), a copy ~2 us. Sum
-  1.25-1.8 ms against a gap of 1.3-1.7 (benchmark gpu p50 dlss 10.2-10.6,
-  off 5.1, door 3.65 per pair); in situ the syncs run ~1.5-2x the
-  synthetic price (the mid-frame bracket read ~14 us per patch against 7).
-- ruled out (same flight): the game's `Map` stalling on the GPU --
-  `Game Map ... reads 4 calls 0.003 ms/frame, writes ~1100 calls 0.10-0.17
-  ms/frame` under dlss, 0.09-0.12 under off; the terrain hook's own CPU --
-  `Hook CPU: 0.62-0.68 us/call, 0.024-0.029 ms/frame`; EDVR's timestamp
-  brackets -- free in the benchmark. The benchmark's CPU rise (still
-  +1.6 ms at dlss over terrain) remains unexplained by any EDVR call the
-  probes time; it is not the terrain hook, not Map, not the door.
-- The optimisation pass, in order of size, all "remove the per-draw GPU
-  sync": (a) BUILT on this branch (journal, latest entry), NOT FLOWN: the
-  terrain hook captures the three constant segments on the CPU at the
-  game's own write (tees in vscreen.cpp on Map/Unmap and
-  UpdateSubresource; CopyResource/CopySubresourceRegion destinations,
-  executed command lists and CreateBuffer invalidate), memcpy per draw,
-  one UpdateSubresource per eye at the batched build; the GPU copy stays
-  as the fallback for a slot whose shadow is not current. Census tail
-  `Constants: N slots from the CPU shadow, M by GPU copy, R re-watches;
-  tee copies X us each over W writes, Y ms/frame`. The rig runs its suite
-  three times (UpdateSubresource tees, Map/Unmap tees, no tees). Expected:
-  -0.6..-0.9 ms/frame over terrain. (b) the holo hook's per-draw dispatch
-  batched like mesh/terrain (-0.2..-0.4). (c) the stellar ring hook's
-  per-draw dispatch batched (-0.19). What remains after those is NVIDIA's
-  own 2.9-3.1 ms per pair plus prep/ui 0.7, the foveated-DLSS arc's lever.
-- Instruments in the build: `native timing CPU ... Game Map over N frames:
-  ...`; `terrain motion GPU ... Hook CPU: ... Constants: ...`; live levers
-  `advanced.terrain_motion` / `advanced.mesh_motion` (on/off, default on,
-  ini edit; not on the menu).
-- Next flight: (a) installed on Frontier; the same parked A/B (dlss vs
-  off, an eye dump with the census in each state) plus, if an ini edit is
-  possible mid-flight, `advanced.terrain_motion = off` under dlss for the
-  residual. Read: benchmark gpu p50 under dlss down ~0.7 ms; `Constants:`
-  nearly all from the CPU shadow with few re-watches; `tee copies` well
-  under 1 us each (mapped memory read as cached) -- if it reads several
-  us each the mapped memory is write-combined and the next lever is to
-  hand the game a cached scratch pointer at Map and stream it to the
-  driver's at Unmap; the census diff showing the 306 copies gone.
-- Report: Sean, Frontier install, Pimax Crystal Super, after the terrain
-  history fix (docs/terrain-history-shimmer-2026-09-17.md): "performance is
-  now quite bad flying low to the surface" (log 122915, HMD quality 75%,
-  3054x2545 in), then his A/B in log 124139 at 65% (2646x2206 in, 4072x3394
-  out): "DLSS effectively doubles the gpu and cpu frametime numbers".
-- The A/B in the log (native benchmark windows w6-w11, gameplay, live
-  toggles of fix.temporal_aa): off cpu 2.8 / gpu 4.5-4.9 ms; dlss cpu
-  4.7-5.2 / gpu 10.9-11.0; fsr 4.4 / 9.3. `Application-render GPU` over
-  terrain: off 4.4-4.6 ms, dlss 10.2-10.7. The door brackets under dlss
-  (`temporal aa price`) hold prep 0.46-0.49 + full 2.82-2.97 + ui 0.34 =
-  3.6-3.8 ms per pair, so 2.2-2.4 ms a frame of EDVR's GPU sits OUTSIDE
-  every bracket. In space (12:43:04-24, before the terrain shader compiled)
-  the same brackets and an app render of 4.7-5.2 ms leave at most ~1.5 ms
-  outside, the game's own render included: the cost arrives with the
-  terrain.
-- First hypothesis, REFUTED (journal, later entry): the per-patch
-  `Dispatch(1,1,1)` in celestial_motion.cpp `begin()`. a17c793 replaced it
-  with three 416-byte constant snapshots per draw and one `Dispatch(count)`
-  per eye at `celestialMotionViews(ctx, ...)` or the frame boundary; the
-  records, keys, matching and the rig are unchanged and it stays (it is
-  correct and no dearer). The `ruled out:` lines are in the journal.
-- Ruled out along the way: the texture LOD bias as the live A/B's delta;
-  the PS + 2 MRTs over the prepass beyond ~0.15 ms; the hook's D3D11 calls
-  as the CPU rise (0.3 us a patch through the runtime); the game blocking
-  in GetData. Still unpriced in flight: EDVR's own wrapper cost per hooked
-  call (`Hook CPU`), the holo hook's per-draw dispatches (in space too, so
-  bounded by orbit's ~0), the depth/luma probes (a constant in every flight
-  compared), HMD quality 75% vs 65% (Sean's slider), outer trim 5 vs 10.
+- State: (a) FLOWN 16:34 on Frontier (log 163420, build 91d5b75, parked
+  on the planet, Pimax Crystal Super, 2646x2206 in, DLSS out 4072x3394)
+  and CONFIRMED: benchmark gpu p50 under dlss 9.0-9.6 ms against 10.2-10.6
+  on 185ceee at the same spot (app render 8.8-10.3 vs 10.0-10.4); the
+  per-patch bracket 3.5-4.0 us against 13.5-15.8; the census diff shows
+  the 306 terrain copies gone; `Constants: 256856 slots from the CPU
+  shadow, 103 by GPU copy, 3 re-watches; tee copies 0.03 us each` (the
+  mapped memory reads at cached speed); `history hidden` 0.000% of the
+  eye, so the captured constants are exact. `advanced.terrain_motion =
+  off` under dlss (windows 8-11) moved nothing -- the hook's residual is
+  below noise -- and makes the terrain flicker, as the lever must (the
+  terrain gets the camera's vectors). Journal, latest entry.
+- ATTRIBUTED (flight 150849 on 185ceee, eye dumps with the draw census
+  under dlss AND off): the gap was the SUM of EDVR's per-draw GPU syncs
+  inside the game's passes, not one carrier: +306 CopySubresourceRegion +
+  102 UpdateSubresource (terrain, 51 patches/eye), +37 Dispatch(1,1,1)
+  (holo, per draw) + 10 (stellar ring), ~50 mesh/probe copies, +38 query
+  Ends; draw counts equal. Offline prices on the 5090 between real draws:
+  a copy ~2 us fixed, a Dispatch(1,1,1) with CS churn 4.75 us, a
+  timestamp pair free, the whole terrain hook 0.7-0.78 ms/100 patches.
+- What is left inside the game's passes under dlss (census diff of
+  flight 163420, per frame): holo 33 Dispatch(1,1,1) + 39 UpdateSubresource
+  + 24 instance copies; stellar ring 10 dispatches; mesh 10 copies into
+  its 1 MB store + 10 uploads; terrain 106 UpdateSubresource(48 B)
+  (priced 0); 48 query Ends (free). By the offline prices 0.3-0.45 ms a
+  frame, 3-5% of the 9.2 ms frame: (b) batch the holo dispatch (needs the
+  CPU shadow generalised to its three CBs, per-record instance slots and
+  a per-record Pool binding in the CS) and (c) batch the stellar ring's.
+- The rest of "DLSS doubles the frame" is the door itself: NVIDIA's `full`
+  2.8-3.1 + `prep` 0.2-0.5 + `ui` 0.36-0.6 = 3.5-4.0 ms per pair at
+  4072x3394, a per-output-pixel price that does not care what is on
+  screen -- Sean's loading screen (off ~1.2 ms, dlss over 5) is exactly
+  this door on a black frame. Levers: the DLSS rectangle (the foveated
+  arc, paused by Sean) or a different DLSS ratio (a smaller game render).
+- ruled out (by measurement, journal): the per-patch dispatch (a17c793
+  flown flat); the game's Map stalling on the GPU (reads 0.003 ms/frame);
+  the hook's CPU (0.03 ms/frame); EDVR's timestamp brackets (free); the
+  texture LOD bias (fixed at install); the PS + 2 MRTs beyond ~0.15 ms;
+  write-combined mapped memory (the tee reads 0.03 us). Open: the
+  benchmark's CPU figure under dlss (3.9-4.2 on the planet, 1.9 after
+  the runtime's wait moved from xrWaitFrame into Submit at 16:37:05).
+- Instruments: `native timing CPU ... Game Map over N frames: ...`;
+  `terrain motion GPU ... Hook CPU: ... Constants: ... tee copies ...`;
+  live levers `advanced.terrain_motion` / `advanced.mesh_motion` (on/off,
+  default on, ini edit; not on the menu; off = diagnostic only).
+- Next: Sean's call between (b)+(c) (~0.3-0.45 ms, a rig and a flight
+  each) and the foveated rectangle. Any flight: an eye dump with the
+  census under dlss and off at the same spot, and an off window parked
+  on the planet (flight 163420 had none; its 4.29 ms at 16:37:45 is the
+  exit frame).
+- Report: Sean, Frontier, Pimax Crystal Super, after the terrain history
+  fix (docs/terrain-history-shimmer-2026-09-17.md): "performance is now
+  quite bad flying low to the surface" (log 122915, HMD quality 75%), then
+  his A/B in log 124139 at 65%: "DLSS effectively doubles the gpu and cpu
+  frametime numbers" (off cpu 2.8 / gpu 4.5-4.9; dlss 4.7-5.2 / 10.9-11.0;
+  fsr 4.4 / 9.3). The journal's oldest entry has the reading of those logs.
 
 ## Journal
+
+### 2026-09-17 (night) -- flight 163420 on 91d5b75: (a) confirmed, the residual priced
+
+Frontier, Pimax Crystal Super, parked on the planet, 2646x2206 in and
+4072x3394 DLSS out (4100x4049 headset), build v0.17.0-rc.3-107-g91d5b75.
+Two draw censuses: census 1 at 16:36:00 under aa off, census 2 at
+16:36:17 under dlss (with the eye dump 163617). dlss on at 16:36:08;
+`advanced.terrain_motion` off 16:36:26-16:36:47 (the settings panel,
+live); the session ended 16:37:46. No aa-off benchmark window on the
+planet: windows 1-5 (off) are the menu and the approach, and the 4.29 ms
+app render at 16:37:45 is the exit frame (luma 0). The off reference
+stays the earlier flights' 4.4-5.1 ms.
+
+| reading | 185ceee (flight 150849) | 91d5b75 (this flight) |
+|---|---|---|
+| benchmark gpu p50 under dlss | 10.2-10.6 ms (w10-12) | 9.02-9.62 ms (w6-13) |
+| benchmark cpu p50 under dlss | 4.6-4.8 ms | 3.9-4.2 (w6-12), 1.9 (w13) |
+| `Application-render GPU` under dlss | 10.0-10.4 ms | 8.8-10.3 ms |
+| door per pair (prep + full + ui) | 0.33-0.46 + 2.62-3.13 + 0.36 | 0.22-0.53 + 2.79-3.14 + 0.36-0.61 |
+| terrain per-patch bracket | 13.5-15.8 us (a17c793 flights) | 3.47-3.96 us |
+| `Constants:` | -- | 256856 CPU / 103 GPU / 3 re-watches |
+| `tee copies` | -- | 0.03 us each, 0.010-0.017 ms/frame |
+| `history hidden` | 28 of 5837076 px | 25 of 5837076 px |
+| terrain_motion off, gpu p50 | -- | 9.02-9.62 ms (w8-11), no change |
+
+So (a) took about 1.0 ms a frame off the GPU at the same spot, which is
+the top of the -0.6..-0.9 expectation, and the hook is now below the
+noise: turning it off entirely moves nothing (and the terrain flickers,
+as the lever must -- off hands the terrain the camera's motion vectors,
+which is the shimmer arc's complaint returning). The captured constants
+are exact: a wrong row would put the terrain's reprojection off and the
+history-hidden census would climb from 0.000%; it did not. The tee's
+memcpy of 128-224 bytes out of the game's mapped buffer reads 0.03 us,
+so the mapped memory is not write-combined for this driver and the
+scratch-pointer lever in the previous entry is not needed.
+
+The census diff, census 2 minus census 1, frames 1-2, per frame
+(scratch census_diff.py): eye draws 550 vs 540, offscreen 712 vs 657-671,
+copies 1740 vs 1431-1471, dispatches 131 vs 49, query begin/end/clear
+148-160 vs 83-84. The terrain hook's three `copy S buf {208,5376,288}
+-> inputs` per patch are gone (the game's own copies of those buffers
+read +12/+10/+4, noise); what dlss still adds inside the game's passes:
+
+| excess per frame | what | offline price |
+|---|---|---|
+| +106 `copy U -> buf 48` | terrain g_draw per patch | 0 (48 B UpdateSubresource) |
+| +33 `dispatch cs=58CB1128... n=1,1,1` + 39 `copy U -> ?` (96 B) + 24 `copy S buf 32768 -> ?` | holo hook per draw: draw CB, instance copy, dispatch | ~0.16 + ~0.05 |
+| +10 `dispatch cs=ED270307... n=1,1,1` | stellar ring per draw | 0.05 (sync) .. 0.2 (its own bracket) |
+| +10 `copy S buf 32768 -> buf 1048576` + 10 `copy U -> buf 49152 stride=96` | mesh motion instance store + keys | ~0.05 |
+| +48 `clear E` | query Ends (EDVR's timestamps) | free |
+| +3 + 3 `dispatch n=1,1,6` | door-side builds | at the door |
+
+That is 0.3-0.45 ms a frame by the offline prices, 3-5% of a 9.2 ms
+frame, and it is all that is left of EDVR inside the game's passes. The
+256x256 BC6H mip chain (18 + 36 copies, 12 draws) that sat in the OFF
+census last time sits in the DLSS census this time: the game's probe
+update, caught by whichever census ran over it, not a dlss cost.
+
+The remaining doubling is the door: NVIDIA's `full` 2.8-3.1 ms per pair
+plus EDVR's `prep` 0.2-0.5 and `ui` 0.36-0.6, 3.5-4.0 ms a frame at
+4072x3394 whatever the scene holds. Sean's loading screen -- off ~1.2
+ms, dlss over 5, a black frame with a spinning model -- is the same door
+on nothing, and says the same thing: the price is per output pixel. The
+levers are the DLSS rectangle (the foveated arc, paused at the quantum
+fix) or a smaller game render behind the same output.
+
+Noted, not chased: at 16:37:05 the runtime's per-frame wait moved from
+xrWaitFrame (`wait 4-5 ms, submits 0.7`) into Submit (`wait 0.1,
+submits 8.3`), the benchmark's cpu p50 fell from 3.9-4.2 to 1.9 with
+the GPU unchanged, and `ui` rose from 0.36 to 0.60 per pair. A pacing
+change in the runtime or a menu left open; it does not touch the GPU
+figure this arc is about.
+
+- ruled out: the mapped constant-buffer memory being write-combined on
+  this driver, because the tee's 128-224 byte memcpy reads 0.03 us.
+- ruled out: any residual cost in the terrain hook worth a flight,
+  because `advanced.terrain_motion = off` under dlss reads the same
+  9.0-9.6 ms as on (windows 8-11 against 6-7 and 12-13).
 
 ### 2026-09-17 (night) -- (a) built: the terrain constants captured on the CPU
 
