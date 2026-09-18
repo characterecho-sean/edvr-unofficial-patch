@@ -2,50 +2,57 @@
 
 ## Status
 
-- State: Frontier flight 80416a0 confirms on-foot CPU headroom but a remaining
-  GPU limit. Borrowed depth metadata and bounded screen/weapon GPU attribution
-  pass focused regression and full build gates, ready for Frontier. Packed
-  capture and all motion/visibility decisions stay as flown; static/visibility
-  skips still lack a correctness proof.
+- State: installed Frontier build 89b9055 is verified in the latest flight. Its
+  final 210 seconds identify the broad on-foot original-vertex motion producer,
+  particularly per-draw identity dispatch, as the next GPU target. Screen
+  motion is small. Static/visibility skips still lack a correctness proof; no
+  rendering changes follow from object labels alone.
 - Environment: Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and
   active XR output 3072x3264 per eye, trims off. Dimensions are unchanged
   between the landed settlement and on-foot intervals in this flight. RTX 5090;
   the flight does not log the DLSS DLL version. Capture stays capped at 512
-  records per eye with a 1 MiB ID snapshot allocation.
-- Timing: latest stable landed CPU p50 12.784-13.044 ms, GPU 16.529-16.684 ms;
-  on-foot CPU 8.110-8.282 ms, GPU 12.968-13.077 ms. The 90 Hz budget is 11.111
-  ms. Different rendering and pacing paths prevent attributing that scene
-  difference solely to meshes. On foot looks shimmer-free to the user.
-- Work: landed still admits about 242 draws / 1024 instances per frame. On foot
-  admits zero: all roughly 8000 known-VS calls per frame reject in the scene
-  stage. The sampled mesh-hook estimate is 1.424-1.464 ms landed and
-  0.721-0.729 ms on foot; these include profiling overhead.
+  records per eye with a 1 MiB ID snapshot allocation. On-foot source is
+  5120x2880; the separate weapon-motion table holds 64 records / 32 MiB.
+- Timing: final interval 07:10:48.160-07:14:18.160 local, 2026-09-18. Stable
+  landed CPU p50 11.864-12.203 ms, GPU 15.643-16.029 ms; on-foot CPU
+  7.734-7.787 ms, GPU 12.415-12.547 ms. The 90 Hz budget is 11.111 ms.
+  Different scenes/pacing and separate flights prevent causal attribution of
+  the whole-frame improvement to the small ownership change.
+- Work: landed admits about 250 rigid draws / 1024 instances per frame; on foot
+  admits zero. Sampled mesh-hook CPU is 1.312-1.341 ms landed and 0.612-0.616
+  ms on foot. The on-foot scene stage fell from 0.273-0.280 to 0.188-0.189 ms,
+  consistent with reduced reference traffic; not a controlled A/B.
 - Prior capture eye_053218: 504 valid records, 500 exact raw poses across a
   uniform origin rebase; 112 fully exact draw groups. Strict unchanged-origin
   candidates are zero. 82 draw groups have zero current coverage. These are
   opportunity counts, not safe skip classes: fallback still selects head motion
   on 2244 candidate pixels, and previous invisibility cannot predict new
   visibility.
-- Current work: the depth-metadata cache already hits on virtually every call,
-  so the change borrows its retained texture and descriptor. The scene-stage
-  envelope is about 0.64 ms landed / 0.28 ms on foot, not a forecast of
-  removable cost. Healthy temporal GPU timers show about 2.3 ms stereo NGX on
-  foot plus prep/UI; new sparse brackets target earlier screen and weapon
-  generation.
+- Current work: about 64 eligible draws/frame enter the separate "weapon"
+  producer even with the weapon holstered. Sampled identity work is 14-18 us
+  per call; all its stages suggest a 1.36-1.60 ms/frame scale if
+  representative. This is not a directly timed total. Screen producers suggest
+  only 0.123-0.125 ms/frame. Older captures suggest limited exact identity
+  reuse; benchmark identity fused with capture locally before choosing a test
+  build.
 - Open: establish static-object fallback and identity across rebases, preserve
   first-moving-frame history, and measure current visibility before expensive
   work. Existing captured-vector comparisons are below 0.002 pixels but leave
   final selection/history decisions unresolved. Station rotation/independent
-  ships and the remaining on-foot GPU cost require separate attribution.
+  ships still need separate attribution. Stencil bit 0x10 is not unique to
+  weapons; the current logs do not identify the captured objects or prove
+  repeated identity inputs, static poses, or invisible raster work.
 - Ruled out: batching inherently slowing this controlled landed scene, because
   B beat both A phases on CPU and GPU central timings. More depth-metadata
   capacity is unnecessary in this flight; pipeline/resource descriptor caches
   address only about 0.06 ms landed and no work on foot. Earlier ruled-out
-  explanations and the uncontrolled regression remain in the journal.
-- Next flight: 90 seconds landed facing the same busy view, then 90 seconds
-  stationary on foot with the weapon visible, at unchanged settings. Read the
-  admission CPU and screen/weapon GPU scopes together. No A/B/A or eye dumps
-  are needed; static-object skipping and mesh-cap changes remain unjustified.
+  explanations and the uncontrolled regression remain in the journal. Screen
+  motion is not supported as the missing sustained multi-millisecond cost.
+- Next flight: no repeat solely for a drawn weapon yet. Its incremental cost
+  remains unmeasured, but the holstered run establishes broad producer
+  activity. First assess the dominant identity step and preserve
+  first-visible/moving history; do not resume the separately paused
+  foveated-DLSS work.
 
 ## Journal
 
@@ -896,3 +903,119 @@ checked owner-context wiring, exact command brackets, skip accounting and the
 three quiet jobs and the unchanged 249-key config contract
 (`build/motion-borrow-gpu-verified.log`). Rebuild the clean commit before the
 Frontier install, preserve the INI, and verify using the installer tool.
+
+### 2026-09-18 -- 89b9055 final 210 seconds: identity dispatch is the larger target
+
+The user requested the final approximately 3.5 minutes and then clarified that
+the weapon remained holstered. Both `edvr_gfx_20260918_070724.log` and
+`edvr_openxr_20260918_070725_985_13004.log` verify as `v0.17.0-10-g89b9055`.
+The selected graphics interval is 07:10:48.160-07:14:18.160 local; the native
+log aligns in UTC at 13:10:48.136-13:14:18.136. Reader evidence and reductions
+are saved under `build/flight-89b9055-final/` (`report.md`, `evidence.txt`, and
+`screen-weapon-gpu.md`). All flight reads used `tools/edvr_log.py`.
+
+Pacing changes to runtime just before the cutoff, at 07:10:47.617. Stable
+landed native windows are 9-11. Turbo begins at 07:12:31.317; stable on-foot
+windows are 12-13. Window 14 agrees but ends at a scope change during exit, so
+it is supporting evidence only. The mesh window ending 07:12:48 straddles the
+transition and is excluded.
+
+| Stable scene | CPU p50 / p95, ms | GPU p50 / p95, ms |
+|---|---|---|
+| Landed, windows 9-11 | 11.864-12.203 / 13.454-14.005 | 15.643-16.029 / 17.384-17.944 |
+| On foot, windows 12-13 | 7.734-7.787 / 8.691-8.811 | 12.415-12.547 / 12.853-13.111 |
+
+The settings remain Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, with 2481x2121
+eye input and 3072x3264 active XR output. The on-foot source is 5120x2880;
+temporal-price reports name a 3818x3264 treatment output. These reported
+surfaces must not be conflated. At the 11.111 ms budget, landed remains over on
+both CPU and GPU; on foot is over on GPU alone.
+
+The borrowed depth-metadata change has the expected direction in its target
+stage. On-foot scene-stage estimates are 0.188-0.189 ms/frame versus the
+previous 0.273-0.280; full mesh-hook estimates are 0.612-0.616 versus
+0.721-0.729. Landed scene-stage estimates are 0.545-0.552 versus 0.615-0.663;
+full hook is 1.312-1.341 versus 1.424-1.464. On-foot work still rejects before
+pipeline/resource checks, with one metadata fill per frame and almost all
+remaining entries hitting. Accepted rigid coverage/capture remains zero there.
+Landed accepted draws increase slightly to about 250/frame with 1024 instances.
+These are separate flights with similar but unequal workloads and sampled clock
+overhead, so the results support the small optimization without proving that it
+caused the entire native-frame improvement.
+
+Stable on-foot temporal prices remain prep 0.42 ms, full NGX 2.30-2.31 ms and
+UI 0.53 ms, each a stereo-pair median. Their arithmetic sum indicates about
+3.25 ms of work, not the median of a measured total. Those windows have no
+dropped pairs or failed region leases.
+
+The new producer scopes are healthy. Scopes 6-8 overlap the stable on-foot
+native interval; complete later scope 9 agrees. Each has 1800 accepted source
+frames. Screen UI clear costs 1.906-1.934 us/sample at one call/frame, UI
+reissues 8.243-8.985 us at 5.73-6 calls/frame, eye clears 3.745-4.020 us at two
+calls/frame, and actual projections 30.615-32.239 us at two calls/frame. All
+selected screen samples are submitted and ready, with no failures, budget
+skips, invalids or pending results. Multiplying those means by call rates gives
+an indicative 0.123-0.125 ms/frame. Heterogeneous systematic samples are not a
+direct whole-frame timing, but these repeated results do not support screen
+motion as the missing sustained multi-millisecond cost.
+
+The holstered run still exercises the broad original-vertex motion producer:
+
+| Scope | Eligible calls/frame | Identify, us/sample | Post-VS capture | Motion raster | Scheduled / budget-skipped / ready per stage |
+|---|---:|---:|---:|---:|---|
+| 6 | 64.00 | 17.330 | 3.430 | 4.175 | 1800 / 109 / 1691 |
+| 7 | 64.00 | 14.263 | 2.761 | 5.632 | 1800 / 50 / 1750 |
+| 8 | 63.99 | 17.769 | 2.805 | 4.427 | 1800 / 136 / 1664 |
+| 9 | 64.00 | 14.272 | 2.451 | 4.410 | 1800 / 30 / 1770 |
+
+The once-per-frame map clear adds about 4.4 us. Every admitted query retires
+ready; begin failures, internal timer skips, invalids and pending results are
+zero. The budget retains 92.4-98.3% of scheduled samples. Multiplication by the
+call rate suggests about 0.91-1.14 ms/frame in identity alone and 1.36-1.60
+ms/frame across these producers, including the clear. These are screening
+estimates: heterogeneous draw cost and the frame-budget omissions can bias
+them. They are not a promised recoverable saving.
+
+The label does not prove these are weapon objects. Admission checks five VS
+families, source-depth identity, and a depth/stencil state writing bit 0x10.
+The earlier planet-performance investigation already records that this bit also
+occurs on generic meshes. The current logs do not identify which objects are
+being captured, nor whether their output passes the final depth/stencil test.
+They establish substantial producer activity while holstered. The incremental
+workload of drawing a weapon remains unmeasured.
+
+Ruled out: treating a holstered weapon as evidence that this producer is idle,
+because about 64 eligible calls/frame reach identity, capture and raster. Ruled
+out as the leading sustained GPU target: screen UI/projection generation,
+because four healthy scopes show the much smaller sampled scale above.
+
+The next target is the separate four-byte instance copy, one-thread identity
+dispatch and compute-state transition in `weapon_motion.cpp::identify`, which
+reads only two words from the instance pool. Before choosing a production
+change, assess exact input reuse and whether identity can be collected with
+existing vertex capture. A programmable geometry shader may make that capture
+slower than its present pass-through form, so fusion needs a local hardware
+comparison first. No static/invisible skip follows from these counters; no
+repeat flight solely to draw the weapon is needed to establish this target.
+
+The read-only feasibility check favors that local fusion experiment over an
+identity cache. The present stream-output shader uses original vertex bytecode
+as an output signature, with no geometry program; this is supported by
+[CreateGeometryShaderWithStreamOutput](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11device-creategeometryshaderwithstreamoutput).
+Identity is absent from that output. A programmable point geometry shader could
+pass positions and load identity once, but runs for every captured index. The
+local prototype must check the complete position count and the exact 16-byte
+identity, including whether a short second output buffer truncates capture,
+then compare GPU cost against separate identity and capture. A UAV alternative
+adds geometry-stage UAV support requirements. None is a production fix until
+correctness and a net timing benefit are demonstrated on hardware.
+
+An exact cache needs the instance resource, byte offset, pool identity and
+write generations. Current weapon-motion invalidation tracks geometry writes,
+not instance/pool writes. Historical on-foot captures contain only 9/42
+duplicate tuples in `102403`, and 4.0-8.3% in five others (`064839`, `064854`,
+`081113`, `081119`, `081148`). These are optimistic reuse counts because the
+captures do not encode intervening writes, and they are different workloads
+from this flight. The earlier planet-performance journal also records changing
+instance slots and skeleton identities. Thus caching is a secondary candidate,
+not evidence that all 64 current identities can be reused safely.
