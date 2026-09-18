@@ -1,0 +1,255 @@
+# EDVR release build and code-signing pipeline.
+#
+# Builds the two graphics/runtime DLLs and the installer that embeds them,
+# submits them to SignPath for Authenticode signing, rebuilds the installer
+# around the now-signed DLLs, signs that too, packages the release archive
+# and hashes it -- then stops. It never creates the GitHub release: a signed
+# zip still has to fly before anyone is told to install it.
+#
+# Reads, from repository configuration (Settings -> Secrets and variables):
+#   secret   SIGNPATH_API_TOKEN            SignPath API token
+#   variable SIGNPATH_SIGNING              'true' to submit anything for
+#                                           signing; anything else (or unset)
+#                                           runs the whole pipeline unsigned,
+#                                           so this workflow proves itself
+#                                           before a SignPath project exists
+#   variable SIGNPATH_ORGANIZATION_ID      SignPath organization id
+#   variable SIGNPATH_PROJECT_SLUG         SignPath project slug
+#   variable SIGNPATH_POLICY_SLUG          SignPath signing-policy slug
+#   variable SIGNPATH_ARTIFACT_DLLS        artifact-configuration slug for
+#                                           the d3d11.dll / openvr_api.dll pair
+#   variable SIGNPATH_ARTIFACT_INSTALLER   artifact-configuration slug for
+#                                           edvr-installer.exe
+name: Release build
+
+"on":
+  push:
+    tags:
+      - 'v*'
+    branches:
+      # TEMPORARY: proves the workflow on its own branch; remove before merging to main
+      - claude/signpath-release-signing
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "bare semver, e.g. 0.18.0"
+        type: string
+        required: true
+      sign:
+        description: "submit to SignPath -- only takes effect when the SIGNPATH_SIGNING repository variable is 'true'"
+        type: boolean
+        default: true
+      dlss:
+        description: "fetch NVIDIA's DLSS SDK so the build carries nvngx_dlss.dll"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: windows-latest
+    # Two signing requests, each approved by hand and each allowed to wait
+    # two hours, plus the build itself.
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SIGN: "${{ vars.SIGNPATH_SIGNING == 'true' && (github.event_name != 'workflow_dispatch' || inputs.sign) }}"
+      DLSS: "${{ github.event_name != 'workflow_dispatch' || inputs.dlss }}"
+    steps:
+      - name: Check out EDVR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The runner image's default python is whatever the image was built
+      # with; pin one so the tools see the same interpreter every release.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compute release version
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $version = '${{ inputs.version }}'
+          } else {
+            # Push to the temporary proving branch below. git describe plus a
+            # -ci marker is not the bare semver package_native.py wants, so
+            # this run uses a fixed placeholder -- it only proves the
+            # pipeline runs end to end, it is never a real, installable
+            # version.
+            $version = '0.0.0'
+          }
+          Write-Host "VERSION=$version"
+          Add-Content -Path $env:GITHUB_ENV -Value "VERSION=$version"
+
+      - name: Print toolchain versions
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -property installationPath
+            Write-Host "Visual Studio: $vsPath"
+          } else {
+            Write-Host "vswhere not found at $vswhere"
+          }
+          python --version
+          cmake --version
+          git --version
+
+      - name: Fetch OpenXR loader
+        run: |
+          python tools\fetch_openxr_loader.py
+          if ($LASTEXITCODE -ne 0) { throw "fetch_openxr_loader.py failed" }
+
+      - name: Fetch FidelityFX DX11 SDK
+        run: |
+          python tools\fetch_ffx_dx11.py
+          if ($LASTEXITCODE -ne 0) { throw "fetch_ffx_dx11.py failed" }
+
+      - name: Fetch NVIDIA DLSS SDK
+        if: env.DLSS == 'true'
+        run: |
+          python tools\fetch_ngx.py
+          if ($LASTEXITCODE -ne 0) { throw "fetch_ngx.py failed" }
+
+      - name: Build
+        shell: cmd
+        run: call "%GITHUB_WORKSPACE%\build.bat" || exit /b 1
+
+      - name: Check build outputs
+        run: |
+          $files = 'build\d3d11.dll', 'build\openvr_api.dll', 'build\edvr-installer.exe'
+          $missing = $false
+          foreach ($f in $files) {
+            if (Test-Path $f) {
+              $item = Get-Item $f
+              Write-Host ("{0}  {1:N0} bytes  FileVersion={2}" -f $item.FullName, $item.Length, $item.VersionInfo.FileVersion)
+            } else {
+              Write-Host "MISSING: $f"
+              $missing = $true
+            }
+          }
+          if ($missing) { throw "build did not produce all expected outputs" }
+
+      - name: Upload DLLs (round one, unsigned)
+        id: dlls
+        uses: actions/upload-artifact@v4
+        with:
+          name: edvr-dlls-${{ env.VERSION }}
+          path: |
+            build/d3d11.dll
+            build/openvr_api.dll
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Submit DLLs to SignPath
+        if: env.SIGN == 'true'
+        uses: SignPath/github-action-submit-signing-request@v3
+        with:
+          api-token: "${{ secrets.SIGNPATH_API_TOKEN }}"
+          organization-id: "${{ vars.SIGNPATH_ORGANIZATION_ID }}"
+          project-slug: "${{ vars.SIGNPATH_PROJECT_SLUG }}"
+          signing-policy-slug: "${{ vars.SIGNPATH_POLICY_SLUG }}"
+          artifact-configuration-slug: "${{ vars.SIGNPATH_ARTIFACT_DLLS }}"
+          github-artifact-id: "${{ steps.dlls.outputs.artifact-id }}"
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signed/dlls
+
+      - name: Install signed DLLs
+        if: env.SIGN == 'true'
+        run: |
+          Copy-Item signed\dlls\d3d11.dll build\d3d11.dll -Force
+          Copy-Item signed\dlls\openvr_api.dll build\openvr_api.dll -Force
+          foreach ($f in 'build\d3d11.dll', 'build\openvr_api.dll') {
+            $sig = Get-AuthenticodeSignature $f
+            if ($sig.Status -ne 'Valid') { throw "$f is not validly signed: $($sig.Status)" }
+            Write-Host "$f signed by $($sig.SignerCertificate.Subject)"
+          }
+
+      - name: Rebuild installer around signed DLLs
+        shell: cmd
+        run: call "%GITHUB_WORKSPACE%\build.bat" --installer-only || exit /b 1
+
+      - name: Upload installer (round two)
+        id: installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: edvr-installer-${{ env.VERSION }}
+          path: build/edvr-installer.exe
+          if-no-files-found: error
+
+      - name: Submit installer to SignPath
+        if: env.SIGN == 'true'
+        uses: SignPath/github-action-submit-signing-request@v3
+        with:
+          api-token: "${{ secrets.SIGNPATH_API_TOKEN }}"
+          organization-id: "${{ vars.SIGNPATH_ORGANIZATION_ID }}"
+          project-slug: "${{ vars.SIGNPATH_PROJECT_SLUG }}"
+          signing-policy-slug: "${{ vars.SIGNPATH_POLICY_SLUG }}"
+          artifact-configuration-slug: "${{ vars.SIGNPATH_ARTIFACT_INSTALLER }}"
+          github-artifact-id: "${{ steps.installer.outputs.artifact-id }}"
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signed/installer
+
+      - name: Install signed installer
+        if: env.SIGN == 'true'
+        run: |
+          Copy-Item signed\installer\edvr-installer.exe build\edvr-installer.exe -Force
+          $sig = Get-AuthenticodeSignature build\edvr-installer.exe
+          if ($sig.Status -ne 'Valid') { throw "build\edvr-installer.exe is not validly signed: $($sig.Status)" }
+          Write-Host "build\edvr-installer.exe signed by $($sig.SignerCertificate.Subject)"
+
+      - name: Package release archive
+        run: |
+          $packageArgs = @($env:VERSION)
+          if ($env:DLSS -ne 'true') { $packageArgs += '--no-dlss' }
+          python tools\package_native.py @packageArgs
+          if ($LASTEXITCODE -ne 0) { throw "package_native.py failed" }
+
+      - name: Hash release files
+        run: |
+          $lines = Get-ChildItem dist -File |
+            Where-Object { $_.Extension -in '.zip', '.exe' } |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content -Path dist\SHA256SUMS.txt -Encoding utf8
+          Get-Content dist\SHA256SUMS.txt
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: edvr-${{ env.VERSION }}
+          path: |
+            dist/edvr-${{ env.VERSION }}.zip
+            dist/edvr-installer-${{ env.VERSION }}.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Next steps
+        run: |
+          Write-Host "================================================================"
+          Write-Host "Built, not published."
+          Write-Host ""
+          Write-Host "By hand, from here:"
+          Write-Host "  1. Download the edvr-$env:VERSION artifact from this run."
+          Write-Host "  2. Install it and fly the SIGNED installer -- a green workflow"
+          Write-Host "     run is not a test flight."
+          Write-Host "  3. Publish the GitHub release yourself, pasting in the SHA-256"
+          Write-Host "     lines below."
+          Write-Host ""
+          if (Test-Path dist\SHA256SUMS.txt) { Get-Content dist\SHA256SUMS.txt }
+          Write-Host "================================================================"

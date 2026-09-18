@@ -104,9 +104,11 @@ only if the game is under `Program Files`, and asks at that point rather than
 up front. It has no network access at all — it installs what it carries. *What
 it decides and why: [docs/installer.md](docs/installer.md).*
 
-Windows will say the program is unrecognised, because it is unsigned: **More
-info → Run anyway**. Every release lists the installer's SHA-256, which is the
-only provenance an unsigned binary can offer.
+The installer and both DLLs are signed from the release workflow: Windows
+should show the publisher as SignPath Foundation, which signs open-source
+projects' builds made on public CI. If Windows still calls a fresh release
+unrecognised, **More info → Run anyway**. Every release still lists each
+file's SHA-256, the only check available for a download.
 
 **Would rather place the package yourself?**
 [docs/manual-install.md](docs/manual-install.md) is the same install by hand:
@@ -684,11 +686,38 @@ it does not offer a legacy OpenVR-only package. `package.bat <version>
 contains DLSS, the archive retains its matching DLL and NVIDIA license notice
 alongside the installer that embeds it.
 
+`build.bat --installer-only` rebuilds only the installer from the DLLs
+already in `build\`, which the release workflow uses after the DLLs come
+back from signing.
+
 ## Antivirus
 
 A DLL that sits next to a game executable and intercepts graphics calls looks,
 structurally, like something worth flagging. Some scanners will. The source is
 here so you can read exactly what it does and build it yourself.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate
+by [SignPath Foundation](https://signpath.org/).
+
+**What is signed.** `edvr-installer.exe`, `d3d11.dll` and `openvr_api.dll` in
+every release from the first signed one on. They are built by the
+[release workflow](.github/workflows/release.yml) on GitHub-hosted runners
+from the tagged commit and signed by SignPath from that workflow's own
+artifacts; nothing built on a developer's machine is ever signed. NVIDIA's
+`nvngx_dlss.dll` and the Khronos OpenXR loader ship exactly as their
+publishers sign them.
+
+**Team.** Author, reviewer and approver:
+[characterecho-sean](https://github.com/characterecho-sean). Two-factor
+authentication is enabled on both the repository and SignPath.
+
+**Privacy.** EDVR has no network code and transfers no information to
+anyone. The only files it writes are in the game folder you choose and
+its settings backup under `%LOCALAPPDATA%\EDVR`.
+
+**Licence.** MIT — see [LICENSE](LICENSE).
 
 ## Licence and standing
 
