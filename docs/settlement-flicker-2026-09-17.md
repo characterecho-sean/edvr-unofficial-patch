@@ -45,14 +45,14 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: the depth-selection and scrim-metadata caches pass their focused WARP
-  fixtures, independent review and full build. Commit, rebuild the exact
-  version, then install to Frontier for a matched DLSS cockpit capture.
-  Draw-hook wall mean is 5.0-5.1 ms per sampled frame, including
-  reissues/waits; it is not wholly removable CPU execution. Preserve active
-  motion, transition-flash/history processing and foveated-DLSS paused.
-  Engine-level skipping still lacks a verified semantic target; no new flight
-  is needed to identify these two proxy costs.
+- Next: Frontier has verified 5efb139 with both caches; focused fixtures,
+  independent review and both full builds pass. The smoke-validated collector
+  is waiting for the same DLSS landed cockpit view, armed 2026-09-18 20:28 UTC
+  with a 30-minute launch window and five-minute recording limit. Hold the view
+  60-90 seconds, then quit normally. Compare against the c1dbb76 DLSS capture,
+  preserving scene/settings and active motion/history behavior. Foveated-DLSS
+  remains paused. Engine-level skipping still lacks a verified semantic target;
+  net performance benefit of these caches needs measurement.
 
 ## Journal
 
@@ -2709,3 +2709,20 @@ symbol-enabled absolute build passed all 65 pooled rigs, three quiet rigs and
 the 249-key configuration contract; output is
 build/scene-metadata-caches-validation.log. The committed version still needs
 its exact-version rebuild and verified Frontier installation.
+
+Committed and pushed as 5efb139. The clean symbol-enabled rebuild also passes
+65 pooled rigs, three quiet rigs and all 249 configuration checks; log:
+build/scene-metadata-caches-5efb139.log. The sanctioned installer dry-run,
+install and verify-only all pass for Frontier, which now has
+v0.17.0-32-g5efb139. Live temporal_aa=dlss, scanner_body=on, foveation=off and
+DLSS DLL version 310,7,0,0 were preserved.
+
+The elevated collector PID 7804 reached waiting_for_game at 20:28:17 UTC after
+its real ETW smoke passed all 60 frames, complete coverage, zero event loss and
+zero unknown/invalid intervals. It expects exactly 5efb139, waits 1800 seconds
+for launch and records until game exit or 300 seconds. Output is
+build/cpu-profile-frontier-5efb139-dlss; matching DLLs/PDBs are archived under
+symbols-5efb139 with verified SHA-256 hashes. Hold the same landed cockpit view
+with DLSS active for 60-90 seconds, then quit normally. Compare with the
+preserved c1dbb76 DLSS capture rather than the older AA-off flight. No in-game
+speedup is claimed before that measurement.
