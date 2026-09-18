@@ -52,6 +52,7 @@ Ptr<ID3D11BlendState> blendState;
 GpuIntervals<16> drawGpu,matchGpu,captureGpu;
 GpuIntervals<16> comparisonCopyGpu,comparisonCoverageGpu,comparisonFlushGpu;
 unsigned frames=0,draws=0,captureBatches=0,capturedInstances=0;
+uint64_t frameStamp=0,normalCaptureGpuFrame=~uint64_t(0);
 bool diagnosticWindowHadComparison=false;
 constexpr unsigned diagnosticWindowFrames=1800,capProbeBudget=32;
 enum class FlushReason { InputChange,WriteOrMap,EyeConsumption,FrameBoundary,GpuWritable,Count };
@@ -89,6 +90,7 @@ struct Diagnostics {
 } diagnostics;
 
 enum class OversizedMode : uint8_t { Immediate, Packed };
+constexpr OversizedMode normalOversizedMode=OversizedMode::Packed;
 enum class ComparisonStage : uint8_t { Idle, Armed, Settling, Running };
 const char* comparisonPhaseName(unsigned phase){static const char* names[]={"A1","B","A2"};return phase<3?names[phase]:"?";}
 const char* oversizedModeName(OversizedMode mode){return mode==OversizedMode::Packed?"packed-batch":"immediate";}
@@ -104,7 +106,7 @@ struct ComparisonMetrics {
 };
 struct ComparisonState {
     ComparisonStage stage=ComparisonStage::Idle;
-    OversizedMode mode=OversizedMode::Immediate;
+    OversizedMode mode=normalOversizedMode;
     unsigned phase=0;
     bool cancelRequested=false,nativeSampling=false,measurement=false,everMeasured=false,haveReport=false;
     uint64_t epoch=0,disturbanceEpoch=0,settleUntilMs=0,phaseDeadlineMs=0,nativeWindow=0,nativeScope=0;
@@ -116,6 +118,10 @@ struct ComparisonState {
 } comparison;
 
 bool comparisonActive(){return comparison.stage!=ComparisonStage::Idle;}
+bool selectCaptureGpuFrame(uint64_t& selectedFrame){
+    if((frameStamp&15u)!=0 || selectedFrame==frameStamp)return false;
+    selectedFrame=frameStamp;return true;
+}
 void clearComparisonMetrics(){comparison.metrics={};}
 bool sameBenchmarkMetadata(const NativeBenchmarkMetadata& a,const NativeBenchmarkMetadata& b){
     return !std::memcmp(a.inputWidth,b.inputWidth,sizeof(a.inputWidth)) &&
@@ -153,12 +159,12 @@ void abortComparison(ID3D11DeviceContext* ctx,const char* reason){
         const auto& m=comparison.metrics;const auto& copy=comparisonCopyGpu.totals;const auto& coverage=comparisonCoverageGpu.totals;const auto& flush=comparisonFlushGpu.totals;
         Log::get().note("motion comparison INCOMPLETE: phase %s, oversized draws %llu; CPU samples full/accepted/copy/flush %llu/%llu/%llu/%llu; GPU copy ready/submitted/skipped/invalid/pending %u/%llu/%u/%u/%llu, coverage %u/%llu/%u/%u/%llu, flush %u/%llu/%u/%u/%llu. These are instrument coverage only, not a comparison result.",comparisonPhaseName(phase),(unsigned long long)m.oversizedDraws,(unsigned long long)m.entryCpuSamples,(unsigned long long)m.acceptedCpuSamples,(unsigned long long)m.idCopyCpuSamples,(unsigned long long)m.flushCpuSamples,copy.samples,(unsigned long long)m.copyGpuSubmitted,copy.skipped,copy.invalid,(unsigned long long)pendingGpu(m.copyGpuSubmitted,copy),coverage.samples,(unsigned long long)m.coverageGpuSubmitted,coverage.skipped,coverage.invalid,(unsigned long long)pendingGpu(m.coverageGpuSubmitted,coverage),flush.samples,(unsigned long long)m.flushGpuSubmitted,flush.skipped,flush.invalid,(unsigned long long)pendingGpu(m.flushGpuSubmitted,flush));
     }
-    comparison.mode=OversizedMode::Immediate;comparison.stage=ComparisonStage::Idle;
+    comparison.mode=normalOversizedMode;comparison.stage=ComparisonStage::Idle;
     comparison.cancelRequested=comparison.nativeSampling=comparison.measurement=comparison.everMeasured=comparison.haveReport=false;
     comparison.disturbanceEpoch=comparison.settleUntilMs=comparison.phaseDeadlineMs=comparison.nativeWindow=comparison.nativeScope=0;
     comparison.failure=nullptr;comparison.haveBaseline=false;clearComparisonMetrics();resetComparisonGpu(ctx);++comparison.epoch;
     Log::get().note("motion comparison: aborted in phase %s; %s%s",comparisonPhaseName(phase),reason?reason:"unknown reason",sampled?".":"; the 30-second sample never opened, so no zero-valued component result is reported.");
-    menuNotify(reason&&std::strstr(reason,"cancelled")?"Motion comparison cancelled; normal capture restored.":"Motion comparison aborted; see the graphics log.");
+    menuNotify(reason&&std::strstr(reason,"cancelled")?"Motion comparison cancelled; normal batched capture restored.":"Motion comparison aborted; normal batched capture restored.");
 }
 void beginComparisonPhase(ID3D11DeviceContext* ctx,uint64_t nowMs){
     comparison.stage=ComparisonStage::Running;
@@ -263,8 +269,8 @@ void flushCapture(FlushReason reason){
     {
         ComputeState saved(ctx);bool timed=false;
         if(comparison.measurement){
-            if(frames%16==0 && comparison.metrics.flushGpuFrame!=frames){comparison.metrics.flushGpuFrame=frames;timed=comparisonFlushGpu.begin(ctx);if(timed)++comparison.metrics.flushGpuSubmitted;}
-        }else timed=captureGpu.begin(ctx);
+            if(selectCaptureGpuFrame(comparison.metrics.flushGpuFrame)){timed=comparisonFlushGpu.begin(ctx);if(timed)++comparison.metrics.flushGpuSubmitted;}
+        }else if(selectCaptureGpuFrame(normalCaptureGpuFrame))timed=captureGpu.begin(ctx);
         Settings data{};data.info[2]=pending.count;
         D3D11_BOX box{0,0,0,UINT(pending.count*sizeof(Settings)),1,1};
         ctx->UpdateSubresource(captureInputs.Get(),0,&box,pending.inputs,0,0);
@@ -316,12 +322,12 @@ const char* benchmarkAbortName(uint32_t reason){
     switch(reason){case kNativeBenchmarkScopeChanged:return "native benchmark scope changed (menu, setting or diagnostic activity)";case kNativeBenchmarkOverflow:return "native benchmark storage overflowed";case kNativeBenchmarkClockReversed:return "native benchmark clock reversed";case kNativeBenchmarkTransportLoss:return "native timing transport lost samples";default:return "native benchmark did not complete";}
 }
 void completeComparison(ID3D11DeviceContext* ctx){
-    comparison.mode=OversizedMode::Immediate;comparison.stage=ComparisonStage::Idle;
+    comparison.mode=normalOversizedMode;comparison.stage=ComparisonStage::Idle;
     comparison.cancelRequested=comparison.nativeSampling=comparison.measurement=comparison.everMeasured=comparison.haveReport=false;
     comparison.disturbanceEpoch=comparison.settleUntilMs=comparison.phaseDeadlineMs=comparison.nativeWindow=comparison.nativeScope=0;
     comparison.failure=nullptr;comparison.haveBaseline=false;clearComparisonMetrics();resetComparisonGpu(ctx);++comparison.epoch;
-    Log::get().note("motion comparison: A/B/A complete; normal oversized capture restored to the immediate path. The three native benchmark lines and phase-tagged component lines are the result.");
-    menuNotify("Motion comparison complete; normal capture restored.");
+    Log::get().note("motion comparison: A/B/A complete; normal oversized capture restored to the packed-batch path. The three native benchmark lines and phase-tagged component lines are the result.");
+    menuNotify("Motion comparison complete; normal batched capture restored.");
 }
 void processComparisonBoundary(ID3D11DeviceContext* ctx){
     if(comparison.stage==ComparisonStage::Idle)return;
@@ -361,20 +367,20 @@ void processComparisonBoundary(ID3D11DeviceContext* ctx){
     ++comparison.phase;beginComparisonPhase(ctx,now);
 }
 } // namespace mesh_motion_detail
-void meshMotionConfigure(bool on){using namespace mesh_motion_detail;if(on!=enabled){if(!on&&comparisonActive()){Log::get().note("motion comparison: aborted because mesh motion was disabled; normal immediate mode will be used when it is enabled again.");menuNotify("Motion comparison aborted: mesh motion was disabled.");}meshMotionShutdown();enabled=on;if(on)Log::get().note("mesh motion diagnostics: 1800-frame windows active; draw CPU sampled 1/256 calls, capture flush CPU sampled 1/16 batches, capped eligibility probed for at most 32 draws per eye in one frame per window (bounded sample only; no population estimate).");}}
+void meshMotionConfigure(bool on){using namespace mesh_motion_detail;if(on!=enabled){if(!on&&comparisonActive()){Log::get().note("motion comparison: aborted because mesh motion was disabled; normal batched capture will be used when it is enabled again.");menuNotify("Motion comparison aborted: mesh motion was disabled.");}meshMotionShutdown();enabled=on;if(on)Log::get().note("mesh motion diagnostics: 1800-frame windows active; draw CPU sampled 1/256 calls, capture flush CPU sampled 1/16 batches, capture GPU samples the first flush in one of 16 frames, capped eligibility probed for at most 32 draws per eye in one frame per window (bounded samples only; no population estimates).");}}
 void meshMotionRequestComparison(){
     using namespace mesh_motion_detail;
     if(!enabled){Log::get().note("motion comparison: refused because mesh motion is disabled.");menuNotify("Motion comparison unavailable: mesh motion is off.");return;}
     if(failed){Log::get().note("motion comparison: refused because mesh capture resource or shader setup has failed.");menuNotify("Motion comparison unavailable: mesh capture failed.");return;}
     if(comparisonActive()){
-        if(!comparison.cancelRequested){comparison.cancelRequested=true;Log::get().note("motion comparison: cancellation requested; the frame boundary will restore immediate oversized capture.");menuNotify("Motion comparison cancellation requested.");}
+        if(!comparison.cancelRequested){comparison.cancelRequested=true;Log::get().note("motion comparison: cancellation requested; the frame boundary will restore normal batched capture.");menuNotify("Motion comparison cancellation requested.");}
         return;
     }
-    comparison.stage=ComparisonStage::Armed;comparison.mode=OversizedMode::Immediate;comparison.phase=0;
+    comparison.stage=ComparisonStage::Armed;comparison.mode=normalOversizedMode;comparison.phase=0;
     comparison.cancelRequested=comparison.nativeSampling=comparison.measurement=comparison.everMeasured=comparison.haveReport=false;
     comparison.disturbanceEpoch=comparison.settleUntilMs=comparison.phaseDeadlineMs=comparison.nativeWindow=comparison.nativeScope=0;comparison.failure=nullptr;comparison.haveBaseline=false;clearComparisonMetrics();
     Log::get().note("motion comparison: armed A1 immediate / B packed-batch / A2 immediate. Close the menu, then hold one landed view and all settings unchanged for about two minutes. Ten seconds of settling, native warmups and drains are excluded.");
-    Log::get().note("motion comparison instrumentation: full hook CPU reuses the existing 1/256 clock; accepted path, ID-copy CPU/GPU and coverage GPU sample fixed accepted/copy-call schedules; capture GPU samples at most the first flush in one of 16 frames. The common schedule replaces the rolling per-batch capture query only during each exact sample.");
+    Log::get().note("motion comparison instrumentation: full hook CPU reuses the existing 1/256 clock; accepted path, ID-copy CPU/GPU and coverage GPU sample fixed accepted/copy-call schedules; capture GPU samples at most the first flush in one of 16 frames, the same bounded policy used by normal capture.");
     menuNotify("Comparison armed. Close the menu and hold the landed view.");
 }
 uint64_t meshMotionComparisonScopeEpoch(){using namespace mesh_motion_detail;return comparison.epoch;}
@@ -479,8 +485,8 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     if(!pending.count){
         pending.context=ctx;pending.scene=cb;pending.ids=ids;pending.pool=pool;pending.poolResource=pr;pending.output=now.uav;
         // Reuse one GPU snapshot for all draws while this stream is unchanged.
-        // The established oversized path copies this draw only and flushes it
-        // before the next oversized draw. Phase B alone packs those ranges.
+        // Normal capture and comparison phase B pack bounded oversized ranges;
+        // the comparison A phases preserve the prior per-draw flush policy.
         if(wholeIds)copyInstanceIds(ctx,0,ids.Get(),0,idd.ByteWidth,true);
         else if(!packedOversized)copyInstanceIds(ctx,0,ids.Get(),UINT(at),UINT(at+n*8),false);
     }
@@ -545,9 +551,11 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
     flushCapture(FlushReason::FrameBoundary);
     if(ctx){drawGpu.poll(ctx);matchGpu.poll(ctx);captureGpu.poll(ctx);if(comparisonActive()){comparisonCopyGpu.poll(ctx);comparisonCoverageGpu.poll(ctx);comparisonFlushGpu.poll(ctx);}}
     processComparisonBoundary(ctx);
+    ++frameStamp;
     if(++frames%1800==0){const auto& d=drawGpu.totals;const auto& m=matchGpu.totals;
         Log::get().note("mesh motion GPU: %u coverage reissues/%u frames; sampled coverage %.3f us (%u samples), batched match %.3f us/eye (%u samples); no waits/readbacks.",draws,frames,d.samples?d.ms*1000/d.samples:0,d.samples,m.samples?m.ms*1000/m.samples:0,m.samples);
         const auto& c=captureGpu.totals;Log::get().note("mesh motion capture: %u instances in %u batches; %.3f us/batch (%u samples, %u skipped).",capturedInstances,captureBatches,c.samples?c.ms*1000/c.samples:0,c.samples,c.skipped);
+        Log::get().note("mesh motion capture sampling: GPU mean is the selected first flush in one of 16 frames, not a population average; at most one capture query is admitted per sampler in a selected frame.");
         for(unsigned i=0;i<2;++i){const auto& x=diagnostics.eye[i];Log::get().note("mesh motion diagnostic eye %u: fully checked candidates %llu draws/%llu instances; accepted %llu/%llu; cap decisions %llu/%llu total, bounded sample %llu/%llu (%llu/%llu eligible, %llu/%llu ineligible; no extrapolation).",i,(unsigned long long)x.candidateDraws,(unsigned long long)x.candidateInstances,(unsigned long long)x.acceptedDraws,(unsigned long long)x.acceptedInstances,(unsigned long long)x.capRejectedDraws,(unsigned long long)x.capRejectedInstances,(unsigned long long)x.sampledCapDraws,(unsigned long long)x.sampledCapInstances,(unsigned long long)x.eligibleCapRejectedDraws,(unsigned long long)x.eligibleCapRejectedInstances,(unsigned long long)x.ineligibleCapSampleDraws,(unsigned long long)x.ineligibleCapSampleInstances);}
         uint64_t flushCount=0;for(auto count:diagnostics.flushes)flushCount+=count;
         Log::get().note("mesh motion diagnostic CPU: draw %.3f us (%llu samples), flush %.3f us (%llu samples); batches %llu, %.1f instances average, %u max.",diagnostics.drawCpuSamples?diagnostics.drawCpuMs*1000/diagnostics.drawCpuSamples:0,(unsigned long long)diagnostics.drawCpuSamples,diagnostics.flushCpuSamples?diagnostics.flushCpuMs*1000/diagnostics.flushCpuSamples:0,(unsigned long long)diagnostics.flushCpuSamples,(unsigned long long)flushCount,flushCount?double(diagnostics.flushInstances)/double(flushCount):0,diagnostics.largestBatch);
@@ -604,7 +612,7 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
 }
 void meshMotionShutdown(){
     using namespace mesh_motion_detail;pending.clear();depthMetadata.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
-    failed=noted=capped=diagnosticWindowHadComparison=false;drawGpu={};matchGpu={};captureGpu={};comparisonCopyGpu={};comparisonCoverageGpu={};comparisonFlushGpu={};comparison={};frames=draws=captureBatches=capturedInstances=0;diagnostics={};watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
+    failed=noted=capped=diagnosticWindowHadComparison=false;drawGpu={};matchGpu={};captureGpu={};comparisonCopyGpu={};comparisonCoverageGpu={};comparisonFlushGpu={};comparison={};frames=draws=captureBatches=capturedInstances=0;frameStamp=0;normalCaptureGpuFrame=~uint64_t(0);diagnostics={};watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,unsigned sceneFrame){
     using namespace mesh_motion_detail;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;

@@ -314,15 +314,22 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     std::vector<UINT> largeIds(maxInstanceBytes/4+4*maxRecords);const UINT farA=maxInstanceBytes/8+17,farB=farA+129;
     largeIds[farA*2]=2;largeIds[farB*2]=3;
     auto largeStream=buffer(UINT(largeIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,largeIds.data());UINT idStep=8,idStart=0;
-    reset();pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();check(comparison.mode==normalOversizedMode,"normal oversized capture defaults to packed batching");pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
-    check(!captureBatches && pending.count==1,"default oversized path retains one draw only until the next boundary");
+    check(!captureBatches && pending.count==1,"normal oversized path retains its first bounded range until a real boundary");
     queue(farB);
-    check(captureBatches==1 && pending.count==1,"default oversized path flushes before reusing its ranged source offset");
+    check(!captureBatches && pending.count==2,"normal oversized path packs distinct ranged source offsets into one batch");
     a=consumeBatch();
-    check(captureBatches==2 && word(a,31)==2 && word(a,91)==3,"default immediate oversized path preserves each source offset and ID");
-    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==1 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==1 && diagnostics.rangedIdCopies==2 && diagnostics.rangedIdInstances==2,"default immediate path preserves the 81eeedb per-draw oversized flush policy and bounded-copy diagnostics");
+    check(captureBatches==1 && word(a,31)==2 && word(a,91)==3,"normal packed oversized path preserves each source offset and ID");
+    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==0 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==0 && diagnostics.rangedIdCopies==2 && diagnostics.rangedIdInstances==2,"normal packed path removes size-only flushes while preserving bounded-copy diagnostics");
     check(comparison.metrics.copyGpuSubmitted==0 && comparisonCopyGpu.totals.samples==0 && comparisonCopyGpu.totals.skipped==0,"unarmed rendering never opens comparison GPU queries");
+
+    // Phase A remains the prior immediate policy even though normal runtime is
+    // packed. It must retain the old per-draw boundary for a controlled A/B/A.
+    reset();comparison.phase=0;beginComparisonPhase(ctx.Get(),GetTickCount64());pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);queue(farB);
+    check(captureBatches==1 && pending.count==1 && comparison.mode==OversizedMode::Immediate,"comparison A phase retains the prior immediate oversized boundary");
+    a=consumeBatch();check(captureBatches==2 && word(a,31)==2 && word(a,91)==3,"comparison A phase preserves both immediate ranged captures");
 
     // The comparison gate must exercise the real WARP command path. One
     // sampled oversized draw covers full-entry early return, accepted work,
@@ -340,7 +347,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     const auto gatedEntries=comparison.metrics.entryCalls;meshMotionComparisonNativeSampling(false,901,902);meshMotionDraw(nullptr,issue,6,1,0,0,0,materialVs);
     check(comparison.metrics.entryCalls==gatedEntries,"drain/inactive callbacks close component collection exactly at the Sampling boundary");
 
-    reset();comparison.mode=OversizedMode::Packed;pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);queue(farB);
     check(!captureBatches && pending.count==2,"oversized draws from distinct far offsets accumulate one batch");a=consumeBatch();
     check(captureBatches==1 && word(a,31)==2 && word(a,91)==3 && a[56]==1 && a[116]==1,"batched oversized draws retain distinct IDs and exact raw poses");
@@ -350,7 +357,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
 
     // The compact destination reaches exactly 4096 bytes at the 512-record
     // cap and the deferred shader must consume every thread group.
-    reset();comparison.mode=OversizedMode::Packed;for(UINT i=0;i<4;++i)pose(1,float(i)*.05f,i);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();for(UINT i=0;i<4;++i)pose(1,float(i)*.05f,i);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     std::vector<UINT> bulkIds(maxInstanceBytes/4+2*maxRecords);const UINT bulkFirst=maxInstanceBytes/8;
     for(UINT i=0;i<maxRecords;++i)bulkIds[(bulkFirst+i)*2]=i&3;
     auto bulkStream=buffer(UINT(bulkIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,bulkIds.data());ctx->IASetVertexBuffers(0,1,bulkStream.GetAddressOf(),&idStep,&idStart);
@@ -360,7 +367,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
 
     // Switching between ranged and whole snapshots retains the ID resource
     // as a real flush boundary, so neither mode can consume the other's bytes.
-    reset();comparison.mode=OversizedMode::Packed;pose(1,.1f,0);pose(1,.3f,2);pose(1,.4f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();pose(1,.1f,0);pose(1,.3f,2);pose(1,.4f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     ctx->IASetVertexBuffers(0,1,iv.GetAddressOf(),&idStep,&idStart);queue();
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farB);a=consumeBatch();
@@ -369,23 +376,51 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
 
     // A source rewrite still submits the ranged batch before the original ID
     // bytes change; the next draw receives a fresh compact copy.
-    reset();comparison.mode=OversizedMode::Packed;pose(1,.2f,2);pose(1,.7f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();pose(1,.2f,2);pose(1,.7f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     meshMotionResourceWritten(largeStream.Get());largeIds[farA*2]=3;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);queue(farA);a=consumeBatch();
     check(captureBatches==2 && word(a,31)==2 && word(a,91)==3 && std::fabs(a[23]-.2f)<1e-6 && std::fabs(a[83]-.7f)<1e-6 && diagnostics.flushes[unsigned(FlushReason::WriteOrMap)]==1,"oversized ID rewrite preserves both draw-time transforms");
 
     // Pool writes and eye changes keep their existing boundaries with ranged
     // IDs, while a GPU-writable source remains immediate.
-    reset();comparison.mode=OversizedMode::Packed;pose(1,.1f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    reset();pose(1,.1f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     meshMotionResourceWritten(pool.Get());pose(1,.6f,2);ctx->UpdateSubresource(pool.Get(),0,nullptr,poolData,0,0);queue(farA);a=consumeBatch();
     check(captureBatches==2 && std::fabs(a[23]-.1f)<1e-6 && std::fabs(a[83]-.6f)<1e-6 && diagnostics.flushes[unsigned(FlushReason::WriteOrMap)]==1,"oversized pool rewrite preserves both draw-time poses");
-    reset();comparison.mode=OversizedMode::Packed;pose(1,.2f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    reset();pose(1,.2f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     testEye=1;testScene=scene[1].Get();testDepth=dsv[1].Get();ctx->OMSetRenderTargets(0,nullptr,dsv[1].Get());ctx->ClearDepthStencilView(dsv[1].Get(),D3D11_CLEAR_DEPTH,0,0);queue(farA);a=consumeBatch();
     auto largeFirstEye=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
     check(captureBatches==2 && a[56]==1 && largeFirstEye[56]==1 && std::fabs(a[23]-.2f)<1e-6 && std::fabs(largeFirstEye[23]-.2f)<1e-6 && diagnostics.inputChanges[unsigned(InputChange::Output)]==1,"oversized eye switch preserves both output batches and draw-time poses");
-    reset();comparison.mode=OversizedMode::Packed;pose(1,.2f);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);const UINT farGpu=farA+1;
+    reset();pose(1,.2f);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);const UINT farGpu=farA+1;
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());queue(farGpu);
     check(!pending.count && captureBatches==1 && diagnostics.rangedIdCopies==1 && diagnostics.flushes[unsigned(FlushReason::GpuWritable)]==1,"GPU-writable oversized capture remains immediate");a=consumeBatch();check(a[56]==1,"GPU-writable oversized capture retains the ranged ID");
+    // Normal capture timing admits only the first eligible flush in a selected
+    // frame. Many immediate safety flushes must not create per-batch queries.
+    reset();pose(1,.2f);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());
+    for(unsigned i=0;i<8;++i)queue(farGpu);
+    check(captureBatches==8 && normalCaptureGpuFrame==frameStamp && captureGpu.totals.skipped==0,"many capture batches admit one normal GPU query in a selected frame");
+    a=consumeBatch(); // test-only readback lets the asynchronous timer retire
+    for(unsigned i=0;i<5;++i)meshMotionFrameBoundary(ctx.Get());
+    check(captureGpu.totals.samples==1 && captureGpu.totals.skipped==0,"the selected normal capture query retires without per-batch skips before the next selected frame");
+    while(frameStamp<16)meshMotionFrameBoundary(ctx.Get());
+    bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());
+    for(unsigned i=0;i<8;++i)queue(farGpu);
+    check(normalCaptureGpuFrame==16 && captureGpu.totals.samples==1 && captureGpu.totals.skipped==0,"frame 16 admits exactly the next normal first-flush query");
+    a=consumeBatch(); // test-only synchronization, never used by production
+    for(unsigned i=0;i<5;++i)meshMotionFrameBoundary(ctx.Get());
+    check(captureGpu.totals.samples==2 && captureGpu.totals.skipped==0,"normal capture timing remains bounded across selected frames");
+    // The 1800-frame diagnostics report clears window counters, not the
+    // monotonic sampling stamp or in-flight timer ownership.
+    frames=1799;frameStamp=1792;bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());
+    for(unsigned i=0;i<8;++i)queue(farGpu);
+    check(normalCaptureGpuFrame==1792 && captureGpu.totals.samples==2 && captureGpu.totals.skipped==0,"the diagnostic-window boundary admits only one normal query for its selected frame");
+    a=consumeBatch();for(unsigned i=0;i<5;++i)meshMotionFrameBoundary(ctx.Get());
+    check(frames>1800 && captureGpu.totals.samples==3 && captureGpu.totals.skipped==0,"a normal capture query retires across the 1800-frame diagnostics boundary");
+    while(frameStamp<1808)meshMotionFrameBoundary(ctx.Get());
+    bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());
+    for(unsigned i=0;i<8;++i)queue(farGpu);
+    check(normalCaptureGpuFrame==1808 && captureGpu.totals.samples==3 && captureGpu.totals.skipped==0,"the next monotonic selected frame admits exactly one normal query after diagnostics reporting");
+    a=consumeBatch();for(unsigned i=0;i<5;++i)meshMotionFrameBoundary(ctx.Get());
+    check(captureGpu.totals.samples==4 && captureGpu.totals.skipped==0,"normal capture timing remains bounded after the diagnostics boundary");
     reset();pose(1,.2f);bind(0);queue();meshMotionFrameBoundary(ctx.Get());
     check(!pending.count && diagnostics.flushes[unsigned(FlushReason::FrameBoundary)]==1,"frame boundary submits pending capture with an exclusive reason");
     // Deferred capture may run after the app enabled predication. Captures,
@@ -448,16 +483,26 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     check(pixels[(30*W+32)*4+3]==0 && pixels[(31*W+32)*4+3]==0,"foreground and UI reject hull motion");
     parameters[4]=.25f;pixels=consume();check(pixels[at+3]==1 && std::fabs(pixels[at]+.39f)<1e-5,"native TAA grid returns same physical motion");parameters[2]=0;pixels=consume();check(pixels[at+3]==0,"nonconsecutive frame rejects mesh history");
 
+    // Arming is asynchronous. A pending normal batch must finish under the
+    // packed policy before the first A phase switches to immediate mode.
+    reset();pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);
+    queue(farA);testMenuOpen=true;meshMotionRequestComparison();queue(farB);
+    check(comparison.stage==ComparisonStage::Armed && comparison.mode==normalOversizedMode && pending.count==2 && !captureBatches,"arming preserves the pending normal packed batch");
+    meshMotionFrameBoundary(ctx.Get());check(comparison.stage==ComparisonStage::Armed && comparison.mode==normalOversizedMode && captureBatches==1,"the boundary flushes the normal packed batch before any A-phase switch");
+    meshMotionRequestComparison();meshMotionFrameBoundary(ctx.Get());testMenuOpen=false;
+    check(comparison.stage==ComparisonStage::Idle && comparison.mode==normalOversizedMode,"cancelling an armed comparison restores normal packed capture");
+
     // Comparison policy is driven only by a matching completed native report.
     // Keep these tests at the boundary/API level so they cover association,
     // retries, cancellation and restoration without inventing menu events.
     auto metadata=[&](UINT width=2481){NativeBenchmarkMetadata m{};m.inputWidth[0]=m.inputWidth[1]=width;m.inputHeight[0]=m.inputHeight[1]=2121;m.outputWidth[0]=m.outputWidth[1]=3072;m.outputHeight[0]=m.outputHeight[1]=3264;m.refreshMilliHz=90000;m.gameFov[0][0]=m.gameFov[1][0]=1.1f;m.treatments[0]=m.treatments[1]=3;m.featureEpoch=7;strcpy_s(m.runtime,"OpenXR");strcpy_s(m.headset,"VirtualDesktopXR");strcpy_s(m.aaMode,"DLSS");strcpy_s(m.dlssMode,"Quality");strcpy_s(m.build,"test");return m;};
     auto report=[&](uint64_t window,uint64_t scope,NativeBenchmarkMetadata meta=NativeBenchmarkMetadata{}){NativeBenchmarkReport r{};r.window=window;r.scope=scope;r.complete=true;r.abortReason=kNativeBenchmarkCompleted;r.cpu.available=r.gpu.available=true;r.metadata=meta;return r;};
     auto seedCompleteMetrics=[&](){auto& m=comparison.metrics;m.entryCpuSamples=m.acceptedCpuSamples=m.idCopyCpuSamples=m.flushCpuSamples=1;m.oversizedDraws=m.oversizedInstances=1;m.copyGpuSubmitted=m.coverageGpuSubmitted=m.flushGpuSubmitted=1;comparisonCopyGpu.totals={.01,1,0,0};comparisonCoverageGpu.totals={.02,1,0,0};comparisonFlushGpu.totals={.03,1,0,0};};
-    auto armToRunning=[&](){reset();testMenuOpen=true;meshMotionRequestComparison();processComparisonBoundary(ctx.Get());testMenuOpen=false;processComparisonBoundary(ctx.Get());comparison.settleUntilMs=0;processComparisonBoundary(ctx.Get());check(comparison.stage==ComparisonStage::Running && comparison.phase==0 && comparison.mode==OversizedMode::Immediate,"comparison starts A1 in restored immediate mode after menu close and settling");};
-    auto expectRestored=[&](const char* why){check(comparison.stage==ComparisonStage::Idle && comparison.mode==OversizedMode::Immediate && !comparison.measurement && !comparison.nativeSampling,why);};
+    auto armToRunning=[&](){reset();testMenuOpen=true;meshMotionRequestComparison();processComparisonBoundary(ctx.Get());testMenuOpen=false;processComparisonBoundary(ctx.Get());check(comparison.stage==ComparisonStage::Settling && comparison.mode==normalOversizedMode,"settling retains normal packed capture");comparison.settleUntilMs=0;processComparisonBoundary(ctx.Get());check(comparison.stage==ComparisonStage::Running && comparison.phase==0 && comparison.mode==OversizedMode::Immediate,"comparison starts A1 in prior immediate mode after menu close and settling");};
+    auto expectRestored=[&](const char* why){check(comparison.stage==ComparisonStage::Idle && comparison.mode==normalOversizedMode && !comparison.measurement && !comparison.nativeSampling,why);};
 
     reset();testMenuOpen=true;meshMotionRequestComparison();
+    check(comparison.mode==normalOversizedMode,"arming leaves normal packed capture active while the menu is open");
     auto stale=report(7,70,metadata());meshMotionComparisonNativeSampling(true,7,70);meshMotionComparisonNativeReport(stale);processComparisonBoundary(ctx.Get());
     check(comparison.stage==ComparisonStage::Armed && !comparison.nativeScope && !comparison.haveReport,"pre-phase callbacks cannot associate with or advance an armed comparison");
     testMenuOpen=false;processComparisonBoundary(ctx.Get());check(comparison.stage==ComparisonStage::Settling,"closing the menu snapshots the environment and enters settling");
@@ -475,10 +520,31 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     check(comparison.phase==2 && comparison.mode==OversizedMode::Immediate,"matching completed B advances to restored A2 mode");
     meshMotionComparisonNativeSampling(true,13,103);seedCompleteMetrics();auto a2=report(13,103,metadata());meshMotionComparisonNativeReport(a2);processComparisonBoundary(ctx.Get());expectRestored("matching completed A2 finishes A/B/A and restores baseline");
 
-    armToRunning();meshMotionRequestComparison();processComparisonBoundary(ctx.Get());expectRestored("cancellation at a frame boundary restores immediate mode");
-    armToRunning();testMenuOpen=true;processComparisonBoundary(ctx.Get());testMenuOpen=false;expectRestored("reopening the menu during a phase aborts and restores immediate mode");
-    armToRunning();comparison.phaseDeadlineMs=0;processComparisonBoundary(ctx.Get());expectRestored("a phase timeout aborts and restores immediate mode");
+    // Public frame boundaries must flush each phase's queued capture before
+    // applying the next mode, including completion back to normal packed mode.
+    armToRunning();pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    meshMotionComparisonNativeSampling(true,60,600);seedCompleteMetrics();auto pendingA1=report(60,600,metadata());meshMotionComparisonNativeReport(pendingA1);meshMotionFrameBoundary(ctx.Get());
+    auto phaseCapture=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[1-eyes[0].write].buffer.Get());
+    check(comparison.phase==1 && comparison.mode==OversizedMode::Packed && !pending.count && word(phaseCapture,31)==2,"A1 pending IDs flush under immediate mode before the boundary starts B");
+    bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);queue(farB);
+    meshMotionComparisonNativeSampling(true,61,601);seedCompleteMetrics();auto pendingB=report(61,601,metadata());meshMotionComparisonNativeReport(pendingB);meshMotionFrameBoundary(ctx.Get());
+    phaseCapture=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[1-eyes[0].write].buffer.Get());
+    check(comparison.phase==2 && comparison.mode==OversizedMode::Immediate && !pending.count && word(phaseCapture,31)==2 && word(phaseCapture,91)==3,"B pending packed IDs flush before the boundary starts A2");
+    bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farB);
+    meshMotionComparisonNativeSampling(true,62,602);seedCompleteMetrics();auto pendingA2=report(62,602,metadata());meshMotionComparisonNativeReport(pendingA2);meshMotionFrameBoundary(ctx.Get());
+    phaseCapture=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[1-eyes[0].write].buffer.Get());
+    check(comparison.stage==ComparisonStage::Idle && comparison.mode==normalOversizedMode && !pending.count && word(phaseCapture,31)==3,"A2 pending IDs flush before completion restores normal packed capture");
+
+    armToRunning();pose(1,0,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);meshMotionRequestComparison();meshMotionFrameBoundary(ctx.Get());
+    phaseCapture=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[1-eyes[0].write].buffer.Get());
+    check(comparison.stage==ComparisonStage::Idle && comparison.mode==normalOversizedMode && !pending.count && word(phaseCapture,31)==2,"a pending A-phase capture flushes before cancellation restores normal packed mode");
+
+    armToRunning();meshMotionRequestComparison();processComparisonBoundary(ctx.Get());expectRestored("cancellation at a frame boundary restores normal packed capture");
+    testMenuOpen=true;meshMotionRequestComparison();check(comparison.stage==ComparisonStage::Armed && comparison.mode==normalOversizedMode,"a comparison can be re-armed after cancellation without changing normal mode");meshMotionRequestComparison();processComparisonBoundary(ctx.Get());testMenuOpen=false;expectRestored("cancelling the re-armed comparison restores normal packed capture");
+    armToRunning();testMenuOpen=true;processComparisonBoundary(ctx.Get());testMenuOpen=false;expectRestored("reopening the menu during a phase aborts and restores normal packed capture");
+    armToRunning();comparison.phaseDeadlineMs=0;processComparisonBoundary(ctx.Get());expectRestored("a phase timeout aborts and restores normal packed capture");
     armToRunning();++testBenchmarkDisturbanceEpoch;processComparisonBoundary(ctx.Get());expectRestored("a disturbance during native warmup or sampling aborts the whole comparison");
+    armToRunning();failed=true;processComparisonBoundary(ctx.Get());expectRestored("a mesh setup failure aborts and restores normal packed capture");failed=false;
 
     armToRunning();meshMotionComparisonNativeSampling(true,20,200);meshMotionComparisonNativeSampling(false,20,201);check(comparison.failure!=nullptr && !comparison.measurement,"an inactive mixed-scope abort tick closes collection and marks the phase invalid");processComparisonBoundary(ctx.Get());expectRestored("mixed window/scope callbacks abort instead of advancing");
     armToRunning();meshMotionComparisonNativeSampling(true,21,201);auto aborted=report(21,201,metadata());aborted.complete=false;aborted.aborted=true;aborted.abortReason=kNativeBenchmarkScopeChanged;meshMotionComparisonNativeReport(aborted);processComparisonBoundary(ctx.Get());expectRestored("a matching aborted native report aborts the comparison");
@@ -490,6 +556,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
 
     armToRunning();meshMotionComparisonNativeSampling(true,50,500);seedCompleteMetrics();auto baselineReport=report(50,500,metadata());meshMotionComparisonNativeReport(baselineReport);processComparisonBoundary(ctx.Get());
     meshMotionComparisonNativeSampling(true,51,501);seedCompleteMetrics();auto changed=report(51,501,metadata(2480));meshMotionComparisonNativeReport(changed);processComparisonBoundary(ctx.Get());expectRestored("metadata changes between phases abort the entire comparison");
+    armToRunning();meshMotionConfigure(false);check(!enabled && comparison.stage==ComparisonStage::Idle && comparison.mode==normalOversizedMode,"disabling mesh motion resets an active comparison to normal packed capture");meshMotionConfigure(true);
 
     if(argc>2 && (std::strcmp(argv[1],"--replay")==0 || std::strcmp(argv[1],"--replay-hardware")==0))replayMeshes(dev.Get(),ctx.Get(),argv[2],hardware);
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T bytes=0;messages->GetMessage(i,nullptr,&bytes);std::vector<char> data(bytes);auto* m=reinterpret_cast<D3D11_MESSAGE*>(data.data());hr(messages->GetMessage(i,m,&bytes));if(m->Severity<=D3D11_MESSAGE_SEVERITY_ERROR){std::puts(m->pDescription);check(false,"D3D debug layer");}}

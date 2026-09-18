@@ -20,8 +20,8 @@ void meshMotionResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~ui
 void meshMotionStageDump(ID3D11DeviceContext*,ID3D11Texture2D*,unsigned sceneFrame=~0u);
 void meshMotionWriteDump(ID3D11DeviceContext*,const wchar_t* directory,const wchar_t* stamp);
 
-// Explicit one-run A/B/A diagnostic. Idle rendering always uses the established
-// immediate path for oversized instance streams. The menu action arms/cancels;
+// Explicit one-run A/B/A diagnostic. Idle rendering uses normal packed capture
+// for oversized instance streams. The menu action arms/cancels;
 // the native benchmark owner supplies the exact 30-second sampling gate and its
 // completed report so component counters cannot drift across benchmark windows.
 void meshMotionRequestComparison();
