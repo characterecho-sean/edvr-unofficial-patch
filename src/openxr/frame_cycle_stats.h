@@ -6,6 +6,7 @@
 #include <mutex>
 #include <memory>
 #include "../common/native_present_trace.h"
+#include "../common/native_cpu_trace_events.h"
 
 namespace edvr::openxr {
 
@@ -34,7 +35,20 @@ class FrameCycleStats final {
     BadProviderSize, BadProviderGeneration, NotYetObservable, LostPresentHistory,
     PartialPresent, WrongPresentThread, FailedPresent, TestPresent, MalformedPresent,
     PostUnavailableCount };
+  static_assert(unsigned(PostAvailable)==unsigned(EdvrCpuPostAvailable)&&unsigned(ProviderMissing)==unsigned(EdvrCpuProviderMissing)&&
+    unsigned(BadProviderVersion)==unsigned(EdvrCpuBadProviderVersion)&&unsigned(BadProviderSize)==unsigned(EdvrCpuBadProviderSize)&&
+    unsigned(BadProviderGeneration)==unsigned(EdvrCpuBadProviderGeneration)&&unsigned(NotYetObservable)==unsigned(EdvrCpuNotYetObservable)&&
+    unsigned(LostPresentHistory)==unsigned(EdvrCpuLostPresentHistory)&&unsigned(PartialPresent)==unsigned(EdvrCpuPartialPresent)&&
+    unsigned(WrongPresentThread)==unsigned(EdvrCpuWrongPresentThread)&&unsigned(FailedPresent)==unsigned(EdvrCpuFailedPresent)&&
+    unsigned(TestPresent)==unsigned(EdvrCpuTestPresent)&&unsigned(MalformedPresent)==unsigned(EdvrCpuMalformedPresent),"native CPU post status ABI");
   struct PostRequest {uint64_t sequence=0,beginUs=0;uint32_t thread=0;};
+  struct Completed {
+    uint64_t sequence=0,generation=0,featureEpoch=0,waitReturnUs=0,
+      secondSubmitReturnUs=0,nextWaitEntryUs=0,nextWaitReturnUs=0,
+      presentBeginUs=0,presentEndUs=0;
+    uint32_t callerThread=0,nextWaitThread=0,sceneReady=0;
+    uint8_t postUnavailable=ProviderMissing;bool postValid=false,singlePresent=false;
+  };
   struct Report {
     uint64_t window=0,firstSequence=0,lastSequence=0,elapsedMs=0,admitted=0;
     unsigned valid=0; Shape shape{}; std::array<uint64_t,MissingCount> missing{};
@@ -51,7 +65,7 @@ class FrameCycleStats final {
 
   void enabled() noexcept { std::lock_guard<std::mutex> l(m_); enabled_=true; }
   bool firstComplete() const noexcept { std::lock_guard<std::mutex> l(m_); return everComplete_; }
-  void reset(Missing why=ShapeChange) noexcept { std::lock_guard<std::mutex> l(m_); fail(why); current_={}; wait_={}; }
+  void reset(Missing why=ShapeChange) noexcept { std::lock_guard<std::mutex> l(m_); fail(why); current_={}; wait_={};completedReady_=false; }
 
   PostRequest postRequest() const noexcept {
     std::lock_guard<std::mutex> l(m_);
@@ -68,7 +82,7 @@ class FrameCycleStats final {
   void waitOwnerBegin(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&!wait_.ownerBegin)wait_.ownerBegin=tick;else ++missing_[Reentrant]; }
   void waitOwnerEnd(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&wait_.ownerBegin&&tick>=wait_.ownerBegin)wait_.ownerEnd=tick;else ++missing_[BadClock]; }
   void waitCallerEnd(uint64_t token,uint64_t sequence,uint64_t tick,uint64_t nowMs,uint32_t thread,const Shape& shape,bool ok) noexcept {
-    std::lock_guard<std::mutex> l(m_);
+    std::lock_guard<std::mutex> l(m_);completedReady_=false;
     if(!ok||!token||wait_.token!=token||!wait_.open||!ordered(wait_.begin,wait_.ownerBegin,wait_.ownerEnd,tick)||thread!=wait_.thread){advanceWindow(nowMs,shape,sequence);bad(!ok?PartialStereo:BadClock);if(wait_.token==token)wait_={};return;}
     if(current_.active&& !sameShape(current_.shape,shape)){++missing_[ShapeChange];if(windowStartMs_)makeReport(lastAttemptedSequence_,nowMs);current_={};}
     else if(current_.active) finishCurrent(tick,nowMs,thread);
@@ -111,6 +125,7 @@ class FrameCycleStats final {
     current_.handoffs[current_.handoffCount++]={beginUs,endUs};
   }
   bool takeReport(Report& out) noexcept { std::lock_guard<std::mutex> l(m_); if(!ready_)return false;out=report_;ready_=false;return true; }
+  bool takeCompleted(Completed& out) noexcept {std::lock_guard<std::mutex>l(m_);if(!completedReady_)return false;out=completed_;completedReady_=false;return true;}
   const std::array<uint64_t,MissingCount>& missingForTest() const noexcept{return missing_;}
 
  private:
@@ -120,6 +135,7 @@ class FrameCycleStats final {
   struct Current {bool active=false,submitOpen=false;uint64_t sequence=0,waitReturn=0,waitRound=0,waitOwner=0,
     beforeFirst=0,between=0,afterSecond=0,submitToken=0,submitBegin=0,ownerBegin=0,ownerEnd=0,submitReturn[2]{},submitRound[2]{},owner[2]{},atMs=0;bool afterSecondReady=false;
     double park[2]{},presentCount=0,rawPresent=0,edvrBeforePresent=0,edvrAfterPresent=0,edvrPresent=0,trailingCallback=0,outsidePresent=0,postResidual=0,beforePresent=0,afterPresent=0,syncNonzeroPresent=0;
+    uint64_t presentBegin=0,presentEnd=0;
     uint32_t callerThread=0,waitThread=0,submitThread=0,order[2]{},seenEyes=0,eyes=0;
     uint8_t postUnavailable=ProviderMissing;bool postValid=false,singlePresent=false;
     Handoff handoffs[handoffCapacity]{};unsigned handoffCount=0,handoffInvalid=0,handoffOverflow=0;Shape shape{};};
@@ -161,7 +177,7 @@ class FrameCycleStats final {
     current_.postResidual=double(interval)*toMs-current_.outsidePresent-current_.rawPresent-
       current_.edvrBeforePresent-current_.edvrAfterPresent-current_.trailingCallback;
     current_.singlePresent=trace->count==1;
-    if(current_.singlePresent){current_.beforePresent=double(trace->spans[0].beginUs-beginUs)*toMs;current_.afterPresent=double(endUs-trace->spans[0].endUs)*toMs;}
+    if(current_.singlePresent){current_.presentBegin=trace->spans[0].beginUs;current_.presentEnd=trace->spans[0].endUs;current_.beforePresent=double(current_.presentBegin-beginUs)*toMs;current_.afterPresent=double(endUs-current_.presentEnd)*toMs;}
   }
   void finishCurrent(uint64_t nextWaitReturn,uint64_t nowMs,uint32_t waitThread){
     if(current_.eyes!=2){bad(PartialStereo);return;}
@@ -183,11 +199,20 @@ class FrameCycleStats final {
     uint64_t unionBegin=0,unionEnd=0,unionUs=0;for(unsigned i=0;i<current_.handoffCount;++i){const auto& h=current_.handoffs[i];if(h.end>wait_.begin)continue;if(!unionBegin){unionBegin=h.begin;unionEnd=h.end;}else if(h.begin<=unionEnd)unionEnd=(std::max)(unionEnd,h.end);else{unionUs+=unionEnd-unionBegin;unionBegin=h.begin;unionEnd=h.end;}}if(unionBegin)unionUs+=unionEnd-unionBegin;s.handoffNested=double(unionUs)*toMs;
     handoffInvalid_+=current_.handoffInvalid;handoffOverflow_+=current_.handoffOverflow;
     if(std::fabs(s.residual)>0.01||!current_.sequence){bad(BadClock);return;}
-    admit(s,current_.shape,nowMs);
+    if(!admit(s,current_.shape,nowMs))return;
+    completed_={};completed_.sequence=current_.sequence;completed_.generation=current_.shape.generation;
+    completed_.featureEpoch=current_.shape.featureEpoch;completed_.waitReturnUs=current_.waitReturn;
+    completed_.secondSubmitReturnUs=current_.submitReturn[1];completed_.nextWaitEntryUs=wait_.begin;
+    completed_.nextWaitReturnUs=nextWaitReturn;completed_.callerThread=current_.callerThread;
+    completed_.nextWaitThread=waitThread;completed_.sceneReady=current_.shape.sceneReady;
+    completed_.postUnavailable=current_.postUnavailable;completed_.postValid=current_.postValid;
+    completed_.singlePresent=current_.singlePresent;
+    if(current_.postValid&&current_.singlePresent){completed_.presentBeginUs=current_.presentBegin;completed_.presentEndUs=current_.presentEnd;}
+    completedReady_=true;
   }
-  void admit(const Sample&s,const Shape& shape,uint64_t nowMs){
+  bool admit(const Sample&s,const Shape& shape,uint64_t nowMs){
     if(!count_){windowStart_=s.sequence;shape_=shape;firstThread_=s.callerThread;waitThread_=s.waitThread;}
-    if(count_>=capacity){++missing_[Overflow];makeReport(s.sequence,nowMs);return;} (*samples_)[count_++]=s;everComplete_=true;
+    if(count_>=capacity){++missing_[Overflow];makeReport(s.sequence,nowMs);return false;} (*samples_)[count_++]=s;everComplete_=true;return true;
   }
   void advanceWindow(uint64_t nowMs,const Shape& shape,uint64_t sequence){
     if(!windowStartMs_){windowStartMs_=nowMs;shape_=shape;windowStart_=sequence;}
@@ -204,7 +229,7 @@ class FrameCycleStats final {
     report_.presentCount=filteredDist(&Sample::presentCount,post);report_.rawPresent=filteredDist(&Sample::rawPresent,post);report_.edvrBeforePresent=filteredDist(&Sample::edvrBeforePresent,post);report_.edvrAfterPresent=filteredDist(&Sample::edvrAfterPresent,post);report_.edvrPresent=filteredDist(&Sample::edvrPresent,post);report_.trailingCallback=filteredDist(&Sample::trailingCallback,post);report_.outsidePresent=filteredDist(&Sample::outsidePresent,post);report_.postResidual=filteredDist(&Sample::postResidual,post);report_.postGap=filteredDist(&Sample::afterSecond,post);report_.beforePresent=filteredDist(&Sample::beforePresent,single);report_.afterPresent=filteredDist(&Sample::afterPresent,single);report_.handoffCount=filteredDist(&Sample::handoffCount,handoff);report_.handoffNested=filteredDist(&Sample::handoffNested,handoff);
     report_.handoffMissing=handoffMissing_;report_.handoffInvalid=handoffInvalid_;report_.handoffOverflow=handoffOverflow_;ready_=true;count_=0;attempted_=0;missing_={};windowStart_=windowStartMs_=lastAttemptedSequence_=0;observedWaitThread_=observedSubmitThread_=0;observedThreadMismatch_=false;handoffMissing_=handoffInvalid_=handoffOverflow_=0;}
   Dist manual(std::array<double,capacity>&v)const{double t=0;for(unsigned i=0;i<count_;++i)t+=v[i];std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?t/count_:0,p(50),p(95)};}
-  mutable std::mutex m_;bool enabled_=false,everComplete_=false,ready_=false;Wait wait_{};Current current_{};
+  mutable std::mutex m_;bool enabled_=false,everComplete_=false,ready_=false,completedReady_=false;Wait wait_{};Current current_{};Completed completed_{};
   std::unique_ptr<std::array<Sample,capacity>> samples_;std::array<uint64_t,MissingCount> missing_{};unsigned count_=0;uint64_t attempted_=0,window_=0,windowStart_=0,windowStartMs_=0,lastAttemptedSequence_=0,nextToken_=0;uint64_t handoffMissing_=0,handoffInvalid_=0,handoffOverflow_=0;Shape shape_{};uint32_t firstThread_=0,waitThread_=0,observedWaitThread_=0,observedSubmitThread_=0;bool observedThreadMismatch_=false;Report report_{};
 };
 } // namespace edvr::openxr

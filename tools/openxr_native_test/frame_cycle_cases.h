@@ -41,7 +41,9 @@ template<class Check> void runFrameCycleCases(Check check) {
   auto z1=zeroGap.submitCallerBegin(0,1200,4);zeroGap.submitOwnerBegin(z1,1210);zeroGap.submitOwnerEnd(z1,1220);zeroGap.submitCallerEnd(z1,0,20,1230,4,0.01,true);
   auto zw=zeroGap.waitCallerBegin(1230,4);zeroGap.waitOwnerBegin(zw,1240);zeroGap.waitOwnerEnd(zw,1250);zeroGap.waitCallerEnd(zw,21,1260,2,4,shape,true);
   check(zeroGap.firstComplete()&&zeroGap.missingForTest()[FrameCycleStats::BadClock]==0,"frame-cycle zero post-submit gap valid");
+  FrameCycleStats::Completed zeroCompleted{};check(zeroGap.takeCompleted(zeroCompleted)&&zeroCompleted.sequence==20,"completed cycle extracted once");
   auto transition=zeroGap.waitCallerBegin(1270,4);zeroGap.waitOwnerBegin(transition,1280);zeroGap.waitOwnerEnd(transition,1290);zeroGap.waitCallerEnd(transition,22,1300,3,4,changed,true);
+  check(!zeroGap.takeCompleted(zeroCompleted),"scope-changed cycle has no completed marker");
   FrameCycleStats::Report transitionReport{};check(zeroGap.takeReport(transitionReport)&&transitionReport.missing[FrameCycleStats::ShapeChange]>0,"frame-cycle transition flushes prior scope");
   auto badSeq=zeroGap.submitCallerBegin(0,1400,4);zeroGap.submitOwnerBegin(badSeq,1410);zeroGap.submitOwnerEnd(badSeq,1420);zeroGap.submitCallerEnd(badSeq,0,9999,1430,4,0.01,true);
   check(zeroGap.missingForTest()[FrameCycleStats::BadSequence]>0,"frame-cycle mismatched sequence rejected");
@@ -60,8 +62,19 @@ template<class Check> void runFrameCycleCases(Check check) {
   auto request=exact.postRequest();check(request.sequence==1&&request.beginUs==1230&&request.thread==4,"post accounting request identifies completed stereo interval");
   auto one=makeTrace();one.count=1;one.spans[0]={1300,1310,1360,1370,1400,4,0,0,0};
   exact.noteHandoff(1260,1360,1,4,true);exact.noteHandoff(1260,1360,1,4,true);closeStart(exact,2,1500,2,&one);
+  FrameCycleStats::Completed completed{};
+  check(exact.takeCompleted(completed)&&completed.sequence==1&&completed.generation==7&&completed.featureEpoch==3&&
+    completed.waitReturnUs==1030&&completed.secondSubmitReturnUs==1230&&completed.nextWaitEntryUs==1500&&
+    completed.nextWaitReturnUs==1530&&completed.presentBeginUs==1300&&completed.presentEndUs==1400&&
+    completed.callerThread==4&&completed.nextWaitThread==4&&completed.sceneReady==1&&
+    completed.postValid&&completed.singlePresent&&completed.postUnavailable==FrameCycleStats::PostAvailable,
+    "completed event exposes admitted same-cycle bounds");
+  check(!exact.takeCompleted(completed),"completed event extraction is one-shot");
   auto missingRequest=exact.postRequest();check(missingRequest.sequence==2&&missingRequest.beginUs==1730,"post accounting request advances with accepted cycle");
   closeStart(exact,3,2500,31002,nullptr);
+  check(exact.takeCompleted(completed)&&completed.sequence==2&&!completed.postValid&&!completed.singlePresent&&
+    completed.postUnavailable==FrameCycleStats::ProviderMissing&&completed.presentBeginUs==0&&completed.presentEndUs==0,
+    "completed event reports unavailable Present without fabricated bounds");
   FrameCycleStats::Report exactReport{};check(exact.takeReport(exactReport),"post accounting report reachable");
   check(exactReport.valid==2&&exactReport.postValid==1&&exactReport.postUnavailable[FrameCycleStats::ProviderMissing]==1&&exactReport.firstPostSequence==1,
     "post accounting distinguishes coverage from unavailable provider");
@@ -73,10 +86,28 @@ template<class Check> void runFrameCycleCases(Check check) {
   check(exactReport.postGap.mean==0.27&&exactReport.handoffValid==2&&exactReport.handoffCount.mean==1.0&&exactReport.handoffNested.mean==0.05,
     "post accounting nested handoff unions duplicates and includes measured zero");
 
+  auto staleStorage=std::make_unique<FrameCycleStats>();auto& stale=*staleStorage;startFrame(stale,1,1000,1);closeStart(stale,2,2000,1,nullptr);
+  auto failedWait=stale.waitCallerBegin(3000,4);stale.waitCallerEnd(failedWait,3,3010,1,4,shape,false);
+  check(!stale.takeCompleted(completed),"failed next wait clears unconsumed completed marker");
+  startFrame(stale,4,4000,1);closeStart(stale,5,5000,1,nullptr);stale.reset();
+  check(!stale.takeCompleted(completed),"explicit reset clears unconsumed completed marker");
+
+  auto boundedStorage=std::make_unique<FrameCycleStats>();auto& bounded=*boundedStorage;startFrame(bounded,1,1000,1);
+  for(uint64_t seq=2;seq<=FrameCycleStats::capacity+1;++seq) {
+    closeStart(bounded,seq,seq*1000,1,nullptr);check(bounded.takeCompleted(completed),"bounded admitted cycle produces completed marker");
+  }
+  closeStart(bounded,FrameCycleStats::capacity+2,uint64_t(FrameCycleStats::capacity+2)*1000,1,nullptr);
+  FrameCycleStats::Report boundedReport{};
+  check(!bounded.takeCompleted(completed)&&bounded.takeReport(boundedReport)&&boundedReport.missing[FrameCycleStats::Overflow]==1,
+    "overflow-dropped sample produces no completed marker");
+
   auto casesStorage=std::make_unique<FrameCycleStats>();auto& cases=*casesStorage;startFrame(cases,10,1000,1);
   auto zero=makeTrace();closeStart(cases,11,2000,2,&zero);
   auto many=makeTrace();many.count=2;many.spans[0]={2240,2245,2255,2265,2280,4,1,0,0};many.spans[1]={2330,2340,2380,2390,2410,4,0,0,0};closeStart(cases,12,3000,3,&many);
   auto partial=makeTrace();partial.count=1;partial.spans[0]={3229,3240,3250,3260,3270,4,0,0,0};closeStart(cases,13,4000,4,&partial);
+  check(cases.takeCompleted(completed)&&completed.sequence==12&&!completed.postValid&&
+    completed.postUnavailable==FrameCycleStats::PartialPresent&&completed.presentBeginUs==0&&completed.presentEndUs==0,
+    "completed event preserves rejected partial Present status");
   auto crossThread=makeTrace();crossThread.count=1;crossThread.spans[0]={4240,4250,4260,4270,4280,99,0,0,0};closeStart(cases,14,5000,5,&crossThread);
   auto overflow=makeTrace();overflow.overflow=1;closeStart(cases,15,6000,6,&overflow);
   auto noGeneration=makeTrace();noGeneration.generation=8;closeStart(cases,16,7000,7,&noGeneration);

@@ -180,7 +180,15 @@ REM 2026-09-16, F2; the STATUS_STACK_BUFFER_OVERRUN signature in the design
 REM doc's journal is that fail-fast). The flag covers every object in this
 REM compile, not just fsr3_engine.cpp; the cost is unwind tables around
 REM extern "C" calls.
-set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- ^
+REM Optional local symbols for CPU profiling. Keep release optimization: DEBUG
+REM otherwise changes the linker's REF/ICF defaults. PDBs stay in build/.
+set "EDVR_CPU_COMPILE="
+set "EDVR_CPU_LINK="
+if "%EDVR_PROFILE_SYMBOLS%"=="1" (
+    set "EDVR_CPU_COMPILE=/Z7"
+    set "EDVR_CPU_LINK=/DEBUG:FULL /OPT:REF /OPT:ICF"
+)
+set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- %EDVR_CPU_COMPILE% ^
  /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
  /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
  /I"%GEN%"
@@ -503,7 +511,7 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the graphics version resou
 rc.exe /nologo /fo "%OBJ%\openxr_module\version.res" "%GEN%\version_runtime.rc"
 if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resource & exit /b 1 )
 
-link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
+link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
     "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
@@ -526,7 +534,7 @@ echo [edvr] === edvr_openxr_runtime.dll ===
 REM Native runtime DLL: the only supported release and installation backend.
 REM Its application fixture calls the game-imported ABI without linking the host.
 if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_CPU_COMPILE% ^
     /I"third_party\openxr\include" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
@@ -536,7 +544,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     "src\common\frame_flag.cpp" ^
-    /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\edvr_openxr_runtime.pdb" /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
 
 REM Shared by the installer and installer_test rigs below.
@@ -1724,6 +1732,12 @@ python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 
 python tools\openxr_pe.py --graphics "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
 python tools\elite_oculus.py --self-test || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1
+python tools\cpu_profile.py --self-test || exit /b 1
+REM Only profiling builds require the optional local .NET/TraceEvent analyzer.
+REM Its parser tests must pass before this build can be flown for CPU capture.
+if "%EDVR_PROFILE_SYMBOLS%"=="1" (
+    python tools\cpu_profile.py --build-analyzer || exit /b 1
+)
 python tools\fetch_ffx_dx11.py --self-test || exit /b 1
 
 REM Do the code, edvr.ini and the log messages agree about setting names?

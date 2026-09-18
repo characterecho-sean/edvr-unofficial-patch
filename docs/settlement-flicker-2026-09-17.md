@@ -44,12 +44,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: prepare CPU execution/wait attribution for the caller thread, with
-  coverage of unmeasured OpenVR calls and correlation to the post-Present
-  interval. Validate collection and analysis before another same-view flight.
-  Installed Frontier build remains 72501fe, AA off; no new build this review.
-  See the latest journal entry for ruled-out Present/handoff hypotheses.
-  Preserve motion history and keep foveated-DLSS paused.
+- Next: CPU execution/wait capture is implemented with paired ETW frame and
+  OpenVR call markers. Build/decoder checks precede an elevated synthetic
+  busy/sleep capture, then a Frontier flight in the same landed AA-off view.
+  Windows kernel recording requires UAC approval; ordinary tool escalation does
+  not supply that privilege. See the latest entry for capture limits, coverage
+  checks and the installation/validation record. Preserve motion history and
+  keep foveated-DLSS paused.
 
 ## Journal
 
@@ -2207,3 +2208,105 @@ not identify a wait reason or provide frequency-independent CPU milliseconds.
 The GPU elapsed-time discrepancy remains a separate target. Frontier stays on
 verified 72501fe; this review changes no runtime code, rendering behavior or
 live configuration.
+
+### 2026-09-18 -- CPU execution/wait capture for the post-Present interval
+
+The user approved preparing the CPU profile after the verified probe-off
+flight. The remaining alternatives are: execution in Elite, EDVR or a driver; a
+caller blocked in an unmeasured runtime/driver operation; or a runnable caller
+waiting to be scheduled. Sampled stacks identify execution sites; context
+switches plus ReadyThread events distinguish running, waiting and ready time.
+Existing wall-time summaries cannot make that distinction.
+
+The native runtime now registers a private ETW provider after successful Scene
+initialization, outside DllMain. It emits only when an external trace session
+enables it. Provider registration and error state have a bounded startup log
+marker. Normal and exceptional shutdown unregister the provider; short write
+locks and registration generations prevent teardown races without holding a
+lock across an OpenVR call. Disabled ABI spans add no clock reads or event
+writes, and there is no per-frame file logging.
+
+Provider `{D3885FA1-0B70-44F1-AF88-63B2012B111E}` uses version 1 and keyword 1.
+Clock, completed-call and completed-frame payloads are fixed at 32, 40 and 96
+bytes, with compile-time layout checks. Clock markers carry absolute QPC
+ticks/frequency and the same QPC microseconds used by Present accounting. They
+appear on capture enable and periodically, so a session started after game
+initialization can still correlate its frames.
+
+Completed-frame boundaries come from the existing frame-cycle admission path.
+They include sequence, generation, feature epoch, caller and next-wait thread,
+the full cycle, second Submit return, and Present bounds only when the existing
+single-Present validation passes. Missing-provider and malformed Present cases
+retain explicit status; base-cycle failure, scope change, stale completion and
+capacity rejection do not emit an admitted completion. Call intervals cover
+GetLastPoses, GetLastPoseForTrackedDeviceIndex, GetFrameTiming,
+GetFrameTimeRemaining, CanRenderScene, GetTimeSinceLastVsync and
+GetDeviceToAbsoluteTrackingPose, as well as WaitGetPoses, Submit and
+PostPresentHandoff. Nested intervals are unioned by the analyzer rather than
+added twice. These markers add no GPU work and change no rendering or pacing
+policy.
+
+`tools/cpu_profile/edvr_cpu.wprp` selects CPU sampling, context switches,
+ReadyThread, process/thread lifetime and module-load events, with stacks for
+the three CPU event classes. Memory mode bounds the kernel ring to 512 MiB and
+the marker ring to 4 MiB. Actual retained history depends on event rate; the
+decoder uses the overlapping scheduler/marker interval and reports excluded
+prefixes, tails and partial coverage. This follows Microsoft's [memory logging
+model](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/logging-mode).
+
+`tools/cpu_profile.py` uses a randomized private WPR instance on every start,
+stop and cancellation. It waits for the exact installed Frontier executable,
+holds its process handle to avoid PID reuse, and verifies that PID's fresh
+native build log before recording. It saves when the game exits or after a hard
+maximum of 300 seconds. Waiting for launch is separately bounded. A failed
+start/stop never cancels another recording. State and artifacts remain under
+the requested new output directory; dry-run creates neither files nor sessions.
+No live INI is changed.
+
+The optional .NET analyzer reuses TraceEvent already installed with Visual
+Studio; no dependency was downloaded. It decodes fixed marker schemas,
+reconstructs exclusive running/ready/waiting/unknown durations on the caller,
+and reports sampled and switch-out stacks with full module paths, relative
+addresses and raw virtual addresses. Ready-waker stacks are labeled separately
+because they belong to the waking thread. Stack counts are not converted into
+CPU milliseconds. Lost events, invalid clocks, malformed markers, incomplete
+scheduler coverage and sequence gaps are explicit. Indexed per-thread lookups
+keep multi-minute traces practical. The ETL is retained for later analysis and
+local symbol lookup.
+
+Profiling builds set `EDVR_PROFILE_SYMBOLS=1`, keeping `/O2` and producing
+local PDBs with `/Z7 /DEBUG:FULL /OPT:REF /OPT:ICF`. The explicit optimization
+flags preserve the release linker defaults that `/DEBUG` otherwise changes, as
+documented by
+[Microsoft](https://learn.microsoft.com/en-us/cpp/build/reference/debug-generate-debug-info).
+Ordinary builds gate the dependency-free Python tests; profiling builds also
+compile the analyzer and run its timeline/schema tests. Capture refuses a stale
+analyzer using hashes of its sources, schema and binary.
+
+The live pipeline test is `openxr_trace_test.exe --cpu-trace-smoke`: thirty 100
+ms busy intervals followed by thirty 100 ms Sleep intervals, with nested call
+markers and an explicitly synthetic zero-duration Present. The wrapper requires
+all 60 frames, complete decoder coverage, sampled busy stacks, and correct
+separation of predominantly running versus waiting phases before arming a
+flight. Missing provider enablement or event-write failure fails the fixture.
+This validates the actual C++ provider and ETL decoder together.
+
+Local WPR profile validation succeeds. The first kernel recording attempt
+failed before starting with `0xc5585011`: the ordinary token has medium
+integrity and lacks SeSystemProfilePrivilege. WPR remained idle afterward. This
+is a Windows privilege boundary, not an automatic tool-approval rejection. An
+administrator process started through Windows UAC is required for the synthetic
+and flight captures. Collection will not be called verified until the live
+smoke succeeds.
+
+Validation before commit: both the ordinary and symbol-enabled absolute
+`build.bat` runs pass all 62 pooled rigs, three quiet rigs and 249
+configuration checks. The native fixture passes 4777 checks, including
+completion extraction and capacity rejection; the trace fixture passes 15
+checks. Python capture tests pass 49 checks, including dry-run filesystem
+snapshots, stale PID logs, process-exit races and private-session cleanup. The
+profiling build also compiles the analyzer with zero warnings/errors and passes
+its scheduler, coverage, schema and nested-span tests. Logs:
+`build/cpu-profile-validation.log` and
+`build/cpu-profile-symbol-validation.log`. The committed package is rebuilt
+before Frontier installation; the elevated live pipeline test is still pending.

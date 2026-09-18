@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0">
+  <Profiles>
+    <!-- 512 MiB circular kernel ring. At 17 MiB/s this retains 30 seconds. -->
+    <SystemCollector Id="EDVRCPUSystemCollector" Name="EDVR CPU system collector">
+      <BufferSize Value="1024" />
+      <Buffers Value="512" />
+    </SystemCollector>
+    <!-- WPR's profile schema expects a file variant even though the flight tool uses memory mode. -->
+    <SystemCollector Id="EDVRCPUFileSystemCollector" Name="EDVR CPU file system collector">
+      <BufferSize Value="1024" />
+      <Buffers Value="20" />
+    </SystemCollector>
+    <!-- EDVR markers are separate; 4 MiB retains the marker stream beyond the kernel tail. -->
+    <EventCollector Id="EDVRCPUEventCollector" Name="EDVR CPU marker collector">
+      <BufferSize Value="64" />
+      <Buffers Value="64" />
+    </EventCollector>
+    <EventCollector Id="EDVRCPUFileEventCollector" Name="EDVR CPU file marker collector">
+      <BufferSize Value="64" />
+      <Buffers Value="64" />
+    </EventCollector>
+    <SystemProvider Id="EDVRCPUSystemProvider">
+      <Keywords>
+        <Keyword Value="CpuConfig" />
+        <Keyword Value="CSwitch" />
+        <Keyword Value="IdealProcessor" />
+        <Keyword Value="Loader" />
+        <Keyword Value="ProcessThread" />
+        <Keyword Value="ReadyThread" />
+        <Keyword Value="SampledProfile" />
+        <Keyword Value="ThreadPriority" />
+      </Keywords>
+      <Stacks>
+        <Stack Value="CSwitch" />
+        <Stack Value="ReadyThread" />
+        <Stack Value="SampledProfile" />
+      </Stacks>
+    </SystemProvider>
+    <EventProvider Id="EDVRMarkerProvider"
+                   Name="D3885FA1-0B70-44F1-AF88-63B2012B111E"
+                   Level="5"
+                   NonPagedMemory="true">
+      <Keywords>
+        <Keyword Value="0x0000000000000001" />
+      </Keywords>
+    </EventProvider>
+    <Profile Id="EDVRCPU.Verbose.Memory"
+             Name="EDVRCPU"
+             Description="EDVR CPU scheduling, stacks, and frame markers"
+             LoggingMode="Memory"
+             DetailLevel="Verbose">
+      <ProblemCategories>
+        <ProblemCategory Value="Resource Analysis" />
+      </ProblemCategories>
+      <Collectors>
+        <SystemCollectorId Value="EDVRCPUSystemCollector">
+          <SystemProviderId Value="EDVRCPUSystemProvider" />
+        </SystemCollectorId>
+        <EventCollectorId Value="EDVRCPUEventCollector">
+          <EventProviders>
+            <EventProviderId Value="EDVRMarkerProvider" />
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+      <TraceMergeProperties>
+        <TraceMergeProperty Id="EDVRCPUTraceMergeProperties" Name="EDVR CPU merge properties">
+          <DeletePreMergedTraceFiles Value="true" />
+          <FileCompression Value="false" />
+          <InjectOnly Value="false" />
+          <SkipMerge Value="false" />
+          <CustomEvents>
+            <CustomEvent Value="ImageId" />
+            <CustomEvent Value="BuildInfo" />
+            <CustomEvent Value="VolumeMapping" />
+            <CustomEvent Value="EventMetadata" />
+          </CustomEvents>
+        </TraceMergeProperty>
+      </TraceMergeProperties>
+    </Profile>
+    <Profile Id="EDVRCPU.Verbose.File"
+             Name="EDVRCPU"
+             Description="EDVR CPU scheduling, stacks, and frame markers"
+             LoggingMode="File"
+             DetailLevel="Verbose">
+      <ProblemCategories>
+        <ProblemCategory Value="Resource Analysis" />
+      </ProblemCategories>
+      <Collectors>
+        <SystemCollectorId Value="EDVRCPUFileSystemCollector">
+          <SystemProviderId Value="EDVRCPUSystemProvider" />
+        </SystemCollectorId>
+        <EventCollectorId Value="EDVRCPUFileEventCollector">
+          <EventProviders>
+            <EventProviderId Value="EDVRMarkerProvider" />
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+      <TraceMergeProperties>
+        <TraceMergeProperty Id="EDVRCPUFileTraceMergeProperties" Name="EDVR CPU file merge properties">
+          <DeletePreMergedTraceFiles Value="true" />
+          <FileCompression Value="false" />
+          <InjectOnly Value="false" />
+          <SkipMerge Value="false" />
+          <CustomEvents>
+            <CustomEvent Value="ImageId" />
+            <CustomEvent Value="BuildInfo" />
+            <CustomEvent Value="VolumeMapping" />
+            <CustomEvent Value="EventMetadata" />
+          </CustomEvents>
+        </TraceMergeProperty>
+      </TraceMergeProperties>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

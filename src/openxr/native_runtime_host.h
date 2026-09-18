@@ -38,6 +38,7 @@
 #include "device_gpu_timing.h"
 #include "submission_stats.h"
 #include "frame_cycle_stats.h"
+#include "native_cpu_trace.h"
 #include "render_route.h"
 #include "shutdown_trace.h"
 #include "session_state.h"
@@ -730,6 +731,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
       frameCycles.waitCallerEnd(cycleToken,out.sequence,frameCycleUs(),GetTickCount64(),caller,cycleShape,
         dispatched&&result==vr::VRCompositorError_None&&out.sequence);
+      FrameCycleStats::Completed completed{};
+      if(frameCycles.takeCompleted(completed)) {
+        EdvrNativeCpuCompletedFramePayload event{};event.timestampUs=completed.nextWaitReturnUs;
+        event.sequence=completed.sequence;event.generation=completed.generation;event.featureEpoch=completed.featureEpoch;
+        event.waitReturnUs=completed.waitReturnUs;event.secondSubmitReturnUs=completed.secondSubmitReturnUs;
+        event.nextWaitEntryUs=completed.nextWaitEntryUs;event.nextWaitReturnUs=completed.nextWaitReturnUs;
+        event.presentBeginUs=completed.presentBeginUs;event.presentEndUs=completed.presentEndUs;
+        event.callerThread=completed.callerThread;event.nextWaitThread=completed.nextWaitThread;
+        event.status=completed.postUnavailable;event.sceneReady=completed.sceneReady;
+        if(completed.postValid)event.flags|=EdvrNativeCpuPostValid;
+        if(completed.singlePresent)event.flags|=EdvrNativeCpuSinglePresent;
+        NativeCpuTrace::get().emitFrame(event);
+      }
       frameCycleSequence.store(dispatched&&result==vr::VRCompositorError_None?out.sequence:0,std::memory_order_release);
       reportFrameCycles();
       return dispatched?result:vr::VRCompositorError_InvalidTexture;
