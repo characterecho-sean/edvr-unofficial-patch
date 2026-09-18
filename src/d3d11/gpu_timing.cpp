@@ -162,7 +162,8 @@ GpuTimer& GpuTimer::operator=(GpuTimer&& other) noexcept {
     return *this;
 }
 
-bool GpuTimer::begin(ID3D11Device* dev, ID3D11DeviceContext* ctx) noexcept {
+bool GpuTimer::beginImpl(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                         bool borrowedFrame) noexcept {
     if (state_ && !state_->domain->owns(ctx)) return false;
     if (!gpuTimingBind(dev, ctx)) return false;
     const auto d = current();
@@ -175,7 +176,8 @@ bool GpuTimer::begin(ID3D11Device* dev, ID3D11DeviceContext* ctx) noexcept {
     auto& s = *state_;
     if (s.phase != State::Phase::Idle || !s.allocate()) return false;
     s.startedAt = now;
-    s.lease = d->clock.acquireInterval(s.startedAt);
+    s.lease = borrowedFrame ? d->clock.acquireBorrowedFrame() :
+                              d->clock.acquireInterval(s.startedAt);
     if (!s.lease) return false;
     s.phase = State::Phase::Open;
     s.ready = 0;
@@ -186,6 +188,14 @@ bool GpuTimer::begin(ID3D11Device* dev, ID3D11DeviceContext* ctx) noexcept {
         return false;
     }
     return true;
+}
+
+bool GpuTimer::begin(ID3D11Device* dev, ID3D11DeviceContext* ctx) noexcept {
+    return beginImpl(dev, ctx, false);
+}
+
+bool GpuTimer::beginBorrowedFrame(ID3D11Device* dev, ID3D11DeviceContext* ctx) noexcept {
+    return beginImpl(dev, ctx, true);
 }
 bool GpuTimer::end(ID3D11DeviceContext* ctx) noexcept {
     if (!state_ || !state_->domain->accepts(ctx)) return false;

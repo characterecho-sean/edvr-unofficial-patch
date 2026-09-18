@@ -102,6 +102,7 @@ struct Fixture {
     ~Fixture(){ops.abandoning=true;gpuTimingAbandon();sampler.reset();for(auto& t:timers)t.reset();}
     ID3D11DeviceContext* ctx(){return d.ctx.Get();}
     bool begin(unsigned i){return timers[i].begin(d.dev.Get(),ctx());}
+    bool beginBorrowed(unsigned i){return timers[i].beginBorrowedFrame(d.dev.Get(),ctx());}
     void finish(){check(gpuTimingShutdown(ctx()),"explicit owner shutdown");sampler.reset();for(auto& t:timers)t.reset();ops.clean();}
 };
 void policyCases(Device& d,Runtime& runtime){
@@ -293,6 +294,36 @@ void nativeFrameWork(Device& d) {
     borrower.reset(f.ctx()); policy.shutdown(GetTickCount64(),owner); driver.reset(f.ctx()); f.finish();
 }
 void frameDriverCases(Device& d) {
+    {
+        Fixture f(d);
+        const auto noParentCommands=f.ops.commands;
+        check(!f.beginBorrowed(0)&&f.ops.active==0&&f.ops.commands==noParentCommands,
+              "borrowed-only timer rejects no parent without query markers");
+        check(f.begin(1),"standalone timer opens for borrowed-only rejection");
+        const auto standaloneCommands=f.ops.commands;
+        check(!f.beginBorrowed(0)&&f.ops.active==1&&f.ops.commands==standaloneCommands,
+              "borrowed-only timer rejects a private standalone parent");
+        check(f.timers[1].end(f.ctx()),"standalone rejection fixture closes");
+        double standaloneMs=0;
+        check(f.timers[1].poll(f.ctx(),standaloneMs)==GpuTimerPoll::Ready,
+              "standalone rejection fixture retires");
+
+        GpuTimingFrameDriver driver;
+        check(driver.bind(d.dev.Get(),f.ctx())&&driver.create(0)&&driver.begin(0)&&
+              driver.timestamp(0,0),"shared frame opens for borrowed-only timer");
+        const auto sharedCommands=f.ops.commands;
+        check(f.beginBorrowed(0)&&f.ops.active==1&&f.ops.commands==sharedCommands+1,
+              "borrowed-only timer adds one timestamp and no disjoint Begin");
+        check(f.timers[0].end(f.ctx())&&driver.timestamp(0,1)&&driver.end(0),
+              "borrowed-only timer and shared frame close");
+        GpuSpanRawSample raw{};
+        check(driver.poll(0,raw)==GpuSpanPoll::Ready&&raw.frequency!=0,
+              "shared frame frequency is available to borrower");
+        double borrowedMs=0;
+        check(f.timers[0].poll(f.ctx(),borrowedMs)==GpuTimerPoll::Ready&&borrowedMs>0,
+              "borrowed-only timer produces a valid duration");
+        driver.destroy(0);driver.reset(f.ctx());f.finish();
+    }
     {
         Fixture f(d); GpuTimingFrameDriver driver;
         check(driver.bind(d.dev.Get(),f.ctx()),"frame driver binds shared domain");

@@ -52,6 +52,7 @@ enum class GpuTimerPoll { Pending, Ready, Invalid };
 class GpuTimer {
     struct State;
     State* state_ = nullptr;
+    bool beginImpl(ID3D11Device*, ID3D11DeviceContext*, bool borrowedFrame) noexcept;
 public:
     GpuTimer() noexcept = default;
     ~GpuTimer() = default;
@@ -61,6 +62,9 @@ public:
     GpuTimer& operator=(GpuTimer&&) noexcept;
 
     bool begin(ID3D11Device*, ID3D11DeviceContext*) noexcept;
+    // Requires the shared application-frame frequency scope to be open. This
+    // never starts a standalone TIMESTAMP_DISJOINT query.
+    bool beginBorrowedFrame(ID3D11Device*, ID3D11DeviceContext*) noexcept;
     bool end(ID3D11DeviceContext*) noexcept;
     // Wrong context/thread returns Pending and touches no mutable query state.
     // Ready/Invalid consumes the sample. S_FALSE never discards a sample;

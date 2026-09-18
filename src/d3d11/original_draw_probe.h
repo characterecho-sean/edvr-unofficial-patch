@@ -95,7 +95,10 @@ struct OriginalDrawProbeSnapshot {
     uint64_t unsupported = 0;
     uint64_t ringFull = 0;
     uint64_t notIssued = 0;
+    uint64_t pipelineReady = 0;
     uint64_t pipelineInvalid = 0;
+    uint64_t timedReady = 0;
+    uint64_t timingUnavailable = 0;
     uint64_t timingInvalid = 0;
     uint64_t expired = 0;
     uint64_t calibrations = 0;

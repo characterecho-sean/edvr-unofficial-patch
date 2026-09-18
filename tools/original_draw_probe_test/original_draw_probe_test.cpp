@@ -13,6 +13,7 @@
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/gpu_timing.h"
+#include "../../src/d3d11/game_query_probe.h"
 #include "../../src/d3d11/original_draw_probe.h"
 
 using Microsoft::WRL::ComPtr;
@@ -41,6 +42,8 @@ struct Device {
 enum class ReadMode { Native, Pending, StatsPending, Error };
 ReadMode g_readMode = ReadMode::Native;
 std::atomic<unsigned> g_begins{0}, g_ends{0}, g_reads{0}, g_badFlags{0};
+std::atomic<unsigned> g_timingDisjointBegins{0}, g_timingDisjointEnds{0};
+std::atomic<unsigned> g_timingTimestampEnds{0};
 void STDMETHODCALLTYPE rawBegin(ID3D11DeviceContext* ctx, ID3D11Asynchronous* query) {
     ++g_begins;
     ctx->Begin(query);
@@ -66,6 +69,34 @@ HRESULT STDMETHODCALLTYPE rawGetData(ID3D11DeviceContext* ctx, ID3D11Asynchronou
     return ctx->GetData(query, data, bytes, flags);
 }
 OriginalDrawProbeQueryOps queryOps() { return {rawBegin, rawEnd, rawGetData}; }
+
+HRESULT timingCreate(void*, ID3D11Device* device, const D3D11_QUERY_DESC* desc,
+                     ID3D11Query** out) {
+    return device->CreateQuery(desc, out);
+}
+HRESULT timingBegin(void*, ID3D11DeviceContext* ctx, ID3D11Asynchronous* query) {
+    D3D11_QUERY_DESC desc{};
+    static_cast<ID3D11Query*>(query)->GetDesc(&desc);
+    if (desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT) ++g_timingDisjointBegins;
+    ctx->Begin(query);
+    return S_OK;
+}
+HRESULT timingEnd(void*, ID3D11DeviceContext* ctx, ID3D11Asynchronous* query) {
+    D3D11_QUERY_DESC desc{};
+    static_cast<ID3D11Query*>(query)->GetDesc(&desc);
+    if (desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT) ++g_timingDisjointEnds;
+    if (desc.Query == D3D11_QUERY_TIMESTAMP) ++g_timingTimestampEnds;
+    ctx->End(query);
+    return S_OK;
+}
+HRESULT timingGetData(void*, ID3D11DeviceContext* ctx, ID3D11Asynchronous* query,
+                      void* data, UINT bytes, UINT flags) {
+    return ctx->GetData(query, data, bytes, flags);
+}
+void timingRelease(void*, ID3D11Query* query) noexcept { query->Release(); }
+GpuSpanD3D11Ops timingOps() {
+    return {nullptr, timingCreate, timingBegin, timingEnd, timingGetData, timingRelease};
+}
 
 ComPtr<ID3DBlob> compile(const char* source, const char* target) {
     ComPtr<ID3DBlob> code, errors;
@@ -192,6 +223,8 @@ unsigned drawFrame(Device& d, Scene& scene, bool pass, OriginalDrawProbeInput va
 void renderingAndCadence(Device& d, Scene& scene) {
     g_readMode = ReadMode::Native;
     g_begins = g_ends = g_reads = g_badFlags = 0;
+    const auto disjointBegins = g_timingDisjointBegins.load();
+    const auto timestampEnds = g_timingTimestampEnds.load();
     check(originalDrawProbeBind(d.device.Get(), d.context.Get(), queryOps()), "bind probe");
     originalDrawProbeConfigure(true);
     boundary(d, 1);
@@ -208,6 +241,12 @@ void renderingAndCadence(Device& d, Scene& scene) {
     check(snapshot.submitted == 6 && snapshot.ready == 6, "six sparse WARP brackets complete");
     check(snapshot.zeroSamples == 3 && snapshot.nonzeroSamples == 3,
           "WARP separates zero and nonzero passed-sample outcomes");
+    check(snapshot.pipelineReady == 6 && snapshot.timingUnavailable == 6 &&
+          snapshot.timedReady == 0 && snapshot.timingInvalid == 0,
+          "visibility and pipeline statistics survive without a shared frame clock");
+    check(g_timingDisjointBegins.load() == disjointBegins &&
+          g_timingTimestampEnds.load() == timestampEnds,
+          "parentless visibility emits no timestamp or disjoint markers");
     check(g_reads.load() != 0 && g_badFlags.load() == 0, "all raw reads use DONOTFLUSH");
     check(g_begins.load() == g_ends.load() && g_begins.load() >= 12,
           "every admitted counter Begin has one raw End");
@@ -242,13 +281,11 @@ void guardCase(Device& d, Scene& scene, unsigned which) {
     boundary(d, 2);
     auto value = input();
     if (which == 0) value.gameCountingActive = true;
-    if (which == 1) value.gameDisjointActive = true;
     if (which == 2) value.gameQueryOverflow = true;
     drawFrame(d, scene, true, value);
     const auto snapshot = originalDrawProbeSnapshot();
     check(snapshot.submitted == 0, "game query guard rejects every selected bracket before Begin");
     check((which == 0 && snapshot.gameCounting == 3) ||
-          (which == 1 && snapshot.gameDisjoint == 3) ||
           (which == 2 && snapshot.queryOverflow == 3), "guard reason is explicit");
     check(g_begins.load() == 0 && g_ends.load() == 0,
           "game query conflict invokes no diagnostic Begin or End");
@@ -273,6 +310,63 @@ void predicationCase(Device& d, Scene& scene) {
           "predication guard runs before every diagnostic Begin");
     check(g_begins.load() == 0 && g_ends.load() == 0,
           "predication invokes no diagnostic Begin or End");
+    originalDrawProbeShutdown(d.context.Get());
+}
+
+void externalDisjointCase(Device& d, Scene& scene, bool pass) {
+    check(originalDrawProbeBind(d.device.Get(), d.context.Get(), queryOps()), "rebind external disjoint case");
+    originalDrawProbeConfigure(true);
+    boundary(d, 1);
+    drawFrame(d, scene, true);
+    boundary(d, 2);
+    D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+    ComPtr<ID3D11Query> external;
+    hr(d.device->CreateQuery(&desc, &external), "create external disjoint");
+    GameQueryProbe gameQueries;
+    const auto disjointBegins = g_timingDisjointBegins.load();
+    const auto disjointEnds = g_timingDisjointEnds.load();
+    const auto timestampEnds = g_timingTimestampEnds.load();
+    d.context->Begin(external.Get());
+    gameQueries.bracketBegin(external.Get());
+    GpuTimingFrameDriver frameClock;
+    check(frameClock.bind(d.device.Get(), d.context.Get()) && frameClock.create(0) &&
+          frameClock.begin(0) && frameClock.timestamp(0, 0),
+          "shared application frame clock opens inside external disjoint context");
+    auto value = input();
+    const auto guard = gameQueries.guard();
+    value.gameDisjointActive = guard.disjoint;
+    drawFrame(d, scene, pass, value);
+    check(frameClock.timestamp(0, 1) && frameClock.end(0),
+          "shared application frame clock closes after sampled draws");
+    gameQueries.bracketEnd(external.Get());
+    d.context->End(external.Get());
+    scene.verify(d, pass);
+    d.context->Flush();
+    for (uint64_t frame = 3; frame != 13; ++frame) boundary(d, frame);
+    const auto snapshot = originalDrawProbeSnapshot();
+    check(snapshot.submitted == 3 && snapshot.ready == 3 &&
+          snapshot.zeroSamples == (pass ? 0u : 3u) &&
+          snapshot.nonzeroSamples == (pass ? 3u : 0u),
+          "external full-frame disjoint preserves zero/nonzero visibility result");
+    check(snapshot.gameDisjoint == 3 && snapshot.pipelineReady == 3 &&
+          snapshot.timedReady == 3 && snapshot.timingUnavailable == 0 &&
+          snapshot.timingInvalid == 0,
+          "borrowed shared frame timestamps and pipeline statistics remain valid");
+    check(g_timingDisjointBegins.load() == disjointBegins + 1 &&
+          g_timingDisjointEnds.load() == disjointEnds + 1 &&
+          g_timingTimestampEnds.load() == timestampEnds + 8,
+          "three sampled draws borrow one frame disjoint and add only timestamp pairs");
+    GpuSpanRawSample raw{};
+    GpuSpanPoll status = GpuSpanPoll::Pending;
+    const auto deadline = GetTickCount64() + 1500;
+    do {
+        status = frameClock.poll(0, raw);
+        if (status == GpuSpanPoll::Pending) Sleep(1);
+    } while (status == GpuSpanPoll::Pending && GetTickCount64() < deadline);
+    check(status == GpuSpanPoll::Ready && raw.frequency != 0,
+          "shared parent frame frequency is healthy");
+    frameClock.destroy(0);
+    frameClock.reset(d.context.Get());
     originalDrawProbeShutdown(d.context.Get());
 }
 
@@ -314,6 +408,38 @@ void terminalRestartCase(Device& d) {
     originalDrawProbeShutdown(d.context.Get());
 }
 
+void timingDomainLossCase(Device& d, Scene& scene) {
+    check(originalDrawProbeBind(d.device.Get(), d.context.Get(), queryOps()),
+          "rebind timing-domain-loss case");
+    originalDrawProbeConfigure(true);
+    boundary(d, 1);
+    drawFrame(d, scene, true);
+    boundary(d, 2);
+    check(gpuTimingShutdown(d.context.Get()), "remove shared timing domain while probe is active");
+    scene.bind(d, true);
+    unsigned selected = 0;
+    for (unsigned i = 0; i < 9; ++i) {
+        if (originalDrawProbeSelect(d.context.Get())) {
+            ++selected;
+            const auto ticket = originalDrawProbeBegin(d.context.Get(), input());
+            check(!ticket, "selected Begin rejects a lost shared timing domain");
+        }
+        d.context->Draw(3, 0);
+    }
+    const auto beforeFrame = originalDrawProbeSnapshot();
+    boundary(d, 3);
+    const auto afterFrame = originalDrawProbeSnapshot();
+    check(selected == 3 && beforeFrame.submitted == 0 &&
+          afterFrame.frames == beforeFrame.frames &&
+          afterFrame.originalCalls == beforeFrame.originalCalls &&
+          afterFrame.pending == beforeFrame.pending,
+          "lost timing domain admits no GPU work and Frame does not mutate or poll");
+    scene.verify(d, true);
+    originalDrawProbeShutdown(d.context.Get());
+    check(gpuTimingBind(d.device.Get(), d.context.Get(), timingOps()),
+          "shared timing domain cleanly rebinds after loss");
+}
+
 size_t occurrences(const std::string& text, const char* needle) {
     size_t count = 0, at = 0;
     while ((at = text.find(needle, at)) != std::string::npos) { ++count; at += std::strlen(needle); }
@@ -340,17 +466,20 @@ void sourceContract() {
 void run() {
     sourceContract();
     Device d;
-    check(gpuTimingBind(d.device.Get(), d.context.Get()), "bind shared GPU timer owner");
+    check(gpuTimingBind(d.device.Get(), d.context.Get(), timingOps()),
+          "bind shared GPU timer owner");
     Scene scene(d);
     renderingAndCadence(d, scene);
     guardCase(d, scene, 0);
-    guardCase(d, scene, 1);
     guardCase(d, scene, 2);
     predicationCase(d, scene);
+    externalDisjointCase(d, scene, true);
+    externalDisjointCase(d, scene, false);
     readFailureCase(d, scene, ReadMode::Error);
     readFailureCase(d, scene, ReadMode::Pending);
     readFailureCase(d, scene, ReadMode::StatsPending);
     terminalRestartCase(d);
+    timingDomainLossCase(d, scene);
     check(gpuTimingShutdown(d.context.Get()), "shutdown shared GPU timer");
 }
 } // namespace

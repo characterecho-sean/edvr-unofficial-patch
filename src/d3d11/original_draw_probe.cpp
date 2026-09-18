@@ -69,7 +69,8 @@ struct Slot {
     ResultState statsState = ResultState::Pending;
     ResultState timerState = ResultState::Pending;
     double gpuMs = 0;
-    bool issued = false, calibration = false, timerNeedsReset = false;
+    bool issued = false, calibration = false, timerUnavailable = false;
+    bool timerNeedsReset = false;
 };
 
 struct Controller {
@@ -97,8 +98,10 @@ struct Controller {
         return ctx && ctx == context.Get() && (!ownerThread || ownerThread == GetCurrentThreadId());
     }
     bool adopt(ID3D11DeviceContext* ctx) noexcept {
-        if (!owns(ctx) || !gpuTimingOwns(ctx)) return false;
-        if (!ownerThread) ownerThread = GetCurrentThreadId();
+        if (!owns(ctx)) return false;
+        if (ownerThread) return true;
+        if (!gpuTimingOwns(ctx)) return false;
+        ownerThread = GetCurrentThreadId();
         return true;
     }
     uint64_t random() noexcept {
@@ -332,16 +335,20 @@ void retire(Controller& c, Slot& slot) noexcept {
         auto* detail = bucketFor(c, slot.key);
         if (detail) addResult(detail->totals, zero, timed, slot.gpuMs);
         if (slot.statsState == ResultState::Ready) {
+            ++c.snapshot.pipelineReady;
             addStats(aggregate, slot.stats);
             if (detail) addStats(detail->totals, slot.stats);
             if (!slot.stats.IAVertices && !slot.stats.IAPrimitives && !slot.stats.VSInvocations) ++c.iaZero;
             else if (!slot.stats.CPrimitives) ++c.clipZero;
             else if (!slot.stats.PSInvocations) ++c.psZero;
         }
+        if (slot.timerState == ResultState::Ready) ++c.snapshot.timedReady;
+        else if (slot.timerUnavailable) ++c.snapshot.timingUnavailable;
     }
     if (slot.occState == ResultState::Invalid || !slot.issued) ++c.snapshot.invalid;
     if (slot.statsState == ResultState::Invalid) ++c.snapshot.pipelineInvalid;
-    if (slot.timerState == ResultState::Invalid) ++c.snapshot.timingInvalid;
+    if (slot.timerState == ResultState::Invalid && !slot.timerUnavailable)
+        ++c.snapshot.timingInvalid;
     if (slot.timerNeedsReset) {
         InternalQuery internal;
         slot.timer.reset(c.context.Get());
@@ -403,13 +410,15 @@ void report(Controller& c, bool timedOut) noexcept {
         static_cast<unsigned long long>(c.snapshot.pending),
         static_cast<unsigned long long>(c.snapshot.invalid));
     Log::get().note(
-        "Original draw diagnostic guards: predicated=%llu counting=%llu disjoint=%llu query-overflow=%llu "
+        "Original draw diagnostic contexts/guards: predicated=%llu counting=%llu external-disjoint-context=%llu query-overflow=%llu "
         "no-raster=%llu no-write=%llu command-list=%llu unsupported=%llu ring-full=%llu not-issued=%llu "
-        "pipeline-invalid=%llu timing-invalid=%llu expired=%llu bucket-overflow=%llu.",
+        "pipeline-ready=%llu pipeline-invalid=%llu timed-ready=%llu timing-unavailable=%llu "
+        "timing-invalid=%llu expired=%llu bucket-overflow=%llu.",
         c.snapshot.predicated, c.snapshot.gameCounting, c.snapshot.gameDisjoint,
         c.snapshot.queryOverflow, c.snapshot.noRaster, c.snapshot.noWrite,
         c.snapshot.commandLists, c.snapshot.unsupported, c.snapshot.ringFull,
-        c.snapshot.notIssued, c.snapshot.pipelineInvalid, c.snapshot.timingInvalid,
+        c.snapshot.notIssued, c.snapshot.pipelineReady, c.snapshot.pipelineInvalid,
+        c.snapshot.timedReady, c.snapshot.timingUnavailable, c.snapshot.timingInvalid,
         c.snapshot.expired, c.snapshot.bucketOverflow);
     Log::get().note(
         "Original draw diagnostic pipeline: IA/VS-empty=%llu zero-CPrimitives=%llu "
@@ -511,7 +520,7 @@ Slot* idleSlot(Controller& c) noexcept {
 bool startQueries(Controller& c, Slot& slot, const OriginalDrawProbeInput& input,
                   const DetailKey& key, bool calibration) noexcept {
     InternalQuery internal;
-    if (!slot.timer.begin(c.device.Get(), c.context.Get())) return false;
+    const bool timed = slot.timer.beginBorrowedFrame(c.device.Get(), c.context.Get());
     c.ops.begin(c.context.Get(), slot.occlusion.Get());
     c.ops.begin(c.context.Get(), slot.pipeline.Get());
     slot.phase = SlotPhase::Open;
@@ -519,9 +528,11 @@ bool startQueries(Controller& c, Slot& slot, const OriginalDrawProbeInput& input
     slot.key = key;
     slot.stats = {};
     slot.samples = 0;
-    slot.occState = slot.statsState = slot.timerState = ResultState::Pending;
+    slot.occState = slot.statsState = ResultState::Pending;
+    slot.timerState = timed ? ResultState::Pending : ResultState::Invalid;
     slot.issued = false;
     slot.calibration = calibration;
+    slot.timerUnavailable = !timed;
     slot.timerNeedsReset = false;
     return true;
 }
@@ -529,10 +540,12 @@ bool startQueries(Controller& c, Slot& slot, const OriginalDrawProbeInput& input
 void finishQueries(Controller& c, Slot& slot, bool issued) noexcept {
     c.ops.end(c.context.Get(), slot.pipeline.Get());
     c.ops.end(c.context.Get(), slot.occlusion.Get());
-    InternalQuery internal;
-    if (!slot.timer.end(c.context.Get())) {
-        slot.timerState = ResultState::Invalid;
-        slot.timerNeedsReset = true;
+    if (!slot.timerUnavailable) {
+        InternalQuery internal;
+        if (!slot.timer.end(c.context.Get())) {
+            slot.timerState = ResultState::Invalid;
+            slot.timerNeedsReset = true;
+        }
     }
     slot.issued = issued;
     slot.submittedFrame = c.frameSerial;
@@ -619,14 +632,15 @@ bool originalDrawProbeSelect(ID3D11DeviceContext* context) noexcept {
 OriginalDrawProbeTicket originalDrawProbeBegin(ID3D11DeviceContext* context,
                                                const OriginalDrawProbeInput& input) noexcept {
     OriginalDrawProbeTicket ticket{};
-    if (!g || !g->enabled || !g->collecting || !g->owns(context)) return ticket;
+    if (!g || !g->enabled || !g->collecting || !g->owns(context) ||
+        !gpuTimingOwns(context)) return ticket;
     if (input.pass >= OriginalDrawPass::Count || input.kind >= OriginalDrawKind::Count) {
         ++g->snapshot.unsupported;
         return ticket;
     }
     if (input.gameQueryOverflow) { ++g->snapshot.queryOverflow; return ticket; }
     if (input.gameCountingActive) { ++g->snapshot.gameCounting; return ticket; }
-    if (input.gameDisjointActive) { ++g->snapshot.gameDisjoint; return ticket; }
+    if (input.gameDisjointActive) ++g->snapshot.gameDisjoint;
     if (g->commandListSeen) { ++g->snapshot.unsupported; return ticket; }
     ID3D11Predicate* predicate = nullptr;
     BOOL predicateValue = FALSE;
@@ -667,7 +681,7 @@ void originalDrawProbeEnd(ID3D11DeviceContext* context, OriginalDrawProbeTicket 
 
 void originalDrawProbeFrame(ID3D11DeviceContext* context,
                             const OriginalDrawProbeFrameInfo& info) noexcept {
-    if (!g || !g->adopt(context)) return;
+    if (!g || !g->adopt(context) || !gpuTimingOwns(context)) return;
     ++g->frameSerial;
     g->sourceFrame = info.sourceFrame;
     poll(*g);

@@ -168,6 +168,22 @@ public:
         collect(now);
         return open(Kind::Standalone);
     }
+    // A diagnostic nested in the application-frame clock must never create a
+    // second disjoint scope. It may borrow only a live Frame record; an active
+    // standalone producer is deliberately rejected.
+    Lease acquireBorrowedFrame() noexcept {
+        if (!ownerOk() || stopped_ || shut_ || active_ < 0) return {};
+        const unsigned i = static_cast<unsigned>(active_);
+        const auto& r = records_[i];
+        bool frame = false;
+        for (const auto& l : r.leases) {
+            if (l.occupied && l.kind == Kind::Frame && !l.ended && !l.invalid) {
+                frame = true;
+                break;
+            }
+        }
+        return frame ? allocate(i, Kind::Borrowed) : Lease{};
+    }
     bool endInterval(Lease t, uint64_t now) noexcept {
         if (!ownerOk() || shut_ || !valid(t)) return false;
         auto& r = records_[t.record];

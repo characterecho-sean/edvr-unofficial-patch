@@ -2,12 +2,12 @@
 
 ## Status
 
-- State: original-game-draw diagnostic implemented; full build and query-safety
-  gates passed. Live Frontier measurement is next. It observes GPU time,
-  depth/stencil-passing samples and pipeline activity by pass/eye; it does not
-  suppress any draw. Prior local comparisons put fresh motion-input work at
-  about 0.21-0.35 ms per subset; they prove neither poor game culling nor a
-  safe skip. See the final two journal entries.
+- State: e11f532 exposed a diagnostic coverage failure: the disjoint-query
+  guard excluded every reached selection. A real WARP query reproduced it; the
+  corrected probe passes visibility/timing tests and removes a measured
+  per-draw ownership lookup cost. The full build passed. Original-draw
+  visibility and GPU cost still require a flight; no draw suppression is
+  active.
 - Environment: Quest 3 / VirtualDesktopXR / 90 Hz, latest run AA off; prior
   DLSS K run used the same input 2481x2121 and active XR output 3072x3264 per
   eye, trims off. Dimensions are unchanged between landed and on-foot intervals
@@ -15,13 +15,14 @@
   version. Capture stays capped at 512 records per eye with a 1 MiB ID snapshot
   allocation. On-foot source is 5120x2880; the separate weapon-motion table
   holds 64 records / 32 MiB.
-- Timing: latest AA-off landed window has CPU p50/p95 10.199/11.830 ms and GPU
-  10.875/12.447 ms; capture stalls are excluded. XR copy/compose is only about
-  0.081 ms GPU combined. Prior DLSS run had landed GPU p50 15.643-16.029 ms and
-  on-foot 12.415-12.547 ms. These are not controlled A/Bs; 90 Hz allows 11.111
-  ms.
-- Work: latest AA-off run still samples 2.567 ms/frame mean draw-hook CPU and
-  0.193-0.318 ms/frame Map tracking, with particle replacements active. In the
+- Timing: latest AA-off stable landed windows have CPU p50 10.353-10.768 ms,
+  GPU 11.045-11.448 ms; on foot CPU 7.112-7.384 ms, GPU 9.750-10.086 ms. XR
+  copy/compose is about 0.075 ms GPU combined. Prior DLSS run had landed GPU
+  p50 15.643-16.029 ms and on-foot 12.415-12.547 ms. These are not controlled
+  A/Bs; 90 Hz allows 11.111 ms.
+- Work: latest AA-off draw-hook means are about 4.2 ms/frame landed and 2.8 ms
+  on foot, including diagnostic overhead; Map tracking is 0.234-0.260 /
+  0.121-0.134 ms/frame respectively, with particle replacements active. In the
   prior DLSS run landed admits about 250 rigid draws / 1024 instances; on foot
   admits zero. Sampled mesh-hook CPU is 1.312-1.341 ms landed and 0.612-0.616
   ms on foot. The on-foot scene stage fell from 0.273-0.280 to 0.188-0.189 ms,
@@ -54,11 +55,10 @@
   address only about 0.06 ms landed and no work on foot. Earlier ruled-out
   explanations and the uncontrolled regression remain in the journal. Screen
   motion is not supported as the missing sustained multi-millisecond cost.
-- Next: collect stable AA-off landed and on-foot settlement windows with the
-  original-draw diagnostic in one Frontier flight. Distinguish costly
-  zero-sample draws from cheap GPU rejection and already predicated work before
-  selecting any culling change. Preserve adjacent motion history and keep the
-  separately paused foveated-DLSS work paused.
+- Next: verify the corrected census in one Frontier flight with stable AA-off
+  landed/on-foot windows. Require submitted, ready and timed-ready samples;
+  timing-unavailable remains distinct from zero visibility. Preserve adjacent
+  motion history and keep the separately paused foveated-DLSS work paused.
 
 ## Journal
 
@@ -1433,3 +1433,77 @@ terrain and the settlement share the view. The image cannot identify invisible
 submitted objects; MeshFallback is unavailable because there is no matching
 first-eye temporal snapshot. Capture causes a scope change at 09:06:56 and a
 later 462.9 ms diagnostic frame; those later capture costs are excluded.
+
+### 2026-09-18 -- e11f532 flight: disjoint guard excludes the census
+
+Verified Frontier `edvr_gfx_20260918_092403.log` as `v0.17.0-15-ge11f532`,
+build `6AAD56E4`. The original-draw path runs and completes its 600-frame
+windows, but reports zero submitted queries. Every reached selection in the
+inspected settlement windows is rejected by the disjoint-query guard; other
+query conflicts, predication and overflow are zero.
+
+Ruled out: the initial guard admitting enough live original draws for a useful
+census, because the verified flight reports only `no-data` windows with
+`submitted=0` and all reached selections attributed to `disjoint`. This is
+unavailable evidence, not zero visible geometry. Identify whether the tracked
+query is genuinely external or an EDVR interval crossing the internal marker
+boundary, and reproduce the complete hook interaction before another flight.
+
+All 43 completed windows have no samples; windows 5-43 plan 68786 selections,
+miss 806 changed-count ordinals and reject the remaining 67980 on disjoint. The
+probe never starts its own timer in this flight. The log does not identify the
+active query's owner; a whole-frame game timing query is plausible but not
+proven. No correction may assume that attribution.
+
+Usable whole-frame results, with AA off, input 2481x2121, output 3072x3264:
+
+- Landed completed benchmark windows 4-5: CPU p50 10.353/10.768 ms and GPU
+  11.045/11.448 ms. GPU p95 is 12.697/12.863 ms.
+- Explicit Disembark at 09:27:03.489 precedes stable on-foot windows 7-9: CPU
+  p50 7.112/7.384/7.238 ms and GPU 9.750/10.086/9.970 ms. GPU p95 ranges from
+  10.576 to 10.849 ms.
+- Startup, transition windows 6/10 and the exit scope change are excluded;
+  there is no eye-capture contamination. Copy/compose stays near 0.025/0.050 ms
+  GPU.
+- Draw-hook CPU means are 4.180-4.315 ms landed and 2.814-2.842 ms on foot;
+  these include diagnostic work and EDVR reissues, not only feature cost. Map
+  tracking is 0.234-0.260 / 0.121-0.134 ms/frame; particle replacement is
+  2508-2684 / 1636-1712 draws per ten seconds. The landed totals remain in the
+  previous AA-off run's broad range; this is not a controlled overhead A/B.
+
+Local reproduction before a correction: a real WARP disjoint query spanning the
+draw frame reproduces zero submitted samples and fails the new admission test,
+while all rendered pixels remain correct. A disjoint timing scope does not
+justify discarding independent occlusion/pipeline measurements. The implemented
+correction borrows timestamps only from an already-open EDVR frame clock, never
+starts another disjoint interval, and retains visibility results with
+explicitly unavailable timing if that clock is absent.
+
+A separate CPU microbenchmark uses the production shared timing owner lookup on
+a WARP context, /O2 x64, five processes with nine alternating 20-million-call
+rounds. Repeated shared-owner lookup costs median 18.996-19.086 ns/call; cached
+context/thread validation costs 1.550-1.582 ns/call. The measured difference
+scales to 0.4005-0.4026 ms at 23000 draws/frame. It does not establish the
+cause of the larger flight hook-timer increase. First adoption, selected draws
+and frame boundaries still need full validation; unsampled draws can use the
+already-proven context/thread identity.
+
+The correction passes 96 original-draw WARP checks and 713 shared-timing
+checks. A real external disjoint wraps the shared frame clock and visible or
+occluded sampled draws. Both cases retain exact 16x16 RGBA output, valid
+pipeline statistics, respectively nonzero/zero passed samples, and valid
+borrowed timestamps. Instrumented timing callbacks prove one shared disjoint
+Begin/End, with no additional disjoint from the probe. Without a frame clock,
+visibility/statistics succeed, timing is explicitly unavailable, and no
+timestamp/disjoint markers are issued. An active standalone producer is not
+accepted as a frame clock.
+
+The cached ownership check is tested through actual shared-domain shutdown:
+Select can still identify planned ordinals, but selected Begin submits no
+queries and Frame performs no polling/mutation after the domain disappears.
+Clean rebind works. Predication, counting-query and overflow exclusions remain.
+The live query's owner remains unattributed; the corrected path is valid under
+the real external-query condition reproduced locally. The full build passed all
+62 pooled rigs, three quiet rigs and the 249-key config contract. The next test
+uses the same AA-off landed/on-foot protocol, without an eye dump, with
+existing live settings preserved.
