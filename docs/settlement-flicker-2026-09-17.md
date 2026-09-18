@@ -2,14 +2,14 @@
 
 ## Status
 
-- State: verified Frontier eye_160859 catches stationary buildings taking
-  moving-ship vectors, then returning to world motion. In a central facade ROI,
-  ship coverage reaches 52.50%; its horizontal vector is about 6 input pixels
-  per frame while the building follows the near-zero world vector. Local
-  history rejection rises with that claim. NPCs and an overhead drone are
-  present: the moving group may be real, but its ownership of walls is wrong.
-  Exact mover identity and whether spill, pool matching or both cause the claim
-  remain unresolved. See the final journal entry; no rendering fix installed.
+- State: the coarse-ship-off A/B reduced reported flicker; verified eye_163223
+  has zero ship claims across all 16 frames. The earlier eye_160859 assigned
+  about 6 px/frame ship motion to static walls. User still sees intermittent
+  simultaneous building flashes, like station flicker, and is unsure the dump
+  caught one. No reset occurs in the capture; the reset total stays 12 over
+  16:31:38-16:32:18. A separate dominant-body path activates at 16:32:05 but is
+  absent from the dump. This is an open discriminator, not a proven second
+  cause. No permanent rendering fix is installed; see the final journal entry.
 - Build: v0.17.0-35-g2a23ee7-dirty, archived under
   build/settlement-decisions-frontier-2a23ee7-dirty. Capture rig: 56528 checks.
   Full gates remain incomplete at the user's request; no rerun this analysis.
@@ -49,13 +49,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next flight: Frontier is ready for the authorized coarse-ship-off A/B:
-  advanced.temporal_aa_objects_ships_metres = 0 (previously default 1000). Same
-  binaries and all other EDVR settings; exact mesh motion and station rotation
-  remain enabled. Stay landed in the same cockpit view, DLSS on, and take one
-  eye dump while watching the buildings. Predict no path-3 claims and stable
-  world vectors there. This is temporary isolation, not a permanent fix; then
-  correct visible-surface ownership. No automatic capture is armed.
+- Next capture: same installed build, ships_metres still 0 temporarily. Press
+  the configured PAUSE history key just after a simultaneous flash, with Elite
+  focused, then remain in the scene at least three seconds. It saves preceding
+  camera/temporal history immediately and again two seconds later: distinguish
+  reset, world-camera fallback and dominant-body activation without guessing
+  eye-dump timing. Exact mesh and station motion remain enabled. No additional
+  automatic capture is armed; correct visible-surface ownership afterward.
 
 ## Journal
 
@@ -3152,3 +3152,76 @@ facades, and correspondence to raw/world motion. Visual improvement would
 confirm this fallback's contribution; remaining shimmer requires inspecting the
 other recorded paths rather than assuming all causes are resolved. No rebuild
 or full-suite rerun was performed for this configuration-only test.
+
+### 2026-09-18 -- 163223 confirms ship suppression; intermittent global flash remains
+
+The user reports substantially less flicker with the coarse ship fallback off,
+but occasional flashes remain. Their clarification is important: all buildings
+appear to flash together, resembling existing station flicker; the event is
+very intermittent, and they are unsure whether the eye dump caught one. They
+suggest a history reset. Do not equate this residual event with the previously
+demonstrated local moving-ship claims without evidence.
+
+Verified `edvr_gfx_20260918_162958.log` and the matching native runtime log
+against `v0.17.0-35-g2a23ee7-dirty`; the live INI still has
+`advanced.temporal_aa_objects_ships_metres = 0`. Eye_163223 has all 16 matched
+C/D/P/T sets, scene frames 13473-13488, unchanged input/output dimensions and
+legacy UI mode. The reader reports complete. All 32 eye-ledger rows retain
+valid camera rows and history, with no jump, and all frames execute DLSS
+successfully without reset. Across 31.36 million captured decision pixels,
+ship, body, second-body, stepped-body and invalid paths each occur zero times.
+The coarse ship suppression is therefore effective, not just an INI inference.
+
+Adjusted the building ROIs for the changed head angle; they are not identical
+pixel populations to the prior dump. Central facade (664,486,150,25) reaches
+only 0.213% hidden-history rejection, versus 11.83% in the prior facade sample.
+The new building band (320,370,960,155) peaks at 0.185%. The left dome remains
+100% world path with no history-hidden flag. P/T changes affect at most 1.04%
+of the building band's pixels, with whole-region mean absolute RGB difference
+0.054-0.078/255. This capture does not establish a broad post-UI replacement.
+Motion-compensated pre-UI changes on unrejected world pixels are small in the
+sampled band (roughly 0.63-1.37/255 mean absolute RGB per adjacent pair), but
+that is not proof an intermittent flash outside these 16 frames is resolved.
+
+The full log separates reset evidence from the user's plausible hypothesis.
+`dlaa totals` reports 12 reset eye-frames at 16:31:38.779, 16:31:58.792 and
+16:32:18.793. Ruled out: additional explicit NVIDIA resets during that bounded
+40-second interval. This does not cover the final unsummarized seconds, an
+unrecorded internal model response, or a motion discontinuity without reset.
+Native omissions end at zero, with zero missing projections or stood-down
+frames; the session's reset total includes earlier loading/transitions.
+
+Another discriminating log line is at 16:32:05.607: the dominant-body path
+activates on a 64-record cluster (29% of movers), fit residual 0.026 m, turning
+0.0145 degrees and moving 0.099 m over a 32 ms pair, with a 4096 m grid extent
+and 1500 m reach. This is the separate station/body fallback, not the disabled
+moving-ship path. It is absent during the later eye capture. Availability does
+not prove that this path claimed buildings at the flash, but broad temporary
+body ownership is a candidate for a simultaneous event. Auxiliary-camera jump
+messages are also not evidence that those rows reached temporal reconstruction.
+
+Existing instrumentation can discriminate these without another build:
+`hotkey.dump_camera = PAUSE` writes the camera ring and
+`temporalPassDumpHistory` immediately and again two seconds later. The temporal
+ring continuously retains 4096 eye calls, about 23 seconds at 90 FPS or 34 at
+60 FPS for stereo. It records requested/actual NVIDIA reset, dimensions,
+source-screen changes, treatment output, world/body availability and motion
+translation. No temporal-history key dump was present in this run. Press Pause
+just after the flash, keep Elite focused and stay in-scene for at least three
+seconds; the retrospective rows avoid needing to anticipate the event. These
+CPU inputs still do not prove per-pixel body claims; use any matching eye trace
+if available before calling the second cause confirmed.
+
+The existing ship-off setting remains temporary. A permanent mover fix needs
+actual visible-geometry ownership; stale sampled pool indices or nonunique
+material/type signatures cannot safely identify current instances. Existing
+depth-tested mesh coverage may provide the raster gate, but association to a
+specific sampled mover remains unproven. Do not disable station motion or
+change radius thresholds to compensate for this unconfirmed residual cause.
+
+Copied artifacts and reports are in
+`build/settlement-decisions-analysis-163223` (`region-report.json`,
+`regions.png`, `motion-aligned-report.json` and the integrity audit). No
+rendering/config changes, new build or full-suite rerun were made during this
+analysis. The next requested capture uses the installed history key rather than
+another unsynchronized 16-frame eye dump.
