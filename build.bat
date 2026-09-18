@@ -11,7 +11,7 @@ REM
 REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
 REM
-REM  Usage:  build.bat [--clean] [--jobs N]
+REM  Usage:  build.bat [--clean] [--jobs N] [--installer-only]
 REM
 REM  Once the DLLs are built, the test rigs run concurrently, --jobs at a time
 REM  (default: one per logical core), through tools\run_jobs.py. Each rig is a
@@ -35,6 +35,7 @@ if "%~1"=="" goto args_done
 if /I "%~1"=="--clean" goto arg_clean
 if /I "%~1"=="--jobs" goto arg_jobs
 if /I "%~1"=="--rig" goto arg_rig
+if /I "%~1"=="--installer-only" goto arg_installer_only
 echo [edvr] unknown argument: %~1
 exit /b 1
 :arg_clean
@@ -51,7 +52,15 @@ set "EDVR_RIG=%~2"
 shift
 shift
 goto parse_args
+:arg_installer_only
+set "INSTALLER_ONLY=1"
+shift
+goto parse_args
 :args_done
+if defined INSTALLER_ONLY if defined DO_CLEAN (
+    echo [edvr] ERROR: --installer-only rebuilds from build\, --clean would delete it
+    exit /b 1
+)
 if defined EDVR_RIG goto run_rig
 
 if defined DO_CLEAN (
@@ -156,6 +165,93 @@ echo %EDVR_VER% | findstr /C:"-dirty" >nul && (
     echo [edvr]       uncommitted changes. Committing does NOT relabel it;
     echo [edvr]       commit first, then build, before sending it anywhere.
 )
+
+REM Shared by the installer and installer_test rigs below. Set here, before
+REM the DLL builds, rather than beside them, so --installer-only (right
+REM below) can reach them without also reaching a d3d11 or openxr compile.
+set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
+    "src\installer\ui.cpp" "src\installer\settings.cpp" ^
+    "src\installer\settings_view.cpp" "src\installer\logbundle.cpp" ^
+    "src\installer\app.cpp" "src\installer\plan.cpp" ^
+    "src\installer\apply.cpp" "src\installer\detect.cpp" ^
+    "src\installer\probe.cpp" "src\common\iniedit.cpp" ^
+    "src\installer\state.cpp" "src\installer\mirror.cpp" ^
+    "src\installer\payload.cpp"
+set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
+    shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
+
+if defined INSTALLER_ONLY goto installer_only
+goto installer_only_done
+
+REM ===========================================================================
+REM  --installer-only: SignPath signs build\d3d11.dll and build\openvr_api.dll,
+REM  the names that ship, after a normal build already produced them unsigned.
+REM  This rebuilds ONLY edvr-installer.exe from whatever is already sitting in
+REM  build\, so a second full compile can never overwrite the signed bytes
+REM  with fresh unsigned ones. This branch is taken before the shader
+REM  precompile, the d3d11 or openxr compiles, and the rig pool, and reaches
+REM  only the two installer rigs below.
+REM ===========================================================================
+:installer_only
+for %%F in (d3d11.dll openvr_api.dll openxr_loader.dll OPENXR-LOADER-LICENSE.txt) do if not exist "%BUILD%\%%F" (
+    echo [edvr] ERROR: --installer-only needs a full build's outputs in build\ ^(missing: %%F^)
+    exit /b 1
+)
+
+REM The reverse of the copies the normal build does further down, once it has
+REM linked its own two DLLs: there the freshly linked file is the source and
+REM the installer's embed name is the copy. Here the shipped names are what
+REM SignPath just signed, so THEY are the source -- the embedded RCDATA must
+REM carry the signed bytes, never the pair from the build that predates
+REM signing.
+echo [edvr] --installer-only: copying the signed build\d3d11.dll and
+echo [edvr] build\openvr_api.dll onto the installer's embed names
+echo [edvr] ^(edvr_openxr_graphics.dll, edvr_openxr_runtime.dll^) -- reversed
+echo [edvr] from the normal build's own direction.
+copy /y "%BUILD%\d3d11.dll" "%BUILD%\edvr_openxr_graphics.dll" >nul || exit /b 1
+copy /y "%BUILD%\openvr_api.dll" "%BUILD%\edvr_openxr_runtime.dll" >nul || exit /b 1
+
+REM settings.cpp includes settings_schema.inc, generated under %GEN%. The
+REM main flow makes this same call before the d3d11 compile (search this
+REM file for gen_settings_schema.py) because the in-headset menu needs the
+REM same generator; that call sits after the shader precompile this branch
+REM skips, so it is repeated here rather than reached.
+python "tools\gen_settings_schema.py" --self-test || (
+    echo [edvr] ERROR: the settings schema generator failed its own test
+    exit /b 1
+)
+python "tools\gen_settings_schema.py" --root "%ROOT%" --out "%GEN%"
+if errorlevel 1 (
+    echo [edvr] ERROR: the settings schema is incomplete ^(see above^)
+    exit /b 1
+)
+
+REM :rig_installer and :rig_installer_test are plain, single-phase rigs (no
+REM EDVR_RIG_STEP split) that read only variables already set above -- ROOT,
+REM BUILD, OBJ, GEN, EDVR_VER, INSTALLER_SRC, INSTALLER_LIBS -- and end every
+REM path in "exit /b", which returns to a "call"er instead of ending the
+REM script. Called in-process here rather than self-invoked as "build.bat
+REM --rig installer" the way tools\run_jobs.py's children are, because that
+REM self-invocation needs "%~f0" to still name this file, and by this line it
+REM does not: cmd's SHIFT starts at argument position 0 unless told
+REM otherwise, so the one "shift" that consumed --installer-only above
+REM already moved %0 to what was %1 (confirmed against a throwaway batch
+REM file, not assumed). tools\run_jobs.py's own module docstring hits the
+REM same trap with --jobs.
+call :rig_installer || exit /b 1
+call :rig_installer_test || exit /b 1
+
+python tools\package_native.py --check-installer || exit /b 1
+echo [edvr] installer rebuilt from build\d3d11.dll + build\openvr_api.dll: %BUILD%\edvr-installer.exe
+if exist "%BUILD%\nvngx_dlss.dll" (
+    echo [edvr] DLSS runtime: CARRIED -- build\edvr-installer.exe places nvngx_dlss.dll
+    echo        beside the game on machines with an NVIDIA card.
+) else (
+    echo [edvr] DLSS runtime: NOT CARRIED -- no DLSS SDK was found ^(the boxed notice
+    echo        above says where it looked^). Not a release build.
+)
+exit /b 0
+:installer_only_done
 
 REM Every cl.exe call below compiles its sources across all cores. cl.exe
 REM prepends the CL environment variable to its own command line, so this one
@@ -538,17 +634,10 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
 
-REM Shared by the installer and installer_test rigs below.
-set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
-    "src\installer\ui.cpp" "src\installer\settings.cpp" ^
-    "src\installer\settings_view.cpp" "src\installer\logbundle.cpp" ^
-    "src\installer\app.cpp" "src\installer\plan.cpp" ^
-    "src\installer\apply.cpp" "src\installer\detect.cpp" ^
-    "src\installer\probe.cpp" "src\common\iniedit.cpp" ^
-    "src\installer\state.cpp" "src\installer\mirror.cpp" ^
-    "src\installer\payload.cpp"
-set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
-    shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
+REM INSTALLER_SRC and INSTALLER_LIBS, shared by the installer and
+REM installer_test rigs below, are set earlier now -- alongside EDVR_VER,
+REM before the temporal shader precompile -- so --installer-only can reach
+REM them without also reaching a d3d11 or openxr compile.
 
 echo.
 echo [edvr] === test rigs ===
