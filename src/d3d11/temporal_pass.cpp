@@ -1581,6 +1581,13 @@ constexpr int kEyeInputs=19;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
 const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"MeshCoverage",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext",L"DlssColour",L"UiInfluence",L"UiDepth"};
+struct MeshFallbackSnapshot {
+    bool valid = false;
+    uint32_t frame = 0;
+    uint32_t flags = 0;
+    PassParams params{};
+};
+MeshFallbackSnapshot g_meshFallbackSnapshot;
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
@@ -1885,8 +1892,16 @@ struct TemporalHistoryScope {
 
 // Preserve the actual first-frame inputs before the next eye overwrites them.
 void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
-                    ID3D11Texture2D* ui,float uiBound,float uiFlags,const UiSeparatedInputs* separated=nullptr) {
+                    ID3D11Texture2D* ui,float uiBound,float uiFlags,const PassParams& params,uint32_t flags,
+                    const UiSeparatedInputs* separated=nullptr) {
     if(g_eyeRunLeft<=0 || g_eyeRunTaken!=0 || g_eyeInputs[0])return;
+    // This is the same constant block the motion dispatch used for the
+    // textures staged below. Keeping its frame beside it makes a stale
+    // snapshot distinguishable from a capture where no temporal pass ran.
+    g_meshFallbackSnapshot.valid=true;
+    g_meshFallbackSnapshot.frame=g_rowsFrame;
+    g_meshFallbackSnapshot.flags=flags;
+    g_meshFallbackSnapshot.params=params;
     ID3D11Texture2D* textures[kEyeInputs]={e.dlMv,e.dlDepth,ui,e.dlMask};
     if(e.dlMv) {
         D3D11_TEXTURE2D_DESC d{};e.dlMv->GetDesc(&d);
@@ -1903,7 +1918,7 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     }
     celestialMotionStageDump(ctx,textures[4]);
     uiDepthHoloStageDump(ctx,textures[4]);
-    meshMotionStageDump(ctx,textures[4]);
+    meshMotionStageDump(ctx,textures[4],g_rowsFrame);
     if(textures[4]){
         ID3D11ShaderResourceView* mesh[2]{};meshMotionViews(ctx,textures[4],mesh);
         if(mesh[0]){Microsoft::WRL::ComPtr<ID3D11Resource> r;mesh[0]->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[11]));}
@@ -1941,7 +1956,94 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
     g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags)|(separated?64u:0u);
 }
+
+void writeJsonFloat(FILE* f,float value) {
+    if(std::isfinite(value))fprintf(f,"%.9g",value);else fputs("null",f);
+}
+void writeJsonFloats(FILE* f,const float* values,size_t count) {
+    fputc('[',f);
+    for(size_t i=0;i<count;++i) {
+        if(i)fputs(", ",f);
+        writeJsonFloat(f,values[i]);
+    }
+    fputc(']',f);
+}
+
+// The mesh optimisation's absent-coverage fallback uses the temporal
+// motion constants, not a private approximation. Preserve the exact first
+// eye block beside Mesh*.bin so the offline probe can compare the measured
+// vector with the head, static-world and enabled object paths. The large
+// per-part and per-ship tables and the body grid are deliberately omitted:
+// their switches are visible here, but a dump cannot prove their final
+// per-pixel branch without those resources.
+void writeMeshFallbackSnapshot(const std::wstring& dir) {
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_MeshFallback.json",dir.c_str(),g_eyeRunStamp);
+    FILE* f=nullptr;
+    if(_wfopen_s(&f,path,L"wb") || !f) {
+        Log::get().note("eye capture: could not write mesh fallback snapshot %ls.",path);
+        return;
+    }
+    const bool available=g_meshFallbackSnapshot.valid && g_meshFallbackSnapshot.frame==g_eyeInputsFrame;
+    fprintf(f,"{\n  \"schema\": 1,\n  \"available\": %s",available?"true":"false");
+    if(!available) {
+        const char* reason=g_meshFallbackSnapshot.valid?"snapshot_frame_mismatch":"no_matching_first_eye_temporal_snapshot";
+        fprintf(f,",\n  \"reason\": \"%s\",\n  \"inputsFrame\": %u,\n  \"snapshotFrame\": %u\n}\n",
+                reason,g_eyeInputsFrame,g_meshFallbackSnapshot.frame);
+    } else {
+        const PassParams& p=g_meshFallbackSnapshot.params;
+        auto ints=[&](const char* name,const int32_t* values,size_t count) {
+            fprintf(f,",\n  \"%s\": [",name);
+            for(size_t i=0;i<count;++i){if(i)fputs(", ",f);fprintf(f,"%d",values[i]);}
+            fputc(']',f);
+        };
+        auto floats=[&](const char* name,const float* values,size_t count) {
+            fprintf(f,",\n  \"%s\": ",name);writeJsonFloats(f,values,count);
+        };
+        auto float4s=[&](const char* name,const float (*values)[4],size_t count) {
+            fprintf(f,",\n  \"%s\": [",name);
+            for(size_t i=0;i<count;++i){if(i)fputs(", ",f);writeJsonFloats(f,values[i],4);}
+            fputc(']',f);
+        };
+        fprintf(f,",\n  \"frame\": %u,\n  \"eye\": 0,\n  \"flags\": %u",g_meshFallbackSnapshot.frame,g_meshFallbackSnapshot.flags);
+        ints("region",p.region,4);ints("size",p.size,2);ints("texSize",p.texSize,2);
+        fputs(",\n  \"blend\": ",f);writeJsonFloat(f,p.blend);
+        fputs(",\n  \"gamma\": ",f);writeJsonFloat(f,p.gamma);
+        fprintf(f,",\n  \"haveHistory\": %d,\n  \"candMask\": %d",p.haveHistory,p.candMask);
+        floats("tanNow",p.tanNow,4);floats("tanPrev",p.tanPrev,4);floats("jit",p.jit,4);
+        floats("dR0",p.dR0,4);floats("dR1",p.dR1,4);floats("dR2",p.dR2,4);
+        fputs(",\n  \"cand\": [",f);
+        for(int candidate=0;candidate<4;++candidate) {
+            if(candidate)fputs(", ",f);
+            fputc('[',f);
+            for(int row=0;row<3;++row){if(row)fputs(", ",f);writeJsonFloats(f,p.cand[candidate][row],4);}
+            fputc(']',f);
+        }
+        fputc(']',f);
+        floats("knobs",p.knobs,4);floats("tvUsed",p.tvUsed,4);floats("tvCand",p.tvCand,4);
+        floats("tvCam",p.tvCam,4);floats("split",p.split,4);floats("fovea0",p.fovea0,4);
+        floats("fovea1",p.fovea1,4);floats("movers",p.movers,4);floats("probe",p.probe,4);
+        floats("st0",p.st0,4);floats("st1",p.st1,4);floats("st2",p.st2,4);floats("tvSt",p.tvSt,4);
+        floats("st2_0",p.st2_0,4);floats("st2_1",p.st2_1,4);floats("st2_2",p.st2_2,4);
+        floats("tv2St",p.tv2St,4);floats("objects",p.objects,4);
+        floats("wR0",p.wR0,4);floats("wR1",p.wR1,4);floats("wR2",p.wR2,4);
+        floats("box0",p.box0,4);floats("box1",p.box1,4);floats("ships",p.ships,4);
+        // These three bounded tables let the analyser prove that a sample
+        // lies outside every moving ship's possible claim. A sample inside
+        // one remains unknown: its part cloud and final path are not dumped.
+        float4s("shBox0",p.shBox0,kObjectShipsMax);float4s("shBox1",p.shBox1,kObjectShipsMax);
+        float4s("shRect",p.shRect,kObjectShipsMax);
+        floats("holoJitter",p.holoJitter,4);floats("skip",p.skip,4);floats("lead",p.lead,4);
+        fputs("\n}\n",f);
+    }
+    const bool wrote=!ferror(f);
+    const int closed=fclose(f);
+    Log::get().note("eye capture: mesh fallback snapshot %ls: %s, scene frame %u.",path,
+                    wrote && closed==0 ? (available?"written":"unavailable marker written") : "write failed",
+                    available?g_meshFallbackSnapshot.frame:g_eyeInputsFrame);
+}
 void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
+    writeMeshFallbackSnapshot(dir);
     for(int k=0;k<kEyeInputs;++k) {
         auto* texture=g_eyeInputs[k];if(!texture)continue;
         D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
@@ -5051,7 +5153,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve && !deferredInput) uiEvidenceWritten = true;
-                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],separated?&separatedCandidate:nullptr);
+                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],p,flags,separated?&separatedCandidate:nullptr);
                     if(deferredInput && eye==0 && g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame){stageEyeRun(ctx,e.dlColour,g_eyeInputs,16);g_eyeInputsUiFlags|=64u;}
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
@@ -7239,6 +7341,8 @@ void temporalPassShutdown() {
     g_eyeRunTaken = 0;
     g_eyeRunReady = false;
     g_eyeMotionTraceCount = 0;
+    g_eyeInputsFrame=0;
+    g_meshFallbackSnapshot=MeshFallbackSnapshot{};
     g_eyeRunUntreated=false;
     memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
     for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
@@ -7287,6 +7391,8 @@ void temporalPassArmEyeDump() {
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
     g_eyeMotionTraceCount = 0;
+    g_eyeInputsFrame=0;
+    g_meshFallbackSnapshot=MeshFallbackSnapshot{};
     g_eyeRunUntreated=false;
     memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
     for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}

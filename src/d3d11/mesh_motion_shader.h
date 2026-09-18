@@ -24,9 +24,17 @@ float3 turn(float4 q,float3 v) {
     [unroll]for(uint k=0;k<4;++k)n.key[k]=input.mesh[k];
     uint index=Instance.Load(input.info.w),count,stride;Pool.GetDimensions(count,stride);
     n.key[7].w=index; // coverage lookup only; excluded from persistent key
+    n.key[6].zw=uint2(asuint(scene[275].x),asuint(scene[275].y));
+    n.key[7].xyz=uint3(asuint(scene[275].z),uint(input.dimensions.z),uint(input.dimensions.w));
     if(index>=count){Current[at]=n;return;}
     PoolRecord p=Pool[index];
     n.key[4]=uint4(p.data[1].w,p.data[20].x,0,0);
+    // Diagnostic-only raw pose and rebase origin. key[0..4] remain the
+    // persistent identity consumed by match, and key[7].w remains the pool
+    // index consumed by coverage. Keeping the packed quaternion avoids
+    // losing information in the measurement path.
+    n.key[5]=uint4(p.data[0].y,p.data[0].z,p.data[0].w,p.data[1].x);
+    n.key[6].xy=p.data[1].yz;
     float scale=asfloat(p.data[0].y);
     uint2 packed=p.data[0].zw;
     // Original DXBC immediate is 0x38000100 (1/32767), not 2/65535.

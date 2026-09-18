@@ -52,6 +52,8 @@ std::vector<float> readBuffer(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11B
     D3D11_MAPPED_SUBRESOURCE map{}; hr(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&map));
     std::vector<float> values(bd.ByteWidth/4); std::memcpy(values.data(),map.pData,bd.ByteWidth); ctx->Unmap(stage.Get(),0); return values;
 }
+UINT word(const std::vector<float>& values,size_t at) { UINT value=0;std::memcpy(&value,&values[at],sizeof(value));return value; }
+UINT bits(float value) { UINT result=0;std::memcpy(&result,&value,sizeof(result));return result; }
 std::vector<float> readTexture(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D* src) {
     D3D11_TEXTURE2D_DESC td{}; src->GetDesc(&td); td.BindFlags=0; td.Usage=D3D11_USAGE_STAGING; td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> stage; hr(dev->CreateTexture2D(&td,nullptr,&stage)); ctx->CopyResource(stage.Get(),src);
@@ -112,6 +114,13 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
         ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx.Get(),scene[eye].Get(),views);check(views[0] && views[1],"mesh views available");return readBuffer(dev.Get(),ctx.Get(),eyes[eye].history[eyes[eye].write].buffer.Get());};
     auto reset=[&](){ctx->ClearState();meshMotionShutdown();std::memset(poolData,0,sizeof(poolData));std::memset(sceneData,0,sizeof(sceneData));std::memset(ids,0,sizeof(ids));sceneData[270][0]=sceneData[271][1]=sceneData[272][3]=1;sceneData[273][2]=.025f;};
     meshMotionConfigure(true);
+    reset();pose(2,1.25f,0);pose(3,-1.5f,1);ids[2]=1;sceneData[275][0]=.25f;sceneData[275][1]=.5f;sceneData[275][2]=.75f;
+    auto raw=run(0,2);
+    check(word(raw,20)==poolData[0][1] && word(raw,21)==poolData[0][2] && word(raw,22)==poolData[0][3] && word(raw,23)==poolData[0][4] && word(raw,24)==poolData[0][5] && word(raw,25)==poolData[0][6],"raw packed rigid pose is captured without conversion");
+    check(word(raw,26)==bits(sceneData[275][0]) && word(raw,27)==bits(sceneData[275][1]) && word(raw,28)==bits(sceneData[275][2]),"raw scene rebase origin is captured");
+    check(word(raw,29)==0 && word(raw,30)==2 && word(raw,31)==0 && word(raw,60+29)==0 && word(raw,60+30)==2 && word(raw,60+31)==1,"draw grouping and pool index use the spare key words");
+    reset();pose(1,0);ids[2]=99;raw=run(0,2);
+    check(raw[60+56]==0 && word(raw,60+29)==0 && word(raw,60+30)==2 && word(raw,60+31)==99,"invalid pool index keeps explicit draw grouping while its pose stays invalid");
     for(float distance:{1.f,12.f,120.f,1200.f}){
         reset();pose(distance,0);auto a=run();check(a[56]==1 && a[59]==0,"first rigid frame has no history at any distance");
         meshMotionFrameBoundary(ctx.Get());pose(distance,distance*.02f);a=run();check(a[59]==1,"rigid mesh matched independent of distance split");
@@ -126,6 +135,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     for(auto& vertex:vertices)vertex[2]=0;ctx->UpdateSubresource(vb.Get(),0,nullptr,vertices,0,0);
     reset();pose(1,0);run(0);pose(1,.1f);run(1);meshMotionFrameBoundary(ctx.Get());pose(1,.02f);auto left=run(0);pose(1,.13f);auto right=run(1);
     check(std::fabs(left[47]+.02f)<1e-5 && std::fabs(right[47]+.03f)<1e-5,"two eyes retain separate transforms despite shared overwritten buffers");
+    check(std::fabs(left[23]-.02f)<1e-6 && std::fabs(right[23]-.13f)<1e-6,"both eyes retain their own raw current pose");
     reset();pose(1,0,0);run();meshMotionFrameBoundary(ctx.Get());pose(1,.02f,2);ids[0]=2;auto a=run();check(a[59]==1,"reordered pool index preserves mesh identity");
     meshMotionFrameBoundary(ctx.Get());meshMotionFrameBoundary(ctx.Get());a=run();check(a[59]==0,"missing frame cannot reuse stale history");
     reset();pose(1,-.05f,0);pose(1,.05f,1);ids[2]=1;run(0,2);meshMotionFrameBoundary(ctx.Get());a=run(0,2);check(a[59]==0 && a[119]==0,"ambiguous identical instances reject history");
@@ -201,12 +211,21 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     }
     ib=originalIb;
     reset();pose(1,0);run();meshMotionFrameBoundary(ctx.Get());bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);issue(ctx.Get(),6,1,0,0,0);
+    diagnostics={};frames=0;
     for(unsigned i=0;i<513;++i)meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
     check(eyes[0].history[eyes[0].write].count==512,"record cap bounds excess draws");
+    check(diagnostics.eye[0].candidateDraws==513 && diagnostics.eye[0].acceptedDraws==512 && diagnostics.eye[0].capRejectedDraws==1 && diagnostics.eye[0].sampledCapDraws==1 && diagnostics.eye[0].eligibleCapRejectedDraws==1,"bounded cap sample separates fully eligible refusal from accepted candidates");
+    diagnostics.eye[0].capProbes=capProbeBudget;
+    const auto candidatesBefore=diagnostics.eye[0].candidateDraws;
+    const auto pendingBefore=pending.count;
+    meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
+    check(diagnostics.eye[0].capRejectedDraws==2 && diagnostics.eye[0].sampledCapDraws==1 && diagnostics.eye[0].candidateDraws==candidatesBefore && pending.count==pendingBefore,"ordinary capped draw keeps the raw early-return fast path");
+    check(diagnostics.drawCpuSamples>=2,"mesh draw CPU timing is sampled rather than measured on every draw");
     check(pending.count==512 && captureBatches==1,"full eye queues a bounded batch after the preceding frame");
     ID3D11ShaderResourceView* batchViews[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),batchViews);
     a=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
     check(!pending.count && captureBatches==2 && a[511*60+56]==1,"one dispatch captures all 512 records including later thread groups");
+    check(diagnostics.flushes[unsigned(FlushReason::EyeConsumption)]==1 && diagnostics.largestBatch==512,"eye consumption reports one bounded 512-record batch");
     auto queue=[&](UINT first=0,UINT n=1){issue(ctx.Get(),6,n,0,0,first);meshMotionDraw(ctx.Get(),issue,6,n,0,0,first,materialVs);};
     auto consumeBatch=[&](){meshMotionViews(ctx.Get(),scene[testEye].Get(),batchViews);return readBuffer(dev.Get(),ctx.Get(),eyes[testEye].history[eyes[testEye].write].buffer.Get());};
     // A write to the same pool must finish earlier captures before the
@@ -214,6 +233,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     reset();pose(1,.1f);bind(0);queue();
     meshMotionResourceWritten(pool.Get());pose(1,.3f);ctx->UpdateSubresource(pool.Get(),0,nullptr,poolData,0,0);queue();a=consumeBatch();
     check(captureBatches==2 && std::fabs(a[35]-.1f)<1e-5 && std::fabs(a[95]-.3f)<1e-5,"pool rewrite preserves both draw-time poses");
+    check(std::fabs(a[23]-.1f)<1e-6 && std::fabs(a[83]-.3f)<1e-6 && diagnostics.flushes[unsigned(FlushReason::WriteOrMap)]==1,"pool rewrite preserves both raw poses and reports write/map flush");
     reset();pose(1,.1f);pose(1,.7f,1);bind(0);queue();
     meshMotionResourceWritten(iv.Get());ids[0]=1;ctx->UpdateSubresource(iv.Get(),0,nullptr,ids,0,0);queue();a=consumeBatch();
     check(captureBatches==2 && std::fabs(a[35]-.1f)<1e-5 && std::fabs(a[95]-.7f)<1e-5,"instance rewrite refreshes the snapshot after preserving earlier IDs");
@@ -234,12 +254,14 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     check(captureBatches==1 && pending.count==1,"eye switch flushes before the shared ID snapshot is reused");a=consumeBatch();
     auto firstEye=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
     check(captureBatches==2 && a[56]==1 && firstEye[56]==1,"both eyes receive their own queued records");
+    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==1 && diagnostics.flushes[unsigned(FlushReason::EyeConsumption)]==1,"eye switch and eye consumption have exclusive flush reasons");
     // GPU-writable pools cannot rely on CPU write notifications.
     reset();pose(1,.2f);bind(0);
     auto gpuPool=buffer(sizeof(poolData),D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,336,poolData);
     ComPtr<ID3D11ShaderResourceView> gpuPoolView;hr(dev->CreateShaderResourceView(gpuPool.Get(),nullptr,&gpuPoolView));
     ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());queue();
     check(!pending.count && captureBatches==1,"UAV-writable pool remains immediate");a=consumeBatch();check(a[56]==1,"GPU-writable pool still captures correct motion inputs");
+    check(diagnostics.flushes[unsigned(FlushReason::GpuWritable)]==1,"GPU-writable capture reports its own flush reason");
     // Very large instance streams preserve bounded per-draw copies, even
     // for offsets near the end, rather than dropping coverage or allocating
     // an unbounded snapshot.
@@ -248,6 +270,8 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     auto largeStream=buffer(UINT(largeIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,largeIds.data());UINT idStep=8,idStart=0;
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);UINT lastId=UINT(largeIds.size()/2-1);queue(lastId);queue(lastId);a=consumeBatch();
     check(captureBatches==2 && std::fabs(a[35]-.4f)<1e-5 && std::fabs(a[95]-.4f)<1e-5,"oversized streams retain exact IDs through bounded copies");
+    reset();pose(1,.2f);bind(0);queue();meshMotionFrameBoundary(ctx.Get());
+    check(!pending.count && diagnostics.flushes[unsigned(FlushReason::FrameBoundary)]==1,"frame boundary submits pending capture with an exclusive reason");
     // Deferred capture may run after the app enabled predication. Captures,
     // uploads and owned timestamps must execute, then restore that state.
     reset();pose(1,.25f);bind(0);queue();
@@ -282,12 +306,22 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     vs=originalVs;testHash=materialVs;
     // The consumer must obey exact scene depth, UI coverage, frame history
     // and raster jitter in both DLSS and native TAA coordinate grids.
-    reset();pose(1,0);run();meshMotionFrameBoundary(ctx.Get());pose(1,.02f);a=run();
-    std::filesystem::create_directories("build/obj/meshmotion");meshMotionStageDump(ctx.Get(),scene[0].Get());
+    std::filesystem::create_directories("build/obj/meshmotion");
+    auto dumpHeaderAt=[&](const char* path){std::ifstream file(path,std::ios::binary);char magic[8]{};UINT h[2]{};file.read(magic,8);file.read(reinterpret_cast<char*>(h),8);check(bool(file) && !std::memcmp(magic,"EDVRMSH1",8) && h[1]==240,"paired dump retains EDVRMSH1 record format");return h[0];};
+    auto dumpText=[&](const char* path){std::ifstream file(path,std::ios::binary);return std::string((std::istreambuf_iterator<char>(file)),{});};
+    reset();pose(1,0);a=run();meshMotionStageDump(ctx.Get(),scene[0].Get(),76);
+    readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
+    meshMotionWriteDump(ctx.Get(),L"build/obj/meshmotion",L"zero_prev");
+    check(dumpHeaderAt("build/obj/meshmotion/eye_zero_prev_Mesh.bin")==1 && dumpHeaderAt("build/obj/meshmotion/eye_zero_prev_MeshPrev.bin")==0,"first-frame pair writes an explicit empty previous history");
+    auto zeroMarker=dumpText("build/obj/meshmotion/eye_zero_prev_MeshProbe.json");
+    check(zeroMarker.find("\"frame\": 76")!=std::string::npos && zeroMarker.find("\"meshFrame\": 0")!=std::string::npos && zeroMarker.find("\"previous\": {\"file\": \"eye_zero_prev_MeshPrev.bin\", \"count\": 0}")!=std::string::npos,"zero-history marker identifies cross-file frame and explicit previous count");
+    meshMotionFrameBoundary(ctx.Get());pose(1,.02f);a=run();meshMotionStageDump(ctx.Get(),scene[0].Get(),77);
     readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get()); // test-only readback completes the staged copy
     meshMotionWriteDump(ctx.Get(),L"build/obj/meshmotion",L"fixture");
-    std::ifstream dumpFile("build/obj/meshmotion/eye_fixture_Mesh.bin",std::ios::binary);char magic[8];UINT dumpHeader[2];dumpFile.read(magic,8);dumpFile.read(reinterpret_cast<char*>(dumpHeader),8);
-    check(bool(dumpFile) && !std::memcmp(magic,"EDVRMSH1",8) && dumpHeader[0]==1 && dumpHeader[1]==240,"explicit eye dump writes exact motion record format");
+    check(dumpHeaderAt("build/obj/meshmotion/eye_fixture_Mesh.bin")==1 && dumpHeaderAt("build/obj/meshmotion/eye_fixture_MeshPrev.bin")==1,"explicit eye dump writes paired current and previous records");
+    auto marker=dumpText("build/obj/meshmotion/eye_fixture_MeshProbe.json");
+    check(marker.find("\"frame\": 77")!=std::string::npos && marker.find("\"meshFrame\": 1")!=std::string::npos && marker.find("\"current\": {\"file\": \"eye_fixture_Mesh.bin\", \"count\": 1}")!=std::string::npos && marker.find("\"previous\": {\"file\": \"eye_fixture_MeshPrev.bin\", \"count\": 1}")!=std::string::npos,"paired marker names compatible files and both record counts");
+    check(std::system("python tools\\mesh_motion_probe.py --mesh build\\obj\\meshmotion\\eye_fixture_Mesh.bin --previous build\\obj\\meshmotion\\eye_fixture_MeshPrev.bin --probe build\\obj\\meshmotion\\eye_fixture_MeshProbe.json --json")==0,"production exporter is accepted by the offline mesh probe");
     std::ifstream header("src/d3d11/temporal_shader_source.h");std::string text((std::istreambuf_iterator<char>(header)),{});auto begin=text.find("bool meshPixel("),end=text.find("\n}\n",begin);check(begin!=std::string::npos && end!=std::string::npos,"production mesh consumer located");
     std::string consumer="Texture2D<float2> MC:register(t15);struct HoloRecord{uint4 key[8];float4 clip[3];float4 map[3];float4 meta;};StructuredBuffer<HoloRecord> MR:register(t16);Texture2D<float> Z:register(t0);RWTexture2D<float4> Out:register(u0);cbuffer P:register(b0){float4 holoJitter;float4 offset;}static const int4 region=0;static const int2 size=int2(64,64);static const float4 knobs=float4(0,1,.025,0);bool uiCovered(int2 q){return q.x==32 && q.y==31;}float zSceneAt(int2 q){return q.x==32 && q.y==30 ? .1 : Z.Load(int3(q,0));}\n";
     consumer+=text.substr(begin,end+3-begin);consumer+="[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){float2 pp;float zp;bool ok=meshPixel(id.xy,offset.xy,pp,zp);Out[id.xy]=float4(pp-id.xy,zp,ok?1:0);}";

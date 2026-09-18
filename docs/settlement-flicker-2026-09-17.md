@@ -2,7 +2,9 @@
 
 ## Status
 
-- State: `eye_165144` read offline, no flight taken, no code changed.
+- State: measurement build gated; Frontier flight pending; no skips enabled.
+  The latest journal entry corrects the earlier implementation plan.
+- Baseline: `eye_165144` read offline; no new flight taken.
   EDVR's treated output does NOT flicker in the dump: aligned per band,
   all 15 frame pairs sit inside the confirmed-good 15:10 baseline's range
   and the output follows the raw camera motion at x1.54. The first read
@@ -53,13 +55,11 @@
   "EDVR's output flickers in pairs 00-01/02-03", because per-band
   alignment shows those pairs moved 8-10 px with the raw input. A DLSS
   history reset at the capture, because dlHistory=1 throughout.
-- Static-mesh exclusion (Sean's question): a static mesh needs no record,
-  the camera path is exact for it, but the CPU never sees the transform.
-  Two-stage plan in the journal (exact-transform match + census first,
-  the CPU-side skip second); worth about the mesh path's 1.2-1.5 ms GPU
-  plus its unmeasured CPU. The game's 20k draws and the door are not
-  EDVR's to cut.
-- Next: the H-runtime flight (no build). Stage 1 when Sean says go.
+- Optimization: measure whole-draw static candidates, cap pressure and
+  capture flushes first. Raw-static does not prove the existing fallback
+  selects world motion; CPU pool shadowing also needs a cost gate. The
+  entire measured mesh path is 1.2-1.5 ms GPU, not a promised saving.
+- Next: Frontier settlement/station route and eye runs; H-runtime open.
 
 ## Journal
 
@@ -176,3 +176,77 @@ ruled out: a history reset at the capture, because dlHistory=1 and
 jumped=0 on all 16 rows of motion.csv.
 ruled out: mesh-motion ambiguity as the buildings' flicker, because the
 buildings are not on the mesh path (73 world records, 0.74% of the eye).
+
+### 2026-09-17 -- mesh optimization measurement pass
+
+Sean authorized the measurement build after review; all test installs for this
+work go to Frontier. The rendering decision is unchanged: the same draws,
+512-record limit and fuzzy matching feed the same temporal consumer. No object
+is skipped for being static or previously invisible, and no live mapped-pool
+CPU shadow is introduced.
+
+Two corrections to the earlier plan are gates, not optional refinements.
+Raw-static does not imply safe camera fallback: `temporal_shader_source.h`
+selects head motion inside the distance split and may then apply ship/body
+membership. Losing mesh coverage can therefore change a nearby world surface's
+vectors. The older `per-object-motion.md` journal (pool probe, 2026-09-08) also
+rejected reads of the mapped write-combined pool as millisecond-scale work; the
+successful small terrain-buffer tee does not price this different allocation. A
+future CPU shadow needs its own measured extraction cost and complete write
+visibility.
+
+ruled out: an unconditional raw-static early return, because removing coverage
+can select head/ship/body motion instead of world motion. Identical pose plus
+geometry keys is an exact-pose candidate, not proof of unique object identity
+or stable slot numbering. Keep previous transforms even for skipped static
+objects so the first moving frame has history; freeze the history across both
+eyes. An origin change is reported separately, not automatically labelled
+object motion.
+
+The measurement captures the six raw pose words, three rebase-origin words and
+original draw grouping in unused mesh-record fields. An explicit eye run saves
+current and previous records together, with a schema marker written only after
+the pair succeeds. The previous file is explicitly empty on a first frame. The
+temporal pass also saves the corresponding fallback parameters; body/ship grids
+are not captured, so membership-dependent results remain unknown. The existing
+coverage and final scene-depth inputs distinguish covered records from pixels
+still depth-visible.
+
+The read-only `tools/mesh_motion_probe.py` compares the admitted records by
+persistent geometry key and exact raw pose, counts duplicates, fully unchanged
+versus mixed draws, origin changes and coverage. These are upper bounds on
+avoidable work, not an instruction to skip. It cannot describe records rejected
+by the cap. The build gates its self-test alongside the GPU mesh rig.
+
+Runtime counters separate early cap rejections from sampled, fully checked
+eligible rejections. Sampled mesh-hook/capture CPU costs, capture flush reasons
+and batch sizes identify whether the next change should remove whole reissues
+or reduce dispatch boundaries. The full draw-hook CPU window reuses its
+existing sampled clocks, so scene-wide hook overhead is visible without timing
+every draw. Zero samples/unavailable captures are distinguished from measured
+zero cost.
+
+Validation: full absolute-path build passed, including 1,484 mesh WARP checks,
+the real exporter-to-analyzer fixture, probe self-tests, all configured rigs
+and the 249-key config contract. Rebuild the clean commit before installation
+so the DLL version matches the checkout. Use `EDVR_JOBS=6` in the environment
+and invoke `build.bat` by absolute path without arguments: the existing
+`--jobs` parser shifts `%0` and breaks the later runner's `%~f0` path. No
+parser change is included in this measurement pass.
+
+Next flight: Frontier, current native OpenXR runtime, Pimax Crystal Super, DLSS
+K, with the resolution and active trims recorded in the new log. Hold each
+useful scene for at least a minute: settlement in ship/SRV, settlement on foot,
+rotating-station approach with traffic, then the slot/docked view. Take an eye
+run at the settlement and station. Include a short stop/start and an occluded
+ship emerging into view. Use the same settings as the baseline where practical;
+do not count the explicit capture stall as steady-state frame time. Start log
+analysis with `tools/edvr_log.py --target frontier --expect-build HEAD
+--version` against this checkout.
+
+Acceptance for a later optimization is lower steady-state CPU/GPU cost with
+correct first-moving-frame and newly visible motion, not simply a lower record
+count. Freeing static records may admit previously capped movers, improving
+motion coverage without reducing the final count. The entire measured 1.2-1.5
+ms mesh cost is the current GPU ceiling; even removing all of it from 13.4 ms
+would still exceed the 11.1 ms refresh budget.

@@ -2,6 +2,7 @@
 #include "gpu_frame_timing.h"
 
 #include <windows.h>
+#include <algorithm>
 
 #include <d3d11.h>
 #include <dxgi1_4.h>
@@ -165,6 +166,9 @@ struct State {
     int64_t  drawRealTicks = 0;
     float    drawsMsRunning = 0.0f;
     bool     drawsSampled = false;
+    double   drawWindowMs = 0.0;
+    float    drawWindowMaxMs = 0.0f;
+    uint32_t drawWindowSamples = 0;
 
     // The door's GPU pairs.
     QuerySlot doorQ[2][kQueryRing];
@@ -802,6 +806,18 @@ void perfMonitorFrame(ID3D11Device* dev) {
                                                         static_cast<double>(qpcFrequency()))
                                    : 0.0f;
         s.drawsSampled = true;
+        s.drawWindowMs += s.drawsMsRunning;
+        s.drawWindowMaxMs = std::max(s.drawWindowMaxMs, s.drawsMsRunning);
+        ++s.drawWindowSamples;
+    }
+    // Reuse the existing sampled clocks; do not time every draw just to
+    // explain a settlement's many thousands of hook invocations. Average
+    // only measured frames, never the held value copied into the ring.
+    if (s.frameNo % 1800 == 0) {
+        Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); excludes forwarded game draw time, includes EDVR reissues; zero samples means unavailable.",
+            s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
+            double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery));
+        s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;

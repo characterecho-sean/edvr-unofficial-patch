@@ -9,8 +9,10 @@
 #include <wrl/client.h>
 #include <unordered_map>
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <string>
 namespace edvr { namespace mesh_motion_detail {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 constexpr unsigned maxRecords=512,stride=240;
@@ -46,6 +48,42 @@ Ptr<ID3D11DepthStencilState> depthState;
 Ptr<ID3D11BlendState> blendState;
 GpuIntervals<16> drawGpu,matchGpu,captureGpu;
 unsigned frames=0,draws=0,captureBatches=0,capturedInstances=0;
+constexpr unsigned diagnosticWindowFrames=1800,capProbeBudget=32;
+enum class FlushReason { InputChange,WriteOrMap,EyeConsumption,FrameBoundary,GpuWritable,Count };
+const char* flushReasonName(FlushReason reason){
+    static const char* names[]={"input-change","write/map","eye-consumption","frame-boundary","gpu-writable"};
+    return names[unsigned(reason)];
+}
+struct EyeDiagnostics {
+    uint64_t candidateDraws=0,candidateInstances=0;
+    uint64_t acceptedDraws=0,acceptedInstances=0;
+    uint64_t capRejectedDraws=0,capRejectedInstances=0;
+    uint64_t sampledCapDraws=0,sampledCapInstances=0;
+    uint64_t eligibleCapRejectedDraws=0,eligibleCapRejectedInstances=0;
+    uint64_t ineligibleCapSampleDraws=0,ineligibleCapSampleInstances=0;
+    unsigned capProbes=0;
+};
+struct CapProbe {
+    EyeDiagnostics* diagnostic=nullptr;unsigned instances=0;bool eligible=false;
+    CapProbe(EyeDiagnostics* value,unsigned count):diagnostic(value),instances(count){if(diagnostic){++diagnostic->sampledCapDraws;diagnostic->sampledCapInstances+=instances;}}
+    ~CapProbe(){if(diagnostic && !eligible){++diagnostic->ineligibleCapSampleDraws;diagnostic->ineligibleCapSampleInstances+=instances;}}
+};
+struct Diagnostics {
+    EyeDiagnostics eye[2];
+    uint64_t flushes[unsigned(FlushReason::Count)]{};
+    uint64_t flushInstances=0;
+    unsigned largestBatch=0;
+    uint64_t drawCalls=0,flushCalls=0;
+    double drawCpuMs=0,flushCpuMs=0;
+    uint64_t drawCpuSamples=0,flushCpuSamples=0;
+    void clearWindow(){*this=Diagnostics{};}
+} diagnostics;
+double cpuTimestamp(){LARGE_INTEGER value;QueryPerformanceCounter(&value);static const double scale=[](){LARGE_INTEGER f;QueryPerformanceFrequency(&f);return 1000.0/double(f.QuadPart);}();return double(value.QuadPart)*scale;}
+struct CpuSample {
+    double* total=nullptr;uint64_t* samples=nullptr;double start=0;
+    CpuSample(bool active,double& sum,uint64_t& count){if(active){total=&sum;samples=&count;start=cpuTimestamp();}}
+    ~CpuSample(){if(total){*total+=cpuTimestamp()-start;++*samples;}}
+};
 struct IndexStamp { unsigned epoch=0,seen=0; };
 struct GeometryStamp {
     unsigned epoch=0,seen=0;
@@ -57,8 +95,8 @@ struct GeometryStamp {
 };
 std::unordered_map<ID3D11Resource*,GeometryStamp> watched;
 unsigned geometryEpoch=0,geometryWrites=0,unknownWrites=0,rangeWrites=0,disjointIndices=0;
-Ptr<ID3D11Buffer> dump;
-unsigned dumpCount=0;
+Ptr<ID3D11Buffer> dump,dumpPrevious;
+unsigned dumpCount=0,dumpPreviousCount=0,dumpSceneFrame=~0u,dumpMeshFrame=0,dumpEye=0,dumpWidth=0,dumpHeight=0,dumpWriteSlot=0;
 struct Settings { UINT info[4],key[16];float dimensions[4]; };
 struct PendingCapture {
     Ptr<ID3D11DeviceContext> context;
@@ -94,8 +132,11 @@ bool uploadSettings(ID3D11DeviceContext* ctx,const Settings& data){
     }
     std::memcpy(mapped.pData,&data,sizeof(data));ctx->Unmap(settings.Get(),0);return true;
 }
-void flushCapture(){
+void flushCapture(FlushReason reason){
     if(!pending.count)return;
+    const unsigned batchSize=pending.count;
+    const bool sample=(++diagnostics.flushCalls&15u)==0;
+    CpuSample cpu(sample,diagnostics.flushCpuMs,diagnostics.flushCpuSamples);
     auto* ctx=pending.context.Get();
     {
         ComputeState saved(ctx);const bool timed=captureGpu.begin(ctx);Settings data{};data.info[2]=pending.count;
@@ -110,6 +151,8 @@ void flushCapture(){
         if(timed)captureGpu.end(ctx);
     }
     ++captureBatches;capturedInstances+=pending.count;
+    ++diagnostics.flushes[unsigned(reason)];diagnostics.flushInstances+=batchSize;
+    diagnostics.largestBatch=std::max(diagnostics.largestBatch,batchSize);
     pending.clear();
 }
 bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev){
@@ -143,9 +186,10 @@ bool createEye(ID3D11Device* dev,ID3D11Texture2D* source,Eye& e){
 }
 void fail(){failed=true;Log::get().note("mesh motion: resource setup failed; existing camera/object motion retained.");}
 } // namespace mesh_motion_detail
-void meshMotionConfigure(bool on){using namespace mesh_motion_detail;if(on!=enabled){meshMotionShutdown();enabled=on;}}
+void meshMotionConfigure(bool on){using namespace mesh_motion_detail;if(on!=enabled){meshMotionShutdown();enabled=on;if(on)Log::get().note("mesh motion diagnostics: 1800-frame windows active; draw CPU sampled 1/256 calls, capture flush CPU sampled 1/16 batches, capped eligibility probed for at most 32 draws per eye in one frame per window (bounded sample only; no population estimate).");}}
 void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned count,unsigned n,unsigned start,int base,unsigned startInstance,uint64_t hash){
     using namespace mesh_motion_detail;
+    CpuSample cpu((++diagnostics.drawCalls&255u)==0,diagnostics.drawCpuMs,diagnostics.drawCpuSamples);
     const auto kind=coverageKind(hash);
     if(!enabled || failed || kind==CoverageCount || !ctx || !issue || !n || n>64 || !count || count%3 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     auto* bound=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!bound)return;
@@ -154,7 +198,19 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     int eye=-1;for(int i=0;i<2;++i){ID3D11Texture2D* s=nullptr;uint32_t fmt=0;if(depthProbeSceneDepthFormat(td.Width,td.Height,i,&s,&fmt) && s==scene.Get()){eye=i;break;}}
     if(eye<0)return;
     Eye& e=eyes[eye];if(e.matched)return; // no history mutation after this eye is consumed
-    if(e.scene==scene && e.history[e.write].count+n>maxRecords){if(!capped){capped=true;Log::get().note("mesh motion: 512 instances per eye reached; excess geometry retains existing motion.");}return;}
+    const bool overCap=e.scene==scene && e.history[e.write].count+n>maxRecords;
+    bool probeCap=false;
+    if(overCap){
+        auto& d=diagnostics.eye[eye];
+        ++d.capRejectedDraws;d.capRejectedInstances+=n;
+        probeCap=frames%diagnosticWindowFrames==0 && d.capProbes<capProbeBudget;
+        if(probeCap)++d.capProbes;
+        else {
+            if(!capped){capped=true;Log::get().note("mesh motion: 512 instances per eye reached; excess geometry retains existing motion.");}
+            return;
+        }
+    }
+    CapProbe capProbe(probeCap?&diagnostics.eye[eye]:nullptr,n);
     Ptr<ID3D11DepthStencilState> ds;UINT ref=0;ctx->OMGetDepthStencilState(&ds,&ref);
     D3D11_DEPTH_STENCIL_DESC dd{};if(ds)ds->GetDesc(&dd);else {dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;}
     if(!dd.DepthEnable || dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL)return;
@@ -180,6 +236,13 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     D3D11_SHADER_RESOURCE_VIEW_DESC pd{};pool->GetDesc(&pd);Ptr<ID3D11Resource> pr;pool->GetResource(&pr);Ptr<ID3D11Buffer> pb;
     if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER || pd.Buffer.FirstElement || FAILED(pr.As(&pb)))return;
     D3D11_BUFFER_DESC pbd{};pb->GetDesc(&pbd);if(pbd.StructureByteStride!=336 || pd.Buffer.NumElements!=pbd.ByteWidth/336)return;
+    auto& diagnostic=diagnostics.eye[eye];++diagnostic.candidateDraws;diagnostic.candidateInstances+=n;
+    if(probeCap){
+        capProbe.eligible=true;
+        ++diagnostic.eligibleCapRejectedDraws;diagnostic.eligibleCapRejectedInstances+=n;
+        if(!capped){capped=true;Log::get().note("mesh motion: 512 instances per eye reached; excess geometry retains existing motion.");}
+        return;
+    }
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);if(!prepare(ctx,dev.Get()) || (e.scene!=scene && !createEye(dev.Get(),scene.Get(),e))){fail();return;}
     auto& now=e.history[e.write];auto& prev=e.history[1-e.write];
     // Coverage only needs the copied instance IDs. Defer transform capture
@@ -187,7 +250,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     // the graphics pipeline with one compute dispatch for every mesh.
     const bool wholeIds=idd.ByteWidth<=maxInstanceBytes;
     const bool gpuWritable=((pbd.BindFlags|idd.BindFlags)&D3D11_BIND_UNORDERED_ACCESS)!=0;
-    if(pending.count && (pending.context.Get()!=ctx || pending.scene!=cb || pending.ids!=ids || pending.pool!=pool || pending.output!=now.uav || !wholeIds))flushCapture();
+    if(pending.count && (pending.context.Get()!=ctx || pending.scene!=cb || pending.ids!=ids || pending.pool!=pool || pending.output!=now.uav || !wholeIds))flushCapture(FlushReason::InputChange);
     if(failed)return;
     if(!pending.count){
         pending.context=ctx;pending.scene=cb;pending.ids=ids;pending.pool=pool;pending.poolResource=pr;pending.output=now.uav;
@@ -197,7 +260,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
         ctx->CopySubresourceRegion(instances.Get(),0,0,0,0,ids.Get(),0,&box);
     }
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11InputLayout> layout;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->IAGetInputLayout(&layout);
-    Settings data{};data.info[0]=now.count;data.info[1]=prev.count;data.info[2]=n;data.info[3]=wholeIds?UINT(at):0;data.dimensions[0]=float(e.width);data.dimensions[1]=float(e.height);
+    Settings data{};data.info[0]=now.count;data.info[1]=prev.count;data.info[2]=n;data.info[3]=wholeIds?UINT(at):0;data.dimensions[0]=float(e.width);data.dimensions[1]=float(e.height);data.dimensions[2]=float(now.count);data.dimensions[3]=float(n);
     IUnknown* objects[4]={vs.Get(),vb.Get(),ib.Get(),layout.Get()};
     for(unsigned i=0;i<4;++i){uint64_t key=reinterpret_cast<uint64_t>(objects[i]);data.key[2*i]=UINT(key);data.key[2*i+1]=UINT(key>>32);now.sources[now.count][i]=objects[i];}
     data.key[8]=UINT(base);data.key[9]=start;data.key[10]=count;data.key[11]=vertexStride;data.key[12]=offset;data.key[13]=indexOffset;data.key[14]=UINT(format);
@@ -222,16 +285,16 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     ctx->PSSetShader(ps.Get(),classes,nc);ctx->PSSetConstantBuffers(13,1,psCb.GetAddressOf());ctx->PSSetShaderResources(15,1,psSrv.GetAddressOf());
     vScreenSetRenderTargetsRaw(ctx,8,rt,originalDepth.Get());ctx->OMSetDepthStencilState(ds.Get(),ref);ctx->OMSetBlendState(blend.Get(),factors,mask);
     for(auto* p:rt)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
-    now.count+=n;if(timed)drawGpu.end(ctx);
+    now.count+=n;++diagnostic.acceptedDraws;diagnostic.acceptedInstances+=n;if(timed)drawGpu.end(ctx);
     // A UAV can change through GPU commands that have no CPU write hook.
     // Keep those sources immediate; ordinary immutable/read-only inputs batch.
-    if(gpuWritable)flushCapture();
+    if(gpuWritable)flushCapture(FlushReason::GpuWritable);
     if(!noted){noted=true;Log::get().note("mesh motion: exact rigid draw transforms at %ux%u, independent of ship-metres split; original VS coverage, 512 instances per eye, batched GPU history matching. Animated/ambiguous geometry retains existing motion.",e.width,e.height);}
 }
 void meshMotionViews(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,ID3D11ShaderResourceView** views){
     using namespace mesh_motion_detail;views[0]=views[1]=nullptr;if(!enabled || failed)return;
     for(auto& e:eyes)if(e.scene.Get()==scene && e.cleared){
-        flushCapture();
+        flushCapture(FlushReason::EyeConsumption);
         if(failed)return;
         auto& now=e.history[e.write];auto& prev=e.history[1-e.write];
         if(!e.matched){
@@ -245,11 +308,16 @@ void meshMotionViews(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,ID3D11Shade
 }
 void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
     using namespace mesh_motion_detail;if(!enabled)return;
-    flushCapture();
+    flushCapture(FlushReason::FrameBoundary);
     if(ctx){drawGpu.poll(ctx);matchGpu.poll(ctx);captureGpu.poll(ctx);}
     if(++frames%1800==0){const auto& d=drawGpu.totals;const auto& m=matchGpu.totals;
         Log::get().note("mesh motion GPU: %u coverage reissues/%u frames; sampled coverage %.3f us (%u samples), batched match %.3f us/eye (%u samples); no waits/readbacks.",draws,frames,d.samples?d.ms*1000/d.samples:0,d.samples,m.samples?m.ms*1000/m.samples:0,m.samples);
-        const auto& c=captureGpu.totals;Log::get().note("mesh motion capture: %u instances in %u batches; %.3f us/batch (%u samples, %u skipped).",capturedInstances,captureBatches,c.samples?c.ms*1000/c.samples:0,c.samples,c.skipped);}
+        const auto& c=captureGpu.totals;Log::get().note("mesh motion capture: %u instances in %u batches; %.3f us/batch (%u samples, %u skipped).",capturedInstances,captureBatches,c.samples?c.ms*1000/c.samples:0,c.samples,c.skipped);
+        for(unsigned i=0;i<2;++i){const auto& x=diagnostics.eye[i];Log::get().note("mesh motion diagnostic eye %u: fully checked candidates %llu draws/%llu instances; accepted %llu/%llu; cap decisions %llu/%llu total, bounded sample %llu/%llu (%llu/%llu eligible, %llu/%llu ineligible; no extrapolation).",i,(unsigned long long)x.candidateDraws,(unsigned long long)x.candidateInstances,(unsigned long long)x.acceptedDraws,(unsigned long long)x.acceptedInstances,(unsigned long long)x.capRejectedDraws,(unsigned long long)x.capRejectedInstances,(unsigned long long)x.sampledCapDraws,(unsigned long long)x.sampledCapInstances,(unsigned long long)x.eligibleCapRejectedDraws,(unsigned long long)x.eligibleCapRejectedInstances,(unsigned long long)x.ineligibleCapSampleDraws,(unsigned long long)x.ineligibleCapSampleInstances);}
+        uint64_t flushCount=0;for(auto count:diagnostics.flushes)flushCount+=count;
+        Log::get().note("mesh motion diagnostic CPU: draw %.3f us (%llu samples), flush %.3f us (%llu samples); batches %llu, %.1f instances average, %u max.",diagnostics.drawCpuSamples?diagnostics.drawCpuMs*1000/diagnostics.drawCpuSamples:0,(unsigned long long)diagnostics.drawCpuSamples,diagnostics.flushCpuSamples?diagnostics.flushCpuMs*1000/diagnostics.flushCpuSamples:0,(unsigned long long)diagnostics.flushCpuSamples,(unsigned long long)flushCount,flushCount?double(diagnostics.flushInstances)/double(flushCount):0,diagnostics.largestBatch);
+        Log::get().note("mesh motion diagnostic flushes: %s %llu, %s %llu, %s %llu, %s %llu, %s %llu.",flushReasonName(FlushReason::InputChange),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::InputChange)],flushReasonName(FlushReason::WriteOrMap),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::WriteOrMap)],flushReasonName(FlushReason::EyeConsumption),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::EyeConsumption)],flushReasonName(FlushReason::FrameBoundary),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::FrameBoundary)],flushReasonName(FlushReason::GpuWritable),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::GpuWritable)]);
+        diagnostics.clearWindow();}
     for(auto& e:eyes){
         e.write=1-e.write;auto& h=e.history[e.write];for(unsigned i=0;i<h.count;++i)for(auto& p:h.sources[i])p.Reset();h.count=0;e.cleared=e.matched=false;
         auto& prev=e.history[1-e.write];for(unsigned i=0;i<prev.count;++i)for(unsigned j=1;j<=2;++j)if(prev.sources[i][j])watched[static_cast<ID3D11Resource*>(prev.sources[i][j].Get())].seen=frames;
@@ -263,7 +331,7 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
 }
 void meshMotionBeforeMap(ID3D11Resource* resource){
     using namespace mesh_motion_detail;
-    if(pending.count && (!resource || resource==pending.scene.Get() || resource==pending.ids.Get() || resource==pending.poolResource.Get()))flushCapture();
+    if(pending.count && (!resource || resource==pending.scene.Get() || resource==pending.ids.Get() || resource==pending.poolResource.Get()))flushCapture(FlushReason::WriteOrMap);
 }
 void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end){
     using namespace mesh_motion_detail;
@@ -295,30 +363,59 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
 }
 void meshMotionShutdown(){
     using namespace mesh_motion_detail;pending.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
-    failed=noted=capped=false;drawGpu={};matchGpu={};captureGpu={};frames=draws=captureBatches=capturedInstances=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpCount=0;
+    failed=noted=capped=false;drawGpu={};matchGpu={};captureGpu={};frames=draws=captureBatches=capturedInstances=0;diagnostics={};watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
 }
-void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene){
-    using namespace mesh_motion_detail;dump.Reset();dumpCount=0;
+void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,unsigned sceneFrame){
+    using namespace mesh_motion_detail;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;
     if(!enabled || failed)return;
-    for(auto& e:eyes)if(e.scene.Get()==scene && e.cleared && e.matched){
-        auto& h=e.history[e.write];if(!h.count)return;
+    for(unsigned eye=0;eye<2;++eye){auto& e=eyes[eye];if(e.scene.Get()==scene && e.cleared && e.matched){
+        auto& h=e.history[e.write];auto& previous=e.history[1-e.write];if(!h.count)return;
         D3D11_BUFFER_DESC b{};b.ByteWidth=maxRecords*stride;b.Usage=D3D11_USAGE_STAGING;b.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);if(SUCCEEDED(dev->CreateBuffer(&b,nullptr,&dump))){ctx->CopyResource(dump.Get(),h.buffer.Get());dumpCount=h.count;}return;
-    }
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        if(SUCCEEDED(dev->CreateBuffer(&b,nullptr,&dump)) && SUCCEEDED(dev->CreateBuffer(&b,nullptr,&dumpPrevious))){
+            // The pair is copied before either history slot can roll.
+            ctx->CopyResource(dump.Get(),h.buffer.Get());ctx->CopyResource(dumpPrevious.Get(),previous.buffer.Get());
+            dumpCount=h.count;dumpPreviousCount=previous.count;dumpSceneFrame=sceneFrame;dumpMeshFrame=frames;dumpEye=eye;dumpWidth=e.width;dumpHeight=e.height;dumpWriteSlot=e.write;
+        }else {dump.Reset();dumpPrevious.Reset();}
+        return;
+    }}
 }
 void meshMotionWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const wchar_t* stamp){
     using namespace mesh_motion_detail;
-    if(!dump){Log::get().note("mesh motion: eye run %ls has no captured mesh records.",stamp);return;}
-    D3D11_MAPPED_SUBRESOURCE mapped{};auto result=ctx->Map(dump.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
-    if(SUCCEEDED(result)){
-        unsigned valid=0,matched=0;for(unsigned i=0;i<dumpCount;++i){auto* p=reinterpret_cast<const float*>(static_cast<const char*>(mapped.pData)+i*stride);valid+=p[56]==1;matched+=p[59]==1;}
-        wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_Mesh.bin",directory,stamp);FILE* f=nullptr;_wfopen_s(&f,path,L"wb");bool ok=false;
-        if(f){const UINT header[2]={dumpCount,stride};ok=fwrite("EDVRMSH1",1,8,f)==8 && fwrite(header,sizeof(header),1,f)==1 && fwrite(mapped.pData,stride,dumpCount,f)==dumpCount;fclose(f);}
-        ctx->Unmap(dump.Get(),0);
-        Log::get().note("mesh motion: eye run %ls matched %u/%u rigid records (%u total); %s. Sampled coverage %.3f us, match %.3f us/eye.",stamp,matched,valid,dumpCount,ok?"written":"WRITE FAILED",drawGpu.totals.samples?drawGpu.totals.ms*1000/drawGpu.totals.samples:0,matchGpu.totals.samples?matchGpu.totals.ms*1000/matchGpu.totals.samples:0);
+    if(!dump || !dumpPrevious){Log::get().note("mesh motion: eye run %ls has no captured mesh records.",stamp);return;}
+    wchar_t currentPath[MAX_PATH],previousPath[MAX_PATH],markerPath[MAX_PATH];
+    wchar_t currentName[MAX_PATH],previousName[MAX_PATH];
+    _snwprintf_s(currentName,MAX_PATH,_TRUNCATE,L"eye_%s_Mesh.bin",stamp);
+    _snwprintf_s(previousName,MAX_PATH,_TRUNCATE,L"eye_%s_MeshPrev.bin",stamp);
+    _snwprintf_s(currentPath,MAX_PATH,_TRUNCATE,L"%s\\%s",directory,currentName);
+    _snwprintf_s(previousPath,MAX_PATH,_TRUNCATE,L"%s\\%s",directory,previousName);
+    _snwprintf_s(markerPath,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_MeshProbe.json",directory,stamp);
+    errno=0;
+    if(_wremove(markerPath)!=0 && errno!=ENOENT){
+        Log::get().note("mesh motion: eye run %ls cannot retire its prior marker; paired dump unavailable.",stamp);
+        dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;return;
+    }
+    unsigned valid=0,matched=0;HRESULT readback=S_OK;
+    auto writeRecords=[&](ID3D11Buffer* source,unsigned count,const wchar_t* path,bool inspect){
+        D3D11_MAPPED_SUBRESOURCE mapped{};readback=ctx->Map(source,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);if(FAILED(readback))return false;
+        if(inspect)for(unsigned i=0;i<count;++i){auto* p=reinterpret_cast<const float*>(static_cast<const char*>(mapped.pData)+i*stride);valid+=p[56]==1;matched+=p[59]==1;}
+        FILE* f=nullptr;_wfopen_s(&f,path,L"wb");bool ok=false;
+        if(f){const UINT header[2]={count,stride};ok=fwrite("EDVRMSH1",1,8,f)==8 && fwrite(header,sizeof(header),1,f)==1 && fwrite(mapped.pData,stride,count,f)==count;ok=fclose(f)==0 && ok;}
+        ctx->Unmap(source,0);return ok;
+    };
+    bool ok=writeRecords(dump.Get(),dumpCount,currentPath,true) && writeRecords(dumpPrevious.Get(),dumpPreviousCount,previousPath,false);
+    auto utf8=[](const wchar_t* value){int bytes=WideCharToMultiByte(CP_UTF8,0,value,-1,nullptr,0,nullptr,nullptr);std::string out(bytes>0?size_t(bytes):0,'\0');if(bytes>0){WideCharToMultiByte(CP_UTF8,0,value,-1,&out[0],bytes,nullptr,nullptr);out.pop_back();}return out;};
+    auto quote=[](const std::string& value){std::string out;for(unsigned char c:value){if(c=='\\' || c=='\"'){out.push_back('\\');out.push_back(char(c));}else if(c>=0x20)out.push_back(char(c));}return out;};
+    const auto currentUtf8=quote(utf8(currentName)),previousUtf8=quote(utf8(previousName));
+    if(ok){FILE* marker=nullptr;_wfopen_s(&marker,markerPath,L"wb");if(marker){
+        const std::string sceneFrame=dumpSceneFrame==~0u?"null":std::to_string(dumpSceneFrame);
+        ok=std::fprintf(marker,"{\n  \"schema\": 1,\n  \"recordFormat\": \"EDVRMSH1\",\n  \"recordStride\": %u,\n  \"capture\": {\"frame\": %s, \"meshFrame\": %u, \"eye\": %u, \"width\": %u, \"height\": %u, \"writeSlot\": %u, \"matched\": true},\n  \"current\": {\"file\": \"%s\", \"count\": %u},\n  \"previous\": {\"file\": \"%s\", \"count\": %u}\n}\n",stride,sceneFrame.c_str(),dumpMeshFrame,dumpEye,dumpWidth,dumpHeight,dumpWriteSlot,currentUtf8.c_str(),dumpCount,previousUtf8.c_str(),dumpPreviousCount)>0;ok=fclose(marker)==0 && ok;}else ok=false;}
+    if(FAILED(readback))Log::get().note("mesh motion: eye run %ls readback unavailable (0x%08X).",stamp,unsigned(readback));
+    else {
+        Log::get().note("mesh motion: eye run %ls matched %u/%u rigid records (%u total, %u previous); paired dump %s. Sampled coverage %.3f us, match %.3f us/eye.",stamp,matched,valid,dumpCount,dumpPreviousCount,ok?"written":"WRITE FAILED",drawGpu.totals.samples?drawGpu.totals.ms*1000/drawGpu.totals.samples:0,matchGpu.totals.samples?matchGpu.totals.ms*1000/matchGpu.totals.samples:0);
         Log::get().note("mesh motion: %u known geometry writes isolated by generation, %u unknown writes reset all history; %zu geometry resources retained.",geometryWrites,unknownWrites,watched.size());
         Log::get().note("mesh motion: %u bounded writes preserved %u disjoint index histories; vertex writes remain conservative.",rangeWrites,disjointIndices);
-    }else Log::get().note("mesh motion: eye run %ls readback unavailable (0x%08X).",stamp,unsigned(result));
-    dump.Reset();dumpCount=0;
+    }
+    dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;
 }
 }

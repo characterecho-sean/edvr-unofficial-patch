@@ -14,6 +14,8 @@ void meshMotionShutdown();
 void meshMotionBeforeMap(ID3D11Resource*);
 // Byte interval [first,end) for a known buffer write; omitted means all.
 void meshMotionResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~uint64_t(0));
-void meshMotionStageDump(ID3D11DeviceContext*,ID3D11Texture2D*);
+// sceneFrame is the temporal eye-dump frame shared with companion files;
+// omit only for callers that do not have that cross-file frame identity.
+void meshMotionStageDump(ID3D11DeviceContext*,ID3D11Texture2D*,unsigned sceneFrame=~0u);
 void meshMotionWriteDump(ID3D11DeviceContext*,const wchar_t* directory,const wchar_t* stamp);
 }

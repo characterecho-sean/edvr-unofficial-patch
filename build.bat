@@ -1098,6 +1098,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     "tools\mesh_motion_test\mesh_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\meshmotion\mesh_motion_test.exe" --self-test || exit /b 1
+python "tools\mesh_motion_probe.py" --self-test || exit /b 1
 if not exist "%OBJ%\nightvision" mkdir "%OBJ%\nightvision"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\nightvision\\" /Fe"%OBJ%\nightvision\night_vision_test.exe" ^
