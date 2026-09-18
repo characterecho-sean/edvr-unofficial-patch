@@ -8,7 +8,8 @@
   than c1dbb76. Overall benefit is modest: one clean settled window gains about
   1 FPS, while benchmark CPU/GPU medians are essentially unchanged. The strict
   trace also shows 0.60 ms more post-Present execution, predominantly outside
-  the graphics proxy; its cause is unproven. See the final journal entry.
+  the graphics proxy; its cause is unproven. The subsequent blend-state cache
+  was rejected locally before installation; see the final journal entry.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -45,14 +46,14 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: audit tracked blend-state bindings with an actual-getter fallback for
-  unknown state. The next measured driver cluster is OMGetBlendState, confirmed
-  at the exact return instruction; it is not BlendState::GetDesc. Blend state
-  is not currently shadowed, so setter hooks, context ownership, invalidation,
-  restoration and lifetime need review before implementation. Preserve draws
-  and active motion/history behavior. Foveated-DLSS remains paused, and
-  engine-level skipping still lacks a verified semantic target. Collector
-  completed normally at game exit; no new capture is armed.
+- Next: measure repeated draw-classification work in beginPanelOverride and
+  uiDepthOnEyeDraw before another state-query cache. The blend experiment
+  passed correctness checks but increased both query and setter costs in two
+  matched RTX 5090 benchmark batches; it was archived and removed. Frontier's
+  retained 5efb139 pair, loader and config pass installer verify-only. Preserve
+  draws and active motion/history behavior. Foveated-DLSS remains paused, and
+  engine-level skipping still lacks a verified semantic target. No new capture
+  is armed and this rejected candidate needs no flight.
 
 ## Journal
 
@@ -2811,3 +2812,114 @@ yet been proven safe to skip. Native shutdown reports zero temporal, sharpen,
 menu or pose failures and zero graphics wrong-thread calls; visual quality
 still requires user observation. Keep 5efb139 installed; no additional flight
 is requested for this analysis.
+
+### 2026-09-18 -- blend binding tracking audit
+
+The user authorized proceeding. The confirmed target is the 128 sampled driver
+PCs whose exact caller return site identifies meshMotionDraw's OMGetBlendState
+in the 5efb139 DLSS flight. The hypothesis is that an observed current binding
+can supply the same state pointer, four blend factors and sample mask without
+another driver query. Unknown state must retain the real getter, and a caller
+must hold a reference across temporary coverage-pass substitutions.
+
+Before implementation, audit every mutation path: OMSetBlendState, ClearState,
+ExecuteCommandList with and without restoration, SwapDeviceContextState,
+alternate context interfaces, hook installation/loss and EDVR's temporary state
+changes. Setter tracking itself adds CPU cost, so query hits/fallbacks and
+setter activity must be distinguishable in the next flight. Existing motion
+eligibility, coverage and original game draws must remain unchanged.
+
+The verified flight uses native LiveCopy with 302 context methods. Restrict
+tracking to that private-hook mode; InPlace and unsupported context aliases
+keep the real getter. Require all supported context interfaces to alias the
+owned pointer and all mutation hooks to install successfully. The setter is
+slot 35 and Context1 SwapDeviceContextState is slot 131. Consumers check the
+live mutation-hook entries and fall back permanently on detected hook loss or
+an owner-context mutation from another thread. ClearState and non-restoring
+command-list execution invalidate the snapshot. Restoring command lists
+preserve its previous known/unknown status. A non-null context-state swap
+permanently disables tracking: a saved state can select D3D10 emulation, where
+D3D11 void setters may silently do nothing. Getter fallback remains available.
+No new user setting is needed.
+
+Microsoft's [OMSetBlendState
+contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-omsetblendstate)
+specifies that null factors store four ones and the context retains a bound
+state reference. The tracked result must still AddRef before temporarily
+unbinding it.
+[SwapDeviceContextState](https://learn.microsoft.com/en-us/windows/win32/api/d3d11_1/nf-d3d11_1-id3d11devicecontext1-swapdevicecontextstate)
+can replace previously saved bindings, so setter tracking alone is
+insufficient. Independent source audit found no remaining blocker for the
+verified native LiveCopy context. Implementation and focused restoration tests
+are next.
+
+The existing device-threading probe in the same verified flight reports
+multithread protection off at install and unchanged after 1800 frames. Tracking
+must additionally check that protection remains off before consuming a raw
+snapshot. Protected or unavailable threading state uses the real getter.
+Microsoft's [D3D11 threading
+contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11_4/nn-d3d11_4-id3d11multithread)
+requires externally serialized context access when protection is off. This
+bounds the raw-pointer lifetime assumption without adding locks to every
+tracked setter. The new protection query is part of the optimization's net cost
+and must be included in measurement.
+
+### 2026-09-18 -- guarded blend cache rejected before flight
+
+Implemented the audited snapshot and real getter fallback, then exercised the
+actual published proxy on WARP. The proxy fixture passes 529 checks; separate
+swap-before-consumer and protection-before-consumer processes pass six and five
+checks, respectively. The motion fixture passes 2506 checks. Independent review
+found no remaining correctness blocker after resolving unknown-state
+restoration, pre-consumer swaps, threading eligibility, reference lifetime and
+COM cleanup ordering. The absolute symbol-enabled full build passes all 65
+pooled rigs, three quiet rigs and the 249-key configuration contract; log:
+build/blend-state-validation-r2.log. These results establish correctness of the
+tested path, not a performance benefit.
+
+The first hardware timing pass was unfavorable, but its fixture asserted a
+cache hit before the mandatory first fill and compared the cache's exported
+wrapper with a direct getter call. A separate higher-tier verification fixed
+the warmup, added equivalent exported getter scaffolding, and used ten paired
+rounds of one million calls with alternating order and 20000 warmup calls. The
+plain setter's factory is explicitly resolved from Windows System32. Both
+devices report the same RTX 5090 adapter LUID, vendor/device 10de:2b85.
+
+Two clean hardware batches each pass 16 checks. Each query case records exactly
+10020000 cache hits, zero fallbacks, zero setters and zero swaps during timing.
+Each setter case records exactly 10020000 tracked owner setters. The cache
+remains armed throughout. Paired median differences are positive in every case:
+
+| Added CPU cost per call | Batch 1 | Batch 2 |
+| --- | --- | --- |
+| Cached null-state query | +4.34 ns | +4.25 ns |
+| Cached non-null-state query | +3.50 ns | +3.53 ns |
+| Null-state setter hook | +4.78 ns | +4.87 ns |
+| Non-null-state setter hook | +3.36 ns | +3.37 ns |
+
+These are warm, uncontended, repeated-state call measurements, not gameplay
+timings or an FPS estimate. They do not rule out every workload-dependent
+effect, but give no performance case for spending a flight: the guarded read is
+slower even with every query hitting, and setter tracking adds another cost.
+There is no positive query/setter break-even under the measured conditions.
+Ruled out: shipping this guarded blend-binding cache as a CPU optimization,
+because matched local measurements increase both costs. The earlier sampled-PC
+cluster correctly identifies OMGetBlendState but does not establish that
+replacing it with this bookkeeping is cheaper.
+
+Archived the source patch against 4b5db2b, DLLs/PDBs, benchmark executable,
+experimental installer, full-build log and both benchmark logs with SHA-256
+checks under build/blend-state-rejected-4b5db2b. The corrected benchmark
+fixture was compiled after the full build; production DLLs were unchanged. All
+experimental source changes were removed. Restored the verified archived
+5efb139 DLLs/PDBs to the ordinary build outputs and moved the experimental
+installer into the archive. tools/install_edvr.py --target frontier
+--verify-only confirms the installed native pair, loader and config. No game
+files or settings were changed, no new collector was armed, and no flight is
+requested for this candidate.
+
+The next investigation should measure work repeated across the broad draw path,
+including beginPanelOverride and uiDepthOnEyeDraw, before proposing another
+narrow getter cache. Treat sampled PCs as locations to investigate; measure
+their replacement and total call frequency before assigning savings. No Elite
+engine operation has yet been proven safe to omit.
