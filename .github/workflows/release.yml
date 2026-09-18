@@ -52,7 +52,15 @@ concurrency: release-${{ github.ref }}
 
 jobs:
   release:
-    runs-on: windows-latest
+    # Pinned, not windows-latest: since 2025 that label is the Windows Server
+    # 2025 image carrying Visual Studio 2026 only, and the first proving run
+    # showed it -- tools\fetch_ffx_dx11.py asks CMake for the "Visual Studio
+    # 17 2022" generator and found no instance, and build.bat would have
+    # compiled with a toolset no EDVR release has been built with. windows-2022
+    # is VS 2022, the same major toolset as the local builds. When GitHub
+    # retires this image, fetch_ffx_dx11.py needs to pick its generator from
+    # vswhere and the build needs proving on the newer compiler first.
+    runs-on: windows-2022
     # Two signing requests, each approved by hand and each allowed to wait
     # two hours, plus the build itself.
     timeout-minutes: 330
