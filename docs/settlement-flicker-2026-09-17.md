@@ -2,11 +2,13 @@
 
 ## Status
 
-- State: verified ea2a7f9 flight produces valid original-draw visibility,
-  pipeline and timing results. About 76% of sampled stable-scene draws pass no
-  depth/stencil samples. This supports investigating submission/geometry work;
-  it is not an object count, a safe skip predicate or an FPS-saving estimate.
-  No draw suppression is active. See the final journal entry.
+- State: targeted material-draw recurrence probe passes local and full build
+  gates; Frontier test flight is pending. The verified ea2a7f9 flight produces
+  valid original-draw visibility, pipeline and timing results. About 76% of
+  sampled stable-scene draws pass no depth/stencil samples. This supports
+  investigating submission/geometry work; it is not an object count, a safe
+  skip predicate or an FPS-saving estimate. No draw suppression is active. See
+  the final journal entry.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
   5120x2880. No eye capture contaminates this flight. Prior DLSS runs used K;
@@ -39,13 +41,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: existing shader bytecode identifies the candidate pairs as instanced
-  surface-material paths. Track individual draw recurrence and zero-to-visible
-  changes, with complete coarse family aggregates. Candidate families have both
-  outcomes, ruling out shader-wide suppression. Prove a cheap conservative
-  current-frame rejection rule before skipping work. Preserve adjacent motion
-  history and keep the separately paused foveated-DLSS work paused. Another
-  broad census flight is not the next useful step.
+- Next flight: Frontier, same settlement and AA-off render settings, ship kept
+  landed. About one minute seated and one minute on foot with weapon drawn;
+  mostly hold the view, with one slow look away and back in each mode. The log
+  is sufficient. Inspect targeted-family coverage, payload changes, ordered
+  recurrence and visibility transitions before proposing a conservative skip
+  rule. Preserve motion history; separately paused foveated-DLSS work stays
+  paused.
 
 ## Journal
 
@@ -1593,3 +1595,76 @@ current-frame predicate and proven pass/state eligibility, including stencil,
 UAV and stream-output effects. Per-draw query brackets are diagnostic, not a
 proposed production optimization. Another broad census flight is not needed to
 reconfirm the high rejection rate.
+
+### 2026-09-18 -- targeted material-draw recurrence probe
+
+The accepted next step measures the three observed instanced material pairs; it
+does not suppress original draws. The existing valid census supplies the reason
+to narrow measurement: roughly 76% rejection in the stable settlement, mixed
+visible/rejected outcomes within each family, and severe fragmentation of the
+128 detailed buckets. Earlier object-probe work already ruled out draw order
+and pool slot alone as persistent identity.
+
+The discriminating observations for the next flight are:
+
+- Repeated zero results for an unchanged captured instance/model payload,
+  versus zero-to-visible transitions with that same payload. These measure
+  recurrence within a sampled cohort, not proof of permanent invisibility.
+- Changed draw bindings, instance IDs or model records at the held ordinal.
+  These break the comparison chain instead of masquerading as object motion or
+  a visibility transition. Reordered query results and missing frames must also
+  break a chain.
+- Unsupported layouts, missing pools, draws exceeding the payload limit and
+  skinned records. These need explicit counts; an inactive payload probe is not
+  evidence that no objects change. A nonzero bone base means t38 affects the
+  geometry, so identical t33 bytes are insufficient for a rigid comparison.
+- Stencil fail/depth-fail operations, UAVs, stream output and extra shader
+  stages. Zero passed samples alone do not establish that suppressing a draw
+  has no other effects.
+
+Only selected draws may query resource bindings and capture data. The instance
+ID range is copied on the GPU; a bounded compute gather reads the referenced
+336-byte t33 records into private staging storage. There is no CPU read of game
+WRITE_DISCARD memory or whole-pool readback. Query results and payloads are
+joined by their submission, with nonblocking polling. Input-layout eligibility
+follows the actual descriptor recorded at creation, irrespective of which
+compatible shader Elite used when creating a shared layout.
+
+Even exact payload recurrence remains a diagnostic match, not a globally unique
+object ID: identical objects, changing material/constant contents and
+uncaptured animation state require further evidence. A cohort follows a
+selected family-local ordinal for several frames, so its visibility results are
+deliberately biased follow-ups, not an updated population percentage. Complete
+coarse family aggregates retain the samples that the old detailed table could
+not rank.
+
+Local validation exposed a real ordering limit that an isolated run missed.
+With 32 concurrent WARP test processes, both samples completed (one zero, one
+nonzero), but the poll cursor retired the newer sample first: `same=0 order=1`
+with no capture, payload or binding failures. Refusing the backwards comparison
+was conservative but lost the useful adjacent pair. Completed samples now wait
+in the bounded slot table for earlier samples of their family to retire;
+polling remains nonblocking, and failures/timeouts still release the queue.
+Calibration slots do not participate in the family ordering barrier.
+
+ruled out: payload corruption as the cause of the parallel transition-test
+failure, because both payload/query results completed and the explicit failure
+snapshot isolated reversed retirement order.
+
+The final focused Release/WARP rig passes 618 checks. Coverage includes actual
+GPU payload capture and state preservation, reused buffer contents, exact
+payload zero-to-visible transitions, geometry-binding changes, missing frames,
+delayed-query retirement order, more than 128 count variants, and capture
+timeout followed by successful reuse. Thirty-two concurrent focused runs
+validated the ordering fix; the last calibration exclusion was then compiled
+and checked in the final focused run. The full build then passed all 62 pooled
+rigs, three quiet rigs and the 249-key configuration contract, including the
+618-check targeted probe rig under the parallel build workload.
+
+Live bounds are three families, at most one selected draw per family per frame,
+24-frame cohorts, 32 instances per captured draw, 64 in-flight slots, and the
+existing 600-frame collection / 120-frame drain windows. Unsupported larger
+draws retain visibility queries but cannot establish full-payload recurrence.
+The selected gather precedes the original-draw query bracket, so its GPU cost
+is outside that per-draw interval and remains part of whole-frame timing. This
+is an instrumented test build, not an asserted frame-time improvement.

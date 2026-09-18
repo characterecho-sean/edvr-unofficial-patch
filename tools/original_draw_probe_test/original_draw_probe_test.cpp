@@ -4,6 +4,8 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -15,6 +17,7 @@
 #include "../../src/d3d11/gpu_timing.h"
 #include "../../src/d3d11/game_query_probe.h"
 #include "../../src/d3d11/original_draw_probe.h"
+#include "identity_capture_test.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace edvr;
@@ -39,8 +42,9 @@ struct Device {
     }
 };
 
-enum class ReadMode { Native, Pending, StatsPending, Error };
+enum class ReadMode { Native, Pending, StatsPending, Error, DelayFirstOcclusion };
 ReadMode g_readMode = ReadMode::Native;
+bool g_delayedFirstOcclusion = false;
 std::atomic<unsigned> g_begins{0}, g_ends{0}, g_reads{0}, g_badFlags{0};
 std::atomic<unsigned> g_timingDisjointBegins{0}, g_timingDisjointEnds{0};
 std::atomic<unsigned> g_timingTimestampEnds{0};
@@ -56,6 +60,14 @@ HRESULT STDMETHODCALLTYPE rawGetData(ID3D11DeviceContext* ctx, ID3D11Asynchronou
                                      void* data, UINT bytes, UINT flags) {
     ++g_reads;
     if (flags != D3D11_ASYNC_GETDATA_DONOTFLUSH) ++g_badFlags;
+    if (g_readMode == ReadMode::DelayFirstOcclusion && !g_delayedFirstOcclusion) {
+        D3D11_QUERY_DESC desc{};
+        static_cast<ID3D11Query*>(query)->GetDesc(&desc);
+        if (desc.Query == D3D11_QUERY_OCCLUSION) {
+            g_delayedFirstOcclusion = true;
+            return S_FALSE;
+        }
+    }
     if (g_readMode == ReadMode::Pending) return S_FALSE;
     if (g_readMode == ReadMode::StatsPending) {
         ComPtr<ID3D11Query> typed;
@@ -203,6 +215,213 @@ OriginalDrawProbeInput input() {
 
 void boundary(Device& d, uint64_t frame) {
     originalDrawProbeFrame(d.context.Get(), {frame, nullptr, 16, 16});
+}
+
+OriginalDrawProbeInput targetedInput(unsigned family, bool modified = false) {
+    static const uint64_t vs[] = {0xEB5234DB6ADB491Dull, 0x5B4D8E894EEDA8B4ull,
+                                  0xBBE58E40FE88EC80ull};
+    static const uint64_t ps[] = {0xCB9F297EFF264251ull, 0x4375B72964F386CDull,
+                                  0xDB3E8D20CF53FBC0ull};
+    auto value = input();
+    value.originalVsHash = vs[family]; value.originalPsHash = ps[family];
+    value.modified = modified;
+    return value;
+}
+
+void targetedSelectionAndScale(Device& d) {
+    check(originalDrawProbeBind(d.device.Get(), d.context.Get(), queryOps()),
+          "bind targeted selection controller");
+    originalDrawProbeConfigure(true, true);
+    boundary(d, 1);
+    std::array<unsigned, 3> population{{7, 5, 3}};
+    auto issuePopulation = [&](const std::array<unsigned, 3>& counts,
+                               std::array<int, 3>* chosen) {
+        unsigned selected = 0;
+        auto unknown = input();
+        for (unsigned i = 0; i < 11; ++i)
+            check(!originalDrawProbeSelect(d.context.Get(), &unknown),
+                  "targeted mode excludes unknown material pairs");
+        for (unsigned family = 0; family < 3; ++family) {
+            auto value = targetedInput(family);
+            for (unsigned i = 0; i < counts[family]; ++i) if (originalDrawProbeSelect(d.context.Get(), &value)) {
+                ++selected; if (chosen) (*chosen)[family] = static_cast<int>(i);
+            }
+            auto modified = targetedInput(family, true);
+            check(!originalDrawProbeSelect(d.context.Get(), &modified),
+                  "targeted mode excludes modified draws");
+        }
+        check(selected <= 3, "targeted controller selects at most one draw per family per frame");
+        return selected;
+    };
+    check(issuePopulation(population, nullptr) == 0,
+          "first targeted frame establishes family-local populations");
+    boundary(d, 2);
+    std::array<int, 3> first{{-1, -1, -1}}, held{{-1, -1, -1}};
+    check(issuePopulation(population, &first) == 3, "one candidate selected from each known family");
+    boundary(d, 3);
+    check(issuePopulation(population, &held) == 3 && held == first,
+          "cohort holds each family-local ordinal across frames");
+    boundary(d, 4);
+    const std::array<unsigned, 3> lower{{1, 1, 1}};
+    for (unsigned frame = 0; frame < 26; ++frame) {
+        issuePopulation(lower, nullptr);
+        boundary(d, 5 + frame);
+    }
+    const auto snapshot = originalDrawProbeSnapshot();
+    check(snapshot.targetedCandidates != 0 && snapshot.cohortReseeds >= 2 &&
+          snapshot.populationDrift >= 3 && snapshot.targetMisses != 0,
+          "lower populations record drift/misses and periodically reseed cohorts");
+
+    auto unknown = input();
+    constexpr unsigned iterations = 230000;
+    const auto start = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i < iterations; ++i) originalDrawProbeSelect(d.context.Get(), &unknown);
+    const auto targetedEnd = std::chrono::steady_clock::now();
+    originalDrawProbeConfigure(true, false);
+    for (unsigned i = 0; i < iterations; ++i) originalDrawProbeSelect(d.context.Get());
+    const auto broadEnd = std::chrono::steady_clock::now();
+    const auto targetedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(targetedEnd - start).count();
+    const auto broadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(broadEnd - targetedEnd).count();
+    std::printf("original_draw_probe_test local Select scale: targeted-unknown %.1f ns/call, broad %.1f ns/call (%u iterations; informational)\n",
+        double(targetedNs) / iterations, double(broadNs) / iterations, iterations);
+    originalDrawProbeShutdown(d.context.Get());
+}
+
+struct RecurrenceScene {
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11Buffer> ids, geometryA, geometryB, pool;
+    ComPtr<ID3D11ShaderResourceView> poolView;
+    ComPtr<ID3D11DepthStencilState> depth;
+    std::array<unsigned char, 336> model{};
+    explicit RecurrenceScene(Device& d) {
+        const auto code = compile(
+            "float4 main(uint2 instance:INSTANCEANDMODELDATAINDEX,uint id:SV_VertexID):SV_Position{"
+            "float2 p=id==0?float2(-1,-1):id==1?float2(-1,3):float2(3,-1);return float4(p,0.5,1);}",
+            "vs_5_0");
+        hr(d.device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &vs),
+           "create recurrence VS");
+        D3D11_INPUT_ELEMENT_DESC element{"INSTANCEANDMODELDATAINDEX",0,DXGI_FORMAT_R32G32_UINT,
+            0,0,D3D11_INPUT_PER_INSTANCE_DATA,1};
+        hr(d.device->CreateInputLayout(&element,1,code->GetBufferPointer(),code->GetBufferSize(),&layout),
+           "create recurrence layout");
+        originalDrawProbeRememberLayout(layout.Get(), &element, 1, 0);
+        const uint32_t pair[2]{};
+        D3D11_BUFFER_DESC b{}; b.ByteWidth=8;b.Usage=D3D11_USAGE_DEFAULT;b.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA init{pair};hr(d.device->CreateBuffer(&b,&init,&ids),"create recurrence IDs");
+        b.ByteWidth=16;hr(d.device->CreateBuffer(&b,nullptr,&geometryA),"create recurrence geometry A");
+        hr(d.device->CreateBuffer(&b,nullptr,&geometryB),"create recurrence geometry B");
+        b={};b.ByteWidth=336;b.Usage=D3D11_USAGE_DEFAULT;b.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;b.StructureByteStride=336;init={model.data()};
+        hr(d.device->CreateBuffer(&b,&init,&pool),"create recurrence pool");
+        hr(d.device->CreateShaderResourceView(pool.Get(),nullptr,&poolView),"create recurrence pool view");
+        D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=TRUE;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+        ds.DepthFunc=D3D11_COMPARISON_LESS;hr(d.device->CreateDepthStencilState(&ds,&depth),"create recurrence depth");
+    }
+    void bind(Device& d, Scene& scene, bool zero, bool alternateGeometry=false) {
+        scene.bind(d, true);d.context->OMSetDepthStencilState(depth.Get(),0);
+        d.context->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,zero?0.0f:1.0f,0);
+        d.context->VSSetShader(vs.Get(),nullptr,0);d.context->IASetInputLayout(layout.Get());
+        ID3D11Buffer* buffers[]={ids.Get(),alternateGeometry?geometryB.Get():geometryA.Get()};
+        UINT strides[]={8,4},offsets[]={0,0};d.context->IASetVertexBuffers(0,2,buffers,strides,offsets);
+        ID3D11ShaderResourceView* view=poolView.Get();d.context->VSSetShaderResources(33,1,&view);
+    }
+    void mutate(Device& d) { model[20]^=0x5a;d.context->UpdateSubresource(pool.Get(),0,nullptr,model.data(),0,0); }
+};
+
+void targetedRecurrence(Device& d, Scene& scene) {
+    RecurrenceScene recurrence(d);
+    uint64_t frame=1;
+    auto start = [&] {
+        check(originalDrawProbeBind(d.device.Get(),d.context.Get(),queryOps()),"bind recurrence probe");
+        originalDrawProbeConfigure(true,true);boundary(d,frame++);
+        recurrence.bind(d,scene,true);auto value=targetedInput(0);value.kind=OriginalDrawKind::DrawInstanced;
+        check(!originalDrawProbeSelect(d.context.Get(),&value),"recurrence first frame establishes family");
+        d.context->DrawInstanced(3,1,0,0);boundary(d,frame++);
+    };
+    auto sample = [&](bool zero, bool alternate, uint32_t count=3) {
+        recurrence.bind(d,scene,zero,alternate);auto value=targetedInput(0);
+        value.kind=OriginalDrawKind::DrawInstanced;value.count=count;value.instances=1;
+        OriginalDrawProbeTicket ticket{};if(originalDrawProbeSelect(d.context.Get(),&value))ticket=originalDrawProbeBegin(d.context.Get(),value);
+        d.context->DrawInstanced(3,1,0,0);originalDrawProbeEnd(d.context.Get(),ticket,true);boundary(d,frame++);
+    };
+    auto settle = [&] {
+        d.context->Flush();
+        for(unsigned i=0;i<200&&originalDrawProbeSnapshot().pending;++i) {
+            Sleep(1); boundary(d,frame++);
+        }
+        check(originalDrawProbeSnapshot().pending==0,"bounded WARP settle retires targeted queries");
+    };
+
+    start();sample(true,false);sample(false,false);settle();
+    auto s=originalDrawProbeSnapshot();
+    if (!(s.recurrenceZeroToVisible==1&&s.recurrenceSamePayload>=1))
+        std::fprintf(stderr,"recurrence failure: submitted=%llu ready=%llu pending=%llu zero=%llu visible=%llu same=%llu changed=%llu binding=%llu gaps=%llu order=%llu unsupported=%llu invalid=%llu readback=%llu expired=%llu skinned=%llu\n",
+            s.submitted,s.ready,s.pending,s.zeroSamples,s.nonzeroSamples,s.recurrenceSamePayload,
+            s.recurrencePayloadChanged,s.recurrenceBindingChanged,s.recurrenceGaps,s.recurrenceOutOfOrder,
+            s.identityUnsupported,s.identityInvalidRecord,s.identityReadbackFailed,s.identityExpired,s.identitySkinned);
+    check(s.recurrenceZeroToVisible==1&&s.recurrenceSamePayload>=1,
+          "same binding and full payload count zero-to-visible recurrence");
+    originalDrawProbeShutdown(d.context.Get());
+
+    // Make every GPU result ready, then force the older sample's first poll
+    // pending. The rotating cursor encounters the newer sample first next time.
+    start();sample(true,false);sample(false,false);
+    D3D11_QUERY_DESC eventDesc{D3D11_QUERY_EVENT,0};
+    ComPtr<ID3D11Query> completed;
+    hr(d.device->CreateQuery(&eventDesc,&completed),"create recurrence completion event");
+    d.context->End(completed.Get());d.context->Flush();
+    HRESULT completedResult=S_FALSE;
+    const auto completionDeadline=GetTickCount64()+5000;
+    while (completedResult==S_FALSE && GetTickCount64()<completionDeadline) {
+        completedResult=d.context->GetData(completed.Get(),nullptr,0,D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if(completedResult==S_FALSE)Sleep(1);
+    }
+    hr(completedResult,"recurrence GPU work completes before forced query delay");
+    g_delayedFirstOcclusion=false;g_readMode=ReadMode::DelayFirstOcclusion;
+    settle();g_readMode=ReadMode::Native;s=originalDrawProbeSnapshot();
+    check(g_delayedFirstOcclusion&&s.recurrenceZeroToVisible==1&&s.recurrenceOutOfOrder==0,
+          "rotating polls retire ready family samples in submission order");
+    originalDrawProbeShutdown(d.context.Get());
+
+    start();sample(true,false);recurrence.mutate(d);sample(false,false);settle();s=originalDrawProbeSnapshot();
+    check(s.recurrencePayloadChanged>=1&&s.recurrenceZeroToVisible==0,
+          "changed full payload prevents a visibility transition");
+    originalDrawProbeShutdown(d.context.Get());
+
+    start();sample(true,false);sample(false,true);settle();s=originalDrawProbeSnapshot();
+    check(s.recurrenceBindingChanged>=1&&s.recurrenceZeroToVisible==0,
+          "changed geometry binding prevents a visibility transition");
+    originalDrawProbeShutdown(d.context.Get());
+
+    start();sample(true,false);boundary(d,frame++);sample(false,false);settle();s=originalDrawProbeSnapshot();
+    check(s.recurrenceGaps>=1&&s.recurrenceZeroToVisible==0,
+          "missing sampled frame resets recurrence without manufacturing a transition");
+    originalDrawProbeShutdown(d.context.Get());
+
+    start();for(uint32_t variant=1;variant<=140;++variant) {
+        sample(false,false,variant);
+        if ((variant%16)==0) settle();
+    } settle();
+    s=originalDrawProbeSnapshot();
+    check(s.targetedFamilySamples>=129&&s.bucketOverflow!=0,
+          "fixed family aggregates survive more than 128 exact count variants");
+    originalDrawProbeShutdown(d.context.Get());
+
+    // A timed-out payload gather must not leave the per-slot helper permanently
+    // pending when that slot is reused after disable/re-enable.
+    start();sample(false,false);g_readMode=ReadMode::Pending;originalDrawProbeConfigure(false);
+    for(unsigned i=0;i<125;++i)boundary(d,frame++);
+    s=originalDrawProbeSnapshot();
+    check(s.identityExpired>=1&&s.pending==0,"targeted timeout abandons pending payload capture");
+    g_readMode=ReadMode::Native;originalDrawProbeConfigure(true,true);
+    recurrence.bind(d,scene,false);auto value=targetedInput(0);value.kind=OriginalDrawKind::DrawInstanced;
+    check(!originalDrawProbeSelect(d.context.Get(),&value),"restart establishes fresh targeted population");
+    d.context->DrawInstanced(3,1,0,0);boundary(d,frame++);sample(false,false);settle();
+    s=originalDrawProbeSnapshot();
+    check(s.targetedFamilySamples==1&&s.identityReadbackFailed==0,
+          "slot captures successfully after timeout and targeted restart");
+    originalDrawProbeShutdown(d.context.Get());
 }
 
 unsigned drawFrame(Device& d, Scene& scene, bool pass, OriginalDrawProbeInput value = input()) {
@@ -459,8 +678,8 @@ void sourceContract() {
     check(text.find("originalDrawNativeBegin(self, separate);\n        g_state->realDrawIndexedInstanced") <
           text.find("originalDrawNativeEnd(self, sample);\n        // The weapon's temporal-AA motion vectors"),
           "indexed-instanced original call ends before weapon motion capture");
-    check(text.find("!originalDrawProbeSelect(self)") != std::string::npos,
-          "selected-only descriptor path remains gated by Select");
+    check(text.find("!originalDrawProbeSelect(self, &input)") != std::string::npos,
+          "selected-only resource capture remains gated by cheap metadata Select");
 }
 
 void run() {
@@ -469,6 +688,9 @@ void run() {
     check(gpuTimingBind(d.device.Get(), d.context.Get(), timingOps()),
           "bind shared GPU timer owner");
     Scene scene(d);
+    identity_capture_test::run(d.device.Get(), d.context.Get(), checks);
+    targetedSelectionAndScale(d);
+    targetedRecurrence(d, scene);
     renderingAndCadence(d, scene);
     guardCase(d, scene, 0);
     guardCase(d, scene, 2);

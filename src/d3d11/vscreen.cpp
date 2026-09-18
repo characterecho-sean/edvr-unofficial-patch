@@ -3167,6 +3167,9 @@ struct OriginalDrawMetadata {
     uint64_t psHash = 0;
     uint32_t verdict = 0;
     bool modified = false;
+    uint32_t startIndex = 0;
+    int32_t baseVertex = 0;
+    uint32_t startInstance = 0;
 };
 thread_local bool t_colourOriginal = false;
 thread_local const OriginalDrawMetadata* t_originalDrawMetadata = nullptr;
@@ -3196,8 +3199,7 @@ OriginalDrawKind originalDrawKind(char kind) {
 
 OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
                                                 bool uiSeparated) {
-    if (!t_colourOriginal || !t_originalDrawMetadata || self != g_state->ownerCtx ||
-        !originalDrawProbeSelect(self)) {
+    if (!t_colourOriginal || !t_originalDrawMetadata || self != g_state->ownerCtx) {
         return {};
     }
     const OriginalDrawMetadata& metadata = *t_originalDrawMetadata;
@@ -3210,6 +3212,12 @@ OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
     input.verdict = metadata.verdict;
     input.modified = uiSeparated || metadata.modified ||
         metadata.verdict != static_cast<uint32_t>(DrawVerdict::kNone);
+    input.startIndex = metadata.startIndex;
+    input.baseVertex = metadata.baseVertex;
+    input.startInstance = metadata.startInstance;
+    // Family selection uses only metadata already in hand. Resource inspection
+    // and payload capture remain bounded to three selected native draws/frame.
+    if (!originalDrawProbeSelect(self, &input)) return {};
 
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
@@ -3261,6 +3269,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         originalDrawKind(kind), count, instances,
         bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps),
         static_cast<uint32_t>(v), false};
+    originalMetadata.startIndex = args.start;
+    originalMetadata.baseVertex = args.base;
+    originalMetadata.startInstance = args.startInstance;
     const auto pureDraw=[&] {
         switch(kind) {
         case 'D':g_state->realDraw(self,count,UINT(args.base));break;
@@ -4512,7 +4523,7 @@ void vScreenRefreshConfig() {
     if (!cfg.reloadIfChanged()) return;
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
     gpuFrameConfigure(gpuTimingEnabled);
-    originalDrawProbeConfigure(gpuTimingEnabled);
+    originalDrawProbeConfigure(gpuTimingEnabled, true);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
     // on the render thread -- is an EDVR event with a duration, for the
     // monitor's drop attribution.
@@ -5885,7 +5896,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
     originalDrawProbeBind(device, ctx,
         OriginalDrawProbeQueryOps{s.realBegin, s.realEnd, s.realGetData});
-    originalDrawProbeConfigure(gpuTimingEnabled);
+    originalDrawProbeConfigure(gpuTimingEnabled, true);
 
     if (!executeHookInstalled || !graphicsBridgeRegisterOwner(device, ctx)) {
         Log::get().note("vScreen: private graphics bridge unavailable (owner already registered or identity check failed)");
