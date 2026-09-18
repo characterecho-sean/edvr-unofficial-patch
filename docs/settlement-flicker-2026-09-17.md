@@ -2,40 +2,41 @@
 
 ## Status
 
-- State: Frontier reverse-route flight 81eeedb verified and analyzed. The
-  metadata cache is heavily used. A confirmed 1 MiB instance-buffer threshold
-  destroys capture batching in the settlement. The bounded ranged-ID fix passes
-  the full build; its Frontier flight validation is pending. No static or
-  visibility skips are enabled.
-- Latest captures: 195254 station, 195609 ship above the settlement, 195653 on
-  foot, matching the user's reverse route. Station coverage is 2307x1652;
-  settlement coverage is 2481x2121. The user removed the Quest 3 trims during
-  the route. Scene and sizing differences prevent a controlled frame-time
-  comparison.
-- Confirmed bottleneck: window 30600 has 425080 capture batches; 402143 (94.6%)
-  flush solely because the source ID buffer exceeds 1 MiB. Context, scene CB,
-  ID buffer, pool and output identities do not change. The other 22937 flushes
-  are write/map boundaries. Station window 12600 already batches 124 instances
-  on average, with no size-triggered flushes.
-- Cache result: settlement window 30600 reports 16923243 hits / 3744 fills
-  (99.978%). Approximate sampled mesh-draw CPU is 1.633 ms/frame, but scene,
-  batching and sizing differences prevent attributing a frame-time gain to the
-  cache alone.
-- Static evidence repeats: 497/504 valid settlement poses are unchanged, but
-  35976 of their 39389 depth-visible candidate pixels select the head-motion
-  base; 35956 belong to match-valid mesh records. Later UI/body/layer gates
-  remain unresolved. Station singleton pairs again show coherent rotation, not
-  504 independent movers. The on-foot windows have no captured rigid meshes.
-- Ruled out: a changing scene/pool/ID binding as the cause of the measured
-  settlement input-change flushes; all are size-only. Earlier ruled-outs
-  remain: blanket static-pose skips, equal-origin requirements, and previous
-  zero coverage as a safe current-visibility test. Details and the earlier
-  Pimax flicker correction are in the journal.
-- Next: verify the ranged-ID build over the settlement with Quest 3 trims left
-  off. Confirm nonzero bounded ID copies, zero size-only flushes, fewer
-  dispatches and intact motion. Coverage, transforms, write barriers, eye
-  boundaries and the 512-record cap remain unchanged. Static/history/fallback
-  and shared station-motion work remain separate.
+- State: the verified 9446f4d Frontier flight supports the user's report of
+  worse overall performance. Batching works, but its effect on total frame time
+  is unresolved. Frontier has been restored to the verified 81eeedb package for
+  a controlled comparison; main retains the batching change pending that
+  evidence. No static or visibility skips are enabled.
+- Latest capture: 204142, ship above the settlement, scene frame 20347. Quest 3
+  / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and active XR output
+  3072x3264. The user's removed trims remain off. These sizes match the prior
+  untrimmed settlement capture, but view and simulation state differ.
+- Regression: prior native window 17 CPU/GPU p50 was 12.703/16.717 ms. New
+  steady windows 8-10 report 13.381-14.930 ms CPU and 17.596-18.971 ms GPU. All
+  finish before the dump; slower medians are not explained by capture stalls.
+- Batching result: new steady windows have 14400 batches per 1800 frames
+  (8/frame), versus 425080 (236/frame) in the prior mixed settlement/transition
+  window. All size-only flushes are gone; bounded ranged-ID copies are active.
+  Approximate mesh-draw CPU falls from 1.633 to 1.079-1.111 ms/frame. These
+  measurements do not establish the cause of the overall regression.
+- Capture result: 504 valid / eight invalid records, all valid raw poses
+  unchanged with an origin shift; no malformed coverage IDs or obvious
+  ranged-offset corruption. This is not proof against a GPU copy/queue
+  scheduling regression. Broader game workload also remains a candidate.
+- Static constraints remain: many static candidate pixels select the
+  head-motion base; final UI/body/layer gates are unresolved. Station singleton
+  pairs show coherent rotation. On-foot windows have no captured rigid meshes
+  and need separate attribution.
+- Ruled out: failure to activate batching, and dump stalls explaining the
+  compared steady native windows. Earlier ruled-outs include changing bindings
+  as the size-only flush cause, blanket static-pose skips, equal-origin
+  requirements, and prior zero coverage as a safe current-visibility test. See
+  the journal for evidence.
+- Next flight: on restored v0.17.0-2-g81eeedb, hold the same settlement
+  position/view with unchanged settings and trims off for roughly 90 seconds,
+  then take one completed eye run. Verify logs against 81eeedb explicitly, not
+  HEAD. Compare steady windows before another code change.
+  Static/history/fallback and shared station-motion work remain separate.
 
 ## Journal
 
@@ -428,3 +429,75 @@ steady native windows and inspect motion, excluding capture stalls. Coverage
 reissues, admitted record count and transform/match math are deliberately
 unchanged. On-foot profiling and static/visibility culling remain future work;
 this change addresses the confirmed batching defect.
+
+### 2026-09-17 -- batching flight is slower overall; restore for comparison
+
+The user reported worse performance. Both logs match `v0.17.0-3-g9446f4d`:
+`edvr_gfx_20260917_203704.log` and `edvr_openxr_20260917_203705_531_9344.log`,
+read through `tools/edvr_log.py`. Capture 204142 is scene frame 20347.
+Environment remains Quest 3, VirtualDesktopXR, 90 Hz, DLSS K, untrimmed
+2481x2121 input and active XR output 3072x3264. Offline evidence and analysis
+are under `build/flight-20260917-batching-check/`.
+
+| Native window | CPU p50 | GPU p50 |
+|---|---:|---:|
+| Prior 81eeedb window 17 | 12.703 ms | 16.717 ms |
+| New 9446f4d window 8 | 13.381 ms | 17.596 ms |
+| New 9446f4d window 9 | 14.930 ms | 18.971 ms |
+| New 9446f4d window 10 | 14.710 ms | 18.696 ms |
+
+The new windows average 14.340 ms CPU and 18.421 ms GPU p50, respectively 12.9%
+and 10.2% above the prior window. This average of window medians is not a
+pooled median. Average p95 also worsens; p99 improves. Ruled out: the eye-dump
+stall explains these slower medians, because even window 10 finishes before
+capture begins.
+
+Batching is active: graphics windows 18000 and 19800 each have 14400 batches /
+1843200 instances, averaging 128 records per batch with a maximum of 502. All
+flushes are write/map boundaries; every input-change cause is zero. Ranged
+copies cover 387626 and 390872 accepted draws respectively. Ruled out: the
+optimization failed to activate, because the old size-only flushes disappear
+and capture dispatches fall to eight per frame.
+
+Approximate sampled mesh-draw CPU is 1.079/1.111 ms per frame, down from 1.633
+in the prior mixed window 30600; nested flush CPU is 0.065/0.093 versus 0.465
+ms. These overlapping scopes must not be added. Full hook means are 5.792/5.782
+versus 5.652 ms. The new full-cap window admits 18.3% more instances than that
+prior partial window, has about 17% more cap-rejected draws and about 4% more
+sampled mesh calls. The scenes are not identical workloads.
+
+Differencing cumulative GPU sums/counts estimates new coverage work at
+1.379/1.492 ms per frame versus 1.130 ms previously, while capture work drops
+to about 0.071/0.074 versus 1.311 ms. The old capture query ring skips many
+batches, so that extrapolation is uncertain. Lower measured mesh costs do not
+clear the batching change: copy/queue scheduling or work outside the timed
+scopes could still regress. The old path already issued one ranged copy per
+accepted draw; the new path changes destination offsets and dispatch boundaries
+rather than adding copy commands. Broader game/render workload is also
+unresolved.
+
+Capture 204142 has 512 current/prior records, 504 valid and eight invalid, with
+all 504 valid raw poses exact across a uniform origin shift and 33 match-valid
+records. All coverage IDs are integral and within 1-512; 232 records have
+nonzero coverage. Coverage is 644095 pixels, of which 408554 agree with
+captured depth, versus 814009/602768 previously. The 479 unique valid pool
+indices span 48-6719 with maximum frequency three. These checks show no
+captured signature of broken ranged offsets, but do not prove rendering or
+scheduling equivalence across the flight.
+
+For a controlled comparison, the sanctioned installer restored the five package
+components from the 9446f4d installation transaction. Every restore hash first
+matched the corresponding installed hash in the earlier 81eeedb receipt.
+Restore completed and `--native-openxr --dll --native-receipt <81eeedb receipt>
+--verify-only` passed. Frontier is now `v0.17.0-2-g81eeedb`; source main
+remains 9446f4d plus this investigation update. The live INI and the user's
+removed trims were preserved. No speculative rendering change was made.
+
+Next flight: remain at the same settlement position/view and unchanged settings
+for roughly 90 seconds, then take one completed eye run. Verify the resulting
+logs against 81eeedb explicitly, because HEAD and the current build artifacts
+still contain the batching change. A repeatable improvement on the restored
+build would implicate batching despite its lower measured capture cost; similar
+slow timing would weaken that hypothesis and direct profiling toward the wider
+frame workload. Compare before deciding whether to revert or instrument the
+change further.
