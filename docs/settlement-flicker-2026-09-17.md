@@ -2,26 +2,26 @@
 
 ## Status
 
-- State: the approved controlled baseline disables the original-draw capture
-  probe independently of coarse GPU timing and splits post-stereo wall time
-  around owned Present and PostPresentHandoff. Full validation passes; the
-  Frontier comparison flight is pending. The prior verified 7cfb5a6 measured
-  15.11-15.12 ms cycles (66 FPS), including 4.11-4.23 ms after stereo Submit.
+- State: verified probe-off build 72501fe improves the landed baseline modestly
+  to 67.1-71.8 FPS, versus about 66 FPS on 7cfb5a6. Four steady windows place
+  3.41-3.78 ms after the recorded Present span and before the next pose wait.
+  Raw DXGI Present takes only 0.07 ms; EDVR work around it is about 0.12 ms.
   Stock SteamVR reportedly reaches mid-80s FPS / 6.8 ms GPU at the same
-  settings. Isolate EDVR/runtime and diagnostic cost before further culling.
-  The prior dcd0a9f draw probe found unchanged payloads becoming visible;
-  cached rejection alone is unsafe. No draw suppression is active.
+  settings. Profile the remaining caller work/waits and EDVR/runtime cost
+  before further culling; the remaining gap is not proven removable. The prior
+  dcd0a9f draw probe found unchanged payloads becoming visible; cached
+  rejection alone is unsafe. No draw suppression is active.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
   5120x2880 in the prior run; this flight has no on-foot leg or eye capture.
   Prior DLSS runs used K; the flight does not log the DLSS DLL version.
-- Timing: two clean 30-second windows account for all 3970 admitted cycles with
-  zero residual or missing counters. Before-first-Submit mean is 10.42-10.55
-  ms, both Submit roundtrips total 0.39-0.40 ms, and next pose-wait roundtrip
-  is 0.05-0.06 ms. Separate gameplay benchmark windows have CPU p50 9.93-10.74
-  ms and GPU p50 10.61-11.18 ms; GPU p95 is 12.10-12.55 ms. These application
-  segments are not full frame periods, and their window alignment differs from
-  the cycle probe. Do not subtract their percentiles.
+- Timing: windows 7-10 account for all 8308 admitted cycles with zero residual
+  or missing counters and exactly one Present and handoff each. Full-cycle mean
+  is 13.93-14.91 ms, before-first-Submit is 9.75-10.33 ms, both Submit
+  roundtrips total 0.38-0.39 ms, and next pose wait is about 0.05 ms. Later
+  gameplay benchmark windows have CPU p50 9.79-10.31 ms and GPU p50 10.62-10.89
+  ms. These application segments are not full frame periods; window alignment
+  differs from the cycle probe. Do not subtract percentiles.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -44,12 +44,12 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next flight after verified installation: Frontier, AA off, same landed
-  cockpit view for two minutes without eye dumps. Confirm the probe-OFF and
-  GPU-timing-on marker, post-submit first-complete and coverage, then compare
-  full-cycle/GPU timing against 7cfb5a6. Attribute the gap only on paired valid
-  samples. Conservative current-depth culling remains an offline candidate;
-  preserve motion history and keep foveated-DLSS paused.
+- Next: prepare CPU execution/wait attribution for the caller thread, with
+  coverage of unmeasured OpenVR calls and correlation to the post-Present
+  interval. Validate collection and analysis before another same-view flight.
+  Installed Frontier build remains 72501fe, AA off; no new build this review.
+  See the latest journal entry for ruled-out Present/handoff hypotheses.
+  Preserve motion history and keep foveated-DLSS paused.
 
 ## Journal
 
@@ -2102,3 +2102,108 @@ neither production nor fixture timeout behavior is changed. Set `EDVR_JOBS=4`
 in the build environment: the existing `--jobs` argument path shifts `%0`
 before passing `%~f0` to the rig runner, losing the batch path. That separate
 script defect is bypassed here, not changed in this diagnostic.
+
+### 2026-09-18 -- probe-off flight: small gain, remaining delay outside Present
+
+The user reports FPS sometimes in the low 70s. Both Frontier logs verify
+`v0.17.0-23-g72501fe` using `tools/edvr_log.py --expect-build 72501fe`:
+`edvr_gfx_20260918_121326.log` and `edvr_openxr_20260918_121328_077_3424.log`.
+The graphics log explicitly confirms `Original draw diagnostic: controlled
+baseline OFF; coarse application GPU timing on.` No original-draw diagnostic
+windows run. Environment remains VirtualDesktopXR / Quest 3 / 90 Hz, AA off,
+input 2481x2121 per eye, output 3072x3264, runtime pacing, feature epoch 3.
+There is no on-foot leg or eye capture in these logs. Caller and Present thread
+are 4324; native log times are UTC, six hours ahead of the graphics log's local
+timestamps.
+
+The four steady landed cycle windows contain 8308 valid/admitted cycles. Each
+has exactly one successful Present with sync interval zero and one
+PostPresentHandoff; all provider, missing, invalid and overflow counts are
+zero. Post-submit and full-cycle valid counts match. Paired residual is zero,
+and the printed exclusive phase sums close within 0.0001 ms rounding.
+
+| Cycle window | 7 | 8 | 9 | 10 |
+| --- | ---: | ---: | ---: | ---: |
+| Valid / admitted cycles | 2034 / 2034 | 2012 / 2012 | 2154 / 2154 | 2108 / 2108 |
+| Caller FPS | 67.800 | 67.067 | 71.800 | 70.267 |
+| Full cycle mean, ms | 14.7512 | 14.9055 | 13.9323 | 14.2315 |
+| Before first Submit, ms | 10.1693 | 10.3286 | 9.7503 | 9.8740 |
+| First Submit, ms | 0.1465 | 0.1458 | 0.1438 | 0.1457 |
+| Second Submit, ms | 0.2426 | 0.2359 | 0.2317 | 0.2343 |
+| Next pose wait, ms | 0.0496 | 0.0486 | 0.0481 | 0.0480 |
+| Post-stereo gap, ms | 4.1426 | 4.1461 | 3.7578 | 3.9290 |
+| Raw DXGI Present, ms | 0.0717 | 0.0723 | 0.0701 | 0.0701 |
+| EDVR before real Present, ms | 0.0006 | 0.0005 | 0.0006 | 0.0005 |
+| EDVR after real Present, ms | 0.0837 | 0.0828 | 0.0831 | 0.0832 |
+| Trailing render callback, ms | 0.0422 | 0.0413 | 0.0365 | 0.0388 |
+| Outside recorded Present span, ms | 3.9443 | 3.9491 | 3.5675 | 3.7363 |
+| Before single Present, nested ms | 0.1651 | 0.1643 | 0.1539 | 0.1528 |
+| After single Present, nested ms | 3.7792 | 3.7848 | 3.4136 | 3.5836 |
+| Handoff roundtrip, nested ms | 0.0071 | 0.0068 | 0.0061 | 0.0064 |
+
+Before/after-single-Present split the outside interval; handoff is another
+nested measurement. Do not add these rows to the exclusive partition. The
+Present end stamp precedes trace publication and the census destructor, so the
+outside interval can still contain that final instrumentation bookkeeping. It
+also admits Elite work, driver work/waits, other runtime calls and thread
+descheduling. This is not evidence of a fixed sleep or wholly removable cost.
+
+Exclude cycle windows 4-5 from landed comparisons: although their shape and
+scene-ready flag are valid, they are menus, with approximately 0.5-0.7 ms
+before first Submit and 8.5-8.7 ms in the next pose wait. Window 6 mixes menu
+and gameplay. Window 11 is a short shutdown/scope-change tail; its reported 47
+FPS is not a steady gameplay rate. Windows 7-10 are the comparison cohort.
+
+Prior build 7cfb5a6 produced 66.133/66.200 FPS and mean cycles 15.1221/15.1072
+ms in its two steady windows. The new result supports the user's modest
+improvement, but does not assign every difference to probe removal:
+scene/head-pose variation and the new Present measurement also differ. The
+later gameplay GPU windows remain around 10.6-10.9 ms, so the stock SteamVR
+comparison is still unresolved. The distinct graphics benchmark windows are:
+
+| Graphics window / local end | Valid | CPU p50 / p95, ms | GPU p50 / p95, ms |
+| --- | ---: | ---: | ---: |
+| 5 / 12:16:09 | 1987 | 10.314 / 11.817 | 10.890 / 12.187 |
+| 6 / 12:16:43 | 2119 | 9.795 / 11.203 | 10.725 / 11.907 |
+| 7 / 12:17:17 | 2115 | 9.786 / 10.964 | 10.622 / 11.700 |
+
+All three have no invalid/missing samples. Their windows differ from the cycle
+cohort, and CPU, GPU and full-cycle intervals are not additive. Sampled
+draw-hook CPU remains about 4.20-4.30 ms; its previously documented omissions
+mean this cannot quantify total EDVR overhead. Game Map counters show about
+0.23-0.26 ms/frame in writes and 0.002-0.003 ms/frame in reads. Existing
+GetData summaries still see ready and pending queries, but have neither
+per-call duration nor frame-phase attribution, so they do not establish a
+query-wait cause. Native pacing reports zero changes, deferred frames,
+synthesized frames and admission kicks.
+
+- Ruled out: raw DXGI Present blocking dominates the remaining post-stereo gap,
+  because it averages only 0.070-0.072 ms with sync interval zero.
+- Ruled out: measured EDVR Present work or the trailing render callback
+  dominates that gap, because together they average about 0.12 ms.
+- Ruled out: PostPresentHandoff dominates that gap, because paired roundtrips
+  average 0.006-0.007 ms with complete coverage.
+- Ruled out: removing the original-draw probe alone closes the reported stock
+  performance gap, because the verified OFF run remains at 67-72 FPS and about
+  10.6-10.9 ms GPU. A smaller diagnostic contribution remains possible.
+
+Next discriminator: attribute execution and waits on the caller thread,
+correlated to the post-Present interval, before choosing another fix. CPU stack
+samples can identify game, EDVR or driver execution; scheduler/wait events are
+needed to distinguish running from blocking or descheduling. Prepare and
+validate the collection and analysis workflow before another flight. WPR is
+available on this machine, but no recording was started and no ETW analysis
+pipeline has yet been validated.
+
+The bounded source audit also identifies unmeasured OpenVR calls to cover.
+`GetLastPoses`, `GetLastPoseForTrackedDeviceIndex` and `CanRenderScene` use
+local snapshots; `GetFrameTiming`, `GetFrameTimeRemaining` and
+`GetTimeSinceLastVsync` return unavailable. In contrast,
+`GetDeviceToAbsoluteTrackingPose` can enter `locateHead`, whose non-owner path
+synchronously invokes the runtime owner. A paired call count and span would
+confirm or exclude that path in the residual. These are hypotheses, not
+evidence that the game calls them there. Caller-thread cycle counts alone would
+not identify a wait reason or provide frequency-independent CPU milliseconds.
+The GPU elapsed-time discrepancy remains a separate target. Frontier stays on
+verified 72501fe; this review changes no runtime code, rendering behavior or
+live configuration.
