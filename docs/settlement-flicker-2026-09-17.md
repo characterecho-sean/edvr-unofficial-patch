@@ -2,41 +2,40 @@
 
 ## Status
 
-- State: Frontier measurement flight c7c4737 analyzed; no rendering skips
-  enabled. The depth-view metadata cache and capture-input diagnostics pass the
-  full build. In-game performance validation is pending; see the last journal
-  entry.
-- Current flight: verified gfx and native OpenXR v0.17.0-1-gc7c4737, Quest 3 /
-  VirtualDesktopXR / 90 Hz / DLSS K, 2307x1652 input and 3072x3264 output per
-  eye. This is not a Pimax A/B comparison. Three completed eye runs were found;
-  192128 is user-confirmed as on foot; overviews identify 192246 as the ship
-  over the settlement and 192513 as the Macleod Market approach.
-- 192128: no rigid-mesh capture work. Screen/weapon motion is active, with a
-  5120x2880 source. Nearby GPU p50 12.592 ms; removing rigid-mesh captures
-  cannot recover this cost.
-- 192246: 504 unchanged raw poses in 112 whole draws, despite a shared changing
-  origin. Of their 13,326 depth-agreeing pixels, 2,389 enter the head-motion
-  fallback base. Its 1800-frame window has 9,146 cap-refused draws/frame, about
-  1.92 ms sampled mesh-draw CPU, and 249 capture batches/frame. Nearby GPU p50
-  16.346 ms.
-- 192513: no exact raw-pose pairs; 23 unambiguous records share a small
-  rotation consistent with the Orbis station, not grounds to discard motion.
-  There are 338 capture batches/frame. All dumps describe admitted records
-  within the 512/eye cap, not the refused population.
-- Ruled out: blindly dropping unchanged poses, because existing fallback can
-  choose head motion; treating changing scene origin as proof every object
-  moved; treating previous zero coverage as safe current-frame invisibility.
-  Earlier Pimax flicker ruled-outs and alignment correction remain in the
-  journal.
-- Earlier Pimax baseline: per-band alignment placed EDVR output inside the
-  good-flight range; GPU p50 13.4 ms exceeded the 11.1 ms budget and native
-  wait_frame collapsed. Runtime reprojection remains the leading explanation
-  for the reported judder, unconfirmed by a controlled still-head /
-  lower-resolution flight.
-- Next: repeat the three scenes on the Frontier metadata-cache build. Keep
-  scene/eye selection live and measure the source of capture-input changes.
-  Static/visibility skips still require correct fallback, retained
-  first-moving-frame history, and conservative current-frame visibility.
+- State: Frontier reverse-route flight 81eeedb verified and analyzed. The
+  metadata cache is heavily used. A confirmed 1 MiB instance-buffer threshold
+  destroys capture batching in the settlement. The bounded ranged-ID fix passes
+  the full build; its Frontier flight validation is pending. No static or
+  visibility skips are enabled.
+- Latest captures: 195254 station, 195609 ship above the settlement, 195653 on
+  foot, matching the user's reverse route. Station coverage is 2307x1652;
+  settlement coverage is 2481x2121. The user removed the Quest 3 trims during
+  the route. Scene and sizing differences prevent a controlled frame-time
+  comparison.
+- Confirmed bottleneck: window 30600 has 425080 capture batches; 402143 (94.6%)
+  flush solely because the source ID buffer exceeds 1 MiB. Context, scene CB,
+  ID buffer, pool and output identities do not change. The other 22937 flushes
+  are write/map boundaries. Station window 12600 already batches 124 instances
+  on average, with no size-triggered flushes.
+- Cache result: settlement window 30600 reports 16923243 hits / 3744 fills
+  (99.978%). Approximate sampled mesh-draw CPU is 1.633 ms/frame, but scene,
+  batching and sizing differences prevent attributing a frame-time gain to the
+  cache alone.
+- Static evidence repeats: 497/504 valid settlement poses are unchanged, but
+  35976 of their 39389 depth-visible candidate pixels select the head-motion
+  base; 35956 belong to match-valid mesh records. Later UI/body/layer gates
+  remain unresolved. Station singleton pairs again show coherent rotation, not
+  504 independent movers. The on-foot windows have no captured rigid meshes.
+- Ruled out: a changing scene/pool/ID binding as the cause of the measured
+  settlement input-change flushes; all are size-only. Earlier ruled-outs
+  remain: blanket static-pose skips, equal-origin requirements, and previous
+  zero coverage as a safe current-visibility test. Details and the earlier
+  Pimax flicker correction are in the journal.
+- Next: verify the ranged-ID build over the settlement with Quest 3 trims left
+  off. Confirm nonzero bounded ID copies, zero size-only flushes, fewer
+  dispatches and intact motion. Coverage, transforms, write barriers, eye
+  boundaries and the 512-record cap remain unchanged. Static/history/fallback
+  and shared station-motion work remain separate.
 
 ## Journal
 
@@ -334,3 +333,98 @@ diagnostic depth metadata` for hit/fill counts and `input-change causes
 quality, excluding capture stalls; this change removes repeated metadata
 queries and does not reduce the 512-record cap or promise a measured frame-time
 improvement before the flight.
+
+### 2026-09-17 -- reverse route exposes the oversized-stream batching limit
+
+Verified graphics log `edvr_gfx_20260917_195056.log` identifies
+`v0.17.0-2-g81eeedb`; use `tools/edvr_log.py --target frontier --expect-build
+81eeedb`. The user's reverse route maps to 195254 station (scene frame 12423),
+195609 settlement from the ship (28930), and 195653 on foot (31463). Each is a
+completed paired eye run. Native environment/sizing and benchmark context are
+recorded in the offline timing report under `build/flight-20260917-reverse/`.
+The native log `edvr_openxr_20260917_195058_200_29064.log` matches the same
+build: Quest 3, VirtualDesktopXR, 90 Hz, DLSS K, active XR output 3072x3264.
+The user confirmed removing the Q3 trims during the route. Benchmark input
+changes from 2307x1652 to 2481x2121, with a transient 2863x2448 allocation;
+captured DLSS output before UI changes from 3550x2542 to 3818x3264.
+Capture-containing native windows have CPU/GPU p50 4.752/8.245 ms (station),
+12.703/16.717 ms (settlement) and 8.710/13.467 ms (on foot). These are
+different workloads, not a controlled cache A/B test.
+
+| Window end / scene | Depth metadata hits / fills | Input-change / write-map flushes | Average records per batch | Approx. mesh-draw CPU/frame | Hook CPU mean |
+|---|---:|---:|---:|---:|---:|
+| 12600 / station | 805988 / 3861 | 0 / 14870 | 124.0 | 0.343 ms | 1.030 ms |
+| 28800 / settlement approach | 9698520 / 4080 | 64748 / 23218 | 20.9 | 0.902 ms | 3.568 ms |
+| 30600 / settlement, includes transition | 16923243 / 3744 | 402143 / 22937 | 3.7 | 1.633 ms | 5.652 ms |
+| 32400 / on foot | 15732911 / 1812 | 0 / 0 | 0 | 0.580 ms | 3.494 ms |
+
+Draw estimates use sampled mean microseconds times sample count times 256,
+divided by 1800 and 1000. Flush estimates overlap draw work and are not added.
+These are per-window diagnostics, not cumulative counters. The cache is heavily
+exercised (99.978% hits in window 30600), but the different scene/pose/size and
+batch distributions prevent a clean before/after frame-time claim. Window 30600
+accepts 1557744 stereo instances, below the 1843200 full-cap window count, and
+includes a transition; do not treat it as a stable 1800-frame settlement
+benchmark.
+
+The new overlapping cause counters are decisive: all 64748 input-change flushes
+in window 28800 and all 402143 in 30600 are `oversized-stream`; context,
+scene-cb, instance-ids, pool and output causes are all zero. At 30600, this is
+94.6% of the 425080 total capture dispatches. Station window 12600 has no
+input-change flushes and already captures 124 records/batch. Ruled out: changed
+scene/pool/ID bindings as the explanation for these settlement input-change
+flushes, because their counters are zero. Buffer-size sensitivity and different
+batch distributions also prevent crediting the cache with the whole station
+timing difference from the first flight.
+
+Source confirmation: `meshMotionDraw` forces a flush whenever `idd.ByteWidth >
+maxInstanceBytes` (1 MiB), even if every input identity is unchanged. That
+protects a per-draw slice copied repeatedly to offset zero. The accepted-record
+budget is only 512 per eye: the actually used eight-byte IDs need at most 4096
+bytes in a pending batch, independent of source-buffer size. Append each used
+range at `pending.count * 8`, then pass that owned offset to both coverage and
+transform capture. Keep the full-stream snapshot path unchanged for smaller
+sources. This removes the size-only flush without enlarging the buffer or
+copying/reading unused source data.
+
+Correctness boundaries: keep all actual context/scene/IDs/pool/output changes
+as flushes, and preserve pre-Map/Update flushes, eye/output changes, frame
+consumption, unknown-write invalidation and immediate GPU-writable handling.
+Source ID identity also prevents mixing the full-copy and ranged-copy layouts
+in a pending batch. Original draw parameters, geometry coverage, record
+admission and prior-frame matching stay unchanged. WARP regressions must check
+distinct IDs at distant offsets, a 512-record batch, later-draw coverage,
+source rewrites, small/large switches, eye switches and GPU-writable sources.
+The expected improvement is fewer capture dispatches; it is not a reduction in
+rendered game meshes or a demonstrated frame-time gain yet.
+
+The mesh samples repeat the earlier classification constraints. Station 195254
+has 504 valid / eight invalid records across 172 draw groups and zero exact
+raw-pose pairs. Of 23 singleton-key pairs, 19 share about 0.039819 degrees of
+rotation (maximum disagreement 0.00298 degrees); repeated-key groups remain
+ambiguous. Settlement 195609 has 497 exact raw-pose matches with changed
+origin, seven changed/unmatched valid records, and 108 wholly exact-pose draws.
+Of 39389 depth-visible exact-pose candidate pixels, 3413 select the world base
+and 35976 the head base. The current-match-valid split is 1463 world / 35956
+head, with unmatched 1950 / 20; final UI/body/terrain/layer membership remains
+unresolved. Coverage size is 2481x2121 here versus 2307x1652 in the station and
+first-flight settlement, so raw pixel totals are not comparable. On foot again
+has no captured rigid meshes and needs separate source/screen-path attribution.
+
+The fix is implemented and independently reviewed with no blocking findings.
+The full absolute-path build passed: 2183 mesh WARP checks, the exporter/probe
+roundtrip and probe self-test, 61 pool jobs plus three quiet gates, and the
+249-key config contract. Log: `build/mesh-id-batching-verified.log`. Rebuild
+the clean commit for Frontier delivery through the sanctioned install tool,
+with dry-run and verify-only checks; preserve the live INI and the user's
+removed trims.
+
+Next flight can focus on the ship above the same busy settlement: keep the
+trims off, hold the view for roughly 90 seconds, then take one completed eye
+run. `mesh motion diagnostic oversized streams` must show nonzero bounded ID
+copies/instances while the old size-only flush cause stays zero; the exclusive
+batch/flush counts show whether capture dispatches fall. Compare same-size
+steady native windows and inspect motion, excluding capture stalls. Coverage
+reissues, admitted record count and transform/match math are deliberately
+unchanged. On-foot profiling and static/visibility culling remain future work;
+this change addresses the confirmed batching defect.

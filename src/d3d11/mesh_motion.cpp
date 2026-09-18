@@ -79,6 +79,7 @@ struct Diagnostics {
     uint64_t drawCpuSamples=0,flushCpuSamples=0;
     uint64_t depthMetadataHits=0,depthMetadataFills=0;
     uint64_t inputChanges[unsigned(InputChange::Count)]{};
+    uint64_t rangedIdCopies=0,rangedIdInstances=0;
     void clearWindow(){*this=Diagnostics{};}
 } diagnostics;
 double cpuTimestamp(){LARGE_INTEGER value;QueryPerformanceCounter(&value);static const double scale=[](){LARGE_INTEGER f;QueryPerformanceFrequency(&f);return 1000.0/double(f.QuadPart);}();return double(value.QuadPart)*scale;}
@@ -275,19 +276,21 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
         if(pending.ids!=ids)inputChanges|=1u<<unsigned(InputChange::Ids);
         if(pending.pool!=pool)inputChanges|=1u<<unsigned(InputChange::Pool);
         if(pending.output!=now.uav)inputChanges|=1u<<unsigned(InputChange::Output);
-        if(!wholeIds)inputChanges|=1u<<unsigned(InputChange::Oversized);
     }
     if(inputChanges){for(unsigned i=0;i<unsigned(InputChange::Count);++i)if(inputChanges&(1u<<i))++diagnostics.inputChanges[i];flushCapture(FlushReason::InputChange);}
     if(failed)return;
     if(!pending.count){
         pending.context=ctx;pending.scene=cb;pending.ids=ids;pending.pool=pool;pending.poolResource=pr;pending.output=now.uav;
         // Reuse one GPU snapshot for all draws while this stream is unchanged.
-        // Unusually large streams retain bounded per-draw copies instead.
-        D3D11_BOX box{wholeIds?0:UINT(at),0,0,wholeIds?idd.ByteWidth:UINT(at+n*8),1,1};
-        ctx->CopySubresourceRegion(instances.Get(),0,0,0,0,ids.Get(),0,&box);
+        if(wholeIds){D3D11_BOX box{0,0,0,idd.ByteWidth,1,1};ctx->CopySubresourceRegion(instances.Get(),0,0,0,0,ids.Get(),0,&box);}
     }
+    const UINT capturedIds=wholeIds?UINT(at):pending.count*8;
+    // A stream too large for the owned snapshot contributes only this draw's
+    // IDs. The batch is capped at 512 records, so these ranged copies occupy
+    // at most 4096 bytes while retaining one source identity for write flushes.
+    if(!wholeIds){D3D11_BOX box{UINT(at),0,0,UINT(at+n*8),1,1};ctx->CopySubresourceRegion(instances.Get(),0,capturedIds,0,0,ids.Get(),0,&box);++diagnostics.rangedIdCopies;diagnostics.rangedIdInstances+=n;}
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11InputLayout> layout;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->IAGetInputLayout(&layout);
-    Settings data{};data.info[0]=now.count;data.info[1]=prev.count;data.info[2]=n;data.info[3]=wholeIds?UINT(at):0;data.dimensions[0]=float(e.width);data.dimensions[1]=float(e.height);data.dimensions[2]=float(now.count);data.dimensions[3]=float(n);
+    Settings data{};data.info[0]=now.count;data.info[1]=prev.count;data.info[2]=n;data.info[3]=capturedIds;data.dimensions[0]=float(e.width);data.dimensions[1]=float(e.height);data.dimensions[2]=float(now.count);data.dimensions[3]=float(n);
     IUnknown* objects[4]={vs.Get(),vb.Get(),ib.Get(),layout.Get()};
     for(unsigned i=0;i<4;++i){uint64_t key=reinterpret_cast<uint64_t>(objects[i]);data.key[2*i]=UINT(key);data.key[2*i+1]=UINT(key>>32);now.sources[now.count][i]=objects[i];}
     data.key[8]=UINT(base);data.key[9]=start;data.key[10]=count;data.key[11]=vertexStride;data.key[12]=offset;data.key[13]=indexOffset;data.key[14]=UINT(format);
@@ -346,6 +349,7 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
         Log::get().note("mesh motion diagnostic depth metadata: %llu cache hits, %llu fills; scene/eye selection remains live.",(unsigned long long)diagnostics.depthMetadataHits,(unsigned long long)diagnostics.depthMetadataFills);
         Log::get().note("mesh motion diagnostic flushes: %s %llu, %s %llu, %s %llu, %s %llu, %s %llu.",flushReasonName(FlushReason::InputChange),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::InputChange)],flushReasonName(FlushReason::WriteOrMap),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::WriteOrMap)],flushReasonName(FlushReason::EyeConsumption),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::EyeConsumption)],flushReasonName(FlushReason::FrameBoundary),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::FrameBoundary)],flushReasonName(FlushReason::GpuWritable),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::GpuWritable)]);
         Log::get().note("mesh motion diagnostic input-change causes (overlapping): context %llu, scene-cb %llu, instance-ids %llu, pool %llu, output %llu, oversized-stream %llu.",(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Context)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Scene)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Ids)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Pool)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Output)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Oversized)]);
+        Log::get().note("mesh motion diagnostic oversized streams: %llu bounded ID copies, %llu instances.",(unsigned long long)diagnostics.rangedIdCopies,(unsigned long long)diagnostics.rangedIdInstances);
         diagnostics.clearWindow();}
     depthMetadata.clear();
     for(auto& e:eyes){

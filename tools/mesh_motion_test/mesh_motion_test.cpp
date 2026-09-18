@@ -297,15 +297,59 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());queue();
     check(!pending.count && captureBatches==1,"UAV-writable pool remains immediate");a=consumeBatch();check(a[56]==1,"GPU-writable pool still captures correct motion inputs");
     check(diagnostics.flushes[unsigned(FlushReason::GpuWritable)]==1,"GPU-writable capture reports its own flush reason");
-    // Very large instance streams preserve bounded per-draw copies, even
-    // for offsets near the end, rather than dropping coverage or allocating
-    // an unbounded snapshot.
-    reset();pose(1,.4f,2);bind(0);
-    std::vector<UINT> largeIds(maxInstanceBytes/4+128);largeIds[largeIds.size()-2]=2;
+    // Very large instance streams append only each draw's IDs to the owned
+    // buffer. Distinct far offsets must share one capture batch while both
+    // the deferred capture and the immediate coverage draw read their own
+    // compact destination offsets.
+    reset();pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    std::vector<UINT> largeIds(maxInstanceBytes/4+4*maxRecords);const UINT farA=maxInstanceBytes/8+17,farB=farA+129;
+    largeIds[farA*2]=2;largeIds[farB*2]=3;
     auto largeStream=buffer(UINT(largeIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,largeIds.data());UINT idStep=8,idStart=0;
-    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);UINT lastId=UINT(largeIds.size()/2-1);queue(lastId);queue(lastId);a=consumeBatch();
-    check(captureBatches==2 && std::fabs(a[35]-.4f)<1e-5 && std::fabs(a[95]-.4f)<1e-5,"oversized streams retain exact IDs through bounded copies");
-    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==1 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==1,"oversized stream attribution counts its actual input-change flush");
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);queue(farB);
+    check(!captureBatches && pending.count==2,"oversized draws from distinct far offsets accumulate one batch");a=consumeBatch();
+    check(captureBatches==1 && word(a,31)==2 && word(a,91)==3 && a[56]==1 && a[116]==1,"batched oversized draws retain distinct IDs and exact raw poses");
+    auto largeCoverage=readTexture(dev.Get(),ctx.Get(),eyes[0].coverage.Get()),largeDepth=readTexture(dev.Get(),ctx.Get(),scene[0].Get());const UINT centre=32*W+32;
+    check(largeCoverage[centre*2]==2 && largeCoverage[centre*2+1]==largeDepth[centre],"later oversized draw writes its exact coverage record ID and depth");
+    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==0 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==0 && diagnostics.rangedIdCopies==2 && diagnostics.rangedIdInstances==2,"oversized batching uses bounded copies without a size-only flush");
+
+    // The compact destination reaches exactly 4096 bytes at the 512-record
+    // cap and the deferred shader must consume every thread group.
+    reset();for(UINT i=0;i<4;++i)pose(1,float(i)*.05f,i);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    std::vector<UINT> bulkIds(maxInstanceBytes/4+2*maxRecords);const UINT bulkFirst=maxInstanceBytes/8;
+    for(UINT i=0;i<maxRecords;++i)bulkIds[(bulkFirst+i)*2]=i&3;
+    auto bulkStream=buffer(UINT(bulkIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,bulkIds.data());ctx->IASetVertexBuffers(0,1,bulkStream.GetAddressOf(),&idStep,&idStart);
+    for(UINT i=0;i<maxRecords;++i)queue(bulkFirst+i);
+    check(!captureBatches && pending.count==maxRecords && diagnostics.rangedIdCopies==maxRecords && diagnostics.rangedIdInstances==maxRecords,"oversized compact offsets stay bounded through 512 queued records");a=consumeBatch();
+    check(captureBatches==1 && a[(maxRecords-1)*60+56]==1 && word(a,31)==0 && word(a,(maxRecords-1)*60+31)==3 && diagnostics.largestBatch==maxRecords,"oversized 512-record batch captures later shader thread groups");
+
+    // Switching between ranged and whole snapshots retains the ID resource
+    // as a real flush boundary, so neither mode can consume the other's bytes.
+    reset();pose(1,.1f,0);pose(1,.3f,2);pose(1,.4f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    ctx->IASetVertexBuffers(0,1,iv.GetAddressOf(),&idStep,&idStart);queue();
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farB);a=consumeBatch();
+    check(captureBatches==3 && word(a,31)==2 && word(a,91)==0 && word(a,151)==3 && std::fabs(a[23]-.3f)<1e-6 && std::fabs(a[83]-.1f)<1e-6 && std::fabs(a[143]-.4f)<1e-6,"large-small-large transitions preserve draw-time IDs and poses");
+    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==2 && diagnostics.inputChanges[unsigned(InputChange::Ids)]==2 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==0,"large-small-large transitions attribute only real ID changes");
+
+    // A source rewrite still submits the ranged batch before the original ID
+    // bytes change; the next draw receives a fresh compact copy.
+    reset();pose(1,.2f,2);pose(1,.7f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    meshMotionResourceWritten(largeStream.Get());largeIds[farA*2]=3;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);queue(farA);a=consumeBatch();
+    check(captureBatches==2 && word(a,31)==2 && word(a,91)==3 && std::fabs(a[23]-.2f)<1e-6 && std::fabs(a[83]-.7f)<1e-6 && diagnostics.flushes[unsigned(FlushReason::WriteOrMap)]==1,"oversized ID rewrite preserves both draw-time transforms");
+
+    // Pool writes and eye changes keep their existing boundaries with ranged
+    // IDs, while a GPU-writable source remains immediate.
+    reset();pose(1,.1f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    meshMotionResourceWritten(pool.Get());pose(1,.6f,2);ctx->UpdateSubresource(pool.Get(),0,nullptr,poolData,0,0);queue(farA);a=consumeBatch();
+    check(captureBatches==2 && std::fabs(a[23]-.1f)<1e-6 && std::fabs(a[83]-.6f)<1e-6 && diagnostics.flushes[unsigned(FlushReason::WriteOrMap)]==1,"oversized pool rewrite preserves both draw-time poses");
+    reset();pose(1,.2f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    testEye=1;testScene=scene[1].Get();testDepth=dsv[1].Get();ctx->OMSetRenderTargets(0,nullptr,dsv[1].Get());ctx->ClearDepthStencilView(dsv[1].Get(),D3D11_CLEAR_DEPTH,0,0);queue(farA);a=consumeBatch();
+    auto largeFirstEye=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
+    check(captureBatches==2 && a[56]==1 && largeFirstEye[56]==1 && std::fabs(a[23]-.2f)<1e-6 && std::fabs(largeFirstEye[23]-.2f)<1e-6 && diagnostics.inputChanges[unsigned(InputChange::Output)]==1,"oversized eye switch preserves both output batches and draw-time poses");
+    reset();pose(1,.2f);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);const UINT farGpu=farA+1;
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());queue(farGpu);
+    check(!pending.count && captureBatches==1 && diagnostics.rangedIdCopies==1 && diagnostics.flushes[unsigned(FlushReason::GpuWritable)]==1,"GPU-writable oversized capture remains immediate");a=consumeBatch();check(a[56]==1,"GPU-writable oversized capture retains the ranged ID");
     reset();pose(1,.2f);bind(0);queue();meshMotionFrameBoundary(ctx.Get());
     check(!pending.count && diagnostics.flushes[unsigned(FlushReason::FrameBoundary)]==1,"frame boundary submits pending capture with an exclusive reason");
     // Deferred capture may run after the app enabled predication. Captures,
