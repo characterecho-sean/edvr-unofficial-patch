@@ -8,7 +8,10 @@
   handoffs do not explain that gap. Its internal cause is still unmeasured. The
   prior verified dcd0a9f draw probe completed 29520 captures; three unchanged
   payloads went from zero passed samples to nonzero. Cached rejection alone is
-  unsafe; no draw suppression is active. See the final journal entry.
+  unsafe; no draw suppression is active. The user now reports stock SteamVR at
+  mid-80s FPS and about 6.8 ms GPU with the same settings. Prioritize isolating
+  EDVR/runtime and diagnostic cost before further Elite culling. See the final
+  journal entry.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
   5120x2880 in the prior run; this flight has no on-foot leg or eye capture.
@@ -42,13 +45,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next diagnostic: split the post-stereo interval on the same caller/sequence
-  into game-side gaps, raw DXGI Present, all EDVR Present work including its
-  trailing render callback, and any PostPresentHandoff roundtrip. Existing
-  Present timers are not persisted in the native flight log and cannot answer
-  this yet. No new build or flight requested. Conservative current-depth
-  culling remains an offline candidate; preserve motion history and keep
-  foveated-DLSS work paused.
+- Next diagnostic: establish native AA-off cost without the active original
+  draw/capture probe, retaining coarse frame/GPU timing. The probe currently
+  shares the GPU-timing enable, so switching that off loses the comparison
+  metric. Split the post-stereo interval into game-side gaps, raw Present, all
+  EDVR Present work and PostPresentHandoff in the same controlled build. No new
+  build installed. Conservative current-depth culling remains an offline
+  candidate; preserve motion history and keep foveated-DLSS paused.
 
 ## Journal
 
@@ -1963,3 +1966,66 @@ Elite/scheduling attribution. None establishes that all 4.2 ms is removable.
 
 No pacing or draw-suppression fix is justified yet. This turn records the
 flight and source findings only; the installed diagnostic remains 7cfb5a6.
+
+### 2026-09-18 -- stock SteamVR comparison changes the optimization priority
+
+The user reports the same settlement scene and headset running stock through
+SteamVR/fpsVR: GPU about 6.8 ms, CPU averaging above 10 ms, and FPS in the
+mid-80s. When asked about AA, resolution and the connection path, the user
+confirmed everything was the same except the SteamVR route, with no
+OpenComposite installed. Treat the settings as matched by user report; there is
+no stock log or fpsVR history artifact attached to this observation.
+
+This is strong evidence to investigate the patched path's cost before
+implementing more Elite draw suppression. At approximately 85 versus 66 FPS,
+the observed complete-frame periods are about 11.8 versus 15.1 ms, a roughly
+3.3 ms difference. The stock CPU reading remains consistent with a demanding
+scene, but scene cost alone no longer explains the patched result. Runtime,
+EDVR features and active diagnostics changed together, so this comparison does
+not isolate which component causes the loss.
+
+The verified 7cfb5a6 flight still ran original-draw query/capture diagnostics
+throughout the landed scene. At 11:29:55.997 its sampled draw-hook CPU mean is
+4.297 ms/frame, and at 11:30:21.954 it is 4.169 ms/frame. Those counters
+exclude forwarded game draw time and include EDVR reissues; they are not a
+clean production-overhead measurement or an estimate of recoverable FPS. They
+are also distinct from the separately bracketed post-stereo gap. Similar
+numbers do not establish a common cause, and neither can be added to GPU
+elapsed time as an independent cost.
+
+The `DrawClock` source further limits attribution: it starts after
+`gpuFrameCommand`, while its subtracted forwarded-draw interval also contains
+the original-draw probe bracket/owner lookup and indexed-instanced weapon work.
+The approximately 4.3 ms hook figure therefore is neither total EDVR overhead
+nor a measurement of what disabling the probe would save.
+
+`vScreenRefreshConfig` and hook initialization both call
+`originalDrawProbeConfigure(gpuTimingEnabled, true)`, with `gpuTimingEnabled`
+read from `advanced.app_gpu_timing`. Disabling that setting would remove the
+coarse GPU comparison metric along with the selected-draw probe. The next
+controlled build should separate that diagnostic admission, retain coarse
+frame/GPU timing, and measure the post-stereo Present/caller phases described
+above. A substantial improvement with the probe disabled implicates diagnostic
+cost; persistence requires isolating the EDVR graphics/runtime path. No
+specific overhead fix or draw suppression is justified by these observations.
+
+The [fpsVR developer's timing
+definitions](https://steamcommunity.com/app/908520/discussions/0/1735462352484917218/)
+say its GPU figure covers scene rendering, post-submit application work and
+compositor work, and its displayed frame times are maxima over a refresh
+interval. These are different scopes and statistics from our native benchmark's
+30-second percentiles. Therefore 6.8 ms versus about 10.6-11.2 ms is a serious
+comparison signal, not a measured 4 ms EDVR GPU tax. In particular, it must not
+be equated with the CPU-side post-stereo interval.
+
+Native timer audit: `GpuSpanResult.outerMs` in ApplicationRender mode sums
+three or four non-overlapping producer-context GPU timestamp pairs
+(`gpu_span_state.h`). It includes game command intervals and producer-side EDVR
+eye treatment, including any active non-temporal treatment with AA off. Closed
+gaps between those pairs, Submit routing, and runtime-device transfer and
+composition are excluded; the latter have separate `DeviceGpuTiming` samples.
+Idle or scheduling delay inside an open timestamp pair can still extend it, so
+this is elapsed GPU time, not pure GPU busy time. The post-second-Submit-return
+gap is outside these pairs by construction. Keep the GPU discrepancy and that
+wall-time gap as separate observations until a controlled run identifies how
+they relate.
