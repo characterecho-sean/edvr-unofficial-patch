@@ -44,13 +44,14 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: CPU execution/wait capture is implemented with paired ETW frame and
-  OpenVR call markers. Build/decoder checks precede an elevated synthetic
-  busy/sleep capture, then a Frontier flight in the same landed AA-off view.
-  Windows kernel recording requires UAC approval; ordinary tool escalation does
-  not supply that privilege. See the latest entry for capture limits, coverage
-  checks and the installation/validation record. Preserve motion history and
-  keep foveated-DLSS paused.
+- Next: CPU execution/wait build 2d98775 is installed and hash-verified in
+  Frontier, with the live INI preserved. The corrected decoder passes saved
+  replay and a second elevated live busy/sleep capture, all 60 frames with zero
+  lost events or unknown time. Collector r2 entered waiting_for_game at
+  19:11:42 UTC with a 30-minute launch window and a five-minute recording cap.
+  Next flight: same landed AA-off view for 60-90 seconds, then exit normally.
+  See the latest entry for coverage and installation records. Preserve motion
+  history and keep foveated-DLSS paused.
 
 ## Journal
 
@@ -2309,4 +2310,46 @@ profiling build also compiles the analyzer with zero warnings/errors and passes
 its scheduler, coverage, schema and nested-span tests. Logs:
 `build/cpu-profile-validation.log` and
 `build/cpu-profile-symbol-validation.log`. The committed package is rebuilt
-before Frontier installation; the elevated live pipeline test is still pending.
+before Frontier installation; the elevated live pipeline test is recorded
+below.
+
+Post-commit validation: the symbol-enabled build of 2d98775 passes the same
+complete build gates (`build/cpu-profile-build-2d98775.log`). Frontier now has
+`v0.17.0-25-g2d98775`, installed and hash-verified through `install_edvr.py`
+without changing its INI. The collector also accepts the installer's verified
+receipt siblings after a reinstall; a regression covers a stale primary receipt
+and a valid replacement sibling. Python tests now pass 50 checks.
+
+The first UAC-elevated pipeline check wrote a 49,283,072-byte ETL, all 60
+synthetic frame markers and sampled stacks, with zero lost events or provider
+write failures. It refused to arm the game capture because nine frames had
+unknown scheduling intervals. Raw context switches account for all nine: eight
+Running (2) transitions during cross-CPU handoff, totaling 28.2 us, and one
+DeferredReady (7) transition lasting 3.7 us. TraceEvent names raw 7 `Unknown`,
+unlike the Windows ETW meaning in Microsoft's [CSwitch state
+table](https://learn.microsoft.com/en-us/windows/win32/etw/cswitch). The C++
+fixture and provider need no change. The correction belongs in the offline
+decoder: retain Running through state 2, map state 7 to ready, and make
+unsupported states inside retained frame intervals fail coverage explicitly.
+The stopped capture left no WPR recording active.
+
+Saved-ETL replay with the corrected decoder passes all 60 frames, zero lost
+events, no cohort gaps or duplicates, and no boundary or unexpected unknown
+time. Busy intervals total 2994.78 ms running; Sleep intervals total 3237.55 ms
+waiting. The strict Python smoke validator passes. The analyzer rebuild has
+zero warnings/errors and passes its numeric-state, coverage and equal-QPC
+ordering regressions. The fix preserves event order for equal QPC timestamps
+and distinguishes an unobserved ring-boundary prefix from an explicit unknown
+state, which now fails coverage. These changes affect offline tools only;
+Frontier remains pinned to runtime build 2d98775 for the next flight.
+
+A second UAC-elevated live capture also passes all 60 frames with zero lost
+events, no unknown time, and correct phase separation: 2996.20 ms busy running
+and 3228.57 ms Sleep waiting. Collector process 2940 entered waiting_for_game
+at 19:11:42 UTC on September 18, with output under
+`build/cpu-profile-frontier-2d98775-r2`. It allows 1800 seconds for Frontier to
+launch, verifies the fresh process log against 2d98775, and records until game
+exit or 300 seconds. The requested flight keeps AA off and the same landed
+cockpit view for 60-90 seconds, then exits normally. No eye dump is required.
+This run identifies execution and scheduling costs; profiling overhead means it
+is not a clean FPS comparison against the prior probe-off flight.

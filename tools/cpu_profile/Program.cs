@@ -15,8 +15,8 @@ internal static class Program
     private const ushort PostValid = 1 << 0;
     private const ushort SinglePresent = 1 << 1;
 
-    private enum CpuState { Unknown, Running, Ready, Waiting }
-    private sealed record Transition(long Qpc, CpuState State, string Detail);
+    private enum CpuState { BoundaryUnknown, UnexpectedUnknown, Running, Ready, Waiting }
+    private sealed record Transition(long Qpc, long Order, CpuState State, string Detail);
     private sealed record ClockMarker(ulong TimestampUs, ulong QpcTicks, ulong QpcFrequency,
                                       ulong SystemTime100ns, long HeaderQpc);
     private sealed record SpanMarker(ulong TimestampUs, ulong CallId, ulong BeginUs, long Result,
@@ -77,6 +77,7 @@ internal static class Program
         public long SwitchIn;
         public long Ready;
         public long Samples;
+        public long NextTransitionOrder;
     }
 
     public static int Main(string[] args)
@@ -188,7 +189,9 @@ internal static class Program
             }
         }
         foreach (var timeline in result.Timelines.Values)
-            timeline.Sort((a, b) => a.Qpc.CompareTo(b.Qpc));
+            timeline.Sort((a, b) => a.Qpc != b.Qpc
+                ? a.Qpc.CompareTo(b.Qpc)
+                : a.Order.CompareTo(b.Order));
         result.Stacks.Sort((a, b) => a.Qpc.CompareTo(b.Qpc));
         return result;
     }
@@ -257,14 +260,21 @@ internal static class Program
     {
         if (!data.Timelines.TryGetValue(thread, out var timeline))
             data.Timelines[thread] = timeline = [];
-        timeline.Add(new Transition(qpc, state, detail));
+        timeline.Add(new Transition(qpc, data.NextTransitionOrder++, state, detail));
     }
 
-    private static CpuState ClassifyOldState(System.Diagnostics.ThreadState state) => state.ToString() switch
+    private static CpuState ClassifyOldState(System.Diagnostics.ThreadState state) =>
+        ClassifyOldState((int)state);
+
+    private static CpuState ClassifyOldState(int rawState) => rawState switch
     {
-        "Ready" or "Standby" or "DeferredReady" => CpuState.Ready,
-        "Waiting" or "Transition" or "GateWait" or "WaitingForProcessInSwap" => CpuState.Waiting,
-        _ => CpuState.Unknown,
+        // ETW CSwitch state 2 remains Running across observed CPU handoffs. State 7 is
+        // DeferredReady, although System.Diagnostics.ThreadState exposes value 7 as Unknown.
+        // https://learn.microsoft.com/en-us/windows/win32/etw/cswitch
+        1 or 3 or 7 => CpuState.Ready,
+        2 => CpuState.Running,
+        5 or 6 => CpuState.Waiting,
+        _ => CpuState.UnexpectedUnknown,
     };
 
     private static void AddStack(TraceLog log, TraceEvent data, int targetThread, string kind, Collected result)
@@ -345,7 +355,7 @@ internal static class Program
         var discardedPrefix = 0;
         var discardedSuffix = 0;
         var discardedPartial = 0;
-        var discardedUnknownState = 0;
+        var discardedBoundaryUnknownState = 0;
 
         foreach (var frame in validFrames)
         {
@@ -356,9 +366,9 @@ internal static class Program
             if (start < traceStartUs || end > traceEndUs) { discardedPartial++; continue; }
             var thread = checked((int)frame.CallerThread);
             var stateUs = StateDurations(data.Timelines.GetValueOrDefault(thread), start, end, QpcUs);
-            if (stateUs[CpuState.Unknown] > 0.001)
+            if (stateUs[CpuState.BoundaryUnknown] > 0.001)
             {
-                discardedUnknownState++;
+                discardedBoundaryUnknownState++;
                 continue;
             }
 
@@ -407,7 +417,8 @@ internal static class Program
                 ["runningUs"] = Round(stateUs[CpuState.Running]),
                 ["readyUs"] = Round(stateUs[CpuState.Ready]),
                 ["waitingUs"] = Round(stateUs[CpuState.Waiting]),
-                ["unknownUs"] = Round(stateUs[CpuState.Unknown]),
+                ["unknownUs"] = Round(stateUs[CpuState.UnexpectedUnknown]),
+                ["unexpectedUnknownUs"] = Round(stateUs[CpuState.UnexpectedUnknown]),
                 ["exclusiveSumUs"] = Round(exclusive),
                 ["sampleStackCount"] = frameStacks.Count(s => s.Kind == "sample"),
                 ["switchOutStackCount"] = frameStacks.Count(s => s.Kind == "switch-out"),
@@ -422,7 +433,7 @@ internal static class Program
             data.UnsupportedMarkers, cohortSequence.Gaps, cohortSequence.Duplicates,
             retainedInvalidSpans + retainedInvalidFrames, clocksValid,
             data.Frames.Count, frameReports.Count, data.SwitchOut, data.SwitchIn,
-            data.HasCallStacks, frameReports.Select(f => Convert.ToDouble(f["unknownUs"])));
+            data.HasCallStacks, frameReports.Select(f => Convert.ToDouble(f["unexpectedUnknownUs"])));
         var inputInfo = new FileInfo(input);
         return new Dictionary<string, object?>
         {
@@ -446,7 +457,10 @@ internal static class Program
             ["discardedBeforeSchedulerTail"] = discardedPrefix,
             ["discardedAfterSchedulerTail"] = discardedSuffix,
             ["discardedPartialSchedulerBoundary"] = discardedPartial,
-            ["discardedUnknownSchedulerState"] = discardedUnknownState,
+            ["discardedUnknownSchedulerState"] = discardedBoundaryUnknownState,
+            ["discardedBoundaryUnknownState"] = discardedBoundaryUnknownState,
+            ["unexpectedUnknownFrameCount"] = frameReports.Count(frame =>
+                Convert.ToDouble(frame["unexpectedUnknownUs"]) > 0.001),
             ["retainedInvalidFrameCount"] = retainedInvalidFrames,
             ["invalidFrameReasons"] = invalidFrameReasons,
             ["unavailableFrameStatuses"] = unavailableStatuses,
@@ -559,7 +573,7 @@ internal static class Program
     {
         var values = Enum.GetValues<CpuState>().ToDictionary(s => s, _ => 0.0);
         if (end <= start) return values;
-        var state = CpuState.Unknown;
+        var state = CpuState.BoundaryUnknown;
         var cursor = start;
         if (timeline is null)
         {
@@ -619,11 +633,19 @@ internal static class Program
 
     private static void SelfTest()
     {
+        if (ClassifyOldState(1) != CpuState.Ready ||
+            ClassifyOldState(2) != CpuState.Running ||
+            ClassifyOldState(3) != CpuState.Ready ||
+            ClassifyOldState(5) != CpuState.Waiting ||
+            ClassifyOldState(6) != CpuState.Waiting ||
+            ClassifyOldState(7) != CpuState.Ready ||
+            ClassifyOldState(99) != CpuState.UnexpectedUnknown)
+            throw new InvalidDataException("Raw scheduler state mapping failed");
         var timeline = new List<Transition>
         {
-            new(0, CpuState.Running, "start"), new(10, CpuState.Waiting, "sleep"),
-            new(20, CpuState.Ready, "wake"), new(25, CpuState.Running, "scheduled"),
-            new(40, CpuState.Ready, "preempted"), new(45, CpuState.Running, "scheduled"),
+            new(0, 0, CpuState.Running, "start"), new(10, 1, CpuState.Waiting, "sleep"),
+            new(20, 2, CpuState.Ready, "wake"), new(25, 3, CpuState.Running, "scheduled"),
+            new(40, 4, CpuState.Ready, "preempted"), new(45, 5, CpuState.Running, "scheduled"),
         };
         var state = StateDurations(timeline, 5, 50, q => q);
         AssertNear(state[CpuState.Running], 25, "running");
@@ -632,8 +654,29 @@ internal static class Program
         AssertNear(state.Values.Sum(), 45, "exclusive state sum");
 
         var boundary = StateDurations(timeline, -5, 5, q => q);
-        AssertNear(boundary[CpuState.Unknown], 5, "unknown prefix");
+        AssertNear(boundary[CpuState.BoundaryUnknown], 5, "unknown prefix");
         AssertNear(boundary[CpuState.Running], 5, "boundary transition");
+
+        var unexpectedTimeline = new List<Transition>
+        {
+            new(0, 0, CpuState.Running, "start"),
+            new(10, 1, CpuState.UnexpectedUnknown, "raw 99"),
+            new(20, 2, CpuState.Running, "scheduled"),
+        };
+        var unexpected = StateDurations(unexpectedTimeline, 5, 15, q => q);
+        AssertNear(unexpected[CpuState.UnexpectedUnknown], 5, "unexpected unknown interval");
+        if (CoverageComplete(0, 0, 0, 0, 0, 0, true, 1, 1, 1, 1, true,
+                             [unexpected[CpuState.UnexpectedUnknown]]))
+            throw new Exception("unexpected unknown coverage test failed");
+
+        var equalQpc = new List<Transition>
+        {
+            new(10, 0, CpuState.Ready, "switch-out"),
+            new(10, 1, CpuState.Running, "switch-in"),
+        };
+        equalQpc.Sort((a, b) => a.Qpc != b.Qpc ? a.Qpc.CompareTo(b.Qpc) : a.Order.CompareTo(b.Order));
+        var equalQpcState = StateDurations(equalQpc, 10, 20, q => q);
+        AssertNear(equalQpcState[CpuState.Running], 10, "equal-QPC event order");
         AssertNear(UnionDuration([(12, 20), (15, 25), (30, 35), (35, 35)]), 18, "nested span union");
 
         var spanCursor = new SpanCursor([

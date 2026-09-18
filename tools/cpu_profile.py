@@ -339,6 +339,21 @@ def analyze(dotnet, analyzer, trace, pid, output):
                    "--output", str(output)], timeout=300)
 
 
+def installed_receipt(target):
+    import install_edvr
+    primary = target / "edvr_native_receipt.json"
+    # Reinstalls preserve earlier receipts and write a new uniquely named sibling.
+    candidates = [primary, *target.glob("edvr_native_receipt.json.pre-*.bak*")]
+    candidates.sort(key=lambda path: path.stat().st_mtime_ns if path.is_file() else -1, reverse=True)
+    errors = []
+    for path in candidates:
+        try:
+            return install_edvr.verify_native_receipt(str(path), str(target)), str(path)
+        except (OSError, ValueError) as exc:
+            errors.append(str(exc))
+    raise ValueError("No receipt verifies the active native install: " + (errors[0] if errors else str(target)))
+
+
 def plan(args):
     import install_edvr
     import edvr_log
@@ -346,7 +361,7 @@ def plan(args):
     executable = target / GAME
     if not executable.is_file():
         raise ValueError("Game executable is missing: " + str(executable))
-    receipt = install_edvr.verify_native_receipt(str(target / "edvr_native_receipt.json"), str(target))
+    receipt, receipt_path = installed_receipt(target)
     expected = edvr_log.expected_version(args.expect_build, str(ROOT))
     dotnet = shutil.which("dotnet")
     wpr = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wpr.exe"
@@ -360,7 +375,7 @@ def plan(args):
         "cpu-profile-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
     if output.exists():
         raise ValueError("Use a new output directory: " + str(output))
-    return dict(target=str(target), executable=str(executable), expected_build=expected,
+    return dict(target=str(target), executable=str(executable), expected_build=expected, receipt=receipt_path,
                 installed_files=receipt["files"], output=str(output), wpr=str(wpr),
                 profile=str(PROFILE), analyzer=str(ANALYZER), dotnet=dotnet,
                 instance="EDVRCPU_" + uuid.uuid4().hex[:12], wait_seconds=args.wait_seconds,
@@ -657,6 +672,12 @@ def self_test():
                                   output=str(directory / "absent"), wait_seconds=10,
                                   max_seconds=10, smoke_first=False)
         import install_edvr
+        sibling_receipt = target / "edvr_native_receipt.json.pre-fixture-20260918-120000.bak"
+        sibling_receipt.write_text("{}", encoding="utf-8")
+        with mock.patch.object(install_edvr, "verify_native_receipt", side_effect=lambda path, _: {"files": []}
+                               if path == str(sibling_receipt) else (_ for _ in ()).throw(ValueError("stale"))):
+            check(installed_receipt(target)[1] == str(sibling_receipt))
+        before = snapshot()
         with mock.patch.object(install_edvr, "resolve_target", return_value=str(target)):
             with mock.patch.object(install_edvr, "verify_native_receipt", return_value={"files": []}):
                 with mock.patch.object(edvr_log, "expected_version", return_value="fixture"):
