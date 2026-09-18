@@ -15,6 +15,9 @@ constexpr char kTemporalCsHlsl[] = R"HLSL(
 #ifndef EDVR_TEMPORAL_DIAGNOSTICS
 #define EDVR_TEMPORAL_DIAGNOSTICS 1
 #endif
+#ifndef EDVR_TEMPORAL_TRACE
+#define EDVR_TEMPORAL_TRACE 0
+#endif
 Texture2D<float4> S : register(t0);      // this frame, the game's own texture (or the region copied out of it)
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
 Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
@@ -42,7 +45,11 @@ Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
+#if EDVR_TEMPORAL_TRACE
+RWTexture2D<float4> DT : register(u7);   // capture-only final path decision: physical motion xy, predicted previous depth z, integer flags w
+#else
 RWTexture2D<float2> ML : register(u7);   // the fovea crop's own copy of MV, plus lead.xy (the head lead): bound ONLY on the fovea prep's dispatch, and read only by NVIDIA's crop
+#endif
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -862,6 +869,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         d.z = -1.0;
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = mvDepthTile[(local.y + 2) * 12 + local.x + 2];
+        const float sceneZraw = zraw;
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
         float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
@@ -908,6 +916,9 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float2 motion = 0.0;
         float mover = 0.0;
         bool trackedForeground = false;
+        uint decisionPath = 0u;
+        bool projectionValid = false;
+        bool worldAvailable = tvCam.w != 0.0 && split.x > 0.0 && knobs.y != 0.0;
         if (dp.z < -1e-6) {
             float xt = dp.x / -dp.z;
             float yt = dp.y / -dp.z;
@@ -915,6 +926,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
             pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
             motion = pp - p;
+            decisionPath = count15 != 0 ? 2u : 1u;
+            projectionValid = true;
             // The body's path for the pixels the body's grid claims, the
             // interface's excepted.
             if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
@@ -928,6 +941,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         motion = pp - p;
                         zPred = zpS;
                         count39 = 1;
+                        decisionPath = 3u;
                         taken = true;
                     }
                 }
@@ -941,6 +955,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                             motion = pp - p;
                             zPred = zpB;
                             count46 = 1;
+                            decisionPath = 5u;
                         }
                     } else if (inb >= 64 && inb < 76) {
                         if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
@@ -948,23 +963,27 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                             motion = pp - p;
                             zPred = zpB;
                             count47 = 1;
+                            decisionPath = 6u;
                         }
                     } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
                         pp = ppB;
                         motion = pp - p;
                         zPred = zpB;
                         count29 = 1;
+                        decisionPath = 4u;
                     }
                 }
             }
             float2 terrainP; float terrainZ;
             if (terrainPixel(p,d,terrainP,terrainZ)) {
                 pp=terrainP; motion=pp-p; zPred=terrainZ;
+                decisionPath=7u;
             }
             float2 holoP; float holoZ;
             if(holoPixel(p,0,holoP,holoZ)) {
                 pp=holoP; motion=pp-p; zPred=holoZ;
                 trackedForeground=true;
+                decisionPath=8u;
             }
             // The ships' claim, counted (Stats 40-45, the registration
             // line): a pixel in a ship's footprint the ship did not claim,
@@ -1003,6 +1022,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         if(meshPixel(p,0,meshP,meshZ)) {
             motion=meshP-p;zPred=meshZ;
             trackedForeground=true;
+            decisionPath=9u;projectionValid=true;
             mover=movers.x!=0 && all(meshP>=0) && all(meshP<float2(size)) ? moverAt(meshP,meshZ,depthN>=6):0;
         }
         if((uint(probe.w+.5)&32u)!=0u) {
@@ -1010,6 +1030,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             if(s.w>0) {
                 motion=s.w!=2?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;
                 trackedForeground=true;
+                decisionPath=10u;projectionValid=s.w!=2;
                 // The eye-space prediction above is not source-scene depth.
                 // Do not apply its mover rejection to screen pixels.
                 mover=0;
@@ -1035,7 +1056,26 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // reduction, its DLAA and the UI resolve all read MV whole and must
         // see the unshifted vectors. Unbound (and lead zero) on every other
         // dispatch, where the store is dropped.
+#if EDVR_TEMPORAL_TRACE
+        // depthValid is a usable non-screen sample on the final route. Screen
+        // z uses its source projection's private encoding, so bit 256 stays
+        // clear for both valid and invalid screen paths rather than claiming
+        // it is comparable with scene depth. Screen-invalid has no physical
+        // correspondence, so its diagnostic xyz are zero even though MV still
+        // receives the production size*2 rejection sentinel.
+        bool depthValid=decisionPath!=10u && knobs.y!=0.0 && sceneZraw>knobs.x;
+        float2 decisionMotion=decisionPath==10u && !projectionValid?0.0:motion;
+        float decisionDepth=decisionPath==10u?0.0:zPred;
+        uint decisionFlags=decisionPath | (hidden?16u:0u) |
+            (decisionPath==10u && !projectionValid?32u:0u) | (uiHere?64u:0u) |
+            (worldAvailable?128u:0u) | (depthValid?256u:0u) |
+            (trackedForeground?512u:0u) | (projectionValid?1024u:0u);
+        DT[id.xy]=float4(decisionMotion,decisionDepth,float(decisionFlags));
+#else
         ML[id.xy] = written + lead.xy;
+#endif
+)HLSL"
+R"HLSL(
         MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output

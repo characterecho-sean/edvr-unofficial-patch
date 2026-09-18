@@ -2,28 +2,28 @@
 
 ## Status
 
-- State: verified 5efb139 DLSS CPU capture is complete with clean retained
-  coverage. Frontier retains this build. Both new caches reduce their targeted
-  sampled-PC rates by over 97%; measured draw-hook time is 0.44-0.51 ms lower
-  than c1dbb76. Overall benefit is modest: one clean settled window gains about
-  1 FPS, while benchmark CPU/GPU medians are essentially unchanged. The strict
-  trace also shows 0.60 ms more post-Present execution, predominantly outside
-  the graphics proxy; its cause is unproven. The subsequent blend-state cache
-  was rejected locally before installation; see the final journal entry.
+- State: the per-frame building-reconstruction diagnostic is installed and
+  verified in Frontier. Its compiled label is v0.17.0-35-g2a23ee7-dirty; use
+  that exact candidate when checking the next flight, not a later source
+  commit. The capture-specific GPU rig passes 56528 checks. Full gates are
+  incomplete: the user explicitly requested stopping reruns after an existing
+  timing test failed under parallel load. This is a diagnostic test build, not
+  a flicker fix. Exact DLL/PDB evidence is under
+  build/settlement-decisions-frontier-2a23ee7-dirty.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
   capture is landed cockpit; station rotation/on-foot still need their own
   validation. No draw suppression is active.
-- Timing: clean native W7 reports 56.700 FPS and a 17.644 ms cycle, versus
-  55.733 FPS / 17.942 ms for c1dbb76. New W8 includes exit and is not a steady
-  comparison. Last benchmark medians are CPU 12.848 and GPU 16.459 ms; these
-  are separate elapsed measurements, not exclusive CPU work or additive costs.
-  Strict sequences 11416-11969 (554 frames, caller 8652) average 4.259 ms after
-  Present: 3.281 running, 0.836 waiting, 0.142 ready, zero unknown. Native
-  call-span union is 0.093 ms/frame. Trace, reports and exact DLLs/PDBs are in
-  build/cpu-profile-frontier-5efb139-dlss. The previous c1dbb76 DLSS capture is
-  the comparator; older 2d98775 used AA off.
+- Timing (prior 5efb139 flight): clean native W7 reports 56.700 FPS and a
+  17.644 ms cycle, versus 55.733 FPS / 17.942 ms for c1dbb76. New W8 includes
+  exit and is not a steady comparison. Last benchmark medians are CPU 12.848
+  and GPU 16.459 ms; these are separate elapsed measurements, not exclusive CPU
+  work or additive costs. Strict sequences 11416-11969 (554 frames, caller
+  8652) average 4.259 ms after Present: 3.281 running, 0.836 waiting, 0.142
+  ready, zero unknown. Native call-span union is 0.093 ms/frame. Trace, reports
+  and exact DLLs/PDBs are in build/cpu-profile-frontier-5efb139-dlss. The
+  previous c1dbb76 DLSS capture is the comparator; older 2d98775 used AA off.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -46,14 +46,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: measure repeated draw-classification work in beginPanelOverride and
-  uiDepthOnEyeDraw before another state-query cache. The blend experiment
-  passed correctness checks but increased both query and setter costs in two
-  matched RTX 5090 benchmark batches; it was archived and removed. Frontier's
-  retained 5efb139 pair, loader and config pass installer verify-only. Preserve
-  draws and active motion/history behavior. Foveated-DLSS remains paused, and
-  engine-level skipping still lacks a verified semantic target. No new capture
-  is armed and this rejected candidate needs no flight.
+- Next flight: stay landed in the cockpit with DLSS on and affected buildings
+  near the centre; take one normal eye dump while switching is visible. Read
+  decisions.json and matched C/D/P/T crops for the three discriminators in the
+  final journal entry. Existing settings are preserved. Repeated draw
+  classification remains a later CPU target. The rejected blend cache remains
+  removed. Foveated-DLSS remains paused; engine-level skipping has no verified
+  target. No automatic capture is armed.
 
 ## Journal
 
@@ -2923,3 +2922,99 @@ including beginPanelOverride and uiDepthOnEyeDraw, before proposing another
 narrow getter cache. Treat sampled PCs as locations to investigate; measure
 their replacement and total call frequency before assigning savings. No Elite
 engine operation has yet been proven safe to omit.
+
+### 2026-09-18 -- per-frame building reconstruction decisions
+
+The user reports settlement buildings repeatedly appearing to gain and lose
+DLSS in the cockpit, while the on-foot display stays stable, and authorized a
+focused capture build. This takes priority over the next CPU
+micro-optimization. A successful full-frame DLSS evaluation treats the eye
+image; reaching the 512-record motion limit does not itself bypass DLSS on a
+building.
+
+The source-level distinction is useful but not a diagnosis. In
+`temporal_shader_source.h`, valid screen motion overrides the eye-space motion
+and marks the pixel as tracked foreground. The on-foot screen therefore avoids
+`backgroundHistoryHidden`, which can replace cockpit world motion with an
+offscreen lookup to force NVIDIA to reject history. Ordinary cockpit pixels
+also use the head/world distance split and depth dilation when exact motion
+does not claim them. Separately, post-DLSS UI reconstruction can replace or
+constrain trained colour where its coverage claims the pixel.
+
+Enumerate the possible failures together before changing any rendering:
+
+- Wrong or changing motion: the final head/world/body/ship/terrain/holo/mesh/
+  screen path and its physical motion disagree with the building's movement
+  between raw frames. Correct the responsible motion source or classification.
+- False history rejection: the hidden-history or screen-invalid bit appears
+  over the affected building as it loses stability. Correct the depth/history
+  decision after checking actual occlusion; do not globally disable rejection.
+- Incorrect UI coverage: pre-UI reconstructed colour is stable but the final
+  treated image changes over the building. Trace the UI producer and correct
+  the coverage; do not mask the effect with sharpening.
+
+Earlier evidence does not select a fix. Corrected alignment of eye_165144 did
+not establish excess reconstruction flicker, and its ledger kept history with
+no camera jump. The verified 81eeedb reverse flight recorded hidden-history
+sentinels on 0.187% of the landed eye (195609) and 0.002% on foot (195653), but
+these are single snapshots, without building-local attribution. They cannot
+explain a whole-building effect by themselves. The previous terrain footprint
+bug was already fixed and confirmed; do not re-propose it as a new finding.
+
+The measurement extends each paired crop with D00..D15 binary decision maps and
+P00..P15 colour before UI reconstruction. The existing T crops remain the final
+colour. A manifest ties each slot to its actual scene frame, input and output
+extents, crop origins, treatment/history state and UI mode. Missing or
+unsupported captures must be explicit. Diagnostic shader work is restricted to
+an explicitly requested capture, with production motion/history unchanged.
+
+`tools/eye_decisions.py` reads the manifest without writing files, checks the
+binary frame/format/crop contract, and reports path/rejection fractions, motion
+magnitudes and P-versus-T differences for the whole crop or an input-crop ROI.
+Fixed-raster changes are not object tracking: head motion and jitter can move
+geometry through a pixel. Raw C crops and the motion ledger remain necessary to
+test whether the vectors follow the building. Capture intervals are not
+performance measurements.
+
+Implementation uses a separately compiled MV shader variant; its capture UAV
+uses slot 7 only for the explicit full-frame NVIDIA capture. Normal fast and
+diagnostic shaders retain their existing outputs. Foveated DLSS cannot share
+that slot with its lead vectors and is explicitly unsupported by this trace.
+The manifest publishes C/D/P/T files only after successful writes, with a
+per-run taken ledger preventing an old staging texture from filling a failed
+slot. Diagnostic staging and the GPU decision texture are released after the
+run. Screen-invalid pixels have no physical correspondence: their diagnostic
+XYZ are zero and the rejection bit identifies them; the game still receives the
+original rejection sentinel.
+
+Focused validation: all five embedded temporal shader variants create on WARP;
+the screen/motion rig passes 56528 checks, including normal-versus-trace motion
+equality, hidden-history versus physical motion, screen-invalid handling and UI
+exemptions. The reader self-test covers malformed, missing and stale inputs,
+unknown/nonfinite decisions, crop mapping and bottom-up BMP row attribution.
+The first full build compiled graphics but its sandboxed test subprocesses lost
+the compiler PATH. The elevated run passed the new capture tests but an
+existing native missing-loader case missed its 100 ms startup deadline under
+eight-worker load; it passed all 247 checks in isolation. Use `EDVR_JOBS=2` in
+the build environment: the existing `--jobs` batch argument shifts `%0` before
+the runner reads its script path. The reduced-concurrency run exposed another
+existing fixture assumption: `original_draw_probe_test` searches binary source
+for literal LF sequences, but the restored local `vscreen.cpp` had CRLF. LF
+normalization leaves its Git content unchanged; the fixture then passes 620
+checks. The next full run compiled the production DLLs and reached 606 checks
+in that original-draw fixture before its asynchronous timeout case failed
+(`timeout preserves ready visibility while retiring pending statistics`). This
+was not a green full-suite result. The user explicitly requested skipping
+further reruns and proceeding to the flight; no further suite run or rebuild
+was performed.
+
+Deployment: installed the already compiled candidate with the sanctioned
+installer after dry-run, then `--verify-only` confirmed the native pair, loader
+and runtime config. Live EDVR/DLSS settings were preserved. The binary label is
+`v0.17.0-35-g2a23ee7-dirty`; committing this source afterward does not relabel
+that DLL. Graphics SHA256 is
+`f2bbcfaf23c04b6f1a7ced635b9f8fdf3e9fbb1748a52d54d42d8cc57ee43a74`; runtime
+SHA256 is `c418955d6e33f23af977ebb70e9c5c76d2ee8cd6ceda0a1ceee89d873a590d27`.
+The exact binaries/PDBs and provenance manifest are retained in
+`build/settlement-decisions-frontier-2a23ee7-dirty`. The next flight needs one
+paired capture of the visible cockpit failure; it is not a performance run.

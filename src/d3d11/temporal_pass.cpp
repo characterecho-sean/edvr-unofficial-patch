@@ -344,6 +344,10 @@ struct EyeState {
     // rest of the dl set.
     ID3D11Texture2D*           dlMvLead = nullptr;
     ID3D11UnorderedAccessView* dlMvLeadUav = nullptr;
+    // Exists only while an explicit eye run asks for the capture-only mv
+    // variant. Its u7 replaces (never aliases) the fovea lead UAV.
+    ID3D11Texture2D*           dlDecision = nullptr;
+    ID3D11UnorderedAccessView* dlDecisionUav = nullptr;
     ID3D11Texture2D*           dlDepth = nullptr;
     ID3D11UnorderedAccessView* dlDepthUav = nullptr;
     ID3D11ShaderResourceView*  dlDepthSrv = nullptr;
@@ -483,10 +487,12 @@ void releaseDl(EyeState& e) {
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
     if (e.dlMvLeadUav) { e.dlMvLeadUav->Release(); e.dlMvLeadUav = nullptr; }
+    if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
     if (e.dlDepthUav) { e.dlDepthUav->Release(); e.dlDepthUav = nullptr; }
     if (e.dlColour) { e.dlColour->Release(); e.dlColour = nullptr; }
     if (e.dlMv) { e.dlMv->Release(); e.dlMv = nullptr; }
     if (e.dlMvLead) { e.dlMvLead->Release(); e.dlMvLead = nullptr; }
+    if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision = nullptr; }
     if (e.dlDepth) { e.dlDepth->Release(); e.dlDepth = nullptr; }
     if (e.dlOutUav) { e.dlOutUav->Release(); e.dlOutUav = nullptr; }
     if (e.dlOutSrv) { e.dlOutSrv->Release(); e.dlOutSrv = nullptr; }
@@ -1290,6 +1296,8 @@ ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for
 bool                       g_csMvTried = false;
 ID3D11ComputeShader*       g_csMvFast = nullptr;
 bool                       g_csMvFastTried = false;
+ID3D11ComputeShader*       g_csMvTrace = nullptr;
+bool                       g_csMvTraceTried = false;
 bool                       g_diagnostics = false;
 
 ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
@@ -1572,12 +1580,17 @@ ID3D11Texture2D* g_eyeRawStaging[kEyeRun] = {};
 bool             g_eyeRunTreated = false;
 bool             g_eyeRunPaired = true; // matching input/output sequence, default for new captures
 ID3D11Texture2D* g_eyeTreatedStaging[kEyeRun] = {};
+ID3D11Texture2D* g_eyeDecisionStaging[kEyeRun] = {};
+ID3D11Texture2D* g_eyePreUiStaging[kEyeRun] = {};
 int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
 wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
+bool             g_eyeTreatedWritten[kEyeRun] = {};
+bool             g_eyeTreatedTaken[kEyeRun] = {};
+bool             g_eyeRawWritten[kEyeRun] = {};
 constexpr int kEyeInputs=19;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
@@ -1594,6 +1607,17 @@ bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
 uint32_t         g_eyeRawInputW[kEyeRun] = {}, g_eyeRawInputH[kEyeRun] = {};
 uint32_t         g_eyeCaptureFrame = 0; // current scene frame, stamped before treatment
+enum class EyeUiMode : uint8_t { None, Legacy, Separated, Deferred };
+struct EyeDecisionFrame {
+    uint32_t frame = 0, diagnosticFrame = 0;
+    uint32_t inputW = 0, inputH = 0, outputW = 0, outputH = 0;
+    uint32_t decisionCrop[4] = {}, outputCrop[4] = {};
+    bool diagnostic = false, preUi = false, dlssSuccess = false;
+    bool dlssHistory = false, dlssReset = false;
+    EyeUiMode uiMode = EyeUiMode::None;
+    const char* error = "capture_not_reached";
+};
+EyeDecisionFrame g_eyeDecisions[kEyeRun] = {};
 struct EyeMotionTrace {
     uint32_t frame, eye, flags, outputWidth, outputHeight;
     bool bodyValid, rowsOk, jumped, dlHistory;
@@ -1957,6 +1981,14 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
     g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags)|(separated?64u:0u);
 }
+ID3D11ComputeShader* motionTraceShader(ID3D11DeviceContext* ctx) {
+    if (!g_csMvTrace && !g_csMvTraceTried) {
+        g_csMvTraceTried = true;
+        g_csMvTrace = shaderSwapCreateCs(ctx, kTemporalMvTraceBytecode,
+            sizeof(kTemporalMvTraceBytecode), "temporal_mv_trace_cs", "temporal aa capture");
+    }
+    return g_csMvTrace;
+}
 
 void writeJsonFloat(FILE* f,float value) {
     if(std::isfinite(value))fprintf(f,"%.9g",value);else fputs("null",f);
@@ -2105,7 +2137,8 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
 
 bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D** slot, uint32_t* cwOut,
                   uint32_t* chOut, const uint32_t* region = nullptr,
-                  uint32_t wantW = kEyeCrop, uint32_t wantH = kEyeCrop) {
+                  uint32_t wantW = kEyeCrop, uint32_t wantH = kEyeCrop,
+                  uint32_t* xOut = nullptr, uint32_t* yOut = nullptr) {
     D3D11_TEXTURE2D_DESC d{};
     tex->GetDesc(&d);
     const uint32_t width = region ? region[2] - region[0] : d.Width;
@@ -2152,7 +2185,129 @@ bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2
     ctx->CopySubresourceRegion(*slot, 0, 0, 0, 0, tex, 0, &box);
     *cwOut = cw;
     *chOut = ch;
+    if (xOut) *xOut = box.left;
+    if (yOut) *yOut = box.top;
     return true;
+}
+
+void eyeOutputCropSize(int k, ID3D11Texture2D* output, uint32_t* wantW, uint32_t* wantH) {
+    *wantW = kEyeCrop;
+    *wantH = kEyeCrop;
+    if (k < 0 || k >= kEyeRun || !output || !g_eyeRunPaired || !g_eyeRawTaken[k] ||
+        !g_eyeRawInputW[k] || !g_eyeRawInputH[k]) return;
+    D3D11_TEXTURE2D_DESC raw{}, out{};
+    g_eyeRawStaging[k]->GetDesc(&raw);
+    output->GetDesc(&out);
+    *wantW = static_cast<uint32_t>((static_cast<uint64_t>(raw.Width) * out.Width +
+                                    g_eyeRawInputW[k] - 1) / g_eyeRawInputW[k]);
+    *wantH = static_cast<uint32_t>((static_cast<uint64_t>(raw.Height) * out.Height +
+                                    g_eyeRawInputH[k] - 1) / g_eyeRawInputH[k]);
+}
+
+const char* eyeUiModeName(EyeUiMode mode) {
+    switch (mode) {
+    case EyeUiMode::Legacy: return "legacy";
+    case EyeUiMode::Separated: return "separated";
+    case EyeUiMode::Deferred: return "deferred";
+    default: return "none";
+    }
+}
+
+bool writeEyeDecisionBin(ID3D11DeviceContext* ctx, ID3D11Texture2D* texture,
+                         uint32_t frame, const wchar_t* path) {
+    if (!ctx || !texture) return false;
+    D3D11_TEXTURE2D_DESC d{};
+    texture->GetDesc(&d);
+    if (d.Format != DXGI_FORMAT_R32G32B32A32_FLOAT) return false;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (FAILED(ctx->Map(texture, 0, D3D11_MAP_READ, 0, &map))) return false;
+    FILE* f = nullptr;
+    _wfopen_s(&f, path, L"wb");
+    bool ok = f != nullptr;
+    if (f) {
+        const uint32_t rowBytes = d.Width * 16;
+        const uint32_t header[9] = {1, d.Width, d.Height, static_cast<uint32_t>(d.Format),
+                                    rowBytes, frame, 0, 0, 0};
+        ok = fwrite("EDVRTEX1", 1, 8, f) == 8 && fwrite(header, sizeof(header), 1, f) == 1;
+        for (uint32_t y = 0; y < d.Height && ok; ++y)
+            ok = fwrite(static_cast<const char*>(map.pData) + y * map.RowPitch,
+                        1, rowBytes, f) == rowBytes;
+        if (fclose(f) != 0) ok = false;
+    }
+    ctx->Unmap(texture, 0);
+    return ok;
+}
+
+void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir) {
+    for (int k = 0; k < g_eyeRunTaken; ++k) {
+        EyeDecisionFrame& d = g_eyeDecisions[k];
+        wchar_t path[MAX_PATH];
+        if (d.preUi && g_eyePreUiStaging[k]) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_P%02d.bmp", dir.c_str(), g_eyeRunStamp, k);
+            D3D11_TEXTURE2D_DESC desc{}; g_eyePreUiStaging[k]->GetDesc(&desc);
+            if (!writeEyeBmp(ctx, g_eyePreUiStaging[k], desc, 0, path)) {
+                d.preUi = false;
+                d.error = "pre_ui_write_failed";
+            }
+        }
+        if (d.diagnostic && g_eyeDecisionStaging[k]) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_D%02d.bin", dir.c_str(), g_eyeRunStamp, k);
+            if (!writeEyeDecisionBin(ctx, g_eyeDecisionStaging[k], d.diagnosticFrame, path)) {
+                d.diagnostic = false;
+                d.error = "decision_write_failed";
+            }
+        }
+        if (d.diagnostic && d.preUi && g_eyeRawWritten[k] && g_eyeTreatedWritten[k] && d.dlssSuccess) d.error = "";
+        if (g_eyePreUiStaging[k]) { g_eyePreUiStaging[k]->Release(); g_eyePreUiStaging[k]=nullptr; }
+        if (g_eyeDecisionStaging[k]) { g_eyeDecisionStaging[k]->Release(); g_eyeDecisionStaging[k]=nullptr; }
+    }
+    wchar_t manifest[MAX_PATH];
+    _snwprintf_s(manifest, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_decisions.json", dir.c_str(), g_eyeRunStamp);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, manifest, L"wb") || !f) {
+        Log::get().note("eye capture: could not write decision manifest %ls.", manifest);
+        for (EyeState& e : g_eye) {
+            if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav=nullptr; }
+            if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision=nullptr; }
+        }
+        return;
+    }
+    fprintf(f, "{\n  \"schema\": 1,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n  \"frames\": [\n",
+            g_eyeRunStamp, kEyeRun);
+    for (int k = 0; k < g_eyeRunTaken; ++k) {
+        const EyeDecisionFrame& d = g_eyeDecisions[k];
+        fprintf(f, "    {\"index\": %d, \"frame\": %u, \"diagnostic_frame\": %u, ",
+                k, d.frame, d.diagnosticFrame);
+        fprintf(f, "\"input_size\": [%u, %u], \"decision_crop\": [%u, %u, %u, %u], ",
+                d.inputW, d.inputH, d.decisionCrop[0], d.decisionCrop[1],
+                d.decisionCrop[2], d.decisionCrop[3]);
+        fprintf(f, "\"output_size\": [%u, %u], \"output_crop\": [%u, %u, %u, %u], ",
+                d.outputW, d.outputH, d.outputCrop[0], d.outputCrop[1],
+                d.outputCrop[2], d.outputCrop[3]);
+        if (d.diagnostic) fprintf(f, "\"decision_file\": \"eye_%ls_D%02d.bin\", ", g_eyeRunStamp, k);
+        else fputs("\"decision_file\": null, ", f);
+        if (d.preUi) fprintf(f, "\"pre_ui_file\": \"eye_%ls_P%02d.bmp\", ", g_eyeRunStamp, k);
+        else fputs("\"pre_ui_file\": null, ", f);
+        if (g_eyeRawWritten[k]) fprintf(f, "\"raw_file\": \"eye_%ls_C%02d.bmp\", ", g_eyeRunStamp, k);
+        else fputs("\"raw_file\": null, ", f);
+        if (g_eyeTreatedWritten[k]) fprintf(f, "\"treated_file\": \"eye_%ls_T%02d.bmp\", ", g_eyeRunStamp, k);
+        else fputs("\"treated_file\": null, ", f);
+        fprintf(f, "\"ui_mode\": \"%s\", \"dlss_success\": %s, \"dlss_history\": %s, "
+                   "\"dlss_reset\": %s, \"error\": \"%s\"}%s\n",
+                eyeUiModeName(d.uiMode), d.dlssSuccess ? "true" : "false",
+                d.dlssHistory ? "true" : "false", d.dlssReset ? "true" : "false",
+                d.error ? d.error : "", k + 1 == g_eyeRunTaken ? "" : ",");
+    }
+    fputs("  ]\n}\n", f);
+    const bool clean = !ferror(f);
+    const int closed = fclose(f);
+    const bool ok = clean && closed == 0;
+    Log::get().note("eye capture: per-frame DLSS decision manifest %ls: %s.", manifest,
+                    ok ? "written" : "write failed");
+    for (EyeState& e : g_eye) {
+        if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav=nullptr; }
+        if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision=nullptr; }
+    }
 }
 
 // The run's write after its last crop: the sixteen crops (raw C00.., or
@@ -2169,17 +2324,25 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
     ID3D11Texture2D** ring = treated ? g_eyeTreatedStaging : g_eyeRawStaging;
     int wrote = 0, wroteTreated = 0;
     for (int i = 0; i < g_eyeRunTaken; ++i) {
-        if (!ring[i]) continue;
         wchar_t path[MAX_PATH];
-        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_%c%02d.bmp", dir.c_str(), g_eyeRunStamp,
-                     treated ? L'T' : L'C', i);
         D3D11_TEXTURE2D_DESC sd{};
-        ring[i]->GetDesc(&sd);
-        if (writeEyeBmp(ctx, ring[i], sd, 0, path)) ++wrote;
+        if (ring[i] && (!treated || g_eyeTreatedTaken[i])) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_%c%02d.bmp", dir.c_str(), g_eyeRunStamp,
+                         treated ? L'T' : L'C', i);
+            ring[i]->GetDesc(&sd);
+            const bool wroteImage = writeEyeBmp(ctx, ring[i], sd, 0, path);
+            if (wroteImage) ++wrote;
+            if (treated) {
+                g_eyeTreatedWritten[i] = wroteImage;
+                if (!wroteImage) g_eyeDecisions[i].error="treated_write_failed";
+            }
+        }
         if (paired && g_eyeRawTaken[i] && g_eyeRawStaging[i]) {
             _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_C%02d.bmp", dir.c_str(), g_eyeRunStamp, i);
             g_eyeRawStaging[i]->GetDesc(&sd);
-            if (writeEyeBmp(ctx, g_eyeRawStaging[i], sd, 0, path)) ++wroteTreated;
+            g_eyeRawWritten[i] = writeEyeBmp(ctx, g_eyeRawStaging[i], sd, 0, path);
+            if (g_eyeRawWritten[i]) ++wroteTreated;
+            else g_eyeDecisions[i].error="raw_write_failed";
         }
     }
     if (g_eyeRunStaging[0]) {
@@ -2205,6 +2368,7 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
         Log::get().note("eye capture: AA off; %d untreated crops C00..%02d (%ux%u), left/right overviews and capture.csv written for run %ls.",
                         wrote,g_eyeRunTaken-1,cw,ch,g_eyeRunStamp);
     } else if (g_eyeRunPaired) {
+        writeEyeDecisionArtifacts(ctx, dir);
         writeEyeMotionTrace(dir);
         Log::get().note("temporal aa: paired eye run %ls: %d treated crops T00..%02d (%ux%u), "
                         "%d raw crops plus overview written. C and T share scene-frame IDs in "
@@ -2282,20 +2446,27 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
         return;
     }
     const int k = g_eyeRunTaken;
-    if (!tex || k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
+    if (!tex || k < 0 || k >= kEyeRun) {
+        if (k >= 0 && k < kEyeRun) ++g_eyeRunTaken;
+        g_eyeRunLeft = 0; g_eyeRunReady = g_eyeRunTaken > 0; return;
+    }
     if (k == 0) stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
     uint32_t cw = 0, ch = 0;
-    uint32_t wantW=kEyeCrop, wantH=kEyeCrop;
-    if (g_eyeRunPaired && g_eyeRawTaken[k] && g_eyeRawInputW[k] && g_eyeRawInputH[k]) {
-        // Under DLSS, 1400 output pixels show less of the scene than 1400
-        // input pixels. Preserve angular coverage so both sequences include
-        // the same station panels. Each image retains its native scale.
-        D3D11_TEXTURE2D_DESC raw{}, output{};
-        g_eyeRawStaging[k]->GetDesc(&raw); tex->GetDesc(&output);
-        wantW=static_cast<uint32_t>((static_cast<uint64_t>(raw.Width)*output.Width+g_eyeRawInputW[k]-1)/g_eyeRawInputW[k]);
-        wantH=static_cast<uint32_t>((static_cast<uint64_t>(raw.Height)*output.Height+g_eyeRawInputH[k]-1)/g_eyeRawInputH[k]);
+    uint32_t wantW=0, wantH=0, cropX=0, cropY=0;
+    eyeOutputCropSize(k, tex, &wantW, &wantH);
+    if (!stageEyeCrop(ctx, tex, &g_eyeTreatedStaging[k], &cw, &ch, nullptr, wantW, wantH,
+                      &cropX, &cropY)) {
+        g_eyeDecisions[k].error="treated_stage_failed";
+        ++g_eyeRunTaken; g_eyeRunLeft = 0; g_eyeRunReady = true; return;
     }
-    if (!stageEyeCrop(ctx, tex, &g_eyeTreatedStaging[k], &cw, &ch, nullptr, wantW, wantH)) { g_eyeRunLeft = 0; return; }
+    EyeDecisionFrame& decision = g_eyeDecisions[k];
+    if (decision.preUi && (decision.outputCrop[0]!=cropX || decision.outputCrop[1]!=cropY ||
+                           decision.outputCrop[2]!=cw || decision.outputCrop[3]!=ch)) {
+        decision.preUi=false;decision.error="pre_ui_crop_mismatch";
+    }
+    decision.outputCrop[0]=cropX;decision.outputCrop[1]=cropY;
+    decision.outputCrop[2]=cw;decision.outputCrop[3]=ch;
+    g_eyeTreatedTaken[k]=true;
     g_eyeRunFrames[k] = g_eyeCaptureFrame;
     objectProbeLedgerMark(k);
     ++g_eyeRunTaken;
@@ -2689,6 +2860,21 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt,
         }
     }
     return true;
+}
+
+bool ensureDecisionTexture(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+    if (e.dlDecision) {
+        D3D11_TEXTURE2D_DESC d{}; e.dlDecision->GetDesc(&d);
+        if (d.Width == w && d.Height == h && d.Format == DXGI_FORMAT_R32G32B32A32_FLOAT &&
+            e.dlDecisionUav) return true;
+        if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
+        e.dlDecision->Release(); e.dlDecision = nullptr;
+    }
+    if (makeTex(dev, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                D3D11_BIND_UNORDERED_ACCESS, &e.dlDecision, nullptr, &e.dlDecisionUav)) return true;
+    if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
+    if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision = nullptr; }
+    return false;
 }
 
 // The mask NVIDIA is handed is R8_UNORM written from a compute shader,
@@ -4280,6 +4466,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 uint32_t cw = 0, ch = 0;
                 g_eyeRawTaken[g_eyeRunTaken] = stageEyeCrop(ctx, src, &g_eyeRawStaging[g_eyeRunTaken], &cw, &ch, region);
                 g_eyeRawInputW[g_eyeRunTaken]=w; g_eyeRawInputH[g_eyeRunTaken]=h;
+                EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
+                decision = {};
+                decision.frame = g_rowsFrame;
+                g_eyeRunFrames[g_eyeRunTaken] = g_rowsFrame;
+                decision.inputW = w; decision.inputH = h;
+                decision.outputW = outW ? outW : w; decision.outputH = outH ? outH : h;
+                decision.decisionCrop[0] = (w - (w < kEyeCrop ? w : kEyeCrop)) / 2;
+                decision.decisionCrop[1] = (h - (h < kEyeCrop ? h : kEyeCrop)) / 2;
+                decision.decisionCrop[2] = w < kEyeCrop ? w : kEyeCrop;
+                decision.decisionCrop[3] = h < kEyeCrop ? h : kEyeCrop;
+                decision.dlssHistory = e.dlHaveHistory;
+                decision.error = "dlss_capture_unavailable";
             }
             if (g_eyeMotionTraceCount < kEyeRun * 4) {
                 EyeMotionTrace& t = g_eyeMotionTrace[g_eyeMotionTraceCount++];
@@ -4754,6 +4952,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 e.dlMvLead->Release();
                 e.dlMvLead = nullptr;
             }
+        } else if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
+            g_eyeDecisions[g_eyeRunTaken].error = "foveated_trace_unsupported";
         }
 
         bool usedDlaa = false;
@@ -4961,6 +5161,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             } else {
                 ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
+                const bool traceRequested = eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 &&
+                                            g_eyeRunTaken < kEyeRun && !amdEngine;
                 // The size to come back at: the frame's own, or the larger
                 // one asked for (DLSS proper).
                 const uint32_t oW = (outW && outH && (outW != w || outH != h)) ? outW : w;
@@ -5010,6 +5212,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 } else if (made && (haveDepth || g_moversOn) && (!e.zPrev || (g_moversOn && !e.dlMask))) {
                     ensureMoverPair(dev, e, w, h, g_moversOn);   // depth became available under a live set
+                }
+                bool traceReady = false;
+                if (traceRequested && made) {
+                    ID3D11ComputeShader* traceCs = motionTraceShader(ctx);
+                    traceReady = traceCs && ensureDecisionTexture(dev, e, w, h);
+                    if (traceReady) mvCs = traceCs;
+                    else g_eyeDecisions[g_eyeRunTaken].error = traceCs ? "decision_texture_unavailable"
+                                                                       : "decision_shader_unavailable";
+                } else if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 &&
+                           g_eyeRunTaken < kEyeRun && amdEngine) {
+                    g_eyeDecisions[g_eyeRunTaken].error = "non_nvidia_trace_unsupported";
                 }
                 if (made && setParams(ctx, p)) {
                     const bool debugPaint = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 || g_debugMode == 5;
@@ -5125,9 +5338,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[17] = {};
-                    ID3D11UnorderedAccessView* nullUavM[7] = {};
+                    ID3D11UnorderedAccessView* nullUavM[8] = {};
+                    ID3D11UnorderedAccessView* savedTraceUav = nullptr;
+                    if (traceReady) ctx->CSGetUnorderedAccessViews(7, 1, &savedTraceUav);
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[17] = {deferredInput?e.dlColourSrv:separated?separatedCandidate.colourView:inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
@@ -5138,19 +5353,35 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
                                                           uiTrack && !deferredInput && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1]};
-                    ID3D11UnorderedAccessView* uavsM[7] = {debugPaint ? e.dlOutUav : nullptr,
+                    ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
-                                                            uiTrack && !uiResolve && !deferredInput ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
+                                                            uiTrack && !uiResolve && !deferredInput ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
+                                                            traceReady ? e.dlDecisionUav : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
                     ctx->CSSetShaderResources(0, 17, srvsM);
-                    ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
+                    ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     ctx->CSSetShaderResources(0, 17, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
+                    if (traceReady) {
+                        EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
+                        uint32_t cw=0,ch=0,cx=0,cy=0;
+                        if (stageEyeCrop(ctx,e.dlDecision,&g_eyeDecisionStaging[g_eyeRunTaken],&cw,&ch,
+                                         nullptr,kEyeCrop,kEyeCrop,&cx,&cy)) {
+                            decision.diagnostic=true;decision.diagnosticFrame=g_rowsFrame;
+                            decision.decisionCrop[0]=cx;decision.decisionCrop[1]=cy;
+                            decision.decisionCrop[2]=cw;decision.decisionCrop[3]=ch;
+                            decision.error="dlss_treatment_failed";
+                        } else decision.error="decision_stage_failed";
+                    }
+                    if (traceReady) {
+                        ctx->CSSetUnorderedAccessViews(7,1,&savedTraceUav,nullptr);
+                        if(savedTraceUav)savedTraceUav->Release();
+                    }
                     endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve && !deferredInput) uiEvidenceWritten = true;
@@ -5165,6 +5396,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // rebuilt textures, or a frame the pass's own history ran in
                     // between -- never every frame (the review's F1, 2026-09-04).
                     const bool resetHist = (flags & 1u) != 0 || !e.dlHaveHistory;
+                    if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
+                        g_eyeDecisions[g_eyeRunTaken].dlssReset = resetHist;
+                        g_eyeDecisions[g_eyeRunTaken].dlssHistory = !resetHist;
+                    }
                     trace.events |= 8u | (resetHist?16u:0u);
                     if (resetHist) {
                         ++g_dlResets;
@@ -5319,6 +5554,24 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const bool captureResolve=eye==0 && g_eyeRunLeft>0 && g_eyeRunTaken==0 &&
                         g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame && !g_eyeInputs[13];
                     if(usedDlaa && captureResolve)stageEyeRun(ctx,e.dlOut,g_eyeInputs,13);
+                    if (usedDlaa && eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 &&
+                        g_eyeRunTaken < kEyeRun) {
+                        EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
+                        decision.dlssSuccess = !amdEngine && !debugPaint;
+                        decision.outputW = oW; decision.outputH = oH;
+                        decision.uiMode = deferredInput ? EyeUiMode::Deferred
+                                          : separated ? EyeUiMode::Separated
+                                          : applyLegacyResolve ? EyeUiMode::Legacy
+                                                               : EyeUiMode::None;
+                        uint32_t wantW=0,wantH=0,cw=0,ch=0,cx=0,cy=0;
+                        eyeOutputCropSize(g_eyeRunTaken,e.dlOut,&wantW,&wantH);
+                        if (stageEyeCrop(ctx,e.dlOut,&g_eyePreUiStaging[g_eyeRunTaken],&cw,&ch,
+                                         nullptr,wantW,wantH,&cx,&cy)) {
+                            decision.preUi=true;
+                            decision.outputCrop[0]=cx;decision.outputCrop[1]=cy;
+                            decision.outputCrop[2]=cw;decision.outputCrop[3]=ch;
+                        } else decision.error="pre_ui_stage_failed";
+                    }
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
                     // applyUiResolve (shared with the fovea path, above) folds
@@ -7307,6 +7560,8 @@ void temporalPassShutdown() {
     fsr3Shutdown();
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
+    if (g_csMvTrace) { g_csMvTrace->Release(); g_csMvTrace = nullptr; }
+    g_csMvTraceTried = false;
     if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }
     if (g_csFovea) { g_csFovea->Release(); g_csFovea = nullptr; }
     if (g_csUiResolve) { g_csUiResolve->Release(); g_csUiResolve=nullptr; }
@@ -7337,6 +7592,8 @@ void temporalPassShutdown() {
     for (int k = 0; k < kEyeRun; ++k) {
         if (g_eyeRawStaging[k]) { g_eyeRawStaging[k]->Release(); g_eyeRawStaging[k] = nullptr; }
         if (g_eyeTreatedStaging[k]) { g_eyeTreatedStaging[k]->Release(); g_eyeTreatedStaging[k] = nullptr; }
+        if (g_eyeDecisionStaging[k]) { g_eyeDecisionStaging[k]->Release(); g_eyeDecisionStaging[k] = nullptr; }
+        if (g_eyePreUiStaging[k]) { g_eyePreUiStaging[k]->Release(); g_eyePreUiStaging[k] = nullptr; }
     }
     g_eyeRunLeft = 0;
     g_eyeRunTaken = 0;
@@ -7346,6 +7603,10 @@ void temporalPassShutdown() {
     g_meshFallbackSnapshot=MeshFallbackSnapshot{};
     g_eyeRunUntreated=false;
     memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
+    memset(g_eyeTreatedWritten,0,sizeof(g_eyeTreatedWritten));
+    memset(g_eyeTreatedTaken,0,sizeof(g_eyeTreatedTaken));
+    memset(g_eyeRawWritten,0,sizeof(g_eyeRawWritten));
+    for(int k=0;k<kEyeRun;++k) g_eyeDecisions[k]=EyeDecisionFrame{};
     for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
     g_frameBodyValid = false;
     g_frameBodyFrame = ~0u;
@@ -7397,6 +7658,14 @@ void temporalPassArmEyeDump() {
     g_meshFallbackSnapshot=MeshFallbackSnapshot{};
     g_eyeRunUntreated=false;
     memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
+    memset(g_eyeTreatedWritten,0,sizeof(g_eyeTreatedWritten));
+    memset(g_eyeTreatedTaken,0,sizeof(g_eyeTreatedTaken));
+    memset(g_eyeRawWritten,0,sizeof(g_eyeRawWritten));
+    for(int k=0;k<kEyeRun;++k) {
+        if(g_eyeDecisionStaging[k]){g_eyeDecisionStaging[k]->Release();g_eyeDecisionStaging[k]=nullptr;}
+        if(g_eyePreUiStaging[k]){g_eyePreUiStaging[k]->Release();g_eyePreUiStaging[k]=nullptr;}
+        g_eyeDecisions[k]=EyeDecisionFrame{};
+    }
     for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
     memset(g_eyeRawTaken, 0, sizeof(g_eyeRawTaken));
     memset(g_eyeRawInputW, 0, sizeof(g_eyeRawInputW));

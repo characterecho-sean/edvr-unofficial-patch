@@ -10,7 +10,9 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     const EmbeddedShader embedded[] = {
         {edvr::kTemporalMvFastBytecode, sizeof(edvr::kTemporalMvFastBytecode), "temporal_mv_fast_cs"},
         {edvr::kTemporalMvBytecode, sizeof(edvr::kTemporalMvBytecode), "temporal_mv_cs"},
-        {edvr::kTemporalAaBytecode, sizeof(edvr::kTemporalAaBytecode), "temporal_aa_cs"}
+        {edvr::kTemporalMvTraceBytecode, sizeof(edvr::kTemporalMvTraceBytecode), "temporal_mv_trace_cs"},
+        {edvr::kTemporalAaBytecode, sizeof(edvr::kTemporalAaBytecode), "temporal_aa_cs"},
+        {edvr::kTemporalAaFastBytecode, sizeof(edvr::kTemporalAaFastBytecode), "temporal_aa_fast_cs"}
     };
     for (const auto& blob : embedded) {
         ComPtr<ID3D11ComputeShader> shader;
@@ -39,10 +41,13 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
           "float2 pp;float zp;bool ok=holoPixel(float2(id.xy),jit.xy,pp,zp);"
           "O[id.xy]=float4(pp,zp,ok?1:0);}";
     auto mvCode=compile(hlsl.c_str(),"cs_5_0","mv");
+    const std::string traceHlsl="#define EDVR_TEMPORAL_TRACE 1\n"+hlsl;
+    auto traceCode=compile(traceHlsl.c_str(),"cs_5_0","mv");
     auto nativeCode=compile(hlsl.c_str(),"cs_5_0","screenTest");
     auto mode5Code=compile(hlsl.c_str(),"cs_5_0","mode5Test");
-    ComPtr<ID3D11ComputeShader> mv,native,mode5;
+    ComPtr<ID3D11ComputeShader> mv,mvTrace,native,mode5;
     hr(dev->CreateComputeShader(mvCode->GetBufferPointer(),mvCode->GetBufferSize(),nullptr,&mv));
+    hr(dev->CreateComputeShader(traceCode->GetBufferPointer(),traceCode->GetBufferSize(),nullptr,&mvTrace));
     hr(dev->CreateComputeShader(nativeCode->GetBufferPointer(),nativeCode->GetBufferSize(),nullptr,&native));
     hr(dev->CreateComputeShader(mode5Code->GetBufferPointer(),mode5Code->GetBufferSize(),nullptr,&mode5));
     ComPtr<ID3D11ShaderReflection> reflection;
@@ -78,11 +83,13 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     auto depth=texture(8,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_UNORDERED_ACCESS);
     auto mask=texture(8,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_UNORDERED_ACCESS);
     auto result=texture(8,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D11_BIND_UNORDERED_ACCESS);
+    auto decision=texture(8,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D11_BIND_UNORDERED_ACCESS);
     ComPtr<ID3D11ShaderResourceView> ms,zs;
     hr(dev->CreateShaderResourceView(map.Get(),nullptr,&ms));hr(dev->CreateShaderResourceView(scene.Get(),nullptr,&zs));
-    ComPtr<ID3D11UnorderedAccessView> mu,zu,ku,ru;
+    ComPtr<ID3D11UnorderedAccessView> mu,zu,ku,ru,du;
     hr(dev->CreateUnorderedAccessView(motion.Get(),nullptr,&mu));hr(dev->CreateUnorderedAccessView(depth.Get(),nullptr,&zu));
     hr(dev->CreateUnorderedAccessView(mask.Get(),nullptr,&ku));hr(dev->CreateUnorderedAccessView(result.Get(),nullptr,&ru));
+    hr(dev->CreateUnorderedAccessView(decision.Get(),nullptr,&du));
     std::vector<float> pixels(16*16*4,0),z(16*16,.25f);
     ctx->UpdateSubresource(scene.Get(),0,nullptr,z.data(),16*4,0);
     D3D11_SAMPLER_DESC sd{};sd.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -102,11 +109,27 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
         ID3D11UnorderedAccessView* uavs[3]={mu.Get(),zu.Get(),ku.Get()};ctx->CSSetUnorderedAccessViews(3,3,uavs,nullptr);
         ctx->CSSetShader(mv.Get(),nullptr,0);ctx->Dispatch(1,1,1);
         auto m=read(dev,ctx,motion.Get()),d=read(dev,ctx,depth.Get()),k=read(dev,ctx,mask.Get());
+        ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+        ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(14,1,ms.GetAddressOf());
+        ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
+        ID3D11UnorderedAccessView* traceOutputs[5]={mu.Get(),zu.Get(),ku.Get(),nullptr,du.Get()};
+        ctx->CSSetUnorderedAccessViews(3,5,traceOutputs,nullptr);ctx->CSSetShader(mvTrace.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+        auto tracedMotion=read(dev,ctx,motion.Get()),decisions=read(dev,ctx,decision.Get());
+        check(tracedMotion==m,"capture-only trace variant preserves production motion output");
         for(int y=0;y<8;++y)for(int x=0;x<8;++x){unsigned i=y*8+x;bool screen=enabled && valid && x>0;
             float mx=screen?(valid!=2?1.0f:16.0f):0.0f,my=screen?(valid!=2?-1.0f:16.0f):0.0f;
             check(std::fabs(m[2*i]-mx)<1e-5f && std::fabs(m[2*i+1]-my)<1e-5f,"DLSS consumes screen motion once with correct jitter and coverage");
             check(std::fabs(d[i]-(screen?.005f:.25f))<1e-6f,"DLSS consumes exact source depth only inside screen");
             if(screen)check(k[i]==0,"screen bypasses unrelated eye-space mover rejection");
+            const UINT bits=UINT(decisions[4*i+3]+.5f);
+            if(screen) {
+                check((bits&15u)==10u,"trace labels the final screen path");
+                check(((bits&32u)!=0)==(valid==2),"trace distinguishes invalid screen history");
+                check(((bits&1024u)!=0)==(valid!=2),"trace projection-valid bit follows screen validity");
+                check(std::fabs(decisions[4*i]-(valid==2?0.0f:1.0f))<1e-5f &&
+                      std::fabs(decisions[4*i+1]-(valid==2?0.0f:-1.0f))<1e-5f && decisions[4*i+2]==0,
+                      "trace records physical screen motion and zeroes invalid correspondence");
+            } else check((bits&15u)==1u && (bits&1024u)!=0,"trace labels valid head fallback");
         }
         ID3D11UnorderedAccessView* empty[3]{};ctx->CSSetUnorderedAccessViews(3,3,empty,nullptr);
         ctx->CSSetUnorderedAccessViews(0,1,ru.GetAddressOf(),nullptr);ctx->CSSetShader(native.Get(),nullptr,0);ctx->Dispatch(1,1,1);
@@ -208,6 +231,26 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
                   "DLSS background rejection respects depth, jitter, continuity, bounds, UI and screens");
             check(std::fabs(depths[at]-(test==7?.005f:z[7*16+6]))<1e-6,
                   "history rejection never changes current DLSS depth");
+            if(variant==0 && (test==1 || test==5 || test==6 || test==7)) {
+                ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+                ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(3,1,previousView.GetAddressOf());
+                ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());ctx->CSSetShaderResources(14,1,ms.GetAddressOf());
+                ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
+                ID3D11UnorderedAccessView* traced[5]={mu.Get(),zu.Get(),ku.Get(),nullptr,du.Get()};
+                ctx->CSSetUnorderedAccessViews(3,5,traced,nullptr);ctx->CSSetShader(mvTrace.Get(),nullptr,0);ctx->Dispatch(1,1,1);
+                auto tracedMv=read(dev,ctx,motion.Get()),decisionPixels=read(dev,ctx,decision.Get());
+                check(tracedMv==m,"trace side channel leaves hidden/UI/screen production MV unchanged");
+                const UINT bits=UINT(decisionPixels[4*at+3]+.5f);
+                if(test==1) {
+                    check((bits&16u)!=0 && (bits&15u)==1u,"trace exposes forced hidden-history miss on head path");
+                    check(std::fabs(decisionPixels[4*at]-2.0f)<1e-5f && std::fabs(decisionPixels[4*at+1])<1e-5f,
+                          "trace keeps physical motion beside hidden sentinel production MV");
+                } else if(test==5 || test==6) {
+                    check((bits&64u)!=0 && (bits&16u)==0,"trace labels current UI and its hidden-history exemption");
+                } else {
+                    check((bits&15u)==10u && (bits&512u)!=0,"trace labels tracked screen override");
+                }
+            }
             floats("dR0",1,0,-.5f,0);
         }
     }
