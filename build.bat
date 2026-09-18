@@ -8,7 +8,8 @@ REM    build\d3d11.dll        native OpenXR graphics and fixes
 REM    build\openvr_api.dll   native OpenXR compatibility ABI for Elite
 REM    build\openxr_loader.dll   pinned Khronos loader; Windows selects runtime
 REM
-REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
+REM  Needs Visual Studio 2022 C++ and Python with Pillow (the eye_draw_snapshot
+REM  rig's self-test exports PNGs through it). Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
 REM
 REM  Usage:  build.bat [--clean] [--jobs N] [--installer-only] [--keep-going]

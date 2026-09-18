@@ -83,6 +83,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The rigs are standard-library Python except eye_draw_snapshot.py,
+      # whose self-test exports PNGs through Pillow; the runner's interpreter
+      # has nothing installed beyond the standard library.
+      - name: Install Python packages the rigs need
+        run: |
+          python -m pip install --disable-pip-version-check --quiet pillow
+          if ($LASTEXITCODE -ne 0) { throw "pip install pillow failed" }
+
       - name: Compute release version
         run: |
           if ($env:GITHUB_REF -like 'refs/tags/v*') {

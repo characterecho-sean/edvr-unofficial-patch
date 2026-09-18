@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include <fstream>
 #include <iterator>
@@ -1114,9 +1115,13 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     UiDepthLayer declined; check(!declined.acquire(ctx.Get(),msaa.tex.Get()),"MSAA safely declined");
     testPlanetCoverage(dev.Get(),ctx.Get());
     testCoronaCoverage(dev.Get(),ctx.Get());
+    // Every offending message is printed before the rig fails, so one run
+    // shows the whole queue rather than its first entry.
+    unsigned layerFaults=0;
     if(info) for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {
         SIZE_T size=0; info->GetMessage(i,nullptr,&size); std::vector<unsigned char> storage(size);
         auto* m=reinterpret_cast<D3D11_MESSAGE*>(storage.data()); hr(info->GetMessage(i,m,&size));
+        if(m->Severity>D3D11_MESSAGE_SEVERITY_WARNING) continue;
         // "The Pixel Shader expects a Render Target View bound to slot 2, but
         // none is bound. This is OK, as writes of an unbound Render Target
         // View are discarded..." -- by design. Production's depth-composite
@@ -1129,12 +1134,25 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         // The rig's single-target draws are the mask-only errand, so slot 2
         // is unbound here exactly as in play without an edit mask, and D3D11
         // discards the write. Windows Server 2022's older D3D11 debug layer
-        // reports it; the newer layer on Windows 11 does not. Every other
-        // message id still fails the rig.
-        if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING && m->ID!=D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET) {
-            std::puts(m->pDescription); check(false,"D3D debug-layer warning/error");
-        }
+        // reports it; the newer layer on Windows 11 does not.
+        if(m->ID==D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET) continue;
+        // "Vertex Shader - Pixel Shader linkage error: ... Semantic
+        // 'SV_Position' is defined for mismatched hardware registers between
+        // the output stage and input stage." -- production's kPlanetCoverageHlsl
+        // (planet_motion.h) names SV_Position alone and runs against the
+        // game's own planet and solar vertex shaders, which write it behind
+        // eight TEXCOORDs; the fixture's vertex shader mimics that layout.
+        // SV_Position is a system value the rasterizer supplies, and neither
+        // hardware nor WARP links it by register (the shader has flown, and
+        // this rig's pixel values pass), which is why the newer layer no
+        // longer reports it. Only the SV_Position case is ignored: a user
+        // semantic in the wrong register is real data corruption and still
+        // fails the rig. Every other message id fails it too.
+        if(m->ID==D3D11_MESSAGE_ID_DEVICE_SHADER_LINKAGE_REGISTERINDEX && m->pDescription &&
+           std::strstr(m->pDescription,"Semantic 'SV_Position' is defined for mismatched hardware registers")) continue;
+        std::puts(m->pDescription); ++layerFaults;
     }
+    check(layerFaults==0,"D3D debug-layer warning/error");
     ctx->ClearState(); uiDepthShutdown();
     check(gpuTimingShutdown(ctx.Get()),"explicit shared timer shutdown before WARP release");
     std::printf("PASS: %d checks; production UI coverage isolates smoke, preserves depth/alpha/occlusion/state, and handles menus and frame/eye/format changes.\n",checks);
