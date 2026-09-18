@@ -27,6 +27,12 @@ internal static class Program
                                       ulong PresentEndUs, uint CallerThread, uint NextWaitThread,
                                       ushort Status, ushort Flags, uint SceneReady);
     private sealed record StackObservation(long Qpc, int Thread, string Kind, string[] Frames);
+    private sealed class CpuSwitchRange
+    {
+        public long FirstQpc = long.MaxValue;
+        public long LastQpc = long.MinValue;
+        public long Count;
+    }
 
     private sealed class SpanCursor
     {
@@ -73,8 +79,11 @@ internal static class Program
         public readonly List<StackObservation> Stacks = [];
         public readonly Dictionary<string, long> RawSwitchStates = [];
         public readonly Dictionary<string, long> WaitReasons = [];
+        public readonly Dictionary<int, CpuSwitchRange> CpuSwitchRanges = [];
         public long SwitchOut;
         public long SwitchIn;
+        public long SwitchOutBlockingStacks;
+        public long SwitchOutBlockingStackOwnerMismatches;
         public long Ready;
         public long Samples;
         public long NextTransitionOrder;
@@ -158,7 +167,7 @@ internal static class Program
 
             if (data is CSwitchTraceData cs)
             {
-                NoteKernel(result, data.TimeStampQPC);
+                NoteSwitch(result, data.ProcessorNumber, data.TimeStampQPC);
                 if (cs.OldProcessID == pid)
                 {
                     result.SwitchOut++;
@@ -166,7 +175,7 @@ internal static class Program
                     Increment(result.WaitReasons, cs.OldThreadWaitReason.ToString());
                     AddTransition(result, cs.OldThreadID, data.TimeStampQPC,
                                   ClassifyOldState(cs.OldThreadState), cs.OldThreadWaitReason.ToString());
-                    AddStack(log, data, cs.OldThreadID, "switch-out", result);
+                    AddBlockingStack(log, cs, result);
                 }
                 if (cs.NewProcessID == pid)
                 {
@@ -200,6 +209,16 @@ internal static class Program
     {
         data.KernelFirstQpc = Math.Min(data.KernelFirstQpc, qpc);
         data.KernelLastQpc = Math.Max(data.KernelLastQpc, qpc);
+    }
+
+    private static void NoteSwitch(Collected data, int processor, long qpc)
+    {
+        NoteKernel(data, qpc);
+        if (!data.CpuSwitchRanges.TryGetValue(processor, out var range))
+            data.CpuSwitchRanges[processor] = range = new CpuSwitchRange();
+        range.FirstQpc = Math.Min(range.FirstQpc, qpc);
+        range.LastQpc = Math.Max(range.LastQpc, qpc);
+        range.Count++;
     }
 
     private static void ParseMarker(TraceEvent data, Collected result)
@@ -277,9 +296,32 @@ internal static class Program
         _ => CpuState.UnexpectedUnknown,
     };
 
-    private static void AddStack(TraceLog log, TraceEvent data, int targetThread, string kind, Collected result)
+    private static void AddBlockingStack(TraceLog log, CSwitchTraceData data, Collected result)
     {
-        var stack = log.GetCallStackForEvent(data);
+        // TraceEvent associates the ordinary event stack with the thread that GOT the CPU.
+        // BlockingStack is the distinct stack for the old thread that LOST the CPU.
+        var index = data.BlockingStack();
+        if (index == CallStackIndex.Invalid) return;
+        var owner = log.CallStacks.Thread(index);
+        result.SwitchOutBlockingStacks++;
+        if (owner is null || !StackOwnerMatches(owner.Process.ProcessID, owner.ThreadID,
+                                                data.OldProcessID, data.OldThreadID))
+        {
+            result.SwitchOutBlockingStackOwnerMismatches++;
+            return;
+        }
+        AddStack(log.CallStacks[index], data.TimeStampQPC, data.OldThreadID, "switch-out", result);
+    }
+
+    private static bool StackOwnerMatches(int ownerProcess, int ownerThread,
+                                          int expectedProcess, int expectedThread) =>
+        ownerProcess == expectedProcess && ownerThread == expectedThread;
+
+    private static void AddStack(TraceLog log, TraceEvent data, int targetThread, string kind, Collected result) =>
+        AddStack(log.GetCallStackForEvent(data), data.TimeStampQPC, targetThread, kind, result);
+
+    private static void AddStack(TraceCallStack? stack, long qpc, int targetThread, string kind, Collected result)
+    {
         if (stack is null) return;
         var frames = new List<string>();
         for (var frame = stack; frame is not null && frames.Count < 64; frame = frame.Caller)
@@ -293,7 +335,7 @@ internal static class Program
             else
                 frames.Add($"0x{code.Address:x}");
         }
-        result.Stacks.Add(new StackObservation(data.TimeStampQPC, targetThread, kind, frames.ToArray()));
+        result.Stacks.Add(new StackObservation(qpc, targetThread, kind, frames.ToArray()));
     }
 
     private static string FormatModuleAddress(string path, ulong imageBase, ulong address) =>
@@ -308,7 +350,11 @@ internal static class Program
         if (frequencies.Length != 1) throw new InvalidDataException("Clock markers have missing or inconsistent QPC frequencies");
         var frequency = frequencies[0];
         double QpcUs(long qpc) => qpc * 1_000_000.0 / frequency;
-        var traceStartUs = QpcUs(data.KernelFirstQpc);
+        var globalTraceStartUs = QpcUs(data.KernelFirstQpc);
+        // A circular system collector can retain a different oldest buffer on each observed CPU.
+        // All scheduler streams are present only after the latest of those retained starts.
+        var commonTraceStartUs = QpcUs(CommonSchedulerStart(data.CpuSwitchRanges));
+        var traceStartUs = commonTraceStartUs;
         var traceEndUs = QpcUs(data.KernelLastQpc);
 
         var clockResiduals = data.Clocks.Select(c =>
@@ -443,10 +489,14 @@ internal static class Program
             ["providerGuid"] = EdvrProvider,
             ["qpcFrequency"] = frequency,
             ["schedulerTraceStartUs"] = Round(traceStartUs),
+            ["schedulerTraceGlobalStartUs"] = Round(globalTraceStartUs),
+            ["schedulerTraceCommonStartUs"] = Round(commonTraceStartUs),
             ["schedulerTraceEndUs"] = Round(traceEndUs),
             ["schedulerTraceDurationMs"] = Round((traceEndUs - traceStartUs) / 1000.0),
+            ["schedulerTraceGlobalDurationMs"] = Round((traceEndUs - globalTraceStartUs) / 1000.0),
+            ["schedulerTraceCommonDurationMs"] = Round((traceEndUs - commonTraceStartUs) / 1000.0),
             ["inputBytes"] = inputInfo.Length,
-            ["inputMiBPerSecond"] = Round(inputInfo.Length / Math.Max(1.0, traceEndUs - traceStartUs) * 1_000_000.0 / 1048576.0),
+            ["inputMiBPerSecond"] = Round(inputInfo.Length / Math.Max(1.0, traceEndUs - globalTraceStartUs) * 1_000_000.0 / 1048576.0),
             ["eventsLost"] = data.EventsLost,
             ["hasCallStacks"] = data.HasCallStacks,
             ["coverageComplete"] = coverageComplete,
@@ -481,15 +531,42 @@ internal static class Program
             ["cohortSequenceDuplicates"] = cohortSequence.Duplicates,
             ["switchOutCount"] = data.SwitchOut,
             ["switchInCount"] = data.SwitchIn,
+            ["switchOutBlockingStackCount"] = data.SwitchOutBlockingStacks,
+            ["switchOutBlockingStackOwnerMismatchCount"] = data.SwitchOutBlockingStackOwnerMismatches,
             ["readyThreadCount"] = data.Ready,
             ["sampleCount"] = data.Samples,
             ["rawSwitchStates"] = data.RawSwitchStates,
             ["waitReasons"] = data.WaitReasons,
+            ["perCpuSwitchRanges"] = data.CpuSwitchRanges.OrderBy(pair => pair.Key)
+                .Select(pair => new Dictionary<string, object?>
+                {
+                    ["processor"] = pair.Key,
+                    ["firstUs"] = Round(QpcUs(pair.Value.FirstQpc)),
+                    ["lastUs"] = Round(QpcUs(pair.Value.LastQpc)),
+                    ["count"] = pair.Value.Count,
+                }).ToArray(),
             ["topStacksInPostPresent"] = stackGroups.Values.OrderByDescending(g => g.Count).Take(50)
                 .Select(g => new Dictionary<string, object?> { ["kind"] = g.Kind, ["count"] = g.Count, ["frames"] = g.Frames }).ToArray(),
+            ["topStacksInPostPresentByKind"] = TopStackGroupsByKind(stackGroups),
             ["frames"] = frameReports,
         };
     }
+
+    private static long CommonSchedulerStart(Dictionary<int, CpuSwitchRange> ranges)
+    {
+        if (ranges.Count == 0) throw new InvalidDataException("trace has no per-CPU context-switch ranges");
+        return ranges.Values.Max(range => range.FirstQpc);
+    }
+
+    private static Dictionary<string, object?> TopStackGroupsByKind(
+        Dictionary<string, (string Kind, string[] Frames, long Count)> groups) =>
+        groups.Values.GroupBy(group => group.Kind).OrderBy(group => group.Key)
+            .ToDictionary(group => group.Key, group => (object?)group.OrderByDescending(item => item.Count).Take(50)
+                .Select(item => new Dictionary<string, object?>
+                {
+                    ["count"] = item.Count,
+                    ["frames"] = item.Frames,
+                }).ToArray());
 
     private static string? FrameInvalidReason(FrameMarker frame)
     {
@@ -678,6 +755,31 @@ internal static class Program
         var equalQpcState = StateDurations(equalQpc, 10, 20, q => q);
         AssertNear(equalQpcState[CpuState.Running], 10, "equal-QPC event order");
         AssertNear(UnionDuration([(12, 20), (15, 25), (30, 35), (35, 35)]), 18, "nested span union");
+
+        var cpuRanges = new Dictionary<int, CpuSwitchRange>
+        {
+            [0] = new() { FirstQpc = 10, LastQpc = 100, Count = 4 },
+            [1] = new() { FirstQpc = 25, LastQpc = 100, Count = 4 },
+            [2] = new() { FirstQpc = 20, LastQpc = 100, Count = 4 },
+        };
+        if (CommonSchedulerStart(cpuRanges) != 25)
+            throw new Exception("staggered per-CPU scheduler boundary test failed");
+        if (!StackOwnerMatches(9392, 17948, 9392, 17948) ||
+            StackOwnerMatches(5116, 14276, 9392, 17948) ||
+            StackOwnerMatches(9392, 14276, 9392, 17948))
+            throw new Exception("blocking stack owner admission test failed");
+
+        var stackFixture = new Dictionary<string, (string Kind, string[] Frames, long Count)>
+        {
+            ["sample-a"] = ("sample", ["sample-a"], 3),
+            ["sample-b"] = ("sample", ["sample-b"], 7),
+            ["switch"] = ("switch-out", ["switch"], 100),
+        };
+        var byKind = TopStackGroupsByKind(stackFixture);
+        var sampleGroups = (Dictionary<string, object?>[])byKind["sample"]!;
+        if (sampleGroups.Length != 2 || Convert.ToInt64(sampleGroups[0]["count"]) != 7 ||
+            !byKind.ContainsKey("switch-out"))
+            throw new Exception("per-kind stack report test failed");
 
         var spanCursor = new SpanCursor([
             new SpanMarker(20, 1, 10, 0, 7, 1, 0),

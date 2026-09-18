@@ -2,26 +2,25 @@
 
 ## Status
 
-- State: verified probe-off build 72501fe improves the landed baseline modestly
-  to 67.1-71.8 FPS, versus about 66 FPS on 7cfb5a6. Four steady windows place
-  3.41-3.78 ms after the recorded Present span and before the next pose wait.
-  Raw DXGI Present takes only 0.07 ms; EDVR work around it is about 0.12 ms.
-  Stock SteamVR reportedly reaches mid-80s FPS / 6.8 ms GPU at the same
-  settings. Profile the remaining caller work/waits and EDVR/runtime cost
-  before further culling; the remaining gap is not proven removable. The prior
-  dcd0a9f draw probe found unchanged payloads becoming visible; cached
-  rejection alone is unsafe. No draw suppression is active.
+- State: verified CPU capture 2d98775 identifies execution as the largest part
+  of the landed post-Present interval. Independent raw-event analysis confirms
+  the conservative 711-frame cohort below. Most sampled execution there is in
+  Elite; the four synchronous pose queries are small. Full-frame sampling also
+  finds substantial execution in EDVR's graphics proxy, spread across hook
+  bookkeeping. No draw suppression is active; prior unchanged payloads becoming
+  visible still rule out cached rejection based only on unchanged draw data.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
   5120x2880 in the prior run; this flight has no on-foot leg or eye capture.
   Prior DLSS runs used K; the flight does not log the DLSS DLL version.
-- Timing: windows 7-10 account for all 8308 admitted cycles with zero residual
-  or missing counters and exactly one Present and handoff each. Full-cycle mean
-  is 13.93-14.91 ms, before-first-Submit is 9.75-10.33 ms, both Submit
-  roundtrips total 0.38-0.39 ms, and next pose wait is about 0.05 ms. Later
-  gameplay benchmark windows have CPU p50 9.79-10.31 ms and GPU p50 10.62-10.89
-  ms. These application segments are not full frame periods; window alignment
-  differs from the cycle probe. Do not subtract percentiles.
+- Timing: retained steady sequences 12225-12935, caller 17948, average 3.698 ms
+  after Present: 2.616 running, 0.938 waiting, 0.144 ready, zero unknown.
+  Measured OpenVR call spans union to 0.095 ms/frame. Native W8 is a larger
+  30-second cohort: 62.733 FPS, 15.939 ms cycle, 10.767 ms before Submit, 4.036
+  ms after Present, and 0.058 ms raw Present. Profiling and scene variance
+  confound the roughly 1 ms slower cycle than 72501fe; this is an ownership
+  capture, not a clean performance comparison. The sequence gap at 13422 is a
+  logged scope rejection during exit, outside the steady cohort.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -44,14 +43,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: CPU execution/wait build 2d98775 is installed and hash-verified in
-  Frontier, with the live INI preserved. The corrected decoder passes saved
-  replay and a second elevated live busy/sleep capture, all 60 frames with zero
-  lost events or unknown time. Collector r2 entered waiting_for_game at
-  19:11:42 UTC with a 30-minute launch window and a five-minute recording cap.
-  Next flight: same landed AA-off view for 60-90 seconds, then exit normally.
-  See the latest entry for coverage and installation records. Preserve motion
-  history and keep foveated-DLSS paused.
+- Next: reduce redundant per-draw bookkeeping in the graphics proxy, guided by
+  the full-frame sampled-PC profile. First candidates are lazy UI trace shader
+  hashes, an AA-off gate for inactive motion helpers, and the existing cleanup-
+  aware foveation gate. Keep active transition-flash processing intact. Decoder
+  fixes pass both saved smoke traces and flight replay; no additional flight
+  was needed. Frontier remains on 2d98775 with its INI preserved. Preserve
+  motion history and keep foveated-DLSS paused.
 
 ## Journal
 
@@ -2353,3 +2351,138 @@ exit or 300 seconds. The requested flight keeps AA off and the same landed
 cockpit view for 60-90 seconds, then exits normally. No eye dump is required.
 This run identifies execution and scheduling costs; profiling overhead means it
 is not a clean FPS comparison against the prior probe-off flight.
+
+### 2026-09-18 -- first CPU flight: landed caller execution and decoder audit
+
+The user ran the capture. Both native and graphics logs verify build 2d98775;
+the collector watched process 9392 and stopped on normal game exit. The saved
+`build/cpu-profile-frontier-2d98775-r2/flight.etl` is 543,162,368 bytes, with
+3372 valid frame markers, 28148 call spans, valid clock mappings, and zero ETW
+lost events. The kernel ring retains about 22.5 seconds. Its initial report
+analyzes 1339 intervals but correctly declines global complete coverage because
+one sequence is absent. Native W9 reports `missing_scope=1` at sequence 13422
+during exit; this gap is outside the landed cohort and does not establish ETW
+event loss.
+
+Native W8 ends at 19:16:07.602 UTC, covers sequences 11056-12937, and admits
+all 1882 attempts with every missing counter zero. The retained ring covers its
+last roughly 11.7 seconds; sequence 12938 onward belongs to the scene/exit
+transition. W8 means are 15.939 ms cycle, 10.767 ms before first Submit, 0.220
+and 0.396 ms Submit calls, 4.477 ms from second Submit to next wait, and 0.077
+ms next pose wait. The paired post accounting has 0.058 ms raw Present, 4.036
+ms after the single Present, and 0.019 ms handoff. All frames have one Present
+and handoff. Compared with 72501fe W7/W8, cycles increase about 0.885/1.034 ms
+and FPS falls 5.7/6.5 percent. Kernel tracing, event emission, and scene
+variance are confounded; this does not measure a rendering change.
+
+An independent raw-ETL decoder reproduces the conservative steady cohort
+12225-12935: 711 frames on caller thread 17948, QPC microseconds
+5450546059-5461524507. Per-frame means after Present are 3.698079 ms total,
+2.616066 ms running, 0.938322 ms waiting, and 0.143691 ms ready but not
+scheduled, with zero unknown. The 2844 GetDeviceToAbsoluteTrackingPose spans
+average 0.0946 ms/frame; all measured OpenVR spans union to 0.0950 ms/frame.
+The 1837 execution samples include 1482 user-leaf observations in Elite, 248 in
+ntdll, 58 in EDVR's graphics DLL, 31 in win32u, 10 in NVIDIA, and three in
+EDVR's OpenVR runtime. These are sample occurrence counts, not measured CPU
+milliseconds or guaranteed removable time.
+
+Local matching runtime symbols resolve the common EDVR ready-waker stack to
+`OwnerService::run -> finish -> _Mtx_unlock`. This is the helper completing
+synchronous pose queries and notifying the caller.
+`NativeRuntimeHost::locateHead` routes non-owner callers through this service.
+A waker stack is not evidence of execution on the waking caller; the direct
+call-span measurement bounds the cost of these four queries in the selected
+interval.
+
+Ruled out: synchronous pose queries as the main post-Present cost, because
+their complete measured spans total only 0.095 ms versus 3.698 ms/frame. Ruled
+out: ready-to-run scheduling delay as the dominant post-Present cost in this
+cohort, because it is 0.144 ms versus 2.616 ms executing. The remaining
+execution and waiting are not proven avoidable.
+
+The raw audit also finds two offline analyzer defects before relying on its
+stack attribution. First, circular buffers have different retained starts per
+CPU: 5449518588.3 us on CPU4 through 5449800919.1 us on CPU0, a 282.331 ms
+spread despite zero lost events. Sequences 12159-12176 are incomplete; frame
+12160 incorrectly appears entirely ready while its pose calls plainly execute.
+The complete scheduler boundary must use the latest first retained CSwitch
+among observed CPUs. The conservative cohort starts well after that boundary.
+
+Second, TraceEvent's generic CSwitch call stack belongs to the incoming thread.
+The outgoing thread requires `BlockingStack()`, as specified in the [TraceEvent
+source](https://github.com/microsoft/perfview/blob/main/src/TraceEvent/TraceLog.cs#L1103).
+Of 51030 caller switch-outs, the generic stack mismatches the old thread on
+51025, while the blocking stack matches on 51023 (seven missing/edge stacks).
+This explains foreign CLR, encoder and driver stacks in the first report.
+Sampled and ReadyThread stack ownership are correct; ReadyThread identifies the
+waker.
+
+The corrected analyzer uses the common retained CPU boundary, verifies the
+outgoing stack's PID and TID before attribution, and reports the top stacks
+separately for execution, switch-out and ready-waker events. Release
+compilation has zero warnings/errors and the self-tests pass, including
+staggered CPU boundaries, stack ownership and per-kind grouping. Both saved
+synthetic traces still pass all 60 frames with complete coverage. Flight replay
+now admits 1321 intervals beginning at sequence 12177, with zero unknown time
+and zero ownership mismatches across 658998 blocking stacks. The conservative
+cohort's statistics are unchanged. Global coverage remains false because the
+exit-time scope gap remains visible. The corrected report is
+`report-fixed-final.json`; the capture's original status/report are retained as
+evidence. The sanctioned analyzer wrapper rebuilt and refreshed its validation
+stamp. No game code or live configuration changed.
+
+Full-frame caller sampling over the same conservative QPC interval finds 9697
+sampled observations: 4190 with their sampled PC in Elite, 2489 in EDVR's
+graphics proxy, 1505 in ntdll, 913 in system D3D11, 377 in NVIDIA, 136 in
+win32u, eight in EDVR's native runtime, 40 other and 39 unknown. Inclusive
+stack presence is different and overlaps: 4078 contain the graphics proxy, 1938
+system D3D11, 1039 NVIDIA and 278 the native runtime. In particular, 1589
+proxy-inclusive samples actually execute farther down the call chain; do not
+charge those samples to proxy computation.
+
+Matching local PDBs symbolize 2487 of the 2489 true proxy sampled PCs into 157
+functions. The largest groups are beginPanelOverride (275), forwardWithVerdict
+(226), its draw lambda (105), and hookedDrawIndexedInstanced (101): 707
+observations across four pieces of draw classification/forwarding. Other groups
+include meshMotionDraw (93), foveationOnDraw (83), celestial_motion::begin
+(78), ui_deferred::beforeTone (71), gpuFrameCommand (64), bindingShaderHash
+(56), screenMotionUiDraw (50), mapWaitNote (49), screenMotionDraw (40), and
+glitch_scene::readPool (24). These features can have active correctness
+responsibilities even with AA off; their presence alone does not justify
+disabling them. The security-cookie check also recurs across these short call
+chains; its presence is not a reason to remove stack protection. Exposure hash
+lookup (249), hookedMap return/timing regions (184), and the
+DrawIndexedInstanced lambda (159) are nearest-proxy-frame counts in inclusive
+stacks, not direct sampled-PC counts. No single feature is established as the
+dominant cost.
+
+This supports a focused audit of repeated per-draw lookups, inactive observer
+calls and timing bookkeeping in our proxy before selecting a safe fast path. It
+does not establish a particular removable number of milliseconds. The matching
+2d98775 runtime/graphics DLLs and PDBs are preserved with SHA-256 metadata
+under the capture's `symbols-2d98775` directory so later builds cannot
+invalidate this analysis.
+
+The source audit identifies a narrow first optimization with an existing
+discriminating condition. `forwardWithVerdict` eagerly computes two
+bindingShaderHash arguments for uiDeferredTraceDrawEnter on every owner draw.
+In this AA-off flight, uiDeferredConfigure leaves capture disabled and its
+failure diagnostic window was never armed, so the callee returns after clearing
+pending state. Move the hash reads inside the callee after its existing active
+and candidate checks, while preserving the entry call and pending reset. An
+active or diagnostic draw must retain identical binding hashes and trace data.
+
+AA-dependent mesh, celestial, screen and weapon motion helpers are also
+configured inactive by this flight's temporal mode but still entered per draw,
+sometimes after eager shader-hash reads. A shared configuration-derived gate
+can avoid that fanout only if live reload updates it in the same transaction,
+enabled call order remains identical, and disabled cleanup/counters are handled
+explicitly. The existing foveationWantsDraws predicate is another candidate: it
+includes active phases and stale bindings requiring cleanup, so it can gate
+entry once fully off. These are proposed runtime changes, not part of this
+analysis-only commit.
+
+Do not bypass beginPanelOverride wholesale: transition-flash camera/pool
+processing is active and relies on its eye-draw counting. Likewise, Map timing
+has measurable overhead but supplies exact slow-call/longest-wait evidence;
+changing that instrumentation belongs in a separate controlled comparison.
