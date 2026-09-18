@@ -1975,11 +1975,14 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 #endif
 }
 
+bool glitchFrameIsSceneDraw(uint64_t hash) {
+    return hash==0xEB5234DB6ADB491Dull || hash==0xDE545DC8EE4FBB87ull ||
+        hash==0x61AE8EB05FDC18DDull || hash==0x66DE2CADB1F4AE6Bull || hash==0xAACFDCF2FB9AD809ull;
+}
 bool glitchFrameWantsSceneDraw(uint64_t hash) {
     State* s=g_state;
     if(!s || !s->observing || s->sceneDrawFrame==s->frameNo)return false;
-    return hash==0xEB5234DB6ADB491Dull || hash==0xDE545DC8EE4FBB87ull ||
-        hash==0x61AE8EB05FDC18DDull || hash==0x66DE2CADB1F4AE6Bull || hash==0xAACFDCF2FB9AD809ull;
+    return glitchFrameIsSceneDraw(hash);
 }
 bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     State* s=g_state;

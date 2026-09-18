@@ -129,6 +129,12 @@ bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
 // target that is still not one of the two picks.
 bool depthProbeSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTargetIndex);
 
+// Diagnostic-only identity lookup against the already settled scene pair.
+// This never scans, refreshes, or changes the pair; false means the view is
+// not one of the two current picks (including when no pair has formed yet).
+bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye,
+                                 int* outTargetIndex);
+
 // Whether target index (from depthProbeSceneEyeOf's outTargetIndex) shares
 // the scene pick's width/height -- a double-buffered twin the game
 // alternates with the chosen pair -- for the eye mask summary's "not the

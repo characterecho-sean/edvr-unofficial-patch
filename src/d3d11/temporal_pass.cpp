@@ -2627,7 +2627,58 @@ struct RowsWrite {
     float       proj[2] = {};   // the projection's z row: the depth written is proj[0] + proj[1] / z
     uint32_t    frame = 0;
     uint32_t    seq = 0;
+    uint32_t    observedSeq = 0; // diagnostic clock, includes rejected non-rotation writes
     bool        valid = false;
+};
+enum CameraChoiceFlag : uint32_t {
+    kChoiceValid          = 1u << 0,
+    kChoiceBoundSeen      = 1u << 1,
+    kChoiceBoundLatchSeen = 1u << 2,
+    kChoiceSelectedBound  = 1u << 3,
+    kChoiceContinuous     = 1u << 4,
+    kChoiceTwinPresent    = 1u << 5,
+    kChoiceTwinFallback   = 1u << 6,
+    kChoiceResync         = 1u << 7,
+    kChoiceRefollow       = 1u << 8,
+    kChoiceBoundLatchRows = 1u << 9,
+};
+enum CameraDrawFlag : uint32_t {
+    kDrawSeen             = 1u << 0,
+    kDrawWriteObserved    = 1u << 1,
+    kDrawRowsValid        = 1u << 2,
+    kDrawPreviousValid    = 1u << 3,
+    kDrawSelectedResource = 1u << 4,
+    kDrawSelectedWrite    = 1u << 5,
+    kDrawSelectedRows     = 1u << 6,
+    kDrawSelectionLater   = 1u << 7,
+};
+struct RowsChoiceCapture {
+    const void* selectedResource = nullptr;
+    const void* boundResource = nullptr;
+    float selectedRows[12] = {};
+    float selectedProj[2] = {};
+    uint32_t frame = 0, flags = 0;
+    uint32_t selectedSeq = 0, boundLatchSeq = 0, twinSeq = 0;
+    uint32_t writesAtChoice = 0, observedWritesAtChoice = 0;
+    uint32_t observedEvictionsAtChoice = 0;
+    uint32_t candidates = 0, boundCandidates = 0;
+    uint32_t continuousCandidates = 0, twinCandidates = 0;
+};
+struct RigidDrawRows {
+    const void* resource = nullptr;
+    float rows[12] = {};
+    float proj[2] = {};
+    uint64_t vsHash = 0;
+    uint32_t frame = 0, seq = 0, writesAtDraw = 0, observedWritesAtDraw = 0;
+    uint32_t observedEvictionsAtDraw = 0;
+    bool seen = false, observed = false, valid = false;
+};
+struct ObservedRowsWrite {
+    const void* resource = nullptr;
+    float rows[12] = {};
+    float proj[2] = {};
+    uint32_t frame = 0, seq = 0;
+    bool rowsValid = false;
 };
 // 256: in space the game writes the block over a hundred times a frame
 // (114 measured 2026-09-04), and a ring of 48 had lost the frame's early
@@ -2636,8 +2687,15 @@ struct RowsWrite {
 constexpr int kRowsRing = 256;
 RowsWrite   g_rowsRing[kRowsRing];
 uint32_t    g_rowsSeq = 0;           // writes ever, the ring's clock
+uint32_t    g_rowsObservedSeq = 0;   // all mapped writes, including rejected rows
+uint32_t    g_rowsObservedWrites = 0;
+uint32_t    g_rowsObservedEvictions = 0;
+ObservedRowsWrite g_rowsObserved[32];
 const void* g_boundBuf = nullptr;    // the object bound at this frame's first scene draw
 bool        g_boundSeen = false;
+uint32_t    g_boundLatchSeq = 0;
+bool        g_boundLatchValid = false;
+bool        g_boundLatchRowsValid = false;
 uint32_t    g_rowsWrites = 0;        // writes this frame
 uint64_t    g_rowsWritesSum = 0;     // ...summed over the interval
 uint32_t    g_rowsFramesSum = 0;
@@ -2665,6 +2723,47 @@ float    g_prevRows[12] = {};
 bool     g_prevValid = false;
 uint32_t g_camPairs = 0;
 bool     g_camNoted = false;
+RowsChoiceCapture g_rowsChoice;
+RigidDrawRows g_rigidDraw[2];
+RigidDrawRows g_prevRigidDraw[2];
+
+ObservedRowsWrite* observedRowsSlot(const void* resource) {
+    int freeSlot = -1, oldest = 0;
+    for (int i = 0; i < static_cast<int>(sizeof(g_rowsObserved) / sizeof(g_rowsObserved[0])); ++i) {
+        if (g_rowsObserved[i].resource == resource) return &g_rowsObserved[i];
+        if (!g_rowsObserved[i].resource && freeSlot < 0) freeSlot = i;
+        if (g_rowsObserved[i].frame < g_rowsObserved[oldest].frame) oldest = i;
+    }
+    const int at = freeSlot >= 0 ? freeSlot : oldest;
+    if (freeSlot < 0) ++g_rowsObservedEvictions;
+    g_rowsObserved[at] = ObservedRowsWrite{};
+    g_rowsObserved[at].resource = resource;
+    return &g_rowsObserved[at];
+}
+
+const ObservedRowsWrite* observedRowsCurrent(const void* resource) {
+    if (!resource) return nullptr;
+    for (const auto& w : g_rowsObserved) {
+        if (w.resource == resource && w.frame == g_rowsFrame) return &w;
+    }
+    return nullptr;
+}
+
+void diagnosticDeltaFromRows(const float prev[12], const float now[12],
+                             float rotation[9], float translation[3]) {
+    float rp[9], rn[9], rpT[9];
+    temporalRot3Of34(prev, rp);
+    temporalRot3Of34(now, rn);
+    temporalTranspose3(rp, rpT);
+    temporalMul3(rpT, rn, rotation);
+    const float dc[3] = {now[3] - prev[3], now[7] - prev[7], now[11] - prev[11]};
+    temporalApply3(rpT, dc, translation);
+    rotation[2] = -rotation[2];
+    rotation[5] = -rotation[5];
+    rotation[6] = -rotation[6];
+    rotation[7] = -rotation[7];
+    translation[2] = -translation[2];
+}
 
 // The frame's camera rows, chosen once per frame at its first treat from
 // the frame's writes: the one that FOLLOWS last frame's chosen rows within
@@ -2680,10 +2779,20 @@ void chooseCameraRows() {
     g_chosenThisFrame = true;
     g_curValid = false;
     g_curRowsBound = false;
+    g_rowsChoice = RowsChoiceCapture{};
+    g_rowsChoice.frame = g_rowsFrame;
+    g_rowsChoice.boundResource = g_boundBuf;
+    g_rowsChoice.boundLatchSeq = g_boundLatchSeq;
+    g_rowsChoice.writesAtChoice = g_rowsWrites;
+    g_rowsChoice.observedWritesAtChoice = g_rowsObservedWrites;
+    g_rowsChoice.observedEvictionsAtChoice = g_rowsObservedEvictions;
+    if (g_boundSeen) g_rowsChoice.flags |= kChoiceBoundSeen;
+    if (g_boundLatchValid) g_rowsChoice.flags |= kChoiceBoundLatchSeen;
+    if (g_boundLatchRowsValid) g_rowsChoice.flags |= kChoiceBoundLatchRows;
     int bestIdx = -1, fallIdx = -1;
     uint32_t bestSeq = 0, fallSeq = 0;
     bool bestBound = false, fallBound = false;
-    uint32_t count = 0;
+    uint32_t count = 0, boundCount = 0, continuousCount = 0, twinCount = 0;
     int contIdx[kRowsRing];
     int contN = 0;
     int twinIdx = -1;
@@ -2700,6 +2809,7 @@ void chooseCameraRows() {
         if (!w.valid || w.frame != g_rowsFrame) continue;
         ++count;
         const bool bound = g_boundSeen && w.buf == g_boundBuf;
+        if (bound) ++boundCount;
         bool continuous = false;
         if (g_prevValid) {
             float rn[9], d[9];
@@ -2708,11 +2818,13 @@ void chooseCameraRows() {
             continuous = temporalRotationAngleDeg(d) < 3.0f;
         }
         if (continuous) {
+            ++continuousCount;
             // A write identical to last frame's chosen rows is the game's
             // own last-view block (nearly every frame in space carried one,
             // a head-turn's angle from the current; 2026-09-04): kept only
             // as the fallback, for a camera that truly stood still.
             if (g_prevValid && memcmp(w.rows, g_prevRows, sizeof(w.rows)) == 0) {
+                ++twinCount;
                 if (twinIdx < 0 || w.seq > twinSeq) { twinIdx = i; twinSeq = w.seq; twinBound = bound; }
                 continue;
             }
@@ -2739,10 +2851,17 @@ void chooseCameraRows() {
                              (bound == fallBound && w.seq > fallSeq);
         if (fbetter) { fallIdx = i; fallSeq = w.seq; fallBound = bound; }
     }
+    g_rowsChoice.candidates = count;
+    g_rowsChoice.boundCandidates = boundCount;
+    g_rowsChoice.continuousCandidates = continuousCount;
+    g_rowsChoice.twinCandidates = twinCount;
     g_candSumCount += count;
+    bool twinFallback = false;
     if (twinIdx >= 0) {
+        g_rowsChoice.flags |= kChoiceTwinPresent;
+        g_rowsChoice.twinSeq = g_rowsRing[twinIdx].observedSeq;
         if (bestIdx >= 0) ++g_twinFrames;
-        else { bestIdx = twinIdx; bestSeq = twinSeq; bestBound = twinBound; }
+        else { bestIdx = twinIdx; bestSeq = twinSeq; bestBound = twinBound; twinFallback = true; }
     }
     // The ambiguity: another continuous write whose rows differ from the
     // chosen (the same matrix written again is no ambiguity). Two cameras
@@ -2790,21 +2909,31 @@ void chooseCameraRows() {
     // reflection camera fails the same test and is dropped again.
     if (g_rowsFollow < 0 && fallBound && !(pick >= 0 && bestBound)) {
         pick = fallIdx;
+        g_rowsChoice.flags |= kChoiceRefollow;
         ++g_chooseRefollow;
     } else if (pick >= 0) {
+        g_rowsChoice.flags |= kChoiceContinuous;
+        if (twinFallback) g_rowsChoice.flags |= kChoiceTwinFallback;
         if (bestBound) ++g_chooseBound; else ++g_chooseOther;
     } else if (fallIdx >= 0) {
         pick = fallIdx;
+        g_rowsChoice.flags |= kChoiceResync;
         ++g_chooseResync;
     } else {
         ++g_chooseNone;
     }
     if (pick >= 0) {
+        g_rowsChoice.flags |= kChoiceValid;
+        g_rowsChoice.selectedResource = g_rowsRing[pick].buf;
+        g_rowsChoice.selectedSeq = g_rowsRing[pick].observedSeq;
+        memcpy(g_rowsChoice.selectedRows, g_rowsRing[pick].rows, sizeof(g_rowsChoice.selectedRows));
+        memcpy(g_rowsChoice.selectedProj, g_rowsRing[pick].proj, sizeof(g_rowsChoice.selectedProj));
         memcpy(g_curRows, g_rowsRing[pick].rows, sizeof(g_curRows));
         g_curProj[0] = g_rowsRing[pick].proj[0];
         g_curProj[1] = g_rowsRing[pick].proj[1];
         g_curValid = true;
         g_curRowsBound = g_boundSeen && g_rowsRing[pick].buf == g_boundBuf;
+        if (g_curRowsBound) g_rowsChoice.flags |= kChoiceSelectedBound;
         // The object probe stamps its pairs with THIS camera (the frame's
         // chosen rows), not the scene buffer's end-of-frame contents, which
         // are whichever camera wrote it last -- another's, often enough that
@@ -4504,6 +4633,67 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             (e.haveHistory?1024u:0u) | (e.dlHaveHistory?2048u:0u) |
             (g_bodyRowsOk?4096u:0u) | (jumpedNow?8192u:0u) | (g_curRowsBound?16384u:0u);
         memcpy(trace.worldTranslation,p.tvCam,12);memcpy(trace.bodyTranslation,p.tvSt,12);
+        if (g_rowsChoice.frame == g_rowsFrame) {
+            trace.cameraChoiceFlags = g_rowsChoice.flags;
+            trace.selectedSeq = g_rowsChoice.selectedSeq;
+            trace.boundLatchSeq = g_rowsChoice.boundLatchSeq;
+            trace.twinSeq = g_rowsChoice.twinSeq;
+            trace.writesAtChoice = g_rowsChoice.writesAtChoice;
+            trace.observedWritesAtChoice = g_rowsChoice.observedWritesAtChoice;
+            trace.observedEvictionsAtChoice = g_rowsChoice.observedEvictionsAtChoice;
+            trace.candidates = g_rowsChoice.candidates;
+            trace.boundCandidates = g_rowsChoice.boundCandidates;
+            trace.continuousCandidates = g_rowsChoice.continuousCandidates;
+            trace.twinCandidates = g_rowsChoice.twinCandidates;
+            trace.selectedResource = reinterpret_cast<uintptr_t>(g_rowsChoice.selectedResource);
+            trace.boundResource = reinterpret_cast<uintptr_t>(g_rowsChoice.boundResource);
+            memcpy(trace.selectedRows, g_rowsChoice.selectedRows, sizeof(trace.selectedRows));
+            memcpy(trace.selectedProj, g_rowsChoice.selectedProj, sizeof(trace.selectedProj));
+        }
+        const RigidDrawRows& draw = g_rigidDraw[eye];
+        if (draw.seen && draw.frame == g_rowsFrame) {
+            trace.cameraDrawFlags |= kDrawSeen;
+            trace.drawSeq = draw.seq;
+            trace.writesAtDraw = draw.writesAtDraw;
+            trace.observedWritesAtDraw = draw.observedWritesAtDraw;
+            trace.observedEvictionsAtDraw = draw.observedEvictionsAtDraw;
+            trace.drawResource = reinterpret_cast<uintptr_t>(draw.resource);
+            trace.drawVsHash = draw.vsHash;
+            if (draw.observed) trace.cameraDrawFlags |= kDrawWriteObserved;
+            if (draw.valid) {
+                trace.cameraDrawFlags |= kDrawRowsValid;
+                memcpy(trace.drawRows, draw.rows, sizeof(trace.drawRows));
+                memcpy(trace.drawProj, draw.proj, sizeof(trace.drawProj));
+            }
+            const RigidDrawRows& before = g_prevRigidDraw[eye];
+            if (draw.valid && before.valid && before.frame + 1 == draw.frame) {
+                trace.cameraDrawFlags |= kDrawPreviousValid;
+                float drawRotation[9];
+                diagnosticDeltaFromRows(before.rows, draw.rows, drawRotation,
+                                        trace.drawTranslation);
+                trace.drawRotationDeg = temporalRotationAngleDeg(drawRotation);
+            }
+            if ((trace.cameraChoiceFlags & kChoiceValid) && draw.valid) {
+                if (g_rowsChoice.selectedResource == draw.resource)
+                    trace.cameraDrawFlags |= kDrawSelectedResource;
+                if (g_rowsChoice.selectedSeq == draw.seq)
+                    trace.cameraDrawFlags |= kDrawSelectedWrite;
+                if (memcmp(g_rowsChoice.selectedRows, draw.rows, sizeof(draw.rows)) == 0)
+                    trace.cameraDrawFlags |= kDrawSelectedRows;
+                if (g_rowsChoice.selectedSeq > draw.seq)
+                    trace.cameraDrawFlags |= kDrawSelectionLater;
+                for (int axis = 0; axis < 3; ++axis) {
+                    trace.selectedDrawOffset[axis] =
+                        g_rowsChoice.selectedRows[axis * 4 + 3] - draw.rows[axis * 4 + 3];
+                }
+                float drawR[9], selectedR[9], drawRT[9], mismatchR[9];
+                temporalRot3Of34(draw.rows, drawR);
+                temporalRot3Of34(g_rowsChoice.selectedRows, selectedR);
+                temporalTranspose3(drawR, drawRT);
+                temporalMul3(drawRT, selectedR, mismatchR);
+                trace.selectedDrawRotationDeg = temporalRotationAngleDeg(mismatchR);
+            }
+        }
 
         ID3D11ComputeShader* savedCs = nullptr;
         ID3D11ShaderResourceView* savedSrv[17] = {};
@@ -6496,7 +6686,18 @@ void temporalPassDumpHistory(const char* trigger) {
         "10 body,20 terrain,40 holo,80 mesh,100 source-screen,200 consecutive,400 native history,"
         "800 NVIDIA history,1000 camera rows,2000 origin step,4000 bound rows. CPU only. ---",
         entries.size(),g_rowsFrame,trigger?trigger:"diagnostic request");
+    constexpr size_t kTcamEntries = 512;
+    const size_t tcamFirst = entries.size() > kTcamEntries ? entries.size() - kTcamEntries : 0;
+    Log::get().note(
+        "TCAM legend: choice flags 1 valid,2 bound seen,4 bound write observed,8 selected bound,"
+        "10 continuous,20 identical-to-previous twin present,40 twin fallback,80 resync,100 refollow,"
+        "200 bound rows valid. Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
+        "8 previous draw rows valid,10 same resource,20 same observed write,40 same rows,80 selection later. "
+        "Rows are literal scene rows; their origin is not assumed to be headset centre or eye pose. "
+        "Detailed rows follow for the newest %zu of %zu eye calls; %zu older calls retain TEMP only.",
+        entries.size() - tcamFirst, entries.size(), tcamFirst);
     if(entries.empty())Log::get().note("TEMP no temporal submissions recorded; this is not evidence that AA ran successfully.");
+    size_t entryIndex = 0;
     for(const auto& e:entries) {
         const double ago=freq.QuadPart?double(int64_t(e.qpc)-now.QuadPart)*1000.0/double(freq.QuadPart):0;
         Log::get().note("TEMP %+.1fms f%u eye=%u flags=%X events=%X inputs=%X out=%u size=%ux%u->%ux%u "
@@ -6504,6 +6705,33 @@ void temporalPassDumpHistory(const char* trigger) {
             ago,e.frame,e.eye,e.flags,e.events,e.inputs,e.output,e.width,e.height,e.outputWidth,e.outputHeight,
             double(e.jitterX),double(e.jitterY),double(e.worldTranslation[0]),double(e.worldTranslation[1]),
             double(e.worldTranslation[2]),double(e.bodyTranslation[0]),double(e.bodyTranslation[1]),double(e.bodyTranslation[2]));
+        if (entryIndex++ < tcamFirst) continue;
+        Log::get().note(
+            "TCAM f%u eye=%u cf=%X df=%X sel=%p:%u bound=%p:%u twin=%u "
+            "cand=%u/%u/%u/%u writes=%u/%u evict=%u draw=%p:%u@%u/%u evict=%u vs=%016llX "
+            "sel-draw=(%+.9g,%+.9g,%+.9g;%.7gdeg) draw-delta=(%+.9g,%+.9g,%+.9g;%.7gdeg) "
+            "proj=(%+.9g,%+.9g)/(%+.9g,%+.9g) "
+            "S=[%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g] "
+            "D=[%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g]",
+            e.frame,e.eye,e.cameraChoiceFlags,e.cameraDrawFlags,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(e.selectedResource)),e.selectedSeq,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(e.boundResource)),e.boundLatchSeq,e.twinSeq,
+            e.candidates,e.boundCandidates,e.continuousCandidates,e.twinCandidates,
+            e.writesAtChoice,e.observedWritesAtChoice,e.observedEvictionsAtChoice,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(e.drawResource)),e.drawSeq,
+            e.writesAtDraw,e.observedWritesAtDraw,e.observedEvictionsAtDraw,
+            static_cast<unsigned long long>(e.drawVsHash),
+            double(e.selectedDrawOffset[0]),double(e.selectedDrawOffset[1]),double(e.selectedDrawOffset[2]),
+            double(e.selectedDrawRotationDeg),
+            double(e.drawTranslation[0]),double(e.drawTranslation[1]),double(e.drawTranslation[2]),
+            double(e.drawRotationDeg),double(e.selectedProj[0]),double(e.selectedProj[1]),
+            double(e.drawProj[0]),double(e.drawProj[1]),
+            double(e.selectedRows[0]),double(e.selectedRows[1]),double(e.selectedRows[2]),double(e.selectedRows[3]),
+            double(e.selectedRows[4]),double(e.selectedRows[5]),double(e.selectedRows[6]),double(e.selectedRows[7]),
+            double(e.selectedRows[8]),double(e.selectedRows[9]),double(e.selectedRows[10]),double(e.selectedRows[11]),
+            double(e.drawRows[0]),double(e.drawRows[1]),double(e.drawRows[2]),double(e.drawRows[3]),
+            double(e.drawRows[4]),double(e.drawRows[5]),double(e.drawRows[6]),double(e.drawRows[7]),
+            double(e.drawRows[8]),double(e.drawRows[9]),double(e.drawRows[10]),double(e.drawRows[11]));
     }
     Log::get().note("--- end temporal submission history ---");
 }
@@ -6514,7 +6742,21 @@ void temporalPassConfigure(Config& cfg) {
     // window regardless of whether the values read back the same.
     ++g_configGeneration;
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
+    const bool wasWanted = g_wanted;
     g_wanted = temporalModeEnabled(mode);
+    if (g_wanted != wasWanted) {
+        memset(g_rowsObserved, 0, sizeof(g_rowsObserved));
+        g_rowsObservedWrites = 0;
+        g_rowsObservedEvictions = 0;
+        g_rowsChoice = RowsChoiceCapture{};
+        for (int eye = 0; eye < 2; ++eye) {
+            g_rigidDraw[eye] = RigidDrawRows{};
+            g_prevRigidDraw[eye] = RigidDrawRows{};
+        }
+        g_boundLatchSeq = 0;
+        g_boundLatchValid = false;
+        g_boundLatchRowsValid = false;
+    }
     // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 1
     // at the treat): only an external engine (dlaa, dlss, fsr) touches NGX
     // or FSR, so only they warm one.
@@ -7004,7 +7246,26 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // when the rows are a rotation.
     if (!g_wanted || !data || bytes < 944 * 4) return;
     const float* f = static_cast<const float*>(data) + 932;
-    if (!temporalRowsAreRotation(f)) return;
+    const float* pz = static_cast<const float*>(data) + 792;
+    const bool rowsValid = temporalRowsAreRotation(f);
+    ++g_rowsObservedWrites;
+    const uint32_t observedSeq = g_rowsObservedSeq++;
+    ObservedRowsWrite* observed = res ? observedRowsSlot(res) : nullptr;
+    if (observed) {
+        observed->frame = g_rowsFrame;
+        observed->seq = observedSeq;
+        observed->rowsValid = rowsValid;
+        if (rowsValid) {
+            memcpy(observed->rows, f, sizeof(observed->rows));
+            observed->proj[0] = pz[2];
+            observed->proj[1] = pz[3];
+        }
+    }
+    // The production chooser keeps its existing contract: only rotations enter
+    // its ring. The diagnostic record above is deliberately wider so a rejected
+    // overwrite before a draw is reported as such, rather than reviving an
+    // earlier valid write from the same buffer.
+    if (!rowsValid) return;
     ++g_rowsWrites;
     RowsWrite& w = g_rowsRing[g_rowsSeq % kRowsRing];
     w.buf = res;
@@ -7018,11 +7279,11 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // projection, not this one, and decoding with those planes read 10 km
     // as 8.3 km (2026-09-08 19:52: the body's grid missed the station
     // beyond a few hundred metres for it).
-    const float* pz = static_cast<const float*>(data) + 792;
     w.proj[0] = pz[2];
     w.proj[1] = pz[3];
     w.frame = g_rowsFrame;
     w.seq = g_rowsSeq;
+    w.observedSeq = observedSeq;
     w.valid = true;
     ++g_rowsSeq;
 }
@@ -7032,6 +7293,9 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx) {
     g_curLatched = true;
     g_boundSeen = false;
     g_boundBuf = nullptr;
+    g_boundLatchSeq = 0;
+    g_boundLatchValid = false;
+    g_boundLatchRowsValid = false;
     if (!ctx) return;
     // The block bound at the scene's first draw: the vertex stage's
     // constant buffers first, then the pixel stage's, the lowest slot
@@ -7055,10 +7319,46 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx) {
     for (int i = 0; i < 8 && !g_boundSeen; ++i) {
         if (inRing(ps[i])) { g_boundBuf = ps[i]; g_boundSeen = true; g_latchSlotPs = i; }
     }
+    if (g_boundSeen) {
+        const ObservedRowsWrite* observed = observedRowsCurrent(g_boundBuf);
+        if (observed) {
+            g_boundLatchValid = true;
+            g_boundLatchRowsValid = observed->rowsValid;
+            g_boundLatchSeq = observed->seq;
+        }
+    }
     for (int i = 0; i < 8; ++i) {
         if (vs[i]) vs[i]->Release();
         if (ps[i]) ps[i]->Release();
     }
+}
+
+bool temporalPassWantsRigidDraw(int eye) {
+    if (!g_wanted || eye < 0 || eye > 1) return false;
+    return !g_rigidDraw[eye].seen || g_rigidDraw[eye].frame != g_rowsFrame;
+}
+
+void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexShaderHash) {
+    if (!temporalPassWantsRigidDraw(eye)) return;
+    RigidDrawRows sample{};
+    sample.seen = true;
+    sample.frame = g_rowsFrame;
+    sample.resource = resource;
+    sample.vsHash = vertexShaderHash;
+    sample.writesAtDraw = g_rowsWrites;
+    sample.observedWritesAtDraw = g_rowsObservedWrites;
+    sample.observedEvictionsAtDraw = g_rowsObservedEvictions;
+    const ObservedRowsWrite* observed = observedRowsCurrent(resource);
+    if (observed) {
+        sample.observed = true;
+        sample.valid = observed->rowsValid;
+        sample.seq = observed->seq;
+        if (sample.valid) {
+            memcpy(sample.rows, observed->rows, sizeof(sample.rows));
+            memcpy(sample.proj, observed->proj, sizeof(sample.proj));
+        }
+    }
+    g_rigidDraw[eye] = sample;
 }
 
 void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
@@ -7075,10 +7375,19 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
 
 void temporalPassFrameBoundary() {
     if (!g_wanted) return;
+    for (int eye = 0; eye < 2; ++eye) {
+        if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
+            g_prevRigidDraw[eye] = g_rigidDraw[eye];
+        } else {
+            g_prevRigidDraw[eye] = RigidDrawRows{};
+        }
+    }
     ++g_rowsFrame;
     g_rowsWritesSum += g_rowsWrites;
     ++g_rowsFramesSum;
     g_rowsWrites = 0;
+    g_rowsObservedWrites = 0;
+    g_rowsObservedEvictions = 0;
     g_chosenThisFrame = false;
     if (g_curValid) {
         if (g_prevValid) ++g_camPairs;

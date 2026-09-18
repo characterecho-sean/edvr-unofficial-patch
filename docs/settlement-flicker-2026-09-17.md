@@ -2,17 +2,20 @@
 
 ## Status
 
-- State: the coarse-ship-off A/B reduced reported flicker; verified eye_163223
-  has zero ship claims across all 16 frames. The earlier eye_160859 assigned
-  about 6 px/frame ship motion to static walls. User still sees intermittent
-  simultaneous building flashes, like station flicker, and is unsure the dump
-  caught one. No reset occurs in the capture; the reset total stays 12 over
-  16:31:38-16:32:18. A separate dominant-body path activates at 16:32:05 but is
-  absent from the dump. This is an open discriminator, not a proven second
-  cause. No permanent rendering fix is installed; see the final journal entry.
-- Build: v0.17.0-35-g2a23ee7-dirty, archived under
-  build/settlement-decisions-frontier-2a23ee7-dirty. Capture rig: 56528 checks.
-  Full gates remain incomplete at the user's request; no rerun this analysis.
+- State: the coarse-ship-off A/B reduced flicker; eye_163223 has zero ship
+  claims. The new 16:48:57 Pause capture catches reversing 0.1105 m world
+  translation pulses, the nearest about 166 ms before the keypress after a
+  reported simultaneous flash. No reset, body motion, size or output change
+  occurs within three seconds of Pause. The separate stereo reset was about
+  five seconds earlier. See the final journal entry for exact frames.
+- Open: camera selection prefers a buffer's latest continuous write, not
+  necessarily the version consumed by the building draws. Wrong write/eye
+  selection is plausible; the existing trace lacks those versions. Stable
+  CAM.scene positions are from float 1100, not the selected rows at 932, and
+  cannot prove those rows were stable. No permanent fix is installed.
+- Build: v0.17.0-39-gde7e272-dirty installed and verified in Frontier; archive
+  build/camera-provenance-frontier-de7e272-dirty. Full build and all gates
+  pass. The analyzed Pause flight used the earlier 35-g2a23ee7-dirty build.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -49,13 +52,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next capture: same installed build, ships_metres still 0 temporarily. Press
-  the configured PAUSE history key just after a simultaneous flash, with Elite
-  focused, then remain in the scene at least three seconds. It saves preceding
-  camera/temporal history immediately and again two seconds later: distinguish
-  reset, world-camera fallback and dominant-body activation without guessing
-  eye-dump timing. Exact mesh and station motion remain enabled. No additional
-  automatic capture is armed; correct visible-surface ownership afterward.
+- Next flight: same landed scene; Pause immediately after the next global
+  flash, then remain in-scene at least three seconds. New TCAM compares chosen
+  rows with both eyes' draw-time rows: late rewrite, eye/twin selection or a
+  pulse already in Elite's draw camera. Ships_metres remains 0 temporarily;
+  exact mesh/station motion stays enabled. No camera selection fix yet.
 
 ## Journal
 
@@ -3225,3 +3226,119 @@ Copied artifacts and reports are in
 rendering/config changes, new build or full-suite rerun were made during this
 analysis. The next requested capture uses the installed history key rather than
 another unsynchronized 16-frame eye dump.
+
+### 2026-09-18 -- Pause after global flash isolates a camera-motion pulse
+
+The user pressed Pause immediately after the buildings flashed. Verified
+`edvr_gfx_20260918_164718.log` against the installed literal build label
+`v0.17.0-35-g2a23ee7-dirty`; comparing with HEAD would reject this
+intentionally unchanged diagnostic. The live coarse ship setting remains zero.
+The immediate camera/temporal histories are timestamped 16:48:57.377/.380, with
+rows-frame 10833; the delayed histories at 16:48:59.386/.389 reach 10953. Each
+temporal snapshot contains 4096 eye calls. Analysis and source provenance are
+retained under `build/pause-flicker-analysis-164857`.
+
+Ruled out for this reported event: an explicit NVIDIA reset, caller-requested
+reset, size/format change, source-screen switch, treatment-output switch or
+dominant-body activation. In the three seconds either side of Pause, all 630
+recorded eye calls (315 frames, 10639-10953) have flags 2, events 8, inputs
+0x5AEF, output 2 and dimensions 2481x2121 to 3818x3264. World, rows, bound
+buffer and history stay valid; body/source/origin bits stay absent and body
+translation is zero. This establishes CPU-side state, not individual pixel
+ownership or NVIDIA's internal history response.
+
+The aggregate NVIDIA reset count rises from 10 to 12, but both added reset eye
+calls are frame 10512, about 4.994 seconds before Pause, during an earlier
+origin/rows transition. Its world delta is zero. It is distinct from the
+reported flash; the count alone would have misattributed that event.
+
+The positive signal is a two-frame world-translation excursion immediately
+before the keypress. Frame 10823, about 166 ms before Pause, supplies
+(-0.02813096, -0.09491654, +0.04902185) m. Frame 10824, about 150 ms before
+Pause, supplies (+0.02772349, +0.09611722, -0.04694854) m. Both are about
+0.1105 m and nearly reverse, while adjacent frames 10822/10825 are only
+0.000061/0.000036 m. Both eyes receive the same vectors. These are the exact
+`p.tvCam` inputs to motion reconstruction, not a detector's discarded
+candidate. The first dump reports -168.8/-152.5 ms relative to its slightly
+later dump time; key-relative values account for that difference.
+
+There are six such pairs in the combined 25.5-second history: 10710-10711,
+10721-10722, 10812-10813, 10823-10824, 10858-10859 and 10869-10870. Their first
+frames span about 1.918 seconds before Pause to 0.589 seconds after it; the
+last return is at +0.605 seconds. Every pulse exceeds 0.108 m, with two-frame
+residuals about 0.0020-0.0025 m; the largest other translation is 0.00341 m.
+The delayed history repeats the pre-key event, excluding Pause's own logging as
+the cause of those earlier pulses. Timing supports a motion discontinuity as
+the residual-flash candidate; it does not prove which camera write produced it
+or that every pulse was visibly noticed.
+
+Source audit: `chooseCameraRows` retains the buffer object bound at an early
+scene-depth draw, then picks its latest continuous write at the first temporal
+submission. It does not retain the version actually consumed by a building
+draw. Identical-to-previous rows are relegated to a fallback, creating another
+selection discriminator when a different continuous candidate exists. The
+chosen rows feed `worldFromRows` and both eyes share that frame's choice. The
+current history omits candidate sequence numbers and draw-time matrices, so a
+late rewrite, a different eye/pass, or a genuine draw-camera excursion cannot
+yet be separated. The log's stable `CAM.scene` and zero `cameraStep` read float
+1100, whereas temporal uses floats 932-943: they are not an independent
+measurement of the same full camera matrix.
+
+The next diagnostic records selected-write provenance and matrices observed at
+recognized rigid scene draws for both eyes, retrospectively with Pause. Missing
+samples must be explicit; a stationary camera or a zero comparison cannot stand
+in for an unexecuted probe. This is evidence collection before changing camera
+selection. Translation clamps, smaller jump thresholds and landed-only
+exceptions would hide the symptom while risking legitimate ship, headset and
+station motion.
+
+Implemented the diagnostic in the existing Pause history. `TCAM` records the
+selected buffer and observed-write sequence, bound-latch and identical-row
+fallback provenance, candidate counts, and the first recognized rigid draw's VS
+b1 write for each eye. It includes literal selected/draw matrices and depth
+projection, their raw row-origin difference and rotation difference, and a
+separate consecutive draw-camera delta in the same view convention as TEMP
+world motion. A constant stereo offset alone is not evidence of a fault.
+
+The draw latch shares the existing VS b1 query where possible and requests at
+most one additional query per identified eye/frame. The five existing rigid
+shader families qualify even when the separate glitch detector is disabled; the
+shader hash is recorded so the first draw is not silently equated with every
+building. Eye lookup only reads the settled depth pair; it cannot scan or
+reselect it. With no recognized draw, unknown eye mapping, missing current
+write or invalid overwritten rows, explicit flags distinguish missing evidence
+from a zero delta. The separate 32-resource observed-write table records
+rejected rotations and counts evictions; the production 256-write chooser ring,
+its sequence and selection behavior remain unchanged. This observes mapped
+writes, not arbitrary unhooked GPU buffer copies.
+
+All 4096 existing TEMP eye records remain in each Pause snapshot. Full TCAM
+detail is bounded to the newest 512 eye calls, about 2.8 seconds at 90 Hz or
+4.3 seconds at 60 Hz, with an explicit omission count. Immediate and delayed
+snapshots therefore cover the reaction-time event and its aftermath without
+writing full matrices for the entire long history into the default 4 MB log.
+The literal float rows use nine significant digits; the worst-case formatted
+line fits the logger's 1200-byte buffer. The intended environment remains the
+Quest 3 / VirtualDesktopXR setup above. Missing first-draw samples on a
+different shader family require another observation point, not a conclusion
+that camera motion is correct.
+
+Validation and deployment: the absolute `build.bat` with `EDVR_JOBS=2` passes
+the full native build and all gates, including 90 depth-pair checks, temporal
+history preservation and shader classification checks. Independent source
+review found no remaining correctness defects. Installed in Frontier through
+`tools/install_edvr.py` after dry-run; `--verify-only` confirms the native
+pair, loader and config. Live INI hash is unchanged at
+`7802f3347940559ba5899df574e742ac50a957cb0e2bfcc3dc2cedc544c9debe`, including
+the temporary ship fallback zero. Receipt is
+`edvr_native_receipt.json.pre-camera-provenance-20260918-171452.bak`.
+
+The compiled label is `v0.17.0-39-gde7e272-dirty`; subsequent source commit
+does not relabel these binaries. Graphics SHA256 is
+`cef22660034842695fbf815afd440336570b9b98c7afdd6e0cfb4c600bb518c7`; runtime
+SHA256 is `9e0728ca10f45bd913e32fc5faf619f34b5e9b20b59af5f6778228ebfa2acaa4`.
+Exact DLLs/PDBs, loader, full build output and manifest are retained under
+`build/camera-provenance-frontier-de7e272-dirty`. Next flight repeats the same
+Pause-after-flash action, followed by at least three seconds in-scene. This
+build collects evidence; it does not fix the remaining flicker or promise a
+frame-time improvement.

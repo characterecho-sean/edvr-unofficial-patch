@@ -1733,6 +1733,8 @@ int main(int argc, char** argv) {
     {
         Buffer sceneBuffer,auxBuffer;auxBuffer.res=reinterpret_cast<void*>(0xCAFE);
         float sampled[3]{};
+        check("pure scene shader classifier rejects an unknown shader",!glitchFrameIsSceneDraw(0));
+        check("pure scene shader classifier accepts a known rigid shader",glitchFrameIsSceneDraw(0x66DE2CADB1F4AE6Bull));
         check("unknown mesh shader does not request a scene-camera sample",!glitchFrameWantsSceneDraw(0));
         check("known hull shader requests a scene-camera sample",glitchFrameWantsSceneDraw(0x66DE2CADB1F4AE6Bull));
         sceneBuffer.setPos(1000,2000,3000);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);

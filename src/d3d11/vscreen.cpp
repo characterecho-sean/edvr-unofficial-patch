@@ -4008,11 +4008,30 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
         if(self==g_state->ownerCtx) {
-            if(g_state->rtv0Eye && perInstance && instances &&
-               glitchFrameWantsSceneDraw(bindingShaderHash(BindSlot::Vs))){
+            const uint64_t sceneVs = bindingShaderHash(BindSlot::Vs);
+            const bool recognisedScene = g_state->rtv0Eye && perInstance && instances &&
+                                         glitchFrameIsSceneDraw(sceneVs);
+            const bool glitchWantsScene = recognisedScene && glitchFrameWantsSceneDraw(sceneVs);
+            const bool temporalWantsAny = temporalPassWantsRigidDraw(0) ||
+                                          temporalPassWantsRigidDraw(1);
+            int temporalEye = -1;
+            if (recognisedScene && temporalWantsAny) {
+                int targetIndex = -1;
+                depthProbeCurrentSceneEyeOf(
+                    static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),
+                    &temporalEye, &targetIndex);
+            }
+            const bool temporalWantsScene = recognisedScene &&
+                temporalPassWantsRigidDraw(temporalEye);
+            // At most one temporal VS-b1 query per identified eye/frame. The
+            // old flash diagnostic shares it when both want this draw. A null
+            // binding is still recorded by the temporal provenance as a seen
+            // draw with no mapped write, rather than silently retried later.
+            if (glitchWantsScene || temporalWantsScene) {
                 ID3D11Buffer* scene=nullptr;self->VSGetConstantBuffers(1,1,&scene);
-                if(scene){
-                    const bool sampled=glitchFrameNoteSceneDraw(scene);scene->Release();
+                if (temporalWantsScene) temporalPassNoteRigidDraw(temporalEye, scene, sceneVs);
+                if(scene && glitchWantsScene){
+                    const bool sampled=glitchFrameNoteSceneDraw(scene);
                     if(sampled){
                         ID3D11ShaderResourceView* pool=nullptr;self->VSGetShaderResources(33,1,&pool);
                         if(pool){
@@ -4029,6 +4048,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                         }
                     }
                 }
+                if(scene)scene->Release();
             }
             screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
@@ -6129,10 +6149,5 @@ void shutdownVScreenFixes() {
 }
 
 }  // namespace edvr
-
-
-
-
-
 
 

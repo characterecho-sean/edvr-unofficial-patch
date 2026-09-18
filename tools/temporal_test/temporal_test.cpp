@@ -552,12 +552,19 @@ int main() {
         edvr::TemporalHistoryEntry entry{};
         for(uint32_t frame=1;frame<=5;++frame) {
             entry.frame=frame;entry.flags=frame==4?33u:2u;entry.output=frame==5?0u:2u;
+            entry.selectedSeq=100u+frame;entry.drawSeq=200u+frame;
+            entry.cameraChoiceFlags=frame;entry.cameraDrawFlags=frame<<4;
+            entry.selectedRows[3]=float(frame)+0.25f;entry.drawRows[11]=-float(frame);
             entry.events=frame==4?17u:8u;history.record(entry);
         }
         check(history.size()==3 && history.oldest(0).frame==3 && history.oldest(2).frame==5,
               "bounded temporal history retains chronological entries after wrap");
         check(history.oldest(1).flags==33 && history.oldest(1).events==17 && history.oldest(2).output==0,
               "reset requests and failed output survive alongside successful calls");
+        check(history.oldest(0).selectedSeq==103 && history.oldest(2).drawSeq==205 &&
+              history.oldest(1).cameraChoiceFlags==4 && history.oldest(1).cameraDrawFlags==64 &&
+              history.oldest(0).selectedRows[3]==3.25f && history.oldest(2).drawRows[11]==-5.0f,
+              "camera provenance and full selected/draw rows survive history wrap");
         history.clear();check(history.size()==0,"cleared temporal history cannot report stale success");
         entry.frame=9;history.record(entry);
         check(history.size()==1 && history.oldest(0).frame==9,"history restarts at its first new entry");

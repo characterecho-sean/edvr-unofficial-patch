@@ -649,6 +649,25 @@ bool depthProbeSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTarg
     return true;
 }
 
+bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye,
+                                 int* outTargetIndex) {
+    if (outEye) *outEye = -1;
+    if (outTargetIndex) *outTargetIndex = -1;
+    if (!g_wanted || !dsv) return false;
+    const int firstPick = g_scenePick[0], secondPick = g_scenePick[1];
+    if (firstPick < 0 || firstPick >= g_targetCount ||
+        secondPick < 0 || secondPick >= g_targetCount) return false;
+    int idx = -1;
+    if (g_targets[firstPick].dsv == dsv) idx = firstPick;
+    else if (g_targets[secondPick].dsv == dsv) idx = secondPick;
+    if (idx < 0) return false;
+    if (outTargetIndex) *outTargetIndex = idx;
+    int first, second;
+    sceneOrderFirstSecond(&first, &second);
+    if (outEye) *outEye = idx == first ? 0 : 1;
+    return true;
+}
+
 // Whether target index (depthProbeSceneEyeOf's outTargetIndex) shares the
 // scene pick's own width/height -- a double-buffered twin the game
 // alternates with the chosen pair, or an unrelated stale target, for the

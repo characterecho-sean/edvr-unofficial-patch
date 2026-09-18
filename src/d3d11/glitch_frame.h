@@ -44,6 +44,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
 // Read-only cross-check of the camera buffer bound to a recognised opaque
 // eye draw. A fresh same-frame write is required. Saved beside the legacy
 // furthest-camera history and paired with the bound pool below.
+bool glitchFrameIsSceneDraw(uint64_t vertexShaderHash);
 bool glitchFrameWantsSceneDraw(uint64_t vertexShaderHash);
 bool glitchFrameNoteSceneDraw(const void* resource, float* sampledPosition = nullptr);
 

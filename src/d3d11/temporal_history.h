@@ -13,6 +13,25 @@ struct TemporalHistoryEntry {
     uint32_t output = 0;
     float jitterX = 0, jitterY = 0;
     float worldTranslation[3] = {}, bodyTranslation[3] = {};
+    // Retrospective camera-row provenance. The temporal path still uses one
+    // shared selection; these fields only preserve which write it selected and
+    // the first recognised rigid scene draw tagged for this entry's eye. `c`
+    // is reported only as the scene-row origin; whether it is an eye pose,
+    // camera centre, or another render origin is evidence for the flight.
+    uint32_t cameraChoiceFlags = 0, cameraDrawFlags = 0;
+    uint32_t selectedSeq = 0, boundLatchSeq = 0, twinSeq = 0, drawSeq = 0;
+    uint32_t writesAtChoice = 0, writesAtDraw = 0;
+    uint32_t observedWritesAtChoice = 0, observedWritesAtDraw = 0;
+    uint32_t observedEvictionsAtChoice = 0, observedEvictionsAtDraw = 0;
+    uint32_t candidates = 0, boundCandidates = 0;
+    uint32_t continuousCandidates = 0, twinCandidates = 0;
+    uint64_t selectedResource = 0, boundResource = 0, drawResource = 0, drawVsHash = 0;
+    float selectedRows[12] = {}, drawRows[12] = {};
+    float selectedProj[2] = {}, drawProj[2] = {};
+    float selectedDrawOffset[3] = {};  // selected c minus this eye draw's c, world coordinates
+    float selectedDrawRotationDeg = 0;
+    float drawTranslation[3] = {};     // this eye's draw rows, current -> previous view
+    float drawRotationDeg = 0;
 };
 
 template<uint32_t Capacity = 4096> class TemporalHistory {

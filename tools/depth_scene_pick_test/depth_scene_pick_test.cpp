@@ -126,6 +126,16 @@ int main(int argc, char** argv) {
         check(edvr::g_scenePickScans == creationScan + 1,
               "unchanged pre-roll negative remains cached");
 
+        int diagnosticEye = 99, diagnosticTarget = 99;
+        const uint32_t readOnlyPrePickScan = edvr::g_scenePickScans;
+        check(!edvr::depthProbeCurrentSceneEyeOf(b.view.Get(), &diagnosticEye,
+                                                 &diagnosticTarget) &&
+                  diagnosticEye == -1 && diagnosticTarget == -1,
+              "read-only eye lookup does not form an unsettled scene pair");
+        check(edvr::g_scenePickScans == readOnlyPrePickScan &&
+                  edvr::g_scenePick[0] < 0 && edvr::g_scenePick[1] < 0,
+              "read-only eye lookup never scans or changes the pair");
+
         edvr::depthProbeFrameBoundary(nullptr);
         const uint32_t firstPairScan = edvr::g_scenePickScans;
         check(scene(100, 100, 0, true) == b.texture.Get(),
@@ -134,6 +144,16 @@ int main(int argc, char** argv) {
               "first-bind order chooses the second eye");
         check(edvr::g_scenePickScans == firstPairScan + 1,
               "both eyes share one scene-pick scan");
+        const uint32_t readOnlySettledScan = edvr::g_scenePickScans;
+        check(edvr::depthProbeCurrentSceneEyeOf(b.view.Get(), &diagnosticEye,
+                                                &diagnosticTarget) &&
+                  diagnosticEye == 0 && diagnosticTarget >= 0,
+              "read-only eye lookup identifies the settled first eye");
+        check(edvr::depthProbeCurrentSceneEyeOf(a.view.Get(), &diagnosticEye,
+                                                &diagnosticTarget) &&
+                  diagnosticEye == 1 && diagnosticTarget >= 0 &&
+                  edvr::g_scenePickScans == readOnlySettledScan,
+              "read-only eye lookup identifies the second eye without scanning");
         scene(100, 100, 0, true);
         check(edvr::g_scenePickScans == firstPairScan + 1,
               "repeated positive query uses the cache");
@@ -142,6 +162,20 @@ int main(int argc, char** argv) {
         draws(a, 7);
         draws(b, 6);
         draws(c, 12);
+        const uint32_t readOnlyNonPairScan = edvr::g_scenePickScans;
+        const int readOnlyPair0 = edvr::g_scenePick[0], readOnlyPair1 = edvr::g_scenePick[1];
+        const edvr::ScenePickCache readOnlyCache = edvr::g_scenePickCache;
+        check(!edvr::depthProbeCurrentSceneEyeOf(c.view.Get(), &diagnosticEye,
+                                                 &diagnosticTarget) &&
+                  diagnosticEye == -1 && diagnosticTarget == -1,
+              "read-only eye lookup rejects a known target outside the settled pair");
+        check(edvr::g_scenePickScans == readOnlyNonPairScan &&
+                  edvr::g_scenePick[0] == readOnlyPair0 && edvr::g_scenePick[1] == readOnlyPair1 &&
+                  edvr::g_scenePickCache.w == readOnlyCache.w &&
+                  edvr::g_scenePickCache.h == readOnlyCache.h &&
+                  edvr::g_scenePickCache.result == readOnlyCache.result &&
+                  edvr::g_scenePickCache.valid == readOnlyCache.valid,
+              "read-only non-pair lookup preserves pair and cache state");
         const uint32_t addedScan = edvr::g_scenePickScans;
         check(scene(100, 100, 0, true) == b.texture.Get(),
               "new target revalidation keeps the prior-frame ordering");
