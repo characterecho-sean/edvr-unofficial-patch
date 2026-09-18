@@ -2,11 +2,11 @@
 
 ## Status
 
-- State: installed Frontier build 89b9055 is verified in the latest flight. Its
-  final 210 seconds identify the broad on-foot original-vertex motion producer,
-  particularly per-draw identity dispatch, as the next GPU target. Screen
-  motion is small. Static/visibility skips still lack a correctness proof; no
-  rendering changes follow from object labels alone.
+- State: installed Frontier build 89b9055 remains unchanged. Its final 210
+  seconds identify per-draw identity work as a GPU target, but local fusion
+  saves only 0.020-0.026 ms per synthetic 40-draw batch. Correctness passes;
+  this is insufficient evidence for a production change or another flight. Full
+  build/gates pass. Static/visibility skips still lack a correctness proof.
 - Environment: Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and
   active XR output 3072x3264 per eye, trims off. Dimensions are unchanged
   between the landed settlement and on-foot intervals in this flight. RTX 5090;
@@ -33,8 +33,9 @@
   per call; all its stages suggest a 1.36-1.60 ms/frame scale if
   representative. This is not a directly timed total. Screen producers suggest
   only 0.123-0.125 ms/frame. Older captures suggest limited exact identity
-  reuse; benchmark identity fused with capture locally before choosing a test
-  build.
+  reuse. Local typed fusion measures 0.221 ms versus 0.241-0.246 ms baseline
+  per 40-draw batch; copying into the existing structured format regresses to
+  0.282 ms. The synthetic shader omits actual skinning and motion-raster work.
 - Open: establish static-object fallback and identity across rebases, preserve
   first-moving-frame history, and measure current visibility before expensive
   work. Existing captured-vector comparisons are below 0.002 pixels but leave
@@ -48,11 +49,11 @@
   address only about 0.06 ms landed and no work on foot. Earlier ruled-out
   explanations and the uncontrolled regression remain in the journal. Screen
   motion is not supported as the missing sustained multi-millisecond cost.
-- Next flight: no repeat solely for a drawn weapon yet. Its incremental cost
-  remains unmeasured, but the holstered run establishes broad producer
-  activity. First assess the dominant identity step and preserve
-  first-visible/moving history; do not resume the separately paused
-  foveated-DLSS work.
+- Next: no new flight build from this prototype. A representative local replay
+  with original shaders and immediate motion consumption must establish a
+  worthwhile net saving before integration. The drawn-weapon increment remains
+  unmeasured; no repeat is needed solely for that. Preserve history and keep
+  the separately paused foveated-DLSS work paused.
 
 ## Journal
 
@@ -1019,3 +1020,87 @@ captures do not encode intervening writes, and they are different workloads
 from this flight. The earlier planet-performance journal also records changing
 instance slots and skeleton identities. Thus caching is a secondary candidate,
 not evidence that all 64 current identities can be reused safely.
+
+### 2026-09-18 -- local identity/capture fusion benchmark
+
+The proposed optimization removes the per-draw identity compute dispatch by
+emitting identity alongside the existing indexed point capture. The local
+`tools/identity_fusion_test/` experiment compares the production identity
+compute shader plus no-program stream output with a programmable point geometry
+shader. Production rendering remains unchanged during this experiment.
+
+The correctness gate compares every position and all four identity words,
+including invalid instance indices, valid zero-valued identities, repeated
+indices, nonzero index start/base, consecutive draws, and counts through
+131072. Separate output statistics check that all positions and exactly one
+identity are written. State checks preserve previously bound GS resources even
+when the original geometry shader is null. Two output appends need
+`maxvertexcount(2)`; one silently exhausts the shared geometry output budget.
+The 16-byte identity stream does not truncate the position stream in the
+initial WARP check.
+
+Historical draw metadata supplies the mixed timing workload. From Steam
+`drawstate_102403.bin`, frame 10963 has 42 source-mesh records in the
+compatible shader families; restricting to single-instance, nonzero triangle
+counts within the production size limit leaves 40 draws and 342741 indices.
+This is not the 64-draw workload in the latest flight, and source-mesh records
+do not establish every production depth/stencil admission condition. Five
+exported original shader signatures all put float4 `SV_POSITION` in output
+register 4; their other outputs differ. The timing fixture uses a synthetic
+vertex shader and historical index counts, not the game's complete
+skinning/material execution. Local metadata and signatures are saved in
+`build/identity-fusion/historical-workloads.json`; game shader assets are not
+included in the repository.
+
+An additional compatibility gate exposed that a structured 16-byte identity
+buffer cannot be created with stream-output binding on the tested WARP device
+(`E_INVALIDARG`). The experiment therefore distinguishes copying the streamed
+identity into the current structured format from directly reading a typed uint4
+stream-output buffer. Both must preserve the exact identity bits as seen by a
+GPU consumer. Performance comparisons must include any required copy and use
+separate outputs per draw, matching production resource ownership.
+
+Both WARP and NVIDIA GeForce RTX 5090 pass 270 correctness checks, including
+GPU reads of both identity formats. The SDK debug layer is unavailable on this
+host and is reported as such. The standalone rig requests it when installed;
+all performance measurements use a release device. A typed `R32G32B32A32_UINT`
+stream with a `Buffer<uint4>` consumer preserves exact bits without a copy; the
+current `StructuredBuffer<uint4>` consumer needs a separate resource and copy
+on both tested devices.
+
+Three hardware runs measure the entire 40-draw identity/capture batch, with
+separate per-draw output resources, the same four-byte instance copies, state
+save/restore, and at least 250 ms each of wall and valid GPU warmup. Each run
+rotates path order over 15 rounds (45 samples); all 135 measured samples have
+ready, non-disjoint timestamps with positive deltas. There are no per-draw
+timestamp pairs inside the measured batch.
+
+| Run | Current CS + no-program capture, ms | Direct typed fusion, ms | Fusion + structured copy, ms |
+|---|---:|---:|---:|
+| 1 | 0.246304 | 0.220544 | 0.282144 |
+| 2 | 0.240928 | 0.220704 | 0.282080 |
+| 3 | 0.245344 | 0.220640 | 0.281888 |
+
+These are whole-batch GPU medians, not game-frame costs. The direct typed
+variant saves 20.224-25.760 us per 40-draw batch (8.4-10.5%). The copy variant
+adds 35.840-41.152 us. CPU submission medians are 7.2-7.6 us for baseline,
+4.4-4.6 us typed, and 5.6 us copied, well below the measured GPU intervals.
+Artifacts are `build/identity-fusion/run1/` through `run3/`, each with JSON
+metadata and CSV samples. The timings do not include actual original shader
+resource access/skinning or the immediate motion-raster consumer. They cannot
+be scaled into the latest flight's 64-draw cost or a promised FPS gain.
+
+Ruled out as an optimization for this tested workload: fusion followed by a
+copy to retain the structured consumer, because all three runs are slower. The
+typed path has a repeatable but small local benefit. It does not justify
+changing five shader families and the motion-history consumer based on the
+earlier sampled identity estimate alone. Keep it as a local experiment; a
+future representative replay must include original shaders and immediate motion
+consumption before selecting a production change. Frontier remains on 89b9055
+and no new test flight is requested.
+
+Validation: the new rig's WARP `--self-test` is registered in `build.bat`.
+Hardware correctness and the no-write `--dry-run` check pass. The absolute-path
+full build exits 0: all 61 pooled jobs, three quiet jobs, 249-key config
+contract and packaging/export gates pass, including the new rig's 270 checks.
+The build log is `build/identity-fusion-validation.log`.
