@@ -49,13 +49,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: correct moving-object pixel ownership, preserving actual drone/NPC/
-  ship motion and station rotation. The capture establishes wrong vectors on
-  walls; it does not justify a global static-scene assumption or smaller
-  arbitrary radii. Existing settings are preserved. Repeated draw
-  classification remains a later CPU target. The rejected blend cache remains
-  removed. Foveated-DLSS remains paused; engine-level skipping has no verified
-  target. No automatic capture is armed.
+- Next flight: Frontier is ready for the authorized coarse-ship-off A/B:
+  advanced.temporal_aa_objects_ships_metres = 0 (previously default 1000). Same
+  binaries and all other EDVR settings; exact mesh motion and station rotation
+  remain enabled. Stay landed in the same cockpit view, DLSS on, and take one
+  eye dump while watching the buildings. Predict no path-3 claims and stable
+  world vectors there. This is temporary isolation, not a permanent fix; then
+  correct visible-surface ownership. No automatic capture is armed.
 
 ## Journal
 
@@ -3112,3 +3112,43 @@ capture, integrity `report.json`, `region-report.json`,
 `ship-claim-report.json`, and labeled `ship-claim.png`. All 32 motion-ledger
 rows were checked. Capture overhead makes this interval unsuitable for FPS
 comparisons. No compiler or full-suite rerun was needed for this analysis.
+
+### 2026-09-18 -- coarse moving-object fallback A/B prepared in Frontier
+
+The user clarifies that walking NPCs are usually occluded by the buildings.
+Pool-based motion detection reads the shared instance buffer, not a list of
+visible pixels, so a moving record does not prove the corresponding NPC was
+submitted or survived depth testing. This observation strengthens the need to
+tie motion to visible surface ownership; it does not identify the offending
+mover or establish unnecessary NPC draws.
+
+The user authorized the controlled A/B. With the game stopped, copied the live
+Frontier INI into local staging, used an explicit patch to change only
+`#temporal_aa_objects_ships_metres = 1000` to `temporal_aa_objects_ships_metres
+= 0`, and verified the complete before/after content including original
+encoding and line endings. The staged source and original are under
+`build/settlement-ships-off-frontier-56a5815`; the four staged native package
+files match the already installed diagnostic. The repository default INI was
+not used to replace the tuned live configuration.
+
+Applied through `tools/install_edvr.py --target frontier --root <stage> --ini
+--tag settlement-ships-off`, after dry-run and a check that the live INI still
+matched the staged original. The installer created transactional backups and
+receipt `edvr_native_receipt.json.pre-settlement-ships-off-20260918-162942.bak`
+in the Frontier product directory. Both staged-config verification and normal
+build verification pass. Live INI SHA256 is
+`7802f3347940559ba5899df574e742ac50a957cb0e2bfcc3dc2cedc544c9debe`.
+
+Only the coarse moving-ship handoff is disabled. DLSS, exact mesh motion and
+station/body motion remain configured as before. Restore the prior commented
+line (default 1000), preserving any subsequent user changes, after the A/B or
+when a replacement is ready. This setting persists across restarts and is not
+an automatic timed test. Do not call it a completed rendering fix.
+
+Next run: same landed cockpit view, unchanged DLSS/headset settings, one normal
+eye dump while observing whether the buildings still switch appearance. Check
+the same compiled label `v0.17.0-35-g2a23ee7-dirty`, path 3 absent over the
+facades, and correspondence to raw/world motion. Visual improvement would
+confirm this fallback's contribution; remaining shimmer requires inspecting the
+other recorded paths rather than assuming all causes are resolved. No rebuild
+or full-suite rerun was performed for this configuration-only test.
