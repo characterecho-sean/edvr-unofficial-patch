@@ -1117,7 +1117,21 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     if(info) for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {
         SIZE_T size=0; info->GetMessage(i,nullptr,&size); std::vector<unsigned char> storage(size);
         auto* m=reinterpret_cast<D3D11_MESSAGE*>(storage.data()); hr(info->GetMessage(i,m,&size));
-        if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING) {
+        // "The Pixel Shader expects a Render Target View bound to slot 2, but
+        // none is bound. This is OK, as writes of an unbound Render Target
+        // View are discarded..." -- by design. Production's depth-composite
+        // shaders (kPanelDepthHlsl, kScreenDepthHlsl, kSpriteDepthHlsl,
+        // kHoloDepthBody in ui_depth.cpp) declare SV_Target0..2 once and
+        // serve several errands with them: depth-only with no colour target
+        // at all, the reactive mask alone at slot 0, and the holo-motion and
+        // edit targets at slots 1-2 only when those exist
+        // (uiDepthReissueBegin binds edits ? 3 : holo ? 2 : mask ? 1 : 0).
+        // The rig's single-target draws are the mask-only errand, so slot 2
+        // is unbound here exactly as in play without an edit mask, and D3D11
+        // discards the write. Windows Server 2022's older D3D11 debug layer
+        // reports it; the newer layer on Windows 11 does not. Every other
+        // message id still fails the rig.
+        if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING && m->ID!=D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET) {
             std::puts(m->pDescription); check(false,"D3D debug-layer warning/error");
         }
     }
