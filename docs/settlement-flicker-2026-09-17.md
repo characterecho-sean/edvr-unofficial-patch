@@ -2,25 +2,27 @@
 
 ## Status
 
-- State: verified CPU capture 2d98775 identifies execution as the largest part
-  of the landed post-Present interval. Independent raw-event analysis confirms
-  the conservative 711-frame cohort below. Most sampled execution there is in
-  Elite; the four synchronous pose queries are small. Full-frame sampling also
-  finds substantial execution in EDVR's graphics proxy, spread across hook
-  bookkeeping. No draw suppression is active; prior unchanged payloads becoming
-  visible still rule out cached rejection based only on unchanged draw data.
-- Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
-  2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
-  5120x2880 in the prior run; this flight has no on-foot leg or eye capture.
-  Prior DLSS runs used K; the flight does not log the DLSS DLL version.
-- Timing: retained steady sequences 12225-12935, caller 17948, average 3.698 ms
-  after Present: 2.616 running, 0.938 waiting, 0.144 ready, zero unknown.
-  Measured OpenVR call spans union to 0.095 ms/frame. Native W8 is a larger
-  30-second cohort: 62.733 FPS, 15.939 ms cycle, 10.767 ms before Submit, 4.036
-  ms after Present, and 0.058 ms raw Present. Profiling and scene variance
-  confound the roughly 1 ms slower cycle than 72501fe; this is an ownership
-  capture, not a clean performance comparison. The sequence gap at 13422 is a
-  logged scope rejection during exit, outside the steady cohort.
+- State: verified c1dbb76 DLSS CPU capture is complete with clean retained
+  coverage. The shared draw-path optimizations are installed in Frontier.
+  Sampled stacks confirm the old dominant resolve-bind getter path is removed
+  and the inactive foveation callback has zero sampled PCs. CPU execution still
+  dominates the post-Present interval, while the measured synchronous native
+  calls are small. The previous 2d98775 trace used AA off; differing modes and
+  workloads prevent a before/after speedup claim.
+- Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
+  2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
+  trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
+  capture is landed cockpit; station rotation/on-foot still need their own
+  validation. No draw suppression is active.
+- Timing: native W7/W8 report 55.733/54.933 FPS, 17.942/18.200 ms cycles. Last
+  completed benchmark medians are CPU 12.823 and GPU 16.506 ms; these are
+  separate elapsed measurements, not exclusive CPU work or additive costs.
+  Strict retained sequences 11580-12078 (499 frames, caller 15248) average
+  3.626 ms after Present: 2.683 running, 0.829 waiting, 0.113 ready, zero
+  unknown. Native call-span union is 0.083 ms/frame. Broader W8 intersection
+  gives essentially the same result but crosses a shadow-workload change.
+  Trace, reports and matching DLLs/PDBs are preserved under the capture
+  directory below.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -43,15 +45,14 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: the shared lazy UI trace hashes, known-binding scanner-body fast path,
-  and inactive-foveation gate have passed the full build and source review.
-  Frontier now has verified c1dbb76. A smoke-validated CPU collector is waiting
-  for a DLSS-on landed capture (armed 2026-09-18 19:59 UTC, 30-minute launch
-  window, five-minute maximum recording). Select DLSS in F8, hold the same
-  cockpit view for 60-90 seconds, then quit normally. DLSS benefit still needs
-  measurement. Keep active motion, transition-flash and history processing
-  intact, and foveated-DLSS paused; the AA-off-only motion gate is outside this
-  pass.
+- Next: audit reuse of unchanged scene-depth selection and scrim SRV metadata,
+  the remaining concrete sampled targets. Validate resource lifetime, target
+  mutation, size/eye changes and unknown-state behavior in local fixtures
+  before another build/flight. Instrumented draw-hook wall mean is 5.0-5.1 ms
+  per sampled frame, including reissues/waits; it is not wholly removable CPU
+  execution. Preserve active motion, transition-flash/history processing and
+  foveated-DLSS paused. Engine-level skipping still lacks a verified semantic
+  target; no new flight is needed to identify these two proxy costs.
 
 ## Journal
 
@@ -2568,3 +2569,95 @@ archived there under symbols-c1dbb76 with verified SHA-256 hashes. Select DLSS
 through F8 and hold the same landed cockpit view for 60-90 seconds before
 quitting. A fresh DLSS-on capture is still required before claiming an in-game
 gain.
+
+### 2026-09-18 -- c1dbb76 DLSS flight and retained CPU ownership
+
+Both graphics/native logs verify v0.17.0-29-gc1dbb76. The collector completed
+normally on game_exit; output is build/cpu-profile-frontier-c1dbb76-dlss. The
+ETL is 540,016,640 bytes. DLSS was selected live at 14:01:21.820 local; the
+settled scene uses input 2481x2121, temporal reconstruction 3818x3264, XR
+output 3072x3264, Quest 3/VirtualDesktopXR, 90 Hz and preset K. The initial
+cheap scene/loading windows must not be used as the settlement measurement.
+
+Native W7 and W8 are the expensive settled scene: 55.733/54.933 FPS and
+17.9422/18.1996 ms cycle means. W8 spans seq10577-12224 and reports 12.6892 ms
+before first Submit, 4.0765 ms after Present, and 0.0670 ms raw Present. The
+last completed benchmark window has CPU median/p95 12.823/14.338 ms and GPU
+16.506/18.154 ms. The CPU field is producer elapsed wall time, including
+stalls/descheduling and treatment callbacks, not exclusive execution. These
+windows and the ETL cohort below have different boundaries.
+
+The report has complete coverage, zero lost events, 3473 valid available frames
+and 1246 analyzed intervals (seq11580-12825). Retained gaps, duplicates,
+invalid spans/frames and unknown scheduler state are all zero. Earlier marker
+gaps precede the retained scheduler tail. The common retained CPU boundary is
+8329270708.1 us, 672.637 ms after the global first switch; one partial boundary
+frame is correctly discarded.
+
+Use seq11580-12078, QPC8329288099-8338036037 us, caller 15248, as the strict
+499-frame cohort. It ends before the 20:04:04.089 UTC shadow census change
+(QPC8338050220.1). The mean post-Present 3.625998 ms comprises 2.683319 ms
+running, 0.829397 ms waiting and 0.113282 ms ready, with zero unknown. The
+native call-span union is 0.083120 ms/frame. The broader W8 intersection
+seq11580-12224 (645 frames) gives 3.624879 ms total and nearly identical
+scheduler components. Exclude the later scene/exit transition; seq12567 alone
+contains a 542.842 ms interval, of which 537.385 ms is waiting.
+
+The previous AA-off cohort's post-Present mean was 3.698 ms, including 2.616 ms
+running and 0.095 ms native call spans. Those similar magnitudes reinforce that
+the synchronous native calls do not explain the multi-millisecond gap; they do
+not establish an optimization delta across different AA modes and scenes. Ruled
+out: using this flight versus 2d98775 to claim a net performance gain or
+regression, because the baseline had AA off and workloads are unequal.
+
+Depth census samples report roughly 22000-22700 draws/frame, about 18500 in the
+two eye targets; at 14:04:04.089 a 256x256 target contributes 4428 draws and
+the total reaches 27303. These are submissions, not unique objects. The
+instrumented draw-hook mean in two heavy windows is 5.022/5.123 ms per sampled
+frame. It excludes original draw forwarding but includes EDVR reissues, waits
+and timer overhead, and misses the previously documented work outside its
+bracket. It must not be presented as an exclusive/removable CPU total. The
+steady temporal price reports roughly 2.51 ms median for NGX reconstruction per
+stereo pair, 0.30-0.31 ms prep and 0.32-0.33 ms UI; independent component
+medians cannot be added into a measured total, and some pairs were unmeasured.
+
+The strict cohort contains 7946 caller sampled-PC observations. Full module
+paths separate Elite (3431), the game-directory graphics proxy (2448, 30.8%),
+ntdll (973), Windows system D3D11 (554), NVIDIA (350), win32u (101), other
+(42), unknown (39), and the native runtime (8). These are observations, not CPU
+milliseconds or removable fractions; the runtime helper threads are outside
+this caller-only tally. Inclusive stack presence overlaps and is a different
+measurement: proxy 3520, system D3D11 1390, NVIDIA 891, runtime 295. After
+Present, the actual PC is in Elite for 1087 observations versus 23 in the
+graphics proxy and three in the runtime, reinforcing the engine ownership of
+most execution in that interval.
+
+The targeted inactive foveation callback has zero direct sampled PCs (83 in the
+previous AA-off cohort). bindingShaderHash has 34 and resolveBindOnEyeDraw
+eight. The old system D3D11 +0x47ab9 hotspot has changed caller: 119 of its 124
+observations are now under guardedBudget -> bindingResolve -> scrimOnEyeDraw,
+not the old dominant scanner-body PSGetShader path. Raw driver offsets alone
+would conceal this improvement. The other old driver offset +0x201dd has 63 of
+67 observations under the accepted meshMotionDraw path near its function end;
+this is system/COM work, not proof of a particular descriptor getter. Different
+capture lengths and workloads preclude raw-count speedup arithmetic.
+
+The remaining concrete proxy work includes refreshScenePick (227 direct PCs),
+uiDepthOnEyeDraw (163), meshMotionDraw (98) and meshMotionResourceWritten (25).
+The central beginPanelOverride/forwardWithVerdict/draw lambda account for
+245/186/149 direct observations. Source inspection confirms refreshScenePick
+linearly scans the depth-target table for each query, largely using last-frame
+counts. Its reusable result must be invalidated by every relevant table/pick
+mutation and size change, not just by advancing the frame. scrimOnEyeDraw
+resolves PS SRV0 resource type/size/format for every shape candidate and SRV1
+only after the rare 16x16 BC1 match. Immutable descriptor reuse is a bounded
+next target; preserve resource lifetime, binding invalidation and unknown
+resolution semantics. Neither optimization would suppress game draws or alter
+object motion eligibility. No engine operation has yet been identified that is
+both expensive and proven safe to omit.
+
+Derived samples and symbolized PCs are retained under
+build/cpu-profile-frontier-c1dbb76-dlss/derived-hotspots/strict-pre-shadow/.
+This flight verifies removal of the targeted hot path and supplies the next CPU
+targets; it does not measure the net FPS benefit of c1dbb76. No runtime or live
+configuration was changed during this analysis.
