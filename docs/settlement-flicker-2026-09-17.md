@@ -2,52 +2,51 @@
 
 ## Status
 
-- State: targeted material-draw recurrence probe passes local and full build
-  gates; Frontier test flight is pending. The verified ea2a7f9 flight produces
-  valid original-draw visibility, pipeline and timing results. About 76% of
-  sampled stable-scene draws pass no depth/stencil samples. This supports
-  investigating submission/geometry work; it is not an object count, a safe
-  skip predicate or an FPS-saving estimate. No draw suppression is active. See
-  the final journal entry.
+- State: verified Frontier dcd0a9f flight completes all 29520 selected draw
+  queries and payload captures without failures. Exact recurrence is sparse:
+  1.57% of landed follow-ups and 4.92% on foot retain identical captured
+  bindings and payload. Three unchanged payloads go from zero passed samples to
+  nonzero. Cached rejection alone is unsafe; no draw suppression is active. See
+  the final journal entry for denominators and limits.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
   5120x2880. No eye capture contaminates this flight. Prior DLSS runs used K;
   the flight does not log the DLSS DLL version.
-- Timing: landed completed windows have CPU p50 9.610-10.276 ms and GPU
-  10.540-10.782 ms; on foot CPU 6.986-7.110 ms and GPU 9.526-9.675 ms. Landed
-  GPU p95 is 11.731-12.107 ms; on foot 10.446-10.556 ms. The 90 Hz budget is
-  11.111 ms. Lower particle activity prevents attributing the improvement over
-  the preceding flight to the ownership optimization.
-- Population: 22743-23827 original native calls/frame landed and 18747-19180 on
-  foot, across all passes. Sparse admission is about three calls/frame.
-  Pixel-shader invocations are zero in 83-85% / 87-90% of samples respectively.
-  Visibility/pipeline results complete; one on-foot timing result is
-  unavailable. No invalid, expired, ring-full or query-tracking overflow
-  occurs.
-- Limits: the 128 detailed buckets drop most newly encountered keys, although
-  all-sample pass aggregates remain valid. Exact count/instance fields split
-  shader families. Printed details cover only 10.55% landed / 6.52% on foot;
-  retained per-shader rankings are incomplete. Eye labels remain unresolved;
-  source-sized color is not a UI classification. Query brackets perturb
-  execution and their times cannot be extrapolated as savings.
-- CPU: sampled hook work is about 4.2 ms landed and 2.76-2.80 ms on foot. The
-  first-call subtraction includes the probe/owner lookup and, for indexed
-  instanced draws, weapon-motion work. This counter is not all EDVR CPU cost
-  and cannot independently measure the owner-lookup change. Map tracking is
-  0.232-0.257 / 0.123-0.178 ms/frame; particle replacements remain active.
+- Timing: completed landed windows have CPU p50 10.326-10.807 ms and GPU
+  10.824-11.298 ms; the completed on-foot window has CPU 7.513 ms and GPU
+  10.073 ms. Landed GPU p95 is 12.475-12.654 ms; on foot 10.888 ms. The 90 Hz
+  budget is 11.111 ms, but these are segmented application-work timers, not
+  frame periods. Actual landed throughput is 63-65 FPS (15-16 ms/frame);
+  on-foot benchmark window 7 averages 80.53 FPS. Slightly slower than ea2a7f9,
+  but scene variation and added instrumentation prevent attribution.
+- Visibility: 25408 selected draws pass no depth/stencil samples; only 82
+  produce zero clipped primitives. This favors investigating depth/stencil
+  rejection over simple frustum rejection in the selected material families.
+  Held ordinal cohorts bias these rates; they are not a population estimate,
+  unique mesh count or removable fraction. The prior broad census found about
+  76% zero-sample draws and roughly 23000/19000 original calls/frame.
+- Limits: binding changes break 78.51% of landed and 50.92% of on-foot
+  follow-ups. The composite counter cannot identify which binding changed.
+  Model changes are confined to pose fields, but comparisons can concern
+  different objects. IDs, draw order and identical payloads are not proven
+  persistent object identity. Coarse family aggregates remain valid despite
+  detail-bucket overflow; query times cannot be extrapolated as FPS savings.
+- CPU: the hook timer excludes the probe/owner lookup and, for indexed
+  instanced draws, weapon-motion work. It cannot measure total EDVR overhead. A
+  skip at the D3D draw hook also cannot recover Elite's earlier scene
+  traversal, draw-list construction or state submission.
 - Prior DLSS work: static identity across rebases and first-visible/moving
   history remain unresolved. Typed fusion was not useful; precomputed capture
   controls suggest only 0.21-0.35 ms per captured subset. Earlier evidence and
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next flight: Frontier, same settlement and AA-off render settings, ship kept
-  landed. About one minute seated and one minute on foot with weapon drawn;
-  mostly hold the view, with one slow look away and back in each mode. The log
-  is sufficient. Inspect targeted-family coverage, payload changes, ordered
-  recurrence and visibility transitions before proposing a conservative skip
-  rule. Preserve motion history; separately paused foveated-DLSS work stays
-  paused.
+- Next: account for the complete frame cycle before prioritizing more culling.
+  Caller-to-owner handoffs and post-Submit work are outside the displayed
+  application timers; measured owner XR waits/submission are too small to
+  explain the cadence gap alone. No repeat flight requested yet. Conservative
+  current-depth culling remains an offline candidate, not a demonstrated win.
+  Preserve motion history; separately paused foveated-DLSS work stays paused.
 
 ## Journal
 
@@ -1668,3 +1667,147 @@ draws retain visibility queries but cannot establish full-payload recurrence.
 The selected gather precedes the original-draw query bracket, so its GPU cost
 is outside that per-draw interval and remains part of whole-frame timing. This
 is an instrumented test build, not an asserted frame-time improvement.
+
+### 2026-09-18 -- targeted flight: sparse recurrence and changing visibility
+
+Verified `edvr_gfx_20260918_104357.log` with the sanctioned reader against
+`dcd0a9f`: version `v0.17.0-18-gdcd0a9f`, build `6AAD6977`, linked at 16:40:23
+UTC. This is the targeted probe, with AA off, VirtualDesktopXR / Quest 3 / 90
+Hz, input 2481x2121 and output 3072x3264 per eye during gameplay. Startup uses
+a narrower input briefly; exclude it. No eye-dump operation is logged.
+
+All 29520 submitted brackets finish with visibility, pipeline statistics,
+timing and complete unskinned payloads. All capture-error, unsupported,
+out-of-order, invalid, expiry, ring-full and query-overflow counters are zero.
+Of 30078 planned brackets, 558 miss their held ordinal. Selected stencil
+fail/depth-fail operations, UAV, stream-output and GS/HS/DS flags are zero. The
+detailed bucket table overflows 15295 times; coarse family and recurrence
+counters do not depend on that table.
+
+Original-draw windows 19-25 are the stable landed EyeColor/pass-1 phase; window
+26 mixes the transition; windows 27-34 are FootSourceColor/pass 2. These window
+numbers are separate from the native benchmark window numbers.
+
+| Stable phase | Ready samples | Exact binding + payload | Payload changed | Binding changed | Gaps |
+|---|---:|---:|---:|---:|---:|
+| Landed | 12303 | 193 (1.57%) | 1888 (15.37%) | 9643 (78.51%) | 558 (4.54%) |
+| On foot | 14354 | 705 (4.92%) | 5751 (40.13%) | 7297 (50.92%) | 577 (4.03%) |
+
+The four categories partition `ready - 3` in every ready collection window. One
+first observation per family has no predecessor: 21 exclusions landed and 24 on
+foot give percentage denominators 12282 and 14330. The 24-frame cohort changes
+count as gaps, not those initial exclusions. Binding changes include draw
+arguments, resources, viewport/scissor and retained pipeline state; IDs are
+compared separately as payload. The composite binding counter cannot say which
+component changed, nor can these counters estimate static-object counts.
+
+Across the whole flight, payload comparisons record 6554 ID changes, 6851
+model-byte changes and 1327 ID-only changes. All model changes include pose
+fields; no other model fields differ. These are comparisons at held ordinals,
+which may refer to different objects, not evidence that settlement structures
+move. Byte-identical model data with changed IDs also does not establish a
+unique object or prove a particular pool-management mechanism.
+
+There are three zero-to-nonzero visibility transitions and six in the other
+direction, all landed, despite identical captured bindings, IDs and t33 data in
+adjacent frames of the same cohort. Camera constants, depth/stencil contents
+and other shader/resource contents are not part of that identity. On-foot
+absence of transitions is inconclusive given its low exact recurrence.
+
+ruled out: reusing a previous zero-sample result solely because captured draw
+bindings and ID/t33 payload are unchanged, because three such draws pass
+samples on the following frame.
+
+The held family/pass aggregates have zero-sample fractions of
+84.20/81.74/88.62% for families 0/1/2 in pass 1, and 89.59/87.69/91.76% in pass
+2. They include all collection windows with that pass and are deliberately
+biased follow-ups. They must not replace the prior broad census's population
+estimate or be multiplied by per-draw timings to claim savings.
+
+Across all selected samples, 25408 have zero passed depth/stencil samples. Only
+82 (0.28%) have nonempty IA/VS work but zero clipped primitives. Another 25304
+(85.72%) have clipped primitives but no pixel-shader invocations. These
+hierarchical pipeline categories show that simple frustum rejection is unlikely
+to recover most of the observed work in these families. The counters do not
+separate depth, stencil and other raster rejection, and do not by themselves
+prove that a draw has no side effects.
+
+Interpretation uses Microsoft's [pipeline-statistics field
+definitions](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_query_data_pipeline_statistics):
+`CPrimitives` accounts for primitives after clipping and `PSInvocations` counts
+pixel-shader executions. The preferred next investigation is an inference from
+these counters, not a direct measurement of occluders.
+
+Completed native benchmark windows 4-5 give landed CPU p50 10.326/10.807 ms and
+GPU p50 10.824/11.298 ms, with GPU p95 12.475/12.654 ms. Completed on-foot
+window 7 gives CPU p50 7.513 ms and GPU p50/p95/p99 10.073/10.888/11.298 ms.
+All these samples are valid and complete. The final 28.047-second window ends
+on a scope change: CPU p50 7.709 ms, GPU 10.108 ms, one GPU sample missing.
+Exclude the shorter transition window 6. These are slightly slower than
+ea2a7f9, but separate flights do not isolate scene variation from probe
+overhead. The gather cost sits outside the original draw bracket and inside the
+segmented application timing. No performance improvement is claimed, and the
+native CPU/GPU medians must not be added together or treated as complete frame
+periods.
+
+Offline feasibility check: `weapon_motion.cpp` already captures original
+post-VS `SV_POSITION` through stream output for supported indexed draws. It
+replays vertex work and is bounded to 131072 indexed vertices. That can help
+validate geometry locally, but does not provide a cheap conservative bound
+before the original draw. The current recurrence capture has IDs and t33
+records, not mesh extents; the shader paths also depend on packed geometry,
+constants and potentially t38. Pose alone is insufficient. An NDC bound across
+nonpositive clip-w is unsafe; a frustum proof must respect homogeneous
+clipping.
+
+The culling candidate is an offline feasibility and break-even check for
+conservative bounds against current-frame depth, with uncertain cases retaining
+the draw. It must first establish complete geometry coverage, correct
+depth/stencil/pass semantics, conservative behavior during camera/occluder
+changes, and a net win after its own GPU work and submission cost. Replaying
+all vertices or waiting for GPU results on the CPU is not an assumed
+optimization. A hook-level skip cannot recover Elite's already-completed scene
+traversal and draw preparation. No further headset run or suppression build is
+justified by this flight alone. Frontier remains on diagnostic dcd0a9f; this
+entry changes documentation only.
+
+The user's FPS follow-up changes the immediate priority: despite application
+CPU/GPU readings around 10-11 ms, the landed cockpit runs in the mid 60s. The
+log confirms it. Native benchmark windows 4 and 5 admit 1952 and 1894 complete,
+valid frame sequences in 30 seconds: 65.07 and 63.13 FPS, or mean frame periods
+of 15.37 and 15.84 ms. Independent Present counts report 1265, 1283 and 1253
+frames per 20 seconds (63.25, 64.15 and 62.65 FPS). The on-foot completed
+window admits 2416 in 30 seconds, or 80.53 FPS. Sample admission is not
+downsampled; the asynchronous GPU drain joins results by frame sequence.
+
+Code trace: `native_timing.cpp` requires four CPU application segments,
+covering game work after WaitGetPoses, the two eye treatments, and between-eye
+game work. `native_runtime_host.h` opens the first only after the WaitGetPoses
+caller's `service.invoke` returns; each Submit closes it before the
+`renderRoute.invoke` handoff. The between-eye segment resumes after that
+handoff returns. GPU application timing likewise sums four producer timestamp
+intervals through `gpu_frame_timing.cpp` / `gpu_span_state.h`. These are
+neither complete frame-cycle durations nor exclusive CPU/GPU busy-time
+measurements. They omit caller-to-owner queue/rendezvous intervals, pose wait,
+transfer/composition, and the interval after the right Submit before the next
+pose-wait return. Sub-budget segment totals are therefore insufficient to
+establish 90 FPS.
+
+The matching native log, `edvr_openxr_20260918_104358_542_21788.log`, also
+verifies as dcd0a9f. Landed submission window 6 reports owner Submit p50 0.3223
+ms, producer dispatch 0.1135 ms, receive 0.0763 ms, XR swapchain wait 0.0002
+ms, xrEndFrame 0.0184 ms and xrWaitFrame 0.0072 ms, with zero pacer block.
+These fields are nested, so must not be added. Gfx owner pose-wait averages are
+about 0.03 ms. They do not explain the cadence gap by themselves, and do not
+include the game caller's wait before the owner starts the body. Landed pacing
+is runtime; foot changes to deferred/turbo at 10:46:47.681, so the landed/foot
+comparison also changes pacing mode.
+
+Immediate next step: account for one complete cycle on the same caller and
+sequence, including WaitGetPoses entry/return, each Submit entry/return,
+caller/owner handoffs and the right-Submit-to-next-WaitGetPoses interval.
+Correlate those with Present cadence and the existing application segments. Do
+not attribute the gap to a fixed 5 ms runtime stall by subtracting a median
+from a mean; per-frame attribution is still missing. This accounting takes
+priority over a suppression implementation. No pacing or culling fix has yet
+been justified, and no additional flight has been requested.
