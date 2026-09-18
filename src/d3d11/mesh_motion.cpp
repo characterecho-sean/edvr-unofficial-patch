@@ -57,10 +57,21 @@ bool diagnosticWindowHadComparison=false;
 constexpr unsigned diagnosticWindowFrames=1800,capProbeBudget=32;
 enum class FlushReason { InputChange,WriteOrMap,EyeConsumption,FrameBoundary,GpuWritable,Count };
 enum class InputChange { Context,Scene,Ids,Pool,Output,Oversized,Count };
+enum class AdmissionStage { Fast,Scene,Pipeline,Resources,Preparation,Accepted,Count };
+enum class FastReject { Disabled,SetupFailed,UnknownVs,DrawShape,Context,Count };
+enum class DescriptorKind { Depth,Blend,Ids,SceneCb,PoolSrv,PoolBuffer,Count };
 const char* flushReasonName(FlushReason reason){
     static const char* names[]={"input-change","write/map","eye-consumption","frame-boundary","gpu-writable"};
     return names[unsigned(reason)];
 }
+struct AdmissionMetrics {
+    struct Stage { uint64_t entered=0,rejected=0,cpuSamples=0;double cpuMs=0; } stages[unsigned(AdmissionStage::Count)];
+    uint64_t fastRejects[unsigned(FastReject::Count)]{};
+    uint64_t completed=0;
+};
+struct DescriptorMetrics {
+    struct Kind { uint64_t calls=0,hits=0,fills=0,evictions=0; } kinds[unsigned(DescriptorKind::Count)];
+};
 struct EyeDiagnostics {
     uint64_t candidateDraws=0,candidateInstances=0;
     uint64_t acceptedDraws=0,acceptedInstances=0;
@@ -86,8 +97,28 @@ struct Diagnostics {
     uint64_t depthMetadataHits=0,depthMetadataFills=0;
     uint64_t inputChanges[unsigned(InputChange::Count)]{};
     uint64_t rangedIdCopies=0,rangedIdInstances=0;
+    AdmissionMetrics admission{};
+    DescriptorMetrics descriptors{};
     void clearWindow(){*this=Diagnostics{};}
 } diagnostics;
+
+template<class T,unsigned Capacity=4>struct DescriptorShadow {
+    Ptr<T> entries[Capacity];unsigned count=0,next=0;
+    enum class Result { Hit,Fill,Eviction };
+    Result observe(T* value){
+        for(unsigned i=0;i<count;++i)if(entries[i].Get()==value)return Result::Hit;
+        if(count<Capacity){entries[count++]=value;return Result::Fill;}
+        entries[next]=value;next=(next+1)%Capacity;return Result::Eviction;
+    }
+    void clear(){for(auto& entry:entries)entry.Reset();count=next=0;}
+};
+struct DescriptorShadows {
+    DescriptorShadow<ID3D11DepthStencilState> depth;
+    DescriptorShadow<ID3D11BlendState> blend;
+    DescriptorShadow<ID3D11Buffer> ids,sceneCb,poolBuffer;
+    DescriptorShadow<ID3D11ShaderResourceView> poolSrv;
+    void clear(){depth.clear();blend.clear();ids.clear();sceneCb.clear();poolBuffer.clear();poolSrv.clear();}
+} descriptorShadows;
 
 enum class OversizedMode : uint8_t { Immediate, Packed };
 constexpr OversizedMode normalOversizedMode=OversizedMode::Packed;
@@ -103,6 +134,8 @@ struct ComparisonMetrics {
     uint64_t entryCpuSamples=0,acceptedCpuSamples=0,idCopyCpuSamples=0,flushCpuSamples=0;
     uint64_t copyGpuSubmitted=0,coverageGpuSubmitted=0,flushGpuSubmitted=0;
     uint64_t flushGpuFrame=~uint64_t(0);
+    AdmissionMetrics admission{};
+    DescriptorMetrics descriptors{};
 };
 struct ComparisonState {
     ComparisonStage stage=ComparisonStage::Idle;
@@ -135,6 +168,58 @@ bool sameBenchmarkMetadata(const NativeBenchmarkMetadata& a,const NativeBenchmar
         !std::strcmp(a.build,b.build);
 }
 double cpuTimestamp(){LARGE_INTEGER value;QueryPerformanceCounter(&value);static const double scale=[](){LARGE_INTEGER f;QueryPerformanceFrequency(&f);return 1000.0/double(f.QuadPart);}();return double(value.QuadPart)*scale;}
+uint64_t admissionClockCalls=0;
+double admissionTimestamp(){++admissionClockCalls;return cpuTimestamp();}
+struct AdmissionTrace {
+    AdmissionMetrics* rolling=&diagnostics.admission;
+    AdmissionMetrics* phase=comparison.measurement?&comparison.metrics.admission:nullptr;
+    AdmissionStage stage=AdmissionStage::Fast;
+    bool sampled=false,finished=false,completedOutcome=false;
+    double started=0,last=0;
+    AdmissionTrace(bool active):sampled(active){
+        enter(stage);
+        if(sampled)started=last=admissionTimestamp();
+    }
+    void enter(AdmissionStage value){
+        ++rolling->stages[unsigned(value)].entered;
+        if(phase)++phase->stages[unsigned(value)].entered;
+    }
+    void addSpan(double now){
+        auto& r=rolling->stages[unsigned(stage)];r.cpuMs+=now-last;++r.cpuSamples;
+        if(phase){auto& p=phase->stages[unsigned(stage)];p.cpuMs+=now-last;++p.cpuSamples;}
+        last=now;
+    }
+    void advance(AdmissionStage next){
+        if(sampled)addSpan(admissionTimestamp());
+        stage=next;enter(stage);
+    }
+    void fastReject(FastReject reason){
+        ++rolling->fastRejects[unsigned(reason)];
+        if(phase)++phase->fastRejects[unsigned(reason)];
+    }
+    void finish(bool completed){
+        if(finished)return;
+        if(completed){++rolling->completed;if(phase)++phase->completed;}
+        else {++rolling->stages[unsigned(stage)].rejected;if(phase)++phase->stages[unsigned(stage)].rejected;}
+        if(sampled){
+            const double now=admissionTimestamp();addSpan(now);
+            diagnostics.drawCpuMs+=now-started;++diagnostics.drawCpuSamples;
+            if(phase){comparison.metrics.entryCpuMs+=now-started;++comparison.metrics.entryCpuSamples;}
+        }
+        finished=true;
+    }
+    // Mark success, but leave the final timestamp to the destructor so local
+    // COM releases and nested timers remain inside the original hook span.
+    void complete(){completedOutcome=true;}
+    ~AdmissionTrace(){finish(completedOutcome);}
+};
+void recordDescriptor(DescriptorKind kind,unsigned result){
+    auto add=[&](DescriptorMetrics& metrics){auto& m=metrics.kinds[unsigned(kind)];++m.calls;if(result==0)++m.hits;else {++m.fills;if(result==2)++m.evictions;}};
+    add(diagnostics.descriptors);if(comparison.measurement)add(comparison.metrics.descriptors);
+}
+template<class T,unsigned Capacity>void observeDescriptor(DescriptorKind kind,DescriptorShadow<T,Capacity>& shadow,T* value){
+    recordDescriptor(kind,unsigned(shadow.observe(value)));
+}
 struct CpuSample {
     double* total=nullptr;uint64_t* samples=nullptr;double start=0;
     CpuSample(bool active,double& sum,uint64_t& count){if(active){total=&sum;samples=&count;start=cpuTimestamp();}}
@@ -181,6 +266,12 @@ void logComparisonMetrics(const NativeBenchmarkReport& report){
         (unsigned long long)m.entryCalls,(unsigned long long)m.acceptedDraws,(unsigned long long)m.acceptedInstances,(unsigned long long)m.oversizedDraws,(unsigned long long)m.oversizedInstances,(unsigned long long)m.idCopies,(unsigned long long)m.idCopyBytes,(unsigned long long)m.wholeCopies,(unsigned long long)m.rangedCopies,(unsigned long long)m.batches,(unsigned long long)m.batchInstances);
     Log::get().note("motion comparison CPU: phase %s, sampled full mesh hook %.3f us (%llu samples, includes early returns and cap checks), accepted path %.3f us (%llu; nested explanatory span, not added to full hook; includes copy enqueue, setup, coverage and capture flush when caused by that draw), ID CopySubresourceRegion call %.3f us (%llu), capture flush %.3f us (%llu).",
         comparisonPhaseName(comparison.phase),m.entryCpuSamples?m.entryCpuMs*1000/m.entryCpuSamples:0,(unsigned long long)m.entryCpuSamples,m.acceptedCpuSamples?m.acceptedCpuMs*1000/m.acceptedCpuSamples:0,(unsigned long long)m.acceptedCpuSamples,m.idCopyCpuSamples?m.idCopyCpuMs*1000/m.idCopyCpuSamples:0,(unsigned long long)m.idCopyCpuSamples,m.flushCpuSamples?m.flushCpuMs*1000/m.flushCpuSamples:0,(unsigned long long)m.flushCpuSamples);
+    const auto& a=m.admission;const auto& af=a.stages[unsigned(AdmissionStage::Fast)];const auto& as=a.stages[unsigned(AdmissionStage::Scene)];const auto& ap=a.stages[unsigned(AdmissionStage::Pipeline)];const auto& ar=a.stages[unsigned(AdmissionStage::Resources)];const auto& apre=a.stages[unsigned(AdmissionStage::Preparation)];const auto& aa=a.stages[unsigned(AdmissionStage::Accepted)];
+    const double exclusiveMs=af.cpuMs+as.cpuMs+ap.cpuMs+ar.cpuMs+apre.cpuMs+aa.cpuMs;
+    Log::get().note("motion comparison admission counts: phase %s, completed %llu; fast %llu entered/%llu rejected (disabled %llu, setup-failed %llu, unknown-VS %llu, draw-shape %llu, context %llu), scene/depth/eye/cap %llu/%llu, pipeline %llu/%llu, IA/resources %llu/%llu, preparation %llu/%llu, accepted work %llu/%llu. Every hook entry ends in one rejection stage or completed.",comparisonPhaseName(comparison.phase),(unsigned long long)a.completed,(unsigned long long)af.entered,(unsigned long long)af.rejected,(unsigned long long)a.fastRejects[unsigned(FastReject::Disabled)],(unsigned long long)a.fastRejects[unsigned(FastReject::SetupFailed)],(unsigned long long)a.fastRejects[unsigned(FastReject::UnknownVs)],(unsigned long long)a.fastRejects[unsigned(FastReject::DrawShape)],(unsigned long long)a.fastRejects[unsigned(FastReject::Context)],(unsigned long long)as.entered,(unsigned long long)as.rejected,(unsigned long long)ap.entered,(unsigned long long)ap.rejected,(unsigned long long)ar.entered,(unsigned long long)ar.rejected,(unsigned long long)apre.entered,(unsigned long long)apre.rejected,(unsigned long long)aa.entered,(unsigned long long)aa.rejected);
+    Log::get().note("motion comparison admission CPU: phase %s, same 1/256 hook sample raw exclusive totals, full %.3f us (%llu samples); fast %.3f us (%llu stage samples), scene/depth/eye/cap %.3f (%llu), pipeline %.3f (%llu), IA/resources %.3f (%llu), preparation %.3f (%llu), accepted work %.3f (%llu). Raw stage totals %.3f us sum to the raw full-hook duration; zero samples mean the stage was not reached. A completed sample adds five boundary QPC reads; unsampled draws add none.",comparisonPhaseName(comparison.phase),m.entryCpuMs*1000,(unsigned long long)m.entryCpuSamples,af.cpuMs*1000,(unsigned long long)af.cpuSamples,as.cpuMs*1000,(unsigned long long)as.cpuSamples,ap.cpuMs*1000,(unsigned long long)ap.cpuSamples,ar.cpuMs*1000,(unsigned long long)ar.cpuSamples,apre.cpuMs*1000,(unsigned long long)apre.cpuSamples,aa.cpuMs*1000,(unsigned long long)aa.cpuSamples,exclusiveMs*1000);
+    const auto& dm=m.descriptors;const auto& dd=dm.kinds[unsigned(DescriptorKind::Depth)];const auto& db=dm.kinds[unsigned(DescriptorKind::Blend)];const auto& di=dm.kinds[unsigned(DescriptorKind::Ids)];const auto& dc=dm.kinds[unsigned(DescriptorKind::SceneCb)];const auto& ds=dm.kinds[unsigned(DescriptorKind::PoolSrv)];const auto& dp=dm.kinds[unsigned(DescriptorKind::PoolBuffer)];
+    Log::get().note("motion comparison descriptor reuse: phase %s, actual GetDesc calls/hits/fills/evictions, depth %llu/%llu/%llu/%llu, blend %llu/%llu/%llu/%llu, IDs %llu/%llu/%llu/%llu, scene-CB %llu/%llu/%llu/%llu, pool-SRV %llu/%llu/%llu/%llu, pool-buffer %llu/%llu/%llu/%llu. Four retained identities per category reset each frame; observation never skips a getter.",comparisonPhaseName(comparison.phase),(unsigned long long)dd.calls,(unsigned long long)dd.hits,(unsigned long long)dd.fills,(unsigned long long)dd.evictions,(unsigned long long)db.calls,(unsigned long long)db.hits,(unsigned long long)db.fills,(unsigned long long)db.evictions,(unsigned long long)di.calls,(unsigned long long)di.hits,(unsigned long long)di.fills,(unsigned long long)di.evictions,(unsigned long long)dc.calls,(unsigned long long)dc.hits,(unsigned long long)dc.fills,(unsigned long long)dc.evictions,(unsigned long long)ds.calls,(unsigned long long)ds.hits,(unsigned long long)ds.fills,(unsigned long long)ds.evictions,(unsigned long long)dp.calls,(unsigned long long)dp.hits,(unsigned long long)dp.fills,(unsigned long long)dp.evictions);
     Log::get().note("motion comparison GPU: phase %s, ID copy %.3f us (%u ready/%llu submitted, %u skipped, %u invalid, %llu pending), coverage reissue %.3f us (%u/%llu, %u skipped, %u invalid, %llu pending), capture dispatch %.3f us (%u/%llu, %u skipped, %u invalid, %llu pending); asynchronous command-stream intervals, not synchronized attribution to a CPU or native frame; no waits, flushes or readbacks.",
         comparisonPhaseName(comparison.phase),copy.samples?copy.ms*1000/copy.samples:0,copy.samples,(unsigned long long)m.copyGpuSubmitted,copy.skipped,copy.invalid,(unsigned long long)pendingGpu(m.copyGpuSubmitted,copy),coverage.samples?coverage.ms*1000/coverage.samples:0,coverage.samples,(unsigned long long)m.coverageGpuSubmitted,coverage.skipped,coverage.invalid,(unsigned long long)pendingGpu(m.coverageGpuSubmitted,coverage),flush.samples?flush.ms*1000/flush.samples:0,flush.samples,(unsigned long long)m.flushGpuSubmitted,flush.skipped,flush.invalid,(unsigned long long)pendingGpu(m.flushGpuSubmitted,flush));
     Log::get().note("motion comparison flushes: phase %s, input-change %llu, write/map %llu, eye-consumption %llu, frame-boundary %llu, gpu-writable %llu.",comparisonPhaseName(comparison.phase),(unsigned long long)m.flushes[unsigned(FlushReason::InputChange)],(unsigned long long)m.flushes[unsigned(FlushReason::WriteOrMap)],(unsigned long long)m.flushes[unsigned(FlushReason::EyeConsumption)],(unsigned long long)m.flushes[unsigned(FlushReason::FrameBoundary)],(unsigned long long)m.flushes[unsigned(FlushReason::GpuWritable)]);
@@ -367,7 +458,7 @@ void processComparisonBoundary(ID3D11DeviceContext* ctx){
     ++comparison.phase;beginComparisonPhase(ctx,now);
 }
 } // namespace mesh_motion_detail
-void meshMotionConfigure(bool on){using namespace mesh_motion_detail;if(on!=enabled){if(!on&&comparisonActive()){Log::get().note("motion comparison: aborted because mesh motion was disabled; normal batched capture will be used when it is enabled again.");menuNotify("Motion comparison aborted: mesh motion was disabled.");}meshMotionShutdown();enabled=on;if(on)Log::get().note("mesh motion diagnostics: 1800-frame windows active; draw CPU sampled 1/256 calls, capture flush CPU sampled 1/16 batches, capture GPU samples the first flush in one of 16 frames, capped eligibility probed for at most 32 draws per eye in one frame per window (bounded samples only; no population estimates).");}}
+void meshMotionConfigure(bool on){using namespace mesh_motion_detail;if(on!=enabled){if(!on&&comparisonActive()){Log::get().note("motion comparison: aborted because mesh motion was disabled; normal batched capture will be used when it is enabled again.");menuNotify("Motion comparison aborted: mesh motion was disabled.");}meshMotionShutdown();enabled=on;if(on){Log::get().note("mesh motion diagnostics: 1800-frame windows active; draw CPU sampled 1/256 calls, capture flush CPU sampled 1/16 batches, capture GPU samples the first flush in one of 16 frames, capped eligibility probed for at most 32 draws per eye in one frame per window (bounded samples only; no population estimates).");Log::get().note("mesh motion admission diagnostics: exclusive stages subdivide the existing 1/256 full-hook sample; descriptor reuse observation retains at most four identities per category until the frame boundary and never skips a getter. These instruments do not change eligibility, culling, capture mode or pipeline state.");}}}
 void meshMotionRequestComparison(){
     using namespace mesh_motion_detail;
     if(!enabled){Log::get().note("motion comparison: refused because mesh motion is disabled.");menuNotify("Motion comparison unavailable: mesh motion is off.");return;}
@@ -380,7 +471,7 @@ void meshMotionRequestComparison(){
     comparison.cancelRequested=comparison.nativeSampling=comparison.measurement=comparison.everMeasured=comparison.haveReport=false;
     comparison.disturbanceEpoch=comparison.settleUntilMs=comparison.phaseDeadlineMs=comparison.nativeWindow=comparison.nativeScope=0;comparison.failure=nullptr;comparison.haveBaseline=false;clearComparisonMetrics();
     Log::get().note("motion comparison: armed A1 immediate / B packed-batch / A2 immediate. Close the menu, then hold one landed view and all settings unchanged for about two minutes. Ten seconds of settling, native warmups and drains are excluded.");
-    Log::get().note("motion comparison instrumentation: full hook CPU reuses the existing 1/256 clock; accepted path, ID-copy CPU/GPU and coverage GPU sample fixed accepted/copy-call schedules; capture GPU samples at most the first flush in one of 16 frames, the same bounded policy used by normal capture.");
+    Log::get().note("motion comparison instrumentation: full hook CPU and its exclusive admission stages reuse the existing 1/256 selector; accepted path, ID-copy CPU/GPU and coverage GPU sample fixed accepted/copy-call schedules; capture GPU samples at most the first flush in one of 16 frames, the same bounded policy used by normal capture. Descriptor identities are observation-only; A1/B/A2 remains immediate/packed/immediate.");
     menuNotify("Comparison armed. Close the menu and hold the landed view.");
 }
 uint64_t meshMotionComparisonScopeEpoch(){using namespace mesh_motion_detail;return comparison.epoch;}
@@ -405,11 +496,15 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     using namespace mesh_motion_detail;
     if(comparison.measurement)++comparison.metrics.entryCalls;
     const bool entrySample=(++diagnostics.drawCalls&255u)==0;
-    DualCpuSample cpu(entrySample,diagnostics.drawCpuMs,diagnostics.drawCpuSamples,
-        comparison.measurement?&comparison.metrics.entryCpuMs:nullptr,
-        comparison.measurement?&comparison.metrics.entryCpuSamples:nullptr);
+    AdmissionTrace admission(entrySample);
     const auto kind=coverageKind(hash);
-    if(!enabled || failed || kind==CoverageCount || !ctx || !issue || !n || n>64 || !count || count%3 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+    if(!enabled){admission.fastReject(FastReject::Disabled);return;}
+    if(failed){admission.fastReject(FastReject::SetupFailed);return;}
+    if(kind==CoverageCount){admission.fastReject(FastReject::UnknownVs);return;}
+    if(!ctx){admission.fastReject(FastReject::Context);return;}
+    if(!issue || !n || n>64 || !count || count%3){admission.fastReject(FastReject::DrawShape);return;}
+    if(ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE){admission.fastReject(FastReject::Context);return;}
+    admission.advance(AdmissionStage::Scene);
     auto* bound=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!bound)return;
     Ptr<ID3D11Texture2D> scene;D3D11_TEXTURE2D_DESC td{};if(!depthMetadata.get(bound,scene,td) || !depthProbeIsSceneDepth(scene.Get()))return;
     if(td.ArraySize!=1 || td.SampleDesc.Count!=1)return;
@@ -429,11 +524,12 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
         }
     }
     CapProbe capProbe(probeCap?&diagnostics.eye[eye]:nullptr,n);
+    admission.advance(AdmissionStage::Pipeline);
     Ptr<ID3D11DepthStencilState> ds;UINT ref=0;ctx->OMGetDepthStencilState(&ds,&ref);
-    D3D11_DEPTH_STENCIL_DESC dd{};if(ds)ds->GetDesc(&dd);else {dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;}
+    D3D11_DEPTH_STENCIL_DESC dd{};if(ds){ds->GetDesc(&dd);observeDescriptor(DescriptorKind::Depth,descriptorShadows.depth,ds.Get());}else {dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;}
     if(!dd.DepthEnable || dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL)return;
     Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT mask=0;ctx->OMGetBlendState(&blend,factors,&mask);
-    D3D11_BLEND_DESC bd{};if(blend)blend->GetDesc(&bd);if(bd.AlphaToCoverageEnable || bd.RenderTarget[0].BlendEnable)return;
+    D3D11_BLEND_DESC bd{};if(blend){blend->GetDesc(&bd);observeDescriptor(DescriptorKind::Blend,descriptorShadows.blend,blend.Get());}if(bd.AlphaToCoverageEnable || bd.RenderTarget[0].BlendEnable)return;
     UINT nv=1;D3D11_VIEWPORT vp{};ctx->RSGetViewports(&nv,&vp);
     if(nv!=1 || vp.TopLeftX || vp.TopLeftY || vp.Width!=td.Width || vp.Height!=td.Height || vp.MinDepth!=0 || vp.MaxDepth!=1)return;
     D3D11_PRIMITIVE_TOPOLOGY topology;ctx->IAGetPrimitiveTopology(&topology);if(topology!=D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)return;
@@ -441,6 +537,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     Ptr<ID3D11Predicate> predicate;BOOL pred=FALSE;ctx->GetPredication(&predicate,&pred);if(predicate)return;
     ID3D11Buffer* so[4]{};ctx->SOGetTargets(4,so);bool busy=false;for(auto* p:so)if(p){busy=true;p->Release();}if(busy)return;
     ID3D11UnorderedAccessView* om[8]{};ctx->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,8,om);for(auto* p:om)if(p){busy=true;p->Release();}if(busy)return;
+    admission.advance(AdmissionStage::Resources);
     Ptr<ID3D11Buffer> vb,ids,ib,cb;UINT vertexStride=0,offset=0,idStride=0,idOffset=0,indexOffset=0;DXGI_FORMAT format{};
     ctx->IAGetVertexBuffers(0,1,&ids,&idStride,&idOffset);ctx->IAGetVertexBuffers(1,1,&vb,&vertexStride,&offset);ctx->IAGetIndexBuffer(&ib,&format,&indexOffset);ctx->VSGetConstantBuffers(1,1,&cb);
     if(!vb || !ids || !ib || !cb || idStride!=8 || vertexStride!=40)return;
@@ -448,12 +545,12 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     const uint64_t indexFirst=uint64_t(indexOffset)+uint64_t(start)*indexBytes;
     const uint64_t indexEnd=indexFirst+uint64_t(count)*indexBytes;
     if(!indexBytes || indexEnd>UINT64_C(0xffffffff))return;
-    D3D11_BUFFER_DESC idd{},cbd{};ids->GetDesc(&idd);cb->GetDesc(&cbd);uint64_t at=uint64_t(idOffset)+uint64_t(startInstance)*8;
+    D3D11_BUFFER_DESC idd{},cbd{};ids->GetDesc(&idd);observeDescriptor(DescriptorKind::Ids,descriptorShadows.ids,ids.Get());cb->GetDesc(&cbd);observeDescriptor(DescriptorKind::SceneCb,descriptorShadows.sceneCb,cb.Get());uint64_t at=uint64_t(idOffset)+uint64_t(startInstance)*8;
     if(at%4 || at+n*8>idd.ByteWidth || cbd.ByteWidth<276*16)return;
     Ptr<ID3D11ShaderResourceView> pool;ctx->VSGetShaderResources(33,1,&pool);if(!pool)return;
-    D3D11_SHADER_RESOURCE_VIEW_DESC pd{};pool->GetDesc(&pd);Ptr<ID3D11Resource> pr;pool->GetResource(&pr);Ptr<ID3D11Buffer> pb;
+    D3D11_SHADER_RESOURCE_VIEW_DESC pd{};pool->GetDesc(&pd);observeDescriptor(DescriptorKind::PoolSrv,descriptorShadows.poolSrv,pool.Get());Ptr<ID3D11Resource> pr;pool->GetResource(&pr);Ptr<ID3D11Buffer> pb;
     if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER || pd.Buffer.FirstElement || FAILED(pr.As(&pb)))return;
-    D3D11_BUFFER_DESC pbd{};pb->GetDesc(&pbd);if(pbd.StructureByteStride!=336 || pd.Buffer.NumElements!=pbd.ByteWidth/336)return;
+    D3D11_BUFFER_DESC pbd{};pb->GetDesc(&pbd);observeDescriptor(DescriptorKind::PoolBuffer,descriptorShadows.poolBuffer,pb.Get());if(pbd.StructureByteStride!=336 || pd.Buffer.NumElements!=pbd.ByteWidth/336)return;
     auto& diagnostic=diagnostics.eye[eye];++diagnostic.candidateDraws;diagnostic.candidateInstances+=n;
     if(probeCap){
         capProbe.eligible=true;
@@ -461,7 +558,9 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
         if(!capped){capped=true;Log::get().note("mesh motion: 512 instances per eye reached; excess geometry retains existing motion.");}
         return;
     }
+    admission.advance(AdmissionStage::Preparation);
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);if(!prepare(ctx,dev.Get()) || (e.scene!=scene && !createEye(dev.Get(),scene.Get(),e))){fail();return;}
+    admission.advance(AdmissionStage::Accepted);
     auto& now=e.history[e.write];auto& prev=e.history[1-e.write];
     // Coverage only needs the copied instance IDs. Defer transform capture
     // until an input changes or the eye is consumed, rather than breaking
@@ -529,6 +628,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     // Keep those sources immediate; ordinary immutable/read-only inputs batch.
     if(gpuWritable)flushCapture(FlushReason::GpuWritable);
     if(!noted){noted=true;Log::get().note("mesh motion: exact rigid draw transforms at %ux%u, independent of ship-metres split; original VS coverage, 512 instances per eye, batched GPU history matching. Animated/ambiguous geometry retains existing motion.",e.width,e.height);}
+    admission.complete();
 }
 void meshMotionViews(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,ID3D11ShaderResourceView** views){
     using namespace mesh_motion_detail;views[0]=views[1]=nullptr;if(!enabled || failed)return;
@@ -559,6 +659,12 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
         for(unsigned i=0;i<2;++i){const auto& x=diagnostics.eye[i];Log::get().note("mesh motion diagnostic eye %u: fully checked candidates %llu draws/%llu instances; accepted %llu/%llu; cap decisions %llu/%llu total, bounded sample %llu/%llu (%llu/%llu eligible, %llu/%llu ineligible; no extrapolation).",i,(unsigned long long)x.candidateDraws,(unsigned long long)x.candidateInstances,(unsigned long long)x.acceptedDraws,(unsigned long long)x.acceptedInstances,(unsigned long long)x.capRejectedDraws,(unsigned long long)x.capRejectedInstances,(unsigned long long)x.sampledCapDraws,(unsigned long long)x.sampledCapInstances,(unsigned long long)x.eligibleCapRejectedDraws,(unsigned long long)x.eligibleCapRejectedInstances,(unsigned long long)x.ineligibleCapSampleDraws,(unsigned long long)x.ineligibleCapSampleInstances);}
         uint64_t flushCount=0;for(auto count:diagnostics.flushes)flushCount+=count;
         Log::get().note("mesh motion diagnostic CPU: draw %.3f us (%llu samples), flush %.3f us (%llu samples); batches %llu, %.1f instances average, %u max.",diagnostics.drawCpuSamples?diagnostics.drawCpuMs*1000/diagnostics.drawCpuSamples:0,(unsigned long long)diagnostics.drawCpuSamples,diagnostics.flushCpuSamples?diagnostics.flushCpuMs*1000/diagnostics.flushCpuSamples:0,(unsigned long long)diagnostics.flushCpuSamples,(unsigned long long)flushCount,flushCount?double(diagnostics.flushInstances)/double(flushCount):0,diagnostics.largestBatch);
+        const auto& a=diagnostics.admission;const auto& af=a.stages[unsigned(AdmissionStage::Fast)];const auto& as=a.stages[unsigned(AdmissionStage::Scene)];const auto& ap=a.stages[unsigned(AdmissionStage::Pipeline)];const auto& ar=a.stages[unsigned(AdmissionStage::Resources)];const auto& apre=a.stages[unsigned(AdmissionStage::Preparation)];const auto& aa=a.stages[unsigned(AdmissionStage::Accepted)];
+        const double exclusiveMs=af.cpuMs+as.cpuMs+ap.cpuMs+ar.cpuMs+apre.cpuMs+aa.cpuMs;
+        Log::get().note("mesh motion diagnostic admission counts: completed %llu; fast %llu entered/%llu rejected (disabled %llu, setup-failed %llu, unknown-VS %llu, draw-shape %llu, context %llu), scene/depth/eye/cap %llu/%llu, pipeline %llu/%llu, IA/resources %llu/%llu, preparation %llu/%llu, accepted work %llu/%llu. Every hook entry ends in one rejection stage or completed.",(unsigned long long)a.completed,(unsigned long long)af.entered,(unsigned long long)af.rejected,(unsigned long long)a.fastRejects[unsigned(FastReject::Disabled)],(unsigned long long)a.fastRejects[unsigned(FastReject::SetupFailed)],(unsigned long long)a.fastRejects[unsigned(FastReject::UnknownVs)],(unsigned long long)a.fastRejects[unsigned(FastReject::DrawShape)],(unsigned long long)a.fastRejects[unsigned(FastReject::Context)],(unsigned long long)as.entered,(unsigned long long)as.rejected,(unsigned long long)ap.entered,(unsigned long long)ap.rejected,(unsigned long long)ar.entered,(unsigned long long)ar.rejected,(unsigned long long)apre.entered,(unsigned long long)apre.rejected,(unsigned long long)aa.entered,(unsigned long long)aa.rejected);
+        Log::get().note("mesh motion diagnostic admission CPU: same 1/256 hook sample raw exclusive totals, full %.3f us (%llu samples); fast %.3f us (%llu stage samples), scene/depth/eye/cap %.3f (%llu), pipeline %.3f (%llu), IA/resources %.3f (%llu), preparation %.3f (%llu), accepted work %.3f (%llu). Raw stage totals %.3f us sum to the raw full-hook duration; zero samples mean the stage was not reached. A completed sample adds five boundary QPC reads; unsampled draws add none.",diagnostics.drawCpuMs*1000,(unsigned long long)diagnostics.drawCpuSamples,af.cpuMs*1000,(unsigned long long)af.cpuSamples,as.cpuMs*1000,(unsigned long long)as.cpuSamples,ap.cpuMs*1000,(unsigned long long)ap.cpuSamples,ar.cpuMs*1000,(unsigned long long)ar.cpuSamples,apre.cpuMs*1000,(unsigned long long)apre.cpuSamples,aa.cpuMs*1000,(unsigned long long)aa.cpuSamples,exclusiveMs*1000);
+        const auto& dm=diagnostics.descriptors;const auto& dd=dm.kinds[unsigned(DescriptorKind::Depth)];const auto& db=dm.kinds[unsigned(DescriptorKind::Blend)];const auto& di=dm.kinds[unsigned(DescriptorKind::Ids)];const auto& dc=dm.kinds[unsigned(DescriptorKind::SceneCb)];const auto& ds=dm.kinds[unsigned(DescriptorKind::PoolSrv)];const auto& dp=dm.kinds[unsigned(DescriptorKind::PoolBuffer)];
+        Log::get().note("mesh motion diagnostic descriptor reuse: actual GetDesc calls/hits/fills/evictions, depth %llu/%llu/%llu/%llu, blend %llu/%llu/%llu/%llu, IDs %llu/%llu/%llu/%llu, scene-CB %llu/%llu/%llu/%llu, pool-SRV %llu/%llu/%llu/%llu, pool-buffer %llu/%llu/%llu/%llu. Four retained identities per category reset each frame; observation never skips a getter.",(unsigned long long)dd.calls,(unsigned long long)dd.hits,(unsigned long long)dd.fills,(unsigned long long)dd.evictions,(unsigned long long)db.calls,(unsigned long long)db.hits,(unsigned long long)db.fills,(unsigned long long)db.evictions,(unsigned long long)di.calls,(unsigned long long)di.hits,(unsigned long long)di.fills,(unsigned long long)di.evictions,(unsigned long long)dc.calls,(unsigned long long)dc.hits,(unsigned long long)dc.fills,(unsigned long long)dc.evictions,(unsigned long long)ds.calls,(unsigned long long)ds.hits,(unsigned long long)ds.fills,(unsigned long long)ds.evictions,(unsigned long long)dp.calls,(unsigned long long)dp.hits,(unsigned long long)dp.fills,(unsigned long long)dp.evictions);
         Log::get().note("mesh motion diagnostic depth metadata: %llu cache hits, %llu fills; scene/eye selection remains live.",(unsigned long long)diagnostics.depthMetadataHits,(unsigned long long)diagnostics.depthMetadataFills);
         Log::get().note("mesh motion diagnostic flushes: %s %llu, %s %llu, %s %llu, %s %llu, %s %llu.",flushReasonName(FlushReason::InputChange),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::InputChange)],flushReasonName(FlushReason::WriteOrMap),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::WriteOrMap)],flushReasonName(FlushReason::EyeConsumption),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::EyeConsumption)],flushReasonName(FlushReason::FrameBoundary),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::FrameBoundary)],flushReasonName(FlushReason::GpuWritable),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::GpuWritable)]);
         Log::get().note("mesh motion diagnostic input-change causes (overlapping): context %llu, scene-cb %llu, instance-ids %llu, pool %llu, output %llu, oversized-stream %llu.",(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Context)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Scene)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Ids)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Pool)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Output)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Oversized)]);
@@ -576,6 +682,7 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
         for(auto i=indices.begin();i!=indices.end();)if(frames-i->second.seen>1)i=indices.erase(i);else ++i;
         ++it;
     }
+    descriptorShadows.clear();
 }
 void meshMotionBeforeMap(ID3D11Resource* resource){
     using namespace mesh_motion_detail;
@@ -611,8 +718,8 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
     watched.clear();
 }
 void meshMotionShutdown(){
-    using namespace mesh_motion_detail;pending.clear();depthMetadata.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
-    failed=noted=capped=diagnosticWindowHadComparison=false;drawGpu={};matchGpu={};captureGpu={};comparisonCopyGpu={};comparisonCoverageGpu={};comparisonFlushGpu={};comparison={};frames=draws=captureBatches=capturedInstances=0;frameStamp=0;normalCaptureGpuFrame=~uint64_t(0);diagnostics={};watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
+    using namespace mesh_motion_detail;pending.clear();depthMetadata.clear();descriptorShadows.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
+    failed=noted=capped=diagnosticWindowHadComparison=false;drawGpu={};matchGpu={};captureGpu={};comparisonCopyGpu={};comparisonCoverageGpu={};comparisonFlushGpu={};comparison={};frames=draws=captureBatches=capturedInstances=0;frameStamp=0;normalCaptureGpuFrame=~uint64_t(0);diagnostics={};admissionClockCalls=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,unsigned sceneFrame){
     using namespace mesh_motion_detail;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;

@@ -121,6 +121,46 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
         ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx.Get(),scene[eye].Get(),views);check(views[0] && views[1],"mesh views available");return readBuffer(dev.Get(),ctx.Get(),eyes[eye].history[eyes[eye].write].buffer.Get());};
     auto reset=[&](){ctx->ClearState();meshMotionShutdown();std::memset(poolData,0,sizeof(poolData));std::memset(sceneData,0,sizeof(sceneData));std::memset(ids,0,sizeof(ids));sceneData[270][0]=sceneData[271][1]=sceneData[272][3]=1;sceneData[273][2]=.025f;};
     meshMotionConfigure(true);
+    // Admission accounting uses no clock on ordinary unsampled rejects and
+    // still explains zero-accepted workloads such as the on-foot path.
+    reset();diagnostics={};admissionClockCalls=0;
+    meshMotionDraw(nullptr,issue,6,1,0,0,0,materialVs);
+    meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,0);
+    meshMotionDraw(ctx.Get(),nullptr,6,1,0,0,0,materialVs);
+    enabled=false;meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);enabled=true;
+    failed=true;meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);failed=false;
+    check(admissionClockCalls==0 && diagnostics.drawCpuSamples==0,"unsampled admission rejects make no performance-counter calls");
+    check(diagnostics.admission.fastRejects[unsigned(FastReject::Context)]==1 && diagnostics.admission.fastRejects[unsigned(FastReject::UnknownVs)]==1 && diagnostics.admission.fastRejects[unsigned(FastReject::DrawShape)]==1 && diagnostics.admission.fastRejects[unsigned(FastReject::Disabled)]==1 && diagnostics.admission.fastRejects[unsigned(FastReject::SetupFailed)]==1,"fast rejection reasons explain context, shader, shape, disabled and setup-failed entries");
+    diagnostics={};admissionClockCalls=0;uint64_t cleanupClock=0;
+    {AdmissionTrace trace(true);struct CleanupMarker { uint64_t* clock;~CleanupMarker(){*clock=admissionClockCalls;} } cleanup{&cleanupClock};trace.complete();}
+    check(admissionClockCalls==cleanupClock+1 && diagnostics.admission.completed==1,"successful admission takes its final timestamp after scoped cleanup");
+    diagnostics={};admissionClockCalls=0;
+    diagnostics.drawCalls=255;meshMotionDraw(nullptr,issue,6,1,0,0,0,materialVs);
+    pose(1,0);bind(0);testDepth=nullptr;diagnostics.drawCalls=255;meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
+    bind(0);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);diagnostics.drawCalls=255;meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
+    bind(0);ID3D11Buffer* noIds=nullptr;UINT noStride=0,noOffset=0;ctx->IASetVertexBuffers(0,1,&noIds,&noStride,&noOffset);diagnostics.drawCalls=255;meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
+    bind(0);diagnostics.drawCalls=255;meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
+    const auto& admission=diagnostics.admission;
+    check(admission.completed==1 && admission.stages[unsigned(AdmissionStage::Fast)].rejected==1 && admission.stages[unsigned(AdmissionStage::Scene)].rejected==1 && admission.stages[unsigned(AdmissionStage::Pipeline)].rejected==1 && admission.stages[unsigned(AdmissionStage::Resources)].rejected==1,"sampled early returns and the completed WARP path land in exclusive admission stages");
+    check(admission.stages[unsigned(AdmissionStage::Fast)].cpuSamples==5 && admission.stages[unsigned(AdmissionStage::Scene)].cpuSamples==4 && admission.stages[unsigned(AdmissionStage::Pipeline)].cpuSamples==3 && admission.stages[unsigned(AdmissionStage::Resources)].cpuSamples==2 && admission.stages[unsigned(AdmissionStage::Preparation)].cpuSamples==1 && admission.stages[unsigned(AdmissionStage::Accepted)].cpuSamples==1,"stage sample denominators expose which portions of the sampled hook actually ran");
+    double admissionTotal=0;for(const auto& stage:admission.stages)admissionTotal+=stage.cpuMs;
+    check(diagnostics.drawCpuSamples==5 && std::fabs(admissionTotal-diagnostics.drawCpuMs)<1e-6,"exclusive admission intervals sum to the same sampled full-hook duration");
+    // Getter-reuse observation retains four COM identities per category for
+    // one frame, counts overflow explicitly, and never substitutes for a call.
+    reset();pose(1,0);bind(0);diagnostics={};descriptorShadows.clear();
+    auto admit=[&](){meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);};
+    admit();admit();
+    auto& initialDepth=diagnostics.descriptors.kinds[unsigned(DescriptorKind::Depth)];auto& initialBlend=diagnostics.descriptors.kinds[unsigned(DescriptorKind::Blend)];auto& initialIds=diagnostics.descriptors.kinds[unsigned(DescriptorKind::Ids)];
+    check(initialDepth.calls==2 && initialDepth.hits==1 && initialDepth.fills==1 && initialBlend.calls==0,"descriptor reuse counts literal non-null GetDesc calls and excludes the default blend state");
+    check(initialIds.calls==2 && initialIds.hits==1 && initialIds.fills==1 && diagnostics.descriptors.kinds[unsigned(DescriptorKind::SceneCb)].hits==1 && diagnostics.descriptors.kinds[unsigned(DescriptorKind::PoolSrv)].hits==1 && diagnostics.descriptors.kinds[unsigned(DescriptorKind::PoolBuffer)].hits==1,"repeated ID, scene-CB, pool-SRV and pool-buffer identities are observed after their real getters");
+    meshMotionFrameBoundary(ctx.Get());check(descriptorShadows.depth.count==0 && descriptorShadows.ids.count==0 && descriptorShadows.poolSrv.count==0,"frame boundary releases descriptor shadow identities");
+    bind(0);admit();
+    D3D11_BLEND_DESC observedBlendDesc{};observedBlendDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;ComPtr<ID3D11BlendState> observedBlend;hr(dev->CreateBlendState(&observedBlendDesc,&observedBlend));ctx->OMSetBlendState(observedBlend.Get(),nullptr,~0u);admit();ctx->OMSetBlendState(observedBlend.Get(),nullptr,~0u);admit();
+    const auto& observedBlendMetrics=diagnostics.descriptors.kinds[unsigned(DescriptorKind::Blend)];check(observedBlendMetrics.calls==2 && observedBlendMetrics.hits==1 && observedBlendMetrics.fills==1,"non-default blend descriptor identity records one fill then one hit");
+    std::vector<ComPtr<ID3D11Buffer>> identityIds;for(unsigned i=0;i<5;++i){identityIds.push_back(buffer(sizeof(ids),D3D11_BIND_VERTEX_BUFFER));UINT identityStride=8,identityOffset=0;ctx->IASetVertexBuffers(0,1,identityIds.back().GetAddressOf(),&identityStride,&identityOffset);admit();}
+    const auto& reboundIds=diagnostics.descriptors.kinds[unsigned(DescriptorKind::Ids)];
+    check(reboundIds.calls==10 && reboundIds.hits==3 && reboundIds.fills==7 && reboundIds.evictions==2 && descriptorShadows.ids.count==4,"descriptor identity rebinds report fills and bounded shadow evictions explicitly");
+    meshMotionShutdown();check(descriptorShadows.depth.count==0 && descriptorShadows.ids.count==0 && descriptorShadows.poolSrv.count==0,"shutdown releases descriptor shadow identities");meshMotionConfigure(true);
     // The frame-local cache retains only immutable DSV metadata. Scene and
     // eye classification must still follow every live depth-probe answer.
     reset();pose(1,0);bind(0);
@@ -339,9 +379,12 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     beginComparisonPhase(ctx.Get(),GetTickCount64());meshMotionComparisonNativeSampling(true,901,902);
     diagnostics.drawCalls=255;meshMotionDraw(nullptr,issue,6,1,0,0,0,materialVs);
     comparison.metrics.idCopies=63;comparison.metrics.acceptedDraws=63;draws=63;diagnostics.flushCalls=15;
+    diagnostics.drawCalls=511;
     queue(farA);a=consumeBatch();
     for(unsigned i=0;i<5;++i)meshMotionFrameBoundary(ctx.Get());
-    check(comparison.metrics.entryCpuSamples==1 && comparison.metrics.acceptedCpuSamples==1 && comparison.metrics.idCopyCpuSamples==1 && comparison.metrics.flushCpuSamples==1,"Sampling-only gate reaches full-entry, accepted, ID-copy and flush CPU samplers");
+    check(comparison.metrics.entryCpuSamples==2 && comparison.metrics.acceptedCpuSamples==1 && comparison.metrics.idCopyCpuSamples==1 && comparison.metrics.flushCpuSamples==1,"Sampling-only gate reaches rejected and completed full-entry samples plus accepted, ID-copy and flush CPU samplers");
+    check(comparison.metrics.admission.completed==1 && comparison.metrics.admission.stages[unsigned(AdmissionStage::Fast)].rejected==1 && comparison.metrics.admission.stages[unsigned(AdmissionStage::Accepted)].cpuSamples==1,"comparison phase accumulates exclusive rejection and completed-path admission spans");
+    check(comparison.metrics.descriptors.kinds[unsigned(DescriptorKind::Depth)].calls==1 && comparison.metrics.descriptors.kinds[unsigned(DescriptorKind::Ids)].calls==1 && comparison.metrics.descriptors.kinds[unsigned(DescriptorKind::PoolSrv)].calls==1,"comparison phase accumulates actual descriptor getter observations");
     check(comparison.metrics.oversizedDraws==1 && comparison.metrics.copyGpuSubmitted==1 && comparison.metrics.coverageGpuSubmitted==1 && comparison.metrics.flushGpuSubmitted==1,"sampled WARP draw submits every comparison GPU interval");
     check(comparisonCopyGpu.totals.samples==1 && comparisonCoverageGpu.totals.samples==1 && comparisonFlushGpu.totals.samples==1,"sampled WARP comparison GPU intervals retire naturally after frame polling");
     const auto gatedEntries=comparison.metrics.entryCalls;meshMotionComparisonNativeSampling(false,901,902);meshMotionDraw(nullptr,issue,6,1,0,0,0,materialVs);

@@ -81,6 +81,8 @@ def read_mesh(path):
             'instances': words[30],
             'pool': words[31],                # diagnostic only; never persistent identity
             'clip': raw[128:176],
+            'clip_rows': struct.unpack_from('<12f', raw, 128),
+            'map_rows': struct.unpack_from('<12f', raw, 176),
             'valid': meta[0] == 1.0,
             'meta': meta,
         })
@@ -402,6 +404,21 @@ def _float4_array(value, count, name):
     return [_vector(row, 4, f'{name}[{i}]', nullable=True) for i, row in enumerate(value)]
 
 
+def _candidate_rows(value):
+    if not isinstance(value, list) or len(value) != 4:
+        raise ProbeError('MeshFallback.json: cand must have 4 candidates')
+    result = []
+    for candidate, rows in enumerate(value):
+        if not isinstance(rows, list) or len(rows) != 3:
+            raise ProbeError(f'MeshFallback.json: cand[{candidate}] must have 3 float4 rows')
+        parsed = [_vector(row, 4, f'cand[{candidate}][{i}]', nullable=True)
+                  for i, row in enumerate(rows)]
+        if any(v is None for row in parsed for v in row):
+            raise ProbeError(f'MeshFallback.json: cand[{candidate}] contains non-finite values')
+        result.append(parsed)
+    return result
+
+
 def read_fallback(path):
     try:
         value = json.loads(Path(path).read_text(encoding='utf-8'))
@@ -426,10 +443,11 @@ def read_fallback(path):
     if any(v is None for key in ('jit', 'knobs', 'tvUsed', 'tvCam', 'split', 'objects', 'ships', 'probe', 'tvSt')
            for v in value[key]):
         raise ProbeError(f'{path}: required fallback constants are non-finite')
-    for key in ('tanNow', 'wR0', 'wR1', 'wR2'):
+    for key in ('tanNow', 'tanPrev', 'dR0', 'dR1', 'dR2', 'wR0', 'wR1', 'wR2', 'holoJitter'):
         value[key] = _vector(value.get(key), 4, key, nullable=True)
         if any(v is None for v in value[key]):
             raise ProbeError(f'{path}: {key} is non-finite')
+    value['cand'] = _candidate_rows(value.get('cand'))
     ship_count = value['ships'][0]
     if ship_count != int(ship_count) or not 0 <= ship_count <= 8:
         raise ProbeError(f'{path}: ships.x is not a count from 0 through 8')
@@ -442,7 +460,57 @@ def read_fallback(path):
     return value
 
 
-def analyse_fallback(marker, fallback, coverage, scene, static_state):
+def _dot3(row, value):
+    return row[0] * value[0] + row[1] * value[1] + row[2] * value[2]
+
+
+def _project_fallback(p, depth, rows, translation, tan_now, tan_prev, size):
+    x, y = p
+    width, height = size
+    d = (tan_now[0] + (x + .5) / width * (tan_now[1] - tan_now[0]),
+         tan_now[3] - (y + .5) / height * (tan_now[3] - tan_now[2]), -1.0)
+    span_x, span_y = tan_prev[1] - tan_prev[0], tan_prev[3] - tan_prev[2]
+    if not math.isfinite(span_x) or not math.isfinite(span_y) or span_x == 0.0 or span_y == 0.0:
+        return None
+    # The far-world branch is rotation only: unlike a finite surface it is
+    # neither multiplied by depth nor translated by tvCam.
+    before = (tuple(_dot3(row, d) for row in rows) if depth is None else
+              tuple(_dot3(row, d) * depth + translation[i] for i, row in enumerate(rows)))
+    if not all(math.isfinite(v) for v in before) or before[2] >= -1e-6:
+        return None
+    previous = ((before[0] / -before[2] - tan_prev[0]) / span_x * width - .5,
+                (tan_prev[3] - before[1] / -before[2]) / span_y * height - .5)
+    return previous if all(math.isfinite(v) for v in previous) else None
+
+
+def _project_mesh(p, z, record, region, tex_size, jitter_delta):
+    x, y = p
+    rx, ry = region
+    width, height = tex_size
+    record_width, record_height = record['meta'][1:3]
+    if min(record_width, record_height) <= 0:
+        return None
+    ndc = ((x + rx + .5) / record_width * 2.0 - 1.0,
+           (y + ry + .5) / record_height * -2.0 + 1.0)
+    current = (ndc[0] * z, ndc[1] * z, z, 1.0)
+    rows = record['map_rows']
+    before = tuple(sum(rows[row * 4 + axis] * current[axis] for axis in range(4))
+                   for row in range(3))
+    if not all(math.isfinite(v) for v in before) or before[2] <= 0.0:
+        return None
+    previous = ((before[0] / before[2] * .5 + .5) * record_width - .5 - rx + jitter_delta[0],
+                (before[1] / before[2] * -.5 + .5) * record_height - .5 - ry + jitter_delta[1])
+    return previous if all(math.isfinite(v) for v in previous) else None
+
+
+def _equivalence_bucket():
+    return {'compared_pixels': 0, 'equivalent_pixels': 0, 'different_pixels': 0,
+            'invalid_mesh_projection_pixels': 0, 'invalid_fallback_projection_pixels': 0,
+            'median_abs_error_pixels': None, 'mean_abs_error_pixels': None,
+            'max_abs_error_pixels': 0.0}
+
+
+def analyse_fallback(marker, fallback, coverage, scene, static_state, mesh_records):
     if not fallback.get('available'):
         return {'available': False, 'reason': fallback['reason']}
     cmeta, cov = coverage
@@ -464,6 +532,8 @@ def analyse_fallback(marker, fallback, coverage, scene, static_state):
     objects, ships, probe, tv_st = fallback['objects'], fallback['ships'], fallback['probe'], fallback['tvSt']
     tan_now = fallback['tanNow']
     world_rows = (fallback['wR0'], fallback['wR1'], fallback['wR2'])
+    parameter_kind = ('nvidia_mv_render_pixels' if fallback['flags'] & 2 and not fallback['flags'] & 64
+                      else 'unsupported')
     world_on = knobs[1] != 0.0 and tv_cam[3] != 0.0 and split[0] > 0.0
     body_enabled = tv_st[3] != 0.0
     ship_count = int(ships[0])
@@ -472,7 +542,8 @@ def analyse_fallback(marker, fallback, coverage, scene, static_state):
     probe_bits = int(probe[3] + .5)
     terrain_holo_enabled = (probe_bits & (8 | 16)) != 0
     screen_enabled = (probe_bits & 32) != 0
-    counts = {'static_candidate_pixels': 0, 'static_world_base': 0, 'head_base': 0,
+    counts = {'static_candidate_pixels': 0, 'exact_pose_candidate_pixels': 0,
+              'same_origin_candidate_pixels': 0, 'static_world_base': 0, 'head_base': 0,
               'menu_assumed_depth_base': 0, 'head_rotation_only_base': 0,
               'body_or_ship_membership_unknown': 0, 'world_with_body_or_ship_membership_unknown': 0,
               'body_grid_membership_unknown': 0, 'ship_box_membership_unknown': 0,
@@ -480,6 +551,45 @@ def analyse_fallback(marker, fallback, coverage, scene, static_state):
               'ui_mesh_rejection_membership_unknown': 0,
               'terrain_or_holo_override_unknown': 0, 'screen_override_unknown': 0,
               'later_layer_override_unknown': 0, 'scanner_ui_membership_unknown': 0}
+    equivalence = {
+        'available': parameter_kind != 'unsupported',
+        'parameter_kind': parameter_kind,
+        'reason': None if parameter_kind != 'unsupported' else
+                  'captured parameters are not from the NVIDIA DLAA/DLSS mv entry',
+        'tolerance_pixels': 1e-4,
+        'tolerance_basis': 'fixed strict diagnostic threshold; not a visual or skip-safety threshold',
+        'depth_visible_exact_pose_pixels': 0,
+        'same_origin_pixels': 0,
+        'origin_rebased_pixels': 0,
+        'mesh_transform_matched_pixels': 0,
+        'mesh_transform_unmatched_pixels': 0,
+        'mesh_dimension_mismatch_pixels': 0,
+        'mesh_nonconsecutive_pixels': 0,
+        'unsupported_base_pixels': 0,
+        'ambiguous_or_unmatched_identity_pixels': 0,
+        'equivalent_without_known_gate_unknowns': 0,
+        'different_without_known_gate_unknowns': 0,
+        'final_effects_unknown_pixels': 0,
+        'unknown_gates': {name: 0 for name in (
+            'ui_mesh_rejection', 'body_grid_membership', 'ship_part_membership',
+            'terrain_override', 'hologram_override', 'screen_override',
+            'background_occlusion', 'mover_reactivity')},
+        'unknown_gate_scope': {
+            'ui_mesh_rejection': 'UiDepth/UiEdits are captured but not evaluated by this probe',
+            'terrain_override': 'TerrainIndex/TerrainZ are captured but not evaluated by this probe',
+            'hologram_override': 'HoloCoverage and its record table are not evaluated by this probe',
+            'screen_override': 'ScreenMotion is captured but not evaluated by this probe',
+            'background_occlusion': 'PrevZ is captured but not evaluated by this probe',
+            'mover_reactivity': 'mover result and mask effects are not evaluated by this probe',
+            'body_grid_membership': 'the body grid is not serialized in MeshFallback',
+            'ship_part_membership': 'ship boxes are serialized, but part clouds and final claims are not',
+        },
+        'by_base': {'head': _equivalence_bucket(), 'world': _equivalence_bucket()},
+        'safe_skippable_claim': False,
+        'safe_skippable_reason': ('one adjacent-frame capture cannot prove stable instance identity or future '
+                                  'visibility, even when captured vectors are equal'),
+    }
+    equivalence_errors = {'head': [], 'world': []}
     by_record = defaultdict(lambda: {'static_world_base': 0, 'head_base': 0,
                                      'body_or_ship_membership_unknown': 0})
 
@@ -494,12 +604,26 @@ def analyse_fallback(marker, fallback, coverage, scene, static_state):
             qx, qy = rx + px, ry + py
             at = qy * tex_w + qx
             index = int(cov[2 * at] + .5)
-            if not index or index > len(static_state) or static_state[index - 1] != 'raw_static_candidate':
+            if not index or index > len(static_state):
+                continue
+            state = static_state[index - 1]
+            exact_pose = state in ('raw_static_candidate', 'raw_pose_candidate_origin_changed')
+            if not exact_pose:
+                if state in ('duplicate', 'unmatched', 'no_previous'):
+                    equivalence['ambiguous_or_unmatched_identity_pixels'] += 1
                 continue
             cov_z = cov[2 * at + 1]
             if cov_z <= knobs[0] or abs(scene_at(qx, qy) - cov_z) > abs(cov_z) * 1e-6:
                 continue
             counts['static_candidate_pixels'] += 1
+            counts['exact_pose_candidate_pixels'] += 1
+            if state == 'raw_static_candidate':
+                counts['same_origin_candidate_pixels'] += 1
+            equivalence['depth_visible_exact_pose_pixels'] += 1
+            if state == 'raw_pose_candidate_origin_changed':
+                equivalence['origin_rebased_pixels'] += 1
+            else:
+                equivalence['same_origin_pixels'] += 1
             if probe[2] != 0.0:
                 counts['ui_mesh_rejection_membership_unknown'] += 1
             zr = 0.0
@@ -560,6 +684,90 @@ def analyse_fallback(marker, fallback, coverage, scene, static_state):
                     if base == 'static_world_base':
                         counts['world_with_body_or_ship_membership_unknown'] += 1
                     by_record[index - 1]['body_or_ship_membership_unknown'] += 1
+            if parameter_kind == 'unsupported':
+                continue
+            if base not in ('static_world_base', 'head_base'):
+                equivalence['unsupported_base_pixels'] += 1
+                continue
+            record = mesh_records[index - 1]
+            if record['meta'][1] != tex_w or record['meta'][2] != tex_h:
+                equivalence['mesh_dimension_mismatch_pixels'] += 1
+                continue
+            if record['meta'][3] != 1.0:
+                equivalence['mesh_transform_unmatched_pixels'] += 1
+                continue
+            if fallback['holoJitter'][2] == 0.0:
+                equivalence['mesh_nonconsecutive_pixels'] += 1
+                continue
+            equivalence['mesh_transform_matched_pixels'] += 1
+            base_name = 'world' if base == 'static_world_base' else 'head'
+            bucket = equivalence['by_base'][base_name]
+            mesh_previous = _project_mesh((px, py), knobs[2] / (cov_z - knobs[0]), record,
+                                          (rx, ry), (tex_w, tex_h), fallback['holoJitter'])
+            rows = fallback['cand'][2] if base_name == 'world' else (
+                fallback['dR0'], fallback['dR1'], fallback['dR2'])
+            translation = fallback['tvCam'] if base_name == 'world' else fallback['tvUsed']
+            fallback_previous = _project_fallback((px, py), None if far else z, rows, translation,
+                                                  fallback['tanNow'], fallback['tanPrev'],
+                                                  (size_w, size_h))
+            if mesh_previous is None:
+                bucket['invalid_mesh_projection_pixels'] += 1
+                continue
+            if fallback_previous is None:
+                bucket['invalid_fallback_projection_pixels'] += 1
+                continue
+            error = max(abs(mesh_previous[0] - fallback_previous[0]),
+                        abs(mesh_previous[1] - fallback_previous[1]))
+            bucket['compared_pixels'] += 1
+            bucket['max_abs_error_pixels'] = max(bucket['max_abs_error_pixels'], error)
+            equivalence_errors[base_name].append(error)
+            if error <= equivalence['tolerance_pixels']:
+                bucket['equivalent_pixels'] += 1
+                vectors_equal = True
+            else:
+                bucket['different_pixels'] += 1
+                vectors_equal = False
+
+            unknown = equivalence['unknown_gates']
+            pixel_unknown = False
+            if probe[2] != 0.0:
+                unknown['ui_mesh_rejection'] += 1
+                pixel_unknown = True
+            if body_enabled and potential_override:
+                unknown['body_grid_membership'] += 1
+                pixel_unknown = True
+            if ship_count and potential_override and ship_unknown:
+                unknown['ship_part_membership'] += 1
+                pixel_unknown = True
+            if probe_bits & 8:
+                unknown['terrain_override'] += 1
+                pixel_unknown = True
+            if probe_bits & 16:
+                unknown['hologram_override'] += 1
+                pixel_unknown = True
+            if probe_bits & 32:
+                unknown['screen_override'] += 1
+                pixel_unknown = True
+            if fallback['holoJitter'][3] != 0.0:
+                unknown['background_occlusion'] += 1
+                pixel_unknown = True
+            if fallback['movers'][0] != 0.0:
+                unknown['mover_reactivity'] += 1
+                pixel_unknown = True
+            if pixel_unknown:
+                equivalence['final_effects_unknown_pixels'] += 1
+            else:
+                key = ('equivalent_without_known_gate_unknowns' if vectors_equal else
+                       'different_without_known_gate_unknowns')
+                equivalence[key] += 1
+    for base_name, values in equivalence_errors.items():
+        if not values:
+            continue
+        values.sort()
+        middle = len(values) // 2
+        equivalence['by_base'][base_name]['median_abs_error_pixels'] = (
+            values[middle] if len(values) & 1 else (values[middle - 1] + values[middle]) * .5)
+        equivalence['by_base'][base_name]['mean_abs_error_pixels'] = sum(values) / len(values)
     counts['world_base_without_body_ship_uncertainty_upper_bound'] = max(
         0, counts['static_world_base'] - counts['world_with_body_or_ship_membership_unknown'])
     counts['available'] = True
@@ -567,6 +775,7 @@ def analyse_fallback(marker, fallback, coverage, scene, static_state):
     counts['world_on'] = world_on
     counts['body_or_ship_enabled'] = body_ship_enabled
     counts['records'] = [{'index': i, **values} for i, values in sorted(by_record.items())]
+    counts['equivalence'] = equivalence
     return counts
 
 
@@ -598,6 +807,8 @@ def analyse(mesh, previous, marker, coverage=None, scene=None, fallback=None):
             'Duplicate compatible keys are equivalent/ambiguous and are never reported as persistent identities.',
             'Coverage is exact raster-sample evidence; it is not expanded to rectangles or subpixel area.',
             'Fallback world/head counts describe the DLSS-mv base branch; UI, body-grid, in-box ship, terrain, hologram, and screen membership can leave the actual final vector unknown.',
+            'Mesh/base equality is motion-only: removing mesh tracking can change hidden-history invalidation and mover/reactivity even when the two vectors agree.',
+            'Exact raw pose across an origin rebase does not prove stable instance identity in a later frame.',
         ],
         'mesh': {'path': str(mesh['path']), 'records': comparison},
         'probe': {'available': bool(marker), 'capture': marker.get('capture') if marker else None},
@@ -623,7 +834,7 @@ def analyse(mesh, previous, marker, coverage=None, scene=None, fallback=None):
         elif not marker:
             report['fallback'] = {'available': False, 'reason': 'MeshProbe marker unavailable; raw-static candidates unknown'}
         else:
-            report['fallback'] = analyse_fallback(marker, fallback, coverage, scene, state)
+            report['fallback'] = analyse_fallback(marker, fallback, coverage, scene, state, mesh['records'])
     return report
 
 
@@ -661,27 +872,42 @@ def print_report(report):
         print(f"coverage: unavailable ({cov['reason']})")
     fb = report['fallback']
     if fb['available']:
-        print(f"fallback among depth-eligible raw-static candidate pixels: world base {fb['static_world_base']}, "
+        print(f"fallback among depth-eligible exact-pose candidate pixels: world base {fb['static_world_base']}, "
               f"head base {fb['head_base']}, menu-depth {fb['menu_assumed_depth_base']}, "
               f"head rotation only {fb['head_rotation_only_base']}")
         print(f"fallback uncertainty: body/ship membership unknown {fb['body_or_ship_membership_unknown']}, "
               f"scanner UI membership unknown {fb['scanner_ui_membership_unknown']}, "
               f"UI mesh rejection unknown {fb['ui_mesh_rejection_membership_unknown']}, "
               f"later-layer override unknown {fb['later_layer_override_unknown']}")
+        eq = fb['equivalence']
+        if eq['available']:
+            head, world = eq['by_base']['head'], eq['by_base']['world']
+            print(f"motion-only equivalence ({eq['parameter_kind']}, within {eq['tolerance_pixels']:.6g} px): "
+                  f"head {head['equivalent_pixels']}/{head['compared_pixels']}, "
+                  f"world {world['equivalent_pixels']}/{world['compared_pixels']}; "
+                  f"different {head['different_pixels'] + world['different_pixels']}")
+            print(f"equivalence coverage: origin-rebased {eq['origin_rebased_pixels']}, "
+                  f"mesh unmatched {eq['mesh_transform_unmatched_pixels']}, "
+                  f"invalid projections {head['invalid_mesh_projection_pixels'] + world['invalid_mesh_projection_pixels'] + head['invalid_fallback_projection_pixels'] + world['invalid_fallback_projection_pixels']}; "
+                  f"final effects unknown {eq['final_effects_unknown_pixels']}")
+        else:
+            print(f"motion-only equivalence: unavailable ({eq['reason']})")
     else:
         print(f"fallback: unavailable ({fb['reason']})")
     print('scope: admitted records only; raw-static and work saved are candidate upper bounds, never a skip-safe claim')
 
 
-def _record(key, pose, origin, first, count, pool, valid=True, clip_seed=0.0):
+def _record(key, pose, origin, first, count, pool, valid=True, clip_seed=0.0,
+            map_rows=None, matched=False, dimensions=(4.0, 2.0)):
     words = [0] * 32
     words[:20] = key
     words[20:26] = pose
     words[26:29] = origin
     words[29:32] = (first, count, pool)
     clip = [clip_seed + i for i in range(12)]
-    mapped = [0.0] * 12
-    meta = [1.0 if valid else 0.0, 4.0, 2.0, 0.0]
+    mapped = list(map_rows) if map_rows is not None else [0.0] * 12
+    meta = [1.0 if valid else 0.0, float(dimensions[0]), float(dimensions[1]),
+            1.0 if matched else 0.0]
     return struct.pack('<32I28f', *(words + clip + mapped + meta))
 
 
@@ -782,13 +1008,17 @@ def self_test():
         assert cov_report['covered_records'] == 4 and cov_report['zero_coverage_records'] == 2
 
         fallback_value = {
-            'schema': 1, 'available': True, 'frame': 17, 'eye': 0, 'flags': 0,
+            'schema': 1, 'available': True, 'frame': 17, 'eye': 0, 'flags': 2,
             'region': [0, 0, 4, 2], 'size': [4, 2], 'texSize': [4, 2],
             'jit': [.75, .75, 0, 0], 'knobs': [0, 1, 1, 0],
             'tvUsed': [0, 0, 0, 0], 'tvCam': [0, 0, 0, 1],
             'split': [10, 0, 0, 0], 'objects': [0, 1, 0, 0],
             'ships': [0, 0, 0, 0], 'probe': [0, 0, 1, 32], 'tvSt': [0, 0, 0, 1],
-            'tanNow': [-1, 1, -1, 1], 'wR0': [1, 0, 0, 0],
+            'tanNow': [-1, 1, -1, 1], 'tanPrev': [-1, 1, -1, 1],
+            'dR0': [1, 0, 0, 0], 'dR1': [0, 1, 0, 0], 'dR2': [0, 0, 1, 0],
+            'cand': [[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]] for _ in range(4)],
+            'holoJitter': [0, 0, 1, 0], 'movers': [0, 0, 0, 0],
+            'wR0': [1, 0, 0, 0],
             'wR1': [0, 1, 0, 0], 'wR2': [0, 0, 1, 0],
         }
         fallback_path = temp / 'fallback.json'
@@ -802,7 +1032,7 @@ def self_test():
         assert full['fallback']['screen_override_unknown'] == 1
         fallback['split'][0] = 1
         static_state = compare_records(mesh['records'], prev['records'], validate_groups(mesh['records']))[2]
-        world = analyse_fallback(loaded_marker, fallback, coverage, scene, static_state)
+        world = analyse_fallback(loaded_marker, fallback, coverage, scene, static_state, mesh['records'])
         assert world['static_world_base'] == 1
         ship_value = json.loads(json.dumps(fallback_value))
         ship_value['split'][0] = 1
@@ -811,9 +1041,160 @@ def self_test():
         ship_value['shBox0'] = [[100, 100, 100, 0] for _ in range(8)]
         ship_value['shBox1'] = [[101, 101, 101, 0] for _ in range(8)]
         fallback_path.write_text(json.dumps(ship_value), encoding='utf-8')
-        outside_ship = analyse_fallback(loaded_marker, read_fallback(fallback_path), coverage, scene, static_state)
+        outside_ship = analyse_fallback(loaded_marker, read_fallback(fallback_path), coverage, scene,
+                                        static_state, mesh['records'])
         assert outside_ship['ship_box_excluded'] == 1
         assert outside_ship['body_or_ship_membership_unknown'] == 0
+
+        # Motion-only equivalence mirrors the NVIDIA mv entry.  Region-local
+        # p is integer, mesh projection uses the full source dimensions, mesh
+        # depth is the covered pixel, and fallback selection uses dilated 3x3
+        # reversed depth.  Both records keep their raw pose across an origin
+        # rebase; only the captured map decides whether their motion agrees.
+        ew, eh = 8, 3
+        jx, jy = .125, -.25
+        head_map = [1, 0, -.1 - 2 * jx / ew, 0,
+                    0, 1, 2 * jy / eh, 0,
+                    0, 0, 1, 0]
+        world_map = [1, 0, .2 - 2 * jx / ew, 0,
+                     0, 1, 2 * jy / eh, 0,
+                     0, 0, 1, 0]
+        eq_current = read_mesh_bytes(_mesh_bytes([
+            _record(key_a, pose_a, moved_origin, 0, 1, 1, map_rows=head_map,
+                    matched=True, dimensions=(ew, eh)),
+            _record(key_b, pose_b, moved_origin, 1, 1, 2, map_rows=world_map,
+                    matched=True, dimensions=(ew, eh)),
+        ]))
+        eq_previous = read_mesh_bytes(_mesh_bytes([
+            _record(key_a, pose_a, origin, 0, 1, 10, dimensions=(ew, eh)),
+            _record(key_b, pose_b, origin, 1, 1, 11, dimensions=(ew, eh)),
+        ]))
+        eq_groups = validate_groups(eq_current['records'])
+        _, _, eq_state = compare_records(eq_current['records'], eq_previous['records'], eq_groups)
+        assert eq_state == ['raw_pose_candidate_origin_changed', 'raw_pose_candidate_origin_changed']
+        eq_cov = array('f', [0.0] * (ew * eh * 2))
+        eq_depth = array('f', [0.0] * (ew * eh))
+        for local_x, record_index, raw_z in ((0, 1, .5), (3, 2, .25)):
+            pixel = 1 * ew + 2 + local_x
+            eq_cov[2 * pixel:2 * pixel + 2] = array('f', [float(record_index), raw_z])
+            eq_depth[pixel] = raw_z
+        eq_meta = {'width': ew, 'height': eh, 'frame': 23, 'eye': 0}
+        eq_marker = {'capture': {'frame': 23, 'eye': 0}}
+        eq_fallback = json.loads(json.dumps(fallback))
+        eq_fallback.update({'frame': 23, 'flags': 2, 'region': [2, 1, 6, 2],
+                            'size': [4, 1], 'texSize': [ew, eh],
+                            'tanNow': [-.5, .5, -1 / 3, 1 / 3],
+                            'tanPrev': [-.5, .5, -1 / 3, 1 / 3],
+                            'dR0': [1, 0, .1, 0], 'dR1': [0, 1, 0, 0],
+                            'dR2': [0, 0, 1, 0], 'tvUsed': [0, 0, 0, 1],
+                            'tvCam': [0, 0, 0, 1], 'split': [3, 0, 0, 0],
+                            'objects': [0, 100, 0, 0], 'ships': [0, 0, 0, 0],
+                            'probe': [0, 0, 0, 0], 'tvSt': [0, 0, 0, 0],
+                            'holoJitter': [jx, jy, 1, 0], 'movers': [0, 0, 0, 0]})
+        eq_fallback['cand'][2] = [[1, 0, -.2, 0], [0, 1, 0, 0], [0, 0, 1, 0]]
+        eq_report = analyse_fallback(eq_marker, eq_fallback, (eq_meta, eq_cov),
+                                     (eq_meta, eq_depth), eq_state, eq_current['records'])
+        eq = eq_report['equivalence']
+        head_mesh = _project_mesh((0, 0), 2.0, eq_current['records'][0], (2, 1),
+                                  (ew, eh), eq_fallback['holoJitter'])
+        head_base = _project_fallback((0, 0), 2.0,
+                                      (eq_fallback['dR0'], eq_fallback['dR1'], eq_fallback['dR2']),
+                                      eq_fallback['tvUsed'], eq_fallback['tanNow'],
+                                      eq_fallback['tanPrev'], (4, 1))
+        world_mesh = _project_mesh((3, 0), 4.0, eq_current['records'][1], (2, 1),
+                                   (ew, eh), eq_fallback['holoJitter'])
+        world_base = _project_fallback((3, 0), 4.0, eq_fallback['cand'][2],
+                                       eq_fallback['tvCam'], eq_fallback['tanNow'],
+                                       eq_fallback['tanPrev'], (4, 1))
+        assert all(abs(a - b) < 1e-6 for a, b in zip(head_mesh, (-.4, 0.0)))
+        assert all(abs(a - b) < 1e-12 for a, b in zip(head_base, (-.4, 0.0)))
+        assert all(abs(a - b) < 1e-6 for a, b in zip(world_mesh, (3.8, 0.0)))
+        assert all(abs(a - b) < 1e-12 for a, b in zip(world_base, (3.8, 0.0)))
+        assert eq['origin_rebased_pixels'] == 2 and eq['mesh_transform_matched_pixels'] == 2
+        assert eq['by_base']['head']['equivalent_pixels'] == 1
+        assert eq['by_base']['world']['equivalent_pixels'] == 1
+        assert eq['by_base']['head']['median_abs_error_pixels'] < 1e-6
+        assert eq['equivalent_without_known_gate_unknowns'] == 2
+
+        mismatch_records = list(eq_current['records'])
+        mismatch_records[1] = dict(mismatch_records[1])
+        mismatch_records[1]['map_rows'] = tuple(head_map)
+        mismatch = analyse_fallback(eq_marker, eq_fallback, (eq_meta, eq_cov),
+                                    (eq_meta, eq_depth), eq_state, mismatch_records)['equivalence']
+        assert mismatch['by_base']['world']['different_pixels'] == 1
+
+        invalid_records = list(eq_current['records'])
+        invalid_records[0] = dict(invalid_records[0])
+        invalid_records[0]['map_rows'] = tuple([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        invalid_records[1] = dict(invalid_records[1])
+        invalid_records[1]['meta'] = (*invalid_records[1]['meta'][:3], 0.0)
+        invalid = analyse_fallback(eq_marker, eq_fallback, (eq_meta, eq_cov),
+                                   (eq_meta, eq_depth), eq_state, invalid_records)['equivalence']
+        assert invalid['by_base']['head']['invalid_mesh_projection_pixels'] == 1
+        assert invalid['mesh_transform_unmatched_pixels'] == 1 and not invalid['by_base']['world']['compared_pixels']
+
+        invalid_fallback = json.loads(json.dumps(eq_fallback))
+        invalid_fallback['dR2'] = [0, 0, -1, 0]
+        invalid_fb_eq = analyse_fallback(eq_marker, invalid_fallback, (eq_meta, eq_cov),
+                                         (eq_meta, eq_depth), eq_state,
+                                         eq_current['records'])['equivalence']
+        assert invalid_fb_eq['by_base']['head']['invalid_fallback_projection_pixels'] == 1
+        zero_span = json.loads(json.dumps(eq_fallback))
+        zero_span['tanPrev'][1] = zero_span['tanPrev'][0]
+        zero_span_eq = analyse_fallback(eq_marker, zero_span, (eq_meta, eq_cov),
+                                        (eq_meta, eq_depth), eq_state,
+                                        eq_current['records'])['equivalence']
+        assert zero_span_eq['by_base']['head']['invalid_fallback_projection_pixels'] == 1
+
+        # Far-world projection is rotation-only and must ignore tvCam.
+        far_a = _project_fallback((1, 0), None, eq_fallback['cand'][2], [0, 0, 0, 1],
+                                  eq_fallback['tanNow'], eq_fallback['tanPrev'], (4, 1))
+        far_b = _project_fallback((1, 0), None, eq_fallback['cand'][2], [99, -50, 20, 1],
+                                  eq_fallback['tanNow'], eq_fallback['tanPrev'], (4, 1))
+        assert far_a == far_b and far_a is not None
+
+        ambiguous_state = ['duplicate', eq_state[1]]
+        ambiguous = analyse_fallback(eq_marker, eq_fallback, (eq_meta, eq_cov),
+                                     (eq_meta, eq_depth), ambiguous_state,
+                                     eq_current['records'])['equivalence']
+        assert ambiguous['ambiguous_or_unmatched_identity_pixels'] == 1
+        assert ambiguous['by_base']['head']['compared_pixels'] == 0
+
+        gated = json.loads(json.dumps(eq_fallback))
+        gated['probe'] = [0, 0, 1, 8 | 16 | 32]
+        gated['holoJitter'][3] = 1
+        gated['movers'][0] = 1
+        gated['tvSt'][3] = 1
+        gated['ships'][0] = 1
+        gated['shBox0'] = [[-100, -100, -100, 0] for _ in range(8)]
+        gated['shBox1'] = [[100, 100, 100, 0] for _ in range(8)]
+        gated_eq = analyse_fallback(eq_marker, gated, (eq_meta, eq_cov), (eq_meta, eq_depth),
+                                    eq_state, eq_current['records'])['equivalence']
+        assert gated_eq['by_base']['head']['equivalent_pixels'] == 1
+        assert gated_eq['equivalent_without_known_gate_unknowns'] == 0
+        assert gated_eq['final_effects_unknown_pixels'] == 2
+        assert all(gated_eq['unknown_gates'][name] == 2 for name in
+                   ('ui_mesh_rejection', 'terrain_override', 'hologram_override',
+                    'screen_override', 'background_occlusion', 'mover_reactivity'))
+        assert gated_eq['unknown_gates']['body_grid_membership'] == 1
+        assert gated_eq['unknown_gates']['ship_part_membership'] == 1
+
+        unsupported = json.loads(json.dumps(eq_fallback))
+        unsupported['flags'] = 0
+        unsupported_eq = analyse_fallback(eq_marker, unsupported, (eq_meta, eq_cov),
+                                          (eq_meta, eq_depth), eq_state,
+                                          eq_current['records'])['equivalence']
+        assert not unsupported_eq['available'] and unsupported_eq['by_base']['head']['compared_pixels'] == 0
+
+        missing_metadata = json.loads(json.dumps(fallback_value))
+        missing_metadata.pop('cand')
+        fallback_path.write_text(json.dumps(missing_metadata), encoding='utf-8')
+        try:
+            read_fallback(fallback_path)
+        except ProbeError:
+            pass
+        else:
+            raise AssertionError('fallback marker with missing projection metadata accepted')
 
         # Marker absence never activates the raw fields, even though this fixture
         # happens to contain them.

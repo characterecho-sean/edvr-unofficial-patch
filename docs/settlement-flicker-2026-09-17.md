@@ -2,11 +2,10 @@
 
 ## Status
 
-- State: c48d231 landed A/B/A completed cleanly. Packed capture beat both
-  immediate phases on CPU p50/p95/p99 and GPU p50/p95. Enable the tested packed
-  path for normal play and retain its bounded capture profiling schedule.
-  Static/visibility skips remain disabled. Full build and regression checks
-  pass; deliver the clean commit to Frontier with settings preserved.
+- State: admission diagnostics and offline static-motion comparison pass all
+  gates and are ready for Frontier. Packed capture with bounded profiling
+  remains the normal path. New caches and static/visibility skips require
+  evidence first.
 - Environment: Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and
   active XR output 3072x3264 per eye, trims off. Same settings and landed
   settlement view throughout native windows 15-17; eye_053218 follows A2. RTX
@@ -26,10 +25,11 @@
   zero. 82 draw groups have zero current coverage. These are opportunity
   counts, not safe skip classes: fallback still selects head motion on 2244
   candidate pixels, and previous invisibility cannot predict new visibility.
-- Implementation: normal capture GPU profiling attempts only the first flush in
-  one of sixteen frames. Diagnostic A1/B/A2 remains immediate/packed/immediate,
-  with safe boundary transitions and restoration to normal packed capture.
-  Selected capture samples cannot be multiplied by all dispatches.
+- Current work: six exclusive sampled admission stages and bounded descriptor
+  reuse observations are implemented without changing draw decisions. Targeted
+  2500-check WARP rig, offline probe self-test and full build gates pass.
+  Existing capture comparisons differ by less than 0.002 input pixels, but all
+  2249 matched-map pixels retain unresolved final selection/history decisions.
 - Open: establish static-object fallback and identity across rebases, preserve
   first-moving-frame history, and measure current visibility before expensive
   work. Station rotation/independent ships and the on-foot path still require
@@ -38,10 +38,10 @@
 - Ruled out: batching inherently slowing this controlled landed scene, because
   B beat both A phases on CPU and GPU central timings. Earlier rules and the
   uncontrolled regression remain in the journal; their cause is unresolved.
-- Next flight: normal play with packed capture and bounded profiling on
-  Frontier, preserving the INI. Retain the menu comparison if another
-  regression appears; this flight already supplies the controlled settlement
-  evidence.
+- Next flight: after validation and Frontier installation, one normal session
+  with settled cockpit and on-foot intervals can distinguish scene/eye lookup,
+  pipeline guards and resource validation. No A/B/A is needed to collect these
+  admission measurements. Static proof starts with existing captures.
 
 ## Journal
 
@@ -688,3 +688,105 @@ WARP/exporter/probe checks pass. The full absolute-path build passes all 61
 parallel jobs, three quiet jobs and the unchanged 249-key config contract
 (`build/motion-packed-reviewed.log`). Rebuild the clean commit and
 install/verify on Frontier without `--ini`.
+
+### 2026-09-18 -- admission costs and static-motion equivalence
+
+The user approved the next pass after 7000eb4 was installed and verified on
+Frontier. That build is pushed to main; all build gates and 2438 mesh WARP
+checks passed, and the live INI hash remained unchanged. Normal rendering keeps
+packed capture and the frame-bounded profiling policy.
+
+Enumerate the remaining hypotheses before changing admission behavior:
+
+- Repeated scene/depth/eye selection dominates rejected draws. Confirm with a
+  sampled exclusive scene/eye stage and explicit early-exit counts.
+- Pipeline guard queries dominate admitted or near-admitted draws. Confirm with
+  their exclusive CPU stage and repeated immutable depth/blend state
+  identities.
+- IA/resource validation repeats expensive descriptor/resource queries. Confirm
+  with its exclusive stage and bounded observations of retained COM identities;
+  pointer reuse without retained ownership is not evidence of resource
+  equality.
+- Static records can use the existing camera fallback. Compare projected motion
+  at captured depth-visible pixels, reporting world/head disagreements and
+  unavailable body, ship, UI, terrain or later selection gates separately. DLSS
+  `mv()` also sets `trackedForeground` when mesh motion succeeds; removing
+  coverage can change later background-history invalidation and reactivity even
+  when the physical vector agrees. These final decisions require their own
+  proof.
+
+The approximately 0.716 ms difference between the prior full-hook and accepted
+CPU estimates is an investigation envelope, not an exclusive measured stage or
+a promised saving. Additional sampled spans must include early returns, avoid
+unsampled clock calls and distinguish never-entered stages from zero elapsed
+cost. Descriptor observations do not authorize bypassing live pipeline, eye,
+write or first-moving-frame checks.
+
+Start static equivalence work on eye_053218 and synthetic nonidentity camera
+cases. An unchanged raw pose across an origin rebase is only a candidate. The
+offline tool must not treat a missing final selection gate, unmatched record or
+ambiguous object identity as proof that coverage can be removed. On-foot's zero
+rigid records make admission profiling useful there, while a rigid static skip
+cannot remove capture work that was never submitted.
+
+Implementation: admission uses the existing 1/256 hook selector and reports raw
+exclusive CPU totals for fast rejection, scene/depth/eye/cap, pipeline guards,
+IA/resources, preparation and accepted work. Per-stage entry, rejection and
+sample counts expose an inactive path or an unsampled stage. Fast rejects also
+distinguish disabled, failed setup, unknown shader, invalid draw and context.
+The final timestamp is taken after local COM releases and nested timers; raw
+stage totals sum to the same full-hook interval. A sampled completed draw adds
+five boundary clock reads, while unsampled draws add none. These instrumented
+timings are not directly interchangeable with the previous uninstrumented stage
+costs.
+
+Descriptor observations follow the actual getter calls and retain at most four
+COM identities for each of depth state, blend state, ID buffer, scene constant
+buffer, pool SRV and pool buffer. Calls, hits, fills and evictions are
+explicit; null/default depth and blend states do not invent a GetDesc call.
+Frame and shutdown boundaries release all identities. This is a bounded
+observation of a possible cache, not an active cache or a change to pipeline
+validation. Both normal 1800-frame reports and existing A/B/A phase reports
+include the new data.
+
+The offline probe now compares the actual captured, match-valid mesh map with
+the DLSS/DLAA `mv()` base projection. It respects the full source size, crop
+origin, half-pixel centers, jitter, previous-minus-current convention, exact
+coverage depth for meshes and dilated depth for fallback. Far-world projection
+uses rotation only. Unknown identity, unmatched maps, missing metadata and
+invalid projections are reported separately. The ordinary CLI remains read-only
+and writes JSON only to stdout.
+
+On eye_053218, all 2715 depth-visible exact-pose candidate pixels cross an
+origin rebase. Only 2249 have matched mesh maps: 2244 choose the head base and
+five the world base. The remaining 466 world-base pixels are unmatched and
+cannot be used as equivalence evidence. Maximum-component vector differences,
+in input pixels:
+
+| Base | Compared pixels | Median difference | Maximum difference |
+|---|---:|---:|---:|
+| Head | 2244 | 0.00114841 | 0.00158126 |
+| World | 5 | 0.000143277 | 0.000151937 |
+
+None meet the tool's fixed 0.0001-pixel diagnostic criterion. The small errors
+could include float arithmetic effects, but that explanation has not been
+established and the criterion was not widened to fit this capture. These values
+do not show a large physical-vector error from selecting the head base in this
+landed view. They also do not authorize removing coverage: all 2249 comparisons
+have final UI, terrain/hologram and hidden-history decisions unevaluated by
+this probe. Those inputs are already captured; this tool does not yet consume
+them. Body-grid and ship-part claims are a distinct omitted-input limitation in
+cases where those paths can apply. `safe_skippable_claim` remains false.
+
+Evidence:
+`build/admission-static-20260918/mesh-motion-static-equivalence-053218.json`.
+The Python self-test covers nonidentity head/world projection, crop/jitter,
+rebases, unmatched and ambiguous records, invalid math, far rotation and
+unknown gates. Independent review caught and corrected far-world translation
+handling. The targeted WARP rig passes 2500 checks, including early returns,
+zero-clock unsampled paths, cleanup timing, raw-total partition, descriptor
+reuse/eviction, frame/shutdown resets and comparison accumulation. The
+absolute-path full build passes all 61 parallel jobs, three quiet jobs and the
+unchanged 249-key config contract (`build/motion-admission-verified.log`).
+Rebuild the clean commit before installing and verifying on Frontier without
+`--ini`.
