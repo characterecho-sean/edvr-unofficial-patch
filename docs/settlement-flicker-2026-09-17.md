@@ -2,12 +2,13 @@
 
 ## Status
 
-- State: installed Frontier build 89b9055 remains unchanged. Original-shader
-  replay with immediate motion consumption puts fused-minus-baseline time at
-  -6.688 through +0.608 us per selected-mesh batch across six runs. Exact
-  positions, identities and motion maps pass; the saving does not justify a
-  production change or another flight. Static/visibility skips still lack a
-  correctness proof. See the final journal entry for replay scope and gates.
+- State: installed Frontier build 89b9055 remains unchanged. Local removal
+  comparisons put the on-foot producer increment at 0.350-0.360 ms and
+  0.221-0.228 ms in two captured subsets. Motion raster with precomputed data
+  adds only about 0.009 ms. Maps and regenerated outputs match exactly. This
+  favors avoiding data production/dependencies over tuning raster arithmetic;
+  it does not yet prove a safe skip or a full-frame saving. See the final
+  journal entry for scope, stage variability, visibility counts and gates.
 - Environment: Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and
   active XR output 3072x3264 per eye, trims off. Dimensions are unchanged
   between the landed settlement and on-foot intervals in this flight. RTX 5090;
@@ -34,10 +35,10 @@
   per call; all its stages suggest a 1.36-1.60 ms/frame scale if
   representative. This is not a directly timed total. Screen producers suggest
   only 0.123-0.125 ms/frame. Older captures suggest limited exact identity
-  reuse. Synthetic typed fusion saves 20-26 us per 40-draw batch, but original
-  shaders plus immediate motion raster show only -6.688 through +0.608 us
-  across two captured subsets. Neither result supports extrapolating the
-  sampled identity intervals into recoverable whole-frame savings.
+  reuse. Typed fusion has no worthwhile gain with original shaders. New local
+  controls save 0.340-0.348 / 0.213-0.219 ms when capture outputs are already
+  available; that is an idealized control, not an implemented cache. 13/22 and
+  10/19 replay motion draws have zero samples, but still feed future history.
 - Open: establish static-object fallback and identity across rebases, preserve
   first-moving-frame history, and measure current visibility before expensive
   work. Existing captured-vector comparisons are below 0.002 pixels but leave
@@ -51,12 +52,12 @@
   address only about 0.06 ms landed and no work on foot. Earlier ruled-out
   explanations and the uncontrolled regression remain in the journal. Screen
   motion is not supported as the missing sustained multi-millisecond cost.
-- Next: close identity fusion as a production candidate for these workloads.
-  Use local replay to establish the removable cost of each producer before
-  pursuing skips; rigid static fallback still needs final selection/history
-  equivalence, and cannot help the on-foot path that admits no rigid records.
-  No repeat flight is needed for the drawn-weapon increment. Preserve history
-  and keep the separately paused foveated-DLSS work paused.
+- Next: investigate conservative visibility while preserving adjacent history.
+  Sean's original-game culling hypothesis needs a separate original-draw
+  visibility/cost census with real pass, eye and predication state. The hook
+  can suppress game draws; these partial motion replays cannot prove which are
+  safe to suppress. No new flight is requested by this local experiment. Keep
+  the separately paused foveated-DLSS work paused.
 
 ## Journal
 
@@ -1203,3 +1204,126 @@ different paths: static rigid skipping cannot remove on-foot work that was
 never admitted. Any static fallback still needs unchanged final DLSS selection,
 foreground/reactive flags and first-moving-frame history, not just nearly equal
 vectors. No new test flight is requested for this result.
+
+### 2026-09-18 -- controlled removal of on-foot motion stages
+
+This experiment measures the existing on-foot mesh producer using the same two
+original-shader fixtures. It does not yet measure the separate rigid settlement
+producer. Five modes keep identical motion/depth clears and original per-draw
+depth work: depth only, depth plus identity, depth plus identity and capture,
+full baseline, and depth plus immediate motion raster using precomputed current
+outputs. Precomputation stays outside timing.
+
+The hypotheses and discriminators are:
+
+- Identity lookup dominates: depth-plus-identity adds most of the full-path
+  increment over depth only.
+- Vertex capture dominates: adding capture after identity is expensive, and
+  bypassing both with precomputed outputs preserves the complete map while
+  removing a substantial part of the full-path cost.
+- Rasterization and its transitions dominate: full baseline costs materially
+  more than identity-plus-capture, while precomputed raster remains costly.
+- Invisible raster work is common: outside-timing occlusion queries around each
+  baseline motion draw report many zero-sample draws. These queries use
+  reconstructed partial selected-mesh depth, not complete game visibility.
+
+Whole-batch timestamps avoid inserting separate timing queries into every
+stage. Modes rotate within each measured round; signed, paired differences
+measure the net effect of removal, including changed synchronization and
+pipeline transitions. They are not additive isolated-stage costs. Shared map
+clears remain in the depth-only control, so it does not represent removing
+every resource or command associated with the feature.
+
+Production inspection also rules out treating current invisibility as a
+complete skip condition. `weaponMotionDraw` captures positions and identities
+before rasterizing, retains bounded duplicate geometry occurrences, and marks
+the next history slot with the frame. The following frame requires adjacent
+history with matching skeleton identity and projection. Dropping capture for an
+invisible object could therefore remove history needed when it becomes visible.
+Any later skip must preserve those invariants or prove an equivalent fallback;
+a zero-sample raster draw alone does not do that.
+
+Sean also asked whether EDVR can suppress Elite's original draws to address
+potentially poor settlement culling. Yes: `hookedDrawIndexedInstanced` forwards
+the real game draw before invoking the motion producers, and
+`forwardWithVerdict` already returns without issuing it for `kSkip`. Hook
+access is sufficient. Suppression could save GPU execution and some driver
+work, but cannot recover Elite's earlier CPU scene traversal and draw setup. An
+instanced draw may also contain both visible and invisible instances.
+
+High submitted draw counts do not prove poor culling. A separate measurement
+must classify original draws by render pass, eye, depth/stencil state and
+existing predication, then distinguish zero-sample work from visible work later
+overwritten. Shadows, reflections, depth-only passes and side effects cannot be
+judged by main-color visibility alone. Existing census hooks expose pass state
+and query brackets, but these two replay fixtures lack complete original
+material/pass state and full-scene occluders. Their motion-draw occlusion
+counts therefore cannot establish the quality of Elite's culling.
+
+The implemented `--cost-breakdown` mode passes the output-poisoning gate:
+identity-only regenerates identity while positions remain poisoned;
+identity-plus-capture and full baseline regenerate both byte-exactly. Full
+baseline and precomputed-output motion maps match exactly, with the same
+nonzero valid/rejected counts as the previous replay. Precomputation is an
+idealized control, not an identity cache proposal or proof of safe input reuse.
+The five modes retain the same clear operations, original shader inputs, draw
+order and reconstructed depth dimensions.
+
+Three release-device RTX 5090 runs per fixture use 15 rounds with rotating
+five-mode order. Every mode accumulates at least 250 ms of valid GPU warmup;
+all 450 measured samples are ready, non-disjoint and positive, with no
+unhealthy warmup samples. Paired differences below are medians of same-round
+differences, not differences between independently calculated mode medians.
+
+| Capture / run | Full minus depth control, ms | Full minus precomputed motion, ms | Precomputed motion minus depth control, ms |
+|---|---:|---:|---:|
+| 064839 / 1 | 0.355616 | 0.346304 | 0.008928 |
+| 064839 / 2 | 0.359616 | 0.348128 | 0.009312 |
+| 064839 / 3 | 0.349600 | 0.340288 | 0.008896 |
+| 102403 / 1 | 0.228032 | 0.219136 | 0.008960 |
+| 102403 / 2 | 0.223712 | 0.215136 | 0.009056 |
+| 102403 / 3 | 0.221248 | 0.212640 | 0.008832 |
+
+These controlled batch increments show that producing fresh inputs and their
+associated dependencies are the larger target in these workloads. Ruled out as
+the main explanation for this replay's producer increment: motion-raster
+arithmetic alone, because the same raster with precomputed inputs adds only
+8.8-9.3 us to the shared depth control. This does not isolate a particular
+driver barrier or make the full precomputed saving recoverable in production.
+
+The intermediate slices are less stable. Primary identity-minus-depth paired
+medians are 225.152, 156.704 and 155.904 us; adding capture gives 22.560,
+30.016 and 79.744 us. Raw samples occupy different timing bands across mode
+orders. Secondary identity increments are steadier at 136.544-137.120 us, with
+capture adding 6.688-7.008 us. Fresh full raster adds 73.408-112.416 us over
+identity-plus-capture, far more than the approximately 9 us with ready inputs.
+Do not add these slices or treat them as stable isolated-stage prices. Primary
+full mode medians are 0.374-0.385 ms in this mixed experiment, versus
+0.317-0.319 ms in the prior two-mode fusion experiment; cross-experiment
+absolute timings are not interchangeable.
+
+Outside-timing occlusion probes find 13/22 zero-sample motion draws in 064839,
+covering 141600/200199 submitted indices (70.7%), and 10/19 in 102403, covering
+56427/73482 indices (76.8%). These are counts for the EDVR motion raster
+against reconstructed partial depth. They do not classify offscreen versus
+occluded geometry, measure the cost of those particular draws, prove zero
+final-game contribution, or establish a cheap current-frame visibility test.
+They support evaluating conservative visibility while retaining the
+capture/history needed when an object becomes visible.
+
+Artifacts are under `build/identity-replay/064839-cost-run1/` through `run3/`
+and `102403-cost-run1/` through `run3/`, each containing
+`identity_fusion_replay_cost.json` and `.csv`. They include raw timestamps, CPU
+submission time, per-mode warmup and health, paired differences, and per-draw
+occlusion counts. The bounded replay scope remains unchanged: two historical
+on-foot subsets, opaque CullNone selected-mesh depth, no complete
+material/occluder state, and no production Get/Restore traffic. These results
+must not be scaled into a promised game-frame improvement.
+
+Validation: `build/motion-producer-cost-validation.log` records an exit-0
+absolute-path full build: 61 pooled jobs, three quiet jobs, all 249 config keys
+and packaging/export gates pass. The replay parser/plan reports 11 checks; the
+identity rig reports 274 checks with zero failures, including the new CLI
+contracts. Targeted hardware gates and no-write dry-run pass; the new code
+compiles without warnings. Frontier remains on 89b9055 and no new test flight
+is required for this local experiment.

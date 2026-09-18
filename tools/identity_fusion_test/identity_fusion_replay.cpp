@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -156,6 +157,37 @@ struct Raster {
 
 enum class ReplayPath {Baseline,Fused};
 
+enum class CostMode {
+    DepthClearOnly,
+    DepthIdentity,
+    DepthIdentityCapture,
+    FullCurrentBaseline,
+    PrecomputedOutputsMotion,
+    Count
+};
+
+struct CostPlan {
+    CostMode mode;
+    const char* name;
+    bool identity;
+    bool capture;
+    bool motion;
+};
+
+constexpr std::array<CostPlan,size_t(CostMode::Count)> kCostPlans{{
+    {CostMode::DepthClearOnly,"depth_clear_only",false,false,false},
+    {CostMode::DepthIdentity,"depth_identity",true,false,false},
+    {CostMode::DepthIdentityCapture,"depth_identity_capture",true,true,false},
+    {CostMode::FullCurrentBaseline,"full_current_baseline",true,true,true},
+    {CostMode::PrecomputedOutputsMotion,"precomputed_outputs_motion",false,false,true},
+}};
+
+const CostPlan& costPlan(CostMode mode){
+    const auto index=size_t(mode);
+    require(index<kCostPlans.size()&&kCostPlans[index].mode==mode,"invalid replay cost mode");
+    return kCostPlans[index];
+}
+
 void depthDraw(Raster& r,const Fixture& f,const Draw& draw){bindDraw(r.d,f,draw);r.d.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);r.d.ctx->GSSetShader(nullptr,nullptr,0);r.d.ctx->PSSetShader(nullptr,nullptr,0);r.d.ctx->OMSetRenderTargets(0,nullptr,r.dsv.Get());r.d.ctx->OMSetDepthStencilState(r.writeDepth.Get(),16);r.d.ctx->DrawIndexedInstanced(f.geometry[draw.geometry].count,1,0,0,0);}
 
 std::vector<size_t> candidates(const Fixture& f,const Draw& draw){std::vector<size_t> out;for(size_t i=0;i<f.frames[0].draws.size();++i)if(f.frames[0].draws[i].geometry==draw.geometry){require(out.size()<4,"replay geometry has more than four prior occurrences");out.push_back(i);}return out;}
@@ -166,9 +198,120 @@ void produceCurrent(Raster& r,Fixture& f,Captures& captured,size_t current,Repla
 
 void rasterBatch(Raster& r,Fixture& f,Captures& captured,ReplayPath path,ID3D11GeometryShader* fused,ID3D11ComputeShader* identify){r.clear();for(size_t i=0;i<f.frames[1].draws.size();++i){depthDraw(r,f,f.frames[1].draws[i]);produceCurrent(r,f,captured,i,path,fused,identify);motionDraw(r,f,captured,i,path);}}
 
+void costBatch(
+    Raster& r,
+    Fixture& f,
+    Captures& captured,
+    CostMode mode,
+    ID3D11ComputeShader* identify){
+    const auto& plan=costPlan(mode);
+    r.clear();
+    for(size_t i=0;i<f.frames[1].draws.size();++i){
+        auto& draw=f.frames[1].draws[i];
+        auto& output=captured[1][i];
+        depthDraw(r,f,draw);
+        if(plan.identity){
+            identifyBaseline(
+                r.d,
+                identify,
+                draw.instanceBuffer.Get(),
+                f.resources[draw.pool].view.Get(),
+                output.baselineUav.Get(),
+                r.index.Get(),
+                r.indexView.Get());
+        }
+        if(plan.capture)
+            captureBaseline(r.d,f,draw,output.baselinePosition.Get());
+        if(plan.motion)
+            motionDraw(r,f,captured,i,ReplayPath::Baseline);
+    }
+}
+
 std::vector<unsigned char> readTexture(Raster& r){D3D11_TEXTURE2D_DESC td{};r.map->GetDesc(&td);td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> stage;hr(r.d.dev->CreateTexture2D(&td,nullptr,&stage),"create replay map staging");r.d.ctx->CopyResource(stage.Get(),r.map.Get());D3D11_MAPPED_SUBRESOURCE map{};hr(r.d.ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&map),"map replay motion texture");const size_t row=size_t(r.width)*8;std::vector<unsigned char> out(row*r.height);for(uint32_t y=0;y<r.height;++y)std::memcpy(out.data()+size_t(y)*row,static_cast<const unsigned char*>(map.pData)+size_t(y)*map.RowPitch,row);r.d.ctx->Unmap(stage.Get(),0);return out;}
 
 void rasterGate(Fixture& f,Device& d,Captures& captured,ID3D11GeometryShader* fused,ID3D11ComputeShader* identify){Raster r(d,f.width,f.height);rasterBatch(r,f,captured,ReplayPath::Baseline,fused,identify);auto baseline=readTexture(r);rasterBatch(r,f,captured,ReplayPath::Fused,fused,identify);auto typed=readTexture(r);require(baseline==typed,"full replay motion maps differ between baseline and typed fusion");uint64_t valid=0,rejected=0;for(size_t i=6;i<baseline.size();i+=8){uint16_t flag=0;std::memcpy(&flag,baseline.data()+i,2);valid+=flag==0x3c00;rejected+=flag==0x4000;}require(valid>0,"replay motion map has no valid correspondence pixels");debugClean(d);std::printf("replay raster gate: dimensions=%ux%u selected_mesh_depth=yes maps_exact=yes valid_pixels=%llu rejected_pixels=%llu\n",f.width,f.height,(unsigned long long)valid,(unsigned long long)rejected);}
+
+struct CurrentReference {
+    std::vector<unsigned char> position;
+    std::vector<unsigned char> identity;
+};
+
+std::vector<CurrentReference> retainCurrent(Fixture& f,Device& d,Captures& captured){
+    std::vector<CurrentReference> retained;
+    retained.reserve(f.frames[1].draws.size());
+    for(size_t i=0;i<f.frames[1].draws.size();++i){
+        const auto bytes=f.geometry[f.frames[1].draws[i].geometry].count*16;
+        retained.push_back({
+            readback(d,captured[1][i].baselinePosition.Get(),bytes),
+            readback(d,captured[1][i].baselineIdentity.Get(),16)});
+    }
+    return retained;
+}
+
+void poisonCurrent(Fixture& f,Device& d,Captures& captured){
+    for(size_t i=0;i<f.frames[1].draws.size();++i){
+        const auto bytes=f.geometry[f.frames[1].draws[i].geometry].count*16;
+        std::vector<unsigned char> position(bytes,0x5a);
+        const std::array<unsigned char,16> identity{{
+            0xa5,0xa5,0xa5,0xa5,0xa5,0xa5,0xa5,0xa5,
+            0xa5,0xa5,0xa5,0xa5,0xa5,0xa5,0xa5,0xa5}};
+        d.ctx->UpdateSubresource(captured[1][i].baselinePosition.Get(),0,nullptr,position.data(),0,0);
+        d.ctx->UpdateSubresource(captured[1][i].baselineIdentity.Get(),0,nullptr,identity.data(),0,0);
+    }
+}
+
+void verifyCurrent(
+    Fixture& f,
+    Device& d,
+    Captures& captured,
+    const std::vector<CurrentReference>& retained,
+    bool expectPosition){
+    for(size_t i=0;i<f.frames[1].draws.size();++i){
+        const auto bytes=f.geometry[f.frames[1].draws[i].geometry].count*16;
+        const auto position=readback(d,captured[1][i].baselinePosition.Get(),bytes);
+        const auto identity=readback(d,captured[1][i].baselineIdentity.Get(),16);
+        require(identity==retained[i].identity,"cost mode did not regenerate current identity");
+        if(expectPosition)
+            require(position==retained[i].position,"cost mode did not regenerate current positions");
+        else
+            require(std::all_of(position.begin(),position.end(),[](unsigned char b){return b==0x5a;}),
+                "identity-only cost mode unexpectedly wrote positions");
+    }
+}
+
+void costGate(Fixture& f,Device& d,Captures& captured,ID3D11ComputeShader* identify){
+    Raster r(d,f.width,f.height);
+    const auto retained=retainCurrent(f,d,captured);
+
+    poisonCurrent(f,d,captured);
+    costBatch(r,f,captured,CostMode::DepthIdentity,identify);
+    verifyCurrent(f,d,captured,retained,false);
+
+    poisonCurrent(f,d,captured);
+    costBatch(r,f,captured,CostMode::DepthIdentityCapture,identify);
+    verifyCurrent(f,d,captured,retained,true);
+
+    poisonCurrent(f,d,captured);
+    costBatch(r,f,captured,CostMode::FullCurrentBaseline,identify);
+    verifyCurrent(f,d,captured,retained,true);
+    const auto full=readTexture(r);
+    costBatch(r,f,captured,CostMode::PrecomputedOutputsMotion,identify);
+    const auto precomputed=readTexture(r);
+    require(full==precomputed,"precomputed-output replay motion map differs from full baseline");
+    uint64_t valid=0,rejected=0;
+    for(size_t i=6;i<full.size();i+=8){
+        uint16_t flag=0;
+        std::memcpy(&flag,full.data()+i,2);
+        valid+=flag==0x3c00;
+        rejected+=flag==0x4000;
+    }
+    require(valid>0,"cost replay motion map has no valid correspondence pixels");
+    debugClean(d);
+    std::printf(
+        "replay cost gate: stage_writes_exact=yes full_vs_precomputed_maps_exact=yes valid_pixels=%llu rejected_pixels=%llu\n",
+        (unsigned long long)valid,
+        (unsigned long long)rejected);
+}
 
 ComPtr<ID3D11Query> query(ID3D11Device* dev,D3D11_QUERY type){D3D11_QUERY_DESC q{type,0};ComPtr<ID3D11Query> out;hr(dev->CreateQuery(&q,&out),"create replay timing query");return out;}
 bool waitData(ID3D11DeviceContext* ctx,ID3D11Asynchronous* query,void* data,UINT size){const ULONGLONG until=GetTickCount64()+5000;ctx->Flush();HRESULT h=S_FALSE;while((h=ctx->GetData(query,data,size,D3D11_ASYNC_GETDATA_DONOTFLUSH))==S_FALSE&&GetTickCount64()<until)Sleep(0);return h==S_OK;}
@@ -183,6 +326,319 @@ void writeBenchmark(const std::filesystem::path& directory,const std::filesystem
 
 void benchmarkReplay(const std::filesystem::path& fixturePath,const std::filesystem::path* output){auto f=parse(fixturePath);Device d(false);ComPtr<ID3D11GeometryShader> fused;ComPtr<ID3D11ComputeShader> identify;createGpu(f,d,fused,identify);auto captured=sourceGate(f,d,fused.Get(),identify.Get(),false);Raster r(d,f.width,f.height);constexpr unsigned rounds=15,maxWarmup=10000;LARGE_INTEGER qpf{},start{},now{};QueryPerformanceFrequency(&qpf);QueryPerformanceCounter(&start);unsigned warmupBatches=0;double warmupWallMs=0,warmupGpuMs=0;do{const auto sample=measure(r,f,captured,(warmupBatches&1)?ReplayPath::Fused:ReplayPath::Baseline,fused.Get(),identify.Get(),0,warmupBatches&1);if(sample.valid)warmupGpuMs+=sample.gpuMs;++warmupBatches;QueryPerformanceCounter(&now);warmupWallMs=double(now.QuadPart-start.QuadPart)*1000.0/double(qpf.QuadPart);}while((warmupGpuMs<250.0||warmupWallMs<250.0)&&warmupBatches<maxWarmup);require(warmupGpuMs>=250.0&&warmupWallMs>=250.0,"replay benchmark warmup failed");std::vector<Sample> samples;samples.reserve(rounds*2);for(unsigned round=0;round<rounds;++round)for(unsigned order=0;order<2;++order)samples.push_back(measure(r,f,captured,((round+order)&1)?ReplayPath::Fused:ReplayPath::Baseline,fused.Get(),identify.Get(),round,order));std::vector<double> baseline,typed;unsigned unhealthy=0;for(const auto&s:samples)if(!s.valid)++unhealthy;else (s.path==ReplayPath::Baseline?baseline:typed).push_back(s.gpuMs);require(!unhealthy,"unhealthy replay timestamp/disjoint sample");uint64_t indices=0;for(const auto&draw:f.frames[1].draws)indices+=f.geometry[draw.geometry].count;const auto adapter=adapterName(d.dev.Get());std::printf("replay benchmark: adapter=%s dimensions=%ux%u draws=%zu indices=%llu families=%zu warmup_batches=%u warmup_wall_ms=%.3f warmup_gpu_ms=%.3f unhealthy=%u\n",adapter.c_str(),f.width,f.height,f.frames[1].draws.size(),(unsigned long long)indices,f.shaders.size(),warmupBatches,warmupWallMs,warmupGpuMs,unhealthy);std::printf("replay GPU median selected-depth+producer+immediate-raster: baseline %.6f ms, fused_typed_direct %.6f ms (descriptive only; no pass/fail threshold)\n",median(baseline),median(typed));if(output)writeBenchmark(*output,fixturePath,f,adapter,samples,warmupBatches,warmupWallMs,warmupGpuMs);}
 
+struct MotionOpportunity {
+    uint32_t original=0;
+    uint32_t count=0;
+    uint64_t samples=0;
+};
+
+std::vector<MotionOpportunity> probeMotionOpportunity(
+    Raster& r,
+    Fixture& f,
+    Captures& captured,
+    ID3D11ComputeShader* identify){
+    std::vector<ComPtr<ID3D11Query>> queries;
+    queries.reserve(f.frames[1].draws.size());
+    r.clear();
+    for(size_t i=0;i<f.frames[1].draws.size();++i){
+        const auto& draw=f.frames[1].draws[i];
+        depthDraw(r,f,draw);
+        produceCurrent(r,f,captured,i,ReplayPath::Baseline,nullptr,identify);
+        auto q=query(r.d.dev.Get(),D3D11_QUERY_OCCLUSION);
+        r.d.ctx->Begin(q.Get());
+        motionDraw(r,f,captured,i,ReplayPath::Baseline);
+        r.d.ctx->End(q.Get());
+        queries.push_back(std::move(q));
+    }
+
+    std::vector<MotionOpportunity> out;
+    out.reserve(queries.size());
+    uint32_t nonzero=0;
+    for(size_t i=0;i<queries.size();++i){
+        uint64_t samples=0;
+        require(waitData(r.d.ctx.Get(),queries[i].Get(),&samples,sizeof(samples)),
+            "replay motion occlusion query did not become ready");
+        const auto& draw=f.frames[1].draws[i];
+        const auto count=f.geometry[draw.geometry].count;
+        out.push_back({draw.original,count,samples});
+        nonzero+=samples!=0;
+        std::printf(
+            "replay motion opportunity: original_draw=%u indices=%u samples=%llu\n",
+            draw.original,
+            count,
+            (unsigned long long)samples);
+    }
+    std::printf(
+        "replay motion opportunity summary: draws=%zu nonzero=%u zero=%zu selected_mesh_partial_depth=yes skip_inference=no\n",
+        out.size(),
+        nonzero,
+        out.size()-nonzero);
+    return out;
+}
+
+struct CostSample {
+    unsigned round=0,order=0;
+    CostMode mode=CostMode::DepthClearOnly;
+    double cpuMs=0,gpuMs=0;
+    uint64_t ticks=0,frequency=0;
+    bool ready=false,disjoint=false,valid=false;
+};
+
+CostSample measureCost(
+    Raster& r,
+    Fixture& f,
+    Captures& captured,
+    CostMode mode,
+    ID3D11ComputeShader* identify,
+    unsigned round,
+    unsigned order){
+    auto disjoint=query(r.d.dev.Get(),D3D11_QUERY_TIMESTAMP_DISJOINT);
+    auto firstQuery=query(r.d.dev.Get(),D3D11_QUERY_TIMESTAMP);
+    auto lastQuery=query(r.d.dev.Get(),D3D11_QUERY_TIMESTAMP);
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjointData{};
+    uint64_t first=0,last=0;
+    LARGE_INTEGER qpf{},begin{},end{};
+    QueryPerformanceFrequency(&qpf);
+
+    r.d.ctx->Begin(disjoint.Get());
+    r.d.ctx->End(firstQuery.Get());
+    QueryPerformanceCounter(&begin);
+    costBatch(r,f,captured,mode,identify);
+    QueryPerformanceCounter(&end);
+    r.d.ctx->End(lastQuery.Get());
+    r.d.ctx->End(disjoint.Get());
+
+    CostSample sample;
+    sample.round=round;
+    sample.order=order;
+    sample.mode=mode;
+    sample.cpuMs=double(end.QuadPart-begin.QuadPart)*1000.0/double(qpf.QuadPart);
+    const bool disjointReady=waitData(r.d.ctx.Get(),disjoint.Get(),&disjointData,sizeof(disjointData));
+    const bool firstReady=waitData(r.d.ctx.Get(),firstQuery.Get(),&first,sizeof(first));
+    const bool lastReady=waitData(r.d.ctx.Get(),lastQuery.Get(),&last,sizeof(last));
+    sample.ready=disjointReady&&firstReady&&lastReady;
+    sample.disjoint=sample.ready&&disjointData.Disjoint!=FALSE;
+    sample.frequency=sample.ready?disjointData.Frequency:0;
+    sample.ticks=sample.ready&&last>=first?last-first:0;
+    sample.valid=sample.ready&&!sample.disjoint&&sample.frequency&&last>first;
+    if(sample.valid)sample.gpuMs=double(sample.ticks)*1000.0/double(sample.frequency);
+    return sample;
+}
+
+struct CostComparison {
+    const char* name;
+    CostMode lhs;
+    CostMode rhs;
+};
+
+constexpr std::array<CostComparison,6> kCostComparisons{{
+    {"depth_identity_minus_depth_clear_only",CostMode::DepthIdentity,CostMode::DepthClearOnly},
+    {"depth_identity_capture_minus_depth_identity",CostMode::DepthIdentityCapture,CostMode::DepthIdentity},
+    {"full_current_baseline_minus_depth_identity_capture",CostMode::FullCurrentBaseline,CostMode::DepthIdentityCapture},
+    {"precomputed_outputs_motion_minus_depth_clear_only",CostMode::PrecomputedOutputsMotion,CostMode::DepthClearOnly},
+    {"full_current_baseline_minus_precomputed_outputs_motion",CostMode::FullCurrentBaseline,CostMode::PrecomputedOutputsMotion},
+    {"full_current_baseline_minus_depth_clear_only",CostMode::FullCurrentBaseline,CostMode::DepthClearOnly},
+}};
+
+double modeMedian(const std::vector<CostSample>& samples,CostMode mode){
+    std::vector<double> values;
+    for(const auto& sample:samples)if(sample.mode==mode&&sample.valid)values.push_back(sample.gpuMs);
+    return median(std::move(values));
+}
+
+double pairedDeltaMedian(
+    const std::vector<CostSample>& samples,
+    unsigned rounds,
+    CostMode lhs,
+    CostMode rhs){
+    std::vector<double> deltas;
+    deltas.reserve(rounds);
+    for(unsigned round=0;round<rounds;++round){
+        const CostSample* left=nullptr;
+        const CostSample* right=nullptr;
+        for(const auto& sample:samples){
+            if(sample.round!=round||!sample.valid)continue;
+            if(sample.mode==lhs)left=&sample;
+            if(sample.mode==rhs)right=&sample;
+        }
+        require(left&&right,"cost comparison is missing a same-round sample");
+        deltas.push_back(left->gpuMs-right->gpuMs);
+    }
+    return median(std::move(deltas));
+}
+
+void writeCostBenchmark(
+    const std::filesystem::path& directory,
+    const std::filesystem::path& fixturePath,
+    const Fixture& f,
+    const std::string& adapter,
+    const std::vector<CostSample>& samples,
+    const std::vector<MotionOpportunity>& opportunity,
+    const std::array<unsigned,kCostPlans.size()>& warmupBatches,
+    const std::array<double,kCostPlans.size()>& warmupGpuMs,
+    const std::array<unsigned,kCostPlans.size()>& warmupUnhealthy,
+    double warmupWallMs,
+    unsigned rounds){
+    std::filesystem::create_directories(directory);
+    const auto json=directory/L"identity_fusion_replay_cost.json";
+    const auto csv=directory/L"identity_fusion_replay_cost.csv";
+    std::ofstream j(json,std::ios::binary),c(csv,std::ios::binary);
+    require(bool(j)&&bool(c),"open replay cost artifacts");
+    j<<std::setprecision(9);
+    c<<std::setprecision(9);
+
+    uint64_t indices=0;
+    for(const auto& draw:f.frames[1].draws)indices+=f.geometry[draw.geometry].count;
+    unsigned measuredUnhealthy=0;
+    for(const auto& sample:samples)measuredUnhealthy+=!sample.valid;
+
+    j<<"{\n"
+     <<"  \"schema\": 1,\n"
+     <<"  \"scope\": {\"driver\":\"hardware\",\"debug\":false,"
+       "\"timing\":\"whole batch only\","
+       "\"common_work\":\"motion/depth clears plus selected-mesh reconstructed depth draws in every mode\","
+       "\"interpretation\":\"signed controlled-removal deltas include barriers and transitions; non-additive\","
+       "\"precomputed_control\":\"idealized bypass using exact source-gate outputs, not a production cache proposal\","
+       "\"get_restore_state_traffic\":false,\"full_game_claim\":false},\n"
+     <<"  \"fixture\": \""<<jsonEscape(fixturePath.string())<<"\",\n"
+     <<"  \"adapter\": \""<<jsonEscape(adapter)<<"\",\n"
+     <<"  \"width\": "<<f.width<<",\n"
+     <<"  \"height\": "<<f.height<<",\n"
+     <<"  \"frame_before\": "<<f.frames[0].number<<",\n"
+     <<"  \"frame_now\": "<<f.frames[1].number<<",\n"
+     <<"  \"draws\": "<<f.frames[1].draws.size()<<",\n"
+     <<"  \"indices\": "<<indices<<",\n"
+     <<"  \"families\": "<<f.shaders.size()<<",\n"
+     <<"  \"measured_rounds\": "<<rounds<<",\n"
+     <<"  \"warmup_wall_ms\": "<<warmupWallMs<<",\n"
+     <<"  \"warmup\": [\n";
+    for(size_t i=0;i<kCostPlans.size();++i){
+        j<<"    {\"mode\":\""<<kCostPlans[i].name<<"\",\"batches\":"<<warmupBatches[i]
+         <<",\"valid_gpu_ms\":"<<warmupGpuMs[i]<<",\"unhealthy\":"<<warmupUnhealthy[i]<<"}"
+         <<(i+1==kCostPlans.size()?"\n":",\n");
+    }
+    j<<"  ],\n  \"mode_gpu_median_ms\": {\n";
+    for(size_t i=0;i<kCostPlans.size();++i){
+        j<<"    \""<<kCostPlans[i].name<<"\": "<<modeMedian(samples,kCostPlans[i].mode)
+         <<(i+1==kCostPlans.size()?"\n":",\n");
+    }
+    j<<"  },\n  \"paired_same_round_delta_median_ms\": {\n";
+    for(size_t i=0;i<kCostComparisons.size();++i){
+        const auto& comparison=kCostComparisons[i];
+        j<<"    \""<<comparison.name<<"\": "
+         <<pairedDeltaMedian(samples,rounds,comparison.lhs,comparison.rhs)
+         <<(i+1==kCostComparisons.size()?"\n":",\n");
+    }
+    j<<"  },\n  \"motion_occlusion_probe\": {\n"
+     <<"    \"assumption\": \"selected-mesh partial depth; read-only opportunity evidence; not a safe skip mask\",\n"
+     <<"    \"draws\": [\n";
+    for(size_t i=0;i<opportunity.size();++i){
+        const auto& draw=opportunity[i];
+        j<<"      {\"original_draw\":"<<draw.original<<",\"indices\":"<<draw.count
+         <<",\"samples\":"<<draw.samples<<"}"
+         <<(i+1==opportunity.size()?"\n":",\n");
+    }
+    j<<"    ]\n  },\n"
+     <<"  \"measured_unhealthy_samples\": "<<measuredUnhealthy<<",\n"
+     <<"  \"samples\": [\n";
+    for(size_t i=0;i<samples.size();++i){
+        const auto& sample=samples[i];
+        j<<"    {\"round\":"<<sample.round<<",\"order\":"<<sample.order
+         <<",\"mode\":\""<<costPlan(sample.mode).name<<"\",\"cpu_ms\":"<<sample.cpuMs
+         <<",\"gpu_ms\":"<<sample.gpuMs<<",\"ticks\":"<<sample.ticks
+         <<",\"frequency\":"<<sample.frequency<<",\"disjoint\":"<<(sample.disjoint?"true":"false")
+         <<",\"ready\":"<<(sample.ready?"true":"false")<<",\"valid\":"<<(sample.valid?"true":"false")<<"}"
+         <<(i+1==samples.size()?"\n":",\n");
+    }
+    j<<"  ]\n}\n";
+
+    c<<"adapter,width,height,frame_before,frame_now,draws,indices,families,round,order,mode,cpu_ms,gpu_ms,ticks,frequency,disjoint,ready,valid\n";
+    for(const auto& sample:samples){
+        c<<adapter<<','<<f.width<<','<<f.height<<','<<f.frames[0].number<<','<<f.frames[1].number
+         <<','<<f.frames[1].draws.size()<<','<<indices<<','<<f.shaders.size()<<','<<sample.round
+         <<','<<sample.order<<','<<costPlan(sample.mode).name<<','<<sample.cpuMs<<','<<sample.gpuMs
+         <<','<<sample.ticks<<','<<sample.frequency<<','<<(sample.disjoint?1:0)
+         <<','<<(sample.ready?1:0)<<','<<(sample.valid?1:0)<<'\n';
+    }
+    j.close();
+    c.close();
+    require(bool(j)&&bool(c),"write replay cost artifacts");
+    std::printf("cost artifacts: %ls, %ls\n",json.c_str(),csv.c_str());
+}
+
+void benchmarkCost(const std::filesystem::path& fixturePath,const std::filesystem::path* output){
+    auto f=parse(fixturePath);
+    Device d(false);
+    ComPtr<ID3D11GeometryShader> fused;
+    ComPtr<ID3D11ComputeShader> identify;
+    createGpu(f,d,fused,identify);
+    auto captured=sourceGate(f,d,fused.Get(),identify.Get(),false);
+    Raster r(d,f.width,f.height);
+    const auto opportunity=probeMotionOpportunity(r,f,captured,identify.Get());
+
+    constexpr unsigned rounds=15,maxWarmup=75000;
+    std::array<unsigned,kCostPlans.size()> warmupBatches{};
+    std::array<unsigned,kCostPlans.size()> warmupUnhealthy{};
+    std::array<double,kCostPlans.size()> warmupGpuMs{};
+    LARGE_INTEGER qpf{},start{},now{};
+    QueryPerformanceFrequency(&qpf);
+    QueryPerformanceCounter(&start);
+    double warmupWallMs=0;
+    unsigned totalWarmup=0;
+    bool allWarm=false;
+    do{
+        const size_t index=totalWarmup%kCostPlans.size();
+        const auto sample=measureCost(
+            r,f,captured,kCostPlans[index].mode,identify.Get(),0,unsigned(index));
+        ++warmupBatches[index];
+        if(sample.valid)warmupGpuMs[index]+=sample.gpuMs;
+        else ++warmupUnhealthy[index];
+        ++totalWarmup;
+        QueryPerformanceCounter(&now);
+        warmupWallMs=double(now.QuadPart-start.QuadPart)*1000.0/double(qpf.QuadPart);
+        allWarm=std::all_of(
+            warmupGpuMs.begin(),warmupGpuMs.end(),[](double value){return value>=250.0;});
+    }while((!allWarm||warmupWallMs<250.0)&&totalWarmup<maxWarmup);
+    require(allWarm&&warmupWallMs>=250.0,"replay cost warmup failed");
+    require(std::all_of(
+        warmupUnhealthy.begin(),warmupUnhealthy.end(),[](unsigned value){return value==0;}),
+        "unhealthy replay cost warmup timestamp/disjoint sample");
+
+    std::vector<CostSample> samples;
+    samples.reserve(rounds*kCostPlans.size());
+    for(unsigned round=0;round<rounds;++round){
+        for(unsigned order=0;order<kCostPlans.size();++order){
+            const auto index=(round+order)%kCostPlans.size();
+            samples.push_back(measureCost(
+                r,f,captured,kCostPlans[index].mode,identify.Get(),round,order));
+        }
+    }
+    require(std::all_of(samples.begin(),samples.end(),[](const CostSample& sample){return sample.valid;}),
+        "unhealthy replay cost measured timestamp/disjoint sample");
+
+    uint64_t indices=0;
+    for(const auto& draw:f.frames[1].draws)indices+=f.geometry[draw.geometry].count;
+    const auto adapter=adapterName(d.dev.Get());
+    std::printf(
+        "replay cost benchmark: adapter=%s dimensions=%ux%u draws=%zu indices=%llu families=%zu rounds=%u warmup_wall_ms=%.3f unhealthy=0\n",
+        adapter.c_str(),f.width,f.height,f.frames[1].draws.size(),
+        (unsigned long long)indices,f.shaders.size(),rounds,warmupWallMs);
+    for(const auto& plan:kCostPlans){
+        std::printf("replay cost GPU median %s: %.6f ms\n",plan.name,modeMedian(samples,plan.mode));
+    }
+    for(const auto& comparison:kCostComparisons){
+        std::printf(
+            "replay cost paired delta median %s: %+.6f ms\n",
+            comparison.name,
+            pairedDeltaMedian(samples,rounds,comparison.lhs,comparison.rhs));
+    }
+    if(output){
+        writeCostBenchmark(
+            *output,fixturePath,f,adapter,samples,opportunity,
+            warmupBatches,warmupGpuMs,warmupUnhealthy,warmupWallMs,rounds);
+    }
+}
+
 void put32(std::vector<unsigned char>& out,uint32_t value){const auto at=out.size();out.resize(at+4);std::memcpy(out.data()+at,&value,4);}
 void put64(std::vector<unsigned char>& out,uint64_t value){const auto at=out.size();out.resize(at+8);std::memcpy(out.data()+at,&value,8);}
 void putBlob(std::vector<unsigned char>& out,const std::vector<unsigned char>& value){put32(out,uint32_t(value.size()));out.insert(out.end(),value.begin(),value.end());}
@@ -191,10 +647,32 @@ bool rejected(const std::vector<unsigned char>& bytes){try{(void)parseBytes(byte
 
 } // namespace
 
-bool run(const std::filesystem::path& fixture,bool benchmark,const std::filesystem::path* output){
-    try{require(benchmark||output==nullptr,"replay output requires benchmark mode");auto f=parse(fixture);Device d;ComPtr<ID3D11GeometryShader> fused;ComPtr<ID3D11ComputeShader> identify;createGpu(f,d,fused,identify);if(d.info)d.info->ClearStoredMessages();auto captured=sourceGate(f,d,fused.Get(),identify.Get(),true);rasterGate(f,d,captured,fused.Get(),identify.Get());if(benchmark)benchmarkReplay(fixture,output);return true;}catch(const std::exception& e){std::fprintf(stderr,"identity fusion replay: %s\n",e.what());return false;}
+bool run(
+    const std::filesystem::path& fixture,
+    bool benchmark,
+    bool costBreakdown,
+    const std::filesystem::path* output){
+    try{
+        require(!(benchmark&&costBreakdown),"replay performance modes are mutually exclusive");
+        require(benchmark||costBreakdown||output==nullptr,"replay output requires a performance mode");
+        auto f=parse(fixture);
+        Device d;
+        ComPtr<ID3D11GeometryShader> fused;
+        ComPtr<ID3D11ComputeShader> identify;
+        createGpu(f,d,fused,identify);
+        if(d.info)d.info->ClearStoredMessages();
+        auto captured=sourceGate(f,d,fused.Get(),identify.Get(),true);
+        rasterGate(f,d,captured,fused.Get(),identify.Get());
+        if(costBreakdown)costGate(f,d,captured,identify.Get());
+        if(benchmark)benchmarkReplay(fixture,output);
+        if(costBreakdown)benchmarkCost(fixture,output);
+        return true;
+    }catch(const std::exception& e){
+        std::fprintf(stderr,"identity fusion replay: %s\n",e.what());
+        return false;
+    }
 }
 
-bool selfTest(){try{const auto good=parserFixture();const auto parsed=parseBytes(good);require(parsed.frames.size()==2&&parsed.geometry.size()==1&&parsed.frames[1].number==11,"replay parser self-test fixture changed");auto truncated=good;truncated.pop_back();require(rejected(truncated),"replay parser accepts truncation");auto trailing=good;trailing.push_back(0);require(rejected(trailing),"replay parser accepts trailing bytes");require(rejected(parserFixture(true)),"replay parser accepts out-of-range rebased index");auto tooManyFrames=good;const uint32_t five=5;std::memcpy(tooManyFrames.data()+20,&five,4);require(rejected(tooManyFrames),"replay parser accepts frame cap violation");auto badMagic=good;badMagic[0]='X';require(rejected(badMagic),"replay parser accepts bad magic");std::printf("identity fusion replay parser: 6 checks passed\n");return true;}catch(const std::exception&e){std::fprintf(stderr,"identity fusion replay self-test: %s\n",e.what());return false;}}
+bool selfTest(){try{const auto good=parserFixture();const auto parsed=parseBytes(good);require(parsed.frames.size()==2&&parsed.geometry.size()==1&&parsed.frames[1].number==11,"replay parser self-test fixture changed");auto truncated=good;truncated.pop_back();require(rejected(truncated),"replay parser accepts truncation");auto trailing=good;trailing.push_back(0);require(rejected(trailing),"replay parser accepts trailing bytes");require(rejected(parserFixture(true)),"replay parser accepts out-of-range rebased index");auto tooManyFrames=good;const uint32_t five=5;std::memcpy(tooManyFrames.data()+20,&five,4);require(rejected(tooManyFrames),"replay parser accepts frame cap violation");auto badMagic=good;badMagic[0]='X';require(rejected(badMagic),"replay parser accepts bad magic");require(kCostPlans.size()==5,"replay cost mode count changed");require(costPlan(CostMode::DepthIdentity).identity&&!costPlan(CostMode::DepthIdentity).capture&&!costPlan(CostMode::DepthIdentity).motion,"identity-only replay cost plan changed");require(costPlan(CostMode::DepthIdentityCapture).identity&&costPlan(CostMode::DepthIdentityCapture).capture&&!costPlan(CostMode::DepthIdentityCapture).motion,"capture replay cost plan changed");require(costPlan(CostMode::FullCurrentBaseline).identity&&costPlan(CostMode::FullCurrentBaseline).capture&&costPlan(CostMode::FullCurrentBaseline).motion,"full replay cost plan changed");require(!costPlan(CostMode::PrecomputedOutputsMotion).identity&&!costPlan(CostMode::PrecomputedOutputsMotion).capture&&costPlan(CostMode::PrecomputedOutputsMotion).motion,"precomputed replay cost plan changed");for(size_t i=0;i<kCostPlans.size();++i)for(size_t n=i+1;n<kCostPlans.size();++n)require(std::strcmp(kCostPlans[i].name,kCostPlans[n].name),"duplicate replay cost mode name");std::printf("identity fusion replay parser/plan: 11 checks passed\n");return true;}catch(const std::exception&e){std::fprintf(stderr,"identity fusion replay self-test: %s\n",e.what());return false;}}
 
 }
