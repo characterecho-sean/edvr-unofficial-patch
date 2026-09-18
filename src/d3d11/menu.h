@@ -70,6 +70,10 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
 // Is the panel up (fading in, showing, or fading out)?
 bool menuOpen();
 
+// Queue a brief diagnostic notification for display after the panel closes.
+// Frame thread only. Respects menu.toasts; the diagnostic must also log status.
+void menuNotify(const char* text);
+
 void menuShutdown();
 
 }  // namespace edvr

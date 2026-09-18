@@ -33,6 +33,7 @@
 #include "native_perf_history.h"
 #include "native_benchmark_collector.h"
 #include "native_render_labels.h"
+#include "mesh_motion.h"
 #include "../common/native_render_settings.h"
 #include "../common/config.h"
 
@@ -246,6 +247,7 @@ const char* eventName(uint32_t bit) {
         case kEvNgx: return "DLSS feature";
         case kEvMenu: return "menu open/close";
         case kEvFsr: return "FSR context";
+        case kEvEyeDump: return "eye dump";
         default: return "?";
     }
 }
@@ -259,7 +261,7 @@ void eventList(uint16_t events, float ms, char* buf, size_t n) {
         return;
     }
     size_t len = 0;
-    for (uint32_t bit = 1; bit <= kEvFsr && len + 1 < n; bit <<= 1) {
+    for (uint32_t bit = 1; bit <= kEvEyeDump && len + 1 < n; bit <<= 1) {
         if (!(events & bit)) continue;
         const bool timed =
             ms > 0.0f && (bit == kEvCompile || bit == kEvReload || bit == kEvNgx || bit == kEvFsr);
@@ -560,7 +562,8 @@ uint64_t benchmarkHashBytes(uint64_t hash, const void* data, size_t size) {
 
 uint64_t benchmarkScope(const NativeTimingSnapshot& timing,
                         const NativeBenchmarkMetadata& metadata,
-                        uint64_t settingsEpoch) {
+                        uint64_t settingsEpoch,
+                        uint64_t comparisonEpoch) {
     uint64_t hash = 1469598103934665603ull;
     hash = benchmarkHashBytes(hash, &timing.generation, sizeof(timing.generation));
     hash = benchmarkHashBytes(hash, &timing.firstSequence, sizeof(timing.firstSequence));
@@ -578,6 +581,7 @@ uint64_t benchmarkScope(const NativeTimingSnapshot& timing,
     hash = benchmarkHashBytes(hash, metadata.dlssMode, sizeof(metadata.dlssMode));
     hash = benchmarkHashBytes(hash, metadata.build, sizeof(metadata.build));
     hash = benchmarkHashBytes(hash, &settingsEpoch, sizeof(settingsEpoch));
+    hash = benchmarkHashBytes(hash, &comparisonEpoch, sizeof(comparisonEpoch));
     return hash ? hash : 1;
 }
 
@@ -641,7 +645,8 @@ bool updateBenchmarkMetadata(State& s, const NativeTimingSnapshot& timing,
         metadata.refreshMilliHz = static_cast<uint32_t>(std::llround(hz * 10.0) * 100.0);
     }
     const uint64_t scope = benchmarkScope(timing, metadata,
-                                          s.nativeBenchmarkSettingsEpoch.load(std::memory_order_relaxed));
+                                          s.nativeBenchmarkSettingsEpoch.load(std::memory_order_relaxed),
+                                          meshMotionComparisonScopeEpoch());
     if (scope != s.nativeBenchmarkScope) {
         s.nativeBenchmarkScope = scope;
         s.nativeBenchmarkMetadata = metadata;
@@ -777,8 +782,17 @@ void perfMonitorFrame(ID3D11Device* dev) {
         tick.scope=s.nativeBenchmarkScope;
         tick.metadata=&s.nativeBenchmarkMetadata;
         s.nativeBenchmark.observe(tick, historyNow);
+        // The comparison follows the collector's authoritative phase. Drain
+        // accepts delayed results but is no longer an active sample.
+        meshMotionComparisonNativeSampling(s.nativeBenchmark.collecting(),
+            s.nativeBenchmark.window(), s.nativeBenchmarkScope);
         NativeBenchmarkReport report{};
-        if (s.nativeBenchmark.takeReport(&report)) logNativeBenchmark(s, report);
+        if (s.nativeBenchmark.takeReport(&report)) {
+            logNativeBenchmark(s, report);
+            // Completed and aborted reports both drive comparison association;
+            // the mesh boundary applies any resulting transition later.
+            meshMotionComparisonNativeReport(report);
+        }
         if (s.nativeHistoryReports<60 && (!s.nativeHistoryLogMs || historyNow-s.nativeHistoryLogMs>=5000)) {
             s.nativeHistoryLogMs=historyNow;++s.nativeHistoryReports;
             const auto cpu=s.nativeHistory.submit(historyNow,200), historyGpu=s.nativeHistory.producer(historyNow,200);
@@ -792,6 +806,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         s.nativeBenchmarkScope = 0;
         s.nativeBenchmarkMetadataMs = 0;
         s.nativeBenchmarkMetadata = {};
+        meshMotionComparisonNativeSampling(false, s.nativeBenchmark.window(), 0);
     }
     const auto waitUs = takeWaitCpuUs(); // Drain legacy accounting without attributing it to native frames.
     f.posesWaitMs = f.native ? 0.0f : static_cast<float>(waitUs) / 1000.0f;
@@ -884,6 +899,10 @@ void perfMonitorFrame(ID3D11Device* dev) {
     }
 }
 
+uint64_t perfMonitorBenchmarkDisturbanceEpoch() noexcept {
+    return g_s.nativeBenchmarkSettingsEpoch.load(std::memory_order_relaxed);
+}
+
 void perfMonitorNoteEvent(uint32_t bits, double ms) {
     State& s = g_s;
     s.events.fetch_or(bits, std::memory_order_relaxed);
@@ -891,7 +910,7 @@ void perfMonitorNoteEvent(uint32_t bits, double ms) {
     // the middle of a benchmark window. Advance a cheap epoch immediately;
     // the next monitor tick hashes it into the scope and aborts the window.
     constexpr uint32_t kBenchmarkScopeEvents = kEvReload | kEvIniWrite |
-        kEvBinds | kEvNgx | kEvFsr | kEvMenu;
+        kEvBinds | kEvNgx | kEvFsr | kEvMenu | kEvCensus | kEvEyeDump;
     if (bits & kBenchmarkScopeEvents)
         s.nativeBenchmarkSettingsEpoch.fetch_add(1, std::memory_order_relaxed);
     if (ms > 0.0) {

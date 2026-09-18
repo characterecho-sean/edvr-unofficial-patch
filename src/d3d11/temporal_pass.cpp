@@ -39,6 +39,7 @@
 #include "weapon_motion.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
+#include "perf_monitor.h"
 #include "shader_swap.h"
 #include "gpu_timing.h"
 #include "temporal_shader_bytecode.h"
@@ -7380,6 +7381,7 @@ void temporalPassArmEyeDump() {
     // The key takes a RUN of the left eye (kEyeRun says why): sixteen raw
     // crops and the first treated frame; a run under way is left to finish.
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+    perfMonitorNoteEvent(kEvEyeDump);
     // Temporary terrain investigation: align the existing bounded draw/compute
     // census with Insert's eye run, including when temporal AA is disabled.
     drawCensusAutoRequest();

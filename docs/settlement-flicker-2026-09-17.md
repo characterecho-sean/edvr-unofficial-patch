@@ -2,41 +2,44 @@
 
 ## Status
 
-- State: the verified 9446f4d Frontier flight supports the user's report of
-  worse overall performance. Batching works, but its effect on total frame time
-  is unresolved. Frontier has been restored to the verified 81eeedb package for
-  a controlled comparison; main retains the batching change pending that
-  evidence. No static or visibility skips are enabled.
-- Latest capture: 204142, ship above the settlement, scene frame 20347. Quest 3
-  / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and active XR output
-  3072x3264. The user's removed trims remain off. These sizes match the prior
-  untrimmed settlement capture, but view and simulation state differ.
-- Regression: prior native window 17 CPU/GPU p50 was 12.703/16.717 ms. New
-  steady windows 8-10 report 13.381-14.930 ms CPU and 17.596-18.971 ms GPU. All
-  finish before the dump; slower medians are not explained by capture stalls.
-- Batching result: new steady windows have 14400 batches per 1800 frames
-  (8/frame), versus 425080 (236/frame) in the prior mixed settlement/transition
-  window. All size-only flushes are gone; bounded ranged-ID copies are active.
-  Approximate mesh-draw CPU falls from 1.633 to 1.079-1.111 ms/frame. These
-  measurements do not establish the cause of the overall regression.
-- Capture result: 504 valid / eight invalid records, all valid raw poses
-  unchanged with an origin shift; no malformed coverage IDs or obvious
-  ranged-offset corruption. This is not proof against a GPU copy/queue
-  scheduling regression. Broader game workload also remains a candidate.
-- Static constraints remain: many static candidate pixels select the
-  head-motion base; final UI/body/layer gates are unresolved. Station singleton
-  pairs show coherent rotation. On-foot windows have no captured rigid meshes
-  and need separate attribution.
-- Ruled out: failure to activate batching, and dump stalls explaining the
-  compared steady native windows. Earlier ruled-outs include changing bindings
-  as the size-only flush cause, blanket static-pose skips, equal-origin
-  requirements, and prior zero coverage as a safe current-visibility test. See
-  the journal for evidence.
-- Next flight: on restored v0.17.0-2-g81eeedb, hold the same settlement
-  position/view with unchanged settings and trims off for roughly 90 seconds,
-  then take one completed eye run. Verify logs against 81eeedb explicitly, not
-  HEAD. Compare steady windows before another code change.
-  Static/history/fallback and shared station-motion work remain separate.
+- State: restored 81eeedb flight verified; the user reports it feels better and
+  total CPU/GPU times improve. The view also changed, so batching's causal role
+  and the mechanism remain unresolved. The diagnostic restores immediate
+  oversized capture by default and exposes batching only in an explicitly armed
+  comparison. Static/visibility skips remain disabled.
+- Latest capture: 205905, scene frame 14003. Quest 3 / VirtualDesktopXR / 90 Hz
+  / DLSS K, input 2481x2121 and active XR output 3072x3264, trims off. The ship
+  faces the same settlement, but is closer/lower than capture 204142; coverage
+  falls from 644095 to 327771 pixels. This is not a strict scene control.
+- Timing: clean restored native window 4 CPU/GPU p50 is 12.898/17.183 ms,
+  versus batching windows 8-10 averages of 14.340/18.421 ms. Restored window 5
+  overlaps the eye dump and is excluded from the main comparison. The earlier
+  81eeedb settlement window was 12.703/16.717 ms.
+- Scope mismatch: restored graphics window 12600 captures the same 1843200
+  instances but needs 418892 batches (233/frame) and about 1.665 ms mesh
+  CPU/frame; batching needed 8/frame and 1.079-1.111 ms mesh CPU. Full hook
+  time stays about 5.8 ms. Lower local cost did not demonstrate an overall win.
+  Map waits and treatment timings do not isolate the missing cost.
+- Next diagnostic: menu Instruments action arms a landed, fixed-view
+  baseline/batching/baseline comparison using complete native timing windows.
+  ID-copy enqueue CPU, GPU command intervals, coverage, capture and
+  accepted-path CPU are measured in both modes. Pending queries, missing
+  samples and invalid windows must be explicit; no GPU waits. Completion
+  restores baseline automatically.
+- Open hypotheses: changed scene workload, or copy/coverage/compute scheduling
+  costs outside the earlier brackets. Timestamp intervals can narrow these down
+  but cannot prove a synchronization mechanism by themselves. No replacement
+  batching fix is justified yet.
+- Ruled out: batching never activating; dump stalls causing the compared clean
+  windows; obvious malformed IDs/offsets in captured records. Earlier
+  static-skip, equal-origin and previous-zero-coverage constraints remain in
+  the journal. Static pixels selecting the head base still need correct
+  fallback; station rotation and on-foot costs require separate treatment.
+- Next flight: land in the cockpit facing a busy settlement, keep
+  settings/trims/view fixed, arm the comparison from F8 > Instruments, close
+  the menu, and wait for completion. Do not dump eyes during measurement. The
+  full build and regression checks passed; deliver the clean commit to Frontier
+  through the sanctioned installer, preserving the INI.
 
 ## Journal
 
@@ -501,3 +504,103 @@ build would implicate batching despite its lower measured capture cost; similar
 slow timing would weaken that hypothesis and direct profiling toward the wider
 frame workload. Compare before deciding whether to revert or instrument the
 change further.
+
+### 2026-09-17 -- restored flight improves; prepare one-run comparison
+
+The restored flight is verified as `v0.17.0-2-g81eeedb` in
+`edvr_gfx_20260917_205628.log` and `edvr_openxr_20260917_205629_490_25244.log`,
+using the sanctioned reader with explicit `--expect-build 81eeedb`. The user
+reports "Better". Offline timing evidence and capture analysis are under
+`build/flight-restored-check/`.
+
+| Run / clean native window | CPU p50 / p95 | GPU p50 / p95 |
+|---|---:|---:|
+| Batching 9446f4d, mean of windows 8-10 | 14.340 / 16.409 ms | 18.421 / 20.735 ms |
+| Restored 81eeedb, window 4 | 12.898 / 14.887 ms | 17.183 / 19.117 ms |
+
+The restored median improves by 10.1% CPU and 6.7% GPU; p95 improves by 9.3%
+and 7.8%. Window 4 is wholly before capture and overlaps the steady graphics
+window for about 28 of its 30 seconds. Restored window 5 overlaps the dump in
+its final two seconds; exclude it from the primary comparison. Graphics window
+12600 accepts 418892 draws / 1843200 instances, more draws than the batching
+windows with the same instance count. It has 418892 capture batches,
+approximately 1.665 ms/frame mesh-draw CPU, 0.431 ms nested flush CPU, and
+5.821 ms hook mean. Do not add the nested scopes. Game Map write waits differ
+by only about 0.04-0.07 ms/frame; native treatment and submit timings improve
+slightly but do not explain the full difference.
+
+Capture 205905 has 504 valid / eight invalid records, all 504 uniquely paired
+raw poses unchanged with an origin shift, 20 match-valid records and 109 fully
+exact groups among 117 draw groups. Coverage IDs are integral and within range;
+431 unique pool indices span 29-7444 with maximum frequency two. There is no
+captured corruption signature. However, the overview shows the settlement
+closer/lower than 204142, and mesh coverage is 147 records / 327771 pixels /
+188640 depth-agree pixels versus 232 / 644095 / 408554 in the batching capture.
+The sequential before/after/restore evidence supports withdrawing the
+optimization, but does not isolate it from scene variance. Do not describe this
+as a strict controlled A/B.
+
+The user approved a diagnostic build and suggested keeping the ship landed. Use
+the cockpit facing a busy part of the settlement, with unchanged settings and
+no camera movement beyond unavoidable headset motion. An explicitly armed
+baseline/batching/baseline sequence removes the need to restart the game or
+reposition between variants; the repeated baseline exposes drift from moving
+NPCs or lighting. Preserve the metadata cache and all original
+admission/history/math/write boundaries. Normal rendering returns to the prior
+immediate oversized-stream path; the packed batching path is exercised only by
+the comparison.
+
+The missing-cost hypothesis is deliberately narrow: batching still performs ID
+copies and coverage re-draws per admitted draw. Their relationship with delayed
+capture may change command scheduling or synchronization outside the previous
+brackets. Add common instrumentation for accepted-path CPU, ID-copy enqueue CPU
+and asynchronous GPU intervals, coverage and capture, with copied bytes/counts,
+batch sizes and missing/pending query counts. Native frame timing remains the
+outcome measure. GPU timestamps are command-stream elapsed intervals, not proof
+of a particular stall or a sum that can be equated directly to a native frame.
+Use complete scoped benchmark windows; exclude settling, menu transitions,
+configuration changes, censuses and eye dumps. A run that never reaches valid
+sampling must report unavailable or aborted, never apparent zero cost.
+
+After this comparison, optimize the measured dominant work: static objects
+require correct camera-motion fallback even when the existing base is
+head-relative; current visibility must not be inferred solely from the previous
+frame; coherent station motion and independent ships need distinct history
+handling. On-foot captures admitted no rigid meshes, so that path needs its own
+cost attribution. These are follow-up implementation targets, not features
+enabled by this diagnostic.
+
+Implementation: the Instruments action waits for menu closure, then settles for
+ten seconds. A1/B/A2 each advances only after its own completed native 2-second
+warmup / 30-second sample / 2-second drain report. A comparison epoch separates
+intentional variant changes; an independent disturbance epoch rejects settings,
+menu, census or eye-dump activity even during warmup, when the native collector
+can restart without an abort report. Mode switches happen only after pending
+capture is flushed at the frame boundary. Missing native/component samples,
+lingering GPU queries, changed metadata, no eligible oversized draws or a
+50-second phase timeout abort with explicit instrument coverage and restore
+immediate capture.
+
+Sampling limits: full-hook CPU reuses the existing 1/256 clock, including early
+returns; accepted-path and copy sampling use bounded call schedules. Copy CPU
+encloses only the copy API call, excluding the diagnostic query calls. Capture
+GPU samples at most the first flush in one of sixteen frames. This is a
+selected boundary sample, not an unbiased average that can be multiplied by all
+batches. During the native sample, the common diagnostic query policy replaces
+the normal rolling capture/coverage queries. Compare A/B/A within this
+diagnostic; its additional instrumentation and changed query schedule prevent
+direct equivalence to historical unarmed runs. Mixed rolling windows are
+labelled; phase-tagged component records are authoritative. Components overlap
+and must not be summed into a purported native frame cost.
+
+Validation: independent integration review found and closed the warmup
+disturbance gap before flight. The full absolute-path build passed with 2265
+mesh-motion WARP checks, 71 native performance-history checks, all
+Python/native/installer gates and the unchanged 249-key config contract. The
+WARP rig exercises both capture layouts, real sampled copy/coverage/flush
+intervals, the full A1/B/A2 sequence, cancellation, stale and mixed report
+identities, disturbance events, missing/pending metrics and changed metadata.
+Log: `build/motion-comparison-verified.log`. Rebuild the clean commit for
+delivery and install/verify on Frontier without `--ini`. Normal play uses the
+restored baseline; select F8 > Instruments > Compare motion performance to arm
+the experiment, and take any eye dump only after the completion notice.

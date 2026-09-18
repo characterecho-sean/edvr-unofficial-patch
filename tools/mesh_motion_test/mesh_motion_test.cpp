@@ -26,9 +26,16 @@ namespace edvr {
 ID3D11Texture2D* testScene=nullptr;
 ID3D11DepthStencilView* testDepth=nullptr;
 int testEye=0;
+bool testMenuOpen=false;
+unsigned testMenuNotices=0;
+const char* testMenuNotice=nullptr;
+uint64_t testBenchmarkDisturbanceEpoch=0;
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log()=default;
 void Log::note(const char*,...) {}
+bool menuOpen() { return testMenuOpen; }
+void menuNotify(const char* message) { ++testMenuNotices;testMenuNotice=message; }
+uint64_t perfMonitorBenchmarkDisturbanceEpoch() noexcept { return testBenchmarkDisturbanceEpoch; }
 void* bindingGet(BindSlot slot) { check(slot==BindSlot::Dsv0,"only scene depth shadow queried"); return testDepth; }
 bool depthProbeIsSceneDepth(const void* resource) { return resource==testScene; }
 bool depthProbeSceneDepthFormat(uint32_t,uint32_t,int eye,ID3D11Texture2D** tex,uint32_t* fmt) {
@@ -245,8 +252,11 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     diagnostics.eye[0].capProbes=capProbeBudget;
     const auto candidatesBefore=diagnostics.eye[0].candidateDraws;
     const auto pendingBefore=pending.count;
+    comparison.stage=ComparisonStage::Running;comparison.measurement=true;comparison.metrics={};
     meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
     check(diagnostics.eye[0].capRejectedDraws==2 && diagnostics.eye[0].sampledCapDraws==1 && diagnostics.eye[0].candidateDraws==candidatesBefore && pending.count==pendingBefore,"ordinary capped draw keeps the raw early-return fast path");
+    check(comparison.metrics.entryCalls==1 && comparison.metrics.acceptedDraws==0,"comparison full-entry gate counts capped calls without claiming accepted work");
+    comparison={};
     check(diagnostics.drawCpuSamples>=2,"mesh draw CPU timing is sampled rather than measured on every draw");
     check(pending.count==512 && captureBatches==1,"full eye queues a bounded batch after the preceding frame");
     ID3D11ShaderResourceView* batchViews[2]{};meshMotionViews(ctx.Get(),scene[0].Get(),batchViews);
@@ -301,10 +311,36 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     // buffer. Distinct far offsets must share one capture batch while both
     // the deferred capture and the immediate coverage draw read their own
     // compact destination offsets.
-    reset();pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     std::vector<UINT> largeIds(maxInstanceBytes/4+4*maxRecords);const UINT farA=maxInstanceBytes/8+17,farB=farA+129;
     largeIds[farA*2]=2;largeIds[farB*2]=3;
     auto largeStream=buffer(UINT(largeIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,largeIds.data());UINT idStep=8,idStart=0;
+    reset();pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    check(!captureBatches && pending.count==1,"default oversized path retains one draw only until the next boundary");
+    queue(farB);
+    check(captureBatches==1 && pending.count==1,"default oversized path flushes before reusing its ranged source offset");
+    a=consumeBatch();
+    check(captureBatches==2 && word(a,31)==2 && word(a,91)==3,"default immediate oversized path preserves each source offset and ID");
+    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==1 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==1 && diagnostics.rangedIdCopies==2 && diagnostics.rangedIdInstances==2,"default immediate path preserves the 81eeedb per-draw oversized flush policy and bounded-copy diagnostics");
+    check(comparison.metrics.copyGpuSubmitted==0 && comparisonCopyGpu.totals.samples==0 && comparisonCopyGpu.totals.skipped==0,"unarmed rendering never opens comparison GPU queries");
+
+    // The comparison gate must exercise the real WARP command path. One
+    // sampled oversized draw covers full-entry early return, accepted work,
+    // bounded ID copy, coverage reissue and capture dispatch timing.
+    reset();pose(1,0,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);
+    beginComparisonPhase(ctx.Get(),GetTickCount64());meshMotionComparisonNativeSampling(true,901,902);
+    diagnostics.drawCalls=255;meshMotionDraw(nullptr,issue,6,1,0,0,0,materialVs);
+    comparison.metrics.idCopies=63;comparison.metrics.acceptedDraws=63;draws=63;diagnostics.flushCalls=15;
+    queue(farA);a=consumeBatch();
+    for(unsigned i=0;i<5;++i)meshMotionFrameBoundary(ctx.Get());
+    check(comparison.metrics.entryCpuSamples==1 && comparison.metrics.acceptedCpuSamples==1 && comparison.metrics.idCopyCpuSamples==1 && comparison.metrics.flushCpuSamples==1,"Sampling-only gate reaches full-entry, accepted, ID-copy and flush CPU samplers");
+    check(comparison.metrics.oversizedDraws==1 && comparison.metrics.copyGpuSubmitted==1 && comparison.metrics.coverageGpuSubmitted==1 && comparison.metrics.flushGpuSubmitted==1,"sampled WARP draw submits every comparison GPU interval");
+    check(comparisonCopyGpu.totals.samples==1 && comparisonCoverageGpu.totals.samples==1 && comparisonFlushGpu.totals.samples==1,"sampled WARP comparison GPU intervals retire naturally after frame polling");
+    const auto gatedEntries=comparison.metrics.entryCalls;meshMotionComparisonNativeSampling(false,901,902);meshMotionDraw(nullptr,issue,6,1,0,0,0,materialVs);
+    check(comparison.metrics.entryCalls==gatedEntries,"drain/inactive callbacks close component collection exactly at the Sampling boundary");
+
+    reset();comparison.mode=OversizedMode::Packed;pose(1,0,2);pose(1,0,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);queue(farB);
     check(!captureBatches && pending.count==2,"oversized draws from distinct far offsets accumulate one batch");a=consumeBatch();
     check(captureBatches==1 && word(a,31)==2 && word(a,91)==3 && a[56]==1 && a[116]==1,"batched oversized draws retain distinct IDs and exact raw poses");
@@ -314,7 +350,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
 
     // The compact destination reaches exactly 4096 bytes at the 512-record
     // cap and the deferred shader must consume every thread group.
-    reset();for(UINT i=0;i<4;++i)pose(1,float(i)*.05f,i);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();comparison.mode=OversizedMode::Packed;for(UINT i=0;i<4;++i)pose(1,float(i)*.05f,i);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     std::vector<UINT> bulkIds(maxInstanceBytes/4+2*maxRecords);const UINT bulkFirst=maxInstanceBytes/8;
     for(UINT i=0;i<maxRecords;++i)bulkIds[(bulkFirst+i)*2]=i&3;
     auto bulkStream=buffer(UINT(bulkIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,bulkIds.data());ctx->IASetVertexBuffers(0,1,bulkStream.GetAddressOf(),&idStep,&idStart);
@@ -324,7 +360,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
 
     // Switching between ranged and whole snapshots retains the ID resource
     // as a real flush boundary, so neither mode can consume the other's bytes.
-    reset();pose(1,.1f,0);pose(1,.3f,2);pose(1,.4f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();comparison.mode=OversizedMode::Packed;pose(1,.1f,0);pose(1,.3f,2);pose(1,.4f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     ctx->IASetVertexBuffers(0,1,iv.GetAddressOf(),&idStep,&idStart);queue();
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farB);a=consumeBatch();
@@ -333,21 +369,21 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
 
     // A source rewrite still submits the ranged batch before the original ID
     // bytes change; the next draw receives a fresh compact copy.
-    reset();pose(1,.2f,2);pose(1,.7f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+    reset();comparison.mode=OversizedMode::Packed;pose(1,.2f,2);pose(1,.7f,3);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
     largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     meshMotionResourceWritten(largeStream.Get());largeIds[farA*2]=3;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);queue(farA);a=consumeBatch();
     check(captureBatches==2 && word(a,31)==2 && word(a,91)==3 && std::fabs(a[23]-.2f)<1e-6 && std::fabs(a[83]-.7f)<1e-6 && diagnostics.flushes[unsigned(FlushReason::WriteOrMap)]==1,"oversized ID rewrite preserves both draw-time transforms");
 
     // Pool writes and eye changes keep their existing boundaries with ranged
     // IDs, while a GPU-writable source remains immediate.
-    reset();pose(1,.1f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    reset();comparison.mode=OversizedMode::Packed;pose(1,.1f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);largeIds[farA*2]=2;ctx->UpdateSubresource(largeStream.Get(),0,nullptr,largeIds.data(),0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     meshMotionResourceWritten(pool.Get());pose(1,.6f,2);ctx->UpdateSubresource(pool.Get(),0,nullptr,poolData,0,0);queue(farA);a=consumeBatch();
     check(captureBatches==2 && std::fabs(a[23]-.1f)<1e-6 && std::fabs(a[83]-.6f)<1e-6 && diagnostics.flushes[unsigned(FlushReason::WriteOrMap)]==1,"oversized pool rewrite preserves both draw-time poses");
-    reset();pose(1,.2f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
+    reset();comparison.mode=OversizedMode::Packed;pose(1,.2f,2);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);queue(farA);
     testEye=1;testScene=scene[1].Get();testDepth=dsv[1].Get();ctx->OMSetRenderTargets(0,nullptr,dsv[1].Get());ctx->ClearDepthStencilView(dsv[1].Get(),D3D11_CLEAR_DEPTH,0,0);queue(farA);a=consumeBatch();
     auto largeFirstEye=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
     check(captureBatches==2 && a[56]==1 && largeFirstEye[56]==1 && std::fabs(a[23]-.2f)<1e-6 && std::fabs(largeFirstEye[23]-.2f)<1e-6 && diagnostics.inputChanges[unsigned(InputChange::Output)]==1,"oversized eye switch preserves both output batches and draw-time poses");
-    reset();pose(1,.2f);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);const UINT farGpu=farA+1;
+    reset();comparison.mode=OversizedMode::Packed;pose(1,.2f);bind(0);ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);const UINT farGpu=farA+1;
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);ctx->VSSetShaderResources(33,1,gpuPoolView.GetAddressOf());queue(farGpu);
     check(!pending.count && captureBatches==1 && diagnostics.rangedIdCopies==1 && diagnostics.flushes[unsigned(FlushReason::GpuWritable)]==1,"GPU-writable oversized capture remains immediate");a=consumeBatch();check(a[56]==1,"GPU-writable oversized capture retains the ranged ID");
     reset();pose(1,.2f);bind(0);queue();meshMotionFrameBoundary(ctx.Get());
@@ -411,6 +447,50 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     auto pixels=consume();auto at=(32*W+32)*4;check(pixels[at+3]==1 && std::fabs(pixels[at]+.39f)<1e-5 && std::fabs(pixels[at+1]+.125f)<1e-5,"DLSS consumes exact motion and removes jitter");
     check(pixels[(30*W+32)*4+3]==0 && pixels[(31*W+32)*4+3]==0,"foreground and UI reject hull motion");
     parameters[4]=.25f;pixels=consume();check(pixels[at+3]==1 && std::fabs(pixels[at]+.39f)<1e-5,"native TAA grid returns same physical motion");parameters[2]=0;pixels=consume();check(pixels[at+3]==0,"nonconsecutive frame rejects mesh history");
+
+    // Comparison policy is driven only by a matching completed native report.
+    // Keep these tests at the boundary/API level so they cover association,
+    // retries, cancellation and restoration without inventing menu events.
+    auto metadata=[&](UINT width=2481){NativeBenchmarkMetadata m{};m.inputWidth[0]=m.inputWidth[1]=width;m.inputHeight[0]=m.inputHeight[1]=2121;m.outputWidth[0]=m.outputWidth[1]=3072;m.outputHeight[0]=m.outputHeight[1]=3264;m.refreshMilliHz=90000;m.gameFov[0][0]=m.gameFov[1][0]=1.1f;m.treatments[0]=m.treatments[1]=3;m.featureEpoch=7;strcpy_s(m.runtime,"OpenXR");strcpy_s(m.headset,"VirtualDesktopXR");strcpy_s(m.aaMode,"DLSS");strcpy_s(m.dlssMode,"Quality");strcpy_s(m.build,"test");return m;};
+    auto report=[&](uint64_t window,uint64_t scope,NativeBenchmarkMetadata meta=NativeBenchmarkMetadata{}){NativeBenchmarkReport r{};r.window=window;r.scope=scope;r.complete=true;r.abortReason=kNativeBenchmarkCompleted;r.cpu.available=r.gpu.available=true;r.metadata=meta;return r;};
+    auto seedCompleteMetrics=[&](){auto& m=comparison.metrics;m.entryCpuSamples=m.acceptedCpuSamples=m.idCopyCpuSamples=m.flushCpuSamples=1;m.oversizedDraws=m.oversizedInstances=1;m.copyGpuSubmitted=m.coverageGpuSubmitted=m.flushGpuSubmitted=1;comparisonCopyGpu.totals={.01,1,0,0};comparisonCoverageGpu.totals={.02,1,0,0};comparisonFlushGpu.totals={.03,1,0,0};};
+    auto armToRunning=[&](){reset();testMenuOpen=true;meshMotionRequestComparison();processComparisonBoundary(ctx.Get());testMenuOpen=false;processComparisonBoundary(ctx.Get());comparison.settleUntilMs=0;processComparisonBoundary(ctx.Get());check(comparison.stage==ComparisonStage::Running && comparison.phase==0 && comparison.mode==OversizedMode::Immediate,"comparison starts A1 in restored immediate mode after menu close and settling");};
+    auto expectRestored=[&](const char* why){check(comparison.stage==ComparisonStage::Idle && comparison.mode==OversizedMode::Immediate && !comparison.measurement && !comparison.nativeSampling,why);};
+
+    reset();testMenuOpen=true;meshMotionRequestComparison();
+    auto stale=report(7,70,metadata());meshMotionComparisonNativeSampling(true,7,70);meshMotionComparisonNativeReport(stale);processComparisonBoundary(ctx.Get());
+    check(comparison.stage==ComparisonStage::Armed && !comparison.nativeScope && !comparison.haveReport,"pre-phase callbacks cannot associate with or advance an armed comparison");
+    testMenuOpen=false;processComparisonBoundary(ctx.Get());check(comparison.stage==ComparisonStage::Settling,"closing the menu snapshots the environment and enters settling");
+    ++testBenchmarkDisturbanceEpoch;processComparisonBoundary(ctx.Get());expectRestored("a census, eye dump, setting or menu disturbance during settling aborts and restores baseline");
+
+    armToRunning();
+    meshMotionComparisonNativeSampling(false,10,100);check(!comparison.nativeScope && !comparison.nativeWindow,"inactive warmup tuples do not latch a phase identity");
+    meshMotionComparisonNativeSampling(true,11,101);check(comparison.nativeScope==101 && comparison.nativeWindow==11 && comparison.measurement,"the first Sampling tuple authoritatively latches phase identity");
+    meshMotionComparisonNativeReport(stale);check(!comparison.haveReport,"an older window/scope report cannot advance the current phase");
+    seedCompleteMetrics();auto a1=report(11,101,metadata());meshMotionComparisonNativeReport(a1);processComparisonBoundary(ctx.Get());
+    check(comparison.stage==ComparisonStage::Running && comparison.phase==1 && comparison.mode==OversizedMode::Packed,"matching completed A1 advances to packed phase B");
+    check(!comparison.nativeScope && comparisonCopyGpu.totals.samples==0 && comparison.metrics.entryCpuSamples==0,"a new phase clears association and component metrics so late completions cannot be mislabeled");
+    meshMotionComparisonNativeReport(a1);check(!comparison.haveReport && !comparison.nativeScope,"the completed A1 report is ignored after phase B starts");
+    meshMotionComparisonNativeSampling(true,12,102);seedCompleteMetrics();auto b=report(12,102,metadata());meshMotionComparisonNativeReport(b);processComparisonBoundary(ctx.Get());
+    check(comparison.phase==2 && comparison.mode==OversizedMode::Immediate,"matching completed B advances to restored A2 mode");
+    meshMotionComparisonNativeSampling(true,13,103);seedCompleteMetrics();auto a2=report(13,103,metadata());meshMotionComparisonNativeReport(a2);processComparisonBoundary(ctx.Get());expectRestored("matching completed A2 finishes A/B/A and restores baseline");
+
+    armToRunning();meshMotionRequestComparison();processComparisonBoundary(ctx.Get());expectRestored("cancellation at a frame boundary restores immediate mode");
+    armToRunning();testMenuOpen=true;processComparisonBoundary(ctx.Get());testMenuOpen=false;expectRestored("reopening the menu during a phase aborts and restores immediate mode");
+    armToRunning();comparison.phaseDeadlineMs=0;processComparisonBoundary(ctx.Get());expectRestored("a phase timeout aborts and restores immediate mode");
+    armToRunning();++testBenchmarkDisturbanceEpoch;processComparisonBoundary(ctx.Get());expectRestored("a disturbance during native warmup or sampling aborts the whole comparison");
+
+    armToRunning();meshMotionComparisonNativeSampling(true,20,200);meshMotionComparisonNativeSampling(false,20,201);check(comparison.failure!=nullptr && !comparison.measurement,"an inactive mixed-scope abort tick closes collection and marks the phase invalid");processComparisonBoundary(ctx.Get());expectRestored("mixed window/scope callbacks abort instead of advancing");
+    armToRunning();meshMotionComparisonNativeSampling(true,21,201);auto aborted=report(21,201,metadata());aborted.complete=false;aborted.aborted=true;aborted.abortReason=kNativeBenchmarkScopeChanged;meshMotionComparisonNativeReport(aborted);processComparisonBoundary(ctx.Get());expectRestored("a matching aborted native report aborts the comparison");
+
+    for(unsigned missing=0;missing<2;++missing){armToRunning();meshMotionComparisonNativeSampling(true,30+missing,300+missing);seedCompleteMetrics();auto invalid=report(30+missing,300+missing,metadata());if(!missing)invalid.cpu.available=false;else invalid.gpu.available=false;meshMotionComparisonNativeReport(invalid);processComparisonBoundary(ctx.Get());expectRestored(missing?"missing native GPU samples abort and restore baseline":"missing native CPU samples abort and restore baseline");}
+    armToRunning();meshMotionComparisonNativeSampling(true,40,400);seedCompleteMetrics();comparison.metrics.oversizedDraws=0;auto noOversized=report(40,400,metadata());meshMotionComparisonNativeReport(noOversized);processComparisonBoundary(ctx.Get());expectRestored("a view with no eligible oversized draws aborts instead of reporting zero cost");
+    armToRunning();meshMotionComparisonNativeSampling(true,41,401);seedCompleteMetrics();comparison.metrics.flushCpuSamples=0;auto missingComponent=report(41,401,metadata());meshMotionComparisonNativeReport(missingComponent);processComparisonBoundary(ctx.Get());expectRestored("missing required component coverage aborts instead of producing a partial comparison");
+    armToRunning();meshMotionComparisonNativeSampling(true,42,402);seedCompleteMetrics();comparison.metrics.copyGpuSubmitted=2;auto pendingComponent=report(42,402,metadata());meshMotionComparisonNativeReport(pendingComponent);processComparisonBoundary(ctx.Get());expectRestored("pending component GPU queries after drain abort instead of leaking into another phase");
+
+    armToRunning();meshMotionComparisonNativeSampling(true,50,500);seedCompleteMetrics();auto baselineReport=report(50,500,metadata());meshMotionComparisonNativeReport(baselineReport);processComparisonBoundary(ctx.Get());
+    meshMotionComparisonNativeSampling(true,51,501);seedCompleteMetrics();auto changed=report(51,501,metadata(2480));meshMotionComparisonNativeReport(changed);processComparisonBoundary(ctx.Get());expectRestored("metadata changes between phases abort the entire comparison");
+
     if(argc>2 && (std::strcmp(argv[1],"--replay")==0 || std::strcmp(argv[1],"--replay-hardware")==0))replayMeshes(dev.Get(),ctx.Get(),argv[2],hardware);
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T bytes=0;messages->GetMessage(i,nullptr,&bytes);std::vector<char> data(bytes);auto* m=reinterpret_cast<D3D11_MESSAGE*>(data.data());hr(messages->GetMessage(i,m,&bytes));if(m->Severity<=D3D11_MESSAGE_SEVERITY_ERROR){std::puts(m->pDescription);check(false,"D3D debug layer");}}
     std::printf("mesh motion: %u checks passed (%s)\n",checks,hardware?"hardware":"WARP");

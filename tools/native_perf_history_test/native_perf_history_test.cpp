@@ -117,7 +117,7 @@ void benchmarkAdmission() {
     NativeBenchmarkCollector c;
     NativeBenchmarkObservation tick{};tick.scope=1;
     c.observe(tick,1000);c.observe(tick,3000);
-    check(c.sampling(),"metadata-only monitor ticks start a usable window");
+    check(c.sampling()&&c.collecting(),"metadata-only monitor ticks start a usable sampling window");
     const auto onlyGpu=[](uint64_t seq,uint64_t at,double value) {
         auto s=benchmarkSample(seq,at,0,value);s.cpuSequence=s.cpuAtMs=0;return s;
     };
@@ -133,6 +133,7 @@ void benchmarkAdmission() {
     auto invalid=onlyCpu(4,3020,NAN);invalid.cpuValid=false;c.observe(invalid,3020);
     c.observe(onlyGpu(4,3021,0),3021); // Valid measured zero remains valid.
     c.observe({},33000);
+    check(c.sampling()&&!c.collecting(),"drain accepts completions without claiming active collection");
     c.observe(onlyGpu(5,33500,30),33500); // Completion in drain before CPU arrival.
     c.observe(onlyCpu(5,32999,3),33501);
     c.observe(onlyCpu(6,33000,999),33502); // Half-open sample interval.

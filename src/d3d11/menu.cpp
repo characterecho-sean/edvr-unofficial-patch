@@ -3371,6 +3371,11 @@ bool menuTakeConfigPollRequest() {
 
 bool menuOpen() { return g_s.open || g_s.alpha > 0.0f; }
 
+void menuNotify(const char* text) {
+    if (g_s.configured && g_s.toasts && text && *text)
+        g_s.toastQueue.emplace_back(text);
+}
+
 void menuNoteConfigReloaded() {
     State& s = g_s;
     if (!s.configured) return;

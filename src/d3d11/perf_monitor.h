@@ -105,10 +105,15 @@ enum PerfEvent : uint32_t {
     kEvNgx      = 1u << 8,   // NVIDIA's DLSS feature was (re)created
     kEvMenu     = 1u << 9,   // the menu opened or closed
     kEvFsr      = 1u << 10,  // AMD's FSR context was (re)created
+    kEvEyeDump  = 1u << 11,  // a diagnostic eye dump was requested
 };
 // Note an event in the frame in progress; `ms` is the event's own duration
 // where one is known (a compile, a reload), 0 otherwise. Any thread.
 void perfMonitorNoteEvent(uint32_t bits, double ms = 0.0);
+
+// Changes for settings, menu and capture disturbances, independently of a
+// diagnostic's intentional variant changes. Safe to read on the frame thread.
+uint64_t perfMonitorBenchmarkDisturbanceEpoch() noexcept;
 
 // EDVR's CPU time, credited to the frame most recently ringed: the frame
 // boundary's body, or the door's (the latter arrives over the channel).

@@ -47,6 +47,7 @@
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
+#include "mesh_motion.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "perf_monitor.h"
 #include "vscreen.h"
@@ -1633,6 +1634,9 @@ void menuActionResetView(void*) {
 void menuActionDumpEyes(void*) {
     temporalPassArmEyeDump();
 }
+void menuActionCompareMotion(void*) {
+    meshMotionRequestComparison();
+}
 void menuActionMarker(void*) {
     static uint32_t n = 0;
     Log::get().note("----- marker %u, from the settings menu -----", ++n);
@@ -1666,6 +1670,9 @@ State& ensureState() {
         menuRegisterAction("Dump both eyes as seen",
                            "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
                            &menuActionDumpEyes, nullptr);
+        menuRegisterAction("Compare motion performance",
+                           "Land facing a busy scene, then close the menu and hold the view for about two minutes. Opening the menu during the comparison cancels it.",
+                           &menuActionCompareMotion, nullptr);
         menuConfigure(Config::get());
         // Empty default: the census is chased-bug instrumentation, and an
         // unbound key is how "off" is spelled for a hotkey.
