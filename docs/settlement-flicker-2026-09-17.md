@@ -2,23 +2,24 @@
 
 ## Status
 
-- State: full-cycle and caller/owner timing instrumentation passes the full
-  build; the Frontier test flight is pending. It investigates 63-65 FPS despite
-  application-work times around 10-11 ms. The verified dcd0a9f draw probe
-  completed 29520 captures; three unchanged payloads went from zero passed
-  samples to nonzero. Cached rejection alone is unsafe; no draw suppression is
-  active. See the final journal entry.
+- State: verified Frontier build 7cfb5a6 accounts for the landed cycle:
+  15.11-15.12 ms, or 66 FPS, including 4.11-4.23 ms after the second Submit
+  returns and before the next pose-wait entry. Captured Submit/Wait caller
+  handoffs do not explain that gap. Its internal cause is still unmeasured. The
+  prior verified dcd0a9f draw probe completed 29520 captures; three unchanged
+  payloads went from zero passed samples to nonzero. Cached rejection alone is
+  unsafe; no draw suppression is active. See the final journal entry.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
-  5120x2880. No eye capture contaminates this flight. Prior DLSS runs used K;
-  the flight does not log the DLSS DLL version.
-- Timing: completed landed windows have CPU p50 10.326-10.807 ms and GPU
-  10.824-11.298 ms; the completed on-foot window has CPU 7.513 ms and GPU
-  10.073 ms. Landed GPU p95 is 12.475-12.654 ms; on foot 10.888 ms. The 90 Hz
-  budget is 11.111 ms, but these are segmented application-work timers, not
-  frame periods. Actual landed throughput is 63-65 FPS (15-16 ms/frame);
-  on-foot benchmark window 7 averages 80.53 FPS. Slightly slower than ea2a7f9,
-  but scene variation and added instrumentation prevent attribution.
+  5120x2880 in the prior run; this flight has no on-foot leg or eye capture.
+  Prior DLSS runs used K; the flight does not log the DLSS DLL version.
+- Timing: two clean 30-second windows account for all 3970 admitted cycles with
+  zero residual or missing counters. Before-first-Submit mean is 10.42-10.55
+  ms, both Submit roundtrips total 0.39-0.40 ms, and next pose-wait roundtrip
+  is 0.05-0.06 ms. Separate gameplay benchmark windows have CPU p50 9.93-10.74
+  ms and GPU p50 10.61-11.18 ms; GPU p95 is 12.10-12.55 ms. These application
+  segments are not full frame periods, and their window alignment differs from
+  the cycle probe. Do not subtract their percentiles.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -41,11 +42,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next flight: Frontier, AA off and the same landed cockpit view for about 90
-  seconds. No eye dump needed. Inspect complete-cycle coverage, per-cycle
-  accounting and caller/owner intervals before choosing a pacing or culling
-  fix. Conservative current-depth culling remains an offline candidate.
-  Preserve motion history; foveated-DLSS work stays paused.
+- Next diagnostic: split the post-stereo interval on the same caller/sequence
+  into game-side gaps, raw DXGI Present, all EDVR Present work including its
+  trailing render callback, and any PostPresentHandoff roundtrip. Existing
+  Present timers are not persisted in the native flight log and cannot answer
+  this yet. No new build or flight requested. Conservative current-depth
+  culling remains an offline candidate; preserve motion history and keep
+  foveated-DLSS work paused.
 
 ## Journal
 
@@ -1875,3 +1878,88 @@ Full build validation passes: all 62 pooled rigs, three quiet rigs and the
 `build/frame-cycle-build-validation.log`. The Frontier package uses the
 sanctioned installer and preserves the live INI; verify the installed package
 against the final committed build before flying.
+
+### 2026-09-18 -- landed cycle locates the missing 4 ms after stereo Submit
+
+The user ran the diagnostic. Both Frontier logs match 7cfb5a6, version
+`v0.17.0-20-g7cfb5a6`, checked with `tools/edvr_log.py --expect-build 7cfb5a6`:
+`edvr_gfx_20260918_112719.log` and `edvr_openxr_20260918_112720_574_6064.log`.
+The native log uses UTC, six hours ahead of the graphics log's local time.
+Native enabled and first-complete markers are present. The route is direct on
+caller/render thread 7364, with runtime owner thread 5236. Environment is Quest
+3 / VirtualDesktopXR / 90 Hz, AA off, input 2481x2121 and output 3072x3264 per
+eye, runtime pacing throughout. There is no on-foot leg or eye capture in this
+run.
+
+Frame-cycle windows 7 and 8 are the clean landed comparison, ending at
+17:29:42.051 and 17:30:12.054 UTC. Each covers 30 seconds; all 1984 and 1986
+admitted cycles are valid, respectively. Every missing counter and the paired
+accounting residual is zero. Both retain generation 1, feature epoch 3,
+scene-ready and should-render true, with consistent caller/wait threads.
+
+| Exclusive phase, paired mean ms | Window 7 | Window 8 |
+| --- | ---: | ---: |
+| Previous pose-wait return to first Submit entry | 10.4218 | 10.5547 |
+| First Submit caller roundtrip | 0.1574 | 0.1469 |
+| Between eye calls | 0.0005 | 0.0005 |
+| Second Submit caller roundtrip | 0.2464 | 0.2437 |
+| Second Submit return to next pose-wait entry | 4.2338 | 4.1133 |
+| Next pose-wait caller roundtrip | 0.0622 | 0.0481 |
+| Complete cycle | 15.1221 | 15.1072 |
+
+The six phase means sum to the full cycle within 0.0001 ms of printed rounding.
+Measured caller rates are 66.133 and 66.200 FPS; graphics Present counts
+independently show 64.4-69.75 FPS in nearby 20-second windows. This explains
+why application-work times near 10-11 ms coexist with mid-60s FPS: those
+shorter timers do not cover the complete 15.1 ms cycle. CPU and GPU work
+overlap and are not additive.
+
+The post-stereo gap is sustained, with p50 4.056/3.966 ms and p95 5.472/5.215
+ms. Nested owner-body means are 0.0452/0.0310 ms for the next pose wait,
+0.1355/0.1338 ms for first Submit and 0.2371/0.2344 ms for second Submit. Their
+total difference from the corresponding caller means is only 0.0482/0.0395 ms.
+Render-park means also closely track Submit roundtrips; these nested spans must
+not be added to the exclusive cycle.
+
+Ruled out: the captured native Submit/WaitGetPoses caller handoffs or pose
+pacing as the dominant missing landed interval, because all three caller
+roundtrips together cost only 0.44-0.47 ms while the separate post-stereo gap
+costs 4.11-4.23 ms. This does not rule out other calls between those wrappers,
+including PostPresentHandoff, or attribute the whole gap to Elite.
+
+Window 2 has zero valid cycles and is not timing evidence. Windows 4/5 are
+menu-like, with short pre-Submit work and long pose waits despite scene-ready
+being true; window 6 mixes menu and gameplay. Window 9 ends in a scope change
+and includes renewed pose waiting, so it is not the clean landed comparison.
+Separate graphics benchmark windows 4-6 report CPU p50 9.993/10.739/9.932 ms,
+GPU p50 10.613/11.180/10.860 ms and GPU p95 12.197/12.550/12.095 ms. Their
+boundaries differ from the cycle probe; do not subtract these medians from
+cycle means. Rendering itself also still exceeds the 11.111 ms budget on some
+frames.
+
+Source review narrows the next measurement, not the cause:
+
+- `hookedPresent` calls the real DXGI Present near its start and already
+  records that duration with `perfMonitorNotePresentWait`.
+- Its later `kCpuBoundary` timer covers the guarded EDVR frame work, but not
+  all bookkeeping before it or the trailing `renderBoundaryPresent` callback.
+- That callback can pump the native render queue and optional frame work.
+  Neither its duration nor the existing Present/boundary totals is persisted by
+  the native long-frame logger, so this flight cannot attribute their
+  contribution to the gap.
+- `PostPresentHandoff` can dispatch to the runtime owner. Its owner body does
+  no XR frame submission, but its caller roundtrip is not measured by this
+  probe. It must be distinguished if Elite calls it within the gap.
+
+Next diagnostic: bracket owned Present entry/return, real DXGI Present, all
+EDVR Present work and its trailing callback, plus PostPresentHandoff if called.
+Join them to the same caller and compositor cycle to distinguish game work
+before Present, Present blocking, EDVR work, and the remaining game/scheduling
+interval before the next pose wait. Report absent/multiple/cross-thread calls
+explicitly instead of assuming one Present per cycle. A large raw Present span
+supports investigating swapchain/backpressure; a large EDVR span points to its
+measured child operation; large outside-call spans require further
+Elite/scheduling attribution. None establishes that all 4.2 ms is removable.
+
+No pacing or draw-suppression fix is justified yet. This turn records the
+flight and source findings only; the installed diagnostic remains 7cfb5a6.
