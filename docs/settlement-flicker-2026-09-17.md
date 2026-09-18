@@ -2,63 +2,50 @@
 
 ## Status
 
-- State: e11f532 exposed a diagnostic coverage failure: the disjoint-query
-  guard excluded every reached selection. A real WARP query reproduced it; the
-  corrected probe passes visibility/timing tests and removes a measured
-  per-draw ownership lookup cost. The full build passed. Original-draw
-  visibility and GPU cost still require a flight; no draw suppression is
-  active.
-- Environment: Quest 3 / VirtualDesktopXR / 90 Hz, latest run AA off; prior
-  DLSS K run used the same input 2481x2121 and active XR output 3072x3264 per
-  eye, trims off. Dimensions are unchanged between landed and on-foot intervals
-  in the prior DLSS flight. RTX 5090; the flight does not log the DLSS DLL
-  version. Capture stays capped at 512 records per eye with a 1 MiB ID snapshot
-  allocation. On-foot source is 5120x2880; the separate weapon-motion table
-  holds 64 records / 32 MiB.
-- Timing: latest AA-off stable landed windows have CPU p50 10.353-10.768 ms,
-  GPU 11.045-11.448 ms; on foot CPU 7.112-7.384 ms, GPU 9.750-10.086 ms. XR
-  copy/compose is about 0.075 ms GPU combined. Prior DLSS run had landed GPU
-  p50 15.643-16.029 ms and on-foot 12.415-12.547 ms. These are not controlled
-  A/Bs; 90 Hz allows 11.111 ms.
-- Work: latest AA-off draw-hook means are about 4.2 ms/frame landed and 2.8 ms
-  on foot, including diagnostic overhead; Map tracking is 0.234-0.260 /
-  0.121-0.134 ms/frame respectively, with particle replacements active. In the
-  prior DLSS run landed admits about 250 rigid draws / 1024 instances; on foot
-  admits zero. Sampled mesh-hook CPU is 1.312-1.341 ms landed and 0.612-0.616
-  ms on foot. The on-foot scene stage fell from 0.273-0.280 to 0.188-0.189 ms,
-  consistent with reduced reference traffic; not a controlled A/B.
-- Prior capture eye_053218: 504 valid records, 500 exact raw poses across a
-  uniform origin rebase; 112 fully exact draw groups. Strict unchanged-origin
-  candidates are zero. 82 draw groups have zero current coverage. These are
-  opportunity counts, not safe skip classes: fallback still selects head motion
-  on 2244 candidate pixels, and previous invisibility cannot predict new
-  visibility.
-- Current work: about 64 eligible draws/frame enter the separate "weapon"
-  producer even with the weapon holstered. Sampled identity work is 14-18 us
-  per call; all its stages suggest a 1.36-1.60 ms/frame scale if
-  representative. This is not a directly timed total. Screen producers suggest
-  only 0.123-0.125 ms/frame. Older captures suggest limited exact identity
-  reuse. Typed fusion has no worthwhile gain with original shaders. New local
-  controls save 0.340-0.348 / 0.213-0.219 ms when capture outputs are already
-  available; that is an idealized control, not an implemented cache. 13/22 and
-  10/19 replay motion draws have zero samples, but still feed future history.
-- Open: establish static-object fallback and identity across rebases, preserve
-  first-moving-frame history, and measure current visibility before expensive
-  work. Existing captured-vector comparisons are below 0.002 pixels but leave
-  final selection/history decisions unresolved. Station rotation/independent
-  ships still need separate attribution. Stencil bit 0x10 is not unique to
-  weapons; the current logs do not identify the captured objects or prove
-  repeated identity inputs, static poses, or invisible raster work.
-- Ruled out: batching inherently slowing this controlled landed scene, because
-  B beat both A phases on CPU and GPU central timings. More depth-metadata
-  capacity is unnecessary in this flight; pipeline/resource descriptor caches
-  address only about 0.06 ms landed and no work on foot. Earlier ruled-out
-  explanations and the uncontrolled regression remain in the journal. Screen
-  motion is not supported as the missing sustained multi-millisecond cost.
-- Next: verify the corrected census in one Frontier flight with stable AA-off
-  landed/on-foot windows. Require submitted, ready and timed-ready samples;
-  timing-unavailable remains distinct from zero visibility. Preserve adjacent
-  motion history and keep the separately paused foveated-DLSS work paused.
+- State: verified ea2a7f9 flight produces valid original-draw visibility,
+  pipeline and timing results. About 76% of sampled stable-scene draws pass no
+  depth/stencil samples. This supports investigating submission/geometry work;
+  it is not an object count, a safe skip predicate or an FPS-saving estimate.
+  No draw suppression is active. See the final journal entry.
+- Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
+  2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
+  5120x2880. No eye capture contaminates this flight. Prior DLSS runs used K;
+  the flight does not log the DLSS DLL version.
+- Timing: landed completed windows have CPU p50 9.610-10.276 ms and GPU
+  10.540-10.782 ms; on foot CPU 6.986-7.110 ms and GPU 9.526-9.675 ms. Landed
+  GPU p95 is 11.731-12.107 ms; on foot 10.446-10.556 ms. The 90 Hz budget is
+  11.111 ms. Lower particle activity prevents attributing the improvement over
+  the preceding flight to the ownership optimization.
+- Population: 22743-23827 original native calls/frame landed and 18747-19180 on
+  foot, across all passes. Sparse admission is about three calls/frame.
+  Pixel-shader invocations are zero in 83-85% / 87-90% of samples respectively.
+  Visibility/pipeline results complete; one on-foot timing result is
+  unavailable. No invalid, expired, ring-full or query-tracking overflow
+  occurs.
+- Limits: the 128 detailed buckets drop most newly encountered keys, although
+  all-sample pass aggregates remain valid. Exact count/instance fields split
+  shader families. Printed details cover only 10.55% landed / 6.52% on foot;
+  retained per-shader rankings are incomplete. Eye labels remain unresolved;
+  source-sized color is not a UI classification. Query brackets perturb
+  execution and their times cannot be extrapolated as savings.
+- CPU: sampled hook work is about 4.2 ms landed and 2.76-2.80 ms on foot. The
+  first-call subtraction includes the probe/owner lookup and, for indexed
+  instanced draws, weapon-motion work. This counter is not all EDVR CPU cost
+  and cannot independently measure the owner-lookup change. Map tracking is
+  0.232-0.257 / 0.123-0.178 ms/frame; particle replacements remain active.
+- Prior DLSS work: static identity across rebases and first-visible/moving
+  history remain unresolved. Typed fusion was not useful; precomputed capture
+  controls suggest only 0.21-0.35 ms per captured subset. Earlier evidence and
+  ruled-out batching/cache/screen-motion hypotheses remain in the journal.
+  Motion tables remain 512 records/eye and 64 source records; station rotation
+  and independently moving ships still need separate validation.
+- Next: existing shader bytecode identifies the candidate pairs as instanced
+  surface-material paths. Track individual draw recurrence and zero-to-visible
+  changes, with complete coarse family aggregates. Candidate families have both
+  outcomes, ruling out shader-wide suppression. Prove a cheap conservative
+  current-frame rejection rule before skipping work. Preserve adjacent motion
+  history and keep the separately paused foveated-DLSS work paused. Another
+  broad census flight is not the next useful step.
 
 ## Journal
 
@@ -1507,3 +1494,102 @@ the real external-query condition reproduced locally. The full build passed all
 62 pooled rigs, three quiet rigs and the 249-key config contract. The next test
 uses the same AA-off landed/on-foot protocol, without an eye dump, with
 existing live settings preserved.
+
+### 2026-09-18 -- ea2a7f9 flight: original-draw census completes
+
+Verified the exact Frontier `edvr_gfx_20260918_094806.log` as
+`v0.17.0-16-gea2a7f9`, build `6AAD5C75`. AA is off throughout; the configured
+`dlss="k"` token does not mean DLSS is active. Input is 2481x2121 and XR output
+3072x3264 on Quest 3 / VirtualDesktopXR at 90 Hz. There is no capture activity.
+
+Stable benchmark windows 6-8 are landed: CPU p50 9.934/10.276/9.610 ms, GPU
+10.556/10.782/10.540 ms; GPU p95 11.731-12.107 ms. Disembark is explicit at
+09:51:24.633. Completed on-foot windows 10-11 have CPU p50 6.986/7.110 ms and
+GPU 9.526/9.675 ms; GPU p95 10.446/10.556 ms. Startup, transitions 5/9, and
+scope-changing window 12 are excluded. The means of those window medians are
+9.940/10.626 ms CPU/GPU landed and 7.048/9.601 ms on foot, not pooled
+percentiles. Particle replacements per ten seconds are about half those of the
+preceding flight, so lower whole-frame times are not a controlled A/B.
+
+Original-draw windows 19-29 are fully landed and 31-43 fully on foot. Landed
+population is 22743-23827 original native calls/frame; on foot 18747-19180.
+About three calls/frame are sampled. Zero depth/stencil-passing samples occur
+in 74.6-77.3% / 74.6-77.6% of those calls. Zero pixel-shader invocations occur
+in 83.1-84.9% / 86.9-89.7%. These are submitted draw calls across passes, not
+unique meshes or final-color visibility. Geometry may still execute when the
+pixel shader does not.
+
+The query correction is confirmed live: visibility and pipeline results are
+complete, and timing is complete except for one unavailable sample in on-foot
+window 36. There are no invalid, expired, ring-full, not-issued or
+query-tracking-overflow failures. An external disjoint context remains present
+but no longer prevents measurement. The detailed bucket table is a separate
+limitation: roughly 1305-1528 records/window cannot acquire a new detail
+bucket. All pass aggregates still include these records. A retained top-16
+shader ranking is not a ranking of the entire scene.
+
+CPU interpretation correction: `DrawClock` starts its subtracted first-call
+interval before `originalDrawNativeBegin` and ends it after
+`originalDrawNativeEnd`; the indexed-instanced path also includes
+`weaponMotionDraw` inside that interval. The ownership lookup optimized in
+ea2a7f9 is therefore excluded from the reported hook-work counter. Its
+unchanged 4.2 ms landed / 2.76-2.80 ms on-foot level neither measures nor
+refutes that specific optimization. Metadata work outside the first-call
+interval can still be included. The local microbenchmark remains a scale
+estimate, not a measured flight saving.
+
+Across all 40 ready census windows, 70358/70358 submitted queries return
+visibility and pipeline statistics; 70295 return timing and 63 have timing
+unavailable, chiefly at startup. The stable subsets are 14700/19271 zero landed
+(76.28%) and 17696/23222 zero on foot (76.20%). Empty-bracket calibration
+completes 400/400 times, averaging 3.237 us. Zero-result EyeColor draw
+intervals average about 9.66 us landed; SourceColor about 8.73 us on foot.
+These include query perturbation and cannot be added, extrapolated or reduced
+by the empty-bracket average to estimate whole-frame savings.
+
+The 128-key detail table overflows on 76.64% of landed observations and 83.27%
+on foot. Printed top-16 retained details cover only 10.55% / 6.52% of the
+stable subsets, so they identify candidates without establishing a global
+ranking. Complete pass aggregates remain available. Across the entire flight,
+unmodified SourceColor is 15993/18259 zero (87.6%) and EyeColor 18421/34895
+(52.8%); these include other flight phases and should not replace the stable
+subset percentages above. All eye labels are unresolved index 2. SourceColor
+denotes a target-size match, not UI or scenery by itself.
+
+Three candidate scene families have mixed outcomes in retained printed details:
+`EB5234DB6ADB491D / CB9F297EFF264251` is 1900/2103 zero; `5B4D8E894EEDA8B4 /
+4375B72964F386CD` is 482/535; `BBE58E40FE88EC80 / DB3E8D20CF53FBC0` is 202/213.
+The first VS is the known material mesh family used by source-mesh motion,
+including scenery; family membership does not prove that every instance is
+static or rigid. Existing bytecode classifies the other two as instanced
+surface-material paths (below). Observed source buckets use triangle-list
+indexed instancing, reverse-Z GREATER_EQUAL depth and back-face culling. The
+current key does not establish stencil fail/depth-fail operations, so zero
+passed samples alone cannot prove absence of stencil side effects.
+
+ruled out: shader-wide suppression of these scene families, because each family
+also produces depth/stencil-passing samples in this flight.
+
+Zero results also do not establish negligible shader work: known curved-screen
+pair `4EF6DDB075A927FA / 85565E9261812E2F` returns zero in all 738 printed
+samples while accumulating 2.03 billion pixel-shader invocations. Known
+panel/composite pair `A888D51024D9798E / 015EF9349EC097E8` returns zero in all
+1512 printed samples. Neither is a settlement-geometry suppression target.
+
+The existing Frontier shader dumps contain both previously unknown pairs.
+Disassembly shows both VS families reading structured t33 (336-byte instance
+records), t38 (48-byte records), CB1/CB2 and packed instanced mesh inputs. The
+5B4D/4375 pair passes material UVs, samples two texture arrays and writes four
+color targets. BBE5/DB3E additionally handles face invariant, normals, tangents
+and a reconstructed tangent basis, with screen/2D and texture-array samples
+feeding four targets. These are surface-material paths consistent with
+deferred/G-buffer rendering, not screen/UI shaders. Bytecode does not establish
+the object or material name, static status or a safe culling rule.
+
+Next: narrow measurement to draw identity, recurrence and transitions from zero
+to visible in these instanced material families, with coarse family keys that
+retain complete aggregates. Any later suppression needs a cheap conservative
+current-frame predicate and proven pass/state eligibility, including stencil,
+UAV and stream-output effects. Per-draw query brackets are diagnostic, not a
+proposed production optimization. Another broad census flight is not needed to
+reconfirm the high rejection rate.
