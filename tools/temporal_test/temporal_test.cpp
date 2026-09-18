@@ -16,6 +16,7 @@
 
 #include "../../src/common/temporal_math.h"
 #include "../../src/common/temporal_mode.h"
+#include "../../src/common/eye_run_trigger.h"
 #include "../../src/d3d11/temporal_history.h"
 
 namespace {
@@ -54,6 +55,45 @@ void yaw34(float theta, float m34[12]) {
 }  // namespace
 
 int main() {
+    {
+        edvr::EyeRunMotionTrigger trigger;
+        check(!trigger.armed(), "motion eye run starts disarmed");
+        trigger.arm(false);
+        check(trigger.armed() &&
+                  trigger.observe(false, true) == edvr::EyeRunMotionStep::None &&
+                  trigger.observe(true, true) == edvr::EyeRunMotionStep::Trigger &&
+                  !trigger.armed(),
+              "motion eye run triggers on an eligible off-to-on edge");
+
+        trigger.arm(true);
+        check(trigger.observe(true, true) == edvr::EyeRunMotionStep::None && trigger.armed(),
+              "arming during motion does not capture part of an episode");
+        check(trigger.observe(false, true) == edvr::EyeRunMotionStep::None &&
+                  trigger.observe(true, true) == edvr::EyeRunMotionStep::Trigger,
+              "arming during motion waits for off and then on");
+
+        trigger.arm(false);
+        check(trigger.observe(true, false) == edvr::EyeRunMotionStep::Unsupported && trigger.armed(),
+              "an unsupported activation leaves the one-shot armed");
+        check(trigger.observe(true, true) == edvr::EyeRunMotionStep::None && trigger.armed(),
+              "support arriving mid-episode cannot start a partial capture");
+        check(trigger.observe(false, true) == edvr::EyeRunMotionStep::None &&
+                  trigger.observe(true, true) == edvr::EyeRunMotionStep::Trigger,
+              "an unsupported activation retries at the next off-to-on edge");
+
+        edvr::EyeRunMotionEligibility eligible{};
+        eligible.paired = eligible.nvidia = eligible.format = eligible.nonFoveated = true;
+        eligible.fullFrame = eligible.history = eligible.resources = eligible.sizeMatches = true;
+        eligible.world = eligible.depth = eligible.rows = eligible.noReset = true;
+        eligible.noSizeChange = eligible.noSourceScreen = true;
+        check(edvr::eyeRunMotionMissing(eligible) == 0,
+              "motion eye run accepts the established full NVIDIA path");
+        eligible.noSourceScreen = false;
+        eligible.history = false;
+        check(edvr::eyeRunMotionMissing(eligible) ==
+                  (edvr::EyeRunMotionSourceScreen | edvr::EyeRunMotionNoHistory),
+              "motion eye run reports every unsupported gate without consuming the arm");
+    }
     for (float scale : {0.5f, 0.65f, 0.999f}) {
         if (strcmp(edvr::temporalNvidiaLabel(scale), "DLSS")) { ++g_fails; puts("FAIL: upscaling label"); }
     }

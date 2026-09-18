@@ -2,20 +2,19 @@
 
 ## Status
 
-- State: the coarse-ship-off A/B reduced flicker; eye_163223 has zero ship
-  claims. The new 16:48:57 Pause capture catches reversing 0.1105 m world
-  translation pulses, the nearest about 166 ms before the keypress after a
-  reported simultaneous flash. No reset, body motion, size or output change
-  occurs within three seconds of Pause. The separate stereo reset was about
-  five seconds earlier. See the final journal entry for exact frames.
-- Open: camera selection prefers a buffer's latest continuous write, not
-  necessarily the version consumed by the building draws. Wrong write/eye
-  selection is plausible; the existing trace lacks those versions. Stable
-  CAM.scene positions are from float 1100, not the selected rows at 932, and
-  cannot prove those rows were stable. No permanent fix is installed.
-- Build: v0.17.0-39-gde7e272-dirty installed and verified in Frontier; archive
-  build/camera-provenance-frontier-de7e272-dirty. Full build and all gates
-  pass. The analyzed Pause flight used the earlier 35-g2a23ee7-dirty build.
+- State: 17:18:47 Pause capture has no world pulse over 0.01 m, unlike the
+  earlier 16:48:57 capture's reversing 0.1105 m pulses. Body fallback instead
+  activates from about -514 ms to +1368 ms around Pause (10645-10765), with
+  roughly 0.8-1.5 m translation. No explicit reset occurs within three seconds
+  of Pause; the stereo reset is about 4.095 seconds earlier. See final entry.
+- Open: body-path availability is not proof of claims on visible buildings.
+  First rigid draw rows can be stale or auxiliary; TCAM does not justify
+  replacing the existing camera selection with that latch. No twin choice or
+  observation eviction occurs around the event. The prior camera pulse remains
+  unexplained, but is absent from this flash capture. No permanent fix yet.
+- Build: v0.17.0-40-gdb78d39-dirty installed and verified in Frontier; archive
+  build/motion-trigger-frontier-db78d39. Full build and all gates pass. The
+  analyzed 17:18:47 Pause flight used 39-gde7e272-dirty.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -52,11 +51,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next flight: same landed scene; Pause immediately after the next global
-  flash, then remain in-scene at least three seconds. New TCAM compares chosen
-  rows with both eyes' draw-time rows: late rewrite, eye/twin selection or a
-  pulse already in Elite's draw camera. Ships_metres remains 0 temporarily;
-  exact mesh/station motion stays enabled. No camera selection fix yet.
+- Next flight: same landed view, buildings centred; press Insert once to arm
+  automatic eye capture on the next body activation. Pause after a visible
+  flash, then wait at least three seconds. The temporary eye_run_trigger is
+  motion and ships_metres remains 0; other settings are preserved. Inspect D
+  path 4 on static facades before changing ownership. No rendering fix yet.
 
 ## Journal
 
@@ -3342,3 +3341,125 @@ Exact DLLs/PDBs, loader, full build output and manifest are retained under
 Pause-after-flash action, followed by at least three seconds in-scene. This
 build collects evidence; it does not fix the remaining flicker or promise a
 frame-time improvement.
+
+### 2026-09-18 -- 171847 Pause: no camera pulse; dominant body activates
+
+Verified `edvr_gfx_20260918_171708.log` against `v0.17.0-39-gde7e272-dirty`,
+build 6AADC50E, linked 23:11:10 UTC. It contains both complete Pause snapshots:
+first camera history at 17:18:47.092, TEMP at 17:18:47.096 through frame 10679;
+delayed TEMP at 17:18:49.099 through 10803. Each has 4096 TEMP and 512 TCAM eye
+records. The file is 3149.1 KB and does not hit the log cap or truncate a TCAM
+line. The overlapping 3848 TEMP and 264 TCAM records have zero payload
+disagreements. Reports are retained under
+`build/camera-provenance-analysis-171847`.
+
+Ruled out for this capture: a recurrence of the prior reversing 0.1105 m
+world-translation pulse. No world translation exceeds 0.01 m anywhere in the
+combined history. The prior pulse remains unexplained; this absence does not
+retroactively excuse it. Also ruled out near this Pause: an explicit NVIDIA
+reset, caller reset, dimension/output switch, source-screen change, origin
+step, lost world/rows/history validity, identical-row fallback or observation
+table eviction. The only stereo reset is frame 10416, about 4.095 seconds
+before Pause, with zero world/body delta. The later aggregate rise from 12 to
+14 therefore does not establish a reset at the reported event.
+
+The new positive signal is body motion: frames 10645-10765, about 514 ms before
+Pause to 1368 ms after it, have body availability set on both eyes (242 calls,
+inputs 0x5AFF); before and afterward it is absent (0x5AEF). Body translation
+magnitude is roughly 0.8-1.5 m while world translation stays small. At
+17:18:46.577 the activation line identifies a 41-record cluster, 77% of pool
+movers, rigid-fit residual 0.005 m, turning 0.2997 degrees with translation
+term 1.815 m over 32.5 ms. Those are transform parameters, not a measurement of
+the object's linear speed. The grid extent is 4096 m on every axis and the
+configured reach is 1500 m. This is the separate dominant-body fallback, still
+enabled while coarse moving-ship fallback is zero.
+
+All 644 eye records within three seconds of Pause have flags 2, events 8,
+output 2 and unchanged 2481x2121 to 3818x3264 dimensions. Every corresponding
+TCAM is present with choice flags 0x21F and draw flags 0x9F: the same buffer
+object, a later selected write, but different selected/draw rows. There are no
+twins or observation evictions. Around frames 10666-10667 the frame has 746
+valid writes, exceeding the chooser's 256-write ring; all retained candidates
+are from the bound object. That is a capacity observation, not proof this
+selection is wrong.
+
+TCAM does not justify replacing selection with the first recognized draw. For
+example, frame 10667's sampled draw rows equal frame 10666's selected rows,
+whereas frame 10666's draw-to-draw delta reports roughly 111 m and 156 degrees
+from an earlier auxiliary-looking snapshot. The selected world delta remains
+tiny. More fundamentally, the five recognized shaders are generic rigid
+material families; their proven original vertex path consumes b1 rows 270-275,
+not the diagnostic rows 233-235. TCAM D is a snapshot of those latter rows in
+the bound buffer at the draw, not proof the shader used them to render that
+building. Its first draw can be cockpit, scenery or another supported object;
+depth first-bind ordering provides the eye label. Do not turn this diagnostic
+into a first-draw camera fix.
+
+The body classifier's share is measured against pose changes, not the entire
+visible scene. After fitting a dominant moving cluster, its grid is seeded from
+live records with the accepted signatures and expanded by the configured reach.
+The shader gives body motion to depth points in those cells unless a later
+exact path overrides it. A compact moving object can therefore produce broad
+candidate coverage. The log proves activation at the relevant time, but lacks
+this flight's depth/grid/decision images; it cannot identify the 41 records as
+the drone or prove a particular facade received path 4.
+
+Next diagnostic: let Insert arm a one-shot paired eye capture that waits for
+the next eligible body activation. Reuse the existing C/D/P/T run and capture
+the triggering frame before its motion decisions are generated. The CPU history
+supplies the preceding off state; D identifies actual body claims on the
+visible buildings. This avoids another eye dump taken after the event. There is
+no continuous GPU image buffer or speculative rendering change.
+
+Implemented `advanced.eye_run_trigger = manual|motion`, default `manual`.
+Motion mode changes Insert into an arm for one capture. If body state is
+unknown or already active, it first waits for an observed off frame. An
+unsupported rising edge logs every missing condition and leaves the arm waiting
+for another off/on edge; becoming eligible mid-episode does not start a partial
+capture. Repeated arming preserves the pending request, and config reload or
+shutdown explicitly cancels it. Normal manual capture is unchanged.
+
+The trigger checks the established paired, full-frame NVIDIA path, supported
+format, existing history/resources at matching input/output dimensions,
+world/depth/accepted camera rows, no reset/size/source transition, and no
+active on-foot screen motion. A zero stored projection pair is allowed because
+the existing depth fallback supports this flight. It starts the existing run
+before C00 metadata/raw staging and before D00 shader selection, preserving the
+activation frame in C00/D00/P00/T00. The accompanying object draw ledger and
+draw census can first contain complete data for the following frame, because
+the trigger frame's scene draws have already run; match frame IDs.
+
+The pure trigger tests cover off/on arming, already-active episodes, rejected
+edges, retry only after a new off/on edge, and missing eligibility reasons.
+Independent review confirms the recorded 2481x2121 to 3818x3264 legacy-UI
+NVIDIA cockpit path meets the gates. No camera, object fit, ownership radius or
+shader motion formula changes are part of this diagnostic.
+
+Validation/deployment: the absolute `build.bat` with `EDVR_JOBS=2` passes all
+gates, including the new trigger tests and 250-key config contract. The
+installed label is `v0.17.0-40-gdb78d39-dirty`. Exact DLLs/PDBs, build output,
+package and provenance manifest are in `build/motion-trigger-frontier-db78d39`;
+the source commit afterward does not change the compiled label. Graphics SHA256
+is `bf8d8cb2812ddb93e8073a0d9a6bfbf09f9e18775b25f05a46705a6a7bd0947a`; runtime
+SHA256 is `4b610d51baf4574ddf465506592935dc6d0d657ad57586766044c8d5f63fb0c3`.
+
+Staged the current live INI and explicitly added only `advanced.eye_run_trigger
+= motion`, preserving its original CRLF and every other byte. The prior ship
+fallback zero remains in force. Sanctioned install with the staged root and
+`--ini` followed dry-run and a fresh unchanged-source hash check. Both
+staged-INI and normal-build `--verify-only` pass. Receipt is
+`edvr_native_receipt.json.pre-motion-trigger-20260918-173700.bak`; installed
+INI hash is `eca5e5fbaac659c83aaa39ca78377287933ab65c4e2985423ac0dc52ac8baa20`.
+The original is staged as `edvr.before.ini`. After this diagnostic, remove only
+the added trigger line (or select manual), preserving any newer user changes;
+do not blindly restore the complete saved INI. The mode persists across
+restarts, but each run needs a fresh Insert arm.
+
+Next flight: keep the affected buildings near the centre of the same landed
+cockpit view, press Insert once to arm, then wait for the flash. Press Pause
+after it and remain in-scene for at least three seconds before exit. The
+one-shot should log armed and triggered, then produce a complete paired
+manifest with C00/D00/P00/T00 at the logged trigger frame. Unsupported,
+cancelled or never-triggered arms are distinct log outcomes, not successful
+captures. Compare decision path 4 with static facades; TEMP/TCAM provide timing
+context. This remains a correctness diagnostic, not a frame-time test.

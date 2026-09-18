@@ -18,6 +18,7 @@
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"   // fssChromeStampValue: the scanner's screen is up this frame
+#include "../common/eye_run_trigger.h"
 #include "../common/temporal_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -45,6 +46,7 @@
 #include "temporal_shader_bytecode.h"
 
 namespace edvr {
+static void beginEyeRun();
 namespace {
 
 // The fovea composite (docs/performance.md feature 6), its own tiny shader
@@ -1579,6 +1581,10 @@ ID3D11Texture2D* g_eyeRawStaging[kEyeRun] = {};
 // it, frame to frame.
 bool             g_eyeRunTreated = false;
 bool             g_eyeRunPaired = true; // matching input/output sequence, default for new captures
+bool             g_eyeRunMotionMode = false;
+EyeRunMotionTrigger g_eyeRunMotionTrigger;
+bool             g_eyeRunBodyObserved = false;
+bool             g_eyeRunBodyOn = false;
 ID3D11Texture2D* g_eyeTreatedStaging[kEyeRun] = {};
 ID3D11Texture2D* g_eyeDecisionStaging[kEyeRun] = {};
 ID3D11Texture2D* g_eyePreUiStaging[kEyeRun] = {};
@@ -4586,6 +4592,53 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 (fssInterface?128u:0u));
         };
 
+        // An opt-in diagnostic arm waits on the CPU for the dominant-body
+        // path's next off->on edge. Start the existing run here, after all
+        // motion inputs for this frame are known but before its raw colour and
+        // metadata are staged, so C00/D00/P00/T00 all name the trigger frame.
+        // The established-resource gates avoid creating a feature or accepting
+        // a reset as evidence. A rejected edge does not consume the arm.
+        if (eye == 0) {
+            g_eyeRunBodyObserved = true;
+            g_eyeRunBodyOn = bodyOn;
+            if (g_eyeRunMotionTrigger.armed()) {
+                const uint32_t wantedOutW =
+                    (outW && outH && (outW != w || outH != h)) ? outW : w;
+                const uint32_t wantedOutH =
+                    (outW && outH && (outW != w || outH != h)) ? outH : h;
+                EyeRunMotionEligibility eligibility{};
+                eligibility.paired = g_eyeRunPaired;
+                eligibility.nvidia = (flags & 2u) != 0 && (flags & 64u) == 0;
+                eligibility.format = fmtIndex == 0;
+                eligibility.nonFoveated = !foveaConfigured();
+                eligibility.fullFrame = region[0] == 0 && region[1] == 0 &&
+                                        w == sd.Width && h == sd.Height;
+                eligibility.history = e.dlHaveHistory;
+                eligibility.resources = e.dlColour && e.dlOut && e.dlSubmit;
+                eligibility.sizeMatches = e.dlW == w && e.dlH == h &&
+                                          e.dlOutW == wantedOutW && e.dlOutH == wantedOutH;
+                eligibility.world = worldOn;
+                eligibility.depth = haveDepth;
+                eligibility.rows = g_curValid && g_prevValid && g_bodyRowsOk;
+                eligibility.noReset = (flags & 1u) == 0 && (trace.events & 4u) == 0;
+                eligibility.noSizeChange = (trace.events & 2u) == 0;
+                eligibility.noSourceScreen = screenSrv == nullptr;
+                const uint32_t missing = eyeRunMotionMissing(eligibility);
+                const EyeRunMotionStep step =
+                    g_eyeRunMotionTrigger.observe(bodyOn, missing == 0);
+                if (step == EyeRunMotionStep::Unsupported) {
+                    Log::get().note(
+                        "eye capture: object-motion activation was not capturable (missing 0x%04X: paired 0x1, NVIDIA 0x2, format 0x4, fovea 0x8, full-frame 0x10, history 0x20, resources 0x40, size 0x80, world 0x100, depth 0x200, rows 0x400, reset/source-change 0x800, size-change 0x1000, source-screen 0x2000); the one-shot arm remains pending for the next off/on edge.",
+                        missing);
+                } else if (step == EyeRunMotionStep::Trigger) {
+                    beginEyeRun();
+                    Log::get().note(
+                        "eye capture: object-motion activation triggered the armed full-frame NVIDIA paired run at frame %u; its first raw crop and motion-decision controls are this frame.",
+                        g_rowsFrame);
+                }
+            }
+        }
+
         // Capture before either temporal path changes colour. Paired runs
         // use the submitted eye rectangle, including the native TAA path;
         // the old raw-only hook below remains for legacy single runs.
@@ -6793,6 +6846,19 @@ void temporalPassConfigure(Config& cfg) {
     g_shipMetres = ship;
     g_eyeRunTreated = cfg.getBool("advanced.eye_run_treated", false);
     g_eyeRunPaired = cfg.getBool("advanced.eye_run_paired", true);
+    const std::string eyeRunTrigger = cfg.getString("advanced.eye_run_trigger", "manual");
+    if (g_eyeRunMotionTrigger.armed()) {
+        Log::get().note("eye capture: pending object-motion one-shot cancelled by a configuration reload.");
+    }
+    g_eyeRunMotionTrigger.cancel();
+    g_eyeRunBodyObserved = false;
+    g_eyeRunBodyOn = false;
+    g_eyeRunMotionMode = _stricmp(eyeRunTrigger.c_str(), "motion") == 0;
+    if (!g_eyeRunMotionMode && _stricmp(eyeRunTrigger.c_str(), "manual") != 0) {
+        Log::get().note(
+            "eye capture: advanced.eye_run_trigger = \"%s\" is not manual or motion; using manual.",
+            eyeRunTrigger.c_str());
+    }
     g_diagnostics = cfg.getBool("advanced.temporal_aa_diagnostics", false);
     g_warmOn = cfg.getBool("advanced.temporal_aa_warm", true);   // g_warmState is NOT re-armed here
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
@@ -7863,6 +7929,45 @@ bool temporalPassPriceWindow(double regionMedianMs[7], double* otherMedianMs,
     return true;
 }
 
+static void beginEyeRun() {
+    if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+    perfMonitorNoteEvent(kEvEyeDump);
+    // This request can occur after the trigger frame's scene draws. The eye
+    // crops and decision controls include that frame; the accompanying draw
+    // census starts here and can begin with its following frame.
+    drawCensusAutoRequest();
+    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
+    SYSTEMTIME stm{};
+    GetLocalTime(&stm);
+    _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
+                 static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
+    g_eyeRunTaken = 0;
+    g_eyeRunLeft = kEyeRun;
+    g_eyeMotionTraceCount = 0;
+    g_eyeInputsFrame=0;
+    g_meshFallbackSnapshot=MeshFallbackSnapshot{};
+    g_eyeRunUntreated=false;
+    memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
+    memset(g_eyeTreatedWritten,0,sizeof(g_eyeTreatedWritten));
+    memset(g_eyeTreatedTaken,0,sizeof(g_eyeTreatedTaken));
+    memset(g_eyeRawWritten,0,sizeof(g_eyeRawWritten));
+    for(int k=0;k<kEyeRun;++k) {
+        if(g_eyeDecisionStaging[k]){g_eyeDecisionStaging[k]->Release();g_eyeDecisionStaging[k]=nullptr;}
+        if(g_eyePreUiStaging[k]){g_eyePreUiStaging[k]->Release();g_eyePreUiStaging[k]=nullptr;}
+        g_eyeDecisions[k]=EyeDecisionFrame{};
+    }
+    for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
+    memset(g_eyeRawTaken, 0, sizeof(g_eyeRawTaken));
+    memset(g_eyeRawInputW, 0, sizeof(g_eyeRawInputW));
+    memset(g_eyeRawInputH, 0, sizeof(g_eyeRawInputH));
+    memset(g_eyeRunFrames, 0, sizeof(g_eyeRunFrames));
+    // The object ledger is armed at the same seam. On a motion-triggered run
+    // the body decision already happened, so its first complete draw ledger
+    // can likewise be the following frame; the capture manifest's frame IDs
+    // keep that limitation explicit.
+    objectProbeArmLedger(g_eyeRunStamp);
+}
+
 void temporalPassShutdown() {
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     dlaaShutdown();
@@ -7907,6 +8012,12 @@ void temporalPassShutdown() {
     g_eyeRunLeft = 0;
     g_eyeRunTaken = 0;
     g_eyeRunReady = false;
+    if (g_eyeRunMotionTrigger.armed()) {
+        Log::get().note("eye capture: pending object-motion one-shot cancelled at shutdown.");
+    }
+    g_eyeRunMotionTrigger.cancel();
+    g_eyeRunBodyObserved = false;
+    g_eyeRunBodyOn = false;
     g_eyeMotionTraceCount = 0;
     g_eyeInputsFrame=0;
     g_meshFallbackSnapshot=MeshFallbackSnapshot{};
@@ -7948,41 +8059,27 @@ bool temporalPassPlanes(float* nearZ, float* farZ) {
 }
 
 void temporalPassArmEyeDump() {
-    // The key takes a RUN of the left eye (kEyeRun says why): sixteen raw
-    // crops and the first treated frame; a run under way is left to finish.
+    // The key takes a RUN of the left eye (kEyeRun says why). In motion mode
+    // it arms that same bounded run for the next dominant-body off->on edge;
+    // a run or one-shot already under way is left alone.
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
-    perfMonitorNoteEvent(kEvEyeDump);
-    // Temporary terrain investigation: align the existing bounded draw/compute
-    // census with Insert's eye run, including when temporal AA is disabled.
-    drawCensusAutoRequest();
-    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
-    SYSTEMTIME stm{};
-    GetLocalTime(&stm);
-    _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
-                 static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
-    g_eyeRunTaken = 0;
-    g_eyeRunLeft = kEyeRun;
-    g_eyeMotionTraceCount = 0;
-    g_eyeInputsFrame=0;
-    g_meshFallbackSnapshot=MeshFallbackSnapshot{};
-    g_eyeRunUntreated=false;
-    memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
-    memset(g_eyeTreatedWritten,0,sizeof(g_eyeTreatedWritten));
-    memset(g_eyeTreatedTaken,0,sizeof(g_eyeTreatedTaken));
-    memset(g_eyeRawWritten,0,sizeof(g_eyeRawWritten));
-    for(int k=0;k<kEyeRun;++k) {
-        if(g_eyeDecisionStaging[k]){g_eyeDecisionStaging[k]->Release();g_eyeDecisionStaging[k]=nullptr;}
-        if(g_eyePreUiStaging[k]){g_eyePreUiStaging[k]->Release();g_eyePreUiStaging[k]=nullptr;}
-        g_eyeDecisions[k]=EyeDecisionFrame{};
+    if (!g_eyeRunMotionMode) {
+        beginEyeRun();
+        return;
     }
-    for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
-    memset(g_eyeRawTaken, 0, sizeof(g_eyeRawTaken));
-    memset(g_eyeRawInputW, 0, sizeof(g_eyeRawInputW));
-    memset(g_eyeRawInputH, 0, sizeof(g_eyeRawInputH));
-    memset(g_eyeRunFrames, 0, sizeof(g_eyeRunFrames));
-    // ...and the object probe's ledger of the same frames (object_probe.h),
-    // when the probe is on; the crops' names and its share the stamp.
-    objectProbeArmLedger(g_eyeRunStamp);
+    if (g_eyeRunMotionTrigger.armed()) {
+        Log::get().note("eye capture: object-motion one-shot is already armed.");
+        return;
+    }
+    const bool waitForOff = !g_eyeRunBodyObserved || g_eyeRunBodyOn;
+    g_eyeRunMotionTrigger.arm(waitForOff);
+    Log::get().note(
+        "eye capture: object-motion one-shot armed; %s The wait is CPU-only. A capture requires a full-frame NVIDIA paired pass with established history, world/depth/rows, unchanged size, no reset and no active on-foot source-screen motion.",
+        !g_eyeRunBodyObserved
+            ? "the dominant-body path has not been observed yet, so it will first wait for an off frame and then on."
+            : g_eyeRunBodyOn
+                  ? "the dominant-body path is already active, so it will wait for off and then on."
+                  : "waiting for the dominant-body path's next activation.");
 }
 
 float temporalPassDepthAt(float metres) {
