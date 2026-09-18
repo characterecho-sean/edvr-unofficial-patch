@@ -2,14 +2,17 @@
 
 ## Status
 
-- State: the per-frame building-reconstruction diagnostic is installed and
-  verified in Frontier. Its compiled label is v0.17.0-35-g2a23ee7-dirty; use
-  that exact candidate when checking the next flight, not a later source
-  commit. The capture-specific GPU rig passes 56528 checks. Full gates are
-  incomplete: the user explicitly requested stopping reruns after an existing
-  timing test failed under parallel load. This is a diagnostic test build, not
-  a flicker fix. Exact DLL/PDB evidence is under
-  build/settlement-decisions-frontier-2a23ee7-dirty.
+- State: verified Frontier eye_160859 catches stationary buildings taking
+  moving-ship vectors, then returning to world motion. In a central facade ROI,
+  ship coverage reaches 52.50%; its horizontal vector is about 6 input pixels
+  per frame while the building follows the near-zero world vector. Local
+  history rejection rises with that claim. NPCs and an overhead drone are
+  present: the moving group may be real, but its ownership of walls is wrong.
+  Exact mover identity and whether spill, pool matching or both cause the claim
+  remain unresolved. See the final journal entry; no rendering fix installed.
+- Build: v0.17.0-35-g2a23ee7-dirty, archived under
+  build/settlement-decisions-frontier-2a23ee7-dirty. Capture rig: 56528 checks.
+  Full gates remain incomplete at the user's request; no rerun this analysis.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -46,10 +49,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next flight: stay landed in the cockpit with DLSS on and affected buildings
-  near the centre; take one normal eye dump while switching is visible. Read
-  decisions.json and matched C/D/P/T crops for the three discriminators in the
-  final journal entry. Existing settings are preserved. Repeated draw
+- Next: correct moving-object pixel ownership, preserving actual drone/NPC/
+  ship motion and station rotation. The capture establishes wrong vectors on
+  walls; it does not justify a global static-scene assumption or smaller
+  arbitrary radii. Existing settings are preserved. Repeated draw
   classification remains a later CPU target. The rejected blend cache remains
   removed. Foveated-DLSS remains paused; engine-level skipping has no verified
   target. No automatic capture is armed.
@@ -3018,3 +3021,94 @@ SHA256 is `c418955d6e33f23af977ebb70e9c5c76d2ee8cd6ceda0a1ceee89d873a590d27`.
 The exact binaries/PDBs and provenance manifest are retained in
 `build/settlement-decisions-frontier-2a23ee7-dirty`. The next flight needs one
 paired capture of the visible cockpit failure; it is not a performance run.
+
+### 2026-09-18 -- 160859 catches moving-ship claims on stationary buildings
+
+The user requested the last eye dump from the latest run. The sanctioned log
+reader verifies `edvr_gfx_20260918_160709.log` against the installed candidate
+`v0.17.0-35-g2a23ee7-dirty` (linked 22:00:39 UTC, build 6AADB487), not the
+later source-only commit. Use eye_160859, not the earlier eye_160853. Its 16
+slots cover consecutive scene frames 8213-8228. All D/C/P/T files are valid and
+matched; both-eye ledger rows retain DLSS history, valid camera rows and raw
+capture, with no jump. All manifests report DLSS success and no reset. Input is
+2481x2121; output is 3818x3264; UI mode is legacy. The user reports walking
+NPCs and a drone flying overhead during this scene.
+
+The building-local trace selects the wrong-motion discriminator. Coordinates
+below are relative to the 1400x1400 input crop at full-input origin (540,360).
+The central facade ROI is (680,385,150,35), visibly including fixed wall faces
+and a few HUD/terrain pixels. Ship-path coverage grows from 6.10% at frame 8213
+to 50.76% at 8221 and 52.50% at 8227, then drops to zero at 8228. The world
+path correspondingly recovers to 87.87%. This is not just a whole-eye aggregate
+or a fixed-raster edge moving through one pixel: the colored ownership overlay
+covers stationary facades, tanks and ramps across the settlement.
+
+At frame 8221, the median physical vector on ship-claimed facade pixels is
+(6.127,0.018) input pixels; on world-claimed facade pixels it is (0.144,0.003).
+Raw-frame phase alignment, corrected for raster jitter, estimates the facade's
+physical vector at (0.194,0.173). Subpixel phase estimates are approximate, but
+the roughly six-pixel horizontal discrepancy is far beyond that uncertainty.
+The pre-UI image also follows the building's near-zero horizontal motion, not
+the ship vector. For this comparison, D is previous-minus-current unjittered
+motion: D = current-minus-previous raster jitter - raw image displacement.
+Output displacement must additionally be divided by output/input scale.
+
+History rejection in this ROI reaches 11.83% at frame 8222, versus 0.21% after
+ship claims disappear at 8228. At 8221, 21.35% of ship-claimed facade pixels
+reject history, versus 0.36% of world-claimed pixels. Rejection is therefore
+associated with an already incorrect correspondence; disabling rejection would
+retain history from the wrong part of the image. The first whole-eye hidden
+count (814/5262201, 0.015%) hid this localized effect. No screen motion is
+active in this cockpit capture; on-foot screen motion can override this coarse
+ship path, consistent with the earlier scene difference.
+
+The user asks why on-foot mode avoids this. The distinction is the final
+screen-motion override, not proof that Elite culls the scene differently. For
+valid on-foot screen pixels, screen motion replaces the earlier world/ship
+candidate and sets trackedForeground, bypassing backgroundHistoryHidden. Thus
+the coarse ship claim demonstrated here need not reach DLSS for those pixels.
+The latest dump is cockpit-only; this explanation follows the source and
+earlier on-foot evidence, rather than a paired on-foot capture from this run.
+
+The independent post-UI discriminator does not explain the broad building
+switch. Replaying the legacy UI resolve against frame 8213's exact inputs
+matches the final building band to within one 8-bit step (99.99% exact pixels).
+Only 1.304% of its output pixels differ from pre-UI DLSS: 0.228% of the ROI is
+current UI, 0.052% retained UI history, and 1.024% the inactive faint-flat
+hold. The left dome remains entirely world motion, without current UI or
+retained UI activity; its sparse P/T differences are all explained by the faint
+hold, averaging only 0.156/255 absolute RGB across that ROI in frame 8213. The
+maximum individual pixel difference alone was misleading. Ruled out here: broad
+UI history clamping as the source of the demonstrated wall/tank motion
+switches.
+
+Source attribution: `insideShip` tests a padded world-space box and proximity
+to a recorded part, then `shipPixel` overrides world reprojection. The captured
+`objects.z=900` permits a 30 m radius around each part. Two ship candidates are
+present in frame 8213; their final boxes span approximately 132x140x216 m and
+89x134x237 m, with four and five sampled parts. Box dimensions alone do not
+prove a pixel belongs to the object. The dump lacks each candidate's part
+positions, motion matrices and source identities, so it cannot decide whether
+the claim comes from a real moving group spilling onto nearby buildings,
+mistaken pool correspondence, or both. A low rigid-fit residual is not proof of
+object identity. Do not describe the drone or NPC movement as false.
+
+Ruled out for this captured interval: per-building DLSS bypass or whole-eye
+history resets, because all frames execute DLSS successfully with history and
+the affected buildings change motion source inside the same treatment. The
+512-record mesh cap is not this switch: the facade has zero mesh-path pixels.
+This evidence does not establish that every reported shimmer has one cause.
+
+The next correction should require evidence that a moving group owns the
+visible surface before applying its motion. Preserve true movers and station
+rotation; do not reduce an arbitrary distance threshold or globally classify
+the settlement as static. An isolated temporary test of the existing coarse
+ship fallback can discriminate its visual contribution if needed, but is not a
+permanent fix for moving ships. No live settings or production code were
+changed during this analysis.
+
+Local evidence is under `build/settlement-decisions-analysis-160859`: copied
+capture, integrity `report.json`, `region-report.json`,
+`ship-claim-report.json`, and labeled `ship-claim.png`. All 32 motion-ledger
+rows were checked. Capture overhead makes this interval unsuitable for FPS
+comparisons. No compiler or full-suite rerun was needed for this analysis.
