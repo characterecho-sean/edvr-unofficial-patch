@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include "binding_shadow.h"
+#include "gpu_interval.h"
 #include "shader_swap.h"
 #include "vscreen.h"
 #include "../common/config.h"
@@ -44,6 +45,89 @@ struct State {
     Screen eyes[2];
 } g;
 
+constexpr uint64_t kGpuWindowFrames=1800;
+constexpr unsigned kGpuDrainFrames=120;
+struct GpuMetric {
+    GpuIntervals<16> timer;
+    uint64_t calls=0,selected=0,submitted=0,budgetSkipped=0;
+    unsigned lastSelectedFrame=~0u;
+    bool begin(ID3D11DeviceContext* ctx,unsigned stride,uint64_t scope,unsigned frame) {
+        const uint64_t ordinal=calls++;
+        const uint64_t block=ordinal/stride;
+        // Exactly one rotating position in every power-of-two block. This
+        // bounds leases and avoids always measuring the first UI/eye draw.
+        const unsigned position=unsigned((block*0x9E3779B97F4A7C15ull+scope*0xD1B54A32D192ED03ull) & (stride-1));
+        if(unsigned(ordinal&(stride-1))!=position)return false;
+        ++selected;
+        // A burst of heterogeneous GUI draws can cross several 64-call
+        // blocks in one frame. Never let that consume the shared clock's
+        // bounded lease supply; the omission is separate from timer skips.
+        if(lastSelectedFrame==frame){++budgetSkipped;return false;}
+        lastSelectedFrame=frame;
+        if(!timer.begin(ctx))return false;
+        ++submitted;return true;
+    }
+    uint64_t pending() const {
+        const uint64_t retired=uint64_t(timer.totals.samples)+timer.totals.invalid;
+        return submitted>retired?submitted-retired:0;
+    }
+    void clear(ID3D11DeviceContext* ctx) {
+        timer.reset(ctx);calls=selected=submitted=budgetSkipped=0;lastSelectedFrame=~0u;
+    }
+};
+struct GpuDiagnostics {
+    enum class Phase { Idle,Collecting,Draining } phase=Phase::Idle;
+    uint64_t nextScope=0,scope=0,sourceFrames=0,lastSourceFrame=0;
+    unsigned width=0,height=0,drainFrames=0;
+    ID3D11Resource* source=nullptr; // identity only; g.depth owns the resource
+    bool policyNoted=false;
+    GpuMetric uiClear,uiDraw,eyeClear,projection;
+    void start(ID3D11Resource* key,unsigned w,unsigned h,unsigned frame) {
+        phase=Phase::Collecting;scope=++nextScope;source=key;width=w;height=h;
+        sourceFrames=0;lastSourceFrame=frame;drainFrames=0;
+    }
+    void close(){if(phase==Phase::Collecting)phase=Phase::Draining;}
+    uint64_t pending() const{return uiClear.pending()+uiDraw.pending()+eyeClear.pending()+projection.pending();}
+    void reset(ID3D11DeviceContext* ctx) {
+        uiClear.clear(ctx);uiDraw.clear(ctx);eyeClear.clear(ctx);projection.clear(ctx);
+        phase=Phase::Idle;scope=sourceFrames=lastSourceFrame=0;width=height=drainFrames=0;
+        source=nullptr;
+    }
+    void report(ID3D11DeviceContext* ctx,bool cutoff) {
+        const auto& c=uiClear.timer.totals;const auto& u=uiDraw.timer.totals;const auto& e=eyeClear.timer.totals;const auto& p=projection.timer.totals;
+        const double frames=sourceFrames?double(sourceFrames):1.0;
+        Log::get().note(
+            "screen motion GPU: scope %llu source %ux%u, %llu source frames%s. Exact added-command intervals; rotating 1/16 clear/projection and 1/64 UI samples, one admission/category/frame. Budget skips can bias bursty calls; zero ready is unavailable, not zero cost.",
+            (unsigned long long)scope,width,height,(unsigned long long)sourceFrames,
+            cutoff?"; 120-frame drain expired, pending samples abandoned":"");
+        Log::get().note(
+            "screen motion GPU UI: scope %llu; clears %llu calls (%.2f/frame), %.3f us/sample [%u ready/%llu selected/%llu submitted, %llu begin-fail, %u timer-skip subset, %llu budget-skip, %u invalid, %llu pending]; reissues %llu calls (%.2f/frame), %.3f us/sample [%u/%llu/%llu, %llu begin-fail, %u timer-skip subset, %llu budget-skip, %u invalid, %llu pending].",
+            (unsigned long long)scope,
+            (unsigned long long)uiClear.calls,uiClear.calls/frames,c.samples?c.ms*1000/c.samples:0,c.samples,(unsigned long long)uiClear.selected,(unsigned long long)uiClear.submitted,(unsigned long long)(uiClear.selected-uiClear.budgetSkipped-uiClear.submitted),c.skipped,(unsigned long long)uiClear.budgetSkipped,c.invalid,(unsigned long long)uiClear.pending(),
+            (unsigned long long)uiDraw.calls,uiDraw.calls/frames,u.samples?u.ms*1000/u.samples:0,u.samples,(unsigned long long)uiDraw.selected,(unsigned long long)uiDraw.submitted,(unsigned long long)(uiDraw.selected-uiDraw.budgetSkipped-uiDraw.submitted),u.skipped,(unsigned long long)uiDraw.budgetSkipped,u.invalid,(unsigned long long)uiDraw.pending());
+        Log::get().note(
+            "screen motion GPU eye: scope %llu; clears %llu calls (%.2f/frame), %.3f us/sample [%u ready/%llu selected/%llu submitted, %llu begin-fail, %u timer-skip subset, %llu budget-skip, %u invalid, %llu pending]; projection draws %llu calls (%.2f/frame), %.3f us/sample [%u/%llu/%llu, %llu begin-fail, %u timer-skip subset, %llu budget-skip, %u invalid, %llu pending].",
+            (unsigned long long)scope,
+            (unsigned long long)eyeClear.calls,eyeClear.calls/frames,e.samples?e.ms*1000/e.samples:0,e.samples,(unsigned long long)eyeClear.selected,(unsigned long long)eyeClear.submitted,(unsigned long long)(eyeClear.selected-eyeClear.budgetSkipped-eyeClear.submitted),e.skipped,(unsigned long long)eyeClear.budgetSkipped,e.invalid,(unsigned long long)eyeClear.pending(),
+            (unsigned long long)projection.calls,projection.calls/frames,p.samples?p.ms*1000/p.samples:0,p.samples,(unsigned long long)projection.selected,(unsigned long long)projection.submitted,(unsigned long long)(projection.selected-projection.budgetSkipped-projection.submitted),p.skipped,(unsigned long long)projection.budgetSkipped,p.invalid,(unsigned long long)projection.pending());
+        reset(ctx);
+    }
+    void noteSource(ID3D11Resource* key,unsigned w,unsigned h,unsigned frame) {
+        if(phase==Phase::Collecting && (source!=key || width!=w || height!=h))close();
+        if(phase==Phase::Idle)start(key,w,h,frame);
+        if(phase!=Phase::Collecting)return;
+        if(lastSourceFrame!=frame){lastSourceFrame=frame;++sourceFrames;}
+        else if(!sourceFrames)++sourceFrames;
+    }
+    void tick(ID3D11DeviceContext* ctx,unsigned frame) {
+        if(ctx){uiClear.timer.poll(ctx);uiDraw.timer.poll(ctx);eyeClear.timer.poll(ctx);projection.timer.poll(ctx);}
+        if(phase==Phase::Collecting && (sourceFrames>=kGpuWindowFrames || (sourceFrames && frame-lastSourceFrame>120)))close();
+        if(phase!=Phase::Draining)return;
+        const uint64_t left=pending();
+        if(!left){report(ctx,false);return;}
+        if(++drainFrames>=kGpuDrainFrames)report(ctx,true);
+    }
+} g_gpu;
 bool copyCb(ID3D11DeviceContext* ctx,ID3D11Device* dev,unsigned slot,Ptr<ID3D11Buffer>& out,unsigned minimum) {
     Ptr<ID3D11Buffer> in;ctx->VSGetConstantBuffers(slot,1,&in);if(!in)return false;
     D3D11_BUFFER_DESC bd{},prior{};in->GetDesc(&bd);if(out)out->GetDesc(&prior);
@@ -82,8 +166,11 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,uns
 }
 void screenMotionConfigure(Config& cfg) {
     bool on=temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
-    if(on!=g.enabled){g=State{};g.enabled=on;}
-    g.weapon=cfg.getBool("fix.weapon_stability",true);
+    if(on!=g.enabled){g_gpu.close();g=State{};g.enabled=on;}
+    if(on&&!g_gpu.policyNoted){g_gpu.policyNoted=true;Log::get().note("on-foot motion GPU diagnostics: enabled for screen UI clears/reissues, per-eye screen projection, and weapon identify/capture/raster; exact sparse query intervals only, one admission per category per frame, 1800 source-frame windows and a 120-frame no-wait drain.");}
+    const bool weapon=cfg.getBool("fix.weapon_stability",true);
+    if(weapon!=g.weapon)g_gpu.close();
+    g.weapon=weapon;
     weaponMotionConfigure(g.enabled && g.weapon);
 }
 bool screenMotionRecognize() {
@@ -120,6 +207,7 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     unsigned next=1-g.sourceWrite;
     if(!copyCb(ctx,dev.Get(),1,g.camera[next],276*16))return;
     g.sourcePrevious=g.sourceFrame;g.sourceFrame=g.frame;g.sourceWrite=next;
+    g_gpu.noteSource(tex.Get(),td.Width,td.Height,g.frame);
     weaponMotionSource(tex.Get());
 }
 void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
@@ -164,13 +252,18 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
         if(FAILED(dev->CreateBlendState(&ub,&g.uiBlend)) || FAILED(dev->CreateDepthStencilState(&ud,&g.uiDs))) {g.uiBlend.Reset();return;}
     }
     if(g.uiFrame!=g.frame) {
+        const bool timed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.uiClear.begin(ctx,16,g_gpu.scope,g.frame);
         const float one[4]={1,1,1,1};ctx->ClearRenderTargetView(g.uiRtv.Get(),one);
+        if(timed)g_gpu.uiClear.timer.end(ctx);
         g.uiTarget=res;g.uiFrame=g.frame;g.uiDraws=0;
     }
     if(g.uiTarget.Get()!=res.Get())return;
     ID3D11RenderTargetView* saved[8]{};Ptr<ID3D11DepthStencilView> savedDepth;ctx->OMGetRenderTargets(8,saved,&savedDepth);
     vScreenSetRenderTargetsRaw(ctx,1,g.uiRtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.uiBlend.Get(),nullptr,mask);ctx->OMSetDepthStencilState(g.uiDs.Get(),0);
-    draw(ctx,count,instances,start,base,startInstance);++g.uiDraws;
+    const bool timed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.uiDraw.begin(ctx,64,g_gpu.scope,g.frame);
+    draw(ctx,count,instances,start,base,startInstance);
+    if(timed)g_gpu.uiDraw.timer.end(ctx);
+    ++g.uiDraws;
     vScreenSetRenderTargetsRaw(ctx,8,saved,savedDepth.Get());ctx->OMSetBlendState(blend.Get(),factors,mask);ctx->OMSetDepthStencilState(ds.Get(),ref);
     for(auto* p:saved)if(p)p->Release();
     if(!g.uiNoted){g.uiNoted=true;Log::get().note("screen UI: original late GUI draws supply alpha coverage at %ux%u; R8 mask, no source colour copies. ScreenMotion.w=3 identifies current UI.",td.Width,td.Height);}
@@ -198,7 +291,10 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     D3D11_BUFFER_DESC vd{};vb->GetDesc(&vd);uint64_t at=uint64_t(offset)+uint64_t(startInstance)*stride;if(at+8>vd.ByteWidth)return;
     D3D11_BOX box{UINT(at),0,0,UINT(at+8),1,1};ctx->CopySubresourceRegion(e.sizes[next].Get(),0,0,0,0,vb.Get(),0,&box);
     bool consecutive=e.frame+1==g.frame && g.sourcePrevious+1==g.frame && e.model[e.write] && e.camera[e.write] && g.camera[1-g.sourceWrite];
-    const float zero[4]{};ctx->ClearRenderTargetView(e.rtv.Get(),zero);e.written=false;
+    const bool clearTimed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.eyeClear.begin(ctx,16,g_gpu.scope,g.frame);
+    const float zero[4]{};ctx->ClearRenderTargetView(e.rtv.Get(),zero);
+    if(clearTimed)g_gpu.eyeClear.timer.end(ctx);
+    e.written=false;
     if(consecutive) {
         bool ui=g.uiFrame==g.frame && g.uiDraws && g.uiTarget.Get()==cr.Get();
         bool weapon=g.weapon && g.stencilSrv;
@@ -213,7 +309,9 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         ID3D11ShaderResourceView* srvs[5]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr,weapon?weaponMotionView():nullptr};
         vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(g.ds.Get(),0);
         ctx->PSSetConstantBuffers(2,5,cb);ctx->PSSetShaderResources(8,5,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
+        const bool projectionTimed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.projection.begin(ctx,16,g_gpu.scope,g.frame);
         draw(ctx,count,instances,start,base,startInstance);
+        if(projectionTimed)g_gpu.projection.timer.end(ctx);
         ID3D11ShaderResourceView* nulls[5]{};ctx->PSSetShaderResources(8,5,nulls);
         vScreenSetRenderTargetsRaw(ctx,8,savedRt,savedDepth.Get());ctx->OMSetBlendState(savedBlend.Get(),factors,mask);ctx->OMSetDepthStencilState(savedDs.Get(),stencil);
         ctx->PSSetConstantBuffers(2,5,savedCb);ctx->PSSetShaderResources(8,5,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
@@ -229,10 +327,21 @@ ID3D11ShaderResourceView* screenMotionView(int eye,unsigned w,unsigned h) {
     if(!g.enabled || eye<0 || eye>1)return nullptr;Screen& e=g.eyes[eye];
     return e.written && e.frame==g.frame && e.width==w && e.height==h?e.srv.Get():nullptr;
 }
-void screenMotionFrameBoundary(){
-    weaponMotionFrameBoundary();
+void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
+    weaponMotionFrameBoundary(ctx);
+    g_gpu.tick(ctx,g.frame);
     ++g.frame;
-    if(g.seen && g.frame-g.lastScreen>120){bool on=g.enabled,weapon=g.weapon;g=State{};g.enabled=on;g.weapon=weapon;}
+    if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool on=g.enabled,weapon=g.weapon;g=State{};g.enabled=on;g.weapon=weapon;}
 }
-void screenMotionShutdown(){g=State{};weaponMotionShutdown();}
+ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics(){
+    ScreenMotionGpuDiagnostics s{};s.scope=g_gpu.scope;s.sourceFrames=g_gpu.sourceFrames;
+    s.uiClearCalls=g_gpu.uiClear.calls;s.uiDrawCalls=g_gpu.uiDraw.calls;s.eyeClearCalls=g_gpu.eyeClear.calls;s.projectionCalls=g_gpu.projection.calls;
+    s.uiClearSelected=g_gpu.uiClear.selected;s.uiDrawSelected=g_gpu.uiDraw.selected;s.eyeClearSelected=g_gpu.eyeClear.selected;s.projectionSelected=g_gpu.projection.selected;
+    s.uiClearSubmitted=g_gpu.uiClear.submitted;s.uiDrawSubmitted=g_gpu.uiDraw.submitted;s.eyeClearSubmitted=g_gpu.eyeClear.submitted;s.projectionSubmitted=g_gpu.projection.submitted;
+    s.uiClearReady=g_gpu.uiClear.timer.totals.samples;s.uiDrawReady=g_gpu.uiDraw.timer.totals.samples;s.eyeClearReady=g_gpu.eyeClear.timer.totals.samples;s.projectionReady=g_gpu.projection.timer.totals.samples;
+    s.uiClearSkipped=g_gpu.uiClear.timer.totals.skipped;s.uiDrawSkipped=g_gpu.uiDraw.timer.totals.skipped;s.eyeClearSkipped=g_gpu.eyeClear.timer.totals.skipped;s.projectionSkipped=g_gpu.projection.timer.totals.skipped;
+    s.uiClearInvalid=g_gpu.uiClear.timer.totals.invalid;s.uiDrawInvalid=g_gpu.uiDraw.timer.totals.invalid;s.eyeClearInvalid=g_gpu.eyeClear.timer.totals.invalid;s.projectionInvalid=g_gpu.projection.timer.totals.invalid;
+    s.collecting=g_gpu.phase==GpuDiagnostics::Phase::Collecting;s.draining=g_gpu.phase==GpuDiagnostics::Phase::Draining;return s;
+}
+void screenMotionShutdown(){g_gpu.reset(nullptr);g=State{};weaponMotionShutdown();}
 }

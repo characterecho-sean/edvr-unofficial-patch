@@ -50,7 +50,7 @@ int main(int argc,char** argv){
  auto pool=buffer(poolData,sizeof(poolData),D3D11_BIND_SHADER_RESOURCE,336),instance=buffer(nullptr,16,D3D11_BIND_VERTEX_BUFFER);
  ComPtr<ID3D11ShaderResourceView> poolView;hr(dev->CreateShaderResourceView(pool.Get(),nullptr,&poolView));
  ComPtr<ID3D11ShaderResourceView> boneView;hr(dev->CreateShaderResourceView(bones.Get(),nullptr,&boneView));
- auto bind=[&](Pose p,bool advance=true){if(advance)weaponMotionFrameBoundary();weaponMotionSource(depth.Get());ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv.Get());ctx->OMSetDepthStencilState(state.Get(),21);ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0,4);D3D11_VIEWPORT vp{0,0,float(W),float(H),0,1};ctx->RSSetViewports(1,&vp);ctx->RSSetState(raster.Get());ctx->IASetInputLayout(layout.Get());UINT stride=16,off=0;ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&off);UINT instanceStride=8;ctx->IASetVertexBuffers(0,1,instance.GetAddressOf(),&instanceStride,&off);
+ auto bind=[&](Pose p,bool advance=true){if(advance)weaponMotionFrameBoundary(ctx.Get());weaponMotionSource(depth.Get());ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv.Get());ctx->OMSetDepthStencilState(state.Get(),21);ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0,4);D3D11_VIEWPORT vp{0,0,float(W),float(H),0,1};ctx->RSSetViewports(1,&vp);ctx->RSSetState(raster.Get());ctx->IASetInputLayout(layout.Get());UINT stride=16,off=0;ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&off);UINT instanceStride=8;ctx->IASetVertexBuffers(0,1,instance.GetAddressOf(),&instanceStride,&off);
  unsigned ids[4]={p.skeleton==740?1u:0u,526606,0,0};ctx->UpdateSubresource(instance.Get(),0,nullptr,ids,0,0);ctx->VSSetShaderResources(33,1,poolView.GetAddressOf());ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,cb.GetAddressOf());ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);float b[8]={p.nearBone,0,0,0,p.farBone,0,0,0};ctx->UpdateSubresource(bones.Get(),0,nullptr,b,0,0);ctx->VSSetShaderResources(38,1,boneView.GetAddressOf());issue(ctx.Get(),9,1,0,0,0);};
  auto motion=[&](){weaponMotionDraw(ctx.Get(),issue,9,1,0,0,0);};
  auto read=[&](){auto& g=weapon_motion_detail::g;D3D11_TEXTURE2D_DESC d{};g.map->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> s;hr(dev->CreateTexture2D(&d,nullptr,&s));ctx->CopyResource(s.Get(),g.map.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(s.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> out(W*H*4);for(UINT y=0;y<H;++y)for(UINT x=0;x<W*4;++x)out[y*W*4+x]=DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const uint16_t*>(static_cast<const unsigned char*>(m.pData)+y*m.RowPitch)[x]);ctx->Unmap(s.Get(),0);return out;};
@@ -72,10 +72,11 @@ int main(int argc,char** argv){
  ctx->ClearState();bind(old);motion();first=read();covered=0;
  for(UINT i=0;i<W*H;++i)if(first[i*4+3]==1)++covered;
  check(covered>2000,"ClearState and rebind preserve original-vertex history");
+ {auto d=weaponMotionGpuDiagnostics();check(d.collecting&&d.sourceFrames>0&&d.calls>=4&&d.selected>0,"weapon GPU diagnostics scope and rotating selection are active");check(d.submitted<=d.selected,"weapon GPU diagnostics distinguish selected and submitted calls");ctx->Flush();for(int i=0;i<8;++i)weaponMotionFrameBoundary(ctx.Get());d=weaponMotionGpuDiagnostics();check(d.identifyReady+d.identifyInvalid<=d.submitted&&d.captureReady+d.captureInvalid<=d.selected&&d.rasterReady+d.rasterInvalid<=d.selected,"weapon GPU diagnostics retire only selected samples");check(d.identifyReady+d.captureReady+d.rasterReady>0,"weapon GPU diagnostics retire WARP timestamp samples without waiting");}
  // World arms and viewmodel share topology, with distinct captured clip Z.
  // Reorder both occurrences, then remove one: match by projection on GPU,
  // never by volatile instance number or the occurrence's CPU slot.
- weaponMotionShutdown();Pose world{-.1f,1,0,0,.0675f},view{.1f,1,0,0,.025f,740};
+ weaponMotionShutdown();{auto d=weaponMotionGpuDiagnostics();check(!d.collecting&&!d.draining&&!d.sourceFrames&&!d.calls,"weapon GPU diagnostics reset on shutdown");}Pose world{-.1f,1,0,0,.0675f},view{.1f,1,0,0,.025f,740};
  bind(world);motion();bind(view,false);motion();
  for(int order=0;order<3;++order){
      Pose a=order%2?world:view,b=order%2?view:world;
@@ -98,14 +99,23 @@ int main(int argc,char** argv){
  // the map remains available to unrelated weapon/tool geometry.
  motion();bind(view);motion();first=read();for(UINT i=0;i<W*H;++i)check(first[i*4+3]!=1,"ambiguous equal-projection histories are never guessed");
  check(weaponMotionView()!=nullptr,"ambiguous mesh does not discard the whole weapon map");
- weaponMotionFrameBoundary();weaponMotionFrameBoundary();weaponMotionFrameBoundary();check(!weaponMotionView()&&weapon_motion_detail::g.records.empty(),"missing frames discard stale mesh history");
+ weaponMotionFrameBoundary(ctx.Get());weaponMotionFrameBoundary(ctx.Get());weaponMotionFrameBoundary(ctx.Get());check(!weaponMotionView()&&weapon_motion_detail::g.records.empty(),"missing frames discard stale mesh history");
  bind(old);motion();first=read();for(UINT i=0;i<W*H;++i)check(first[i*4+3]!=1,"returning mesh has no old animation history");
- weaponMotionConfigure(false);check(!weaponMotionView()&&!weapon_motion_detail::g.map,"off frees temporal weapon resources");bind(old);motion();check(!weaponMotionView(),"live off stays inactive");
+ weaponMotionConfigure(false);check(weaponMotionGpuDiagnostics().draining,"weapon GPU diagnostics close immediately on config change");check(!weaponMotionView()&&!weapon_motion_detail::g.map,"off frees temporal weapon resources");bind(old);motion();check(!weaponMotionView(),"live off stays inactive");
  weaponMotionConfigure(true);bind(old);motion();check(weaponMotionView()!=nullptr,"live on resumes with fresh coverage");
  // Bound GPU resource growth; these states must decline before a draw.
  unsigned allocated=weapon_motion_detail::g.bytes;weaponMotionDraw(ctx.Get(),issue,131073,1,0,0,0);weaponMotionDraw(ctx.Get(),issue,9,2,0,0,0);check(weapon_motion_detail::g.bytes==allocated,"oversized and instanced meshes allocate nothing");
  weaponMotionResourceWritten(bones.Get());check(weaponMotionView()!=nullptr,"animation updates preserve vertex correspondence");
  weaponMotionResourceWritten(ib.Get());check(!weaponMotionView(),"rewritten mesh indices invalidate motion");bind(old);motion();first=read();for(UINT i=0;i<W*H;++i)check(first[i*4+3]!=1,"rewritten mesh cannot reuse old correspondence");
+ // Deterministic source-boundary, drain-cutoff and same-frame budget checks.
+ auto& diagnostics=weapon_motion_detail::gpu;diagnostics.reset(ctx.Get());diagnostics.noteSource(depth.Get(),W,H,weapon_motion_detail::g.frame);const uint64_t diagnosticScope=diagnostics.scope;
+ D3D11_TEXTURE2D_DESC replacementDesc{};depth->GetDesc(&replacementDesc);ComPtr<ID3D11Texture2D> replacementDepth;hr(dev->CreateTexture2D(&replacementDesc,nullptr,&replacementDepth));diagnostics.noteSource(replacementDepth.Get(),W,H,weapon_motion_detail::g.frame);
+ check(diagnostics.phase==weapon_motion_detail::GpuDiagnostics::Phase::Draining&&diagnostics.scope==diagnosticScope,"weapon GPU diagnostics source change closes the current scope");
+ diagnostics.identify.submitted=1;diagnostics.drainFrames=weapon_motion_detail::gpuDrainFrames-1;diagnostics.tick(ctx.Get(),weapon_motion_detail::g.frame);
+ check(diagnostics.phase==weapon_motion_detail::GpuDiagnostics::Phase::Idle&&!diagnostics.identify.submitted,"weapon GPU diagnostics abandon unresolved samples at the drain cutoff");
+ diagnostics.start(depth.Get(),W,H,weapon_motion_detail::g.frame);bool admitted=false,budgetSkipped=false;
+ for(unsigned n=0;n<192&&!budgetSkipped;++n){if(diagnostics.choose(weapon_motion_detail::g.frame))admitted=true;budgetSkipped=diagnostics.budgetSkipped!=0;}
+ check(admitted&&budgetSkipped&&diagnostics.selected==2,"weapon GPU diagnostics enforce one draw admission per frame");diagnostics.reset(ctx.Get());
  weaponMotionShutdown();ctx->ClearState();
  if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T n=0;queue->GetMessage(i,nullptr,&n);std::vector<char> bytes(n);auto* m=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());hr(queue->GetMessage(i,m,&n));if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings/errors");}}
  std::printf("weapon motion: %u checks passed (%s)\n",checks,driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");

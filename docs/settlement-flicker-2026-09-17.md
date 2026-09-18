@@ -2,46 +2,50 @@
 
 ## Status
 
-- State: admission diagnostics and offline static-motion comparison pass all
-  gates and are ready for Frontier. Packed capture with bounded profiling
-  remains the normal path. New caches and static/visibility skips require
-  evidence first.
+- State: Frontier flight 80416a0 confirms on-foot CPU headroom but a remaining
+  GPU limit. Borrowed depth metadata and bounded screen/weapon GPU attribution
+  pass focused regression and full build gates, ready for Frontier. Packed
+  capture and all motion/visibility decisions stay as flown; static/visibility
+  skips still lack a correctness proof.
 - Environment: Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and
-  active XR output 3072x3264 per eye, trims off. Same settings and landed
-  settlement view throughout native windows 15-17; eye_053218 follows A2. RTX
-  5090; the flight does not log the DLSS DLL version. Capture stays capped at
-  512 records per eye with a 1 MiB ID snapshot allocation.
-- Timing: A1/B/A2 CPU p50 13.335/12.415/12.826 ms; GPU p50 17.008/16.301/16.448
-  ms. B improves CPU by 0.411-0.920 ms and GPU by 0.147-0.707 ms versus the two
-  baselines. Baseline drift is material; GPU p99 is worse than A2. This does
-  not isolate the earlier separate-flight slowdown.
-- Work: all phases retain 1024 instances/frame and about 244 admitted draws. B
-  reduces capture dispatches from about 244 to 10/frame (95.9%) and sampled
-  mesh-hook CPU from a baseline mean 1.732 to 1.293 ms/frame (25.3%). ID copies
-  and coverage draws remain per admitted draw. No queries
-  skipped/invalid/pending.
-- Capture: 504 valid records, 500 exact raw poses across a uniform origin
-  rebase; 112 fully exact draw groups. Strict unchanged-origin candidates are
-  zero. 82 draw groups have zero current coverage. These are opportunity
-  counts, not safe skip classes: fallback still selects head motion on 2244
-  candidate pixels, and previous invisibility cannot predict new visibility.
-- Current work: six exclusive sampled admission stages and bounded descriptor
-  reuse observations are implemented without changing draw decisions. Targeted
-  2500-check WARP rig, offline probe self-test and full build gates pass.
-  Existing capture comparisons differ by less than 0.002 input pixels, but all
-  2249 matched-map pixels retain unresolved final selection/history decisions.
+  active XR output 3072x3264 per eye, trims off. Dimensions are unchanged
+  between the landed settlement and on-foot intervals in this flight. RTX 5090;
+  the flight does not log the DLSS DLL version. Capture stays capped at 512
+  records per eye with a 1 MiB ID snapshot allocation.
+- Timing: latest stable landed CPU p50 12.784-13.044 ms, GPU 16.529-16.684 ms;
+  on-foot CPU 8.110-8.282 ms, GPU 12.968-13.077 ms. The 90 Hz budget is 11.111
+  ms. Different rendering and pacing paths prevent attributing that scene
+  difference solely to meshes. On foot looks shimmer-free to the user.
+- Work: landed still admits about 242 draws / 1024 instances per frame. On foot
+  admits zero: all roughly 8000 known-VS calls per frame reject in the scene
+  stage. The sampled mesh-hook estimate is 1.424-1.464 ms landed and
+  0.721-0.729 ms on foot; these include profiling overhead.
+- Prior capture eye_053218: 504 valid records, 500 exact raw poses across a
+  uniform origin rebase; 112 fully exact draw groups. Strict unchanged-origin
+  candidates are zero. 82 draw groups have zero current coverage. These are
+  opportunity counts, not safe skip classes: fallback still selects head motion
+  on 2244 candidate pixels, and previous invisibility cannot predict new
+  visibility.
+- Current work: the depth-metadata cache already hits on virtually every call,
+  so the change borrows its retained texture and descriptor. The scene-stage
+  envelope is about 0.64 ms landed / 0.28 ms on foot, not a forecast of
+  removable cost. Healthy temporal GPU timers show about 2.3 ms stereo NGX on
+  foot plus prep/UI; new sparse brackets target earlier screen and weapon
+  generation.
 - Open: establish static-object fallback and identity across rebases, preserve
   first-moving-frame history, and measure current visibility before expensive
-  work. Station rotation/independent ships and the on-foot path still require
-  separate cost attribution. Whole-source ID snapshots are not justified by
-  command intervals; current copies total only 8192 bytes/frame.
+  work. Existing captured-vector comparisons are below 0.002 pixels but leave
+  final selection/history decisions unresolved. Station rotation/independent
+  ships and the remaining on-foot GPU cost require separate attribution.
 - Ruled out: batching inherently slowing this controlled landed scene, because
-  B beat both A phases on CPU and GPU central timings. Earlier rules and the
-  uncontrolled regression remain in the journal; their cause is unresolved.
-- Next flight: after validation and Frontier installation, one normal session
-  with settled cockpit and on-foot intervals can distinguish scene/eye lookup,
-  pipeline guards and resource validation. No A/B/A is needed to collect these
-  admission measurements. Static proof starts with existing captures.
+  B beat both A phases on CPU and GPU central timings. More depth-metadata
+  capacity is unnecessary in this flight; pipeline/resource descriptor caches
+  address only about 0.06 ms landed and no work on foot. Earlier ruled-out
+  explanations and the uncontrolled regression remain in the journal.
+- Next flight: 90 seconds landed facing the same busy view, then 90 seconds
+  stationary on foot with the weapon visible, at unchanged settings. Read the
+  admission CPU and screen/weapon GPU scopes together. No A/B/A or eye dumps
+  are needed; static-object skipping and mesh-cap changes remain unjustified.
 
 ## Journal
 
@@ -790,3 +794,105 @@ absolute-path full build passes all 61 parallel jobs, three quiet jobs and the
 unchanged 249-key config contract (`build/motion-admission-verified.log`).
 Rebuild the clean commit before installing and verifying on Frontier without
 `--ini`.
+
+### 2026-09-18 -- 80416a0: landed versus on-foot admission and GPU cost
+
+The graphics log `edvr_gfx_20260918_062040.log` and paired native log
+`edvr_openxr_20260918_062041_399_9568.log` both verify as `v0.17.0-7-g80416a0`.
+The sanctioned reader commands and selected evidence are in
+`build/admission-flight-20260918/evidence.txt`; its companion `report.md`
+contains the detailed reduction. The user reports no shimmer on foot and lower
+frame time, still short of 90 FPS.
+
+| Stable native windows | CPU p50 / p95, ms | GPU p50 / p95, ms |
+|---|---|---|
+| Landed, 5 | 13.044 / 14.494 | 16.684 / 18.343 |
+| Landed, 6 | 12.784 / 14.271 | 16.529 / 18.196 |
+| On foot, 8 | 8.110 / 9.139 | 12.968 / 14.292 |
+| On foot, 9 | 8.282 / 9.121 | 13.077 / 13.642 |
+
+Window 4 includes landed onset, 7 ends at a scope change, and 10 ends at
+transport loss during shutdown; none is in the primary comparison. At 06:24:05,
+pacing becomes turbo, the panel begins applying twice per frame, and rigid-mesh
+admission stops. Input/output sizes remain 2481x2121 / 3072x3264 per eye. The
+11.111 ms budget is exceeded by both CPU and GPU landed, but by GPU alone on
+foot. Rendering and pacing change together, so this is not an A/B measurement
+of the mesh path or proof of its relationship to shimmer.
+
+The exclusive admission estimates use raw sampled microseconds times 256 / 1800
+/ 1000. They include sampled clock overhead and are cost envelopes, not
+forecasts of removable time:
+
+| Scene | Full hook | Fast | Depth / scene / eye / cap | Pipeline + resources | Preparation | Accepted |
+|---|---:|---:|---:|---:|---:|---:|
+| Landed, 06:23:21 | 1.424 | 0.569 | 0.615 | 0.058 | 0.007 | 0.175 |
+| Landed, 06:23:52 | 1.464 | 0.554 | 0.663 | 0.059 | 0.007 | 0.180 |
+| On foot, 06:25:07 | 0.728 | 0.449 | 0.279 | 0 | 0 | 0 |
+| On foot, 06:25:30 | 0.721 | 0.448 | 0.273 | 0 | 0 | 0 |
+
+At 06:23:21, depth metadata reports 18,859,339 hits and 4624 fills across 1800
+frames. On foot at 06:25:07, it reports 14,509,695 hits and 1800 fills: exactly
+one fill per frame. Every on-foot scene-stage entry rejects before pipeline
+validation; accepted draws, cap decisions, descriptor observations and new mesh
+coverage/capture work are zero. The combined stage cannot tell which of its
+internal checks rejected a draw. The borrowed-metadata change targets the
+redundant AddRef/Release and descriptor copy on each cache hit, about 10,477
+times per frame landed and 8061 on foot. It preserves the owning cache and all
+live selection checks; it does not skip any mesh or motion work.
+
+Ruled out: increasing depth-metadata cache capacity as a useful fix for this
+flight, because the existing single entry already hits on virtually every call.
+Ruled out as a priority: pipeline/resource descriptor caching, because the
+entire containing stages cost about 0.06 ms landed and are never reached on
+foot, despite high observed reuse. The much larger cap-rejected population is
+refused work, not a count of mesh coverage draws or successfully matched
+records.
+
+The seven-region temporal GPU reports are present and healthy: settled on-foot
+windows contain 600 stereo pairs with no dropped pairs or region leases. Median
+stereo costs are prep 0.41-0.43 ms, full-frame NGX 2.30-2.32 ms, and UI
+0.53-0.54 ms. Landed reports are about 0.30 / 2.52-2.58 / 0.32-0.33 ms. These
+component medians indicate scale; their sum is not the measured median of a
+total. Native application-render GPU time includes producer rendering and
+native treatment while excluding transfer/runtime waits. Its approximately 13
+ms on foot leaves substantial work outside the temporal bracket.
+
+The next GPU attribution must distinguish three plausible EDVR costs before
+changing rendering: screen UI-mask clear/reissues, per-eye screen-motion clear
+and projection, and weapon motion generation. Each needs exact command-bracket
+timing and eligible/submitted/ready/invalid/skipped counts. These producers run
+before the already measured temporal consumers. Call counts and representative
+samples together can test whether they account for a material fraction of the
+remaining GPU cost; a cheap first draw alone cannot bound heterogeneous work.
+Sparse bounded queries must not span intervening game commands, wait for
+results, or report unavailable measurements as zero.
+
+The borrowed-metadata regression passes 2506 WARP checks. New ownership tests
+release external texture/view owners while the cache remains alive, check a hit
+does not take another reference, and check release at cache clear. Existing
+alias-DSV, live scene-pair change, frame, unknown-write and shutdown checks
+remain green. An isolated five-million-iteration WARP hit/reject loop measured
+median 12.602 ns before and 1.481 ns after; this establishes the removed
+mechanical cost, not a game-frame or FPS improvement.
+
+Screen and weapon diagnostics use bounded nonblocking query rings, rotating
+positions within fixed call blocks, and explicit per-frame admission budgets.
+The screen clear is measured separately from an actual consecutive-frame
+projection so a first-frame clear cannot masquerade as a projection sample.
+Each source scope collects up to 1800 source frames, stops admissions, and
+drains outstanding results before another scope starts. Source/size changes and
+inactivity also close a scope. A 120-frame drain cutoff explicitly reports
+pending samples as abandoned; late completions cannot enter the next window.
+Policy and compact counter lines distinguish zero eligible work, zero ready
+results, begin failures and budget skips. Means describe sampled command
+intervals; the log does not extrapolate them to a whole-frame cost. Busy-frame
+budget skips can bias that sample and must be considered in the analysis.
+
+Final validation: 55,438 screen-motion and 80,503 weapon-motion WARP checks,
+including immediate configuration closure, source changes, forced drain cutoff,
+same-frame budgets, query retirement and shutdown reset. Independent review
+checked owner-context wiring, exact command brackets, skip accounting and the
+1200-byte logger limit. The absolute-path full build passes all 61 pool jobs,
+three quiet jobs and the unchanged 249-key config contract
+(`build/motion-borrow-gpu-verified.log`). Rebuild the clean commit before the
+Frontier install, preserve the INI, and verify using the installer tool.

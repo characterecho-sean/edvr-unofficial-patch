@@ -161,6 +161,17 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     const auto& reboundIds=diagnostics.descriptors.kinds[unsigned(DescriptorKind::Ids)];
     check(reboundIds.calls==10 && reboundIds.hits==3 && reboundIds.fills==7 && reboundIds.evictions==2 && descriptorShadows.ids.count==4,"descriptor identity rebinds report fills and bounded shadow evictions explicitly");
     meshMotionShutdown();check(descriptorShadows.depth.count==0 && descriptorShadows.ids.count==0 && descriptorShadows.poolSrv.count==0,"shutdown releases descriptor shadow identities");meshMotionConfigure(true);
+    // Depth metadata owns the view and texture for the frame. Callers borrow
+    // both the texture identity and immutable descriptor without a per-draw
+    // AddRef/Release pair; clearing the cache is the end of that lifetime.
+    reset();ComPtr<ID3D11Texture2D> ownedScene;ComPtr<ID3D11DepthStencilView> ownedDepth;hr(dev->CreateTexture2D(&td,nullptr,&ownedScene));hr(dev->CreateDepthStencilView(ownedScene.Get(),&dd,&ownedDepth));
+    ID3D11DepthStencilView* borrowedView=ownedDepth.Get();ID3D11Texture2D* borrowedScene=nullptr;const D3D11_TEXTURE2D_DESC* borrowedDesc=nullptr;
+    check(depthMetadata.get(borrowedView,borrowedScene,borrowedDesc) && borrowedScene==ownedScene.Get() && borrowedDesc==&depthMetadata.desc,"depth metadata fill returns cache-owned borrowed values");
+    ownedScene.Reset();ownedDepth.Reset();D3D11_TEXTURE2D_DESC retainedDesc{};borrowedScene->GetDesc(&retainedDesc);
+    const ULONG referencesBefore=borrowedScene->AddRef();borrowedScene->Release();ID3D11Texture2D* borrowedAgain=nullptr;const D3D11_TEXTURE2D_DESC* descAgain=nullptr;
+    check(depthMetadata.get(borrowedView,borrowedAgain,descAgain) && borrowedAgain==borrowedScene && descAgain==borrowedDesc && retainedDesc.Width==W && retainedDesc.Height==H,"cache ownership keeps borrowed depth metadata valid after external owners release");
+    const ULONG referencesAfter=borrowedScene->AddRef();borrowedScene->Release();check(referencesAfter==referencesBefore,"depth metadata hit does not add a caller-owned texture reference");
+    depthMetadata.clear();check(!depthMetadata.view && !depthMetadata.texture,"clearing depth metadata ends the borrowed lifetime and releases both owners");
     // The frame-local cache retains only immutable DSV metadata. Scene and
     // eye classification must still follow every live depth-probe answer.
     reset();pose(1,0);bind(0);

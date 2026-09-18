@@ -19,7 +19,15 @@ void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsig
 // on, the on-foot source depth seen this frame, and a weapon family VS.
 bool weaponMotionWants(uint64_t vsHash);
 ID3D11ShaderResourceView* weaponMotionView();
-void weaponMotionFrameBoundary();
+struct WeaponMotionGpuDiagnostics {
+    uint64_t scope=0,sourceFrames=0,calls=0,selected=0,submitted=0;
+    unsigned identifyReady=0,captureReady=0,rasterReady=0;
+    unsigned identifySkipped=0,captureSkipped=0,rasterSkipped=0;
+    unsigned identifyInvalid=0,captureInvalid=0,rasterInvalid=0;
+    bool collecting=false,draining=false;
+};
+void weaponMotionFrameBoundary(ID3D11DeviceContext* ctx=nullptr);
+WeaponMotionGpuDiagnostics weaponMotionGpuDiagnostics();
 void weaponMotionResourceWritten(ID3D11Resource*);
 void weaponMotionShutdown();
 

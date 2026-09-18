@@ -1083,13 +1083,13 @@ if not exist "%OBJ%\screenmotion" mkdir "%OBJ%\screenmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /I"%GEN%" ^
     /Fo"%OBJ%\screenmotion\\" /Fe"%OBJ%\screenmotion\screen_motion_test.exe" ^
-    "tools\screen_motion_test\screen_motion_test.cpp" ^
+    "tools\screen_motion_test\screen_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\screenmotion\screen_motion_test.exe" --self-test || exit /b 1
 if not exist "%OBJ%\weaponmotion" mkdir "%OBJ%\weaponmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\weaponmotion\\" /Fe"%OBJ%\weaponmotion\weapon_motion_test.exe" ^
-    "tools\weapon_motion_test\weapon_motion_test.cpp" ^
+    "tools\weapon_motion_test\weapon_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\weaponmotion\weapon_motion_test.exe" --self-test || exit /b 1
 if not exist "%OBJ%\meshmotion" mkdir "%OBJ%\meshmotion"

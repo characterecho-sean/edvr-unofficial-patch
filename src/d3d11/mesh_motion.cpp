@@ -309,11 +309,15 @@ struct DepthMetadata {
     Ptr<ID3D11Texture2D> texture;
     D3D11_TEXTURE2D_DESC desc{};
     void clear(){view.Reset();texture.Reset();desc={};}
-    bool get(ID3D11DepthStencilView* bound,Ptr<ID3D11Texture2D>& out,D3D11_TEXTURE2D_DESC& outDesc){
-        if(view.Get()==bound){out=texture;outDesc=desc;++diagnostics.depthMetadataHits;return true;}
+    // Returned pointers borrow this cache's references. meshMotionDraw consumes
+    // them synchronously before any frame/write/shutdown path can call clear;
+    // createEye or an existing Eye owns the texture before later hooked work.
+    bool get(ID3D11DepthStencilView* bound,ID3D11Texture2D*& out,const D3D11_TEXTURE2D_DESC*& outDesc){
+        out=nullptr;outDesc=nullptr;
+        if(view.Get()==bound){out=texture.Get();outDesc=&desc;++diagnostics.depthMetadataHits;return true;}
         clear();Ptr<ID3D11Resource> resource;bound->GetResource(&resource);Ptr<ID3D11Texture2D> candidate;
         if(FAILED(resource.As(&candidate)))return false;
-        candidate->GetDesc(&desc);view=bound;texture=candidate;out=candidate;outDesc=desc;++diagnostics.depthMetadataFills;return true;
+        candidate->GetDesc(&desc);view=bound;texture=candidate;out=texture.Get();outDesc=&desc;++diagnostics.depthMetadataFills;return true;
     }
 } depthMetadata;
 struct ComputeState {
@@ -506,12 +510,12 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     if(ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE){admission.fastReject(FastReject::Context);return;}
     admission.advance(AdmissionStage::Scene);
     auto* bound=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!bound)return;
-    Ptr<ID3D11Texture2D> scene;D3D11_TEXTURE2D_DESC td{};if(!depthMetadata.get(bound,scene,td) || !depthProbeIsSceneDepth(scene.Get()))return;
-    if(td.ArraySize!=1 || td.SampleDesc.Count!=1)return;
-    int eye=-1;for(int i=0;i<2;++i){ID3D11Texture2D* s=nullptr;uint32_t fmt=0;if(depthProbeSceneDepthFormat(td.Width,td.Height,i,&s,&fmt) && s==scene.Get()){eye=i;break;}}
+    ID3D11Texture2D* scene=nullptr;const D3D11_TEXTURE2D_DESC* td=nullptr;if(!depthMetadata.get(bound,scene,td) || !depthProbeIsSceneDepth(scene))return;
+    if(td->ArraySize!=1 || td->SampleDesc.Count!=1)return;
+    int eye=-1;for(int i=0;i<2;++i){ID3D11Texture2D* s=nullptr;uint32_t fmt=0;if(depthProbeSceneDepthFormat(td->Width,td->Height,i,&s,&fmt) && s==scene){eye=i;break;}}
     if(eye<0)return;
     Eye& e=eyes[eye];if(e.matched)return; // no history mutation after this eye is consumed
-    const bool overCap=e.scene==scene && e.history[e.write].count+n>maxRecords;
+    const bool overCap=e.scene.Get()==scene && e.history[e.write].count+n>maxRecords;
     bool probeCap=false;
     if(overCap){
         auto& d=diagnostics.eye[eye];
@@ -531,7 +535,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT mask=0;ctx->OMGetBlendState(&blend,factors,&mask);
     D3D11_BLEND_DESC bd{};if(blend){blend->GetDesc(&bd);observeDescriptor(DescriptorKind::Blend,descriptorShadows.blend,blend.Get());}if(bd.AlphaToCoverageEnable || bd.RenderTarget[0].BlendEnable)return;
     UINT nv=1;D3D11_VIEWPORT vp{};ctx->RSGetViewports(&nv,&vp);
-    if(nv!=1 || vp.TopLeftX || vp.TopLeftY || vp.Width!=td.Width || vp.Height!=td.Height || vp.MinDepth!=0 || vp.MaxDepth!=1)return;
+    if(nv!=1 || vp.TopLeftX || vp.TopLeftY || vp.Width!=td->Width || vp.Height!=td->Height || vp.MinDepth!=0 || vp.MaxDepth!=1)return;
     D3D11_PRIMITIVE_TOPOLOGY topology;ctx->IAGetPrimitiveTopology(&topology);if(topology!=D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)return;
     Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> dom;ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&dom,nullptr,nullptr);if(gs || hs || dom)return;
     Ptr<ID3D11Predicate> predicate;BOOL pred=FALSE;ctx->GetPredication(&predicate,&pred);if(predicate)return;
@@ -559,7 +563,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
         return;
     }
     admission.advance(AdmissionStage::Preparation);
-    Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);if(!prepare(ctx,dev.Get()) || (e.scene!=scene && !createEye(dev.Get(),scene.Get(),e))){fail();return;}
+    Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);if(!prepare(ctx,dev.Get()) || (e.scene.Get()!=scene && !createEye(dev.Get(),scene,e))){fail();return;}
     admission.advance(AdmissionStage::Accepted);
     auto& now=e.history[e.write];auto& prev=e.history[1-e.write];
     // Coverage only needs the copied instance IDs. Defer transform capture

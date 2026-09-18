@@ -4598,7 +4598,7 @@ void vScreenFrameBoundary() {
         uiSeparationFrameBoundary();
         uiDeferredFrameBoundary(g_state->ownerCtx);
         uiDepthFrameBoundary(g_state->ownerCtx);
-        screenMotionFrameBoundary();
+        screenMotionFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
         meshMotionFrameBoundary(g_state->ownerCtx);
         // The sharpening's warm compile and missing-hook note, once a frame,

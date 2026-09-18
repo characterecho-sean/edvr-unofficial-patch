@@ -11,7 +11,20 @@ void screenMotionUiDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,uns
 bool screenMotionRecognize();
 void screenMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                       unsigned start,int base,unsigned startInstance,const float* curve=nullptr);
-void screenMotionFrameBoundary();
+struct ScreenMotionGpuDiagnostics {
+    uint64_t scope=0,sourceFrames=0;
+    uint64_t uiClearCalls=0,uiDrawCalls=0,eyeClearCalls=0,projectionCalls=0;
+    uint64_t uiClearSelected=0,uiDrawSelected=0,eyeClearSelected=0,projectionSelected=0;
+    uint64_t uiClearSubmitted=0,uiDrawSubmitted=0,eyeClearSubmitted=0,projectionSubmitted=0;
+    unsigned uiClearReady=0,uiDrawReady=0,eyeClearReady=0,projectionReady=0;
+    unsigned uiClearSkipped=0,uiDrawSkipped=0,eyeClearSkipped=0,projectionSkipped=0;
+    unsigned uiClearInvalid=0,uiDrawInvalid=0,eyeClearInvalid=0,projectionInvalid=0;
+    bool collecting=false,draining=false;
+};
+// ctx is supplied by production's owner-thread frame boundary. The default
+// keeps source-only fixtures able to advance history without a timing owner.
+void screenMotionFrameBoundary(ID3D11DeviceContext* ctx=nullptr);
+ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics();
 void screenMotionShutdown();
 ID3D11ShaderResourceView* screenMotionView(int eye,unsigned width,unsigned height);
 

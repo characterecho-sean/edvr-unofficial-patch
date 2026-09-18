@@ -21,7 +21,7 @@ ID3D11ShaderResourceView* testWeaponMotion=nullptr;
 void weaponMotionConfigure(bool){}
 void weaponMotionSource(ID3D11Texture2D*){}
 ID3D11ShaderResourceView* weaponMotionView(){return testWeaponMotion;}
-void weaponMotionFrameBoundary(){}
+void weaponMotionFrameBoundary(ID3D11DeviceContext*){}
 void weaponMotionShutdown(){}
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
@@ -96,20 +96,20 @@ int main(int argc,char** argv){
         ComPtr<ID3D11RenderTargetView> after;ctx->OMGetRenderTargets(1,&after,nullptr);check(after.Get()==er[e].Get(),"game colour target restored");
         ComPtr<ID3D11PixelShader> afterPs;ctx->PSGetShader(&afterPs,nullptr,nullptr);check(afterPs.Get()==ps.Get(),"game pixel shader restored");
     };
-    sourceDraw();check(!g.depth,"source work waits for actual screen");screenDraw(0);screenDraw(1);screenMotionFrameBoundary();
+    sourceDraw();check(!g.depth,"source work waits for actual screen");screenDraw(0);screenDraw(1);screenMotionFrameBoundary(ctx.Get());
     sourceDraw();screenDraw(0);screenDraw(1);check(!screenMotionView(0,W,H),"first source frame has no invented history");
-    screenMotionFrameBoundary();source[275][0]=.1f;sourceDraw();
+    screenMotionFrameBoundary(ctx.Get());source[275][0]=.1f;sourceDraw();
     // The game clears depth later in the frame: read completed depth now,
     // not a premature copy at the first terrain draw.
     ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_DEPTH,.005f,0);screenDraw(0);screenDraw(1);
     check(screenMotionView(0,W,H) && screenMotionView(1,W,H),"independent eye maps available");
     for(auto& e:g.eyes){auto a=read(dev.Get(),ctx.Get(),e.map.Get());for(unsigned i=0;i<W*H;++i)if(a[i*4+3]==1){check(std::fabs(a[i*4]-.64f)<.001f,"walking uses completed depth and source camera");check(std::fabs(a[i*4+1])<.001f,"walking X does not move Y");}}
-    screenMotionFrameBoundary();check(!screenMotionView(0,W,H),"map cannot outlive its frame");
-    screenMotionFrameBoundary();sourceDraw();screenDraw(0);screenDraw(1);check(!screenMotionView(0,W,H),"missing screen frame breaks history");
+    screenMotionFrameBoundary(ctx.Get());check(!screenMotionView(0,W,H),"map cannot outlive its frame");
+    screenMotionFrameBoundary(ctx.Get());sourceDraw();screenDraw(0);screenDraw(1);check(!screenMotionView(0,W,H),"missing screen frame breaks history");
     // Original source UI alpha (including discard), straight/premultiplied
     // blend contracts, source identity and per-frame mask lifetime.
     {
-        screenMotionFrameBoundary();source[275][0]+=.1f;sourceDraw();
+        screenMotionFrameBoundary(ctx.Get());source[275][0]+=.1f;sourceDraw();
         auto uc=compile("float4 main(float4 p:SV_Position):SV_Target{if(p.x>48)discard;return float4(0,1,0,p.x<16?0:p.x<32?.25:1);}","ps_5_0");
         ComPtr<ID3D11PixelShader> up;hr(dev->CreatePixelShader(uc->GetBufferPointer(),uc->GetBufferSize(),nullptr,&up));
         D3D11_BLEND_DESC ub{};auto& r=ub.RenderTarget[0];r.BlendEnable=TRUE;r.SrcBlend=D3D11_BLEND_SRC_ALPHA;r.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=D3D11_BLEND_OP_ADD;
@@ -146,12 +146,22 @@ int main(int argc,char** argv){
             if(x>=18&&x<=46){check(a[i+3]==3,"source UI survives projection into both eye maps");check(std::fabs(a[i])<.001f,"source UI does not receive scenery translation");}
             if(x<14||x>50){check(a[i+3]==1,"transparent source/UI discard retains scenery");check(std::fabs(a[i]-.32f)<.001f,"scenery still receives source camera translation");}
         }}
-        screenMotionFrameBoundary();sourceDraw();screenDraw(0);
+        screenMotionFrameBoundary(ctx.Get());sourceDraw();screenDraw(0);
         auto a=read(dev.Get(),ctx.Get(),g.eyes[0].map.Get());for(UINT i=0;i<W*H;++i)check(a[i*4+3]!=3,"absent source UI cannot retain stale coverage");
-        screenMotionFrameBoundary();sourceDraw();ctx->PSSetShader(up.Get(),nullptr,0);ctx->OMSetBlendState(blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(uds.Get(),14);
+        screenMotionFrameBoundary(ctx.Get());sourceDraw();ctx->PSSetShader(up.Get(),nullptr,0);ctx->OMSetBlendState(blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(uds.Get(),14);
         testVs=0xA888D51024D9798Eull;testPs=0x015EF9349EC097E8ull;uiDraw();
         coverage=read(dev.Get(),ctx.Get(),g.ui.Get());check(std::fabs(coverage[20]-191/255.f)<1e-6,"new source frame clears previous opacity");
         ctx->PSSetShader(ps.Get(),nullptr,0);screenDraw(0);
+    }
+    {
+        auto d=screenMotionGpuDiagnostics();
+        check(d.collecting&&d.sourceFrames>0,"screen GPU diagnostics scope follows accepted source frames");
+        check(d.uiClearCalls>0&&d.uiDrawCalls>0&&d.eyeClearCalls>0&&d.projectionCalls>0,"screen GPU diagnostics count each eligible command class");
+        check(d.uiClearSubmitted<=d.uiClearSelected&&d.uiDrawSubmitted<=d.uiDrawSelected&&d.eyeClearSubmitted<=d.eyeClearSelected&&d.projectionSubmitted<=d.projectionSelected,"screen GPU diagnostics distinguish selected and submitted samples");
+        ctx->Flush();for(int i=0;i<4;++i){g_gpu.uiClear.timer.poll(ctx.Get());g_gpu.uiDraw.timer.poll(ctx.Get());g_gpu.eyeClear.timer.poll(ctx.Get());g_gpu.projection.timer.poll(ctx.Get());}
+        d=screenMotionGpuDiagnostics();
+        check(d.uiClearReady+d.uiClearInvalid<=d.uiClearSubmitted&&d.uiDrawReady+d.uiDrawInvalid<=d.uiDrawSubmitted&&d.eyeClearReady+d.eyeClearInvalid<=d.eyeClearSubmitted&&d.projectionReady+d.projectionInvalid<=d.projectionSubmitted,"screen GPU diagnostics retire only submitted samples");
+        check(d.uiClearReady+d.uiDrawReady+d.eyeClearReady+d.projectionReady>0,"screen GPU diagnostics retire WARP timestamp samples without waiting");
     }
     // The game's first-person stencil is independent of surface distance.
     // Exercise both eyes, scenery at the same depth, the previous screen
@@ -165,7 +175,7 @@ int main(int argc,char** argv){
         ComPtr<ID3D11Texture2D> mt;ComPtr<ID3D11ShaderResourceView> mv;hr(dev->CreateTexture2D(&motionDesc,&mi,&mt));hr(dev->CreateShaderResourceView(mt.Get(),nullptr,&mv));
         testWeaponMotion=mv.Get();
         for(int pass=0;pass<4;++pass){
-            screenMotionFrameBoundary();source[275][0]+=.1f;sourceDraw();
+            screenMotionFrameBoundary(ctx.Get());source[275][0]+=.1f;sourceDraw();
             check(bool(g.stencilSrv),"stencil SRV created from source depth");
             ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_STENCIL,1,pass==2?4:20);
             g.weapon=pass!=1;
@@ -182,11 +192,11 @@ int main(int argc,char** argv){
             ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(11,1,&none);
         }
         // Keep default fixture path unchanged, including missing-stencil fallback.
-        testWeaponMotion=nullptr;screenMotionFrameBoundary();sourceDraw();ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_STENCIL,1,20);screenDraw(0);
+        testWeaponMotion=nullptr;screenMotionFrameBoundary(ctx.Get());sourceDraw();ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_STENCIL,1,20);screenDraw(0);
         auto rejected=read(dev.Get(),ctx.Get(),g.eyes[0].map.Get());for(UINT i=0;i<W*H;++i)check(rejected[i*4+3]!=1,"missing weapon motion rejects history instead of assuming fixed UV");
         ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(11,1,&none);
         model[9][3]=0;td.Format=DXGI_FORMAT_R32_TYPELESS;depth.Reset();ds.Reset();hr(dev->CreateTexture2D(&td,nullptr,&depth));dd.Format=DXGI_FORMAT_D32_FLOAT;hr(dev->CreateDepthStencilView(depth.Get(),&dd,&ds));
-        screenMotionFrameBoundary();sourceDraw();check(!g.stencilSrv,"new source without stencil drops old mask");screenDraw(0);
+        screenMotionFrameBoundary(ctx.Get());sourceDraw();check(!g.stencilSrv,"new source without stencil drops old mask");screenDraw(0);
     }
     // Optional recorded source/eye matrices and double-precision expected
     // projection. No proprietary assets are committed with the test.
@@ -212,7 +222,19 @@ int main(int argc,char** argv){
             check(a[3]==1 && std::fabs(a[0]-expected[0])<.005f && std::fabs(a[1]-expected[1])<.005f,"captured camera/depth/curved-screen correspondence");
         }
     }
+    // Exercise collector boundaries without rendering a synthetic full window.
+    // A source change closes immediately, the cutoff abandons unresolved work,
+    // and one category cannot admit a second interval in the same frame.
+    g_gpu.reset(ctx.Get());g_gpu.noteSource(depth.Get(),W,H,g.frame);const uint64_t diagnosticScope=g_gpu.scope;
+    g_gpu.noteSource(colour.Get(),W,H,g.frame);check(g_gpu.phase==GpuDiagnostics::Phase::Draining&&g_gpu.scope==diagnosticScope,"screen GPU diagnostics source change closes the current scope");
+    g_gpu.uiClear.submitted=1;g_gpu.drainFrames=kGpuDrainFrames-1;g_gpu.tick(ctx.Get(),g.frame);
+    check(g_gpu.phase==GpuDiagnostics::Phase::Idle&&!g_gpu.uiClear.submitted,"screen GPU diagnostics abandon unresolved samples at the drain cutoff");
+    g_gpu.start(depth.Get(),W,H,g.frame);const bool firstAdmission=g_gpu.uiClear.begin(ctx.Get(),1,g_gpu.scope,g.frame);if(firstAdmission)g_gpu.uiClear.timer.end(ctx.Get());
+    const bool secondAdmission=g_gpu.uiClear.begin(ctx.Get(),1,g_gpu.scope,g.frame);
+    check(firstAdmission&&!secondAdmission&&g_gpu.uiClear.selected==2&&g_gpu.uiClear.submitted==1&&g_gpu.uiClear.budgetSkipped==1,"screen GPU diagnostics enforce one category admission per frame");
+    g_gpu.reset(ctx.Get());
     ctx->ClearState();screenMotionShutdown();
+    {auto d=screenMotionGpuDiagnostics();check(!d.collecting&&!d.draining&&!d.sourceFrames&&!d.uiClearCalls&&!d.uiDrawCalls&&!d.eyeClearCalls&&!d.projectionCalls,"screen GPU diagnostics reset on shutdown");}
     testScreenConsumers(dev.Get(),ctx.Get());
     if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessages();++i){SIZE_T messageBytes=0;queue->GetMessage(i,nullptr,&messageBytes);std::vector<unsigned char> b(messageBytes);auto* m=reinterpret_cast<D3D11_MESSAGE*>(b.data());queue->GetMessage(i,m,&messageBytes);if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"D3D debug layer clean");}}
     std::printf("PASS: %u screen motion checks.\n",checks);
