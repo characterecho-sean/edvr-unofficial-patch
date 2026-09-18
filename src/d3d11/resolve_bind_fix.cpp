@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <string>
 
 #include <d3d11.h>
@@ -9,6 +10,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "binding_shadow.h"
 #include "exposure_fix.h"   // lookupShaderHash: the shared shader registry
 
 namespace edvr {
@@ -20,6 +22,13 @@ namespace {
 // the two modules stand alone: one is a probe somebody arms for an
 // evening, this is a fix that ships on.
 constexpr uint64_t kResolvePs = 0x7CECABDE34FFBE9EULL;
+
+enum class ShadowMatch : uint8_t { Unknown, No, Yes };
+
+constexpr ShadowMatch shadowMatch(bool hasShader, uint64_t hash) {
+    if (!hasShader || !hash) return ShadowMatch::Unknown;
+    return hash == kResolvePs ? ShadowMatch::Yes : ShadowMatch::No;
+}
 
 FaultBudget g_budget("resolveBind", 8);
 
@@ -88,12 +97,31 @@ bool resolveBindWants() { return g_on; }
 
 bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx) {
     if (!g_on || !ctx) return false;
+
+    // beginPanelOverride calls this only after rejecting foreign contexts, so
+    // these are the owner immediate context's bindings. The PS setter records
+    // the pointer and hash together. A nonzero hash with a live pointer is a
+    // complete answer and avoids PSGetShader's device lock and AddRef/Release
+    // on every eye draw.
+    //
+    // Null and hash zero remain UNKNOWN, not "not the resolve". ClearState and
+    // ExecuteCommandList without restore deliberately forget the shadow, and a
+    // shader may be bound before its registry entry exists. Both cases must use
+    // the real getter. A successful fallback lookup repairs this one slot so a
+    // command-list invalidation costs one getter rather than every later draw.
+    const ShadowMatch shadow =
+        shadowMatch(bindingGet(BindSlot::Ps) != nullptr,
+                    bindingShaderHash(BindSlot::Ps));
+    if (shadow != ShadowMatch::Unknown) return shadow == ShadowMatch::Yes;
+
     bool match = false;
     guardedBudget(g_budget, [&] {
         ID3D11PixelShader* ps = nullptr;
         ctx->PSGetShader(&ps, nullptr, nullptr);
         if (ps) {
-            match = lookupShaderHash(ps) == kResolvePs;
+            const uint64_t hash = lookupShaderHash(ps);
+            if (hash) bindingSetShader(BindSlot::Ps, ps, hash);
+            match = hash == kResolvePs;
             ps->Release();
         }
     });

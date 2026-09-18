@@ -23,8 +23,7 @@ void uiDeferredBeforeDispatch(ID3D11DeviceContext*);
 // last produced its source. `verdict` is the wrapper's opaque DrawVerdict
 // value; no rendering decision is made here.
 void uiDeferredTraceDrawEnter(ID3D11DeviceContext*, bool eyeSizedTarget,
-                              char kind, uint32_t count, uint32_t instances, uint32_t verdict,
-                              uint64_t originalVs, uint64_t originalPs);
+                              char kind, uint32_t count, uint32_t instances, uint32_t verdict);
 void uiDeferredTraceBeforeTone(ID3D11DeviceContext*);
 void uiDeferredTraceOriginalIssued();
 // Captures supported UI for native replay, or mirrors an interleaved world

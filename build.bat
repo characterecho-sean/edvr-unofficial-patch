@@ -1164,6 +1164,22 @@ python "tools\terrain_motion.py" --self-test || exit /b 1
 python "tools\terrain_motion.py" "%OBJ%\terrainmotion\eye_fixture_Terrain.bin" --verify-fixture || exit /b 1
 exit /b 0
 
+:rig_resolve_bind_test
+echo [edvr] === resolve bind shadow regression ===
+if not exist "%OBJ%\resolvebind" mkdir "%OBJ%\resolvebind"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\resolvebind\\" /Fe"%OBJ%\resolvebind\resolve_bind_test.exe" ^
+    "tools\resolve_bind_test\resolve_bind_test.cpp" ^
+    "src\d3d11\resolve_bind_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: resolve bind test build failed & exit /b 1 )
+"%OBJ%\resolvebind\resolve_bind_test.exe" || exit /b 1
+exit /b 0
+
 :rig_eye_draw_snapshot
 echo [edvr] === eye draw snapshot regression ===
 if not exist "%OBJ%\drawsnapshot" mkdir "%OBJ%\drawsnapshot"

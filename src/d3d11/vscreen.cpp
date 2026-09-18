@@ -1714,7 +1714,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // for anything else. One compare per draw once the answer is known, and
     // it changes no binding of the game's, so everything below composes
     // with it.
-    foveationOnDraw(self, s->rtv0Eye, bindingGet(BindSlot::Rtv0), rtvGen, kind, count, instances);
+    if (foveationWantsDraws()) {
+        foveationOnDraw(self, s->rtv0Eye, bindingGet(BindSlot::Rtv0), rtvGen,
+                         kind, count, instances);
+    }
     // The intro probe, ABOVE the eye gate and deliberately. Its subject is the
     // startup sequence, and for the whole of the sequence's first phase there
     // is no eye texture to be on the right side of a gate about: one eye's
@@ -3295,8 +3298,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         }
     };
     if(self==g_state->ownerCtx){
-        uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,static_cast<uint32_t>(v),
-            bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
+        uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,
+                                 static_cast<uint32_t>(v));
         uiDeferredBeforeDraw(self,kind,count,instances,args.start,args.base,args.startInstance,static_cast<uint32_t>(v));
     }
     struct EffectCaptureScope {

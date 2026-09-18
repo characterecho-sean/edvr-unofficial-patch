@@ -55,7 +55,9 @@ void resolveBindConfigure(Config& cfg);
 bool resolveBindWants();
 
 // True when this eye draw is the lighting resolve (matched by PIXEL shader
-// content hash, the same key resolve_probe matches on).
+// content hash, the same key resolve_probe matches on). Uses the owner
+// context's binding shadow when its pointer and hash are both known; otherwise
+// reads the real context and repairs that shadow slot when possible.
 bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx);
 
 // Around the matched draw: cache the vertex buffer if one is bound; lend

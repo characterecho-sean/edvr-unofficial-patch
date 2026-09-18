@@ -364,7 +364,7 @@ void uiDeferredConfigure(Config& cfg) {
     writerShaderDir=cfg.logDir()+L"\\shaders";
 }
 void uiDeferredTraceDrawEnter(ID3D11DeviceContext* ctx,bool eyeSizedTarget,char kind,uint32_t count,uint32_t instances,
-    uint32_t verdict,uint64_t originalVs,uint64_t originalPs) {
+    uint32_t verdict) {
     writerTracePending=-1;
     if(!ctx || inside || (!enabled && !diagnosticWindow()))return;
     const uint32_t ordinal=++writerTraceOrdinal;
@@ -395,7 +395,11 @@ void uiDeferredTraceDrawEnter(ID3D11DeviceContext* ctx,bool eyeSizedTarget,char 
     if(!writerTargetCache.candidate || !writerTargetCache.resource)return;
     const size_t slot=writerTraceNext++%writerTrace.size();auto& w=writerTrace[slot];w=WriterTrace{};
     w.target=writerTargetCache.resource;w.serial=++writerTraceSerial;w.frame=generation;w.ordinal=ordinal;
-    w.entryVs=originalVs;w.entryPs=originalPs;w.kind=kind;w.count=count;w.instances=instances;w.verdict=verdict;
+    // Read the shadow only after this draw has qualified for the rolling trace.
+    // In particular, AA-off and non-candidate draws still clear pending state and
+    // retain ordinal semantics above without paying two hot-path hash lookups.
+    w.entryVs=bindingShaderHash(BindSlot::Vs);w.entryPs=bindingShaderHash(BindSlot::Ps);
+    w.kind=kind;w.count=count;w.instances=instances;w.verdict=verdict;
     actualShaderHashes(ctx,w,false);writerTracePending=static_cast<int>(slot);
 }
 void uiDeferredTraceBeforeTone(ID3D11DeviceContext* ctx) {

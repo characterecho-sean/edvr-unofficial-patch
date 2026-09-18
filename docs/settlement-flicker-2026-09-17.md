@@ -43,13 +43,12 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: reduce shared per-draw bookkeeping for the DLSS goal; lazy UI trace
-  hashes and the existing foveation gate can help when their work is unused.
-  The inactive-motion gate benefits AA off, not active DLSS motion work.
-  DLSS-on benefit still needs measurement. Keep transition-flash processing
-  intact. Decoder fixes pass both saved smoke traces and flight replay; no
-  additional flight was needed. Frontier remains on 2d98775 with its INI
-  preserved. Preserve motion history and keep foveated-DLSS paused.
+- Next: the shared lazy UI trace hashes, known-binding scanner-body fast path,
+  and inactive-foveation gate have passed the full build and source review.
+  Rebuild the committed version and install to Frontier for a DLSS-on landed
+  capture. The AA-off-only motion gate is outside this first pass. DLSS benefit
+  needs measurement; keep active motion and transition-flash processing intact.
+  Preserve motion history and keep foveated-DLSS paused.
 
 ## Journal
 
@@ -2497,3 +2496,62 @@ still needed to target active motion work toward the original settlement goal.
 Final module-path validation also separates the post-Present D3D11 sample
 group: 40 belong to EDVR and 18 to Windows, correcting an initial basename-only
 grouping of 58. Full-frame module totals and scheduler timings are unchanged.
+
+### 2026-09-18 -- shared draw-hook fast paths for the DLSS follow-up
+
+The user approved the shared-path pass and asked about optimizing Elite's own
+CPU cost in settlements. The measured hypothesis for this build is narrower:
+draws rejected by the UI writer's existing candidate checks do not need their
+shader hashes, and fully inactive foveation does not need its draw callback.
+The prior caller sampled-PC profile identifies bindingShaderHash and
+foveationOnDraw among the repeated hook costs; source control flow confirms
+which results are discarded. These checks are shared by AA-off and DLSS modes.
+
+Move UI entry hashes behind the existing active and target checks while keeping
+the unconditional pending-state reset and existing ordinal semantics. Gate
+foveationOnDraw with foveationWantsDraws, which also retains stale
+bound/unknown state until cleanup. Active DLSS motion work, transition-flash
+logic, original draw submission and Map timing remain outside this pass.
+
+Further stack attribution finds an EDVR-caused driver cost in the same saved
+cohort: system D3D11 PCs at +0x47ab9 (376 samples) and +0x201dd (78) sit under
+resolveBindOnEyeDraw's PSGetShader path. This is the scanner-body fix
+(`fix.scanner_body`), whose healthy-case classifier runs on every eye draw. It
+queries, hashes and releases the current PS before any healing decision. The
+existing owner-context binding shadow may supply that identity without entering
+the driver, provided shader substitutions and state invalidation are respected
+and unknown identity keeps the guarded getter fallback. This is a shared-path
+candidate with direct sampled evidence; it does not suppress any Elite draw or
+change the scanner-body repair.
+
+Optimizing Elite itself remains possible only at the layer where work occurs.
+The proxy can reduce its own overhead and driver calls it introduces. Avoiding
+genuinely redundant game submissions could reduce later driver cost if their
+side effects are proven absent. It cannot recover CPU work already spent on
+scene traversal, visibility decisions, draw preparation or task scheduling.
+Earlier engine interception would require a verified version-specific call site
+plus reliable object and visibility semantics; the current censuses and sampled
+addresses do not supply those guarantees. Large zero-sample draw counts are not
+evidence that their upstream CPU work can safely be omitted.
+
+Before installation, Frontier's nvngx_dlss.dll reports Windows file/product
+version `310,7,0,0` (58,977,904 bytes). The live INI has temporal_aa off,
+scanner_body on, and foveation off. Installation preserves that file; the next
+capture will select DLSS from the F8 menu in the same landed cockpit view.
+
+Implemented all three shared paths. Scanner-body recognition now uses a known
+owner-context PS pointer/hash directly; unknown identity retains the guarded
+real getter, and a successful lookup repairs that one shadow slot. The UI
+fixture covers disabled, non-eye and eye-sized depth-target rejection without
+hash reads, pending reset, ordinal preservation, and retained candidate hashes.
+A new WARP resolve fixture counts real PSGetShader calls and verifies known
+match/nonmatch, unknown fallback and repair, invalidation, null state, and
+exact vertex-buffer lend/restoration. Independent source and fixture review
+found no blocking issue.
+
+The absolute symbol-enabled build passed all 63 pooled rigs, three quiet rigs,
+and the 249-key config contract. Both new/extended fixtures ran successfully;
+the complete output is build/shared-draw-fastpaths-validation.log. The
+committed version still needs its final rebuild, paired Frontier install
+verification, and a fresh bounded DLSS-on CPU capture before claiming an
+in-game improvement.
