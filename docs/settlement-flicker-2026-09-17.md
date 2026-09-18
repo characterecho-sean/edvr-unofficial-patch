@@ -45,10 +45,13 @@
   and independently moving ships still need separate validation.
 - Next: the shared lazy UI trace hashes, known-binding scanner-body fast path,
   and inactive-foveation gate have passed the full build and source review.
-  Rebuild the committed version and install to Frontier for a DLSS-on landed
-  capture. The AA-off-only motion gate is outside this first pass. DLSS benefit
-  needs measurement; keep active motion and transition-flash processing intact.
-  Preserve motion history and keep foveated-DLSS paused.
+  Frontier now has verified c1dbb76. A smoke-validated CPU collector is waiting
+  for a DLSS-on landed capture (armed 2026-09-18 19:59 UTC, 30-minute launch
+  window, five-minute maximum recording). Select DLSS in F8, hold the same
+  cockpit view for 60-90 seconds, then quit normally. DLSS benefit still needs
+  measurement. Keep active motion, transition-flash and history processing
+  intact, and foveated-DLSS paused; the AA-off-only motion gate is outside this
+  pass.
 
 ## Journal
 
@@ -2551,7 +2554,17 @@ found no blocking issue.
 
 The absolute symbol-enabled build passed all 63 pooled rigs, three quiet rigs,
 and the 249-key config contract. Both new/extended fixtures ran successfully;
-the complete output is build/shared-draw-fastpaths-validation.log. The
-committed version still needs its final rebuild, paired Frontier install
-verification, and a fresh bounded DLSS-on CPU capture before claiming an
-in-game improvement.
+the complete output is build/shared-draw-fastpaths-validation.log. The clean
+committed rebuild c1dbb76 also passed every gate, with its output in
+build/shared-draw-fastpaths-c1dbb76.log. The sanctioned installer dry-run,
+install and verify-only all passed for Frontier; installed native version is
+v0.17.0-29-gc1dbb76. Live settings and the DLSS DLL were preserved.
+
+The elevated collector PID 6132 passed its real ETW smoke validation and
+reached waiting_for_game at 19:59:50 UTC. It expects exactly c1dbb76, waits 30
+minutes for launch, then records until normal game exit or five minutes.
+Output: build/cpu-profile-frontier-c1dbb76-dlss. Exact DLLs and PDBs are
+archived there under symbols-c1dbb76 with verified SHA-256 hashes. Select DLSS
+through F8 and hold the same landed cockpit view for 60-90 seconds before
+quitting. A fresh DLSS-on capture is still required before claiming an in-game
+gain.
