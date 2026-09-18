@@ -10,7 +10,7 @@ still reads as if the rigs had run one after another.
 
   python tools\\run_jobs.py --script build.bat [--jobs N] [--mp N]
                            [--exe-dir build] [--serial a,b,c]... [--quiet d,e]
-                           [--times build\\rig_times.json] [--dry-run]
+                           [--times build\\rig_times.json] [--dry-run] [--keep-going]
   python tools\\run_jobs.py --sweep-exe-dir build [--dry-run]
   python tools\\run_jobs.py --self-test
 
@@ -79,7 +79,10 @@ from how many sources its subroutine compiles.
 
 A failing rig stops new launches. The rigs already running finish and print,
 the failed rig's output is printed last so the tail of the build log names the
-failure, and the exit code is 1. --dry-run prints the plan and writes nothing.
+failure, and the exit code is 1. --keep-going instead runs every rig
+regardless of failures -- the quiet rigs too, even if a pooled one failed --
+and ends with one line naming every rig that failed, in the order they
+failed. --dry-run prints the plan and writes nothing.
 """
 import argparse
 import io
@@ -385,13 +388,17 @@ def launchable(pending, busy):
     return None
 
 
-def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, labels=()):
+def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, labels=(),
+              keep_going=False):
     """Start spawn(job) for the jobs in order, at most jobs at a time and
     never two held-back jobs of one serial group. A serial rig's run step is
     queued, at the front, the moment its build step succeeds. Each result is
     printed as it completes, except failures, which are held and printed
     after the group drains. Given exe_dir, each job's own job_exe_dirs are
     cleaned up (cleanup_job_exe_dirs) the moment it finishes, pass or fail.
+    Without keep_going, the first failure stops new jobs from launching and
+    the jobs already running are left to finish; with it, every job in order
+    launches regardless of earlier failures.
     Returns (results, failures) where each entry is (job, code, seconds,
     output, kept) in completion order; kept is empty except for a failed
     job with a directory of its own."""
@@ -405,7 +412,7 @@ def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, label
 
     pending, running, busy, results, failures = list(order), 0, set(), [], []
     while pending or running:
-        while pending and running < jobs and not failures:
+        while pending and running < jobs and (keep_going or not failures):
             job = launchable(pending, busy)
             if job is None:
                 break
@@ -429,8 +436,12 @@ def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, label
         failures.append((job, code, seconds, output, kept))
         if len(failures) == 1:
             note = "" if not kept else " (kept %s)" % ", ".join(kept)
-            emit(out, "[edvr] %s failed (exit code %d)%s; no more rigs start, %d still running\n"
-                 % (job.title, code, note, running))
+            if keep_going:
+                emit(out, "[edvr] %s failed (exit code %d)%s; continuing (--keep-going), "
+                          "%d still running\n" % (job.title, code, note, running))
+            else:
+                emit(out, "[edvr] %s failed (exit code %d)%s; no more rigs start, %d still running\n"
+                     % (job.title, code, note, running))
             out.flush()
     for entry in failures:
         report(out, *entry)
@@ -482,7 +493,7 @@ def describe(pool, quiet, times, serial=()):
 
 
 def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=time.monotonic,
-        serial=(), exe_dir=None):
+        serial=(), exe_dir=None, keep_going=False):
     text = script.read_text(encoding="utf-8", errors="replace")
     rigs = parse_rigs(text)
     labels = tuple(rig.label for rig in rigs)
@@ -507,14 +518,16 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
         # A quiet rig has the machine to itself, so its compiles may use every core.
         quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"), exe_dir)
     started = clock()
-    results, failures = run_group(pool, jobs, spawn, out, clock, exe_dir=exe_dir, labels=labels)
+    results, failures = run_group(pool, jobs, spawn, out, clock, exe_dir=exe_dir, labels=labels,
+                                   keep_going=keep_going)
     pool_seconds = clock() - started
     summed = sum(seconds for _, _, seconds, *_ in results)
     quiet_results, quiet_failures, quiet_seconds = [], [], 0.0
-    if not failures:
+    if not failures or keep_going:
         started = clock()
         quiet_results, quiet_failures = run_group(later, 1, quiet_spawn, out, clock,
-                                                   exe_dir=exe_dir, labels=labels)
+                                                   exe_dir=exe_dir, labels=labels,
+                                                   keep_going=keep_going)
         quiet_seconds = clock() - started
     results += quiet_results
     failures += quiet_failures
@@ -527,6 +540,10 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
         job, code = failures[0][0], failures[0][1]
         emit(out, "[edvr] ERROR: %s failed with exit code %d (%d of %d jobs ran)\n"
              % (job.title, code, len(results), len(pool) + len(later)))
+        if keep_going:
+            failed_labels = [entry[0].rig.label for entry in failures]
+            emit(out, "[edvr] --keep-going: %d rig(s) failed: %s\n"
+                 % (len(failed_labels), ", ".join(failed_labels)))
         out.flush()
         return 1
     emit(out, "[edvr] the pool of %d jobs took %.1f s (%.1f s summed, %d at a time); "
@@ -801,6 +818,42 @@ def self_test():
         check(code == 1 and "run" not in steps and b"ERROR: beta (build) failed" in out.getvalue(),
               "a failed build step never gets its run step: %r %r" % (steps, out.getvalue()))
 
+    # --keep-going: a failure must not stop the rest of the pool from
+    # starting, every rig must still run, and the run ends with one line
+    # naming every rig that failed, in the order they failed.
+    with tempfile.TemporaryDirectory() as scratch:
+        script = Path(scratch) / "keep_going.bat"
+        script.write_text("""@echo off
+exit /b 0
+
+:rig_first
+exit /b 1
+
+:rig_second
+exit /b 0
+
+:rig_third
+exit /b 1
+""", encoding="utf-8")
+        ran = []
+
+        def kg_spawn(job):
+            ran.append(job.rig.label)
+            return (1, b"boom") if job.rig.label in ("first", "third") else (0, b"ok")
+
+        out = io.BytesIO()
+        code = run(script, 1, 2, [], None, False, out, spawn=kg_spawn)
+        check(code == 1 and ran == ["first"],
+              "without --keep-going, a failure stops the rest of the pool from starting: %r" % ran)
+
+        ran.clear()
+        out = io.BytesIO()
+        code = run(script, 1, 2, [], None, False, out, spawn=kg_spawn, keep_going=True)
+        check(code == 1 and ran == ["first", "second", "third"],
+              "--keep-going runs every rig even after one fails: %r" % ran)
+        check(b"[edvr] --keep-going: 2 rig(s) failed: first, third" in out.getvalue(),
+              "the summary line names every failed rig in the order they failed: %r" % out.getvalue())
+
     # owns_exe_dir_entry / job_exe_dirs / cleanup_job_exe_dirs: the
     # "<label>-" / "<label>_" convention documented for a rig that stages a
     # private directory directly under --exe-dir. No shipped rig does this
@@ -914,6 +967,9 @@ def main(argv=None):
     parser.add_argument("--times", type=Path, default=None, help="where rig durations are recorded")
     parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing "
                                                                 "(or, with --sweep-exe-dir, remove nothing)")
+    parser.add_argument("--keep-going", action="store_true",
+                        help="run every rig even after one fails, instead of stopping new "
+                             "launches at the first failure; report every failed rig at the end")
     parser.add_argument("--sweep-exe-dir", type=Path, default=None, metavar="DIR",
                         help="remove stale per-instance exe directories left under DIR by any "
                              "earlier build (see stale_exe_dirs), then exit; independent of "
@@ -943,7 +999,7 @@ def main(argv=None):
         exe_dir = os.path.abspath(str(args.exe_dir))
     try:
         return run(args.script.resolve(), args.jobs, mp, quiet, args.times, args.dry_run,
-                   sys.stdout.buffer, serial=serial, exe_dir=exe_dir)
+                   sys.stdout.buffer, serial=serial, exe_dir=exe_dir, keep_going=args.keep_going)
     except ValueError as error:
         print("[edvr] ERROR: %s" % error)
         return 1

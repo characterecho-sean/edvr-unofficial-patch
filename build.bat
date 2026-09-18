@@ -11,7 +11,7 @@ REM
 REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
 REM
-REM  Usage:  build.bat [--clean] [--jobs N] [--installer-only]
+REM  Usage:  build.bat [--clean] [--jobs N] [--installer-only] [--keep-going]
 REM
 REM  Once the DLLs are built, the test rigs run concurrently, --jobs at a time
 REM  (default: one per logical core), through tools\run_jobs.py. Each rig is a
@@ -26,6 +26,14 @@ set "BUILD=%ROOT%\build"
 set "GEN=%BUILD%\gen"
 set "OBJ=%BUILD%\obj"
 
+REM Captured before any argument parsing: cmd's SHIFT moves %0 along with %1
+REM onward (see the --installer-only note below, confirmed against a
+REM throwaway batch file), so a build that reaches the rig pool after even
+REM one recognised flag would otherwise hand run_jobs.py a --script that is
+REM not this file. SELF is what "%~f0" said before the first shift, and
+REM stays valid for the rest of the run.
+set "SELF=%~f0"
+
 REM The literal ")" in "Program Files (x86)" would close a parenthesised block.
 set "PROGFILES86=%ProgramFiles(x86)%"
 
@@ -36,6 +44,7 @@ if /I "%~1"=="--clean" goto arg_clean
 if /I "%~1"=="--jobs" goto arg_jobs
 if /I "%~1"=="--rig" goto arg_rig
 if /I "%~1"=="--installer-only" goto arg_installer_only
+if /I "%~1"=="--keep-going" goto arg_keep_going
 echo [edvr] unknown argument: %~1
 exit /b 1
 :arg_clean
@@ -54,6 +63,10 @@ shift
 goto parse_args
 :arg_installer_only
 set "INSTALLER_ONLY=1"
+shift
+goto parse_args
+:arg_keep_going
+set "EDVR_KEEP_GOING=1"
 shift
 goto parse_args
 :args_done
@@ -670,8 +683,9 @@ REM each is split (see the rig area below): its compiles run in the pool like
 REM any other rig's and only its runs wait their turn.
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
+if defined EDVR_KEEP_GOING set "RUN_JOBS_ARGS=%RUN_JOBS_ARGS% --keep-going"
 python tools\run_jobs.py --self-test || exit /b 1
-python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
+python tools\run_jobs.py --script "%SELF%" --times "%BUILD%\rig_times.json" ^
     --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,vtable_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 

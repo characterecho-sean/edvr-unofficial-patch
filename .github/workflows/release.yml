@@ -129,9 +129,10 @@ jobs:
           python tools\fetch_ngx.py
           if ($LASTEXITCODE -ne 0) { throw "fetch_ngx.py failed" }
 
+      # --keep-going: the pool reports every failing rig rather than the first, so one run shows the whole picture; the exit status is unchanged.
       - name: Build
         shell: cmd
-        run: call "%GITHUB_WORKSPACE%\build.bat" || exit /b 1
+        run: call "%GITHUB_WORKSPACE%\build.bat" --keep-going || exit /b 1
 
       - name: Check build outputs
         run: |
