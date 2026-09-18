@@ -87,6 +87,7 @@
 #include "witchstar_fix.h"
 #include "graphics_bridge.h"
 #include "game_query_probe.h"
+#include "original_draw_probe.h"
 #include <intrin.h>
 
 namespace edvr {
@@ -2859,6 +2860,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     }
     const bool privateExecution = graphicsBridgeConsumePermit(self, list, restoreContextState);
     if (!privateExecution) {
+        originalDrawProbeExecuteCommandListNote(self);
         uiSeparationUnknownWrite();
         uiDeferredUnknownWrite(self);
         graphicsBridgeNoteUnknownExecution();
@@ -3157,11 +3159,108 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 // the real draw, the matching end. One function so the fifth verdict cannot
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
 // was pasted four times and this is the shape that stops the pattern.
+struct OriginalDrawMetadata {
+    OriginalDrawKind kind = OriginalDrawKind::Draw;
+    uint32_t count = kOriginalDrawProbeUnknown;
+    uint32_t instances = kOriginalDrawProbeUnknown;
+    uint64_t vsHash = 0;
+    uint64_t psHash = 0;
+    uint32_t verdict = 0;
+    bool modified = false;
+};
 thread_local bool t_colourOriginal = false;
+thread_local const OriginalDrawMetadata* t_originalDrawMetadata = nullptr;
+
+struct OriginalDrawScope {
+    bool previousColour = t_colourOriginal;
+    const OriginalDrawMetadata* previousMetadata = t_originalDrawMetadata;
+    explicit OriginalDrawScope(const OriginalDrawMetadata* metadata) {
+        t_colourOriginal = true;
+        t_originalDrawMetadata = metadata;
+    }
+    ~OriginalDrawScope() {
+        t_originalDrawMetadata = previousMetadata;
+        t_colourOriginal = previousColour;
+    }
+};
+
+OriginalDrawKind originalDrawKind(char kind) {
+    switch (kind) {
+    case 'D': return OriginalDrawKind::Draw;
+    case 'I': return OriginalDrawKind::DrawIndexed;
+    case 'N': return OriginalDrawKind::DrawInstanced;
+    case 'X': return OriginalDrawKind::DrawIndexedInstanced;
+    default: return OriginalDrawKind::Draw;
+    }
+}
+
+OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
+                                                bool uiSeparated) {
+    if (!t_colourOriginal || !t_originalDrawMetadata || self != g_state->ownerCtx ||
+        !originalDrawProbeSelect(self)) {
+        return {};
+    }
+    const OriginalDrawMetadata& metadata = *t_originalDrawMetadata;
+    OriginalDrawProbeInput input{};
+    input.kind = metadata.kind;
+    input.count = metadata.count;
+    input.instances = metadata.instances;
+    input.originalVsHash = metadata.vsHash;
+    input.originalPsHash = metadata.psHash;
+    input.verdict = metadata.verdict;
+    input.modified = uiSeparated || metadata.modified ||
+        metadata.verdict != static_cast<uint32_t>(DrawVerdict::kNone);
+
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    self->OMGetRenderTargets(1, &rtv, &dsv);
+    ResourceInfo target{};
+    const bool resolved = bindingResolve(rtv, &target) && target.isTexture2D;
+    // Classification must not feed the production eye-size learner: an EDVR
+    // replacement target is the actual timed target, but it is not a game
+    // scene candidate. Use only sizes the normal path has already settled.
+    input.eyeSized = resolved && !fssResIsInflated(target.resource) &&
+        vScreenIsEyeSized(target.a, target.b);
+    const uint32_t panelW = g_state->panelW ? g_state->panelW : 1920;
+    const uint32_t panelH = g_state->panelH ? g_state->panelH : 1080;
+    const bool panelSized = resolved && target.a == panelW && target.b == panelH;
+    const bool sceneSized = resolved && g_state->sceneW && g_state->sceneH &&
+        target.a == g_state->sceneW && target.b == g_state->sceneH;
+    input.sourceSized = panelSized || sceneSized;
+    if (input.eyeSized) input.pass = OriginalDrawPass::EyeColor;
+    else if (input.sourceSized) input.pass = OriginalDrawPass::SourceColor;
+    else if (resolved) input.pass = OriginalDrawPass::OtherColor;
+    else if (!rtv && dsv) input.pass = OriginalDrawPass::DepthOnly;
+    else if (!rtv) input.pass = OriginalDrawPass::Unbound;
+
+    if (input.eyeSized && dsv && !input.modified) {
+        int eye = -1;
+        int targetIndex = -1;
+        if (depthProbeSceneEyeOf(dsv, &eye, &targetIndex) && eye >= 0 && eye <= 1) {
+            input.eye = static_cast<int8_t>(eye);
+        }
+    }
+    if (dsv) dsv->Release();
+    if (rtv) rtv->Release();
+    const GameQueryProbe::Guard guard = g_state->gameQueries.guard();
+    input.gameCountingActive = guard.counting;
+    input.gameDisjointActive = guard.disjoint;
+    input.gameQueryOverflow = guard.overflow;
+    return originalDrawProbeBegin(self, input);
+}
+
+void originalDrawNativeEnd(ID3D11DeviceContext* self,
+                           OriginalDrawProbeTicket ticket) {
+    if (ticket) originalDrawProbeEnd(self, ticket, true);
+}
 
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
+    OriginalDrawMetadata originalMetadata{
+        originalDrawKind(kind), count, instances,
+        bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps),
+        static_cast<uint32_t>(v), false};
     const auto pureDraw=[&] {
         switch(kind) {
         case 'D':g_state->realDraw(self,count,UINT(args.base));break;
@@ -3340,8 +3439,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         g_state->gameQueries.countingActive();
     const bool deferred=self==g_state->ownerCtx && uiDeferredBegin(self,uiDepthDeferredEye(),kind,count,instances,args.start,args.base,args.startInstance,
         static_cast<uint32_t>(v),glassQueryActive);
+    originalMetadata.modified = terrainOriginal || deferred;
     bool originalIssued=false;
-    { struct OriginalDrawScope { bool previous=t_colourOriginal; OriginalDrawScope(){t_colourOriginal=true;} ~OriginalDrawScope(){t_colourOriginal=previous;} } original;
+    { OriginalDrawScope original(&originalMetadata);
       originalIssued=draw(); }
     if(originalIssued && self==g_state->ownerCtx)uiDeferredTraceOriginalIssued();
     if(originalIssued && self==g_state->ownerCtx && uiDeferredWorldReplayBegin(self))pureDraw();
@@ -3475,7 +3575,8 @@ void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
     if (drawCensusArmed()) {
         drawCensusQuery('B', async, foreignContext(self));
     }
-    if(!foreignContext(self))g_state->gameQueries.bracketBegin(async);
+    if(!foreignContext(self) && !originalDrawProbeInternalQuery())
+        g_state->gameQueries.bracketBegin(async);
     g_state->realBegin(self, async);
 }
 
@@ -3487,7 +3588,10 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
         drawCensusQuery('E', async, foreignContext(self));
     }
     g_state->realEnd(self, async);
-    if(!foreignContext(self)){g_state->gameQueries.bracketEnd(async);g_state->gameQueries.noteEnd(async,_ReturnAddress());}
+    if(!foreignContext(self) && !originalDrawProbeInternalQuery()) {
+        g_state->gameQueries.bracketEnd(async);
+        g_state->gameQueries.noteEnd(async,_ReturnAddress());
+    }
 }
 
 HRESULT STDMETHODCALLTYPE hookedGetData(ID3D11DeviceContext* self,ID3D11Asynchronous* query,
@@ -3514,7 +3618,14 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
     }
+    const OriginalDrawMetadata metadata{
+        OriginalDrawKind::DrawIndexedInstancedIndirect, kOriginalDrawProbeUnknown,
+        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
+        bindingShaderHash(BindSlot::Ps), 0};
+    OriginalDrawScope original(&metadata);
+    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
+    originalDrawNativeEnd(self, sample);
 }
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
@@ -3531,7 +3642,14 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
     }
+    const OriginalDrawMetadata metadata{
+        OriginalDrawKind::DrawInstancedIndirect, kOriginalDrawProbeUnknown,
+        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
+        bindingShaderHash(BindSlot::Ps), 0};
+    OriginalDrawScope original(&metadata);
+    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawInstancedIndirect(self, args, off);
+    originalDrawNativeEnd(self, sample);
 }
 
 void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
@@ -3733,7 +3851,9 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     forwardWithVerdict(self, v, 'D', count, 1, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDraw(self, count, start);
+        originalDrawNativeEnd(self, sample);
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
         return true;
@@ -3743,7 +3863,14 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     gpuFrameCommand(self);
     if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+    const OriginalDrawMetadata metadata{
+        OriginalDrawKind::DrawAuto, kOriginalDrawProbeUnknown,
+        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
+        bindingShaderHash(BindSlot::Ps), 0};
+    OriginalDrawScope original(&metadata);
+    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawAuto(self);
+    originalDrawNativeEnd(self, sample);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
@@ -3761,7 +3888,9 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     forwardWithVerdict(self, v, 'I', count, 1, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        originalDrawNativeEnd(self, sample);
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
         return true;
@@ -3797,8 +3926,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     forwardWithVerdict(self, v, 'N', perInstance, drawn, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                    startInstance);
+        originalDrawNativeEnd(self, sample);
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
         return true;
@@ -3837,8 +3968,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
+        originalDrawNativeEnd(self, sample);
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs)))
@@ -4377,7 +4510,9 @@ void vScreenRefreshConfig() {
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
     const int64_t reloadT0 = qpcNow();
     if (!cfg.reloadIfChanged()) return;
-    gpuFrameConfigure(cfg.getBool("advanced.app_gpu_timing", true));
+    const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
+    gpuFrameConfigure(gpuTimingEnabled);
+    originalDrawProbeConfigure(gpuTimingEnabled);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
     // on the render thread -- is an EDVR event with a duration, for the
     // monitor's drop attribution.
@@ -4590,6 +4725,13 @@ void vScreenFrameBoundary() {
     // here, where the copy has certainly executed and mapping cannot stall
     // the render thread mid-frame.
     if (g_state && g_state->ownerCtx) {
+        OriginalDrawProbeFrameInfo originalFrame{};
+        originalFrame.sourceFrame = g_state->frameNo;
+        originalFrame.width = g_state->sceneW ? g_state->sceneW
+                                              : (g_state->panelW ? g_state->panelW : 1920);
+        originalFrame.height = g_state->sceneH ? g_state->sceneH
+                                               : (g_state->panelH ? g_state->panelH : 1080);
+        originalDrawProbeFrame(g_state->ownerCtx, originalFrame);
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
         objectProbeFrameBoundary(g_state->ownerCtx);
@@ -5740,6 +5882,11 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         return;
     }
 
+    const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
+    originalDrawProbeBind(device, ctx,
+        OriginalDrawProbeQueryOps{s.realBegin, s.realEnd, s.realGetData});
+    originalDrawProbeConfigure(gpuTimingEnabled);
+
     if (!executeHookInstalled || !graphicsBridgeRegisterOwner(device, ctx)) {
         Log::get().note("vScreen: private graphics bridge unavailable (owner already registered or identity check failed)");
     }
@@ -5943,6 +6090,7 @@ void shutdownVScreenFixes() {
     temporalPassShutdown();
     depthProbeShutdown();
     sharpenPassShutdown();
+    originalDrawProbeShutdown(g_state->ownerCtx);
     g_state->hook.uninstall();
 }
 

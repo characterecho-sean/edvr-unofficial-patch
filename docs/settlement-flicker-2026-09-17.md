@@ -2,25 +2,27 @@
 
 ## Status
 
-- State: installed Frontier build 89b9055 remains unchanged. Local removal
-  comparisons put the on-foot producer increment at 0.350-0.360 ms and
-  0.221-0.228 ms in two captured subsets. Motion raster with precomputed data
-  adds only about 0.009 ms. Maps and regenerated outputs match exactly. This
-  favors avoiding data production/dependencies over tuning raster arithmetic;
-  it does not yet prove a safe skip or a full-frame saving. See the final
-  journal entry for scope, stage variability, visibility counts and gates.
-- Environment: Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and
-  active XR output 3072x3264 per eye, trims off. Dimensions are unchanged
-  between the landed settlement and on-foot intervals in this flight. RTX 5090;
-  the flight does not log the DLSS DLL version. Capture stays capped at 512
-  records per eye with a 1 MiB ID snapshot allocation. On-foot source is
-  5120x2880; the separate weapon-motion table holds 64 records / 32 MiB.
-- Timing: final interval 07:10:48.160-07:14:18.160 local, 2026-09-18. Stable
-  landed CPU p50 11.864-12.203 ms, GPU 15.643-16.029 ms; on-foot CPU
-  7.734-7.787 ms, GPU 12.415-12.547 ms. The 90 Hz budget is 11.111 ms.
-  Different scenes/pacing and separate flights prevent causal attribution of
-  the whole-frame improvement to the small ownership change.
-- Work: landed admits about 250 rigid draws / 1024 instances per frame; on foot
+- State: original-game-draw diagnostic implemented; full build and query-safety
+  gates passed. Live Frontier measurement is next. It observes GPU time,
+  depth/stencil-passing samples and pipeline activity by pass/eye; it does not
+  suppress any draw. Prior local comparisons put fresh motion-input work at
+  about 0.21-0.35 ms per subset; they prove neither poor game culling nor a
+  safe skip. See the final two journal entries.
+- Environment: Quest 3 / VirtualDesktopXR / 90 Hz, latest run AA off; prior
+  DLSS K run used the same input 2481x2121 and active XR output 3072x3264 per
+  eye, trims off. Dimensions are unchanged between landed and on-foot intervals
+  in the prior DLSS flight. RTX 5090; the flight does not log the DLSS DLL
+  version. Capture stays capped at 512 records per eye with a 1 MiB ID snapshot
+  allocation. On-foot source is 5120x2880; the separate weapon-motion table
+  holds 64 records / 32 MiB.
+- Timing: latest AA-off landed window has CPU p50/p95 10.199/11.830 ms and GPU
+  10.875/12.447 ms; capture stalls are excluded. XR copy/compose is only about
+  0.081 ms GPU combined. Prior DLSS run had landed GPU p50 15.643-16.029 ms and
+  on-foot 12.415-12.547 ms. These are not controlled A/Bs; 90 Hz allows 11.111
+  ms.
+- Work: latest AA-off run still samples 2.567 ms/frame mean draw-hook CPU and
+  0.193-0.318 ms/frame Map tracking, with particle replacements active. In the
+  prior DLSS run landed admits about 250 rigid draws / 1024 instances; on foot
   admits zero. Sampled mesh-hook CPU is 1.312-1.341 ms landed and 0.612-0.616
   ms on foot. The on-foot scene stage fell from 0.273-0.280 to 0.188-0.189 ms,
   consistent with reduced reference traffic; not a controlled A/B.
@@ -52,12 +54,11 @@
   address only about 0.06 ms landed and no work on foot. Earlier ruled-out
   explanations and the uncontrolled regression remain in the journal. Screen
   motion is not supported as the missing sustained multi-millisecond cost.
-- Next: investigate conservative visibility while preserving adjacent history.
-  Sean's original-game culling hypothesis needs a separate original-draw
-  visibility/cost census with real pass, eye and predication state. The hook
-  can suppress game draws; these partial motion replays cannot prove which are
-  safe to suppress. No new flight is requested by this local experiment. Keep
-  the separately paused foveated-DLSS work paused.
+- Next: collect stable AA-off landed and on-foot settlement windows with the
+  original-draw diagnostic in one Frontier flight. Distinguish costly
+  zero-sample draws from cheap GPU rejection and already predicated work before
+  selecting any culling change. Preserve adjacent motion history and keep the
+  separately paused foveated-DLSS work paused.
 
 ## Journal
 
@@ -1327,3 +1328,108 @@ identity rig reports 274 checks with zero failures, including the new CLI
 contracts. Targeted hardware gates and no-write dry-run pass; the new code
 compiles without warnings. Frontier remains on 89b9055 and no new test flight
 is required for this local experiment.
+
+### 2026-09-18 -- original-game-draw visibility and cost diagnostic
+
+Sean authorized the next measurement build for Frontier. The target is Elite's
+original draws, not EDVR's motion producer. Competing explanations are measured
+together:
+
+- Many submitted draws do substantial work yet pass no depth/stencil samples:
+  repeated zero-sample buckets with geometry activity and meaningful GPU
+  intervals would identify candidates for conservative culling research.
+- GPU rejection is already cheap: zero-sample buckets close to the instrument
+  floor would weaken a draw-suppression optimization even if counts are high.
+- The game already predicates or encloses draws in visibility queries: separate
+  guard counters identify this population without changing its query results or
+  pretending skipped measurements have zero visible samples.
+- Main-view counts include other passes or altered EDVR draws: exact target
+  state, eye labels, original shader hashes and modification flags keep those
+  populations separate. Unknown eye identity remains unknown.
+
+The exact timing seam is the saved native draw function inside each of the four
+ordinary draw lambdas, plus DrawAuto and the two indirect variants. Timing the
+enclosing `forwardWithVerdict` lambda would include post-call EDVR motion work
+and is therefore incorrect. `t_colourOriginal` limits ordinary samples to the
+first issuance; later EDVR reissues are excluded. Original shader/verdict
+provenance is captured before fix wrappers, while selected samples describe the
+actual pipeline at issuance and flag modifications.
+
+Selection uses three unique draw ordinals derived from the preceding frame's
+total, rather than always taking the first match near the front of the frame.
+Detailed D3D state is read only for selected draws. Count changes, missing
+target ordinals, unknown indirect counts, command-list coverage and fixed-table
+overflow are reported. No draw is removed or replaced by this diagnostic.
+
+Occlusion and pipeline-statistics queries accompany a shared-domain GpuTimer.
+Predication, active external counting/disjoint queries and uncertain query
+tracking must reject admission before any query Begin/End. Raw query
+trampolines keep the instrument out of the game's query tracker. Polling is
+bounded at later frame boundaries with DONOTFLUSH; pending, failed, expired and
+disjoint outcomes remain distinct from a completed zero-sample result.
+
+Interpretation follows Microsoft's definitions: an [occlusion
+query](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_query)
+counts samples passing depth/stencil, and [pipeline
+statistics](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_query_data_pipeline_statistics)
+describe geometry and shader invocations. Neither is a final-color visibility
+test or proof that an entire object can be removed. Instrumented draw times
+also include query/pipeline effects and are not additive frame-saving
+estimates. The earlier replay's large timing changes across command sequences
+make that limitation material here.
+
+The diagnostic follows `advanced.app_gpu_timing`, which already defaults to on.
+It uses 64 reusable query slots and 128 detailed buckets, collects for 600
+frame boundaries, and allows at most 120 more boundaries for outstanding
+results. It repeats so the trip to the settlement cannot exhaust the capture.
+At most 16 eligible slots are visited at each boundary, starting at least four
+frames after submission. A small empty-bracket calibration exposes query cost;
+it is not subtracted to manufacture an estimated saving.
+
+The next flight should keep the ship landed, facing a busy settlement for 60-90
+seconds, then spend 60-90 seconds on foot in the same area. Keep AA off and
+render settings fixed, following Sean's new baseline run. No eye dump or weapon
+draw is required for this census. Each window needs to distinguish completed
+zero-sample results from unavailable measurements, with early
+enabled/observed/submitted messages exposing a dead instrumentation path.
+Whole-frame timing remains an instrumented observation, not an optimization
+A/B.
+
+Targeted validation passed 66 new probe checks and 162 live-query-hook checks.
+WARP draws retain the expected pixels while separating visible and rejected
+samples. Guard tests verify no diagnostic bracket is submitted under
+predication or active counting/disjoint/overflow state. Other checks cover
+owner context/thread, non-flushing reads, query errors, bounded expiration,
+ready visibility surviving a pending statistics timeout, clean re-enable,
+600-frame report/restart, and the native-call seam closing before motion work.
+Both visible and rejected fixtures verify every RGBA pixel of the 16x16 target.
+The full build passed 62 pooled rigs, three quiet rigs and the 249-key config
+contract. The diagnostic preserves the installed AA/render settings.
+
+### 2026-09-18 -- AA-off landed baseline while the diagnostic was prepared
+
+Verified Frontier `edvr_gfx_20260918_090413.log` as exactly
+`v0.17.0-10-g89b9055`, build `6AAD36B4`. The sandbox initially hid the Frontier
+Products directory; the sanctioned `edvr_log.py` locator succeeded outside the
+sandbox. The stale Steam log/dump was rejected as a build mismatch.
+
+The final 17.64-second AA-off benchmark window records CPU p50/p95/p99
+10.199/11.830/13.386 ms and GPU 10.875/12.447/13.613 ms at input 2481x2121,
+output 3072x3264. Application-render samples around the settled view are
+10.35-11.36 ms. XR copy/compose remains about 0.027/0.054 ms GPU, so transfer
+and composition do not explain the approximately 11 ms application cost.
+
+AA and UI depth are off; Deferred UI reports zero, and the dump has no terrain,
+mesh or holo motion records. Remaining EDVR work includes particle billboard
+replacement (1152-4164 draws per trailing ten seconds), Map write tracking
+(0.193-0.318 ms/frame), and draw-hook CPU sampling (2.567 ms mean, 4.745 ms max
+at 09:06:39). The hook timer excludes the forwarded game call but can include
+EDVR reissues. Therefore this strengthens the case for investigating original
+game draws without proving that all remaining CPU/GPU cost belongs to Elite.
+
+`eye_090656` confirms mode=off, frame 4115, 2481x2121 and a nearly unchanged
+landed cockpit view across the 16 crops. Cockpit/HUD foreground, exposed
+terrain and the settlement share the view. The image cannot identify invisible
+submitted objects; MeshFallback is unavailable because there is no matching
+first-eye temporal snapshot. Capture causes a scope change at 09:06:56 and a
+later 462.9 ms diagnostic frame; those later capture costs are excluded.

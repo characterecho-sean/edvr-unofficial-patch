@@ -198,15 +198,22 @@ void queryBracketTests(Device& device) {
 
     GameQueryProbe probe;
     check(!probe.countingActive(), "query guard starts open");
+    check(!probe.guard().counting && !probe.guard().disjoint && !probe.guard().overflow,
+          "expanded query guard starts open");
     probe.bracketBegin(nullptr);
     probe.bracketEnd(nullptr);
     check(!probe.countingActive(), "null query brackets leave replay open");
     probe.bracketBegin(disjoint.Get());
     check(!probe.countingActive(), "timestamp-disjoint interval leaves replay open");
+    check(probe.guard().disjoint && !probe.guard().counting,
+          "timestamp-disjoint interval is separately guarded");
     probe.bracketEnd(disjoint.Get());
+    check(!probe.guard().disjoint, "matching disjoint End clears separate guard");
 
     probe.bracketBegin(occlusion.Get());
     check(probe.countingActive(), "occlusion interval blocks replay");
+    check(probe.guard().counting && !probe.guard().disjoint,
+          "counting interval is separately classified");
     probe.bracketEnd(unrelated.Get());
     check(probe.countingActive(), "unknown End does not clear an active counting query");
     probe.bracketBegin(occlusion.Get());
@@ -224,6 +231,7 @@ void queryBracketTests(Device& device) {
         overflow.bracketBegin(query.Get());
     }
     check(overflow.countingActive(), "more than 64 active query identities blocks replay");
+    check(overflow.guard().overflow, "active query identity overflow is exposed to diagnostics");
     overflow.bracketEnd(unrelated.Get());
     check(overflow.countingActive(), "unrelated End cannot clear query-identity overflow");
     for(auto& query : active) overflow.bracketEnd(query.Get());
