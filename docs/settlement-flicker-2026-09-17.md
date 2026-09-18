@@ -2,12 +2,12 @@
 
 ## Status
 
-- State: verified Frontier dcd0a9f flight completes all 29520 selected draw
-  queries and payload captures without failures. Exact recurrence is sparse:
-  1.57% of landed follow-ups and 4.92% on foot retain identical captured
-  bindings and payload. Three unchanged payloads go from zero passed samples to
-  nonzero. Cached rejection alone is unsafe; no draw suppression is active. See
-  the final journal entry for denominators and limits.
+- State: full-cycle and caller/owner timing instrumentation passes the full
+  build; the Frontier test flight is pending. It investigates 63-65 FPS despite
+  application-work times around 10-11 ms. The verified dcd0a9f draw probe
+  completed 29520 captures; three unchanged payloads went from zero passed
+  samples to nonzero. Cached rejection alone is unsafe; no draw suppression is
+  active. See the final journal entry.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
   5120x2880. No eye capture contaminates this flight. Prior DLSS runs used K;
@@ -41,12 +41,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: account for the complete frame cycle before prioritizing more culling.
-  Caller-to-owner handoffs and post-Submit work are outside the displayed
-  application timers; measured owner XR waits/submission are too small to
-  explain the cadence gap alone. No repeat flight requested yet. Conservative
-  current-depth culling remains an offline candidate, not a demonstrated win.
-  Preserve motion history; separately paused foveated-DLSS work stays paused.
+- Next flight: Frontier, AA off and the same landed cockpit view for about 90
+  seconds. No eye dump needed. Inspect complete-cycle coverage, per-cycle
+  accounting and caller/owner intervals before choosing a pacing or culling
+  fix. Conservative current-depth culling remains an offline candidate.
+  Preserve motion history; foveated-DLSS work stays paused.
 
 ## Journal
 
@@ -1811,3 +1810,68 @@ not attribute the gap to a fixed 5 ms runtime stall by subtracting a median
 from a mean; per-frame attribution is still missing. This accounting takes
 priority over a suppression implementation. No pacing or culling fix has yet
 been justified, and no additional flight has been requested.
+
+### 2026-09-18 -- complete frame-cycle accounting
+
+The user approved a diagnostic build for the uncovered frame time. Three
+possibilities need distinct signatures in the same run:
+
+- Game work or scheduling outside the measured application segments: a large
+  interval from the completed stereo Submit return to the next pose-wait entry.
+- Caller/owner handoff cost: large caller roundtrips with small owner bodies,
+  distinguished from time parked on the render thread during Submit.
+- Runtime work inside the owner: a large owner pose-wait or Submit body, with
+  the existing nested XR/transfer phases identifying which part accounts for
+  it.
+
+The complete-cycle boundary is one host `waitPoses` caller return to the next.
+This includes the next frame's pose-wait call. Partition each valid cycle into
+game work before the first Submit, first Submit roundtrip, game work between
+eyes, second unique-eye Submit roundtrip, the post-stereo gap before the next
+pose wait, and that next pose-wait roundtrip. Support either eye order.
+Owner-body and render-thread-park measurements are nested inside the caller
+roundtrips; they must not be added again. Compute the accounting residual on
+each paired cycle, not by subtracting separately aggregated medians.
+
+The fixed 4096-sample collector reports about every 30 seconds, with partial
+reports on scope changes. Separate enabled, first-complete and aggregate
+markers distinguish an inactive probe from valid zero-cost phases. Incomplete
+pairs, duplicate eyes, caller-thread changes, rejected calls, clock/order
+failures, scope changes and capacity overflow have visible counts. Actual
+caller/wait thread IDs are retained even for zero-valid windows. Scope is
+captured on the owner and returned through the completed call, including
+runtime generation, feature epoch, pacing, scene readiness, should-render and
+dimensions. Frame pairing uses the compositor sequence, independently of the
+graphics timing provider's sequence counter.
+
+The log reports per-phase mean/p50/p95, the paired residual, valid cycle sums,
+and separate caller-wait and valid-sample rates over the observation interval.
+The total cycle and residual are not extra exclusive phases. Compare means on
+the same accepted samples; do not add nested owner/park spans or subtract
+unpaired percentiles. Collection adds CPU clock reads and bounded storage, with
+no GPU queries, readbacks or changes to the existing thread handoffs.
+
+The focused native rig passes 658 checks. Deterministic cases assert exact
+exclusive and nested phase durations with injected delays, reverse eye order,
+zero post-submit gap, partial/invalid calls, wrong threads, mismatched
+sequences, scope flushes and zero-valid reports. Review found and corrected a
+collision between scope change and the 30-second gate that could overwrite an
+unread report. The fixture also triggers the production reporter and verifies
+its first-complete marker; its report has zero accounting residual. The
+complete outer host Wait/Submit loop was traced through the existing
+owner/render dispatch code rather than adding another synthetic runtime API.
+The previous verified native log independently confirms that Elite reaches this
+non-owner Submit wrapper and that caller-thread trace output reaches the
+durable log.
+
+This is timing instrumentation only. No draw suppression or pacing behavior
+change is part of this build. The next flight should hold the same landed
+cockpit view with AA off for about 90 seconds; no on-foot leg or eye capture is
+needed to answer the immediate question.
+
+Full build validation passes: all 62 pooled rigs, three quiet rigs and the
+249-key configuration contract, including the 658-check native rig and the
+618-check original-draw rig. Build log:
+`build/frame-cycle-build-validation.log`. The Frontier package uses the
+sanctioned installer and preserves the live INI; verify the installed package
+against the final committed build before flying.

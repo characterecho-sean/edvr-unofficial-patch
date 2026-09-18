@@ -37,6 +37,7 @@
 #include "native_timing_client.h"
 #include "device_gpu_timing.h"
 #include "submission_stats.h"
+#include "frame_cycle_stats.h"
 #include "render_route.h"
 #include "shutdown_trace.h"
 #include "session_state.h"
@@ -206,6 +207,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool timingGpuBegun[2]{};
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
+  FrameCycleStats frameCycles;
+  std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false};
+  std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
   TransferWallTimes transferWall;
   uint64_t submitCallbacksBegin=0;
   std::atomic<bool> submitRouteNoted[2]{};
@@ -693,8 +697,20 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void compositorUnsupported(unsigned slot) noexcept override {nativeTracePrintf("compositor_unavailable,slot=%u\n",slot);}
   vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
     if(!service.isOwner()) {
+      const uint64_t callerBegan=frameCycleUs();const DWORD caller=GetCurrentThreadId();
+      frameCycles.enabled();const uint64_t cycleToken=frameCycles.waitCallerBegin(callerBegan,caller);
+      if(!frameCycleEnabledNoted.exchange(true)){nativeTracePrintf("native_frame_cycle,enabled=1,boundary=host_wait_return_to_next_host_wait_return,units=wall_ms,nested=1,gpu=0\n");}
       auto result=vr::VRCompositorError_InvalidTexture;
-      const bool dispatched=service.invoke([&]{result=waitPoses(generation,out);});
+      FrameCycleStats::Shape cycleShape{};
+      const bool dispatched=service.invoke([&]{
+        frameCycleWaitToken.store(cycleToken,std::memory_order_release);frameCycles.waitOwnerBegin(cycleToken,frameCycleUs());
+        result=waitPoses(generation,out);
+        cycleShape.generation=runtimeGeneration;cycleShape.featureEpoch=featureChanges;cycleShape.pacing=unsigned(lastPacing);
+        cycleShape.shouldRender=boundary.frame().shouldRender?1u:0u;
+        cycleShape.sceneReady=featureFrameKnown&&featureFrame.sceneReady?1u:0u;
+        for(unsigned i=0;i<2;++i){const auto submitted=cullGuard.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
+        frameCycles.waitOwnerEnd(cycleToken,frameCycleUs());frameCycleWaitToken.store(0,std::memory_order_release);
+      });
       // Start after the route returns so the dispatch/rendezvous is outside
       // the application interval. Direct owner calls have no producer-side
       // route return and therefore do not claim this interval.
@@ -705,8 +721,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         timingApplicationOpen.store(opened,std::memory_order_release);
         timingApplicationSequence.store(opened?sequence:0,std::memory_order_release);
       }
+      frameCycles.waitCallerEnd(cycleToken,out.sequence,frameCycleUs(),GetTickCount64(),caller,cycleShape,
+        dispatched&&result==vr::VRCompositorError_None&&out.sequence);
+      frameCycleSequence.store(dispatched&&result==vr::VRCompositorError_None?out.sequence:0,std::memory_order_release);
+      reportFrameCycles();
       return dispatched?result:vr::VRCompositorError_InvalidTexture;
     }
+    if(!frameCycleWaitToken.load(std::memory_order_acquire))frameCycles.noteDirectOwner();
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed||!seated.space()||!changes.active())
@@ -927,6 +948,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!service.isOwner()) {
       auto result=vr::VRCompositorError_InvalidTexture;
       const auto sequence=timingApplicationSequence.load(std::memory_order_acquire);
+      const auto cycleSequence=frameCycleSequence.load(std::memory_order_acquire);
+      const DWORD caller=GetCurrentThreadId();const uint64_t cycleToken=frameCycles.submitCallerBegin(unsigned(eye),frameCycleUs(),caller);
       const bool queued=renderRoute.present&&!renderRoute.present->isRenderThread();
       bool expected=false;
       if(submitRouteNoted[queued?1:0].compare_exchange_strong(expected,true,std::memory_order_relaxed))
@@ -937,7 +960,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(timingApplicationOpen.exchange(false,std::memory_order_acq_rel) && sequence)
         timing.applicationSegment(sequence,false);
       if(sequence) timing.producerPause(sequence);
-      const bool dispatched=renderRoute.invoke([&]{result=submitEye(generation,eye,texture,bounds,flags);});
+      RenderRoute::Park cyclePark;
+      const bool dispatched=renderRoute.invoke([&]{frameCycleSubmitToken.store(cycleToken,std::memory_order_release);frameCycles.submitOwnerBegin(cycleToken,frameCycleUs());result=submitEye(generation,eye,texture,bounds,flags);frameCycles.submitOwnerEnd(cycleToken,frameCycleUs());frameCycleSubmitToken.store(0,std::memory_order_release);},&cyclePark);
       // Admission after the route returns excludes the rendezvous itself and
       // permits the next between-eye game interval. A completed pair retires
       // the timing context, in which case this callback correctly returns 0.
@@ -946,8 +970,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(dispatched&&result==vr::VRCompositorError_None&&sequence&&
           timing.applicationSegment(sequence,true))
         timingApplicationOpen.store(true,std::memory_order_release);
+      frameCycles.submitCallerEnd(cycleToken,unsigned(eye),cycleSequence,frameCycleUs(),caller,
+        cyclePark.measured?cyclePark.ms:0.0,dispatched&&result==vr::VRCompositorError_None&&cyclePark.measured);
       return dispatched?result:vr::VRCompositorError_InvalidTexture;
     }
+    if(!frameCycleSubmitToken.load(std::memory_order_acquire))frameCycles.noteDirectOwner();
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return vr::VRCompositorError_InvalidTexture;
@@ -1351,6 +1378,25 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
     else { invalidateEyeTreatments(); timingInvalidate(); }
     return r;
+  }
+  static uint64_t frameCycleUs() noexcept {
+    LARGE_INTEGER q{},f{};if(!QueryPerformanceCounter(&q)||!QueryPerformanceFrequency(&f)||f.QuadPart<=0)return 0;
+    return static_cast<uint64_t>(static_cast<double>(q.QuadPart)*1000000.0/static_cast<double>(f.QuadPart));
+  }
+  void reportFrameCycles() {
+    if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
+    FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
+    const auto& c=r.cycle;const double validSum=c.mean*double(r.valid);
+    nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu\n",
+      (unsigned long long)r.window,(unsigned long long)r.admitted,r.valid,(unsigned long long)r.firstSequence,(unsigned long long)r.lastSequence,(unsigned long long)r.elapsedMs,validSum,
+      r.elapsedMs?double(r.admitted)*1000.0/double(r.elapsedMs):0.0,r.elapsedMs?double(r.valid)*1000.0/double(r.elapsedMs):0.0,r.callerThread,r.waitThread,unsigned(r.threadConsistent),
+      r.shape.width[0],r.shape.height[0],r.shape.width[1],r.shape.height[1],r.shape.outputWidth[0],r.shape.outputHeight[0],r.shape.outputWidth[1],r.shape.outputHeight[1],r.shape.pacing,r.shape.shouldRender,r.shape.sceneReady,
+      (unsigned long long)r.shape.generation,(unsigned long long)r.shape.featureEpoch,
+      (unsigned long long)r.missing[FrameCycleStats::BadClock],(unsigned long long)r.missing[FrameCycleStats::Reentrant],(unsigned long long)r.missing[FrameCycleStats::WrongThread],(unsigned long long)r.missing[FrameCycleStats::BadSequence],(unsigned long long)r.missing[FrameCycleStats::PartialStereo],(unsigned long long)r.missing[FrameCycleStats::DuplicateEye],(unsigned long long)r.missing[FrameCycleStats::DirectOwner],(unsigned long long)r.missing[FrameCycleStats::ShapeChange],(unsigned long long)r.missing[FrameCycleStats::Overflow]);
+    const auto phase=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,units=wall_ms,nested=0\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95);};
+    phase("cycle",r.cycle);phase("game_before_first_submit",r.beforeFirst);phase("first_submit_roundtrip",r.firstSubmit);phase("between_eye_calls",r.betweenEyes);phase("second_submit_roundtrip",r.secondSubmit);phase("post_second_submit_to_next_wait",r.afterSecond);phase("next_wait_roundtrip",r.nextWait);phase("per_frame_residual",r.residual);
+    const auto nested=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,units=wall_ms,nested=1\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95);};
+    nested("next_wait_owner_body",r.waitOwner);nested("first_submit_owner_body",r.submitOwner[0]);nested("second_submit_owner_body",r.submitOwner[1]);nested("first_submit_render_park",r.renderPark[0]);nested("second_submit_render_park",r.renderPark[1]);
   }
   void reportSubmitStats() {
     const auto wall=submitStats.distribution(&SubmissionStats::Sample::submitMs);
