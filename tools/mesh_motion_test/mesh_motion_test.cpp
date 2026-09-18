@@ -114,6 +114,33 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
         ID3D11ShaderResourceView* views[2]{};meshMotionViews(ctx.Get(),scene[eye].Get(),views);check(views[0] && views[1],"mesh views available");return readBuffer(dev.Get(),ctx.Get(),eyes[eye].history[eyes[eye].write].buffer.Get());};
     auto reset=[&](){ctx->ClearState();meshMotionShutdown();std::memset(poolData,0,sizeof(poolData));std::memset(sceneData,0,sizeof(sceneData));std::memset(ids,0,sizeof(ids));sceneData[270][0]=sceneData[271][1]=sceneData[272][3]=1;sceneData[273][2]=.025f;};
     meshMotionConfigure(true);
+    // The frame-local cache retains only immutable DSV metadata. Scene and
+    // eye classification must still follow every live depth-probe answer.
+    reset();pose(1,0);bind(0);
+    auto observe=[&](){issue(ctx.Get(),6,1,0,0,0);meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);};
+    observe();observe();
+    check(diagnostics.depthMetadataFills==1 && diagnostics.depthMetadataHits==1,"repeated DSV reuses only immutable texture metadata");
+    bind(1);observe();observe();
+    check(diagnostics.depthMetadataFills==2 && diagnostics.depthMetadataHits==2,"DSV switch replaces the single metadata entry");
+    ComPtr<ID3D11DepthStencilView> aliasDepth;hr(dev->CreateDepthStencilView(scene[1].Get(),&dd,&aliasDepth));
+    testDepth=aliasDepth.Get();ctx->OMSetRenderTargets(0,nullptr,testDepth);observe();
+    check(diagnostics.depthMetadataFills==3,"alias DSV gets its own retained identity while sharing the texture");
+    auto fills=diagnostics.depthMetadataFills,hits=diagnostics.depthMetadataHits;
+    testDepth=nullptr;observe();
+    check(diagnostics.depthMetadataFills==fills && diagnostics.depthMetadataHits==hits,"null DSV bypasses the metadata cache");
+    ComPtr<ID3D11Texture2D> foreignScene;ComPtr<ID3D11DepthStencilView> foreignDepth;
+    hr(dev->CreateTexture2D(&td,nullptr,&foreignScene));hr(dev->CreateDepthStencilView(foreignScene.Get(),&dd,&foreignDepth));
+    testDepth=foreignDepth.Get();ctx->OMSetRenderTargets(0,nullptr,testDepth);const auto candidates=diagnostics.eye[1].candidateDraws;
+    observe();observe();
+    check(diagnostics.depthMetadataFills==fills+1 && diagnostics.depthMetadataHits==hits+1 && diagnostics.eye[1].candidateDraws==candidates,"non-scene DSV metadata may hit but live classification still rejects it");
+    testDepth=dsv[1].Get();testScene=scene[1].Get();ctx->OMSetRenderTargets(0,nullptr,testDepth);observe();
+    const auto selectedCandidates=diagnostics.eye[1].candidateDraws;testScene=scene[0].Get();observe();
+    check(diagnostics.eye[1].candidateDraws==selectedCandidates,"cached DSV cannot preserve a stale scene-pick decision");
+    testScene=scene[1].Get();fills=diagnostics.depthMetadataFills;meshMotionFrameBoundary(ctx.Get());observe();
+    check(diagnostics.depthMetadataFills==fills+1,"frame boundary expires retained DSV metadata");
+    observe();fills=diagnostics.depthMetadataFills;meshMotionResourceWritten(nullptr);observe();
+    check(diagnostics.depthMetadataFills==fills+1,"unknown writes expire retained DSV metadata");
+    meshMotionShutdown();check(!depthMetadata.view && !depthMetadata.texture,"shutdown releases retained DSV metadata");
     reset();pose(2,1.25f,0);pose(3,-1.5f,1);ids[2]=1;sceneData[275][0]=.25f;sceneData[275][1]=.5f;sceneData[275][2]=.75f;
     auto raw=run(0,2);
     check(word(raw,20)==poolData[0][1] && word(raw,21)==poolData[0][2] && word(raw,22)==poolData[0][3] && word(raw,23)==poolData[0][4] && word(raw,24)==poolData[0][5] && word(raw,25)==poolData[0][6],"raw packed rigid pose is captured without conversion");
@@ -255,6 +282,14 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     auto firstEye=readBuffer(dev.Get(),ctx.Get(),eyes[0].history[eyes[0].write].buffer.Get());
     check(captureBatches==2 && a[56]==1 && firstEye[56]==1,"both eyes receive their own queued records");
     check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==1 && diagnostics.flushes[unsigned(FlushReason::EyeConsumption)]==1,"eye switch and eye consumption have exclusive flush reasons");
+    check(diagnostics.inputChanges[unsigned(InputChange::Output)]==1 && diagnostics.inputChanges[unsigned(InputChange::Context)]==0 && diagnostics.inputChanges[unsigned(InputChange::Scene)]==0 && diagnostics.inputChanges[unsigned(InputChange::Ids)]==0 && diagnostics.inputChanges[unsigned(InputChange::Pool)]==0 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==0,"input-change attribution isolates an eye output switch");
+    // Cause counters overlap when one actual flush changes several inputs.
+    reset();pose(1,.2f);bind(0);queue();
+    auto alternateIds=buffer(sizeof(ids),D3D11_BIND_VERTEX_BUFFER,0,ids);
+    auto alternatePool=buffer(sizeof(poolData),D3D11_BIND_SHADER_RESOURCE,336,poolData);ComPtr<ID3D11ShaderResourceView> alternatePoolView;
+    hr(dev->CreateShaderResourceView(alternatePool.Get(),nullptr,&alternatePoolView));UINT alternateStep=8,alternateOffset=0;
+    ctx->IASetVertexBuffers(0,1,alternateIds.GetAddressOf(),&alternateStep,&alternateOffset);ctx->VSSetShaderResources(33,1,alternatePoolView.GetAddressOf());queue();a=consumeBatch();
+    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==1 && diagnostics.inputChanges[unsigned(InputChange::Ids)]==1 && diagnostics.inputChanges[unsigned(InputChange::Pool)]==1,"one input flush attributes both changed ID and pool inputs");
     // GPU-writable pools cannot rely on CPU write notifications.
     reset();pose(1,.2f);bind(0);
     auto gpuPool=buffer(sizeof(poolData),D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,336,poolData);
@@ -270,6 +305,7 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     auto largeStream=buffer(UINT(largeIds.size()*4),D3D11_BIND_VERTEX_BUFFER,0,largeIds.data());UINT idStep=8,idStart=0;
     ctx->IASetVertexBuffers(0,1,largeStream.GetAddressOf(),&idStep,&idStart);UINT lastId=UINT(largeIds.size()/2-1);queue(lastId);queue(lastId);a=consumeBatch();
     check(captureBatches==2 && std::fabs(a[35]-.4f)<1e-5 && std::fabs(a[95]-.4f)<1e-5,"oversized streams retain exact IDs through bounded copies");
+    check(diagnostics.flushes[unsigned(FlushReason::InputChange)]==1 && diagnostics.inputChanges[unsigned(InputChange::Oversized)]==1,"oversized stream attribution counts its actual input-change flush");
     reset();pose(1,.2f);bind(0);queue();meshMotionFrameBoundary(ctx.Get());
     check(!pending.count && diagnostics.flushes[unsigned(FlushReason::FrameBoundary)]==1,"frame boundary submits pending capture with an exclusive reason");
     // Deferred capture may run after the app enabled predication. Captures,

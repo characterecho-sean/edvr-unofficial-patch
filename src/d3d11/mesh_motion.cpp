@@ -50,6 +50,7 @@ GpuIntervals<16> drawGpu,matchGpu,captureGpu;
 unsigned frames=0,draws=0,captureBatches=0,capturedInstances=0;
 constexpr unsigned diagnosticWindowFrames=1800,capProbeBudget=32;
 enum class FlushReason { InputChange,WriteOrMap,EyeConsumption,FrameBoundary,GpuWritable,Count };
+enum class InputChange { Context,Scene,Ids,Pool,Output,Oversized,Count };
 const char* flushReasonName(FlushReason reason){
     static const char* names[]={"input-change","write/map","eye-consumption","frame-boundary","gpu-writable"};
     return names[unsigned(reason)];
@@ -76,6 +77,8 @@ struct Diagnostics {
     uint64_t drawCalls=0,flushCalls=0;
     double drawCpuMs=0,flushCpuMs=0;
     uint64_t drawCpuSamples=0,flushCpuSamples=0;
+    uint64_t depthMetadataHits=0,depthMetadataFills=0;
+    uint64_t inputChanges[unsigned(InputChange::Count)]{};
     void clearWindow(){*this=Diagnostics{};}
 } diagnostics;
 double cpuTimestamp(){LARGE_INTEGER value;QueryPerformanceCounter(&value);static const double scale=[](){LARGE_INTEGER f;QueryPerformanceFrequency(&f);return 1000.0/double(f.QuadPart);}();return double(value.QuadPart)*scale;}
@@ -109,6 +112,21 @@ struct PendingCapture {
     unsigned count=0;
     void clear(){count=0;context.Reset();scene.Reset();ids.Reset();pool.Reset();poolResource.Reset();output.Reset();}
 } pending;
+// Retaining both COM objects makes pointer reuse impossible during the frame.
+// Only immutable texture metadata is cached; scene-pick and eye selection below
+// stay live because other depth-probe callers can change the current pair.
+struct DepthMetadata {
+    Ptr<ID3D11DepthStencilView> view;
+    Ptr<ID3D11Texture2D> texture;
+    D3D11_TEXTURE2D_DESC desc{};
+    void clear(){view.Reset();texture.Reset();desc={};}
+    bool get(ID3D11DepthStencilView* bound,Ptr<ID3D11Texture2D>& out,D3D11_TEXTURE2D_DESC& outDesc){
+        if(view.Get()==bound){out=texture;outDesc=desc;++diagnostics.depthMetadataHits;return true;}
+        clear();Ptr<ID3D11Resource> resource;bound->GetResource(&resource);Ptr<ID3D11Texture2D> candidate;
+        if(FAILED(resource.As(&candidate)))return false;
+        candidate->GetDesc(&desc);view=bound;texture=candidate;out=candidate;outDesc=desc;++diagnostics.depthMetadataFills;return true;
+    }
+} depthMetadata;
 struct ComputeState {
     ID3D11DeviceContext* ctx;
     Ptr<ID3D11ComputeShader> shader;
@@ -193,8 +211,8 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     const auto kind=coverageKind(hash);
     if(!enabled || failed || kind==CoverageCount || !ctx || !issue || !n || n>64 || !count || count%3 || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     auto* bound=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!bound)return;
-    Ptr<ID3D11Resource> res;bound->GetResource(&res);Ptr<ID3D11Texture2D> scene;if(FAILED(res.As(&scene)) || !depthProbeIsSceneDepth(scene.Get()))return;
-    D3D11_TEXTURE2D_DESC td{};scene->GetDesc(&td);if(td.ArraySize!=1 || td.SampleDesc.Count!=1)return;
+    Ptr<ID3D11Texture2D> scene;D3D11_TEXTURE2D_DESC td{};if(!depthMetadata.get(bound,scene,td) || !depthProbeIsSceneDepth(scene.Get()))return;
+    if(td.ArraySize!=1 || td.SampleDesc.Count!=1)return;
     int eye=-1;for(int i=0;i<2;++i){ID3D11Texture2D* s=nullptr;uint32_t fmt=0;if(depthProbeSceneDepthFormat(td.Width,td.Height,i,&s,&fmt) && s==scene.Get()){eye=i;break;}}
     if(eye<0)return;
     Eye& e=eyes[eye];if(e.matched)return; // no history mutation after this eye is consumed
@@ -250,7 +268,16 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     // the graphics pipeline with one compute dispatch for every mesh.
     const bool wholeIds=idd.ByteWidth<=maxInstanceBytes;
     const bool gpuWritable=((pbd.BindFlags|idd.BindFlags)&D3D11_BIND_UNORDERED_ACCESS)!=0;
-    if(pending.count && (pending.context.Get()!=ctx || pending.scene!=cb || pending.ids!=ids || pending.pool!=pool || pending.output!=now.uav || !wholeIds))flushCapture(FlushReason::InputChange);
+    unsigned inputChanges=0;
+    if(pending.count){
+        if(pending.context.Get()!=ctx)inputChanges|=1u<<unsigned(InputChange::Context);
+        if(pending.scene!=cb)inputChanges|=1u<<unsigned(InputChange::Scene);
+        if(pending.ids!=ids)inputChanges|=1u<<unsigned(InputChange::Ids);
+        if(pending.pool!=pool)inputChanges|=1u<<unsigned(InputChange::Pool);
+        if(pending.output!=now.uav)inputChanges|=1u<<unsigned(InputChange::Output);
+        if(!wholeIds)inputChanges|=1u<<unsigned(InputChange::Oversized);
+    }
+    if(inputChanges){for(unsigned i=0;i<unsigned(InputChange::Count);++i)if(inputChanges&(1u<<i))++diagnostics.inputChanges[i];flushCapture(FlushReason::InputChange);}
     if(failed)return;
     if(!pending.count){
         pending.context=ctx;pending.scene=cb;pending.ids=ids;pending.pool=pool;pending.poolResource=pr;pending.output=now.uav;
@@ -316,8 +343,11 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
         for(unsigned i=0;i<2;++i){const auto& x=diagnostics.eye[i];Log::get().note("mesh motion diagnostic eye %u: fully checked candidates %llu draws/%llu instances; accepted %llu/%llu; cap decisions %llu/%llu total, bounded sample %llu/%llu (%llu/%llu eligible, %llu/%llu ineligible; no extrapolation).",i,(unsigned long long)x.candidateDraws,(unsigned long long)x.candidateInstances,(unsigned long long)x.acceptedDraws,(unsigned long long)x.acceptedInstances,(unsigned long long)x.capRejectedDraws,(unsigned long long)x.capRejectedInstances,(unsigned long long)x.sampledCapDraws,(unsigned long long)x.sampledCapInstances,(unsigned long long)x.eligibleCapRejectedDraws,(unsigned long long)x.eligibleCapRejectedInstances,(unsigned long long)x.ineligibleCapSampleDraws,(unsigned long long)x.ineligibleCapSampleInstances);}
         uint64_t flushCount=0;for(auto count:diagnostics.flushes)flushCount+=count;
         Log::get().note("mesh motion diagnostic CPU: draw %.3f us (%llu samples), flush %.3f us (%llu samples); batches %llu, %.1f instances average, %u max.",diagnostics.drawCpuSamples?diagnostics.drawCpuMs*1000/diagnostics.drawCpuSamples:0,(unsigned long long)diagnostics.drawCpuSamples,diagnostics.flushCpuSamples?diagnostics.flushCpuMs*1000/diagnostics.flushCpuSamples:0,(unsigned long long)diagnostics.flushCpuSamples,(unsigned long long)flushCount,flushCount?double(diagnostics.flushInstances)/double(flushCount):0,diagnostics.largestBatch);
+        Log::get().note("mesh motion diagnostic depth metadata: %llu cache hits, %llu fills; scene/eye selection remains live.",(unsigned long long)diagnostics.depthMetadataHits,(unsigned long long)diagnostics.depthMetadataFills);
         Log::get().note("mesh motion diagnostic flushes: %s %llu, %s %llu, %s %llu, %s %llu, %s %llu.",flushReasonName(FlushReason::InputChange),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::InputChange)],flushReasonName(FlushReason::WriteOrMap),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::WriteOrMap)],flushReasonName(FlushReason::EyeConsumption),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::EyeConsumption)],flushReasonName(FlushReason::FrameBoundary),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::FrameBoundary)],flushReasonName(FlushReason::GpuWritable),(unsigned long long)diagnostics.flushes[unsigned(FlushReason::GpuWritable)]);
+        Log::get().note("mesh motion diagnostic input-change causes (overlapping): context %llu, scene-cb %llu, instance-ids %llu, pool %llu, output %llu, oversized-stream %llu.",(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Context)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Scene)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Ids)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Pool)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Output)],(unsigned long long)diagnostics.inputChanges[unsigned(InputChange::Oversized)]);
         diagnostics.clearWindow();}
+    depthMetadata.clear();
     for(auto& e:eyes){
         e.write=1-e.write;auto& h=e.history[e.write];for(unsigned i=0;i<h.count;++i)for(auto& p:h.sources[i])p.Reset();h.count=0;e.cleared=e.matched=false;
         auto& prev=e.history[1-e.write];for(unsigned i=0;i<prev.count;++i)for(unsigned j=1;j<=2;++j)if(prev.sources[i][j])watched[static_cast<ID3D11Resource*>(prev.sources[i][j].Get())].seen=frames;
@@ -338,6 +368,7 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
     // Copy/Update hooks call before the write; Map must flush before the
     // actual Map call, since a mapped resource cannot be used by the GPU.
     meshMotionBeforeMap(resource);
+    if(!resource)depthMetadata.clear();
     if(!enabled || (resource && watched.find(resource)==watched.end()))return;
     if(resource){
         if(first==end)return; // Empty D3D11 box performs no write.
@@ -362,7 +393,7 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
     watched.clear();
 }
 void meshMotionShutdown(){
-    using namespace mesh_motion_detail;pending.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
+    using namespace mesh_motion_detail;pending.clear();depthMetadata.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
     failed=noted=capped=false;drawGpu={};matchGpu={};captureGpu={};frames=draws=captureBatches=capturedInstances=0;diagnostics={};watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,unsigned sceneFrame){
