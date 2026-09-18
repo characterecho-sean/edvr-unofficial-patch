@@ -1164,6 +1164,35 @@ python "tools\terrain_motion.py" --self-test || exit /b 1
 python "tools\terrain_motion.py" "%OBJ%\terrainmotion\eye_fixture_Terrain.bin" --verify-fixture || exit /b 1
 exit /b 0
 
+:rig_depth_scene_pick_test
+echo [edvr] === scene depth selection cache regression ===
+if not exist "%OBJ%\depthscenepick" mkdir "%OBJ%\depthscenepick"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\depthscenepick\\" /Fe"%OBJ%\depthscenepick\depth_scene_pick_test.exe" ^
+    "tools\depth_scene_pick_test\depth_scene_pick_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF
+if errorlevel 1 ( echo [edvr] ERROR: scene depth selection test build failed & exit /b 1 )
+"%OBJ%\depthscenepick\depth_scene_pick_test.exe" --dry-run || exit /b 1
+"%OBJ%\depthscenepick\depth_scene_pick_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_scrim_metadata_test
+echo [edvr] === scrim metadata cache regression ===
+if not exist "%OBJ%\scrimmetadata" mkdir "%OBJ%\scrimmetadata"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_SCRIM_METADATA_TEST ^
+    /Fo"%OBJ%\scrimmetadata\\" /Fe"%OBJ%\scrimmetadata\scrim_metadata_test.exe" ^
+    "tools\scrim_metadata_test\scrim_metadata_test.cpp" ^
+    "src\d3d11\scrim_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: scrim metadata test build failed & exit /b 1 )
+"%OBJ%\scrimmetadata\scrim_metadata_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_resolve_bind_test
 echo [edvr] === resolve bind shadow regression ===
 if not exist "%OBJ%\resolvebind" mkdir "%OBJ%\resolvebind"

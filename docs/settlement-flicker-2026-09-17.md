@@ -45,14 +45,14 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: audit reuse of unchanged scene-depth selection and scrim SRV metadata,
-  the remaining concrete sampled targets. Validate resource lifetime, target
-  mutation, size/eye changes and unknown-state behavior in local fixtures
-  before another build/flight. Instrumented draw-hook wall mean is 5.0-5.1 ms
-  per sampled frame, including reissues/waits; it is not wholly removable CPU
-  execution. Preserve active motion, transition-flash/history processing and
-  foveated-DLSS paused. Engine-level skipping still lacks a verified semantic
-  target; no new flight is needed to identify these two proxy costs.
+- Next: the depth-selection and scrim-metadata caches pass their focused WARP
+  fixtures, independent review and full build. Commit, rebuild the exact
+  version, then install to Frontier for a matched DLSS cockpit capture.
+  Draw-hook wall mean is 5.0-5.1 ms per sampled frame, including
+  reissues/waits; it is not wholly removable CPU execution. Preserve active
+  motion, transition-flash/history processing and foveated-DLSS paused.
+  Engine-level skipping still lacks a verified semantic target; no new flight
+  is needed to identify these two proxy costs.
 
 ## Journal
 
@@ -2661,3 +2661,51 @@ build/cpu-profile-frontier-c1dbb76-dlss/derived-hotspots/strict-pre-shadow/.
 This flight verifies removal of the targeted hot path and supplies the next CPU
 targets; it does not measure the net FPS benefit of c1dbb76. No runtime or live
 configuration was changed during this analysis.
+
+### 2026-09-18 -- depth selection and scrim metadata reuse
+
+The user authorized the next two CPU optimizations. The measured hypotheses are
+that unchanged scene-depth selection inputs do not need another linear
+target-table scan (227 actual proxy PCs in the strict DLSS cohort), and that an
+unchanged PS SRV binding does not need its immutable texture metadata resolved
+again (119 system-D3D11 PCs under bindingResolve -> scrimOnEyeDraw). Neither
+hypothesis permits skipping Elite draws or changing motion eligibility.
+
+The depth path must preserve pick hysteresis, failed-query stale-pick behavior,
+alternating sizes and eye ordering, and invalidate on every target-table or
+last-frame input change. The scrim path must retain its shape/format/size
+recognition, temporary texture substitution and restoration, retry unknown
+metadata, and reject stale bindings. Existing binding generations already
+advance on setters, frame boundaries and binding invalidation, allowing a
+frame-bounded cache without another draw callback. Local production-path
+fixtures will check repeated-hit avoidance and all relevant invalidation and
+recovery behavior before installation. No predicted millisecond or FPS saving
+is assigned to sampled-PC counts.
+
+Implementation uses a single last-size depth-query result. A different size
+must rescan because the algorithm updates one global hysteresis pair; a table
+of independent cached sizes could replay the wrong pair. Configure, discovery
+(including reused slots), frame rollover/eviction and shutdown invalidate the
+cache. Eye order is still calculated from the current last-frame ordering. The
+original scan and hysteresis logic are unchanged on misses.
+
+Scrim stores only a known classification boolean for each of PS SRV0 and SRV1,
+keyed by view pointer and binding generation. It retains no borrowed resource
+identity and adds no reference-count operation on hits. Failed resolution is
+never cached as a known rejection. Enable-state changes and shutdown reset both
+entries; normal binding/frame generations handle the remaining changes. All
+query/scan counters used by the fixtures compile out of production.
+
+The focused WARP fixtures compile and pass independently. The depth fixture
+passes 84 checks, including positive/negative reuse, size switching,
+hysteresis, eye order, new targets, frame rollover, eviction/reuse and
+reconfiguration. The scrim fixture exercises the production resolver on real
+SRVs, including a same-generation failed GetResource followed by successful
+retry. Its context shim forwards real PSSetShaderResources while updating the
+common shadow, so scrimBegin/End prove real substitution/restoration and
+exactly two generation changes. Both fixtures are now full-build gates.
+Independent source and fixture review found no blocking issue. The
+symbol-enabled absolute build passed all 65 pooled rigs, three quiet rigs and
+the 249-key configuration contract; output is
+build/scene-metadata-caches-validation.log. The committed version still needs
+its exact-version rebuild and verified Frontier installation.

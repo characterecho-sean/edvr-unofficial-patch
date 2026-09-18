@@ -67,6 +67,62 @@ bool                      g_engaged = false;
 ID3D11ShaderResourceView* g_displaced = nullptr;
 uint64_t                  g_applied = 0;
 
+// Resource metadata is immutable for a view's lifetime. The binding shadow's
+// generation changes on every setter (even the same pointer), ClearState,
+// ExecuteCommandList(false), and every frame boundary. A pointer plus that
+// generation is therefore a bounded identity: the cache never dereferences or
+// owns the pointer, and pointer reuse cannot inherit an older classification.
+// Failed resolves stay unknown and are retried; only successful answers cache.
+struct MetadataCache {
+    void* view = nullptr;
+    uint32_t generation = 0;
+    bool known = false;
+    bool matches = false;
+};
+
+MetadataCache g_washMetadata;
+MetadataCache g_uiMetadata;
+
+#ifdef EDVR_SCRIM_METADATA_TEST
+uint64_t g_metadataResolveCalls = 0;
+#endif
+
+void resetMetadataCaches() {
+    g_washMetadata = MetadataCache{};
+    g_uiMetadata = MetadataCache{};
+}
+
+bool resolveMetadata(void* view, ResourceInfo* out) {
+#ifdef EDVR_SCRIM_METADATA_TEST
+    if (view) ++g_metadataResolveCalls;
+#endif
+    return bindingResolve(view, out);
+}
+
+template <typename Predicate>
+bool cachedMetadata(BindSlot slot, MetadataCache& cache, Predicate matches) {
+    void* const view = bindingGet(slot);
+    const uint32_t generation = bindingGeneration(slot);
+    if (cache.known && cache.view == view && cache.generation == generation) {
+        return cache.matches;
+    }
+
+    ResourceInfo info;
+    if (!resolveMetadata(view, &info)) {
+        cache.view = view;
+        cache.generation = generation;
+        cache.known = false;
+        cache.matches = false;
+        return false;
+    }
+
+    cache.view = view;
+    cache.generation = generation;
+    cache.known = true;
+    cache.matches = matches(info);
+    return cache.matches;
+}
+
 ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
     if (g_srv && g_texLevel == g_level) return g_srv;
 
@@ -129,6 +185,7 @@ void scrimConfigure(Config& cfg) {
         cfg.getIntInRange("advanced.loading_dim_level", 0, 0, 255));
 
     if (was != g_on) {
+        resetMetadataCaches();
         Log::get().note(
             "loading dim: %s. The wash the loader's dialog lays over "
             "everything behind it is %s; level %u. Found by diffing two "
@@ -150,17 +207,19 @@ bool scrimOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     }
     // Slot 0 first: a 16x16 BC1 is the rare binding, and every other mesh in
     // the frame fails here without paying for a second resolve.
-    ResourceInfo wash;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &wash) ||
-        !wash.isTexture2D || wash.a != kWashW || wash.b != kWashH ||
-        !isBc1(wash.fmt)) {
+    if (!cachedMetadata(BindSlot::PsSrv0, g_washMetadata,
+                        [](const ResourceInfo& wash) {
+                            return wash.isTexture2D && wash.a == kWashW &&
+                                   wash.b == kWashH && isBc1(wash.fmt);
+                        })) {
         return false;
     }
     // Slot 1 must be the interface surface the wash is dimming. Without this
     // the fix would fire on any mesh that happened to carry a small BC1.
-    ResourceInfo ui;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv1), &ui) ||
-        !ui.isTexture2D || ui.a < kUiMinW) {
+    if (!cachedMetadata(BindSlot::PsSrv1, g_uiMetadata,
+                        [](const ResourceInfo& ui) {
+                            return ui.isTexture2D && ui.a >= kUiMinW;
+                        })) {
         return false;
     }
     return true;
@@ -200,6 +259,13 @@ void scrimShutdown() {
     if (g_srv) { g_srv->Release(); g_srv = nullptr; }
     if (g_tex) { g_tex->Release(); g_tex = nullptr; }
     g_texLevel = 0xFFFFFFFFu;
+    resetMetadataCaches();
 }
+
+#ifdef EDVR_SCRIM_METADATA_TEST
+uint64_t scrimMetadataResolveCallsForTest() { return g_metadataResolveCalls; }
+
+void scrimMetadataResetResolveCallsForTest() { g_metadataResolveCalls = 0; }
+#endif
 
 }  // namespace edvr

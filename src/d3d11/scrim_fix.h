@@ -96,4 +96,11 @@ void scrimEnd(ID3D11DeviceContext* ctx);
 
 void scrimShutdown();
 
+#ifdef EDVR_SCRIM_METADATA_TEST
+// Counts non-null calls through the production metadata resolver. The focused
+// WARP fixture uses this to prove cache hits avoid the real D3D query path.
+uint64_t scrimMetadataResolveCallsForTest();
+void scrimMetadataResetResolveCallsForTest();
+#endif
+
 }  // namespace edvr
