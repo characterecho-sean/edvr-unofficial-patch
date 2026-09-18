@@ -43,13 +43,13 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: reduce redundant per-draw bookkeeping in the graphics proxy, guided by
-  the full-frame sampled-PC profile. First candidates are lazy UI trace shader
-  hashes, an AA-off gate for inactive motion helpers, and the existing cleanup-
-  aware foveation gate. Keep active transition-flash processing intact. Decoder
-  fixes pass both saved smoke traces and flight replay; no additional flight
-  was needed. Frontier remains on 2d98775 with its INI preserved. Preserve
-  motion history and keep foveated-DLSS paused.
+- Next: reduce shared per-draw bookkeeping for the DLSS goal; lazy UI trace
+  hashes and the existing foveation gate can help when their work is unused.
+  The inactive-motion gate benefits AA off, not active DLSS motion work.
+  DLSS-on benefit still needs measurement. Keep transition-flash processing
+  intact. Decoder fixes pass both saved smoke traces and flight replay; no
+  additional flight was needed. Frontier remains on 2d98775 with its INI
+  preserved. Preserve motion history and keep foveated-DLSS paused.
 
 ## Journal
 
@@ -2382,9 +2382,9 @@ An independent raw-ETL decoder reproduces the conservative steady cohort
 scheduled, with zero unknown. The 2844 GetDeviceToAbsoluteTrackingPose spans
 average 0.0946 ms/frame; all measured OpenVR spans union to 0.0950 ms/frame.
 The 1837 execution samples include 1482 user-leaf observations in Elite, 248 in
-ntdll, 58 in EDVR's graphics DLL, 31 in win32u, 10 in NVIDIA, and three in
-EDVR's OpenVR runtime. These are sample occurrence counts, not measured CPU
-milliseconds or guaranteed removable time.
+ntdll, 40 in EDVR's graphics DLL, 18 in Windows D3D11, 31 in win32u, 10 in
+NVIDIA, and three in EDVR's OpenVR runtime. These are sample occurrence counts,
+not measured CPU milliseconds or guaranteed removable time.
 
 Local matching runtime symbols resolve the common EDVR ready-waker stack to
 `OwnerService::run -> finish -> _Mtx_unlock`. This is the helper completing
@@ -2486,3 +2486,14 @@ Do not bypass beginPanelOverride wholesale: transition-flash camera/pool
 processing is active and relies on its eye-draw counting. Likewise, Map timing
 has measurable overhead but supplies exact slow-call/longest-wait evidence;
 changing that instrumentation belongs in a separate controlled comparison.
+
+Scope clarification: the disabled-motion fast path specifically reduces the
+AA-off baseline; DLSS needs those motion helpers and must retain their work.
+Lazy shader hashes after UI-target rejection can benefit both modes, as can
+skipping an inactive foveation path after required cleanup. Shared draw-path
+improvements are relevant to DLSS, but this AA-off capture cannot quantify
+their DLSS-on benefit or establish stock-game parity. A DLSS-on profile is
+still needed to target active motion work toward the original settlement goal.
+Final module-path validation also separates the post-Present D3D11 sample
+group: 40 belong to EDVR and 18 to Windows, correcting an initial basename-only
+grouping of 58. Full-frame module totals and scheduler timings are unchanged.
