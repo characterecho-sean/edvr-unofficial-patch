@@ -6,6 +6,7 @@
 #include <dxgi.h>
 #include <wrl/client.h>
 #include "../../src/d3d11/weapon_motion.h"
+#include "identity_fusion_replay.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -183,8 +184,8 @@ bool benchmark(Device& d,const fs::path* output){
     }return failures==0;
 }
 
-struct Options {bool selfTest=false,hardware=false,bench=false,dryRun=false;bool haveOutput=false;fs::path output;};
-Options options(int argc,wchar_t** argv){Options o;for(int i=1;i<argc;++i){if(!std::wcscmp(argv[i],L"--self-test"))o.selfTest=true;else if(!std::wcscmp(argv[i],L"--hardware"))o.hardware=true;else if(!std::wcscmp(argv[i],L"--benchmark")){o.bench=true;o.hardware=true;}else if(!std::wcscmp(argv[i],L"--dry-run"))o.dryRun=true;else if(!std::wcscmp(argv[i],L"--output")&&i+1<argc){o.haveOutput=true;o.output=argv[++i];}else throw std::runtime_error("usage: identity_fusion_test --self-test | --hardware [--benchmark [--output DIR]] | --dry-run [--output DIR]");}if(!o.dryRun&&(o.selfTest==(o.hardware||o.bench)||o.haveOutput&&!o.bench))throw std::runtime_error("usage: identity_fusion_test --self-test | --hardware [--benchmark [--output DIR]] | --dry-run [--output DIR]");return o;}
+struct Options {bool selfTest=false,hardware=false,bench=false,dryRun=false;bool haveOutput=false;fs::path output,replay;};
+Options options(int argc,wchar_t** argv){Options o;for(int i=1;i<argc;++i){if(!std::wcscmp(argv[i],L"--self-test"))o.selfTest=true;else if(!std::wcscmp(argv[i],L"--hardware"))o.hardware=true;else if(!std::wcscmp(argv[i],L"--benchmark")){o.bench=true;o.hardware=true;}else if(!std::wcscmp(argv[i],L"--replay")&&i+1<argc)o.replay=argv[++i];else if(!std::wcscmp(argv[i],L"--dry-run"))o.dryRun=true;else if(!std::wcscmp(argv[i],L"--output")&&i+1<argc){o.haveOutput=true;o.output=argv[++i];}else throw std::runtime_error("usage: identity_fusion_test --self-test | --hardware [--benchmark [--output DIR]] | --replay FILE [--benchmark --output DIR] | --dry-run [--output DIR]");}if(o.dryRun)return o;if(!o.replay.empty()){if(o.selfTest||o.haveOutput&&!o.bench)throw std::runtime_error("invalid replay options");return o;}if(o.selfTest&&(o.hardware||o.bench)||!o.selfTest&&!o.hardware||o.haveOutput&&!o.bench)throw std::runtime_error("invalid identity fusion options");return o;}
 } // namespace
 
-int wmain(int argc,wchar_t** argv){try{const Options o=options(argc,argv);if(o.dryRun){std::printf("identity_fusion_test: dry-run (no device, directories, or files created)\n");return 0;}Device correctnessDevice(o.selfTest?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,true);if(!correctness(correctnessDevice))return 1;if(o.bench){correctnessDevice.ctx->ClearState();correctnessDevice.ctx->Flush();Device releaseDevice(D3D_DRIVER_TYPE_HARDWARE,false);if(!benchmark(releaseDevice,o.haveOutput?&o.output:nullptr))return 1;}std::printf("identity_fusion_test: %u checks, %u failures\n",checks,failures);return failures?1:0;}catch(const std::exception& e){std::fprintf(stderr,"identity_fusion_test: %s\n",e.what());return 1;}}
+int wmain(int argc,wchar_t** argv){try{const Options o=options(argc,argv);if(o.dryRun){std::printf("identity_fusion_test: dry-run (no device, directories, or files created)\n");return 0;}if(!o.replay.empty())return identity_fusion_replay::run(o.replay,o.bench,o.haveOutput?&o.output:nullptr)?0:1;if(o.selfTest&&!identity_fusion_replay::selfTest())return 1;Device correctnessDevice(o.selfTest?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,true);if(!correctness(correctnessDevice))return 1;if(o.bench){correctnessDevice.ctx->ClearState();correctnessDevice.ctx->Flush();Device releaseDevice(D3D_DRIVER_TYPE_HARDWARE,false);if(!benchmark(releaseDevice,o.haveOutput?&o.output:nullptr))return 1;}std::printf("identity_fusion_test: %u checks, %u failures\n",checks,failures);return failures?1:0;}catch(const std::exception& e){std::fprintf(stderr,"identity_fusion_test: %s\n",e.what());return 1;}}

@@ -2,11 +2,12 @@
 
 ## Status
 
-- State: installed Frontier build 89b9055 remains unchanged. Its final 210
-  seconds identify per-draw identity work as a GPU target, but local fusion
-  saves only 0.020-0.026 ms per synthetic 40-draw batch. Correctness passes;
-  this is insufficient evidence for a production change or another flight. Full
-  build/gates pass. Static/visibility skips still lack a correctness proof.
+- State: installed Frontier build 89b9055 remains unchanged. Original-shader
+  replay with immediate motion consumption puts fused-minus-baseline time at
+  -6.688 through +0.608 us per selected-mesh batch across six runs. Exact
+  positions, identities and motion maps pass; the saving does not justify a
+  production change or another flight. Static/visibility skips still lack a
+  correctness proof. See the final journal entry for replay scope and gates.
 - Environment: Quest 3 / VirtualDesktopXR / 90 Hz / DLSS K, input 2481x2121 and
   active XR output 3072x3264 per eye, trims off. Dimensions are unchanged
   between the landed settlement and on-foot intervals in this flight. RTX 5090;
@@ -33,9 +34,10 @@
   per call; all its stages suggest a 1.36-1.60 ms/frame scale if
   representative. This is not a directly timed total. Screen producers suggest
   only 0.123-0.125 ms/frame. Older captures suggest limited exact identity
-  reuse. Local typed fusion measures 0.221 ms versus 0.241-0.246 ms baseline
-  per 40-draw batch; copying into the existing structured format regresses to
-  0.282 ms. The synthetic shader omits actual skinning and motion-raster work.
+  reuse. Synthetic typed fusion saves 20-26 us per 40-draw batch, but original
+  shaders plus immediate motion raster show only -6.688 through +0.608 us
+  across two captured subsets. Neither result supports extrapolating the
+  sampled identity intervals into recoverable whole-frame savings.
 - Open: establish static-object fallback and identity across rebases, preserve
   first-moving-frame history, and measure current visibility before expensive
   work. Existing captured-vector comparisons are below 0.002 pixels but leave
@@ -49,11 +51,12 @@
   address only about 0.06 ms landed and no work on foot. Earlier ruled-out
   explanations and the uncontrolled regression remain in the journal. Screen
   motion is not supported as the missing sustained multi-millisecond cost.
-- Next: no new flight build from this prototype. A representative local replay
-  with original shaders and immediate motion consumption must establish a
-  worthwhile net saving before integration. The drawn-weapon increment remains
-  unmeasured; no repeat is needed solely for that. Preserve history and keep
-  the separately paused foveated-DLSS work paused.
+- Next: close identity fusion as a production candidate for these workloads.
+  Use local replay to establish the removable cost of each producer before
+  pursuing skips; rigid static fallback still needs final selection/history
+  equivalence, and cannot help the on-foot path that admits no rigid records.
+  No repeat flight is needed for the drawn-weapon increment. Preserve history
+  and keep the separately paused foveated-DLSS work paused.
 
 ## Journal
 
@@ -1104,3 +1107,99 @@ Hardware correctness and the no-write `--dry-run` check pass. The absolute-path
 full build exits 0: all 61 pooled jobs, three quiet jobs, 249-key config
 contract and packaging/export gates pass, including the new rig's 270 checks.
 The build log is `build/identity-fusion-validation.log`.
+
+### 2026-09-18 -- original shaders and immediate motion consumption
+
+Hypothesis: the synthetic typed-fusion saving survives the original vertex
+shaders and immediate motion-map consumer. The discriminator is the GPU time of
+an entire selected-mesh batch, after exact position, uint4 identity and full
+motion-map comparisons pass. This is a standalone replay; no production
+renderer or installed Frontier files change.
+
+`tools/identity_fusion_capture.py` exports two adjacent frames and their used
+shader bytecode, constant buffers, instance pairs, pool/bone snapshots, and
+complete geometry. It normalizes index/base/instance offsets and preserves
+shared geometry groups for the production history candidate selection. It
+verifies shader IDs with EDVR's FNV seed, records SHA-256 hashes and rejection
+reasons, and rejects ambiguous geometry borrowing. Binary fixtures and game
+shader assets remain local under ignored `build/identity-replay/`.
+
+| Capture | Accepted draws / candidates per frame | Accepted indices / candidates per frame | Used VS families |
+|---|---:|---:|---:|
+| 064839, frames 48601-48602 | 22 / 25 | 200199 / 328830 | 4 |
+| 102403, frames 10963-10964 | 19 / 40 | 73482 / 342741 | 3 |
+
+The primary fixture covers four of the five compatible families; it does not
+validate the fifth original shader. Truncated or absent geometry is excluded.
+Later capture frames omit geometry bytes and binding descriptors, so matching
+first-frame geometry is reused only for a unique metadata/payload group. This
+is a replay assumption, not proof that live bindings or buffers stayed
+unchanged. Pool/bone snapshots retain their original first-draw provenance; the
+format cannot reproduce intervening writes that it did not record.
+
+The captured DXBC has signatures and shader instructions but no RDEF resource
+table. The rig checks reflected signatures and disassembled declarations:
+CB1/CB2 and structured t33/t38, including their sizes and strides. It rejects
+unexpected contracts and system vertex/instance IDs that normalization could
+change. The fused GS consumes only SV_POSITION, so different non-position
+outputs do not need a fabricated common signature.
+
+On RTX 5090, all 44 primary and 38 secondary two-frame draws produce byte-exact
+positions and identities. The production motion vertex/pixel shaders also
+produce byte-exact complete 5120x2880 maps. The primary map contains 794262
+valid-history and 63124 rejected-history pixels; the secondary has 883624 valid
+and zero rejected pixels. The typed consumer changes only its five identity
+declarations from StructuredBuffer<uint4> to Buffer<uint4>. The D3D SDK debug
+layer is unavailable; no debug-layer validation is claimed.
+
+Each timed batch clears depth and motion targets, then interleaves each
+original-VS opaque depth draw, identity/position production, and its immediate
+motion raster. This avoids a prebuilt final depth buffer suppressing early draw
+work. Both paths include the common depth cost. Depth is reconstructed from
+selected meshes with CullNone, without material alpha or full-scene occluders.
+Clean replay state omits the production hook's Get/Restore traffic. These are
+selected-depth-plus-motion costs, not isolated patch overhead or complete
+game-frame times. The runtime accepts exactly two adjacent frames.
+
+Three release-device runs per fixture use at least 250 ms each of wall and
+valid GPU warmup, alternate path order over 15 rounds, and timestamp whole
+batches. All 180 measured samples are ready, non-disjoint and positive.
+
+| Capture / run | Baseline GPU median, ms | Typed fusion GPU median, ms | Fused minus baseline, us |
+|---|---:|---:|---:|
+| 064839 / 1 | 0.317280 | 0.313600 | -3.680 |
+| 064839 / 2 | 0.316864 | 0.317088 | +0.224 |
+| 064839 / 3 | 0.318592 | 0.311904 | -6.688 |
+| 102403 / 1 | 0.224256 | 0.222432 | -1.824 |
+| 102403 / 2 | 0.223744 | 0.224352 | +0.608 |
+| 102403 / 3 | 0.223232 | 0.222752 | -0.480 |
+
+The difference changes sign, and even the best result saves less than 7 us per
+batch. Mean differences across the three run medians are -3.381 us for 064839
+and -0.565 us for 102403. Ruled out as a worthwhile production optimization for
+these tested workloads: typed identity fusion, because the small synthetic
+advantage largely disappears with original shaders and immediate motion
+consumption. This does not establish a universal result for other hardware, the
+missing meshes, or the latest 64-draw flight.
+
+Manifests are `build/identity-replay/064839.json` and `102403.json`. JSON/CSV
+timings are in `benchmark-run1/` through `benchmark-run3/` and
+`102403-benchmark-run1/` through `102403-benchmark-run3/` under the same root.
+The exporter self-test covers normalization, shared geometry, ambiguous
+matching, missing data, frame gaps, round-trip parsing and no-write dry-run.
+The C++ gate adds six parser checks to the existing 270 WARP checks, without
+depending on private game assets. Replay CLI dry-run also leaves its absent
+output directory absent.
+
+Validation: the absolute-path full build exits 0 in
+`build/identity-replay-validation.log`. All 61 pooled jobs, three quiet jobs,
+the 249-key config contract and packaging/export gates pass, including the new
+parser and exporter gates and all 270 existing identity checks. The new replay
+compiles without warnings; existing unrelated build warnings remain.
+
+Next, establish removable producer cost locally before choosing another
+optimization. The on-foot producer and the rigid settlement producer are
+different paths: static rigid skipping cannot remove on-foot work that was
+never admitted. Any static fallback still needs unchanged final DLSS selection,
+foreground/reactive flags and first-moving-frame history, not just nearly equal
+vectors. No new test flight is requested for this result.

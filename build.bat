@@ -1095,9 +1095,10 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
 if not exist "%OBJ%\identityfusion" mkdir "%OBJ%\identityfusion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\identityfusion\\" /Fe"%OBJ%\identityfusion\identity_fusion_test.exe" ^
-    "tools\identity_fusion_test\identity_fusion_test.cpp" ^
-    /link /INCREMENTAL:NO d3dcompiler.lib || exit /b 1
+    "tools\identity_fusion_test\identity_fusion_test.cpp" "tools\identity_fusion_test\identity_fusion_replay.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib dxguid.lib || exit /b 1
 "%OBJ%\identityfusion\identity_fusion_test.exe" --self-test || exit /b 1
+python "tools\identity_fusion_capture.py" --self-test || exit /b 1
 if not exist "%OBJ%\meshmotion" mkdir "%OBJ%\meshmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\meshmotion\\" /Fe"%OBJ%\meshmotion\mesh_motion_test.exe" ^
