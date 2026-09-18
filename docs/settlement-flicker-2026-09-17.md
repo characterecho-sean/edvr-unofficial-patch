@@ -2,16 +2,15 @@
 
 ## Status
 
-- State: verified Frontier build 7cfb5a6 accounts for the landed cycle:
-  15.11-15.12 ms, or 66 FPS, including 4.11-4.23 ms after the second Submit
-  returns and before the next pose-wait entry. Captured Submit/Wait caller
-  handoffs do not explain that gap. Its internal cause is still unmeasured. The
-  prior verified dcd0a9f draw probe completed 29520 captures; three unchanged
-  payloads went from zero passed samples to nonzero. Cached rejection alone is
-  unsafe; no draw suppression is active. The user now reports stock SteamVR at
-  mid-80s FPS and about 6.8 ms GPU with the same settings. Prioritize isolating
-  EDVR/runtime and diagnostic cost before further Elite culling. See the final
-  journal entry.
+- State: the approved controlled baseline disables the original-draw capture
+  probe independently of coarse GPU timing and splits post-stereo wall time
+  around owned Present and PostPresentHandoff. Full validation passes; the
+  Frontier comparison flight is pending. The prior verified 7cfb5a6 measured
+  15.11-15.12 ms cycles (66 FPS), including 4.11-4.23 ms after stereo Submit.
+  Stock SteamVR reportedly reaches mid-80s FPS / 6.8 ms GPU at the same
+  settings. Isolate EDVR/runtime and diagnostic cost before further culling.
+  The prior dcd0a9f draw probe found unchanged payloads becoming visible;
+  cached rejection alone is unsafe. No draw suppression is active.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, AA off, input
   2481x2121, XR output 3072x3264 per eye, trims off. On-foot source is
   5120x2880 in the prior run; this flight has no on-foot leg or eye capture.
@@ -45,13 +44,12 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next diagnostic: establish native AA-off cost without the active original
-  draw/capture probe, retaining coarse frame/GPU timing. The probe currently
-  shares the GPU-timing enable, so switching that off loses the comparison
-  metric. Split the post-stereo interval into game-side gaps, raw Present, all
-  EDVR Present work and PostPresentHandoff in the same controlled build. No new
-  build installed. Conservative current-depth culling remains an offline
-  candidate; preserve motion history and keep foveated-DLSS paused.
+- Next flight after verified installation: Frontier, AA off, same landed
+  cockpit view for two minutes without eye dumps. Confirm the probe-OFF and
+  GPU-timing-on marker, post-submit first-complete and coverage, then compare
+  full-cycle/GPU timing against 7cfb5a6. Attribute the gap only on paired valid
+  samples. Conservative current-depth culling remains an offline candidate;
+  preserve motion history and keep foveated-DLSS paused.
 
 ## Journal
 
@@ -2029,3 +2027,78 @@ this is elapsed GPU time, not pure GPU busy time. The post-second-Submit-return
 gap is outside these pairs by construction. Keep the GPU discrepancy and that
 wall-time gap as separate observations until a controlled run identifies how
 they relate.
+
+### 2026-09-18 -- controlled probe-off baseline with Present attribution
+
+The user approved implementation and Frontier installation. A private
+build-scoped gate disables the experimental original-draw query/capture
+controller, its GPU resource allocation, probe metadata shader lookups and
+metadata TLS writes, and returns before per-draw selection/capture. The
+original-color scope remains intact because UI separation also uses it.
+`advanced.app_gpu_timing` continues to control the coarse GPU measurement;
+there is no new public setting or live INI edit. Startup explicitly logs
+`Original draw diagnostic: controlled baseline OFF; coarse application GPU
+timing on.` (or `off` if coarse timing is disabled).
+
+Owned swapchain Present records CPU timestamps at hook entry, real DXGI Present
+entry/return, the end of ordinary EDVR frame work, and the return of the
+trailing render callback. Foreign swapchains are excluded. A private optional
+reader uses the existing native-timing lease and QPC microseconds shared with
+the native caller. It performs no graphics work, GPU queries, readbacks or
+waits. Its 64 completed records and 16 active tokens are bounded; the response
+carries at most 16 spans, generation, observed count and loss. Active
+overlapping Presents, overwritten history and capacity loss cannot masquerade
+as a zero-Present interval. Closed leases and stale completion tokens cannot
+contaminate a later runtime generation.
+
+At the next caller pose-wait entry, the runtime reads the exact preceding
+post-stereo interval. Present records must belong to the same caller and
+runtime generation, be ordered, wholly contained, successful and non-TEST.
+Missing provider, no observed hook, incomplete/cross-thread/overlapping calls
+and lost records have explicit coverage counts. The existing full-cycle
+measurement remains usable even when the Present subdivision is unavailable.
+Valid zero-, one- and multiple-Present cycles are counted separately; nonzero
+Present sync intervals are also counted.
+
+The `native_post_submit` enabled/first-complete markers and 30-second reports
+share frame-cycle window IDs. Exclusive means cover raw Present, EDVR work
+before/after it, the trailing render callback, and time outside these recorded
+Present spans. Their sum is checked against the gap on exactly the same
+accepted samples, with a paired residual. Single-Present before/after gaps use
+their own explicit subset. PostPresentHandoff caller roundtrips are reported as
+nested spans because they may overlap Present work; overlapping handoff
+intervals are unioned, and invalid/missing/overflow calls are counted. Neither
+aggregate totals nor nested spans should be added to the exclusive partition.
+Time outside recorded spans can still contain Elite work, scheduling or EDVR
+calls/instrument bookkeeping; it is not labeled pure game CPU time.
+
+Discriminators for the next flight: a fall in whole-cycle/GPU timing with the
+draw probe disabled supports diagnostic overhead; a large raw Present span
+points to presentation/backpressure; a large EDVR or trailing callback span
+points to that operation; a large outside span requires further caller-side
+attribution. None presumes the original 4.2 ms is entirely removable. Pacing,
+rendering features and original Elite draws are unchanged by this diagnostic.
+
+Focused provider tests pass 930 checks and the actual client/provider GPU rig
+passes 151. The collector adds deterministic cases for exact accounting,
+filtered coverage, zero/multiple calls, malformed/partial/cross-thread/lost
+records, scope changes and nested handoffs. The production reporter fixture
+also exercises its first-complete marker and reports zero paired residual. The
+full build passes all 62 pooled rigs, three quiet rigs and the 249-key
+configuration contract, including 672 native-runtime checks and 620
+original-draw checks. Validation log:
+`build/controlled-baseline-build-validated.log`. The committed package is
+rebuilt for an unambiguous flight version, then installed and verified with
+`tools/install_edvr.py --target frontier`, preserving the live INI. The next
+flight should hold the same landed AA-off cockpit view for two minutes without
+an eye capture.
+
+Build verification found a pre-existing startup-fixture scheduling limit: one
+parallel run took 144.9 ms to admit the missing-loader test against its 100 ms
+fixture timeout, producing two cascading assertions. Five isolated reruns of
+the exact `openxr_module_test.exe --self-test-separate` gate each passed all
+247 checks, with 0.2-0.5 ms admission. The full gate passes with four workers;
+neither production nor fixture timeout behavior is changed. Set `EDVR_JOBS=4`
+in the build environment: the existing `--jobs` argument path shifts `%0`
+before passing `%~f0` to the rig runner, losing the batch path. That separate
+script defect is bypassed here, not changed in this diagnostic.

@@ -644,9 +644,13 @@ int selfTest() {
     shape.outputWidth[0]=shape.outputWidth[1]=1;shape.outputHeight[0]=shape.outputHeight[1]=1;shape.generation=1;
     auto frame=[&](uint64_t seq,uint64_t base,uint64_t ms){auto w=cycleHost->frameCycles.waitCallerBegin(base,7);cycleHost->frameCycles.waitOwnerBegin(w,base+1);cycleHost->frameCycles.waitOwnerEnd(w,base+2);cycleHost->frameCycles.waitCallerEnd(w,seq,base+3,ms,7,shape,true);
       for(unsigned eye=0;eye<2;++eye){auto s=cycleHost->frameCycles.submitCallerBegin(eye,base+10+eye*10,7);cycleHost->frameCycles.submitOwnerBegin(s,base+11+eye*10);cycleHost->frameCycles.submitOwnerEnd(s,base+12+eye*10);cycleHost->frameCycles.submitCallerEnd(s,eye,seq,base+13+eye*10,7,0.001,true);}};
-    frame(1,1000,1);frame(2,2000,2);auto w=cycleHost->frameCycles.waitCallerBegin(3000,7);cycleHost->frameCycles.waitOwnerBegin(w,3001);cycleHost->frameCycles.waitOwnerEnd(w,3002);cycleHost->frameCycles.waitCallerEnd(w,3,3003,31002,7,shape,true);
+    frame(1,1000,1);frame(2,2000,2);
+    EdvrNativePresentTrace present{sizeof(present),EDVR_NATIVE_PRESENT_TRACE_VERSION_1,1,0,1,1};
+    present.spans[0]={2100,2200,2400,2500,2600,7,0,0,0};
+    auto w=cycleHost->frameCycles.waitCallerBegin(3000,7,&present);cycleHost->frameCycles.waitOwnerBegin(w,3001);cycleHost->frameCycles.waitOwnerEnd(w,3002);cycleHost->frameCycles.waitCallerEnd(w,3,3003,31002,7,shape,true);
     cycleHost->reportFrameCycles();
     check(cycleHost->frameCycleFirstNoted.load(),"production frame-cycle report path reachable");
+    check(cycleHost->postSubmitFirstNoted.load(),"production post-submit report path reachable with accepted Present sample");
   }
   edvr::openxr::test::runFrequencyCases(check);
   edvr::openxr::test::runVisibilityCases(check);

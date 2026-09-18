@@ -4,6 +4,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/timing.h"
+#include "../common/native_present_trace.h"
 
 #include <cmath>
 #include <cstring>
@@ -55,6 +56,33 @@ constexpr unsigned kCompletionCapacity = 256;
 struct Completion { uint64_t ordinal = 0; edvr::NativeTimingSnapshot value{}; };
 std::array<Completion,kCompletionCapacity> completions{};
 uint64_t nextCompletion = 1;
+constexpr unsigned kPresentHistoryCapacity = 64;
+struct PresentRecord { uint64_t ordinal = 0; EdvrNativePresentSpan span{}; };
+std::array<PresentRecord, kPresentHistoryCapacity> presentHistory{};
+uint64_t presentTotalObserved = 0;
+uint64_t presentOverwrittenMaxEndUs = 0;
+bool presentOverwrittenMalformed = false;
+constexpr unsigned kActivePresentCapacity = 16;
+struct ActivePresent { uint64_t token = 0, beginUs = 0; uint32_t thread = 0; };
+std::array<ActivePresent, kActivePresentCapacity> activePresents{};
+uint64_t nextPresentToken = 1;
+bool activePresentSaturated = false;
+
+bool malformedPresent(const EdvrNativePresentSpan& s) noexcept {
+    return !s.beginUs || !s.endUs || s.endUs < s.beginUs ||
+        !s.realBeginUs || !s.realEndUs || !s.bodyEndUs ||
+        s.realBeginUs < s.beginUs || s.realEndUs < s.realBeginUs ||
+        s.bodyEndUs < s.realEndUs || s.endUs < s.bodyEndUs;
+}
+
+void resetPresentHistory() noexcept {
+    presentHistory = {};
+    presentTotalObserved = 0;
+    presentOverwrittenMaxEndUs = 0;
+    presentOverwrittenMalformed = false;
+    activePresents = {};
+    activePresentSaturated = false;
+}
 
 Context* identify(void* p) noexcept {
     for (unsigned i = 0; i < used; ++i) if (p == &pool[i]) return &pool[i];
@@ -420,7 +448,7 @@ HRESULT WINAPI close(void* p) {
     poison(c->waitSequence);
     c->active = false; c->device = nullptr; c->waitOutstanding = c->waitValid = false;
     c->published = false;
-    if (current == c) current = nullptr;
+    if (current == c) { current = nullptr; resetPresentHistory(); }
     snapshot = {};
     return S_OK;
 }
@@ -453,6 +481,80 @@ unsigned nativeTimingReadCompletions(uint64_t& cursor, NativeTimingSnapshot* out
     }
     return count;
 }
+uint64_t nativeTimingPresentBegin(ID3D11Device* device, uint64_t beginUs,
+                                  uint32_t thread) noexcept {
+    if (!device || !beginUs || !thread) return 0;
+    std::lock_guard<std::mutex> lock(lifetime);
+    if (!current || !current->active || current->device != device) return 0;
+    for (auto& active : activePresents) if (!active.token) {
+        uint64_t token = nextPresentToken++;
+        if (!token) token = nextPresentToken++;
+        active = {token, beginUs, thread};
+        return token;
+    }
+    activePresentSaturated = true;
+    return 0;
+}
+void nativeTimingNotePresent(ID3D11Device* device, uint64_t token,
+                             const EdvrNativePresentSpan& span) noexcept {
+    if (!device || !token) return;
+    std::lock_guard<std::mutex> lock(lifetime);
+    if (!current || !current->active || current->device != device) return;
+    ActivePresent* matched = nullptr;
+    for (auto& active : activePresents) if (active.token == token) { matched = &active; break; }
+    if (!matched) return;
+    *matched = {};
+    const uint64_t ordinal = ++presentTotalObserved;
+    auto& slot = presentHistory[(ordinal - 1) % kPresentHistoryCapacity];
+    if (slot.ordinal) {
+        if (malformedPresent(slot.span)) presentOverwrittenMalformed = true;
+        else presentOverwrittenMaxEndUs = (std::max)(presentOverwrittenMaxEndUs,
+                                                      slot.span.endUs);
+    }
+    slot = {ordinal, span};
+}
+}
+
+extern "C" HRESULT WINAPI edvrReadNativePresentTrace(
+    void* timingContext, uint64_t beginUs, uint64_t endUs,
+    EdvrNativePresentTrace* trace) {
+    if (!trace || trace->size != sizeof(*trace) ||
+        trace->version != EDVR_NATIVE_PRESENT_TRACE_VERSION_1 ||
+        !beginUs || !endUs || beginUs > endUs)
+        return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(lifetime);
+    Context* c = identify(timingContext);
+    if (!c || !c->active || c != current || !c->generation)
+        return E_INVALIDARG;
+    *trace = {};
+    trace->size = sizeof(*trace);
+    trace->version = EDVR_NATIVE_PRESENT_TRACE_VERSION_1;
+    trace->generation = c->generation;
+    trace->totalObserved = presentTotalObserved;
+    trace->overflow = (presentOverwrittenMalformed ||
+        presentOverwrittenMaxEndUs >= beginUs || activePresentSaturated) ? 1u : 0u;
+    for (const auto& active : activePresents)
+        if (active.token && active.beginUs <= endUs) trace->overflow = 1;
+    const uint64_t oldest = presentTotalObserved > kPresentHistoryCapacity ?
+        presentTotalObserved - kPresentHistoryCapacity + 1 : 1;
+    unsigned overlaps = 0;
+    for (uint64_t ordinal = oldest; ordinal <= presentTotalObserved; ++ordinal) {
+        const auto& record = presentHistory[(ordinal - 1) % kPresentHistoryCapacity];
+        if (record.ordinal != ordinal) { trace->overflow = 1; continue; }
+        const auto& span = record.span;
+        const bool malformed = malformedPresent(span);
+        const bool overlap = malformed ?
+            (!span.beginUs || !span.endUs || span.endUs < span.beginUs ||
+             (span.endUs >= beginUs && span.beginUs <= endUs)) :
+            (span.endUs >= beginUs && span.beginUs <= endUs);
+        if (!overlap) continue;
+        if (overlaps < EDVR_NATIVE_PRESENT_TRACE_CAPACITY)
+            trace->spans[overlaps] = span;
+        ++overlaps;
+    }
+    trace->count = (std::min)(overlaps, EDVR_NATIVE_PRESENT_TRACE_CAPACITY);
+    if (overlaps > EDVR_NATIVE_PRESENT_TRACE_CAPACITY) trace->overflow = 1;
+    return S_OK;
 }
 
 extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest* request,
@@ -467,6 +569,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest*
     Context& c = pool[used++];
     c = {}; c.active = true; c.device = request->device; c.producer = GetCurrentThreadId();
     c.generation = request->generation; current = &c;
+    resetPresentHistory();
     snapshot = {}; snapshot.active = true; snapshot.generation = c.generation;
     table->context = &c; table->waitBegin = waitBegin; table->waitEnd = waitEnd;
     table->gpuEye = gpuEye; table->publishCpu = publishCpu; table->invalidate = invalidate; table->close = close;

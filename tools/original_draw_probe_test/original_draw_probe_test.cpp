@@ -680,6 +680,11 @@ void sourceContract() {
           "indexed-instanced original call ends before weapon motion capture");
     check(text.find("!originalDrawProbeSelect(self, &input)") != std::string::npos,
           "selected-only resource capture remains gated by cheap metadata Select");
+    check(text.find("constexpr bool kControlledBaselineOriginalDrawDiagnostics = false;") != std::string::npos &&
+          text.find("if constexpr (!kControlledBaselineOriginalDrawDiagnostics) return {};") != std::string::npos,
+          "controlled baseline exits before original-draw metadata and query bookkeeping");
+    check(text.find("Original draw diagnostic: controlled baseline OFF; coarse application GPU timing %s.") != std::string::npos,
+          "controlled baseline has an explicit probe-off/coarse-timer startup marker");
 }
 
 void run() {

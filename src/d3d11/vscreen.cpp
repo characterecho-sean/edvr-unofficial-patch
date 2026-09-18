@@ -3159,6 +3159,16 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 // the real draw, the matching end. One function so the fifth verdict cannot
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
 // was pasted four times and this is the shape that stops the pattern.
+// Controlled performance baseline: retain the coarse application GPU timer,
+// but compile the experimental per-original-draw diagnostic out of the hot
+// path. This is deliberately private to this build, not a user-facing option.
+constexpr bool kControlledBaselineOriginalDrawDiagnostics = false;
+
+uint64_t originalDrawDiagnosticShaderHash(BindSlot slot) {
+    if constexpr (kControlledBaselineOriginalDrawDiagnostics) return bindingShaderHash(slot);
+    return 0;
+}
+
 struct OriginalDrawMetadata {
     OriginalDrawKind kind = OriginalDrawKind::Draw;
     uint32_t count = kOriginalDrawProbeUnknown;
@@ -3176,13 +3186,14 @@ thread_local const OriginalDrawMetadata* t_originalDrawMetadata = nullptr;
 
 struct OriginalDrawScope {
     bool previousColour = t_colourOriginal;
-    const OriginalDrawMetadata* previousMetadata = t_originalDrawMetadata;
+    const OriginalDrawMetadata* previousMetadata =
+        kControlledBaselineOriginalDrawDiagnostics ? t_originalDrawMetadata : nullptr;
     explicit OriginalDrawScope(const OriginalDrawMetadata* metadata) {
         t_colourOriginal = true;
-        t_originalDrawMetadata = metadata;
+        if constexpr (kControlledBaselineOriginalDrawDiagnostics) t_originalDrawMetadata = metadata;
     }
     ~OriginalDrawScope() {
-        t_originalDrawMetadata = previousMetadata;
+        if constexpr (kControlledBaselineOriginalDrawDiagnostics) t_originalDrawMetadata = previousMetadata;
         t_colourOriginal = previousColour;
     }
 };
@@ -3199,6 +3210,8 @@ OriginalDrawKind originalDrawKind(char kind) {
 
 OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
                                                 bool uiSeparated) {
+    if constexpr (!kControlledBaselineOriginalDrawDiagnostics) return {};
+    else {
     if (!t_colourOriginal || !t_originalDrawMetadata || self != g_state->ownerCtx) {
         return {};
     }
@@ -3255,6 +3268,7 @@ OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
     input.gameDisjointActive = guard.disjoint;
     input.gameQueryOverflow = guard.overflow;
     return originalDrawProbeBegin(self, input);
+    }
 }
 
 void originalDrawNativeEnd(ID3D11DeviceContext* self,
@@ -3267,7 +3281,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
     OriginalDrawMetadata originalMetadata{
         originalDrawKind(kind), count, instances,
-        bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps),
+        originalDrawDiagnosticShaderHash(BindSlot::Vs), originalDrawDiagnosticShaderHash(BindSlot::Ps),
         static_cast<uint32_t>(v), false};
     originalMetadata.startIndex = args.start;
     originalMetadata.baseVertex = args.base;
@@ -3631,8 +3645,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     }
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawIndexedInstancedIndirect, kOriginalDrawProbeUnknown,
-        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
-        bindingShaderHash(BindSlot::Ps), 0};
+        kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
+        originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
     const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
@@ -3655,8 +3669,8 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     }
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawInstancedIndirect, kOriginalDrawProbeUnknown,
-        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
-        bindingShaderHash(BindSlot::Ps), 0};
+        kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
+        originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
     const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawInstancedIndirect(self, args, off);
@@ -3876,8 +3890,8 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawAuto, kOriginalDrawProbeUnknown,
-        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
-        bindingShaderHash(BindSlot::Ps), 0};
+        kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
+        originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
     const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawAuto(self);
@@ -4523,7 +4537,8 @@ void vScreenRefreshConfig() {
     if (!cfg.reloadIfChanged()) return;
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
     gpuFrameConfigure(gpuTimingEnabled);
-    originalDrawProbeConfigure(gpuTimingEnabled, true);
+    originalDrawProbeConfigure(
+        gpuTimingEnabled && kControlledBaselineOriginalDrawDiagnostics, true);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
     // on the render thread -- is an EDVR event with a duration, for the
     // monitor's drop attribution.
@@ -5894,9 +5909,14 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     }
 
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
-    originalDrawProbeBind(device, ctx,
-        OriginalDrawProbeQueryOps{s.realBegin, s.realEnd, s.realGetData});
-    originalDrawProbeConfigure(gpuTimingEnabled, true);
+    if constexpr (kControlledBaselineOriginalDrawDiagnostics) {
+        originalDrawProbeBind(device, ctx,
+            OriginalDrawProbeQueryOps{s.realBegin, s.realEnd, s.realGetData});
+        originalDrawProbeConfigure(gpuTimingEnabled, true);
+    }
+    Log::get().note(
+        "Original draw diagnostic: controlled baseline OFF; coarse application GPU timing %s.",
+        gpuTimingEnabled ? "on" : "off");
 
     if (!executeHookInstalled || !graphicsBridgeRegisterOwner(device, ctx)) {
         Log::get().note("vScreen: private graphics bridge unavailable (owner already registered or identity check failed)");

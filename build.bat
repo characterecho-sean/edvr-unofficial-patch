@@ -269,6 +269,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeFrame ^
     --extra-export edvrAcquireNativeFss ^
     --extra-export edvrAcquireNativeTiming ^
+    --extra-export edvrReadNativePresentTrace ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
     --extra-export "edvrNativeStartupRouting DATA" ^

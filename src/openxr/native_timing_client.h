@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common/native_timing.h"
+#include "../common/native_present_trace.h"
 #include <mutex>
 
 namespace edvr::openxr {
@@ -30,6 +31,9 @@ class NativeTimingClient final {
       return E_NOINTERFACE;
     }
     table_ = candidate;
+    const auto trace = GetProcAddress(provider, "edvrReadNativePresentTrace");
+    presentTrace_ = owned(provider, trace) ?
+        reinterpret_cast<decltype(&edvrReadNativePresentTrace)>(trace) : nullptr;
     provider_ = provider;
     generation_ = generation;
     return S_OK;
@@ -38,6 +42,16 @@ class NativeTimingClient final {
   bool acquired() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context != nullptr;
+  }
+  bool presentTraceAvailable() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return table_.context && presentTrace_;
+  }
+  bool readPresentTrace(uint64_t beginUs, uint64_t endUs, EdvrNativePresentTrace& out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out = {sizeof(out), EDVR_NATIVE_PRESENT_TRACE_VERSION_1};
+    return table_.context && presentTrace_ &&
+        presentTrace_(table_.context, beginUs, endUs, &out) == S_OK;
   }
   uint64_t waitBegin() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -96,7 +110,7 @@ class NativeTimingClient final {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!table_.context) return S_FALSE;
     const auto result = table_.close(table_.context);
-    table_ = {}; provider_ = nullptr; generation_ = 0;
+    table_ = {}; presentTrace_ = nullptr; provider_ = nullptr; generation_ = 0;
     return result;
   }
 
@@ -110,6 +124,7 @@ class NativeTimingClient final {
   }
   mutable std::mutex mutex_;
   EdvrNativeTimingTable table_{};
+  decltype(&edvrReadNativePresentTrace) presentTrace_ = nullptr;
   HMODULE provider_ = nullptr;
   uint64_t generation_ = 0;
 };

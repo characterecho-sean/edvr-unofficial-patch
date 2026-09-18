@@ -4,6 +4,8 @@
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
 #include "original_draw_probe.h"
+#include "native_timing.h"
+#include "../common/native_present_trace.h"
 
 #include "shader_sig.h"
 #include "weapon_motion.h"
@@ -904,6 +906,9 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
+    const uint64_t traceBegan = self == g_state->swapChain ? edvrNativeTraceNowUs() : 0;
+    const uint64_t traceToken = self == g_state->swapChain ?
+        nativeTimingPresentBegin(g_state->device, traceBegan, GetCurrentThreadId()) : 0;
     VrCensusScope census(VrCensusEvent::PresentEnter, VrCensusEvent::PresentExit,
                           self, self == g_state->swapChain ? 1 : 0);
     // Not our swapchain: forward and do no frame work. A second swapchain
@@ -920,8 +925,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // thread's own busy time.
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+    const int64_t presentT1 = qpcNow();
     if (qpcFrequency() > 0) {
-        perfMonitorNotePresentWait(static_cast<double>(qpcNow() - presentT0) * 1000.0 /
+        perfMonitorNotePresentWait(static_cast<double>(presentT1 - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
     }
     gameExitProbePresent(hr,flags,g_state->frameCounter);
@@ -1462,8 +1468,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
                                              static_cast<double>(qpcFrequency()));
     }
+    const uint64_t traceBodyEnd = edvrNativeTraceNowUs();
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
         renderBoundaryPresent(g_state->device);
+    const EdvrNativePresentSpan trace{traceBegan, edvrNativeTraceUs(presentT0),
+        edvrNativeTraceUs(presentT1), traceBodyEnd, edvrNativeTraceNowUs(),
+        GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};
+    nativeTimingNotePresent(g_state->device, traceToken, trace);
     return hr;
 }
 

@@ -208,7 +208,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
   FrameCycleStats frameCycles;
-  std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false};
+  std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false},postSubmitFirstNoted{false};
   std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
   TransferWallTimes transferWall;
   uint64_t submitCallbacksBegin=0;
@@ -698,8 +698,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
     if(!service.isOwner()) {
       const uint64_t callerBegan=frameCycleUs();const DWORD caller=GetCurrentThreadId();
-      frameCycles.enabled();const uint64_t cycleToken=frameCycles.waitCallerBegin(callerBegan,caller);
-      if(!frameCycleEnabledNoted.exchange(true)){nativeTracePrintf("native_frame_cycle,enabled=1,boundary=host_wait_return_to_next_host_wait_return,units=wall_ms,nested=1,gpu=0\n");}
+      const auto postRequest=frameCycles.postRequest();
+      EdvrNativePresentTrace postTrace{};
+      const bool havePostTrace=postRequest.sequence&&
+        timing.readPresentTrace(postRequest.beginUs,callerBegan,postTrace);
+      frameCycles.enabled();const uint64_t cycleToken=frameCycles.waitCallerBegin(callerBegan,caller,havePostTrace?&postTrace:nullptr);
+      if(!frameCycleEnabledNoted.exchange(true)){
+        nativeTracePrintf("native_frame_cycle,enabled=1,boundary=host_wait_return_to_next_host_wait_return,units=wall_ms,nested=1,gpu=0\n");
+        nativeTracePrintf("native_post_submit,enabled=1,present_provider=%u,boundary=second_submit_return_to_next_wait_entry,units=wall_ms,gpu=0,handoff_nested=1\n",unsigned(timing.presentTraceAvailable()));
+      }
       auto result=vr::VRCompositorError_InvalidTexture;
       FrameCycleStats::Shape cycleShape{};
       const bool dispatched=service.invoke([&]{
@@ -1069,7 +1076,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     skybox.clear();loading.overrideCleared();++skyboxClears;return true;
   }
   bool handoff(uint64_t generation) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=handoff(generation);})&&result;}
+    if(!service.isOwner()) {
+      const auto began=frameCycleUs();const auto sequence=frameCycleSequence.load(std::memory_order_acquire);
+      const DWORD caller=GetCurrentThreadId();bool result=false;
+      const bool dispatched=service.invoke([&]{result=handoff(generation);});
+      frameCycles.noteHandoff(began,frameCycleUs(),sequence,caller,dispatched&&result);
+      return dispatched&&result;
+    }
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||state.frameOpen())return false;
@@ -1380,8 +1393,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return r;
   }
   static uint64_t frameCycleUs() noexcept {
-    LARGE_INTEGER q{},f{};if(!QueryPerformanceCounter(&q)||!QueryPerformanceFrequency(&f)||f.QuadPart<=0)return 0;
-    return static_cast<uint64_t>(static_cast<double>(q.QuadPart)*1000000.0/static_cast<double>(f.QuadPart));
+    return edvrNativeTraceNowUs();
   }
   void reportFrameCycles() {
     if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
@@ -1397,6 +1409,36 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     phase("cycle",r.cycle);phase("game_before_first_submit",r.beforeFirst);phase("first_submit_roundtrip",r.firstSubmit);phase("between_eye_calls",r.betweenEyes);phase("second_submit_roundtrip",r.secondSubmit);phase("post_second_submit_to_next_wait",r.afterSecond);phase("next_wait_roundtrip",r.nextWait);phase("per_frame_residual",r.residual);
     const auto nested=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,units=wall_ms,nested=1\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95);};
     nested("next_wait_owner_body",r.waitOwner);nested("first_submit_owner_body",r.submitOwner[0]);nested("second_submit_owner_body",r.submitOwner[1]);nested("first_submit_render_park",r.renderPark[0]);nested("second_submit_render_park",r.renderPark[1]);
+    if(r.postValid&&!postSubmitFirstNoted.exchange(true))
+      nativeTracePrintf("native_post_submit,first_complete=1,window=%llu,sequence=%llu\n",
+        (unsigned long long)r.window,(unsigned long long)r.firstPostSequence);
+    nativeTracePrintf("native_post_submit_window,window=%llu,base_valid=%u,valid=%u,single_present=%u,zero_present=%u,multiple_present=%u,present_sync_nonzero=%llu,present_provider=%u,handoff_valid=%u,handoff_missing=%llu,handoff_invalid=%llu,handoff_overflow=%llu\n",
+      (unsigned long long)r.window,r.valid,r.postValid,r.singlePresentValid,r.zeroPresentValid,r.multiplePresentValid,
+      (unsigned long long)r.syncNonzeroPresent,unsigned(timing.presentTraceAvailable()),r.handoffValid,(unsigned long long)r.handoffMissing,
+      (unsigned long long)r.handoffInvalid,(unsigned long long)r.handoffOverflow);
+    const char* postReasons[]={"available","provider_missing","provider_version","provider_size","provider_generation",
+      "not_yet_observable","lost_or_inflight_present_history","partial_present","other_present_thread",
+      "failed_present","test_present","malformed_or_overlapping_present"};
+    static_assert(sizeof(postReasons)/sizeof(*postReasons)==FrameCycleStats::PostUnavailableCount,"post-submit rejection names");
+    for(unsigned i=1;i<FrameCycleStats::PostUnavailableCount;++i)
+      nativeTracePrintf("native_post_submit_unavailable,window=%llu,reason=%s,count=%llu\n",
+        (unsigned long long)r.window,postReasons[i],(unsigned long long)r.postUnavailable[i]);
+    const auto postPhase=[&](const char* name,const FrameCycleStats::Dist& d,unsigned samples,unsigned isNested,const char* units="wall_ms"){
+      nativeTracePrintf("native_post_submit_phase,window=%llu,name=%s,valid=%u,mean=%.4f,p50=%.4f,p95=%.4f,units=%s,nested=%u\n",
+        (unsigned long long)r.window,name,samples,d.mean,d.p50,d.p95,units,isNested);
+    };
+    postPhase("paired_gap",r.postGap,r.postValid,0);
+    postPhase("raw_dxgi_present",r.rawPresent,r.postValid,0);
+    postPhase("edvr_before_real_present",r.edvrBeforePresent,r.postValid,0);
+    postPhase("edvr_after_real_present",r.edvrAfterPresent,r.postValid,0);
+    postPhase("trailing_render_callback",r.trailingCallback,r.postValid,0);
+    postPhase("outside_present",r.outsidePresent,r.postValid,0);
+    postPhase("per_frame_residual",r.postResidual,r.postValid,0);
+    postPhase("present_count",r.presentCount,r.postValid,1,"calls");
+    postPhase("before_single_present",r.beforePresent,r.singlePresentValid,1);
+    postPhase("after_single_present",r.afterPresent,r.singlePresentValid,1);
+    postPhase("post_present_handoff",r.handoffNested,r.handoffValid,1);
+    postPhase("handoff_count",r.handoffCount,r.handoffValid,1,"calls");
   }
   void reportSubmitStats() {
     const auto wall=submitStats.distribution(&SubmissionStats::Sample::submitMs);

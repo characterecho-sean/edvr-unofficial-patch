@@ -15,6 +15,7 @@
 using Microsoft::WRL::ComPtr;
 using namespace edvr::openxr;
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTiming")
+#pragma comment(linker, "/EXPORT:edvrReadNativePresentTrace")
 namespace {
 std::atomic<unsigned> checks{0};
 void require(bool value, const char* why) {
@@ -63,6 +64,15 @@ void run() {
                 "module-owned production capability on producer");
         }), "acquire producer callback");
     }), "acquire owner route");
+    require(client.presentTraceAvailable(), "optional Present trace export resolved from provider module");
+    EdvrNativePresentSpan present{100,110,120,130,140,GetCurrentThreadId(),1,7,S_OK};
+    const auto presentToken=edvr::nativeTimingPresentBegin(device.Get(),present.beginUs,present.thread);
+    edvr::nativeTimingNotePresent(device.Get(),presentToken,present);
+    EdvrNativePresentTrace presentTrace{};
+    require(client.readPresentTrace(120,130,presentTrace) && presentTrace.generation==41 &&
+        presentTrace.totalObserved==1 && presentTrace.count==1 && !presentTrace.overflow &&
+        presentTrace.spans[0].thread==present.thread && presentTrace.spans[0].flags==7,
+        "client reads owned provider Present trace end to end");
     auto source=texture(device.Get(),0xff4488dd), copy=texture(device.Get(),0xff000000);
     ComPtr<ID3D11RenderTargetView> target;
     require(SUCCEEDED(device->CreateRenderTargetView(source.Get(),nullptr,&target)), "render target");
