@@ -2,27 +2,27 @@
 
 ## Status
 
-- State: verified c1dbb76 DLSS CPU capture is complete with clean retained
-  coverage. The shared draw-path optimizations are installed in Frontier.
-  Sampled stacks confirm the old dominant resolve-bind getter path is removed
-  and the inactive foveation callback has zero sampled PCs. CPU execution still
-  dominates the post-Present interval, while the measured synchronous native
-  calls are small. The previous 2d98775 trace used AA off; differing modes and
-  workloads prevent a before/after speedup claim.
+- State: verified 5efb139 DLSS CPU capture is complete with clean retained
+  coverage. Frontier retains this build. Both new caches reduce their targeted
+  sampled-PC rates by over 97%; measured draw-hook time is 0.44-0.51 ms lower
+  than c1dbb76. Overall benefit is modest: one clean settled window gains about
+  1 FPS, while benchmark CPU/GPU medians are essentially unchanged. The strict
+  trace also shows 0.60 ms more post-Present execution, predominantly outside
+  the graphics proxy; its cause is unproven. See the final journal entry.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
   capture is landed cockpit; station rotation/on-foot still need their own
   validation. No draw suppression is active.
-- Timing: native W7/W8 report 55.733/54.933 FPS, 17.942/18.200 ms cycles. Last
-  completed benchmark medians are CPU 12.823 and GPU 16.506 ms; these are
-  separate elapsed measurements, not exclusive CPU work or additive costs.
-  Strict retained sequences 11580-12078 (499 frames, caller 15248) average
-  3.626 ms after Present: 2.683 running, 0.829 waiting, 0.113 ready, zero
-  unknown. Native call-span union is 0.083 ms/frame. Broader W8 intersection
-  gives essentially the same result but crosses a shadow-workload change.
-  Trace, reports and matching DLLs/PDBs are preserved under the capture
-  directory below.
+- Timing: clean native W7 reports 56.700 FPS and a 17.644 ms cycle, versus
+  55.733 FPS / 17.942 ms for c1dbb76. New W8 includes exit and is not a steady
+  comparison. Last benchmark medians are CPU 12.848 and GPU 16.459 ms; these
+  are separate elapsed measurements, not exclusive CPU work or additive costs.
+  Strict sequences 11416-11969 (554 frames, caller 8652) average 4.259 ms after
+  Present: 3.281 running, 0.836 waiting, 0.142 ready, zero unknown. Native
+  call-span union is 0.093 ms/frame. Trace, reports and exact DLLs/PDBs are in
+  build/cpu-profile-frontier-5efb139-dlss. The previous c1dbb76 DLSS capture is
+  the comparator; older 2d98775 used AA off.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -45,14 +45,14 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: Frontier has verified 5efb139 with both caches; focused fixtures,
-  independent review and both full builds pass. The smoke-validated collector
-  is waiting for the same DLSS landed cockpit view, armed 2026-09-18 20:28 UTC
-  with a 30-minute launch window and five-minute recording limit. Hold the view
-  60-90 seconds, then quit normally. Compare against the c1dbb76 DLSS capture,
-  preserving scene/settings and active motion/history behavior. Foveated-DLSS
-  remains paused. Engine-level skipping still lacks a verified semantic target;
-  net performance benefit of these caches needs measurement.
+- Next: audit tracked blend-state bindings with an actual-getter fallback for
+  unknown state. The next measured driver cluster is OMGetBlendState, confirmed
+  at the exact return instruction; it is not BlendState::GetDesc. Blend state
+  is not currently shadowed, so setter hooks, context ownership, invalidation,
+  restoration and lifetime need review before implementation. Preserve draws
+  and active motion/history behavior. Foveated-DLSS remains paused, and
+  engine-level skipping still lacks a verified semantic target. Collector
+  completed normally at game exit; no new capture is armed.
 
 ## Journal
 
@@ -2726,3 +2726,88 @@ symbols-5efb139 with verified SHA-256 hashes. Hold the same landed cockpit view
 with DLSS active for 60-90 seconds, then quit normally. Compare with the
 preserved c1dbb76 DLSS capture rather than the older AA-off flight. No in-game
 speedup is claimed before that measurement.
+
+### 2026-09-18 -- verified 5efb139 DLSS cache flight
+
+The user ran the installed build. Both graphics and native logs identify
+v0.17.0-32-g5efb139, checked with tools/edvr_log.py --expect-build 5efb139.
+Graphics log is edvr_gfx_20260918_142925.log; native log is
+edvr_openxr_20260918_142927_012_16980.log. The collector completed normally on
+game exit at 20:32:43 UTC. Capture, report and matching archived DLLs/PDBs are
+under build/cpu-profile-frontier-5efb139-dlss; derived sampled PCs and symbols
+are under derived-hotspots/strict-pre-shadow. Environment and DLSS settings
+match the Status block. No runtime or live configuration was changed during
+this analysis.
+
+Coverage is complete: zero ETW event loss, retained sequence gaps, malformed
+records, invalid intervals, scheduler unknowns or stack-owner mismatches. Of
+3395 available frames, the scheduler-covered tail retains 1190 continuous
+frames, sequences 11416-12605. Provider gaps precede that retained tail. The
+strict comparison uses sequences 11416-11969, 554 frames on caller TID 8652,
+before the shadow-workload change at 20:32:12.570 UTC. Later luminance changes
+and the exit stall are excluded. An isolated 22.975 ms post-Present interval
+inside this cohort is retained; it contributes only about 0.034 ms/frame to the
+mean, and the increased running time is also present in the median.
+
+The new depth-selection cache reduces direct refreshScenePick observations from
+227/499 frames to 6/554, a 97.6% lower sampled-PC rate. Scrim-origin
+system-D3D11 observations fall from 120/499 to 2/554, a 98.5% lower rate. The
+old 119-PC system-D3D11 +0x47ab9 cluster under bindingResolve -> scrimOnEyeDraw
+has no new observations. These are targeted sampling-rate changes, not
+percentages of total CPU time saved. Total graphics-proxy exclusive-PC rate
+falls from 2448/499 to 2495/554, approximately 8.2%; inclusive stack counts
+overlap and are not removable fractions.
+
+The two 1800-frame draw-hook means fall from 5.022/5.123 ms to 4.511/4.687 ms,
+about 0.44-0.51 ms or 9-10% lower. That timer includes proxy reissues, waits
+and instrumentation but excludes original draw forwarding, the earlier
+probe/owner lookup and some weapon work; it is neither total EDVR overhead nor
+wholly removable CPU execution. Motion-admission scene/depth/eye/cap samples
+fall from 4711 us / 74316 observations to 2381.2 us / 75493, about half the
+time per sample. Diagnostic cohorts differ from the ETL cohort, so this is
+supporting evidence rather than another additive millisecond saving.
+
+The clean native W7 window improves from 55.733 to 56.700 FPS, with cycle time
+17.9422 -> 17.6437 ms and before-Submit time 12.5300 -> 12.2110 ms. Its
+post-Present mean is 3.9640 -> 4.0363 ms. New W8 includes the exit transition
+and must not be treated as a steady FPS comparison. Last completed benchmark
+window medians are essentially unchanged: CPU 12.823 -> 12.848 ms, GPU 16.506
+-> 16.459 ms. CPU p95 is 14.338 -> 14.328 ms; GPU p95 is 18.154 -> 18.134 ms.
+These elapsed CPU/GPU measures are not additive.
+
+In the stricter sampled trace cohort, post-Present time rises from 3.626 to
+4.259 ms: running 2.683 -> 3.281, ready 0.113 -> 0.142, waiting 0.829 -> 0.836
+ms. Native call-span union is only 0.083 -> 0.093 ms/frame. New medians are
+3.976 ms total, 3.009 running, 0.110 ready and 0.839 waiting. Exclusive
+post-Present PCs are predominantly Elite (1349), ntdll (234), win32u (108) and
+NVIDIA (80); graphics proxy has 28, system D3D11 has 15, native runtime has six
+and other modules have four. Proxy observations per frame are nearly flat
+versus the old cohort. The extra execution is mostly outside the graphics
+proxy, but ownership alone does not establish its cause or prove a regression
+caused by either cache. Separate flights also have some variation in eye draw
+counts. The data supports a modest proxy-cost reduction, not a controlled claim
+of a large overall FPS gain.
+
+The next measured driver cluster needs precise attribution. System-D3D11
++0x47ab9 has 133 new exclusive PCs, 128 under meshMotionDraw. A line-level PDB
+mapping initially suggested BlendState::GetDesc, but that source line spans
+several calls. Disassembly of the matching archived graphics DLL places the
+observed proxy return RVA 0xb83b5 immediately after call rbx at 0xb83b3; rbx is
+loaded from context vtable offset 0x2d8, slot 91, OMGetBlendState. The
+BlendState::GetDesc return is later at 0xb83e7, and the observer-cache AddRef
+return is at 0xb843d. Ruled out: assigning the 128-PC cluster to
+BlendState::GetDesc, because its exact sampled caller return site identifies
+OMGetBlendState. Descriptor-only caching does not directly remove this measured
+query cost.
+
+Current binding_shadow slots do not include blend or depth state, and vscreen
+does not hook OMSetBlendState. The next investigation should audit tracking
+blend-state setters on the owned context and using known bindings for motion
+eligibility, retaining the real getter for unknown state. ClearState,
+ExecuteCommandList restoration, temporary proxy substitutions and COM lifetime
+must be handled before a build. Existing descriptor observers measure reuse but
+do not bypass getters. No Elite scene-traversal or other engine operation has
+yet been proven safe to skip. Native shutdown reports zero temporal, sharpen,
+menu or pose failures and zero graphics wrong-thread calls; visual quality
+still requires user observation. Keep 5efb139 installed; no additional flight
+is requested for this analysis.
