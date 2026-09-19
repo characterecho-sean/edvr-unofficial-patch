@@ -2,10 +2,10 @@
 
 ## Status
 
-- State: flight 085213 captured exact-frame mesh sources and their real CPU
-  upload routes, including visible settlement records. No static classification
-  or exclusion is proven; the two t33 words remain rejected as standalone
-  flags.
+- State: flight 085213 joins visible settlement records to AtlasModel2's CPU
+  upload route. Offline tracing resolves whole-record copies and one upstream
+  producer, but not their source-pointer join. No static classification is
+  proven; the two t33 words remain rejected as standalone flags.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -55,10 +55,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: trace payload preparation at 0x4c81be0 from the verified pool owner;
-  0x4c822e0 is a separate instance-stream candidate. Use the existing capture
-  before another flight. Neither routine yet proves object identity, planet
-  attachment or a safe motion-work skip.
+- Next: establish which CPU producer supplies the captured model blocks.
+  0x4c81be0 copies them; 0x4c822e0 assigns instance ranges. Neither constructs
+  object identity. The latest offline entry records source-descriptor fields
+  and a possible bounded owner capture; no further flight is requested yet.
 
 ## Journal
 
@@ -4285,3 +4285,112 @@ e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988, identical to
 the earlier offline binary. This turn changes documentation only. The installed
 test build and settings remain unchanged; no additional flight is needed for
 the next bounded offline step.
+
+### 2026-09-19 - Offline payload preparation and CPU source blocks
+
+The next pass uses the same verified executable and flight 085213. No game code
+or installed payload is changed. New evidence is retained beside that capture
+under mapping-*, payload-* and instance-* prefixes. The original upload
+association remains the anchor; a matching 336-byte layout alone is not proof
+that an arbitrary CPU producer made the captured settlement records.
+
+Ruled out: 0x4c81be0 as the constructor of the model fields. It is a copier of
+already-prepared CPU blocks. For a leaf batch and source descriptor, it
+computes destination = mappedPool + stride * (leaf[+0xc0] + entry[+0x38]),
+copies stride * entry[+0x3c] bytes from pointer entry[+8], and traverses one
+0x48-byte descriptor list plus seven 0x50-byte descriptor lists. Aligned copies
+use explicit 16/64-byte loads/stores; the fallback calls 0x4899f50. It does not
+calculate the captured raw pose or synthesize t33 words28/320.
+
+This also corrects the earlier archive note's units: leaf +0xc0/+0xc8
+accumulate element offsets/counts, not bytes. The later multiplication by
+resource stride establishes that distinction. The pool allocation aligns the
+element count to 0x400; the captured 15,360-element, 336-byte-stride capacity
+agrees with that representation.
+
+Mapping helper 0x50f000 stores D3D Map's pData at result+0x28, RowPitch at +0
+and DepthPitch at +4 on its success path at 0x50f213. Wrapper 0x51e0c0 retains
+the resource wrapper in result+0x18; wrapper+0x140 holds the actual D3D
+resource. Therefore pool-owner +0x178/+0x180 are mapped pData and its
+duplicate, and +0x168 is a resource wrapper, not a D3D context. The
+instance-owner equivalents are +0x128/+0x130 and +0x118, relative to the upload
+method's owner base. Upload-state flags and these mapping fields are not
+evidence of object mobility.
+
+Ruled out: 0x4c822e0 as the instruction that constructs IA's two 32-bit words.
+Its verified caller passes the mapped ID pointer, cumulative element offset and
+count. The function stores them into entry +0xf0/+0xf8/+0xfc, clears the
+per-entry counter at +0x100, and registers/enqueues the entry. It never writes
+through the mapped ID pointer. The word emitter must be downstream of this
+bookkeeping.
+
+A common 0x150-byte initializer at 0x4c835d0 writes word28 = 0x65f (1631),
+zeroes the position and optional tail fields, and initializes packed
+orientation/scale. One directly linked CPU builder, 0x42b4130, invokes it,
+writes a supplied pose, and replaces only mask 0xfc0000 of word28 with a
+selected table index shifted by 18. Numerically, 0xc065f (788063) is the same
+default plus index three in that field. That builder copies optional caller
+data into the +0x140 tail, explaining how word320 can remain zero or receive
+caller data on this path. These instruction-level facts explain the encoding on
+that producer path; the table's semantic meaning and its connection to the
+captured settlement source blocks still require proof. The earlier
+rotating-station counterexamples continue to rule out either observed metadata
+pair as an immovable-in-world test.
+
+That producer retains up to eight records per CPU node, with count at
+node+0x18, payloads at node+0x20+i*0x150 and separate pointers at
+node+0xaa0+i*8. Its owner is builder[+0x20]; a compound-key lookup at
+owner+0x260 selects the list. The immediate caller's primary function is
+0x42b4420. These are concrete storage and calling relationships, not entity or
+attachment semantics. In particular, no pointer-identity chain yet connects
+node+0x20 to the upload copier's entry[+8]. A same-sized record with the same
+default fields does not close that gap.
+
+The upload owner's constructor is primary 0x4c7e4d0. Its embedded labels
+identify AtlasModel2, gfModelGPUModelData and
+frAtlasModelRenderer_InstanceIndexRemapBuffer. A helper registers three named
+streams: gfrAtlasModelBaseStreamData (0x150 bytes), gfrAnimationData (0x30),
+and gfrPreviousAnimationData (0x30). These labels come from code references to
+embedded strings, not recovered RTTI. They identify the rendering subsystem and
+layouts; they do not identify buildings or planet-fixed objects.
+
+There is an important eight-byte owner-base distinction: the constructor
+returns complete object C, but the upload dispatch table at 0x5a6fc10 is
+installed at C+8. The upload methods receive S=C+8 and do not adjust it. The
+instance count/list at S+0x60/S+0x68 and mapping fields at S+0x100 onward are
+therefore secondary-interface offsets. The constructor stores its supplied
+owner at C+0x48; calling that an ownership parent does not establish a
+transform/entity parent. The earlier reference at 0x4c7e9e4 belongs to
+destructor primary 0x4c7e9c0, not a second constructor.
+
+Ruled out: the constructor's registered callback as the missing IA pair
+emitter. Thunk 0x4c7bd70 jumps to 0x4c82a40, which filters linked records and
+submits integer ranges through 0x51baf0. It neither follows the prepared
+entry's mapped-pointer/range fields nor writes through instance-buffer pData.
+Callback registration alone does not join the CPU model producer to captured
+source records.
+
+The final bounded descriptor check also leaves the pointer join open. Primary
+functions 0x4c7b010 and 0x4c7b3c0 contain the earlier scan's 0xc0/0xc8/0xd0
+displacements as stack arguments, not object fields. Their grouped-submission
+vectors mix 0x60-byte and 0x50-byte entries and do not expose the upload leaf's
++0xd0 link. Immediate helper 0x4c7a1d0 writes similarly placed +8/+0x38/+0x3c
+fields in a 0x50-byte record, but its source is an input-array element pointer
+and the latter fields have different established inputs. It supplies no
+node+0x20-to-upload-source pointer chain. Matching offsets alone are therefore
+ruled out as proof that these candidates construct the captured source
+descriptors.
+
+Flight 085213 contains stack return addresses and GPU buffer bytes, but no live
+CPU-owner registers or source-block addresses. The bounded static pass has not
+closed that missing pointer join. The next discriminant is a bounded diagnostic
+at the already observed Map return 0x4c821b3. Recover the preserved pool-owner
+register by unwinding, validate its wrapped native D3D resource against the
+hook's mapped resource, and then retain bounded leaf descriptors and
+source-record bytes for comparison with the same upload generation. The mapped
+pData field may still refer to the previous mapping while the hook is running;
+native resource identity, not that field, must validate the owner.
+Build/callsite checks, guarded reads, bounds, pointer lifetime and explicit
+failure reporting must be validated offline before requesting a flight. This is
+an instrument design, not an implemented classifier or evidence of a
+performance gain.
