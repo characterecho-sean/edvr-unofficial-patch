@@ -2,10 +2,10 @@
 
 ## Status
 
-- State: bounded CPU source-owner capture built, tested and installed on
-  Frontier, awaiting one landed cockpit capture. It requires exact CPU/GPU
-  bytes from the same upload generation. No static classification is proven;
-  the two t33 words remain rejected as standalone flags.
+- State: flight 100737 matched all 512 admitted records to exact CPU source
+  bytes, including 27 visible records (22 settlement-facing). All three owner
+  traces were complete. The shared batch also contains player geometry, so it
+  does not identify planet attachment or static objects.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -25,11 +25,11 @@
   Its sampled 0.390 us/check implies about 4.06 ms/frame of added gate work,
   excluding lock acquisition/unsupported families. Earlier low-cost benchmark
   windows include menu/loading and must not be called comparable settlements.
-- Capture: 085213 sealed mesh/scene frame 16584; 512 records in 122 draws, 27
-  records with 49,704 exact-depth pixels. Both source buffers have matched
-  Map/Unmap generations; six events and 12 stacks, no cap/failure/foreign-write
-  declines. This admitted subset is not a static classifier or a scene census.
-- Static opportunity: 501/512 admitted records have exact unchanged raw pose,
+- Capture: 100737 sealed mesh/scene frame 11738; 512 records in 133 draws, 27
+  records with 64,583 exact-depth pixels. Both source buffers have matched
+  Map/Unmap generations; six events and 12 stacks, no failed or foreign writes.
+  The 512-record admission cap prevents treating this subset as a scene census.
+- Earlier static opportunity: 501/512 records have exact unchanged raw pose,
   across 115/124 whole draws; all 501 also have changed scene origin. Of these,
   446 leave no motion-coverage pixels. These are conditional opportunities, not
   safe skip counts, unique scene-object counts or a forecast of speedup.
@@ -45,7 +45,7 @@
   different objects. IDs, draw order and identical payloads are not proven
   persistent object identity. Coarse family aggregates remain valid despite
   detail-bucket overflow; query times cannot be extrapolated as FPS savings.
-- CPU: current mesh-hook samples imply 1.241 ms/frame, including 0.970 ms
+- Earlier CPU samples imply 1.241 ms/frame in the mesh hook, with 0.970 ms
   fast/scene/eye/cap checks and 0.202 ms accepted work. These are cost
   envelopes, not savings forecasts; other hooks and Elite's earlier CPU work
   are excluded.
@@ -55,10 +55,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: same landed cockpit scene with DLSS enabled; let it settle, press
-  Insert once and remain in game for at least 30 seconds. A flicker is not
-  required. Inspect the CPU source-owner counters and per-record joins before
-  tracing ownership further; no static filtering is enabled.
+- Next: trace the captured per-record descriptors toward their CPU producer and
+  object ownership through the upload list's registration/append path. A
+  literal stride-store search found no initializer. Use the retained evidence
+  before another flight; no static filtering is enabled.
 
 ## Journal
 
@@ -4498,3 +4498,109 @@ capture. Check it with tools/edvr_log.py --target frontier --expect-build
 build carried the same version but is not the installed payload. Require the
 new CPU source-owner completion line and v2 report. An empty, failed or partial
 capture is not evidence that the buildings have no CPU owner or are static.
+
+### 2026-09-19 - Flight 100737: CPU sources joined to visible settlement records
+
+The newest Frontier log is edvr_gfx_20260919_100542.log. The sanctioned reader
+verifies v0.17.0-50-g104763d-dirty, graphics stamp 6AAEB01E, linked 2026-09-19
+15:54:06 UTC, matching the installed archive rather than the earlier
+failed-launch build. Insert at 10:07:37.469 armed capture 100737; publication
+completed at 10:07:41.274. The v2 JSON/binary pair is copied and hash-verified
+under build/source-owner-flight-100737, with the log evidence, manifest, reader
+report and reproducible ownership visualization. The source files live under
+edvr_logs/pool, not the eye-image directory.
+
+All three nominated model-pool Maps yielded a complete owner capture:
+maps/attempts 3/3, complete/partial 3/0, resource matches 3.
+Identity/opcode/unwind rejects, read faults, observed metadata changes,
+descriptor overflow and CPU-byte declines were all zero. The paired report
+sealed mesh/scene frame 11738, with 133 draws, six resources, six write events,
+three buffer snapshots and 12 stacks. GPU source provenance also has no
+unobserved, unmatched or foreign writes. This confirms the instrument reached
+the verified caller and recovered the associated upload-owner chain; it is not
+merely an empty or dormant diagnostic.
+
+The unchanged reader validates 512 staged mesh records and finds 27 records /
+18 metadata groups with 64,583 exact-depth pixels out of 133,425
+motion-coverage pixels in the 1996x2121 input eye. All 27 visible records have
+a unique, complete, direct same-generation Map source and an exact 336-byte
+CPU/GPU match. Scene colour, SceneZ and MeshCoverage belong to the same
+selected frame. The overlay places five records (1, 3, 6, 8, 9) / 64,104 pixels
+on foreground player/cockpit geometry, and 22 records / 479 pixels sparsely on
+distant settlement facades and fixtures. These are spatial observations within
+the saturated 512-record admission subset, not a count of the settlement's
+meshes or a semantic classification.
+
+Ruled out: using the recovered group/leaf owner alone as a planet-fixed or
+static-object discriminator. All 22 settlement-facing records and four
+player/body foreground records share CPU group3/leaf3 in this capture; the
+remaining cockpit record6 uses group5/leaf5. The engine's upload grouping
+therefore crosses the foreground/settlement distinction. Its child descriptors
+and source blocks are the concrete evidence to follow next; the enclosing group
+number is not an entity parent or an immobility flag.
+
+An independent full-table analysis extends the visible reader result: all 512
+staged records across all 133 draws have unique direct generation-3 descriptor
+coverage and exact 336-byte CPU/GPU equality, using 96 descriptors. There are
+no missing, overlapping, partial, failed or byte-mismatched joins. The 22
+settlement-facing records use 21 pool slots and 17 descriptors/source blocks;
+all 22 have valid rigid-motion inputs, while only three have matched motion
+history. Valid rigid inputs and matched history do not establish immobility.
+
+| Generation / frame | Groups / leaves | Descriptors | CPU source records | Source bytes |
+|---|---|---|---|---|
+| 1 / 11736 | 11 / 11 | 2262 | 12451 | 4183536 |
+| 2 / 11737 | 11 / 11 | 2241 | 12322 | 4140192 |
+| 3 / 11738 | 11 / 11 | 2250 | 12403 | 4167408 |
+
+These CPU record totals describe the captured upload, not unique scene meshes
+or visible objects. Declared/scanned descriptor counts agree in all three
+generations. Within each generation both source and destination intervals are
+disjoint. Owner, group and leaf addresses are reused across the three Maps, and
+exact source intervals recur with both equal and changed bytes. For example,
+generations 1 and 3 reuse 535 exact source intervals: 190 are byte-identical
+and 345 have changed bytes. This is capture-local address/byte evidence, not
+stable object identity. Only generation 3 has the staged draw and visibility
+associations.
+
+The reproducible archive analysis is analyze_source_owner.py, with
+source-owner-analysis.json and source-owner-analysis.md. Input hashes match the
+retained manifest, and the analysis JSON is byte-identical on rerun. No
+production code, reader, configuration or installation changed during this
+analysis.
+
+The retained raw descriptors narrow the missing producer edge. All 6,753
+descriptors across the three Maps contain source at +0x08, source+0x1c at
++0x10, the leaf owner link at +0x20, destination-relative index/count at
++0x38/+0x3c, and stride 0x150 at +0x40. For 18 of the 19 descriptors serving
+visible records, the pointer at +0x18 is source+0xa80 (eight records); the
+remaining player descriptor has a one-record span. Other captured descriptors
+have different spans, so this observation does not establish universal capacity
+semantics.
+
+This corroborates the layout of the earlier 0x42b4130 producer: eight records
+start at node+0x20 and its separate pointer array starts at node+0xaa0, the
+same eight-record span later. It does not prove that producer supplied these
+records. No retained descriptor contains source-0x20, and the capture excludes
+both that candidate node header and memory reached through the +0x18 pointer.
+The exact allocation-to-descriptor pointer relationship and its initializer
+remain unproven. Metadata, record size and matching storage shape cannot
+substitute for that edge. Reproducible raw-layout analysis is retained as
+payload-source-shapes.py, payload-source-shapes.json and payload-findings.md.
+
+A bounded offline check of the known AtlasModel constructors and descriptor
+helpers still does not identify the initializer. The exact .text search for an
+immediate 0x150 store to base+0x40 found zero hits in the verified executable
+(optional REX/SIB, disp8/disp32 covered). This excludes only the searched
+encoding: storing a register, wider initialization or copying a prepared entry
+can still populate that field. The scan and result are retained as
+payload-stride-store-scan.py/json. Both archive scripts verify that --dry-run
+writes nothing.
+
+Next is an offline trace of the registration/append path feeding the lists
+consumed by 0x4c81be0, using the full captured descriptor layout rather than
+the literal stride store alone. That path must connect a specific source
+allocation to the descriptor and expose the upstream owner before it can
+support object classification. Another run of the unchanged probe would not
+supply the missing header or ownership fields. No new flight or performance
+claim follows from this capture, and static filtering remains off.
