@@ -2,33 +2,34 @@
 
 ## Status
 
-- State: a default-off static-surface correction is installed for a Frontier
-  landed-cockpit test. Eye_174658 proved dominant-body path 4 claims stationary
-  settlement walls, tanks and ramps. Its complete 16-frame sequence begins at
-  activation frame 12693 with no reset, source change or origin jump; it was
-  weaker than the prior Pause event and not tied to a user-observed flash.
-- Open: validate new owner coverage, flicker reduction and added cost; 98.51%
-  of captured body pixels have no per-mesh coverage. A static matching
-  improvement alone can recover only 0.745%. The prior 16:48:57 camera pulse
-  remains unexplained; the 17:18:47 Pause event had body activation but no such
-  pulse. First-draw rows remain unsuitable as a camera replacement.
-- Build: v0.17.0-42-gc8add89-dirty installed and verified in Frontier; archive
-  build/static-surfaces-frontier-c8add89. Full build/all 70 gates pass. No
-  flight yet; prior evidence is edvr_gfx_20260918_174448.log, eye_174658.
+- State: user reports substantially worse performance in the static-owner test
+  and less synchronized blurring. The experiment is now disabled in Frontier;
+  Insert is restored to immediate/manual capture. Flight 190059 is the correct
+  v0.17.0-42 build. Its ownership hook did millions of unsuccessful checks; no
+  captured building pixels received its static correction.
+- Open: exclude proven-static objects before expensive EDVR motion work while
+  retaining camera/world motion. Classification must be cheaper than the work
+  removed and detect new movement without stale labels. Prior body-on-buildings
+  evidence remains valid; the independent 16:48:57 camera pulse is unexplained.
+- Build: v0.17.0-42-gc8add89-dirty remains installed (6AADDB74), with
+  temporal_aa_static_surfaces=off. Disabled configuration and exact binaries:
+  build/static-surfaces-disabled-frontier-93af971; install verification passed.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
   capture is landed cockpit; station rotation/on-foot still need their own
   validation. No draw suppression is active.
-- Timing (prior 5efb139 flight): clean native W7 reports 56.700 FPS and a
-  17.644 ms cycle, versus 55.733 FPS / 17.942 ms for c1dbb76. New W8 includes
-  exit and is not a steady comparison. Last benchmark medians are CPU 12.848
-  and GPU 16.459 ms; these are separate elapsed measurements, not exclusive CPU
-  work or additive costs. Strict sequences 11416-11969 (554 frames, caller
-  8652) average 4.259 ms after Present: 3.281 running, 0.836 waiting, 0.142
-  ready, zero unknown. Native call-span union is 0.093 ms/frame. Trace, reports
-  and exact DLLs/PDBs are in build/cpu-profile-frontier-5efb139-dlss. The
-  previous c1dbb76 DLSS capture is the comparator; older 2d98775 used AA off.
+- Timing: new W7 has CPU/GPU medians 18.394/22.090 ms, separately measured
+  elapsed spans. Its 30-second sample ends before eye_190309 begins; capture
+  changes the scope during drain. The 19:03:24 ownership window has 18,751,925
+  candidates, 6,576 accepted and 17,734,402 cache declines over 1,800 frames.
+  Its sampled 0.390 us/check implies about 4.06 ms/frame of added gate work,
+  excluding lock acquisition/unsupported families. Earlier low-cost benchmark
+  windows include menu/loading and must not be called comparable settlements.
+- Capture: valid owner pair, but only 225/5,262,201 current pixels have owners;
+  all finish on head motion, none on body motion. Static flag 2048 is absent
+  across 16 frames/31.36 million decision pixels; body claims remain about
+  60,000 pixels/frame. The reported visual change does not validate this pass.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -51,12 +52,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: hold the same landed view, focus Elite, Insert to arm, Pause just after
-  any flash, then leave it running at least ten seconds. Only the new
-  temporal_aa_static_surfaces=on was added; eye_run_trigger=motion and
-  ships_metres=0 remain. No rendering success or performance gain is
-  established before the flight; station and on-foot validation remain
-  separate.
+- Next: use retained captures to test early static rejection before building
+  another candidate. Do not raise cache limits and request another flight.
+  Static capture/matching/replay savings are distinct from Elite draw costs;
+  current cap rejection already avoids most expensive mesh admission. The
+  ruled-out experiments and this failed implementation are in the journal.
 
 ## Journal
 
@@ -3650,3 +3650,97 @@ test INIs, manifest, build-validation log and VS transform audit. Graphics
 SHA-256 starts c5732d9016e3df5c; runtime starts 7548265d90750b8a; full hashes
 are in manifest.json. The installer backup receipt ends
 pre-static-surfaces-c8add89-20260918-185005.bak. No flight result is claimed.
+
+### 2026-09-18 -- 190059 static-owner regression; experiment disabled
+
+User report: not everything blurred together, but performance was significantly
+worse. The correct log is edvr_gfx_20260918_190059.log, version
+v0.17.0-42-gc8add89-dirty, graphics stamp 6AADDB74. The paired eye capture is
+190309, beginning at scene frame 12078. This report does not establish that the
+less synchronized blur was caused by the new correction.
+
+The defensible busy-scene comparison is prior flight 174448 window 5 versus new
+flight 190059 window 7, with the same Quest 3 / VirtualDesktopXR / 90 Hz / DLSS
+K and 2481x2121 input, 3072x3264 XR output. Depth-census draw counts are
+similar: old 22,499/22,350 and 22,607/22,493; new 23,111/23,076 and
+22,749/22,534. CPU median increases 10.606->18.394 ms and GPU elapsed median
+14.342->22.090 ms. These separate elapsed spans are not additive or an isolated
+measurement of GPU execution. The older scene reports about 59 FPS; the newer
+scene falls through 42 to 37 FPS. This is a comparable scene, not a controlled
+same-flight A/B.
+
+New W7's complete 30-second sample ends 224 ms before the eye trigger; its
+scope changes during drain. The capture therefore does not explain this
+slowdown. New W6's 0.658/4.097 ms medians instead concern mostly menu/low-draw
+frames (30-34 eye draws, about 90 FPS), with loading at the end; comparing it
+with the old settlement window would be invalid. The corrected report is
+build/static-surfaces-flight-190059/timing-corrected.md.
+
+The 19:03:24.799 ownership summary reports 18,751,925 supported candidates in
+1,800 frames, only 6,576 accepted (0.035%), 17,734,402 cache declines and
+1,010,947 eye declines. The sampled mean of 0.390 us per supported check
+implies about 4.063 ms/frame inside this added hook. It excludes locking and
+unsupported-family overhead; it is not the complete cost. The aggregate cache
+counter cannot distinguish resource/key/index-slice/state limits or allocation
+failures, so naming a specific exhausted table would be speculation. Earlier
+52,928 accepts show that this was not a completely inert path, but most later
+work produced no ownership information.
+
+The eye_190309 owner pair is available and valid: 225 current and 228 previous
+pixels out of 5,262,201 have nonzero ownership, all exactly matching the
+corresponding scene depth. All 225 current pixels finish on path 1 (head), with
+no overlap with body pixels. Static-confirmed flag 2048 occurs zero times
+across 16 frames and 31,360,000 decision pixels. Path 4 still claims 964,291
+pixels across that run, ranging from 60,043 to 60,382 per frame. Thus the
+correction did not engage the captured building surfaces; reduced synchronized
+blurring cannot be attributed to it. Reproducible local evidence is in
+build/static-surfaces-flight-190059/capture-engagement.md and its adjacent
+JSON/analyzer.
+
+Ruled out: this per-draw static-owner implementation as a performance solution,
+because it adds millions of mostly unsuccessful admission checks while leaving
+the existing capture, matching and motion replay intact. Raising its cache
+limits and flying again would not address that architectural cost.
+
+The static-building path should retain camera/world reprojection and avoid
+per-object motion work. However, a static label must be checked cheaply enough
+to detect new movement, bone animation, pool repacking and geometry changes.
+The existing 512-record cap already returns before most expensive mesh
+admission. Freeing static slots can admit more previously capped work, so count
+both the saved work and newly admitted movers before claiming a speedup. The
+existing pool probe deliberately uses delayed GPU readback: scanning full
+WRITE_DISCARD mappings on the CPU is already documented as millisecond-scale
+work in object_probe.h. No new draw suppression or CPU pool scan is justified.
+
+There is currently no cheap, safe pre-cap static predicate. Exact
+classification needs instance IDs and model-pool data, resolved after the cap;
+moving those reads before the cap would charge millions of currently cheap
+rejects. Delayed pool observations cannot detect the first moving frame, and
+last-frame invisibility cannot justify skipping current-frame work. The
+retained data contains nine visibility transitions despite unchanged bindings,
+IDs and model-pool data.
+
+Next offline discriminator: replay eye_190309's consecutive draws, instance ID
+streams and model-pool captures in draw order, and simulate 512-record
+admission with/without static exclusion. Count static records removed, later
+movers admitted, residual cap saturation and lost first-moving-frame history.
+Require unique geometry identity, exact pose comparison with rebasing handled,
+write invalidation and no bone animation; reject the design if retained data
+cannot establish consecutive identity. Both eyes must share the decision. This
+tests the savings opportunity before a production prototype; it does not yet
+prove a cheap runtime implementation.
+
+Static exclusion alone also leaves the flicker unresolved: most building pixels
+still lack exact ownership and can inherit coarse body motion. A world-motion
+default with exact moving-object overrides is a possible separate design,
+requiring evidence for rotating stations, bones, mixed draws and cap overflow.
+Keep that correctness problem distinct from removing EDVR overhead.
+
+Disabled and independently verified the experiment in Frontier. Same v42
+binaries; only temporal_aa_static_surfaces=off and eye_run_trigger=manual
+changed. Other settings, including ships_metres=0, are preserved. Archive:
+build/static-surfaces-disabled-frontier-93af971, with exact payload hashes,
+before/after INIs and manifest. Backup receipt ends
+pre-static-surfaces-off-93af971-20260918-190805.bak. Insert again starts an
+immediate eye capture; Pause records recent history and its delayed follow-up.
+No rerun is needed to establish that this experiment regressed performance.
