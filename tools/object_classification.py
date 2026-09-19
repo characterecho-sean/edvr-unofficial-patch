@@ -1010,7 +1010,15 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
                     valid_frame = (int(address, 16) != 0 and module_rva is not None and
                                    int(module_rva, 16) < executable["image_size"])
                 elif frame_status == "outside_image":
-                    valid_frame = int(address, 16) != 0 and module_rva is None
+                    # Version 2's unwind writer records the stack-end RIP as a
+                    # final zero-address outside-image frame before unwindOne
+                    # reports failure.  Keep this narrow compatibility for
+                    # that existing format; zero addresses elsewhere remain
+                    # malformed evidence.
+                    valid_frame = (module_rva is None and
+                                   (int(address, 16) != 0 or
+                                    (trace_status == "unwind_failed" and
+                                     fi == len(frames) - 1)))
                 else:
                     raise CaptureError("%s.status is unknown" % frame_label)
                 if not valid_frame:
@@ -2715,6 +2723,47 @@ def self_test():
         assert ownership_results[1]["candidates"][0]["ownership"]["context"] == "0x0"
         assert ownership_results[1]["candidates"][0]["ownership"]["record_index"] == 0
         assert ownership_root["record_writers"]["ownership_summary"]["deduplicated"] == 1
+
+        # The v2 producer retains the stack-end RIP as a final zero
+        # outside-image frame when unwindOne fails.  Accept only that exact
+        # terminal frame shape, while keeping all other frame addresses strict.
+        unwind_root = copy.deepcopy(ownership_root)
+        unwind_record = unwind_root["record_writers"]["records"][2]
+        unwind_record.update(ownership_id=None, ownership_status="unwind_failed")
+        unwind_summary = unwind_root["record_writers"]["ownership_summary"]
+        unwind_summary.update(linked=2, deduplicated=0, unwind_failed=1,
+                              ancestor_traces=1)
+        unwind_root["record_writers"]["ownership_status"] = "partial"
+        unwind_root["record_writers"]["ancestor_traces"] = [{
+            "status": "unwind_failed", "writer_record": 2,
+            "return_rva": unwind_record["return_rva"],
+            "frames": [
+                {"address": "0x431b21f", "status": "module_relative",
+                 "module_rva": "0x31b21f"},
+                {"address": "0x0", "status": "outside_image",
+                 "module_rva": None},
+            ],
+        }]
+        path = _write_fixture(temp, unwind_root, ownership_binary)
+        unwind_report = analyse(load_capture(path), include_records=True)
+        assert unwind_report["kinematic_ownership"]["visible_record_outcomes"] == {
+            "partial": 2}
+
+        def rejected_trace_frame(mutator):
+            value = copy.deepcopy(unwind_root)
+            mutator(value["record_writers"]["ancestor_traces"][0]["frames"])
+            path = _write_fixture(temp, value, ownership_binary)
+            try:
+                load_capture(path)
+            except CaptureError:
+                return
+            raise AssertionError("malformed unwind trace frame accepted")
+
+        rejected_trace_frame(lambda frames: frames.insert(
+            0, {"address": "0x0", "status": "outside_image", "module_rva": None}))
+        rejected_trace_frame(lambda frames: frames[0].update(
+            address="0x0", status="module_relative", module_rva="0x0"))
+        rejected_trace_frame(lambda frames: frames[1].update(module_rva="0x1"))
 
         ownership_duplicate = copy.deepcopy(ownership_root)
         ownership_duplicate["record_writers"]["uploads"][0]["cutoff"] = 6

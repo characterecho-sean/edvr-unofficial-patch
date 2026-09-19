@@ -2,10 +2,10 @@
 
 ## Status
 
-- State: flight 132513 captured healthy writer evidence but zero KinematicRig
-  links: all 44,055 ownership attempts failed an opcode guard. The actual EXE
-  proves a wrong call-displacement byte in the diagnostic. The corrected guard
-  passes live-EXE validation and is built/installed to Frontier. Filtering off.
+- State: flight 134252 passes the guard but has zero owner links. Seventeen
+  saved paths use worker dispatch, with no upstream KinematicRig ancestor; one
+  truncates at recursion. Worker descriptors retain collection/registry but no
+  direct outer pointer. Submission capture is needed; filtering off.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -25,10 +25,10 @@
   Its sampled 0.390 us/check implies about 4.06 ms/frame of added gate work,
   excluding lock acquisition/unsupported families. Earlier low-cost benchmark
   windows include menu/loading and must not be called comparable settlements.
-- Capture: 132513, mesh/scene 11058: 119 draws, 36 visible records/191,708
-  exact-depth pixels. All 44,319 writer calls completed without faults or caps,
-  but ownership validation rejected all eligible calls before unwinding. The
-  512-record admission limit still prevents a complete scene census.
+- Capture: 134252, mesh/scene 11084: 126 draws, 29 visible records/153,957
+  exact-depth pixels. All 44,303 writer calls completed without faults or caps;
+  44,039 ownership attempts report unwind failure, retaining 18 unique traces.
+  The 512-record admission limit still prevents a complete scene census.
 - Earlier static opportunity: 501/512 records have exact unchanged raw pose,
   across 115/124 whole draws; all 501 also have changed scene origin. Of these,
   446 leave no motion-coverage pixels. These are conditional opportunities, not
@@ -55,11 +55,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: one Insert in the same landed settlement view with DLSS on; leave the
-  game running 30 seconds before exit. No Pause or flicker needed. Confirm
-  ownership links or explicit ancestor failures on the corrected build before
-  interpreting mobility. Context+0xA8 is LOD data; +8/+0x78 are residue; a
-  resolved dependency or parent presence does not establish a static object.
+- Next: capture owner-to-collection provenance before task submission at
+  431AFE0, and retain worker descriptor context from the existing lookup hook.
+  Validate both sides without collapsing ambiguous/reused pointers. Bundle
+  normal stack-end and repeated-RIP handling with that instrument; no rerun
+  needed yet. Ownership would still not establish a static object.
 
 ## Journal
 
@@ -5160,3 +5160,82 @@ Next capture: same landed settlement view, DLSS on, Insert once, then wait 30
 seconds before exit. No Pause or flicker reproduction is necessary. This
 corrects the instrument only; ownership and mobility still require live
 evidence.
+
+### 2026-09-19 -- ownership flight 134252: asynchronous caller evidence
+
+Flight edvr_gfx_20260919_134111.log matches v0.17.0-57-ge700d4f-dirty and
+graphics stamp 6AAEE376. Insert armed at 13:42:52.664; the sealed
+classification finished at 13:42:56.441. The JSON/binary pair is hash-verified
+in build/kinematic-owner-flight-134252; the archive dry-run created no
+directory. Mesh/scene frame 11084 contains 126 draws. The validated reader
+finds 29 exact-depth visible records covering 153,957 pixels, with CPU source
+matches for all 29. Writer candidates are unique for eight records, multiple
+for 17 and absent for four. No object identity or mobility follows from these
+counts.
+
+The writer diagnostic completed all 44,303 calls: 40,452 inline, 3,587 direct
+and 264 unsupported helper calls. No writer faults, caps or incomplete records
+occurred. All 44,039 eligible ownership attempts passed opcode validation, but
+none found either expected owner ancestor. They were labeled unwind_failed; 18
+distinct traces were retained without trace overflow.
+
+Ruled out: recovering the KinematicRig owner through the two expected ancestor
+returns in the saved worker paths, because no retained trace contains 431B212
+or 431B21F. Seventeen traces continue through scheduler callers and
+outside-image returns to a zero RIP; this is not evidence that all those stacks
+were corrupt. One short trace stops after 43125E4,4312655 and needs separate
+explanation. The diagnostic currently labels stack termination as unwind
+failure and has no per-trace frequency counts, so 17/18 is a count of distinct
+saved paths, not a percentage of calls.
+
+Inline paths reach 4321AE0 then 5D6A81. Direct paths reach 43125E4, optionally
+4312655, then 43219C0 or 43203F6 and 5D6A81. The absent upstream owner cannot
+be recreated by increasing stack depth or repeating the same flight. Task
+payload and submission code must establish the missing owner association.
+
+The existing v2 producer retains the final zero RIP as outside_image/null RVA;
+the reader previously rejected that shape. The reader now narrowly accepts it
+only as the final frame of an unwind_failed trace. Zero addresses in the
+middle, zero module-relative frames and outside-image frames carrying an RVA
+remain rejected. Its self-tests and the original unmodified flight capture
+pass. This compatibility correction does not turn failed owner evidence into a
+join.
+
+Hash-verified bounded disassembly confirms 5D6A7E is call [rax+8], returning to
+5D6A81 inside generic worker 5D6960. Five saved shapes are inline writers
+inside 4321940; six are direct writers through 4321940 and six through 4320340.
+The 18th stops at recursion. These are distinct trace shapes, not per-call
+frequency counts. Writer records span eight threads and mesh frames
+11081-11084.
+
+Function 4312040 recursively calls itself at 4312650, returning to 4312655. The
+current unwindOne requires both increasing RSP and a changed RIP, so a valid
+repeated return address can truncate traversal. The short trace ends at that
+recursive return. Increasing RSP is the relevant progress check; the bounded
+depth remains necessary. Normal RIP-zero termination also needs an explicit
+outcome. Correct both with regression fixtures alongside the next capture
+instrument, without spending a flight solely on outcome labels.
+
+The worker payload has an exact provenance chain. At 431B193, 431AFE0 builds
+descriptor+0x10 as collection_owner+0x300; descriptor+0x28 is its record array,
++0x30 the count, and +0x40 the registry. Function 4321940 consumes the copied
+0x60-byte descriptor; 4320340 enumerates the same descriptor layout. At the
+observed writer-return ancestors, restored RDI in 4321940 or R14 in 4320340 can
+identify the descriptor. These fields can validate a collection/registry
+association but do not contain a direct outer pointer. The saved capture has
+only ancestor addresses, not those register contexts or descriptor bytes.
+
+The next instrument should therefore retain the owner-to-collection association
+at the proved 431AFE0 submission path (entry RCX is outer; later RDI=outer,
+RBX=collection_owner), and match it against the worker descriptor and existing
+writer evidence. It must retain observation order/frame, validate registry and
+record ranges, and expose absent, conflicting or reused associations rather
+than promote pointer equality to persistent identity. Tests should model a
+queued callback whose submitting caller has already returned, including
+recursion and normal stack termination. A worker-only capture cannot establish
+outer ownership. The mapping is still diagnostic evidence, not a static label.
+
+Reader self-tests and the original 134252 capture pass after the narrow
+terminal-frame compatibility fix. No C++ or installed game files changed in
+this analysis; Frontier remains on v0.17.0-57-ge700d4f-dirty. An unchanged
+headset rerun is unnecessary until the submission/worker instrument is ready.
