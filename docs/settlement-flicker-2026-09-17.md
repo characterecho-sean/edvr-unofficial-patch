@@ -2,15 +2,14 @@
 
 ## Status
 
-- State: user reports substantially worse performance in the static-owner test
-  and less synchronized blurring. The experiment is now disabled in Frontier;
-  Insert is restored to immediate/manual capture. Flight 190059 is the correct
-  v0.17.0-42 build. Its ownership hook did millions of unsuccessful checks; no
-  captured building pixels received its static correction.
+- State: offline static-exclusion audit finds substantial unchanged data, but
+  retained captures cannot establish a safe pre-cap skip or exact admission
+  replay. The failed static-owner experiment remains disabled in Frontier;
+  Insert remains immediate/manual. No new rendering build is justified yet.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
-  removed and detect new movement without stale labels. Prior body-on-buildings
-  evidence remains valid; the independent 16:48:57 camera pulse is unexplained.
+  removed and detect new movement without stale labels. The separate coarse
+  body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
 - Build: v0.17.0-42-gc8add89-dirty remains installed (6AADDB74), with
   temporal_aa_static_surfaces=off. Disabled configuration and exact binaries:
   build/static-surfaces-disabled-frontier-93af971; install verification passed.
@@ -30,6 +29,10 @@
   all finish on head motion, none on body motion. Static flag 2048 is absent
   across 16 frames/31.36 million decision pixels; body claims remain about
   60,000 pixels/frame. The reported visual change does not validate this pass.
+- Static opportunity: 501/512 admitted records have exact unchanged raw pose,
+  across 115/124 whole draws; all 501 also have changed scene origin. Of these,
+  446 leave no motion-coverage pixels. These are conditional opportunities, not
+  safe skip counts, unique scene-object counts or a forecast of speedup.
 - Visibility: 25408 selected draws pass no depth/stencil samples; only 82
   produce zero clipped primitives. This favors investigating depth/stencil
   rejection over simple frustum rejection in the selected material families.
@@ -42,21 +45,20 @@
   different objects. IDs, draw order and identical payloads are not proven
   persistent object identity. Coarse family aggregates remain valid despite
   detail-bucket overflow; query times cannot be extrapolated as FPS savings.
-- CPU: the hook timer excludes the probe/owner lookup and, for indexed
-  instanced draws, weapon-motion work. It cannot measure total EDVR overhead. A
-  skip at the D3D draw hook also cannot recover Elite's earlier scene
-  traversal, draw-list construction or state submission.
+- CPU: current mesh-hook samples imply 1.241 ms/frame, including 0.970 ms
+  fast/scene/eye/cap checks and 0.202 ms accepted work. These are cost
+  envelopes, not savings forecasts; other hooks and Elite's earlier CPU work
+  are excluded.
 - Prior DLSS work: static identity across rebases and first-visible/moving
   history remain unresolved. Typed fusion was not useful; precomputed capture
   controls suggest only 0.21-0.35 ms per captured subset. Earlier evidence and
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: use retained captures to test early static rejection before building
-  another candidate. Do not raise cache limits and request another flight.
-  Static capture/matching/replay savings are distinct from Elite draw costs;
-  current cap rejection already avoids most expensive mesh admission. The
-  ruled-out experiments and this failed implementation are in the journal.
+- Next: audit the larger repeated eligibility-check cost while preserving live
+  scene/eye/cap decisions. Early static skipping remains unproven; do not build
+  it from pool slots, stale visibility or incomplete admission replay. GPU
+  savings from static exclusion remain possible but unquantified.
 
 ## Journal
 
@@ -3744,3 +3746,102 @@ before/after INIs and manifest. Backup receipt ends
 pre-static-surfaces-off-93af971-20260918-190805.bak. Insert again starts an
 immediate eye capture; Pause records recent history and its delayed follow-up.
 No rerun is needed to establish that this experiment regressed performance.
+
+### 2026-09-18 -- offline static-exclusion feasibility
+
+User authorized replaying the retained capture before another runtime change.
+The analysis uses eye_190309 from the already authenticated v42 flight, with
+the same Quest 3 / VirtualDesktopXR / DLSS K environment above. Frontier stays
+on the verified static-surfaces-off/manual-capture configuration. No new game
+build, installation or headset run is part of this analysis.
+
+The authenticated Mesh/MeshPrev pair has 512 current records in 124 draws: 504
+valid rigid records and eight invalid. Of the valid records, 501 have a unique
+compatibility-key/raw-pose match in the previous capture; three are changed or
+unmatched. Those 501 records fill 115 whole draws, with no mixed exact-pose
+draws. All 501 have a different scene origin, so none passes the existing
+same-origin raw-static candidate test. The 501 figure is an opportunity
+requiring correct rebasing, not proof of static world identity or permission to
+discard their history.
+
+Within those 501 candidates, 446 records leave no marker pixels; 55 do, and 31
+have any marker pixels agreeing exactly with final scene depth. Those 31 cover
+2,182 final-depth pixels. At draw granularity, 80 of the 115 whole exact-pose
+draws leave no marker pixels, eight leave markers with no exact final-depth
+pixels, and 27 have some exact final-depth contribution. These measurements are
+available after the coverage draw/final depth comparison; they cannot decide
+whether to skip that work beforehand. The other 11 records cover 223,917 exact
+final-depth pixels. Record counts therefore do not describe either pixel
+workload or potential frame-time savings.
+
+The scene-wide ledger is version 1: 351,208 rows over 20 frames. It records
+shader, counts, start instance, draw kind and whether t33 held the pool. It
+does not retain eye/depth eligibility, geometry bindings, base/start index,
+write epochs or the exact runtime cap state. The detailed mesh snapshot is
+bounded to 4,096 draws from frame 12080 with 28,020 dropped. Of its 4,002
+supported-family draws, only 444 have vertex payloads, and no second rich frame
+exists. Existing identity-fusion fixtures explicitly borrow later geometry and
+binding descriptors by occurrence and reconstruct partial depth; their
+synthetic compatibility groups cannot establish persistent game identity.
+
+Ruled out: exact full-scene admission replay from eye_190309, because the
+required per-draw eligibility and identity inputs are absent. Simulating the
+first 512 ledger instances would not reproduce meshMotionDraw: admission is per
+eye, checks all pipeline/resource guards, and rejects an entire draw when
+count+instances exceeds 512. Smaller subsequent draws may still fit. Neither
+slots freed nor newly admitted movers can be reported as measured results.
+
+The independent pool/ledger census examines 188,886 supported-family, t33-held,
+shape-compatible draw rows referencing 999,806 instances across the run.
+Comparing stable non-pose bytes as a conditional content signature finds 4,294
+all-rigid, unique-signature, equal-pose draw/reference observations; 184,098
+draw rows have missing or ambiguous rigid identity and 494 are bone-only. These
+are repeated observations, not unique scene objects. No static-to-moving
+transition is established with a unique signature across three frames. This
+absence does not validate wake-up behavior: 995,018 instance references have
+ambiguous content identity.
+
+The weaker same-slot comparison does find 23,120 unchanged-to-changed
+draw-reference observations, representing 3,621 frame-local record events.
+Slots are not persistent identities, so these cannot be called newly moving
+objects; they demonstrate why a stale label indexed by pool slot is not a safe
+alternative. Unknown identity, repacking and actual motion must stay distinct.
+
+Current-flight timing gives a more useful CPU priority than raw static counts.
+The last 1,800-frame window's exclusive 1/256 samples project to the following
+stage envelopes (clock overhead included):
+
+| Mesh hook stage | Estimated ms/frame |
+|---|---:|
+| Fast classification | 0.567 |
+| Scene/depth/eye/cap | 0.403 |
+| Pipeline guards | 0.034 |
+| IA/resources | 0.027 |
+| Preparation | 0.008 |
+| Accepted work | 0.202 |
+| Full hook | 1.241 |
+
+The approximately 0.970 ms of early checks remains if an optimization only
+removes accepted work. The 0.202 ms accepted envelope is neither a total EDVR
+cost nor a guaranteed static-filter saving. Scaling it by 115/124 would assume
+homogeneous draw costs and a representative single capture; it cannot establish
+an upper bound. Coverage raster samples likewise cannot be scaled into a GPU
+saving, and both eyes' cap probes find eligible rejected draws (64 draws total
+in the bounded sample). Freed slots can refill rather than reduce work. This
+supports auditing repeated eligibility bookkeeping before adding another broad
+classifier, while preserving current scene/eye/cap selection and using offline
+equivalence tests before any flight.
+
+Decision: do not implement a pre-cap static skip from this evidence. No nonzero
+safely avoidable pre-capture set has been established; that is an evidence
+limit, not proof that static exclusion is impossible. A post-capture static tag
+would still pay capture/coverage costs and would not protect unowned building
+pixels from coarse body motion. The first-moving-frame correctness gate and net
+CPU/GPU benefit remain open.
+
+Artifacts: build/static-exclusion-190309/report.md and report.json contain the
+ledger census, every input's hash, parser provenance and synthetic checks;
+build/static-exclusion-coverage-190309/report.md, mesh-probe-report.json and
+distribution.json contain the admitted-record analysis. Its
+admission-extract.txt preserves the version-verified current-flight timing
+lines read through tools/edvr_log.py. No production source changed.
