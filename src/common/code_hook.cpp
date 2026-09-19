@@ -195,7 +195,7 @@ uint8_t* allocateNear(void* anchor, size_t bytes) {
 }  // namespace
 
 bool CodeHook::install(void* target, void* replacement, void** origOut,
-                       const char* who) {
+                       const char* who, Prepare prepare, void* prepareContext) {
     const char* label = who ? who : "?";
     if (m_installed || !target || !replacement) return false;
 
@@ -357,6 +357,18 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
     memcpy(patched + 1, &rel, sizeof(rel));
     uint64_t newWord = 0;
     memcpy(&newWord, patched, sizeof(newWord));
+
+    // A newly intercepted call can arrive as soon as the entry store below.
+    // Relay users must therefore publish their original-function forward now,
+    // rather than waiting for origOut after the target has already changed.
+    bool prepared = true;
+    if (prepare && (!guarded("CodeHook::install/prepare", [&] {
+            prepared = prepare(tramp, prepareContext);
+        }) || !prepared)) {
+        Log::get().note("CodeHook %s: replacement preparation refused; target unchanged.", label);
+        VirtualFree(tramp, 0, MEM_RELEASE);
+        return false;
+    }
 
     DWORD oldProtect = 0;
     if (!VirtualProtect(code, 8, PAGE_EXECUTE_READWRITE, &oldProtect)) {

@@ -2,17 +2,17 @@
 
 ## Status
 
-- State: offline tracing proved the allocation-to-upload path and two writers
-  using that batching route. Flight 100737 matched all 512 admitted records to
-  CPU bytes, but retained no per-record writer/game-object association. Object
-  attachment and static classification remain unproven.
+- State: a manual record-writer diagnostic now covers five verified creation
+  paths through one dictionary lookup. It retains completed writer context for
+  exact upload matching, with duplicate and timing ambiguity explicit. Flight
+  100737 proved CPU-byte correspondence, not object attachment or immobility.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-50-g104763d-dirty installed (6AAEB01E); static surfaces off,
+- Build: v0.17.0-53-gaadac6a-dirty installed (6AAECC1E); static surfaces off,
   DLSS and manual Insert capture retained. Payloads, INI and verification
-  receipts: build/source-owner-frontier-104763d.
+  receipts: build/record-writer-frontier-aadac6a; both INIs unchanged.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -55,10 +55,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: capture record creation at both proven writers, including caller/pose
-  object context; match to the existing upload evidence with ambiguity checks.
-  A shared builder is not an entity identity. Repeating the unchanged probe
-  cannot supply that association; no static filtering is enabled.
+- Next: one landed cockpit capture at the same settlement: press Insert once,
+  remain in scene at least 30 seconds, then exit normally. No flicker or Pause
+  is needed. Inspect hook status, writer counts, failures and completed matches
+  before interpreting opaque context. No static filtering is enabled.
 
 ## Journal
 
@@ -4702,3 +4702,76 @@ caller/input-transform association. Neither object identity nor a
 planet-attachment flag has yet been proven at those seams. This turn added
 offline evidence and a concrete diagnostic target; no new hook, test build or
 installation was made.
+
+### 2026-09-19 -- capture record writers before upload batching
+
+Hypothesis: exact completed 336-byte producer records can connect the existing
+CPU/upload evidence to a narrower caller or pose-bearing object. A unique
+payload match is candidate provenance only: reused bytes, repeated calls and
+shared builder addresses still cannot prove persistent identity or planetary
+attachment. The discriminating evidence is the writer return RVA, owner/key,
+bounded caller-object snapshots, lookup completion and the exact payload join
+before the upload cutoff. Missing, partial and multiple matches remain
+explicit.
+
+The verified executable has timestamp 1788384820 and image size 104894464; its
+SHA-256 is unchanged from the preceding entry. A single diagnostic hook at RVA
+0x3696fa0 covers five callers with complete records available before the
+original lookup: returns 0x369ce91, 0x42b42ef, 0x42b4ed6, 0x43130aa and
+0x434d149. The 0x434e316 caller merges existing node lists and is counted as a
+management decline. Unknown callers are counted separately. The hook requires
+the exact executable identity, entry prologue and seven verified callsites;
+other builds fail closed. No new static or visibility interpretation is made.
+
+The relay forwards the original lookup exactly once and preserves its result.
+The executable entry is patched only when Insert arms a capture. Afterward, an
+inactive relay bypasses the C++ observer; the trampoline remains allocated for
+process lifetime so outstanding calls cannot execute freed code. Preparing the
+trampoline and relay before publishing the entry patch closes the first-call
+forwarding race. A new capture validates the exact owned patch before reusing
+it, and epochs reject completions from an earlier capture. Classification
+admission closes before the writer observer drains, preventing an upload from
+being admitted after writer observation stops; draining holds no classification
+lock.
+
+Writer evidence is limited to 65,536 records and 64 MiB, alongside the existing
+source-owner limits. Each retained event has a dense ID, begin and completion
+event numbers, exact producer bytes, key bytes and applicable bounded context.
+Map samples the event cutoff before traversing source-owner memory, preventing
+a later writer from becoming eligible during the diagnostic scan. The reader
+requires a complete lookup before that cutoff and compares all 336 bytes to the
+CPU-source-proven upload record. It reports duplicate candidates and their
+opaque-context agreement without promoting them to object identity. Legacy
+captures without writer evidence remain readable. The completion log exposes
+hook refusal, cap/budget declines, read/unwind/context/completion failures and
+management/unknown callers so a dead probe cannot resemble an empty success.
+
+This is a diagnostic for the documented Quest 3 / VirtualDesktopXR / DLSS K
+setup, not a performance change. It neither skips Elite draws nor removes EDVR
+motion work; the bounded capture itself can disturb frame timing. The next
+flight needs ordinary settlement geometry and does not depend on reproducing a
+flicker. The isolated real-hook WARP rig passes 12,465 checks, including relay
+forwarding, real caller unwind, five recipes, stale completion rejection and
+the upload-cutoff race. Both generated capture fixtures pass the Python reader.
+The reader also tests event numbering with interleaved begin/completion events,
+duplicate candidates and incomplete/capped evidence. Archived v1 capture 085213
+and v2 capture 100737 remain readable. The full absolute build passed 68 pooled
+and three quiet test jobs, including the common CodeHook publication tests, and
+the 251-key config contract. The initial sandbox run could not pass its
+compiler environment to child rigs; the successful build ran outside that
+sandbox. An intermediate full run caught a fixture whitelist error, corrected
+without relaxing the production executable or caller guards.
+
+Installed to Frontier using the sanctioned dry-run/install/verify-only flow:
+v0.17.0-53-gaadac6a-dirty, graphics stamp 6AAECC1E (17:53:34 UTC), runtime
+6AAECC21 (17:53:37 UTC). Graphics SHA-256 is
+263c47a4f5aabbee492829beb53d2039864b93bfa6b227be24953aa0d07ed0d1; runtime is
+be136f62eb286470c92d13a09d7f4b3ebece08a8477641dd782ca0a35b4da13a. The user INI
+is byte-identical before/after, SHA-256
+aa27c06406576aadd3eda1a8dd0c0cb26a813ead380c9273a175eb459f5ccf24; native
+routing config is also unchanged. The verified game executable hash still
+matches the identity used for the hook. Payloads, symbols, source-base/patch,
+fixtures, build log, INIs, manifest and installer receipts are retained in
+build/record-writer-frontier-aadac6a. The next flight must match this literal
+version and graphics link stamp; the later source commit changes the Git
+description but does not rebuild the installed binary.

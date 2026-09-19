@@ -24,8 +24,8 @@ SCHEMA_V2 = "edvr_object_classification_v2"
 SCHEMA = SCHEMA_V1
 MESH_STRIDE = 240
 POOL_STRIDE = 336
-MAX_JSON_BYTES = 64 * 1024 * 1024
-MAX_BINARY_BYTES = 320 * 1024 * 1024
+MAX_JSON_BYTES = 128 * 1024 * 1024
+MAX_BINARY_BYTES = 384 * 1024 * 1024
 MAX_ITEMS = 1_000_000
 UINT32_MAX = (1 << 32) - 1
 UINT64_MAX = (1 << 64) - 1
@@ -36,6 +36,11 @@ SOURCE_OWNER_LIMITS = {
     "single_source_bytes": 8 * 1024 * 1024,
 }
 SOURCE_OWNER_CALLSITE_RVA = 0x4C821B3
+RECORD_WRITER_LIMITS = {"records": 65536, "bytes": 64 * 1024 * 1024}
+RECORD_WRITERS = {
+    "direct_369ce91", "primary_42b42ef", "inline_42b4ed6",
+    "direct_43130aa", "helper_434d149",
+}
 KIND_NAMES = {1: "map", 3: "update", 4: "copy_resource", 5: "copy_region", 6: "unknown"}
 ROLE_NAMES = {"t33_pool", "ia_ids", "provenance_source", "copy_source", "staged_input"}
 BUFFER_STATUSES = {
@@ -601,6 +606,185 @@ def _validate_cpu_blob_contents(binary, attempts, cpu_blobs):
                 raise CaptureError("source_owner.attempts[%u].descriptors[%u] metadata disagrees with raw descriptor" % (ai, di))
 
 
+def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok):
+    diagnostic = root.get("record_writers")
+    if diagnostic is None:
+        return None, [], [], packed_bytes
+    diagnostic = _dict(diagnostic, "record_writers")
+    if _u32(diagnostic.get("version"), "record_writers.version") != 1:
+        raise CaptureError("record_writers.version is unsupported")
+    status = _string(diagnostic.get("status"), "record_writers.status", 32)
+    hook_status = _string(diagnostic.get("hook_status"), "record_writers.hook_status", 32)
+    statuses = {"not_run", "captured", "partial", "unavailable"}
+    hook_statuses = {"not_run", "installed", "identity_mismatch", "opcode_mismatch",
+                     "install_failed", "finished"}
+    if status not in statuses or hook_status not in hook_statuses:
+        raise CaptureError("record_writers status is unknown")
+    if ((status == "not_run") != (hook_status == "not_run") or
+            (status == "unavailable") !=
+            (hook_status in {"identity_mismatch", "opcode_mismatch", "install_failed"}) or
+            status in {"captured", "partial"} and hook_status not in {"installed", "finished"}):
+        raise CaptureError("record_writers status and hook_status disagree")
+
+    limits = _dict(diagnostic.get("limits"), "record_writers.limits")
+    for field, maximum in RECORD_WRITER_LIMITS.items():
+        value = _uint(limits.get(field), "record_writers.limits.%s" % field)
+        if not value or value > maximum:
+            raise CaptureError("record_writers.limits.%s exceeds reader safety bound" % field)
+    summary = _dict(diagnostic.get("summary"), "record_writers.summary")
+    summary_fields = ("observed", "stored", "completed", "retained_bytes", "record_overflow",
+                      "byte_budget_declines", "read_faults", "context_failures",
+                      "declined_management", "declined_unknown", "unwind_failures",
+                      "completion_failures")
+    for field in summary_fields:
+        _uint(summary.get(field), "record_writers.summary.%s" % field)
+
+    uploads = _list(diagnostic.get("uploads"), "record_writers.uploads", len(attempts))
+    upload_attempts = set()
+    for ui, upload in enumerate(uploads):
+        label = "record_writers.uploads[%u]" % ui
+        upload = _dict(upload, label)
+        attempt_ref = _u32(upload.get("attempt"), label + ".attempt")
+        resource_ref = _u32(upload.get("resource"), label + ".resource")
+        generation = _uint(upload.get("generation"), label + ".generation")
+        _uint(upload.get("cutoff"), label + ".cutoff")
+        if attempt_ref >= len(attempts) or resource_ref >= len(resources):
+            raise CaptureError("%s references missing attempt/resource" % label)
+        attempt = attempts[attempt_ref]
+        if attempt["resource"] != resource_ref or attempt["generation"] != generation:
+            raise CaptureError("%s disagrees with its source-owner attempt" % label)
+        if attempt_ref in upload_attempts:
+            raise CaptureError("record_writers contains duplicate upload attempt")
+        upload_attempts.add(attempt_ref)
+
+    records = _list(diagnostic.get("records"), "record_writers.records", limits["records"])
+    snapshot_statuses = {"available", "not_applicable", "null_pointer", "read_fault", "byte_budget",
+                         "bin_open_failed", "bin_write_failed"}
+    writer_rvas = {name: int(name.rsplit("_", 1)[1], 16) for name in RECORD_WRITERS}
+    cursor = packed_bytes
+    last_sequence = 0
+    event_sequences = set()
+    for ri, record in enumerate(records):
+        label = "record_writers.records[%u]" % ri
+        record = _dict(record, label)
+        _sequential_id(record, ri, "record_writers.records")
+        sequence = _uint(record.get("sequence"), label + ".sequence")
+        if not sequence or sequence <= last_sequence:
+            raise CaptureError("record_writers begin-event sequences must be nonzero and increase")
+        if sequence in event_sequences:
+            raise CaptureError("record_writers event sequences must be unique")
+        event_sequences.add(sequence)
+        last_sequence = sequence
+        writer = _string(record.get("writer"), label + ".writer", 32)
+        if writer not in RECORD_WRITERS:
+            raise CaptureError("%s.writer is unknown" % label)
+        return_rva = _address(record.get("return_rva"), label + ".return_rva")
+        if int(return_rva, 16) != writer_rvas[writer]:
+            raise CaptureError("%s return RVA disagrees with writer" % label)
+        _u32(record.get("thread_id"), label + ".thread_id")
+        _u32(record.get("observed_frame"), label + ".observed_frame")
+        addresses = {}
+        for field in ("owner", "key", "builder", "object", "entry"):
+            addresses[field] = _address(record.get(field), label + "." + field)
+        context_status = _string(record.get("context_status"), label + ".context_status", 32)
+        if context_status not in {"complete", "partial", "unavailable"}:
+            raise CaptureError("%s.context_status is unknown" % label)
+        lookup_status = _string(record.get("lookup_status"), label + ".lookup_status", 32)
+        completion_sequence = _uint(record.get("completion_sequence"), label + ".completion_sequence")
+        if lookup_status not in {"pending", "complete", "completion_failed"}:
+            raise CaptureError("%s.lookup_status is unknown" % label)
+        if (lookup_status == "pending") != (completion_sequence == 0):
+            raise CaptureError("%s lookup/completion sequence disagree" % label)
+        if completion_sequence:
+            if completion_sequence <= sequence or completion_sequence in event_sequences:
+                raise CaptureError("record_writers completion event must uniquely follow its begin event")
+            event_sequences.add(completion_sequence)
+
+        applicable = {"record": True, "key_snapshot": True,
+                      "builder_snapshot": writer == "primary_42b42ef",
+                      "object_snapshot": writer in {"primary_42b42ef", "inline_42b4ed6", "helper_434d149"},
+                      "entry_snapshot": lookup_status != "pending"}
+        sizes = {"record": POOL_STRIDE, "key_snapshot": 32,
+                 "builder_snapshot": 96,
+                 "object_snapshot": 416 if writer == "helper_434d149" else 176,
+                 "entry_snapshot": 0x38}
+        snapshots = {}
+        for field in ("record", "key_snapshot", "builder_snapshot", "object_snapshot", "entry_snapshot"):
+            snap_label = label + "." + field
+            snapshot = _dict(record.get(field), snap_label)
+            snap_status = _string(snapshot.get("status"), snap_label + ".status", 32)
+            if snap_status not in snapshot_statuses:
+                raise CaptureError("%s.status is unknown" % snap_label)
+            offset = _uint(snapshot.get("offset"), snap_label + ".offset")
+            size = _uint(snapshot.get("bytes"), snap_label + ".bytes")
+            if offset != cursor:
+                raise CaptureError("%s does not begin at the packed writer cursor" % snap_label)
+            if not applicable[field]:
+                if snap_status != "not_applicable" or size or (
+                        field == "builder_snapshot" and int(addresses["builder"], 16) or
+                        field == "object_snapshot" and int(addresses["object"], 16)):
+                    raise CaptureError("%s non-applicable snapshot is inconsistent" % snap_label)
+            elif snap_status == "available":
+                if size != sizes[field]:
+                    raise CaptureError("%s available byte count is invalid" % snap_label)
+                cursor += size
+            elif size:
+                raise CaptureError("%s unavailable snapshot declares bytes" % snap_label)
+            if field == "key_snapshot":
+                pointer = int(addresses["key"], 16)
+            elif field == "builder_snapshot":
+                pointer = int(addresses["builder"], 16)
+            elif field == "object_snapshot":
+                pointer = int(addresses["object"], 16)
+            elif field == "entry_snapshot":
+                pointer = int(addresses["entry"], 16)
+            else:
+                pointer = None
+            if applicable[field] and pointer is not None:
+                if ((snap_status == "null_pointer" and pointer != 0) or
+                        snap_status in {"available", "read_fault", "byte_budget",
+                                        "bin_open_failed", "bin_write_failed"} and pointer == 0):
+                    raise CaptureError("%s pointer and status disagree" % snap_label)
+            snapshots[field] = snapshot
+        required_available = all(snapshots[field]["status"] == "available"
+                                 for field in applicable if applicable[field])
+        if context_status == "complete" and not required_available and binary_ok:
+            raise CaptureError("%s complete context lacks required snapshots" % label)
+        if context_status == "partial" and required_available and lookup_status != "pending":
+            raise CaptureError("%s partial context has every required snapshot" % label)
+        if lookup_status == "pending" and context_status == "complete":
+            raise CaptureError("%s pending lookup claims complete context" % label)
+        if binary_ok:
+            entry_status = snapshots["entry_snapshot"]["status"]
+            if (lookup_status == "complete") != (entry_status == "available"):
+                raise CaptureError("%s lookup status disagrees with entry snapshot" % label)
+            if lookup_status == "pending" and (int(addresses["entry"], 16) or entry_status != "not_applicable"):
+                raise CaptureError("%s pending lookup carries completion evidence" % label)
+
+    if (summary["stored"] != len(records) or summary["observed"] < len(records) or
+            summary["completed"] > summary["stored"]):
+        raise CaptureError("record_writers summary counts disagree with records")
+    if summary["completed"] != sum(record["lookup_status"] != "pending" for record in records):
+        raise CaptureError("record_writers completed count disagrees with record lifecycle")
+    retained_bytes = cursor - packed_bytes
+    if retained_bytes != summary["retained_bytes"] or retained_bytes > limits["bytes"]:
+        raise CaptureError("record_writers retained byte count is invalid")
+    complete_capture = (bool(records) and summary["observed"] == summary["stored"] and
+                        summary["completed"] == summary["stored"] and
+                        not any(summary[field] for field in
+                                ("record_overflow", "byte_budget_declines", "read_faults",
+                                 "context_failures", "unwind_failures", "completion_failures",
+                                 "declined_unknown")))
+    expected_status = ("not_run" if hook_status == "not_run" else
+                       "unavailable" if hook_status in {"identity_mismatch", "opcode_mismatch", "install_failed"} else
+                       "captured" if complete_capture else "partial")
+    if status != expected_status:
+        raise CaptureError("record_writers top status disagrees with counters")
+    if status in {"not_run", "unavailable"} and (records or summary["stored"] or summary["retained_bytes"]):
+        raise CaptureError("unavailable record_writers capture retains records")
+    return diagnostic, uploads, records, cursor
+
+
 def _validate_snapshots(root, resources, blobs):
     snapshots = _list(root.get("snapshots"), "snapshots", 1024)
     versions = set()
@@ -737,10 +921,15 @@ def load_capture(path):
     source_owner = None
     source_owner_attempts = []
     cpu_blobs = []
+    record_writers = None
+    writer_uploads = []
+    writer_records = []
     total_packed_bytes = packed_bytes
     if schema == SCHEMA_V2:
         source_owner, source_owner_attempts, cpu_blobs, total_packed_bytes = _validate_source_owner(
             root, executable, resources, events, summary, packed_bytes)
+        record_writers, writer_uploads, writer_records, total_packed_bytes = _validate_record_writers(
+            root, resources, source_owner_attempts, total_packed_bytes, summary["binary_ok"])
     for i, snapshot in enumerate(snapshots):
         if snapshot["foreign_epoch"] > summary["foreign_writes"]:
             raise CaptureError("snapshots[%u].foreign_epoch exceeds observed foreign writes" % i)
@@ -796,6 +985,8 @@ def load_capture(path):
         "snapshots": snapshots, "draws": draws, "blobs": blobs,
         "source_owner": source_owner, "source_owner_attempts": source_owner_attempts,
         "cpu_blobs": cpu_blobs,
+        "record_writers": record_writers, "writer_uploads": writer_uploads,
+        "writer_records": writer_records,
     }
 
 
@@ -813,6 +1004,96 @@ def _cpu_blob_bytes(capture, reference):
     if blob["status"] != "available":
         return None
     return memoryview(capture["binary"])[blob["offset"]:blob["offset"] + blob["bytes"]]
+
+
+def _writer_snapshot_bytes(capture, snapshot):
+    if snapshot["status"] != "available":
+        return None
+    begin = snapshot["offset"]
+    return memoryview(capture["binary"])[begin:begin + snapshot["bytes"]]
+
+
+def _opaque_writer_context(capture, record):
+    values = [record[field] for field in ("owner", "key", "builder", "object", "entry")]
+    for field in ("key_snapshot", "builder_snapshot", "object_snapshot", "entry_snapshot"):
+        snapshot = record[field]
+        payload = _writer_snapshot_bytes(capture, snapshot)
+        values.extend((snapshot["status"], None if payload is None else bytes(payload)))
+    return tuple(values)
+
+
+def _record_writer_candidates(capture, cpu_source, cpu_record):
+    result = {
+        "status": "unavailable", "reason": None,
+        "attribution": "candidate_provenance_only", "candidate_count": 0,
+        "opaque_context_consensus": "not_applicable", "candidates": [],
+    }
+    diagnostic = capture["record_writers"]
+    if diagnostic is None:
+        result["reason"] = "capture_has_no_record_writer_diagnostic"
+        return result
+    result.update(capture_status=diagnostic["status"], hook_status=diagnostic["hook_status"])
+    if diagnostic["status"] in {"not_run", "unavailable"}:
+        result["reason"] = "record_writer_%s" % diagnostic["status"]
+        return result
+    if cpu_source["status"] != "matched":
+        result["reason"] = "cpu_source_record_was_not_proven"
+        return result
+    uploads = [upload for upload in capture["writer_uploads"]
+               if upload["attempt"] == cpu_source["attempt"]]
+    if len(uploads) != 1:
+        result["status"] = "partial" if diagnostic["status"] == "partial" else "unavailable"
+        result["reason"] = "source_owner_map_has_no_writer_cutoff"
+        return result
+    upload = uploads[0]
+    cutoff = upload["cutoff"]
+    result.update(upload_attempt=upload["attempt"], cutoff=cutoff)
+    eligible = [record for record in capture["writer_records"]
+                if record["lookup_status"] == "complete" and
+                record["sequence"] <= cutoff and
+                0 < record["completion_sequence"] <= cutoff]
+    unreadable = sum(record["record"]["status"] != "available" for record in eligible)
+    candidates = []
+    candidate_contexts = []
+    for record in eligible:
+        payload = _writer_snapshot_bytes(capture, record["record"])
+        if payload is None or bytes(payload) != bytes(cpu_record):
+            continue
+        candidate_contexts.append(_opaque_writer_context(capture, record))
+        candidates.append({
+            "record": record["id"], "sequence": record["sequence"],
+            "completion_sequence": record["completion_sequence"],
+            "lookup_status": record["lookup_status"],
+            "writer": record["writer"], "return_rva": record["return_rva"],
+            "thread_id": record["thread_id"], "observed_frame": record["observed_frame"],
+            "owner": record["owner"], "key": record["key"],
+            "builder": record["builder"], "object": record["object"],
+            "entry": record["entry"],
+            "context_status": record["context_status"],
+            "key_snapshot_status": record["key_snapshot"]["status"],
+            "builder_snapshot_status": record["builder_snapshot"]["status"],
+            "object_snapshot_status": record["object_snapshot"]["status"],
+            "entry_snapshot_status": record["entry_snapshot"]["status"],
+        })
+    result.update(candidate_count=len(candidates), candidates=candidates,
+                  eligible_records=len(eligible), unreadable_eligible_records=unreadable)
+    if len(candidates) > 1:
+        result["opaque_context_consensus"] = "same" if len(set(candidate_contexts)) == 1 else "different"
+    elif len(candidates) == 1:
+        result["opaque_context_consensus"] = "single_candidate"
+    if diagnostic["status"] == "partial" or unreadable:
+        result["status"] = "partial"
+        result["reason"] = "record_writer_capture_is_incomplete"
+    elif len(candidates) == 0:
+        result["status"] = "no_candidate"
+        result["reason"] = "no_pre_upload_writer_payload_matches_cpu_source"
+    elif len(candidates) == 1:
+        result["status"] = "unique_candidate"
+        result["reason"] = None
+    else:
+        result["status"] = "multiple_candidates"
+        result["reason"] = "multiple_pre_upload_writer_payloads_match_cpu_source"
+    return result
 
 
 def _source_result(status, reason, draw, slot, **extra):
@@ -1034,6 +1315,7 @@ def analyse(capture, include_records=False):
             "A matched Map/Unmap or Update route does not prove which CPU operation initialized an individual record; byte-range relation is reported separately.",
             "CPU source addresses are capture-local provenance only; they are not stable object identities or a static classification.",
             "A CPU source is proven only by unique destination-slot coverage and exact 336-byte equality in the same retained Map generation.",
+            "Writer payload equality before a Map cutoff is candidate provenance only; duplicates remain explicit and do not establish object identity or a causal generation link.",
             "The report classifies captured metadata and does not infer that an object is static from absent motion.",
         ],
         "counts": {"draws": len(capture["draws"]), "mesh_records": None,
@@ -1045,6 +1327,13 @@ def analyse(capture, include_records=False):
         "groups": [], "missing": [],
         "cpu_source_owner": {
             "capture_status": (capture["source_owner"]["status"] if capture["source_owner"] else "unavailable"),
+            "visible_record_outcomes": {},
+        },
+        "record_writers": {
+            "capture_status": (capture["record_writers"]["status"]
+                               if capture["record_writers"] else "unavailable"),
+            "hook_status": (capture["record_writers"]["hook_status"]
+                            if capture["record_writers"] else "unavailable"),
             "visible_record_outcomes": {},
         },
     }
@@ -1209,6 +1498,7 @@ def analyse(capture, include_records=False):
             traces[label]["target_range_relation"] = (traces[label]["chain"][0]["requested_range_relation"]
                                                          if traces[label]["chain"] else "unavailable")
         cpu_source = _cpu_source_owner(capture, draw, pool_slot, pool_record, traces["pool"])
+        writer_candidates = _record_writer_candidates(capture, cpu_source, pool_record)
         group_key = (tuple(draw["key16"]), word28, word320, second_word,
                      draw["pool_resource"], draw["pool_generation"],
                      draw["id_resource"], draw["id_generation"],
@@ -1220,6 +1510,7 @@ def analyse(capture, include_records=False):
                 "pixels": 0, "records": 0,
                 "valid_rigid_records": 0, "history_matched_records": 0,
                 "cpu_source_owners": [],
+                "record_writer_candidates": [],
                 "source_versions": {
                     "t33_pool": {"resource": draw["pool_resource"], "generation": draw["pool_generation"],
                                  "write_observed": draw["pool_write_observed"], "generation_matched": draw["pool_matched"],
@@ -1237,6 +1528,8 @@ def analyse(capture, include_records=False):
         group_outcomes[cpu_source["status"]] = group_outcomes.get(cpu_source["status"], 0) + 1
         groups[group_key]["cpu_source_owners"].append(
             {"record": record_index, "pixels": pixel_count, **cpu_source})
+        groups[group_key]["record_writer_candidates"].append(
+            {"record": record_index, "pixels": pixel_count, **writer_candidates})
         owners.append({
             "record": record_index, "draw": draw_id, "instance": local,
             "pixels": pixel_count, "pool_slot": pool_slot,
@@ -1245,11 +1538,14 @@ def analyse(capture, include_records=False):
             "pool_generation": draw["pool_generation"], "id_generation": draw["id_generation"],
             "valid_rigid": valid_rigid, "history_matched": history_matched,
             "cpu_source_owner": cpu_source,
+            "record_writer_candidates": writer_candidates,
         })
     report["groups"] = list(groups.values())
     report["counts"]["metadata_groups"] = len(report["groups"])
     report["cpu_source_owner"]["visible_record_outcomes"] = dict(sorted(Counter(
         owner["cpu_source_owner"]["status"] for owner in owners).items()))
+    report["record_writers"]["visible_record_outcomes"] = dict(sorted(Counter(
+        owner["record_writer_candidates"]["status"] for owner in owners).items()))
     if include_records:
         report["records"] = owners
     return report
@@ -1278,6 +1574,10 @@ def print_report(report):
         outcomes = report["cpu_source_owner"]["visible_record_outcomes"]
         print("CPU source owner: capture=%s; visible record outcomes=%s" %
               (report["cpu_source_owner"]["capture_status"], json.dumps(outcomes, sort_keys=True)))
+        writer_outcomes = report["record_writers"]["visible_record_outcomes"]
+        print("record writers: capture=%s hook=%s; visible record outcomes=%s" %
+              (report["record_writers"]["capture_status"], report["record_writers"]["hook_status"],
+               json.dumps(writer_outcomes, sort_keys=True)))
     for item in report["missing"]:
         print("missing: %s (%s)" % (item["scope"], item["reason"]))
     print("scope: exact-frame captured evidence only; no static classification is inferred")
@@ -1427,6 +1727,61 @@ def _source_owner_fixture(root, binary):
     return root, binary + bytes(raw) + source
 
 
+def _record_writer_fixture(root, binary):
+    root = copy.deepcopy(root)
+    attempt = root["source_owner"]["attempts"][0]
+    descriptor = attempt["descriptors"][0]
+    source_blob = root["cpu_blobs"][descriptor["payload_blob"]]
+    source = binary[source_blob["offset"]:source_blob["offset"] + source_blob["bytes"]]
+    payloads = (source[:POOL_STRIDE], source[POOL_STRIDE:2 * POOL_STRIDE], source[:POOL_STRIDE])
+    contexts = (("0x810000", "0x820000", "0x830000"),
+                ("0x811000", "0x821000", "0x831000"),
+                ("0x810000", "0x820000", "0x830000"))
+    chunks = [binary]
+    cursor = len(binary)
+    records = []
+    key_bytes = bytes(range(32))
+    entry_bytes = bytes(range(0x38))
+    for index, (payload, context) in enumerate(zip(payloads, contexts)):
+        owner, key, entry = context
+        record_span = {"status": "available", "offset": cursor, "bytes": len(payload)}
+        chunks.append(payload)
+        cursor += len(payload)
+        key_span = {"status": "available", "offset": cursor, "bytes": len(key_bytes)}
+        chunks.append(key_bytes)
+        cursor += len(key_bytes)
+        builder_span = {"status": "not_applicable", "offset": cursor, "bytes": 0}
+        object_span = {"status": "not_applicable", "offset": cursor, "bytes": 0}
+        entry_span = {"status": "available", "offset": cursor, "bytes": len(entry_bytes)}
+        chunks.append(entry_bytes)
+        cursor += len(entry_bytes)
+        records.append({
+            "id": index, "sequence": index * 2 + 1, "writer": "direct_369ce91",
+            "return_rva": "0x369ce91", "thread_id": 17,
+            "observed_frame": 10 + index, "owner": owner, "key": key,
+            "builder": "0x0", "object": "0x0", "entry": entry,
+            "context_status": "complete", "lookup_status": "complete",
+            "completion_sequence": (index + 1) * 2, "record": record_span,
+            "key_snapshot": key_span, "builder_snapshot": builder_span,
+            "object_snapshot": object_span, "entry_snapshot": entry_span,
+        })
+    retained = cursor - len(binary)
+    root["record_writers"] = {
+        "version": 1, "status": "captured", "hook_status": "finished",
+        "limits": copy.deepcopy(RECORD_WRITER_LIMITS),
+        "summary": {"observed": 3, "stored": 3, "completed": 3,
+                    "retained_bytes": retained, "record_overflow": 0,
+                    "byte_budget_declines": 0, "read_faults": 0,
+                    "context_failures": 0, "declined_management": 0,
+                    "declined_unknown": 0, "unwind_failures": 0,
+                    "completion_failures": 0},
+        "uploads": [{"attempt": 0, "resource": attempt["resource"],
+                     "generation": attempt["generation"], "cutoff": 5}],
+        "records": records,
+    }
+    return root, b"".join(chunks)
+
+
 def _write_fixture(directory, root, binary):
     directory = Path(directory)
     marker = directory / "classification_fixture.json"
@@ -1551,6 +1906,19 @@ def verify_source_fixture(capture, report):
     payload = capture["cpu_blobs"][descriptor["payload_blob"]]
     if descriptor["record_count"] != 1 or payload["status"] != "available" or payload["bytes"] != POOL_STRIDE:
         raise CaptureError("source-owner fixture descriptor payload changed")
+    writer_capture = capture.get("record_writers")
+    if not writer_capture or writer_capture["status"] != "captured" or writer_capture["hook_status"] != "finished":
+        raise CaptureError("source-owner fixture lacks its completed record-writer diagnostic")
+    if report["record_writers"]["visible_record_outcomes"] != {"unique_candidate": 1}:
+        raise CaptureError("source-owner fixture did not retain one pre-upload writer candidate")
+    writer = records[0]["record_writer_candidates"]
+    if (writer["attribution"] != "candidate_provenance_only" or writer["candidate_count"] != 1 or
+            writer["opaque_context_consensus"] != "single_candidate" or
+            writer["candidates"][0]["writer"] != "direct_369ce91" or
+            writer["candidates"][0]["lookup_status"] != "complete" or
+            writer["candidates"][0]["context_status"] != "complete" or
+            writer["candidates"][0]["completion_sequence"] > writer["cutoff"]):
+        raise CaptureError("source-owner fixture writer cutoff/context join changed")
 
 
 def self_test():
@@ -1662,6 +2030,95 @@ def self_test():
         assert v2_report["cpu_source_owner"]["visible_record_outcomes"] == {"matched": 2}
         assert all(record["cpu_source_owner"]["proof"] == "same_generation_exact_bytes"
                    for record in v2_report["records"])
+        assert v2_report["record_writers"]["visible_record_outcomes"] == {"unavailable": 2}
+
+        # Writer payload equality is bounded by the nominated Map cutoff and
+        # remains candidate-only even when exactly one stored event matches.
+        writer_root, writer_binary = _record_writer_fixture(v2_root, v2_binary)
+        path = _write_fixture(temp, writer_root, writer_binary)
+        writer_report = analyse(load_capture(path), include_records=True)
+        assert writer_report["record_writers"]["visible_record_outcomes"] == {"unique_candidate": 2}
+        writer_results = [record["record_writer_candidates"] for record in writer_report["records"]]
+        assert [item["candidates"][0]["sequence"] for item in writer_results] == [1, 3]
+        assert all(item["attribution"] == "candidate_provenance_only" for item in writer_results)
+
+        duplicate = copy.deepcopy(writer_root)
+        duplicate["record_writers"]["uploads"][0]["cutoff"] = 6
+        path = _write_fixture(temp, duplicate, writer_binary)
+        duplicate_report = analyse(load_capture(path), include_records=True)
+        first_duplicate = duplicate_report["records"][0]["record_writer_candidates"]
+        assert first_duplicate["status"] == "multiple_candidates"
+        assert first_duplicate["candidate_count"] == 2
+        assert first_duplicate["opaque_context_consensus"] == "same"
+        assert [item["sequence"] for item in first_duplicate["candidates"]] == [1, 5]
+
+        different = copy.deepcopy(duplicate)
+        different["record_writers"]["records"][2]["owner"] = "0x899000"
+        path = _write_fixture(temp, different, writer_binary)
+        different_report = analyse(load_capture(path), include_records=True)
+        assert different_report["records"][0]["record_writer_candidates"]["opaque_context_consensus"] == "different"
+
+        no_candidate_bytes = bytearray(writer_binary)
+        for record in writer_root["record_writers"]["records"][:2]:
+            no_candidate_bytes[record["record"]["offset"] + 28] ^= 1
+        path = _write_fixture(temp, writer_root, bytes(no_candidate_bytes))
+        no_candidate_report = analyse(load_capture(path), include_records=True)
+        assert no_candidate_report["record_writers"]["visible_record_outcomes"] == {"no_candidate": 2}
+
+        writer_partial = copy.deepcopy(writer_root)
+        writer_partial["record_writers"]["status"] = "partial"
+        writer_partial["record_writers"]["summary"]["record_overflow"] = 1
+        path = _write_fixture(temp, writer_partial, writer_binary)
+        partial_writer_report = analyse(load_capture(path), include_records=True)
+        assert partial_writer_report["record_writers"]["visible_record_outcomes"] == {"partial": 2}
+        assert all(record["record_writer_candidates"]["candidate_count"] == 1
+                   for record in partial_writer_report["records"])
+
+        writer_fault = copy.deepcopy(writer_root)
+        faulty = writer_fault["record_writers"]["records"][0]
+        removed_at = faulty["key_snapshot"]["offset"]
+        removed_bytes = faulty["key_snapshot"]["bytes"]
+        faulty["key_snapshot"].update(status="read_fault", bytes=0)
+        faulty["context_status"] = "partial"
+        for record in writer_fault["record_writers"]["records"]:
+            for field in ("record", "key_snapshot", "builder_snapshot", "object_snapshot", "entry_snapshot"):
+                if record[field]["offset"] > removed_at:
+                    record[field]["offset"] -= removed_bytes
+        writer_fault["record_writers"]["status"] = "partial"
+        writer_fault["record_writers"]["summary"]["retained_bytes"] -= removed_bytes
+        writer_fault["record_writers"]["summary"]["read_faults"] = 1
+        writer_fault["record_writers"]["summary"]["context_failures"] = 1
+        fault_binary = writer_binary[:removed_at] + writer_binary[removed_at + removed_bytes:]
+        path = _write_fixture(temp, writer_fault, fault_binary)
+        fault_report = analyse(load_capture(path), include_records=True)
+        assert fault_report["record_writers"]["visible_record_outcomes"] == {"partial": 2}
+
+        for top_status, hook_status in (("unavailable", "opcode_mismatch"), ("not_run", "not_run")):
+            inactive = copy.deepcopy(writer_root)
+            start = inactive["record_writers"]["records"][0]["record"]["offset"]
+            inactive["record_writers"].update(status=top_status, hook_status=hook_status, records=[])
+            inactive["record_writers"]["uploads"][0]["cutoff"] = 0
+            for field in inactive["record_writers"]["summary"]:
+                inactive["record_writers"]["summary"][field] = 0
+            path = _write_fixture(temp, inactive, writer_binary[:start])
+            inactive_report = analyse(load_capture(path), include_records=True)
+            assert inactive_report["record_writers"]["visible_record_outcomes"] == {"unavailable": 2}
+
+        def rejected_writer(mutator):
+            value = copy.deepcopy(writer_root)
+            mutator(value)
+            path = _write_fixture(temp, value, writer_binary)
+            try:
+                load_capture(path)
+            except CaptureError:
+                return
+            raise AssertionError("malformed record-writer capture accepted")
+
+        rejected_writer(lambda value: value["record_writers"]["limits"].update(
+            records=RECORD_WRITER_LIMITS["records"] + 1))
+        rejected_writer(lambda value: value["record_writers"]["records"][0].update(sequence=2))
+        rejected_writer(lambda value: value["record_writers"]["records"][0].update(return_rva="0x42b42ef"))
+        rejected_writer(lambda value: value["record_writers"]["uploads"][0].update(generation=1))
         first_source = v2_root["cpu_blobs"][1]["offset"]
         changed = bytearray(v2_binary)
         changed[first_source + 28] ^= 1

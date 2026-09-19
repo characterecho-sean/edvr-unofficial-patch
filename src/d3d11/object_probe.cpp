@@ -2985,6 +2985,19 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     classification.sourceOwnerReadFaults,classification.sourceOwnerMetadataChanges,
                     static_cast<unsigned long long>(classification.sourceOwnerDescriptorOverflow),
                     static_cast<unsigned long long>(classification.sourceOwnerCpuByteDeclines));
+    Log::get().note("object classification: CPU record-writer probe hook %s; observed/stored/completed %llu/%u/%u, retained %llu bytes; record overflow/byte declines/read/context/unwind/completion failures %llu/%llu/%llu/%llu/%llu/%llu; declined management/unknown callers %llu/%llu. Exact 336-byte producer records and opaque caller context are evidence only; inactive/refused hooks and incomplete lookups remain explicit and unavailable for upload joins.",
+                    objectRecordWriterProbe.hookStatusText(),
+                    static_cast<unsigned long long>(classification.recordWriterObserved),
+                    classification.recordWriterStored,classification.recordWriterCompleted,
+                    static_cast<unsigned long long>(classification.recordWriterRetainedBytes),
+                    static_cast<unsigned long long>(classification.recordWriterOverflow),
+                    static_cast<unsigned long long>(classification.recordWriterByteBudgetDeclines),
+                    static_cast<unsigned long long>(classification.recordWriterReadFaults),
+                    static_cast<unsigned long long>(classification.recordWriterContextFailures),
+                    static_cast<unsigned long long>(classification.recordWriterUnwindFailures),
+                    static_cast<unsigned long long>(classification.recordWriterCompletionFailures),
+                    static_cast<unsigned long long>(classification.recordWriterDeclinedManagement),
+                    static_cast<unsigned long long>(classification.recordWriterDeclinedUnknown));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
                     "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "

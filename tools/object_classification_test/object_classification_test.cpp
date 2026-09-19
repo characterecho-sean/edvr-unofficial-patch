@@ -1,4 +1,5 @@
 #include "../../src/d3d11/object_classification_probe.h"
+#include "../../src/d3d11/object_record_writer_hook.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <windows.h>
@@ -46,9 +47,19 @@ std::wstring joined(const wchar_t* dir,const wchar_t* file){std::wstring p=dir;i
 
 extern "C" void sourceOwnerUnwindStub(uintptr_t owner);
 extern "C" void sourceOwnerUnwindResume();
+extern "C" void recordWriterUnwindStub(uintptr_t dictionary,uintptr_t key,const void* record);
+extern "C" void recordWriterUnwindResume();
 uintptr_t unwindOwner=0;uint32_t unwindFrames=0;std::string unwindStatus;
 extern "C" __declspec(noinline) void sourceOwnerTestCapture(){
     edvr::ObjectSourceOwnerProbe::recoverOwnerAt(reinterpret_cast<uintptr_t>(&sourceOwnerUnwindResume),unwindOwner,unwindFrames,unwindStatus);
+}
+
+edvr::ObjectRecordWriterProbe* writerUnwindProbe=nullptr;
+edvr::ObjectRecordWriterProbe::Pending writerUnwindPending{};
+extern "C" __declspec(noinline) void recordWriterUnwindCapture(uintptr_t dictionary,uintptr_t key){
+    CONTEXT context{};RtlCaptureContext(&context);
+    writerUnwindPending=writerUnwindProbe->beginLookupUnwindRvaForTest(
+        reinterpret_cast<uintptr_t>(&recordWriterUnwindResume),0x369CE91,dictionary,key,context);
 }
 
 struct OwnerGraph {
@@ -72,6 +83,45 @@ struct OwnerGraph {
     }
 };
 
+void recordWriterTests(){
+    check(edvr::objectRecordWriterHookSelfTest()==0,"record-writer relay publishes original before gate and forwards exactly once");
+    edvr::ObjectRecordWriterProbe p;p.armForTest(77);
+    std::vector<uint8_t> owner(0x300),keyBytes(0x60),stack(0x400),object(0x1A0),entry(0x38);
+    for(size_t i=0;i<keyBytes.size();++i)keyBytes[i]=uint8_t(0x20+i);
+    for(size_t i=0;i<object.size();++i)object[i]=uint8_t(0x80+i);
+    for(size_t i=0;i<entry.size();++i)entry[i]=uint8_t(0xE0+i);
+    auto fillRecord=[](uint8_t* at,uint8_t seed){for(size_t i=0;i<edvr::ObjectRecordWriterProbe::kRecordBytes;++i)at[i]=uint8_t(seed+i*3);};
+    const uintptr_t dictionary=reinterpret_cast<uintptr_t>(owner.data()+0x260);
+    CONTEXT c{};
+    std::vector<uint8_t> unwindRecord(0x150);fillRecord(unwindRecord.data(),0x71);writerUnwindProbe=&p;writerUnwindPending={};
+    recordWriterUnwindStub(dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),unwindRecord.data());
+    check(writerUnwindPending.record!=edvr::ObjectRecordWriterProbe::kNone&&p.recordsForTest().back().record.data==unwindRecord,"real unwind stops at writer caller and captures its stack record");
+    p.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
+    fillRecord(stack.data()+0x50,1);
+    auto a=p.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(stack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    p.completeLookup(a,reinterpret_cast<uintptr_t>(entry.data()));
+    check(p.recordsForTest().back().writer=="direct_369ce91"&&p.recordsForTest().back().record.data[7]==uint8_t(1+7*3),"direct writer captures caller-stack record");
+    std::vector<uint8_t> primaryStack(0x300),builder(0x60),pose(0xB0);fillRecord(primaryStack.data()+0x30,2);c.R12=reinterpret_cast<DWORD64>(pose.data());
+    auto b=p.beginLookupRvaForTest(0x42B42EF,reinterpret_cast<uintptr_t>(primaryStack.data()),dictionary,reinterpret_cast<uintptr_t>(builder.data()+0x40),c);p.completeLookup(b,reinterpret_cast<uintptr_t>(entry.data()));
+    check(p.recordsForTest().back().builder==reinterpret_cast<uintptr_t>(builder.data())&&p.recordsForTest().back().builderSnapshot.data.size()==0x60&&p.recordsForTest().back().objectSnapshot.data.size()==0xB0,"primary writer retains builder and outer input candidate");
+    std::vector<uint8_t> inlineFrame(0x400);uintptr_t rbp=reinterpret_cast<uintptr_t>(inlineFrame.data()+0x80);fillRecord(reinterpret_cast<uint8_t*>(rbp+0x1C0),3);put64(inlineFrame,0x18,reinterpret_cast<uintptr_t>(pose.data()));c.Rbp=rbp;
+    auto d=p.beginLookupRvaForTest(0x42B4ED6,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(d,reinterpret_cast<uintptr_t>(entry.data()));
+    check(p.recordsForTest().back().object==reinterpret_cast<uintptr_t>(pose.data())&&p.recordsForTest().back().record.data[0]==3,"inline writer reads spilled outer input and RBP record");
+    std::vector<uint8_t> directStack(0x300);fillRecord(directStack.data()+0x60,4);
+    auto e=p.beginLookupRvaForTest(0x43130AA,reinterpret_cast<uintptr_t>(directStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(e,reinterpret_cast<uintptr_t>(entry.data()));
+    std::vector<uint8_t> helperRecord(0x150);fillRecord(helperRecord.data(),5);c.Rbx=reinterpret_cast<DWORD64>(helperRecord.data());c.Rdi=reinterpret_cast<DWORD64>(object.data());
+    auto f=p.beginLookupRvaForTest(0x434D149,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(f,reinterpret_cast<uintptr_t>(entry.data()));
+    check(p.recordsForTest().back().objectSnapshot.data.size()==0x1A0&&p.recordsForTest().back().lookupStatus=="complete","helper writer retains bounded input and completed entry");
+    p.beginLookupRvaForTest(0x434E316,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.beginLookupRvaForTest(0x123456,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    const uint64_t uploadCutoff=p.sampleUploadCutoff();
+    std::vector<uint8_t> lateStack(0x200);fillRecord(lateStack.data()+0x50,8);auto late=p.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(lateStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(late,reinterpret_cast<uintptr_t>(entry.data()));
+    p.noteUpload(3,4,5,uploadCutoff);const auto s=p.summary();check(s.observed==7&&s.stored==7&&s.completed==7&&s.declinedManagement==1&&s.declinedUnknown==1,"all five writer recipes accepted and management/unknown callers declined");
+    check(p.uploadsForTest().back().cutoff==12&&p.recordsForTest().back().completionSequence>p.uploadsForTest().back().cutoff,"Map-entry cutoff excludes a writer completed during source-owner traversal");
+    std::vector<uint8_t> pendingStack(0x200);fillRecord(pendingStack.data()+0x50,9);auto pending=p.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(pendingStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    p.finish();check(p.recordsForTest().back().lookupStatus=="pending"&&p.summary().completed+1==p.summary().stored,"finish preserves an explicit incomplete lookup");
+    p.armForTest(78);p.completeLookup(pending,reinterpret_cast<uintptr_t>(entry.data()));check(p.summary().completionFailures==1&&p.summary().stored==0,"stale pending completion is rejected by epoch");p.finish();writerUnwindProbe=nullptr;
+}
+
 void sourceOwnerTests(Device& x,const wchar_t* directory){
     const uintptr_t sentinel=sizeof(uintptr_t)==8?uintptr_t(0x123456789ABCDEF0ull):uintptr_t(0x12345678u);
     sourceOwnerUnwindStub(sentinel);check(unwindStatus=="matched"&&unwindOwner==sentinel&&unwindFrames>0,"real unwind recovers target-frame RBX before caller unwind");
@@ -80,8 +130,12 @@ void sourceOwnerTests(Device& x,const wchar_t* directory){
     std::vector<uint8_t> poolData(672,0x44),idsData(8,0);auto pool=x.buffer(672,D3D11_BIND_SHADER_RESOURCE,D3D11_USAGE_DYNAMIC,poolData.data(),336);auto ids=x.buffer(8,D3D11_BIND_VERTEX_BUFFER,D3D11_USAGE_DYNAMIC,idsData.data());
     edvr::ObjectClassificationProbe identity;identity.arm(1);identity.noteDraw(x.c.Get(),1,0,0,1,pool.Get(),ids.Get(),0,nullptr);D3D11_MAPPED_SUBRESOURCE rejectMap{};hr(x.c->Map(pool.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&rejectMap),"identity fixture map");identity.noteMap(x.c.Get(),pool.Get(),0,D3D11_MAP_WRITE_DISCARD,S_OK,true);check(identity.sourceOwnerForTest().attempts().size()==1&&identity.sourceOwnerForTest().attempts()[0].status=="identity_mismatch"&&identity.sourceOwnerForTest().summary().readFaults==0,"wrong executable identity fails before owner pointer reads");x.c->Unmap(pool.Get(),0);identity.noteUnmap(x.c.Get(),pool.Get(),0);
 
-    edvr::ObjectClassificationProbe p;p.arm(100);auto drawKey=key(0x5150);p.noteDraw(x.c.Get(),100,0,0,1,pool.Get(),ids.Get(),0,drawKey.data(),0xEB5234DB6ADB491Dull);
-    p.setFrame(101);D3D11_MAPPED_SUBRESOURCE m{};hr(x.c->Map(pool.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&m),"owner fixture pool map");OwnerGraph graph(pool.Get());const uint32_t synthetic=p.noteMapSourceOwnerForTest(x.c.Get(),pool.Get(),0,D3D11_MAP_WRITE_DISCARD,reinterpret_cast<uintptr_t>(graph.nested.data()));check(synthetic==0,"one-to-one synthetic Map owner capture");
+    edvr::ObjectClassificationProbe p;p.arm(100);edvr::objectRecordWriterProbe.armForTest(100);auto drawKey=key(0x5150);p.noteDraw(x.c.Get(),100,0,0,1,pool.Get(),ids.Get(),0,drawKey.data(),0xEB5234DB6ADB491Dull);
+    p.setFrame(101);D3D11_MAPPED_SUBRESOURCE m{};hr(x.c->Map(pool.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&m),"owner fixture pool map");OwnerGraph graph(pool.Get());
+    std::vector<uint8_t> writerStack(0x200),writerKey(0x20),writerEntry(0x38);memcpy(writerStack.data()+0x50,graph.source.data(),graph.source.size());CONTEXT writerContext{};
+    auto writerPending=edvr::objectRecordWriterProbe.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(writerStack.data()),reinterpret_cast<uintptr_t>(graph.nested.data()+0x260),reinterpret_cast<uintptr_t>(writerKey.data()),writerContext);
+    edvr::objectRecordWriterProbe.completeLookup(writerPending,reinterpret_cast<uintptr_t>(writerEntry.data()));
+    const uint32_t synthetic=p.noteMapSourceOwnerForTest(x.c.Get(),pool.Get(),0,D3D11_MAP_WRITE_DISCARD,reinterpret_cast<uintptr_t>(graph.nested.data()));check(synthetic==0,"one-to-one synthetic Map owner capture");
     memcpy(poolData.data(),graph.source.data(),graph.source.size());memcpy(m.pData,poolData.data(),poolData.size());x.c->Unmap(pool.Get(),0);p.noteUnmap(x.c.Get(),pool.Get(),0);
     const auto& success=p.sourceOwnerForTest().attempts()[synthetic];check(success.status=="captured"&&success.descriptors.size()==1&&success.descriptors[0].status=="captured","synthetic graph captures one source descriptor");
     const auto& sourceBlob=p.sourceOwnerForTest().blobs()[success.descriptors[0].payloadBlob];check(sourceBlob.data==graph.source,"captured CPU source bytes are exact");
@@ -89,7 +143,7 @@ void sourceOwnerTests(Device& x,const wchar_t* directory){
     std::vector<float> scene(1,0.5f);auto sceneTex=x.texture(1,1,DXGI_FORMAT_R32_FLOAT,scene.data(),4);struct Float2{float x,y;};Float2 coverage{1,0.5f};auto coverageTex=x.texture(1,1,DXGI_FORMAT_R32G32_FLOAT,&coverage,8,D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE);
     std::vector<uint8_t> mesh(240);makeRecord(mesh.data(),drawKey,poolData,0,0,1,0);auto meshBuffer=x.buffer(UINT(mesh.size()),D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,D3D11_USAGE_DEFAULT,mesh.data(),240);uint32_t colour=0xFF406080;auto colourTex=x.texture(1,1,DXGI_FORMAT_R8G8B8A8_UNORM,&colour,4);
     p.stage(x.c.Get(),103,0,701,sceneTex.Get(),coverageTex.Get(),meshBuffer.Get(),1,colourTex.Get());check(p.sealed(),"source-owner fixture stages selected visible record");p.useExpectedExecutableIdentityForTest();check(p.write(x.c.Get(),directory,L"source_fixture"),"write source-owner fixture");
-    const auto sourceJson=readFile(joined(directory,L"classification_source_fixture.json"));const std::string sourceText(sourceJson.begin(),sourceJson.end());check(sourceText.find("edvr_object_classification_v2")!=std::string::npos&&sourceText.find("nested_owner_field_130")!=std::string::npos,"source-owner fixture publishes v2 schema and ownership fields");
+    const auto sourceJson=readFile(joined(directory,L"classification_source_fixture.json"));const std::string sourceText(sourceJson.begin(),sourceJson.end());check(sourceText.find("edvr_object_classification_v2")!=std::string::npos&&sourceText.find("nested_owner_field_130")!=std::string::npos&&sourceText.find("direct_369ce91")!=std::string::npos,"source-owner fixture publishes ownership and exact record-writer join");
 
     edvr::ObjectSourceOwnerProbe bad;OwnerGraph wrong(reinterpret_cast<ID3D11Resource*>(uintptr_t(0x1234)));
     bad.captureSynthetic(0,0,1,1,0,pool.Get(),672,reinterpret_cast<uintptr_t>(wrong.nested.data()));check(bad.attempts().back().status=="resource_mismatch","wrong wrapped native resource rejected");
@@ -178,4 +232,4 @@ void fixture(Device& x,const wchar_t* directory){
 }
 }
 
-int wmain(int argc,wchar_t** argv){if(argc!=2){std::puts("usage: object_classification_test.exe <output-directory>");return 2;}Device device;stateTests(device);sourceOwnerTests(device,argv[1]);fixture(device,argv[1]);std::printf("object classification: %u checks passed; fixtures written\n",checks);return 0;}
+int wmain(int argc,wchar_t** argv){if(argc!=2){std::puts("usage: object_classification_test.exe <output-directory>");return 2;}Device device;recordWriterTests();stateTests(device);sourceOwnerTests(device,argv[1]);fixture(device,argv[1]);std::printf("object classification: %u checks passed; fixtures written\n",checks);return 0;}

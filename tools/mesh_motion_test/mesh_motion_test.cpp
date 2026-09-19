@@ -23,6 +23,10 @@ ComPtr<ID3DBlob> compile(const char* hlsl,const char* profile,const char* entry=
     hr(result); return code;
 }
 namespace edvr {
+// This rig exercises mesh rendering without installing game-code diagnostics.
+const char* attachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {return "identity_mismatch";}
+void detachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {}
+bool objectRecordWriterHookMatches(uintptr_t) noexcept {return false;}
 ID3D11Texture2D* testScene=nullptr;
 ID3D11DepthStencilView* testDepth=nullptr;
 int testEye=0;

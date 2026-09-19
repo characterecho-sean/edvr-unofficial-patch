@@ -912,6 +912,50 @@ int main() {
         }
     }
 
+    // A relay must have a usable forward before the entry becomes reachable.
+    // Exercise the new preparation contract without relying on origOut being
+    // assigned after publication, and prove a refusal leaves the target alone.
+    {
+        struct PreparedForward {
+            uint8_t entry[8]{};
+            unsigned calls=0;
+            bool allow=false,unchanged=false,forwardWorked=false;
+        } state;
+        memcpy(state.entry,reinterpret_cast<const void*>(&codeTarget),sizeof(state.entry));
+        auto prepare = +[](void* original,void* context) noexcept -> bool {
+            auto& s=*static_cast<PreparedForward*>(context);
+            ++s.calls;
+            s.unchanged=memcmp(s.entry,reinterpret_cast<const void*>(&codeTarget),sizeof(s.entry))==0;
+            auto forward=reinterpret_cast<decltype(g_codeOriginal)>(original);
+            s.forwardWorked=forward(1)==8;
+            if(s.allow)g_codeOriginal=forward;
+            return s.allow;
+        };
+        CodeHook hook;
+        void* refusedOutput=reinterpret_cast<void*>(uintptr_t(1));
+        check(!hook.install(reinterpret_cast<void*>(&codeTarget),reinterpret_cast<void*>(&codeReplacement),
+                            &refusedOutput,"prepare-refusal",prepare,&state),
+              "preparation can refuse before entry publication","a refused preparation still installed");
+        check(state.calls==1 && state.unchanged && state.forwardWorked &&
+                  refusedOutput==reinterpret_cast<void*>(uintptr_t(1)) &&
+                  memcmp(state.entry,reinterpret_cast<const void*>(&codeTarget),sizeof(state.entry))==0,
+              "refused preparation leaves entry and output untouched","preparation changed the target or lacked a working forward");
+        state.allow=true;state.calls=0;state.unchanged=state.forwardWorked=false;
+        const bool installed=hook.install(reinterpret_cast<void*>(&codeTarget),reinterpret_cast<void*>(&codeReplacement),
+                                          nullptr,"prepare-forward",prepare,&state);
+        check(installed && state.calls==1 && state.unchanged && state.forwardWorked,
+              "forward is prepared while target is still original","preparation ran after publication or lacked a forward");
+        if(installed) {
+            g_codeHookCalls=0;g_codeTargetCalls=0;
+            check(codeTarget(1)==108 && g_codeHookCalls==1 && g_codeTargetCalls==1,
+                  "prepared forward works without post-publication origOut","replacement could not forward through its prepared trampoline");
+            hook.uninstall();
+        }
+        g_codeOriginal=nullptr;
+        check(memcmp(state.entry,reinterpret_cast<const void*>(&codeTarget),sizeof(state.entry))==0,
+              "prepared hook restores the original entry","prepared hook left its entry patched");
+    }
+
     // THE DECODER -- what it measures, where it says the displacement is, and
     // what it refuses. The refusals matter more than the successes: a length
     // this gets wrong is a crash in somebody else's code with EDVR nowhere on

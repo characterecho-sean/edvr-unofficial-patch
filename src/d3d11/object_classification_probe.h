@@ -5,6 +5,7 @@
 // happen later in write().  It never changes a live binding or draw.
 #include "../common/game_call_probe.h"
 #include "object_source_owner_probe.h"
+#include "object_record_writer_probe.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -41,6 +42,11 @@ public:
         uint32_t sourceOwnerIdentityRejects=0,sourceOwnerOpcodeRejects=0,sourceOwnerUnwindFailures=0;
         uint32_t sourceOwnerResourceMatches=0,sourceOwnerReadFaults=0,sourceOwnerMetadataChanges=0;
         uint64_t sourceOwnerDescriptorOverflow=0,sourceOwnerCpuByteDeclines=0;
+        uint64_t recordWriterObserved=0,recordWriterRetainedBytes=0;
+        uint32_t recordWriterStored=0,recordWriterCompleted=0;
+        uint64_t recordWriterOverflow=0,recordWriterByteBudgetDeclines=0,recordWriterReadFaults=0;
+        uint64_t recordWriterContextFailures=0,recordWriterUnwindFailures=0,recordWriterCompletionFailures=0;
+        uint64_t recordWriterDeclinedManagement=0,recordWriterDeclinedUnknown=0;
     };
 
 private:
@@ -326,11 +332,34 @@ private:
     }
 
 public:
-    void arm(){std::lock_guard<std::recursive_mutex> lock(mutex_);clear(true);active_=true;gateActive_.store(true,std::memory_order_release);}
-    void arm(uint32_t meshFrame){std::lock_guard<std::recursive_mutex> lock(mutex_);clear(false);currentFrame_=meshFrame;active_=true;gateActive_.store(true,std::memory_order_release);}
-    void reset(){std::lock_guard<std::recursive_mutex> lock(mutex_);clear(true);}
+    void arm(){
+        uint32_t clock=0;{
+            std::lock_guard<std::recursive_mutex> lock(mutex_);clock=currentFrame_;clear(true);
+        }
+        objectRecordWriterProbe.arm(clock);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);active_=true;gateActive_.store(true,std::memory_order_release);
+    }
+    void arm(uint32_t meshFrame){
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);clear(false);currentFrame_=meshFrame;
+        }
+        objectRecordWriterProbe.arm(meshFrame);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);active_=true;gateActive_.store(true,std::memory_order_release);
+    }
+    void reset(){
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);active_=false;gateActive_.store(false,std::memory_order_release);
+        }
+        objectRecordWriterProbe.reset();
+        std::lock_guard<std::recursive_mutex> lock(mutex_);clear(true);
+    }
     bool active() const noexcept {return gateActive_.load(std::memory_order_acquire);}
-    void finish(){std::lock_guard<std::recursive_mutex> lock(mutex_);active_=false;gateActive_.store(false,std::memory_order_release);}
+    void finish(){
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);active_=false;gateActive_.store(false,std::memory_order_release);
+        }
+        objectRecordWriterProbe.finish();
+    }
     // Foreign/deferred contexts deliberately do not touch the resource ledger.
     // The epoch prevents reuse of a snapshot made before an unclassified write.
     void foreignWrite() noexcept {
@@ -338,18 +367,18 @@ public:
         foreignWrites_.fetch_add(1,std::memory_order_relaxed);
         foreignEpoch_.fetch_add(1,std::memory_order_release);
     }
-    void setFrame(uint32_t meshFrame){std::lock_guard<std::recursive_mutex> lock(mutex_);currentFrame_=meshFrame;}
+    void setFrame(uint32_t meshFrame){objectRecordWriterProbe.setFrame(meshFrame);std::lock_guard<std::recursive_mutex> lock(mutex_);currentFrame_=meshFrame;}
     void noteDraw(ID3D11DeviceContext* ctx,uint32_t meshFrame,uint32_t eye,uint32_t firstRecord,
                   uint32_t instances,ID3D11Buffer* pool,ID3D11Buffer* ids,uint32_t idByteOffset,
                   const uint32_t* key16,uint64_t vertexShaderHash=0) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);if(!active_)return;if(busy_){++counters_.suppressed;return;}
+        std::unique_lock<std::recursive_mutex> lock(mutex_);if(!active_)return;if(busy_){++counters_.suppressed;return;}
         currentFrame_=meshFrame;if(eye){++counters_.ignoredEye;return;}
         if(!haveDiscovery_){discoveryFrame_=meshFrame;haveDiscovery_=true;}
         const uint32_t poolId=addResource(pool,true,false),idsId=addResource(ids,false,true);
         // Three nomination frames cover Elite's rotating upload buffers before
         // the first captured frame.  Writes remain observed throughout.
         if(meshFrame<discoveryFrame_+3)return;
-        if(meshFrame>discoveryFrame_+7){++counters_.ignoredFrame;if(!haveSelected_){missedWindow_=true;active_=false;gateActive_.store(false,std::memory_order_release);}return;}
+        if(meshFrame>discoveryFrame_+7){++counters_.ignoredFrame;if(!haveSelected_){missedWindow_=true;active_=false;gateActive_.store(false,std::memory_order_release);lock.unlock();objectRecordWriterProbe.finish();}return;}
         if(!haveSelected_){selectedFrame_=meshFrame;haveSelected_=true;}
         if(meshFrame!=selectedFrame_){++counters_.ignoredFrame;return;}
         if(draws_.size()>=kDrawCap){++counters_.drawOverflow;return;}
@@ -370,8 +399,10 @@ public:
         const uint32_t e=appendEvent(r,MapWrite,ctx,nullptr,subresource,0,~0ull,true,false);
         if(e!=kNone&&e<events_.size())events_[e].mapType=uint32_t(type);
         if(e!=kNone&&e<events_.size()&&resources_[r].pool) {
+            const uint64_t writerCutoff=objectRecordWriterProbe.sampleUploadCutoff();
             events_[e].sourceOwnerAttempt=sourceOwner_.captureMap(e,r,resources_[r].generation,
                 currentFrame_,events_[e].foreignEpoch,resource,resources_[r].buffer.ByteWidth);
+            objectRecordWriterProbe.noteUpload(events_[e].sourceOwnerAttempt,r,resources_[r].generation,writerCutoff);
         }
         if(pendingMaps_.size()<kWriteCap)pendingMaps_.push_back({ctx,resource,subresource,e,resources_[r].generation,type,false});
         else {++counters_.pendingMapOverflow;resources_[r].unmatched=true;if(e!=kNone&&e<events_.size())events_[e].completionStatus="pending_map_cap";}
@@ -402,7 +433,7 @@ public:
     void stage(ID3D11DeviceContext* ctx,uint32_t meshFrame,uint32_t eye,uint32_t sceneFrame,
                ID3D11Resource* sceneTexture,ID3D11Resource* coverageTexture,
                ID3D11Buffer* meshBuffer,uint32_t recordCount,ID3D11Texture2D* colour=nullptr) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);if(!active_||busy_)return;
+        std::unique_lock<std::recursive_mutex> lock(mutex_);if(!active_||busy_)return;
         if(!haveSelected_||meshFrame!=selectedFrame_||eye||sealed_){++counters_.stageRejects;return;}
         Ptr<ID3D11Predicate> predicate;BOOL predicateValue=FALSE;ctx->GetPredication(&predicate,&predicateValue);
         if(predicate)ctx->SetPredication(nullptr,FALSE);
@@ -411,7 +442,7 @@ public:
         captureStageBuffer(ctx,meshBuffer,meshFrame,"mesh_records",recordCount);
         if(colour)captureTexture(ctx,colour,meshFrame,"scene_colour");
         if(predicate)ctx->SetPredication(predicate.Get(),predicateValue);
-        sealed_=true;active_=false;gateActive_.store(false,std::memory_order_release);
+        sealed_=true;active_=false;gateActive_.store(false,std::memory_order_release);lock.unlock();objectRecordWriterProbe.finish();
     }
     Summary summary() const {
         std::lock_guard<std::recursive_mutex> lock(mutex_);Summary s=counters_;s.active=active_;s.sealed=sealed_;
@@ -423,7 +454,13 @@ public:
         s.sourceOwnerComplete=o.completeAttempts;s.sourceOwnerPartial=o.partialAttempts;s.sourceOwnerIdentityRejects=o.identityRejects;
         s.sourceOwnerOpcodeRejects=o.opcodeRejects;s.sourceOwnerUnwindFailures=o.unwindFailures;s.sourceOwnerResourceMatches=o.resourceMatches;
         s.sourceOwnerReadFaults=o.readFaults;s.sourceOwnerMetadataChanges=o.metadataChanges;
-        s.sourceOwnerDescriptorOverflow=o.descriptorOverflow;s.sourceOwnerCpuByteDeclines=o.cpuByteDeclines;return s;
+        s.sourceOwnerDescriptorOverflow=o.descriptorOverflow;s.sourceOwnerCpuByteDeclines=o.cpuByteDeclines;
+        const auto w=objectRecordWriterProbe.summary();s.recordWriterObserved=w.observed;s.recordWriterStored=w.stored;
+        s.recordWriterCompleted=w.completed;s.recordWriterRetainedBytes=w.retainedBytes;s.recordWriterOverflow=w.recordOverflow;
+        s.recordWriterByteBudgetDeclines=w.byteBudgetDeclines;s.recordWriterReadFaults=w.readFaults;
+        s.recordWriterContextFailures=w.contextFailures;s.recordWriterUnwindFailures=w.unwindFailures;
+        s.recordWriterCompletionFailures=w.completionFailures;s.recordWriterDeclinedManagement=w.declinedManagement;
+        s.recordWriterDeclinedUnknown=w.declinedUnknown;return s;
     }
     uint32_t discoveryFrame() const{return summary().discoveryFrame;}
     uint32_t selectedFrame() const{return summary().selectedFrame;}
@@ -433,18 +470,21 @@ public:
     bool sealed() const{return summary().sealed;}
     uint32_t captureSourceOwnerForTest(ID3D11Resource* resource,uintptr_t nestedOwner,uint32_t event=0) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);const uint32_t r=findResource(resource);if(r==kNone)return kNone;
+        const uint64_t writerCutoff=objectRecordWriterProbe.sampleUploadCutoff();
         const uint32_t attempt=sourceOwner_.captureSynthetic(event,r,resources_[r].generation,currentFrame_,
             foreignEpoch_.load(std::memory_order_acquire),resource,resources_[r].buffer.ByteWidth,nestedOwner);
-        if(event<events_.size())events_[event].sourceOwnerAttempt=attempt;return attempt;
+        if(event<events_.size())events_[event].sourceOwnerAttempt=attempt;
+        objectRecordWriterProbe.noteUpload(attempt,r,resources_[r].generation,writerCutoff);return attempt;
     }
     uint32_t noteMapSourceOwnerForTest(ID3D11DeviceContext* ctx,ID3D11Resource* resource,
                                        uint32_t subresource,D3D11_MAP type,uintptr_t nestedOwner) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);const uint32_t r=findResource(resource);if(!nominated(r))return kNone;
         const uint32_t e=appendEvent(r,MapWrite,ctx,nullptr,subresource,0,~0ull,true,false);if(e==kNone)return kNone;
         events_[e].mapType=uint32_t(type);pendingMaps_.push_back({ctx,resource,subresource,e,resources_[r].generation,type,false});
+        const uint64_t writerCutoff=objectRecordWriterProbe.sampleUploadCutoff();
         const uint32_t attempt=sourceOwner_.captureSynthetic(e,r,resources_[r].generation,currentFrame_,
             events_[e].foreignEpoch,resource,resources_[r].buffer.ByteWidth,nestedOwner);
-        events_[e].sourceOwnerAttempt=attempt;return attempt;
+        events_[e].sourceOwnerAttempt=attempt;objectRecordWriterProbe.noteUpload(attempt,r,resources_[r].generation,writerCutoff);return attempt;
     }
     void useExpectedExecutableIdentityForTest(){std::lock_guard<std::recursive_mutex> lock(mutex_);testIdentityOverride_=true;sourceOwner_.markSyntheticFixture();}
     const ObjectSourceOwnerProbe& sourceOwnerForTest() const noexcept{return sourceOwner_;}
@@ -476,6 +516,7 @@ public:
             else if(ioFailure){b.status="bin_write_failed";binOk=false;}
         }
         sourceOwner_.writeBinary(bin,offset,binOk);
+        objectRecordWriterProbe.writeBinary(bin,offset,binOk);
         if(bin && fclose(bin)!=0)binOk=false;
         uint32_t peTimestamp=0,peImageSize=0;executableIdentity(peTimestamp,peImageSize);
         if(testIdentityOverride_){peTimestamp=ObjectSourceOwnerProbe::kExpectedTimestamp;peImageSize=ObjectSourceOwnerProbe::kExpectedImageSize;}
@@ -507,7 +548,7 @@ public:
         j<<"  \"snapshots\":[";for(uint32_t i=0;i<snapshots_.size();++i){if(i)j<<',';const auto& x=snapshots_[i];j<<"{\"id\":"<<i<<",\"resource\":"<<x.resource<<",\"generation\":"<<x.generation<<",\"foreign_epoch\":"<<x.foreignEpoch<<",\"mesh_frame\":"<<x.meshFrame<<",\"blob\":"<<x.blob<<'}';}j<<"],\n";
         j<<"  \"draws\":[";for(uint32_t i=0;i<draws_.size();++i){if(i)j<<',';const auto& d=draws_[i];j<<"{\"id\":"<<i<<",\"mesh_frame\":"<<d.meshFrame<<",\"eye\":"<<d.eye<<",\"first_record\":"<<d.firstRecord<<",\"instances\":"<<d.instances<<",\"id_byte_offset\":"<<d.idByteOffset<<",\"vertex_shader_hash\":\"0x"<<std::hex<<d.vertexShaderHash<<std::dec<<"\",\"key_present\":"<<(d.keyPresent?"true":"false")<<",\"key16\":[";for(uint32_t k=0;k<16;++k){if(k)j<<',';j<<d.key[k];}j<<"],\"pool_resource\":";if(d.poolResource==kNone)j<<"null";else j<<d.poolResource;j<<",\"pool_generation\":"<<d.poolGeneration<<",\"pool_write_observed\":"<<(d.poolWriteObserved?"true":"false")<<",\"pool_matched\":"<<(cpuProvenance&&d.poolMatched?"true":"false")<<",\"pool_snapshot\":";if(d.poolSnapshot==kNone)j<<"null";else j<<d.poolSnapshot;j<<",\"id_resource\":";if(d.idResource==kNone)j<<"null";else j<<d.idResource;j<<",\"id_generation\":"<<d.idGeneration<<",\"id_write_observed\":"<<(d.idWriteObserved?"true":"false")<<",\"id_matched\":"<<(cpuProvenance&&d.idMatched?"true":"false")<<",\"id_snapshot\":";if(d.idSnapshot==kNone)j<<"null";else j<<d.idSnapshot;j<<'}';}j<<"],\n";
         j<<"  \"blobs\":[";for(uint32_t i=0;i<blobs_.size();++i){if(i)j<<',';const auto& b=blobs_[i];j<<"{\"id\":"<<i<<",\"name\":"<<quote(b.name)<<",\"status\":"<<quote(b.status)<<",\"source_resource\":";if(b.sourceResource==kNone)j<<"null";else j<<b.sourceResource;j<<",\"generation\":"<<b.generation<<",\"foreign_epoch\":"<<b.foreignEpoch<<",\"mesh_frame\":"<<b.meshFrame<<",\"subresource_or_record_count\":"<<b.subresource<<",\"texture\":"<<(b.texture?"true":"false")<<",\"format\":"<<b.format<<",\"width\":"<<b.width<<",\"height\":"<<b.height<<",\"row_bytes\":"<<b.rowBytes<<",\"offset\":"<<b.fileOffset<<",\"bytes\":"<<b.fileBytes<<'}';}j<<"],\n";
-        sourceOwner_.writeJson(j);j<<"\n}\n";
+        sourceOwner_.writeJson(j);j<<",\n";objectRecordWriterProbe.writeJson(j);j<<"\n}\n";
         FILE* json=nullptr;bool jsonOk=_wfopen_s(&json,jsonPath.c_str(),L"wb")==0&&json;
         const std::string body=j.str();if(jsonOk)jsonOk=fwrite(body.data(),1,body.size(),json)==body.size();
         if(json&&fclose(json)!=0)jsonOk=false;return jsonOk&&binOk;
