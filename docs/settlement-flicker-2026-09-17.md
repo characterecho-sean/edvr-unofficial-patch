@@ -2,9 +2,10 @@
 
 ## Status
 
-- State: bounded object-classification capture awaits a landed flight. The two
-  t33 candidate words remain rejected as standalone immobility flags; no static
-  exclusion is enabled. The probe preserves rendering behavior.
+- State: flight 085213 captured exact-frame mesh sources and their real CPU
+  upload routes, including visible settlement records. No static classification
+  or exclusion is proven; the two t33 words remain rejected as standalone
+  flags.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -12,22 +13,22 @@
 - Build: v0.17.0-47-g60a5d38-dirty installed (6AAE9DB8); static surfaces off,
   DLSS and manual Insert capture retained. Payloads, INI and verification
   receipts: build/object-classification-frontier-60a5d38.
-- Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
-  2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
-  trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
-  capture is landed cockpit; station rotation/on-foot still need their own
-  validation. No draw suppression is active.
-- Timing: new W7 has CPU/GPU medians 18.394/22.090 ms, separately measured
+- Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
+  DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
+  timings are not directly comparable. Installed DLSS Windows file/product
+  version is 310,7,0,0. This is landed cockpit; station rotation/on-foot still
+  need separate validation. No draw suppression is active.
+- Timing: earlier W7 has CPU/GPU medians 18.394/22.090 ms, separately measured
   elapsed spans. Its 30-second sample ends before eye_190309 begins; capture
   changes the scope during drain. The 19:03:24 ownership window has 18,751,925
   candidates, 6,576 accepted and 17,734,402 cache declines over 1,800 frames.
   Its sampled 0.390 us/check implies about 4.06 ms/frame of added gate work,
   excluding lock acquisition/unsupported families. Earlier low-cost benchmark
   windows include menu/loading and must not be called comparable settlements.
-- Capture: valid owner pair, but only 225/5,262,201 current pixels have owners;
-  all finish on head motion, none on body motion. Static flag 2048 is absent
-  across 16 frames/31.36 million decision pixels; body claims remain about
-  60,000 pixels/frame. The reported visual change does not validate this pass.
+- Capture: 085213 sealed mesh/scene frame 16584; 512 records in 122 draws, 27
+  records with 49,704 exact-depth pixels. Both source buffers have matched
+  Map/Unmap generations; six events and 12 stacks, no cap/failure/foreign-write
+  declines. This admitted subset is not a static classifier or a scene census.
 - Static opportunity: 501/512 admitted records have exact unchanged raw pose,
   across 115/124 whole draws; all 501 also have changed scene origin. Of these,
   446 leave no motion-coverage pixels. These are conditional opportunities, not
@@ -54,11 +55,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: take one Insert capture while landed at the settlement and remain in
-  game at least 30 seconds for the capture to finish draining. Its
-  classification report must show actual sources, upload stacks and a sealed
-  same-frame eye. Missing or capped evidence is not a match. See the final
-  classification entry for the capture and interpretation contract.
+- Next: trace payload preparation at 0x4c81be0 from the verified pool owner;
+  0x4c822e0 is a separate instance-stream candidate. Use the existing capture
+  before another flight. Neither routine yet proves object identity, planet
+  attachment or a safe motion-work skip.
 
 ## Journal
 
@@ -4168,3 +4168,120 @@ settle, press Insert once, remain in the game for at least 30 seconds, then
 report completion. A flicker is not required; this capture investigates object
 identity and upload provenance. Station/on-foot and movable/parked controls
 remain required before any static-exclusion behavior can be justified.
+
+### 2026-09-19 - Flight 085213: visible records reach real upload callers
+
+The Frontier log edvr_gfx_20260919_084920.log verifies the intended
+v0.17.0-47-g60a5d38-dirty build, graphics stamp 6AAE9DB8 and 14:35:36 UTC link
+time. Insert armed capture 085213 at 08:52:13.213; the classification report
+was written at 08:52:16.779. It sealed mesh and scene frame 16584 after
+discovery began at 16581. This flight's actual input is 1996x2121 per eye, with
+DLSS K output 3072x3264 on VirtualDesktopXR / Meta Quest 3 / 90 Hz. The
+previous 2481x2121 input does not describe this capture, and its timings cannot
+serve as an unchanged-resolution comparison.
+
+Artifacts are retained under build/object-classification-flight-085213: the
+original classification JSON/BIN, validated per-record report, spatial
+statistics, same-frame colour and ownership images, and bounded caller
+disassembly. The capture has 122 admitted draws / 512 records, six observed
+upload events, 12 stack samples and three buffer snapshots. All payloads are
+available. Resource/write/draw/stack/snapshot limits, readback failures,
+unmatched writes, unobserved source versions and foreign writes are all zero.
+Six rejected early stage attempts are expected during discovery; the later
+frame sealed successfully.
+
+The source pool is one 5,160,960-byte dynamic structured buffer with 336-byte
+stride (15,360 capacity); the instance stream is one 1,540,096-byte dynamic
+vertex buffer (192,512 eight-byte pairs). Both were observed in completed
+WRITE_DISCARD Map/Unmap pairs on frames 16582, 16583 and 16584. The selected
+draw snapshots refer to generation three. This proves the retained current
+source bytes and their buffer upload routes; it does not identify the
+particular CPU instruction that filled any one object record. WRITE_DISCARD
+still does not expose a precise dirty-byte extent.
+
+The reader finds 112,953 covered pixels, of which 49,704 exactly match SceneZ
+and join to 27 Mesh records. There are 19 metadata groups. The entire
+4,233,516-pixel eye and all source-buffer bytes were retained, but only the
+existing 512-record admitted subset has these draw/coverage joins. Neither the
+buffer capacity nor pixel counts are unique-object counts or a removable-draw
+estimate.
+
+The same-frame ownership overlay puts five records / 49,214 pixels on cockpit
+and player foreground geometry, and 22 records / 490 pixels sparsely on distant
+settlement facades and fixtures. The latter use 21 current-frame model slots;
+those slots are not persistent identities. The foreground group has one
+valid/history-matched rigid record and four invalid rigid records on the player
+geometry. All 22 settlement-positioned records are valid rigid, but only two
+are history matched. Across the complete staged 512-record table, 504 are valid
+and only 24 are history matched. Current source ownership remains valid
+independently of prior motion-history matching.
+
+Those spatial groups carry t33 word28 values 1631 and 788063 respectively, with
+word320 zero throughout the visible subset. Their location in this frame does
+not establish semantic meanings for those values. The earlier rotating-station
+counterexamples still rule out interpreting 788063/0 as immovable in world
+space.
+
+All 122 draws refer to the same pool resource0/generation3/snapshot0 and
+instance resource1/generation3/snapshot1. The reader checks all 512 draw/source
+joins, including key, original IA offset, pool slot, raw pose and metadata; the
+report's missing list is empty. The visualization recipe
+render_classification_085213.py was rerun successfully. The 512-record motion
+admission cap is saturated even though the separate diagnostic tables did not
+overflow.
+
+The model-pool Map route is 0x50f0e5 -> 0x51e11a -> 0x4c821b3 -> 0x4c80c2d ->
+0x6bf7a7. The instance-stream route instead reaches 0x4c80e56 from the same
+0x51e11a helper, then 0x6bf7a7. Completion routes are 0x523207 -> 0x4c83ed8 for
+the pool and 0x523207 -> 0x4c83ff9 for instances, both continuing through
+0x6c0667 and 0x27bbe53. Each route repeats across the three observed upload
+generations. These are stack return RVAs, not invented function names or entry
+points.
+
+Ruled out for this captured upload: assuming the earlier ETW sample's 0x51b640
+map/copy/unmap helper is the source-preparation route for these two buffers. It
+is absent from their directly associated stacks; the resource-linked paths
+above now replace that guess. This does not rule out that helper elsewhere in
+Elite.
+
+The next offline step follows the actual buffer owners and mapped destination
+pointers into record construction. PE exception-table entries can describe
+chained unwind fragments rather than complete functions: the fragment
+containing 0x4c821b3 begins at 0x4c81f0f, while its direct caller targets
+0x4c81e80. Resolve those chains before interpreting entry arguments or naming a
+containing function. No static filter, executable detour or rendering change is
+justified by upload provenance alone.
+
+Bounded disassembly resolves the paired preparation/completion virtual entries
+to 0x4c80b20 and 0x4c83e70. Dispatchers at 0x6bf770 and 0x6c0630 call slots
++0x30 and +0x38 on the same kind of list entry; one read-only table at RVA
+0x5a6fc10 contains this exact pair. No usable RTTI class name was recovered:
+the preceding table word points into executable code, not a valid MSVC
+complete-object locator. Adjacent function pointers alone must not be assumed
+to belong to the same class.
+
+The model-pool preparation helper at 0x4c81e80 walks an outer count/array at
+owner +0x198/+0x1a0 and nested count/array pairs at +0x140/+0x148. Its loop
+writes cumulative offsets to each leaf's +0xc0 and advances the running total
+by that leaf's +0xc8. This gives a concrete CPU-side grouping/allocation chain
+to follow from the verified pool owner. It does not yet establish entity
+identity, planet attachment, static flags, or the function that fills each
+336-byte record. That object/record-construction step remains the next offline
+discriminant; this flight does not justify another render change or a claimed
+performance gain.
+
+The preparation loop calls 0x4c81be0 for each non-empty leaf payload. This is
+the strongest next record-preparation candidate; a separate owner collection at
++0x60/+0x68 calls 0x4c822e0 and may prepare the instance stream. Their actual
+payload writes and upstream object semantics remain unverified. The vtable has
+direct RIP-relative references at 0x4c7e50b and 0x4c7e9e4, additional
+owner-construction leads if needed. Bounded details and the exact field
+assignments are in caller-findings.md beside the disassembly, not inferred from
+a recovered class name.
+
+The current executable matches the capture's PE timestamp 1788384820 and image
+size 104,894,464; file size is 103,469,056 and SHA-256 is
+e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988, identical to
+the earlier offline binary. This turn changes documentation only. The installed
+test build and settings remain unchanged; no additional flight is needed for
+the next bounded offline step.
