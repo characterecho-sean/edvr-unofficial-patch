@@ -2977,6 +2977,14 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     classification.writes,classification.snapshots,classification.stackSamples,classification.unobservedSources,
                     classification.unmatchedWrites,classification.writeOverflow,classification.stackOverflow,
                     static_cast<unsigned long long>(classification.foreignWrites));
+    Log::get().note("object classification: CPU source-owner probe maps/attempts %u/%u, complete/partial %u/%u, resource matches %u; identity/opcode/unwind rejects %u/%u/%u, read faults/metadata changes %u/%u, descriptor overflow %llu, CPU byte declines %llu. Zero maps is distinct from a successful empty capture.",
+                    classification.sourceOwnerMaps,classification.sourceOwnerAttempts,
+                    classification.sourceOwnerComplete,classification.sourceOwnerPartial,
+                    classification.sourceOwnerResourceMatches,classification.sourceOwnerIdentityRejects,
+                    classification.sourceOwnerOpcodeRejects,classification.sourceOwnerUnwindFailures,
+                    classification.sourceOwnerReadFaults,classification.sourceOwnerMetadataChanges,
+                    static_cast<unsigned long long>(classification.sourceOwnerDescriptorOverflow),
+                    static_cast<unsigned long long>(classification.sourceOwnerCpuByteDeclines));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
                     "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "

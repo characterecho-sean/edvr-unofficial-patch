@@ -2,17 +2,17 @@
 
 ## Status
 
-- State: flight 085213 joins visible settlement records to AtlasModel2's CPU
-  upload route. Offline tracing resolves whole-record copies and one upstream
-  producer, but not their source-pointer join. No static classification is
-  proven; the two t33 words remain rejected as standalone flags.
+- State: bounded CPU source-owner capture built, tested and installed on
+  Frontier, awaiting one landed cockpit capture. It requires exact CPU/GPU
+  bytes from the same upload generation. No static classification is proven;
+  the two t33 words remain rejected as standalone flags.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-47-g60a5d38-dirty installed (6AAE9DB8); static surfaces off,
+- Build: v0.17.0-50-g104763d-dirty installed (6AAEB01E); static surfaces off,
   DLSS and manual Insert capture retained. Payloads, INI and verification
-  receipts: build/object-classification-frontier-60a5d38.
+  receipts: build/source-owner-frontier-104763d.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -55,10 +55,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: establish which CPU producer supplies the captured model blocks.
-  0x4c81be0 copies them; 0x4c822e0 assigns instance ranges. Neither constructs
-  object identity. The latest offline entry records source-descriptor fields
-  and a possible bounded owner capture; no further flight is requested yet.
+- Next: same landed cockpit scene with DLSS enabled; let it settle, press
+  Insert once and remain in game for at least 30 seconds. A flicker is not
+  required. Inspect the CPU source-owner counters and per-record joins before
+  tracing ownership further; no static filtering is enabled.
 
 ## Journal
 
@@ -4394,3 +4394,107 @@ Build/callsite checks, guarded reads, bounds, pointer lifetime and explicit
 failure reporting must be validated offline before requesting a flight. This is
 an instrument design, not an implemented classifier or evidence of a
 performance gain.
+
+### 2026-09-19 - Bounded CPU source-owner capture
+
+Sean approved implementing the source-owner instrument and installing test
+builds to Frontier. The hypothesis is that the preserved RBX at the already
+captured Map return 0x4c821b3 identifies the nested AtlasModel2 pool owner,
+whose pre-existing upload descriptors identify the CPU records later copied
+into the nominated GPU pool. The earlier disassembly confirms RBX is
+initialized from the function's owner argument, is preserved across the Map
+helper call, and that cumulative record ranges are assigned before that call.
+This hypothesis concerns source provenance only, not planet attachment or
+static classification.
+
+The next capture must discriminate unsupported executable or callsite, failed
+register recovery, wrong wrapped D3D resource, changed layout, unreadable
+memory, exhausted bounds, overlapping destination ranges, changed source bytes,
+and missing or changed upload generations. Exact byte equality with a unique
+source descriptor and the same completed GPU upload generation is the
+confirmation signal. It must not accept an identical record from another
+generation, or interpret a partial traversal as proof that no competing
+descriptor exists. CPU addresses and ownership fields remain capture-local
+evidence, not persistent game-object IDs.
+
+The instrument is restricted to the existing manual eye-run window and
+nominated model-pool write Maps. The inactive hook retains its existing gate.
+It validates executable identity and callsite bytes before chasing the owner,
+validates the wrapped native resource against the actual Map resource, and
+checks the known 336-byte stride. It does not read the owner's stale
+mapped-pData field as validation, because the game assigns the new Map result
+only after our hook returns. Source metadata and bytes are retained during the
+hook; comparison, formatting and file output remain offline or on the existing
+capture drain.
+
+The known flight contains three uploads of a 5,160,960-byte pool before the
+selected frame is sealed. The planned 32 MiB total CPU evidence budget and 8
+MiB per attempt avoid spending a smaller budget entirely on the first two
+generations. Traversals and unwind depth also have fixed caps and explicit
+decline reporting. This is diagnostic work only: motion calculation, draw
+admission, DLSS history and static-surfaces settings are unchanged.
+
+Implementation extends the capture to edvr_object_classification_v2 while
+preserving v1 reader support. ObjectSourceOwnerProbe unwinds at most 32 frames,
+stops at the target return before unwinding its caller, and verifies the
+instruction bytes around that callsite. It captures at most 16 attempts, with
+64 groups, 512 leaves and 4,096 descriptors per attempt. The eight source lists
+use the verified 0x48/0x50-byte layouts. Raw descriptors and bounded source
+payloads are appended to the existing binary; known ownership pointers are
+retained without guessing their semantic meaning. An empty leaf is skipped as
+in Elite's copier. Rechecked container/leaf/list fields and descriptor bytes
+detect observed metadata changes; this does not claim an atomic snapshot of
+other threads' memory.
+
+Review corrected three ways the probe could waste a flight: exhausting the byte
+budget before the selected generation, reporting a complete scan when an exact
+cap skipped a later list, and retaining failed-read allocations without
+charging them to a budget. Failed source reads now consume the attempted-byte
+budget and release their storage. A partial scan cannot prove unique source
+ownership. The reader requires a direct completed Map on the selected pool
+resource/generation, rejects foreign writes and ambiguous descriptors, and
+compares all 336 bytes. Copy routes without validated slot translation remain
+unmatched. Counters distinguish zero attempted Maps, unsupported
+binary/callsite, unwind/resource mismatch, read faults, metadata changes, caps
+and completed captures.
+
+Focused validation passed before the full build: 12,454 C++ rig checks,
+including a real x64 assembly caller with a known RBX value and normal unwind
+metadata; guarded invalid-owner reads, wrong native resource, empty leaf,
+invalid range, exact descriptor-cap boundary and attempt cap; reader self-tests
+and both generated fixtures. The source fixture sends known CPU data through a
+real D3D buffer upload, stages a selected visible record, writes v2 evidence
+and proves event0/attempt0/descriptor0/leaf0/group0 by exact CPU/GPU byte
+equality. Fixture-only identity and graph injection do not alter the production
+guard. The retained v1 flight 085213 still yields 27 visible records / 19
+groups and explicitly reports CPU source-owner data unavailable for all 27
+records.
+
+The full absolute-path build passed all 68 pooled jobs, three quiet timing jobs
+and the 251-key config contract. Launch it with EDVR_JOBS=2 in the environment:
+the initial --jobs argument invocation compiled both DLLs but failed when SHIFT
+changed the batch file's %0 before the test runner consumed %~f0. The corrected
+invocation passed every gate; no unrelated launcher change is included. Both
+logs are retained in the archive.
+
+Frontier dry-run, installation and verify-only passed. The game executable
+still has the exact verified SHA-256
+e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988. Installed
+graphics v0.17.0-50-g104763d-dirty has stamp 6AAEB01E (2026-09-19 15:54:06
+UTC), SHA-256 396a81a1e1539168d0ba115fd418deb5a6d1880d8a73418ef2f02031badd98a1.
+Payloads, symbols, manifest, source patch, install receipt, build output and
+before/after INIs are archived under build/source-owner-frontier-104763d. The
+user's current INI was preserved byte for byte, SHA-256
+aa27c06406576aadd3eda1a8dd0c0cb26a813ead380c9273a175eb459f5ccf24; it had
+changed since the previous flight archive, so this installation preserves the
+current file rather than restoring that older copy. DLSS, manual Insert and
+static surfaces off were verified before installation.
+
+Next flight: use the same landed cockpit settlement view, let it settle, press
+Insert once, and remain in game for at least 30 seconds before exiting
+normally. No Pause press or flicker reproduction is required for this ownership
+capture. Check it with tools/edvr_log.py --target frontier --expect-build
+104763d --version and the 6AAEB01E graphics stamp; the earlier failed-launch
+build carried the same version but is not the installed payload. Require the
+new CPU source-owner completion line and v2 report. An empty, failed or partial
+capture is not evidence that the buildings have no CPU owner or are static.

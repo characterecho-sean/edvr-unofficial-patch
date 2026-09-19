@@ -4,6 +4,7 @@
 // records hook-observed writes and takes GPU copies; CPU readback and file I/O
 // happen later in write().  It never changes a live binding or draw.
 #include "../common/game_call_probe.h"
+#include "object_source_owner_probe.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -36,6 +37,10 @@ public:
         uint32_t ignoredEye=0,ignoredFrame=0,stageRejects=0,suppressed=0;
         uint32_t duplicateMaps=0,unmatchedUnmaps=0,pendingMapOverflow=0,openMapSnapshots=0;
         uint64_t foreignWrites=0;
+        uint32_t sourceOwnerMaps=0,sourceOwnerAttempts=0,sourceOwnerComplete=0,sourceOwnerPartial=0;
+        uint32_t sourceOwnerIdentityRejects=0,sourceOwnerOpcodeRejects=0,sourceOwnerUnwindFailures=0;
+        uint32_t sourceOwnerResourceMatches=0,sourceOwnerReadFaults=0,sourceOwnerMetadataChanges=0;
+        uint64_t sourceOwnerDescriptorOverflow=0,sourceOwnerCpuByteDeclines=0;
     };
 
 private:
@@ -63,7 +68,9 @@ private:
         uint32_t completionStack=kNone,completionFrame=0;
         uint32_t sourceResource=kNone;
         uint64_t generation=0,context=0,sourceIdentity=0,sourceGeneration=0;
+        uint64_t foreignEpoch=0;
         uint64_t first=0,end=~0ull;
+        uint32_t sourceOwnerAttempt=kNone;
         bool mapped=false,complete=true,sourceMatched=false;
         std::string completionStatus="not_applicable";
     };
@@ -101,7 +108,7 @@ private:
     mutable std::recursive_mutex mutex_;
     std::atomic<bool> gateActive_{false};
     std::atomic<uint64_t> foreignWrites_{0},foreignEpoch_{0};
-    bool active_=false,sealed_=false,busy_=false,missedWindow_=false;
+    bool active_=false,sealed_=false,busy_=false,missedWindow_=false,testIdentityOverride_=false;
     bool haveDiscovery_=false,haveSelected_=false;
     uint32_t currentFrame_=0,discoveryFrame_=0,selectedFrame_=0,sceneFrame_=0;
     uint64_t bufferBytes_=0,textureBytes_=0,observedWrites_=0;
@@ -112,6 +119,7 @@ private:
     std::vector<Blob> blobs_;
     std::vector<Snapshot> snapshots_;
     std::vector<Draw> draws_;
+    ObjectSourceOwnerProbe sourceOwner_;
     Summary counters_{};
 
     struct Busy {
@@ -122,13 +130,14 @@ private:
     static uint64_t identity(const void* p) noexcept {return uint64_t(reinterpret_cast<uintptr_t>(p));}
     void clear(bool keepClock) {
         const uint32_t clock=keepClock?currentFrame_:0;
-        active_=sealed_=busy_=missedWindow_=false;haveDiscovery_=haveSelected_=false;
+        active_=sealed_=busy_=missedWindow_=testIdentityOverride_=false;haveDiscovery_=haveSelected_=false;
         gateActive_.store(false,std::memory_order_release);
         foreignWrites_.store(0,std::memory_order_relaxed);foreignEpoch_.store(0,std::memory_order_relaxed);
         currentFrame_=clock;discoveryFrame_=selectedFrame_=sceneFrame_=0;
         bufferBytes_=textureBytes_=observedWrites_=0;
         resources_.clear();stacks_.clear();events_.clear();pendingMaps_.clear();
         blobs_.clear();snapshots_.clear();draws_.clear();counters_=Summary{};
+        sourceOwner_.reset();
         resources_.reserve(kResourceCap);stacks_.reserve(kStackCap);events_.reserve(kWriteCap);
         pendingMaps_.reserve(kWriteCap);draws_.reserve(kDrawCap);
     }
@@ -174,6 +183,7 @@ private:
         else target.unmatched=false;
         if(events_.size()>=kWriteCap){if(!target.unmatched)++counters_.unmatchedWrites;target.unmatched=true;++counters_.writeOverflow;return kNone;}
         Event e;e.resource=resource;e.kind=kind;e.frame=currentFrame_;e.generation=target.generation;
+        e.foreignEpoch=foreignEpoch_.load(std::memory_order_acquire);
         e.context=identity(context);e.subresource=sub;e.first=first;e.end=end;e.mapped=mapped;e.complete=complete;
         if(mapped)e.completionStatus="open";
         e.stack=sampleStack();
@@ -359,6 +369,10 @@ public:
         if(type==D3D11_MAP_READ){if(pendingMaps_.size()<kWriteCap)pendingMaps_.push_back({ctx,resource,subresource,kNone,resources_[r].generation,type,false});else ++counters_.pendingMapOverflow;return;}
         const uint32_t e=appendEvent(r,MapWrite,ctx,nullptr,subresource,0,~0ull,true,false);
         if(e!=kNone&&e<events_.size())events_[e].mapType=uint32_t(type);
+        if(e!=kNone&&e<events_.size()&&resources_[r].pool) {
+            events_[e].sourceOwnerAttempt=sourceOwner_.captureMap(e,r,resources_[r].generation,
+                currentFrame_,events_[e].foreignEpoch,resource,resources_[r].buffer.ByteWidth);
+        }
         if(pendingMaps_.size()<kWriteCap)pendingMaps_.push_back({ctx,resource,subresource,e,resources_[r].generation,type,false});
         else {++counters_.pendingMapOverflow;resources_[r].unmatched=true;if(e!=kNone&&e<events_.size())events_[e].completionStatus="pending_map_cap";}
     }
@@ -404,7 +418,12 @@ public:
         s.currentFrame=currentFrame_;s.discoveryFrame=discoveryFrame_;s.selectedFrame=selectedFrame_;s.sceneFrame=sceneFrame_;
         s.resources=uint32_t(resources_.size());s.writes=uint32_t(events_.size());s.draws=uint32_t(draws_.size());
         s.snapshots=uint32_t(snapshots_.size());s.blobs=uint32_t(blobs_.size());s.observedWrites=observedWrites_;
-        s.stackSamples=uint32_t(stacks_.size());s.foreignWrites=foreignWrites_.load(std::memory_order_acquire);return s;
+        s.stackSamples=uint32_t(stacks_.size());s.foreignWrites=foreignWrites_.load(std::memory_order_acquire);
+        const auto& o=sourceOwner_.summary();s.sourceOwnerMaps=o.mapsConsidered;s.sourceOwnerAttempts=o.attemptsStored;
+        s.sourceOwnerComplete=o.completeAttempts;s.sourceOwnerPartial=o.partialAttempts;s.sourceOwnerIdentityRejects=o.identityRejects;
+        s.sourceOwnerOpcodeRejects=o.opcodeRejects;s.sourceOwnerUnwindFailures=o.unwindFailures;s.sourceOwnerResourceMatches=o.resourceMatches;
+        s.sourceOwnerReadFaults=o.readFaults;s.sourceOwnerMetadataChanges=o.metadataChanges;
+        s.sourceOwnerDescriptorOverflow=o.descriptorOverflow;s.sourceOwnerCpuByteDeclines=o.cpuByteDeclines;return s;
     }
     uint32_t discoveryFrame() const{return summary().discoveryFrame;}
     uint32_t selectedFrame() const{return summary().selectedFrame;}
@@ -412,6 +431,23 @@ public:
     uint32_t writeCount() const{return summary().writes;}
     uint64_t observedWriteCount() const{return summary().observedWrites;}
     bool sealed() const{return summary().sealed;}
+    uint32_t captureSourceOwnerForTest(ID3D11Resource* resource,uintptr_t nestedOwner,uint32_t event=0) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);const uint32_t r=findResource(resource);if(r==kNone)return kNone;
+        const uint32_t attempt=sourceOwner_.captureSynthetic(event,r,resources_[r].generation,currentFrame_,
+            foreignEpoch_.load(std::memory_order_acquire),resource,resources_[r].buffer.ByteWidth,nestedOwner);
+        if(event<events_.size())events_[event].sourceOwnerAttempt=attempt;return attempt;
+    }
+    uint32_t noteMapSourceOwnerForTest(ID3D11DeviceContext* ctx,ID3D11Resource* resource,
+                                       uint32_t subresource,D3D11_MAP type,uintptr_t nestedOwner) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);const uint32_t r=findResource(resource);if(!nominated(r))return kNone;
+        const uint32_t e=appendEvent(r,MapWrite,ctx,nullptr,subresource,0,~0ull,true,false);if(e==kNone)return kNone;
+        events_[e].mapType=uint32_t(type);pendingMaps_.push_back({ctx,resource,subresource,e,resources_[r].generation,type,false});
+        const uint32_t attempt=sourceOwner_.captureSynthetic(e,r,resources_[r].generation,currentFrame_,
+            events_[e].foreignEpoch,resource,resources_[r].buffer.ByteWidth,nestedOwner);
+        events_[e].sourceOwnerAttempt=attempt;return attempt;
+    }
+    void useExpectedExecutableIdentityForTest(){std::lock_guard<std::recursive_mutex> lock(mutex_);testIdentityOverride_=true;sourceOwner_.markSyntheticFixture();}
+    const ObjectSourceOwnerProbe& sourceOwnerForTest() const noexcept{return sourceOwner_;}
 
     bool write(ID3D11DeviceContext* ctx,const wchar_t* directory,const wchar_t* stamp) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);if(!ctx||!directory||!stamp)return false;
@@ -439,10 +475,12 @@ public:
             if(payloadOk){b.fileBytes=b.reservedBytes;offset+=b.fileBytes;b.status="available";}
             else if(ioFailure){b.status="bin_write_failed";binOk=false;}
         }
+        sourceOwner_.writeBinary(bin,offset,binOk);
         if(bin && fclose(bin)!=0)binOk=false;
         uint32_t peTimestamp=0,peImageSize=0;executableIdentity(peTimestamp,peImageSize);
+        if(testIdentityOverride_){peTimestamp=ObjectSourceOwnerProbe::kExpectedTimestamp;peImageSize=ObjectSourceOwnerProbe::kExpectedImageSize;}
         const Summary s=summary();const bool cpuProvenance=s.foreignWrites==0;std::ostringstream j;
-        j<<"{\n  \"schema\":\"edvr_object_classification_v1\",\n  \"binary\":"<<quote(binName)
+        j<<"{\n  \"schema\":\"edvr_object_classification_v2\",\n  \"binary\":"<<quote(binName)
          <<",\n  \"executable\":{\"pe_timestamp\":"<<peTimestamp<<",\"image_size\":"<<peImageSize<<"},\n"
          <<"  \"selection\":{\"discovery_mesh_frame\":"<<discoveryFrame_<<",\"selected_mesh_frame\":"<<selectedFrame_
          <<",\"scene_frame\":"<<sceneFrame_<<",\"has_discovery\":"<<(haveDiscovery_?"true":"false")<<",\"has_selection\":"<<(haveSelected_?"true":"false")<<",\"sealed\":"<<(sealed_?"true":"false")<<",\"missed_window\":"<<(missedWindow_?"true":"false")<<"},\n"
@@ -463,11 +501,13 @@ public:
             j<<"{\"id\":"<<i<<",\"resource\":"<<e.resource<<",\"kind\":"<<quote(kindName(e.kind))<<",\"kind_id\":"<<e.kind<<",\"mesh_frame\":"<<e.frame<<",\"generation\":"<<e.generation
              <<",\"context\":\"0x"<<std::hex<<e.context<<std::dec<<"\",\"source_resource\":";if(e.sourceResource==kNone)j<<"null";else j<<e.sourceResource;
             j<<",\"source_identity\":\"0x"<<std::hex<<e.sourceIdentity<<std::dec<<"\",\"source_generation\":"<<e.sourceGeneration<<",\"source_matched\":"<<(cpuProvenance&&e.sourceMatched?"true":"false")
-             <<",\"subresource\":"<<e.subresource<<",\"map_type\":"<<e.mapType<<",\"first\":"<<e.first<<",\"end\":"<<e.end<<",\"mapped\":"<<(e.mapped?"true":"false")<<",\"complete\":"<<(e.complete?"true":"false")<<",\"completion_status\":"<<quote(e.completionStatus)<<",\"completion_frame\":"<<e.completionFrame<<",\"stack\":";
+             <<",\"foreign_epoch\":"<<e.foreignEpoch<<",\"subresource\":"<<e.subresource<<",\"map_type\":"<<e.mapType<<",\"first\":"<<e.first<<",\"end\":"<<e.end<<",\"mapped\":"<<(e.mapped?"true":"false")<<",\"complete\":"<<(e.complete?"true":"false")<<",\"completion_status\":"<<quote(e.completionStatus)<<",\"completion_frame\":"<<e.completionFrame<<",\"source_owner_attempt\":";
+            if(e.sourceOwnerAttempt==kNone)j<<"null";else j<<e.sourceOwnerAttempt;j<<",\"stack\":";
             if(e.stack==kNone)j<<"null";else j<<e.stack;j<<",\"completion_stack\":";if(e.completionStack==kNone)j<<"null";else j<<e.completionStack;j<<'}';}j<<"],\n";
         j<<"  \"snapshots\":[";for(uint32_t i=0;i<snapshots_.size();++i){if(i)j<<',';const auto& x=snapshots_[i];j<<"{\"id\":"<<i<<",\"resource\":"<<x.resource<<",\"generation\":"<<x.generation<<",\"foreign_epoch\":"<<x.foreignEpoch<<",\"mesh_frame\":"<<x.meshFrame<<",\"blob\":"<<x.blob<<'}';}j<<"],\n";
         j<<"  \"draws\":[";for(uint32_t i=0;i<draws_.size();++i){if(i)j<<',';const auto& d=draws_[i];j<<"{\"id\":"<<i<<",\"mesh_frame\":"<<d.meshFrame<<",\"eye\":"<<d.eye<<",\"first_record\":"<<d.firstRecord<<",\"instances\":"<<d.instances<<",\"id_byte_offset\":"<<d.idByteOffset<<",\"vertex_shader_hash\":\"0x"<<std::hex<<d.vertexShaderHash<<std::dec<<"\",\"key_present\":"<<(d.keyPresent?"true":"false")<<",\"key16\":[";for(uint32_t k=0;k<16;++k){if(k)j<<',';j<<d.key[k];}j<<"],\"pool_resource\":";if(d.poolResource==kNone)j<<"null";else j<<d.poolResource;j<<",\"pool_generation\":"<<d.poolGeneration<<",\"pool_write_observed\":"<<(d.poolWriteObserved?"true":"false")<<",\"pool_matched\":"<<(cpuProvenance&&d.poolMatched?"true":"false")<<",\"pool_snapshot\":";if(d.poolSnapshot==kNone)j<<"null";else j<<d.poolSnapshot;j<<",\"id_resource\":";if(d.idResource==kNone)j<<"null";else j<<d.idResource;j<<",\"id_generation\":"<<d.idGeneration<<",\"id_write_observed\":"<<(d.idWriteObserved?"true":"false")<<",\"id_matched\":"<<(cpuProvenance&&d.idMatched?"true":"false")<<",\"id_snapshot\":";if(d.idSnapshot==kNone)j<<"null";else j<<d.idSnapshot;j<<'}';}j<<"],\n";
-        j<<"  \"blobs\":[";for(uint32_t i=0;i<blobs_.size();++i){if(i)j<<',';const auto& b=blobs_[i];j<<"{\"id\":"<<i<<",\"name\":"<<quote(b.name)<<",\"status\":"<<quote(b.status)<<",\"source_resource\":";if(b.sourceResource==kNone)j<<"null";else j<<b.sourceResource;j<<",\"generation\":"<<b.generation<<",\"foreign_epoch\":"<<b.foreignEpoch<<",\"mesh_frame\":"<<b.meshFrame<<",\"subresource_or_record_count\":"<<b.subresource<<",\"texture\":"<<(b.texture?"true":"false")<<",\"format\":"<<b.format<<",\"width\":"<<b.width<<",\"height\":"<<b.height<<",\"row_bytes\":"<<b.rowBytes<<",\"offset\":"<<b.fileOffset<<",\"bytes\":"<<b.fileBytes<<'}';}j<<"]\n}\n";
+        j<<"  \"blobs\":[";for(uint32_t i=0;i<blobs_.size();++i){if(i)j<<',';const auto& b=blobs_[i];j<<"{\"id\":"<<i<<",\"name\":"<<quote(b.name)<<",\"status\":"<<quote(b.status)<<",\"source_resource\":";if(b.sourceResource==kNone)j<<"null";else j<<b.sourceResource;j<<",\"generation\":"<<b.generation<<",\"foreign_epoch\":"<<b.foreignEpoch<<",\"mesh_frame\":"<<b.meshFrame<<",\"subresource_or_record_count\":"<<b.subresource<<",\"texture\":"<<(b.texture?"true":"false")<<",\"format\":"<<b.format<<",\"width\":"<<b.width<<",\"height\":"<<b.height<<",\"row_bytes\":"<<b.rowBytes<<",\"offset\":"<<b.fileOffset<<",\"bytes\":"<<b.fileBytes<<'}';}j<<"],\n";
+        sourceOwner_.writeJson(j);j<<"\n}\n";
         FILE* json=nullptr;bool jsonOk=_wfopen_s(&json,jsonPath.c_str(),L"wb")==0&&json;
         const std::string body=j.str();if(jsonOk)jsonOk=fwrite(body.data(),1,body.size(),json)==body.size();
         if(json&&fclose(json)!=0)jsonOk=false;return jsonOk&&binOk;

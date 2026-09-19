@@ -34,6 +34,7 @@ struct Device {
 };
 template<class T>std::vector<uint8_t> bytes(const std::vector<T>& v){const auto* p=reinterpret_cast<const uint8_t*>(v.data());return {p,p+v.size()*sizeof(T)};}
 void put32(std::vector<uint8_t>& v,size_t at,uint32_t value){check(at+4<=v.size(),"fixture put32 range");memcpy(v.data()+at,&value,4);}
+void put64(std::vector<uint8_t>& v,size_t at,uint64_t value){check(at+8<=v.size(),"fixture put64 range");memcpy(v.data()+at,&value,8);}
 std::array<uint32_t,16> key(uint32_t base){std::array<uint32_t,16> x{};for(uint32_t i=0;i<16;++i)x[i]=base+i;return x;}
 void makeRecord(uint8_t* record,const std::array<uint32_t,16>& k,const std::vector<uint8_t>& pool,size_t poolAt,uint32_t firstRecord,uint32_t instances,uint32_t poolIndex){
     memset(record,0,240);memcpy(record,k.data(),64);memcpy(record+64,pool.data()+poolAt+28,4);
@@ -42,6 +43,63 @@ void makeRecord(uint8_t* record,const std::array<uint32_t,16>& k,const std::vect
 }
 std::vector<uint8_t> readFile(const std::wstring& p){FILE* f=nullptr;check(_wfopen_s(&f,p.c_str(),L"rb")==0&&f,"open generated file");fseek(f,0,SEEK_END);long n=ftell(f);check(n>=0,"generated file size");rewind(f);std::vector<uint8_t> out(static_cast<size_t>(n));check(fread(out.data(),1,out.size(),f)==out.size(),"read generated file");check(fclose(f)==0,"close generated file");return out;}
 std::wstring joined(const wchar_t* dir,const wchar_t* file){std::wstring p=dir;if(!p.empty()&&p.back()!=L'\\'&&p.back()!=L'/')p+=L'\\';p+=file;return p;}
+
+extern "C" void sourceOwnerUnwindStub(uintptr_t owner);
+extern "C" void sourceOwnerUnwindResume();
+uintptr_t unwindOwner=0;uint32_t unwindFrames=0;std::string unwindStatus;
+extern "C" __declspec(noinline) void sourceOwnerTestCapture(){
+    edvr::ObjectSourceOwnerProbe::recoverOwnerAt(reinterpret_cast<uintptr_t>(&sourceOwnerUnwindResume),unwindOwner,unwindFrames,unwindStatus);
+}
+
+struct OwnerGraph {
+    std::vector<uint8_t> nested=std::vector<uint8_t>(0x1A8),wrapper=std::vector<uint8_t>(0x148),strideOwner=std::vector<uint8_t>(0x18),group=std::vector<uint8_t>(0x150),leaf=std::vector<uint8_t>(0xD8),link=std::vector<uint8_t>(0x18);
+    std::vector<uint64_t> groups{1},leaves{1};
+    std::vector<uint8_t> first,second,source=std::vector<uint8_t>(336);
+    explicit OwnerGraph(ID3D11Resource* resource,uint32_t firstCount=1,bool secondEntry=false):
+        first(size_t(firstCount)*0x48),second(secondEntry?0x50:0) {
+        put64(nested,0x100,uint64_t(reinterpret_cast<uintptr_t>(strideOwner.data())));
+        put64(nested,0x130,0x130130130ull);put64(nested,0x138,0x138138138ull);
+        put64(nested,0x140,uint64_t(reinterpret_cast<uintptr_t>(wrapper.data())));
+        put64(nested,0x198,1);groups[0]=uint64_t(reinterpret_cast<uintptr_t>(group.data()));
+        put64(nested,0x1A0,uint64_t(reinterpret_cast<uintptr_t>(groups.data())));
+        put64(wrapper,0x140,uint64_t(reinterpret_cast<uintptr_t>(resource)));put32(strideOwner,0x10,336);
+        put64(group,0x140,1);leaves[0]=uint64_t(reinterpret_cast<uintptr_t>(leaf.data()));put64(group,0x148,uint64_t(reinterpret_cast<uintptr_t>(leaves.data())));
+        put64(leaf,0xC0,0);put64(leaf,0xC8,1);put64(leaf,0xD0,uint64_t(reinterpret_cast<uintptr_t>(link.data())));put64(link,0x10,uint64_t(reinterpret_cast<uintptr_t>(nested.data())));
+        put64(leaf,0x8,firstCount);put64(leaf,0x10,uint64_t(reinterpret_cast<uintptr_t>(first.data())));
+        for(uint32_t i=0;i<firstCount;++i){put64(first,size_t(i)*0x48+8,uint64_t(reinterpret_cast<uintptr_t>(source.data())));put32(first,size_t(i)*0x48+0x38,0);put32(first,size_t(i)*0x48+0x3C,i?0:1);}
+        if(secondEntry){put64(leaf,0x20,1);put64(leaf,0x28,uint64_t(reinterpret_cast<uintptr_t>(second.data())));put64(second,8,uint64_t(reinterpret_cast<uintptr_t>(source.data())));}
+        for(size_t i=0;i<source.size();++i)source[i]=uint8_t(i*13+7);
+    }
+};
+
+void sourceOwnerTests(Device& x,const wchar_t* directory){
+    const uintptr_t sentinel=sizeof(uintptr_t)==8?uintptr_t(0x123456789ABCDEF0ull):uintptr_t(0x12345678u);
+    sourceOwnerUnwindStub(sentinel);check(unwindStatus=="matched"&&unwindOwner==sentinel&&unwindFrames>0,"real unwind recovers target-frame RBX before caller unwind");
+    check(!edvr::ObjectSourceOwnerProbe::opcodeMatchesAtBaseForTest(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))),"wrong callsite opcode rejected");
+
+    std::vector<uint8_t> poolData(672,0x44),idsData(8,0);auto pool=x.buffer(672,D3D11_BIND_SHADER_RESOURCE,D3D11_USAGE_DYNAMIC,poolData.data(),336);auto ids=x.buffer(8,D3D11_BIND_VERTEX_BUFFER,D3D11_USAGE_DYNAMIC,idsData.data());
+    edvr::ObjectClassificationProbe identity;identity.arm(1);identity.noteDraw(x.c.Get(),1,0,0,1,pool.Get(),ids.Get(),0,nullptr);D3D11_MAPPED_SUBRESOURCE rejectMap{};hr(x.c->Map(pool.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&rejectMap),"identity fixture map");identity.noteMap(x.c.Get(),pool.Get(),0,D3D11_MAP_WRITE_DISCARD,S_OK,true);check(identity.sourceOwnerForTest().attempts().size()==1&&identity.sourceOwnerForTest().attempts()[0].status=="identity_mismatch"&&identity.sourceOwnerForTest().summary().readFaults==0,"wrong executable identity fails before owner pointer reads");x.c->Unmap(pool.Get(),0);identity.noteUnmap(x.c.Get(),pool.Get(),0);
+
+    edvr::ObjectClassificationProbe p;p.arm(100);auto drawKey=key(0x5150);p.noteDraw(x.c.Get(),100,0,0,1,pool.Get(),ids.Get(),0,drawKey.data(),0xEB5234DB6ADB491Dull);
+    p.setFrame(101);D3D11_MAPPED_SUBRESOURCE m{};hr(x.c->Map(pool.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&m),"owner fixture pool map");OwnerGraph graph(pool.Get());const uint32_t synthetic=p.noteMapSourceOwnerForTest(x.c.Get(),pool.Get(),0,D3D11_MAP_WRITE_DISCARD,reinterpret_cast<uintptr_t>(graph.nested.data()));check(synthetic==0,"one-to-one synthetic Map owner capture");
+    memcpy(poolData.data(),graph.source.data(),graph.source.size());memcpy(m.pData,poolData.data(),poolData.size());x.c->Unmap(pool.Get(),0);p.noteUnmap(x.c.Get(),pool.Get(),0);
+    const auto& success=p.sourceOwnerForTest().attempts()[synthetic];check(success.status=="captured"&&success.descriptors.size()==1&&success.descriptors[0].status=="captured","synthetic graph captures one source descriptor");
+    const auto& sourceBlob=p.sourceOwnerForTest().blobs()[success.descriptors[0].payloadBlob];check(sourceBlob.data==graph.source,"captured CPU source bytes are exact");
+    p.noteDraw(x.c.Get(),101,0,0,1,pool.Get(),ids.Get(),0,drawKey.data(),0xEB5234DB6ADB491Dull);p.noteDraw(x.c.Get(),102,0,0,1,pool.Get(),ids.Get(),0,drawKey.data(),0xEB5234DB6ADB491Dull);p.noteDraw(x.c.Get(),103,0,0,1,pool.Get(),ids.Get(),0,drawKey.data(),0xEB5234DB6ADB491Dull);
+    std::vector<float> scene(1,0.5f);auto sceneTex=x.texture(1,1,DXGI_FORMAT_R32_FLOAT,scene.data(),4);struct Float2{float x,y;};Float2 coverage{1,0.5f};auto coverageTex=x.texture(1,1,DXGI_FORMAT_R32G32_FLOAT,&coverage,8,D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE);
+    std::vector<uint8_t> mesh(240);makeRecord(mesh.data(),drawKey,poolData,0,0,1,0);auto meshBuffer=x.buffer(UINT(mesh.size()),D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,D3D11_USAGE_DEFAULT,mesh.data(),240);uint32_t colour=0xFF406080;auto colourTex=x.texture(1,1,DXGI_FORMAT_R8G8B8A8_UNORM,&colour,4);
+    p.stage(x.c.Get(),103,0,701,sceneTex.Get(),coverageTex.Get(),meshBuffer.Get(),1,colourTex.Get());check(p.sealed(),"source-owner fixture stages selected visible record");p.useExpectedExecutableIdentityForTest();check(p.write(x.c.Get(),directory,L"source_fixture"),"write source-owner fixture");
+    const auto sourceJson=readFile(joined(directory,L"classification_source_fixture.json"));const std::string sourceText(sourceJson.begin(),sourceJson.end());check(sourceText.find("edvr_object_classification_v2")!=std::string::npos&&sourceText.find("nested_owner_field_130")!=std::string::npos,"source-owner fixture publishes v2 schema and ownership fields");
+
+    edvr::ObjectSourceOwnerProbe bad;OwnerGraph wrong(reinterpret_cast<ID3D11Resource*>(uintptr_t(0x1234)));
+    bad.captureSynthetic(0,0,1,1,0,pool.Get(),672,reinterpret_cast<uintptr_t>(wrong.nested.data()));check(bad.attempts().back().status=="resource_mismatch","wrong wrapped native resource rejected");
+    bad.captureSynthetic(1,0,1,1,0,pool.Get(),672,1);check(bad.attempts().back().status=="nested_unreadable","malformed owner pointer guarded");
+    OwnerGraph empty(pool.Get());put64(empty.leaf,0xC8,0);put64(empty.leaf,0xD0,1);bad.captureSynthetic(2,0,1,1,0,pool.Get(),672,reinterpret_cast<uintptr_t>(empty.nested.data()));check(bad.attempts().back().status=="captured"&&bad.attempts().back().leaves.size()==1,"empty leaf skips unused owner link and descriptors");
+    OwnerGraph range(pool.Get());put32(range.first,0x3C,3);bad.captureSynthetic(3,0,1,1,0,pool.Get(),672,reinterpret_cast<uintptr_t>(range.nested.data()));check(bad.attempts().back().status=="partial"&&bad.attempts().back().descriptors[0].status=="range_overflow","destination range outside leaf is explicit partial");
+    OwnerGraph capped(pool.Get(),edvr::ObjectSourceOwnerProbe::kDescriptorCap,true);bad.captureSynthetic(4,0,1,1,0,pool.Get(),672,reinterpret_cast<uintptr_t>(capped.nested.data()));const auto& cap=bad.attempts().back();check(cap.status=="partial"&&cap.descriptorCount==edvr::ObjectSourceOwnerProbe::kDescriptorCap+1ull&&cap.descriptorsScanned==edvr::ObjectSourceOwnerProbe::kDescriptorCap&&bad.summary().descriptorOverflow==1,"descriptor cap reports omitted later list");
+    for(uint32_t i=bad.summary().attemptsStored;i<edvr::ObjectSourceOwnerProbe::kAttemptCap+1;++i)bad.captureSynthetic(10+i,0,1,1,0,pool.Get(),672,1);
+    check(bad.summary().attemptsStored==edvr::ObjectSourceOwnerProbe::kAttemptCap&&bad.summary().attemptOverflow==1,"attempt cap is explicit");
+}
 
 void stateTests(Device& x){
     std::vector<uint8_t> poolData(336,0x11),idData(16,0x22);auto pool=x.buffer(UINT(poolData.size()),D3D11_BIND_SHADER_RESOURCE,D3D11_USAGE_DYNAMIC,poolData.data(),336);auto ids=x.buffer(UINT(idData.size()),D3D11_BIND_VERTEX_BUFFER,D3D11_USAGE_DYNAMIC,idData.data());
@@ -115,9 +173,9 @@ void fixture(Device& x,const wchar_t* directory){
     p.stage(x.c.Get(),23,0,900,sceneTex.Get(),coverageTex.Get(),meshBuffer.Get(),3,colourTex.Get());check(p.sealed()&&!p.active()&&p.writeCount()==writesBefore,"own GPU copies do not enter write ledger");
     ComPtr<ID3D11Predicate> restored;BOOL predicateValue=TRUE;x.c->GetPredication(&restored,&predicateValue);check(restored==predicate&&!predicateValue,"stage copies restore caller predication");x.c->SetPredication(nullptr,FALSE);
     check(p.write(x.c.Get(),directory,L"fixture"),"write fixture JSON and BIN");
-    const auto json=readFile(joined(directory,L"classification_fixture.json"));const std::string text(json.begin(),json.end());check(text.find("edvr_object_classification_v1")!=std::string::npos&&text.find("scene_colour")!=std::string::npos,"fixture JSON schema and colour blob");
+    const auto json=readFile(joined(directory,L"classification_fixture.json"));const std::string text(json.begin(),json.end());check(text.find("edvr_object_classification_v2")!=std::string::npos&&text.find("scene_colour")!=std::string::npos,"fixture JSON schema and colour blob");
     const auto bin=readFile(joined(directory,L"classification_fixture.bin"));check(bin.size()==2688,"fixture binary exact size");check(memcmp(bin.data(),poolA.data(),poolA.size())==0,"first draw retains original pool bytes");check(memcmp(bin.data()+696,poolSecond.data(),poolSecond.size())==0,"rewrite produces a distinct pool snapshot");
 }
 }
 
-int wmain(int argc,wchar_t** argv){if(argc!=2){std::puts("usage: object_classification_test.exe <output-directory>");return 2;}Device device;stateTests(device);fixture(device,argv[1]);std::printf("object classification: %u checks passed; fixture written\n",checks);return 0;}
+int wmain(int argc,wchar_t** argv){if(argc!=2){std::puts("usage: object_classification_test.exe <output-directory>");return 2;}Device device;stateTests(device);sourceOwnerTests(device,argv[1]);fixture(device,argv[1]);std::printf("object classification: %u checks passed; fixtures written\n",checks);return 0;}

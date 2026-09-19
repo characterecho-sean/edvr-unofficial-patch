@@ -19,14 +19,23 @@ import sys
 import tempfile
 
 
-SCHEMA = "edvr_object_classification_v1"
+SCHEMA_V1 = "edvr_object_classification_v1"
+SCHEMA_V2 = "edvr_object_classification_v2"
+SCHEMA = SCHEMA_V1
 MESH_STRIDE = 240
 POOL_STRIDE = 336
-MAX_JSON_BYTES = 16 * 1024 * 1024
-MAX_BINARY_BYTES = 256 * 1024 * 1024
+MAX_JSON_BYTES = 64 * 1024 * 1024
+MAX_BINARY_BYTES = 320 * 1024 * 1024
 MAX_ITEMS = 1_000_000
 UINT32_MAX = (1 << 32) - 1
 UINT64_MAX = (1 << 64) - 1
+SOURCE_OWNER_LIMITS = {
+    "attempts": 16, "unwind_frames": 32, "groups": 64, "leaves": 512,
+    "descriptors": 4096, "cpu_bytes": 32 * 1024 * 1024,
+    "attempt_cpu_bytes": 8 * 1024 * 1024,
+    "single_source_bytes": 8 * 1024 * 1024,
+}
+SOURCE_OWNER_CALLSITE_RVA = 0x4C821B3
 KIND_NAMES = {1: "map", 3: "update", 4: "copy_resource", 5: "copy_region", 6: "unknown"}
 ROLE_NAMES = {"t33_pool", "ia_ids", "provenance_source", "copy_source", "staged_input"}
 BUFFER_STATUSES = {
@@ -307,6 +316,291 @@ def _validate_blobs(root, resources):
     return blobs, cursor
 
 
+def _address(value, name):
+    text = _string(value, name, 34)
+    if not HEX_ID.fullmatch(text) or int(text, 16) > UINT64_MAX:
+        raise CaptureError("%s must be a hexadecimal pointer" % name)
+    return text
+
+
+def _validate_source_owner(root, executable, resources, events, summary, packed_bytes):
+    owner = _dict(root.get("source_owner"), "source_owner")
+    owner_statuses = {"not_run", "identity_mismatch", "no_callsite",
+                      "no_resource_match", "captured", "partial"}
+    status = _string(owner.get("status"), "source_owner.status", 32)
+    if status not in owner_statuses:
+        raise CaptureError("source_owner.status is unknown")
+    _boolean(owner.get("synthetic_fixture"), "source_owner.synthetic_fixture")
+    expected_timestamp = _u32(owner.get("expected_pe_timestamp"), "source_owner.expected_pe_timestamp")
+    expected_image_size = _u32(owner.get("expected_image_size"), "source_owner.expected_image_size")
+    callsite = _u32(owner.get("callsite_rva"), "source_owner.callsite_rva")
+    if callsite != SOURCE_OWNER_CALLSITE_RVA or callsite >= expected_image_size:
+        raise CaptureError("source_owner callsite is outside the expected executable contract")
+    identity_matches = (expected_timestamp == executable["pe_timestamp"] and
+                        expected_image_size == executable["image_size"])
+    if status == "identity_mismatch" and identity_matches:
+        raise CaptureError("source_owner identity status disagrees with executable")
+    if status not in {"not_run", "identity_mismatch"} and not identity_matches:
+        raise CaptureError("source_owner ran against an unexpected executable")
+
+    limits = _dict(owner.get("limits"), "source_owner.limits")
+    for field, maximum in SOURCE_OWNER_LIMITS.items():
+        value = _uint(limits.get(field), "source_owner.limits.%s" % field)
+        if not value or value > maximum:
+            raise CaptureError("source_owner.limits.%s exceeds reader safety bound" % field)
+
+    owner_summary = _dict(owner.get("summary"), "source_owner.summary")
+    summary_fields = ("maps_considered", "identity_rejects", "opcode_rejects",
+                      "unwind_attempts", "unwind_failures", "callsite_matches",
+                      "resource_matches", "attempts_stored", "complete_attempts",
+                      "partial_attempts", "read_faults", "group_overflow",
+                      "leaf_overflow", "descriptor_overflow", "attempt_overflow",
+                      "cpu_byte_declines", "metadata_changes")
+    for field in summary_fields:
+        _uint(owner_summary.get(field), "source_owner.summary.%s" % field)
+
+    cpu_blobs = _list(root.get("cpu_blobs"), "cpu_blobs",
+                      limits["descriptors"] * 2 * limits["attempts"])
+    attempts = _list(owner.get("attempts"), "source_owner.attempts", limits["attempts"])
+    attempt_statuses = {"captured", "partial", "identity_mismatch", "opcode_mismatch",
+                        "unwind_not_found", "unwind_failed", "nested_unreadable",
+                        "resource_mismatch", "layout_invalid", "attempt_cap"}
+    unwind_statuses = {"not_run", "matched", "callsite_not_found", "metadata_unreadable",
+                       "frame_unreadable", "leaf_unreadable", "no_progress", "frame_limit"}
+    for ai, attempt in enumerate(attempts):
+        attempt = _dict(attempt, "source_owner.attempts[%u]" % ai)
+        _sequential_id(attempt, ai, "source_owner.attempts")
+        event_ref = _nullable_ref(attempt.get("event"), "source_owner.attempts[%u].event" % ai, len(events))
+        resource = _nullable_ref(attempt.get("resource"), "source_owner.attempts[%u].resource" % ai, len(resources))
+        if event_ref is None or resource is None:
+            raise CaptureError("source_owner.attempts[%u] lacks event/resource" % ai)
+        if "t33_pool" not in resources[resource]["roles"] or resources[resource].get("buffer", {}).get("stride") != POOL_STRIDE:
+            raise CaptureError("source_owner.attempts[%u] resource is not a t33 pool" % ai)
+        generation = _uint(attempt.get("generation"), "source_owner.attempts[%u].generation" % ai)
+        mesh_frame = _u32(attempt.get("mesh_frame"), "source_owner.attempts[%u].mesh_frame" % ai)
+        foreign_epoch = _uint(attempt.get("foreign_epoch"), "source_owner.attempts[%u].foreign_epoch" % ai)
+        if foreign_epoch > summary["foreign_writes"]:
+            raise CaptureError("source_owner.attempts[%u].foreign_epoch exceeds foreign writes" % ai)
+        event = events[event_ref]
+        if (event["kind_id"] != 1 or event["resource"] != resource or
+                event["generation"] != generation or event["mesh_frame"] != mesh_frame):
+            raise CaptureError("source_owner.attempts[%u] is stale or belongs to another event generation" % ai)
+        attempt_status = _string(attempt.get("status"), "source_owner.attempts[%u].status" % ai, 32)
+        if attempt_status not in attempt_statuses:
+            raise CaptureError("source_owner.attempts[%u].status is unknown" % ai)
+        unwind_status = _string(attempt.get("unwind_status"), "source_owner.attempts[%u].unwind_status" % ai, 32)
+        if unwind_status not in unwind_statuses:
+            raise CaptureError("source_owner.attempts[%u].unwind_status is unknown" % ai)
+        unwind_frames = _u32(attempt.get("unwind_frames"), "source_owner.attempts[%u].unwind_frames" % ai)
+        if unwind_frames > limits["unwind_frames"]:
+            raise CaptureError("source_owner.attempts[%u] exceeds unwind frame cap" % ai)
+        return_rva = _u32(attempt.get("return_rva"), "source_owner.attempts[%u].return_rva" % ai)
+        if return_rva and return_rva >= executable["image_size"]:
+            raise CaptureError("source_owner.attempts[%u].return_rva lies outside executable" % ai)
+        for field in ("nested_owner", "nested_owner_field_130", "nested_owner_field_138",
+                      "wrapper", "native_resource"):
+            _address(attempt.get(field), "source_owner.attempts[%u].%s" % (ai, field))
+        if attempt_status in {"captured", "partial"} and attempt["native_resource"] != resources[resource]["identity"]:
+            raise CaptureError("source_owner.attempts[%u] wrapped native resource disagrees with event resource" % ai)
+        stride = _u32(attempt.get("stride"), "source_owner.attempts[%u].stride" % ai)
+        if attempt_status in {"captured", "partial"} and (unwind_status != "matched" or return_rva != callsite or stride != POOL_STRIDE):
+            raise CaptureError("source_owner.attempts[%u] capture lacks matched unwind/callsite/stride" % ai)
+
+        for field, maximum in (("group_count", UINT64_MAX), ("groups_scanned", limits["groups"]),
+                               ("leaf_count", UINT64_MAX), ("leaves_scanned", limits["leaves"]),
+                               ("descriptor_count", UINT64_MAX), ("descriptors_scanned", limits["descriptors"])):
+            value = _uint(attempt.get(field), "source_owner.attempts[%u].%s" % (ai, field))
+            if value > maximum:
+                raise CaptureError("source_owner.attempts[%u].%s exceeds safety bound" % (ai, field))
+        retained_bytes = _uint(attempt.get("retained_bytes"), "source_owner.attempts[%u].retained_bytes" % ai)
+        if retained_bytes > limits["attempt_cpu_bytes"]:
+            raise CaptureError("source_owner.attempts[%u].retained_bytes exceeds attempt budget" % ai)
+        groups = _list(attempt.get("groups"), "source_owner.attempts[%u].groups" % ai, limits["groups"])
+        leaves = _list(attempt.get("leaves"), "source_owner.attempts[%u].leaves" % ai, limits["leaves"])
+        descriptors = _list(attempt.get("descriptors"), "source_owner.attempts[%u].descriptors" % ai, limits["descriptors"])
+        if (attempt["groups_scanned"] != len(groups) or attempt["leaves_scanned"] != len(leaves) or
+                attempt["descriptors_scanned"] != len(descriptors) or
+                attempt["group_count"] < len(groups) or attempt["leaf_count"] < len(leaves) or
+                attempt["descriptor_count"] < len(descriptors)):
+            raise CaptureError("source_owner.attempts[%u] declared/scanned counts disagree with arrays" % ai)
+        for gi, group in enumerate(groups):
+            group = _dict(group, "source_owner.attempts[%u].groups[%u]" % (ai, gi))
+            _address(group.get("address"), "source_owner.attempts[%u].groups[%u].address" % (ai, gi))
+            leaf_count = _uint(group.get("leaf_count"), "source_owner.attempts[%u].groups[%u].leaf_count" % (ai, gi))
+            leaves_scanned = _u32(group.get("leaves_scanned"), "source_owner.attempts[%u].groups[%u].leaves_scanned" % (ai, gi))
+            if leaves_scanned > leaf_count or leaves_scanned > limits["leaves"]:
+                raise CaptureError("source_owner.attempts[%u].groups[%u] leaf counts are invalid" % (ai, gi))
+        group_leaf_counts = Counter()
+        for li, leaf in enumerate(leaves):
+            leaf = _dict(leaf, "source_owner.attempts[%u].leaves[%u]" % (ai, li))
+            group = _u32(leaf.get("group"), "source_owner.attempts[%u].leaves[%u].group" % (ai, li))
+            if group >= len(groups):
+                raise CaptureError("source_owner.attempts[%u].leaves[%u] references missing group" % (ai, li))
+            group_leaf_counts[group] += 1
+            _address(leaf.get("address"), "source_owner.attempts[%u].leaves[%u].address" % (ai, li))
+            _address(leaf.get("owner_link"), "source_owner.attempts[%u].leaves[%u].owner_link" % (ai, li))
+            _uint(leaf.get("base_record"), "source_owner.attempts[%u].leaves[%u].base_record" % (ai, li))
+            _uint(leaf.get("record_count"), "source_owner.attempts[%u].leaves[%u].record_count" % (ai, li))
+        for gi, group in enumerate(groups):
+            if group_leaf_counts[gi] != group["leaves_scanned"]:
+                raise CaptureError("source_owner.attempts[%u].groups[%u].leaves_scanned disagrees with leaves" % (ai, gi))
+        for di, descriptor in enumerate(descriptors):
+            label = "source_owner.attempts[%u].descriptors[%u]" % (ai, di)
+            descriptor = _dict(descriptor, label)
+            leaf_ref = _u32(descriptor.get("leaf"), label + ".leaf")
+            if leaf_ref >= len(leaves):
+                raise CaptureError("%s references missing leaf" % label)
+            list_index = _u32(descriptor.get("list"), label + ".list")
+            _u32(descriptor.get("entry"), label + ".entry")
+            entry_stride = _u32(descriptor.get("entry_stride"), label + ".entry_stride")
+            if list_index > 7 or entry_stride != (72 if list_index == 0 else 80):
+                raise CaptureError("%s has invalid list/entry stride" % label)
+            _address(descriptor.get("address"), label + ".address")
+            source_address = _address(descriptor.get("source_address"), label + ".source_address")
+            relative = _uint(descriptor.get("destination_relative_record"), label + ".destination_relative_record")
+            record_count = _uint(descriptor.get("record_count"), label + ".record_count")
+            first = _uint(descriptor.get("destination_first_record"), label + ".destination_first_record")
+            end = _uint(descriptor.get("destination_end_record"), label + ".destination_end_record")
+            leaf = leaves[leaf_ref]
+            expected_first = min(UINT64_MAX, leaf["base_record"] + relative)
+            expected_end = min(UINT64_MAX, expected_first + record_count)
+            if first != expected_first or end != expected_end:
+                raise CaptureError("%s destination interval disagrees with leaf and descriptor" % label)
+            descriptor_status = _string(descriptor.get("status"), label + ".status", 32)
+            descriptor_statuses = {"captured", "zero_count", "null_source", "range_overflow",
+                                   "source_too_large", "byte_budget", "read_fault", "descriptor_fault",
+                                   "descriptor_changed"}
+            if descriptor_status not in descriptor_statuses:
+                raise CaptureError("%s.status is unknown" % label)
+            pool_records = resources[resource]["buffer"]["bytes"] // POOL_STRIDE
+            leaf_end = min(UINT64_MAX, leaf["base_record"] + leaf["record_count"])
+            range_bad = (first < leaf["base_record"] or end < first or
+                         end > leaf_end or end > pool_records)
+            unavailable = ("zero_count" if record_count == 0 else
+                           "null_source" if int(source_address, 16) == 0 else
+                           "range_overflow" if range_bad else None)
+            if descriptor_status in {"zero_count", "null_source", "range_overflow"}:
+                if descriptor_status != unavailable:
+                    raise CaptureError("%s unavailable status disagrees with descriptor fields" % label)
+            elif unavailable is not None:
+                raise CaptureError("%s ignores an unavailable descriptor condition" % label)
+            descriptor["raw_blob"] = _nullable_ref(descriptor.get("raw_blob"), label + ".raw_blob", len(cpu_blobs))
+            descriptor["payload_blob"] = _nullable_ref(descriptor.get("payload_blob"), label + ".payload_blob", len(cpu_blobs))
+
+        if attempt_status == "captured" and any(
+                descriptor["status"] not in {"captured", "zero_count"} for descriptor in descriptors):
+            raise CaptureError("source_owner.attempts[%u] captured status contains partial descriptors" % ai)
+
+    spans = []
+    attempt_bytes = Counter()
+    blob_statuses = {"available", "read_fault", "byte_budget", "source_too_large",
+                     "zero_count", "null_source", "range_overflow",
+                     "bin_open_failed", "bin_write_failed"}
+    for bi, blob in enumerate(cpu_blobs):
+        blob = _dict(blob, "cpu_blobs[%u]" % bi)
+        _sequential_id(blob, bi, "cpu_blobs")
+        kind = _string(blob.get("kind"), "cpu_blobs[%u].kind" % bi, 32)
+        if kind not in {"descriptor", "source_records"}:
+            raise CaptureError("cpu_blobs[%u].kind is unknown" % bi)
+        attempt_ref = _nullable_ref(blob.get("attempt"), "cpu_blobs[%u].attempt" % bi, len(attempts))
+        if attempt_ref is None:
+            raise CaptureError("cpu_blobs[%u] lacks attempt" % bi)
+        descriptor_ref = _u32(blob.get("descriptor"), "cpu_blobs[%u].descriptor" % bi)
+        if descriptor_ref >= len(attempts[attempt_ref]["descriptors"]):
+            raise CaptureError("cpu_blobs[%u] references missing descriptor" % bi)
+        descriptor = attempts[attempt_ref]["descriptors"][descriptor_ref]
+        address = _address(blob.get("address"), "cpu_blobs[%u].address" % bi)
+        expected_address = descriptor["address"] if kind == "descriptor" else descriptor["source_address"]
+        if address != expected_address:
+            raise CaptureError("cpu_blobs[%u] address disagrees with descriptor" % bi)
+        offset = _uint(blob.get("offset"), "cpu_blobs[%u].offset" % bi)
+        size = _uint(blob.get("bytes"), "cpu_blobs[%u].bytes" % bi)
+        blob_status = _string(blob.get("status"), "cpu_blobs[%u].status" % bi, 32)
+        if blob_status not in blob_statuses:
+            raise CaptureError("cpu_blobs[%u].status is unknown" % bi)
+        if offset > MAX_BINARY_BYTES or size > limits["single_source_bytes"] or offset + size > MAX_BINARY_BYTES:
+            raise CaptureError("cpu_blobs[%u] binary span exceeds safety bound" % bi)
+        if blob_status == "available":
+            if not size:
+                raise CaptureError("cpu_blobs[%u] available payload is empty" % bi)
+            spans.append((offset, offset + size, bi))
+            attempt_bytes[attempt_ref] += size
+        elif size:
+            raise CaptureError("cpu_blobs[%u] unavailable payload declares bytes" % bi)
+        if kind == "descriptor" and blob_status == "available" and size != descriptor["entry_stride"]:
+            raise CaptureError("cpu_blobs[%u] descriptor byte count disagrees with entry stride" % bi)
+        if kind == "source_records" and blob_status == "available" and size != descriptor["record_count"] * POOL_STRIDE:
+            raise CaptureError("cpu_blobs[%u] source byte count disagrees with record count" % bi)
+    spans.sort()
+    cursor = packed_bytes
+    for begin, end, index in spans:
+        if begin != cursor:
+            reason = "overlaps" if begin < cursor else "leaves an unaccounted gap"
+            raise CaptureError("cpu_blobs[%u] %s in packed binary" % (index, reason))
+        cursor = end
+    if cursor - packed_bytes > limits["cpu_bytes"]:
+        raise CaptureError("cpu blobs exceed global byte cap")
+    if any(size > limits["attempt_cpu_bytes"] for size in attempt_bytes.values()):
+        raise CaptureError("cpu blobs exceed per-attempt byte cap")
+
+    for ai, attempt in enumerate(attempts):
+        for di, descriptor in enumerate(attempt["descriptors"]):
+            label = "source_owner.attempts[%u].descriptors[%u]" % (ai, di)
+            raw_ref, payload_ref = descriptor["raw_blob"], descriptor["payload_blob"]
+            if raw_ref is not None:
+                raw = cpu_blobs[raw_ref]
+                if raw["attempt"] != ai or raw["descriptor"] != di or raw["kind"] != "descriptor":
+                    raise CaptureError("%s raw_blob points at unrelated bytes" % label)
+            if payload_ref is not None:
+                payload = cpu_blobs[payload_ref]
+                if payload["attempt"] != ai or payload["descriptor"] != di or payload["kind"] != "source_records":
+                    raise CaptureError("%s payload_blob points at unrelated bytes" % label)
+            if descriptor["status"] == "captured" and summary["binary_ok"]:
+                if raw_ref is None or payload_ref is None or cpu_blobs[raw_ref]["status"] != "available" or cpu_blobs[payload_ref]["status"] != "available":
+                    raise CaptureError("%s captured status lacks both available blobs" % label)
+            elif descriptor["status"] in {"zero_count", "null_source", "range_overflow",
+                                           "source_too_large", "read_fault", "descriptor_changed"} and summary["binary_ok"]:
+                if raw_ref is None or cpu_blobs[raw_ref]["status"] != "available":
+                    raise CaptureError("%s lacks exact raw descriptor bytes" % label)
+                if descriptor["status"] != "descriptor_changed" and (
+                        payload_ref is None or cpu_blobs[payload_ref]["status"] != descriptor["status"]):
+                    raise CaptureError("%s payload status disagrees with descriptor" % label)
+
+    for ei, event in enumerate(events):
+        ref = _nullable_ref(event.get("source_owner_attempt"), "events[%u].source_owner_attempt" % ei, len(attempts))
+        if ref is not None and attempts[ref]["event"] != ei:
+            raise CaptureError("events[%u].source_owner_attempt points at another event" % ei)
+        if ref is None and any(attempt["event"] == ei for attempt in attempts):
+            raise CaptureError("events[%u] omits its stored source-owner attempt" % ei)
+    if owner_summary["attempts_stored"] != len(attempts):
+        raise CaptureError("source_owner.summary.attempts_stored disagrees with attempts")
+    if owner_summary["complete_attempts"] != sum(a["status"] == "captured" for a in attempts):
+        raise CaptureError("source_owner.summary.complete_attempts disagrees with attempts")
+    if owner_summary["partial_attempts"] != sum(a["status"] == "partial" for a in attempts):
+        raise CaptureError("source_owner.summary.partial_attempts disagrees with attempts")
+    if status == "not_run" and attempts:
+        raise CaptureError("source_owner not_run capture has attempts")
+    if status == "captured" and not any(a["status"] == "captured" for a in attempts):
+        raise CaptureError("source_owner captured status lacks a complete attempt")
+    return owner, attempts, cpu_blobs, cursor
+
+
+def _validate_cpu_blob_contents(binary, attempts, cpu_blobs):
+    for ai, attempt in enumerate(attempts):
+        for di, descriptor in enumerate(attempt["descriptors"]):
+            raw_ref = descriptor["raw_blob"]
+            if raw_ref is None or cpu_blobs[raw_ref]["status"] != "available":
+                continue
+            blob = cpu_blobs[raw_ref]
+            raw = memoryview(binary)[blob["offset"]:blob["offset"] + blob["bytes"]]
+            source_address = struct.unpack_from("<Q", raw, 8)[0]
+            relative, count = struct.unpack_from("<2I", raw, 0x38)
+            if (source_address != int(descriptor["source_address"], 16) or
+                    relative != descriptor["destination_relative_record"] or
+                    count != descriptor["record_count"]):
+                raise CaptureError("source_owner.attempts[%u].descriptors[%u] metadata disagrees with raw descriptor" % (ai, di))
+
+
 def _validate_snapshots(root, resources, blobs):
     snapshots = _list(root.get("snapshots"), "snapshots", 1024)
     versions = set()
@@ -391,7 +685,8 @@ def _validate_draws(root, resources, snapshots, selected_frame):
 def load_capture(path):
     path = Path(path)
     root = _read_json(path)
-    if root.get("schema") != SCHEMA:
+    schema = root.get("schema")
+    if schema not in {SCHEMA_V1, SCHEMA_V2}:
         raise CaptureError("unsupported object-classification schema")
     binary_name = _string(root.get("binary"), "binary", 255)
     if not binary_name or Path(binary_name).name != binary_name:
@@ -439,6 +734,13 @@ def load_capture(path):
     blobs, packed_bytes = _validate_blobs(root, resources)
     snapshots = _validate_snapshots(root, resources, blobs)
     draws = _validate_draws(root, resources, snapshots, selection["selected_mesh_frame"])
+    source_owner = None
+    source_owner_attempts = []
+    cpu_blobs = []
+    total_packed_bytes = packed_bytes
+    if schema == SCHEMA_V2:
+        source_owner, source_owner_attempts, cpu_blobs, total_packed_bytes = _validate_source_owner(
+            root, executable, resources, events, summary, packed_bytes)
     for i, snapshot in enumerate(snapshots):
         if snapshot["foreign_epoch"] > summary["foreign_writes"]:
             raise CaptureError("snapshots[%u].foreign_epoch exceeds observed foreign writes" % i)
@@ -476,20 +778,24 @@ def load_capture(path):
             binary = None
     except OSError as exc:
         raise CaptureError("%s: %s" % (binary_path, exc)) from exc
-    if packed_bytes:
+    if total_packed_bytes:
         if binary is None:
             raise CaptureError("available blob payload is missing")
-        if len(binary) != packed_bytes:
+        if len(binary) != total_packed_bytes:
             raise CaptureError("binary length does not match packed available blobs")
     elif binary is not None and len(binary):
         raise CaptureError("binary has bytes but no available blob spans")
     elif binary is None and summary["binary_ok"]:
         raise CaptureError("successful capture is missing its declared binary")
+    if schema == SCHEMA_V2:
+        _validate_cpu_blob_contents(binary or b"", source_owner_attempts, cpu_blobs)
     return {
         "path": path, "binary_path": binary_path, "binary": binary or b"", "root": root,
         "selection": selection, "summary": summary, "resources": resources,
         "stacks": stacks, "events": events, "event_by_version": event_by_version,
         "snapshots": snapshots, "draws": draws, "blobs": blobs,
+        "source_owner": source_owner, "source_owner_attempts": source_owner_attempts,
+        "cpu_blobs": cpu_blobs,
     }
 
 
@@ -498,6 +804,90 @@ def _blob_bytes(capture, blob):
         return None
     begin, size = blob["offset"], blob["bytes"]
     return memoryview(capture["binary"])[begin:begin + size]
+
+
+def _cpu_blob_bytes(capture, reference):
+    if reference is None:
+        return None
+    blob = capture["cpu_blobs"][reference]
+    if blob["status"] != "available":
+        return None
+    return memoryview(capture["binary"])[blob["offset"]:blob["offset"] + blob["bytes"]]
+
+
+def _source_result(status, reason, draw, slot, **extra):
+    result = {"status": status, "reason": reason, "resource": draw["pool_resource"],
+              "generation": draw["pool_generation"], "pool_slot": slot,
+              "proof": "same_generation_exact_bytes" if status == "matched" else None}
+    result.update(extra)
+    return result
+
+
+def _cpu_source_owner(capture, draw, pool_slot, pool_record, route):
+    owner = capture["source_owner"]
+    if owner is None:
+        return _source_result("unavailable", "legacy_capture_has_no_cpu_source_owner", draw, pool_slot)
+    if owner["status"] == "not_run":
+        return _source_result("unavailable", "cpu_source_owner_not_run", draw, pool_slot)
+    if owner["status"] not in {"captured", "partial"}:
+        return _source_result("failure", "source_owner_%s" % owner["status"], draw, pool_slot)
+    if route["status"] != "matched" or route.get("endpoint_kind") != "map":
+        return _source_result("unmatched", "pool_generation_has_no_complete_map_endpoint", draw, pool_slot)
+    event = capture["events"][route["endpoint_event"]]
+    if event["resource"] != draw["pool_resource"] or event["generation"] != draw["pool_generation"]:
+        return _source_result("unmatched", "copy_route_has_no_validated_slot_translation", draw, pool_slot,
+                              event=event["id"])
+    attempt_ref = event.get("source_owner_attempt")
+    if attempt_ref is None:
+        return _source_result("missing", "map_event_has_no_source_owner_attempt", draw, pool_slot,
+                              event=event["id"])
+    attempt = capture["source_owner_attempts"][attempt_ref]
+    common = {"event": event["id"], "attempt": attempt_ref,
+              "attempt_status": attempt["status"], "foreign_epoch": attempt["foreign_epoch"]}
+    if (not capture["summary"]["cpu_provenance_available"] or attempt["foreign_epoch"] != 0):
+        return _source_result("unmatched", "foreign_generation_cannot_be_joined", draw, pool_slot, **common)
+    if attempt["status"] not in {"captured", "partial"}:
+        return _source_result("failure", "attempt_%s" % attempt["status"], draw, pool_slot, **common)
+    candidates = []
+    for index, descriptor in enumerate(attempt["descriptors"]):
+        if descriptor["destination_first_record"] <= pool_slot < descriptor["destination_end_record"]:
+            candidates.append((index, descriptor))
+    if not candidates:
+        return _source_result("missing", "destination_slot_not_enumerated", draw, pool_slot, **common)
+    if len(candidates) != 1:
+        return _source_result("overlap", "destination_slot_has_multiple_source_descriptors", draw, pool_slot,
+                              descriptors=[index for index, unused in candidates], **common)
+    descriptor_index, descriptor = candidates[0]
+    leaf = attempt["leaves"][descriptor["leaf"]]
+    group = attempt["groups"][leaf["group"]]
+    provenance = {
+        "descriptor": descriptor_index, "descriptor_address": descriptor["address"],
+        "source_address": descriptor["source_address"], "leaf": descriptor["leaf"],
+        "leaf_address": leaf["address"], "leaf_owner_link": leaf["owner_link"], "group": leaf["group"],
+        "group_address": group["address"],
+        "destination_first_record": descriptor["destination_first_record"],
+        "destination_end_record": descriptor["destination_end_record"],
+    }
+    common.update(provenance)
+    enumeration_complete = (attempt["group_count"] == attempt["groups_scanned"] and
+                            attempt["leaf_count"] == attempt["leaves_scanned"] and
+                            attempt["descriptor_count"] == attempt["descriptors_scanned"])
+    if attempt["status"] == "partial" and not enumeration_complete:
+        return _source_result("partial", "descriptor_enumeration_was_partial", draw, pool_slot, **common)
+    if descriptor["status"] != "captured":
+        return _source_result("failure", "descriptor_%s" % descriptor["status"], draw, pool_slot, **common)
+    payload = _cpu_blob_bytes(capture, descriptor["payload_blob"])
+    if payload is None:
+        return _source_result("failure", "source_payload_unavailable", draw, pool_slot, **common)
+    local_record = pool_slot - descriptor["destination_first_record"]
+    at = local_record * POOL_STRIDE
+    cpu_record = payload[at:at + POOL_STRIDE]
+    source_record_address = int(descriptor["source_address"], 16) + at
+    common.update({"source_record": local_record, "source_record_address": "0x%x" % source_record_address,
+                   "byte_equal": bytes(cpu_record) == bytes(pool_record)})
+    if common["byte_equal"]:
+        return _source_result("matched", None, draw, pool_slot, **common)
+    return _source_result("mismatch", "cpu_and_gpu_record_bytes_differ", draw, pool_slot, **common)
 
 
 def _named_blob(capture, name):
@@ -642,6 +1032,8 @@ def analyse(capture, include_records=False):
             "Pool slots are interpreted only from the same draw-generation snapshot; they are never identities across frames.",
             "Upload-route provenance is hook-observed and bounded; missing or unmatched generations stay explicit.",
             "A matched Map/Unmap or Update route does not prove which CPU operation initialized an individual record; byte-range relation is reported separately.",
+            "CPU source addresses are capture-local provenance only; they are not stable object identities or a static classification.",
+            "A CPU source is proven only by unique destination-slot coverage and exact 336-byte equality in the same retained Map generation.",
             "The report classifies captured metadata and does not infer that an object is static from absent motion.",
         ],
         "counts": {"draws": len(capture["draws"]), "mesh_records": None,
@@ -651,6 +1043,10 @@ def analyse(capture, include_records=False):
                    "history_matched_owned_pixels": None, "history_matched_owned_records": None,
                    "metadata_groups": None},
         "groups": [], "missing": [],
+        "cpu_source_owner": {
+            "capture_status": (capture["source_owner"]["status"] if capture["source_owner"] else "unavailable"),
+            "visible_record_outcomes": {},
+        },
     }
     if not capture["summary"]["binary_ok"]:
         report["missing"].append({"scope": "capture", "reason": "binary_write_not_confirmed"})
@@ -812,6 +1208,7 @@ def analyse(capture, include_records=False):
             traces[label]["record_write_attribution"] = "not_proven"
             traces[label]["target_range_relation"] = (traces[label]["chain"][0]["requested_range_relation"]
                                                          if traces[label]["chain"] else "unavailable")
+        cpu_source = _cpu_source_owner(capture, draw, pool_slot, pool_record, traces["pool"])
         group_key = (tuple(draw["key16"]), word28, word320, second_word,
                      draw["pool_resource"], draw["pool_generation"],
                      draw["id_resource"], draw["id_generation"],
@@ -822,10 +1219,11 @@ def analyse(capture, include_records=False):
                 "t33_word320": word320, "instance_second_word": second_word,
                 "pixels": 0, "records": 0,
                 "valid_rigid_records": 0, "history_matched_records": 0,
+                "cpu_source_owners": [],
                 "source_versions": {
                     "t33_pool": {"resource": draw["pool_resource"], "generation": draw["pool_generation"],
                                  "write_observed": draw["pool_write_observed"], "generation_matched": draw["pool_matched"],
-                                 "upload_route": traces["pool"]},
+                                 "upload_route": traces["pool"], "cpu_source_owner_outcomes": {}},
                     "ia_ids": {"resource": draw["id_resource"], "generation": draw["id_generation"],
                                "write_observed": draw["id_write_observed"], "generation_matched": draw["id_matched"],
                                "upload_route": traces["id"]},
@@ -835,6 +1233,10 @@ def analyse(capture, include_records=False):
         groups[group_key]["records"] += 1
         groups[group_key]["valid_rigid_records"] += int(valid_rigid)
         groups[group_key]["history_matched_records"] += int(history_matched)
+        group_outcomes = groups[group_key]["source_versions"]["t33_pool"]["cpu_source_owner_outcomes"]
+        group_outcomes[cpu_source["status"]] = group_outcomes.get(cpu_source["status"], 0) + 1
+        groups[group_key]["cpu_source_owners"].append(
+            {"record": record_index, "pixels": pixel_count, **cpu_source})
         owners.append({
             "record": record_index, "draw": draw_id, "instance": local,
             "pixels": pixel_count, "pool_slot": pool_slot,
@@ -842,9 +1244,12 @@ def analyse(capture, include_records=False):
             "t33_word320": word320, "key16": list(draw["key16"]),
             "pool_generation": draw["pool_generation"], "id_generation": draw["id_generation"],
             "valid_rigid": valid_rigid, "history_matched": history_matched,
+            "cpu_source_owner": cpu_source,
         })
     report["groups"] = list(groups.values())
     report["counts"]["metadata_groups"] = len(report["groups"])
+    report["cpu_source_owner"]["visible_record_outcomes"] = dict(sorted(Counter(
+        owner["cpu_source_owner"]["status"] for owner in owners).items()))
     if include_records:
         report["records"] = owners
     return report
@@ -865,9 +1270,14 @@ def print_report(report):
         for index, group in enumerate(report["groups"]):
             pool = group["source_versions"]["t33_pool"]["upload_route"]
             ids = group["source_versions"]["ia_ids"]["upload_route"]
-            print("  group %u: %u px/%u records, t33[28]=%u t33[320]=%u id.second=%u; upload routes pool=%s ids=%s" %
+            cpu = group["source_versions"]["t33_pool"]["cpu_source_owner_outcomes"]
+            print("  group %u: %u px/%u records, t33[28]=%u t33[320]=%u id.second=%u; upload routes pool=%s ids=%s; CPU sources=%s" %
                   (index, group["pixels"], group["records"], group["t33_word28"],
-                   group["t33_word320"], group["instance_second_word"], pool["status"], ids["status"]))
+                   group["t33_word320"], group["instance_second_word"], pool["status"], ids["status"],
+                   json.dumps(cpu, sort_keys=True)))
+        outcomes = report["cpu_source_owner"]["visible_record_outcomes"]
+        print("CPU source owner: capture=%s; visible record outcomes=%s" %
+              (report["cpu_source_owner"]["capture_status"], json.dumps(outcomes, sort_keys=True)))
     for item in report["missing"]:
         print("missing: %s (%s)" % (item["scope"], item["reason"]))
     print("scope: exact-frame captured evidence only; no static classification is inferred")
@@ -955,6 +1365,66 @@ def _fixture_value(binary_name="classification_fixture.bin"):
         "blobs": blobs,
     }
     return root, b"".join(chunks)
+
+
+def _source_owner_fixture(root, binary):
+    root = copy.deepcopy(root)
+    root["schema"] = SCHEMA_V2
+    root["executable"].update(pe_timestamp=1788384820, image_size=104894464)
+    for event in root["events"]:
+        event["source_owner_attempt"] = None
+    root["events"][1]["source_owner_attempt"] = 0
+    source_address = 0x710000
+    descriptor_address = 0x720000
+    raw = bytearray(72)
+    struct.pack_into("<Q", raw, 8, source_address)
+    struct.pack_into("<2I", raw, 0x38, 1, 2)
+    pool_blob = root["blobs"][0]
+    pool = binary[pool_blob["offset"]:pool_blob["offset"] + pool_blob["bytes"]]
+    source = pool[POOL_STRIDE:POOL_STRIDE * 3]
+    raw_at = len(binary)
+    source_at = raw_at + len(raw)
+    root["source_owner"] = {
+        "status": "captured", "synthetic_fixture": False,
+        "expected_pe_timestamp": 1788384820,
+        "expected_image_size": 104894464, "callsite_rva": SOURCE_OWNER_CALLSITE_RVA,
+        "limits": copy.deepcopy(SOURCE_OWNER_LIMITS),
+        "summary": {"maps_considered": 1, "identity_rejects": 0, "opcode_rejects": 0,
+                    "unwind_attempts": 1, "unwind_failures": 0, "callsite_matches": 1,
+                    "resource_matches": 1, "attempts_stored": 1, "complete_attempts": 1,
+                    "partial_attempts": 0, "read_faults": 0, "group_overflow": 0,
+                    "leaf_overflow": 0, "descriptor_overflow": 0, "attempt_overflow": 0,
+                    "cpu_byte_declines": 0, "metadata_changes": 0},
+        "attempts": [{
+            "id": 0, "event": 1, "resource": 0, "generation": 2, "mesh_frame": 11,
+            "foreign_epoch": 0, "status": "captured", "unwind_status": "matched",
+            "unwind_frames": 2, "return_rva": SOURCE_OWNER_CALLSITE_RVA,
+            "nested_owner": "0x700000", "nested_owner_field_130": "0x701300",
+            "nested_owner_field_138": "0x701380", "wrapper": "0x700140",
+            "native_resource": "0x1000",
+            "stride": POOL_STRIDE, "group_count": 1, "groups_scanned": 1,
+            "leaf_count": 1, "leaves_scanned": 1, "descriptor_count": 1,
+            "descriptors_scanned": 1, "retained_bytes": len(raw) + len(source),
+            "groups": [{"address": "0x730000", "leaf_count": 1, "leaves_scanned": 1}],
+            "leaves": [{"group": 0, "address": "0x740000", "owner_link": "0x700000",
+                        "base_record": 0, "record_count": 3}],
+            "descriptors": [{"leaf": 0, "list": 0, "entry": 0, "entry_stride": 72,
+                             "address": "0x%x" % descriptor_address,
+                             "source_address": "0x%x" % source_address,
+                             "destination_relative_record": 1, "record_count": 2,
+                             "destination_first_record": 1, "destination_end_record": 3,
+                             "raw_blob": 0, "payload_blob": 1, "status": "captured"}],
+        }],
+    }
+    root["cpu_blobs"] = [
+        {"id": 0, "kind": "descriptor", "attempt": 0, "descriptor": 0,
+         "address": "0x%x" % descriptor_address, "offset": raw_at,
+         "bytes": len(raw), "status": "available"},
+        {"id": 1, "kind": "source_records", "attempt": 0, "descriptor": 0,
+         "address": "0x%x" % source_address, "offset": source_at,
+         "bytes": len(source), "status": "available"},
+    ]
+    return root, binary + bytes(raw) + source
 
 
 def _write_fixture(directory, root, binary):
@@ -1046,6 +1516,41 @@ def verify_pipeline(capture, report):
         event = capture["events"][route["endpoint_event"]]
         if event["resource"] != source["resource"] or event["generation"] != source["generation"]:
             raise CaptureError("pipeline fixture %s upload-route version mismatch" % label)
+
+
+def verify_source_fixture(capture, report):
+    owner_capture = capture.get("source_owner")
+    if not owner_capture or not owner_capture["synthetic_fixture"]:
+        raise CaptureError("source-owner fixture lacks its explicit synthetic marker")
+    selection = capture["selection"]
+    if (selection["selected_mesh_frame"], selection["scene_frame"], selection["sealed"]) != (103, 701, True):
+        raise CaptureError("source-owner fixture selected/scene frame changed")
+    if len(capture["draws"]) != 1 or report["counts"]["mesh_records"] != 1:
+        raise CaptureError("source-owner fixture draw/record count changed")
+    counts = report["counts"]
+    if (counts["coverage_pixels"], counts["depth_agreeing_pixels"],
+            counts["owned_visible_pixels"], counts["owned_visible_records"]) != (1, 1, 1, 1):
+        raise CaptureError("source-owner fixture visible ownership changed")
+    if report["cpu_source_owner"]["visible_record_outcomes"] != {"matched": 1}:
+        raise CaptureError("source-owner fixture did not prove one exact CPU source record")
+    records = report.get("records", [])
+    if len(records) != 1:
+        raise CaptureError("source-owner fixture record detail is unavailable")
+    proof = records[0]["cpu_source_owner"]
+    if (proof["status"] != "matched" or proof.get("proof") != "same_generation_exact_bytes" or
+            proof["pool_slot"] != 0 or proof["source_record"] != 0 or not proof["byte_equal"]):
+        raise CaptureError("source-owner fixture exact-byte proof changed")
+    attempt = capture["source_owner_attempts"][proof["attempt"]]
+    event = capture["events"][proof["event"]]
+    draw = capture["draws"][0]
+    if (attempt["status"] != "captured" or attempt["mesh_frame"] != 101 or
+            event["resource"] != draw["pool_resource"] or
+            event["generation"] != draw["pool_generation"] or event["generation"] != 1):
+        raise CaptureError("source-owner fixture generation/event join changed")
+    descriptor = attempt["descriptors"][proof["descriptor"]]
+    payload = capture["cpu_blobs"][descriptor["payload_blob"]]
+    if descriptor["record_count"] != 1 or payload["status"] != "available" or payload["bytes"] != POOL_STRIDE:
+        raise CaptureError("source-owner fixture descriptor payload changed")
 
 
 def self_test():
@@ -1148,6 +1653,75 @@ def self_test():
         provenance_report = analyse(load_capture(path))
         assert provenance_report["groups"][0]["source_versions"]["t33_pool"]["upload_route"]["status"] == "missing"
 
+        # V2 proves each visible pool record only against exact CPU bytes from
+        # the same completed Map generation.  A changed byte remains a
+        # mismatch rather than being attributed by address or layout alone.
+        v2_root, v2_binary = _source_owner_fixture(root, binary)
+        path = _write_fixture(temp, v2_root, v2_binary)
+        v2_report = analyse(load_capture(path), include_records=True)
+        assert v2_report["cpu_source_owner"]["visible_record_outcomes"] == {"matched": 2}
+        assert all(record["cpu_source_owner"]["proof"] == "same_generation_exact_bytes"
+                   for record in v2_report["records"])
+        first_source = v2_root["cpu_blobs"][1]["offset"]
+        changed = bytearray(v2_binary)
+        changed[first_source + 28] ^= 1
+        path = _write_fixture(temp, v2_root, bytes(changed))
+        changed_report = analyse(load_capture(path), include_records=True)
+        assert changed_report["cpu_source_owner"]["visible_record_outcomes"] == {"matched": 1, "mismatch": 1}
+
+        partial = copy.deepcopy(v2_root)
+        partial["source_owner"]["status"] = "partial"
+        partial_attempt = partial["source_owner"]["attempts"][0]
+        partial_attempt.update(status="partial", descriptor_count=2)
+        partial["source_owner"]["summary"].update(complete_attempts=0, partial_attempts=1,
+                                                    descriptor_overflow=1)
+        path = _write_fixture(temp, partial, v2_binary)
+        partial_report = analyse(load_capture(path), include_records=True)
+        assert partial_report["cpu_source_owner"]["visible_record_outcomes"] == {"partial": 2}
+
+        failed = copy.deepcopy(v2_root)
+        failed["source_owner"]["status"] = "partial"
+        failed_attempt = failed["source_owner"]["attempts"][0]
+        failed_attempt["status"] = "partial"
+        failed_attempt["descriptors"][0]["status"] = "read_fault"
+        failed["source_owner"]["summary"].update(complete_attempts=0, partial_attempts=1, read_faults=1)
+        failed["cpu_blobs"][1].update(bytes=0, status="read_fault")
+        path = _write_fixture(temp, failed, v2_binary[:failed["cpu_blobs"][1]["offset"]])
+        failed_report = analyse(load_capture(path), include_records=True)
+        assert failed_report["cpu_source_owner"]["visible_record_outcomes"] == {"failure": 2}
+
+        wrong_generation = copy.deepcopy(v2_root)
+        wrong_generation["source_owner"]["attempts"][0]["generation"] = 1
+        path = _write_fixture(temp, wrong_generation, v2_binary)
+        try:
+            load_capture(path)
+        except CaptureError:
+            pass
+        else:
+            raise AssertionError("cross-generation CPU source-owner attempt accepted")
+
+        excessive_cap = copy.deepcopy(v2_root)
+        excessive_cap["source_owner"]["limits"]["descriptors"] = SOURCE_OWNER_LIMITS["descriptors"] + 1
+        path = _write_fixture(temp, excessive_cap, v2_binary)
+        try:
+            load_capture(path)
+        except CaptureError:
+            pass
+        else:
+            raise AssertionError("oversized CPU source-owner cap accepted")
+
+        unavailable = copy.deepcopy(v2_root)
+        unavailable["source_owner"]["status"] = "not_run"
+        unavailable["source_owner"]["attempts"] = []
+        unavailable["source_owner"]["summary"].update(
+            unwind_attempts=0, callsite_matches=0, resource_matches=0,
+            attempts_stored=0, complete_attempts=0)
+        unavailable["events"][1]["source_owner_attempt"] = None
+        unavailable["cpu_blobs"] = []
+        path = _write_fixture(temp, unavailable, binary)
+        unavailable_report = analyse(load_capture(path), include_records=True)
+        assert unavailable_report["cpu_source_owner"]["visible_record_outcomes"] == {"unavailable": 2}
+
     print("Object classification reader self-test passed")
 
 
@@ -1158,28 +1732,33 @@ def main(argv=None):
     parser.add_argument("--records", action="store_true", help="include bounded per-owner record details")
     parser.add_argument("--verify-fixture", action="store_true", help="assert the WARP fixture semantics")
     parser.add_argument("--verify-pipeline", action="store_true", help="assert the production mesh-motion pipeline fixture")
+    parser.add_argument("--verify-source-fixture", action="store_true", help="assert the generated CPU source-owner fixture")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
-        if args.path or args.verify_fixture or args.verify_pipeline or args.records or args.json:
+        if args.path or args.verify_fixture or args.verify_pipeline or args.verify_source_fixture or args.records or args.json:
             parser.error("--self-test must be used alone")
         self_test()
         return 0
-    if args.verify_fixture and args.verify_pipeline:
-        parser.error("--verify-fixture and --verify-pipeline are mutually exclusive")
+    if sum((args.verify_fixture, args.verify_pipeline, args.verify_source_fixture)) > 1:
+        parser.error("fixture verification modes are mutually exclusive")
     if not args.path:
         parser.error("path is required unless --self-test is used")
     try:
         capture = load_capture(args.path)
-        report = analyse(capture, include_records=args.records or args.verify_fixture or args.verify_pipeline)
+        report = analyse(capture, include_records=args.records or args.verify_fixture or args.verify_pipeline or args.verify_source_fixture)
         if args.verify_fixture:
             verify_fixture(capture, report)
         if args.verify_pipeline:
             verify_pipeline(capture, report)
+        if args.verify_source_fixture:
+            verify_source_fixture(capture, report)
     except CaptureError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
-    if args.verify_fixture and not args.json:
+    if args.verify_source_fixture and not args.json:
+        print("CPU source-owner fixture verified")
+    elif args.verify_fixture and not args.json:
         print("GPU object-classification fixture verified")
     elif args.verify_pipeline and not args.json:
         print("Object-classification pipeline fixture verified")
