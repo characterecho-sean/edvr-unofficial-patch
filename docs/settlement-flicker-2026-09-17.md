@@ -2,10 +2,10 @@
 
 ## Status
 
-- State: a manual record-writer diagnostic now covers five verified creation
-  paths through one dictionary lookup. It retains completed writer context for
-  exact upload matching, with duplicate and timing ambiguity explicit. Flight
-  100737 proved CPU-byte correspondence, not object attachment or immobility.
+- State: flight 120047 matched CPU bytes for all 512 admitted records; 504 have
+  writer candidates. Nineteen visible settlement-facing records each retain one
+  inline pose context (eight contexts total); five use the direct path without
+  object context. Attachment and immobility remain unproven.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -25,10 +25,10 @@
   Its sampled 0.390 us/check implies about 4.06 ms/frame of added gate work,
   excluding lock acquisition/unsupported families. Earlier low-cost benchmark
   windows include menu/loading and must not be called comparable settlements.
-- Capture: 100737 sealed mesh/scene frame 11738; 512 records in 133 draws, 27
-  records with 64,583 exact-depth pixels. Both source buffers have matched
-  Map/Unmap generations; six events and 12 stacks, no failed or foreign writes.
-  The 512-record admission cap prevents treating this subset as a scene census.
+- Capture: 120047, mesh/scene 15059: 122 draws, 29 visible records/125,462
+  exact-depth pixels. Of these, 24 settlement-facing records cover 482 pixels.
+  All 44,596 writer calls completed with no faults or caps. The 512-record
+  admission limit prevents treating this subset as a complete scene census.
 - Earlier static opportunity: 501/512 records have exact unchanged raw pose,
   across 115/124 whole draws; all 501 also have changed scene origin. Of these,
   446 leave no motion-coverage pixels. These are conditional opportunities, not
@@ -55,10 +55,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: one landed cockpit capture at the same settlement: press Insert once,
-  remain in scene at least 30 seconds, then exit normally. No flicker or Pause
-  is needed. Inspect hook status, writer counts, failures and completed matches
-  before interpreting opaque context. No static filtering is enabled.
+- Next: find the initializer of collection-record+0x290 before the verified
+  0x4320340/0x4321940 consumers, then trace context+0xA8 and the direct
+  writer's earlier input. No captured field proves attachment yet. No repeat
+  flight is needed for this offline step; static filtering/draw suppression
+  stay off.
 
 ## Journal
 
@@ -4775,3 +4776,101 @@ fixtures, build log, INIs, manifest and installer receipts are retained in
 build/record-writer-frontier-aadac6a. The next flight must match this literal
 version and graphics link stamp; the later source commit changes the Git
 description but does not rebuild the installed binary.
+
+### 2026-09-19 -- writer flight 120047
+
+The sanctioned log reader verified edvr_gfx_20260919_115849.log against
+v0.17.0-53-gaadac6a-dirty and graphics stamp 6AAECC1E, linked at 17:53:34 UTC.
+Installer verify-only also passed. Insert armed capture 120047 at 12:00:47.134;
+the entry hook installed, classification sealed mesh/scene frame 15059, and the
+complete report was written at 12:00:50.993. The game exited normally around
+12:01:31. This is a valid diagnostic flight, with no early-exit loss.
+
+The capture has 122 selected draws, six resources, six write events, three
+snapshots and 12 stacks. Source-owner attempts were 3/3 complete with three
+resource matches and no identity/opcode/unwind rejection, read fault, metadata
+change, descriptor overflow or CPU-byte decline. Writer status was finished:
+44,596 observed, stored and completed calls, 26,187,360 retained bytes, and
+zero record overflow, byte-budget decline, read/context/unwind/completion
+failure. The 15,248 list-management calls were declined as intended; no unknown
+callers appeared. These counters establish that the instrument ran and retained
+the intended data; they do not by themselves establish a mesh/object join.
+
+Runtime remains VirtualDesktopXR / Meta Quest 3 / RTX 5090 / 90 Hz, DLSS K,
+input 1996x2121 and output 3072x3264 per eye. W5 reports CPU/GPU elapsed-span
+medians 12.285/15.065 ms with 1,638 valid samples over 30 seconds. W4 ended at
+Insert after only 6.922 seconds, and W1-W3 have much lower costs from an
+earlier part of the run. These windows are not a controlled performance
+comparison; the diagnostic was the purpose of this flight. The verified log
+extract is build/record-writer-120047-log-summary.txt.
+
+The archived classification pair passes the reader. All 512 admitted records
+have exact CPU-source correspondence. Writer matching yields 211 unique
+candidates, 293 multiple-candidate records and eight with no candidate. The 29
+exact-depth-visible records cover 125,462 pixels: nine unique, 16 multiple and
+four without a candidate. These are exact byte/time-qualified candidates, not
+proof of causal creation or persistent game-object identity.
+
+The current color/coverage overlay confirms two spatial groups. Twenty-four
+small settlement-facing records cover 482 pixels and all have writer matches:
+nine unique and 15 multiple. The five foreground cockpit/player records (1, 3,
+6, 8, 9) cover 124,980 pixels and have one multiple-candidate match and four
+with no candidate. The foreground geometry issue remains separate from this
+classification work. Coverage is a bounded admitted subset, not the visible
+fraction of the entire settlement or the number of physical objects.
+
+Nineteen settlement-facing records are inline-writer-only. Each has exactly one
+nonzero captured object address across all eligible matches; collectively they
+point to eight addresses. Nine have one writer event, one has two and nine have
+four. Repeated events keep the same owner, key and pose-object address. The
+four-event cases differ in entry identity/bookkeeping, without changing the
+captured object bytes. The other five settlement-facing records are
+direct-writer-only, each with four candidates but no captured object context.
+No settlement candidate set mixes the two writer paths. This is a more specific
+association than the old shared upload group, but it is still capture-local
+candidate evidence.
+
+Across all retained calls, 40,732 used inline return 0x42b4ed6, 3,600 used
+direct 0x43130aa and 264 used helper 0x434d149. No primary 0x42b42ef or direct
+0x369ce91 calls occurred. All 211 unique staged-record matches are inline; no
+helper record matched this admitted subset. The per-record analysis and
+scene/coverage views are in build/record-writer-flight-120047. Its JSON is
+33,145,881 bytes, SHA-256
+bf7030b6fc56a58f8f8bb4e10c23f2a38882d7a537edaacbe24d0dc49ed38964; BIN is
+129,355,000 bytes, SHA-256
+29662d98e767f0dbfc135630b587a73f756af3cbb15d6723559e619f315df0ef. Archive and
+analysis helpers support verified no-write dry runs. No new DLL or settings
+change follows from these counts.
+
+The bounded context audit confirms the inline object's origin: 0x42b445c saves
+the original RCX in [rbp-0x68], the slot the new probe reads at 0x42b4ed6. Both
+verified collection enumerators obtain this pointer from +0x290 in a 0x2f0-byte
+record. Thus the current inline capture is the same pose/render context studied
+on the primary path, not a new inferred type. All 520 inline context addresses
+share one heap pointer at +0. The routine passes that field to ordinary helpers
+rather than dispatching virtually through it; it supplies no class name or
+attachment semantics.
+
+Two independent analyses find context+0x30 == writer_owner-0x78 in all 40,732
+inline events. Ruled out: treating +0x30 as independent new evidence of a scene
+parent, because it points into the already-known render-owner allocation. Ruled
+out: using +0 as individual object identity, because all 520 contexts share it;
+and following the optional +0xa0 builder for these 19 scene records, because it
+is null in all of them. The +0x48/+0x50 pair is a count/array with stride 0x58,
+not evidence of mobility. The retained +0xa8 field is nonzero and distinguishes
+the eight scene contexts, but its producer and target semantics remain unknown.
+Pointer-shaped variation alone does not justify a parent or static
+classification.
+
+The next precise offline edge is the initializer/store of collection-record
++0x290 before consumers 0x4320340/0x4321940, followed by the immediate writes
+to context+0xa8 (and +8/+0x78 when present). The audited 0x4312040 routine only
+reads +0x290; its complete chained fragments contain no store there, so it is
+not that initializer. Bounded disassembly, verified executable identity and
+findings are in build/record-writer-context-audit. This evidence narrows the
+search without requiring another flight of the unchanged diagnostic.
+
+The analysis and image-generation helpers were rerun twice with deterministic
+outputs; their dry runs left the existing archive files byte-identical. The
+current reader accepts the capture. Only this investigation document changed in
+tracked source; installed binaries and settings remain as tested.
