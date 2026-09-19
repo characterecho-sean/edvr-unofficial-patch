@@ -2,16 +2,16 @@
 
 ## Status
 
-- State: offline object-classification audit rejects the two t33 metadata words
-  as standalone immobility flags. All 17 labeled building records share their
-  values with rotating-station controls. No static exclusion is proven.
+- State: bounded object-classification capture awaits a landed flight. The two
+  t33 candidate words remain rejected as standalone immobility flags; no static
+  exclusion is enabled. The probe preserves rendering behavior.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-45-gfedd340-dirty installed (6AAE7FD3), with static surfaces
-  off and manual Insert capture. Payloads, unchanged INI and receipts are in
-  build/mesh-eligibility-frontier-fedd340; install verification passed.
+- Build: v0.17.0-47-g60a5d38-dirty installed (6AAE9DB8); static surfaces off,
+  DLSS and manual Insert capture retained. Payloads, INI and verification
+  receipts: build/object-classification-frontier-60a5d38.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -54,11 +54,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: connect the bound model/instance resources to their CPU upload callers
-  and same-frame visible labels. The retained ETW path reaches a generic copy
-  helper, not a proven model-pool writer. Shader use, capture alignment and
-  rejected fields are in the final classification entry. No new build or flight
-  was needed for this offline pass.
+- Next: take one Insert capture while landed at the settlement and remain in
+  game at least 30 seconds for the capture to finish draining. Its
+  classification report must show actual sources, upload stacks and a sealed
+  same-frame eye. Missing or capped evidence is not a match. See the final
+  classification entry for the capture and interpretation contract.
 
 ## Journal
 
@@ -4070,3 +4070,101 @@ reaching the property against the work saved. The current evidence justifies
 targeted provenance work; it does not justify enabling a static filter or
 promising a frame-time gain. No headset rerun is requested for this offline
 pass.
+
+### 2026-09-19 - Bounded classification capture
+
+The offline audit above established two missing associations: which CPU upload
+callers supply the actual t33/instance buffers used by a building draw, and
+which source bytes belong to the same frame as the visible pixel label. The
+diagnostic addresses both in one explicit Insert capture. It does not classify
+static objects, suppress draws, change motion admission, or remove
+camera/parent motion.
+
+The accepted mesh-motion path nominates its actual t33 and stride-8 instance
+buffers. Three discovery frames allow alternating upload buffers to be seen
+before one later left-eye mesh frame is selected. Each admitted draw retains
+its Mesh output-record range, original instance byte range, shader hash,
+compatibility key and source resource/version references. Source buffers are
+held for the capture, preventing address reuse from inventing identity. GPU
+copies occur at the draw and are reused only for the same resource, observed
+write generation and frame. Rewrites produce a new version; no full
+write-combined CPU pool scan is performed.
+
+Map/Unmap, UpdateSubresource, CopyResource, CopySubresourceRegion and
+CopyStructureCount hooks record bounded provenance only while the capture is
+armed. A failed or read-only map cannot become an upload. A writable map needs
+its matching completion; partial writes preserve their range, and copies
+preserve source association separately from CPU writes. Unknown command-list
+writes invalidate prior attribution. Foreign-context writes conservatively make
+CPU provenance unavailable. UAV/stream-output-capable resources, pre-nomination
+versions, missing completions and saturated tables remain explicitly uncertain.
+Generations continue to advance when the event table fills, so exhaustion
+cannot reuse stale source bytes under an old generation.
+
+The temporal consumer stages the selected frame's current Mesh records,
+MeshCoverage, SceneZ and colour after mesh history matching. It records both
+the internal mesh frame and the temporal scene frame. These are separate files
+from the original trigger-frame eye dump, which keeps its existing timing. The
+delayed object-ledger writer emits `classification_<stamp>.json` and `.bin`
+beside the ledger in the pool capture directory, including a report for an
+empty or incomplete run. Arming and completion have separate log lines, with
+actual resource, draw, write, snapshot and stack counts.
+
+`tools/object_classification.py` validates the schema, payload extents and
+source references before joining a pixel to a Mesh record, its draw, the
+instance pair and its 336-byte model record. An exact coverage/SceneZ depth
+match establishes current-frame raster ownership; prior motion-history matching
+is a separate observation. The source key, raw pose and metadata are
+cross-checked against the retained Mesh record. The result reports the second
+instance word, model metadata and available upload routes, without treating
+absence of motion or a buffer upload as a semantic static flag.
+
+An observed upload route is evidence about that buffer version. A partial
+update may concern another record; Map does not expose a precise dirty-byte
+range. A copy caller can be a transfer layer rather than the CPU record
+constructor. This probe covers the hooked owner-context paths and explicitly
+invalidates known unknown/foreign writes; it does not claim an exhaustive trace
+of every possible D3D11 extension or engine-side memory write. The next offline
+step is to follow a verified resource's caller chain into the code preparing
+its payload, with the executable timestamp/image size from the report.
+
+The capture applies to the current Quest 3 / VirtualDesktopXR / RTX 5090, DLSS
+K settlement setup above, including the existing 512-record-per-eye motion cap.
+Captured records are that admitted subset, not a scene census. Fixed probe
+limits are 64 held resources, 512 upload events, 128 stack samples and 512 draw
+rows, with bounded source and image readbacks; reported declines stay
+unavailable. This is diagnostic capture overhead, not a performance
+optimization or a frame-time benchmark. No configuration key is added or
+changed.
+
+Validation passed: 49 standalone WARP probe checks, reader self-tests and both
+GPU-generated fixtures, 2,559 production mesh-motion checks, all 68 pooled plus
+three quiet build jobs, and the 251-key config contract. The production fixture
+joins 1,444 exact-depth pixels to its current source record and upload
+generations. The standalone fixture also verifies current-frame ownership
+without prior motion-history matching. A test-isolation failure was corrected
+before the final green build; no rendering behavior was changed to satisfy it.
+
+Final review covers predication save/restore, observed copy-source upload
+chains, zero-length writes, failed snapshot retry after matching Unmap, and
+unavailable provenance through an unobserved copy source. The reader refuses
+ownership claims when binary publication failed. These cases have explicit
+unavailable outcomes rather than silently reporting a valid static object.
+
+Frontier dry-run, installation and verify-only passed. Final graphics build
+v0.17.0-47-g60a5d38-dirty has stamp 6AAE9DB8 (2026-09-19 14:35:36 UTC), SHA-256
+6bc13038fa85a279e4e7710ebedd877e1dde37452def579ec874ee95533130d6. Its payloads,
+symbols, build output, source patch, receipts and manifest are in
+build/object-classification-frontier-60a5d38. The live INI was preserved byte
+for byte (SHA-256
+1abd3fea466356c1348154193e6d088f1bc8bbda6b773d887a23d41a47ee91dd); DLSS, static
+surfaces off and manual Insert capture remain set. Validate this flight with
+`tools/edvr_log.py --target frontier --expect-build 60a5d38 --version` and
+check the 6AAE9DB8 stamp; an earlier same-version trial linked at 14:31:44 UTC
+was replaced before handoff.
+
+The requested next flight is the same landed cockpit scene: let the scene
+settle, press Insert once, remain in the game for at least 30 seconds, then
+report completion. A flicker is not required; this capture investigates object
+identity and upload provenance. Station/on-foot and movable/parked controls
+remain required before any static-exclusion behavior can be justified.

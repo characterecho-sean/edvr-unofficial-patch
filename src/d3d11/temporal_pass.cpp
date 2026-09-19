@@ -3713,6 +3713,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             uiDepthHoloMotion(eye,scene,holoSrvs);
             uiSeparationInputs(src,scene,eye,sd.Width,sd.Height,separatedCandidate);
             meshMotionViews(ctx,scene,meshSrvs);
+            // The classifier's selected frame has its own matched records,
+            // coverage, depth and colour; preserve the first-trigger eye dump.
+            meshMotionStageClassification(ctx,scene,g_rowsFrame,src);
             staticOwnerAvailable = staticSurfaceViews(ctx, scene, staticOwnerSrvs);
             for (unsigned i = 0; i < 2; ++i) staticOwnerHeld[i].Attach(staticOwnerSrvs[i]);
             scene->Release();

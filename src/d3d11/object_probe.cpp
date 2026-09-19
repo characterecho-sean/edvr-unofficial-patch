@@ -25,6 +25,8 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
+#include "object_classification_probe.h"
+#include "mesh_motion.h"
 #include "eye_tonemap_snapshot.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
@@ -2964,6 +2966,17 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     Log::get().note("object probe: solar snapshots: %u draws, %u with draw-time b0/b1, %u with bounded geometry/layout; VS/PS retained for surface, corona and arcs. Constants throughout run; geometry first three watched frames. No solar rendering changes.",solarDraws,solarConstants,solarGeometry);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\drawstate_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
     const bool eyeMeshOk=g_eyeMeshSnapshot.write(ctx,path);
+    // Always emit a report, including a run with no nominated sources or no
+    // matching temporal stage. Silence must not mean successful association.
+    objectClassificationProbe.finish();
+    const bool classificationOk=objectClassificationProbe.write(ctx,dir.c_str(),g_ledgerStamp);
+    const auto classification=objectClassificationProbe.summary();
+    Log::get().note("object classification: eye run %ls provenance report %s (classification_%ls.json/.bin); sealed %u, mesh/scene frame %u/%u, %u draws, %u resources, %u writes, %u snapshots, %u stacks; unobserved %u, unmatched %u, write/stack overflow %u/%u, foreign writes %llu. Missing data and limits are explicit in the report; no static filtering enabled.",
+                    g_ledgerStamp,classificationOk?"written":"WRITE FAILED",g_ledgerStamp,classification.sealed?1u:0u,
+                    classification.selectedFrame,classification.sceneFrame,classification.draws,classification.resources,
+                    classification.writes,classification.snapshots,classification.stackSamples,classification.unobservedSources,
+                    classification.unmatchedWrites,classification.writeOverflow,classification.stackOverflow,
+                    static_cast<unsigned long long>(classification.foreignWrites));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
                     "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
@@ -3008,6 +3021,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
     g_ledgerOn = false;
     ledgerRelease();
+    objectClassificationProbe.reset();
 }
 
 void poll(ID3D11DeviceContext* ctx) {
@@ -3405,6 +3419,8 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     g_ledgerSkipped = 0;
     ledgerRelease();
     g_ledgerOn = true;
+    meshMotionArmClassification();
+    Log::get().note("object classification: armed with eye run %ls; discover accepted mesh sources, then capture one complete later eye and its upload provenance. No rendering changes.",g_ledgerStamp);
     // The eye run is an explicit diagnostic capture. Pair its ledger with
     // the full draw census so offscreen effects and surviving billboard
     // particles have their PS/resources recorded without another keypress.
@@ -3421,6 +3437,7 @@ void objectProbeLedgerMark(int k) {
 }
 
 void objectProbeShutdown() {
+    objectClassificationProbe.reset();
     stopWorker();
     releaseRing();
     releasePool();

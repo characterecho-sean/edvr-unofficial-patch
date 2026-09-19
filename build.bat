@@ -1241,6 +1241,20 @@ if errorlevel 1 ( echo [edvr] ERROR: resolve bind test build failed & exit /b 1 
 "%OBJ%\resolvebind\resolve_bind_test.exe" || exit /b 1
 exit /b 0
 
+:rig_object_classification
+echo [edvr] === object classification provenance regression ===
+if not exist "%OBJ%\classification" mkdir "%OBJ%\classification"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\classification\\" /Fe"%OBJ%\classification\object_classification_test.exe" ^
+    "tools\object_classification_test\object_classification_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: object classification test build failed & exit /b 1 )
+"%OBJ%\classification\object_classification_test.exe" "%OBJ%\classification" || exit /b 1
+python "tools\object_classification.py" --self-test || exit /b 1
+python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" --verify-fixture || exit /b 1
+exit /b 0
+
 :rig_eye_draw_snapshot
 echo [edvr] === eye draw snapshot regression ===
 if not exist "%OBJ%\drawsnapshot" mkdir "%OBJ%\drawsnapshot"

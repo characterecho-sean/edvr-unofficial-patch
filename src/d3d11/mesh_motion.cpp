@@ -1,5 +1,6 @@
 #include "mesh_motion.h"
 #include "mesh_motion_shader.h"
+#include "object_classification_probe.h"
 #include "vscreen.h"
 #include "binding_shadow.h"
 #include "depth_probe.h"
@@ -613,6 +614,8 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     const bool coverageSample=(++draws&63u)==0;bool timed=false,timedComparison=false;
     if(coverageSample){if(comparison.measurement){timed=comparisonCoverageGpu.begin(ctx);timedComparison=timed;if(timed)++comparison.metrics.coverageGpuSubmitted;}else timed=drawGpu.begin(ctx);}
     if(!uploadSettings(ctx,data)){if(timed){if(timedComparison)comparisonCoverageGpu.end(ctx);else drawGpu.end(ctx);}return;}
+    if(objectClassificationProbe.active())
+        objectClassificationProbe.noteDraw(ctx,frames,eye,now.count,n,pb.Get(),ids.Get(),UINT(at),data.key,hash);
     if(!e.cleared){float zero[4]{};ctx->ClearRenderTargetView(e.rtv.Get(),zero);e.cleared=true;}
     ID3D11RenderTargetView* rt[8]{};Ptr<ID3D11DepthStencilView> originalDepth;ctx->OMGetRenderTargets(8,rt,&originalDepth);
     Ptr<ID3D11PixelShader> ps;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->PSGetShader(&ps,classes,&nc);
@@ -655,7 +658,9 @@ void meshMotionFrameBoundary(ID3D11DeviceContext* ctx){
     if(ctx){drawGpu.poll(ctx);matchGpu.poll(ctx);captureGpu.poll(ctx);if(comparisonActive()){comparisonCopyGpu.poll(ctx);comparisonCoverageGpu.poll(ctx);comparisonFlushGpu.poll(ctx);}}
     processComparisonBoundary(ctx);
     ++frameStamp;
-    if(++frames%1800==0){const auto& d=drawGpu.totals;const auto& m=matchGpu.totals;
+    ++frames;
+    if(objectClassificationProbe.active())objectClassificationProbe.setFrame(frames);
+    if(frames%1800==0){const auto& d=drawGpu.totals;const auto& m=matchGpu.totals;
         Log::get().note("mesh motion GPU: %u coverage reissues/%u frames; sampled coverage %.3f us (%u samples), batched match %.3f us/eye (%u samples); no waits/readbacks.",draws,frames,d.samples?d.ms*1000/d.samples:0,d.samples,m.samples?m.ms*1000/m.samples:0,m.samples);
         const auto& c=captureGpu.totals;Log::get().note("mesh motion capture: %u instances in %u batches; %.3f us/batch (%u samples, %u skipped).",capturedInstances,captureBatches,c.samples?c.ms*1000/c.samples:0,c.samples,c.skipped);
         Log::get().note("mesh motion capture sampling: GPU mean is the selected first flush in one of 16 frames, not a population average; at most one capture query is admitted per sampler in a selected frame.");
@@ -721,8 +726,20 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
     watched.clear();
 }
 void meshMotionShutdown(){
+    objectClassificationProbe.finish();
     using namespace mesh_motion_detail;pending.clear();depthMetadata.clear();descriptorShadows.clear();for(auto& e:eyes)e=Eye{};capture.Reset();match.Reset();for(auto& p:coverageShaders)p.Reset();settings.Reset();instances.Reset();instanceView.Reset();captureInputs.Reset();captureInputView.Reset();depthState.Reset();blendState.Reset();
     failed=noted=capped=diagnosticWindowHadComparison=false;drawGpu={};matchGpu={};captureGpu={};comparisonCopyGpu={};comparisonCoverageGpu={};comparisonFlushGpu={};comparison={};frames=draws=captureBatches=capturedInstances=0;frameStamp=0;normalCaptureGpuFrame=~uint64_t(0);diagnostics={};admissionClockCalls=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
+}
+void meshMotionArmClassification(){objectClassificationProbe.arm(mesh_motion_detail::frames);}
+void meshMotionStageClassification(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,unsigned sceneFrame,ID3D11Texture2D* colour){
+    using namespace mesh_motion_detail;
+    if(!objectClassificationProbe.active() || !ctx || !scene || !enabled || failed)return;
+    for(unsigned eye=0;eye<2;++eye){auto& e=eyes[eye];
+        if(e.scene.Get()==scene && e.cleared && e.matched){auto& h=e.history[e.write];
+            objectClassificationProbe.stage(ctx,frames,eye,sceneFrame,scene,e.coverage.Get(),h.buffer.Get(),h.count,colour);
+            return;
+        }
+    }
 }
 void meshMotionStageDump(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,unsigned sceneFrame){
     using namespace mesh_motion_detail;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;
