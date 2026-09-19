@@ -2,17 +2,17 @@
 
 ## Status
 
-- State: the bounded KinematicRig ownership diagnostic is built, fully tested
-  and installed to Frontier. It extends the existing writer hook to retain
-  owner/parent-physics evidence; the next flight must establish real joins.
-  Planet attachment and immobility remain unproven; filtering stays off.
+- State: flight 132513 captured healthy writer evidence but zero KinematicRig
+  links: all 44,055 ownership attempts failed an opcode guard. The actual EXE
+  proves a wrong call-displacement byte in the diagnostic. The corrected guard
+  passes live-EXE validation and is built/installed to Frontier. Filtering off.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-56-g88c1ce2-dirty installed (6AAEDE0A); static surfaces off,
+- Build: v0.17.0-57-ge700d4f-dirty installed (6AAEE376); static surfaces off,
   DLSS and manual Insert capture retained. Payloads, INI and verification
-  receipts: build/kinematic-owner-frontier-88c1ce2; both INIs unchanged.
+  receipts: build/kinematic-opcode-frontier-e700d4f; both INIs unchanged.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -25,10 +25,10 @@
   Its sampled 0.390 us/check implies about 4.06 ms/frame of added gate work,
   excluding lock acquisition/unsupported families. Earlier low-cost benchmark
   windows include menu/loading and must not be called comparable settlements.
-- Capture: 120047, mesh/scene 15059: 122 draws, 29 visible records/125,462
-  exact-depth pixels. Of these, 24 settlement-facing records cover 482 pixels.
-  All 44,596 writer calls completed with no faults or caps. The 512-record
-  admission limit prevents treating this subset as a complete scene census.
+- Capture: 132513, mesh/scene 11058: 119 draws, 36 visible records/191,708
+  exact-depth pixels. All 44,319 writer calls completed without faults or caps,
+  but ownership validation rejected all eligible calls before unwinding. The
+  512-record admission limit still prevents a complete scene census.
 - Earlier static opportunity: 501/512 records have exact unchanged raw pose,
   across 115/124 whole draws; all 501 also have changed scene origin. Of these,
   446 leave no motion-coverage pixels. These are conditional opportunities, not
@@ -55,11 +55,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: one Insert capture in the same landed settlement view with DLSS on;
-  leave the game running 30 seconds before exit. No flicker or Pause needed.
-  Check owner links, parent types and missing-ancestor traces. Context+0xA8 is
-  LOD-selection data; +8/+0x78 are residue; a resolved dependency or parent
-  presence does not establish a static object.
+- Next: one Insert in the same landed settlement view with DLSS on; leave the
+  game running 30 seconds before exit. No Pause or flicker needed. Confirm
+  ownership links or explicit ancestor failures on the corrected build before
+  interpreting mobility. Context+0xA8 is LOD data; +8/+0x78 are residue; a
+  resolved dependency or parent presence does not establish a static object.
 
 ## Journal
 
@@ -5099,3 +5099,64 @@ These addresses are RVAs in the executable with SHA256
 e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988 (preferred
 image base 0x140000000). Names and repeated values alone do not prove safe
 motion exclusion or safe suppression of Elite's draws.
+
+### 2026-09-19 -- ownership flight 132513 and opcode-guard correction
+
+Flight edvr_gfx_20260919_132329.log matches installed
+v0.17.0-56-g88c1ce2-dirty, stamp 6AAEDE0A. Insert armed at 13:25:13.761 and the
+sealed classification completed at 13:25:17.769, well before shutdown. The
+capture is archived with source/destination SHA256 verification in
+build/kinematic-owner-flight-132513; the archive dry-run created no directory.
+The reader validates the capture. Mesh/scene frame 11058 has 119 draws and 36
+exact-depth visible records covering 191,708 pixels. All 36 have CPU upload
+matches; writer joins have 11 unique, 20 multiple and five absent candidates.
+These candidate counts are not proven object identities or static counts.
+
+All 44,319 writer calls were stored and completed, with no read, unwind,
+completion or budget failures. Ownership attempted 44,055 eligible calls; 264
+unsupported writers were explicit. Every attempted ownership call was rejected
+by the opcode guard, leaving zero links, snapshots or ancestor traces. No
+parent-physics or alternate-dispatch conclusion is possible from this run.
+
+Ruled out: the installed executable matching the diagnostic's ownership opcode
+expectation, because the exact hashed EXE has E8 2E 67 00 00 at RVA 431B20D,
+where the guard expected E8 2E F7 00 00. The actual call targets 4321940 and
+returns to 431B212, agreeing with the prior disassembly. The virtual call at
+431B21C is FF 50 50 and returns to 431B21F, as expected. Validation requires
+both sites, so the single incorrect displacement byte disables both paths. This
+is an instrument defect, not evidence of a changed game or static objects.
+
+The correction must preserve strict instruction validation, include a
+regression derived from the real executable window with rejected wrong-target
+variants, and exercise the production guard against the verified EXE before
+another flight. Rendering behavior and static filtering remain unchanged.
+
+The corrected guard decodes the signed E8 displacement and requires the proved
+target RVA 4321940, together with the unchanged exact FF 50 50 virtual call.
+Its regression uses the independently captured 40-byte executable window; wrong
+target, neighboring call placement and wrong virtual slot are rejected. A
+refusal-path fixture confirms that writer records still complete when ownership
+validation refuses the image.
+
+The isolated C++/ASM rig in build/kinematic-opcode-preflight passed 12,534
+checks. Its optional executable argument maps the game with
+SEC_IMAGE_NO_EXECUTE and invokes the same production validation as the
+installed hook. Against the live EXE, rehashed to the exact SHA256 above, it
+passed 12,541 checks. This covers the PE identity, lookup prologue, all seven
+writer/management callsites and both ownership guards; it neither executes game
+code nor proves a live object association.
+
+The full absolute build passed all 68 pooled jobs, three quiet checks and the
+251-key config contract, including actual installer-resource verification.
+Frontier installation and verify-only passed with both settings files
+unchanged. Installed version: v0.17.0-57-ge700d4f-dirty; graphics stamp
+6AAEE376, runtime stamp 6AAEE379. The payloads, source patch, fixtures,
+preflight evidence, build log, install receipts and hash manifest are archived
+under build/kinematic-opcode-frontier-e700d4f. Graphics SHA256:
+f3efee257b2ec50878802d206cf08af53cb3229c53ea44026328eb937bb9586f. The next
+flight must match this literal version even after the fix is committed.
+
+Next capture: same landed settlement view, DLSS on, Insert once, then wait 30
+seconds before exit. No Pause or flicker reproduction is necessary. This
+corrects the instrument only; ownership and mobility still require live
+evidence.

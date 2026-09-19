@@ -44,6 +44,18 @@ void makeRecord(uint8_t* record,const std::array<uint32_t,16>& k,const std::vect
 }
 std::vector<uint8_t> readFile(const std::wstring& p){FILE* f=nullptr;check(_wfopen_s(&f,p.c_str(),L"rb")==0&&f,"open generated file");fseek(f,0,SEEK_END);long n=ftell(f);check(n>=0,"generated file size");rewind(f);std::vector<uint8_t> out(static_cast<size_t>(n));check(fread(out.data(),1,out.size(),f)==out.size(),"read generated file");check(fclose(f)==0,"close generated file");return out;}
 std::wstring joined(const wchar_t* dir,const wchar_t* file){std::wstring p=dir;if(!p.empty()&&p.back()!=L'\\'&&p.back()!=L'/')p+=L'\\';p+=file;return p;}
+void realExecutableOpcodeTest(const wchar_t* path){
+    HANDLE file=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    check(file!=INVALID_HANDLE_VALUE,"open exact Elite executable for opcode validation");
+    HANDLE mapping=CreateFileMappingW(file,nullptr,PAGE_READONLY|SEC_IMAGE_NO_EXECUTE,0,0,nullptr);
+    check(mapping!=nullptr,"map exact Elite executable as image");
+    const void* image=MapViewOfFile(mapping,FILE_MAP_READ,0,0,0);check(image!=nullptr,"view exact Elite executable image");
+    edvr::ObjectRecordWriterProbe probe;
+    check(probe.executableOpcodesMatchAtBaseForTest(reinterpret_cast<uintptr_t>(image)),"exact Elite executable passes all writer and ownership opcode guards");
+    check(UnmapViewOfFile(image)!=FALSE,"unmap exact Elite executable image");
+    check(CloseHandle(mapping)!=FALSE,"close exact Elite executable mapping");
+    check(CloseHandle(file)!=FALSE,"close exact Elite executable");
+}
 
 extern "C" void sourceOwnerUnwindStub(uintptr_t owner);
 extern "C" void sourceOwnerUnwindResume();
@@ -124,6 +136,18 @@ struct OwnerGraph {
 
 void recordWriterTests(){
     check(edvr::objectRecordWriterHookSelfTest()==0,"record-writer relay publishes original before gate and forwards exactly once");
+    constexpr std::array<uint8_t,40> ownershipWindow={
+        0x00,0x00,0x01,0x48,0x85,0xC9,0x75,0x0C,0x48,0x8D,0x4C,0x24,0x20,0xE8,0x2E,0x67,
+        0x00,0x00,0xEB,0x31,0x48,0x8B,0x01,0x48,0x8D,0x54,0x24,0x20,0xFF,0x50,0x50,0xEB,
+        0x24,0x48,0x8D,0x8B,0x00,0x03,0x00,0x00};
+    check(edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431B200,ownershipWindow.data(),ownershipWindow.size()),"exact Elite ownership dispatch window passes production guard");
+    int32_t directDisplacement=0;memcpy(&directDisplacement,ownershipWindow.data()+14,sizeof(directDisplacement));
+    check(int64_t(0x431B212)+directDisplacement==int64_t(0x4321940),"exact direct rel32 independently resolves to 4321940");
+    auto wrongTarget=ownershipWindow;wrongTarget[15]=0xF7;
+    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431B200,wrongTarget.data(),wrongTarget.size()),"stale direct rel32 target is rejected");
+    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431B1FF,ownershipWindow.data(),ownershipWindow.size()),"neighboring ownership instruction placement is rejected");
+    auto wrongVirtual=ownershipWindow;wrongVirtual[30]=0x58;
+    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431B200,wrongVirtual.data(),wrongVirtual.size()),"wrong virtual slot is rejected");
     edvr::ObjectRecordWriterProbe p;p.armForTest(77);
     std::vector<uint8_t> owner(0x300),keyBytes(0x60),stack(0x400),object(0x1A0),entry(0x38);
     for(size_t i=0;i<keyBytes.size();++i)keyBytes[i]=uint8_t(0x20+i);
@@ -171,6 +195,17 @@ void recordWriterTests(){
     kinematicOwnerVirtualUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
     check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431B21F,"virtual ancestor return identifies slot-50 branch");
+
+    edvr::ObjectRecordWriterProbe refusedProbe;refusedProbe.armForTest(91);refusedProbe.setOwnershipOpcodesValidForTest(false);writerUnwindProbe=&refusedProbe;
+    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431B212;
+    kinematicOwnerDirectUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
+    refusedProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
+    const auto refusedSummary=refusedProbe.summary();const auto refusedOwnership=refusedProbe.ownershipSummary();
+    check(refusedSummary.observed==1&&refusedSummary.stored==1&&refusedSummary.completed==1&&
+          refusedOwnership.attempted==1&&refusedOwnership.opcodeMismatch==1&&refusedOwnership.linked==0&&
+          refusedProbe.recordsForTest().back().ownershipStatus=="opcode_mismatch",
+          "ownership opcode refusal preserves completed writer diagnostics");
+    refusedProbe.finish();writerUnwindProbe=&ownershipProbe;
 
     std::vector<uint8_t> ownedInlineFrame(0x400);uintptr_t ownedRbp=reinterpret_cast<uintptr_t>(ownedInlineFrame.data()+0x80);
     fillRecord(reinterpret_cast<uint8_t*>(ownedRbp+0x1C0),0x61);put64(ownedInlineFrame,0x18,reinterpret_cast<uintptr_t>(rig.context.data()));
@@ -319,4 +354,4 @@ void fixture(Device& x,const wchar_t* directory){
 }
 }
 
-int wmain(int argc,wchar_t** argv){if(argc!=2){std::puts("usage: object_classification_test.exe <output-directory>");return 2;}Device device;recordWriterTests();stateTests(device);sourceOwnerTests(device,argv[1]);fixture(device,argv[1]);std::printf("object classification: %u checks passed; fixtures written\n",checks);return 0;}
+int wmain(int argc,wchar_t** argv){if(argc<2||argc>3){std::puts("usage: object_classification_test.exe <output-directory> [exact-Elite-executable]");return 2;}if(argc==3)realExecutableOpcodeTest(argv[2]);Device device;recordWriterTests();stateTests(device);sourceOwnerTests(device,argv[1]);fixture(device,argv[1]);std::printf("object classification: %u checks passed; fixtures written\n",checks);return 0;}

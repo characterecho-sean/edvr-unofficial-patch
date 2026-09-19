@@ -100,6 +100,10 @@ public:
                         uintptr_t key,const CONTEXT& captured) noexcept;
     void completeLookup(Pending pending,uintptr_t entry) noexcept;
 #ifdef EDVR_RECORD_WRITER_TEST
+    static bool ownershipOpcodeWindowMatchesForTest(
+        uint64_t windowRva,const uint8_t* bytes,size_t byteCount) noexcept;
+    bool executableOpcodesMatchAtBaseForTest(uintptr_t imageBase) noexcept;
+    void setOwnershipOpcodesValidForTest(bool valid) noexcept;
     // Exercise the production unwind from a real fixture frame while applying
     // an explicitly nominated game-return recipe.  Test executable RVAs are
     // intentionally not accepted by beginLookup itself.
@@ -149,6 +153,7 @@ private:
 
     void clearLocked();
     bool validateExecutableLocked() noexcept;
+    bool validateExecutableBaseLocked(uintptr_t imageBase) noexcept;
     struct OwnershipCandidate {
         const char* status="ancestor_missing";
         uint64_t returnRva=0;uint32_t depth=0;CONTEXT context{};

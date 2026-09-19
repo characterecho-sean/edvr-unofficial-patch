@@ -12,6 +12,9 @@ constexpr uint64_t kManagementReturn=0x434E316u;
 constexpr uint64_t kWriterReturns[]={0x369CE91u,0x42B42EFu,0x42B4ED6u,0x43130AAu,0x434D149u};
 constexpr uint64_t kOwnershipDirectReturn=0x431B212u;
 constexpr uint64_t kOwnershipVirtualReturn=0x431B21Fu;
+constexpr uint64_t kOwnershipDirectTarget=0x4321940u;
+constexpr uint64_t kOwnershipOpcodeWindowRva=0x431B200u;
+constexpr size_t kOwnershipOpcodeWindowBytes=40;
 struct Callsite {uintptr_t call;uint8_t bytes[5];};
 constexpr Callsite kCalls[]={
     {0x369CE8Cu,{0xE8,0x0F,0xA1,0xFF,0xFF}},
@@ -24,8 +27,19 @@ constexpr Callsite kCalls[]={
     {0x42B4843u,{0xE8,0xE8,0xF8,0xFF,0xFF}},
 };
 constexpr uint8_t kLookupPrologue[16]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x56,0x48,0x83};
-constexpr uint8_t kOwnershipDirectCall[5]={0xE8,0x2E,0xF7,0x00,0x00};
 constexpr uint8_t kOwnershipVirtualCall[3]={0xFF,0x50,0x50};
+bool ownershipOpcodeWindowMatches(uint64_t windowRva,const uint8_t* bytes,size_t byteCount) noexcept {
+    constexpr uint64_t directCallRva=kOwnershipDirectReturn-5;
+    constexpr uint64_t virtualCallRva=kOwnershipVirtualReturn-sizeof(kOwnershipVirtualCall);
+    if(!bytes||windowRva>directCallRva||windowRva>virtualCallRva)return false;
+    const uint64_t directOffset=directCallRva-windowRva,virtualOffset=virtualCallRva-windowRva;
+    if(directOffset>byteCount||byteCount-directOffset<5||
+       virtualOffset>byteCount||byteCount-virtualOffset<sizeof(kOwnershipVirtualCall))return false;
+    if(bytes[directOffset]!=0xE8||std::memcmp(bytes+virtualOffset,kOwnershipVirtualCall,sizeof(kOwnershipVirtualCall))!=0)return false;
+    int32_t displacement=0;std::memcpy(&displacement,bytes+directOffset+1,sizeof(displacement));
+    const int64_t target=int64_t(windowRva+directOffset+5)+int64_t(displacement);
+    return target==int64_t(kOwnershipDirectTarget);
+}
 bool subtract(uintptr_t value,uintptr_t amount,uintptr_t& out) noexcept {
     if(value<amount)return false;out=value-amount;return true;
 }
@@ -52,8 +66,8 @@ void ObjectRecordWriterProbe::clearLocked() {
     hookStatus_=HookStatus::NotRun;active_.store(false,std::memory_order_release);
 }
 
-bool ObjectRecordWriterProbe::validateExecutableLocked() noexcept {
-    imageBase_=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+bool ObjectRecordWriterProbe::validateExecutableBaseLocked(uintptr_t imageBase) noexcept {
+    imageBase_=imageBase;
     IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS nt{};
     if(!guardedRead(imageBase_,&dos,sizeof(dos))||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<=0||
        !guardedRead(imageBase_+uintptr_t(dos.e_lfanew),&nt,sizeof(nt))||nt.Signature!=IMAGE_NT_SIGNATURE||
@@ -71,12 +85,14 @@ bool ObjectRecordWriterProbe::validateExecutableLocked() noexcept {
             hookStatus_=HookStatus::OpcodeMismatch;return false;
         }
     }
-    uint8_t direct[sizeof(kOwnershipDirectCall)]{},virtualCall[sizeof(kOwnershipVirtualCall)]{};
-    ownershipOpcodesValid_=guardedRead(imageBase_+kOwnershipDirectReturn-sizeof(direct),direct,sizeof(direct))&&
-        std::memcmp(direct,kOwnershipDirectCall,sizeof(direct))==0&&
-        guardedRead(imageBase_+kOwnershipVirtualReturn-sizeof(virtualCall),virtualCall,sizeof(virtualCall))&&
-        std::memcmp(virtualCall,kOwnershipVirtualCall,sizeof(virtualCall))==0;
+    std::array<uint8_t,kOwnershipOpcodeWindowBytes> ownershipWindow{};
+    ownershipOpcodesValid_=guardedRead(imageBase_+kOwnershipOpcodeWindowRva,ownershipWindow.data(),ownershipWindow.size())&&
+        ownershipOpcodeWindowMatches(kOwnershipOpcodeWindowRva,ownershipWindow.data(),ownershipWindow.size());
     return true;
+}
+
+bool ObjectRecordWriterProbe::validateExecutableLocked() noexcept {
+    return validateExecutableBaseLocked(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)));
 }
 
 bool ObjectRecordWriterProbe::arm(uint32_t meshFrame) noexcept {
@@ -179,6 +195,17 @@ ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginLookup(
     catch(...) {++summary_.recordOverflow;recountRetainedBytesLocked();return {};}
 }
 #ifdef EDVR_RECORD_WRITER_TEST
+bool ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(
+    uint64_t windowRva,const uint8_t* bytes,size_t byteCount) noexcept {
+    return ownershipOpcodeWindowMatches(windowRva,bytes,byteCount);
+}
+bool ObjectRecordWriterProbe::executableOpcodesMatchAtBaseForTest(uintptr_t imageBase) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);clearLocked();
+    return validateExecutableBaseLocked(imageBase)&&ownershipOpcodesValid_;
+}
+void ObjectRecordWriterProbe::setOwnershipOpcodesValidForTest(bool valid) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);ownershipOpcodesValid_=valid;
+}
 ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginLookupUnwindRvaForTest(
     uintptr_t fixtureReturn,uint64_t gameReturnRva,uintptr_t dictionary,
     uintptr_t key,const CONTEXT& captured) noexcept {
