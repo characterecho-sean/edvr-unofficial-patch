@@ -5537,3 +5537,39 @@ What each outcome proves:
 
 Environment note: landed cockpit, Quest 3 / VirtualDesktopXR / RTX 5090,
 DLSS K -- same rig as flight 134252 so record/flags behaviour is comparable.
+
+### 2026-09-19 -- next-flight spec addition: job-stats CPU attribution probe
+
+Same settlement flight as the predicate capture above; read-only.
+
+Goal: attribute the settlement CPU frame (landed ~10.0-10.8 ms p50 vs station
+~4.75 ms) across Elite's own job families, so the optimization target is
+chosen from measurement: render-data jobs vs physics vs animation vs
+submission. Current evidence gives call counts (22.7-23.8k native calls
+landed) but no in-engine CPU split.
+
+Mechanism: every Kinematic job descriptor in .rdata carries a
+GetCategoryStats thunk (0x1400039F0 pattern) beside its run thunk and inline
+name (job map: analysis\kinematic_jobs.py; tables 0x145591C98, 0x145591DC0
+and the unnamed runs 0x1442DFAF0/0x1442DFB00/0x1442DFB50/0x1442DFBA0). The
+probe calls each known job table's GetCategoryStats once per frame for one
+60-frame window landed at the settlement and one at a station, and logs the
+per-family accumulators (layout unknown a priori: dump the returned struct
+raw, 64 bytes, and diff across frames -- deltas are the per-frame family
+times). Fallback if the thunk returns null or static zeroes: bracket the run
+thunks themselves (0x1442DF520 -> 0x4321940, 0x1442DFAF0 -> 0x4320340,
+0x1442DF530/40/50 physics) with QPC timestamps, count calls, report per-job
+ms/frame.
+
+What each outcome decides:
+- UpdateRenderDataJob dominant -> the per-record pipeline mapped in waves
+  4-12 (LOD metric + traversal + FUN_14430EFE0) is the settlement CPU tax;
+  feed the kinematic-motion-injection phase 1 and the static-skip hook.
+- Physics jobs dominant -> kinematic work is innocent; redirect to the
+  physics object census before any render-side build.
+- Neither dominant (submission thread) -> the 23k-call D3D11 volume is the
+  tax; the lever becomes draw suppression of the 76% zero-sample draws, not
+  the kinematic pipeline.
+
+Cost guard: one indirect call per job table per frame (5-9 calls), one raw
+64-byte copy each; no game-state writes; off by default behind a config key.
