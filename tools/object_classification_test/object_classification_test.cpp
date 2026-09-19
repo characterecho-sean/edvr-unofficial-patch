@@ -49,6 +49,11 @@ extern "C" void sourceOwnerUnwindStub(uintptr_t owner);
 extern "C" void sourceOwnerUnwindResume();
 extern "C" void recordWriterUnwindStub(uintptr_t dictionary,uintptr_t key,const void* record);
 extern "C" void recordWriterUnwindResume();
+extern "C" void kinematicOwnerDirectUnwindStub(uintptr_t outer,uintptr_t dictionary,uintptr_t key,const void* record);
+extern "C" void kinematicOwnerVirtualUnwindStub(uintptr_t outer,uintptr_t dictionary,uintptr_t key,const void* record);
+extern "C" void recordWriterOwnershipUnwindResume();
+extern "C" void kinematicOwnerDirectUnwindResume();
+extern "C" void kinematicOwnerVirtualUnwindResume();
 uintptr_t unwindOwner=0;uint32_t unwindFrames=0;std::string unwindStatus;
 extern "C" __declspec(noinline) void sourceOwnerTestCapture(){
     edvr::ObjectSourceOwnerProbe::recoverOwnerAt(reinterpret_cast<uintptr_t>(&sourceOwnerUnwindResume),unwindOwner,unwindFrames,unwindStatus);
@@ -56,11 +61,45 @@ extern "C" __declspec(noinline) void sourceOwnerTestCapture(){
 
 edvr::ObjectRecordWriterProbe* writerUnwindProbe=nullptr;
 edvr::ObjectRecordWriterProbe::Pending writerUnwindPending{};
+uintptr_t writerOwnershipFixtureReturn=0;uint64_t writerOwnershipGameReturn=0;
 extern "C" __declspec(noinline) void recordWriterUnwindCapture(uintptr_t dictionary,uintptr_t key){
     CONTEXT context{};RtlCaptureContext(&context);
     writerUnwindPending=writerUnwindProbe->beginLookupUnwindRvaForTest(
         reinterpret_cast<uintptr_t>(&recordWriterUnwindResume),0x369CE91,dictionary,key,context);
 }
+extern "C" __declspec(noinline) void recordWriterOwnershipUnwindCapture(uintptr_t dictionary,uintptr_t key){
+    CONTEXT context{};RtlCaptureContext(&context);
+    writerUnwindPending=writerUnwindProbe->beginLookupOwnershipUnwindRvaForTest(
+        reinterpret_cast<uintptr_t>(&recordWriterOwnershipUnwindResume),0x43130AA,
+        writerOwnershipFixtureReturn,writerOwnershipGameReturn,dictionary,key,context);
+}
+
+struct KinematicFixture {
+    std::vector<uint8_t> outer=std::vector<uint8_t>(0x460),collection=std::vector<uint8_t>(0x700);
+    std::vector<uint8_t> context=std::vector<uint8_t>(0xC0),records=std::vector<uint8_t>(0x2F0);
+    std::vector<uint8_t> gameObject=std::vector<uint8_t>(0x80),descriptor=std::vector<uint8_t>(0x80);
+    std::vector<uint8_t> provider=std::vector<uint8_t>(0x80),parent=std::vector<uint8_t>(0x80);
+    uintptr_t registry=0;
+    explicit KinematicFixture(uint32_t parentToken=UINT32_MAX,bool parentPresent=true){
+        const uintptr_t module=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        registry=reinterpret_cast<uintptr_t>(collection.data()+0x80);
+        put64(outer,0,module+0x1000);put64(gameObject,0,module+0x1010);put64(descriptor,0,module+0x1020);
+        put64(provider,0,module+0x1030);put64(parent,0,module+0x1040);
+        put64(outer,0x20,reinterpret_cast<uintptr_t>(gameObject.data()));
+        put64(outer,0x50,reinterpret_cast<uintptr_t>(descriptor.data()));
+        put64(outer,0x180,reinterpret_cast<uintptr_t>(provider.data()));
+        put32(outer,0x1B8,parentToken);put64(outer,0x1C0,parentPresent?reinterpret_cast<uintptr_t>(parent.data()):0);
+        put64(outer,0x348,reinterpret_cast<uintptr_t>(collection.data()));
+        put64(collection,0x280,reinterpret_cast<uintptr_t>(records.data()));put64(collection,0x298,1);
+        put64(collection,0x2E0,registry);put64(context,0x30,registry);put64(context,0xB0,0xB0B0B0B0ull);
+        put64(records,0x290,reinterpret_cast<uintptr_t>(context.data()));
+    }
+    uintptr_t directOwner() const{return reinterpret_cast<uintptr_t>(collection.data()+0x300);}
+    uintptr_t directDictionary() const{return directOwner()+0x260;}
+    uintptr_t directKey() const{return reinterpret_cast<uintptr_t>(records.data()+0x250);}
+    uintptr_t inlineOwner() const{return registry+0x78;}
+    uintptr_t inlineDictionary() const{return inlineOwner()+0x260;}
+};
 
 struct OwnerGraph {
     std::vector<uint8_t> nested=std::vector<uint8_t>(0x1A8),wrapper=std::vector<uint8_t>(0x148),strideOwner=std::vector<uint8_t>(0x18),group=std::vector<uint8_t>(0x150),leaf=std::vector<uint8_t>(0xD8),link=std::vector<uint8_t>(0x18);
@@ -101,9 +140,9 @@ void recordWriterTests(){
     auto a=p.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(stack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     p.completeLookup(a,reinterpret_cast<uintptr_t>(entry.data()));
     check(p.recordsForTest().back().writer=="direct_369ce91"&&p.recordsForTest().back().record.data[7]==uint8_t(1+7*3),"direct writer captures caller-stack record");
-    std::vector<uint8_t> primaryStack(0x300),builder(0x60),pose(0xB0);fillRecord(primaryStack.data()+0x30,2);c.R12=reinterpret_cast<DWORD64>(pose.data());
+    std::vector<uint8_t> primaryStack(0x300),builder(0x60),pose(0xC0);fillRecord(primaryStack.data()+0x30,2);c.R12=reinterpret_cast<DWORD64>(pose.data());
     auto b=p.beginLookupRvaForTest(0x42B42EF,reinterpret_cast<uintptr_t>(primaryStack.data()),dictionary,reinterpret_cast<uintptr_t>(builder.data()+0x40),c);p.completeLookup(b,reinterpret_cast<uintptr_t>(entry.data()));
-    check(p.recordsForTest().back().builder==reinterpret_cast<uintptr_t>(builder.data())&&p.recordsForTest().back().builderSnapshot.data.size()==0x60&&p.recordsForTest().back().objectSnapshot.data.size()==0xB0,"primary writer retains builder and outer input candidate");
+    check(p.recordsForTest().back().builder==reinterpret_cast<uintptr_t>(builder.data())&&p.recordsForTest().back().builderSnapshot.data.size()==0x60&&p.recordsForTest().back().objectSnapshot.data.size()==0xC0,"primary writer retains builder and complete context allocation");
     std::vector<uint8_t> inlineFrame(0x400);uintptr_t rbp=reinterpret_cast<uintptr_t>(inlineFrame.data()+0x80);fillRecord(reinterpret_cast<uint8_t*>(rbp+0x1C0),3);put64(inlineFrame,0x18,reinterpret_cast<uintptr_t>(pose.data()));c.Rbp=rbp;
     auto d=p.beginLookupRvaForTest(0x42B4ED6,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(d,reinterpret_cast<uintptr_t>(entry.data()));
     check(p.recordsForTest().back().object==reinterpret_cast<uintptr_t>(pose.data())&&p.recordsForTest().back().record.data[0]==3,"inline writer reads spilled outer input and RBP record");
@@ -119,7 +158,54 @@ void recordWriterTests(){
     check(p.uploadsForTest().back().cutoff==12&&p.recordsForTest().back().completionSequence>p.uploadsForTest().back().cutoff,"Map-entry cutoff excludes a writer completed during source-owner traversal");
     std::vector<uint8_t> pendingStack(0x200);fillRecord(pendingStack.data()+0x50,9);auto pending=p.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(pendingStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     p.finish();check(p.recordsForTest().back().lookupStatus=="pending"&&p.summary().completed+1==p.summary().stored,"finish preserves an explicit incomplete lookup");
-    p.armForTest(78);p.completeLookup(pending,reinterpret_cast<uintptr_t>(entry.data()));check(p.summary().completionFailures==1&&p.summary().stored==0,"stale pending completion is rejected by epoch");p.finish();writerUnwindProbe=nullptr;
+    p.armForTest(78);p.completeLookup(pending,reinterpret_cast<uintptr_t>(entry.data()));check(p.summary().completionFailures==1&&p.summary().stored==0,"stale pending completion is rejected by epoch");p.finish();
+
+    edvr::ObjectRecordWriterProbe ownershipProbe;ownershipProbe.armForTest(90);writerUnwindProbe=&ownershipProbe;
+    KinematicFixture rig;std::vector<uint8_t> ownershipRecord(0x150);fillRecord(ownershipRecord.data(),0x51);
+    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431B212;
+    kinematicOwnerDirectUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
+    check(writerUnwindPending.record!=edvr::ObjectRecordWriterProbe::kNone&&ownershipProbe.recordsForTest().back().ownershipStatus=="linked","real nested unwind restores direct ancestor RBX/RDI and links ownership");
+    ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
+    check(ownershipProbe.ownershipsForTest().back().branch=="direct_4321940"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431B212,"direct ancestor return identifies 4321940 branch");
+    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerVirtualUnwindResume);writerOwnershipGameReturn=0x431B21F;
+    kinematicOwnerVirtualUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
+    ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
+    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431B21F,"virtual ancestor return identifies slot-50 branch");
+
+    std::vector<uint8_t> ownedInlineFrame(0x400);uintptr_t ownedRbp=reinterpret_cast<uintptr_t>(ownedInlineFrame.data()+0x80);
+    fillRecord(reinterpret_cast<uint8_t*>(ownedRbp+0x1C0),0x61);put64(ownedInlineFrame,0x18,reinterpret_cast<uintptr_t>(rig.context.data()));
+    CONTEXT inlineCaller{};inlineCaller.Rbp=ownedRbp;CONTEXT ownerContext{};ownerContext.Rdi=reinterpret_cast<DWORD64>(rig.outer.data());ownerContext.Rbx=reinterpret_cast<DWORD64>(rig.collection.data());
+    auto ownedInline=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,ownerContext,3);
+    ownershipProbe.completeLookup(ownedInline,reinterpret_cast<uintptr_t>(entry.data()));const auto inlineOwnershipId=ownershipProbe.recordsForTest().back().ownershipId;
+    check(ownershipProbe.recordsForTest().back().ownershipStatus=="linked"&&ownershipProbe.ownershipsForTest()[inlineOwnershipId].contextSnapshot.data.size()==0xC0,"inline ownership proves registry join and captures context tail");
+    auto duplicate=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,ownerContext,3);
+    check(ownershipProbe.recordsForTest().back().ownershipId==inlineOwnershipId&&ownershipProbe.ownershipSummary().deduplicated==1,"identical ownership provenance deduplicates");
+    ownershipProbe.completeLookup(duplicate,reinterpret_cast<uintptr_t>(entry.data()));
+    std::vector<uint8_t> secondContext(0xC0);put64(secondContext,0x30,rig.registry);put64(ownedInlineFrame,0x18,reinterpret_cast<uintptr_t>(secondContext.data()));
+    auto distinct=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,ownerContext,3);
+    check(ownershipProbe.recordsForTest().back().ownershipId!=inlineOwnershipId,"same owner and frame keeps distinct inline contexts");ownershipProbe.completeLookup(distinct,reinterpret_cast<uintptr_t>(entry.data()));
+    put64(ownedInlineFrame,0x18,reinterpret_cast<uintptr_t>(rig.context.data()));
+    std::vector<uint8_t> provider2(0x80);put64(provider2,0,reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))+0x1050);put64(rig.outer,0x180,reinterpret_cast<uintptr_t>(provider2.data()));
+    auto metadataChanged=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,ownerContext,3);
+    check(ownershipProbe.recordsForTest().back().ownershipId!=inlineOwnershipId,"changed outer metadata cannot reuse first ownership snapshot");ownershipProbe.completeLookup(metadataChanged,reinterpret_cast<uintptr_t>(entry.data()));
+    put64(rig.outer,0x180,reinterpret_cast<uintptr_t>(rig.provider.data()));
+    put32(rig.outer,0x1B8,UINT32_MAX);put64(rig.outer,0x1C0,0);auto absent=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,ownerContext,3);
+    check(ownershipProbe.ownershipsForTest()[ownershipProbe.recordsForTest().back().ownershipId].parentStatus=="resolved_absent","resolved absent parent is explicit");ownershipProbe.completeLookup(absent,reinterpret_cast<uintptr_t>(entry.data()));
+    put32(rig.outer,0x1B8,7);put64(rig.outer,0x1C0,reinterpret_cast<uintptr_t>(rig.parent.data()));auto unresolved=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,ownerContext,3);
+    check(ownershipProbe.ownershipsForTest()[ownershipProbe.recordsForTest().back().ownershipId].parentStatus=="unresolved","non-sentinel parent token is unresolved");ownershipProbe.completeLookup(unresolved,reinterpret_cast<uintptr_t>(entry.data()));
+    put64(rig.records,0x290,0);CONTEXT directCaller{};auto nullContext=ownershipProbe.beginLookupOwnershipRvaForTest(0x43130AA,reinterpret_cast<uintptr_t>(directStack.data()),rig.directDictionary(),rig.directKey(),directCaller,0x431B212,ownerContext,2);
+    const auto& nullOwner=ownershipProbe.ownershipsForTest()[ownershipProbe.recordsForTest().back().ownershipId];check(nullOwner.context==0&&nullOwner.contextSnapshot.status=="null_pointer","direct record without optional inline context retains outer ownership");ownershipProbe.completeLookup(nullContext,reinterpret_cast<uintptr_t>(entry.data()));
+    put64(rig.records,0x290,reinterpret_cast<uintptr_t>(rig.context.data()));
+    const auto beforeFault=ownershipProbe.ownershipSummary();CONTEXT badOwner=ownerContext;badOwner.Rdi=1;
+    ownershipProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,badOwner,1);
+    put64(rig.collection,0x280,reinterpret_cast<uintptr_t>(rig.records.data()+0x10));ownershipProbe.beginLookupOwnershipRvaForTest(0x43130AA,reinterpret_cast<uintptr_t>(directStack.data()),rig.directDictionary(),rig.directKey(),directCaller,0x431B212,ownerContext,2);
+    check(ownershipProbe.ownershipSummary().tupleReadFault==beforeFault.tupleReadFault+1&&ownershipProbe.ownershipSummary().recordRangeMismatch==beforeFault.recordRangeMismatch+1,"ownership faults and direct range refusal are explicit");
+    ownershipProbe.beginLookupRvaForTest(0x434D149,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);check(ownershipProbe.recordsForTest().back().ownershipStatus=="unsupported_writer","unsupported ownership recipe preserves writer record");
+    ownershipProbe.finish();writerUnwindProbe=nullptr;
+
+    edvr::ObjectRecordWriterProbe capProbe;capProbe.armForTest(1);put64(rig.collection,0x280,reinterpret_cast<uintptr_t>(rig.records.data()));
+    for(uint32_t i=0;i<=edvr::ObjectRecordWriterProbe::kOwnershipCap;++i){capProbe.setFrame(i);capProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431B21F,ownerContext,1);}
+    check(capProbe.ownershipSummary().stored==edvr::ObjectRecordWriterProbe::kOwnershipCap&&capProbe.ownershipSummary().recordOverflow==1,"ownership record cap is explicit");capProbe.finish();
 }
 
 void sourceOwnerTests(Device& x,const wchar_t* directory){
@@ -132,8 +218,9 @@ void sourceOwnerTests(Device& x,const wchar_t* directory){
 
     edvr::ObjectClassificationProbe p;p.arm(100);edvr::objectRecordWriterProbe.armForTest(100);auto drawKey=key(0x5150);p.noteDraw(x.c.Get(),100,0,0,1,pool.Get(),ids.Get(),0,drawKey.data(),0xEB5234DB6ADB491Dull);
     p.setFrame(101);D3D11_MAPPED_SUBRESOURCE m{};hr(x.c->Map(pool.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&m),"owner fixture pool map");OwnerGraph graph(pool.Get());
-    std::vector<uint8_t> writerStack(0x200),writerKey(0x20),writerEntry(0x38);memcpy(writerStack.data()+0x50,graph.source.data(),graph.source.size());CONTEXT writerContext{};
-    auto writerPending=edvr::objectRecordWriterProbe.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(writerStack.data()),reinterpret_cast<uintptr_t>(graph.nested.data()+0x260),reinterpret_cast<uintptr_t>(writerKey.data()),writerContext);
+    std::vector<uint8_t> writerStack(0x400),writerEntry(0x38);uintptr_t writerRbp=reinterpret_cast<uintptr_t>(writerStack.data()+0x80);memcpy(reinterpret_cast<void*>(writerRbp+0x1C0),graph.source.data(),graph.source.size());
+    KinematicFixture writerRig;put64(writerStack,0x18,reinterpret_cast<uintptr_t>(writerRig.context.data()));CONTEXT writerContext{};writerContext.Rbp=writerRbp;CONTEXT writerOwner{};writerOwner.Rdi=reinterpret_cast<DWORD64>(writerRig.outer.data());writerOwner.Rbx=reinterpret_cast<DWORD64>(writerRig.collection.data());
+    auto writerPending=edvr::objectRecordWriterProbe.beginLookupOwnershipRvaForTest(0x42B4ED6,0,writerRig.inlineDictionary(),writerRig.directKey(),writerContext,0x431B21F,writerOwner,3);
     edvr::objectRecordWriterProbe.completeLookup(writerPending,reinterpret_cast<uintptr_t>(writerEntry.data()));
     const uint32_t synthetic=p.noteMapSourceOwnerForTest(x.c.Get(),pool.Get(),0,D3D11_MAP_WRITE_DISCARD,reinterpret_cast<uintptr_t>(graph.nested.data()));check(synthetic==0,"one-to-one synthetic Map owner capture");
     memcpy(poolData.data(),graph.source.data(),graph.source.size());memcpy(m.pData,poolData.data(),poolData.size());x.c->Unmap(pool.Get(),0);p.noteUnmap(x.c.Get(),pool.Get(),0);
@@ -143,7 +230,7 @@ void sourceOwnerTests(Device& x,const wchar_t* directory){
     std::vector<float> scene(1,0.5f);auto sceneTex=x.texture(1,1,DXGI_FORMAT_R32_FLOAT,scene.data(),4);struct Float2{float x,y;};Float2 coverage{1,0.5f};auto coverageTex=x.texture(1,1,DXGI_FORMAT_R32G32_FLOAT,&coverage,8,D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE);
     std::vector<uint8_t> mesh(240);makeRecord(mesh.data(),drawKey,poolData,0,0,1,0);auto meshBuffer=x.buffer(UINT(mesh.size()),D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,D3D11_USAGE_DEFAULT,mesh.data(),240);uint32_t colour=0xFF406080;auto colourTex=x.texture(1,1,DXGI_FORMAT_R8G8B8A8_UNORM,&colour,4);
     p.stage(x.c.Get(),103,0,701,sceneTex.Get(),coverageTex.Get(),meshBuffer.Get(),1,colourTex.Get());check(p.sealed(),"source-owner fixture stages selected visible record");p.useExpectedExecutableIdentityForTest();check(p.write(x.c.Get(),directory,L"source_fixture"),"write source-owner fixture");
-    const auto sourceJson=readFile(joined(directory,L"classification_source_fixture.json"));const std::string sourceText(sourceJson.begin(),sourceJson.end());check(sourceText.find("edvr_object_classification_v2")!=std::string::npos&&sourceText.find("nested_owner_field_130")!=std::string::npos&&sourceText.find("direct_369ce91")!=std::string::npos,"source-owner fixture publishes ownership and exact record-writer join");
+    const auto sourceJson=readFile(joined(directory,L"classification_source_fixture.json"));const std::string sourceText(sourceJson.begin(),sourceJson.end());check(sourceText.find("edvr_object_classification_v2")!=std::string::npos&&sourceText.find("nested_owner_field_130")!=std::string::npos&&sourceText.find("inline_42b4ed6")!=std::string::npos&&sourceText.find("\"ownerships\":[{")!=std::string::npos&&sourceText.find("\"ownership_status\":\"linked\"")!=std::string::npos,"source-owner fixture publishes kinematic ownership and exact record-writer join");
 
     edvr::ObjectSourceOwnerProbe bad;OwnerGraph wrong(reinterpret_cast<ID3D11Resource*>(uintptr_t(0x1234)));
     bad.captureSynthetic(0,0,1,1,0,pool.Get(),672,reinterpret_cast<uintptr_t>(wrong.nested.data()));check(bad.attempts().back().status=="resource_mismatch","wrong wrapped native resource rejected");

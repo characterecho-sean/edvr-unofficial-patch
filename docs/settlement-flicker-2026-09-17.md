@@ -2,17 +2,17 @@
 
 ## Status
 
-- State: offline tracing closed the pose-context constructor and its owning
-  KinematicRig path, including the named parent-root-physics dependency. Its
-  resolved pointer and type were not captured. Attachment to the planet and
-  immobility remain unproven; context+0x08/+0x78 are allocator residue.
+- State: the bounded KinematicRig ownership diagnostic is built, fully tested
+  and installed to Frontier. It extends the existing writer hook to retain
+  owner/parent-physics evidence; the next flight must establish real joins.
+  Planet attachment and immobility remain unproven; filtering stays off.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-53-gaadac6a-dirty installed (6AAECC1E); static surfaces off,
+- Build: v0.17.0-56-g88c1ce2-dirty installed (6AAEDE0A); static surfaces off,
   DLSS and manual Insert capture retained. Payloads, INI and verification
-  receipts: build/record-writer-frontier-aadac6a; both INIs unchanged.
+  receipts: build/kinematic-owner-frontier-88c1ce2; both INIs unchanged.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -55,11 +55,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: a bounded ownership capture must join KinematicRig -> collection ->
-  record/context and retain game-object, provider and parent-physics types.
-  Context+0xA8 is a render-selector result, not a proven parent. Neither the
-  dependency's resolved sentinel nor parent presence is a static flag. The
-  unchanged diagnostic cannot supply these bytes; filtering stays off.
+- Next: one Insert capture in the same landed settlement view with DLSS on;
+  leave the game running 30 seconds before exit. No flicker or Pause needed.
+  Check owner links, parent types and missing-ancestor traces. Context+0xA8 is
+  LOD-selection data; +8/+0x78 are residue; a resolved dependency or parent
+  presence does not establish a static object.
 
 ## Journal
 
@@ -4982,3 +4982,120 @@ were hash checked and instruction boundaries were verified after xref scans.
 The shared parent-token reference scan exceeded its bounded cap and was not
 broadened. This is documentation-only work; no C++ build or Frontier
 installation was needed, and settings remain unchanged.
+
+### 2026-09-19 -- bounded KinematicRig ownership capture
+
+Hypothesis: the verified record-writer call stack can recover the KinematicRig
+owner and connect its parent-physics interface to the already captured visible
+record candidates. The discriminating evidence is an exact ancestor return
+address, restored outer/collection registers, matching collection and registry
+pointers, and a recipe-specific record/context join. The parent interface type
+and retained bytes can then support offline mobility analysis; a resolved
+dependency, null parent or repeated address is not a static classification.
+
+The existing lookup hook already captures a Windows CONTEXT in a normally
+unwindable observer. Continuing that unwind to 431B212 (the direct 4321940
+return) or 431B21F (virtual +0x50 return) recovers RDI=outer and
+RBX=[outer+0x348]=collection owner without a second game-code patch. These are
+the dispatch returns before the common 431B245 path considered above. The
+no-render cleanup branch does not pass either return; its absence from
+writer-driven evidence must not be reported as observed scene coverage.
+
+An additional direct-path distinction was verified before implementation:
+431B18C/431B193 stores collection owner+0x300 into descriptor+0x10; 4312040
+retains that descriptor in R15, and 43125D8 passes its +0x10 field to 4312E00.
+The direct lookup's dictionary is that pointer+0x260. Thus direct_43130aa's
+writer owner equals collection owner+0x300, whereas the proved inline/primary
+writer owner equals registry+0x78. Applying the inline equation to the direct
+path would reject valid direct records. Both paths still require the actual
+ancestor tuple and matching pointer reads.
+
+The latest saved capture has 44,596 writer calls across eight threads and four
+mesh frames, so worker-thread stacks are explicitly in scope. A missing known
+ancestor must retain a bounded sample of module-relative return addresses and
+report why the unwind ended. This distinguishes an unsupported dispatch path
+from an instrument that never ran without spending a separate flight merely to
+discover the missing caller.
+
+The extension uses version 2 of the optional record-writer section, retaining
+legacy readers' version-1 captures through the updated analysis tool. It adds
+at most 8,192 ownership snapshots and 32 distinct missing-ancestor traces of 32
+frames each, under the existing shared 64-MiB writer byte budget. Ownership
+records retain the 0x460-byte outer prefix, 0x2F0-byte collection prefix, full
+0xC0-byte context, applicable direct-record tail, and guarded 0x80-byte
+prefixes of associated interfaces/data. Those opaque prefixes do not establish
+the allocations' complete layout. Candidate vtable addresses are related to the
+verified executable where possible; no game virtual functions are invoked.
+
+The ownership cache includes the context/direct-record identity as well as the
+writer owner, frame, thread, dispatch branch and owner metadata. Distinct
+meshes sharing a registry cannot collapse into one owner-context association.
+Each event still validates its actual ancestor and tuple. A reused snapshot
+records its first event; reuse does not establish persistent object identity or
+unchanged physics state. Parent resolution and absent, unreadable or
+unsupported evidence remain explicit in both JSON and the completion log.
+
+Direct records may legitimately have no inline context: 4321A3D/4321A41 loads
+and tests record+0x290, and 4321A44 skips the inline call when null, after the
+direct 4312040 work has already run. A validated direct record can therefore
+retain its outer association with an explicit null context; a non-null context
+must still match the registry. Inline/primary records require their actual pose
+context. The new ancestor opcode checks have a separate refusal counter and
+leave the pre-existing writer evidence available.
+
+Before the full build, the focused C++/ASM rig passed 12,528 checks. Actual
+nested frames clobber RBX/RDI in the writer and verify Windows unwinding
+restores the ancestor values on both direct and virtual dispatch routes.
+Fixtures cover shared-owner/different-context separation, changed metadata,
+parent states, direct null contexts, read/range refusals, unsupported writers
+and the ownership cap. The reader's self-tests and the newly emitted C++ source
+fixture pass, including writer -> virtual_50 owner -> available parent and
+exact packed-byte accounting. Archived 085213, 100737 and 120047 captures
+remain readable. These establish diagnostic behavior in fixtures; the next
+flight must establish which owner paths occur in the real scene.
+
+The full build passed all 68 pooled jobs, three quiet checks and the 251-key
+config contract, including verification of the actual installer resources. The
+first two-job run terminated installer and Python-gate subprocesses with
+4294967295 and no compiler diagnostic; its cause is unproven. The one-job rerun
+passed without omitting any gate. Both logs are retained under build/ as
+kinematic-owner-build-r1-failed.log and kinematic-owner-build.log.
+
+Frontier now has v0.17.0-56-g88c1ce2-dirty, graphics stamp 6AAEDE0A and runtime
+stamp 6AAEDE0D. The sanctioned installer dry-run, install and verify-only all
+passed. Both settings files are byte-identical before and after; static
+surfaces remain off, with DLSS and manual Insert retained. The executable hash
+is unchanged. Payloads, fixtures, source patch, receipts, build log and
+manifest are archived in build/kinematic-owner-frontier-88c1ce2. The graphics
+SHA256 is e96df10234c1b6c06ed2ab98ec62b4aaf8442a692b05d1bc563a570180c4f4ba;
+runtime SHA256 is
+d3615fc9dd44bf1979023a39590a8e98359b509f2a6d4427a0d985838b0bbd93. Use that
+literal installed version when checking the next flight, since the subsequent
+source commit will advance HEAD without changing these payloads.
+
+Next flight: the same landed settlement view with DLSS on; press Insert once,
+then leave the game running at least 30 seconds before exit. No flicker or
+Pause is required. This is an ownership diagnostic, not an optimization or a
+performance comparison during the capture window.
+
+Sean is also having an independent agent disassemble settlement-related code.
+The highest-value handoff is semantic evidence for mobility and visibility:
+
+- KinematicRig constructor RVA 430B2A0 and render/update 431AFE0: trace
+  collection owner +0x348, associated game-object interface +0x20 and
+  descriptor +0x50.
+- Resolve parent-physics +0x1C0 implementing classes. At 432A840 the diagnostic
+  names the parent root physics model and calls virtual +0x90; 431B7D4 uses
+  virtual +0x170. Find exact writes and consumers proving fixed, moving,
+  kinematic or parent-relative semantics, including independent child motion.
+  The +0x1B8 token becoming FFFFFFFF only proves dependency resolution.
+- Trace the alternate 4320340 caller/job dispatch and compare it with the known
+  431AFE0 -> 4321940 route. Records have stride 0x2F0 and context at +0x290.
+- Trace visibility decisions and mask producers before dispatch around
+  431B11D-431B221, including whether they encode frustum, occlusion, pass/layer
+  eligibility or simply render readiness. Prove both producer and consumer.
+
+These addresses are RVAs in the executable with SHA256
+e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988 (preferred
+image base 0x140000000). Names and repeated values alone do not prove safe
+motion exclusion or safe suppression of Elite's draws.

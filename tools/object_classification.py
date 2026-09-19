@@ -37,9 +37,22 @@ SOURCE_OWNER_LIMITS = {
 }
 SOURCE_OWNER_CALLSITE_RVA = 0x4C821B3
 RECORD_WRITER_LIMITS = {"records": 65536, "bytes": 64 * 1024 * 1024}
+RECORD_OWNERSHIP_LIMITS = {
+    "ownership_records": 8192, "ownership_unwind_depth": 32,
+    "ownership_traces": 32, "ownership_trace_frames": 32,
+    "ownership_outer_bytes": 0x460, "ownership_collection_bytes": 0x2F0,
+    "ownership_context_bytes": 0xC0, "ownership_record_tail_bytes": 0x18,
+    "ownership_opaque_prefix_bytes": 0x80,
+}
 RECORD_WRITERS = {
     "direct_369ce91", "primary_42b42ef", "inline_42b4ed6",
     "direct_43130aa", "helper_434d149",
+}
+RECORD_OWNERSHIP_STATUSES = {
+    "linked", "unsupported_writer", "ancestor_missing", "unwind_failed",
+    "opcode_mismatch", "tuple_read_fault", "tuple_mismatch", "registry_read_fault",
+    "registry_mismatch", "record_range_mismatch", "record_read_fault",
+    "cache_conflict", "record_overflow",
 }
 KIND_NAMES = {1: "map", 3: "update", 4: "copy_resource", 5: "copy_region", 6: "unknown"}
 ROLE_NAMES = {"t33_pool", "ia_ids", "provenance_source", "copy_source", "staged_input"}
@@ -606,12 +619,13 @@ def _validate_cpu_blob_contents(binary, attempts, cpu_blobs):
                 raise CaptureError("source_owner.attempts[%u].descriptors[%u] metadata disagrees with raw descriptor" % (ai, di))
 
 
-def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok):
+def _validate_record_writers(root, executable, resources, attempts, packed_bytes, binary_ok):
     diagnostic = root.get("record_writers")
     if diagnostic is None:
-        return None, [], [], packed_bytes
+        return None, [], [], [], [], packed_bytes
     diagnostic = _dict(diagnostic, "record_writers")
-    if _u32(diagnostic.get("version"), "record_writers.version") != 1:
+    version = _u32(diagnostic.get("version"), "record_writers.version")
+    if version not in {1, 2}:
         raise CaptureError("record_writers.version is unsupported")
     status = _string(diagnostic.get("status"), "record_writers.status", 32)
     hook_status = _string(diagnostic.get("hook_status"), "record_writers.hook_status", 32)
@@ -627,7 +641,10 @@ def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok)
         raise CaptureError("record_writers status and hook_status disagree")
 
     limits = _dict(diagnostic.get("limits"), "record_writers.limits")
-    for field, maximum in RECORD_WRITER_LIMITS.items():
+    limit_bounds = dict(RECORD_WRITER_LIMITS)
+    if version == 2:
+        limit_bounds.update(RECORD_OWNERSHIP_LIMITS)
+    for field, maximum in limit_bounds.items():
         value = _uint(limits.get(field), "record_writers.limits.%s" % field)
         if not value or value > maximum:
             raise CaptureError("record_writers.limits.%s exceeds reader safety bound" % field)
@@ -638,6 +655,26 @@ def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok)
                       "completion_failures")
     for field in summary_fields:
         _uint(summary.get(field), "record_writers.summary.%s" % field)
+
+    ownership_status = None
+    ownership_summary = None
+    if version == 2:
+        ownership_status = _string(diagnostic.get("ownership_status"),
+                                   "record_writers.ownership_status", 32)
+        if ownership_status not in {"not_run", "unavailable", "captured", "partial"}:
+            raise CaptureError("record_writers.ownership_status is unknown")
+        ownership_summary = _dict(diagnostic.get("ownership_summary"),
+                                  "record_writers.ownership_summary")
+        ownership_summary_fields = (
+            "attempted", "linked", "stored", "deduplicated", "unsupported_writer",
+            "opcode_mismatch", "ancestor_missing", "unwind_failed", "tuple_read_fault", "tuple_mismatch",
+            "registry_read_fault", "registry_mismatch", "record_range_mismatch",
+            "record_read_fault", "cache_conflicts", "record_overflow",
+            "byte_budget_declines", "read_faults", "ancestor_traces",
+            "ancestor_trace_overflow",
+        )
+        for field in ownership_summary_fields:
+            _uint(ownership_summary.get(field), "record_writers.ownership_summary.%s" % field)
 
     uploads = _list(diagnostic.get("uploads"), "record_writers.uploads", len(attempts))
     upload_attempts = set()
@@ -699,6 +736,16 @@ def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok)
             if completion_sequence <= sequence or completion_sequence in event_sequences:
                 raise CaptureError("record_writers completion event must uniquely follow its begin event")
             event_sequences.add(completion_sequence)
+        if version == 2:
+            ownership_link = record.get("ownership_id")
+            if ownership_link is not None:
+                ownership_link = _u32(ownership_link, label + ".ownership_id")
+            record_ownership_status = _string(record.get("ownership_status"),
+                                              label + ".ownership_status", 32)
+            if record_ownership_status not in RECORD_OWNERSHIP_STATUSES:
+                raise CaptureError("%s.ownership_status is unknown" % label)
+            if (record_ownership_status == "linked") != (ownership_link is not None):
+                raise CaptureError("%s ownership link and status disagree" % label)
 
         applicable = {"record": True, "key_snapshot": True,
                       "builder_snapshot": writer == "primary_42b42ef",
@@ -706,7 +753,8 @@ def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok)
                       "entry_snapshot": lookup_status != "pending"}
         sizes = {"record": POOL_STRIDE, "key_snapshot": 32,
                  "builder_snapshot": 96,
-                 "object_snapshot": 416 if writer == "helper_434d149" else 176,
+                 "object_snapshot": (416 if writer == "helper_434d149" else
+                                     192 if version == 2 else 176),
                  "entry_snapshot": 0x38}
         snapshots = {}
         for field in ("record", "key_snapshot", "builder_snapshot", "object_snapshot", "entry_snapshot"):
@@ -761,6 +809,266 @@ def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok)
             if lookup_status == "pending" and (int(addresses["entry"], 16) or entry_status != "not_applicable"):
                 raise CaptureError("%s pending lookup carries completion evidence" % label)
 
+    ownerships = []
+    ancestor_traces = []
+    if version == 2:
+        ownerships = _list(diagnostic.get("ownerships"), "record_writers.ownerships",
+                           limits["ownership_records"])
+        snapshot_statuses = {"available", "not_applicable", "null_pointer", "read_fault",
+                             "byte_budget", "bin_open_failed", "bin_write_failed"}
+        snapshot_fields = (
+            "outer_snapshot", "collection_snapshot", "context_snapshot", "record_tail_snapshot",
+            "game_object_prefix", "descriptor_prefix", "provider_prefix", "parent_prefix",
+        )
+        snapshot_sizes = {
+            "outer_snapshot": limits["ownership_outer_bytes"],
+            "collection_snapshot": limits["ownership_collection_bytes"],
+            "context_snapshot": limits["ownership_context_bytes"],
+            "record_tail_snapshot": limits["ownership_record_tail_bytes"],
+            "game_object_prefix": limits["ownership_opaque_prefix_bytes"],
+            "descriptor_prefix": limits["ownership_opaque_prefix_bytes"],
+            "provider_prefix": limits["ownership_opaque_prefix_bytes"],
+            "parent_prefix": limits["ownership_opaque_prefix_bytes"],
+        }
+        branch_rvas = {"direct_4321940": 0x431B212, "virtual_50": 0x431B21F}
+        relation_writers = {
+            "inline_registry_plus_78": {"inline_42b4ed6", "primary_42b42ef"},
+            "direct_collection_plus_300": {"direct_43130aa"},
+        }
+        for oi, ownership in enumerate(ownerships):
+            label = "record_writers.ownerships[%u]" % oi
+            ownership = _dict(ownership, label)
+            _sequential_id(ownership, oi, "record_writers.ownerships")
+            first_sequence = _uint(ownership.get("first_sequence"), label + ".first_sequence")
+            if not first_sequence:
+                raise CaptureError("%s.first_sequence must be nonzero" % label)
+            _u32(ownership.get("observed_frame"), label + ".observed_frame")
+            _u32(ownership.get("thread_id"), label + ".thread_id")
+            item_status = _string(ownership.get("status"), label + ".status", 32)
+            if item_status not in {"captured", "partial"}:
+                raise CaptureError("%s.status is unknown" % label)
+            branch = _string(ownership.get("branch"), label + ".branch", 32)
+            if branch not in branch_rvas:
+                raise CaptureError("%s.branch is unknown" % label)
+            ancestor_rva = _address(ownership.get("ancestor_return_rva"),
+                                    label + ".ancestor_return_rva")
+            if int(ancestor_rva, 16) != branch_rvas[branch]:
+                raise CaptureError("%s branch and ancestor return RVA disagree" % label)
+            unwind_depth = _u32(ownership.get("unwind_depth"), label + ".unwind_depth")
+            if not unwind_depth or unwind_depth > limits["ownership_unwind_depth"]:
+                raise CaptureError("%s.unwind_depth exceeds capture limit" % label)
+            relation = _string(ownership.get("writer_relation"), label + ".writer_relation", 40)
+            if relation not in relation_writers:
+                raise CaptureError("%s.writer_relation is unknown" % label)
+            addresses = {}
+            for field in ("writer_owner", "outer", "collection_owner", "registry", "context",
+                          "collection_record", "game_object", "descriptor", "provider", "parent"):
+                addresses[field] = _address(ownership.get(field), label + "." + field)
+            record_index = ownership.get("record_index")
+            if record_index is not None:
+                record_index = _u32(record_index, label + ".record_index")
+            record_status = _string(ownership.get("record_status"), label + ".record_status", 32)
+            if record_status not in {"not_applicable", "validated"}:
+                raise CaptureError("%s.record_status is unknown" % label)
+            direct = relation == "direct_collection_plus_300"
+            if direct != (record_status == "validated") or direct != (record_index is not None):
+                raise CaptureError("%s direct-record metadata is inconsistent" % label)
+            if direct != bool(int(addresses["collection_record"], 16)):
+                raise CaptureError("%s collection-record address is inconsistent" % label)
+            parent_token = _u32(ownership.get("parent_token"), label + ".parent_token")
+            parent_status = _string(ownership.get("parent_status"), label + ".parent_status", 32)
+            if parent_status not in {"unresolved", "resolved_absent", "available", "read_fault"}:
+                raise CaptureError("%s.parent_status is unknown" % label)
+
+            identity_fields = ("outer_identity", "game_object_identity", "descriptor_identity",
+                               "provider_identity", "parent_identity")
+            identity_addresses = ("outer", "game_object", "descriptor", "provider", "parent")
+            identities = {}
+            for field, address_field in zip(identity_fields, identity_addresses):
+                identity_label = label + "." + field
+                identity = _dict(ownership.get(field), identity_label)
+                identity_address = _address(identity.get("address"), identity_label + ".address")
+                if int(identity_address, 16) != int(addresses[address_field], 16):
+                    raise CaptureError("%s address disagrees with ownership tuple" % identity_label)
+                vtable = _address(identity.get("vtable"), identity_label + ".vtable")
+                identity_status = _string(identity.get("status"), identity_label + ".status", 32)
+                vtable_rva = identity.get("vtable_rva")
+                if vtable_rva is not None:
+                    vtable_rva = _address(vtable_rva, identity_label + ".vtable_rva")
+                pointer = int(identity_address, 16)
+                vtable_value = int(vtable, 16)
+                if identity_status == "null_pointer":
+                    valid_identity = pointer == 0 and vtable_value == 0 and vtable_rva is None
+                elif identity_status == "read_fault":
+                    valid_identity = pointer != 0 and vtable_value == 0 and vtable_rva is None
+                elif identity_status == "module_relative":
+                    valid_identity = (pointer != 0 and vtable_value != 0 and vtable_rva is not None and
+                                      int(vtable_rva, 16) < executable["image_size"])
+                elif identity_status == "outside_image":
+                    valid_identity = pointer != 0 and vtable_value != 0 and vtable_rva is None
+                else:
+                    raise CaptureError("%s.status is unknown" % identity_label)
+                if not valid_identity:
+                    raise CaptureError("%s fields disagree with status" % identity_label)
+                identities[field] = identity
+
+            snapshots = {}
+            for field in snapshot_fields:
+                snap_label = label + "." + field
+                snapshot = _dict(ownership.get(field), snap_label)
+                snap_status = _string(snapshot.get("status"), snap_label + ".status", 32)
+                if snap_status not in snapshot_statuses:
+                    raise CaptureError("%s.status is unknown" % snap_label)
+                offset = _uint(snapshot.get("offset"), snap_label + ".offset")
+                size = _uint(snapshot.get("bytes"), snap_label + ".bytes")
+                if offset != cursor:
+                    raise CaptureError("%s does not begin at the packed ownership cursor" % snap_label)
+                if field == "record_tail_snapshot":
+                    applicable_snapshot = direct
+                    pointer = int(addresses["collection_record"], 16)
+                else:
+                    address_field = {"outer_snapshot": "outer", "collection_snapshot": "collection_owner",
+                                     "context_snapshot": "context", "game_object_prefix": "game_object",
+                                     "descriptor_prefix": "descriptor", "provider_prefix": "provider",
+                                     "parent_prefix": "parent"}[field]
+                    pointer = int(addresses[address_field], 16)
+                    applicable_snapshot = (field != "parent_prefix" or parent_status == "available")
+                if not applicable_snapshot:
+                    if snap_status != "not_applicable" or size:
+                        raise CaptureError("%s non-applicable snapshot is inconsistent" % snap_label)
+                elif snap_status == "available":
+                    if not pointer or size != snapshot_sizes[field]:
+                        raise CaptureError("%s available span is inconsistent" % snap_label)
+                    cursor += size
+                elif size:
+                    raise CaptureError("%s unavailable snapshot declares bytes" % snap_label)
+                elif snap_status == "null_pointer" and pointer:
+                    raise CaptureError("%s null snapshot has a nonzero pointer" % snap_label)
+                elif snap_status not in {"null_pointer", "not_applicable"} and not pointer:
+                    raise CaptureError("%s unavailable snapshot has a null pointer" % snap_label)
+                snapshots[field] = snapshot
+            parent_pointer = int(addresses["parent"], 16)
+            parent_valid = (
+                (parent_status == "unresolved" and parent_token != UINT32_MAX and
+                 snapshots["parent_prefix"]["status"] == "not_applicable") or
+                (parent_status == "resolved_absent" and parent_token == UINT32_MAX and
+                 parent_pointer == 0 and snapshots["parent_prefix"]["status"] == "not_applicable") or
+                (parent_status == "available" and parent_token == UINT32_MAX and
+                 parent_pointer != 0 and snapshots["parent_prefix"]["status"] == "available") or
+                (parent_status == "read_fault" and
+                 snapshots["parent_prefix"]["status"] == "not_applicable"))
+            if not parent_valid:
+                raise CaptureError("%s parent resolution fields are inconsistent" % label)
+            required_fields = ["outer_snapshot", "collection_snapshot"]
+            if int(addresses["context"], 16):
+                required_fields.append("context_snapshot")
+            elif snapshots["context_snapshot"]["status"] != "null_pointer":
+                raise CaptureError("%s null context lacks a null-pointer snapshot" % label)
+            if direct:
+                required_fields.append("record_tail_snapshot")
+            for field, address_field in (("game_object_prefix", "game_object"),
+                                         ("descriptor_prefix", "descriptor"),
+                                         ("provider_prefix", "provider"),
+                                         ("parent_prefix", "parent")):
+                if int(addresses[address_field], 16) and (field != "parent_prefix" or
+                                                          parent_status == "available"):
+                    required_fields.append(field)
+            complete = (all(snapshots[field]["status"] == "available" for field in required_fields) and
+                        all(identities[field]["status"] != "read_fault" for field in identity_fields) and
+                        parent_status != "read_fault")
+            if (item_status == "captured") != complete:
+                raise CaptureError("%s status disagrees with retained evidence" % label)
+
+        ancestor_traces = _list(diagnostic.get("ancestor_traces"),
+                                "record_writers.ancestor_traces", limits["ownership_traces"])
+        trace_writer_records = set()
+        for ti, trace in enumerate(ancestor_traces):
+            label = "record_writers.ancestor_traces[%u]" % ti
+            trace = _dict(trace, label)
+            trace_status = _string(trace.get("status"), label + ".status", 32)
+            if trace_status not in {"ancestor_missing", "unwind_failed"}:
+                raise CaptureError("%s.status is unknown" % label)
+            writer_record = _u32(trace.get("writer_record"), label + ".writer_record")
+            if writer_record >= len(records) or writer_record in trace_writer_records:
+                raise CaptureError("%s writer record is missing or duplicated" % label)
+            trace_writer_records.add(writer_record)
+            return_rva = _address(trace.get("return_rva"), label + ".return_rva")
+            if (int(return_rva, 16) != int(records[writer_record]["return_rva"], 16) or
+                    records[writer_record]["ownership_status"] != trace_status):
+                raise CaptureError("%s disagrees with its writer refusal" % label)
+            frames = _list(trace.get("frames"), label + ".frames",
+                           limits["ownership_trace_frames"])
+            for fi, frame in enumerate(frames):
+                frame_label = label + ".frames[%u]" % fi
+                frame = _dict(frame, frame_label)
+                address = _address(frame.get("address"), frame_label + ".address")
+                frame_status = _string(frame.get("status"), frame_label + ".status", 32)
+                module_rva = frame.get("module_rva")
+                if module_rva is not None:
+                    module_rva = _address(module_rva, frame_label + ".module_rva")
+                if frame_status == "module_relative":
+                    valid_frame = (int(address, 16) != 0 and module_rva is not None and
+                                   int(module_rva, 16) < executable["image_size"])
+                elif frame_status == "outside_image":
+                    valid_frame = int(address, 16) != 0 and module_rva is None
+                else:
+                    raise CaptureError("%s.status is unknown" % frame_label)
+                if not valid_frame:
+                    raise CaptureError("%s fields disagree with status" % frame_label)
+
+        linked_records = [record for record in records if record["ownership_status"] == "linked"]
+        for ri, record in enumerate(records):
+            ownership_id = record["ownership_id"]
+            if ownership_id is not None and ownership_id >= len(ownerships):
+                raise CaptureError("record_writers.records[%u].ownership_id is missing" % ri)
+            if record["ownership_status"] == "linked":
+                ownership = ownerships[ownership_id]
+                if record["writer"] not in relation_writers[ownership["writer_relation"]]:
+                    raise CaptureError("record writer and ownership relation disagree")
+                if (int(record["owner"], 16) != int(ownership["writer_owner"], 16) or
+                        record["thread_id"] != ownership["thread_id"] or
+                        record["observed_frame"] != ownership["observed_frame"]):
+                    raise CaptureError("record writer and ownership tuple disagree")
+        for oi, ownership in enumerate(ownerships):
+            sequences = [record["sequence"] for record in linked_records
+                         if record["ownership_id"] == oi]
+            if not sequences or ownership["first_sequence"] != min(sequences):
+                raise CaptureError("ownership first sequence disagrees with linked writers")
+
+        terminal_fields = ("opcode_mismatch", "ancestor_missing", "unwind_failed", "tuple_read_fault", "tuple_mismatch",
+                           "registry_read_fault", "registry_mismatch", "record_range_mismatch",
+                           "record_read_fault", "cache_conflicts", "record_overflow")
+        status_counter = Counter(record["ownership_status"] for record in records)
+        if (ownership_summary["stored"] != len(ownerships) or
+                ownership_summary["linked"] != len(linked_records) or
+                ownership_summary["deduplicated"] != ownership_summary["linked"] - len(ownerships) or
+                ownership_summary["unsupported_writer"] != status_counter["unsupported_writer"] or
+                ownership_summary["ancestor_traces"] != len(ancestor_traces)):
+            raise CaptureError("record ownership summary counts disagree with arrays")
+        for field in terminal_fields:
+            status_name = "cache_conflict" if field == "cache_conflicts" else field
+            if ownership_summary[field] != status_counter[status_name]:
+                raise CaptureError("record ownership terminal counter disagrees with records")
+        if ownership_summary["attempted"] != ownership_summary["linked"] + sum(
+                ownership_summary[field] for field in terminal_fields):
+            raise CaptureError("record ownership attempted count is inconsistent")
+        complete_ownership = (ownership_summary["attempted"] > 0 and
+                              ownership_summary["linked"] == ownership_summary["attempted"] and
+                              not ownership_summary["record_overflow"] and
+                              not ownership_summary["ancestor_trace_overflow"] and
+                              not ownership_summary["byte_budget_declines"] and
+                              not ownership_summary["read_faults"] and
+                              all(item["status"] == "captured" for item in ownerships))
+        expected_ownership_status = (
+            "not_run" if hook_status == "not_run" else
+            "unavailable" if hook_status in {"identity_mismatch", "opcode_mismatch", "install_failed"} else
+            "captured" if complete_ownership else "partial")
+        if ownership_status != expected_ownership_status:
+            raise CaptureError("record_writers ownership status disagrees with counters")
+        if ownership_status in {"not_run", "unavailable"} and (ownerships or ancestor_traces or
+                                                               ownership_summary["attempted"]):
+            raise CaptureError("inactive ownership diagnostic retains evidence")
+
     if (summary["stored"] != len(records) or summary["observed"] < len(records) or
             summary["completed"] > summary["stored"]):
         raise CaptureError("record_writers summary counts disagree with records")
@@ -782,7 +1090,77 @@ def _validate_record_writers(root, resources, attempts, packed_bytes, binary_ok)
         raise CaptureError("record_writers top status disagrees with counters")
     if status in {"not_run", "unavailable"} and (records or summary["stored"] or summary["retained_bytes"]):
         raise CaptureError("unavailable record_writers capture retains records")
-    return diagnostic, uploads, records, cursor
+    return diagnostic, uploads, records, ownerships, ancestor_traces, cursor
+
+
+def _validate_record_ownership_contents(binary, diagnostic, records, ownerships):
+    if not diagnostic or diagnostic["version"] != 2:
+        return
+
+    def payload(ownership, field):
+        snapshot = ownership[field]
+        if snapshot["status"] != "available":
+            return None
+        begin = snapshot["offset"]
+        return memoryview(binary)[begin:begin + snapshot["bytes"]]
+
+    linked_by_ownership = defaultdict(list)
+    for record in records:
+        if record["ownership_status"] == "linked":
+            linked_by_ownership[record["ownership_id"]].append(record)
+
+    for oi, ownership in enumerate(ownerships):
+        label = "record_writers.ownerships[%u]" % oi
+        writer_owner = int(ownership["writer_owner"], 16)
+        collection_owner = int(ownership["collection_owner"], 16)
+        registry = int(ownership["registry"], 16)
+        context = int(ownership["context"], 16)
+        collection_record = int(ownership["collection_record"], 16)
+        relation = ownership["writer_relation"]
+        linked = linked_by_ownership[oi]
+        if relation == "inline_registry_plus_78":
+            if writer_owner < 0x78 or registry != writer_owner - 0x78:
+                raise CaptureError("%s inline writer/registry relation is invalid" % label)
+            if any(int(record["object"], 16) != context for record in linked):
+                raise CaptureError("%s inline context disagrees with writer object" % label)
+        else:
+            if writer_owner < 0x300 or collection_owner != writer_owner - 0x300:
+                raise CaptureError("%s direct writer/collection relation is invalid" % label)
+            if any(int(record["key"], 16) < 0x250 or
+                   int(record["key"], 16) - 0x250 != collection_record for record in linked):
+                raise CaptureError("%s direct record disagrees with writer key" % label)
+
+        outer_bytes = payload(ownership, "outer_snapshot")
+        if outer_bytes is not None:
+            outer_fields = {
+                "game_object": struct.unpack_from("<Q", outer_bytes, 0x20)[0],
+                "descriptor": struct.unpack_from("<Q", outer_bytes, 0x50)[0],
+                "provider": struct.unpack_from("<Q", outer_bytes, 0x180)[0],
+                "parent": struct.unpack_from("<Q", outer_bytes, 0x1C0)[0],
+                "collection_owner": struct.unpack_from("<Q", outer_bytes, 0x348)[0],
+            }
+            for field, value in outer_fields.items():
+                if value != int(ownership[field], 16):
+                    raise CaptureError("%s.%s disagrees with outer snapshot" % (label, field))
+            if struct.unpack_from("<I", outer_bytes, 0x1B8)[0] != ownership["parent_token"]:
+                raise CaptureError("%s.parent_token disagrees with outer snapshot" % label)
+
+        context_bytes = payload(ownership, "context_snapshot")
+        if context_bytes is not None and struct.unpack_from("<Q", context_bytes, 0x30)[0] != registry:
+            raise CaptureError("%s.registry disagrees with context snapshot" % label)
+
+        if relation == "direct_collection_plus_300":
+            collection_bytes = payload(ownership, "collection_snapshot")
+            if collection_bytes is not None:
+                base = struct.unpack_from("<Q", collection_bytes, 0x280)[0]
+                count = struct.unpack_from("<Q", collection_bytes, 0x298)[0]
+                if (collection_record < base or (collection_record - base) % 0x2F0 or
+                        (collection_record - base) // 0x2F0 >= count or
+                        ownership["record_index"] != (collection_record - base) // 0x2F0):
+                    raise CaptureError("%s collection record is outside the retained range" % label)
+            record_tail = payload(ownership, "record_tail_snapshot")
+            if record_tail is not None and struct.unpack_from("<Q", record_tail, 0x10)[0] != context:
+                raise CaptureError("%s context disagrees with collection record" % label)
 
 
 def _validate_snapshots(root, resources, blobs):
@@ -924,12 +1302,16 @@ def load_capture(path):
     record_writers = None
     writer_uploads = []
     writer_records = []
+    writer_ownerships = []
+    writer_ancestor_traces = []
     total_packed_bytes = packed_bytes
     if schema == SCHEMA_V2:
         source_owner, source_owner_attempts, cpu_blobs, total_packed_bytes = _validate_source_owner(
             root, executable, resources, events, summary, packed_bytes)
-        record_writers, writer_uploads, writer_records, total_packed_bytes = _validate_record_writers(
-            root, resources, source_owner_attempts, total_packed_bytes, summary["binary_ok"])
+        (record_writers, writer_uploads, writer_records, writer_ownerships,
+         writer_ancestor_traces, total_packed_bytes) = _validate_record_writers(
+            root, executable, resources, source_owner_attempts, total_packed_bytes,
+            summary["binary_ok"])
     for i, snapshot in enumerate(snapshots):
         if snapshot["foreign_epoch"] > summary["foreign_writes"]:
             raise CaptureError("snapshots[%u].foreign_epoch exceeds observed foreign writes" % i)
@@ -978,6 +1360,8 @@ def load_capture(path):
         raise CaptureError("successful capture is missing its declared binary")
     if schema == SCHEMA_V2:
         _validate_cpu_blob_contents(binary or b"", source_owner_attempts, cpu_blobs)
+        _validate_record_ownership_contents(binary or b"", record_writers,
+                                            writer_records, writer_ownerships)
     return {
         "path": path, "binary_path": binary_path, "binary": binary or b"", "root": root,
         "selection": selection, "summary": summary, "resources": resources,
@@ -986,7 +1370,8 @@ def load_capture(path):
         "source_owner": source_owner, "source_owner_attempts": source_owner_attempts,
         "cpu_blobs": cpu_blobs,
         "record_writers": record_writers, "writer_uploads": writer_uploads,
-        "writer_records": writer_records,
+        "writer_records": writer_records, "writer_ownerships": writer_ownerships,
+        "writer_ancestor_traces": writer_ancestor_traces,
     }
 
 
@@ -1074,6 +1459,9 @@ def _record_writer_candidates(capture, cpu_source, cpu_record):
             "builder_snapshot_status": record["builder_snapshot"]["status"],
             "object_snapshot_status": record["object_snapshot"]["status"],
             "entry_snapshot_status": record["entry_snapshot"]["status"],
+            "ownership_status": (record["ownership_status"] if diagnostic["version"] == 2
+                                 else "unavailable_legacy_capture"),
+            "ownership_id": (record["ownership_id"] if diagnostic["version"] == 2 else None),
         })
     result.update(candidate_count=len(candidates), candidates=candidates,
                   eligible_records=len(eligible), unreadable_eligible_records=unreadable)
@@ -1093,6 +1481,87 @@ def _record_writer_candidates(capture, cpu_source, cpu_record):
     else:
         result["status"] = "multiple_candidates"
         result["reason"] = "multiple_pre_upload_writer_payloads_match_cpu_source"
+    return result
+
+
+def _record_ownership_candidates(capture, writer_result):
+    result = {
+        "status": "unavailable", "reason": None,
+        "attribution": "candidate_ownership_provenance_only",
+        "writer_candidate_count": writer_result["candidate_count"],
+        "linked_candidate_count": 0, "ownership_count": 0,
+        "ownership_consensus": "not_applicable", "candidates": [],
+    }
+    diagnostic = capture["record_writers"]
+    if diagnostic is None or diagnostic["version"] == 1:
+        result["reason"] = "capture_has_no_kinematic_ownership_diagnostic"
+        return result
+    ownership_status = diagnostic["ownership_status"]
+    result["capture_status"] = ownership_status
+    if ownership_status in {"not_run", "unavailable"}:
+        result["reason"] = "kinematic_ownership_%s" % ownership_status
+        return result
+    if writer_result["status"] in {"unavailable", "partial"}:
+        result["status"] = writer_result["status"]
+        result["reason"] = "record_writer_candidates_are_%s" % writer_result["status"]
+        return result
+    if not writer_result["candidates"]:
+        result["status"] = "no_candidate"
+        result["reason"] = "no_record_writer_candidate"
+        return result
+
+    ownership_ids = []
+    refused = Counter()
+    for writer in writer_result["candidates"]:
+        item = {
+            "writer_record": writer["record"], "writer": writer["writer"],
+            "writer_sequence": writer["sequence"],
+            "ownership_status": writer["ownership_status"],
+            "ownership_id": writer["ownership_id"],
+        }
+        if writer["ownership_status"] == "linked":
+            ownership = capture["writer_ownerships"][writer["ownership_id"]]
+            item["ownership"] = {
+                "id": ownership["id"], "first_sequence": ownership["first_sequence"],
+                "status": ownership["status"], "branch": ownership["branch"],
+                "ancestor_return_rva": ownership["ancestor_return_rva"],
+                "writer_relation": ownership["writer_relation"],
+                "outer": ownership["outer"], "collection_owner": ownership["collection_owner"],
+                "registry": ownership["registry"], "context": ownership["context"],
+                "collection_record": ownership["collection_record"],
+                "record_index": ownership["record_index"],
+                "game_object": ownership["game_object"], "descriptor": ownership["descriptor"],
+                "provider": ownership["provider"], "parent": ownership["parent"],
+                "parent_token": ownership["parent_token"],
+                "parent_status": ownership["parent_status"],
+                "outer_identity": ownership["outer_identity"],
+                "game_object_identity": ownership["game_object_identity"],
+                "descriptor_identity": ownership["descriptor_identity"],
+                "provider_identity": ownership["provider_identity"],
+                "parent_identity": ownership["parent_identity"],
+            }
+            ownership_ids.append(writer["ownership_id"])
+        else:
+            refused[writer["ownership_status"]] += 1
+        result["candidates"].append(item)
+    unique_ids = sorted(set(ownership_ids))
+    result.update(linked_candidate_count=len(ownership_ids), ownership_count=len(unique_ids),
+                  refusal_outcomes=dict(sorted(refused.items())))
+    if unique_ids:
+        result["ownership_consensus"] = "single" if len(unique_ids) == 1 else "different"
+    incomplete = (ownership_status == "partial" or len(ownership_ids) != len(writer_result["candidates"]) or
+                  any(capture["writer_ownerships"][item]["status"] == "partial" for item in unique_ids))
+    if incomplete:
+        result["status"] = "partial"
+        result["reason"] = "kinematic_ownership_capture_or_candidate_set_is_incomplete"
+    elif len(unique_ids) == 1:
+        result["status"] = "unique_candidate"
+    elif len(unique_ids) > 1:
+        result["status"] = "multiple_candidates"
+        result["reason"] = "writer_candidates_link_to_multiple_ownership_records"
+    else:
+        result["status"] = "no_candidate"
+        result["reason"] = "writer_candidates_have_no_linked_ownership_record"
     return result
 
 
@@ -1316,6 +1785,7 @@ def analyse(capture, include_records=False):
             "CPU source addresses are capture-local provenance only; they are not stable object identities or a static classification.",
             "A CPU source is proven only by unique destination-slot coverage and exact 336-byte equality in the same retained Map generation.",
             "Writer payload equality before a Map cutoff is candidate provenance only; duplicates remain explicit and do not establish object identity or a causal generation link.",
+            "Kinematic ownership is retained ancestor/context evidence attached to writer candidates; cache reuse, pointer stability, parent presence, and sentinel values do not establish static or physics state.",
             "The report classifies captured metadata and does not infer that an object is static from absent motion.",
         ],
         "counts": {"draws": len(capture["draws"]), "mesh_records": None,
@@ -1334,6 +1804,11 @@ def analyse(capture, include_records=False):
                                if capture["record_writers"] else "unavailable"),
             "hook_status": (capture["record_writers"]["hook_status"]
                             if capture["record_writers"] else "unavailable"),
+            "visible_record_outcomes": {},
+        },
+        "kinematic_ownership": {
+            "capture_status": (capture["record_writers"].get("ownership_status", "unavailable")
+                               if capture["record_writers"] else "unavailable"),
             "visible_record_outcomes": {},
         },
     }
@@ -1499,6 +1974,7 @@ def analyse(capture, include_records=False):
                                                          if traces[label]["chain"] else "unavailable")
         cpu_source = _cpu_source_owner(capture, draw, pool_slot, pool_record, traces["pool"])
         writer_candidates = _record_writer_candidates(capture, cpu_source, pool_record)
+        ownership_candidates = _record_ownership_candidates(capture, writer_candidates)
         group_key = (tuple(draw["key16"]), word28, word320, second_word,
                      draw["pool_resource"], draw["pool_generation"],
                      draw["id_resource"], draw["id_generation"],
@@ -1511,6 +1987,7 @@ def analyse(capture, include_records=False):
                 "valid_rigid_records": 0, "history_matched_records": 0,
                 "cpu_source_owners": [],
                 "record_writer_candidates": [],
+                "kinematic_ownership_candidates": [],
                 "source_versions": {
                     "t33_pool": {"resource": draw["pool_resource"], "generation": draw["pool_generation"],
                                  "write_observed": draw["pool_write_observed"], "generation_matched": draw["pool_matched"],
@@ -1530,6 +2007,8 @@ def analyse(capture, include_records=False):
             {"record": record_index, "pixels": pixel_count, **cpu_source})
         groups[group_key]["record_writer_candidates"].append(
             {"record": record_index, "pixels": pixel_count, **writer_candidates})
+        groups[group_key]["kinematic_ownership_candidates"].append(
+            {"record": record_index, "pixels": pixel_count, **ownership_candidates})
         owners.append({
             "record": record_index, "draw": draw_id, "instance": local,
             "pixels": pixel_count, "pool_slot": pool_slot,
@@ -1539,6 +2018,7 @@ def analyse(capture, include_records=False):
             "valid_rigid": valid_rigid, "history_matched": history_matched,
             "cpu_source_owner": cpu_source,
             "record_writer_candidates": writer_candidates,
+            "kinematic_ownership_candidates": ownership_candidates,
         })
     report["groups"] = list(groups.values())
     report["counts"]["metadata_groups"] = len(report["groups"])
@@ -1546,6 +2026,8 @@ def analyse(capture, include_records=False):
         owner["cpu_source_owner"]["status"] for owner in owners).items()))
     report["record_writers"]["visible_record_outcomes"] = dict(sorted(Counter(
         owner["record_writer_candidates"]["status"] for owner in owners).items()))
+    report["kinematic_ownership"]["visible_record_outcomes"] = dict(sorted(Counter(
+        owner["kinematic_ownership_candidates"]["status"] for owner in owners).items()))
     if include_records:
         report["records"] = owners
     return report
@@ -1578,6 +2060,10 @@ def print_report(report):
         print("record writers: capture=%s hook=%s; visible record outcomes=%s" %
               (report["record_writers"]["capture_status"], report["record_writers"]["hook_status"],
                json.dumps(writer_outcomes, sort_keys=True)))
+        ownership_outcomes = report["kinematic_ownership"]["visible_record_outcomes"]
+        print("kinematic ownership candidates: capture=%s; visible record outcomes=%s" %
+              (report["kinematic_ownership"]["capture_status"],
+               json.dumps(ownership_outcomes, sort_keys=True)))
     for item in report["missing"]:
         print("missing: %s (%s)" % (item["scope"], item["reason"]))
     print("scope: exact-frame captured evidence only; no static classification is inferred")
@@ -1734,16 +2220,17 @@ def _record_writer_fixture(root, binary):
     source_blob = root["cpu_blobs"][descriptor["payload_blob"]]
     source = binary[source_blob["offset"]:source_blob["offset"] + source_blob["bytes"]]
     payloads = (source[:POOL_STRIDE], source[POOL_STRIDE:2 * POOL_STRIDE], source[:POOL_STRIDE])
-    contexts = (("0x810000", "0x820000", "0x830000"),
-                ("0x811000", "0x821000", "0x831000"),
-                ("0x810000", "0x820000", "0x830000"))
+    contexts = (("0x920078", "0x820000", "0x830000", "0x930000"),
+                ("0xa10300", "0xa40250", "0x831000", "0x0"),
+                ("0x920078", "0x820000", "0x830000", "0x930000"))
+    writers = ("inline_42b4ed6", "direct_43130aa", "inline_42b4ed6")
     chunks = [binary]
     cursor = len(binary)
     records = []
     key_bytes = bytes(range(32))
     entry_bytes = bytes(range(0x38))
-    for index, (payload, context) in enumerate(zip(payloads, contexts)):
-        owner, key, entry = context
+    for index, (payload, context, writer) in enumerate(zip(payloads, contexts, writers)):
+        owner, key, entry, object_address = context
         record_span = {"status": "available", "offset": cursor, "bytes": len(payload)}
         chunks.append(payload)
         cursor += len(payload)
@@ -1751,15 +2238,21 @@ def _record_writer_fixture(root, binary):
         chunks.append(key_bytes)
         cursor += len(key_bytes)
         builder_span = {"status": "not_applicable", "offset": cursor, "bytes": 0}
-        object_span = {"status": "not_applicable", "offset": cursor, "bytes": 0}
+        if writer == "inline_42b4ed6":
+            object_bytes = bytes([0x40]) * 176
+            object_span = {"status": "available", "offset": cursor, "bytes": len(object_bytes)}
+            chunks.append(object_bytes)
+            cursor += len(object_bytes)
+        else:
+            object_span = {"status": "not_applicable", "offset": cursor, "bytes": 0}
         entry_span = {"status": "available", "offset": cursor, "bytes": len(entry_bytes)}
         chunks.append(entry_bytes)
         cursor += len(entry_bytes)
         records.append({
-            "id": index, "sequence": index * 2 + 1, "writer": "direct_369ce91",
-            "return_rva": "0x369ce91", "thread_id": 17,
-            "observed_frame": 10 + index, "owner": owner, "key": key,
-            "builder": "0x0", "object": "0x0", "entry": entry,
+            "id": index, "sequence": index * 2 + 1, "writer": writer,
+            "return_rva": "0x" + writer.rsplit("_", 1)[1], "thread_id": 17,
+            "observed_frame": 10 if index == 2 else 10 + index, "owner": owner, "key": key,
+            "builder": "0x0", "object": object_address, "entry": entry,
             "context_status": "complete", "lookup_status": "complete",
             "completion_sequence": (index + 1) * 2, "record": record_span,
             "key_snapshot": key_span, "builder_snapshot": builder_span,
@@ -1779,6 +2272,140 @@ def _record_writer_fixture(root, binary):
                      "generation": attempt["generation"], "cutoff": 5}],
         "records": records,
     }
+    return root, b"".join(chunks)
+
+
+def _kinematic_ownership_fixture(root, binary):
+    root = copy.deepcopy(root)
+    diagnostic = root["record_writers"]
+    diagnostic["version"] = 2
+    diagnostic["limits"].update(RECORD_OWNERSHIP_LIMITS)
+    writer_start = diagnostic["records"][0]["record"]["offset"]
+    repacked = [binary[:writer_start]]
+    writer_cursor = writer_start
+    for record in diagnostic["records"]:
+        for field in ("record", "key_snapshot", "builder_snapshot", "object_snapshot", "entry_snapshot"):
+            snapshot = record[field]
+            old_payload = (binary[snapshot["offset"]:snapshot["offset"] + snapshot["bytes"]]
+                           if snapshot["status"] == "available" else b"")
+            if field == "object_snapshot" and record["writer"] in {
+                    "primary_42b42ef", "inline_42b4ed6"}:
+                old_payload += bytes(RECORD_OWNERSHIP_LIMITS["ownership_context_bytes"] - len(old_payload))
+                snapshot["bytes"] = len(old_payload)
+            snapshot["offset"] = writer_cursor
+            if old_payload:
+                repacked.append(old_payload)
+                writer_cursor += len(old_payload)
+    binary = b"".join(repacked)
+    diagnostic["summary"]["retained_bytes"] = len(binary) - writer_start
+    for index, record in enumerate(diagnostic["records"]):
+        record["ownership_status"] = "linked"
+        record["ownership_id"] = 0 if index in {0, 2} else 1
+
+    chunks = [binary]
+    cursor = len(binary)
+
+    def identity(address, status="outside_image"):
+        if address == 0:
+            return {"address": "0x0", "vtable": "0x0", "status": "null_pointer",
+                    "vtable_rva": None}
+        if status == "module_relative":
+            return {"address": "0x%x" % address, "vtable": "0x710000", "status": status,
+                    "vtable_rva": "0x1000"}
+        return {"address": "0x%x" % address, "vtable": "0x710000", "status": status,
+                "vtable_rva": None}
+
+    def span(data=None, status=None):
+        nonlocal cursor
+        if data is None:
+            return {"status": status, "offset": cursor, "bytes": 0}
+        result = {"status": "available", "offset": cursor, "bytes": len(data)}
+        chunks.append(bytes(data))
+        cursor += len(data)
+        return result
+
+    def make_ownership(index, relation, branch, outer, collection, registry, context,
+                       collection_record, game_object, descriptor, provider, parent,
+                       parent_token, record_index):
+        outer_bytes = bytearray(RECORD_OWNERSHIP_LIMITS["ownership_outer_bytes"])
+        struct.pack_into("<Q", outer_bytes, 0x20, game_object)
+        struct.pack_into("<Q", outer_bytes, 0x50, descriptor)
+        struct.pack_into("<Q", outer_bytes, 0x180, provider)
+        struct.pack_into("<I", outer_bytes, 0x1B8, parent_token)
+        struct.pack_into("<Q", outer_bytes, 0x1C0, parent)
+        struct.pack_into("<Q", outer_bytes, 0x348, collection)
+        collection_bytes = bytearray(RECORD_OWNERSHIP_LIMITS["ownership_collection_bytes"])
+        context_bytes = (bytearray(RECORD_OWNERSHIP_LIMITS["ownership_context_bytes"])
+                         if context else None)
+        if context_bytes is not None:
+            struct.pack_into("<Q", context_bytes, 0x30, registry)
+        direct = relation == "direct_collection_plus_300"
+        if direct:
+            struct.pack_into("<Q", collection_bytes, 0x280, collection_record)
+            struct.pack_into("<Q", collection_bytes, 0x298, 1)
+            record_tail = bytearray(RECORD_OWNERSHIP_LIMITS["ownership_record_tail_bytes"])
+            struct.pack_into("<Q", record_tail, 0x10, context)
+        else:
+            record_tail = None
+        ancestor_rva = 0x431B212 if branch == "direct_4321940" else 0x431B21F
+        writer_owner = registry + 0x78 if not direct else collection + 0x300
+        result = {
+            "id": index, "first_sequence": 1 if index == 0 else 3,
+            "observed_frame": 10 if index == 0 else 11, "thread_id": 17,
+            "status": "captured", "branch": branch,
+            "ancestor_return_rva": "0x%x" % ancestor_rva, "unwind_depth": 3,
+            "writer_relation": relation, "writer_owner": "0x%x" % writer_owner,
+            "outer": "0x%x" % outer, "collection_owner": "0x%x" % collection,
+            "registry": "0x%x" % registry, "context": "0x%x" % context,
+            "collection_record": "0x%x" % collection_record,
+            "record_index": record_index,
+            "record_status": "validated" if direct else "not_applicable",
+            "game_object": "0x%x" % game_object, "descriptor": "0x%x" % descriptor,
+            "provider": "0x%x" % provider, "parent": "0x%x" % parent,
+            "parent_token": parent_token,
+            "parent_status": ("available" if parent_token == UINT32_MAX and parent else
+                              "resolved_absent" if parent_token == UINT32_MAX else "unresolved"),
+            "outer_identity": identity(outer, "module_relative"),
+            "game_object_identity": identity(game_object),
+            "descriptor_identity": identity(descriptor),
+            "provider_identity": identity(provider), "parent_identity": identity(parent),
+            "outer_snapshot": span(outer_bytes), "collection_snapshot": span(collection_bytes),
+            "context_snapshot": span(context_bytes, "null_pointer"),
+            "record_tail_snapshot": span(record_tail, "not_applicable"),
+        }
+        prefixes = {}
+        for field, address in (("game_object_prefix", game_object),
+                               ("descriptor_prefix", descriptor),
+                               ("provider_prefix", provider), ("parent_prefix", parent)):
+            if field == "parent_prefix" and parent_token != UINT32_MAX:
+                prefixes[field] = span(None, "not_applicable")
+            else:
+                prefixes[field] = span(bytearray(RECORD_OWNERSHIP_LIMITS["ownership_opaque_prefix_bytes"])
+                                       if address else None,
+                                       "not_applicable" if field == "parent_prefix" and not address
+                                       else "null_pointer" if not address else None)
+        result.update(prefixes)
+        return result
+
+    diagnostic["ownerships"] = [
+        make_ownership(0, "inline_registry_plus_78", "direct_4321940",
+                       0x900000, 0x910000, 0x920000, 0x930000, 0,
+                       0x940000, 0x950000, 0x960000, 0x970000, UINT32_MAX, None),
+        make_ownership(1, "direct_collection_plus_300", "virtual_50",
+                       0xA00000, 0xA10000, 0, 0, 0xA40000,
+                       0, 0xA50000, 0xA60000, 0, UINT32_MAX, 0),
+    ]
+    diagnostic["ownership_status"] = "captured"
+    diagnostic["ownership_summary"] = {
+        "attempted": 3, "linked": 3, "stored": 2, "deduplicated": 1,
+        "unsupported_writer": 0, "opcode_mismatch": 0, "ancestor_missing": 0, "unwind_failed": 0,
+        "tuple_read_fault": 0, "tuple_mismatch": 0, "registry_read_fault": 0,
+        "registry_mismatch": 0, "record_range_mismatch": 0, "record_read_fault": 0,
+        "cache_conflicts": 0, "record_overflow": 0, "byte_budget_declines": 0,
+        "read_faults": 0, "ancestor_traces": 0, "ancestor_trace_overflow": 0,
+    }
+    diagnostic["ancestor_traces"] = []
+    diagnostic["summary"]["retained_bytes"] += cursor - len(binary)
     return root, b"".join(chunks)
 
 
@@ -1914,11 +2541,41 @@ def verify_source_fixture(capture, report):
     writer = records[0]["record_writer_candidates"]
     if (writer["attribution"] != "candidate_provenance_only" or writer["candidate_count"] != 1 or
             writer["opaque_context_consensus"] != "single_candidate" or
-            writer["candidates"][0]["writer"] != "direct_369ce91" or
             writer["candidates"][0]["lookup_status"] != "complete" or
             writer["candidates"][0]["context_status"] != "complete" or
             writer["candidates"][0]["completion_sequence"] > writer["cutoff"]):
         raise CaptureError("source-owner fixture writer cutoff/context join changed")
+    if writer_capture["version"] == 1:
+        if writer["candidates"][0]["writer"] != "direct_369ce91":
+            raise CaptureError("legacy source-owner fixture writer changed")
+    else:
+        candidate = writer["candidates"][0]
+        if (candidate["writer"] != "inline_42b4ed6" or
+                candidate["ownership_status"] != "linked" or candidate["ownership_id"] != 0):
+            raise CaptureError("source-owner fixture writer/ownership link changed")
+        ownership_capture = report["kinematic_ownership"]
+        ownership_result = records[0]["kinematic_ownership_candidates"]
+        if (ownership_capture["capture_status"] != "captured" or
+                ownership_capture["visible_record_outcomes"] != {"unique_candidate": 1} or
+                ownership_result["attribution"] != "candidate_ownership_provenance_only" or
+                ownership_result["writer_candidate_count"] != 1 or
+                ownership_result["linked_candidate_count"] != 1 or
+                ownership_result["ownership_count"] != 1):
+            raise CaptureError("source-owner fixture ownership candidate join changed")
+        ownership = ownership_result["candidates"][0]["ownership"]
+        stored = capture["writer_ownerships"][0]
+        summary = writer_capture["ownership_summary"]
+        if (ownership["branch"] != "virtual_50" or
+                ownership["ancestor_return_rva"] != "0x431b21f" or
+                ownership["writer_relation"] != "inline_registry_plus_78" or
+                int(ownership["registry"], 16) + 0x78 != int(candidate["owner"], 16) or
+                ownership["context"] != candidate["object"] or
+                ownership["parent_status"] != "available" or
+                stored["context_snapshot"]["status"] != "available" or
+                stored["context_snapshot"]["bytes"] != 0xC0 or
+                summary["attempted"] != 1 or summary["linked"] != 1 or
+                summary["stored"] != 1 or summary["deduplicated"] != 0):
+            raise CaptureError("source-owner fixture retained KinematicRig tuple changed")
 
 
 def self_test():
@@ -2041,6 +2698,76 @@ def self_test():
         writer_results = [record["record_writer_candidates"] for record in writer_report["records"]]
         assert [item["candidates"][0]["sequence"] for item in writer_results] == [1, 3]
         assert all(item["attribution"] == "candidate_provenance_only" for item in writer_results)
+        assert writer_report["kinematic_ownership"]["visible_record_outcomes"] == {"unavailable": 2}
+
+        # V2 writer captures can attach a bounded KinematicRig ancestor tuple.
+        # The first and third writer events deliberately deduplicate to one
+        # ownership item; the direct recipe exercises a valid null context.
+        ownership_root, ownership_binary = _kinematic_ownership_fixture(writer_root, writer_binary)
+        path = _write_fixture(temp, ownership_root, ownership_binary)
+        ownership_report = analyse(load_capture(path), include_records=True)
+        assert ownership_report["kinematic_ownership"]["visible_record_outcomes"] == {
+            "unique_candidate": 2}
+        ownership_results = [record["kinematic_ownership_candidates"]
+                             for record in ownership_report["records"]]
+        assert [item["candidates"][0]["ownership"]["branch"]
+                for item in ownership_results] == ["direct_4321940", "virtual_50"]
+        assert ownership_results[1]["candidates"][0]["ownership"]["context"] == "0x0"
+        assert ownership_results[1]["candidates"][0]["ownership"]["record_index"] == 0
+        assert ownership_root["record_writers"]["ownership_summary"]["deduplicated"] == 1
+
+        ownership_duplicate = copy.deepcopy(ownership_root)
+        ownership_duplicate["record_writers"]["uploads"][0]["cutoff"] = 6
+        path = _write_fixture(temp, ownership_duplicate, ownership_binary)
+        ownership_duplicate_report = analyse(load_capture(path), include_records=True)
+        first_ownership = ownership_duplicate_report["records"][0]["kinematic_ownership_candidates"]
+        assert first_ownership["writer_candidate_count"] == 2
+        assert first_ownership["linked_candidate_count"] == 2
+        assert first_ownership["ownership_count"] == 1
+        assert first_ownership["status"] == "unique_candidate"
+
+        refused_ownership = copy.deepcopy(ownership_root)
+        refused_record = refused_ownership["record_writers"]["records"][0]
+        refused_record.update(ownership_id=None, ownership_status="tuple_mismatch")
+        refused_ownership["record_writers"]["ownerships"][0]["first_sequence"] = 5
+        refused_summary = refused_ownership["record_writers"]["ownership_summary"]
+        refused_summary.update(linked=2, deduplicated=0, tuple_mismatch=1)
+        refused_ownership["record_writers"]["ownership_status"] = "partial"
+        path = _write_fixture(temp, refused_ownership, ownership_binary)
+        refused_report = analyse(load_capture(path), include_records=True)
+        refused_result = refused_report["records"][0]["kinematic_ownership_candidates"]
+        assert refused_result["status"] == "partial"
+        assert refused_result["refusal_outcomes"] == {"tuple_mismatch": 1}
+
+        unsupported_ownership = copy.deepcopy(ownership_root)
+        unsupported_record = unsupported_ownership["record_writers"]["records"][0]
+        unsupported_record.update(ownership_id=None, ownership_status="unsupported_writer")
+        unsupported_ownership["record_writers"]["ownerships"][0]["first_sequence"] = 5
+        unsupported_summary = unsupported_ownership["record_writers"]["ownership_summary"]
+        unsupported_summary.update(attempted=2, linked=2, deduplicated=0, unsupported_writer=1)
+        path = _write_fixture(temp, unsupported_ownership, ownership_binary)
+        unsupported_report = analyse(load_capture(path), include_records=True)
+        assert unsupported_report["records"][0]["kinematic_ownership_candidates"][
+            "refusal_outcomes"] == {"unsupported_writer": 1}
+
+        fault_ownership = copy.deepcopy(ownership_root)
+        fault_item = fault_ownership["record_writers"]["ownerships"][0]
+        fault_span = fault_item["parent_prefix"]
+        fault_at, fault_size = fault_span["offset"], fault_span["bytes"]
+        fault_span.update(status="not_applicable", bytes=0)
+        fault_item.update(status="partial", parent_status="read_fault")
+        for item in fault_ownership["record_writers"]["ownerships"][1:]:
+            for field in ("outer_snapshot", "collection_snapshot", "context_snapshot",
+                          "record_tail_snapshot", "game_object_prefix", "descriptor_prefix",
+                          "provider_prefix", "parent_prefix"):
+                item[field]["offset"] -= fault_size
+        fault_ownership["record_writers"]["summary"]["retained_bytes"] -= fault_size
+        fault_ownership["record_writers"]["ownership_summary"]["read_faults"] = 1
+        fault_ownership["record_writers"]["ownership_status"] = "partial"
+        fault_binary = ownership_binary[:fault_at] + ownership_binary[fault_at + fault_size:]
+        path = _write_fixture(temp, fault_ownership, fault_binary)
+        fault_ownership_report = analyse(load_capture(path), include_records=True)
+        assert fault_ownership_report["kinematic_ownership"]["visible_record_outcomes"] == {"partial": 2}
 
         duplicate = copy.deepcopy(writer_root)
         duplicate["record_writers"]["uploads"][0]["cutoff"] = 6
@@ -2104,6 +2831,26 @@ def self_test():
             inactive_report = analyse(load_capture(path), include_records=True)
             assert inactive_report["record_writers"]["visible_record_outcomes"] == {"unavailable": 2}
 
+            inactive_v2 = copy.deepcopy(inactive)
+            inactive_v2["record_writers"]["version"] = 2
+            inactive_v2["record_writers"]["limits"].update(RECORD_OWNERSHIP_LIMITS)
+            inactive_v2["record_writers"]["ownership_status"] = top_status
+            inactive_v2["record_writers"]["ownership_summary"] = {
+                "attempted": 0, "linked": 0, "stored": 0, "deduplicated": 0,
+                "unsupported_writer": 0, "opcode_mismatch": 0, "ancestor_missing": 0,
+                "unwind_failed": 0, "tuple_read_fault": 0, "tuple_mismatch": 0,
+                "registry_read_fault": 0, "registry_mismatch": 0,
+                "record_range_mismatch": 0, "record_read_fault": 0,
+                "cache_conflicts": 0, "record_overflow": 0, "byte_budget_declines": 0,
+                "read_faults": 0, "ancestor_traces": 0, "ancestor_trace_overflow": 0,
+            }
+            inactive_v2["record_writers"]["ownerships"] = []
+            inactive_v2["record_writers"]["ancestor_traces"] = []
+            path = _write_fixture(temp, inactive_v2, writer_binary[:start])
+            inactive_v2_report = analyse(load_capture(path), include_records=True)
+            assert inactive_v2_report["kinematic_ownership"]["visible_record_outcomes"] == {
+                "unavailable": 2}
+
         def rejected_writer(mutator):
             value = copy.deepcopy(writer_root)
             mutator(value)
@@ -2119,6 +2866,27 @@ def self_test():
         rejected_writer(lambda value: value["record_writers"]["records"][0].update(sequence=2))
         rejected_writer(lambda value: value["record_writers"]["records"][0].update(return_rva="0x42b42ef"))
         rejected_writer(lambda value: value["record_writers"]["uploads"][0].update(generation=1))
+
+        def rejected_ownership(mutator):
+            value = copy.deepcopy(ownership_root)
+            mutator(value)
+            path = _write_fixture(temp, value, ownership_binary)
+            try:
+                load_capture(path)
+            except CaptureError:
+                return
+            raise AssertionError("malformed KinematicRig ownership capture accepted")
+
+        rejected_ownership(lambda value: value["record_writers"]["limits"].update(
+            ownership_records=RECORD_OWNERSHIP_LIMITS["ownership_records"] + 1))
+        rejected_ownership(lambda value: value["record_writers"]["records"][0].update(
+            ownership_id=None))
+        rejected_ownership(lambda value: value["record_writers"]["ownerships"][0].update(
+            ancestor_return_rva="0x431b21f"))
+        rejected_ownership(lambda value: value["record_writers"]["ownerships"][1].update(
+            record_index=1))
+        rejected_ownership(lambda value: value["record_writers"]["ownerships"][0][
+            "context_snapshot"].update(bytes=0, status="read_fault"))
         first_source = v2_root["cpu_blobs"][1]["offset"]
         changed = bytearray(v2_binary)
         changed[first_source + 28] ^= 1

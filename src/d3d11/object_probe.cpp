@@ -2998,6 +2998,29 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<unsigned long long>(classification.recordWriterCompletionFailures),
                     static_cast<unsigned long long>(classification.recordWriterDeclinedManagement),
                     static_cast<unsigned long long>(classification.recordWriterDeclinedUnknown));
+    const auto ownership=objectRecordWriterProbe.ownershipSummary();
+    Log::get().note("object classification: KinematicRig ownership attempted/linked/stored/reused %llu/%llu/%llu/%llu; unsupported/ancestor missing/unwind failed %llu/%llu/%llu; tuple read/mismatch %llu/%llu, registry read/mismatch %llu/%llu, record range/read %llu/%llu. These are capture-local associations, not static-object classifications.",
+                    static_cast<unsigned long long>(ownership.attempted),
+                    static_cast<unsigned long long>(ownership.linked),
+                    static_cast<unsigned long long>(ownership.stored),
+                    static_cast<unsigned long long>(ownership.deduplicated),
+                    static_cast<unsigned long long>(ownership.unsupportedWriter),
+                    static_cast<unsigned long long>(ownership.ancestorMissing),
+                    static_cast<unsigned long long>(ownership.unwindFailed),
+                    static_cast<unsigned long long>(ownership.tupleReadFault),
+                    static_cast<unsigned long long>(ownership.tupleMismatch),
+                    static_cast<unsigned long long>(ownership.registryReadFault),
+                    static_cast<unsigned long long>(ownership.registryMismatch),
+                    static_cast<unsigned long long>(ownership.recordRangeMismatch),
+                    static_cast<unsigned long long>(ownership.recordReadFault));
+    Log::get().note("object classification: KinematicRig ownership opcode rejects/conflicts/cap/byte declines/read faults %llu/%llu/%llu/%llu/%llu; missing-ancestor traces stored/declined %llu/%llu. Zero linked records is unavailable ownership evidence, not a successful empty scene.",
+                    static_cast<unsigned long long>(ownership.opcodeMismatch),
+                    static_cast<unsigned long long>(ownership.cacheConflicts),
+                    static_cast<unsigned long long>(ownership.recordOverflow),
+                    static_cast<unsigned long long>(ownership.byteBudgetDeclines),
+                    static_cast<unsigned long long>(ownership.readFaults),
+                    static_cast<unsigned long long>(ownership.ancestorTraces),
+                    static_cast<unsigned long long>(ownership.ancestorTraceOverflow));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
                     "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
