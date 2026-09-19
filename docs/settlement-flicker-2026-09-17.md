@@ -2,19 +2,19 @@
 
 ## Status
 
-- State: automatic eye_174658 capture proves dominant-body path 4 claims
-  stationary settlement buildings, including walls, tanks and ramps. Its
-  complete 16-frame sequence starts at activation frame 12693; no DLSS reset,
-  source change or origin jump occurs. This activation is weaker than the
-  preceding Pause event and is not yet tied to a user-observed flash.
-- Open: establish visible-surface ownership before applying coarse body motion;
-  98.51% of captured body pixels have no per-mesh coverage. A static matching
+- State: a default-off static-surface correction is installed for a Frontier
+  landed-cockpit test. Eye_174658 proved dominant-body path 4 claims stationary
+  settlement walls, tanks and ramps. Its complete 16-frame sequence begins at
+  activation frame 12693 with no reset, source change or origin jump; it was
+  weaker than the prior Pause event and not tied to a user-observed flash.
+- Open: validate new owner coverage, flicker reduction and added cost; 98.51%
+  of captured body pixels have no per-mesh coverage. A static matching
   improvement alone can recover only 0.745%. The prior 16:48:57 camera pulse
   remains unexplained; the 17:18:47 Pause event had body activation but no such
   pulse. First-draw rows remain unsuitable as a camera replacement.
-- Build: v0.17.0-40-gdb78d39-dirty installed and verified in Frontier; archive
-  build/motion-trigger-frontier-db78d39. Full build and all gates pass. The
-  analyzed flight is edvr_gfx_20260918_174448.log, eye_174658. No new binary.
+- Build: v0.17.0-42-gc8add89-dirty installed and verified in Frontier; archive
+  build/static-surfaces-frontier-c8add89. Full build/all 70 gates pass. No
+  flight yet; prior evidence is edvr_gfx_20260918_174448.log, eye_174658.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -51,11 +51,12 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: design exact surface ownership for the uncovered building draws;
-  another threshold or small matching change cannot cover the captured error.
-  Temporary eye_run_trigger=motion and ships_metres=0 remain; Elite is still
-  running, so restore normal Insert at the next safe install. No rendering
-  change or performance gain is claimed from this diagnostic.
+- Next: hold the same landed view, focus Elite, Insert to arm, Pause just after
+  any flash, then leave it running at least ten seconds. Only the new
+  temporal_aa_static_surfaces=on was added; eye_run_trigger=motion and
+  ships_metres=0 remain. No rendering success or performance gain is
+  established before the flight; station and on-foot validation remain
+  separate.
 
 ## Journal
 
@@ -3562,3 +3563,90 @@ invocation; ownership_intersection.py reproduces it and has a write-free dry
 run. The installed graphics/runtime remain unchanged. Elite was still running
 when cleanup was checked, so the temporary motion-trigger setting remains;
 return Insert to manual at the next safe install, preserving other settings.
+
+### 2026-09-18 -- static-surface test candidate and capture procedure
+
+The 174658 capture establishes the unsafe ownership mechanism: a coarse body
+path claims stationary building surfaces that lack mesh coverage. The candidate
+adds a 96-bit geometry/rigid-pose fingerprint and raw depth to MRT7 during
+eligible original draws. It does not reissue those draws or expand the
+512-record matching table. A consecutive visible fingerprint match at the
+world-reprojected pixel can replace a coarse ship/body proposal with world
+motion. Moving, skinned, unsupported or unproven surfaces retain the existing
+route. A one-bit raw pose change breaks the match; there is no movement
+threshold. Fingerprints provide practical collision resistance, not a
+mathematical identity guarantee.
+
+The five original vertex shaders were checked against their captured DXBC: the
+rigid position path uses packed vertex data, the six hashed pool pose words,
+shared scene origin cb1[275] and scene projection cb1[270..273]. The
+bone-palette path has nonzero boneBase and receives no owner. The detail
+shader's extra switch culls vertices rather than applying another transform.
+Prior confirmed Orbis captures eye_192513 and eye_195254 have changing raw
+rotating-part poses, not unchanged station-local transforms. These are older
+mesh captures; a rotating-station positive control with the new owner textures
+is still required. The settlement captures 160859 and 163223 are not station
+controls.
+
+The new setting is advanced.temporal_aa_static_surfaces, default off. This
+first candidate is restricted to full-frame NVIDIA temporal AA and the five
+verified rigid VS families. Shader, runtime and consumer regression gates
+passed before installation. Added ownership work still needs a flight timing
+check; no performance improvement is claimed.
+
+On-foot source-screen motion disables the consumer, but the producer can still
+incur cost under full-frame DLSS. This candidate therefore remains default off
+pending station correctness and on-foot cost validation. Its first flight is
+the existing landed-cockpit view.
+
+The producer retains bounded caches: 2,048 shaders per stage (64 MiB PS
+bytecode), 1,024 patched PS/input pairs, 4,096 geometry resources and 8,192
+geometry constant buffers. Exhaustion declines protection instead of changing
+the fallback. The retained shader corpus has 469 unique PS blobs (6,560,040
+bytes), but this does not bound all shader instances created during a flight.
+The 1,800-frame log reports admission failures and sampled producer/restore CPU
+time inside the ownership lock; it excludes lock acquisition and the
+unsupported-family fast path. Use full-frame timing for the overall cost.
+Modified draws are explicitly marked in the original-draw probe.
+
+An eye run includes StaticOwner/StaticOwnerPrev binary textures and a JSON
+availability marker. Motion decision flag 2048 records a confirmed static
+match; path 2 is world motion. First verify these on the previously body-owned
+walls, then compare clean frame-time windows. A remaining visible flash still
+requires the Pause history: the earlier independent camera pulse has not been
+explained by this correction.
+
+For this test, focus Elite's desktop window, press Insert before watching, then
+press Pause immediately after an observed flicker. Insert arms a one-shot for
+the next eligible dominant-body off/on transition; it is not a continuous
+recorder or a trigger for every kind of flash. Pause writes the camera and
+temporal history immediately and again two seconds later. Keep the game running
+in the same view for at least ten seconds before exiting. Report the mode
+(cockpit/SRV/on foot) and whether all buildings or only specific objects
+flashed. Both hotkeys require game focus. After this experiment, return Insert
+to manual for general captures unless a specific event trigger is requested.
+
+Validation and installation: the absolute build.bat completed with all 70 gates
+passing (67 pooled and three quiet jobs), including the config contract. The
+focused real shader corpus/WARP patcher passed 202 checks; production
+controller passed 78; the unmodified production temporal consumer passed 181.
+The consumer fixture changes body path 4 (0.04 pixels) to confirmed world path
+2 (zero pixels); negative owner/depth/history/flag/jitter cases retain path 4.
+The tests also cover original MRT colour/discard parity, one-bit pose changes,
+bone exclusion, input-layout restrictions, two-eye history and state restore.
+
+A final old/current temporal-shader reflection comparison uses the production
+build macros and compiler flags. Temporary register counts remain 22 for fast
+and 30 for normal/trace. Instruction counts increase 2234->2329 (fast),
+2865->2960 (normal) and 2886->3002 (trace). This rules out increased compiler
+temporary-register allocation, not added execution cost. The report and
+reproduction harness are in build/temporal_reflection_audit.
+
+Installed v0.17.0-42-gc8add89-dirty in Frontier after dry-run and live-config
+hash comparison. Independent install_edvr.py --verify-only verified the pair,
+loader and config. The only INI delta is the new switch set on. Archive
+build/static-surfaces-frontier-c8add89 holds the exact DLLs/PDBs, original and
+test INIs, manifest, build-validation log and VS transform audit. Graphics
+SHA-256 starts c5732d9016e3df5c; runtime starts 7548265d90750b8a; full hashes
+are in manifest.json. The installer backup receipt ends
+pre-static-surfaces-c8add89-20260918-185005.bak. No flight result is claimed.

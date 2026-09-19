@@ -19,7 +19,7 @@ PATHS = {0: 'invalid', 1: 'head', 2: 'world', 3: 'ship', 4: 'body',
          5: 'body2', 6: 'stepped', 7: 'terrain', 8: 'holo', 9: 'mesh', 10: 'screen'}
 FLAGS = {16: 'hidden_history', 32: 'screen_invalid_history', 64: 'ui_here',
          128: 'world_available', 256: 'depth_valid', 512: 'tracked_foreground',
-         1024: 'projection_valid'}
+         1024: 'projection_valid', 2048: 'static_confirmed'}
 KNOWN = 15 | sum(FLAGS)
 
 
@@ -239,7 +239,7 @@ def self_test():
                          dlss_reset=False, error='')
             frames.append(frame)
             payload = b'EDVRTEX1' + struct.pack('<9I', 1, 2, 2, 2, 32, k + 10, 0, 0, 0)
-            payload += struct.pack('<16f', 3, 4, 1, 2 | 16 | 1024, 0, 0, 0, 10 | 32,
+            payload += struct.pack('<16f', 3, 4, 1, 2 | 16 | 1024 | 2048, 0, 0, 0, 10 | 32,
                                    0, 0, 3, 9 | 512 | 1024, 0, 0, 2, 1 | 64 | 1024)
             (base / frame['decision_file']).write_bytes(payload)
             for field, value in (('pre_ui_file', 10), ('treated_file', 12), ('raw_file', 10)):
@@ -258,6 +258,7 @@ def self_test():
         first = result['frames'][0]
         assert first['path_fraction']['world'] == .25
         assert first['flag_fraction']['hidden_history'] == .25
+        assert first['flag_fraction']['static_confirmed'] == .25
         assert first['flag_fraction']['screen_invalid_history'] == .25
         assert first['physical_motion_samples'] == 3
         assert first['physical_motion_rms_px'] == math.sqrt(25 / 3)

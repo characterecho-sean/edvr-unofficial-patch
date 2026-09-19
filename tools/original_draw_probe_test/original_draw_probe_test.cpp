@@ -675,9 +675,14 @@ void sourceContract() {
           "one helper declaration plus seven native End call sites");
     check(text.find("originalDrawProbeInternalQuery()") != std::string::npos,
           "hook guard excludes only probe-owned shared timer traffic");
-    check(text.find("originalDrawNativeBegin(self, separate);\n        g_state->realDrawIndexedInstanced") <
-          text.find("originalDrawNativeEnd(self, sample);\n        // The weapon's temporal-AA motion vectors"),
-          "indexed-instanced original call ends before weapon motion capture");
+    check(text.find("originalDrawNativeBegin(self, separate || staticOwner);\n"
+                    "        g_state->realDrawIndexedInstanced") != std::string::npos,
+          "indexed-instanced original draw remains immediately after probe Begin");
+    check(text.find("baseVertex, startInstance);\n"
+                    "        originalDrawNativeEnd(self, sample);\n"
+                    "        if(staticOwner)staticSurfaceEnd(self);\n"
+                    "        // The weapon's temporal-AA motion vectors") != std::string::npos,
+          "indexed-instanced probe End remains adjacent and precedes static-owner restore");
     check(text.find("!originalDrawProbeSelect(self, &input)") != std::string::npos,
           "selected-only resource capture remains gated by cheap metadata Select");
     check(text.find("constexpr bool kControlledBaselineOriginalDrawDiagnostics = false;") != std::string::npos &&

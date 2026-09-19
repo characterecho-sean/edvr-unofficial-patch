@@ -45,6 +45,7 @@
 #include "eye_tonemap_snapshot.h"
 #include "ui_separation.h"
 #include "ui_deferred.h"
+#include "static_surface.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
 #include "quad_probe.h"
@@ -570,6 +571,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPU
             GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
             EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
             originalDrawProbeRememberLayout(*out,elements,count,hash);
+            staticSurfaceRememberLayout(*out,elements,count,hash);
             EyeTonemapSnapshot::rememberLayout(*out,elements,count,hash);
             EyePanelSnapshot::rememberLayout(*out,elements,count,hash);
         });
@@ -593,6 +595,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
         uiDeferredRemember(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        staticSurfaceRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
@@ -617,6 +620,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         registerShaderHash(*out, hash);
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         uiDeferredRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        staticSurfaceRememberPs(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));

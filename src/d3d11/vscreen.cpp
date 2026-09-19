@@ -70,6 +70,7 @@
 #include "ui_deferred.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
+#include "static_surface.h"
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "intro_panel.h"
 #include "intro_skip.h"
@@ -98,6 +99,7 @@ namespace {
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
     weaponMotionResourceWritten(resource);
     meshMotionResourceWritten(resource,first,end);
+    staticSurfaceResourceWritten(resource,first,end);
     uiDepthMotionResourceWritten(resource,first,end);
 }
 
@@ -3996,10 +3998,14 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
+        const bool staticOwner=t_colourOriginal && !separate && self==g_state->ownerCtx &&
+            staticSurfaceBegin(self,perInstance,instances,startIndex,baseVertex,
+                               startInstance,bindingShaderHash(BindSlot::Vs));
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate || staticOwner);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         originalDrawNativeEnd(self, sample);
+        if(staticOwner)staticSurfaceEnd(self);
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs)))
@@ -4792,6 +4798,7 @@ void vScreenFrameBoundary() {
         screenMotionFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
         meshMotionFrameBoundary(g_state->ownerCtx);
+        staticSurfaceFrameBoundary(g_state->ownerCtx);
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         sharpenPassTick(g_state->ownerCtx);
@@ -6115,6 +6122,7 @@ void shutdownVScreenFixes() {
     nightVisionShutdown();
     celestialMotionShutdown();
     meshMotionShutdown();
+    staticSurfaceShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();

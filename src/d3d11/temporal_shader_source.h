@@ -41,6 +41,8 @@ struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 StructuredBuffer<HoloRecord> HR : register(t13);
 Texture2D<float2> MC : register(t15);
 StructuredBuffer<HoloRecord> MR : register(t16);
+Texture2D<uint4> ownerNow : register(t17);
+Texture2D<uint4> ownerPrev : register(t18);
 Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
@@ -918,6 +920,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bool trackedForeground = false;
         uint decisionPath = 0u;
         bool projectionValid = false;
+        bool staticConfirmed = false;
         bool worldAvailable = tvCam.w != 0.0 && split.x > 0.0 && knobs.y != 0.0;
         if (dp.z < -1e-6) {
             float xt = dp.x / -dp.z;
@@ -971,6 +974,46 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         zPred = zpB;
                         count29 = 1;
                         decisionPath = 4u;
+                    }
+                }
+            }
+            // A rigid surface owner match can promote only a coarse body
+            // proposal. It uses the exact centre depth and the raw previous
+            // coordinate; no neighbourhood erosion or dilated depth is
+            // allowed to manufacture a match.
+            if (haveHistory != 0 && (uint(probe.w + 0.5) & 256u) != 0u &&
+                decisionPath >= 3u && decisionPath <= 6u &&
+                worldAvailable && count15 != 0u &&
+                !uiCovered(region.xy + int2(p)) && isfinite(sceneZraw) &&
+                sceneZraw > knobs.x) {
+                float zactual = knobs.z / (sceneZraw - knobs.x);
+                if (isfinite(zactual) && zactual > split.x) {
+                    uint4 nowOwner = ownerNow.Load(int3(region.xy + int2(id.xy), 0));
+                    if ((nowOwner.x | nowOwner.y | nowOwner.z) != 0u &&
+                        asfloat(nowOwner.w) == sceneZraw) {
+                        float3 worldPP = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d),
+                                                dot(c2R2.xyz, d)) * zactual + tvCam.xyz;
+                        if (worldPP.z < -1e-6) {
+                            float xt = worldPP.x / -worldPP.z;
+                            float yt = worldPP.y / -worldPP.z;
+                            float2 rawPrev;
+                            rawPrev.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+                            rawPrev.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+                            int2 prevQ = int2(round(rawPrev - holoJitter.xy));
+                            if (all(prevQ >= 0) && all(prevQ < size)) {
+                                uint4 prevOwner = ownerPrev.Load(int3(prevQ, 0));
+                                if ((prevOwner.x | prevOwner.y | prevOwner.z) != 0u &&
+                                    (prevOwner.x == nowOwner.x && prevOwner.y == nowOwner.y &&
+                                     prevOwner.z == nowOwner.z) && isfinite(asfloat(prevOwner.w)) &&
+                                    asfloat(prevOwner.w) > knobs.x) {
+                                    pp = rawPrev;
+                                    motion = rawPrev - p;
+                                    zPred = -worldPP.z;
+                                    decisionPath = 2u;
+                                    staticConfirmed = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1069,7 +1112,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         uint decisionFlags=decisionPath | (hidden?16u:0u) |
             (decisionPath==10u && !projectionValid?32u:0u) | (uiHere?64u:0u) |
             (worldAvailable?128u:0u) | (depthValid?256u:0u) |
-            (trackedForeground?512u:0u) | (projectionValid?1024u:0u);
+            (trackedForeground?512u:0u) | (projectionValid?1024u:0u) |
+            (staticConfirmed?2048u:0u);
         DT[id.xy]=float4(decisionMotion,decisionDepth,float(decisionFlags));
 #else
         ML[id.xy] = written + lead.xy;
