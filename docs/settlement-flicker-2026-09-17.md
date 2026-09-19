@@ -2,10 +2,10 @@
 
 ## Status
 
-- State: flight 100737 matched all 512 admitted records to exact CPU source
-  bytes, including 27 visible records (22 settlement-facing). All three owner
-  traces were complete. The shared batch also contains player geometry, so it
-  does not identify planet attachment or static objects.
+- State: offline tracing proved the allocation-to-upload path and two writers
+  using that batching route. Flight 100737 matched all 512 admitted records to
+  CPU bytes, but retained no per-record writer/game-object association. Object
+  attachment and static classification remain unproven.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -55,10 +55,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: trace the captured per-record descriptors toward their CPU producer and
-  object ownership through the upload list's registration/append path. A
-  literal stride-store search found no initializer. Use the retained evidence
-  before another flight; no static filtering is enabled.
+- Next: capture record creation at both proven writers, including caller/pose
+  object context; match to the existing upload evidence with ambiguity checks.
+  A shared builder is not an entity identity. Repeating the unchanged probe
+  cannot supply that association; no static filtering is enabled.
 
 ## Journal
 
@@ -4338,13 +4338,15 @@ rotating-station counterexamples continue to rule out either observed metadata
 pair as an immovable-in-world test.
 
 That producer retains up to eight records per CPU node, with count at
-node+0x18, payloads at node+0x20+i*0x150 and separate pointers at
-node+0xaa0+i*8. Its owner is builder[+0x20]; a compound-key lookup at
-owner+0x260 selects the list. The immediate caller's primary function is
-0x42b4420. These are concrete storage and calling relationships, not entity or
-attachment semantics. In particular, no pointer-identity chain yet connects
-node+0x20 to the upload copier's entry[+8]. A same-sized record with the same
-default fields does not close that gap.
+node+0x18, payloads at node+0x20+i*0x150 and separate 64-bit values at
+node+0xaa0+i*8. These values are bitmasks on the verified caller path, not
+established pointers (corrected in the later append-path investigation). Its
+owner is builder[+0x20]; a compound-key lookup at owner+0x260 selects the list.
+The immediate caller's primary function is 0x42b4420. These are concrete
+storage and calling relationships, not entity or attachment semantics. In
+particular, no pointer-identity chain yet connects node+0x20 to the upload
+copier's entry[+8]. A same-sized record with the same default fields does not
+close that gap.
 
 The upload owner's constructor is primary 0x4c7e4d0. Its embedded labels
 identify AtlasModel2, gfModelGPUModelData and
@@ -4579,8 +4581,8 @@ have different spans, so this observation does not establish universal capacity
 semantics.
 
 This corroborates the layout of the earlier 0x42b4130 producer: eight records
-start at node+0x20 and its separate pointer array starts at node+0xaa0, the
-same eight-record span later. It does not prove that producer supplied these
+start at node+0x20 and its separate 64-bit array starts at node+0xaa0, the same
+eight-record span later. It does not prove that producer supplied these
 records. No retained descriptor contains source-0x20, and the capture excludes
 both that candidate node header and memory reached through the +0x18 pointer.
 The exact allocation-to-descriptor pointer relationship and its initializer
@@ -4604,3 +4606,99 @@ allocation to the descriptor and expose the upstream owner before it can
 support object classification. Another run of the unchanged probe would not
 supply the missing header or ownership fields. No new flight or performance
 claim follows from this capture, and static filtering remains off.
+
+### 2026-09-19 - Offline upload append path and source-block slicing
+
+The exact descriptor appender is RVA 0x4c7ef70. It selects the first 0x48-byte
+vector or one of seven 0x50-byte vectors on the same leaf read by the capture
+and 0x4c81be0. Its stores reproduce the retained descriptor layout: source at
++8, record-word pointer at +0x10, mask-array pointer at +0x18, leaf owner link
+at +0x20, another caller-supplied pointer at +0x28, combined mask at +0x30,
+destination-relative index/count at +0x38/+0x3c, and a 16-bit stride at +0x40.
+That last store explains why searching for an immediate DWORD stride store
+failed. The appender advances leaf+0xc8 by the appended record count. This
+establishes the descriptor constructor and consumption path without assigning
+object semantics to its pointers.
+
+Its caller 0x4c837b0 processes the source records' 64-bit masks, accumulates
+per-bit counts and their union, trims leading/trailing records with zero masks,
+and emits one descriptor for the resulting contiguous slice. Interior zero-mask
+records can remain in that slice. At 0x4c83943 it calls the appender with
+source advanced by start*sourceStride, mask pointer advanced by start*8, the
+similarly advanced record-word pointer, and the trimmed count. This is not
+evidence of final-eye visibility, occlusion or removable draws.
+
+One concrete input bridge, primary 0x434d7a0, traverses a dictionary and each
+entry's linked list of record nodes. Its call at 0x434d8d0 supplies base
+source=node+0x20, count=[node+0x18], record-word pointer=node+0x3c, source/word
+stride=0x150, and mask-array base=node+0xaa0. The descriptor's +0x18 value
+therefore names a mask array on this path; it is not an allocation-end or
+capacity field. With slice start i, descriptor.source=node+0x20+i*0x150 and
+descriptor.mask=node+0xaa0+i*8, giving a pointer difference of 0xa80-i*0x148.
+Source-0x20 is the node header only when i=0. The bridge proves these layout
+relationships on its path, not that every captured descriptor came through that
+path.
+
+Ruled out: treating the candidate node's trailing 64-bit values as per-object
+ownership pointers. Producer 0x42b4130 stores its fifth argument at
+node+0xaa0+i*8; its verified caller 0x42b4420 loads this argument from values
+combined with OR at 0x42b47a7/0x42b47d2. The upload grouping also applies bit
+scans and mask operations to this array. Earlier journal references to separate
+pointers have been corrected. Neither those values nor their combined
+descriptor mask establish planet attachment.
+
+The producer's immediate caller has two verified callers of its own, at
+0x43204f3 and 0x4321adb. Both enumerate 0x2f0-byte records from an array/count
+pair at collection+0x28/+0x30 and pass the pointer at record+0x290 as the
+pose-bearing argument to 0x42b4420. They check bytes at record+0x234/+0x298 and
+perform mask/nibble selection before making the call. This identifies a more
+specific upstream render structure, but none of those checks proves immobility,
+an entity parent or persistent identity. The trace is conditional until a
+captured source is linked to that producer.
+
+The verified executable SHA-256 remains
+e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988. Bounded
+append, grouping and bridge assembly plus xref results are retained under
+build/source-owner-flight-100737/payload-trace-*.asm and
+payload-append-xrefs.json. The independent caller trace is in
+builder-owner/trace.json and builder-owner/findings.md, generated by
+owner-code-trace.py with chained unwind resolution and a verified no-write dry
+run. No game code or configuration has changed.
+
+The dictionary connection is also proven. Writer 0x42b4130 calls 0x3696fa0 with
+owner+0x260 and key=producer+0x40, then appends to an eight-slot record node
+and increments owner+0x2a4. A second writer, 0x434d470, constructs another
+0x150-byte record and calls 0x434d120; that helper uses the same dictionary
+lookup, allocator, node layout and owner counter. The later 0x434d7a0 bridge
+traverses the owner's dictionary array at +0x280/+0x288. Its entries hold a
+resource reference at +8, the descriptor's +0x28 value at +0x10, a leaf at
++0x18 and the node-list anchor at +0x28. Thus the allocation-to-upload route
+can accept records from either writer; this does not prove which writer or
+runtime owner instance supplied a particular captured record. A descriptor does
+not retain that association or establish a per-record game object.
+
+Independent capture analysis confirms there is no hidden saved-pointer route to
+that owner. Descriptor +0/+0x28/+0x18 targets have no same-generation
+containment in retained CPU blobs or captured structural ranges. Each +0x28
+value pairs with exactly one +0 value and group/leaf/list scope, while some +0
+values span multiple +0x28 values/scopes: these are capture-local opaque batch
+relationships. Seven source-0x20 windows per generation happen to be covered,
+but all are the last 32 bytes of an adjacent preceding 336-byte source record,
+not independently retained node headers. Ruled out: interpreting incidental
+coverage of source-0x20 as proof of an allocation header. The reproducible
+analysis, exact ranges and no-write/deterministic checks are in
+analyze_descriptor_links.py and descriptor-link-analysis.json/md.
+
+The next evidence seam is record creation before batching. At the 0x42b4130
+insertion, the complete record is at rsp+0x30, the shared owner is in rsi and
+the key is r14=producer+0x40. At 0x434d470's call to 0x434d120 at 0x434d73c,
+the complete record is in r8, owner in rcx, key in rdx and sidecar mask in r9.
+A diagnostic must capture both paths, retain their calling/pose-object context,
+and require exact 336-byte correspondence with explicit duplicate/ambiguity
+outcomes. Producer/builder addresses alone are insufficient: the first path's
+more specific pose-bearing object belongs to caller 0x42b4420, whose original
+RCX is retained in R12 across the producer call. The second path also needs its
+caller/input-transform association. Neither object identity nor a
+planet-attachment flag has yet been proven at those seams. This turn added
+offline evidence and a concrete diagnostic target; no new hook, test build or
+installation was made.
