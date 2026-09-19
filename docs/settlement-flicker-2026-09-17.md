@@ -2,10 +2,10 @@
 
 ## Status
 
-- State: flight 120047 matched CPU bytes for all 512 admitted records; 504 have
-  writer candidates. Nineteen visible settlement-facing records each retain one
-  inline pose context (eight contexts total); five use the direct path without
-  object context. Attachment and immobility remain unproven.
+- State: offline tracing closed the pose-context constructor and its owning
+  KinematicRig path, including the named parent-root-physics dependency. Its
+  resolved pointer and type were not captured. Attachment to the planet and
+  immobility remain unproven; context+0x08/+0x78 are allocator residue.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -55,11 +55,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: find the initializer of collection-record+0x290 before the verified
-  0x4320340/0x4321940 consumers, then trace context+0xA8 and the direct
-  writer's earlier input. No captured field proves attachment yet. No repeat
-  flight is needed for this offline step; static filtering/draw suppression
-  stay off.
+- Next: a bounded ownership capture must join KinematicRig -> collection ->
+  record/context and retain game-object, provider and parent-physics types.
+  Context+0xA8 is a render-selector result, not a proven parent. Neither the
+  dependency's resolved sentinel nor parent presence is a static flag. The
+  unchanged diagnostic cannot supply these bytes; filtering stays off.
 
 ## Journal
 
@@ -4874,3 +4874,111 @@ The analysis and image-generation helpers were rerun twice with deterministic
 outputs; their dry runs left the existing archive files byte-identical. The
 current reader accepts the capture. Only this investigation document changed in
 tracked source; installed binaries and settings remain as tested.
+
+### 2026-09-19 -- offline context construction and KinematicRig ownership
+
+This step uses the saved 120047 capture and the same verified executable,
+SHA-256 e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988. It
+requires no new flight. All addresses below are executable RVAs or explicit
+structure offsets. Detailed bounded disassembly, pointer analysis and notes are
+retained in build/record-writer-context-audit.
+
+The exact collection-record initializer is now proved. 431B830 loads the
+collection owner from outer+0x348 and calls 432A430. That function enumerates
+the owner's +0x280 array / +0x298 count with stride 0x2F0, calls factory
+42B5780 at 432A6A5, and stores its return directly to record+0x290 at 432A6AA.
+The existing 431AFE0 -> 4321940 consumer uses the same outer+0x348 and the same
+array/count fields. Factory 42B5780 allocates 0xC0 bytes and calls constructor
+42B29C0. Its +0x30 registry comes from collection owner +0x2E0; the descriptor
+and shared +0 field come from record+0x18 and record+0x2C8 respectively. This
+closes a producer-to-consumer chain, not just an offset resemblance.
+
+Ruled out: context+0x08 and +0x78 as object/parent links, because the
+uninitialized allocation and complete constructor leave both holes untouched.
+The 75 apparent +0x78-to-other-context matches are allocator residue, not an
+ownership graph. Writes that superficially resembled initialization of +8 occur
+only after the register is repurposed as a list-entry pointer.
+
+Context+0xA8 is deliberately constructed, but its provenance is render
+selection. A fallback lives at +0xB0; 16-bit handles/selectors live at
++0xB8/+0xBA. These final 16 bytes were outside the retained 0xB0 snapshot. The
+constructor can replace the fallback through provider virtual slot +0x18,
+passing the mutable selector, a float, and a boolean. The provider comes from
+outer+0x180 through collection owner+0x10 and registry+0x20. All 520 captured
+inline contexts have distinct, stable nonzero +0xA8 values, but no target bytes
+or links into the other retained allocations. The eight settlement-associated
+contexts likewise have eight different values. Ruled out: treating this
+pointer's uniqueness as proof of a scene parent or static classification; it is
+a selected render object with unresolved concrete type.
+
+The provider trace narrows this to the LOD-selector interface family. 430B2A0
+resolves outer+0x180 using the runtime token at 5F2D684. The same token is
+returned by getter A8E530, slot zero of table 513F0F8, installed at object+0x58
+by the constructor fragment A8A714. Table slot +0x18 is A8F1D0, whose complete
+code looks up a 16-bit handle and binary-searches float thresholds, returning a
+selected entry or fallback. Registration at A936D0 names a matching 0x130-byte
+implementation LODManager. This strongly identifies LOD selection rather than
+ownership; the flight did not capture the provider vtable, so the concrete
+runtime implementation remains unverified. The process-local token number
+itself is not a stable type identifier.
+
+The direct path also has an exact structural origin. At 4313083, function
+4312E00 builds the writer key as its input collection-record pointer+0x250. The
+4312040 caller receives this record from the same enumerator schema.
+Subtracting 0x250 therefore recovers 895 record addresses across the captured
+direct keys, but the retained +0x250..+0x26F bytes omit the context pointer at
++0x290. They cannot retrospectively bridge those five direct-only visible
+settlement records to an inline context. The direct-path resource byte test at
++0x4B selects a render path; no mobility meaning has been established.
+
+The useful new ownership evidence is upstream of the collection. Its
+initializer 431B2A0 contains exact references to KinematicRig.cpp and a
+diagnostic naming Game Object, Item Symbol Name and Kinematic Rig Symbol Name
+(431B472/431B4A5, string RVAs 5593820/5593890). The Game Object text is
+obtained through outer+0x20. This ties the render collection to a named
+kinematic component, rather than guessing a class from adjacent strings.
+
+The same initializer calls 432A840, whose check at 432A912 uses the resolved
+interface at outer+0x1C0 and names its dependency "parent root physics model"
+(exact reference 432A939, string RVA55937F8). It calls virtual slot +0x90 and
+reports when that readiness test fails. This establishes a parent-physics
+dependency; it does not identify the planet or tell us whether the child can
+move independently.
+
+Constructor 430B2A0 installs final vtable RVA5592380; its +0x10 entry is
+4327E40, which calls the proved outer initializer 431B830. At 430B68C it loads
+a component token into outer+0x1B8, zeros +0x1C0/+0x1C8, and registers that
+dependency through 529500. The helper either queues it or resolves the token,
+stores the interface at +0x1C0 and marks +0x1B8 as -1. Ruled out: the -1
+sentinel as a static/immovable flag, because the resolver writes it after
+lookup regardless of the returned component's mobility. Parent presence alone
+is also insufficient for static classification.
+
+The next diagnostic needs a bounded join from the actual KinematicRig owner to
+its collection, records and contexts in the captured generation, plus the
+game-object, provider and parent-physics interface identities and context tail.
+For a proposed attachment classifier, the discriminating evidence is a joined
+visible record with a validated parent/interface type and a semantically proved
+mobility field. A shared parent, stable payload or resolved token cannot pass
+that gate. Capture must separately count unresolved/absent dependencies, read
+failures and missing joins so an instrument that never reaches the owner cannot
+look like success. Keep this work manual and bounded; do not add ownership
+traversal to every normal draw.
+
+The common path at 431B245 still retains RDI=outer and
+RBX=[outer+0x348]=collection owner. It follows both the direct 4321940 dispatch
+and virtual +0x50 dispatch, but also a no-render cleanup path; the diagnostic
+must distinguish those branches. Retain the registry pointer at collection
+owner+0x2E0 as an explicit join to context+0x30. The registry is separately
+allocated: subtracting 0x2E0 from context+0x30 cannot recover the collection
+owner. Record+0x290 and the direct key's record base provide the remaining
+joins, with generation and lifetime checks still required.
+
+The current capture cannot supply the missing owner/interface bytes, and an
+unchanged diagnostic rerun would not add them. No static filtering, draw
+suppression or performance claim follows from this trace. Saved-capture pointer
+analysis was deterministic and its dry run wrote nothing; executable traces
+were hash checked and instruction boundaries were verified after xref scans.
+The shared parent-token reference scan exceeded its bounded cap and was not
+broadened. This is documentation-only work; no C++ build or Frontier
+installation was needed, and settings remain unchanged.
