@@ -2,17 +2,17 @@
 
 ## Status
 
-- State: offline static-exclusion audit finds substantial unchanged data, but
-  retained captures cannot establish a safe pre-cap skip or exact admission
-  replay. The failed static-owner experiment remains disabled in Frontier;
-  Insert remains immediate/manual. No new rendering build is justified yet.
+- State: combined live scene/eye lookup built, installed and verified in
+  Frontier. Equivalence and CPU checks pass. Offline static exclusion remains
+  unproven; the failed static-owner experiment stays off. Expected benefit is a
+  small CPU cleanup, not a noticeable FPS gain.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-42-gc8add89-dirty remains installed (6AADDB74), with
-  temporal_aa_static_surfaces=off. Disabled configuration and exact binaries:
-  build/static-surfaces-disabled-frontier-93af971; install verification passed.
+- Build: v0.17.0-45-gfedd340-dirty installed (6AAE7FD3), with static surfaces
+  off and manual Insert capture. Payloads, unchanged INI and receipts are in
+  build/mesh-eligibility-frontier-fedd340; install verification passed.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -55,10 +55,10 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next: audit the larger repeated eligibility-check cost while preserving live
-  scene/eye/cap decisions. Early static skipping remains unproven; do not build
-  it from pool slots, stale visibility or incomplete admission replay. GPU
-  savings from static exclusion remain possible but unquantified.
+- Next: investigate an authoritative static-scenery classification in Elite's
+  instance metadata or draw construction. Planet-relative coordinates alone
+  include movable objects. Do not infer immobility from unchanged poses, pool
+  slots, prior invisibility or immutable geometry. No new flight is required.
 
 ## Journal
 
@@ -3845,3 +3845,121 @@ build/static-exclusion-coverage-190309/report.md, mesh-probe-report.json and
 distribution.json contain the admitted-record analysis. Its
 admission-extract.txt preserves the version-verified current-flight timing
 lines read through tools/edvr_log.py. No production source changed.
+
+### 2026-09-19 -- repeated eligibility checks: hypothesis and gates
+
+User authorized the next CPU pass. The candidate is the live depth/eye lookup
+inside meshMotionDraw, not a static-object cache. It first calls
+depthProbeIsSceneDepth, then depthProbeSceneDepthFormat for eye zero and, when
+needed, eye one. Each format call refreshes the size-specific scene pick,
+orders the pair, and scans target records for the first matching texture's
+format. The hypothesis is that combining these operations preserves the same
+current result with less repeated work.
+
+Confirm/refute before installing: compare the combined function against the
+exact old call sequence across pair changes, first-bind order, failed refresh,
+size switches, same-texture aliases and invalid formats. Compare scene-pick
+state as well as returned eye. The old membership prefilter must precede any
+refresh; replacing it with the view-based lookup would change behavior.
+Preserve the mesh cap, its diagnostic probes, consumed-eye guard and all later
+admission decisions. An outer-clock benchmark over repeated calls must show a
+benefit; the existing sampled stage envelopes include measurement overhead and
+are not a prediction of recoverable milliseconds. Do not introduce stale
+scene-result caching or move timers to make the reported stage smaller.
+
+The independent fast-path audit rejects broader micro-optimizations. Preserving
+all admission counts while deriving redundant counters later saves only 0.225
+ns/call in its randomized workload; caching the five-shader coverage tag saves
+0.262 ns/call before accounting for tag updates. At this flight's 23,249 hook
+entries/frame those are roughly 0.005-0.006 ms each. WARP GetType cost is
+likewise about 0.012 ms/frame at the supported-call rate, insufficient reason
+to remove the context guard. These are bounded synthetic results, not flight
+savings.
+
+Clock calibration measures 16.748 ns per QPC call, versus sampled Fast and
+Scene spans of 24.41 and 38.61 ns. It cannot be subtracted directly from the
+stage samples, but confirms that their projected 0.567/0.403 ms envelopes
+include material measurement overhead. Preserve the full 41,848,960-entry
+denominator, rejection priority, all counters and the destructor's final
+timestamp. Benchmark sources, compiler settings and results are in
+build/eligibility-fast-audit-fedd340/report.md. The combined live scene lookup
+remains the sole production candidate.
+
+Implemented depthProbeSceneTextureEye and changed only the mesh motion caller.
+The old immutable depth-metadata cache remains; no new scene-result cache,
+static predicate, visibility skip or change to the 512-record cap is added. The
+other users of depthProbeSceneDepthFormat retain their existing API. Test-only
+counters compile out of production. Independent review found no equivalence
+issue after the benchmark checksum was corrected (XOR of equal A/B results had
+cancelled).
+
+The production-include depth rig passes 156 checks, covering the literal old
+sequence against identical restored pair/cache/scan state. The mesh WARP rig
+passes 2,506 checks, including live selection, consumed-eye/history behavior
+and bounded cap probes. Observed target positions 2/3 reduce format-table
+visits from ten to seven per alternating-eye pair, and refresh/order calls from
+three to two. The depth table remains bounded to 32 targets.
+
+The uninstrumented outer-clock benchmark warms up, alternates variant order
+over nine trials, and uses volatile dispatch plus a non-cancelling checksum.
+Initial medians at positions 2/3 are 4.69 ns/call old and 3.73 ns/call combined
+(eight of nine paired wins). At synthetic positions 30/31 they are 16.10/10.43
+ns (nine wins; visits 94 to 63). These are lookup-only synthetic measurements,
+not game frame-time savings; the observed-position difference is less than one
+nanosecond per query. It does not justify another dedicated headset comparison
+or a claim of material progress toward 90 FPS.
+
+The absolute-path full build exited zero; its 67 pooled rigs and three quiet
+gates passed. Log: build/mesh-eligibility-build.log. A post-build benchmark
+again measures 4.69/3.73 ns at positions 2/3, now nine of nine paired wins; the
+synthetic late-table case measures 14.32/11.13 ns, also nine wins. Its full
+ranges and checksums are in build/mesh-eligibility-benchmark.txt.
+
+User steering: investigate whether planet-fixed scenery has an authoritative
+classification, rather than discovering immobility repeatedly. That would be a
+better early predicate if present. Planet/reference-frame membership alone does
+not establish immobility: ships, drones and NPCs can share that frame. Start
+with known instance fields and labeled static/movable examples; a correlated
+bit is only a candidate. Confirm its meaning through shader use or the code
+writing the instance buffer. If no such property reaches the GPU, the required
+hook would move upstream into Elite's object/draw construction.
+
+Field audit: the known t33 fields are bone base at byte 0 and raw rigid pose at
+bytes 4..27. Both scenery and moving objects use that flattened record; the
+parent relationship is not recoverable from its pose alone. The pose at
+288..319 was previously measured as a duplicate of current pose, not previous
+pose or a static tag. The second word of INSTANCEANDMODELDATAINDEX is retained
+but its semantics are unknown; the transcribed FSS shader only consumes the
+first word as its pool index. The compact discriminator words at t33 offsets 28
+and 320 are used in mesh compatibility keys, but neither has established
+static/parent semantics. A wider stable-byte signature proved non-unique.
+
+Ruled out as static classifications: boneBase==0, the five rigid shader
+families, immutable vertex/index buffers and stencil bit 0x10. Those also occur
+on movable geometry. EDVR flag 2048 is our correction result, not a
+classification supplied by Elite.
+
+Next bounded discriminator: join retained building-owned coverage with its draw
+snapshot and instance data, then compare the second instance word and the two
+discriminator fields against independently moving records. Reject any candidate
+value/mask also present on movable examples, including parked ships where
+known. A surviving correlation requires tracing the CPU writer to its source
+object/draw-list property; it does not authorize static exclusion by itself.
+The retained 174658 data can start this search, but most building pixels lack
+exact ownership, so label confidence and unknowns must be explicit.
+Rotating-station controls, parent motion and animation remain required before
+generalizing beyond settlements.
+
+Installed and verified in Frontier through tools/install_edvr.py: dry-run,
+apply, then verify-only. Version v0.17.0-45-gfedd340-dirty, graphics stamp
+6AAE7FD3 (2026-09-19 12:28:03 UTC). The native pair and loader match the
+archive build/mesh-eligibility-frontier-fedd340. Graphics SHA-256 begins
+7eeafbec23282c01; runtime begins 6b1868b39ab8a1ea. Full hashes, symbols, build
+log, source patch and receipt are retained there. Receipt backup ends
+pre-mesh-eligibility-fedd340-20260919-063211.bak.
+
+No INI was installed or edited. Before/after SHA-256 is identical:
+6d6208a8af38e24fa9deb24ff3a066c69a516b4e48818ff097e4ac7329914b6f. Static
+surfaces remain off, eye trigger manual and temporal AA DLSS. No game
+frame-time gain is established, and no dedicated repeat flight is requested for
+this small equivalent lookup change.

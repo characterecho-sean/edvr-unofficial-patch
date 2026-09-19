@@ -4,6 +4,8 @@
 
 #include <wrl/client.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -82,6 +84,368 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext*, const char*, size
 void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext*) {}
 }  // namespace edvr
 
+namespace {
+struct PickState {
+    int pair[2];
+    edvr::ScenePickCache cache;
+    uint32_t scans;
+};
+
+struct WorkCounts {
+    uint32_t refresh;
+    uint32_t order;
+    uint32_t formatVisits;
+};
+
+struct Selection {
+    bool found;
+    int eye;
+    PickState state;
+    WorkCounts work;
+};
+
+PickState capturePickState() {
+    return {{edvr::g_scenePick[0], edvr::g_scenePick[1]},
+            edvr::g_scenePickCache, edvr::g_scenePickScans};
+}
+
+void restorePickState(const PickState& state) {
+    edvr::g_scenePick[0] = state.pair[0];
+    edvr::g_scenePick[1] = state.pair[1];
+    edvr::g_scenePickCache = state.cache;
+    edvr::g_scenePickScans = state.scans;
+}
+
+void clearWorkCounts() {
+    edvr::g_scenePickRefreshCalls = 0;
+    edvr::g_scenePickOrderCalls = 0;
+    edvr::g_scenePickFormatVisits = 0;
+}
+
+WorkCounts captureWorkCounts() {
+    return {edvr::g_scenePickRefreshCalls, edvr::g_scenePickOrderCalls,
+            edvr::g_scenePickFormatVisits};
+}
+
+bool samePickState(const PickState& a, const PickState& b) {
+    return a.pair[0] == b.pair[0] && a.pair[1] == b.pair[1] &&
+           a.cache.w == b.cache.w && a.cache.h == b.cache.h &&
+           a.cache.result == b.cache.result && a.cache.valid == b.cache.valid &&
+           a.scans == b.scans;
+}
+
+// Literal copy of meshMotionDraw's former membership + two-eye format loop.
+bool oldSceneTextureEye(uint32_t w, uint32_t h, const void* resource, int* outEye) {
+    *outEye = -1;
+    if (!edvr::depthProbeIsSceneDepth(resource)) return false;
+    for (int i = 0; i < 2; ++i) {
+        ID3D11Texture2D* sceneTexture = nullptr;
+        uint32_t format = 0;
+        if (edvr::depthProbeSceneDepthFormat(w, h, i, &sceneTexture, &format) &&
+            sceneTexture == resource) {
+            *outEye = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+Selection selectFrom(const PickState& initial, bool fused, uint32_t w, uint32_t h,
+                     const void* resource) {
+    restorePickState(initial);
+    clearWorkCounts();
+    int eye = 77;
+    const bool found = fused
+        ? edvr::depthProbeSceneTextureEye(w, h, resource, &eye)
+        : oldSceneTextureEye(w, h, resource, &eye);
+    return {found, eye, capturePickState(), captureWorkCounts()};
+}
+
+Selection checkEquivalent(const char* label, uint32_t w, uint32_t h,
+                          const void* resource) {
+    const PickState initial = capturePickState();
+    const Selection oldResult = selectFrom(initial, false, w, h, resource);
+    const Selection fusedResult = selectFrom(initial, true, w, h, resource);
+    const std::string prefix = std::string(label) + ": ";
+    check(oldResult.found == fusedResult.found,
+          (prefix + "return differs").c_str());
+    check(oldResult.eye == fusedResult.eye,
+          (prefix + "eye differs").c_str());
+    check(samePickState(oldResult.state, fusedResult.state),
+          (prefix + "pair/cache/scan side effects differ").c_str());
+    return fusedResult;
+}
+
+struct TargetTableGuard {
+    edvr::Target targets[edvr::kMaxTargets];
+    int targetCount = edvr::g_targetCount;
+    bool wanted = edvr::g_wanted;
+    PickState pick = capturePickState();
+
+    TargetTableGuard() { std::memcpy(targets, edvr::g_targets, sizeof(targets)); }
+    ~TargetTableGuard() {
+        std::memcpy(edvr::g_targets, targets, sizeof(targets));
+        edvr::g_targetCount = targetCount;
+        edvr::g_wanted = wanted;
+        restorePickState(pick);
+    }
+};
+
+ID3D11Texture2D* fakeTexture(unsigned id) {
+    return reinterpret_cast<ID3D11Texture2D*>(uintptr_t{0x10000u + id * 0x100u});
+}
+
+void setSyntheticTarget(int index, unsigned textureId, uint32_t w, uint32_t h,
+                        uint32_t draws, uint32_t firstBind,
+                        DXGI_FORMAT format = DXGI_FORMAT_D32_FLOAT) {
+    edvr::Target target{};
+    target.dsv = reinterpret_cast<void*>(uintptr_t{0x20000u + unsigned(index) * 0x100u});
+    target.tex = fakeTexture(textureId);
+    target.w = w;
+    target.h = h;
+    target.samples = 1;
+    target.drawsLastFrame = draws;
+    target.firstBindLastFrame = firstBind;
+    target.dsvFmt = format;
+    edvr::g_targets[index] = target;
+}
+
+void baseSyntheticTable() {
+    std::memset(edvr::g_targets, 0, sizeof(edvr::g_targets));
+    edvr::g_targetCount = 6;
+    setSyntheticTarget(0, 10, 200, 100, 10, 2);
+    setSyntheticTarget(1, 11, 200, 100, 8, 4);
+    setSyntheticTarget(2, 20, 100, 100, 10, 10);
+    setSyntheticTarget(3, 21, 100, 100, 8, 20);
+    setSyntheticTarget(4, 22, 400, 100, 7, 30);
+    setSyntheticTarget(5, 23, 500, 100, 6, 40);
+    edvr::g_wanted = true;
+    edvr::g_scenePick[0] = 2;
+    edvr::g_scenePick[1] = 3;
+    edvr::g_scenePickCache = edvr::ScenePickCache{100, 100, true, true};
+    edvr::g_scenePickScans = 41;
+}
+
+void runEquivalenceTests() {
+    TargetTableGuard restore;
+
+    baseSyntheticTable();
+    edvr::g_wanted = false;
+    Selection result = checkEquivalent("disabled", 100, 100, fakeTexture(20));
+    check(!result.found && result.eye == -1, "disabled selection rejects and clears eye");
+
+    baseSyntheticTable();
+    result = checkEquivalent("null resource", 100, 100, nullptr);
+    check(!result.found && result.eye == -1, "null resource rejects and clears eye");
+
+    baseSyntheticTable();
+    edvr::g_scenePick[0] = edvr::g_scenePick[1] = -1;
+    result = checkEquivalent("no pair", 100, 100, fakeTexture(20));
+    check(!result.found && result.eye == -1, "missing pair rejects and clears eye");
+
+    baseSyntheticTable();
+    result = checkEquivalent("settled first eye", 100, 100, fakeTexture(20));
+    check(result.found && result.eye == 0, "settled first eye retained");
+    baseSyntheticTable();
+    result = checkEquivalent("settled second eye", 100, 100, fakeTexture(21));
+    check(result.found && result.eye == 1, "settled second eye retained");
+
+    baseSyntheticTable();
+    setSyntheticTarget(4, 22, 100, 100, 12, 30);
+    edvr::g_scenePickCache.valid = false;
+    result = checkEquivalent("invalid cache hysteresis", 100, 100, fakeTexture(20));
+    check(result.found && result.eye == 0 && result.state.pair[0] == 2 &&
+          result.state.pair[1] == 3 && result.state.scans == 42,
+          "invalid cache refresh keeps pair within hysteresis");
+
+    baseSyntheticTable();
+    setSyntheticTarget(4, 22, 100, 100, 30, 30);
+    setSyntheticTarget(5, 23, 100, 100, 20, 40);
+    edvr::g_scenePickCache.valid = false;
+    result = checkEquivalent("busiest replacement", 100, 100, fakeTexture(21));
+    check(!result.found && result.eye == -1 && result.state.pair[0] == 4 &&
+          result.state.pair[1] == 5,
+          "refresh rejects a formerly selected texture after replacement");
+
+    baseSyntheticTable();
+    edvr::g_scenePickCache.valid = false;
+    result = checkEquivalent("alternate size", 200, 100, fakeTexture(20));
+    check(!result.found && result.state.pair[0] == 0 && result.state.pair[1] == 1,
+          "alternate-size refresh displaces the old pair");
+
+    baseSyntheticTable();
+    setSyntheticTarget(0, 10, 300, 100, 10, 2);
+    edvr::g_scenePickCache.valid = false;
+    result = checkEquivalent("one candidate", 300, 100, fakeTexture(20));
+    check(!result.found && result.state.pair[0] == 2 && result.state.pair[1] == 3 &&
+          result.state.cache.valid && !result.state.cache.result,
+          "failed one-candidate refresh preserves the stale pair");
+
+    baseSyntheticTable();
+    setSyntheticTarget(4, 22, 100, 100, 30, 30);
+    edvr::g_scenePickCache.valid = false;
+    result = checkEquivalent("third same-size target", 100, 100, fakeTexture(22));
+    check(!result.found && result.state.scans == 41 && result.state.pair[0] == 2,
+          "non-pair target rejects before refresh");
+
+    baseSyntheticTable();
+    edvr::g_targets[3].tex = fakeTexture(20);
+    edvr::g_targets[3].firstBindLastFrame = 5;
+    result = checkEquivalent("same-texture pair aliases", 100, 100, fakeTexture(20));
+    check(result.found && result.eye == 0,
+          "same-texture pair chooses the first ordered eye");
+
+    baseSyntheticTable();
+    edvr::g_targets[0].tex = fakeTexture(20);
+    edvr::g_targets[0].dsvFmt = DXGI_FORMAT_UNKNOWN;
+    result = checkEquivalent("zero-format first alias", 100, 100, fakeTexture(20));
+    check(!result.found && result.eye == -1,
+          "first target-table alias controls format validity");
+
+    baseSyntheticTable();
+    edvr::g_targets[2].dsvFmt = DXGI_FORMAT_UNKNOWN;
+    result = checkEquivalent("invalid other-eye format", 100, 100, fakeTexture(21));
+    check(result.found && result.eye == 1,
+          "invalid first-eye format does not reject the valid second eye");
+
+    baseSyntheticTable();
+    ID3D11Texture2D* evictedTexture = edvr::g_targets[2].tex;
+    setSyntheticTarget(2, 25, 100, 100, 11, 9);
+    edvr::g_scenePickCache.valid = false;
+    result = checkEquivalent("evicted identity", 100, 100, evictedTexture);
+    check(!result.found && result.state.scans == 41,
+          "evicted identity rejects before a reused-slot refresh");
+    result = checkEquivalent("reused slot", 100, 100, fakeTexture(25));
+    check(result.found && result.eye == 0,
+          "reused scene slot selects its new texture identity");
+
+    baseSyntheticTable();
+    const PickState counterStart = capturePickState();
+    restorePickState(counterStart);
+    clearWorkCounts();
+    int eye = -1;
+    check(oldSceneTextureEye(100, 100, fakeTexture(20), &eye) && eye == 0,
+          "old counter sequence selects first eye");
+    check(oldSceneTextureEye(100, 100, fakeTexture(21), &eye) && eye == 1,
+          "old counter sequence selects second eye");
+    const WorkCounts oldWork = captureWorkCounts();
+    restorePickState(counterStart);
+    clearWorkCounts();
+    check(edvr::depthProbeSceneTextureEye(100, 100, fakeTexture(20), &eye) && eye == 0,
+          "fused counter sequence selects first eye");
+    check(edvr::depthProbeSceneTextureEye(100, 100, fakeTexture(21), &eye) && eye == 1,
+          "fused counter sequence selects second eye");
+    const WorkCounts fusedWork = captureWorkCounts();
+    check(oldWork.formatVisits == 10 && fusedWork.formatVisits == 7,
+          "observed indices 2/3 reduce alternating-eye format visits from 10 to 7");
+    check(oldWork.refresh == 3 && fusedWork.refresh == 2 &&
+          oldWork.order == 3 && fusedWork.order == 2,
+          "fused lookup performs one refresh and order operation per resource");
+}
+
+bool oldSceneTextureEyeUninstrumented(uint32_t w, uint32_t h, const void* resource,
+                                      int* outEye) {
+    *outEye = -1;
+    if (!edvr::depthProbeIsSceneDepth(resource)) return false;
+    for (int eye = 0; eye < 2; ++eye) {
+        if (!edvr::refreshScenePickImpl<false>(w, h)) continue;
+        int first, second;
+        edvr::sceneOrderFirstSecondImpl<false>(&first, &second);
+        ID3D11Texture2D* texture = edvr::g_targets[eye == 0 ? first : second].tex;
+        if (edvr::sceneTextureHasFormat<false>(texture) && texture == resource) {
+            *outEye = eye;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool fusedSceneTextureEyeUninstrumented(uint32_t w, uint32_t h, const void* resource,
+                                        int* outEye) {
+    return edvr::sceneTextureEyeImpl<false>(w, h, resource, outEye);
+}
+
+using SelectionFn = bool (*)(uint32_t, uint32_t, const void*, int*);
+volatile uintptr_t benchmarkChecksum = 0;
+
+double benchmarkOne(SelectionFn function, const void* first, const void* second,
+                    unsigned iterations, LARGE_INTEGER frequency) {
+    SelectionFn volatile dispatch = function;
+    uintptr_t checksum = 0;
+    LARGE_INTEGER begin{}, end{};
+    QueryPerformanceCounter(&begin);
+    for (unsigned i = 0; i < iterations; ++i) {
+        int eye = -1;
+        const void* resource = (i & 1) ? second : first;
+        const bool found = dispatch(100, 100, resource, &eye);
+        checksum = checksum * 33u + uintptr_t(found ? eye + 3 : 1);
+    }
+    QueryPerformanceCounter(&end);
+    benchmarkChecksum += checksum | uintptr_t{1};
+    return double(end.QuadPart - begin.QuadPart) * 1.0e9 /
+           double(frequency.QuadPart) / double(iterations);
+}
+
+double median(std::array<double, 9> values) {
+    std::sort(values.begin(), values.end());
+    return values[values.size() / 2];
+}
+
+void benchmarkTable(int count, int firstIndex, int secondIndex,
+                    const char* label, LARGE_INTEGER frequency) {
+    std::memset(edvr::g_targets, 0, sizeof(edvr::g_targets));
+    edvr::g_targetCount = count;
+    for (int i = 0; i < count; ++i)
+        setSyntheticTarget(i, unsigned(i + 1), 100, 100, 1, unsigned(i + 1));
+    edvr::g_wanted = true;
+    edvr::g_scenePick[0] = firstIndex;
+    edvr::g_scenePick[1] = secondIndex;
+    edvr::g_scenePickCache = edvr::ScenePickCache{100, 100, true, true};
+    const void* first = edvr::g_targets[firstIndex].tex;
+    const void* second = edvr::g_targets[secondIndex].tex;
+    constexpr unsigned iterations = 300000;
+    std::array<double, 9> oldTimes{}, fusedTimes{};
+    // Warm code and data before collecting the rotating-order trials.
+    benchmarkOne(oldSceneTextureEyeUninstrumented, first, second, 50000, frequency);
+    benchmarkOne(fusedSceneTextureEyeUninstrumented, first, second, 50000, frequency);
+    for (size_t trial = 0; trial < oldTimes.size(); ++trial) {
+        if ((trial & 1) == 0) {
+            oldTimes[trial] = benchmarkOne(oldSceneTextureEyeUninstrumented, first, second,
+                                           iterations, frequency);
+            fusedTimes[trial] = benchmarkOne(fusedSceneTextureEyeUninstrumented, first, second,
+                                             iterations, frequency);
+        } else {
+            fusedTimes[trial] = benchmarkOne(fusedSceneTextureEyeUninstrumented, first, second,
+                                             iterations, frequency);
+            oldTimes[trial] = benchmarkOne(oldSceneTextureEyeUninstrumented, first, second,
+                                           iterations, frequency);
+        }
+    }
+    const double oldNs = median(oldTimes), fusedNs = median(fusedTimes);
+    const auto oldRange = std::minmax_element(oldTimes.begin(), oldTimes.end());
+    const auto fusedRange = std::minmax_element(fusedTimes.begin(), fusedTimes.end());
+    unsigned fusedWins = 0;
+    for (size_t i = 0; i < oldTimes.size(); ++i) fusedWins += fusedTimes[i] < oldTimes[i];
+    const int oldVisits = (firstIndex + 1) * 2 + secondIndex + 1;
+    const int fusedVisits = firstIndex + secondIndex + 2;
+    std::printf("depth_scene_pick_test: benchmark %s: old %.2f ns/call [%.2f, %.2f], fused %.2f ns/call [%.2f, %.2f], %.2fx, fused wins %u/9; two-call format visits %d -> %d; iterations %u x 9, checksum 0x%llx\n",
+                label, oldNs, *oldRange.first, *oldRange.second,
+                fusedNs, *fusedRange.first, *fusedRange.second,
+                oldNs / fusedNs, fusedWins, oldVisits, fusedVisits, iterations,
+                static_cast<unsigned long long>(benchmarkChecksum));
+}
+
+int runBenchmark() {
+    TargetTableGuard restore;
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return 1;
+    benchmarkTable(4, 2, 3, "indices-2-3", frequency);
+    benchmarkTable(edvr::kMaxTargets, edvr::kMaxTargets - 2,
+                   edvr::kMaxTargets - 1, "indices-30-31", frequency);
+    return benchmarkChecksum == 0 ? 1 : 0;
+}
+}  // namespace
+
 int main(int argc, char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
                  SEM_NOOPENFILEERRORBOX);
@@ -91,6 +455,7 @@ int main(int argc, char** argv) {
             std::puts("depth_scene_pick_test: dry-run");
             return 0;
         }
+        if (!std::strcmp(argv[1], "--benchmark")) return runBenchmark();
         if (std::strcmp(argv[1], "--self-test")) return 2;
 
         const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -105,6 +470,7 @@ int main(int argc, char** argv) {
 
         edvr::depthProbeConfigure(edvr::Config::get());
         check(edvr::g_wanted, "DLSS enables the depth probe");
+        runEquivalenceTests();
 
         const uint32_t negativeScan = edvr::g_scenePickScans;
         scene(100, 100, 0, false);

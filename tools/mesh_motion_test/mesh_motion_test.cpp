@@ -37,9 +37,8 @@ bool menuOpen() { return testMenuOpen; }
 void menuNotify(const char* message) { ++testMenuNotices;testMenuNotice=message; }
 uint64_t perfMonitorBenchmarkDisturbanceEpoch() noexcept { return testBenchmarkDisturbanceEpoch; }
 void* bindingGet(BindSlot slot) { check(slot==BindSlot::Dsv0,"only scene depth shadow queried"); return testDepth; }
-bool depthProbeIsSceneDepth(const void* resource) { return resource==testScene; }
-bool depthProbeSceneDepthFormat(uint32_t,uint32_t,int eye,ID3D11Texture2D** tex,uint32_t* fmt) {
-    *tex=eye==testEye?testScene:nullptr; *fmt=DXGI_FORMAT_D32_FLOAT; return *tex!=nullptr;
+bool depthProbeSceneTextureEye(uint32_t,uint32_t,const void* resource,int* eye) {
+    if(!eye)return false;*eye=-1;if(!resource || resource!=testScene || testEye<0 || testEye>1)return false;*eye=testEye;return true;
 }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx,UINT n,ID3D11RenderTargetView* const* rt,ID3D11DepthStencilView* ds) { ctx->OMSetRenderTargets(n,rt,ds); }
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,const char* hlsl,size_t,const char* entry,const char*,const SwapMacro*,const char*) {

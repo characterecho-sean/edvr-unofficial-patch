@@ -510,10 +510,9 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     if(ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE){admission.fastReject(FastReject::Context);return;}
     admission.advance(AdmissionStage::Scene);
     auto* bound=static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));if(!bound)return;
-    ID3D11Texture2D* scene=nullptr;const D3D11_TEXTURE2D_DESC* td=nullptr;if(!depthMetadata.get(bound,scene,td) || !depthProbeIsSceneDepth(scene))return;
+    ID3D11Texture2D* scene=nullptr;const D3D11_TEXTURE2D_DESC* td=nullptr;if(!depthMetadata.get(bound,scene,td))return;
     if(td->ArraySize!=1 || td->SampleDesc.Count!=1)return;
-    int eye=-1;for(int i=0;i<2;++i){ID3D11Texture2D* s=nullptr;uint32_t fmt=0;if(depthProbeSceneDepthFormat(td->Width,td->Height,i,&s,&fmt) && s==scene){eye=i;break;}}
-    if(eye<0)return;
+    int eye=-1;if(!depthProbeSceneTextureEye(td->Width,td->Height,scene,&eye))return;
     Eye& e=eyes[eye];if(e.matched)return; // no history mutation after this eye is consumed
     const bool overCap=e.scene.Get()==scene && e.history[e.write].count+n>maxRecords;
     bool probeCap=false;
