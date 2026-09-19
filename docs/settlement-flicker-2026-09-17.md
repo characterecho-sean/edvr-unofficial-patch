@@ -2,6 +2,25 @@
 
 ## Status
 
+- Reversing (2026-09-19): KinematicRig pipeline decoded statically (Ghidra
+  headless, exe hash-verified), no flight spent. State machine rig+0x380
+  (4 = render-ready); dependency tokens +0x188/+0x1A0/+0x1B8 with -1 =
+  resolved, paired interfaces +0x190/+0x1A8/+0x1C0; +0x1C0 slot +0x90 =
+  readiness, slot +0x170 writes parent-relative 3x4 pose to rig+0x58.
+  0x4321940/0x4320340 dispatch via named job "Kinematic::UpdateRenderDataJob"
+  (vtables 0x145591C98/0x145591DC0) through a no-.pdata thunk table. Waves
+  4-12: record filler FOUND (FUN_14432A4E8, fragment of undecompilable 30 KB
+  parent 0x4329984): fills collection+0x280 stride 0x2F0, creates pose ctx
+  record+0x290 (0xC0, registry collection+0x2E0) and content hash record
+  +0x268. CORRECTION: the change predicate is at record+0x2C0, not pose
+  +0xB0 (undefined4* x4 scaling misread); skip signal = render-record
+  (stride 0x6A0) +0x688 bit 0x1000, honored only when predicate slots say
+  unchanged (slot+0x70 == 0) and tracking (slot+0x58 != 0). Dirty pipeline:
+  FUN_14431E860 float-channel epsilon bitmap -> FUN_14432CCC0 per-record
+  mask-AND + world-bounds recompute (record+0xB0..0x12C). Predicate class
+  still unidentified (vtable slot +0xB8 install in filler). Dumps in
+  analysis\decomp.
+
 - State: flight 134252 passes the guard but has zero owner links. Seventeen
   saved paths use worker dispatch, with no upstream KinematicRig ancestor; one
   truncates at recursion. Worker descriptors retain collection/registry but no
@@ -5239,3 +5258,282 @@ Reader self-tests and the original 134252 capture pass after the narrow
 terminal-frame compatibility fix. No C++ or installed game files changed in
 this analysis; Frontier remains on v0.17.0-57-ge700d4f-dirty. An unchanged
 headset rerun is unnecessary until the submission/worker instrument is ready.
+
+### 2026-09-19 -- static reversing: KinematicRig pipeline decoded (Ghidra, no flight cost)
+
+Setup now in-repo: Ghidra 12.1.3 headless project at analysis\ghidra\EDAnalysis
+(exe SHA-256 e6be8bbe...e988, byte-identical to the capture target; .pdata gave
+253,483 function entries, analysis\pdata_functions.csv), portable Temurin 21 at
+analysis\jdk-21.0.12.1+1, Java GhidraScripts in analysis\ghidra_scripts, decomp
+dumps in analysis\decomp. MSVC RTTI is stripped (20 stray names only); class
+identity comes from Cobra reflection strings and vtable-adjacent job-name strings.
+Gotcha recorded: GhidraScript toAddr(long) is a raw offset, not image-base+RVA;
+use currentProgram.getImageBase().add(rva).
+
+Decoded, all RVAs, all confirmed against the hash-verified exe:
+
+- Lifecycle state dword at rig+0x380 (FUN_14432aa00 prints it): 0 Dead,
+  1 WaitingToCreate (m_blockInitialisation=%d), 2 resolving dependencies
+  (invokes the 0x432A840 labeler), 3 CreatingRT, 4 Ready, 5 DestroyingRT,
+  6 DestroyingMT. Render/update 0x431AFE0 runs only in state 4; the
+  initializer 0x431B2A0 leaves the rig in state 3. Source path in assert:
+  Libraries\Systems\Kinematic\Component\KinematicRig.cpp line 0x6d8.
+- Dependency triples: tokens at +0x188/+0x1A0/+0x1B8 (int, -1 = resolved)
+  pair with interface pointers at +0x190/+0x1A8/+0x1C0. "token -1 AND pointer
+  non-null" is the linked/ready invariant everywhere it is tested. The labeler
+  passes &rig+0x1B8 to FUN_140e75ac0 (dependency registry) named "parent root
+  physics model"; slot +0x90 of the +0x1C0 interface is a readiness predicate;
+  slot +0x170 writes a parent-relative 3x4 pose to rig+0x58. The initializer
+  calls +0x170 only when descriptor flags (rig+0x50 -> +0x28) bit 12 are clear.
+- Culling in 0x431AFE0 (0x431B11D-0x431B221 region decoded): the 64-bit mask
+  uVar9 is the OR of record+0x570 over eligible stride-0x6A0 records
+  (eligibility: FUN_142840840 set-membership vs rig+0x350, record+0x68C bit 5,
+  and FUN_14432C520 layer test ANDing record+0x68C against rig masks
+  0x3D8/0x3DA/0x3DC selected by record class). uVar9 then has one of three
+  masks at outer+0x1A950/+0x1A958/+0x1A960 ANDed out, selected by
+  collection+0x70 bit 7. Empty mask or collection+0x70 bit 0 clear -> cheap
+  path, no dispatch. The surviving mask is descriptor field +0x48.
+- Dispatch: 0x431AFE0 builds the 0x60-byte worker descriptor and either calls
+  0x4321940 directly or, if collection+8 non-null, virtual slot +0x50 (job
+  queue). 0x4321940 consumes the single descriptor; 0x4320340 consumes a
+  descriptor ARRAY at param+0x40 stride 0x60, count at param+0x300. Both run
+  the same stride-0x2F0 record loop gating on record+0x290 (pose context),
+  +0x234, +0x298, then per set bit of record+0x208 compare the 4-bit LOD
+  nibble in record+0x210 (bit b -> qword b>>4, nibble b&0xF) against the
+  ushort cap at *(record+0x18)+0x6A, and submit via FUN_1442B4420.
+- The unresolved caller path into 0x4320340 is closed: 0x42DF47A/0x42DF523/
+  0x42DFAF3 are not functions but thunks in a no-.pdata trampoline table.
+  0x42DF460 is a this-adjust (-0xD0) adjuster into 0x431AFE0; 0x42DF520 and
+  0x42DFAF0 are "MOV RCX,RDX; JMP" job adapters into 0x4321940/0x4320340.
+  Their vtables sit at 0x145591C98 and 0x145591DC0, and the bytes immediately
+  after the first vtable are the ASCII job name "Kinematic::UpdateRenderDataJob".
+  Both dispatch functions are therefore reached through the Cobra job
+  scheduler via named job descriptors, not direct calls.
+- Children can move independently: FUN_144312040 (the recursive function in
+  the 134252 unwind traces) walks pose contexts via children array at
+  pose+0xAA/count+0xAC, recomposes parent x child 3x4 matrices per node, and
+  consults a per-node predicate interface at pose+0xB0 (slots +0x70/+0x58)
+  before recomputing. Planet attachment does not make children static.
+- Factory: FUN_14431D2A0 allocates from pool DAT_145FC1B60 (gated on
+  DAT_145FC1C20) and returns object+8, i.e. callers receive the secondary
+  interface, not the object base.
+
+Ruled out: 0x431B7D4 as a distinct state writer -- it is a 77-byte fragment
+immediately after FUN_14431B2A0 sharing its tail (slot +0x170 call, +0x458=1,
++0x380=3); treat the initializer as one function.
+
+Open, in priority order: (a) which class implements the +0x1C0 interface --
+scan .rdata for vtables whose slots 18 (+0x90) and 46 (+0x170) point at
+.pdata entries, decompile candidates; (b) which collection+0x70 flag bit, if
+any, is the static/anchored classification EDVR wants -- bit 10 (0x400) is
+cleared unless the +0x1A0 dependency is resolved, bit 0 gates dispatch, bit 7
+selects the exclusion mask set, bit 8 is default-on unless rig+0x3F9;
+(c) outer+0x1A950/58/60 mask provenance (which pass/eye each covers);
+(d) thunk-table callers of the 0x145591DC0 batch-job vtable to find where
+settlement batches are queued.
+
+### 2026-09-19 -- wave 2: dependency bus, collection layout, static-bit verdict
+
+Second Ghidra pass (scripts and dumps in analysis\, all RVAs, hash-verified exe):
+
+- The dependency tokens are a typed component bus, not a name registry.
+  FUN_14432F500 (the "labeler" helper) only builds log strings
+  ("KinematicRig %s/%s <label>"); the "parent root physics model" string has
+  exactly one xref (the labeler) and is diagnostic text. Resolution runs
+  through per-interface template functions keyed by interface-name strings:
+  "IKinematicRig" at RVA 0x5140308, "IPhysicsData" at 0x5284438,
+  "IShipPhysics" at 0x5331AB0. The bus core FUN_1408C4D70 walks a provider
+  linked list (node+0x3C8 = next); each node's provider at node+0x38 answers
+  an interface-ID query via its vtable slot 0. ~100+ call sites; this is the
+  Cobra component model.
+- Consequence for the +0x1C0 question: the parent-physics interface is a
+  provider-list node looked up by interface ID, so it has multiple
+  implementors by design (planet body, ship, station physics). There is no
+  single class to name; what EDVR can rely on is the contract: slot +0x90 =
+  readiness predicate, slot +0x170 = write parent-relative 3x4 pose.
+- Collection ctor FUN_14430A060 layout: +0x18 owning rig; +0x30..0x58 the
+  48-byte default transform block (same 0x1450C8090 global as the rig ctor);
+  +0x70 flags dword; four 17-bucket hash sets at +0xF8/+0x150/+0x180/+0x1B0
+  (load factor 0.75 at +0x140) backed by rig arenas +0x110/+0x180/+0x1F0/
+  +0x260; render record array fields +0x280..+0x2A0; +0x620 = 0xFFFF.
+- Static-bit verdict: collection+0x70 is static configuration, not runtime
+  mobility. Its low bits come from the asset descriptor flags dword
+  (descriptor+0x28) via the initializer; bit 10 (0x400) is cleared unless the
+  +0x1A0 dependency is resolved; bit 8 (0x100) defaults on unless rig+0x3F9;
+  bit 0 gates dispatch in 0x431AFE0; bit 7 selects the exclusion mask set.
+  No per-frame "is moving" bit exists in this structure, and the +0x1C0
+  interface exposes no "static" query either (readiness + pose read only).
+- The engine's own change tracking is the right hook target instead:
+  FUN_144312040 consults a per-node predicate interface at pose+0xB0 before
+  recomputing a node -- slots +0x70 (node, pose ctx, 0) and +0x58 -- and the
+  pose context caches the composed matrices and LOD/mask state at +0x82..+0x8C
+  with a resolved-handle cache at +0x00 (two -1 shorts = unresolved).
+  Mirroring that predicate's verdict is a cheaper and more truthful mobility
+  signal than pose-bytes equality. Open: which class sits at pose+0xB0 (set
+  by the pose-context constructor FUN_144331300) and the exact polarity of
+  its two slots.
+- Cheap path decoded: FUN_14434DD50 (called with collection+0x300) just
+  clears a dword at +0x2A4 of its argument -- a "no visible work this pass"
+  reset, matching the zero-dispatch path in 0x431AFE0/0x4321940/0x4320340.
+
+ruled out: identifying one +0x1C0 implementing class -- the bus is
+interface-ID based with multiple implementors; the useful contract is the
+slot pair, not the class.
+
+### 2026-09-19 -- wave 3: LOD metric, record teardown, Kinematic job map
+
+- FUN_144331300 (called at the top of 0x4321940/0x4320340) is the LOD metric
+  computer: transforms a view position through two 3x4 matrices, walks the
+  stride-0x6A0 records, and for each record whose record+0x570 mask hits the
+  dispatch mask computes radius * (1/dist - k) * fov_scale + bias via
+  rcpps/rsqrtps, then searches a threshold-band table for the 4-bit LOD
+  nibble (slot index at record+0x5A4, table count at table+0x38). It emits
+  the nibble array + remaining mask that the stride-0x2F0 loops consume.
+  This is the per-frame CPU cost EDVR's motion work sits beside.
+- FUN_14430EFE0 (inner per-record update in the FUN_144312040 traversal):
+  gates on record+0x570 & mask, record+0x688 & 0x7FF0 flags, two record-class
+  predicates, a portal/region test FUN_1404F4E10 (bounds pair in/out, -1 =
+  reject), a distance-vs-band LOD pick, and a shadow-cascade branch
+  (FUN_142842E90/FUN_14288AC40/FUN_14288A1E0) with a lazily-built cached
+  plane set (flag byte at cache+0x60). Output: LOD index + visible byte.
+- FUN_144332707 is the collection teardown: walks collection+0x280 records
+  stride 0x2F0 releasing record+0x2B8 objects (vtable slot +8 arg 1) and
+  zeroing record+0x290 (the pose context pointer), frees the +0x2E0 registry,
+  clears collection+4 bit 1. Record population is a different function, still
+  unidentified; the pose+0xB0 predicate writer is inside that path.
+- Kinematic job family mapped from inline-name tables in .rdata (raw file
+  pointers are 0x140000000-based VAs; preferred base 0x20000001000 is NOT
+  what is stored). Descriptor layout: [phase fn slots..., 0x140578300,
+  run thunk, GetCategoryStats thunk 0x1400039F0, 0x1401F2FE0, inline name].
+  Jobs: JobBatcher, UpdateRenderDataJob (phase functions 0x1442DE6F0..
+  0x1442DF4C0, run thunk 0x1442DF520 -> 0x4321940), PrePhysicsAdvanceJob
+  (run 0x1442DF530), UpdatePhysicsObjectsJob (run 0x1442DF540),
+  PrePhysicsAdvanceCurveJob (run 0x1442DF550), plus three unnamed tables
+  with run thunks 0x1442DFAF0 (-> 0x4320340 batch), 0x1442DFB00,
+  0x1442DFB50, 0x1442DFBA0. Map regenerated by analysis\kinematic_jobs.py.
+- Correction to wave 1: the 14-run / 292-triple vtable scan
+  (analysis\vtable_candidates.txt) is invalid -- it RVA-range-checked raw
+  qwords and matched 32-bit offset tables. Disregard it; the thunk-table
+  conclusions stand because they were verified through Ghidra memory.
+
+Open: which function fills collection+0x280 records and writes pose+0xB0 --
+  the UpdateRenderDataJob phase functions 0x1442DE6F0..0x1442DF4C0 are the
+  search space, one decompile wave of ~25 functions, or a narrower store-scan
+  for stride-0x2F0 writes of a fresh allocation.
+
+### 2026-09-19 -- waves 4-12: record filler found, predicate field corrected,
+### change-detection pipeline decoded (static, no flight spent)
+
+- Record filler FOUND by exhaustive instruction store-scan
+  (analysis\ghidra_scripts\FindStores.java, [reg+0x290] stores filtered to the
+  0x14430-0x14434xxxx range). It is FUN_14432A4E8, a fragment of the 30 KB
+  pdata function 0x4329984-0x4330160 (the parent resists decompilation:
+  NO FUNCTION EVEN AFTER FORCED DISASSEMBLY). Per record (base
+  collection+0x280, stride 0x2F0, count collection+0x298): record+0x2B8 =
+  helper from factory FUN_14434C9A0, registered into the collection+0xB0/+0xB8
+  list (count record+0x2D8); record+0x2C0 = interface from vtable slot +0xB8;
+  record+0x2C8 = interface from slot +0x50 result slot +0xA0; record+0x290 =
+  pose context via FUN_1442B5780 (allocates 0xC0 bytes via ctor FUN_1442B29C0,
+  appends to registry collection+0x2E0 with cap/count/array at +0x58/+0x68/
+  +0x70). Ends with collection+4 |= 2 (records-built flag). Per record the
+  filler also runs FUN_14433C750: a 64-bit content hash of the +0x2B8 helper
+  state -> record+0x268 (inputs cached record+0x250/+0x258/+0x260), and
+  FUN_144312A60: initial render setup consuming record+0x290/+0x2D0.
+- MAJOR CORRECTION to waves 1-3: the per-node predicate is at record+0x2C0,
+  NOT pose+0xB0. FUN_144312040s param_5 is undefined4*, so param_5 + 0xb0
+  is BYTE offset 0x2C0 (x4 pointer scaling misread). Verified against the
+  consumer 0x4321940: pcVar8 = record+0x234; gates are record+0x290 non-null
+  AND record+0x234 bool != 0 AND record+0x298 != 0; mask words read at
+  record+0x208 and +0x210+i*8; LOD cap ushort at [record+0x18]+0x6A. All
+  match the traversals writes once scaled. Corrected record (stride 0x2F0)
+  layout: +0x0/+0x2 dependency tokens (-1 = resolved, via pred slot +0x80);
+  +0x18 node; +0x208..+0x228 five cached mask qwords; +0x230 pass id; +0x234
+  cached has-work bool (traversal writes it, consumer honors it); +0x2A8/
+  +0x2B0 children array/count; +0x2B8 helper; +0x2C0 predicate interface;
+  +0x2C8 secondary interface; +0x2D8 registration count; +0x2E0 registry.
+- Predicate semantics (traversal, called from 0x4321940/0x4320340): the live
+  byte = 1 ONLY IF record+0x2C0 != 0 AND slot+0x70(pred, record, 0) == 0 AND
+  slot+0x58(pred) != 0. The byte lands in the worker descriptor at +0x49 and
+  FUN_14430EFE0 honors it: byte set AND render-record (stride 0x6A0) +0x688
+  bit 12 (0x1000) set -> skip the record (FUN_142854140 tests bit 12). A
+  second gate: descriptor +0x58 byte AND record+0x688 bits 4-11 (0xFF0,
+  FUN_142852F80) -> skip. So the engines skip signal is flag bit 0x1000 at
+  render-record+0x688, honored only when the predicate allows. Polarity
+  hypothesis: slot+0x70 nonzero = changed/cannot-skip; slot+0x58 zero = not
+  tracking. Implementing class still unidentified: the filler obtains it via
+  vtable slot +0xB8 on an object (unaff_R12) whose type lives in the
+  undecompilable parent 0x4329984.
+- The object at POSE-CTX+0xB0 is unrelated to the predicate: FUN_140A7ED60
+  builds a 0x80-byte POD quantized-float array (scale DAT_14513FAA8, up to 7
+  values, count at +0x70) -- no vtable. Pose-ctx ctor FUN_1442B29C0 zeroes
+  pose+0xA8/+0xB0/+0xB8, writes a 16-byte GUID from DAT_1450C80C0 at +0x10,
+  registry at +0x30, then installs the quantized array at +0xB0.
+- Dirty-channel pipeline: FUN_14431E860 (called from unnamed job run
+  0x1442DFB50 and three other sites) walks float channels collection+0xC0
+  (stride 0x14, count +0xC8), |current-previous| >= epsilon DAT_144DEDD10 ->
+  set bit in a local bitmap, copy current->previous. Any dirty (or force
+  byte collection+0x98) -> per record FUN_14432CCC0(record, collection+0x30,
+  dirty_bitmap, flags). FUN_14432CCC0 ANDs the dirty bitmap into sub-object
+  mask sets (array record+0x1A8, stride 0xB0, count +0x1B0), transforms the
+  source bounds record+0x1A0 by record+0x130..0x16C and writes world bounds
+  record+0xB0..0xEC plus transform products record+0xF0..0x12C.
+- Ruled out: FUN_14433AF10 = physics double-buffer swap/reparent (state
+  machine returning 0/1/2, refcount churn, transform copy at +0x1E0), not the
+  record filler. FUN_14431A0D0 = streaming-queue drain over the op stack at
+  collection+0x5D8/+0x5E0; reads collection+0x280 but never populates it.
+
+Open: (a) predicate implementing class and definitive slot polarity -- the
+  +0x688/+0x2C0 writer scan (analysis\decomp\flag_writers.txt) found only
+  the filler's own install at 0x14432A588 and no +0x688 writers in the
+  Kinematic range; the 0x6A0-stride render record belongs to the renderer,
+  so its flags are set elsewhere (96 MOV writers binary-wide, none OR/AND).
+  Next evidence: a runtime vtable capture at record+0x2C0; (b) parent
+  function 0x4329984 (30 KB) needs a manual slice or smaller sub-function
+  forcing to identify unaff_R12; (c) exclusion-mask outer+0x1A950/58/60
+  provenance; (d) callers of the batch-job table 0x145591DC0.
+
+### 2026-09-19 -- next flight spec: predicate vtable + skip-flag capture
+
+Goal: close the two remaining static unknowns with ONE settlement flight --
+the predicate implementing class (record+0x2C0) and the runtime behaviour of
+the skip flag (render-record+0x688 bit 0x1000). Read-only dereference only;
+no writes to game state.
+
+Hook: FUN_14430EFE0 (RVA 0x430EFE0, the per-render-record evaluator the
+traversal calls; xrefs prove it runs inside both 0x4321940 and 0x4320340
+worker paths). Entry hook, ABI args: RCX = worker descriptor, R8 = render
+record (stride 0x6A0). From the descriptor: record2f0 = *(u64*)(RCX+0x10),
+predicate byte = *(u8*)(RCX+0x49), second gate byte = *(u8*)(RCX+0x58).
+
+Log per unique record2f0 (dedupe by pointer; reuse the existing safe-read
+and admission machinery from the ownership capture):
+- predPtr  = *(u64*)(record2f0+0x2C0); predVtable = predPtr ? *(u64*)predPtr
+  - imageBase : 0   <-- THE key datum; the vtable RVA identifies the class
+- pred2Vtable likewise from record2f0+0x2C8
+- node     = *(u64*)(record2f0+0x18)
+- poseCtx  = *(u64*)(record2f0+0x290)
+- bool234  = *(u8*)(record2f0+0x234) (cached has-work bool)
+- hash268  = *(u64*)(record2f0+0x268) (content hash from FUN_14433C750)
+- flags688 = *(u32*)(R8+0x688) (skip bit 0x1000; gate bits 0xFF0)
+
+Emit one line per unique predVtable/pred2Vtable (that is enough to close the
+class question), plus a transition line whenever flags688 or hash268 CHANGES
+for a known record2f0 (not every call -- the 44k-call flood of flight 134252
+must not repeat). Keep the 512-record admission cap but make evictions
+explicit in the log.
+
+What each outcome proves:
+- predVtable RVA -> I decompile its slots +0x58/+0x70/+0x80 statically and
+  the polarity question (slot+0x70 == 0 = unchanged?) is settled without
+  another flight. One vtable = one decompile wave.
+- flags688 bit 0x1000 stable-set on known-static settlement records across
+  frames -> the engine already marks them skippable; EDVR can key its
+  static-skip on the predicate path instead of its own classifier.
+- hash268 stable for records whose raw pose is unchanged (the 501/512
+  cohort) -> validates record+0x268 as a cheap skip key.
+- If predPtr is always 0 in settlements, the predicate path is inert there
+  and the whole slot-polarity question is moot for this use case -- that
+  would redirect the hook design to the +0x688 flag writers directly.
+
+Environment note: landed cockpit, Quest 3 / VirtualDesktopXR / RTX 5090,
+DLSS K -- same rig as flight 134252 so record/flags behaviour is comparable.
