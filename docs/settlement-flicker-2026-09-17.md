@@ -2,19 +2,19 @@
 
 ## Status
 
-- State: 17:18:47 Pause capture has no world pulse over 0.01 m, unlike the
-  earlier 16:48:57 capture's reversing 0.1105 m pulses. Body fallback instead
-  activates from about -514 ms to +1368 ms around Pause (10645-10765), with
-  roughly 0.8-1.5 m translation. No explicit reset occurs within three seconds
-  of Pause; the stereo reset is about 4.095 seconds earlier. See final entry.
-- Open: body-path availability is not proof of claims on visible buildings.
-  First rigid draw rows can be stale or auxiliary; TCAM does not justify
-  replacing the existing camera selection with that latch. No twin choice or
-  observation eviction occurs around the event. The prior camera pulse remains
-  unexplained, but is absent from this flash capture. No permanent fix yet.
+- State: automatic eye_174658 capture proves dominant-body path 4 claims
+  stationary settlement buildings, including walls, tanks and ramps. Its
+  complete 16-frame sequence starts at activation frame 12693; no DLSS reset,
+  source change or origin jump occurs. This activation is weaker than the
+  preceding Pause event and is not yet tied to a user-observed flash.
+- Open: establish visible-surface ownership before applying coarse body motion;
+  98.51% of captured body pixels have no per-mesh coverage. A static matching
+  improvement alone can recover only 0.745%. The prior 16:48:57 camera pulse
+  remains unexplained; the 17:18:47 Pause event had body activation but no such
+  pulse. First-draw rows remain unsuitable as a camera replacement.
 - Build: v0.17.0-40-gdb78d39-dirty installed and verified in Frontier; archive
   build/motion-trigger-frontier-db78d39. Full build and all gates pass. The
-  analyzed 17:18:47 Pause flight used 39-gde7e272-dirty.
+  analyzed flight is edvr_gfx_20260918_174448.log, eye_174658. No new binary.
 - Environment: Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz, DLSS K, input
   2481x2121, temporal output 3818x3264 before XR output 3072x3264 per eye,
   trims off. Installed DLSS Windows file/product version is 310,7,0,0. The new
@@ -51,11 +51,11 @@
   ruled-out batching/cache/screen-motion hypotheses remain in the journal.
   Motion tables remain 512 records/eye and 64 source records; station rotation
   and independently moving ships still need separate validation.
-- Next flight: same landed view, buildings centred; press Insert once to arm
-  automatic eye capture on the next body activation. Pause after a visible
-  flash, then wait at least three seconds. The temporary eye_run_trigger is
-  motion and ships_metres remains 0; other settings are preserved. Inspect D
-  path 4 on static facades before changing ownership. No rendering fix yet.
+- Next: design exact surface ownership for the uncovered building draws;
+  another threshold or small matching change cannot cover the captured error.
+  Temporary eye_run_trigger=motion and ships_metres=0 remain; Elite is still
+  running, so restore normal Insert at the next safe install. No rendering
+  change or performance gain is claimed from this diagnostic.
 
 ## Journal
 
@@ -3463,3 +3463,102 @@ manifest with C00/D00/P00/T00 at the logged trigger frame. Unsupported,
 cancelled or never-triggered arms are distinct log outcomes, not successful
 captures. Compare decision path 4 with static facades; TEMP/TCAM provide timing
 context. This remains a correctness diagnostic, not a frame-time test.
+
+### 2026-09-18 -- 174658 automatic capture proves body claims on buildings
+
+Verified `edvr_gfx_20260918_174448.log` against the installed compiled label
+`v0.17.0-40-gdb78d39-dirty`, graphics build stamp `6AADCA58`, before reading
+the flight. Insert arms at 17:46:28.593; the next eligible dominant-body
+activation triggers eye_174658 at 17:46:58.261, frame 12693. The activation
+reports 85 records, 38% of pose changes, 0.027 m fit residual, 0.0044 degrees
+and a 0.025 m translation term over 32.3 ms, with a 4096 m box and 1500 m
+reach. Translation terms are rigid-transform parameters, not object speeds.
+
+Manifest and motion CSV independently agree: C/D/P/T00..15 correspond to
+12693..12708, including the trigger frame. All 64 referenced files exist; the
+CSV contains exactly both eyes for each frame. All 32 evaluations have valid
+body, world rows and NVIDIA history, no reset request or origin jump, and
+stable input/output sizes. All 16 manifest entries report successful DLSS
+evaluation and valid history. The legacy `history=0` CSV field is not the
+NVIDIA `dlHistory=1` field. No Pause history payload or TEMP/TCAM records occur
+in this flight; the automatic trigger alone does not timestamp a user-observed
+flash.
+
+The first decision image contains 68,291 path-4 pixels, 3.4842% of its
+1400x1400 crop. A body-only overlay forms a near-solid silhouette of the
+visible settlement: left cylindrical building, green modules, tanks, central
+ramp and facades, roof dome, main dark wall and right ramp/annex. Some rocks
+are also claimed. The broad foreground terrain is mostly protected by its own
+exact path. This is direct visible-surface evidence, beyond the earlier CPU
+flag showing only that body motion was available.
+
+Conservative fixed image rectangles over the main dark wall, white facade,
+central ramp, tank wall and left cylinder receive body motion for roughly
+72-99% of their pixels across the sequence. These are raster rectangles, not
+object tracking: head movement changes how much of a surface remains inside
+each rectangle. Whole-crop or whole-band percentages dilute the building claim
+with sky, terrain and cockpit; do not interpret them as fractions of building
+geometry.
+
+The same-pixel counterfactual reconstructs current depth from D.z and the
+recorded body transform, then applies the recorded world transform to those
+same path-4 pixels. Reconstructing the original body D.xy agrees within 0.00048
+input pixels throughout. At activation, body-minus-world error has median
+0.0833 input pixels (0.128 output), p95 0.4406 input (0.678 output), and
+maximum 0.7295 input (1.123 output). Across the run, median error ranges
+0.056-0.207 input pixels; the worst frame, 12696, has p95 1.126 input (1.733
+output) and maximum 2.891 output pixels. This is an incorrect accepted motion,
+but its typical initial error is subpixel; it does not by itself establish that
+the visible flash was caught. Most body pixels retain history; the settlement
+band's pre-UI to submitted-image mean difference peaks at only 0.074/255.
+Neither whole-scene history rejection nor the legacy UI resolve accounts for a
+global flash in this sequence. There is no pre-activation P/T image in this
+run, and the 85 fitted records have not been identified as NPCs or a drone.
+
+Ruled out: a DLSS history reset or source-size switch during these 16 frames,
+because every manifest entry has valid history, reset=false and stable
+dimensions. Ruled out: dominant-body availability without visible building
+claims in this capture, because final decision path 4 covers the actual
+facades. This does not rule out another cause of flashes elsewhere.
+
+Source explains the unsupported ownership: `object_probe.cpp::buildGrid`
+expands from fitted members to all live records sharing their signatures, then
+dilates their cells by the configured reach. Signatures identify types, not
+persistent instances. `insideBody` accepts a pixel's reconstructed depth point
+in that grid; it has no building-instance ownership proof. Later
+terrain/holo/mesh paths can override it only where their own data is valid. No
+new rendering change is justified merely by shrinking the radius, requiring a
+stronger fit or declaring every settlement object stationary.
+
+The existing mesh data cannot supply a broad static veto. Of 68,291 body pixels
+at C00, 67,276 (98.51%) have no MeshCoverage record at all. Just 509 (0.745%)
+have final-depth-agreeing coverage and a unique unchanged full compatibility
+key/raw pose despite a changed recorded mesh origin, but an unresolved GPU
+match. Another 506 covered body pixels fail final-depth agreement. A
+conservative matching tie-break could recover those 509 pixels, but only
+fragments of the facade: 261/9,689 on the main dark wall, 36/3,861 on the tank
+and 23/4,391 on the central ramp; several other building regions have none. The
+512-record cap and draw admission must be considered before adding per-object
+work. Unchanged or shuffled records are also legitimate rotating-station parts,
+so excluding every non-fit-member is not a safe replacement for visible-surface
+ownership. Next work should establish that ownership for presently uncovered
+draws, with a proven-static path and station/mover validation; no new flight is
+needed to reconfirm this claim.
+
+Artifact integrity has one reporting defect: the separate object ledger starts
+at frame 12694, as expected because scene draws precede the temporal trigger,
+but its old text labels C00..15 as 12694..12709. That label is one frame late;
+use the manifest and CSV's 12693..12708. The ledger has 20 pool frames, 19
+instance/palette/auxiliary streams, 349,350 draw rows and no skipped copies. It
+cannot supply the trigger frame's already-finished original draws.
+
+Evidence, checked images and read-only analysis outputs are archived under
+`build/motion-trigger-analysis-174658`: integrity-report.json/.txt,
+analyze_integrity.py, roi-report.json, roi-summary.json and roi-body-C00.png.
+The same-pixel comparison is in roi-counterfactual.json; roi-findings.txt and
+roi-body-building-band.png provide the compact report and visible proof.
+ownership-report.json records the mesh intersection, input hashes and
+invocation; ownership_intersection.py reproduces it and has a write-free dry
+run. The installed graphics/runtime remain unchanged. Elite was still running
+when cleanup was checked, so the temporary motion-trigger setting remains;
+return Insert to manual at the next safe install, preserving other settings.
