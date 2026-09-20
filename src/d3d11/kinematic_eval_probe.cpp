@@ -152,6 +152,9 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
         r.flags=flags;r.predByte=predByte;r.gate2=gate2;
         r.epoch1b8=epoch1b8;r.descEpoch38=descEpoch38;
         r.firstFrame=frame;r.lastFrame=frame;r.calls=1;
+        if(!guardedRead(static_cast<uintptr_t>(record)+0x130,r.xfFirst,sizeof(r.xfFirst)))
+            ++summary_.readFaults;
+        std::memcpy(r.xfLatest,r.xfFirst,sizeof(r.xfFirst));
         if(!ok)++summary_.readFaults;
         r.predVtableRva=vtableRvaLocked(static_cast<uintptr_t>(r.predPtr));
         r.pred2VtableRva=vtableRvaLocked(static_cast<uintptr_t>(r.pred2Ptr));
@@ -166,6 +169,16 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
     ++r.calls;r.lastFrame=frame;
     if(r.epoch1b8!=epoch1b8){++summary_.epochChanges;r.epoch1b8=epoch1b8;}
     r.descEpoch38=descEpoch38;
+    // Engine-truth motion: bit-exact compare of the world transform block.
+    uint64_t xf[8];
+    if(guardedRead(static_cast<uintptr_t>(record)+0x130,xf,sizeof(xf))) {
+        if(std::memcmp(xf,r.xfLatest,sizeof(xf))!=0) {
+            std::memcpy(r.xfLatest,xf,sizeof(xf));
+            ++r.xfChanges;r.lastXfChangeFrame=frame;
+            ++summary_.xfChanges;
+            if(r.xfChanges==1)++summary_.xfMovers;
+        }
+    } else ++summary_.readFaults;
     bool hashOk=true;
     const uint64_t hash=read64(record+0x268,hashOk);
     if(!hashOk)++summary_.readFaults;
@@ -289,7 +302,9 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"riglink_checks\":"<<summary_.riglinkChecks
      <<",\"riglink_state4\":"<<summary_.riglinkState4
      <<",\"riglink_null_collection\":"<<summary_.riglinkNullCollection
-     <<",\"riglink_overflow\":"<<summary_.riglinkOverflow<<"},"
+     <<",\"riglink_overflow\":"<<summary_.riglinkOverflow
+     <<",\"xf_movers\":"<<summary_.xfMovers
+     <<",\"xf_changes\":"<<summary_.xfChanges<<"},"
      <<"\"vtables\":[";
     for(size_t i=0;i<vtables_.size();++i) {
         if(i)j<<',';
@@ -319,7 +334,13 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<"\",\"bool234\":"<<uint32_t(r.bool234)<<",\"pred_byte\":"<<uint32_t(r.predByte)
          <<",\"gate2\":"<<uint32_t(r.gate2)
          <<",\"epoch1b8\":\"0x"<<std::hex<<r.epoch1b8
-         <<"\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec<<"\"}";
+         <<",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec
+         <<",\"xf_changes\":"<<r.xfChanges<<",\"last_xf_change\":"<<r.lastXfChangeFrame
+         <<",\"xf_first\":[";
+        for(int k=0;k<8;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfFirst[k]<<std::dec<<"\"";}
+        j<<"],\"xf_latest\":[";
+        for(int k=0;k<8;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfLatest[k]<<std::dec<<"\"";}
+        j<<"]}";
     }
     j<<"],\"transitions\":[";
     for(size_t i=0;i<transitions_.size();++i) {

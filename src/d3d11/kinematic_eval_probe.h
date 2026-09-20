@@ -42,7 +42,13 @@ public:
         uint64_t record=0,node=0,poseCtx=0,predPtr=0,predVtableRva=0;
         uint64_t pred2Ptr=0,pred2VtableRva=0,hash=0,count298=0;
         uint64_t epoch1b8=0,descEpoch38=0;
+        // record+0x130..0x170: the world transform block (4x4, raw bits;
+        // the doc's 3x4 at +0x130..0x16C sits inside it, +0x170 is the
+        // next field). First/latest snapshots plus a change counter are
+        // the engine-truth mover/static classification.
+        uint64_t xfFirst[8]={},xfLatest[8]={};
         uint32_t flags=0,firstFrame=0,lastFrame=0;
+        uint32_t xfChanges=0,lastXfChangeFrame=0;
         uint8_t bool234=0,predByte=0,gate2=0;
         uint64_t calls=0;
     };
@@ -78,6 +84,7 @@ public:
         uint64_t epochMatches=0,epochMismatches=0,epochChanges=0;
         uint64_t ownershipChecks=0,ownerBackPtrMatch=0,ownerState4=0,ownershipOverflow=0;
         uint64_t riglinkChecks=0,riglinkState4=0,riglinkNullCollection=0,riglinkOverflow=0;
+        uint64_t xfMovers=0,xfChanges=0;
     };
 
     bool arm(uint32_t meshFrame) noexcept;
