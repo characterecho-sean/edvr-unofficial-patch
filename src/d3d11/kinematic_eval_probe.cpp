@@ -61,6 +61,7 @@ void KinematicEvalProbe::clearLocked() {
     riglinkIndex_.clear();riglinks_.clear();
     samples_.clear();events_.clear();seenThisFrame_=0;
     clockSamples_.clear();
+    clockSeeded_=false;gapRelogsThisFrame_=0;
     for(uint32_t i=0;i<kJobCount;++i) {
         jobs_[i].calls.store(0,std::memory_order_relaxed);
         jobs_[i].totalNs.store(0,std::memory_order_relaxed);
@@ -119,6 +120,7 @@ void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame,uint32_t meshClo
     // dies with the capture lifecycle rather than running unarmed.
     if(!active_.load(std::memory_order_acquire))return;
     std::lock_guard<std::mutex> lock(mutex_);
+    clockSeeded_=true; // present-domain clock live; sampling may begin
     const uint32_t prev=frame_.exchange(presentFrame,std::memory_order_acq_rel);
     if(prev!=presentFrame)flushFrameStatsLocked();
     // The mesh counter resets to 0 on every config re-poll (meshMotionShutdown
@@ -139,6 +141,7 @@ void KinematicEvalProbe::flushFrameStatsLocked() noexcept {
     if(seenThisFrame_>summary_.maxFrameRecords)summary_.maxFrameRecords=seenThisFrame_;
     if(seenThisFrame_<summary_.minFrameRecords)summary_.minFrameRecords=seenThisFrame_;
     seenThisFrame_=0;
+    gapRelogsThisFrame_=0;
 }
 
 void KinematicEvalProbe::noteIdentityEventLocked(uint32_t recordId,uint32_t frame,
@@ -154,6 +157,14 @@ void KinematicEvalProbe::noteIdentityEventLocked(uint32_t recordId,uint32_t fram
 // block the caller already read (no extra guarded reads for the transform).
 void KinematicEvalProbe::samplePoseLocked(uint32_t recordId,RecordState& r,
         const uint64_t* xf,uintptr_t recordAddr) noexcept {
+    // 094158: arm() seeds frame_ with a mesh-domain stamp; records first
+    // sampled under it were re-stamped at the first present-domain tick,
+    // firing 3,073 fake gap_len=2 events and saturating the identity log at
+    // frame one. Until the clock is seeded the probe behaves exactly as the
+    // pre-pose-history build: the xf/transition logic in observe() still
+    // runs, only the sampling paths gate. First-sight baselines are kept
+    // once the clock is live (they carry identity context).
+    if(!clockSeeded_)return;
     const uint32_t frame=frame_.load(std::memory_order_acquire);
     if(r.framesSampled&&r.lastSampledFrame==frame) {
         ++r.dupInFrame;++summary_.dupInFrame;
@@ -211,13 +222,19 @@ void KinematicEvalProbe::samplePoseLocked(uint32_t recordId,RecordState& r,
     // sample after a gap (continuity marker even if unchanged).
     const bool poseChanged=!r.hasPrevSample||std::memcmp(pose,r.prevPose,sizeof(pose))!=0;
     if(poseChanged||gapResume) {
-        if(samples_.size()<kPoseSampleCap) {
+        // Backstop: at most 256 gap-resume re-log appends per frame; the
+        // IdentityEvent log itself stays capped with its own overflow
+        // counter.
+        if(gapResume&&gapRelogsThisFrame_>=256u) {
+            ++summary_.gapRelogSkipped;
+        } else if(samples_.size()<kPoseSampleCap) {
             PoseSample s;
             s.recordId=recordId;s.frame=frame;
             s.tx=tx;s.ty=ty;s.tz=tz;
             s.q0=q0;s.q1=q1;s.q2=q2;s.q3=q3;
             samples_.push_back(s);
             ++summary_.poseSamples;
+            if(gapResume)++gapRelogsThisFrame_;
         } else ++summary_.poseSampleOverflow;
     }
     std::memcpy(r.prevPose,pose,sizeof(pose));
@@ -450,6 +467,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"min_frame_records\":"<<summary_.minFrameRecords
      <<",\"max_frame_records\":"<<summary_.maxFrameRecords
      <<",\"clock_sample_overflow\":"<<summary_.clockSampleOverflow
+     <<",\"gap_relog_skipped\":"<<summary_.gapRelogSkipped
      <<"},"
      <<"\"vtables\":[";
     for(size_t i=0;i<vtables_.size();++i) {
@@ -670,6 +688,7 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     summary_.framesCounted=40;summary_.zeroRecordFrames=1;
     summary_.minFrameRecords=2;summary_.maxFrameRecords=17;
     summary_.clockSampleOverflow=3;
+    summary_.gapRelogSkipped=11;
 }
 
 } // namespace edvr

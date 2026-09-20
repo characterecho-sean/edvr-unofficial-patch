@@ -61,13 +61,13 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-107-g5fe9c004-dirty installed to frontier (02D09A2A),
-  re-clocking KinematicEvalProbe on the per-present frame counter with
-  the clock_samples mesh-staleness discriminator (09:35 entry);
-  supersedes v0.17.0-103-g267d0430-dirty (D3CA6EA1). The 064047 flight
-  proved record+0x170 is the per-frame world position (06:45 entry).
-  INIs unchanged. Flight check: --expect-build
-  v0.17.0-107-g5fe9c004-dirty.
+- Build: v0.17.0-111-g3b9fc127-dirty installed to frontier (76ED3EE3),
+  fixing the arm-seed clock-domain seam, bumping the pose-sample cap to
+  32,768 and adding the gap re-log backstop (10:20 entry); supersedes
+  v0.17.0-107-g5fe9c004-dirty (02D09A2A). The 064047 flight proved
+  record+0x170 is the per-frame world position (06:45 entry). INIs
+  unchanged. Flight check: --expect-build
+  v0.17.0-111-g3b9fc127-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6388,3 +6388,35 @@ Uninformative flags: identity events past frame one were lost to the
 cap saturation; the re-poll -> mesh-stall link is inferred; post-gap
 pointer reuse is untested.
 
+### 2026-09-20 10:20 — instrument: arm-seed fix, sample-cap bump, gap re-log backstop (installed to frontier)
+
+Flight 094158 (analysis: build\pose-diag-analysis-094158.md) proved the
+re-clock works — mesh == present-2, 1:1 over 52 presents — but two
+instrument defects burned the capture. Fix one, the startup clock-domain
+seam: arm() seeded frame_ with the mesh-domain stamp, so records first
+sampled under it were re-stamped at the first present-domain tick,
+firing 3,073 spurious gap_len=2 events (saturating the 256-event
+identity log at frame one; true mid-window stream-out was ZERO) and
+3,073 spurious gap-resume sample re-logs. All pose sampling — first-
+sight baselines, re-seen samples, gap/node-change detection — now waits
+for the first notePresentFrame after arm (clockSeeded_); before the
+clock is live the probe behaves exactly as the pre-pose-history build,
+and first-sight baselines still log once it is (they carry identity
+context). Fix two, the saturation: sample demand was 31,514 against the
+8,192 cap, which died ~6 frames into the 52-frame window; kPoseSampleCap
+is now 32,768 (24 B/sample, ~768 KB), sized to that measurement. Plus a
+backstop: gap-resume re-log appends are capped at 256 per frame, with
+overflows counted in the new gap_relog_skipped summary counter (the
+IdentityEvent log keeps its own cap and overflow counter).
+
+Next flight should read: zero gap events at startup unless real
+stream-out occurs, pose_samples surviving the full window, the identity
+log no longer saturated at frame one. Dead-instrument reads stay
+distinguishable: if the clock never seeds, clock_samples is empty and
+frames_counted is 0 (dead clock feed); clock_samples non-empty with
+zero pose_samples would mean the sampling path broke while the clock
+lives. JSON gate extended (gap_relog_skipped fixture + exact-equality
+assertion); green on first run.
+
+Build v0.17.0-111-g3b9fc127-dirty installed to frontier (76ED3EE3); all
+gates green. INIs unchanged. Not yet flown.
