@@ -6910,3 +6910,18 @@ Cross-entry from the kinematic arc (same-time foot entry there). Sean's
    JSON (seeded with the 064047 drone records), then a TLS
    job-attribution bit on the existing job brackets riding the next
    instrumented build.
+
+### 2026-09-20 17:10 -- clustering null: the eval population is homogeneous
+
+Cross-entry from the kinematic arc (same-time foot entry there). The
+offline vtable/flag clustering Sean sanctioned ran across all 12
+labelable classification captures (tool analysis/kinematic_vtable_cluster.py,
+report analysis/kinematic_vtable_cluster.txt; labels per the 06:45
+protocol, validated by reproducing 064047's documented 125 movers).
+NULL result: pred_vtable_rva is a single value (0x52e9288) for every
+record in every flight; flags, pred2_vtable_rva, gate2, pred_byte all
+shared between movers and statics. Ruled out: record-field clustering
+as a mover/static discriminator. With the render path proven
+mover-blind (17:02 entry), the remaining engine-truth candidate is
+which jobs touch each record -- the TLS job-attribution bit on the
+existing brackets is the next instrument.
