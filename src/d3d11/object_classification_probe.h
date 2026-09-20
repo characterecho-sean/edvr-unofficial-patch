@@ -6,6 +6,7 @@
 #include "../common/game_call_probe.h"
 #include "object_source_owner_probe.h"
 #include "object_record_writer_probe.h"
+#include "kinematic_eval_probe.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -337,6 +338,7 @@ public:
             std::lock_guard<std::recursive_mutex> lock(mutex_);clock=currentFrame_;clear(true);
         }
         objectRecordWriterProbe.arm(clock);
+        kinematicEvalProbe.arm(clock);
         std::lock_guard<std::recursive_mutex> lock(mutex_);active_=true;gateActive_.store(true,std::memory_order_release);
     }
     void arm(uint32_t meshFrame){
@@ -344,6 +346,7 @@ public:
             std::lock_guard<std::recursive_mutex> lock(mutex_);clear(false);currentFrame_=meshFrame;
         }
         objectRecordWriterProbe.arm(meshFrame);
+        kinematicEvalProbe.arm(meshFrame);
         std::lock_guard<std::recursive_mutex> lock(mutex_);active_=true;gateActive_.store(true,std::memory_order_release);
     }
     void reset(){
@@ -351,6 +354,7 @@ public:
             std::lock_guard<std::recursive_mutex> lock(mutex_);active_=false;gateActive_.store(false,std::memory_order_release);
         }
         objectRecordWriterProbe.reset();
+        kinematicEvalProbe.reset();
         std::lock_guard<std::recursive_mutex> lock(mutex_);clear(true);
     }
     bool active() const noexcept {return gateActive_.load(std::memory_order_acquire);}
@@ -359,6 +363,7 @@ public:
             std::lock_guard<std::recursive_mutex> lock(mutex_);active_=false;gateActive_.store(false,std::memory_order_release);
         }
         objectRecordWriterProbe.finish();
+        kinematicEvalProbe.finish();
     }
     // Foreign/deferred contexts deliberately do not touch the resource ledger.
     // The epoch prevents reuse of a snapshot made before an unclassified write.
@@ -367,7 +372,7 @@ public:
         foreignWrites_.fetch_add(1,std::memory_order_relaxed);
         foreignEpoch_.fetch_add(1,std::memory_order_release);
     }
-    void setFrame(uint32_t meshFrame){objectRecordWriterProbe.setFrame(meshFrame);std::lock_guard<std::recursive_mutex> lock(mutex_);currentFrame_=meshFrame;}
+    void setFrame(uint32_t meshFrame){objectRecordWriterProbe.setFrame(meshFrame);kinematicEvalProbe.setFrame(meshFrame);std::lock_guard<std::recursive_mutex> lock(mutex_);currentFrame_=meshFrame;}
     void noteDraw(ID3D11DeviceContext* ctx,uint32_t meshFrame,uint32_t eye,uint32_t firstRecord,
                   uint32_t instances,ID3D11Buffer* pool,ID3D11Buffer* ids,uint32_t idByteOffset,
                   const uint32_t* key16,uint64_t vertexShaderHash=0) {
@@ -548,7 +553,7 @@ public:
         j<<"  \"snapshots\":[";for(uint32_t i=0;i<snapshots_.size();++i){if(i)j<<',';const auto& x=snapshots_[i];j<<"{\"id\":"<<i<<",\"resource\":"<<x.resource<<",\"generation\":"<<x.generation<<",\"foreign_epoch\":"<<x.foreignEpoch<<",\"mesh_frame\":"<<x.meshFrame<<",\"blob\":"<<x.blob<<'}';}j<<"],\n";
         j<<"  \"draws\":[";for(uint32_t i=0;i<draws_.size();++i){if(i)j<<',';const auto& d=draws_[i];j<<"{\"id\":"<<i<<",\"mesh_frame\":"<<d.meshFrame<<",\"eye\":"<<d.eye<<",\"first_record\":"<<d.firstRecord<<",\"instances\":"<<d.instances<<",\"id_byte_offset\":"<<d.idByteOffset<<",\"vertex_shader_hash\":\"0x"<<std::hex<<d.vertexShaderHash<<std::dec<<"\",\"key_present\":"<<(d.keyPresent?"true":"false")<<",\"key16\":[";for(uint32_t k=0;k<16;++k){if(k)j<<',';j<<d.key[k];}j<<"],\"pool_resource\":";if(d.poolResource==kNone)j<<"null";else j<<d.poolResource;j<<",\"pool_generation\":"<<d.poolGeneration<<",\"pool_write_observed\":"<<(d.poolWriteObserved?"true":"false")<<",\"pool_matched\":"<<(cpuProvenance&&d.poolMatched?"true":"false")<<",\"pool_snapshot\":";if(d.poolSnapshot==kNone)j<<"null";else j<<d.poolSnapshot;j<<",\"id_resource\":";if(d.idResource==kNone)j<<"null";else j<<d.idResource;j<<",\"id_generation\":"<<d.idGeneration<<",\"id_write_observed\":"<<(d.idWriteObserved?"true":"false")<<",\"id_matched\":"<<(cpuProvenance&&d.idMatched?"true":"false")<<",\"id_snapshot\":";if(d.idSnapshot==kNone)j<<"null";else j<<d.idSnapshot;j<<'}';}j<<"],\n";
         j<<"  \"blobs\":[";for(uint32_t i=0;i<blobs_.size();++i){if(i)j<<',';const auto& b=blobs_[i];j<<"{\"id\":"<<i<<",\"name\":"<<quote(b.name)<<",\"status\":"<<quote(b.status)<<",\"source_resource\":";if(b.sourceResource==kNone)j<<"null";else j<<b.sourceResource;j<<",\"generation\":"<<b.generation<<",\"foreign_epoch\":"<<b.foreignEpoch<<",\"mesh_frame\":"<<b.meshFrame<<",\"subresource_or_record_count\":"<<b.subresource<<",\"texture\":"<<(b.texture?"true":"false")<<",\"format\":"<<b.format<<",\"width\":"<<b.width<<",\"height\":"<<b.height<<",\"row_bytes\":"<<b.rowBytes<<",\"offset\":"<<b.fileOffset<<",\"bytes\":"<<b.fileBytes<<'}';}j<<"],\n";
-        sourceOwner_.writeJson(j);j<<",\n";objectRecordWriterProbe.writeJson(j);j<<"\n}\n";
+        sourceOwner_.writeJson(j);j<<",\n";objectRecordWriterProbe.writeJson(j);j<<",\n";kinematicEvalProbe.writeJson(j);j<<"\n}\n";
         FILE* json=nullptr;bool jsonOk=_wfopen_s(&json,jsonPath.c_str(),L"wb")==0&&json;
         const std::string body=j.str();if(jsonOk)jsonOk=fwrite(body.data(),1,body.size(),json)==body.size();
         if(json&&fclose(json)!=0)jsonOk=false;return jsonOk&&binOk;

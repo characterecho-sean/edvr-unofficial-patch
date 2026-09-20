@@ -27,6 +27,8 @@ namespace edvr {
 const char* attachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {return "identity_mismatch";}
 void detachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {}
 bool objectRecordWriterHookMatches(uintptr_t) noexcept {return false;}
+const char* attachKinematicEvalHooks(KinematicEvalProbe*) noexcept {return "identity_mismatch";}
+bool kinematicEvalHooksMatch(uintptr_t) noexcept {return false;}
 ID3D11Texture2D* testScene=nullptr;
 ID3D11DepthStencilView* testDepth=nullptr;
 int testEye=0;

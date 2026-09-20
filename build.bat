@@ -443,6 +443,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
+    "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
     "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
@@ -1145,7 +1146,7 @@ if not exist "%OBJ%\meshmotion" mkdir "%OBJ%\meshmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\meshmotion\\" /Fe"%OBJ%\meshmotion\mesh_motion_test.exe" ^
     "tools\mesh_motion_test\mesh_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\object_record_writer_probe.cpp" ^
+    "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\kinematic_eval_probe.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\meshmotion\mesh_motion_test.exe" --self-test || exit /b 1
 python "tools\mesh_motion_probe.py" --self-test || exit /b 1
@@ -1254,6 +1255,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /Fo"%OBJ%\classification\\" /Fe"%OBJ%\classification\object_classification_test.exe" ^
     "tools\object_classification_test\object_classification_test.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
+    "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\common\code_hook.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" "src\common\guard.cpp" ^
     "%OBJ%\classification\source_owner_unwind.obj" ^
