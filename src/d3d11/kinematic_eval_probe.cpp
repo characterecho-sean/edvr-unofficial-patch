@@ -280,7 +280,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<"\",\"bool234\":"<<uint32_t(r.bool234)<<",\"pred_byte\":"<<uint32_t(r.predByte)
          <<",\"gate2\":"<<uint32_t(r.gate2)
          <<",\"epoch1b8\":\"0x"<<std::hex<<r.epoch1b8
-         <<"\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec<<'}';
+         <<"\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec<<"\"}";
     }
     j<<"],\"transitions\":[";
     for(size_t i=0;i<transitions_.size();++i) {

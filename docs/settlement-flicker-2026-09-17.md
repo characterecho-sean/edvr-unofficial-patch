@@ -22,10 +22,11 @@
   analysis\decomp. Waves 11-17 (offline, 21:58 entry): collection+0x18 =
   backing-owner pointer, written once by collection ctor FUN_14430A060
   (param_3); the collection aliases seven owner arrays (+0xA0..+0x340) and
-  sizes tables from owner+0x388. Owner == rig NOT proven (attach is a
-  dispatcher fragment, R15 live-in); runtime discriminator: owner =
-  *(collection+0x18), check *(owner+0x348) == collection and owner+0x380
-  == 4. UpdateRenderDataJob chain mapped: FUN_14431AFE0 accumulates
+  sizes tables from owner+0x388. Owner == rig REFUTED in flight (05:05
+  entry: one shared global owner for all 64 collections, backptr 0,
+  state != 4); discriminator was owner = *(collection+0x18),
+  *(owner+0x348) == collection, owner+0x380 == 4. UpdateRenderDataJob
+  chain mapped: FUN_14431AFE0 accumulates
   LOD-entry masks -> FUN_144331300 per-frame LOD evaluator (epoch
   collection+0x90 vs record+0x1B8 -> refresh FUN_14433C870) -> traversal
   FUN_144312040 -> FUN_14433DB20 per-record world updater (translation
@@ -37,16 +38,17 @@
   saved paths use worker dispatch, with no upstream KinematicRig ancestor; one
   truncates at recursion. Worker descriptors retain collection/registry but no
   direct outer pointer. Submission capture is needed; filtering off. The owner
-  discriminator in build 6AAFB3C8 may retire that capture: collection+0x18 IS
-  a direct outer pointer (offline proof, 21:58 entry); one flight confirms.
+  discriminator flew (043344, 05:05 entry): collection+0x18 is a SHARED
+  GLOBAL, not the rig — owner==rig refuted, submission capture NOT retired.
+  Next reachability: hook FUN_14431AFE0 for the direct rig<->collection pair.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-82-gba373645-dirty installed to frontier (6AAFB3C8; tree
-  == commit 8075da75), carrying the owner discriminator + epoch pair from
-  the 04:30 entry; supersedes v0.17.0-57-ge700d4f-dirty (6AAEE376). INIs
-  unchanged. Flight check: --expect-build v0.17.0-82-gba373645-dirty.
+- Build: v0.17.0-85-ga02e1eee-dirty installed to frontier, adding the
+  desc_epoch38 JSON quote fix (05:05 entry) to the owner discriminator +
+  epoch pair; supersedes v0.17.0-82-gba373645-dirty (6AAFB3C8). INIs
+  unchanged. Flight check: --expect-build v0.17.0-85-ga02e1eee-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -5854,3 +5856,61 @@ Flight protocol: unchanged (eye dump, 30 s per the previous protocol).
 After: python tools\edvr_log.py --target frontier --expect-build
 v0.17.0-82-gba373645-dirty, then read kinematicEval.ownership and
 kinematicEval.summary epoch_* / owner_* counters.
+### 2026-09-20 05:05 — flight 043344: owner==rig REFUTED, epoch pair dead as captured
+
+Flight edvr_gfx_20260920_042813.log, eye run 043344, mesh frames
+26311-26314, build verified --expect-build v0.17.0-82-gba373645-dirty
+(6AAFB3C8). kinematicEval: 1,567,565 observations, 2,882 records,
+read_faults 0, ownership_checks 39,289. Data bug first, self-inflicted:
+my record writer dropped the closing quote on desc_epoch38
+(kinematic_eval_probe.cpp:283), corrupting every record line; repaired
+offline (2,882 regex repairs), fix built green and installed below.
+Probe-JSON validation has no build-gate self-test — same bug class as
+b70e3d0; noted, not fixed here.
+
+ruled out: collection+0x18 == KinematicRig, because all 64 captured
+collections share ONE heap owner 0x144eae6bb60 with *(owner+0x348)==0
+and *(owner+0x380)==3940990720 (!= 4). +0x18 points at a shared global
+(scene-graph-world-like singleton), not a per-rig object, so the
+submission capture is NOT retired. The job-0 reads themselves were
+validated: collections come in 0x630-stride families (0x145139xxxxx,
+0x14821d6xxxx), matching the collection size, so
+collection = *(arg+0x10) - 0x300 is sound. Address note: the
+0x144…/0x145… 11-digit values here are high heap (~1.4 TB), not
+in-image ([0x140000000, 0x14640C000)); only vtables resolve to RVAs.
+
+ruled out: +0x18/+0x20 aliasing, because alias20 != owner on all 64
+rows (alias20 varies per collection group: 0x1450003df00,
+0x14514b99c10, 0x148b0acdd30, 0x144e6f211e0, 0x144fb323290).
+
+ruled out: the epoch pair as a change signal AS CAPTURED, because
+record+0x1B8 is a small enum-like constant (values 0-8; nonzero on
+778/2,882 records) that never changed in 1,567,565 observations
+(epoch_changes 0, epoch_matches 0), and collection+0x90 == 0 on every
+row. The eval-hook descriptor's +0x38 holds a heap POINTER
+(0x14511b279e0), not [collection+0x90], so the eval hook's arg is not
+FUN_14431AFE0's job descriptor and the offline epoch semantics do not
+transfer to it. All ownership rows read job:0 because dedupe keeps
+first-sighting jobId; job 1 did fire (RenderDataBatch 6,113 calls).
+
+Job timings (observer ON — include observer mutex cost, not clean
+engine cost): UpdateRenderDataJob 33,176 calls mean 44.6 us max 26.5
+ms; RenderDataBatch 6,113 mean 108.2 us max 2.8 ms;
+UpdatePhysicsObjectsJob 1,144 mean 6.8 us; Unnamed_BA0 2,402 mean 0.5
+us. PrePhysicsAdvanceJob 0 calls EXPLAINED: CodeHook refused job-3 at
+04:33:44.645 (target begins with a jmp/call — linker thunk or foreign
+hook; "Not hooked, and nothing was changed"). PrePhysicsAdvanceCurveJob
+was hooked but never invoked in the window; physics remains partly
+unmeasured. transitions 8,192 kept / 1,556,491 overflowed — the cap
+Sean flagged 21:23 still stands; "unchanged" claims remain unprovable
+from this instrument.
+
+Next: hook FUN_14431AFE0 (RVA 0x431AFE0) directly and capture
+rig=param_1 with poseCtx=param_2, paired with *(rig+0x348). That is
+the direct rig<->collection link the job descriptor cannot give, and
+it does not depend on +0x18 being per-rig (it is not).
+
+Build v0.17.0-85-ga02e1eee-dirty installed to frontier and verified
+(adds only the desc_epoch38 JSON quote fix); INIs untouched. Flight
+check: --expect-build v0.17.0-85-ga02e1eee-dirty.
+

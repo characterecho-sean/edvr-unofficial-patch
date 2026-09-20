@@ -18,12 +18,19 @@
   backing-owner pointer (ctor FUN_14430A060 param_3, single writer) and
   mapped the transform chain (FUN_144331300 LOD evaluator ->
   FUN_14433DB20 world updater; epoch pair collection+0x90 vs record+0x1B8
-  as change-signal candidate). Still open: owner == rig proof (runtime
-  discriminator IMPLEMENTED in build 6AAFB3C8, installed to frontier
-  2026-09-20 04:30 — one flight reads kinematicEval.ownership), job-cost
-  remeasure with the detailed observer disabled and job-3 hooked. No
-  per-record identity, pixel-ownership, or stasis claim survives without
-  that work.
+  as change-signal candidate). Flight 043344 (settlement doc 05:05
+  entry) then REFUTED owner == rig — collection+0x18 is one shared
+  global owner for every collection, not a per-rig object — and killed
+  the epoch pair as captured (record+0x1B8 a constant small enum, never
+  changing; the eval-hook descriptor +0x38 is a pointer, not the job
+  descriptor's epoch field). The submission hook is NOT retired;
+  proposed next reachability is a direct FUN_14431AFE0 hook capturing
+  (rig, poseCtx) paired with *(rig+0x348). Still open: job-cost
+  remeasure with the detailed observer disabled (job-3 =
+  PrePhysicsAdvanceJob was never hooked — CodeHook refused a
+  thunk/foreign-hook leading instruction; CurveJob hooked but never
+  invoked). No per-record identity, pixel-ownership, or stasis claim
+  survives without that work.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
