@@ -26,6 +26,16 @@ alignas(8) std::atomic<KinematicEvalProbe*> observer{nullptr};
 static_assert(decltype(observer)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 
+// The relay gate, distinct from observer: non-zero while EITHER consumer
+// wants eval callbacks -- the probe while attached (eye-dump captures) or
+// the kinematic tracker while fix.engine_motion is on (no dump involved).
+// observer stays the probe's own cell; the relays gate on evalGate.
+alignas(8) std::atomic<uintptr_t> evalGate{0};
+static_assert(decltype(evalGate)::is_always_lock_free,
+              "The x64 relay reads the aligned atomic pointer directly.");
+std::atomic<bool> trackerWanted{false};
+alignas(8) std::atomic<KinematicTrackerObserverFn> trackerObserver{nullptr};
+
 // The probe is a process-lifetime global (kinematicEvalProbe), so a bracket
 // that loaded the pointer before a detach remains safe while it finishes;
 // detach only stops NEW callbacks. No in-flight drain is needed.
@@ -147,6 +157,8 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
                                                        uintptr_t renderRecord) noexcept {
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
     if(probe)probe->observe(descriptor,renderRecord); // observe() gates on active()
+    const auto tracker=trackerObserver.load(std::memory_order_acquire);
+    if(tracker)tracker(descriptor); // kinematicMotionObserve gates on its own flag
     const auto forward=reinterpret_cast<EvalFn>(g_evalEntry.forward.load(std::memory_order_acquire));
     return forward(descriptor,param2,renderRecord);
 }
@@ -192,10 +204,61 @@ EDVR_JOB_WRAPPER(3) EDVR_JOB_WRAPPER(4) EDVR_JOB_WRAPPER(5)
 
 std::mutex g_installMutex;
 
+bool installOne(HookEntry& entry,uintptr_t base) noexcept;
+
+// One install path for both consumers: process-lifetime hooks, QPC for the
+// job brackets. Jobs and the rig-link hook stand down alone on failure (the
+// eval capture is the primary evidence; CodeHook logs each reason).
+bool ensureInstalled(uintptr_t base) noexcept {
+    if(g_evalEntry.ready)return true;
+    LARGE_INTEGER freq{};
+    if(!QueryPerformanceFrequency(&freq)||freq.QuadPart<=0)return false;
+    g_qpcFreq=freq.QuadPart;
+    if(!installOne(g_evalEntry,base))return false;
+    for(uint32_t i=0;i<KinematicEvalProbe::kJobCount;++i) {
+        if(!installOne(g_jobEntries[i],base)) {
+            // A job that cannot be hooked stands down alone; the eval
+            // capture is the flight's primary evidence. CodeHook has
+            // already logged the reason under the job's own name.
+        }
+    }
+    if(!installOne(g_rigEvalEntry,base)) {
+        // The rig-link hook stands down alone too; riglink_checks == 0
+        // with installed status then means the stand-down, and
+        // CodeHook has logged the reason under kinematic-rig-eval.
+    }
+    return true;
+}
+
+// The executable check for the tracker path: PE timestamp/image size of the
+// hash-verified build plus the evaluator's prologue (or our own patch
+// already there). Mirrors KinematicEvalProbe::validateExecutableLocked
+// without touching probe state -- this file's copy-culture is deliberate.
+bool targetValid(uintptr_t base) noexcept {
+    __try {
+        uint32_t peOff=0;
+        std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
+        if(peOff>0x1000)return false;
+        uint32_t timestamp=0,imageSize=0;
+        std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
+        std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
+        if(timestamp!=KinematicEvalProbe::kExpectedTimestamp ||
+           imageSize!=KinematicEvalProbe::kExpectedImageSize)return false;
+        // push rbx; push rbp; push rsi; push rdi; push r12; r14; r15; sub rsp,0x70
+        static const uint8_t kPrologue[14]={0x40,0x53,0x55,0x56,0x57,0x41,0x54,0x41,
+                                            0x56,0x41,0x57,0x48,0x83,0xEC};
+        uint8_t got[sizeof(kPrologue)]{};
+        std::memcpy(got,reinterpret_cast<const void*>(base+KinematicEvalProbe::kEvalRva),
+                    sizeof(got));
+        return std::memcmp(got,kPrologue,sizeof(kPrologue))==0 ||
+               kinematicEvalHooksMatch(base+KinematicEvalProbe::kEvalRva);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+
 bool installOne(HookEntry& entry,uintptr_t base) noexcept {
     entry.relay=allocateRelay(base+entry.rva);
     if(!entry.relay)return false;
-    buildRelay(entry.relay,&observer,entry.callback);
+    buildRelay(entry.relay,&evalGate,entry.callback);
     if(!entry.hook.install(reinterpret_cast<void*>(base+entry.rva),entry.relay,nullptr,
                            entry.name,&prepareRelay,&entry)) {
         VirtualFree(entry.relay,0,MEM_RELEASE);
@@ -237,32 +300,44 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
         if(active && active!=probe)return "observer_busy";
         const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         if(!base)return "identity_mismatch";
-        if(!g_evalEntry.ready) {
-            LARGE_INTEGER freq{};
-            if(!QueryPerformanceFrequency(&freq)||freq.QuadPart<=0)return "install_failed";
-            g_qpcFreq=freq.QuadPart;
-            if(!installOne(g_evalEntry,base))return "install_failed";
-            for(uint32_t i=0;i<KinematicEvalProbe::kJobCount;++i) {
-                if(!installOne(g_jobEntries[i],base)) {
-                    // A job that cannot be hooked stands down alone; the eval
-                    // capture is the flight's primary evidence. CodeHook has
-                    // already logged the reason under the job's own name.
-                }
-            }
-            if(!installOne(g_rigEvalEntry,base)) {
-                // The rig-link hook stands down alone too; riglink_checks == 0
-                // with installed status then means the stand-down, and
-                // CodeHook has logged the reason under kinematic-rig-eval.
-            }
-        }
+        if(!ensureInstalled(base))return "install_failed";
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         observer.store(probe,std::memory_order_release);
+        evalGate.store(1,std::memory_order_release);
         return "installed";
     } catch(...) {return "install_failed";}
 }
 
 void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
     observer.compare_exchange_strong(probe,nullptr,std::memory_order_acq_rel);
+    // The gate closes only when no consumer wants callbacks; the tracker
+    // keeps the feed open while fix.engine_motion is on.
+    if(!trackerWanted.load(std::memory_order_acquire))
+        evalGate.store(0,std::memory_order_release);
+}
+
+void kinematicEvalSetTrackerObserver(KinematicTrackerObserverFn fn) noexcept {
+    trackerObserver.store(fn,std::memory_order_release);
+}
+
+const char* kinematicEvalTrackerAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready && !targetValid(base))return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        trackerWanted.store(true,std::memory_order_release);
+        evalGate.store(1,std::memory_order_release);
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalTrackerDetach() noexcept {
+    trackerWanted.store(false,std::memory_order_release);
+    if(!observer.load(std::memory_order_acquire))
+        evalGate.store(0,std::memory_order_release);
 }
 
 } // namespace edvr

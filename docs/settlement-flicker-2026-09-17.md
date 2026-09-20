@@ -70,14 +70,17 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-111-g3b9fc127-dirty installed to frontier (76ED3EE3),
-  fixing the arm-seed clock-domain seam, bumping the pose-sample cap to
-  32,768 and adding the gap re-log backstop (10:20 entry), flight-proven
-  by 103339 (10:38 entry); supersedes
-  v0.17.0-107-g5fe9c004-dirty (02D09A2A). The 064047 flight proved
-  record+0x170 is the per-frame world position (06:45 entry). INIs
-  unchanged. Flight check: --expect-build
-  v0.17.0-111-g3b9fc127-dirty.
+  Stage B (ownership coverage + compose veto) is blocked on decoding the
+  world-bounds layout from stage A's dump (11:20 entry).
+- Build: v0.17.0-117-g0d042f5c-dirty installed to frontier (2AAA67BF),
+  stage A of the kinematic tracker (11:20 entry): live static/mover
+  labels plus the bounds-layout capture, zero rendering change;
+  supersedes v0.17.0-111-g3b9fc127-dirty (76ED3EE3), flight-proven by
+  103339 (10:38 entry). The 064047 flight proved record+0x170 is the
+  per-frame world position (06:45 entry). INIs unchanged;
+  fix.engine_motion defaults off and must be set on in the live ini
+  for the tracker. Flight check: --expect-build
+  v0.17.0-117-g0d042f5c-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6500,3 +6503,49 @@ Analysis scratch: build\pose-diag-analysis-103339.md.
 Uninformative this flight: post-gap pointer reuse (no real gaps); the
 re-poll -> mesh-stall link (no stall occurred); live identity-event
 firing (zero real events -- correct silence, see above).
+### 2026-09-20 11:20 -- stage A landed: kinematic tracker live, diagnostics only
+
+- Stage split, decided mid-implementation: stage A = tracker +
+  diagnostics, ZERO rendering change. Stage B (GPU ownership coverage
+  + compose-shader veto) is deferred -- the world-bounds layout is not
+  flight-proven and the decomps conflict: FUN_14432CCC0 writes 16
+  floats at record+0xB0..0xEC that read as four transformed float4
+  rows (decomp_432CCC0.txt:410-425), while updater FUN_14433DB20
+  copies a 64-byte current/previous pair at +0xF0->+0x1C0
+  (decomp_433DB20.txt:506-513), reads a 4-float change-test block at
+  +0x120 (line 398) and writes a world center at +0x240 (line 302).
+  Guessing the layout ships an untested hypothesis; a wrong MV is
+  worse than none.
+- Stage A therefore also captures the raw +0xB0..+0x130 block (128 B)
+  and the +0x240 center (16 B) per record, and dumps movers+statics on
+  ONE flight so the layout decodes offline: position-like fields shift
+  by exactly the +0x170 delta between the part-A and part-B dumps;
+  view products move with the head instead.
+- Landed: src\d3d11\kinematic_motion.h/.cpp -- cap 4,096, staticRun
+  >= 3 of bit-exact stasis over all 20 pose bytes (quat included, so
+  the 103339 rotating-in-place class can never label), 1 mm near-miss
+  counter, gap/node/read-fault -> new identity with re-prove, no
+  eviction, 20 s summaries, 5 s zero-observation stand-down note,
+  10 s no-mover note, once-per-session bounds dump (part A on the
+  first ended frame with >= 8 movers, part B the next ended frame,
+  same table indices). The eval-hook relay is now a shared gate cell
+  open while EITHER consumer wants callbacks; the tracker registers a
+  fn-pointer observer, so the existing rigs needed no link changes.
+  Present tick beside the probe's (device_hook.cpp), configure beside
+  meshMotionConfigure (temporal_pass.cpp); fix.engine_motion = off/on
+  (default off; auto logs "reserved" and behaves off).
+- Gates: kinematic_motion_test.exe 35 checks, 0 failures (9 case
+  groups incl. the 103339 rotating-in-place regression); full build
+  green, config contract 252 keys. The gate caught one test bug: case
+  6 checked eligibility after endFrame, but RecordEligible is a
+  within-frame query (lastFrame == live frame) -- the check moved
+  mid-frame, tracker semantics unchanged.
+- End-to-end trace for the next flight: with fix.engine_motion = on
+  the log shows "engine motion: tracker live"; 20 s summaries carry
+  tracked/seen/eligible/movers; "STAND-DOWN -- five seconds live with
+  zero eval" means the hook refused or is not feeding; "ten seconds,
+  N tracked records, zero pose changes" means the feed is healthy and
+  nothing is moving. Absence of the tracker-live line = the tracker
+  never ran. install_edvr.py does not touch the live ini --
+  engine_motion = on must be set in the game-dir edvr.ini by hand
+  before flying.

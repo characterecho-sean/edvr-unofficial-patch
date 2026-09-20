@@ -486,3 +486,22 @@ The tracker already stores prevPose per frame; the rigid delta is
 struct reserves kind (0 = static-zero, 1 = rigid-delta) and a 3x4
 prev-frame map slot so phase 2 is an upload-side change, not a
 re-plumb. Rotation injection stays out of v1 per the design table.
+## 2026-09-20 (11:20) -- stage split: A landed, B deferred
+
+The 10:52 spec shipped in two stages. Stage A landed in
+v0.17.0-117-g0d042f5c-dirty: the tracker, the shared eval-hook gate,
+the present tick, fix.engine_motion and the 35-check build gate -- and
+NO rendering change. kinematicMotionViews is not wired and the compose
+shader is untouched.
+
+Stage B (the ownership coverage texture and the t19 compose veto) is
+deferred on one specific unknown: the world-bounds layout is not
+flight-proven and the two decomps conflict (FUN_14432CCC0's four
+float4 rows at +0xB0..0xEC vs FUN_14433DB20's 64-byte current/previous
+pair at +0xF0->+0x1C0, change-test block at +0x120, center at +0x240).
+Projecting the wrong bytes as bounds would feed a wrong motion field
+-- the failure this project never ships on a guess. Stage A dumps the
+raw +0xB0..+0x130 block for movers and statics on one flight; the
+layout decodes offline (position fields shift by the +0x170 delta
+between consecutive frames; view products track the head). Stage B
+gets spec'd against that decode, not before.
