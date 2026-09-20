@@ -69,13 +69,14 @@ bool KinematicEvalProbe::arm(uint32_t meshFrame) noexcept {
         hookStatus_=HookStatus::IdentityMismatch;
         return false;
     }
-    if(hookStatus_!=HookStatus::Installed) {
-        const char* result=attachKinematicEvalHooks(this);
-        hookStatus_=std::strcmp(result,"installed")==0?HookStatus::Installed
-            :std::strcmp(result,"opcode_mismatch")==0?HookStatus::OpcodeMismatch
-            :HookStatus::InstallFailed;
-        if(hookStatus_!=HookStatus::Installed)return false;
-    }
+    // attach is called on every arm, not just the first: finish/reset detach
+    // the observer gate, and the already-installed path only verifies the
+    // patch and re-stores the observer -- one mutex, one prologue read.
+    const char* result=attachKinematicEvalHooks(this);
+    hookStatus_=std::strcmp(result,"installed")==0?HookStatus::Installed
+        :std::strcmp(result,"opcode_mismatch")==0?HookStatus::OpcodeMismatch
+        :HookStatus::InstallFailed;
+    if(hookStatus_!=HookStatus::Installed)return false;
     frame_.store(meshFrame,std::memory_order_release);
     clearLocked();
     active_.store(true,std::memory_order_release);
@@ -84,10 +85,12 @@ bool KinematicEvalProbe::arm(uint32_t meshFrame) noexcept {
 
 void KinematicEvalProbe::finish() noexcept {
     active_.store(false,std::memory_order_release);
+    detachKinematicEvalHooks(this);
 }
 
 void KinematicEvalProbe::reset() noexcept {
     active_.store(false,std::memory_order_release);
+    detachKinematicEvalHooks(this);
     std::lock_guard<std::mutex> lock(mutex_);
     clearLocked();
 }

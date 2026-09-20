@@ -12,17 +12,35 @@ namespace {
 using EvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t);
 using JobFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
-KinematicEvalProbe* g_probe=nullptr;
-EvalFn g_evalOriginal=nullptr;
-JobFn g_jobOriginal[KinematicEvalProbe::kJobCount]={};
-CodeHook g_hooks[KinematicEvalProbe::kJobCount+1];
-bool g_installed=false;
-std::mutex g_installMutex;
+// The evaluator and the job bodies live in the GAME'S module; this DLL loads
+// more than two gigabytes away, which a five-byte E9 patch cannot reach
+// (first flight, 2026-09-19: "more than two gigabytes from the replacement.
+// Not hooked."). The answer is the record-writer hook's relay pattern: a
+// 44-byte stub allocated within reach of the target, which tail-jumps
+// through absolute eight-byte operands that have no range limit. Do not
+// "simplify" this back to passing the replacement to CodeHook directly.
+alignas(8) std::atomic<KinematicEvalProbe*> observer{nullptr};
+static_assert(decltype(observer)::is_always_lock_free,
+              "The x64 relay reads the aligned atomic pointer directly.");
+
+// The probe is a process-lifetime global (kinematicEvalProbe), so a bracket
+// that loaded the pointer before a detach remains safe while it finishes;
+// detach only stops NEW callbacks. No in-flight drain is needed.
 int64_t g_qpcFreq=0;
+
+struct HookEntry {
+    const char* name;
+    uintptr_t rva;
+    void* callback;
+    std::atomic<uintptr_t> forward{0};
+    CodeHook hook;
+    uint8_t* relay=nullptr;
+    bool ready=false;
+};
 
 // Job bodies behind the run thunks (recovered from the hash-verified exe,
 // SHA-256 e6be8bbe...; thunk jmps decoded 2026-09-19):
-const uintptr_t kJobRvas[KinematicEvalProbe::kJobCount]={
+constexpr uintptr_t kJobRvas[KinematicEvalProbe::kJobCount]={
     0x4321940, // UpdateRenderDataJob   (thunk 0x42DF520)
     0x4320340, // render-data batch     (thunk 0x42DFAF0)
     0x432B2A0, // UpdatePhysicsObjectsJob (thunk 0x42DF540)
@@ -37,13 +55,104 @@ int64_t qpcNow() noexcept {
     return t.QuadPart;
 }
 
-uintptr_t __fastcall bracket(uint32_t job,JobFn original,
-                             uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d) noexcept {
-    if(!original)return 0; // install stood down; the wrapper is unreachable then, but never chase a null
-    KinematicEvalProbe* probe=g_probe;
-    if(!probe || !probe->active())return original(a,b,c,d);
+// --- Relay machinery, mirrored from object_record_writer_hook.cpp. --------
+// Kept as a copy rather than a shared unit so the flight-proven writer hook
+// file is not touched; if one changes, change both.
+constexpr size_t kRelayBytes=44,kOriginalLiteral=36;
+
+uint8_t* allocateRelay(uintptr_t target) noexcept {
+    SYSTEM_INFO info{};GetSystemInfo(&info);
+    const uintptr_t granularity=info.dwAllocationGranularity;
+    const uintptr_t floor=reinterpret_cast<uintptr_t>(info.lpMinimumApplicationAddress);
+    const uintptr_t ceiling=reinterpret_cast<uintptr_t>(info.lpMaximumApplicationAddress);
+    const uintptr_t distance=uintptr_t(INT32_MAX)-0x10000u;
+    uintptr_t at=target>distance?target-distance:floor;
+    if(at<floor)at=floor;
+    const uintptr_t limit=target>ceiling-distance?ceiling:target+distance;
+    while(at<limit) {
+        MEMORY_BASIC_INFORMATION region{};
+        if(!VirtualQuery(reinterpret_cast<void*>(at),&region,sizeof(region)))break;
+        const uintptr_t start=reinterpret_cast<uintptr_t>(region.BaseAddress);
+        if(region.RegionSize>UINTPTR_MAX-start)break;
+        const uintptr_t end=start+region.RegionSize;
+        if(region.State==MEM_FREE) {
+            uintptr_t candidate=at>start?at:start;
+            if(candidate>UINTPTR_MAX-(granularity-1))break;
+            candidate=(candidate+granularity-1)&~(granularity-1);
+            if(candidate<limit && candidate<end && end-candidate>=4096) {
+                auto* p=static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(candidate),4096,
+                                                         MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+                if(p)return p;
+            }
+        }
+        if(end<=at)break;at=end;
+    }
+    return nullptr;
+}
+
+void buildRelay(uint8_t* code,const void* gate,void* callback) noexcept {
+    // mov rax,&gate; cmp qword ptr[rax],0; je original; jmp [callback];
+    // original: jmp [trampoline]. RAX/flags are volatile, and neither the
+    // evaluator nor the job bodies consume RAX on entry. No stack adjustment
+    // or nonvolatile modification occurs.
+    const uint8_t body[kRelayBytes]={
+        0x48,0xB8,0,0,0,0,0,0,0,0, 0x48,0x83,0x38,0,
+        0x74,0x0E, 0xFF,0x25,0,0,0,0, 0,0,0,0,0,0,0,0,
+        0xFF,0x25,0,0,0,0, 0,0,0,0,0,0,0,0};
+    std::memcpy(code,body,sizeof(body));
+    const uintptr_t gateAddress=reinterpret_cast<uintptr_t>(gate);
+    const uintptr_t callbackAddress=reinterpret_cast<uintptr_t>(callback);
+    std::memcpy(code+2,&gateAddress,8);std::memcpy(code+22,&callbackAddress,8);
+}
+
+bool prepareRelay(void* trampoline,void* context) noexcept {
+    auto& entry=*static_cast<HookEntry*>(context);
+    const uintptr_t address=reinterpret_cast<uintptr_t>(trampoline);
+    std::memcpy(entry.relay+kOriginalLiteral,&address,8);
+    DWORD oldProtect=0;
+    if(!VirtualProtect(entry.relay,4096,PAGE_EXECUTE_READ,&oldProtect) ||
+       !FlushInstructionCache(GetCurrentProcess(),entry.relay,kRelayBytes))return false;
+    entry.forward.store(address,std::memory_order_release);
+    return true;
+}
+// ---------------------------------------------------------------------------
+
+// Forward declarations: the entry table initialises with callback addresses,
+// the callbacks read the entries' forward trampolines.
+__declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t,uintptr_t,uintptr_t) noexcept;
+#define EDVR_JOB_PROTO(i) \
+    __declspec(noinline) uintptr_t __fastcall job##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
+EDVR_JOB_PROTO(0) EDVR_JOB_PROTO(1) EDVR_JOB_PROTO(2)
+EDVR_JOB_PROTO(3) EDVR_JOB_PROTO(4) EDVR_JOB_PROTO(5)
+#undef EDVR_JOB_PROTO
+
+HookEntry g_evalEntry{"kinematic-eval",KinematicEvalProbe::kEvalRva,
+                      reinterpret_cast<void*>(&evalObserved)};
+HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
+    {"kinematic-job-0",kJobRvas[0],reinterpret_cast<void*>(&job0)},
+    {"kinematic-job-1",kJobRvas[1],reinterpret_cast<void*>(&job1)},
+    {"kinematic-job-2",kJobRvas[2],reinterpret_cast<void*>(&job2)},
+    {"kinematic-job-3",kJobRvas[3],reinterpret_cast<void*>(&job3)},
+    {"kinematic-job-4",kJobRvas[4],reinterpret_cast<void*>(&job4)},
+    {"kinematic-job-5",kJobRvas[5],reinterpret_cast<void*>(&job5)},
+};
+
+__declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uintptr_t param2,
+                                                       uintptr_t renderRecord) noexcept {
+    KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
+    if(probe)probe->observe(descriptor,renderRecord); // observe() gates on active()
+    const auto forward=reinterpret_cast<EvalFn>(g_evalEntry.forward.load(std::memory_order_acquire));
+    return forward(descriptor,param2,renderRecord);
+}
+
+uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
+                             uintptr_t c,uintptr_t d) noexcept {
+    const auto forward=reinterpret_cast<JobFn>(g_jobEntries[job].forward.load(std::memory_order_acquire));
+    if(!forward)return 0; // this job stood down at install; the relay is unreachable then
+    KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
+    if(!probe || !probe->active())return forward(a,b,c,d);
     const int64_t start=qpcNow();
-    const uintptr_t result=original(a,b,c,d);
+    const uintptr_t result=forward(a,b,c,d);
     const int64_t elapsed=qpcNow()-start;
     if(elapsed>0 && g_qpcFreq>0) {
         auto* stats=probe->jobStats();
@@ -56,80 +165,82 @@ uintptr_t __fastcall bracket(uint32_t job,JobFn original,
     return result;
 }
 
-__declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uintptr_t param2,
-                                                       uintptr_t renderRecord) noexcept {
-    KinematicEvalProbe* probe=g_probe;
-    if(probe && probe->active())probe->observe(descriptor,renderRecord);
-    return g_evalOriginal(descriptor,param2,renderRecord);
-}
-
 #define EDVR_JOB_WRAPPER(i) \
     __declspec(noinline) uintptr_t __fastcall job##i(uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d) noexcept { \
-        return bracket(i,g_jobOriginal[i],a,b,c,d); \
+        return bracket(i,a,b,c,d); \
     }
 EDVR_JOB_WRAPPER(0) EDVR_JOB_WRAPPER(1) EDVR_JOB_WRAPPER(2)
 EDVR_JOB_WRAPPER(3) EDVR_JOB_WRAPPER(4) EDVR_JOB_WRAPPER(5)
 #undef EDVR_JOB_WRAPPER
 
-void* const kJobReplacements[KinematicEvalProbe::kJobCount]={
-    reinterpret_cast<void*>(&job0),reinterpret_cast<void*>(&job1),
-    reinterpret_cast<void*>(&job2),reinterpret_cast<void*>(&job3),
-    reinterpret_cast<void*>(&job4),reinterpret_cast<void*>(&job5),
-};
+std::mutex g_installMutex;
 
-bool patchIsOurs(uintptr_t target,void* replacement) noexcept {
-    uint8_t bytes[5]{};
+bool installOne(HookEntry& entry,uintptr_t base) noexcept {
+    entry.relay=allocateRelay(base+entry.rva);
+    if(!entry.relay)return false;
+    buildRelay(entry.relay,&observer,entry.callback);
+    if(!entry.hook.install(reinterpret_cast<void*>(base+entry.rva),entry.relay,nullptr,
+                           entry.name,&prepareRelay,&entry)) {
+        VirtualFree(entry.relay,0,MEM_RELEASE);
+        entry.relay=nullptr;
+        return false;
+    }
+    entry.ready=true;
+    return true;
+    // Process-lifetime storage: do not free a relay or trampoline which an
+    // in-flight call may already be executing. Captures only gate it.
+}
+
+bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
+    if(!entry.ready || !entry.relay)return false;
+    const uintptr_t target=base+entry.rva;
+    const intptr_t displacement=reinterpret_cast<intptr_t>(entry.relay)-intptr_t(target+5);
+    // The evaluator's prologue past the five patch bytes, from the
+    // hash-verified exe: 41 54 41 56 41 57 48 83.
+    const uint8_t tail[8]={0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x83};
+    uint8_t bytes[13]{};
     __try {std::memcpy(bytes,reinterpret_cast<const void*>(target),sizeof(bytes));}
     __except(EXCEPTION_EXECUTE_HANDLER){return false;}
-    if(bytes[0]!=0xE9)return false;
-    int32_t disp=0;std::memcpy(&disp,bytes+1,4);
-    return target+5+disp==reinterpret_cast<uintptr_t>(replacement);
+    int32_t actual=0;std::memcpy(&actual,bytes+1,4);
+    return bytes[0]==0xE9 && actual==displacement && std::memcmp(bytes+5,tail,sizeof(tail))==0;
 }
 
 } // namespace
 
 bool kinematicEvalHooksMatch(uintptr_t evalTarget) noexcept {
-    return g_installed && patchIsOurs(evalTarget,reinterpret_cast<void*>(&evalObserved));
+    const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    return base && evalTarget==base+KinematicEvalProbe::kEvalRva && patchIsOurs(g_evalEntry,base);
 }
 
 const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
     if(!probe)return "install_failed";
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
-        if(!g_installed) {
-            const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-            if(!base)return "identity_mismatch";
+        auto* active=observer.load(std::memory_order_acquire);
+        if(active && active!=probe)return "observer_busy";
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready) {
             LARGE_INTEGER freq{};
             if(!QueryPerformanceFrequency(&freq)||freq.QuadPart<=0)return "install_failed";
             g_qpcFreq=freq.QuadPart;
-            g_probe=probe;
-            if(!g_hooks[0].install(reinterpret_cast<void*>(base+KinematicEvalProbe::kEvalRva),
-                                   reinterpret_cast<void*>(&evalObserved),
-                                   reinterpret_cast<void**>(&g_evalOriginal),
-                                   "kinematic-eval")) {
-                g_probe=nullptr;return "install_failed";
-            }
-            if(!patchIsOurs(base+KinematicEvalProbe::kEvalRva,
-                            reinterpret_cast<void*>(&evalObserved)))return "opcode_mismatch";
+            if(!installOne(g_evalEntry,base))return "install_failed";
             for(uint32_t i=0;i<KinematicEvalProbe::kJobCount;++i) {
-                if(!g_hooks[i+1].install(reinterpret_cast<void*>(base+kJobRvas[i]),
-                                         kJobReplacements[i],
-                                         reinterpret_cast<void**>(&g_jobOriginal[i]),
-                                         "kinematic-job")) {
+                if(!installOne(g_jobEntries[i],base)) {
                     // A job that cannot be hooked stands down alone; the eval
-                    // capture is the flight's primary evidence.
-                    g_jobOriginal[i]=nullptr;
+                    // capture is the flight's primary evidence. CodeHook has
+                    // already logged the reason under the job's own name.
                 }
             }
-            g_installed=true;
-            return "installed";
         }
-        if(!patchIsOurs(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))+
-                        KinematicEvalProbe::kEvalRva,
-                        reinterpret_cast<void*>(&evalObserved)))return "opcode_mismatch";
-        g_probe=probe;
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        observer.store(probe,std::memory_order_release);
         return "installed";
     } catch(...) {return "install_failed";}
+}
+
+void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
+    observer.compare_exchange_strong(probe,nullptr,std::memory_order_acq_rel);
 }
 
 } // namespace edvr

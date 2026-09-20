@@ -28,6 +28,7 @@ const char* attachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {ret
 void detachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {}
 bool objectRecordWriterHookMatches(uintptr_t) noexcept {return false;}
 const char* attachKinematicEvalHooks(KinematicEvalProbe*) noexcept {return "identity_mismatch";}
+void detachKinematicEvalHooks(KinematicEvalProbe*) noexcept {}
 bool kinematicEvalHooksMatch(uintptr_t) noexcept {return false;}
 ID3D11Texture2D* testScene=nullptr;
 ID3D11DepthStencilView* testDepth=nullptr;

@@ -5591,3 +5591,23 @@ HEAD; set core.eol=lf + core.autocrlf=false repo-local and re-checked
 out the tree (744 LF / 20 CRLF, matching .gitattributes), gate passes,
 621 checks. After the flight:
 python tools\edvr_log.py --target frontier --expect-build HEAD
+
+### 2026-09-19 20:31 flight: instrument failed, no eval evidence
+
+The 20:31 flight ran the probe build (DLL link time 01:30:45 UTC matches
+build output; --expect-build HEAD fails only because the build predates the
+evening commits -- gf03cdb6d-dirty IS the probe build). No sentinel
+refusals, no fault sites, record-writer probe healthy (44275 records).
+
+ruled out: nothing about the engine -- the kinematic-eval hook never
+installed. Log line 1192: target 00007FF76CAFEFE0 is more than two
+gigabytes from the replacement; a five-byte E9 cannot reach our DLL from
+the exe. The writer hook already solved this with a relay stub allocated
+near the target; the eval hook had passed its replacement to CodeHook
+directly. Fixed by porting the relay pattern (44-byte stub, gate on the
+observer atomic, absolute-indirect tail jumps) to the eval hook and all
+six job brackets; detach on finish/reset so relays fall through to the
+trampoline between captures. Rebuilt green, installed to frontier
+20:49, needs a refly. Prologue note: stolen bytes are 40 53 / 55 / 56 /
+57 (exactly 5); the patchIsOurs tail check expects 41 54 41 56 41 57 48
+83 after the patch.
