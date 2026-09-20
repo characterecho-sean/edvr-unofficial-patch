@@ -56,14 +56,24 @@
   informative — pointer identity stable while present). Drone group
   re-found per-frame (rotates every frame); +0x130 4x4 static on a
   third flight. Quaternion decode validated (unit norms);
-  sign canonicalization required before differencing.
+  sign canonicalization required before differencing. Capture v2 flew
+  (103339, 10:38 entry): arm-seed fix CONFIRMED (zero gap events,
+  identity log unsaturated, re-log backstop unused), pose_samples
+  24,520/32,768 survived the window, clock mesh==present-2 1:1 over 52
+  presents (second flight), drone per-frame series complete (11/11
+  members, 51/51 frames). Rotating-in-place class quantified: 292
+  records translate <0.1 m yet rotate 0.8-1.6 deg/present every
+  present — static labels must cover rotation, now flight-evidenced.
+  One terminal zero-record present = capture teardown (a mid-window
+  one would have fired ~3,008 gap events; none fired).
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
 - Build: v0.17.0-111-g3b9fc127-dirty installed to frontier (76ED3EE3),
   fixing the arm-seed clock-domain seam, bumping the pose-sample cap to
-  32,768 and adding the gap re-log backstop (10:20 entry); supersedes
+  32,768 and adding the gap re-log backstop (10:20 entry), flight-proven
+  by 103339 (10:38 entry); supersedes
   v0.17.0-107-g5fe9c004-dirty (02D09A2A). The 064047 flight proved
   record+0x170 is the per-frame world position (06:45 entry). INIs
   unchanged. Flight check: --expect-build
@@ -6420,3 +6430,73 @@ assertion); green on first run.
 
 Build v0.17.0-111-g3b9fc127-dirty installed to frontier (76ED3EE3); all
 gates green. INIs unchanged. Not yet flown.
+
+### 2026-09-20 10:38 — capture v2 flown (103339): arm-seed fix confirmed, samples survive, drone series complete
+
+Flight 103339 (same protocol: eye dump with the drone visibly moving,
+then a 30 s wait), build v0.17.0-111-g3b9fc127-dirty verified
+(--expect-build exit 0). Eye run 103339 armed 10:33:39.977, report
+written 10:33:44.061. 3,008 records, 52 presents, zero read faults.
+Analysis scratch: build\pose-diag-analysis-103339.md.
+
+- Arm-seed fix CONFIRMED: gap_events=0 (094158 fired 3,073 spurious
+  gap_len=2), identity event log empty and unsaturated
+  (identity_event_overflow=0), gap_relog_skipped=0 -- the backstop
+  never fired. Pose sampling now starts cleanly at the first present
+  tick. Detector liveness is established by 094158 (the same path
+  fired there) and by this flight's counters showing inputs flowing
+  (24,520 samples written, frames advanced); zero events is correct
+  silence, not a dead detector.
+- pose_samples survived the full window: 24,520 of 32,768, zero
+  overflow -- 3,008 first-sight baselines + ~21,512 pose-change
+  samples. 094158's demand was 31,514 against the 8,192 cap and died
+  ~6 frames in; ~37% of that demand was the spurious re-logs now fixed.
+- Clock healthy, second flight running: mesh == present-2 for all 52
+  clock_samples, contiguous presents 11136..11187,
+  clock_sample_overflow=0, frames_counted=52.
+- zero_record_frames=1 is the TERMINAL present 11187 -- capture
+  teardown, not mid-window stand-down. Discriminator: a mid-window
+  zero-record frame would have fired ~3,008 gap events on resume; none
+  fired. All records span the window uniformly (first_frame 11133 = the
+  arm-seed stamp, pose data begins at first present 11136 by design;
+  last_frame 11186). No stream-in/out this flight.
+- node_change_events=0 over 1,750,656 record observations -- pointer
+  identity stable while continuously present, second informative
+  flight. Post-gap pointer reuse remains UNTESTED (no real gaps).
+- Drone group re-found (new ids, same 11-sub-mesh fingerprint): 2404,
+  2410, 2413, 2416, 2419, 2420, 2430, 2459, 2475, 2482, 2490. Rigid:
+  member spread 2.063 m at BOTH window ends. Centroid +12.27 m, median
+  step 0.181 m/present; rotates every present (median 1.361 deg,
+  canonicalized decode; lane deltas far above quantization). Per-frame
+  translation+quat series COMPLETE: 51/51 frames for all 11 members.
+- Mover census (path over 51 frames): 2,583 records <=1 mm; 296 micro
+  (1 mm..0.1 m); 10 at 0.1-0.5 m; 4 at 0.5-2 m; ZERO at 2-10 m; 115 at
+  >10 m -- all 115 genuine travelers (net/path ~0.99): two decelerating
+  ship assemblies (tight 24+24 cores at ~142 m plus ~56 radius-spread
+  companions at 171-203 m; per-present steps decay ~9 -> 2 m, arrivals
+  slowing). xf_movers=437, xf_changes=21,945, quat_change_frames=21,033.
+- NEW CLASS quantified -- rotating-in-place: 206+86 records translate
+  <0.1 m over the whole window but rotate 0.8-1.6 deg/present EVERY
+  present (canonicalized decode, max lane delta 1,551 -- orders above
+  LSB noise). Phase-1 consequence, now flight-evidenced: a static-zero
+  MV gated on translation alone would have mis-labeled ~292 records
+  this window. Translation-static != rotation-static; the spec's
+  both-required rule is not theoretical.
+- Fan-out unchanged: uniform 582 calls/record (~11.2/present x 52),
+  dup_in_frame=1,567,168 -- first-sample-wins dedup mandatory.
+- Jobs: UpdateRenderDataJob 33,384 calls / 1.774 s / 53.1 us mean /
+  25.9 ms max (094158: 49.7 us); RenderDataBatch 6,188 / 0.792 s /
+  128.0 us; physics 1,196 / 8.3 ms; PrePhysicsAdvance jobs 0 calls
+  again (never hooked). Still WITH the observer -- the observer-off
+  job-cost remeasure remains owed (Sean's 21:23 review).
+- Unchanged dead signals: epoch pair 0 matches / 1,750,656 mismatches /
+  0 changes (ruled out, do not re-propose); transition cap 8,192 still
+  saturated (overflow 1,703,360) -- flags/hash stream, not pose data.
+- Eye-capture draw-side rig ownership join: 44,139 attempted / 0
+  linked -- per the log's own wording, unavailable ownership evidence,
+  not a successful empty scene. Eval-side riglinks healthy: 82,680
+  checks, all state-4, zero null collections.
+
+Uninformative this flight: post-gap pointer reuse (no real gaps); the
+re-poll -> mesh-stall link (no stall occurred); live identity-event
+firing (zero real events -- correct silence, see above).

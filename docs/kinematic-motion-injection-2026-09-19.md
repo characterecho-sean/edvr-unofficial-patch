@@ -47,7 +47,10 @@
   records), frame stats, bounded mover sample log. Not yet flown.
   Update 09:35: re-clocked per-present (flight 083323 refuted the mesh
   clock) with a clock_samples mesh-staleness discriminator,
-  v0.17.0-107-g5fe9c004-dirty.
+  v0.17.0-107-g5fe9c004-dirty. Update 10:38: capture v2 (arm-seed fix,
+  32,768-sample cap, gap re-log backstop) flight-proven clean on 103339
+  -- zero startup gap events, samples survive the full window, drone
+  per-frame series complete (settlement doc 10:38 entry).
 
 ## Premise
 
@@ -212,7 +215,11 @@ updater (FUN_14433DB20) writes an 8-byte orientation value at
 record+0x17C immediately after position: four uint16 lanes, component
 = (lane - 32768)/32767, degenerate norm -> (0,0,0,65535) = identity.
 Flight-verified on 064047 data: the drone group's lanes tracked its
-yaw while every static record's lanes stayed bit-constant. Remaining
+yaw while every static record's lanes stayed bit-constant. Flight
+103339 quantified a rotating-in-place class: 292 records translate
+<0.1 m over a 51-frame window yet rotate 0.8-1.6 deg/present every
+present -- flight evidence that static-zero must gate on BOTH
+translation and rotation stasis, never translation alone. Remaining
 rotation work: sign canonicalization (q == -q) before differencing,
 and frame-aligned quat history (capture extends to the full 8 bytes
 from build v0.17.0-96).
