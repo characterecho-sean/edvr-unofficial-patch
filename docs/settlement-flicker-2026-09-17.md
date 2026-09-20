@@ -50,8 +50,12 @@
   frames; gap/node-change detectors disabled by the stall — zero
   identity events is uninformative). Tracker clock = EDVR's own
   present/temporal-pass frame index — LANDED in
-  v0.17.0-107-g5fe9c004-dirty (09:35 entry). Drone group re-found with the
-  064047 fingerprint; quaternion decode validated (unit norms);
+  v0.17.0-107-g5fe9c004-dirty (09:35 entry) and flight-proven
+  (094158, 10:05 entry: mesh==present-2 1:1 all 52 presents; eval
+  fan-out ~11x/record/frame, dedup mandatory; node-change zero now
+  informative — pointer identity stable while present). Drone group
+  re-found per-frame (rotates every frame); +0x130 4x4 static on a
+  third flight. Quaternion decode validated (unit norms);
   sign canonicalization required before differencing.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
@@ -6333,3 +6337,54 @@ Gate green on first run.
 
 Build v0.17.0-107-g5fe9c004-dirty installed to frontier (02D09A2A); all
 gates green. INIs unchanged. Not yet flown.
+
+### 2026-09-20 10:05 — re-clocked capture flown (094158): clock healthy, eval fan-out ~11x, drone per-frame series
+
+Flight 094158 (same protocol), build v0.17.0-107-g5fe9c004-dirty
+verified. 3,086 records, 52 presents, zero read faults. Analysis
+scratch: build\pose-diag-analysis-094158.md.
+
+- Re-clock WORKS: clock_samples show mesh = present - 2 exactly, 1:1
+  across all 52 presents — the 083323 stall was window-specific (the
+  once-per-second config re-poll can reset the mesh clock; inferred,
+  not proven). Present clock stays: no gates, no resets.
+  frames_counted = clock_samples = 52, zero zero-record frames.
+- Eval fan-out is ~11x per record per frame, uniform (3,073 records x
+  569 calls; UpdateRenderDataJob 644 calls/present x ~52 records/call
+  explains it). First-sample-wins dedup per frame is mandatory —
+  confirmed by design, now measured.
+- The 3,073 gap events are a STARTUP ARTIFACT: the arm path seeds
+  frame_ with the mesh-domain stamp (12262) and the second stamp is
+  present-domain (12265), firing gap_len=2 for every pre-existing
+  record. True mid-window stream-out: ZERO. One real stream-in
+  (records 3073-3085 at present 12302). Fix queued: suppress sampling/
+  gap detection until the first present tick.
+- node_change_events=0 is now INFORMATIVE: ~160k per-sample node
+  compares with the identity path provably live — a continuously
+  tracked record pointer never changes node. Pointer identity is
+  stable while present; post-gap reuse remains untested (no real
+  gaps occurred).
+- Drone group (new ids, same fingerprint): 2266, 2276, 2279, 2304,
+  2306, 2356, 2359, 2363, 2364, 2371, 2373 — all frames_sampled=52,
+  path 4.179 m (members agree to 1.5 mm), net 3.445 m (curving),
+  quaternion changes EVERY frame, no sign flips. Two ship groups:
+  79 records at 320 m accelerating to ~10 m/present (a departure) and
+  101 records at 205 m. Wall-clock speeds not derivable (no wall clock
+  in the capture).
+- Mover census: 519/531 translation movers, bimodal (12 twitch <=1 mm,
+  then 0.1 m up; bands 44/196/99/180 for 0.1-0.5/0.5-2/2-10/>10 m, the
+  >10 m band exactly the two ship groups); 315 rotated every frame,
+  181 never. record+0x130 4x4 bit-static for all 3,086 records — third
+  flight confirming.
+- pose_samples saturated: demand 31,514 = 3,086 baselines + 3,073
+  spurious startup re-logs + ~25,355 mover changes (~490/frame); the
+  8,192 cap died ~6 frames in, 37.5% burned on the artifact. Fix
+  queued: arm-seed fix + cap to 32,768 + gap re-log rate limit.
+- Jobs: UpdateRenderDataJob 33,502 / 1.664 s / 49.7 us mean / 24.4 ms
+  max; RenderDataBatch 6,292 / 0.784 s / 124.7 us; physics 1,248 /
+  8.8 ms; PrePhysicsAdvance jobs 0 calls again.
+
+Uninformative flags: identity events past frame one were lost to the
+cap saturation; the re-poll -> mesh-stall link is inferred; post-gap
+pointer reuse is untested.
+
