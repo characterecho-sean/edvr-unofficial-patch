@@ -31,7 +31,10 @@ public:
     static constexpr uint32_t kOwnershipCap=64u;
     static constexpr uintptr_t kRigEvalRva=0x431AFE0u;
     static constexpr uint32_t kRigLinkCap=256u;
-    static constexpr uint32_t kPoseSampleCap=8192u;
+    // Sized to cover a full capture window's mover demand: 31,514 samples
+    // measured on flight 094158. 24 B/sample => ~768 KB, fine for a
+    // diagnostic.
+    static constexpr uint32_t kPoseSampleCap=32768u;
     static constexpr uint32_t kIdentityEventCap=256u;
     static constexpr uint32_t kClockSampleCap=4096u;
 
@@ -120,6 +123,7 @@ public:
         uint64_t framesCounted=0,zeroRecordFrames=0,maxFrameRecords=0;
         uint64_t minFrameRecords=~0ull; // the first real frame sets it
         uint64_t clockSampleOverflow=0;
+        uint64_t gapRelogSkipped=0; // gap-resume re-logs past the per-frame cap
     };
 
     bool arm(uint32_t meshFrame) noexcept;
@@ -173,6 +177,11 @@ private:
     std::vector<IdentityEvent> events_;
     std::vector<ClockSample> clockSamples_;
     uint32_t seenThisFrame_=0;
+    // False until the first notePresentFrame after arm: the mesh-domain arm
+    // stamp fired 3,073 fake gap events on 094158, so all pose sampling
+    // waits for the present-domain clock.
+    bool clockSeeded_=false;
+    uint32_t gapRelogsThisFrame_=0; // per-frame gap-resume re-log budget (256)
     JobStat jobs_[kJobCount];
 
     void clearLocked();
