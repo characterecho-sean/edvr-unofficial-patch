@@ -27,6 +27,12 @@ constexpr double kNearMissM = 0.001; // 0 < translation delta < 1 mm
 constexpr size_t kPoseBytes = 20;    // +0x170 translation (12) + +0x17C quat (8), contiguous
 constexpr size_t kBoundsBytes = 128; // stage-A diagnostic: +0xB0..+0x130 raw
 constexpr size_t kCenterBytes = 16;  // stage-A diagnostic: +0x240 center float4
+// Stage-A.5 diagnostic: the local bounding SPHERE, +0x270 centre float4 +
+// +0x280 radius float4 (lanes 1-3 padding). Found offline 2026-09-20: writer
+// FUN_14433c870 seeds centre from model data +0x20 and radius from +0x2c and
+// unions over children via sphere-merge FUN_140a8c9a0; the updater then maps
+// centre to world at +0x240. The game culls on spheres, not AABBs.
+constexpr size_t kSphereBytes = 32;
 constexpr uint64_t kSummaryMs = 20000;
 constexpr uint64_t kStandDownMs = 5000;
 constexpr uint64_t kNoMoverMs = 10000;
@@ -127,15 +133,18 @@ void dumpBoundsLocked(int part, uint32_t frame, uint32_t id, const TrackedRecord
     std::memcpy(t, r.prevPose, sizeof(t));
     uint8_t center[kCenterBytes]{};
     const bool cok = guardedRead(static_cast<uintptr_t>(r.record) + 0x240, center, sizeof(center));
-    std::string b, c;
+    uint8_t sphere[kSphereBytes]{};
+    const bool sok = guardedRead(static_cast<uintptr_t>(r.record) + 0x270, sphere, sizeof(sphere));
+    std::string b, c, s;
     hexWords(r.bounds, sizeof(r.bounds), b);
     hexWords(center, sizeof(center), c);
+    hexWords(sphere, sizeof(sphere), s);
     Log::get().note(
         "engine motion bounds: part=%c frame=%u id=%u rec=0x%llx node=0x%llx run=%u path=%.3f "
-        "pos=(%.3f,%.3f,%.3f) bvalid=%u cvalid=%u b=%s c=%s",
+        "pos=(%.3f,%.3f,%.3f) bvalid=%u cvalid=%u svalid=%u b=%s c=%s s=%s",
         part ? 'B' : 'A', frame, id, (unsigned long long)r.record, (unsigned long long)r.node,
         r.staticRun, r.path, (double)t[0], (double)t[1], (double)t[2],
-        r.boundsValid ? 1u : 0u, cok ? 1u : 0u, b.c_str(), c.c_str());
+        r.boundsValid ? 1u : 0u, cok ? 1u : 0u, sok ? 1u : 0u, b.c_str(), c.c_str(), s.c_str());
 }
 
 void maybeDumpBoundsLocked(uint32_t endedFrame, uint32_t movers, uint32_t eligible) {

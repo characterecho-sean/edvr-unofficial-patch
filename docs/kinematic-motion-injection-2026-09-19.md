@@ -55,6 +55,14 @@
   ownership coverage + static-zero compose veto, fix.engine_motion
   default off) -- the build spec for the next branch, with its own
   test rig and flight-verification plan.
+  Update 13:30: stage-A.5 -- the stage-B extents question is resolved
+  OFFLINE (settlement doc same-time entry): the record bounds are a
+  bounding SPHERE, centre float4 at +0x270 and radius at +0x280
+  (writer FUN_14433C870 from model data +0x20/+0x2C, unioned over
+  children by sphere-merge FUN_140A8C9A0). The planned wide
+  +0x130..+0x250 capture is replaced by a targeted 32-byte sphere read
+  in the dump line (svalid/s=, v0.17.0-123-gdae06c51-dirty, installed
+  to frontier, verified).
 
 ## Premise
 
@@ -529,3 +537,38 @@ elsewhere: the local AABB (LOD/model data) transformed by this matrix,
 or a field past +0x240. The next stage-A instrument widens the raw
 capture toward +0x130..+0x250 for the same mover/static dump set
 before any GPU work is spec'd.
+
+## 2026-09-20 (13:30) -- the extents are a sphere radius, found offline
+
+Sean's question: can the disassembly answer the extents location
+instead of spending a flight on the widened capture? Yes -- the wide
+net is cancelled. The full store scan found no direct writer of
+record+0x270/+0x280 in the record family, so the write had to go
+through a computed pointer; the LEA scan found exactly one family
+hit, FUN_14433C870 (LEA RDI,[RSI+0x270]).
+
+That function is the bounds writer, recursive over the record's child
+array (+0x2A8 pointers, +0x2B0 count): local centre float3 copied
+from model data *(*(record+0x18)+8)+0x20, radius from +0x2C stored as
+a single float lane at +0x280 (lanes 1-3 zero), zeroed when the model
+is absent. Children are folded in by FUN_140A8C9A0, a bounding-sphere
+union (containment both ways, else Ritter-style expand) operating on
+{float4 centre; float radius}. FUN_144330194 independently confirms
+the record stride 0x2F0 and adds the identity layout: +0x250..+0x264
+node qwords + model pointer, +0x268 combined hash, +0x2B8 source node.
+The updater's visibility query is a virtual thunk fed with the world
+centre (+0x240) and the +0x280 lane -- the game culls on spheres, not
+AABBs. Movers' zero +0x240 in flight 125207 is the updater's guard
+(no children at +0x2B0, no modifier at +0x290), not missing bounds.
+
+Stage B consequence: world extents = radius at +0x280 scaled by the
+max 3x3 column scale at +0xF0; world centre is +0x240 when present,
+else M x local centre computed from +0xF0/+0x120. The stage-A.5
+capture is therefore targeted: dumpBoundsLocked live-reads
++0x270..+0x28F (32 B) as svalid/s= next to the existing b=/c= blocks
+(kinematic_motion.cpp, kSphereBytes). Built v0.17.0-123-gdae06c51-dirty,
+gates green (kinematic_motion_test 52, kinematic_probe_test 25),
+installed to frontier (d3d11 sha256 5F7626D7). Next flight confirms:
+radius > 0 for statics, finite values everywhere, and M x local
+centre == +0x240 where the guard allows. Detail: settlement doc,
+same-time entry.
