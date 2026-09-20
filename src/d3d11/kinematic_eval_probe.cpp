@@ -32,28 +32,13 @@ uint8_t KinematicEvalProbe::read8(uintptr_t address,bool& ok) noexcept {
     uint8_t v=0;if(!guardedRead(address,&v,sizeof(v)))ok=false;return v;
 }
 
-bool KinematicEvalProbe::validateExecutableLocked() noexcept {
-    const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    if(!base)return false;
-    uint64_t peOff=0;
-    bool ok=true;
-    peOff=read32(base+0x3C,ok);
-    if(!ok||peOff>0x1000)return false;
-    const uint32_t timestamp=read32(base+peOff+8,ok);
-    const uint32_t imageSize=read32(base+peOff+0x50,ok);
-    if(!ok||timestamp!=kExpectedTimestamp||imageSize!=kExpectedImageSize)return false;
-    // The evaluator's prologue: push rbx; push rbp; push rsi; push rdi;
-    // push r12; push r14; push r15; sub rsp,0x70. Checked before hooking.
-    static const uint8_t kEvalPrologue[14]={0x40,0x53,0x55,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x83,0xEC};
-    uint8_t got[sizeof(kEvalPrologue)]{};
-    if(!guardedRead(base+kEvalRva,got,sizeof(got)))return false;
-    if(std::memcmp(got,kEvalPrologue,sizeof(kEvalPrologue))!=0 &&
-       !kinematicEvalHooksMatch(base+kEvalRva))return false;
-    imageBase_=base;
-    return true;
-}
-
 void KinematicEvalProbe::clearLocked() {
+    // New capture boundary: in-flight job brackets that entered before this
+    // bump drop their samples instead of committing into the new capture
+    // (2026-09-20 review finding 8). Then wait out a mid-commit bracket
+    // (three stores between the seq toggles) so the zeroing itself never
+    // leaves a seq odd.
+    jobGeneration_.fetch_add(1,std::memory_order_acq_rel);
     summary_=Summary{};
     index_.clear();records_.clear();transitions_.clear();
     vtableIndex_.clear();vtables_.clear();
@@ -63,6 +48,7 @@ void KinematicEvalProbe::clearLocked() {
     clockSamples_.clear();
     clockSeeded_=false;gapRelogsThisFrame_=0;
     for(uint32_t i=0;i<kJobCount;++i) {
+        while(jobs_[i].seq.load(std::memory_order_acquire)&1u) {}
         jobs_[i].calls.store(0,std::memory_order_relaxed);
         jobs_[i].totalNs.store(0,std::memory_order_relaxed);
         jobs_[i].maxNs.store(0,std::memory_order_relaxed);
@@ -71,21 +57,22 @@ void KinematicEvalProbe::clearLocked() {
 
 bool KinematicEvalProbe::arm(uint32_t meshFrame) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if(!validateExecutableLocked()) {
-        hookStatus_=HookStatus::IdentityMismatch;
-        return false;
-    }
-    // attach is called on every arm, not just the first: finish/reset detach
-    // the observer gate, and the already-installed path only verifies the
-    // patch and re-stores the observer -- one mutex, one prologue read.
+    // Executable validation lives INSIDE the attach, under the hook
+    // installation mutex: validating unlocked here raced a concurrent
+    // tracker install that had patched the prologue but not yet published
+    // ready, and the arm then rejected the supported executable
+    // (2026-09-20 review finding 5).
     const char* result=attachKinematicEvalHooks(this);
     hookStatus_=std::strcmp(result,"installed")==0?HookStatus::Installed
         :std::strcmp(result,"opcode_mismatch")==0?HookStatus::OpcodeMismatch
+        :std::strcmp(result,"identity_mismatch")==0?HookStatus::IdentityMismatch
         :HookStatus::InstallFailed;
     if(hookStatus_!=HookStatus::Installed)return false;
+    imageBase_=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     // The arm stamp is the legacy mesh clock; it only seeds frame_ as a
     // baseline for lastSampledFrame compares. The first notePresentFrame
-    // (the real per-present clock feed) overwrites it.
+    // (the real per-present clock feed) overwrites it -- without flushing,
+    // so no artificial empty frame is counted (review finding 7).
     frame_.store(meshFrame,std::memory_order_release);
     clearLocked();
     active_.store(true,std::memory_order_release);
@@ -120,9 +107,18 @@ void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame,uint32_t meshClo
     // dies with the capture lifecycle rather than running unarmed.
     if(!active_.load(std::memory_order_acquire))return;
     std::lock_guard<std::mutex> lock(mutex_);
-    clockSeeded_=true; // present-domain clock live; sampling may begin
-    const uint32_t prev=frame_.exchange(presentFrame,std::memory_order_acq_rel);
-    if(prev!=presentFrame)flushFrameStatsLocked();
+    if(!clockSeeded_) {
+        // Seed WITHOUT flushing: sampling was gated on clockSeeded_, so the
+        // frame that just "ended" could not accept a single sample -- flushing
+        // it fabricates an empty frame and forces min_frame_records to zero
+        // even with a healthy feed (2026-09-20 review finding 7). Only real
+        // present-domain transitions close frames, as the tracker does.
+        clockSeeded_=true;
+        frame_.store(presentFrame,std::memory_order_release);
+    } else {
+        const uint32_t prev=frame_.exchange(presentFrame,std::memory_order_acq_rel);
+        if(prev!=presentFrame)flushFrameStatsLocked();
+    }
     // The mesh counter resets to 0 on every config re-poll (meshMotionShutdown
     // via the once-per-second re-configure), so absolute mesh values are
     // only meaningful between configure events; the per-window
@@ -134,8 +130,9 @@ void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame,uint32_t meshClo
 }
 
 void KinematicEvalProbe::flushFrameStatsLocked() noexcept {
-    // The first flush after arm counts a partial frame -- acceptable for a
-    // diagnostic; min/max still bracket the steady state.
+    // Only real present-domain transitions reach here: the clock seed does
+    // not flush (review finding 7), so every counted frame could accept
+    // samples. A zero here is a genuine empty frame, never an artifact.
     ++summary_.framesCounted;
     if(seenThisFrame_==0)++summary_.zeroRecordFrames;
     if(seenThisFrame_>summary_.maxFrameRecords)summary_.maxFrameRecords=seenThisFrame_;
@@ -156,7 +153,7 @@ void KinematicEvalProbe::noteIdentityEventLocked(uint32_t recordId,uint32_t fram
 // Frame-aligned pose sample: one per record per frame, decoded from the xf
 // block the caller already read (no extra guarded reads for the transform).
 void KinematicEvalProbe::samplePoseLocked(uint32_t recordId,RecordState& r,
-        const uint64_t* xf,uintptr_t recordAddr) noexcept {
+        const uint64_t* xf) noexcept {
     // 094158: arm() seeds frame_ with a mesh-domain stamp; records first
     // sampled under it were re-stamped at the first present-domain tick,
     // firing 3,073 fake gap_len=2 events and saturating the identity log at
@@ -166,7 +163,9 @@ void KinematicEvalProbe::samplePoseLocked(uint32_t recordId,RecordState& r,
     // once the clock is live (they carry identity context).
     if(!clockSeeded_)return;
     const uint32_t frame=frame_.load(std::memory_order_acquire);
-    if(r.framesSampled&&r.lastSampledFrame==frame) {
+    // The dup gate yields to an identity reset (hasPrevSample==false): the
+    // observation that detected the new node re-baselines immediately.
+    if(r.hasPrevSample&&r.lastSampledFrame==frame) {
         ++r.dupInFrame;++summary_.dupInFrame;
         return; // second observation of the same record in one frame
     }
@@ -191,16 +190,10 @@ void KinematicEvalProbe::samplePoseLocked(uint32_t recordId,RecordState& r,
         if(gapLen>r.maxGap)r.maxGap=gapLen;
         noteIdentityEventLocked(recordId,frame,1,gapLen,0,0);
     }
-    // Frame-aligned node read (~3k/frame): a node change on a continuously
-    // seen record pointer is possible slot reuse.
-    bool nodeOk=true;
-    const uint64_t node=read64(recordAddr+0x18,nodeOk);
-    if(!nodeOk)++summary_.readFaults;
-    else if(r.hasPrevSample&&node!=r.node) {
-        ++r.nodeChanges;++summary_.nodeChangeEvents;
-        noteIdentityEventLocked(recordId,frame,2,0,r.node,node);
-        r.node=node;
-    }
+    // Identity is handled by the caller: observe() reads the node BEFORE the
+    // motion compares and, on a change, clears hasPrevSample so neither this
+    // jump nor the xf diff crosses the identity boundary (2026-09-20 review
+    // finding 3). No node read here any more.
     uint8_t pose[20];
     std::memcpy(pose,&txb,4);std::memcpy(pose+4,&tyb,4);std::memcpy(pose+8,&tzb,4);
     std::memcpy(pose+12,&q0,2);std::memcpy(pose+14,&q1,2);
@@ -212,8 +205,12 @@ void KinematicEvalProbe::samplePoseLocked(uint32_t recordId,RecordState& r,
         std::memcpy(&pb,r.prevPose+8,4);std::memcpy(&ptz,&pb,4);
         const float dx=tx-ptx,dy=ty-pty,dz=tz-ptz;
         const float jump=std::sqrt(dx*dx+dy*dy+dz*dz);
-        if(jump>r.maxJump)r.maxJump=jump;
-        r.totalJump+=jump;
+        // Non-finite input or overflow must not reach the JSON floats
+        // (finding 9): reject the measurement, keep the raw bits below.
+        if(std::isfinite(jump)) {
+            if(jump>r.maxJump)r.maxJump=jump;
+            r.totalJump+=jump;
+        } else ++summary_.nonFinitePose;
         if(std::memcmp(pose+12,r.prevPose+12,8)!=0) {
             ++r.quatChangeFrames;++summary_.quatChangeFrames;
         }
@@ -297,13 +294,18 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
         r.flags=flags;r.predByte=predByte;r.gate2=gate2;
         r.epoch1b8=epoch1b8;r.descEpoch38=descEpoch38;
         r.firstFrame=frame;r.lastFrame=frame;r.calls=1;
-        if(!guardedRead(static_cast<uintptr_t>(record)+0x130,r.xfFirst,sizeof(r.xfFirst)))
-            ++summary_.readFaults;
+        // No state from a partial read: a record straddling an unreadable
+        // page would otherwise be created with zero-filled fields and a zero
+        // transform baseline, and the first successful later read would
+        // fabricate motion from zero to the real pose (2026-09-20 review
+        // finding 2). The record simply gets created on a later call.
+        if(!ok){++summary_.readFaults;return;}
+        if(!guardedRead(static_cast<uintptr_t>(record)+0x130,r.xfFirst,sizeof(r.xfFirst))) {
+            ++summary_.readFaults;return;
+        }
         std::memcpy(r.xfLatest,r.xfFirst,sizeof(r.xfFirst));
         // First sample comes from the xfFirst block already read above.
-        samplePoseLocked(static_cast<uint32_t>(records_.size()),r,r.xfFirst,
-            static_cast<uintptr_t>(record));
-        if(!ok)++summary_.readFaults;
+        samplePoseLocked(static_cast<uint32_t>(records_.size()),r,r.xfFirst);
         r.predVtableRva=vtableRvaLocked(static_cast<uintptr_t>(r.predPtr));
         r.pred2VtableRva=vtableRvaLocked(static_cast<uintptr_t>(r.pred2Ptr));
         noteVtableLocked(r.predVtableRva,frame);
@@ -317,22 +319,47 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
     ++r.calls;r.lastFrame=frame;
     if(r.epoch1b8!=epoch1b8){++summary_.epochChanges;r.epoch1b8=epoch1b8;}
     r.descEpoch38=descEpoch38;
+    // Identity BEFORE motion: a changed node ends the previous occupant's
+    // history at this pointer; neither the xf diff nor the pose jump may
+    // cross the boundary (2026-09-20 review finding 3: a node swap charged
+    // the new occupant's pose as a 90 m jump plus an xf_mover on the old
+    // occupant's record).
+    bool identityReset=false;
+    {
+        bool nodeOk=true;
+        const uint64_t nodeNow=read64(record+0x18,nodeOk);
+        if(!nodeOk)++summary_.readFaults;
+        else if(nodeNow!=r.node) {
+            ++r.nodeChanges;++summary_.nodeChangeEvents;
+            noteIdentityEventLocked(it->second,frame,2,0,r.node,nodeNow);
+            r.node=nodeNow;
+            r.hasPrevSample=false; // the boundary is never a jump
+            identityReset=true;
+        }
+    }
     // Engine-truth motion: bit-exact compare of the world transform block.
     uint64_t xf[11];
     if(guardedRead(static_cast<uintptr_t>(record)+0x130,xf,sizeof(xf))) {
-        if(std::memcmp(xf,r.xfLatest,sizeof(xf))!=0) {
+        if(identityReset) {
+            // The new occupant's transform is its baseline, uncharged.
+            std::memcpy(r.xfLatest,xf,sizeof(xf));
+        } else if(std::memcmp(xf,r.xfLatest,sizeof(xf))!=0) {
             std::memcpy(r.xfLatest,xf,sizeof(xf));
             ++r.xfChanges;r.lastXfChangeFrame=frame;
             ++summary_.xfChanges;
             if(r.xfChanges==1)++summary_.xfMovers;
         }
         // Frame-aligned sampling rides the block already read above.
-        samplePoseLocked(it->second,r,xf,static_cast<uintptr_t>(record));
+        samplePoseLocked(it->second,r,xf);
     } else ++summary_.readFaults;
     bool hashOk=true;
     const uint64_t hash=read64(record+0x268,hashOk);
-    if(!hashOk)++summary_.readFaults;
-    if(r.flags!=flags||r.hash!=hash) {
+    if(!hashOk) {
+        // A faulted hash reads as zero: comparing it would emit a false
+        // transition to zero and a second false one on recovery (finding
+        // 2). Keep the last valid pair and skip the compare.
+        ++summary_.readFaults;
+    } else if(r.flags!=flags||r.hash!=hash) {
         if(transitions_.size()<kTransitionCap) {
             Transition t;t.recordId=it->second;t.frame=frame;
             t.oldFlags=r.flags;t.newFlags=flags;t.oldHash=r.hash;t.newHash=hash;
@@ -468,6 +495,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"max_frame_records\":"<<summary_.maxFrameRecords
      <<",\"clock_sample_overflow\":"<<summary_.clockSampleOverflow
      <<",\"gap_relog_skipped\":"<<summary_.gapRelogSkipped
+     <<",\"non_finite_pose\":"<<summary_.nonFinitePose
      <<"},"
      <<"\"vtables\":[";
     for(size_t i=0;i<vtables_.size();++i) {
@@ -478,11 +506,24 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
     j<<"],\"jobs\":[";
     for(uint32_t i=0;i<kJobCount;++i) {
         if(i)j<<',';
-        const uint64_t calls=jobs_[i].calls.load(std::memory_order_relaxed);
-        const uint64_t total=jobs_[i].totalNs.load(std::memory_order_relaxed);
+        // Seqlocked read: a job bracket commits calls/totalNs/maxNs between
+        // two seq toggles outside this mutex; retry until the snapshot is
+        // coherent (2026-09-20 review finding 8). Bounded: a stuck writer
+        // (impossible absent a killed thread) must not hang the dump.
+        uint64_t calls=0,total=0,mx=0;
+        for(uint32_t tries=0;;++tries) {
+            const uint32_t s0=jobs_[i].seq.load(std::memory_order_acquire);
+            if((s0&1u)&&tries<10000000u)continue;
+            calls=jobs_[i].calls.load(std::memory_order_relaxed);
+            total=jobs_[i].totalNs.load(std::memory_order_relaxed);
+            mx=jobs_[i].maxNs.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if(jobs_[i].seq.load(std::memory_order_acquire)==s0)break;
+            if(tries>=10000000u)break;
+        }
         j<<"{\"name\":\""<<kJobNames[i]<<"\",\"calls\":"<<calls<<",\"total_ns\":"<<total
          <<",\"mean_ns\":"<<(calls?total/calls:0)
-         <<",\"max_ns\":"<<jobs_[i].maxNs.load(std::memory_order_relaxed)<<'}';
+         <<",\"max_ns\":"<<mx<<'}';
     }
     j<<"],\"records\":[";
     for(size_t i=0;i<records_.size();++i) {
@@ -689,6 +730,7 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     summary_.minFrameRecords=2;summary_.maxFrameRecords=17;
     summary_.clockSampleOverflow=3;
     summary_.gapRelogSkipped=11;
+    summary_.nonFinitePose=9;
 }
 
 } // namespace edvr

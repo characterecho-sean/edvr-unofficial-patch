@@ -30,6 +30,7 @@ constexpr size_t kCenterBytes = 16;  // stage-A diagnostic: +0x240 center float4
 constexpr uint64_t kSummaryMs = 20000;
 constexpr uint64_t kStandDownMs = 5000;
 constexpr uint64_t kNoMoverMs = 10000;
+constexpr uint64_t kBoundsWaitMs = 20000; // one-time note if part A never fires
 constexpr uint32_t kBoundsDumpMovers = 8, kBoundsDumpStatics = 8;
 
 struct TrackedRecord {
@@ -54,8 +55,11 @@ std::vector<TrackedRecord> records_;
 KinematicMotionStats stats_;
 uint64_t seenThisFrame_ = 0;
 uint64_t configureTickMs_ = 0, lastSummaryMs_ = 0;
-bool standDownNoted_ = false, noMoverNoted_ = false;
-// Bounds-layout decode dump: part A on the first ended frame with >=8 movers,
+bool standDownNoted_ = false, noMoverNoted_ = false, boundsWaitNoted_ = false;
+// Bounds-layout decode dump: part A on the first ended frame with BOTH
+// populations present (>=8 movers AND >=8 eligible statics -- movers qualify
+// after two samples, statics need baseline + 3 equal frames, so a movers-only
+// trigger would dump zero comparison statics; 2026-09-20 review finding 6),
 // part B on the next ended frame for the same mover table indices (the delta
 // between parts separates position-like fields from extent-like fields; head
 // motion separates both from the view products). Once per session.
@@ -75,12 +79,35 @@ void clearLocked() {
     stats_ = KinematicMotionStats{};
     seenThisFrame_ = 0;
     clockSeeded_ = false;
-    standDownNoted_ = false; noMoverNoted_ = false;
+    standDownNoted_ = false; noMoverNoted_ = false; boundsWaitNoted_ = false;
     boundsDumpStage_ = 0; boundsDumpIds_.clear();
 }
 
 bool eligibleLocked(const TrackedRecord& r, uint32_t frame) {
     return r.hasPrev && r.lastFrame == frame && r.staticRun >= kStaticRunRequired;
+}
+
+// One pose change, classified: translation vs quat-only (the 103339
+// rotating-in-place class), the sub-1 mm near-miss counter, the dump-ranking
+// path length. Shared by the cross-frame and the same-frame-dup paths so both
+// invalidate identically (2026-09-20 review finding 1).
+void notePoseChangeLocked(TrackedRecord& r, const uint8_t* pose, uint32_t frame) {
+    float t0[3], t1[3];
+    std::memcpy(t0, r.prevPose, sizeof(t0));
+    std::memcpy(t1, pose, sizeof(t1));
+    const double dx = (double)t1[0] - t0[0], dy = (double)t1[1] - t0[1], dz = (double)t1[2] - t0[2];
+    const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    ++stats_.poseChanges;
+    r.lastChangeFrame = frame;
+    if (std::memcmp(pose, r.prevPose, 12) != 0) {
+        ++stats_.translationChanges;
+        if (d < kNearMissM) ++stats_.nearMiss;
+        r.path += d;
+    } else {
+        ++stats_.quatOnlyChanges;
+    }
+    if (!r.everMoved) { r.everMoved = true; ++stats_.moversTotal; }
+    r.staticRun = 0;
 }
 
 void hexWords(const uint8_t* p, size_t bytes, std::string& out) {
@@ -111,9 +138,14 @@ void dumpBoundsLocked(int part, uint32_t frame, uint32_t id, const TrackedRecord
         r.boundsValid ? 1u : 0u, cok ? 1u : 0u, b.c_str(), c.c_str());
 }
 
-void maybeDumpBoundsLocked(uint32_t endedFrame, uint32_t movers) {
+void maybeDumpBoundsLocked(uint32_t endedFrame, uint32_t movers, uint32_t eligible) {
     if (boundsDumpStage_ == 0) {
-        if (movers < 8) return; // the drone alone fields 11; wait for a mover crowd
+        // Both populations or neither: movers qualify after two samples while
+        // statics need baseline + 3 equal frames, so a movers-only trigger
+        // completes the one-shot dump with zero static comparisons under a
+        // normal startup (2026-09-20 review finding 6). The drone alone
+        // fields 11 movers; a settlement fields thousands of statics.
+        if (movers < kBoundsDumpMovers || eligible < kBoundsDumpStatics) return;
         // Top movers by accumulated path, seen in the ended frame.
         std::vector<uint32_t> moversByPath;
         for (uint32_t i = 0; i < records_.size(); ++i)
@@ -157,7 +189,8 @@ void summaryLocked(uint64_t now) {
         "engine motion: tracked %llu; last frame seen %llu, eligible %llu, movers %llu; "
         "observed %llu dup %llu faults %llu overflow %llu; pose changes %llu "
         "(translation %llu, quat-only %llu, near-miss %llu), movers total %llu; "
-        "gap drops %llu, node changes %llu, bounds changes %llu; frames %llu, "
+        "gap drops %llu, node changes %llu, bounds changes %llu, same-frame "
+        "invalidations %llu; frames %llu, "
         "zero-record %llu, eligible-frames %llu. Absence of this line with "
         "fix.engine_motion on reads as a dead instrument, never as success.",
         (unsigned long long)records_.size(),
@@ -169,7 +202,7 @@ void summaryLocked(uint64_t now) {
         (unsigned long long)stats_.quatOnlyChanges, (unsigned long long)stats_.nearMiss,
         (unsigned long long)stats_.moversTotal,
         (unsigned long long)stats_.gapDrops, (unsigned long long)stats_.nodeChanges,
-        (unsigned long long)stats_.boundsChanges,
+        (unsigned long long)stats_.boundsChanges, (unsigned long long)stats_.sameFrameChanges,
         (unsigned long long)stats_.framesCounted, (unsigned long long)stats_.zeroRecordFrames,
         (unsigned long long)stats_.eligibleFrames);
 }
@@ -247,7 +280,7 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept {
     stats_.moversLast = movers;
     stats_.tracked = static_cast<uint32_t>(records_.size());
     if (eligible > 0) ++stats_.eligibleFrames;
-    maybeDumpBoundsLocked(prev, movers);
+    maybeDumpBoundsLocked(prev, movers, eligible);
     seenThisFrame_ = 0;
     const uint64_t now = GetTickCount64();
     if (!standDownNoted_ && configureTickMs_ && now - configureTickMs_ >= kStandDownMs &&
@@ -256,6 +289,15 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept {
         Log::get().note("engine motion: STAND-DOWN -- five seconds live with zero eval "
                         "observations; the hook is not feeding. The tracker is inert and the "
                         "stock motion path is untouched.");
+    }
+    if (!boundsWaitNoted_ && configureTickMs_ && now - configureTickMs_ >= kBoundsWaitMs &&
+        boundsDumpStage_ == 0 && stats_.observed > 0) {
+        boundsWaitNoted_ = true;
+        Log::get().note("engine motion bounds: 20 s live and part A has not fired -- it needs "
+                        ">=8 movers AND >=8 eligible statics in one ended frame (last ended "
+                        "frame: movers %u, eligible %u). If the scene cannot field both, the "
+                        "layout decode waits for a settlement flight.",
+                        stats_.moversLast, stats_.eligibleLast);
     }
     if (!noMoverNoted_ && configureTickMs_ && now - configureTickMs_ >= kNoMoverMs &&
         stats_.observed > 0 && stats_.poseChanges == 0) {
@@ -297,7 +339,38 @@ void kinematicMotionObserve(uintptr_t descriptor) noexcept {
     }
     TrackedRecord& r = records_[it->second];
     ++r.calls;
-    if (r.lastFrame == frame) { ++stats_.dupInFrame; return; } // fan-out dup
+    if (r.lastFrame == frame) {
+        ++stats_.dupInFrame;
+        // Fan-out dup: history does not advance twice in one frame, but the
+        // invariance of repeated observations within a Present is an
+        // ASSUMPTION (assembly-established updater ordering, not a contract).
+        // Verify cheaply: a same-frame node or pose disagreement invalidates
+        // the label exactly like a cross-frame change (2026-09-20 review
+        // finding 1: an eligible record otherwise kept its static label
+        // through a same-frame node swap or translation change).
+        bool vok = true;
+        const uint64_t node = read64(record + 0x18, vok);
+        if (!vok) { ++stats_.readFaults; r.staticRun = 0; r.hasPrev = false; return; }
+        if (node != r.node) {
+            ++stats_.nodeChanges; ++stats_.sameFrameChanges;
+            r.staticRun = 0; r.hasPrev = false; r.everMoved = false;
+            r.boundsValid = false; r.path = 0; r.node = node;
+            if (guardedRead(record + 0x170, r.prevPose, kPoseBytes)) r.hasPrev = true;
+            else ++stats_.readFaults;
+            return;
+        }
+        uint8_t vpose[kPoseBytes];
+        if (!guardedRead(record + 0x170, vpose, kPoseBytes)) {
+            ++stats_.readFaults; r.staticRun = 0; r.hasPrev = false; return;
+        }
+        if (!r.hasPrev) { std::memcpy(r.prevPose, vpose, kPoseBytes); r.hasPrev = true; return; }
+        if (std::memcmp(vpose, r.prevPose, kPoseBytes) != 0) {
+            ++stats_.sameFrameChanges;
+            notePoseChangeLocked(r, vpose, frame);
+            std::memcpy(r.prevPose, vpose, kPoseBytes);
+        }
+        return;
+    }
     // A pointer absent for at least one frame is a NEW identity: never
     // re-proven on somebody else's history (post-gap reuse is flight-untested).
     if (frame > r.lastFrame + 1) {
@@ -355,24 +428,7 @@ void kinematicMotionObserve(uintptr_t descriptor) noexcept {
     if (std::memcmp(pose, r.prevPose, kPoseBytes) == 0) {
         if (r.staticRun < 0xFFFF) ++r.staticRun;
     } else {
-        float t0[3], t1[3];
-        std::memcpy(t0, r.prevPose, sizeof(t0));
-        std::memcpy(t1, pose, sizeof(t1));
-        const double dx = (double)t1[0] - t0[0], dy = (double)t1[1] - t0[1], dz = (double)t1[2] - t0[2];
-        const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
-        ++stats_.poseChanges;
-        r.lastChangeFrame = frame;
-        if (std::memcmp(pose, r.prevPose, 12) != 0) {
-            ++stats_.translationChanges;
-            if (d < kNearMissM) ++stats_.nearMiss;
-            r.path += d;
-        } else {
-            // The 103339 rotating-in-place class: translation bit-static,
-            // quat lanes churning. Never eligible, by construction.
-            ++stats_.quatOnlyChanges;
-        }
-        if (!r.everMoved) { r.everMoved = true; ++stats_.moversTotal; }
-        r.staticRun = 0;
+        notePoseChangeLocked(r, pose, frame);
     }
     std::memcpy(r.prevPose, pose, kPoseBytes);
 }
@@ -389,6 +445,11 @@ bool kinematicMotionRecordEligible(uint64_t record) noexcept {
     const auto it = index_.find(record);
     if (it == index_.end()) return false;
     return eligibleLocked(records_[it->second], frame_.load(std::memory_order_acquire));
+}
+
+int kinematicMotionBoundsDumpStage() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return boundsDumpStage_;
 }
 
 } // namespace edvr

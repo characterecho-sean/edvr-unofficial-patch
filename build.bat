@@ -1994,3 +1994,22 @@ if errorlevel 1 ( echo [edvr] ERROR: kinematic motion tracker test build failed 
 "%BUILD%\kinematic_motion_test.exe" --dry-run || exit /b 1
 "%BUILD%\kinematic_motion_test.exe" --self-test || exit /b 1
 exit /b 0
+
+:rig_kinematic_probe_test
+echo [edvr] === kinematic_probe_test.exe ===
+REM Build gate for the KinematicEvalProbe's observe/clock logic: the
+REM 2026-09-20 review's four probe-side findings (fabricated zero baselines
+REM from faulted reads, identity-crossing motion, the artificial seed frame,
+REM non-finite JSON floats) each reached flight analysis before this rig
+REM existed. Drives the production observe() on synthetic records, including
+REM a VirtualProtect page-fault fixture.
+if not exist "%OBJ%\kinematicprobe" mkdir "%OBJ%\kinematicprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\kinematicprobe\\" /Fe"%BUILD%\kinematic_probe_test.exe" ^
+    "tools\kinematic_probe_test\kinematic_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: kinematic probe test build failed & exit /b 1 )
+"%BUILD%\kinematic_probe_test.exe" --dry-run || exit /b 1
+"%BUILD%\kinematic_probe_test.exe" --self-test || exit /b 1
+exit /b 0

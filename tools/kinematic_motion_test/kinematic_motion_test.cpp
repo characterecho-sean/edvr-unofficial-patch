@@ -222,6 +222,95 @@ void caseZeroRecordFrame() {
     check(s.gapDrops == 1, "8: re-sight after the dead frame is a new identity");
 }
 
+// 2026-09-20 review finding 1: a same-frame dup used to return before the
+// identity/pose reads, so an eligible record kept its label through a node
+// swap or a translation change inside one Present.
+void caseSameFrameNodeSwap() {
+    fresh();
+    FakeRecord a; initRecord(a, 0xD1, 100.f, 200.f, 300.f, 8);
+    FakeDesc d = descFor(a);
+    const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
+    for (int i = 0; i < 3; ++i) { kinematicMotionObserve(dp); endFrame(); }
+    kinematicMotionObserve(dp);                    // run 3, mid-frame
+    check(kinematicMotionRecordEligible(ptrOf(a)), "9: eligible before the same-frame swap");
+    setNode(a, 0xD2);
+    kinematicMotionObserve(dp);                    // same frame, new node
+    KinematicMotionStats s = kinematicMotionStats();
+    check(s.nodeChanges == 1, "9: same-frame node swap counted");
+    check(s.sameFrameChanges == 1, "9: same-frame invalidation counted");
+    check(!kinematicMotionRecordEligible(ptrOf(a)), "9: the label dies with the node");
+    check(s.dupInFrame == 1, "9: the dup itself still counts");
+}
+
+void caseSameFramePoseChange() {
+    fresh();
+    FakeRecord a; initRecord(a, 0xD3, 100.f, 200.f, 300.f, 9);
+    FakeDesc d = descFor(a);
+    const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
+    for (int i = 0; i < 3; ++i) { kinematicMotionObserve(dp); endFrame(); }
+    kinematicMotionObserve(dp);                    // run 3, mid-frame
+    setPose(a, 115.f, 200.f, 300.f, 0, 0, 0, 65535);
+    kinematicMotionObserve(dp);                    // same frame, moved 15 m
+    KinematicMotionStats s = kinematicMotionStats();
+    check(s.poseChanges == 1 && s.translationChanges == 1,
+          "10: same-frame translation change counted");
+    check(s.sameFrameChanges == 1, "10: same-frame invalidation counted");
+    check(!kinematicMotionRecordEligible(ptrOf(a)), "10: the label dies with the pose");
+    kinematicMotionObserve(dp); endFrame();        // pose stable again: run 1
+    kinematicMotionObserve(dp); endFrame();        // run 2
+    check(!kinematicMotionRecordEligible(ptrOf(a)), "10: re-prove restarts from zero");
+}
+
+void caseIdenticalDupStillDedups() {
+    fresh();
+    FakeRecord a; initRecord(a, 0xD4, 100.f, 200.f, 300.f, 10);
+    FakeDesc d = descFor(a);
+    const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
+    kinematicMotionObserve(dp); kinematicMotionObserve(dp); kinematicMotionObserve(dp);
+    KinematicMotionStats s = kinematicMotionStats();
+    check(s.dupInFrame == 2 && s.sameFrameChanges == 0 && s.poseChanges == 0,
+          "11: an invariant dup is still just a dup");
+}
+
+// 2026-09-20 review finding 6: part A used to fire on the first frame with
+// >=8 movers -- frame 2 of a session, before any static can be eligible --
+// and the one-shot dump completed with zero static comparisons.
+void caseBoundsDumpWaitsForStatics() {
+    fresh();
+    FakeRecord mv[8], st[8];
+    FakeDesc dm[8], ds[8];
+    for (int i = 0; i < 8; ++i) {
+        initRecord(mv[i], 0xE00 + i, 10.f * i, 2.f, 3.f, 20 + i);
+        initRecord(st[i], 0xE80 + i, 500.f, 600.f, 700.f + i, 40 + i);
+        dm[i] = descFor(mv[i]); ds[i] = descFor(st[i]);
+    }
+    auto observeAll = [&]() {
+        for (int i = 0; i < 8; ++i) {
+            kinematicMotionObserve(reinterpret_cast<uintptr_t>(&dm[i]));
+            kinematicMotionObserve(reinterpret_cast<uintptr_t>(&ds[i]));
+        }
+    };
+    observeAll(); endFrame();                      // baselines
+    KinematicMotionStats s = kinematicMotionStats();
+    check(kinematicMotionBoundsDumpStage() == 0, "12: no dump without movers");
+    for (int i = 0; i < 8; ++i) setPose(mv[i], 10.f * i + 5.f, 2.f, 3.f, 0, 0, 0, 65535);
+    observeAll(); endFrame();                      // 8 movers, statics run 1
+    s = kinematicMotionStats();
+    check(s.moversLast == 8 && s.eligibleLast == 0, "12: movers before statics qualify");
+    check(kinematicMotionBoundsDumpStage() == 0,
+          "12: movers alone do not fire part A (finding 6)");
+    for (int i = 0; i < 8; ++i) setPose(mv[i], 10.f * i + 6.f, 2.f, 3.f, 0, 0, 0, 65535);
+    observeAll(); endFrame();                      // statics run 2
+    check(kinematicMotionBoundsDumpStage() == 0, "12: two change-free frames still not enough");
+    for (int i = 0; i < 8; ++i) setPose(mv[i], 10.f * i + 7.f, 2.f, 3.f, 0, 0, 0, 65535);
+    observeAll(); endFrame();                      // statics run 3 -> eligible
+    s = kinematicMotionStats();
+    check(s.eligibleLast == 8, "12: eight statics eligible at run 3");
+    check(kinematicMotionBoundsDumpStage() == 1, "12: part A fires once both qualify");
+    observeAll(); endFrame();
+    check(kinematicMotionBoundsDumpStage() == 2, "12: part B completes the one-shot dump");
+}
+
 void caseConfigLifecycle() {
     kinematicMotionConfigure(false);
     check(!kinematicMotionActive(), "0: off is inactive");
@@ -250,6 +339,10 @@ int wmain(int argc, wchar_t** argv) {
     caseNodeChange();
     caseOverflow();
     caseZeroRecordFrame();
+    caseSameFrameNodeSwap();
+    caseSameFramePoseChange();
+    caseIdenticalDupStillDedups();
+    caseBoundsDumpWaitsForStatics();
     kinematicMotionShutdown();
     std::printf("kinematic_motion_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
