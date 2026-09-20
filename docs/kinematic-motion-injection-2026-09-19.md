@@ -93,6 +93,21 @@
   (KinSpheres.bin, EDVRKSP1) and per-frame kin_bound/kin_veto in
   decisions.json schema 2. Gates green; frontier d3d11
   ac6758093e45419d. Re-fly: movers view HELD through the burst.
+  Update 16:20: dump 160734 (ship landing, movers HELD) settles the
+  movers-view question -- and Sean's 16:08 correction reframes 15:45:
+  that strobing was the MOTION view (mvUsed paint), not movers, so the
+  cyan H1/H2/H3 framing never applied to it. From the dump: the
+  coverage pair is 100% claimed with ONE uniform [0.05 m, 671 m]
+  interval in both eyes (straddle paint-all fired; 10 straddlers by
+  the cameraR rows, 92-94 by the now/prev rows); kin_bound solid
+  16/16 (bind flapping refuted); T15 shows ground and settlement cyan,
+  sky correctly rejected by the depth gate, and the LANDING SHIP cyan
+  (Sean confirms in-headset) -- the mask owning a known mover through
+  other spheres' intervals, review finding 2 made visible. Fix
+  direction (design call, unbuilt): straddle -> paint-none. The
+  motion-view whole-scene pulse is the MV field itself -- the
+  pathology this arc is fixing, not a stage-B regression (veto dark);
+  its capture is a burst held in the MOTION view.
 
 ## Premise
 
@@ -984,3 +999,70 @@ Flight ask: settlement, a mover in view (the drone), fix.engine_motion
 burst. Two questions for Sean while watching: is the colour cyan, and
 does the SKY paint too? Sky painting would refute all three hypotheses
 (the depth gate should reject it) and point somewhere deeper.
+
+## 2026-09-20 (16:20: dump 160734 read-out -- paint-all confirmed, mover owned, 15:45 reframed)
+
+Flight 160359, dump stamp 160734 (frames 14939-14954), settlement, a
+ship landing in view, temporal_aa_debug = movers HELD through the
+burst -- the protocol the 15:40 entry asked for. Right build
+(v0.17.0-137-g784f017d-dirty == the instrumented temporal_pass.cpp of
+6fd1e17; HEAD's merge commit 1fe33b9 post-dates the link, hence the
+edvr_log.py --expect-build mismatch note).
+
+Findings, all from the new burst artifacts:
+
+1. **H1 CONFIRMED -- straddle paint-all owns the whole eye.** KCNear /
+   KCFar (499x531 quarter-res, both eyes) are 100% claimed with ONE
+   uniform interval: near bits = asuint(0.5) -- every winning thread
+   hit the 0.05 m zNearM clamp (knobs.z/0.05); far bits =
+   asuint(3.7287e-05) ~= 0.025/671 m. A uniform value over 264,969
+   texels can only come from the paint-all branch
+   (temporal_shader_source.h:1742); any projected-rect path would leave
+   near < 0.5 somewhere. Straddlers at the kc frame: 10 under the
+   cameraR rows -- the own-ship candidate pair sphere[876]/[980] (r=30
+   m, centre ~10 m off, containing the eye under every row set) and
+   sphere[1284] (r=467.7 m, a settlement-scale structure) among them --
+   and 92-94 under the now/prev rows. Which row set g_curRows held at
+   14954 is OPEN (the KC textures reflect the last pass frame, which
+   can post-date the last captured frame; their far value matches
+   sphere[1284] at |zv| ~ 203 m with the sign flipped vs cameraR.
+   kc_frame currently labels the last CAPTURED frame, not the pass's
+   paint frame -- an instrumentation gap to close if the provenance
+   matters). Either way containing spheres are pervasive at a
+   settlement, so paint-all fires every frame there.
+2. **H2 REFUTED.** kin_bound true on all 16 frames, kin_veto false
+   (veto dark, as designed). The bind does not flap.
+3. **The mask owns a mover.** T15 (the movers paint, last burst frame):
+   ground and settlement cyan, sky correctly dark (the depth gate
+   rejects zraw = 0 -- the 16:10 sky check PASSES, nothing deeper is
+   wrong), the horizon band beyond 671 m correctly unowned -- and the
+   LANDING SHIP cyan, top right. Sean confirms in-headset: the landing
+   ship was cyan. The published set held only static records (2,569
+   spheres, gen 1510, session 1), so the ship's pixels are claimed
+   through OTHER spheres' intervals -- review finding 2 (bounding
+   spheres do not establish pixel ownership) made visible on a known
+   mover. Had the veto been armed, that ship would have composed
+   camera-only motion: the exact corruption class the design must
+   never ship. The diagnostic-only stance is vindicated.
+4. **The 15:45 strobing is reframed.** Sean's 16:08 correction: it was
+   the MOTION view (split.y == 1: mvUsed as RG, worldTaken as B), not
+   movers. The H1/H2/H3 cyan framing never applied to it. A
+   whole-scene rapid pulse in that view is the MV FIELD itself
+   oscillating -- the settlement MV pathology this arc exists to fix,
+   made directly visible -- independent of stage B (veto dark; stage B
+   never touches MVs without it). Its discriminating capture is a
+   burst held in the MOTION view: 16 consecutive T crops of the mvUsed
+   paint plus motion.csv (originStep cadence is a suspect: a floating-
+   origin rebase mishandled for one frame pulses every static MV at
+   once).
+
+Fix direction (design call for Sean, not yet built): straddle ->
+paint-none in kinCover (`return` instead of the full-rect paint). A
+sphere containing the camera proves nothing about pixel ownership, and
+the eye-plane grazers (sphere[914] r=2.6 m zv=1.9 m; sphere[1017]/
+[1047] r<=1.1 crossing zv=0 with millimetre head motion) are
+flicker-prone by construction -- they are what a movers-view strobe
+would have meant. After the flip, re-check mover ownership in a
+re-flight: if the landing ship is still cyan via non-straddling
+spheres' unioned intervals, the finding-2 tightening (per-pixel
+interval overlap vs scene depth) is next.
