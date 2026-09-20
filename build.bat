@@ -1956,6 +1956,16 @@ python "tools\reflow_notes.py" --self-test || (
     echo [edvr] ERROR: the reflow tool failed its own test
     exit /b 1
 )
+
+echo [edvr] === kinematic coverage read-out self-test ===
+REM The tool that reads a movers-view burst's coverage pair and sphere
+REM upload. Its EDVRTEX1 R32_UINT and EDVRKSP1 decodes must match what
+REM writeEyeDecisionArtifacts writes, and its verdicts (paint-all
+REM signature, bind flapping) are what a flight read-out quotes.
+python "tools\kin_coverage.py" --self-test || (
+    echo [edvr] ERROR: the kinematic coverage read-out failed its own test
+    exit /b 1
+)
 exit /b 0
 
 :rig_kinematic_json_test

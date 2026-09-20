@@ -1108,4 +1108,7 @@ cyan, no uniform full-claim interval -- honest rects only. A mover
 still cyan means non-straddling unions own it and the finding-2
 per-pixel tightening is next. Separately, a burst with
 temporal_aa_debug = motion HELD captures the 15:45 MV-field pulse
-(16 consecutive mvUsed paints + motion.csv).
+(16 consecutive mvUsed paints + motion.csv). The burst read-out is
+now one command: python tools/kin_coverage.py --target frontier
+(paint-all signature, bind flap, straddlers per row set; --self-test
+18 checks, wired into the build gate).
