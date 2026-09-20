@@ -80,6 +80,19 @@
   in flight, tracker healthy at settlement scale (~2.6k published); the
   movers-view cyan question is OPEN: the eye burst missed the debug
   toggle window. Re-fly with the movers view HELD through the capture.
+  Update 16:10: Sean's headset-only movers test (15:45) answered with a
+  NEW symptom: everything outside the cockpit paints one rapidly-cycling
+  colour -- near-certainly the stage-B cyan owning ~the whole scene and
+  strobing. No log (headset-only, burst missed the toggle again).
+  Hypotheses enumerated in the same-date 16:10 entry: H1 a straddling
+  sphere paints the whole quarter-res texture (the player's own landed
+  ship is the prime suspect), H2 the bind bit flaps per frame, H3
+  interval-union mis-ownership at scale. Instrumented, not fixed blind:
+  the eye burst now also dumps both eyes' coverage pair
+  (KCNear/KCFar0-1.bin, EDVRTEX1 R32_UINT), the GPU sphere upload
+  (KinSpheres.bin, EDVRKSP1) and per-frame kin_bound/kin_veto in
+  decisions.json schema 2. Gates green; frontier d3d11
+  ac6758093e45419d. Re-fly: movers view HELD through the burst.
 
 ## Premise
 
@@ -902,3 +915,72 @@ not inside the burst window. The mask's pixel quality -- cyan on
 settlement surfaces, NOT on the drone, NOT across occlusion gaps (the
 finding-2 question) -- awaits a dump taken while the movers view is
 HELD active.
+
+## 2026-09-20 (16:10: movers view = whole scene strobing; burst instrumented)
+
+Sean, 15:45, headset-only with fix.engine_motion=on and
+temporal_aa_debug=movers: "everything outside my cockpit is a single
+color that cycles rapidly". Read: the stage-B ownership paint (cyan)
+claims ~the whole non-cockpit scene and strobes -- either the coverage
+is genuinely full-screen (vast over-ownership) or the bind flaps per
+frame (paint/no-paint strobing). No log or dump: the test was visual
+only, and the burst again missed the toggle. Per diagnosis discipline
+this is instrumented, not fixed blind -- three hypotheses, one flight
+eliminates all:
+
+- **H1 straddle paint-all.** kinCover treats a sphere straddling the
+  eye (zv - r <= 0.05) as covering the WHOLE quarter-res texture
+  (temporal_shader_source.h kinCover). The player's own landed ship is
+  static, eligible, and its sphere is centred on the player -- it
+  straddles the camera by construction. Head sway (or the gen churn
+  seen in 152934: 926 bumps / 2,200 eligible frames) would strobe it.
+  Signature in the dump: a sphere in KinSpheres.bin whose centre is
+  within radius of the camera position (motion.csv cameraTv), AND
+  KCNear/KCFar at ~full coverage.
+- **H2 bind flapping.** Bit 512 (kcBound) oscillating frame to frame
+  paints/unpaints cyan without any coverage change. The 152934 log
+  shows the empty-snapshot stand-down fired only twice, pre-scene --
+  but per-frame bit state was unlogged until now. Signature:
+  decisions.json kin_bound alternating within one burst.
+- **H3 interval-union mis-ownership at scale** (review finding 2
+  realized): 2,606 spheres merged into one nearest-to-farthest depth
+  interval per texel claim all mid-field depths. Signature: coverage
+  wide but NOT full; sky rejected by the depth gate (zraw <= knobs.x);
+  no straddling sphere in the dump.
+
+A settled design note, held until the dump lands: straddle-paint-all is
+the DANGEROUS direction for an ownership veto (a sphere containing the
+camera proves nothing about pixels); paint-none is the defensible flip.
+Do not ship it off H1 alone -- the dump decides.
+
+The instrument (this commit, temporal_pass.cpp only, diagnostic-only,
+no rendering change): writeEyeDecisionArtifacts now also writes
+
+- eye_<stamp>_KCNear0/1.bin, KCFar0/1.bin -- EDVRTEX1 R32_UINT readback
+  of each eye's coverage pair as of the run's last treated frame
+  (textures persist post-run; header frame = that frame);
+- eye_<stamp>_KinSpheres.bin -- EDVRKSP1: count, session, generation,
+  then count x 80-byte KinematicSphereGpu rows, copied from the GPU
+  UPLOAD BUFFER (what the last frame composed with, not a fresh tracker
+  snapshot -- the tracker may have re-published during the burst);
+- decisions.json schema 2: top-level "kinematic" block (session,
+  generation, count, kc_frame, kc_size, file names, nulls when stage B
+  stood down) and per-frame "kin_bound" (bit 512) / "kin_veto"
+  (bit 1024) stamped at both kcBound call sites (NVIDIA path and own
+  path), gated on the live eye-run slot.
+
+Offline analysis plan (no flight needed once the dump exists):
+recompute the shader's kinematicStatic per pixel from KCNear/KCFar +
+KinSpheres + the camera rows in eye_<stamp>_motion.csv, classify
+H1/H2/H3, and count claimed vs total texels per eye.
+
+Gates: kinematic_motion_test 82/0, kinematic_probe_test 25/0,
+kinematic_json_test green, shader self-test PASS, config contract
+253/253, full build green. Installed to frontier: d3d11.dll sha256
+ac6758093e45419d (= build output, --verify-only green).
+
+Flight ask: settlement, a mover in view (the drone), fix.engine_motion
+= on, temporal_aa_debug = movers HELD active, THEN trigger the eye
+burst. Two questions for Sean while watching: is the colour cyan, and
+does the SKY paint too? Sky painting would refute all three hypotheses
+(the depth gate should reject it) and point somewhere deeper.
