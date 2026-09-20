@@ -1,5 +1,6 @@
 #include "kinematic_eval_probe.h"
 #include "kinematic_eval_hook.h"
+#include <cmath>
 #include <cstring>
 
 namespace edvr {
@@ -58,6 +59,7 @@ void KinematicEvalProbe::clearLocked() {
     vtableIndex_.clear();vtables_.clear();
     ownershipIndex_.clear();ownerships_.clear();
     riglinkIndex_.clear();riglinks_.clear();
+    samples_.clear();events_.clear();seenThisFrame_=0;
     for(uint32_t i=0;i<kJobCount;++i) {
         jobs_[i].calls.store(0,std::memory_order_relaxed);
         jobs_[i].totalNs.store(0,std::memory_order_relaxed);
@@ -95,6 +97,111 @@ void KinematicEvalProbe::reset() noexcept {
     detachKinematicEvalHooks(this);
     std::lock_guard<std::mutex> lock(mutex_);
     clearLocked();
+}
+
+void KinematicEvalProbe::setFrame(uint32_t meshFrame) noexcept {
+    if(!active_.load(std::memory_order_acquire)) {
+        frame_.store(meshFrame,std::memory_order_release);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint32_t prev=frame_.exchange(meshFrame,std::memory_order_acq_rel);
+    if(prev==meshFrame)return;
+    flushFrameStatsLocked();
+}
+
+void KinematicEvalProbe::flushFrameStatsLocked() noexcept {
+    // The first flush after arm counts a partial frame -- acceptable for a
+    // diagnostic; min/max still bracket the steady state.
+    ++summary_.framesCounted;
+    if(seenThisFrame_==0)++summary_.zeroRecordFrames;
+    if(seenThisFrame_>summary_.maxFrameRecords)summary_.maxFrameRecords=seenThisFrame_;
+    if(seenThisFrame_<summary_.minFrameRecords)summary_.minFrameRecords=seenThisFrame_;
+    seenThisFrame_=0;
+}
+
+void KinematicEvalProbe::noteIdentityEventLocked(uint32_t recordId,uint32_t frame,
+        uint32_t kind,uint32_t gapLen,uint64_t oldNode,uint64_t newNode) noexcept {
+    if(events_.size()>=kIdentityEventCap){++summary_.identityEventOverflow;return;}
+    IdentityEvent e;
+    e.recordId=recordId;e.frame=frame;e.kind=kind;e.gapLen=gapLen;
+    e.oldNode=oldNode;e.newNode=newNode;
+    events_.push_back(e);
+}
+
+// Frame-aligned pose sample: one per record per frame, decoded from the xf
+// block the caller already read (no extra guarded reads for the transform).
+void KinematicEvalProbe::samplePoseLocked(uint32_t recordId,RecordState& r,
+        const uint64_t* xf,uintptr_t recordAddr) noexcept {
+    const uint32_t frame=frame_.load(std::memory_order_acquire);
+    if(r.framesSampled&&r.lastSampledFrame==frame) {
+        ++r.dupInFrame;++summary_.dupInFrame;
+        return; // second observation of the same record in one frame
+    }
+    // tx/ty/tz = 3 floats at record+0x170 (xf[8] low/high, xf[9] low);
+    // q0..q3 = 4 uint16 lanes at +0x17C..0x184 (xf[9] bits 32..63, xf[10]
+    // bits 0..31). Raw bits; decode is offline.
+    const uint32_t txb=uint32_t(xf[8]&0xFFFFFFFFull);
+    const uint32_t tyb=uint32_t(xf[8]>>32);
+    const uint32_t tzb=uint32_t(xf[9]&0xFFFFFFFFull);
+    const uint16_t q0=uint16_t((xf[9]>>32)&0xFFFFull);
+    const uint16_t q1=uint16_t((xf[9]>>48)&0xFFFFull);
+    const uint16_t q2=uint16_t(xf[10]&0xFFFFull);
+    const uint16_t q3=uint16_t((xf[10]>>16)&0xFFFFull);
+    float tx,ty,tz;
+    std::memcpy(&tx,&txb,4);std::memcpy(&ty,&tyb,4);std::memcpy(&tz,&tzb,4);
+    ++r.framesSampled;
+    ++seenThisFrame_;
+    const bool gapResume=r.hasPrevSample&&frame>r.lastSampledFrame+1;
+    if(gapResume) {
+        const uint32_t gapLen=frame-r.lastSampledFrame-1;
+        ++r.gaps;++summary_.gapEvents;
+        if(gapLen>r.maxGap)r.maxGap=gapLen;
+        noteIdentityEventLocked(recordId,frame,1,gapLen,0,0);
+    }
+    // Frame-aligned node read (~3k/frame): a node change on a continuously
+    // seen record pointer is possible slot reuse.
+    bool nodeOk=true;
+    const uint64_t node=read64(recordAddr+0x18,nodeOk);
+    if(!nodeOk)++summary_.readFaults;
+    else if(r.hasPrevSample&&node!=r.node) {
+        ++r.nodeChanges;++summary_.nodeChangeEvents;
+        noteIdentityEventLocked(recordId,frame,2,0,r.node,node);
+        r.node=node;
+    }
+    uint8_t pose[20];
+    std::memcpy(pose,&txb,4);std::memcpy(pose+4,&tyb,4);std::memcpy(pose+8,&tzb,4);
+    std::memcpy(pose+12,&q0,2);std::memcpy(pose+14,&q1,2);
+    std::memcpy(pose+16,&q2,2);std::memcpy(pose+18,&q3,2);
+    if(r.hasPrevSample) {
+        float ptx,pty,ptz;uint32_t pb;
+        std::memcpy(&pb,r.prevPose,4);std::memcpy(&ptx,&pb,4);
+        std::memcpy(&pb,r.prevPose+4,4);std::memcpy(&pty,&pb,4);
+        std::memcpy(&pb,r.prevPose+8,4);std::memcpy(&ptz,&pb,4);
+        const float dx=tx-ptx,dy=ty-pty,dz=tz-ptz;
+        const float jump=std::sqrt(dx*dx+dy*dy+dz*dz);
+        if(jump>r.maxJump)r.maxJump=jump;
+        r.totalJump+=jump;
+        if(std::memcmp(pose+12,r.prevPose+12,8)!=0) {
+            ++r.quatChangeFrames;++summary_.quatChangeFrames;
+        }
+    }
+    // Mover sample log: first-ever sample, any pose change, or the first
+    // sample after a gap (continuity marker even if unchanged).
+    const bool poseChanged=!r.hasPrevSample||std::memcmp(pose,r.prevPose,sizeof(pose))!=0;
+    if(poseChanged||gapResume) {
+        if(samples_.size()<kPoseSampleCap) {
+            PoseSample s;
+            s.recordId=recordId;s.frame=frame;
+            s.tx=tx;s.ty=ty;s.tz=tz;
+            s.q0=q0;s.q1=q1;s.q2=q2;s.q3=q3;
+            samples_.push_back(s);
+            ++summary_.poseSamples;
+        } else ++summary_.poseSampleOverflow;
+    }
+    std::memcpy(r.prevPose,pose,sizeof(pose));
+    r.hasPrevSample=true;
+    r.lastSampledFrame=frame;
 }
 
 uint64_t KinematicEvalProbe::vtableRvaLocked(uintptr_t object) noexcept {
@@ -155,6 +262,9 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
         if(!guardedRead(static_cast<uintptr_t>(record)+0x130,r.xfFirst,sizeof(r.xfFirst)))
             ++summary_.readFaults;
         std::memcpy(r.xfLatest,r.xfFirst,sizeof(r.xfFirst));
+        // First sample comes from the xfFirst block already read above.
+        samplePoseLocked(static_cast<uint32_t>(records_.size()),r,r.xfFirst,
+            static_cast<uintptr_t>(record));
         if(!ok)++summary_.readFaults;
         r.predVtableRva=vtableRvaLocked(static_cast<uintptr_t>(r.predPtr));
         r.pred2VtableRva=vtableRvaLocked(static_cast<uintptr_t>(r.pred2Ptr));
@@ -178,6 +288,8 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
             ++summary_.xfChanges;
             if(r.xfChanges==1)++summary_.xfMovers;
         }
+        // Frame-aligned sampling rides the block already read above.
+        samplePoseLocked(it->second,r,xf,static_cast<uintptr_t>(record));
     } else ++summary_.readFaults;
     bool hashOk=true;
     const uint64_t hash=read64(record+0x268,hashOk);
@@ -304,7 +416,19 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"riglink_null_collection\":"<<summary_.riglinkNullCollection
      <<",\"riglink_overflow\":"<<summary_.riglinkOverflow
      <<",\"xf_movers\":"<<summary_.xfMovers
-     <<",\"xf_changes\":"<<summary_.xfChanges<<"},"
+     <<",\"xf_changes\":"<<summary_.xfChanges
+     <<",\"pose_samples\":"<<summary_.poseSamples
+     <<",\"pose_sample_overflow\":"<<summary_.poseSampleOverflow
+     <<",\"identity_event_overflow\":"<<summary_.identityEventOverflow
+     <<",\"dup_in_frame\":"<<summary_.dupInFrame
+     <<",\"gap_events\":"<<summary_.gapEvents
+     <<",\"node_change_events\":"<<summary_.nodeChangeEvents
+     <<",\"quat_change_frames\":"<<summary_.quatChangeFrames
+     <<",\"frames_counted\":"<<summary_.framesCounted
+     <<",\"zero_record_frames\":"<<summary_.zeroRecordFrames
+     <<",\"min_frame_records\":"<<summary_.minFrameRecords
+     <<",\"max_frame_records\":"<<summary_.maxFrameRecords
+     <<"},"
      <<"\"vtables\":[";
     for(size_t i=0;i<vtables_.size();++i) {
         if(i)j<<',';
@@ -336,6 +460,14 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<",\"epoch1b8\":\"0x"<<std::hex<<r.epoch1b8
          <<"\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec
          <<"\",\"xf_changes\":"<<r.xfChanges<<",\"last_xf_change\":"<<r.lastXfChangeFrame
+         <<",\"frames_sampled\":"<<r.framesSampled
+         <<",\"dup_in_frame\":"<<r.dupInFrame
+         <<",\"gaps\":"<<r.gaps
+         <<",\"max_gap\":"<<r.maxGap
+         <<",\"node_changes\":"<<r.nodeChanges
+         <<",\"quat_change_frames\":"<<r.quatChangeFrames
+         <<",\"max_jump\":"<<r.maxJump
+         <<",\"total_jump\":"<<r.totalJump
          <<",\"xf_first\":[";
         for(int k=0;k<11;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfFirst[k]<<std::dec<<"\"";}
         j<<"],\"xf_latest\":[";
@@ -371,6 +503,25 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<",\"hits\":"<<r.hits
          <<",\"collection_known\":"<<(r.collection&&ownershipIndex_.count(r.collection)?1:0)<<'}';
     }
+    j<<"],\"pose_events\":[";
+    for(size_t i=0;i<events_.size();++i) {
+        if(i)j<<',';
+        const IdentityEvent& e=events_[i];
+        j<<"{\"record\":"<<e.recordId<<",\"frame\":"<<e.frame
+         <<",\"kind\":"<<e.kind<<",\"gap_len\":"<<e.gapLen
+         <<",\"old_node\":\"0x"<<std::hex<<e.oldNode
+         <<"\",\"new_node\":\"0x"<<e.newNode<<std::dec<<"\"}";
+    }
+    j<<"],\"mover_samples\":[";
+    for(size_t i=0;i<samples_.size();++i) {
+        if(i)j<<',';
+        const PoseSample& s=samples_[i];
+        uint32_t txb,tyb,tzb;
+        std::memcpy(&txb,&s.tx,4);std::memcpy(&tyb,&s.ty,4);std::memcpy(&tzb,&s.tz,4);
+        j<<"{\"record\":"<<s.recordId<<",\"frame\":"<<s.frame
+         <<",\"t\":[\"0x"<<std::hex<<txb<<"\",\"0x"<<tyb<<"\",\"0x"<<tzb<<std::dec<<"\"]"
+         <<",\"q\":["<<s.q0<<','<<s.q1<<','<<s.q2<<','<<s.q3<<"]}";
+    }
     j<<"]}";
 }
 
@@ -402,6 +553,10 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     mover.xfChanges=7u;mover.lastXfChangeFrame=42u;
     mover.bool234=1u;mover.predByte=0x5Au;mover.gate2=2u;
     mover.calls=123u;
+    mover.framesSampled=40u;mover.dupInFrame=2u;
+    mover.gaps=1u;mover.maxGap=3u;mover.nodeChanges=1u;mover.quatChangeFrames=6u;
+    mover.maxJump=0.125f;mover.totalJump=4.5;
+    mover.lastSampledFrame=42u;mover.hasPrevSample=true;
 
     RecordState still{};
     still.record=0x2222333344445555ull;
@@ -410,6 +565,7 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     still.flags=0x41u;
     still.firstFrame=10u;still.lastFrame=42u;
     still.calls=120u;
+    still.framesSampled=40u;still.lastSampledFrame=42u;still.hasPrevSample=true;
 
     index_[mover.record]=0;index_[still.record]=1;
     records_.push_back(mover);records_.push_back(still);
@@ -443,6 +599,26 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     rl.rigState=4u;rl.firstFrame=10u;rl.hits=58u;
     riglinkIndex_[rl.rig]=0;riglinks_.push_back(rl);
 
+    PoseSample s1{};
+    s1.recordId=0u;s1.frame=42u;
+    s1.tx=1.0f;s1.ty=2.0f;s1.tz=3.0f;  // bits 0x3F800000/0x40000000/0x40400000
+    s1.q0=32768u;s1.q1=32768u;s1.q2=32768u;s1.q3=65535u;
+    samples_.push_back(s1);
+    PoseSample s2{};
+    s2.recordId=0u;s2.frame=43u;
+    s2.tx=0.5f;s2.ty=2.0f;s2.tz=3.0f;  // tx bits 0x3F000000
+    s2.q0=32768u;s2.q1=32768u;s2.q2=32768u;s2.q3=65534u;
+    samples_.push_back(s2);
+
+    IdentityEvent e1{};
+    e1.recordId=1u;e1.frame=30u;e1.kind=1u;e1.gapLen=3u;
+    e1.oldNode=still.node;e1.newNode=still.node;
+    events_.push_back(e1);
+    IdentityEvent e2{};
+    e2.recordId=0u;e2.frame=41u;e2.kind=2u;
+    e2.oldNode=0x1111222233334444ull;e2.newNode=0x99990000AAAABBBBull;
+    events_.push_back(e2);
+
     jobs_[0].calls.store(2,std::memory_order_relaxed);
     jobs_[0].totalNs.store(1000,std::memory_order_relaxed);
     jobs_[0].maxNs.store(700,std::memory_order_relaxed);
@@ -457,6 +633,10 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     summary_.ownershipChecks=44;summary_.ownerBackPtrMatch=45;summary_.ownerState4=46;summary_.ownershipOverflow=47;
     summary_.riglinkChecks=48;summary_.riglinkState4=49;summary_.riglinkNullCollection=50;summary_.riglinkOverflow=51;
     summary_.xfMovers=52;summary_.xfChanges=53;
+    summary_.poseSamples=2;summary_.poseSampleOverflow=5;summary_.identityEventOverflow=7;
+    summary_.dupInFrame=2;summary_.gapEvents=1;summary_.nodeChangeEvents=1;summary_.quatChangeFrames=6;
+    summary_.framesCounted=40;summary_.zeroRecordFrames=1;
+    summary_.minFrameRecords=2;summary_.maxFrameRecords=17;
 }
 
 } // namespace edvr
