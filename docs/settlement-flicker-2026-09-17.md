@@ -49,10 +49,10 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-89-gbbfcded7-dirty installed to frontier (6AAFC286),
-  adding the direct rig-link hook on FUN_14431AFE0 (05:30 entry);
-  supersedes v0.17.0-85-ga02e1eee-dirty (6AAFBC12). INIs unchanged.
-  Flight check: --expect-build v0.17.0-89-gbbfcded7-dirty.
+- Build: v0.17.0-93-gd6ed264f-dirty installed to frontier, adding
+  per-record world-transform snapshots (06:10 entry); supersedes
+  v0.17.0-89-gbbfcded7-dirty (6AAFC286). INIs unchanged. Flight check:
+  --expect-build v0.17.0-93-gd6ed264f-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6020,4 +6020,44 @@ reachability is SOLVED — enumerate rigs at FUN_14431AFE0, read
 record+0x130..0x16C world transforms. Remaining phase-0 opens:
 per-record identity (~5 records share one node pointer), pixel
 ownership, and the observer-off job-cost remeasure.
+
+### 2026-09-20 06:10 — instrument: per-record world-transform snapshots (installed to frontier)
+
+Build v0.17.0-93-gd6ed264f-dirty installed to frontier and verified;
+INIs untouched. Adds the engine-truth motion capture the 05:45 entry
+made reachable — in observe(), NOT by walking collection arrays from
+the rig side: the eval hook already sees the same stride-0x2F0 records
+deduped, so no new layout assumption (array base/count) was needed,
+and the riglink rows already attribute collections to rigs.
+
+What was added (kinematic_eval_probe only; no new hook):
+
+- Per eval call, one 64-byte guarded read of the world-transform
+  block record+0x130..0x170 (the doc's 3x4 at +0x130..0x16C sits
+  inside it; +0x170 is the next field). Bit-exact compare against the
+  record's latest snapshot; on change: copy, ++xfChanges, stamp
+  last_xf_change frame. New records store xfFirst + xfLatest.
+- Summary: xf_movers (records with >=1 change), xf_changes (total
+  change events). Per record in JSON: xf_changes, last_xf_change,
+  xf_first[8], xf_latest[8] (raw uint64 bits as hex strings —
+  float-exact; threshold offline).
+- A record with 0 changes across the window is engine-proven STATIC
+  in it; a record changing every frame is a mover. This is the
+  classification the +0x268 render-config hash (retracted) and the
+  epoch pair (constant enum) could never give.
+- Failure modes: read_faults climbing = the +0x130 block assumption
+  failed; xf_changes == 0 everywhere with read_faults 0 = a window
+  with no motion (landed cockpit) — confirm against a station session
+  before calling the instrument dead. Neither reads as a pass.
+- Cost: one 64-byte guarded read + memcmp per observe() call, same
+  mutex as before. No new hook, no QPC bracket.
+- Process note: the writer edit needed a byte-level repair pass after
+  an escaping mishap during editing (44-line collateral, fully
+  reverted, verified at byte level); the build gates then passed.
+  Probe-JSON validation still has no build-gate self-test.
+
+Flight protocol: unchanged (eye dump, 30 s). After: python
+tools\edvr_log.py --target frontier --expect-build
+v0.17.0-93-gd6ed264f-dirty, then read kinematicEval.summary.xf_* and
+records[].xf_*.
 
