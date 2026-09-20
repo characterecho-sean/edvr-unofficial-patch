@@ -227,7 +227,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
         const Transition& t=transitions_[i];
         j<<"{\"record\":"<<t.recordId<<",\"frame\":"<<t.frame
          <<",\"old_flags\":\"0x"<<std::hex<<t.oldFlags<<"\",\"new_flags\":\"0x"<<t.newFlags
-         <<"\",\"old_hash\":\"0x"<<t.oldHash<<"\",\"new_hash\":\"0x"<<t.newHash<<std::dec<<'}';
+         <<"\",\"old_hash\":\"0x"<<t.oldHash<<"\",\"new_hash\":\"0x"<<t.newHash<<std::dec<<"\"}";
     }
     j<<"]}";
 }

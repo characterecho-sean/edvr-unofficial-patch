@@ -38,15 +38,16 @@ expensive way to run this project, so instruments batch.
 
 ## Levers, cheapest measurement first
 
-### L1. Know the split: CPU job brackets (instrumented, awaiting flight)
+### L1. Know the split: CPU job brackets (MEASURED 2026-09-19, eye run 205251)
 
-The kinematic_eval_hook QPC brackets on the six job bodies
-(UpdateRenderDataJob, 0x4320340 batch, UpdatePhysicsObjectsJob, both
-PrePhysicsAdvance jobs, the BA0 body) plus the existing D3D11 call
-census answer: is the settlement tax kinematic eval, physics, or
-submission volume? This gates everything below. Decision table lives in
-settlement-flicker-2026-09-17.md (kinematic dominant -> L3; physics
-dominant -> L4; submission dominant -> L2).
+Answer: **kinematic render-data dominant**. Per settlement frame (~63 fps):
+UpdateRenderDataJob ~7.0 ms (138 calls x 51 us), RenderDataBatch
+(0x4320340) ~2.4 ms (24 x 98 us), physics jobs <= 0.05 ms, BA0 negligible.
+~9.4 ms of the 15.9 ms frame sits in the two kinematic jobs. The split is
+robust; absolute ms is an upper bound (the eval observer may nest inside
+the brackets). Gates L3 and the motion-injection phase 1. L4 is closed
+unless later flights contradict. Details: settlement-flicker-2026-09-17.md
+journal, 20:52 flight.
 
 ### L2. Draw suppression of proven-zero-sample draws
 

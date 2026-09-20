@@ -5611,3 +5611,40 @@ trampoline between captures. Rebuilt green, installed to frontier
 20:49, needs a refly. Prologue note: stolen bytes are 40 53 / 55 / 56 /
 57 (exactly 5); the patchIsOurs tail check expects 41 54 41 56 41 57 48
 83 after the patch.
+
+### 2026-09-19 20:52 flight (relay-fix build): kinematic dominant, flags ruled out
+
+Capture 20:52:51.9-20:52:55.6 (~3.75 s, ~63 fps at the settlement, eye run
+205251). All hooks installed except kinematic-job-3: 0x42DF530 begins with
+a jmp -- it is itself a thunk, not the PrePhysicsAdvanceJob body; decode
+its target next Ghidra run. Job-4 hooked but saw zero calls.
+
+CPU per frame: UpdateRenderDataJob 32604 calls, ~138/frame x 51 us =
+~7.0 ms; RenderDataBatch (0x4320340) ~24/frame x 98 us = ~2.4 ms;
+UpdatePhysicsObjectsJob ~5/frame x 7 us = 0.03 ms; BA0 negligible.
+Kinematic render-data ~= 9.4 ms of the 15.9 ms frame; physics innocent.
+CAVEAT: the eval observer adds per-call overhead that may nest inside the
+job brackets (eval call path not yet mapped to jobs); the split is robust,
+the absolute ms is an upper bound. Decision table: kinematic dominant ->
+L3 eval narrowing + motion-injection phase 1.
+
+Engine semantics:
+- One predicate class everywhere: all 2633 records share vtable
+  0x52e9288. Decompile its slots (+0x70/+0x58) next Ghidra run.
+- ruled out: render-record+0x688 flags as a stasis/skip signal -- 1.44M
+  transitions, 99.7% of eval calls, two interleaved count-up chains
+  (0x3->0x100000->0x200000->0x400000->0x800000->0x3 and
+  0x3->0x5000->0x4010->0x4020->0x4040). It is a per-call sequencer; the
+  0x1000 bit appears transiently mid-sequence on every record.
+- hash record+0x268: ZERO changes across 1.4M calls; 500 distinct values
+  over 510 nodes (near 1:1 per node). Proven-static candidate, but a
+  static scene cannot distinguish stable-hash from not-a-hash; needs a
+  capture with known movers to confirm it tracks content.
+- pred_byte (descriptor+0x49): 2132 records 0 / 501 records 1.
+  bool234: 2624 / 9. Per-record gates to cross-reference with the
+  predicate decompile.
+- 2633 records over 510 nodes (~5 records/node); ~6120 eval calls/frame,
+  ~2.3 per record per frame.
+
+Probe defect found and fixed post-flight: transition JSON writer dropped
+the closing quote on new_hash (analysis used regex; fixed in tree).

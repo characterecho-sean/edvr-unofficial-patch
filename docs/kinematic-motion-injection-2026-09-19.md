@@ -9,10 +9,13 @@
   DLSS-path MV replacement (surface 2) is the end goal; EDVR's own
   temporal pass (surface 1) is the diagnostic stepping stone that proves
   the injected MVs are right before they touch DLSS history.
-- **Open:** everything in Phasing; phase 0 shares the next-flight capture
-  spec in settlement-flicker-2026-09-17.md (predicate vtable + flags).
-  Probes built and installed to the frontier copy 2026-09-19 evening
-  (commit 116a2e0); phase 1 stays unbuilt until that log is read.
+- **Open:** phasing. Phase 0 flew 2026-09-19 20:52 (eye run 205251):
+  predicate vtable captured (single class 0x52e9288 for all 2633
+  records -- decompile its slots next); +0x268 hash stable across 1.4M
+  eval calls, 500 values over 510 nodes, near 1:1 per node; the +0x688
+  flags field is ruled out as a stasis signal (per-call sequencer).
+  Remaining gate question: does +0x268 track CONTENT (needs a capture
+  with known movers) and what does predicate 0x52e9288 test.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
