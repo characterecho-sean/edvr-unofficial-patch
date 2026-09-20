@@ -118,6 +118,22 @@
   one key). UNFLOWN. Re-fly movers HELD at a settlement: expect no
   whole-eye cyan; a mover still cyan via non-straddling unions sends
   the finding-2 per-pixel tightening next.
+  Update 17:05: flip FLIED (flight 163300; dumps 163502 motion,
+  163619+163645 movers; build gc4bceb50-dirty == the 5313a81 content,
+  installed 16:29 -- HEAD moved on docs/tools only, hence the
+  expect-build note). Whole-eye cyan GONE: claimed 100% -> 45-53%,
+  no paint-all signature, dominant interval share 25-31%;
+  kc_paint_frame stamped and equal to kc_frame. Movers still cyan --
+  Sean's moving turret, and a landing ship once near the ground:
+  unioned intervals own mover pixels (finding 2 confirmed on movers).
+  Offline rect reproduction explains only 52-77% of claimed texels by
+  row set -- the pass's exact inputs are not yet dumped; the KCParams
+  cbuffer dump is the next instrument. Motion dump 163502 settles
+  15:45: the MV FIELD oscillates sign-alternating frame to frame at
+  45% of strongly-changing pixels (median ~3.7 px), cadence matching
+  the game's jitter sign flip; originStep zero throughout (rebase
+  refuted this window); jitter scale alone explains ~1/5 of the
+  amplitude; worldTaken (path selection) steady.
 
 ## Premise
 
@@ -1112,3 +1128,76 @@ temporal_aa_debug = motion HELD captures the 15:45 MV-field pulse
 now one command: python tools/kin_coverage.py --target frontier
 (paint-all signature, bind flap, straddlers per row set; --self-test
 18 checks, wired into the build gate).
+
+## 2026-09-20 (17:05: flip flown -- whole-eye cyan gone; movers owned via unions; the MV-field oscillation captured)
+
+Flight 163300 (the flip build, gc4bceb50-dirty == 5313a81's content;
+HEAD had moved on docs/tools only). Three bursts: 163502 with
+temporal_aa_debug = motion, then 163619 and 163645 with movers HELD.
+Tracker healthy (3,503 tracked, ~2,570-2,682 eligible, 433-558 movers,
+0 faults/overflow, upload gen advancing 1,502 -> 1,757).
+
+**The flip holds in flight.** Movers bursts: claimed 49.9/52.9% and
+45.2/43.5% of texels (was 100%), NO paint-all signature, dominant
+interval share 25-31% (was 100%) -- honest varied rects. The 10-94
+straddlers still exist but paint nothing, as designed. kc_paint_frame
+stamps correctly and equals kc_frame (the textures WERE the last
+captured frame's this time).
+
+**Movers are still cyan -- finding 2 confirmed on movers.** Sean,
+in-headset: a visibly moving gun turret is cyan, and a landing ship
+painted cyan once it got close to the ground. T15 of 163645 shows a
+ship silhouette cyan against (correctly dark) sky, with a partial dark
+cutout -- partial-depth ownership. Mechanism: unioned [near,far]
+intervals from OTHER spheres claim the mover's pixels when its depth
+falls inside their span; near the ground the ship's depth enters the
+ground structures' intervals. The published set holds statics only
+(gen 1,558, count 2,569) -- the mover's own records are not the
+source.
+
+**The offline rect reproduction is not yet faithful.** Spheres whose
+projected rects should cover a claimed texel explain only 52.2% of
+claimed texels under the now/prev rows and 76.8% under cameraR/headR --
+never ~100%, so the pass's exact inputs differ from every set
+motion.csv carries (g_curRows provenance, tan variant, or a publish
+between the paint and the dump). Next instrument: dump the 96-byte
+KCParams cbuffer (tanNow, wR0..2, knobs, size/count) per eye with the
+burst -- exact inputs, no row-set guessing. Until then, per-mover
+attribution (which sphere owns the turret's pixels) is deferred, and
+with it the finding-2 tightening design.
+
+**Motion burst 163502 settles the 15:45 strobing.** The motion view
+paints mvUsed only (R/G = mv/16 px, B = worldTaken), so the capture is
+16 consecutive frames of the MV field itself:
+
+- The field OSCILLATES sign-alternating frame to frame: median
+  frame-to-frame change 59/255 levels (~3.7 px at output scale), and
+  45% of strongly-changing pixels flip sign >=10 times in 14
+  opportunities. Geometry edges saturate (255). This is the cycling
+  colour Sean saw -- the MV field pulsing, not a paint artifact.
+- The cadence matches the game's own jitter: jitter0/1 flip sign every
+  frame (Halton-like, amplitude <=0.44). But jitter at that amplitude
+  explains only ~1/5 of the observed oscillation (~0.7 px
+  output-scaled vs ~3.7 px) -- either the jitter term enters the
+  composed MV at a wrong scale (and possibly twice), or another
+  per-frame alternator exists. Enumerated, not concluded.
+- originStep is 0 on all 16 frames: the floating-origin rebase
+  hypothesis is REFUTED for this window.
+- worldTaken (the B channel, path selection) is steady at ~140 --
+  paths don't flip; the VALUES oscillate.
+- Caveat for future bursts: dtMs quadrupled mid-burst (11.1 -> 43.5 ms
+  at frame 12952) -- the burst's own staging perturbs frametime. The
+  oscillation is present in both halves (T00-T05 wobble too), so the
+  finding stands, but frametime-sensitive read-outs should use the
+  11 ms prefix.
+- Tracker's camera arbitration shows in the log: "the camera's delta
+  was dropped on 34 eye-frames as another camera's (over 3 deg from
+  the head's)" -- multiple camera sources exist and are arbitrated;
+  relevant to the g_curRows provenance question above.
+
+No rendering change this entry; the veto remains dark. Next steps, in
+order: (1) KCParams cbuffer in the burst -> exact mover attribution ->
+finding-2 tightening design; (2) the MV oscillation's alternating
+term: jitter units/scale audit in the compose (input vs output pixels,
+single vs double application) is an OFFLINE code read before any
+flight is spent.
