@@ -1955,3 +1955,22 @@ python "tools\reflow_notes.py" --self-test || (
     exit /b 1
 )
 exit /b 0
+
+:rig_kinematic_json_test
+echo [edvr] === kinematic_json_test.exe ===
+REM Build gate for the production KinematicEvalProbe JSON writer: three
+REM serialization failures reached the flight journal before this rig
+REM existed, and compilation cannot catch a dropped quote. The exe
+REM serializes a deterministic fixture through the real writeJson; the
+REM python gate strict-parses it and asserts every value round-trips.
+if not exist "%OBJ%\kinematicjson" mkdir "%OBJ%\kinematicjson"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\kinematicjson\\" /Fe"%BUILD%\kinematic_json_test.exe" ^
+    "tools\kinematic_json_test\kinematic_json_test.cpp" "src\d3d11\kinematic_eval_probe.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: kinematic JSON writer test build failed & exit /b 1 )
+"%BUILD%\kinematic_json_test.exe" --dry-run || exit /b 1
+"%BUILD%\kinematic_json_test.exe" --self-test || exit /b 1
+python "tools\kinematic_json_selftest.py" --self-test || exit /b 1
+exit /b 0
