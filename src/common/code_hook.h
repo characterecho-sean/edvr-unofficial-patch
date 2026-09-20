@@ -58,6 +58,11 @@ constexpr size_t kCodeHookPatchBytes = 5;
 
 class CodeHook {
 public:
+    // Prepare a replacement's original-function forward before publishing the
+    // entry patch. The trampoline is executable at this point, but the target
+    // is unchanged. A false result refuses installation. A prepared pointer is
+    // valid only if install ultimately succeeds; discard it on failure.
+    using Prepare = bool (*)(void* trampoline, void* context) noexcept;
     CodeHook() = default;
     ~CodeHook() { uninstall(); }
 
@@ -75,7 +80,8 @@ public:
     // nothing, if the target cannot be hooked safely -- and says why. Callers
     // must treat false as "run without this fix", never as "try harder".
     bool install(void* target, void* replacement, void** origOut,
-                 const char* who);
+                 const char* who, Prepare prepare = nullptr,
+                 void* prepareContext = nullptr);
 
     // Put the original bytes back, but ONLY if the patch is still ours: another
     // tool that hooked the same function after us owns those bytes now, and

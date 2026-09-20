@@ -70,6 +70,8 @@
 #include "ui_deferred.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
+#include "object_classification_probe.h"
+#include "static_surface.h"
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "intro_panel.h"
 #include "intro_skip.h"
@@ -96,8 +98,10 @@ namespace {
 // nullptr invalidates every cached input (command-list execution); otherwise
 // only writes to a source instance, bone or camera buffer invalidate them.
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
+    if(!resource && objectClassificationProbe.active())objectClassificationProbe.unknownWrites();
     weaponMotionResourceWritten(resource);
     meshMotionResourceWritten(resource,first,end);
+    staticSurfaceResourceWritten(resource,first,end);
     uiDepthMotionResourceWritten(resource,first,end);
 }
 
@@ -1714,7 +1718,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // for anything else. One compare per draw once the answer is known, and
     // it changes no binding of the game's, so everything below composes
     // with it.
-    foveationOnDraw(self, s->rtv0Eye, bindingGet(BindSlot::Rtv0), rtvGen, kind, count, instances);
+    if (foveationWantsDraws()) {
+        foveationOnDraw(self, s->rtv0Eye, bindingGet(BindSlot::Rtv0), rtvGen,
+                         kind, count, instances);
+    }
     // The intro probe, ABOVE the eye gate and deliberately. Its subject is the
     // startup sequence, and for the whole of the sequence's first phase there
     // is no eye texture to be on the right side of a gate about: one eye's
@@ -2848,6 +2855,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ExecuteList, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (foreignContext(self)) {
+        if(objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         s->realExecuteCommandList(self, list, restoreContextState);
         return;
     }
@@ -2882,6 +2890,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     State* s = g_state;
     ++s->thunkHits[kHitMap];
     if (foreignContext(self)) {
+        if(type!=D3D11_MAP_READ && objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         return s->realMap(self, res, sub, type, flags, mapped);
     }
     meshMotionBeforeMap(res);
@@ -2892,6 +2901,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     const HRESULT hr = s->realMap(self, res, sub, type, flags, mapped);
     LARGE_INTEGER mapT1{}; QueryPerformanceCounter(&mapT1);
     edvr::mapWaitNote(type, mapT1.QuadPart > mapT0.QuadPart ? static_cast<uint64_t>(mapT1.QuadPart - mapT0.QuadPart) : 0u);
+    if(objectClassificationProbe.active())objectClassificationProbe.noteMap(self,res,sub,type,hr,mapped && mapped->pData);
     // The census CB watch's half of the tee: while a census runs, it needs
     // the mapped pointer of any buffer it is watching. One bool call when no
     // census runs, two pointer compares inside when one does.
@@ -3065,6 +3075,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     State* s = g_state;
     ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
+        if(objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         s->realUnmap(self, res, sub);
         return;
     }
@@ -3153,12 +3164,23 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->bbBytes = 0;
     }
     s->realUnmap(self, res, sub);
+    if(objectClassificationProbe.active())objectClassificationProbe.noteUnmap(self,res,sub);
 }
 
 // The shared tail of all four draw thunks: run the wrapped fix's begin,
 // the real draw, the matching end. One function so the fifth verdict cannot
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
 // was pasted four times and this is the shape that stops the pattern.
+// Controlled performance baseline: retain the coarse application GPU timer,
+// but compile the experimental per-original-draw diagnostic out of the hot
+// path. This is deliberately private to this build, not a user-facing option.
+constexpr bool kControlledBaselineOriginalDrawDiagnostics = false;
+
+uint64_t originalDrawDiagnosticShaderHash(BindSlot slot) {
+    if constexpr (kControlledBaselineOriginalDrawDiagnostics) return bindingShaderHash(slot);
+    return 0;
+}
+
 struct OriginalDrawMetadata {
     OriginalDrawKind kind = OriginalDrawKind::Draw;
     uint32_t count = kOriginalDrawProbeUnknown;
@@ -3167,19 +3189,23 @@ struct OriginalDrawMetadata {
     uint64_t psHash = 0;
     uint32_t verdict = 0;
     bool modified = false;
+    uint32_t startIndex = 0;
+    int32_t baseVertex = 0;
+    uint32_t startInstance = 0;
 };
 thread_local bool t_colourOriginal = false;
 thread_local const OriginalDrawMetadata* t_originalDrawMetadata = nullptr;
 
 struct OriginalDrawScope {
     bool previousColour = t_colourOriginal;
-    const OriginalDrawMetadata* previousMetadata = t_originalDrawMetadata;
+    const OriginalDrawMetadata* previousMetadata =
+        kControlledBaselineOriginalDrawDiagnostics ? t_originalDrawMetadata : nullptr;
     explicit OriginalDrawScope(const OriginalDrawMetadata* metadata) {
         t_colourOriginal = true;
-        t_originalDrawMetadata = metadata;
+        if constexpr (kControlledBaselineOriginalDrawDiagnostics) t_originalDrawMetadata = metadata;
     }
     ~OriginalDrawScope() {
-        t_originalDrawMetadata = previousMetadata;
+        if constexpr (kControlledBaselineOriginalDrawDiagnostics) t_originalDrawMetadata = previousMetadata;
         t_colourOriginal = previousColour;
     }
 };
@@ -3196,8 +3222,9 @@ OriginalDrawKind originalDrawKind(char kind) {
 
 OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
                                                 bool uiSeparated) {
-    if (!t_colourOriginal || !t_originalDrawMetadata || self != g_state->ownerCtx ||
-        !originalDrawProbeSelect(self)) {
+    if constexpr (!kControlledBaselineOriginalDrawDiagnostics) return {};
+    else {
+    if (!t_colourOriginal || !t_originalDrawMetadata || self != g_state->ownerCtx) {
         return {};
     }
     const OriginalDrawMetadata& metadata = *t_originalDrawMetadata;
@@ -3210,6 +3237,12 @@ OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
     input.verdict = metadata.verdict;
     input.modified = uiSeparated || metadata.modified ||
         metadata.verdict != static_cast<uint32_t>(DrawVerdict::kNone);
+    input.startIndex = metadata.startIndex;
+    input.baseVertex = metadata.baseVertex;
+    input.startInstance = metadata.startInstance;
+    // Family selection uses only metadata already in hand. Resource inspection
+    // and payload capture remain bounded to three selected native draws/frame.
+    if (!originalDrawProbeSelect(self, &input)) return {};
 
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
@@ -3247,6 +3280,7 @@ OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
     input.gameDisjointActive = guard.disjoint;
     input.gameQueryOverflow = guard.overflow;
     return originalDrawProbeBegin(self, input);
+    }
 }
 
 void originalDrawNativeEnd(ID3D11DeviceContext* self,
@@ -3259,8 +3293,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
     OriginalDrawMetadata originalMetadata{
         originalDrawKind(kind), count, instances,
-        bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps),
+        originalDrawDiagnosticShaderHash(BindSlot::Vs), originalDrawDiagnosticShaderHash(BindSlot::Ps),
         static_cast<uint32_t>(v), false};
+    originalMetadata.startIndex = args.start;
+    originalMetadata.baseVertex = args.base;
+    originalMetadata.startInstance = args.startInstance;
     const auto pureDraw=[&] {
         switch(kind) {
         case 'D':g_state->realDraw(self,count,UINT(args.base));break;
@@ -3270,8 +3307,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         }
     };
     if(self==g_state->ownerCtx){
-        uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,static_cast<uint32_t>(v),
-            bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
+        uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,
+                                 static_cast<uint32_t>(v));
         uiDeferredBeforeDraw(self,kind,count,instances,args.start,args.base,args.startInstance,static_cast<uint32_t>(v));
     }
     struct EffectCaptureScope {
@@ -3540,6 +3577,10 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                        foreignContext(self));
     }
     g_state->realCopyResource(self, dst, src);
+    if(objectClassificationProbe.active()) {
+        if(foreignContext(self))objectClassificationProbe.foreignWrite();
+        else objectClassificationProbe.noteWrite(self,dst,4,src);
+    }
 }
 
 // The depth clear, record-only: the planet's terrain colour landing at all
@@ -3620,8 +3661,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     }
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawIndexedInstancedIndirect, kOriginalDrawProbeUnknown,
-        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
-        bindingShaderHash(BindSlot::Ps), 0};
+        kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
+        originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
     const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
@@ -3644,8 +3685,8 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     }
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawInstancedIndirect, kOriginalDrawProbeUnknown,
-        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
-        bindingShaderHash(BindSlot::Ps), 0};
+        kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
+        originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
     const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawInstancedIndirect(self, args, off);
@@ -3661,6 +3702,10 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }
     g_state->realCopyStructureCount(self, dst, off, src);
+    if(objectClassificationProbe.active()) {
+        if(foreignContext(self))objectClassificationProbe.foreignWrite();
+        else objectClassificationProbe.noteWrite(self,dst,6,nullptr,0,off,uint64_t(off)+4);
+    }
 }
 
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
@@ -3690,6 +3735,11 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     }
     g_state->realCopySubresourceRegion(self, dst, dstSub, dstX, dstY, dstZ, src, srcSub,
                                        box);
+    if(objectClassificationProbe.active()) {
+        if(foreignContext(self))objectClassificationProbe.foreignWrite();
+        else objectClassificationProbe.noteWrite(self,dst,5,src,dstSub,dstX,
+            box && box->right>=box->left?uint64_t(dstX)+box->right-box->left:~uint64_t(0));
+    }
 }
 
 // The CPU-upload path, recorded as kind 'U' with the destination box and no
@@ -3730,6 +3780,10 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     }
     g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
                                    depthPitch);
+    if(objectClassificationProbe.active()) {
+        if(foreignContext(self))objectClassificationProbe.foreignWrite();
+        else objectClassificationProbe.noteWrite(self,dst,3,nullptr,dstSub,box?box->left:0,box?box->right:~uint64_t(0));
+    }
 }
 
 // The MSAA resolve, recorded as kind 'V'. The one call that turns a
@@ -3865,8 +3919,8 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawAuto, kOriginalDrawProbeUnknown,
-        kOriginalDrawProbeUnknown, bindingShaderHash(BindSlot::Vs),
-        bindingShaderHash(BindSlot::Ps), 0};
+        kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
+        originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
     const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
     g_state->realDrawAuto(self);
@@ -3968,10 +4022,14 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
+        const bool staticOwner=t_colourOriginal && !separate && self==g_state->ownerCtx &&
+            staticSurfaceBegin(self,perInstance,instances,startIndex,baseVertex,
+                               startInstance,bindingShaderHash(BindSlot::Vs));
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate || staticOwner);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         originalDrawNativeEnd(self, sample);
+        if(staticOwner)staticSurfaceEnd(self);
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs)))
@@ -3980,11 +4038,30 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         if (clock.on) clock.realCall(r0);
         if(separate)uiSeparationEnd(self);
         if(self==g_state->ownerCtx) {
-            if(g_state->rtv0Eye && perInstance && instances &&
-               glitchFrameWantsSceneDraw(bindingShaderHash(BindSlot::Vs))){
+            const uint64_t sceneVs = bindingShaderHash(BindSlot::Vs);
+            const bool recognisedScene = g_state->rtv0Eye && perInstance && instances &&
+                                         glitchFrameIsSceneDraw(sceneVs);
+            const bool glitchWantsScene = recognisedScene && glitchFrameWantsSceneDraw(sceneVs);
+            const bool temporalWantsAny = temporalPassWantsRigidDraw(0) ||
+                                          temporalPassWantsRigidDraw(1);
+            int temporalEye = -1;
+            if (recognisedScene && temporalWantsAny) {
+                int targetIndex = -1;
+                depthProbeCurrentSceneEyeOf(
+                    static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),
+                    &temporalEye, &targetIndex);
+            }
+            const bool temporalWantsScene = recognisedScene &&
+                temporalPassWantsRigidDraw(temporalEye);
+            // At most one temporal VS-b1 query per identified eye/frame. The
+            // old flash diagnostic shares it when both want this draw. A null
+            // binding is still recorded by the temporal provenance as a seen
+            // draw with no mapped write, rather than silently retried later.
+            if (glitchWantsScene || temporalWantsScene) {
                 ID3D11Buffer* scene=nullptr;self->VSGetConstantBuffers(1,1,&scene);
-                if(scene){
-                    const bool sampled=glitchFrameNoteSceneDraw(scene);scene->Release();
+                if (temporalWantsScene) temporalPassNoteRigidDraw(temporalEye, scene, sceneVs);
+                if(scene && glitchWantsScene){
+                    const bool sampled=glitchFrameNoteSceneDraw(scene);
                     if(sampled){
                         ID3D11ShaderResourceView* pool=nullptr;self->VSGetShaderResources(33,1,&pool);
                         if(pool){
@@ -4001,6 +4078,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                         }
                     }
                 }
+                if(scene)scene->Release();
             }
             screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
@@ -4512,7 +4590,8 @@ void vScreenRefreshConfig() {
     if (!cfg.reloadIfChanged()) return;
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
     gpuFrameConfigure(gpuTimingEnabled);
-    originalDrawProbeConfigure(gpuTimingEnabled);
+    originalDrawProbeConfigure(
+        gpuTimingEnabled && kControlledBaselineOriginalDrawDiagnostics, true);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
     // on the render thread -- is an EDVR event with a duration, for the
     // monitor's drop attribution.
@@ -4743,6 +4822,7 @@ void vScreenFrameBoundary() {
         screenMotionFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
         meshMotionFrameBoundary(g_state->ownerCtx);
+        staticSurfaceFrameBoundary(g_state->ownerCtx);
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         sharpenPassTick(g_state->ownerCtx);
@@ -5883,9 +5963,14 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     }
 
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
-    originalDrawProbeBind(device, ctx,
-        OriginalDrawProbeQueryOps{s.realBegin, s.realEnd, s.realGetData});
-    originalDrawProbeConfigure(gpuTimingEnabled);
+    if constexpr (kControlledBaselineOriginalDrawDiagnostics) {
+        originalDrawProbeBind(device, ctx,
+            OriginalDrawProbeQueryOps{s.realBegin, s.realEnd, s.realGetData});
+        originalDrawProbeConfigure(gpuTimingEnabled, true);
+    }
+    Log::get().note(
+        "Original draw diagnostic: controlled baseline OFF; coarse application GPU timing %s.",
+        gpuTimingEnabled ? "on" : "off");
 
     if (!executeHookInstalled || !graphicsBridgeRegisterOwner(device, ctx)) {
         Log::get().note("vScreen: private graphics bridge unavailable (owner already registered or identity check failed)");
@@ -6061,6 +6146,7 @@ void shutdownVScreenFixes() {
     nightVisionShutdown();
     celestialMotionShutdown();
     meshMotionShutdown();
+    staticSurfaceShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();
@@ -6095,10 +6181,5 @@ void shutdownVScreenFixes() {
 }
 
 }  // namespace edvr
-
-
-
-
-
 
 

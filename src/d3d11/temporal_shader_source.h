@@ -15,6 +15,9 @@ constexpr char kTemporalCsHlsl[] = R"HLSL(
 #ifndef EDVR_TEMPORAL_DIAGNOSTICS
 #define EDVR_TEMPORAL_DIAGNOSTICS 1
 #endif
+#ifndef EDVR_TEMPORAL_TRACE
+#define EDVR_TEMPORAL_TRACE 0
+#endif
 Texture2D<float4> S : register(t0);      // this frame, the game's own texture (or the region copied out of it)
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
 Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
@@ -38,11 +41,21 @@ struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 StructuredBuffer<HoloRecord> HR : register(t13);
 Texture2D<float2> MC : register(t15);
 StructuredBuffer<HoloRecord> MR : register(t16);
+Texture2D<uint4> ownerNow : register(t17);
+Texture2D<uint4> ownerPrev : register(t18);
+Texture2D<uint> KCNear : register(t19);   // kinematic static ownership, quarter-res (stage B,
+Texture2D<uint> KCFar  : register(t20);   // kinematic-motion-injection-2026-09-19.md): the
+                                          // asuint(zraw) [near,far] span of the proven-static
+                                          // records projecting to the texel; near 0 = unowned
 Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
+#if EDVR_TEMPORAL_TRACE
+RWTexture2D<float4> DT : register(u7);   // capture-only final path decision: physical motion xy, predicted previous depth z, integer flags w
+#else
 RWTexture2D<float2> ML : register(u7);   // the fovea crop's own copy of MV, plus lead.xy (the head lead): bound ONLY on the fovea prep's dispatch, and read only by NVIDIA's crop
+#endif
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -486,6 +499,47 @@ bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
     pp=(before.xy/before.z*float2(.5,-.5)+.5)*r.meta.yz-.5-region.xy+holoJitter.xy-offset;
     zp=before.z;return all(isfinite(pp));
 }
+// Kinematic static ownership (stage B, docs/kinematic-motion-injection-2026-09-19.md,
+// 2026-09-20 13:55 spec): the coverage pass's quarter-res [near,far] reversed-Z
+// span of the union of proven-static engine records projecting to this texel.
+// This is the pure OWNERSHIP query: the movers views paint it cyan, and the
+// compose veto (kinVeto below) consults it FIRST at every object-motion
+// candidate site when armed. probe.w bit 512 says the pair is bound this
+// frame; the bit-gate runs before any load so an unbound path is
+// byte-identical to before. uiCovered rejects: UI pixels never take an
+// object-motion override. Screen-covered pixels reject too: the scanner's
+// depth is a private encoding, incomparable with the span (the DT trace's
+// own comment says so). The depth gate is relative -- volumetric bounds are
+// looser than meshPixel's exact-depth 1e-6 -- and kKcMargin is sized by the
+// movers view's cyan mis-own diagnostic, never silently tuned.
+bool kinematicStatic(int2 q) {
+    if ((uint(probe.w + 0.5) & 512u) == 0u) return false;
+    // The coverage pair is eye-local; q arrives in source-texture coords, so
+    // the region origin comes off first (2026-09-20 review finding 5: a
+    // nonzero Submit region or a packed eye otherwise reads shifted or
+    // out-of-range coverage; out-of-range loads return 0, the reject side).
+    int2 kq = (q - region.xy) >> 2;   // the quarter-res coverage texel
+    uint nearBits = KCNear.Load(int3(kq, 0));
+    if (nearBits == 0u) return false;
+    if (uiCovered(q)) return false;
+    if ((uint(probe.w + 0.5) & 32u) != 0u) {
+        float4 s = Screen.Load(int3(q, 0));
+        if (s.w > 0) return false;
+    }
+    float zraw = zSceneAt(q);
+    if (zraw <= knobs.x) return false;   // no depth: the far plane owns no record
+    uint farBits = KCFar.Load(int3(kq, 0));
+    const float kKcMargin = 0.02;
+    float zn = asfloat(nearBits), zf = asfloat(farBits);
+    return zraw <= zn * (1.0 + kKcMargin) && zraw >= zf * (1.0 - kKcMargin);
+}
+// The compose veto: ownership AND probe.w bit 1024 (fix.engine_motion_veto).
+// The bit defaults off -- the 2026-09-20 review keeps the veto dark until
+// current-frame validity, camera inputs and real pixel ownership are
+// flight-established; ownership alone only paints the movers-view cyan.
+bool kinVeto(int2 q) {
+    return ((uint(probe.w + 0.5) & 1024u) != 0u) && kinematicStatic(q);
+}
 // The mv pass's tile of this frame's scene depth: the group's 8x8 with a
 // two-texel apron, filled at the top of mv() and read by the pixel's own
 // dilation and by backgroundHistoryHidden's footprint below.
@@ -675,7 +729,10 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     }
     hy = 0.0;
     float2 meshP;float meshZ;
-    if(allowWorld && meshPixel(p,jit.xy,meshP,meshZ)) {
+    // Kinematic ownership FIRST (stage B), when the veto is armed: an owned
+    // pixel takes the camera/depth path below and never the draw's own
+    // transform. Unarmed (the default) the query is not even run here.
+    if(allowWorld && !kinVeto(region.xy+int2(round(p+jit.xy))) && meshPixel(p,jit.xy,meshP,meshZ)) {
         if(any(meshP<0) || any(meshP>float2(size)-1))return false;
         mvOut=meshP-p;zPred=meshZ;world=0;
         hy=rgbToYcocg(catmullRom((meshP+.5)/float2(size),float2(size)).rgb);
@@ -862,6 +919,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         d.z = -1.0;
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = mvDepthTile[(local.y + 2) * 12 + local.x + 2];
+        const float sceneZraw = zraw;
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
         float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
@@ -908,6 +966,19 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float2 motion = 0.0;
         float mover = 0.0;
         bool trackedForeground = false;
+        uint decisionPath = 0u;
+        bool projectionValid = false;
+        bool staticConfirmed = false;
+        bool worldAvailable = tvCam.w != 0.0 && split.x > 0.0 && knobs.y != 0.0;
+        // Kinematic ownership (stage B): with the veto armed (probe.w 1024,
+        // off by default) a proven-static engine record under this pixel
+        // vetoes every object-motion candidate below -- mesh, terrain, holo,
+        // screen and the rigid-owner promotion -- so the pixel keeps the
+        // camera/depth motion computed above. Unbound, unowned or unarmed
+        // leaves the path byte-identical; the movers view paints owned
+        // pixels cyan as the mis-own diagnostic (the ship gate reads it).
+        const bool kinOwned = kinematicStatic(region.xy + int2(round(p)));
+        const bool kinVetoed = kinOwned && ((uint(probe.w + 0.5) & 1024u) != 0u);
         if (dp.z < -1e-6) {
             float xt = dp.x / -dp.z;
             float yt = dp.y / -dp.z;
@@ -915,6 +986,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
             pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
             motion = pp - p;
+            decisionPath = count15 != 0 ? 2u : 1u;
+            projectionValid = true;
             // The body's path for the pixels the body's grid claims, the
             // interface's excepted.
             if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
@@ -928,6 +1001,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         motion = pp - p;
                         zPred = zpS;
                         count39 = 1;
+                        decisionPath = 3u;
                         taken = true;
                     }
                 }
@@ -941,6 +1015,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                             motion = pp - p;
                             zPred = zpB;
                             count46 = 1;
+                            decisionPath = 5u;
                         }
                     } else if (inb >= 64 && inb < 76) {
                         if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
@@ -948,23 +1023,67 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                             motion = pp - p;
                             zPred = zpB;
                             count47 = 1;
+                            decisionPath = 6u;
                         }
                     } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
                         pp = ppB;
                         motion = pp - p;
                         zPred = zpB;
                         count29 = 1;
+                        decisionPath = 4u;
+                    }
+                }
+            }
+            // A rigid surface owner match can promote only a coarse body
+            // proposal. It uses the exact centre depth and the raw previous
+            // coordinate; no neighbourhood erosion or dilated depth is
+            // allowed to manufacture a match.
+            if (!kinVetoed && haveHistory != 0 && (uint(probe.w + 0.5) & 256u) != 0u &&
+                decisionPath >= 3u && decisionPath <= 6u &&
+                worldAvailable && count15 != 0u &&
+                !uiCovered(region.xy + int2(p)) && isfinite(sceneZraw) &&
+                sceneZraw > knobs.x) {
+                float zactual = knobs.z / (sceneZraw - knobs.x);
+                if (isfinite(zactual) && zactual > split.x) {
+                    uint4 nowOwner = ownerNow.Load(int3(region.xy + int2(id.xy), 0));
+                    if ((nowOwner.x | nowOwner.y | nowOwner.z) != 0u &&
+                        asfloat(nowOwner.w) == sceneZraw) {
+                        float3 worldPP = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d),
+                                                dot(c2R2.xyz, d)) * zactual + tvCam.xyz;
+                        if (worldPP.z < -1e-6) {
+                            float xt = worldPP.x / -worldPP.z;
+                            float yt = worldPP.y / -worldPP.z;
+                            float2 rawPrev;
+                            rawPrev.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+                            rawPrev.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+                            int2 prevQ = int2(round(rawPrev - holoJitter.xy));
+                            if (all(prevQ >= 0) && all(prevQ < size)) {
+                                uint4 prevOwner = ownerPrev.Load(int3(prevQ, 0));
+                                if ((prevOwner.x | prevOwner.y | prevOwner.z) != 0u &&
+                                    (prevOwner.x == nowOwner.x && prevOwner.y == nowOwner.y &&
+                                     prevOwner.z == nowOwner.z) && isfinite(asfloat(prevOwner.w)) &&
+                                    asfloat(prevOwner.w) > knobs.x) {
+                                    pp = rawPrev;
+                                    motion = rawPrev - p;
+                                    zPred = -worldPP.z;
+                                    decisionPath = 2u;
+                                    staticConfirmed = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
             float2 terrainP; float terrainZ;
-            if (terrainPixel(p,d,terrainP,terrainZ)) {
+            if (!kinVetoed && terrainPixel(p,d,terrainP,terrainZ)) {
                 pp=terrainP; motion=pp-p; zPred=terrainZ;
+                decisionPath=7u;
             }
             float2 holoP; float holoZ;
-            if(holoPixel(p,0,holoP,holoZ)) {
+            if(!kinVetoed && holoPixel(p,0,holoP,holoZ)) {
                 pp=holoP; motion=pp-p; zPred=holoZ;
                 trackedForeground=true;
+                decisionPath=8u;
             }
             // The ships' claim, counted (Stats 40-45, the registration
             // line): a pixel in a ship's footprint the ship did not claim,
@@ -1000,16 +1119,18 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
         }
         float2 meshP;float meshZ;
-        if(meshPixel(p,0,meshP,meshZ)) {
+        if(!kinVetoed && meshPixel(p,0,meshP,meshZ)) {
             motion=meshP-p;zPred=meshZ;
             trackedForeground=true;
+            decisionPath=9u;projectionValid=true;
             mover=movers.x!=0 && all(meshP>=0) && all(meshP<float2(size)) ? moverAt(meshP,meshZ,depthN>=6):0;
         }
-        if((uint(probe.w+.5)&32u)!=0u) {
+        if(!kinVetoed && (uint(probe.w+.5)&32u)!=0u) {
             float4 s=Screen.Load(int3(region.xy+int2(p),0));
             if(s.w>0) {
                 motion=s.w!=2?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;
                 trackedForeground=true;
+                decisionPath=10u;projectionValid=s.w!=2;
                 // The eye-space prediction above is not source-scene depth.
                 // Do not apply its mover rejection to screen pixels.
                 mover=0;
@@ -1035,7 +1156,27 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // reduction, its DLAA and the UI resolve all read MV whole and must
         // see the unshifted vectors. Unbound (and lead zero) on every other
         // dispatch, where the store is dropped.
+#if EDVR_TEMPORAL_TRACE
+        // depthValid is a usable non-screen sample on the final route. Screen
+        // z uses its source projection's private encoding, so bit 256 stays
+        // clear for both valid and invalid screen paths rather than claiming
+        // it is comparable with scene depth. Screen-invalid has no physical
+        // correspondence, so its diagnostic xyz are zero even though MV still
+        // receives the production size*2 rejection sentinel.
+        bool depthValid=decisionPath!=10u && knobs.y!=0.0 && sceneZraw>knobs.x;
+        float2 decisionMotion=decisionPath==10u && !projectionValid?0.0:motion;
+        float decisionDepth=decisionPath==10u?0.0:zPred;
+        uint decisionFlags=decisionPath | (hidden?16u:0u) |
+            (decisionPath==10u && !projectionValid?32u:0u) | (uiHere?64u:0u) |
+            (worldAvailable?128u:0u) | (depthValid?256u:0u) |
+            (trackedForeground?512u:0u) | (projectionValid?1024u:0u) |
+            (staticConfirmed?2048u:0u);
+        DT[id.xy]=float4(decisionMotion,decisionDepth,float(decisionFlags));
+#else
         ML[id.xy] = written + lead.xy;
+#endif
+)HLSL"
+R"HLSL(
         MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
@@ -1124,7 +1265,11 @@ R"HLSL(
             // screenshot in the slot shows the rim's edges and nothing else.
             // Painted the way main's views are, into the output's own size.
             float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
-            paintDebug(id.xy, size, mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim);
+            float3 o4 = mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim;
+            // Stage B, LAST: a kinematic-owned pixel paints cyan, so a
+            // mis-owned mover shows the tint -- the ship gate reads this view.
+            if (kinOwned) o4 = float3(0.0, 0.9, 0.9);
+            paintDebug(id.xy, size, o4);
         } else if (split.y == 5.0) {
             // The objects view, by reason (2026-09-09, for reading an eye
             // dump off the desk): white where the body's path was taken;
@@ -1482,6 +1627,9 @@ R"HLSL(
         } else if (split.y == 4.0) {
             // The mover view: the mask white over the frame dimmed.
             o = mover != 0.0 ? float3(1.0, 1.0, 1.0) : cur.rgb * 0.25;
+            // Stage B, LAST: kinematic-owned pixels paint cyan, the mis-own
+            // diagnostic the ship gate reads (the mv entry's view likewise).
+            if (kinematicStatic(region.xy + ci)) o = float3(0.0, 0.9, 0.9);
         } else if (split.y == 5.0) {
             // The objects view: the pixels that took the body's path.
             o = worldTaken == 2 ? float3(1.0, 1.0, 1.0)
@@ -1538,6 +1686,80 @@ R"HLSL(
     GroupMemoryBarrierWithGroupSync();
     if (gi < 48 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
 #endif
+}
+)HLSL"
+// (adjacent literals: MSVC caps one at 16 KB)
+R"HLSL(
+// ---- Stage B: kinematic ownership coverage (2026-09-20 13:55 spec) --------
+// One thread per uploaded record: project the record's world bounding sphere
+// to a conservative quarter-res screen rect and give it the sphere's
+// [near,far] reversed-Z span -- InterlockedMax the near lane, InterlockedMin
+// the far. Two R32_UINT textures rather than the spec's one R32G32_UINT: SM5
+// atomics take a single-component 32-bit UAV only. The stored bits are
+// asuint(zraw): monotone for the positive floats a reversed-Z depth is, so
+// the min/max compare exact floats at full precision and the spec's 24-bit
+// quantization is unneeded. Near's empty sentinel is 0 (InterlockedMax never
+// lowers it); far clears to 0xFFFFFFFF. These bindings overlap the compose's
+// registers per entry point: each entry references only its own (the u7
+// DT/ML precedent).
+struct KinSphere {
+    float3 centre;     // world
+    float  radius;     // world
+    uint   kind;       // 0 = static-zero (phase 1)
+    uint3  reserved;
+    float4 prevMap0;   // the phase-2 seam, zero in phase 1
+    float4 prevMap1;
+    float4 prevMap2;
+};
+cbuffer KCParams : register(b0) {
+    float4 kcTan;      // this frame's l r t b, jitter excluded -- the compose's own frame
+    float4 kcWR0;      // this frame's camera rows, view -> world, w the eye's position
+    float4 kcWR1;
+    float4 kcWR2;
+    float4 kcKnobs;    // x, z the depth encoding (zraw = x + z / metres); y 1 = depth bound
+    int4   kcSize;     // xy the coverage pair's size (quarter-res), z the record count
+};
+StructuredBuffer<KinSphere> KS : register(t0);
+RWTexture2D<uint> KCNearU : register(u0);
+RWTexture2D<uint> KCFarU  : register(u1);
+[numthreads(64, 1, 1)]
+void kinCover(uint3 id : SV_DispatchThreadID) {
+    if ((int)id.x >= kcSize.z || kcKnobs.y == 0.0) return;
+    KinSphere s = KS[id.x];
+    if (s.radius <= 0.0) return;
+    // World -> view: rel off the eye's position, then the COLUMNS of R (the
+    // inverse of the wR rows is the transpose -- the shipCentreZ precedent at
+    // the box centre). The game is +Z forward: zv > 0 in front.
+    float3 rel = s.centre - float3(kcWR0.w, kcWR1.w, kcWR2.w);
+    float xv = dot(float3(kcWR0.x, kcWR1.x, kcWR2.x), rel);
+    float yv = dot(float3(kcWR0.y, kcWR1.y, kcWR2.y), rel);
+    float zv = dot(float3(kcWR0.z, kcWR1.z, kcWR2.z), rel);
+    if (zv + s.radius <= 0.05) return;   // wholly behind the eye
+    float zNearM = max(zv - s.radius, 0.05);
+    uint nearBits = asuint(kcKnobs.x + kcKnobs.z / zNearM);
+    uint farBits  = asuint(kcKnobs.x + kcKnobs.z / (zv + s.radius));
+    int2 lo, hi;
+    if (zv - s.radius <= 0.05) {
+        // The sphere straddles the eye: its rect is unbounded. Paint all of
+        // it; the per-pixel depth gate in kinematicStatic still decides.
+        lo = int2(0, 0);
+        hi = kcSize.xy - 1;
+    } else {
+        float inv = 1.0 / zv;
+        // The same frustum the compose projects through (tanNow's l r t b),
+        // in coverage texels, rounded outward.
+        float cx = (xv * inv - kcTan.x) / (kcTan.y - kcTan.x) * (float)kcSize.x - 0.5;
+        float cy = (kcTan.w - yv * inv) / (kcTan.w - kcTan.z) * (float)kcSize.y - 0.5;
+        float ex = (s.radius * inv) / (kcTan.y - kcTan.x) * (float)kcSize.x;
+        float ey = (s.radius * inv) / (kcTan.w - kcTan.z) * (float)kcSize.y;
+        lo = clamp(int2((int)floor(cx - ex), (int)floor(cy - ey)), int2(0, 0), kcSize.xy - 1);
+        hi = clamp(int2((int)ceil(cx + ex), (int)ceil(cy + ey)), int2(0, 0), kcSize.xy - 1);
+    }
+    for (int y = lo.y; y <= hi.y; ++y)
+        for (int x = lo.x; x <= hi.x; ++x) {
+            InterlockedMax(KCNearU[int2(x, y)], nearBits);
+            InterlockedMin(KCFarU[int2(x, y)], farBits);
+        }
 }
 )HLSL";
 

@@ -19,6 +19,14 @@ void meshMotionResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~ui
 // omit only for callers that do not have that cross-file frame identity.
 void meshMotionStageDump(ID3D11DeviceContext*,ID3D11Texture2D*,unsigned sceneFrame=~0u);
 void meshMotionWriteDump(ID3D11DeviceContext*,const wchar_t* directory,const wchar_t* stamp);
+// Explicit eye-run classification evidence: nominate accepted source buffers,
+// then retain one later complete eye with its matching source generations.
+void meshMotionArmClassification();
+// The raw mesh-frame counter (mesh_motion_detail::frames). Resets to 0 on
+// every config re-poll via meshMotionShutdown, so absolute values are only
+// meaningful between configure events.
+unsigned meshMotionFrameCount() noexcept;
+void meshMotionStageClassification(ID3D11DeviceContext*,ID3D11Texture2D* scene,unsigned sceneFrame,ID3D11Texture2D* colour);
 
 // Explicit one-run A/B/A diagnostic. Idle rendering uses normal packed capture
 // for oversized instance streams. The menu action arms/cancels;

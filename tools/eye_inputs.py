@@ -43,7 +43,7 @@ def _load(path):
     if meta['version'] != 1 or len(data) != 44 + meta['row_bytes'] * meta['height']:
         raise ValueError('Unsupported version or incomplete capture')
     fmt, w, h = meta['format'], meta['width'], meta['height']
-    pixel_bytes = {10: 8, 16: 8, 27: 4, 28: 4, 29: 4, 34: 4, 39: 4, 40: 4, 41: 4,
+    pixel_bytes = {2: 16, 10: 8, 16: 8, 27: 4, 28: 4, 29: 4, 34: 4, 39: 4, 40: 4, 41: 4,
                    42: 4, 19: 8, 20: 8, 44: 4, 45: 4, 53: 2, 55: 2, 61: 1}
     if not w or not h or fmt not in pixel_bytes or meta['row_bytes'] != w * pixel_bytes[fmt]:
         raise ValueError('Unsupported format or invalid packed row extent')
@@ -54,7 +54,9 @@ def read(path):
     import numpy as np
     meta, data = _load(path)
     fmt, w, h = meta['format'], meta['width'], meta['height']
-    if fmt == 10:  # ScreenMotion: raster motion XY, source Z, validity (1/2/3).
+    if fmt == 2:  # Per-frame decision capture: physical motion XY, prior depth Z, flags W.
+        image = np.frombuffer(data, '<f4', offset=44).reshape(h, w, 4)
+    elif fmt == 10:  # ScreenMotion: raster motion XY, source Z, validity (1/2/3).
         image = np.frombuffer(data, '<f2', offset=44).reshape(h, w, 4).astype('float32')
     elif fmt == 16:  # R32G32_FLOAT: hologram record index and exact raster depth
         image = np.frombuffer(data, '<f4', offset=44).reshape(h, w, 2)
@@ -100,6 +102,17 @@ def self_test():
             _, image = read(path)
             expected = np.array(struct.unpack('<16e', pixels), dtype='float32').reshape(2, 2, 4)
             np.testing.assert_array_equal(image, expected)
+        decisions = struct.pack('<8f', 3, 4, 12, 18, 0, 0, 0, 42)
+        path.write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, 2, 1, 2, 32, 19, 0, 0, 0) + decisions)
+        meta, data = _load(path)
+        assert meta['format'] == 2 and meta['frame'] == 19 and data[44:] == decisions
+        try:
+            import numpy as np
+        except ImportError:
+            pass
+        else:
+            _, image = read(path)
+            np.testing.assert_array_equal(image, np.array(struct.unpack('<8f', decisions), dtype='float32').reshape(1, 2, 4))
         for fmt in (27, 28, 29):
             rgba = bytes((1, 17, 127, 255, 0, 2, 254, 128))
             colour = b'EDVRTEX1' + struct.pack('<9I', 1, 2, 1, fmt, 8, 17, 0, 0, 0) + rgba

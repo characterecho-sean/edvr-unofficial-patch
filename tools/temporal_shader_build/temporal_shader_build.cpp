@@ -198,16 +198,19 @@ static bool writeAtomic(const fs::path& target, const std::string& text) {
 static int generate(const Options& o) {
     // The actual command path short-circuits before compiler or file access.
     if (o.dry) {
-        std::puts("dry-run: compile mv and main (fast/diagnostic); embed bytecode; no files written");
+        std::puts("dry-run: compile mv and main (fast/diagnostic) plus capture-only mv trace; embed bytecode; no files written");
         return 0;
     }
     static const D3D_SHADER_MACRO fast[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {nullptr, nullptr}};
     static const D3D_SHADER_MACRO diagnostic[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO trace[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_TEMPORAL_TRACE", "1"}, {nullptr, nullptr}};
     std::vector<Variant> variants = {
         {"kTemporalMvFastBytecode", "temporal_mv_fast_cs", "mv", fast, {}},
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
+        {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
         {"kTemporalAaBytecode", "temporal_aa_cs", "main", diagnostic, {}},
-        {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}}
+        {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}},
+        {"kTemporalKinBytecode", "temporal_kin_cs", "kinCover", fast, {}}
     };
     const std::string key = sourceKey(edvr::kTemporalCsHlsl, variants, compilerPath());
     if (outputCurrent(o.output, key)) {

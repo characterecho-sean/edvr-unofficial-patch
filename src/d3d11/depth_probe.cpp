@@ -103,6 +103,26 @@ bool     g_stagingAtBoundary = false;
 uint32_t g_frameNo = 0;
 constexpr uint32_t kReleaseAfterFrames = 120;
 
+struct ScenePickCache {
+    uint32_t w = 0, h = 0;
+    bool result = false;
+    bool valid = false;
+};
+// There is deliberately one entry, not one per size: refreshing another size
+// may replace the one global hysteresis pair. Returning to the earlier size
+// must scan again and restore that pair rather than replaying a stale answer.
+ScenePickCache g_scenePickCache;
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+uint32_t g_scenePickScans = 0;
+uint32_t g_scenePickRefreshCalls = 0;
+uint32_t g_scenePickOrderCalls = 0;
+uint32_t g_scenePickFormatVisits = 0;
+#endif
+
+void invalidateScenePickCache() {
+    g_scenePickCache.valid = false;
+}
+
 // The GPU side: the shader, its parameter buffer, the 1 KB result, TWO
 // staging twins (one per read path), and an owned copy of the target.
 ID3D11ComputeShader*       g_cs = nullptr;
@@ -383,6 +403,7 @@ void depthProbeConfigure(Config& cfg) {
     // keeps for the temporal pass (depthProbeClearValueFor): the near value
     // it writes must come from a recorded clear, never a guess, so the probe
     // must be watching even on a rig with the temporal pass off.
+    invalidateScenePickCache();
     g_wanted = (_stricmp(mode.c_str(), "off") != 0 && !mode.empty()) ||
                (_stricmp(eyeMask.c_str(), "off") != 0 && !eyeMask.empty());
 }
@@ -435,6 +456,7 @@ int discoverTarget(void* dsv) {
     }
     if (idx < 0) idx = g_targetCount++;
     g_targets[idx] = t;
+    invalidateScenePickCache();
     return idx;
 }
 
@@ -493,13 +515,25 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
 // depthProbeSceneDepth and depthProbeSceneEyeOf so the two can never
 // disagree about which target is which eye. Only meaningful once both
 // g_scenePick entries are valid; callers check that first.
-static void sceneOrderFirstSecond(int* outFirst, int* outSecond) {
+template <bool CountTestWork>
+static void sceneOrderFirstSecondImpl(int* outFirst, int* outSecond) {
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    if constexpr (CountTestWork) ++g_scenePickOrderCalls;
+#endif
     int first = g_scenePick[0], second = g_scenePick[1];
     if (g_targets[second].firstBindLastFrame < g_targets[first].firstBindLastFrame) {
         const int tmp = first; first = second; second = tmp;
     }
     *outFirst = first;
     *outSecond = second;
+}
+
+static void sceneOrderFirstSecond(int* outFirst, int* outSecond) {
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    sceneOrderFirstSecondImpl<true>(outFirst, outSecond);
+#else
+    sceneOrderFirstSecondImpl<false>(outFirst, outSecond);
+#endif
 }
 
 // The scene's targets for this size: the two BUSIEST of this size last
@@ -515,7 +549,17 @@ static void sceneOrderFirstSecond(int* outFirst, int* outSecond) {
 // where every other asker is off. True when a pick of this size is in
 // place afterwards; a stale pick is left alone when nothing of this size
 // was drawn last frame.
-static bool refreshScenePick(uint32_t w, uint32_t h) {
+template <bool CountTestWork>
+static bool refreshScenePickImpl(uint32_t w, uint32_t h) {
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    if constexpr (CountTestWork) ++g_scenePickRefreshCalls;
+#endif
+    if (g_scenePickCache.valid && g_scenePickCache.w == w && g_scenePickCache.h == h) {
+        return g_scenePickCache.result;
+    }
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    ++g_scenePickScans;
+#endif
     int best[2] = {-1, -1};
     for (int i = 0; i < g_targetCount; ++i) {
         const Target& t = g_targets[i];
@@ -528,7 +572,10 @@ static bool refreshScenePick(uint32_t w, uint32_t h) {
             best[1] = i;
         }
     }
-    if (best[0] < 0 || best[1] < 0) return false;
+    if (best[0] < 0 || best[1] < 0) {
+        g_scenePickCache = ScenePickCache{w, h, false, true};
+        return false;
+    }
     // Hysteresis: the pair in use stays while both are still of this size
     // and drawn into at least half as much as the busiest.
     bool keep = g_scenePick[0] >= 0 && g_scenePick[1] >= 0;
@@ -544,7 +591,33 @@ static bool refreshScenePick(uint32_t w, uint32_t h) {
         g_scenePick[0] = best[0];
         g_scenePick[1] = best[1];
     }
+    g_scenePickCache = ScenePickCache{w, h, true, true};
     return true;
+}
+
+
+static bool refreshScenePick(uint32_t w, uint32_t h) {
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    return refreshScenePickImpl<true>(w, h);
+#else
+    return refreshScenePickImpl<false>(w, h);
+#endif
+}
+
+template <bool CountTestWork>
+static bool sceneTextureHasFormat(const void* resource) {
+    for (int i = 0; i < g_targetCount; ++i) {
+        if (g_targets[i].tex == resource) {
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+            if constexpr (CountTestWork) g_scenePickFormatVisits += static_cast<uint32_t>(i + 1);
+#endif
+            return g_targets[i].dsvFmt != DXGI_FORMAT_UNKNOWN;
+        }
+    }
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    if constexpr (CountTestWork) g_scenePickFormatVisits += static_cast<uint32_t>(g_targetCount);
+#endif
+    return false;
 }
 
 bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
@@ -565,11 +638,16 @@ bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
     *dsvFormat = 0;
     if (!depthProbeSceneDepth(w, h, eye, tex) || !*tex) return false;
     for (int i = 0; i < g_targetCount; ++i) {
-        if (g_targets[i].tex == *tex) {
-            *dsvFormat = static_cast<uint32_t>(g_targets[i].dsvFmt);
-            return *dsvFormat != 0;
-        }
+        if (g_targets[i].tex != *tex) continue;
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+        g_scenePickFormatVisits += static_cast<uint32_t>(i + 1);
+#endif
+        *dsvFormat = static_cast<uint32_t>(g_targets[i].dsvFmt);
+        return *dsvFormat != 0;
     }
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    g_scenePickFormatVisits += static_cast<uint32_t>(g_targetCount);
+#endif
     return false;
 }
 
@@ -581,6 +659,35 @@ bool depthProbeIsSceneDepth(const void* resource) {
         if (g_targets[i].tex == resource) return true;
     }
     return false;
+}
+
+template <bool CountTestWork>
+static bool sceneTextureEyeImpl(uint32_t w, uint32_t h, const void* resource,
+                                int* outEye) {
+    if (!outEye) return false;
+    *outEye = -1;
+    // Preserve the old mesh path's current-pair membership guard ahead of the
+    // size-based refresh.
+    if (!depthProbeIsSceneDepth(resource)) return false;
+    if (!refreshScenePickImpl<CountTestWork>(w, h)) return false;
+    int first, second;
+    sceneOrderFirstSecondImpl<CountTestWork>(&first, &second);
+    int eye = -1;
+    if (g_targets[first].tex == resource) eye = 0;
+    else if (g_targets[second].tex == resource) eye = 1;
+    else return false;  // The refresh displaced the formerly selected texture.
+    if (!sceneTextureHasFormat<CountTestWork>(resource)) return false;
+    *outEye = eye;
+    return true;
+}
+
+bool depthProbeSceneTextureEye(uint32_t w, uint32_t h, const void* resource,
+                               int* outEye) {
+#ifdef EDVR_DEPTH_SCENE_PICK_TEST
+    return sceneTextureEyeImpl<true>(w, h, resource, outEye);
+#else
+    return sceneTextureEyeImpl<false>(w, h, resource, outEye);
+#endif
 }
 
 // For fix.eye_mask: which eye (if either) THIS EXACT depth-stencil view
@@ -617,6 +724,25 @@ bool depthProbeSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTarg
     int first, second;
     sceneOrderFirstSecond(&first, &second);
     if (outEye) *outEye = (idx == first) ? 0 : 1;
+    return true;
+}
+
+bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye,
+                                 int* outTargetIndex) {
+    if (outEye) *outEye = -1;
+    if (outTargetIndex) *outTargetIndex = -1;
+    if (!g_wanted || !dsv) return false;
+    const int firstPick = g_scenePick[0], secondPick = g_scenePick[1];
+    if (firstPick < 0 || firstPick >= g_targetCount ||
+        secondPick < 0 || secondPick >= g_targetCount) return false;
+    int idx = -1;
+    if (g_targets[firstPick].dsv == dsv) idx = firstPick;
+    else if (g_targets[secondPick].dsv == dsv) idx = secondPick;
+    if (idx < 0) return false;
+    if (outTargetIndex) *outTargetIndex = idx;
+    int first, second;
+    sceneOrderFirstSecond(&first, &second);
+    if (outEye) *outEye = idx == first ? 0 : 1;
     return true;
 }
 
@@ -796,6 +922,9 @@ bool depthProbeClearValueFor(ID3D11DepthStencilView* dsv, float* outClearValue, 
 
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_wanted) return;
+    // drawsLastFrame, firstBindLastFrame and live target identities all roll
+    // below. One invalidation covers count changes and any evicted slot.
+    invalidateScenePickCache();
     ++g_frameNo;
     if (g_eyeDrawThisFrame) ++g_eyeFrames;
     g_eyeDrawThisFrame = false;
@@ -1076,6 +1205,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void depthProbeShutdown() {
+    invalidateScenePickCache();
     if (g_targetCount > 0) {
         Log::get().note("depth probe: %d depth target(s) seen at the eye draws "
                         "this session.", g_targetCount);

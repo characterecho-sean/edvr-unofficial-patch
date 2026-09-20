@@ -115,6 +115,13 @@ bool depthProbeIsSceneDepth(const void* resource);
 bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
                                 ID3D11Texture2D** tex, uint32_t* dsvFormat);
 
+// For a caller that already has the scene-depth texture: validate that it
+// remains in the refreshed pair, that its first matching target-table entry
+// has a usable format, and return its first-bind eye. The cheap current-pair
+// identity check happens before the size-based refresh. False clears *outEye.
+bool depthProbeSceneTextureEye(uint32_t w, uint32_t h, const void* resource,
+                               int* outEye);
+
 // For fix.eye_mask: which eye (if either) THIS EXACT depth-stencil view
 // is, among the scene pair depthProbeSceneDepth picks, using the same
 // first-bind ordering (one shared helper, so the two can never disagree).
@@ -128,6 +135,12 @@ bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
 // every bound view is eye-sized. No order-based fallback for a same-sized
 // target that is still not one of the two picks.
 bool depthProbeSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTargetIndex);
+
+// Diagnostic-only identity lookup against the already settled scene pair.
+// This never scans, refreshes, or changes the pair; false means the view is
+// not one of the two current picks (including when no pair has formed yet).
+bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye,
+                                 int* outTargetIndex);
 
 // Whether target index (from depthProbeSceneEyeOf's outTargetIndex) shares
 // the scene pick's width/height -- a double-buffered twin the game

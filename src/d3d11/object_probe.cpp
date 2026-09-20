@@ -25,6 +25,8 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
+#include "object_classification_probe.h"
+#include "mesh_motion.h"
 #include "eye_tonemap_snapshot.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
@@ -2964,6 +2966,61 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     Log::get().note("object probe: solar snapshots: %u draws, %u with draw-time b0/b1, %u with bounded geometry/layout; VS/PS retained for surface, corona and arcs. Constants throughout run; geometry first three watched frames. No solar rendering changes.",solarDraws,solarConstants,solarGeometry);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\drawstate_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
     const bool eyeMeshOk=g_eyeMeshSnapshot.write(ctx,path);
+    // Always emit a report, including a run with no nominated sources or no
+    // matching temporal stage. Silence must not mean successful association.
+    objectClassificationProbe.finish();
+    const bool classificationOk=objectClassificationProbe.write(ctx,dir.c_str(),g_ledgerStamp);
+    const auto classification=objectClassificationProbe.summary();
+    Log::get().note("object classification: eye run %ls provenance report %s (classification_%ls.json/.bin); sealed %u, mesh/scene frame %u/%u, %u draws, %u resources, %u writes, %u snapshots, %u stacks; unobserved %u, unmatched %u, write/stack overflow %u/%u, foreign writes %llu. Missing data and limits are explicit in the report; no static filtering enabled.",
+                    g_ledgerStamp,classificationOk?"written":"WRITE FAILED",g_ledgerStamp,classification.sealed?1u:0u,
+                    classification.selectedFrame,classification.sceneFrame,classification.draws,classification.resources,
+                    classification.writes,classification.snapshots,classification.stackSamples,classification.unobservedSources,
+                    classification.unmatchedWrites,classification.writeOverflow,classification.stackOverflow,
+                    static_cast<unsigned long long>(classification.foreignWrites));
+    Log::get().note("object classification: CPU source-owner probe maps/attempts %u/%u, complete/partial %u/%u, resource matches %u; identity/opcode/unwind rejects %u/%u/%u, read faults/metadata changes %u/%u, descriptor overflow %llu, CPU byte declines %llu. Zero maps is distinct from a successful empty capture.",
+                    classification.sourceOwnerMaps,classification.sourceOwnerAttempts,
+                    classification.sourceOwnerComplete,classification.sourceOwnerPartial,
+                    classification.sourceOwnerResourceMatches,classification.sourceOwnerIdentityRejects,
+                    classification.sourceOwnerOpcodeRejects,classification.sourceOwnerUnwindFailures,
+                    classification.sourceOwnerReadFaults,classification.sourceOwnerMetadataChanges,
+                    static_cast<unsigned long long>(classification.sourceOwnerDescriptorOverflow),
+                    static_cast<unsigned long long>(classification.sourceOwnerCpuByteDeclines));
+    Log::get().note("object classification: CPU record-writer probe hook %s; observed/stored/completed %llu/%u/%u, retained %llu bytes; record overflow/byte declines/read/context/unwind/completion failures %llu/%llu/%llu/%llu/%llu/%llu; declined management/unknown callers %llu/%llu. Exact 336-byte producer records and opaque caller context are evidence only; inactive/refused hooks and incomplete lookups remain explicit and unavailable for upload joins.",
+                    objectRecordWriterProbe.hookStatusText(),
+                    static_cast<unsigned long long>(classification.recordWriterObserved),
+                    classification.recordWriterStored,classification.recordWriterCompleted,
+                    static_cast<unsigned long long>(classification.recordWriterRetainedBytes),
+                    static_cast<unsigned long long>(classification.recordWriterOverflow),
+                    static_cast<unsigned long long>(classification.recordWriterByteBudgetDeclines),
+                    static_cast<unsigned long long>(classification.recordWriterReadFaults),
+                    static_cast<unsigned long long>(classification.recordWriterContextFailures),
+                    static_cast<unsigned long long>(classification.recordWriterUnwindFailures),
+                    static_cast<unsigned long long>(classification.recordWriterCompletionFailures),
+                    static_cast<unsigned long long>(classification.recordWriterDeclinedManagement),
+                    static_cast<unsigned long long>(classification.recordWriterDeclinedUnknown));
+    const auto ownership=objectRecordWriterProbe.ownershipSummary();
+    Log::get().note("object classification: KinematicRig ownership attempted/linked/stored/reused %llu/%llu/%llu/%llu; unsupported/ancestor missing/unwind failed %llu/%llu/%llu; tuple read/mismatch %llu/%llu, registry read/mismatch %llu/%llu, record range/read %llu/%llu. These are capture-local associations, not static-object classifications.",
+                    static_cast<unsigned long long>(ownership.attempted),
+                    static_cast<unsigned long long>(ownership.linked),
+                    static_cast<unsigned long long>(ownership.stored),
+                    static_cast<unsigned long long>(ownership.deduplicated),
+                    static_cast<unsigned long long>(ownership.unsupportedWriter),
+                    static_cast<unsigned long long>(ownership.ancestorMissing),
+                    static_cast<unsigned long long>(ownership.unwindFailed),
+                    static_cast<unsigned long long>(ownership.tupleReadFault),
+                    static_cast<unsigned long long>(ownership.tupleMismatch),
+                    static_cast<unsigned long long>(ownership.registryReadFault),
+                    static_cast<unsigned long long>(ownership.registryMismatch),
+                    static_cast<unsigned long long>(ownership.recordRangeMismatch),
+                    static_cast<unsigned long long>(ownership.recordReadFault));
+    Log::get().note("object classification: KinematicRig ownership opcode rejects/conflicts/cap/byte declines/read faults %llu/%llu/%llu/%llu/%llu; missing-ancestor traces stored/declined %llu/%llu. Zero linked records is unavailable ownership evidence, not a successful empty scene.",
+                    static_cast<unsigned long long>(ownership.opcodeMismatch),
+                    static_cast<unsigned long long>(ownership.cacheConflicts),
+                    static_cast<unsigned long long>(ownership.recordOverflow),
+                    static_cast<unsigned long long>(ownership.byteBudgetDeclines),
+                    static_cast<unsigned long long>(ownership.readFaults),
+                    static_cast<unsigned long long>(ownership.ancestorTraces),
+                    static_cast<unsigned long long>(ownership.ancestorTraceOverflow));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
                     "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
@@ -3008,6 +3065,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
     g_ledgerOn = false;
     ledgerRelease();
+    objectClassificationProbe.reset();
 }
 
 void poll(ID3D11DeviceContext* ctx) {
@@ -3405,6 +3463,8 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     g_ledgerSkipped = 0;
     ledgerRelease();
     g_ledgerOn = true;
+    meshMotionArmClassification();
+    Log::get().note("object classification: armed with eye run %ls; discover accepted mesh sources, then capture one complete later eye and its upload provenance. No rendering changes.",g_ledgerStamp);
     // The eye run is an explicit diagnostic capture. Pair its ledger with
     // the full draw census so offscreen effects and surviving billboard
     // particles have their PS/resources recorded without another keypress.
@@ -3421,6 +3481,7 @@ void objectProbeLedgerMark(int k) {
 }
 
 void objectProbeShutdown() {
+    objectClassificationProbe.reset();
     stopWorker();
     releaseRing();
     releasePool();

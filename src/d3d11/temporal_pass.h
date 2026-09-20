@@ -78,6 +78,11 @@ bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread);
 // draw was another camera's on half the frames in space (2026-09-04).
 void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t bytes);
 void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
+// Retrospective provenance only: latch the rows actually current at the first
+// supported rigid scene draw for each identified eye. The selection and motion
+// path do not read this state. `resource` is the VS b1 object used by the draw.
+bool temporalPassWantsRigidDraw(int eye);
+void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexShaderHash);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 

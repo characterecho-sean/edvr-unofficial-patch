@@ -180,7 +180,15 @@ REM 2026-09-16, F2; the STATUS_STACK_BUFFER_OVERRUN signature in the design
 REM doc's journal is that fail-fast). The flag covers every object in this
 REM compile, not just fsr3_engine.cpp; the cost is unwind tables around
 REM extern "C" calls.
-set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- ^
+REM Optional local symbols for CPU profiling. Keep release optimization: DEBUG
+REM otherwise changes the linker's REF/ICF defaults. PDBs stay in build/.
+set "EDVR_CPU_COMPILE="
+set "EDVR_CPU_LINK="
+if "%EDVR_PROFILE_SYMBOLS%"=="1" (
+    set "EDVR_CPU_COMPILE=/Z7"
+    set "EDVR_CPU_LINK=/DEBUG:FULL /OPT:REF /OPT:ICF"
+)
+set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- %EDVR_CPU_COMPILE% ^
  /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
  /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
  /I"%GEN%"
@@ -269,6 +277,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeFrame ^
     --extra-export edvrAcquireNativeFss ^
     --extra-export edvrAcquireNativeTiming ^
+    --extra-export edvrReadNativePresentTrace ^
     --extra-export edvrDoorGpuBegin ^
     --extra-export edvrDoorGpuEnd ^
     --extra-export "edvrNativeStartupRouting DATA" ^
@@ -433,6 +442,9 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
+    "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
+    "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
+    "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
     "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
@@ -466,6 +478,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\mesh_motion.cpp" ^
+    "src\d3d11\static_surface.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
@@ -502,7 +515,7 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the graphics version resou
 rc.exe /nologo /fo "%OBJ%\openxr_module\version.res" "%GEN%\version_runtime.rc"
 if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resource & exit /b 1 )
 
-link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
+link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
     "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
@@ -525,7 +538,7 @@ echo [edvr] === edvr_openxr_runtime.dll ===
 REM Native runtime DLL: the only supported release and installation backend.
 REM Its application fixture calls the game-imported ABI without linking the host.
 if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_CPU_COMPILE% ^
     /I"third_party\openxr\include" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
@@ -535,7 +548,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS ^
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     "src\common\frame_flag.cpp" ^
-    /link /INCREMENTAL:NO /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\edvr_openxr_runtime.pdb" /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
 
 REM Shared by the installer and installer_test rigs below.
@@ -1045,6 +1058,37 @@ if errorlevel 1 ( echo [edvr] ERROR: UI separation controller test build failed 
 "%OBJ%\uicolourtest\controller_test.exe" || exit /b 1
 exit /b 0
 
+:rig_static_surface_test
+echo [edvr] === static surface ownership regression ===
+if not exist "%OBJ%\staticsurfacetest" mkdir "%OBJ%\staticsurfacetest"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\staticsurfacetest\\" /Fe"%OBJ%\staticsurfacetest\static_surface_test.exe" ^
+    "tools\static_surface_test\static_surface_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: static surface shader test build failed & exit /b 1 )
+"%OBJ%\staticsurfacetest\static_surface_test.exe" || exit /b 1
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\staticsurfacetest\\" /Fe"%OBJ%\staticsurfacetest\controller_test.exe" ^
+    "tools\static_surface_test\controller_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: static surface controller test build failed & exit /b 1 )
+"%OBJ%\staticsurfacetest\controller_test.exe" || exit /b 1
+exit /b 0
+
+:rig_static_surface_consumer_test
+echo [edvr] === static surface temporal consumer regression ===
+if not exist "%OBJ%\staticsurfaceconsumer" mkdir "%OBJ%\staticsurfaceconsumer"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\staticsurfaceconsumer\\" /Fe"%OBJ%\staticsurfaceconsumer\static_surface_consumer_test.exe" ^
+    "tools\static_surface_consumer_test\static_surface_consumer_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: static surface consumer test build failed & exit /b 1 )
+"%OBJ%\staticsurfaceconsumer\static_surface_consumer_test.exe" || exit /b 1
+exit /b 0
+
 :rig_native_deferred_ui
 echo [edvr] === native deferred UI regression ===
 if not exist "%OBJ%\uideferredtest" mkdir "%OBJ%\uideferredtest"
@@ -1103,6 +1147,7 @@ if not exist "%OBJ%\meshmotion" mkdir "%OBJ%\meshmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\meshmotion\\" /Fe"%OBJ%\meshmotion\mesh_motion_test.exe" ^
     "tools\mesh_motion_test\mesh_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\kinematic_eval_probe.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\meshmotion\mesh_motion_test.exe" --self-test || exit /b 1
 python "tools\mesh_motion_probe.py" --self-test || exit /b 1
@@ -1155,6 +1200,74 @@ python "tools\terrain_motion.py" --self-test || exit /b 1
 python "tools\terrain_motion.py" "%OBJ%\terrainmotion\eye_fixture_Terrain.bin" --verify-fixture || exit /b 1
 exit /b 0
 
+:rig_depth_scene_pick_test
+echo [edvr] === scene depth selection cache regression ===
+if not exist "%OBJ%\depthscenepick" mkdir "%OBJ%\depthscenepick"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\depthscenepick\\" /Fe"%OBJ%\depthscenepick\depth_scene_pick_test.exe" ^
+    "tools\depth_scene_pick_test\depth_scene_pick_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF
+if errorlevel 1 ( echo [edvr] ERROR: scene depth selection test build failed & exit /b 1 )
+"%OBJ%\depthscenepick\depth_scene_pick_test.exe" --dry-run || exit /b 1
+"%OBJ%\depthscenepick\depth_scene_pick_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_scrim_metadata_test
+echo [edvr] === scrim metadata cache regression ===
+if not exist "%OBJ%\scrimmetadata" mkdir "%OBJ%\scrimmetadata"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_SCRIM_METADATA_TEST ^
+    /Fo"%OBJ%\scrimmetadata\\" /Fe"%OBJ%\scrimmetadata\scrim_metadata_test.exe" ^
+    "tools\scrim_metadata_test\scrim_metadata_test.cpp" ^
+    "src\d3d11\scrim_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: scrim metadata test build failed & exit /b 1 )
+"%OBJ%\scrimmetadata\scrim_metadata_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_resolve_bind_test
+echo [edvr] === resolve bind shadow regression ===
+if not exist "%OBJ%\resolvebind" mkdir "%OBJ%\resolvebind"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\resolvebind\\" /Fe"%OBJ%\resolvebind\resolve_bind_test.exe" ^
+    "tools\resolve_bind_test\resolve_bind_test.cpp" ^
+    "src\d3d11\resolve_bind_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: resolve bind test build failed & exit /b 1 )
+"%OBJ%\resolvebind\resolve_bind_test.exe" || exit /b 1
+exit /b 0
+
+:rig_object_classification
+echo [edvr] === object classification provenance regression ===
+if not exist "%OBJ%\classification" mkdir "%OBJ%\classification"
+ml64.exe /nologo /c /Fo"%OBJ%\classification\source_owner_unwind.obj" ^
+    "tools\object_classification_test\source_owner_unwind.asm"
+if errorlevel 1 ( echo [edvr] ERROR: source owner unwind fixture build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_RECORD_WRITER_TEST ^
+    /Fo"%OBJ%\classification\\" /Fe"%OBJ%\classification\object_classification_test.exe" ^
+    "tools\object_classification_test\object_classification_test.cpp" ^
+    "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
+    "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    "%OBJ%\classification\source_owner_unwind.obj" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: object classification test build failed & exit /b 1 )
+"%OBJ%\classification\object_classification_test.exe" "%OBJ%\classification" || exit /b 1
+python "tools\object_classification.py" --self-test || exit /b 1
+python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" --verify-fixture || exit /b 1
+python "tools\object_classification.py" "%OBJ%\classification\classification_source_fixture.json" --verify-source-fixture || exit /b 1
+exit /b 0
+
 :rig_eye_draw_snapshot
 echo [edvr] === eye draw snapshot regression ===
 if not exist "%OBJ%\drawsnapshot" mkdir "%OBJ%\drawsnapshot"
@@ -1169,6 +1282,7 @@ python "tools\eye_draw_snapshot.py" --self-test || exit /b 1
 python "tools\eye_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin" --verify-fixture || exit /b 1
 python "tools\gui_draw_snapshot.py" --self-test || exit /b 1
 python "tools\eye_inputs.py" --self-test || exit /b 1
+python "tools\eye_decisions.py" --self-test || exit /b 1
 python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
 exit /b 0
 
@@ -1723,6 +1837,12 @@ python tools\openxr_pe.py --native "%BUILD%\edvr_openxr_runtime.dll" || exit /b 
 python tools\openxr_pe.py --graphics "%BUILD%\edvr_openxr_graphics.dll" || exit /b 1
 python tools\elite_oculus.py --self-test || exit /b 1
 python tools\run_openxr_frontier.py --self-test || exit /b 1
+python tools\cpu_profile.py --self-test || exit /b 1
+REM Only profiling builds require the optional local .NET/TraceEvent analyzer.
+REM Its parser tests must pass before this build can be flown for CPU capture.
+if "%EDVR_PROFILE_SYMBOLS%"=="1" (
+    python tools\cpu_profile.py --build-analyzer || exit /b 1
+)
 python tools\fetch_ffx_dx11.py --self-test || exit /b 1
 
 REM Do the code, edvr.ini and the log messages agree about setting names?
@@ -1835,4 +1955,61 @@ python "tools\reflow_notes.py" --self-test || (
     echo [edvr] ERROR: the reflow tool failed its own test
     exit /b 1
 )
+exit /b 0
+
+:rig_kinematic_json_test
+echo [edvr] === kinematic_json_test.exe ===
+REM Build gate for the production KinematicEvalProbe JSON writer: three
+REM serialization failures reached the flight journal before this rig
+REM existed, and compilation cannot catch a dropped quote. The exe
+REM serializes a deterministic fixture through the real writeJson; the
+REM python gate strict-parses it and asserts every value round-trips.
+if not exist "%OBJ%\kinematicjson" mkdir "%OBJ%\kinematicjson"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\kinematicjson\\" /Fe"%BUILD%\kinematic_json_test.exe" ^
+    "tools\kinematic_json_test\kinematic_json_test.cpp" "src\d3d11\kinematic_eval_probe.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: kinematic JSON writer test build failed & exit /b 1 )
+"%BUILD%\kinematic_json_test.exe" --dry-run || exit /b 1
+"%BUILD%\kinematic_json_test.exe" --self-test || exit /b 1
+python "tools\kinematic_json_selftest.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_kinematic_motion_test
+echo [edvr] === kinematic_motion_test.exe ===
+REM Build gate for the production kinematic tracker: the tracker decides
+REM which records are proven-static, a wrong label becomes a wrong motion
+REM vector in stage B, and compilation cannot catch a state-machine bug.
+REM The rig feeds synthetic eval-hook streams through the real module and
+REM asserts the labels and counters (the 8 cases of the 2026-09-20 10:52
+REM spec in docs\kinematic-motion-injection-2026-09-19.md).
+if not exist "%OBJ%\kinematicmotion" mkdir "%OBJ%\kinematicmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\kinematicmotion\\" /Fe"%BUILD%\kinematic_motion_test.exe" ^
+    "tools\kinematic_motion_test\kinematic_motion_test.cpp" "src\d3d11\kinematic_motion.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: kinematic motion tracker test build failed & exit /b 1 )
+"%BUILD%\kinematic_motion_test.exe" --dry-run || exit /b 1
+"%BUILD%\kinematic_motion_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_kinematic_probe_test
+echo [edvr] === kinematic_probe_test.exe ===
+REM Build gate for the KinematicEvalProbe's observe/clock logic: the
+REM 2026-09-20 review's four probe-side findings (fabricated zero baselines
+REM from faulted reads, identity-crossing motion, the artificial seed frame,
+REM non-finite JSON floats) each reached flight analysis before this rig
+REM existed. Drives the production observe() on synthetic records, including
+REM a VirtualProtect page-fault fixture.
+if not exist "%OBJ%\kinematicprobe" mkdir "%OBJ%\kinematicprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\kinematicprobe\\" /Fe"%BUILD%\kinematic_probe_test.exe" ^
+    "tools\kinematic_probe_test\kinematic_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: kinematic probe test build failed & exit /b 1 )
+"%BUILD%\kinematic_probe_test.exe" --dry-run || exit /b 1
+"%BUILD%\kinematic_probe_test.exe" --self-test || exit /b 1
 exit /b 0

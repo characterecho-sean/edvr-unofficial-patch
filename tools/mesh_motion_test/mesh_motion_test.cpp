@@ -23,6 +23,13 @@ ComPtr<ID3DBlob> compile(const char* hlsl,const char* profile,const char* entry=
     hr(result); return code;
 }
 namespace edvr {
+// This rig exercises mesh rendering without installing game-code diagnostics.
+const char* attachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {return "identity_mismatch";}
+void detachObjectRecordWriterHook(ObjectRecordWriterProbe*) noexcept {}
+bool objectRecordWriterHookMatches(uintptr_t) noexcept {return false;}
+const char* attachKinematicEvalHooks(KinematicEvalProbe*) noexcept {return "identity_mismatch";}
+void detachKinematicEvalHooks(KinematicEvalProbe*) noexcept {}
+bool kinematicEvalHooksMatch(uintptr_t) noexcept {return false;}
 ID3D11Texture2D* testScene=nullptr;
 ID3D11DepthStencilView* testDepth=nullptr;
 int testEye=0;
@@ -37,9 +44,8 @@ bool menuOpen() { return testMenuOpen; }
 void menuNotify(const char* message) { ++testMenuNotices;testMenuNotice=message; }
 uint64_t perfMonitorBenchmarkDisturbanceEpoch() noexcept { return testBenchmarkDisturbanceEpoch; }
 void* bindingGet(BindSlot slot) { check(slot==BindSlot::Dsv0,"only scene depth shadow queried"); return testDepth; }
-bool depthProbeIsSceneDepth(const void* resource) { return resource==testScene; }
-bool depthProbeSceneDepthFormat(uint32_t,uint32_t,int eye,ID3D11Texture2D** tex,uint32_t* fmt) {
-    *tex=eye==testEye?testScene:nullptr; *fmt=DXGI_FORMAT_D32_FLOAT; return *tex!=nullptr;
+bool depthProbeSceneTextureEye(uint32_t,uint32_t,const void* resource,int* eye) {
+    if(!eye)return false;*eye=-1;if(!resource || resource!=testScene || testEye<0 || testEye>1)return false;*eye=testEye;return true;
 }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx,UINT n,ID3D11RenderTargetView* const* rt,ID3D11DepthStencilView* ds) { ctx->OMSetRenderTargets(n,rt,ds); }
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,const char* hlsl,size_t,const char* entry,const char*,const SwapMacro*,const char*) {
@@ -536,6 +542,39 @@ O o=(O)0;o.id=uint3(0,id.x,0);o.pos=pos.x*scene[270]+pos.y*scene[271]+pos.z*scen
     auto pixels=consume();auto at=(32*W+32)*4;check(pixels[at+3]==1 && std::fabs(pixels[at]+.39f)<1e-5 && std::fabs(pixels[at+1]+.125f)<1e-5,"DLSS consumes exact motion and removes jitter");
     check(pixels[(30*W+32)*4+3]==0 && pixels[(31*W+32)*4+3]==0,"foreground and UI reject hull motion");
     parameters[4]=.25f;pixels=consume();check(pixels[at+3]==1 && std::fabs(pixels[at]+.39f)<1e-5,"native TAA grid returns same physical motion");parameters[2]=0;pixels=consume();check(pixels[at+3]==0,"nonconsecutive frame rejects mesh history");
+
+    // Exercise the actual admission -> nomination -> temporal-consumption
+    // wiring. These updates bypass vscreen in the rig, so feed the same
+    // post-forward write notifications that its hooks supply in production.
+    objectClassificationProbe.reset();reset();pose(1,0);run();
+    check(!objectClassificationProbe.active() && objectClassificationProbe.drawCount()==0,
+          "unarmed rendering does not nominate classification sources");
+    reset();pose(1,0);meshMotionArmClassification();
+    for(unsigned captureFrame=0;captureFrame<4;++captureFrame){
+        if(captureFrame)meshMotionFrameBoundary(ctx.Get());
+        bind(0);
+        objectClassificationProbe.noteWrite(ctx.Get(),pool.Get(),ObjectClassificationProbe::Update);
+        objectClassificationProbe.noteWrite(ctx.Get(),iv.Get(),ObjectClassificationProbe::Update);
+        ctx->ClearDepthStencilView(dsv[0].Get(),D3D11_CLEAR_DEPTH,0,0);
+        issue(ctx.Get(),6,1,0,0,0);meshMotionDraw(ctx.Get(),issue,6,1,0,0,0,materialVs);
+        meshMotionStageClassification(ctx.Get(),scene[0].Get(),10000+captureFrame,nullptr);
+        check(!objectClassificationProbe.sealed(),"classification cannot consume unmatched mesh records");
+        ID3D11ShaderResourceView* classifierViews[2]{};
+        meshMotionViews(ctx.Get(),scene[0].Get(),classifierViews);
+        meshMotionStageClassification(ctx.Get(),scene[0].Get(),10000+captureFrame,nullptr);
+        check(eyes[0].history[eyes[0].write].count==1 && classifierViews[0] && classifierViews[1],
+              "classification preserves original motion admission and views");
+        if(captureFrame<3)check(!objectClassificationProbe.sealed(),"discovery frames cannot seal a partial snapshot");
+    }
+    const auto classifierSummary=objectClassificationProbe.summary();
+    check(classifierSummary.sealed && !classifierSummary.active && classifierSummary.selectedFrame==3 &&
+          classifierSummary.sceneFrame==10003 && classifierSummary.draws==1 && classifierSummary.writes>=6,
+          "classification stage joins exact scene frame to the later complete mesh eye");
+    check(objectClassificationProbe.write(ctx.Get(),L"build/obj/meshmotion",L"pipeline"),
+          "production mesh classification evidence writes successfully");
+    check(std::system("python tools\\object_classification.py build\\obj\\meshmotion\\classification_pipeline.json --verify-pipeline")==0,
+          "offline reader joins visible production coverage to the same source generation and upload");
+    objectClassificationProbe.reset();
 
     // Arming is asynchronous. A pending normal batch must finish under the
     // packed policy before the first A phase switches to immediate mode.

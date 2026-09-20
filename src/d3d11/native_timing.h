@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/native_timing.h"
+#include "../common/native_present_trace.h"
 
 namespace edvr {
 struct NativeTimingSnapshot {
@@ -23,4 +24,10 @@ struct NativeTimingSnapshot {
 NativeTimingSnapshot nativeTimingSnapshot() noexcept;
 unsigned nativeTimingReadCompletions(uint64_t& cursor, NativeTimingSnapshot* out,
                                      unsigned capacity, uint64_t& dropped) noexcept;
+// CPU-only producer hook observation. Records only the device owned by the
+// current native timing lease; no COM ownership or graphics work is added.
+uint64_t nativeTimingPresentBegin(ID3D11Device*, uint64_t beginUs,
+                                  uint32_t thread) noexcept;
+void nativeTimingNotePresent(ID3D11Device*, uint64_t token,
+                             const EdvrNativePresentSpan&) noexcept;
 }

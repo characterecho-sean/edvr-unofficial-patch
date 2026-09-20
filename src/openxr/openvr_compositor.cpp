@@ -1,4 +1,5 @@
 #include "openvr_compositor.h"
+#include "native_cpu_trace.h"
 
 #include <cstring>
 #include <cmath>
@@ -77,46 +78,48 @@ vr::ETrackingUniverseOrigin OpenVRCompositor::GetTrackingSpace() {
 vr::EVRCompositorError OpenVRCompositor::WaitGetPoses(
     vr::TrackedDevicePose_t* render, uint32_t renderCount,
     vr::TrackedDevicePose_t* game, uint32_t gameCount) {
+  NativeCpuTraceSpan trace(EdvrCpuWaitGetPoses);
   // Validate and initialize caller buffers before asking the source to wait.
   initialize(render, renderCount);
   initialize(game, gameCount);
   if ((renderCount && !render) || (gameCount && !game) || renderCount > vr::k_unMaxTrackedDeviceCount ||
-      gameCount > vr::k_unMaxTrackedDeviceCount || !source_) return kInvalid;
+      gameCount > vr::k_unMaxTrackedDeviceCount || !source_) return trace.finish(kInvalid);
 
   const CompositorRead before = source_->compositorRead();
-  if (!before.connected || before.generation == 0) return kInvalid;
+  if (!before.connected || before.generation == 0) return trace.finish(kInvalid);
   CompositorRead published{};
   const vr::EVRCompositorError error = source_->waitPoses(before.generation, published);
-  if (error != vr::VRCompositorError_None) return error;
+  if (error != vr::VRCompositorError_None) return trace.finish(error);
   if (published.generation != before.generation || !published.connected || !published.posesAvailable ||
-      !validOrigin(published.origin)) return kInvalid;
+      !validOrigin(published.origin)) return trace.finish(kInvalid);
   copyPose(render, renderCount, published.renderPose, published.connected, true);
   copyPose(game, gameCount, published.gamePose, published.connected, true);
-  return vr::VRCompositorError_None;
+  return trace.finish(vr::VRCompositorError_None);
 }
 
 vr::EVRCompositorError OpenVRCompositor::GetLastPoses(
     vr::TrackedDevicePose_t* render, uint32_t renderCount,
     vr::TrackedDevicePose_t* game, uint32_t gameCount) {
-  initialize(render, renderCount); initialize(game, gameCount);
+  NativeCpuTraceSpan trace(EdvrCpuGetLastPoses);initialize(render, renderCount); initialize(game, gameCount);
   if ((renderCount && !render) || (gameCount && !game) ||
       renderCount > vr::k_unMaxTrackedDeviceCount ||
-      gameCount > vr::k_unMaxTrackedDeviceCount) return kInvalid;
-  if (!source_) return kInvalid;
+      gameCount > vr::k_unMaxTrackedDeviceCount) return trace.finish(kInvalid);
+  if (!source_) return trace.finish(kInvalid);
   const CompositorRead read = source_->compositorRead();
   const bool connected=read.generation && read.connected;
   const bool sample = connected && read.posesAvailable && validOrigin(read.origin);
   copyPose(render, renderCount, read.renderPose, connected, sample);
   copyPose(game, gameCount, read.gamePose, connected, sample);
-  return sample?vr::VRCompositorError_None:kInvalid;
+  return trace.finish(sample?vr::VRCompositorError_None:kInvalid);
 }
 
 vr::EVRCompositorError OpenVRCompositor::GetLastPoseForTrackedDeviceIndex(
     vr::TrackedDeviceIndex_t index, vr::TrackedDevicePose_t* render,
     vr::TrackedDevicePose_t* game) {
+  NativeCpuTraceSpan trace(EdvrCpuGetLastPoseForTrackedDeviceIndex);
   if (render) identity(*render); if (game) identity(*game);
-  if (index >= vr::k_unMaxTrackedDeviceCount) return vr::VRCompositorError_IndexOutOfRange;
-  if (!source_) return vr::VRCompositorError_None;
+  if (index >= vr::k_unMaxTrackedDeviceCount) return trace.finish(vr::VRCompositorError_IndexOutOfRange);
+  if (!source_) return trace.finish(vr::VRCompositorError_None);
   const CompositorRead read = source_->compositorRead();
   if (index == vr::k_unTrackedDeviceIndex_Hmd) {
     const bool connected=read.generation && read.connected;
@@ -124,16 +127,17 @@ vr::EVRCompositorError OpenVRCompositor::GetLastPoseForTrackedDeviceIndex(
     copyPose(render, 1, read.renderPose, connected, sample);
     copyPose(game, 1, read.gamePose, connected, sample);
   }
-  return vr::VRCompositorError_None;
+  return trace.finish(vr::VRCompositorError_None);
 }
 
 vr::EVRCompositorError OpenVRCompositor::Submit(vr::EVREye eye, const vr::Texture_t* texture,
     const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags) {
-  if (eye != vr::Eye_Left && eye != vr::Eye_Right) return vr::VRCompositorError_IndexOutOfRange;
-  if (!source_) return kInvalid;
+  NativeCpuTraceSpan trace(EdvrCpuSubmit);
+  if (eye != vr::Eye_Left && eye != vr::Eye_Right) return trace.finish(vr::VRCompositorError_IndexOutOfRange);
+  if (!source_) return trace.finish(kInvalid);
   const CompositorRead read = source_->compositorRead();
-  if (!read.connected || read.generation == 0) return kInvalid;
-  return source_->submitEye(read.generation, eye, texture, bounds, flags);
+  if (!read.connected || read.generation == 0) return trace.finish(kInvalid);
+  return trace.finish(source_->submitEye(read.generation, eye, texture, bounds, flags));
 }
 
 void OpenVRCompositor::ClearLastSubmittedFrame() {
@@ -143,15 +147,17 @@ void OpenVRCompositor::ClearLastSubmittedFrame() {
 }
 
 void OpenVRCompositor::PostPresentHandoff() {
-  if (!source_) { unsupported(7); return; }
+  NativeCpuTraceSpan trace(EdvrCpuPostPresentHandoff);
+  if (!source_) { unsupported(7);trace.finishVoid(0); return; }
   const CompositorRead read = source_->compositorRead();
-  if (read.generation == 0 || !source_->handoff(read.generation)) unsupported(7);
+  const bool result=read.generation != 0 && source_->handoff(read.generation);
+  if (!result) unsupported(7);trace.finishVoid(result?1:0);
 }
 
 bool OpenVRCompositor::GetFrameTiming(vr::Compositor_FrameTiming*, uint32_t) {
-  unsupported(8); return false;
+  NativeCpuTraceSpan trace(EdvrCpuGetFrameTiming);unsupported(8); return trace.finish(false);
 }
-float OpenVRCompositor::GetFrameTimeRemaining() { unsupported(9); return 0.0f; }
+float OpenVRCompositor::GetFrameTimeRemaining() { NativeCpuTraceSpan trace(EdvrCpuGetFrameTimeRemaining);unsupported(9); return trace.finish(0.0f); }
 void OpenVRCompositor::FadeToColor(float, float, float, float, float, bool) { unsupported(10); }
 void OpenVRCompositor::FadeGrid(float, bool) { unsupported(11); }
 vr::EVRCompositorError OpenVRCompositor::SetSkyboxOverride(const vr::Texture_t* textures, uint32_t count) {
@@ -174,10 +180,11 @@ bool OpenVRCompositor::IsFullscreen() { unsupported(17); return false; }
 uint32_t OpenVRCompositor::GetCurrentSceneFocusProcess() { unsupported(18); return 0; }
 uint32_t OpenVRCompositor::GetLastFrameRenderer() { unsupported(19); return 0; }
 bool OpenVRCompositor::CanRenderScene() {
-  if (!source_) { unsupported(20); return false; }
+  NativeCpuTraceSpan trace(EdvrCpuCanRenderScene);
+  if (!source_) { unsupported(20); return trace.finish(false); }
   const CompositorRead read = source_->compositorRead();
-  if (!read.canRenderKnown) { unsupported(20); return false; }
-  return read.generation && read.connected && read.canRender;
+  if (!read.canRenderKnown) { unsupported(20); return trace.finish(false); }
+  return trace.finish(bool(read.generation && read.connected && read.canRender));
 }
 void OpenVRCompositor::ShowMirrorWindow() { unsupported(21); }
 void OpenVRCompositor::HideMirrorWindow() { unsupported(22); }

@@ -1,8 +1,11 @@
-﻿#include "../common/vr_census.h"
+#include "../common/vr_census.h"
 #include "device_hook.h"
 #include "game_exit_probe.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
+#include "original_draw_probe.h"
+#include "native_timing.h"
+#include "../common/native_present_trace.h"
 
 #include "shader_sig.h"
 #include "weapon_motion.h"
@@ -42,12 +45,15 @@
 #include "eye_tonemap_snapshot.h"
 #include "ui_separation.h"
 #include "ui_deferred.h"
+#include "static_surface.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
 #include "mesh_motion.h"
+#include "kinematic_eval_probe.h"
+#include "kinematic_motion.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "perf_monitor.h"
 #include "vscreen.h"
@@ -566,6 +572,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPU
             const uint64_t hash=fnv1a64(bytecode,len);
             GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
             EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
+            originalDrawProbeRememberLayout(*out,elements,count,hash);
+            staticSurfaceRememberLayout(*out,elements,count,hash);
             EyeTonemapSnapshot::rememberLayout(*out,elements,count,hash);
             EyePanelSnapshot::rememberLayout(*out,elements,count,hash);
         });
@@ -589,6 +597,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
         uiDeferredRemember(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        staticSurfaceRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
@@ -613,6 +622,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         registerShaderHash(*out, hash);
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         uiDeferredRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        staticSurfaceRememberPs(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));
@@ -902,6 +912,9 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
+    const uint64_t traceBegan = self == g_state->swapChain ? edvrNativeTraceNowUs() : 0;
+    const uint64_t traceToken = self == g_state->swapChain ?
+        nativeTimingPresentBegin(g_state->device, traceBegan, GetCurrentThreadId()) : 0;
     VrCensusScope census(VrCensusEvent::PresentEnter, VrCensusEvent::PresentExit,
                           self, self == g_state->swapChain ? 1 : 0);
     // Not our swapchain: forward and do no frame work. A second swapchain
@@ -918,8 +931,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // thread's own busy time.
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+    const int64_t presentT1 = qpcNow();
     if (qpcFrequency() > 0) {
-        perfMonitorNotePresentWait(static_cast<double>(qpcNow() - presentT0) * 1000.0 /
+        perfMonitorNotePresentWait(static_cast<double>(presentT1 - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
     }
     gameExitProbePresent(hr,flags,g_state->frameCounter);
@@ -982,6 +996,14 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // whether the table changed before the hang or after it, and neither
         // number could answer it. One counter, published here, printed by both.
         ++g_state->frameCounter;
+        // The kinematic probe's clock: exactly once per owned Present. Here,
+        // not beside vScreenFrameBoundary below -- that site sits behind the
+        // graphicsRuntimeDisabled early return and would skip those presents.
+        kinematicEvalProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter),
+            meshMotionFrameCount());
+        // The kinematic tracker's clock, same call site for the same
+        // exactly-once-per-owned-present guarantee. One atomic load when off.
+        kinematicMotionNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
         // The write watch's per-frame work, here rather than inside
         // vScreenReclaimTick where the re-arm used to sit behind
         // `if (!g_state) return;`. In the two context probes vScreen never
@@ -1460,8 +1482,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
                                              static_cast<double>(qpcFrequency()));
     }
+    const uint64_t traceBodyEnd = edvrNativeTraceNowUs();
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
         renderBoundaryPresent(g_state->device);
+    const EdvrNativePresentSpan trace{traceBegan, edvrNativeTraceUs(presentT0),
+        edvrNativeTraceUs(presentT1), traceBodyEnd, edvrNativeTraceNowUs(),
+        GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};
+    nativeTimingNotePresent(g_state->device, traceToken, trace);
     return hr;
 }
 
