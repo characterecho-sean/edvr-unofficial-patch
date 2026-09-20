@@ -6825,4 +6825,23 @@ same-time entry. The eye burst now dumps the coverage pair
 and per-frame kin_bound/kin_veto (decisions.json schema 2), so ONE held
 movers-view burst settles it offline. Gates green (82/0, 25/0, contract
 253/253); frontier d3d11 ac6758093e45419d, verified. Diagnostic-only;
-no rendering change.
+no rendering change. Amended by the 16:20 entry: 15:45 was the MOTION
+view, not movers -- the movers question was settled by dump 160734.
+
+### 2026-09-20 16:20 -- dump 160734: paint-all confirmed, landing ship cyan, 15:45 was the motion view
+
+Kinematic doc same-time entry has the numbers. Movers HELD through the
+burst (ship landing in view): the coverage pair is 100% claimed with
+one uniform [0.05 m, 671 m] interval in both eyes -- the straddle
+paint-all fired (10 straddlers by the cameraR rows, 92-94 by now/prev;
+the own-ship r=30 m sphere contains the eye). kin_bound solid 16/16.
+The movers paint shows ground and settlement cyan, sky correctly
+rejected by the depth gate, and the LANDING SHIP cyan (Sean confirms)
+-- the mask owning a known mover through other spheres' intervals:
+review finding 2 made visible. Sean's 16:08 correction reframes 15:45:
+that strobing was the MOTION view (mvUsed paint), i.e. the MV field
+itself pulsing -- the pathology this arc is fixing, not a stage-B
+regression (veto dark throughout). Fix direction: straddle ->
+paint-none in kinCover, then re-check mover ownership; the motion-view
+pulse wants a burst held in the motion view (originStep/rebase cadence
+a suspect).
