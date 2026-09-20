@@ -9,16 +9,16 @@
   DLSS-path MV replacement (surface 2) is the end goal; EDVR's own
   temporal pass (surface 1) is the diagnostic stepping stone that proves
   the injected MVs are right before they touch DLSS history.
-- **Open:** phasing. Phase 0 flew 2026-09-19 20:52 (eye run 205251):
-  +0x268 hash stable across 1.4M eval calls, 500 values over 510 nodes,
-  near 1:1 per node; the +0x688 flags field is ruled out as a stasis
-  signal (per-call evaluation sequencer whose states drive the eval's
-  own skip gates). CORRECTION: there is no predicate vtable at
-  record+0x2C0 -- the "0x52e9288" first field is the name string
-  "p::DeferredBufferView" of a shared render-graph view object; the
-  earlier "single predicate class" claim is retracted (settlement doc,
-  21:05 entry). Remaining gate question: does +0x268 track CONTENT
-  (needs a capture with known movers).
+- **Open:** phase 0 is OFFLINE again after Sean's 2026-09-19 21:23 review
+  (settlement doc, same-time entry): the 20:52 flight's "hash stable
+  across 1.4M calls" was never established (transition cap 8192 with
+  1.44M overflowed, no hash-only counter), and +0x268 is a render-config
+  hash that never reads the transform (FUN_14433C750) — retracted as a
+  stasis signal. Phase 0 is now: resolve writer -> collection ->
+  collection+0x18 ownership and the transform/dirty-state dependencies
+  offline; remeasure job cost with the detailed observer disabled and
+  job-3 hooked. No per-record identity, pixel-ownership, or stasis claim
+  survives without that work.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
@@ -29,8 +29,8 @@ EDVR's temporal pass already composes its motion-vector field from
 per-class motion sources (screen_motion, weapon_motion, celestial_motion,
 mesh_motion, object_probe). Each source computes exact motion for one
 object family. This design adds a **kinematic source** fed by engine
-truth instead of GPU-side estimation, and optionally a corrected MV copy
-at the DLSS hand-off.
+truth instead of GPU-side estimation, writing into the same MV field the
+pass already hands to NGX.
 
 Engine-level injection replaces the identity and motion problems, not the
 coverage problem: which pixels a record owns still comes from its world
@@ -43,57 +43,68 @@ screen-space work".
   FUN_144312040 (RVA 0x4312040) recomposes parent x child 3x4 matrices
   per node, recursing children at record+0x2A8/+0x2B0. Reaches the
   hidden skinning bone that defeated pool-based estimation.
-- Engine-validated stasis/change per record (stride 0x2F0, base
-  collection+0x280): content hash record+0x268, cached has-work bool
-  record+0x234, change predicate record+0x2C0 (slots +0x70/+0x58),
-  skip bit render-record+0x688 bit 0x1000.
 - Current-frame record transform: 3x4 at record+0x130..0x16C, view
   products at record+0xF0..0x12C; world bounds at record+0xB0..0xEC.
-- Stable identity: node pointer record+0x18 is the game object. Key on
-  it, not on the record address (the collection vector can realloc).
+- NOT provided, after the 2026-09-19 review (settlement doc 21:23
+  entry): a proven stasis/change signal. record+0x268 is a
+  render-config hash that never reads the transform (FUN_14433C750);
+  render-record+0x688 is the engine's intra-frame evaluation sequencer;
+  record+0x2C0 is a shared render-graph view object, not a per-record
+  predicate. The transform/dirty-state dependency chain is an open
+  offline item.
+- Identity is NOT solved by node pointer alone: 2633 records share 510
+  node pointers (~5 records per node), so per-record history needs a
+  finer key; and projected bounds + depth gating do not uniquely own a
+  mesh's pixels. Both must be resolved before any MV overwrite.
 
 ## Where injection makes sense
 
 | Class | Signal | Injected MV | Expected win |
 |---|---|---|---|
-| Proven-static settlement geometry | record+0x268 hash unchanged | exact zero object motion | kills settlement shimmer/ghosting at the source |
+| Proven-static settlement geometry | NONE PROVEN YET (was: +0x268 hash — retracted) | exact zero object motion | kills settlement shimmer/ghosting at the source |
 | Rigid movers (stations, ships) | per-frame delta of record+0x130..0x16C | exact rigid MV | closes tier-2's up-to-8-frame staleness; reaches hidden-bone spin |
 | Skinned/particle/smoke | none reliable | inject nothing | avoids the smoke-voids regression class |
 
-## Injection surfaces
+Zero OBJECT motion always means the camera/head term stays in the final
+vector — the injection composes object motion into the existing camera
+motion, never replaces the whole vector.
 
-1. **EDVR's own temporal pass** (easy, diagnostic stepping stone): a
-   kinematic_motion module mirroring mesh_motion's interface. Per frame,
-   walk hooked collections, compute deltas, write MVs into the pass's MV
-   field over each record's projected bounds, depth-gated (tier-1 lesson:
-   a mover's interior still ghosts without depth consistency). Proves the
-   injected MVs are right with the existing temporal_aa_debug MV view
-   before anything touches DLSS history.
-2. **The game's DLSS path** (medium, the end goal): dlaa.cpp already
-   holds the game's MV texture at the NGX hand-off (pInMotionVectors,
-   MVLowRes, unjittered, scale 1.0). Copy it, overwrite regions belonging
-   to known records, pass the copy. No game-internal hooking; one bounded
-   compute pass.
+## Injection surface (singular, after the 2026-09-19 review)
+
+There is only one: **EDVR's own temporal pass**. NGX already consumes
+EDVR's own MV texture (e.dlMv at the dlaaEvaluate/fsr3Evaluate hand-off
+in temporal_pass.cpp) — the "game's DLSS path" surface was imaginary;
+the diagnostic MV view and DLSS consume the same composition. A
+kinematic_motion module mirroring mesh_motion's interface: per frame,
+walk hooked collections, compute deltas, write object-motion deltas over
+each record's verified pixel ownership, depth-gated (tier-1 lesson: a
+mover's interior still ghosts without depth consistency). Proven right
+with the existing temporal_aa_debug MV view before it ships.
 
 ## Phasing
 
-- **Phase 0 (gate, shared flight):** record+0x268 hash stability census
-  on known-static settlement records + predicate vtable capture (spec in
-  settlement-flicker-2026-09-17.md). No build before this lands.
-- **Phase 1:** static-zero injection in EDVR's own pass only, config
-  key, depth-gated, settlements only. One hook (traversal or collection
-  walk), one compute shader, one motion module. Diagnosable with the
-  existing temporal_aa_debug MV view.
+- **Phase 0 (offline, current):** resolve the writer -> collection ->
+  collection+0x18 backing-owner chain (possibly the KinematicRig itself;
+  proving it may avoid the planned submission hook) and the
+  transform/dirty-state dependencies. No build before this lands.
+- **Phase 1:** static-zero object-motion injection, config key,
+  depth-gated, settlements only, gated on a PROVEN stasis signal from
+  phase 0. One hook (traversal or collection walk), one compute shader,
+  one motion module. Diagnosable with the temporal_aa_debug MV view.
 - **Phase 2:** rigid-delta injection for movers (per-frame).
-- **Phase 3:** DLSS-path MV replacement, only if 1-2 show measured wins;
-  a wrong MV in DLSS history is worse than none.
+- A wrong MV in DLSS history is worse than none; each phase ships only
+  with a measured before/after.
 
 ## Costs and risks
 
 - CPU: a few hundred record reads per frame (trivial). GPU: one bounded
   compute pass per eye.
-- Wrong-MV artifacts: mitigated by depth gating and engine-validated
-  change signals, not heuristics.
-- Identity drift on collection realloc: mitigated by node-pointer keys.
+- Wrong-MV artifacts: the biggest risk. Mitigation requires per-record
+  identity finer than the node pointer, verified pixel ownership, depth
+  gating, and an engine-proven change signal — none of which exists yet;
+  that is what phase 0 is for.
+- Identity drift on collection realloc: key on record identity resolved
+  in phase 0, never on the record address (the collection vector can
+  realloc).
 - Environment dependency to state at flight time: VR runtime, headset,
   per-eye render size, DLSS version, and the fixed record-table sizes.
