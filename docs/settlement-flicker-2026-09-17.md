@@ -6812,3 +6812,17 @@ movers/frame, zero faults/overflow. The eye burst caught only the plain
 render (16 frames, ~0.18 s, constant flags) -- the movers-view cyan
 question (finding 2's pixel-ownership check) is still open. Next flight:
 hold temporal_aa_debug = movers THROUGH the eye-capture burst.
+
+### 2026-09-20 16:10 -- movers view strobes the whole scene; burst instrumented
+
+Sean's 15:45 headset-only movers test: everything outside the cockpit is
+ONE colour cycling rapidly -- the ownership paint claiming ~the whole
+scene and strobing, not the selective-cyan check the 15:40 flight was
+after. Three hypotheses (straddling sphere paints all, bind flapping,
+interval-union at scale) with dump signatures in the kinematic doc's
+same-time entry. The eye burst now dumps the coverage pair
+(KCNear/KCFar, R32_UINT), the GPU sphere upload (KinSpheres, EDVRKSP1)
+and per-frame kin_bound/kin_veto (decisions.json schema 2), so ONE held
+movers-view burst settles it offline. Gates green (82/0, 25/0, contract
+253/253); frontier d3d11 ac6758093e45419d, verified. Diagnostic-only;
+no rendering change.

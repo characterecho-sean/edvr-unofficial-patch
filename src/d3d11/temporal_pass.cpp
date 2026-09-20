@@ -1671,6 +1671,10 @@ struct EyeDecisionFrame {
     uint32_t decisionCrop[4] = {}, outputCrop[4] = {};
     bool diagnostic = false, preUi = false, dlssSuccess = false;
     bool dlssHistory = false, dlssReset = false;
+    // Stage B diagnostic: bit 512 (the coverage pair was live) and bit 1024
+    // (the compose veto was armed) as this frame ran, for kin_bound/kin_veto
+    // in the manifest -- whether a strobing movers view was a flapping bind.
+    bool kinBound = false, kinVeto = false;
     EyeUiMode uiMode = EyeUiMode::None;
     const char* error = "capture_not_reached";
 };
@@ -2297,6 +2301,95 @@ bool writeEyeDecisionBin(ID3D11DeviceContext* ctx, ID3D11Texture2D* texture,
     return ok;
 }
 
+// Stage B eye-burst diagnostics (2026-09-20 15:45: movers view showed the
+// whole scene strobing one colour): dump the coverage pair and the sphere
+// upload a movers view is painted from, captured WITH the burst, so a
+// full-coverage report is settled offline instead of by another flight.
+// Same EDVRTEX1 container as the decision bins; format field R32_UINT.
+bool writeEyeKcBin(ID3D11DeviceContext* ctx, ID3D11Texture2D* src,
+                   uint32_t frame, const wchar_t* path) {
+    if (!ctx || !src) return false;
+    D3D11_TEXTURE2D_DESC d{};
+    src->GetDesc(&d);
+    if (d.Format != DXGI_FORMAT_R32_UINT) return false;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    ID3D11Texture2D* st = nullptr;
+    const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &st);
+    dev->Release();
+    if (FAILED(hr) || !st) return false;
+    ctx->CopyResource(st, src);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    const bool mapped = SUCCEEDED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &map));
+    bool ok = false;
+    if (mapped) {
+        FILE* f = nullptr;
+        _wfopen_s(&f, path, L"wb");
+        ok = f != nullptr;
+        if (f) {
+            const uint32_t rowBytes = d.Width * 4;
+            const uint32_t header[9] = {1, d.Width, d.Height, static_cast<uint32_t>(d.Format),
+                                        rowBytes, frame, 0, 0, 0};
+            ok = fwrite("EDVRTEX1", 1, 8, f) == 8 && fwrite(header, sizeof(header), 1, f) == 1;
+            for (uint32_t y = 0; y < d.Height && ok; ++y)
+                ok = fwrite(static_cast<const char*>(map.pData) + y * map.RowPitch,
+                            1, rowBytes, f) == rowBytes;
+            if (fclose(f) != 0) ok = false;
+        }
+        ctx->Unmap(st, 0);
+    }
+    st->Release();
+    return ok;
+}
+
+// The sphere set the coverage pair was painted from: the GPU upload buffer
+// itself, not a fresh tracker snapshot -- the tracker may have published
+// again during the burst, and it is the GPU copy the last frame composed
+// with. EDVRKSP1: count, session, generation (lo, hi), then count x
+// KinematicSphereGpu rows.
+bool writeEyeKinSpheres(ID3D11DeviceContext* ctx, const wchar_t* path) {
+    if (!ctx || !g_kinSphereBuf || !g_kinSphereCount) return false;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = 4096 * sizeof(KinematicSphereGpu);
+    bd.Usage = D3D11_USAGE_STAGING;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    bd.StructureByteStride = sizeof(KinematicSphereGpu);
+    ID3D11Buffer* st = nullptr;
+    const HRESULT hr = dev->CreateBuffer(&bd, nullptr, &st);
+    dev->Release();
+    if (FAILED(hr) || !st) return false;
+    ctx->CopyResource(st, g_kinSphereBuf);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    const bool mapped = SUCCEEDED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &map));
+    bool ok = false;
+    if (mapped) {
+        FILE* f = nullptr;
+        _wfopen_s(&f, path, L"wb");
+        ok = f != nullptr;
+        if (f) {
+            const uint32_t header[4] = {g_kinSphereCount, g_kinSphereSession,
+                                        static_cast<uint32_t>(g_kinSphereGen & 0xFFFFFFFFu),
+                                        static_cast<uint32_t>(g_kinSphereGen >> 32)};
+            ok = fwrite("EDVRKSP1", 1, 8, f) == 8 && fwrite(header, sizeof(header), 1, f) == 1 &&
+                 fwrite(map.pData, sizeof(KinematicSphereGpu), g_kinSphereCount, f) == g_kinSphereCount;
+            if (fclose(f) != 0) ok = false;
+        }
+        ctx->Unmap(st, 0);
+    }
+    st->Release();
+    return ok;
+}
+
 void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir) {
     for (int k = 0; k < g_eyeRunTaken; ++k) {
         EyeDecisionFrame& d = g_eyeDecisions[k];
@@ -2320,6 +2413,27 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         if (g_eyePreUiStaging[k]) { g_eyePreUiStaging[k]->Release(); g_eyePreUiStaging[k]=nullptr; }
         if (g_eyeDecisionStaging[k]) { g_eyeDecisionStaging[k]->Release(); g_eyeDecisionStaging[k]=nullptr; }
     }
+    // The stage B diagnostics: each eye's coverage pair as of the run's last
+    // treated frame (the textures persist post-run) and the sphere upload
+    // they were painted from. kc_frame links the pair to the T crops.
+    const uint32_t kcFrame = g_eyeRunTaken > 0 ? g_eyeDecisions[g_eyeRunTaken - 1].frame : 0;
+    bool kcNearOk[2] = {}, kcFarOk[2] = {};
+    uint32_t kcDim[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        wchar_t kcPath[MAX_PATH];
+        if (g_eye[i].kcNear) {
+            _snwprintf_s(kcPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KCNear%d.bin", dir.c_str(), g_eyeRunStamp, i);
+            kcNearOk[i] = writeEyeKcBin(ctx, g_eye[i].kcNear, kcFrame, kcPath);
+        }
+        if (g_eye[i].kcFar) {
+            _snwprintf_s(kcPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KCFar%d.bin", dir.c_str(), g_eyeRunStamp, i);
+            kcFarOk[i] = writeEyeKcBin(ctx, g_eye[i].kcFar, kcFrame, kcPath);
+        }
+        if (kcNearOk[i] || kcFarOk[i]) { kcDim[0] = g_eye[i].kcW; kcDim[1] = g_eye[i].kcH; }
+    }
+    wchar_t sphPath[MAX_PATH];
+    _snwprintf_s(sphPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KinSpheres.bin", dir.c_str(), g_eyeRunStamp);
+    const bool kinSpheresOk = writeEyeKinSpheres(ctx, sphPath);
     wchar_t manifest[MAX_PATH];
     _snwprintf_s(manifest, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_decisions.json", dir.c_str(), g_eyeRunStamp);
     FILE* f = nullptr;
@@ -2331,8 +2445,25 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         }
         return;
     }
-    fprintf(f, "{\n  \"schema\": 1,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n  \"frames\": [\n",
+    fprintf(f, "{\n  \"schema\": 2,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n",
             g_eyeRunStamp, kEyeRun);
+    fprintf(f, "  \"kinematic\": {\"session\": %u, \"generation\": %llu, \"count\": %u, "
+               "\"kc_frame\": %u, \"kc_size\": [%u, %u],\n",
+            g_kinSphereSession, static_cast<unsigned long long>(g_kinSphereGen),
+            g_kinSphereCount, kcFrame, kcDim[0], kcDim[1]);
+    fputs("    \"spheres_file\": ", f);
+    if (kinSpheresOk) fprintf(f, "\"eye_%ls_KinSpheres.bin\"", g_eyeRunStamp); else fputs("null", f);
+    fputs(", \"kc_near\": [", f);
+    for (int i = 0; i < 2; ++i) {
+        if (kcNearOk[i]) fprintf(f, "\"eye_%ls_KCNear%d.bin\"", g_eyeRunStamp, i); else fputs("null", f);
+        if (!i) fputs(", ", f);
+    }
+    fputs("], \"kc_far\": [", f);
+    for (int i = 0; i < 2; ++i) {
+        if (kcFarOk[i]) fprintf(f, "\"eye_%ls_KCFar%d.bin\"", g_eyeRunStamp, i); else fputs("null", f);
+        if (!i) fputs(", ", f);
+    }
+    fputs("]},\n  \"frames\": [\n", f);
     for (int k = 0; k < g_eyeRunTaken; ++k) {
         const EyeDecisionFrame& d = g_eyeDecisions[k];
         fprintf(f, "    {\"index\": %d, \"frame\": %u, \"diagnostic_frame\": %u, ",
@@ -2352,9 +2483,11 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         if (g_eyeTreatedWritten[k]) fprintf(f, "\"treated_file\": \"eye_%ls_T%02d.bmp\", ", g_eyeRunStamp, k);
         else fputs("\"treated_file\": null, ", f);
         fprintf(f, "\"ui_mode\": \"%s\", \"dlss_success\": %s, \"dlss_history\": %s, "
-                   "\"dlss_reset\": %s, \"error\": \"%s\"}%s\n",
+                   "\"dlss_reset\": %s, \"kin_bound\": %s, \"kin_veto\": %s, "
+                   "\"error\": \"%s\"}%s\n",
                 eyeUiModeName(d.uiMode), d.dlssSuccess ? "true" : "false",
                 d.dlssHistory ? "true" : "false", d.dlssReset ? "true" : "false",
+                d.kinBound ? "true" : "false", d.kinVeto ? "true" : "false",
                 d.error ? d.error : "", k + 1 == g_eyeRunTaken ? "" : ",");
     }
     fputs("  ]\n}\n", f);
@@ -5817,6 +5950,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // (off): bit 1024 arms it, ownership alone only paints.
                     if (kcBound && g_engineMotionVeto) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
+                    if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
+                        g_eyeDecisions[g_eyeRunTaken].kinBound = kcBound;
+                        g_eyeDecisions[g_eyeRunTaken].kinVeto = kcBound && g_engineMotionVeto;
+                    }
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[21] = {};
@@ -6103,6 +6240,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (kcBound) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
             if (kcBound && g_engineMotionVeto) p.probe[3] =
                 static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
+            if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
+                g_eyeDecisions[g_eyeRunTaken].kinBound = kcBound;
+                g_eyeDecisions[g_eyeRunTaken].kinVeto = kcBound && g_engineMotionVeto;
+            }
         }
         bool ran = usedDlaa || (ensureNative(dev, e, viewFmt) && setParams(ctx, p));
         // A native fallback also writes counters, even when the requested
