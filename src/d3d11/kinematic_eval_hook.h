@@ -16,4 +16,10 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
 // already-hooked prologue during validation).
 bool kinematicEvalHooksMatch(uintptr_t evalTarget) noexcept;
 
+// Stops new callbacks into this probe (relay gates read a null observer and
+// fall straight through to the original). Hooks and relays stay installed
+// for the process lifetime; the probe itself is a global, so a bracket that
+// already loaded the pointer finishes safely.
+void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
+
 } // namespace edvr
