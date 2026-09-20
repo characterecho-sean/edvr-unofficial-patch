@@ -9,16 +9,19 @@
   DLSS-path MV replacement (surface 2) is the end goal; EDVR's own
   temporal pass (surface 1) is the diagnostic stepping stone that proves
   the injected MVs are right before they touch DLSS history.
-- **Open:** phase 0 is OFFLINE again after Sean's 2026-09-19 21:23 review
-  (settlement doc, same-time entry): the 20:52 flight's "hash stable
-  across 1.4M calls" was never established (transition cap 8192 with
+- **Open:** phase 0 is PARTLY RESOLVED offline after Sean's 2026-09-19
+  21:23 review (settlement doc, same-time entry): the 20:52 flight's "hash
+  stable across 1.4M calls" was never established (transition cap 8192 with
   1.44M overflowed, no hash-only counter), and +0x268 is a render-config
   hash that never reads the transform (FUN_14433C750) — retracted as a
-  stasis signal. Phase 0 is now: resolve writer -> collection ->
-  collection+0x18 ownership and the transform/dirty-state dependencies
-  offline; remeasure job cost with the detailed observer disabled and
-  job-3 hooked. No per-record identity, pixel-ownership, or stasis claim
-  survives without that work.
+  stasis signal. The 21:58 offline trace resolved collection+0x18 as a
+  backing-owner pointer (ctor FUN_14430A060 param_3, single writer) and
+  mapped the transform chain (FUN_144331300 LOD evaluator ->
+  FUN_14433DB20 world updater; epoch pair collection+0x90 vs record+0x1B8
+  as change-signal candidate). Still open: owner == rig proof (named
+  runtime discriminator ready), job-cost remeasure with the detailed
+  observer disabled and job-3 hooked. No per-record identity,
+  pixel-ownership, or stasis claim survives without that work.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
@@ -83,10 +86,19 @@ with the existing temporal_aa_debug MV view before it ships.
 
 ## Phasing
 
-- **Phase 0 (offline, current):** resolve the writer -> collection ->
-  collection+0x18 backing-owner chain (possibly the KinematicRig itself;
-  proving it may avoid the planned submission hook) and the
-  transform/dirty-state dependencies. No build before this lands.
+- **Phase 0 (offline, current):** writer -> collection -> collection+0x18
+  RESOLVED offline 2026-09-19 (settlement doc 21:58 entry): +0x18 is a
+  backing-owner pointer written once by the collection ctor FUN_14430A060;
+  the collection aliases the owner's scene-graph arrays. Owner == rig is
+  unproven behind the computed dispatcher; a two-dereference runtime check
+  (*(owner+0x348) == collection and owner+0x380 == 4) settles it in the
+  next instrumented flight and would retire the planned submission hook.
+  Transform/dirty chain mapped: FUN_144331300 LOD evaluator ->
+  FUN_14433DB20 world updater (record+0x170 translation, +0x240 center,
+  +0xF0/+0x1C0 current/previous bounds); the collection+0x90 vs
+  record+0x1B8 epoch pair is a genuine change-signal candidate. Remaining
+  offline: remeasure job cost with the detailed observer disabled and
+  job-3 hooked. No build before this lands.
 - **Phase 1:** static-zero object-motion injection, config key,
   depth-gated, settlements only, gated on a PROVEN stasis signal from
   phase 0. One hook (traversal or collection walk), one compute shader,

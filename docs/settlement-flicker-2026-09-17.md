@@ -19,7 +19,19 @@
   FUN_14431E860 float-channel epsilon bitmap -> FUN_14432CCC0 per-record
   mask-AND + world-bounds recompute (record+0xB0..0x12C). Predicate class
   still unidentified (vtable slot +0xB8 install in filler). Dumps in
-  analysis\decomp.
+  analysis\decomp. Waves 11-17 (offline, 21:58 entry): collection+0x18 =
+  backing-owner pointer, written once by collection ctor FUN_14430A060
+  (param_3); the collection aliases seven owner arrays (+0xA0..+0x340) and
+  sizes tables from owner+0x388. Owner == rig NOT proven (attach is a
+  dispatcher fragment, R15 live-in); runtime discriminator: owner =
+  *(collection+0x18), check *(owner+0x348) == collection and owner+0x380
+  == 4. UpdateRenderDataJob chain mapped: FUN_14431AFE0 accumulates
+  LOD-entry masks -> FUN_144331300 per-frame LOD evaluator (epoch
+  collection+0x90 vs record+0x1B8 -> refresh FUN_14433C870) -> traversal
+  FUN_144312040 -> FUN_14433DB20 per-record world updater (translation
+  record+0x170, center +0x240, bounds current +0xF0 copied to previous
+  +0x1C0). The traversal mask is recomputed per frame from distance and
+  visibility, not a stored dirty flag.
 
 - State: flight 134252 passes the guard but has zero owner links. Seventeen
   saved paths use worker dispatch, with no upstream KinematicRig ancestor; one
@@ -5719,3 +5731,89 @@ Checked against the cited evidence before recording; all four stand.
    hand-off): NGX already consumes EDVRs own e.dlMv -- no separate
    game-DLSS-path replacement; the diagnostic MV view and DLSS consume
    the same corrected composition.
+
+### 2026-09-19 21:58 — offline: collection+0x18 resolved as backing-owner pointer; transform chain mapped
+
+Ghidra waves 11-17, no flight spent; exe hash unchanged. Dumps cited are
+in analysis\decomp (gitignored).
+
+**Ownership chain (Sean's writer -> collection -> collection+0x18 shortcut):**
+
+- rig+0x348 (collection) is only zeroed by the rig ctor (funasm_430B2A0.txt
+  0x14430B8D7, R15 = 0, one of ~30 zero stores) and lazily allocated by the
+  attach fragment FUN_14431B4D5 at 0x14431B650:
+  FUN_14430A060(mem = factory DAT_146034500, param_2 = ([[rig+0x1D8]]+0x60)(),
+  param_3 = R15 (live-in), param_4 = [rig+0x180], flags).
+- Collection ctor FUN_14430A060 (decomp_430A060.txt line 47):
+  `collection+0x18 = param_3`. This is the ONLY writer of +0x18 (attach's
+  two rig+0x348 stores carry no +0x18 write; confirmed by full-asm listing).
+  +0x18 is immutable for the collection's lifetime; the collection dtor
+  FUN_14430DA30 never reads it.
+- The ctor aliases seven owner arrays into the collection (+0xD8=owner+0x110,
+  +0xF0=owner+0xA0, +0x148=owner+0x180, +0x178=owner+0x1F0,
+  +0x1A8=owner+0x260, +0x2B0=owner+0x2D0, hash-key seed owner+0x340) and
+  sizes its open-addressing tables from owner+0x388. The dtor actively frees
+  list nodes back through collection+0xD8 = owner+0x110
+  (decomp_430DA30.txt line 86), so the aliasing is live, not vestigial.
+  Conclusion: collection+0x18 is a deliberate backing-owner pointer; the
+  collection is a view over the owner's scene-graph state. Sean's structural
+  claim CONFIRMED.
+- The same owner value (R15) is handed to FUN_144319460(rig, owner)
+  immediately before allocation (0x14431B587): it walks [owner+0x10]'s node
+  tree (children +0x88/+0x90 stride 200, components +0xB8/+0xC0 stride 0x18)
+  and registers components into the rig+0x310 map and rig+0x330/0x338
+  vector. The owner is a scene-graph-bearing object.
+- The reinit branch stores the same R15 to collection+0x20 (0x14431B670)
+  while the ctor path sets collection+0x20 = param_2 = vtable slot +0x60 of
+  [rig+0x1D8] — consistent with owner == that virtual result, i.e.
+  collection+0x18 and +0x20 alias the same object.
+- NOT proven: owner == KinematicRig. The attach is a dispatcher fragment
+  entered through pair-slot 0x1462B4724 (dword pair 0x431B4D5/0x431B6C9; no
+  static references — dispatch is computed), so R15's provenance is behind
+  the dispatcher. Runtime discriminator for the next instrumented flight:
+  owner = *(collection+0x18); check *(owner+0x348) == collection AND
+  *(uint*)(owner+0x380) == 4 (rig render-ready state). Both true means
+  owner IS the rig and the planned submission hook can be retired.
+  Cost: two dereferences in the existing probe; saves the hook entirely.
+
+**Transform/dirty chain (corrects the earlier "dirty bitmask" framing):**
+
+- FUN_14431AFE0 accumulates uVar9 = OR of LOD-entry masks (entry+0x570;
+  table at poseCtx+0x40 stride 0x6A0, count poseCtx+0x1A940) over entries
+  passing render-state gate FUN_142840840 and the eval gates; exclusion
+  masks poseCtx+0x1A950/58/60 selected by collection+0x70 bit-7 class.
+  uVar9 lands at descriptor+0x48.
+- FUN_144331300 (0x4331300) is a per-frame LOD evaluator, not a dirty-flag
+  reader: for each entry in uVar9 it recomputes the record world center
+  (local via [record+0x190] x parent world via matrix+0x50) and distance,
+  picks a LOD level from the threshold array, writes a 4-bit nibble per
+  entry and ORs the entry bit into the traversal mask (desc+0x50). Epoch
+  check: desc+0x38 (= [collection+0x90]) vs record+0x1B8; mismatch calls
+  FUN_14433C870(record).
+- FUN_14433C870 (0x433C870) refreshes the record pivot/aggregate bounds:
+  copies node position ([[record+0x18]+8]+0x20/+0x2C) to record+0x270..0x28C,
+  accumulates into pose ctx +0x80, recurses children (record+0x2A8 array,
+  +0x2B0 count) composing child-minus-parent centers.
+- Traversal FUN_144312040 walks the mask bit-by-bit into
+  FUN_14433DB20(record, filteredMask, 0) per active node.
+- FUN_14433DB20 is the per-record world updater: writes world translation
+  record+0x170..0x178, packed scale +0x17C, transformed center
+  record+0x240..0x24C, quaternion to the pose ctx via FUN_1442B6410,
+  current bounds record+0xF0..0x118, then copies current -> previous at
+  record+0x1C0..0x1F8 (lines 506-513); cull path FUN_142846540 +
+  record+0x2E8 = 1 when the record+0x2C8 object's mask misses.
+- The "64-bit dirty bitmask" of earlier notes is recomputed every dispatch
+  from distances and visibility masks; no stored per-record dirty flag
+  participates in this path. The engine re-evaluates every in-mask record
+  each frame — consistent with CPU frame time scaling with scene size
+  rather than with change (engine-render-performance doc).
+- FUN_144320340 (batch) iterates worker descriptors at collection+0x40
+  stride 0x60, count collection+0x300; fields match the unwind findings
+  (desc+0x00 pose ctx, +0x28 records, +0x30 count, +0x40 registry).
+
+**Implications for kinematic-motion-injection phase 0:** record+0x170/0x240
+world data and the +0xF0/+0x1C0 current/previous bounds pair are the
+engine-side motion truth the design needs; the epoch pair (collection+0x90
+vs record+0x1B8) is a genuine engine change signal worth capturing, unlike
+the retracted +0x268 render-config hash. The owner==rig discriminator above
+is the last open hop for retiring the submission hook.
