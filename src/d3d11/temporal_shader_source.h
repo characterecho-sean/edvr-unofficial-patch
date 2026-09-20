@@ -1735,26 +1735,28 @@ void kinCover(uint3 id : SV_DispatchThreadID) {
     float yv = dot(float3(kcWR0.y, kcWR1.y, kcWR2.y), rel);
     float zv = dot(float3(kcWR0.z, kcWR1.z, kcWR2.z), rel);
     if (zv + s.radius <= 0.05) return;   // wholly behind the eye
-    float zNearM = max(zv - s.radius, 0.05);
-    uint nearBits = asuint(kcKnobs.x + kcKnobs.z / zNearM);
+    // Straddling the eye (the centre within one radius of the eye plane,
+    // containing it included): paint NONE. The projected rect is unbounded
+    // there, and a sphere that contains the camera proves nothing about
+    // which pixels it owns -- dump 160734: 10-94 straddlers at a settlement
+    // painted one uniform whole-eye [0.05 m, 671 m] interval and owned even
+    // a landing ship through the union (kinematic-motion-injection-2026-09-19.md,
+    // 16:20 entry). The eye-plane grazers this drops were flicker-prone by
+    // construction (millimetre head motion crosses the boundary). Ownership
+    // of big containing geometry comes from tighter per-record spheres or
+    // not at all.
+    if (zv - s.radius <= 0.05) return;
+    uint nearBits = asuint(kcKnobs.x + kcKnobs.z / (zv - s.radius));
     uint farBits  = asuint(kcKnobs.x + kcKnobs.z / (zv + s.radius));
-    int2 lo, hi;
-    if (zv - s.radius <= 0.05) {
-        // The sphere straddles the eye: its rect is unbounded. Paint all of
-        // it; the per-pixel depth gate in kinematicStatic still decides.
-        lo = int2(0, 0);
-        hi = kcSize.xy - 1;
-    } else {
-        float inv = 1.0 / zv;
-        // The same frustum the compose projects through (tanNow's l r t b),
-        // in coverage texels, rounded outward.
-        float cx = (xv * inv - kcTan.x) / (kcTan.y - kcTan.x) * (float)kcSize.x - 0.5;
-        float cy = (kcTan.w - yv * inv) / (kcTan.w - kcTan.z) * (float)kcSize.y - 0.5;
-        float ex = (s.radius * inv) / (kcTan.y - kcTan.x) * (float)kcSize.x;
-        float ey = (s.radius * inv) / (kcTan.w - kcTan.z) * (float)kcSize.y;
-        lo = clamp(int2((int)floor(cx - ex), (int)floor(cy - ey)), int2(0, 0), kcSize.xy - 1);
-        hi = clamp(int2((int)ceil(cx + ex), (int)ceil(cy + ey)), int2(0, 0), kcSize.xy - 1);
-    }
+    float inv = 1.0 / zv;
+    // The same frustum the compose projects through (tanNow's l r t b),
+    // in coverage texels, rounded outward.
+    float cx = (xv * inv - kcTan.x) / (kcTan.y - kcTan.x) * (float)kcSize.x - 0.5;
+    float cy = (kcTan.w - yv * inv) / (kcTan.w - kcTan.z) * (float)kcSize.y - 0.5;
+    float ex = (s.radius * inv) / (kcTan.y - kcTan.x) * (float)kcSize.x;
+    float ey = (s.radius * inv) / (kcTan.w - kcTan.z) * (float)kcSize.y;
+    int2 lo = clamp(int2((int)floor(cx - ex), (int)floor(cy - ey)), int2(0, 0), kcSize.xy - 1);
+    int2 hi = clamp(int2((int)ceil(cx + ex), (int)ceil(cy + ey)), int2(0, 0), kcSize.xy - 1);
     for (int y = lo.y; y <= hi.y; ++y)
         for (int x = lo.x; x <= hi.x; ++x) {
             InterlockedMax(KCNearU[int2(x, y)], nearBits);

@@ -108,6 +108,16 @@
   motion-view whole-scene pulse is the MV field itself -- the
   pathology this arc is fixing, not a stage-B regression (veto dark);
   its capture is a burst held in the MOTION view.
+  Update 16:35: the straddle flip is BUILT and installed (frontier
+  d3d11 d0caa44f0e926188) -- kinCover paints NONE for a sphere
+  straddling or containing the eye; the projected rect is unbounded
+  there and a containing sphere proves nothing about pixel ownership.
+  KC bins now carry the pass's own paint frame (e.kcPaintFrame; JSON
+  kc_paint_frame[2]) -- the 16:20 provenance gap is closed. Gates
+  green (82/0, 25/0, contract 252/252 after the vscreen merge took
+  one key). UNFLOWN. Re-fly movers HELD at a settlement: expect no
+  whole-eye cyan; a mover still cyan via non-straddling unions sends
+  the finding-2 per-pixel tightening next.
 
 ## Premise
 
@@ -1062,7 +1072,40 @@ sphere containing the camera proves nothing about pixel ownership, and
 the eye-plane grazers (sphere[914] r=2.6 m zv=1.9 m; sphere[1017]/
 [1047] r<=1.1 crossing zv=0 with millimetre head motion) are
 flicker-prone by construction -- they are what a movers-view strobe
-would have meant. After the flip, re-check mover ownership in a
-re-flight: if the landing ship is still cyan via non-straddling
-spheres' unioned intervals, the finding-2 tightening (per-pixel
-interval overlap vs scene depth) is next.
+would have meant. Sean sanctioned it at 16:22; BUILT at 16:35 (next
+entry). After the flip, re-check mover ownership in a re-flight: if
+the landing ship is still cyan via non-straddling spheres' unioned
+intervals, the finding-2 tightening (per-pixel interval overlap vs
+scene depth) is next.
+
+## 2026-09-20 (16:35: straddle -> paint-none built, paint-frame stamp closes the provenance gap)
+
+Two changes, one build (Sean sanctioned at 16:22 "go"):
+
+1. **kinCover's straddle branch flipped to paint-NONE**
+   (temporal_shader_source.h): a sphere straddling or containing the
+   eye returns without painting. The projected rect is unbounded at
+   the eye plane; a containing sphere proves nothing about pixel
+   ownership (the 16:20 entry's evidence). The eye-plane grazers this
+   drops were flicker-prone by construction. Ownership of big
+   containing geometry (the landed own-ship's r=30 m pair) now comes
+   from tighter per-record spheres or not at all -- those pixels
+   revert to stock handling, never to a whole-eye claim.
+2. **e.kcPaintFrame stamps the game frame at each coverage paint**;
+   the burst dump writes it into the KC bin headers (per eye) and the
+   manifest as kc_paint_frame [eye0, eye1], closing the 16:20
+   provenance gap (kc_frame remains the last captured crop frame).
+
+Gates: kinematic_motion_test 82/0, kinematic_probe_test 25/0,
+kinematic_json_test green, temporal shader compiler PASS (bytecode
+rebuilt), config contract 252/252 (the vscreen merge took one key;
+internally consistent). Installed to frontier: d3d11.dll sha256
+d0caa44f0e926188, verified against the build. UNFLOWN.
+
+Flight protocol: settlement, fix.engine_motion = on,
+temporal_aa_debug = movers HELD, eye burst. Expected: no whole-eye
+cyan, no uniform full-claim interval -- honest rects only. A mover
+still cyan means non-straddling unions own it and the finding-2
+per-pixel tightening is next. Separately, a burst with
+temporal_aa_debug = motion HELD captures the 15:45 MV-field pulse
+(16 consecutive mvUsed paints + motion.csv).

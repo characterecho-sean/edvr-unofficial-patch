@@ -6845,3 +6845,18 @@ regression (veto dark throughout). Fix direction: straddle ->
 paint-none in kinCover, then re-check mover ownership; the motion-view
 pulse wants a burst held in the motion view (originStep/rebase cadence
 a suspect).
+
+### 2026-09-20 16:35 -- straddle flip built + installed (unflown)
+
+Sean sanctioned the 16:20 fix direction ("go"). kinCover now paints
+NONE for a sphere straddling or containing the eye -- the 16:20
+evidence showed paint-all owning the whole eye, mover included; big
+containing geometry (own ship) reverts to tighter per-record spheres
+or stock handling. kcPaintFrame stamps the pass's paint frame into
+the KC bin headers and kc_paint_frame in the manifest, closing the
+16:20 provenance gap. Gates green (82/0, 25/0, shader compiler PASS,
+bytecode rebuilt, contract 252/252 post-vscreen-merge); frontier
+d3d11 d0caa44f0e926188, verified. Re-fly: movers HELD at a
+settlement -- expect no whole-eye cyan; a still-cyan mover sends the
+finding-2 per-pixel tightening next. The motion-view pulse (15:45) is
+separate: a burst held in the motion view.

@@ -398,7 +398,8 @@ struct EyeState {
     ID3D11UnorderedAccessView* kcNearUav = nullptr;
     ID3D11UnorderedAccessView* kcFarUav = nullptr;
     uint32_t                   kcW = 0, kcH = 0;
-    uint32_t                   kcFrame = UINT32_MAX;
+    uint32_t                   kcFrame = UINT32_MAX;   // the tracker snapshot's ended frame
+    uint32_t                   kcPaintFrame = 0;       // the game frame the pair was last painted on
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -2421,13 +2422,16 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
     uint32_t kcDim[2] = {};
     for (int i = 0; i < 2; ++i) {
         wchar_t kcPath[MAX_PATH];
+        // Header frame: the pass's own paint frame when it is known (the
+        // textures persist post-run), else the last captured frame.
+        const uint32_t hdrFrame = g_eye[i].kcPaintFrame ? g_eye[i].kcPaintFrame : kcFrame;
         if (g_eye[i].kcNear) {
             _snwprintf_s(kcPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KCNear%d.bin", dir.c_str(), g_eyeRunStamp, i);
-            kcNearOk[i] = writeEyeKcBin(ctx, g_eye[i].kcNear, kcFrame, kcPath);
+            kcNearOk[i] = writeEyeKcBin(ctx, g_eye[i].kcNear, hdrFrame, kcPath);
         }
         if (g_eye[i].kcFar) {
             _snwprintf_s(kcPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KCFar%d.bin", dir.c_str(), g_eyeRunStamp, i);
-            kcFarOk[i] = writeEyeKcBin(ctx, g_eye[i].kcFar, kcFrame, kcPath);
+            kcFarOk[i] = writeEyeKcBin(ctx, g_eye[i].kcFar, hdrFrame, kcPath);
         }
         if (kcNearOk[i] || kcFarOk[i]) { kcDim[0] = g_eye[i].kcW; kcDim[1] = g_eye[i].kcH; }
     }
@@ -2448,9 +2452,10 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
     fprintf(f, "{\n  \"schema\": 2,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n",
             g_eyeRunStamp, kEyeRun);
     fprintf(f, "  \"kinematic\": {\"session\": %u, \"generation\": %llu, \"count\": %u, "
-               "\"kc_frame\": %u, \"kc_size\": [%u, %u],\n",
+               "\"kc_frame\": %u, \"kc_paint_frame\": [%u, %u], \"kc_size\": [%u, %u],\n",
             g_kinSphereSession, static_cast<unsigned long long>(g_kinSphereGen),
-            g_kinSphereCount, kcFrame, kcDim[0], kcDim[1]);
+            g_kinSphereCount, kcFrame, g_eye[0].kcPaintFrame, g_eye[1].kcPaintFrame,
+            kcDim[0], kcDim[1]);
     fputs("    \"spheres_file\": ", f);
     if (kinSpheresOk) fprintf(f, "\"eye_%ls_KinSpheres.bin\"", g_eyeRunStamp); else fputs("null", f);
     fputs(", \"kc_near\": [", f);
@@ -3216,6 +3221,7 @@ void releaseKc(EyeState& e) {
     if (e.kcFar) { e.kcFar->Release(); e.kcFar = nullptr; }
     e.kcW = e.kcH = 0;
     e.kcFrame = UINT32_MAX;
+    e.kcPaintFrame = 0;
 }
 
 bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState& e,
@@ -3344,6 +3350,11 @@ bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState
     ctx->CSSetUnorderedAccessViews(0, 2, nullKcUav, nullptr);
     ctx->CSSetConstantBuffers(0, 1, &nullKcCb);
     e.kcFrame = snapFrame;
+    // The frame the pair was painted ON, for the burst dump: the textures
+    // persist post-run, so a readback at burst-write time shows the LAST
+    // painted frame, which can post-date the last captured crop (dump
+    // 160734's far lane did not reproduce from frame 14954's camera rows).
+    e.kcPaintFrame = g_rowsFrame;
     return true;
 }
 
