@@ -40,6 +40,7 @@
 #include "weapon_motion.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
+#include "kinematic_motion.h"
 #include "static_surface.h"
 #include "perf_monitor.h"
 #include "shader_swap.h"
@@ -6864,6 +6865,20 @@ void temporalPassConfigure(Config& cfg) {
     // which is the point: a lever, not a setting to fly with.
     celestialMotionConfigure(g_wanted && cfg.getBool("advanced.terrain_motion", true));
     meshMotionConfigure(g_wanted && cfg.getBool("advanced.mesh_motion", true));
+    // The kinematic tracker (docs/kinematic-motion-injection-2026-09-19.md):
+    // engine-truth stasis for settlement records. Stage A is diagnostics
+    // only -- no rendering change. auto is reserved until the scene gate
+    // lands and behaves as off, said once.
+    {
+        const std::string engineMotion = cfg.getString("fix.engine_motion", "off");
+        static bool engineMotionAutoNoted = false;
+        if (_stricmp(engineMotion.c_str(), "auto") == 0 && !engineMotionAutoNoted) {
+            engineMotionAutoNoted = true;
+            Log::get().note("engine motion: fix.engine_motion=auto is reserved until the "
+                            "scene gate lands -- behaving as off.");
+        }
+        kinematicMotionConfigure(g_wanted && _stricmp(engineMotion.c_str(), "on") == 0);
+    }
     const std::string staticFovea = cfg.getString("advanced.temporal_aa_fovea", "0");
     g_staticSurfacesOn = g_wanted && g_trainedWanted &&
                          g_temporalEngine == edvr::TemporalEngine::Nvidia &&

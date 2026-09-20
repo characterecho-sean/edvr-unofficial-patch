@@ -444,6 +444,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
+    "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
     "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
@@ -1973,4 +1974,23 @@ if errorlevel 1 ( echo [edvr] ERROR: kinematic JSON writer test build failed & e
 "%BUILD%\kinematic_json_test.exe" --dry-run || exit /b 1
 "%BUILD%\kinematic_json_test.exe" --self-test || exit /b 1
 python "tools\kinematic_json_selftest.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_kinematic_motion_test
+echo [edvr] === kinematic_motion_test.exe ===
+REM Build gate for the production kinematic tracker: the tracker decides
+REM which records are proven-static, a wrong label becomes a wrong motion
+REM vector in stage B, and compilation cannot catch a state-machine bug.
+REM The rig feeds synthetic eval-hook streams through the real module and
+REM asserts the labels and counters (the 8 cases of the 2026-09-20 10:52
+REM spec in docs\kinematic-motion-injection-2026-09-19.md).
+if not exist "%OBJ%\kinematicmotion" mkdir "%OBJ%\kinematicmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\kinematicmotion\\" /Fe"%BUILD%\kinematic_motion_test.exe" ^
+    "tools\kinematic_motion_test\kinematic_motion_test.cpp" "src\d3d11\kinematic_motion.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: kinematic motion tracker test build failed & exit /b 1 )
+"%BUILD%\kinematic_motion_test.exe" --dry-run || exit /b 1
+"%BUILD%\kinematic_motion_test.exe" --self-test || exit /b 1
 exit /b 0
