@@ -2491,8 +2491,13 @@ void hookDevice(ID3D11Device* device) {
     // Unlike everything else in this DLL, this writes to the game's code. It
     // identifies what it edits by shape rather than by build, refuses if what it
     // finds does not look right, and undoes itself on unload. Asking for the
-    // stock resolution -- which is what the shipped ini does -- is a no-op it
-    // takes before scanning anything.
+    // stock resolution is a no-op it takes before scanning anything; fix.
+    // vscreen_res_width ships as "auto" now, resolved by
+    // resolveVScreenTargetResolution (vscreen_res.cpp) into a width and a
+    // height that always keeps 16:9 -- there is no independent height setting
+    // any more. "Auto" has nothing to go on until a session with VR running
+    // has completed once, so a fresh install behaves exactly like the old
+    // 1920x1080 default until then.
     //
     // It is NOT part of the toggle hotkey, and cannot be: it changes what size
     // the game ALLOCATES, so images already made keep the size they were made
@@ -2500,8 +2505,8 @@ void hookDevice(ID3D11Device* device) {
     // worse than either. Comparing it means changing the value and restarting.
     {
         Config& cfg = Config::get();
-        const uint32_t w = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_width", 0));
-        const uint32_t h = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_height", 0));
+        uint32_t w = 0, h = 0;
+        resolveVScreenTargetResolution(cfg, &w, &h);
         // Elite's own on-foot panel size, and what the panel still renders at if
         // the patch is not asked for or refuses.
         const uint32_t kStockW = 1920, kStockH = 1080;

@@ -37,6 +37,7 @@
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
+#include "vscreen_res.h"
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
 // reaches AMD's price and its name through temporal_pass.h's
 // temporalPassTrainedTotals, which answers for the engine in force (F6).
@@ -320,6 +321,37 @@ bool isOpenxrRenderScaleRow(const MenuRowDef& d) {
 // everything above rather than by the generic integer row below.
 bool isHeadsetRow(const MenuRowDef& d) {
     return d.headset && !isOpenxrRenderScaleRow(d);
+}
+
+// The on-foot panel's width: "auto", or a width in pixels -- never a list, so
+// this is not a headset row despite living beside one in the ini. The height
+// is not a setting any more; it is derived from whichever width applies.
+bool isVscreenResolutionRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "vscreen_res_width") == 0;
+}
+
+constexpr uint32_t kVscreenWidthLo = 640, kVscreenWidthHi = 8192;
+
+// "auto" (any case), or digits within the panel patch's own sane range --
+// vscreen_res.cpp refuses outside it anyway, so a value this rejects would
+// only be refused later with a less specific message.
+bool parseVscreenWidth(const std::string& text, uint32_t* out) {
+    std::string v = text;
+    while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+    while (!v.empty() && v.back() == ' ') v.pop_back();
+    if (_stricmp(v.c_str(), "auto") == 0) {
+        if (out) *out = 0;
+        return true;
+    }
+    if (v.empty() || v.size() > 5) return false;
+    uint32_t value = 0;
+    for (char c : v) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<uint32_t>(c - '0');
+    }
+    if (value < kVscreenWidthLo || value > kVscreenWidthHi) return false;
+    if (out) *out = value;
+    return true;
 }
 
 bool coherentNativeRenderSizing(const EdvrNativeRenderSizing& sizing) {
@@ -1936,6 +1968,20 @@ void buildContent(MenuContent& c) {
             if (hi && headsetRow) {
                 snprintf(c.hint, sizeof(c.hint), "%s", headsetRowHint(headsetValue).c_str());
             }
+            if (hi && isVscreenResolutionRow(d)) {
+                // announce=false: this runs every frame the row is highlighted,
+                // not once at startup, so the resolver must stay silent here.
+                uint32_t vw = 0, vh = 0;
+                resolveVScreenTargetResolution(Config::get(), &vw, &vh, /*announce=*/false);
+                if (vw && vh) {
+                    snprintf(c.hint, sizeof(c.hint), "Currently resolves to %ux%u.", vw, vh);
+                } else {
+                    snprintf(c.hint, sizeof(c.hint),
+                             "No runtime width on record yet; the panel stays at the "
+                             "game's own 1920x1080 until a session with VR running has "
+                             "completed once.");
+                }
+            }
             if (hi && showTip) {
                 // The tooltip beside the row: what the ini says about this
                 // key, in the ini's own words, plus the facts a person
@@ -1955,6 +2001,9 @@ void buildContent(MenuContent& c) {
                     body += openxrResolutionFacts();
                 } else if (headsetRow) {
                     body += headsetRowFacts(d, headsetValue);
+                } else if (isVscreenResolutionRow(d) && d.lo[0] && d.hi[0]) {
+                    body += std::string("\"auto\", or a width in pixels from ") + d.lo +
+                            " to " + d.hi + ". The height always follows it at 16:9.  ";
                 } else if (d.kind == MenuKind::Number && d.lo[0] && d.hi[0]) {
                     body += std::string("Range ") + d.lo + " to " + d.hi + ".  ";
                 } else if (d.kind == MenuKind::Choice) {
@@ -2644,6 +2693,7 @@ bool editBufferBad() {
     // 1..16384, or the row's own range -- never the list.
     if (isOpenxrRenderScaleRow(d)) return !parseTypedWidth(s.editBuf, nullptr);
     if (isHeadsetRow(d)) return !parseTypedHeadsetValue(d, s.editBuf, nullptr);
+    if (isVscreenResolutionRow(d)) return !parseVscreenWidth(s.editBuf, nullptr);
     if (d.kind != MenuKind::Number) return false;
     if (s.editBuf.empty()) return true;
     char* end = nullptr;
@@ -2731,6 +2781,8 @@ void commitEdit() {
         // title).
         if (isOpenxrRenderScaleRow(d)) {
             s.lastWrite = "not written: needs a width in pixels, 1 to 16384";
+        } else if (isVscreenResolutionRow(d)) {
+            s.lastWrite = "not written: needs \"auto\" or a width in pixels, 640 to 8192";
         } else if (isHeadsetRow(d)) {
             // As above, the dotted key is dropped: the row is highlighted and
             // the key is the tooltip's title, and the line has to fit the

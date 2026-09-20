@@ -76,10 +76,10 @@ which is why screen curvature and panel distance have no effect on it -- the
 field observation that started the hunt.
 
 **Panel resolution makes it worse.** The backdrop is pinned at 1920x1080 at
-every stage before the composite. Raising `vscreen_res_width`/`_height`
-sharpens everything around it and magnifies it further, so on a 5120x2880
-panel the backdrop is the softest thing in view. This is the opposite of the
-intuition and it is worth saying in the ini, which it is.
+every stage before the composite. Raising `vscreen_res_width` sharpens
+everything around it and magnifies it further, so on a 5120-wide panel the
+backdrop is the softest thing in view. This is the opposite of the intuition
+and it is worth saying in the ini, which it is.
 
 ## The signature
 

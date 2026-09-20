@@ -13,6 +13,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "shader_swap.h"
+#include "vscreen_res.h"
 
 // AMD's own FSR, CPU side: A_CPU gives FsrEasuCon and FsrRcasCon, which
 // compute the constants each pass needs. Transcribing that arithmetic by hand
@@ -668,8 +669,16 @@ void introUpscaleConfigure(Config& cfg) {
                           : (ivm.upscale == 1 ? Mode::kSharp : Mode::kOff);
     const float wasDeband = g_deband;
     const float wasSharpen = g_sharpen;
-    g_targetW = static_cast<uint32_t>(
-        cfg.getIntInRange("fix.vscreen_res_width", 1920, 640, 8192));
+    {
+        // The same question the panel patch asks (vscreen_res.cpp), asked
+        // once: "auto" now resolves through resolveVScreenTargetResolution
+        // rather than a plain getIntInRange, so the movie tracks the same
+        // width the on-foot screen does instead of falling back to a plain
+        // "auto is not a number" warning on every default-config launch.
+        uint32_t vw = 0, vh = 0;
+        resolveVScreenTargetResolution(cfg, &vw, &vh, /*announce=*/false);
+        g_targetW = vw;
+    }
     g_deband = static_cast<float>(
         cfg.getIntInRange("advanced.intro_video_deband", 8, 0, 64));
     g_dither = static_cast<float>(

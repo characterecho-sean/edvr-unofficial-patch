@@ -2,9 +2,11 @@
 
 #include <windows.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
+#include "../common/config.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
 
@@ -306,6 +308,124 @@ void revertVScreenModeResolution() {
                     g_origW, g_origH, g_count);
     g_applied = false;
     g_count = 0;
+}
+
+// --- "auto": 125% of what the runtime actually rendered per eye last time ---
+//
+// WHY LAST SESSION'S NUMBER, NOT THIS ONE'S. The panel patch above has to run
+// at device creation, before the game builds its render chain -- that is the
+// whole reason this file exists as a code patch rather than a config value.
+// But the OpenXR host that resolves fix.openxr_resolution into a real per-eye
+// width is not even constructed until the game's device has Presented
+// (docs/openxr-resolution-per-headset-2026-09-14.md), which is well after
+// device creation. So at the moment this session's own panel size has to be
+// decided, this session's own headset is not identified yet, let alone its
+// resolved width. Persisting the LAST session's answer and reading it back
+// here is the only way "auto" can track the runtime resolution at all without
+// moving the patch later than "the device exists" -- which is not a change to
+// make on a hypothesis, given what a wrong guess there costs.
+//
+// The trade this accepts: a resolution change tracks one restart late, which
+// is no worse than this setting already requires for a manual change to take
+// effect, and a fresh install runs "auto" as "off" (the same stock 1920x1080
+// as before) until one session with VR running has completed.
+namespace {
+
+// Not headset-keyed, unlike fix.openxr_resolution: this is a single "what did
+// we last see" fact, not a per-headset table. Swapping headsets between
+// sessions costs one extra restart to settle, which was accepted as the
+// simplest workable design rather than built around.
+constexpr wchar_t kAutoWidthFile[] = L"vscreen_auto_eye_width.txt";
+
+// 125%: modest headroom over the runtime's own per-eye width, not a match-or-
+// double swing -- the panel is a single flat (mono) texture, cheap to raise
+// relative to a stereo pair, but there is no reason to chase the eye width by
+// a large multiple either.
+constexpr double kAutoWidthMultiplier = 1.25;
+
+std::wstring autoWidthStatePath(const std::wstring& logDir) {
+    return logDir + L"\\" + kAutoWidthFile;
+}
+
+// Nearest multiple of 16, so width * 9 / 16 is an exact integer -- an honestly
+// 16:9 pair rather than one a fraction of a pixel off, which would trip the
+// "not 16:9" warning applyVScreenModeResolution already prints above.
+uint32_t roundTo16(double value) {
+    return static_cast<uint32_t>((value / 16.0) + 0.5) * 16;
+}
+
+// The last session's resolved per-eye width, or false when none is on record
+// yet -- a fresh install, or a log directory that was cleared.
+bool lastKnownEyeWidth(const std::wstring& logDir, uint32_t* outWidth) {
+    if (outWidth) *outWidth = 0;
+    if (logDir.empty()) return false;
+    HANDLE f = CreateFileW(autoWidthStatePath(logDir).c_str(), GENERIC_READ,
+                           FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    char buf[16] = {};
+    DWORD readBytes = 0;
+    const bool ok = ReadFile(f, buf, sizeof(buf) - 1, &readBytes, nullptr) != 0;
+    CloseHandle(f);
+    if (!ok || !readBytes) return false;
+    buf[readBytes] = '\0';
+    const long value = strtol(buf, nullptr, 10);
+    if (value < static_cast<long>(kMinWidth) || value > 65535) return false;
+    if (outWidth) *outWidth = static_cast<uint32_t>(value);
+    return true;
+}
+
+}  // namespace
+
+void noteResolvedEyeWidthForVScreenAuto(const std::wstring& logDir, uint32_t eyeWidth) {
+    if (!eyeWidth || logDir.empty()) return;
+    // Log::open() may not have created this directory: log.enabled = 0 is a
+    // documented setting, and Sentinel::arm() guards against the same gap.
+    CreateDirectoryW(logDir.c_str(), nullptr);
+    HANDLE f = CreateFileW(autoWidthStatePath(logDir).c_str(), GENERIC_WRITE, 0,
+                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    char text[16];
+    const int n = snprintf(text, sizeof(text), "%u\n", eyeWidth);
+    DWORD written = 0;
+    if (n > 0) WriteFile(f, text, static_cast<DWORD>(n), &written, nullptr);
+    CloseHandle(f);
+}
+
+void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
+                                    bool announce) {
+    if (outWidth) *outWidth = 0;
+    if (outHeight) *outHeight = 0;
+    const std::string widthCfg = cfg.getString("fix.vscreen_res_width", "auto");
+    uint32_t w = 0;
+    if (_stricmp(widthCfg.c_str(), "auto") == 0) {
+        uint32_t eyeWidth = 0;
+        if (!lastKnownEyeWidth(cfg.logDir(), &eyeWidth)) {
+            if (announce) {
+                Log::get().note(
+                    "vScreen resolution: auto, but no per-eye render width is on record "
+                    "yet for this install -- the on-foot screen stays at the game's own "
+                    "1920x1080 until a session with VR running has completed once. Set "
+                    "fix.vscreen_res_width to a width in pixels instead if you don't want "
+                    "to wait.");
+            }
+            return;
+        }
+        w = roundTo16(static_cast<double>(eyeWidth) * kAutoWidthMultiplier);
+        if (announce) {
+            Log::get().note(
+                "vScreen resolution: auto = %u wide (%.0f%% of the %u wide the runtime "
+                "last rendered per eye).",
+                w, kAutoWidthMultiplier * 100.0, eyeWidth);
+        }
+    } else {
+        w = static_cast<uint32_t>(atoi(widthCfg.c_str()));
+        if (!w) return;  // "0", empty or unparsable: the same "leave it alone" as before
+    }
+    if (w < kMinWidth) w = kMinWidth;
+    if (w > 8192) w = 8192;
+    if (outWidth) *outWidth = w;
+    if (outHeight) *outHeight = (w * 9 + 8) / 16;
 }
 
 }  // namespace edvr

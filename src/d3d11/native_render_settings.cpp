@@ -11,6 +11,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
+#include "vscreen_res.h"
 
 namespace {
 std::mutex g_sizingMutex;
@@ -248,9 +249,17 @@ extern "C" BOOL WINAPI edvrPublishNativeRenderSizing(uint32_t version,
                candidate.eyes[eye].originalHeight,candidate.eyes[eye].maxHeight,candidate.effectiveScale))
             return FALSE;
     }
-    std::lock_guard<std::mutex> lock(g_sizingMutex);
-    if(g_sizing.valid && candidate.generation<g_sizing.generation) return FALSE;
-    g_sizing=candidate;
+    {
+        std::lock_guard<std::mutex> lock(g_sizingMutex);
+        if(g_sizing.valid && candidate.generation<g_sizing.generation) return FALSE;
+        g_sizing=candidate;
+    }
+    // Remembered for a LATER launch's fix.vscreen_res_width = auto, which has
+    // to decide the on-foot panel's size before this session's own headset is
+    // known (vscreen_res.cpp). Eye 0 only: the panel is mono and one width is
+    // all "auto" derives from.
+    edvr::noteResolvedEyeWidthForVScreenAuto(edvr::Config::get().logDir(),
+                                             candidate.activeWidth[0]);
     return TRUE;
 }
 

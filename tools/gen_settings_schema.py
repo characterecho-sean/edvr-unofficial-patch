@@ -345,9 +345,9 @@ def parse_ini(path):
         s.live = not commented
         s.description = ' '.join(prose).strip()
         if not s.description and settings and settings[-1].section == section:
-            # edvr.ini documents some settings as a group -- vscreen_res_width
-            # and _height, the three head-offset axes -- with one comment block
-            # above the first. The others are not undocumented; they share it.
+            # edvr.ini documents some settings as a group -- the three
+            # head-offset axes, for instance -- with one comment block above
+            # the first. The others are not undocumented; they share it.
             s.description = settings[-1].description
         s.group = group
         s.movedFrom = list(movedFrom)
