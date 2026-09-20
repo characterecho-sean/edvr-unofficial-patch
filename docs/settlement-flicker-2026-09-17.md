@@ -70,15 +70,19 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-  Stage B (ownership coverage + compose veto) is blocked on decoding the
-  world-bounds layout from stage A's dump (11:20 entry).
+  Stage B (ownership coverage + compose veto): the +0xB0..+0x130 block
+  decoded as the world TRANSFORM, not bounds (13:05 entry) -- world
+  centre is +0x240, the extents are not yet located; a widened raw
+  capture is the next instrument.
 - Build: v0.17.0-119-g6899d0ff-dirty installed to frontier (CFDEFA79),
-  the nine 2026-09-20 review fixes on stage A (12:45 entry);
-  supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). The 064047 flight
-  proved record+0x170 is the per-frame world position (06:45 entry).
-  INIs unchanged; fix.engine_motion defaults off and must be set on in
-  the live ini for the tracker. Flight check: --expect-build
-  v0.17.0-119-g6899d0ff-dirty.
+  the nine 2026-09-20 review fixes on stage A (12:45 entry),
+  flight-proven by 125207 (13:05 entry: tracker clean, bounds block
+  decoded); supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). The
+  064047 flight proved record+0x170 is the per-frame world position
+  (06:45 entry). INIs unchanged; fix.engine_motion defaults off and
+  must be set on in the live ini for the tracker (the 12:46 flight
+  had it under [advanced] -- dark, not evidence). Flight check:
+  --expect-build v0.17.0-119-g6899d0ff-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6610,3 +6614,56 @@ kinematic_probe_test 25 checks, kinematic_json gate round-trips the
 new key, full build green (71 jobs, config contract 252 keys).
 Build: v0.17.0-119-g6899d0ff-dirty installed to frontier (CFDEFA79);
 supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). INIs unchanged.
+### 2026-09-20 13:05 -- flight 125207: tracker clean, +0xB0..+0x130 decoded as the world transform
+
+- Build check: v0.17.0-119-g6899d0ff-dirty (6AB0284E) -- the
+  review-fix build, fix.engine_motion=on in the live ini. (The 12:46
+  flight had the key under [advanced]; the unread-keys log line caught
+  it and that flight is not evidence.)
+- Tracker live from launch (12:52:07.703). Summaries every 20 s; final
+  tally: observed 132.5M, dup 120.2M, faults 0, overflow 0, node
+  changes 0, same-frame invalidations 0 -- the dup-invariance
+  assumption the finding-1 fix defends held universally. 31 gap drops
+  late (session end). The 10 s no-mover note fired correctly during
+  the menu phase (8 records, still scene).
+- Eligible set 2,571-2,636 per frame vs the 103339 census's <=1 mm
+  band of 2,583 -- the bit-exact rule labels the population the
+  offline census predicted. Near-miss: 374,482 of 1,690,073
+  translation changes (22%) are sub-1 mm wobble on MOVERS; eligible
+  stayed stable, so bit-exactness is NOT refuted -- the wobble rides
+  on genuinely moving records.
+- Zero-record frames 9,923/14,465 are the menu/loading phases around
+  the settlement segment (in-scene feed healthy, faults 0). These are
+  the tracker's own counts -- artifact-free by construction (the
+  probe's seed-flush artifact, finding 7, never existed here).
+- Bounds dump: part A frame 10292 (8 movers + 8 statics) and part B
+  frame 10293. The finding-6 gate held: part A fired on the first
+  settlement frame where BOTH populations qualified, not at session
+  frame 2. Decode (raw lines in this log, 12:53:40):
+  +0xB0..+0xEF constant identity 3x4 + zero row across all 16 records
+  (likely parent-relative, unproven); +0xF0..+0x11F rotation, three
+  padded float4 rows (unit rows, third ~= cross of the first two);
+  +0x120..+0x12B translation numerically EQUAL to the +0x170 pose in
+  all 16 records (e.g. id=1452: c38c6780 42772800 c3b0b980 =
+  -280.809,61.789,-353.449); +0x12C zero. All 32 words bit-identical
+  between the two frames for all 16 records: no view products in the
+  block, and the top-by-path movers were stationary across the pair
+  (run 2 -> 3, bit-exact).
+- REFUTED: the decomp reading "world-bounds recompute at
+  record+0xB0..0x12C" -- the block is the world transform (rotation +
+  translation == +0x170); there are no min/max bounds in it. The
+  updater's 64-byte current/previous pair (+0xF0 -> +0x1C0,
+  decomp_433DB20:506-513) is this rotation+translation matrix; its
+  +0x120 change-test (line 398) is the translation compare. CONFIRMED:
+  +0x240 is the world centre (statics: a few metres off the origin,
+  e.g. id=143 pos (-80.442,70.150,-237.202) vs centre
+  (-79.85,73.20,-238.90); zero for the dumped movers).
+- Stage B consequence: the ownership coverage needs a world AABB and
+  the extents are not in the captured block -- centre at +0x240,
+  extents somewhere else (local AABB in LOD data transformed by this
+  matrix, or a field past +0x240). Next instrument: widen the raw
+  capture toward +0x130..+0x250 for the same dump set.
+- Eye dump taken (eye_125429_*, 12:54:29). The eval probe's own JSON
+  capture was not armed this flight; its fixes (findings 2/3/7/9) are
+  covered by the new kinematic_probe_test gate and await the next
+  armed capture.

@@ -511,3 +511,21 @@ trigger in the tracker (rig cases 9-12), identity-before-motion,
 no-state-from-partial-reads, seed-without-flush and non-finite
 rejection in the probe (kinematic_probe_test, 25 checks), and the hook
 gate/validation/job-timing races closed by construction.
+## 2026-09-20 (13:05) -- the bounds block is the world transform, not bounds
+
+Flight 125207's dump (settlement doc 13:05 entry, raw lines at
+12:53:40 in the log): +0xB0..+0x130 is bit-identical across the two
+dumped frames for all 16 records and contains no min/max pair.
++0xF0..+0x11F is a rotation (three padded float4 rows),
++0x120..+0x12B the translation -- numerically equal to the +0x170
+pose in every dumped record -- and +0xB0..+0xEF a constant identity
+3x4 (likely parent-relative, unproven). The "world-bounds recompute at
+record+0xB0..0x12C" reading of FUN_14432CCC0/FUN_14433DB20 is refuted;
+what recomputes there is the transform. +0x240 is confirmed as the
+world centre (statics).
+
+Stage B's ownership coverage therefore needs the extents from
+elsewhere: the local AABB (LOD/model data) transformed by this matrix,
+or a field past +0x240. The next stage-A instrument widens the raw
+capture toward +0x130..+0x250 for the same mover/static dump set
+before any GPU work is spec'd.
