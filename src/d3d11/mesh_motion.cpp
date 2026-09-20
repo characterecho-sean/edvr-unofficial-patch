@@ -731,6 +731,7 @@ void meshMotionShutdown(){
     failed=noted=capped=diagnosticWindowHadComparison=false;drawGpu={};matchGpu={};captureGpu={};comparisonCopyGpu={};comparisonCoverageGpu={};comparisonFlushGpu={};comparison={};frames=draws=captureBatches=capturedInstances=0;frameStamp=0;normalCaptureGpuFrame=~uint64_t(0);diagnostics={};admissionClockCalls=0;watched.clear();geometryEpoch=geometryWrites=unknownWrites=rangeWrites=disjointIndices=0;dump.Reset();dumpPrevious.Reset();dumpCount=dumpPreviousCount=0;dumpSceneFrame=~0u;dumpMeshFrame=dumpEye=dumpWidth=dumpHeight=dumpWriteSlot=0;
 }
 void meshMotionArmClassification(){objectClassificationProbe.arm(mesh_motion_detail::frames);}
+unsigned meshMotionFrameCount() noexcept{return mesh_motion_detail::frames;}
 void meshMotionStageClassification(ID3D11DeviceContext* ctx,ID3D11Texture2D* scene,unsigned sceneFrame,ID3D11Texture2D* colour){
     using namespace mesh_motion_detail;
     if(!objectClassificationProbe.active() || !ctx || !scene || !enabled || failed)return;

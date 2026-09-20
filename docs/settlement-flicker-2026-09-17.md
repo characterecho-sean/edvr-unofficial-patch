@@ -49,19 +49,21 @@
   counter is REFUTED as the tracker clock (3 ticks in ~51 rendered
   frames; gap/node-change detectors disabled by the stall — zero
   identity events is uninformative). Tracker clock = EDVR's own
-  present/temporal-pass frame index. Drone group re-found with the
+  present/temporal-pass frame index — LANDED in
+  v0.17.0-107-g5fe9c004-dirty (09:35 entry). Drone group re-found with the
   064047 fingerprint; quaternion decode validated (unit norms);
   sign canonicalization required before differencing.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-103-g267d0430-dirty installed to frontier (D3CA6EA1),
-  adding the frame-aligned pose/identity capture to KinematicEvalProbe
-  (08:22 entry); supersedes v0.17.0-101-g39e6a422-dirty (BE7E7188).
-  The 064047 flight proved record+0x170 is the per-frame world position
-  (06:45 entry). INIs unchanged. Flight check: --expect-build
-  v0.17.0-103-g267d0430-dirty.
+- Build: v0.17.0-107-g5fe9c004-dirty installed to frontier (02D09A2A),
+  re-clocking KinematicEvalProbe on the per-present frame counter with
+  the clock_samples mesh-staleness discriminator (09:35 entry);
+  supersedes v0.17.0-103-g267d0430-dirty (D3CA6EA1). The 064047 flight
+  proved record+0x170 is the per-frame world position (06:45 entry).
+  INIs unchanged. Flight check: --expect-build
+  v0.17.0-107-g5fe9c004-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6291,3 +6293,43 @@ zero read faults. Analysis scratch: build\pose-diag-analysis-083323.md.
 Next flight discriminator: log the mesh-frame counter once per present
 frame to learn what it actually counts.
 
+### 2026-09-20 09:35 — instrument: probe re-clocked on the present frame counter (installed to frontier)
+
+Flight 083323 refuted the mesh-frame counter as the tracker clock: it
+ticked 3 times in ~51 rendered frames, which stalled every frame-aligned
+stat (a "frame" lasted ~17 presents; gap-resume and node-change
+detectors were effectively disabled, so zero identity events there is
+uninformative). The probe now runs on g_state->frameCounter in
+device_hook.cpp — the session's canonical frame number, incremented
+exactly once per owned Present before any feature gates — via a new
+entry point KinematicEvalProbe.notePresentFrame(presentFrame,
+meshClock), called immediately after ++g_state->frameCounter. The
+alternative site beside vScreenFrameBoundary sits behind the
+graphicsRuntimeDisabled early return and would skip those presents, so
+it was rejected; exactly-once-per-owned-present is the hard requirement.
+The object_classification_probe setFrame fan-out no longer forwards the
+mesh clock to kinematicEvalProbe (objectRecordWriterProbe keeps it,
+unchanged); arm() still takes the legacy mesh stamp, which only seeds
+frame_ until the first notePresentFrame overwrites it.
+
+Each call also appends {present, mesh} to a bounded (4096) clock_samples
+ring — the mesh-staleness discriminator. Gated on active like the rest
+of the probe: the log lives and dies with the capture lifecycle. The
+mesh counter resets to 0 on every config re-poll (the once-per-second
+re-configure runs meshMotionShutdown), so absolute mesh values are only
+meaningful between configure events; the per-window ratio is the
+signal. Next flight should show mesh:present ≈ 3:51 in a steady window
+and the actual tick cadence; if mesh ticks align with configure or
+streaming events the ring will show it directly. Failure modes read
+clean: if notePresentFrame is never called, clock_samples is empty and
+frames_counted is 0 (dead instrument, not success); if the mesh
+accessor returns garbage the ratio is nonsense but the present clock
+and all frame-aligned stats still work.
+
+JSON gate extended in the same change: fixture gained 2 clock_samples
+(same mesh value twice — the staleness signature) and the
+clock_sample_overflow summary counter, asserted by exact dict equality.
+Gate green on first run.
+
+Build v0.17.0-107-g5fe9c004-dirty installed to frontier (02D09A2A); all
+gates green. INIs unchanged. Not yet flown.

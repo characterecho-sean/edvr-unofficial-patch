@@ -372,7 +372,11 @@ public:
         foreignWrites_.fetch_add(1,std::memory_order_relaxed);
         foreignEpoch_.fetch_add(1,std::memory_order_release);
     }
-    void setFrame(uint32_t meshFrame){objectRecordWriterProbe.setFrame(meshFrame);kinematicEvalProbe.setFrame(meshFrame);std::lock_guard<std::recursive_mutex> lock(mutex_);currentFrame_=meshFrame;}
+    // kinematicEvalProbe is no longer clocked here: the mesh clock was
+    // refuted by flight 083323 (3 ticks in ~51 rendered frames), and the
+    // probe is now clocked per-present via notePresentFrame from
+    // device_hook. objectRecordWriterProbe keeps the mesh clock.
+    void setFrame(uint32_t meshFrame){objectRecordWriterProbe.setFrame(meshFrame);std::lock_guard<std::recursive_mutex> lock(mutex_);currentFrame_=meshFrame;}
     void noteDraw(ID3D11DeviceContext* ctx,uint32_t meshFrame,uint32_t eye,uint32_t firstRecord,
                   uint32_t instances,ID3D11Buffer* pool,ID3D11Buffer* ids,uint32_t idByteOffset,
                   const uint32_t* key16,uint64_t vertexShaderHash=0) {

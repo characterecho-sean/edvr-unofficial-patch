@@ -1,4 +1,4 @@
-﻿#include "../common/vr_census.h"
+#include "../common/vr_census.h"
 #include "device_hook.h"
 #include "game_exit_probe.h"
 #include "gpu_timing.h"
@@ -52,6 +52,7 @@
 #include "exposure_fix.h"
 #include "menu.h"
 #include "mesh_motion.h"
+#include "kinematic_eval_probe.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "perf_monitor.h"
 #include "vscreen.h"
@@ -994,6 +995,11 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // whether the table changed before the hang or after it, and neither
         // number could answer it. One counter, published here, printed by both.
         ++g_state->frameCounter;
+        // The kinematic probe's clock: exactly once per owned Present. Here,
+        // not beside vScreenFrameBoundary below -- that site sits behind the
+        // graphicsRuntimeDisabled early return and would skip those presents.
+        kinematicEvalProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter),
+            meshMotionFrameCount());
         // The write watch's per-frame work, here rather than inside
         // vScreenReclaimTick where the re-arm used to sit behind
         // `if (!g_state) return;`. In the two context probes vScreen never
