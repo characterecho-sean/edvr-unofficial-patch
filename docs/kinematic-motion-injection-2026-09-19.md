@@ -65,6 +65,10 @@
   to frontier, verified). Flight 132856 then CONFIRMED the sphere end
   to end (settlement doc 13:45 entry): sane radii, and world centre
   +0x240 == R^T x local + T exactly on all statics. Stage B unblocked.
+  Update 13:55: stage B spec'd below against the flight-proven sphere
+  layout -- sphere projection replaces the 10:52 AABB-corners sketch,
+  the stasis compare extends to pose+sphere (the LOD-rewrite case),
+  world centre is computed (R^T x local + T), never read.
 
 ## Premise
 
@@ -586,3 +590,148 @@ unioned record's centre w drifts off zero (id=148, w=0.00097); lanes
 0-2 are unaffected. Stage B is unblocked on flight evidence, not just
 the decomp: world sphere = +0x240 where written, else R^T x +0x270 +
 +0x120; world radius = +0x280 x max column scale (1.0 observed).
+
+## 2026-09-20 (13:55) -- stage-B spec: sphere-backed ownership coverage
+
+Stage B unblocked by flight 132856 (13:45 entry). This supersedes the
+10:52 spec's Ownership (GPU) section wherever they disagree; everything
+else in the 10:52 spec stands. Ship gate unchanged: shimmer visibly
+gone in the temporal_aa_debug MV view, measured before/after, before
+any DLSS-consuming change is discussed.
+
+### What the flight changed
+
+The 10:52 spec assumed a world AABB (bMin/bMax from +0xB0..0xEC, "the
+bounds' 8 corners"). That reading was refuted (13:05 entry) and the
+truth is flight-proven (13:45): each record carries a bounding SPHERE
+-- local centre float4 at +0x270, local radius float at +0x280 --
+written at spawn/LOD refresh by FUN_14433C870, unioned over children.
+World centre is computed, never read: R^T x local + T with the +0xF0
+3x3 (rows = basis-vector images, unit scale observed) and +0x120
+translation; exact to 0.0000 on all 8 dumped statics. +0x240 is the
+game's own world centre but is zero for guard-off records, so the
+injector does not consume it. World radius = local radius x max 3x3
+column scale (1.0 observed; the multiply stays, scales exist in ElDorado
+content even if the settlement set didn't show one).
+
+### Tracker change (the only CPU behavior change)
+
+The stasis compare extends from the 20 pose bytes to 20 + 32 bytes:
+pose (+0x170..+0x183) plus the sphere (+0x270..+0x28F). Reason: the
+sphere has a writer INDEPENDENT of pose -- an LOD refresh rewrites
++0x270/+0x280 with zero pose change, and a stale sphere injected after
+an LOD swap is exactly the wrong-MV class stage B exists to kill.
+Folding the sphere into the bit-exact compare turns an LOD rewrite
+into the standard 3-frame re-proof. The sphere bytes are read per
+record per frame alongside the pose (3.5k records x 52 B -- noise).
+
+Eligible-record state gains a cached world sphere (centre float3 +
+radius float), computed at eligibility time from +0x270/+0x280 and
++0xF0/+0x120. Recompute happens only on re-eligibility, which the
+extended compare forces on any sphere or pose change; a bit-static
+pose implies a bit-static matrix (125207: the whole +0xB0..0x130
+block bit-identical across frames), so the cache is exact while
+eligible. The one-shot diagnostic dump (dumpBoundsLocked) is
+untouched -- it stays the regression anchor for future flights.
+
+### GPU upload
+
+Structured buffer, 80 B per record, cap = kTrackCap (4,096; the
+tracker never hands over more, so overflow is impossible by
+construction -- stated, not handled):
+
+    struct KinSphereGpu {
+        float    centre[3];      // world
+        float    radius;         // world
+        uint32_t kind;           // 0 = static-zero (phase-2 seam)
+        uint32_t reserved[3];
+        float    prevMap[12];    // 3x4, zero-filled in phase 1 (seam)
+    };
+
+Versioned upload: a generation counter bumps when the eligible set or
+any member's world sphere changes; the upload is skipped when the
+generation is unchanged (the coverage texture still rebuilds every
+frame -- the camera moves). Typical settlement frame: zero upload,
+one bounded compute pass per eye.
+
+### Coverage pass (replaces "8 corners")
+
+One thread per uploaded record per eye, quarter-res R32G32_UINT
+[near,far] reversed-Z span texture, empty sentinel stated, as in the
+10:52 spec -- but the projection is the conservative SPHERE rect, not
+8 AABB corners: view-space centre (xv,yv,zv) via the eye's
+current-frame view rows (the 10:52 camera-rows rule stands and is the
+#1 expected bug class); screen rect = NDC(centre) +-
+(fx*r/zv, fy*r/zv) with fx/fy from the same frame's projection;
+depth span [zv - r, zv + r] mapped through the frame's reversed-Z
+mapping, 24-bit quantized, InterlockedMin/Max. Tighter and cheaper
+than 8 corner projections; the coarse coverage + full-res depth-gate
+precision split is unchanged.
+
+### Compose veto
+
+Unchanged from the 10:52 spec (Compose integration): KC at t19, flag
+bit 256, bound at all three SRV-array sites with the nullptr = off
+precedent, kinematicStatic(p) beside meshPixel consulted FIRST at both
+call sites, uiCovered rejection, the named relative depth margin sized
+by the mis-own diagnostic (no silent tuning), and the movers-view
+debug paint as the ship-gate readout. The only delta: the [near,far]
+span is now the sphere's [zv - r, zv + r] instead of AABB corners.
+
+### Config
+
+No new key. fix.engine_motion=on completes its documented meaning
+(tracker + coverage + veto). The edvr.ini doc block's "this build is
+tracker plus diagnostics only -- no rendering change yet" sentence is
+replaced in the same commit with the phase-1 behavior (coverage +
+static-zero veto, movers and unknowns untouched) -- the key, its
+position, and the commented form stay; check_config_contract.py runs
+in the gate.
+
+### Failure modes (added to the 10:52 list, each logged distinctly)
+
+- Coverage pass with zero uploaded records while active: stand-down
+  counter, not a pass (same shape as the zero-record frame rule).
+- A record eligible with radius <= 0 or non-finite sphere bytes:
+  counted and never uploaded (the failed-reads-fabricate-motion class
+  from the 12:45 review -- no state from implausible reads).
+- Upload generation unchanged for a full summary window while the
+  eligible count moved: counted; stale-buffer suspicion is named in
+  the log, never silently patched.
+
+### Gates and tests (extend kinematic_motion_test, currently 52 checks)
+
+1. LOD-swap case: sphere bytes change with pose bit-static ->
+   invalidation, 3-frame re-proof, no upload in between.
+2. Flight fixtures: 3 dumped records from 132856 (R, T, local centre ->
+   expected +0x240 world centre) asserted under 1 mm -- this anchors
+   the transpose convention against any future "cleanup".
+3. Radius scale multiply: a fixture 3x3 with column scale 2 doubles
+   the uploaded radius.
+4. Upload set contents and generation: bump on set/member change,
+   skip when unchanged; eligible > cap impossible by construction
+   (asserted, not handled).
+5. Implausible sphere (radius <= 0, non-finite) never uploads and is
+   counted.
+Shader side: temporal_shader_build.exe --self-test green; the t19
+symbol and any new helper names checked against the entry-point
+collision class before flying; temporal_pass flag-word bit 256 as
+spec'd at 10:52.
+
+### Flight verification plan
+
+Protocol unchanged (settlement, drone visibly moving, 30 s,
+fix.engine_motion=on, eye dump; temporal_aa_debug = motion then
+movers). Expected: the 10:52 tracker expectations plus generation/
+stand-down counters at zero; movers view paints static tint on
+settlement surfaces, NOT the drone, NOT occlusion edges against
+nearer geometry; motion view shows settlement geometry carrying
+camera-only vectors. Quantitative: eligible count vs the census band
+as before. Environment line mandatory: VR runtime, headset, per-eye
+render size, DLSS version, kTrackCap.
+
+### Non-goals (unchanged, stated so they are not folded in)
+
+No mover injection (phase 2, the kind=1 seam), no rotation injection,
+no DLSS-path change, no new config key, no eviction, no epsilon
+tuning anywhere in the chain.
