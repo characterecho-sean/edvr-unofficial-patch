@@ -23,9 +23,11 @@
   global owner for every collection, not a per-rig object — and killed
   the epoch pair as captured (record+0x1B8 a constant small enum, never
   changing; the eval-hook descriptor +0x38 is a pointer, not the job
-  descriptor's epoch field). The submission hook is NOT retired;
-  proposed next reachability is a direct FUN_14431AFE0 hook capturing
-  (rig, poseCtx) paired with *(rig+0x348). Still open: job-cost
+  descriptor's epoch field). The submission hook is NOT retired; the
+  direct FUN_14431AFE0 rig-link hook is IMPLEMENTED in build
+  v0.17.0-89-gbbfcded7-dirty (settlement doc 05:30 entry) — one flight
+  reads kinematicEval.riglinks, whose collection_known join closes
+  rig -> collection -> shared-global owner. Still open: job-cost
   remeasure with the detailed observer disabled (job-3 =
   PrePhysicsAdvanceJob was never hooked — CodeHook refused a
   thunk/foreign-hook leading instruction; CurveJob hooked but never

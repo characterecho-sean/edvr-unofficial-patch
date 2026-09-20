@@ -11,6 +11,9 @@ namespace {
 
 using EvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t);
 using JobFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+// FUN_14431AFE0 (decomp_431AFE0.txt): ulonglong f(longlong rig, longlong
+// poseCtx) -- exactly two register params, rig state checked at +0x380.
+using RigEvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t);
 
 // The evaluator and the job bodies live in the GAME'S module; this DLL loads
 // more than two gigabytes away, which a five-byte E9 patch cannot reach
@@ -120,6 +123,7 @@ bool prepareRelay(void* trampoline,void* context) noexcept {
 // Forward declarations: the entry table initialises with callback addresses,
 // the callbacks read the entries' forward trampolines.
 __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t,uintptr_t,uintptr_t) noexcept;
+__declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t,uintptr_t) noexcept;
 #define EDVR_JOB_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall job##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_JOB_PROTO(0) EDVR_JOB_PROTO(1) EDVR_JOB_PROTO(2)
@@ -128,6 +132,8 @@ EDVR_JOB_PROTO(3) EDVR_JOB_PROTO(4) EDVR_JOB_PROTO(5)
 
 HookEntry g_evalEntry{"kinematic-eval",KinematicEvalProbe::kEvalRva,
                       reinterpret_cast<void*>(&evalObserved)};
+HookEntry g_rigEvalEntry{"kinematic-rig-eval",KinematicEvalProbe::kRigEvalRva,
+                         reinterpret_cast<void*>(&rigEvalObserved)};
 HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
     {"kinematic-job-0",kJobRvas[0],reinterpret_cast<void*>(&job0)},
     {"kinematic-job-1",kJobRvas[1],reinterpret_cast<void*>(&job1)},
@@ -143,6 +149,13 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
     if(probe)probe->observe(descriptor,renderRecord); // observe() gates on active()
     const auto forward=reinterpret_cast<EvalFn>(g_evalEntry.forward.load(std::memory_order_acquire));
     return forward(descriptor,param2,renderRecord);
+}
+
+__declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t rig,uintptr_t poseCtx) noexcept {
+    KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
+    if(probe)probe->noteRigLink(rig,poseCtx); // noteRigLink() gates on active()
+    const auto forward=reinterpret_cast<RigEvalFn>(g_rigEvalEntry.forward.load(std::memory_order_acquire));
+    return forward(rig,poseCtx);
 }
 
 uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
@@ -235,6 +248,11 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
                     // capture is the flight's primary evidence. CodeHook has
                     // already logged the reason under the job's own name.
                 }
+            }
+            if(!installOne(g_rigEvalEntry,base)) {
+                // The rig-link hook stands down alone too; riglink_checks == 0
+                // with installed status then means the stand-down, and
+                // CodeHook has logged the reason under kinematic-rig-eval.
             }
         }
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
