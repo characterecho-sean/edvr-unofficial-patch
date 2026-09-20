@@ -40,6 +40,7 @@
   direct outer pointer. Submission capture is needed; filtering off. The owner
   discriminator flew (043344, 05:05 entry): collection+0x18 is a SHARED
   GLOBAL, not the rig — owner==rig refuted, submission capture NOT retired.
+  Replicated on 050820 (05:15 entry); JSON quote fix flight-proven there.
   Next reachability: hook FUN_14431AFE0 for the direct rig<->collection pair.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
@@ -5913,4 +5914,32 @@ it does not depend on +0x18 being per-rig (it is not).
 Build v0.17.0-85-ga02e1eee-dirty installed to frontier and verified
 (adds only the desc_epoch38 JSON quote fix); INIs untouched. Flight
 check: --expect-build v0.17.0-85-ga02e1eee-dirty.
+
+### 2026-09-20 05:15 — flight 050820: JSON fix flight-proven, refutation replicates
+
+Flight edvr_gfx_20260920_050630.log, eye run 050820, build verified
+--expect-build v0.17.0-85-ga02e1eee-dirty (6AAFBC12).
+classification_050820.json parsed CLEAN, no repair — the desc_epoch38
+quote fix is flight-proven. kinematicEval: 1,729,224 observations,
+3,066 records, read_faults 0, ownership_checks 39,936.
+
+The 05:05 verdict replicates: 58/64 ownership rows share ONE heap
+owner (0x174421585a0 this session — the address moves with the heap,
+the pattern does not), backptr 0 on all 64 rows, owner_state never 4.
+owner==rig stays refuted. epoch_changes 0 again; epoch1b8
+nonzero-but-constant on 936/3,066 records.
+
+New detail from the 6 job-1-first rows (collection family 0x529b…, a
+low-heap family distinct from job-0's 0x17x…): 4 have NULL +0x18; the
+other 2 have unique owners with alias20 == owner+0x270 exactly — the
+fixed intra-owner array aliasing the ctor (FUN_14430A060) implied —
+and collection+0x90 is small-nonzero (1-2) only on this family. No
+rig link anywhere in either family.
+
+Job timings replicate the 04:33 flight's shape (observer ON, same
+caveat): UpdateRenderDataJob 33,696 calls mean 45.1 us max 25.0 ms;
+RenderDataBatch 6,240 mean 107.5 us; UpdatePhysicsObjectsJob 1,248
+mean 8.1 us; PrePhysics pair 0 calls (job-3 unhookable, CurveJob not
+invoked); Unnamed_BA0 2,593 mean 0.6 us. transitions 8,192 kept /
+1,699,570 overflowed — cap unchanged.
 
