@@ -1,5 +1,32 @@
 # The missing terrain at the edges of view
 
+## Status
+
+- **State (2026-09-20):** binary-analysis arc underway against build 332753
+  (the exe in `analysis\`, SHA-256 e6be8bbe…). Goal: a memory patch to the
+  culler replacing the render-wider-and-crop cull guard.
+- **Ruled out (pointers, do not re-propose):** the
+  `AstroSurfaceRenderManager::Cull` chain (`FUN_1412772b0` →
+  `FUN_143d097b0` → `FUN_14444b4a0` → `FUN_1444d0200`) is a **mono
+  horizon-cone LOD culler**, not the view-frustum culler: its 48-plane
+  table is built once at construction from planet geometry
+  (`FUN_144497d30`), its fov scalar feeds only the LOD screen-size gate
+  (`tan(fov/2)` at subobj+0x8E0, written by `FUN_14448e0b0`), and no
+  projection matrix or per-eye tangent ever enters it. Decompiles in
+  `analysis\decomp\cull_round3*.txt`. Also ruled out:
+  `EnableFrustum0Override` / `CullingBias` are shadow-cascade config
+  (`FUN_1428555A0`), unrelated to terrain tile culling.
+- **Established:** the game loads `openvr\win64\openvr_api.dll`
+  dynamically and holds the `IVRSystem_012` pointer in global
+  VA 0x145F1A860 (init at RVA 0x4E4870). Open lead: readers of that
+  global that call `GetProjectionMatrix` (vtable +0x8) /
+  `GetProjectionRaw` (+0x10) — the terrain draw-cull consumer is
+  downstream of one of them. The engine's generic plane-set frustum test
+  is `FUN_1404f4e10` (26 callers; analysis\decomp\decomp_04F4E10.txt).
+- **Next:** identify the draw-time terrain frustum culler and the
+  instruction(s) where per-eye asymmetry is lost; then design the patch
+  (code-hook machinery: `src\common\code_hook.cpp`).
+
 *Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
 "Culling of planet surface in VR too aggressive", a recurrence of
 [37119](https://issues.frontierstore.net/issue-detail/37119), which was
