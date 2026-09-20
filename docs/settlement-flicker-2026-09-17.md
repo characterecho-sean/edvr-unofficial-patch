@@ -5648,3 +5648,37 @@ Engine semantics:
 
 Probe defect found and fixed post-flight: transition JSON writer dropped
 the closing quote on new_hash (analysis used regex; fixed in tree).
+
+### 2026-09-19 21:05 Ghidra: eval gate mapped; two corrections
+
+- CORRECTION: record+0x2C0 is not a per-record change predicate.
+  *(pred) points at the string "p::DeferredBufferView" (RVA 0x52e9288 sits
+  in a string table beside "NodeGroup::DeferredShading" and
+  "NodeGroup::Schematics"). All 2633 captured records share the same
+  +0x2C0 object, so it cannot carry per-record change state. The
+  "predicate vtable 0x52e9288" line in the 20:52 entry above is that
+  string's RVA, not a vtable. Where +0x2C0/+0x2C8 are actually consumed
+  is unresolved; claim no meaning for them until a consumer is traced.
+- Eval FUN_14430EFE0 gate chain, in order (decomp_430EFE0.txt):
+  1. (record+0x570 mask AND *descriptor+0x18) == 0 -> skip.
+  2. node = *(record2f0+0x18); skip when *(node+8)==0 or
+     *(char*)(record2f0+0x298)==0 (a byte flag; the probe's u32
+     "count298" had low byte 0x81 on every captured record).
+  3. (record+0x688 AND 0x7ff0) != 0 and *(node+0x21)==0 -> skip.
+  4. descriptor+0x58 byte set and FUN_142852f80(record) -> skip;
+     FUN_142852f80 = (flags AND 0xff0) != 0 (bits 4..11).
+  5. descriptor+0x49 byte set and FUN_142854140(record) -> skip;
+     FUN_142854140 = (flags>>12) AND 0xffffff01 != 0 (bit 12, or >=20).
+  6. LOD distance test on descriptor bounds, then FUN_1404f4e10 twice --
+     a plane-loop frustum test (planes at *(record+0x30), count
+     *(ushort*)(record+0x44); -1 = fully outside).
+  The observed 0x688 churn IS this machinery: the count-up chains are
+  evaluation-progress states and the gates skip records mid-sequence.
+  Intra-frame dedup, not cross-frame stasis. Cross-frame stasis remains
+  the +0x268 hash's job; content-tracking still unconfirmed (needs a
+  capture with known movers).
+- CORRECTION: kinematic-job-3 (0x42DF530) was not refused for being a
+  thunk. Its first instruction is 80 FA 19 (cmp dl,0x19), which
+  codeInstructionLength does not recognise. Decoder extension deferred:
+  physics jobs measured <=0.05 ms/frame, so the missing bracket has no
+  decision value now.

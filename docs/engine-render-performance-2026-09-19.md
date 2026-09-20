@@ -68,6 +68,16 @@ predicate (record+0x2C0). The lever is making the skip bit
 proves unchanged — engine-validated stasis, not our heuristic. Shared
 with the motion-injection design's phase-0 gate; one census serves both.
 
+**2026-09-19 update:** L1 confirmed the eval side dominant. But the
+0x688 flags are the engine's own intra-frame evaluation sequencer, and
+the eval's gates already skip mid-sequence records — there is no spare
+intra-frame dedup to win there. The +0x2C0 "change predicate" does not
+exist (shared render-graph view object; settlement doc 21:05 entry).
+The cross-frame stasis signal is the +0x268 hash, pending a movers
+capture. L3's lever is therefore: skip the LOD/frustum/work path for
+records whose hash is unchanged since last frame, evaluated BEFORE the
+existing gate chain, keyed on node identity.
+
 ### L4. Physics decimation for attached-static children
 
 If physics jobs dominate: children rigidly attached to a static parent

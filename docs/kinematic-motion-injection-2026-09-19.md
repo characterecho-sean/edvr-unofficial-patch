@@ -10,12 +10,15 @@
   temporal pass (surface 1) is the diagnostic stepping stone that proves
   the injected MVs are right before they touch DLSS history.
 - **Open:** phasing. Phase 0 flew 2026-09-19 20:52 (eye run 205251):
-  predicate vtable captured (single class 0x52e9288 for all 2633
-  records -- decompile its slots next); +0x268 hash stable across 1.4M
-  eval calls, 500 values over 510 nodes, near 1:1 per node; the +0x688
-  flags field is ruled out as a stasis signal (per-call sequencer).
-  Remaining gate question: does +0x268 track CONTENT (needs a capture
-  with known movers) and what does predicate 0x52e9288 test.
+  +0x268 hash stable across 1.4M eval calls, 500 values over 510 nodes,
+  near 1:1 per node; the +0x688 flags field is ruled out as a stasis
+  signal (per-call evaluation sequencer whose states drive the eval's
+  own skip gates). CORRECTION: there is no predicate vtable at
+  record+0x2C0 -- the "0x52e9288" first field is the name string
+  "p::DeferredBufferView" of a shared render-graph view object; the
+  earlier "single predicate class" claim is retracted (settlement doc,
+  21:05 entry). Remaining gate question: does +0x268 track CONTENT
+  (needs a capture with known movers).
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
