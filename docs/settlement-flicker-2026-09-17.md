@@ -6667,3 +6667,46 @@ supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). INIs unchanged.
   capture was not armed this flight; its fixes (findings 2/3/7/9) are
   covered by the new kinematic_probe_test gate and await the next
   armed capture.
+
+### 2026-09-20 13:30 -- offline trace: bounds are a SPHERE (centre +0x270, radius +0x280); targeted capture installed
+
+- Prompt: Sean asked whether the extents could come from the
+  disassembly instead of a widened-capture flight. Yes; the wide net
+  (+0x130..+0x250 live-read) is cancelled.
+- FindStores270 (full .text store scan, 19.6M instructions,
+  stores_270_280.txt): no direct writer of record+0x270/+0x280 in the
+  record family -- the write goes through a computed base. FindLea270
+  (lea_270_280.txt) found exactly one family hit: FUN_14433C870 does
+  LEA RDI,[RSI+0x270].
+- FUN_14433C870 (decomp_433C870) is the bounds writer, recursive over
+  the record's child array (+0x2A8 pointers, +0x2B0 count): local
+  centre float3 copied from model data *(*(record+0x18)+8)+0x20,
+  radius from model +0x2C stored as a single float lane at +0x280
+  (ZEXT416; lanes 1-3 zero); both zeroed when the model is absent.
+  Children are folded in by FUN_140A8C9A0 (decomp_0A8C9A0), a
+  textbook bounding-sphere union (containment both ways, else
+  Ritter-style expand, newR = (rA + dist + rB)/2) operating on
+  {float4 centre; float radius} -- param_1[4] as radius nails the
+  sphere layout at +0x270/+0x280.
+- FUN_144330194 (decomp_4330194) independently confirms record stride
+  0x2F0 and adds the identity block: +0x250..+0x264 = node+0xF0 qword,
+  model ptr, node+0x1A0 qword; +0x268 = combined hash; +0x2B8 =
+  source node pointer. The updater's visibility query FUN_14288EC30
+  (decomp_288EC30) is a vtable+0x68 thunk fed the world centre
+  (+0x240) and the +0x280 lane: the game culls on spheres, not AABBs.
+- Movers' zero +0x240 in flight 125207 is explained: the updater
+  guards the world-centre write on +0x2B0/+0x290; FUN_14433C870 (the
+  LOD-refresh target from the 21:58 wave-17 chain) writes the local
+  sphere regardless, at spawn/LOD change.
+- Capture change (kinematic_motion.cpp, kSphereBytes): dumpBoundsLocked
+  live-reads +0x270..+0x28F (32 B) as svalid/s= next to b=/c= --
+  targeted, dump-time only, no per-record storage. Gates green
+  (kinematic_motion_test 52 checks, kinematic_probe_test 25), built
+  v0.17.0-123-gdae06c51-dirty, installed to frontier and verified
+  (d3d11 sha256 5F7626D7).
+- Next flight, same dump protocol: confirm s= carries sane spheres
+  (finite, radius > 0 for statics) and world centre +0x240 ==
+  M(+0xF0/+0x120) x local centre +0x270 where the guard allows.
+  Stage B can then be spec'd on sphere bounds: world radius = local
+  radius x max 3x3 column scale at +0xF0; world centre = +0x240, else
+  M x local centre computed by us.
