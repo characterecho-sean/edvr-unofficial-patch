@@ -102,3 +102,32 @@ openxr-submit-performance arc notes are re-read; there is history there.
   sizes.
 - Instruments are part of the deliverable. A lever that cannot report
   its own before/after cost in the log does not merge.
+
+## 2026-09-20 (17:55) -- the L1 catch in code: timing is gated on the observer
+
+Verified while wiring the job-attribution TLS mask (kinematic doc 17:50
+entry, build installed to frontier): bracket() early-returns the
+untimed forward when `!probe || !probe->active()`, so the QPC brackets
+measure ONLY while the detailed observer is capturing. That is the L1
+catch made concrete: probe on = the observer's per-record mutex/reads
+inside every measured job; probe off = no numbers at all, even with the
+tracker live (fix.engine_motion on). The 17:50 instrument does not
+touch the timing path (its cost is one TLS read/OR/restore per job
+call), so L1's remeasure is neither advanced nor worsened -- it is
+blocked on exactly this gate.
+
+The unblock is small and probe-side: hoist the QPC bracket off the
+active() gate (time whenever the hooks own the job bodies), keeping
+observe()/noteOwnership gated as today. Every tracker flight then
+returns brackets-only job costs in the jobs[] JSON with no extra
+flight, and a probe-armed window still gives the with-observer
+comparison for the overlap correction. Semantics change to note:
+jobs[] becomes per-session rather than per-capture-window. Job-3
+(0x42DF530) still refuses the CodeHook (thunk-shaped leading
+instruction) -- extend the hook for that prologue or accept the gap;
+physics was <= 0.05 ms on eye run 205251, so job-3 is unlikely to
+dominate, but the 21:23 remeasure note explicitly includes it.
+
+If hoisted before the job-attribution flight, ONE flight batches both
+measurements: the mover/static discriminator census AND the L1
+brackets-only numbers.
