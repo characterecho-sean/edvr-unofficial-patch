@@ -49,11 +49,12 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-95-g873c4024-dirty installed to frontier, extending
-  the transform snapshot to +0x130..0x180 (covers the +0x170 updater
-  translation; 06:30 entry) and fixing writer quotes; supersedes
-  v0.17.0-93-gd6ed264f-dirty (6AAFCC46). INIs unchanged. Flight check:
-  --expect-build v0.17.0-95-g873c4024-dirty.
+- Build: v0.17.0-95-g873c4024-dirty installed to frontier (6AAFD0FB),
+  extending the transform snapshot to +0x130..0x180 (covers the +0x170
+  updater translation; 06:30 entry) and fixing writer quotes;
+  supersedes v0.17.0-93-gd6ed264f-dirty (6AAFCC46). The 064047 flight
+  proved record+0x170 is the per-frame world position (06:45 entry).
+  INIs unchanged. Flight check: --expect-build v0.17.0-95-g873c4024-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6109,4 +6110,41 @@ partial-window records (streamed in/out or intermittent evaluation).
 Build v0.17.0-95-g873c4024-dirty installed to frontier and verified;
 INIs untouched. Flight check: --expect-build
 v0.17.0-95-g873c4024-dirty.
+
+### 2026-09-20 06:45 — flight 064047: the drone FOUND at record+0x170; +0x130 matrix is static
+
+Flight edvr_gfx_20260920_063858.log, eye run 064047 with the drone in
+motion, build verified --expect-build v0.17.0-95-g873c4024-dirty
+(6AAFD0FB). Parse clean — the writer quote fix is flight-proven.
+xf_movers 338 of 2,909 records, xf_changes 16,316, read_faults 0.
+
+Per-slot analysis across all movers: slots 0-15 (the +0x130 4x4)
+NEVER changed for ANY record; slots 16-19 (+0x170..0x180) changed
+for 322-329 records each. Bit churn includes the -0.0/+0.0 sign
+class (the top-by-changes record's only delta was a zero sign bit),
+so bit-compare alone overstates motion; ranking by NET displacement
+separates real movers:
+
+- Top 11 records all moved ~2.59 m as ONE rigid group (positions
+  clustered at (-65..-68, 60..62, -188..-190)) — the drone, as ~11
+  sub-mesh records including two pairs sharing exact start positions
+  (the ~5-records-per-node sharing). 2.59 m over the 52-frame window
+  (~4.5 m/s at 90 Hz): drone flight speed.
+- One further record at 1.25 m elsewhere; 125 of 338 movers exceed
+  1 cm net displacement; median mover displacement 5.8 mm
+  (bobbing/rewrite class).
+
+ruled out: record+0x130..0x16C as the per-frame world transform,
+because with a known mover in view the 4x4 stayed bit-static for
+every record while +0x170 moved. It is a static local/default
+matrix; the motion-injection doc's "3x4 at record+0x130..0x16C =
+current-frame transform" is corrected accordingly.
+
+confirmed: record+0x170 (3 floats; +0x17C spare/flag) is the
+per-frame world-position field — the engine-truth motion signal for
+the kinematic MV source: object motion = per-frame delta of
+record+0x170. The drone is IN the kinematic eval population (06:30
+explanation 1 confirmed; 2 and 3 unnecessary for it). Remaining
+phase-0 opens stand: per-record identity (sub-mesh records sharing
+positions/nodes), pixel ownership, observer-off job-cost remeasure.
 
