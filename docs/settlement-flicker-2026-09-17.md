@@ -6148,3 +6148,15 @@ explanation 1 confirmed; 2 and 3 unnecessary for it). Remaining
 phase-0 opens stand: per-record identity (sub-mesh records sharing
 positions/nodes), pixel ownership, observer-off job-cost remeasure.
 
+### 2026-09-20 06:55 — phase-1 spec written (no code)
+
+The diagnostic kinematic motion source is specced in
+kinematic-motion-injection-2026-09-19.md (2026-09-20 section):
+tracker on the eval hook's record stream, record+0x170 deltas,
+bounds+depth ownership, compose-into-camera MVs, config proposal
+fix.engine_motion on|off|auto (default off), temporal_aa_debug
+verification gate before DLSS sees anything, v1 = translation only
+(rotation needs the node matrix, unverified). The doc's injection
+table and phase-0 bullet were updated for the 064047 proofs. No code
+yet — Sean picks when phase 1 gets built.
+

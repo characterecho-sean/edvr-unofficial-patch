@@ -83,8 +83,8 @@ screen-space work".
 
 | Class | Signal | Injected MV | Expected win |
 |---|---|---|---|
-| Proven-static settlement geometry | NONE PROVEN YET (was: +0x268 hash — retracted) | exact zero object motion | kills settlement shimmer/ghosting at the source |
-| Rigid movers (stations, ships) | per-frame delta of record+0x130..0x16C | exact rigid MV | closes tier-2's up-to-8-frame staleness; reaches hidden-bone spin |
+| Proven-static settlement geometry | record+0x170 delta == 0 across a window WITH a mover control present (flight-proven 064047) | exact zero object motion | kills settlement shimmer/ghosting at the source |
+| Rigid movers (stations, ships, drones) | per-frame delta of record+0x170 (flight-proven: the drone, 11 sub-mesh records, 2.59 m) | exact rigid translation MV | closes tier-2's up-to-8-frame staleness; rotation still open (v1 limit) |
 | Skinned/particle/smoke | none reliable | inject nothing | avoids the smoke-voids regression class |
 
 Zero OBJECT motion always means the camera/head term stays in the final
@@ -105,19 +105,14 @@ with the existing temporal_aa_debug MV view before it ships.
 
 ## Phasing
 
-- **Phase 0 (offline, current):** writer -> collection -> collection+0x18
-  RESOLVED offline 2026-09-19 (settlement doc 21:58 entry): +0x18 is a
-  backing-owner pointer written once by the collection ctor FUN_14430A060;
-  the collection aliases the owner's scene-graph arrays. Owner == rig is
-  unproven behind the computed dispatcher; a two-dereference runtime check
-  (*(owner+0x348) == collection and owner+0x380 == 4) settles it in the
-  next instrumented flight and would retire the planned submission hook.
-  Transform/dirty chain mapped: FUN_144331300 LOD evaluator ->
-  FUN_14433DB20 world updater (record+0x170 translation, +0x240 center,
-  +0xF0/+0x1C0 current/previous bounds); the collection+0x90 vs
-  record+0x1B8 epoch pair is a genuine change-signal candidate. Remaining
-  offline: remeasure job cost with the detailed observer disabled and
-  job-3 hooked. No build before this lands.
+- **Phase 0 (RESOLVED by flights, 2026-09-20):** reachability CLOSED
+  (rig -> *(rig+0x348) collection, 58/58 join; ~1,572 stable rigs) and
+  the motion field PROVEN (record+0x170 per-frame world position; the
+  +0x130 4x4 ruled static; the epoch pair dead as captured) — see the
+  settlement doc 05:05/05:45/06:45 entries and the Status block above.
+  Remaining phase-0 debts: per-record identity finer than node
+  (sub-mesh records share positions, pairs seen at identical starts),
+  pixel ownership, and the observer-off job-cost remeasure.
 - **Phase 1:** static-zero object-motion injection, config key,
   depth-gated, settlements only, gated on a PROVEN stasis signal from
   phase 0. One hook (traversal or collection walk), one compute shader,
@@ -139,3 +134,65 @@ with the existing temporal_aa_debug MV view before it ships.
   realloc).
 - Environment dependency to state at flight time: VR runtime, headset,
   per-eye render size, DLSS version, and the fixed record-table sizes.
+
+## 2026-09-20 — Phase 1 spec: the diagnostic kinematic motion source
+
+**Inputs, all flight-proven.** The live record set comes from the eval
+hook (FUN_14430EFE0), which already sees every evaluated record every
+frame via descriptor+0x10 — per-frame re-resolution makes collection
+reallocs a non-issue for the live set. The motion signal is
+record+0x170 (world translation, 064047). Stasis is provable: zero
+delta across a window that contains a mover control (the drone was
+correctly isolated into the mover set, so the static label on the
+other 2,571 records is trustworthy, not instrument-dead). Rig
+attribution is available from the riglink rows but not needed for the
+MV itself.
+
+**Module shape.** kinematic_motion, mirroring mesh_motion's interface
+(the per-class source pattern: compute per frame, write into the
+pass's MV field ahead of the e.dlMv hand-off). Three parts:
+
+1. Tracker (CPU): piggybacks the eval hook's per-frame record stream;
+   keeps previous +0x170 per record; computes the world delta; drops
+   records unseen for N frames (stream-out). Bounded (~4k records);
+   on overflow the source reports DEGRADED and injects nothing beyond
+   the static-zero class — it never guesses.
+2. Ownership: each tracked record's world bounds (record+0xB0..0xEC)
+   projected to screen, depth-gated against the depth buffer (the
+   tier-1 lesson: a mover's interior still ghosts without depth
+   consistency).
+3. Compose: MV = existing camera/head motion + projected object delta
+   for owned pixels. Static records write zero object delta — the
+   camera term stays, shimmer dies at the source. Movers write their
+   measured delta.
+
+**Config.** One functionality-named key (AGENTS.md: what the user
+gets, never the mechanism): proposal `fix.engine_motion on|off|auto`,
+default off while diagnostic, auto = settlements/landed scenes only
+once phase 1 proves out.
+
+**Verification before any DLSS exposure.** temporal_aa_debug MV view
+on the drone scene: the drone's pixels must carry its measured
+per-frame delta as screen-space MVs while settlement geometry carries
+camera-only vectors. Quantitative check: the tracker logs per-frame
++0x170 deltas for the top group; the MV written for their pixels must
+match within projection error. Shimmer gone in the diagnostic view is
+the ship gate for phase 1; DLSS sees nothing until then.
+
+**v1 limits (stated, not hidden).** Translation only: rotation is not
+in record+0x170 and the +0x130 4x4 is static, so a spinning-in-place
+object reads as static — phase 2 needs the node's composed matrix
+(traversal FUN_144312040 output via record+0x18), UNVERIFIED. Only
+eval-population records are tracked (the drone is a member; skinned/
+smoke classes are not and get nothing). Pixel ownership is
+bounds+depth, not unique-mesh; occlusion edges can mis-own — the
+depth gate is the mitigation, not a cure.
+
+**Failure modes, each logged distinctly:** tracker overflow (degraded
+mode), zero records seen in a frame (hook stood down — reads as
+stand-down, never as pass), bounds read faults, stale-record drops.
+End-to-end trace before flying, per build discipline.
+
+**Not in scope:** no DLSS-path change (surface 2 is the same e.dlMv
+hand-off), no skinned/particle injection, no sharpening or other
+compensation (root causes only).
