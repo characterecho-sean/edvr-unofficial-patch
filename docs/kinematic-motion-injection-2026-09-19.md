@@ -2,11 +2,17 @@
 
 ## Status
 
-- **State:** design sketch, 2026-09-19. Nothing built. Bridges
-  settlement-flicker-2026-09-17.md (the engine map) and
-  per-object-motion.md (the existing motion-source architecture).
+- **State:** DECIDED DIRECTION, 2026-09-19 (Sean): the final design for
+  DLSS motion is engine-level injection from KinematicRig truth, not
+  draw-call interpretation in the render pipeline. Draw-call identity
+  and motion estimation are ruled out as a class (see below). The
+  DLSS-path MV replacement (surface 2) is the end goal; EDVR's own
+  temporal pass (surface 1) is the diagnostic stepping stone that proves
+  the injected MVs are right before they touch DLSS history.
 - **Open:** everything in Phasing; phase 0 shares the next-flight capture
   spec in settlement-flicker-2026-09-17.md (predicate vtable + flags).
+  Probes built and installed to the frontier copy 2026-09-19 evening
+  (commit 116a2e0); phase 1 stays unbuilt until that log is read.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
@@ -19,6 +25,11 @@ mesh_motion, object_probe). Each source computes exact motion for one
 object family. This design adds a **kinematic source** fed by engine
 truth instead of GPU-side estimation, and optionally a corrected MV copy
 at the DLSS hand-off.
+
+Engine-level injection replaces the identity and motion problems, not the
+coverage problem: which pixels a record owns still comes from its world
+bounds projected and depth-gated. Do not let "engine level" read as "no
+screen-space work".
 
 ## What the engine provides (from the settlement-flicker arc)
 
@@ -45,16 +56,18 @@ at the DLSS hand-off.
 
 ## Injection surfaces
 
-1. **EDVR's own temporal pass** (easy): a kinematic_motion module
-   mirroring mesh_motion's interface. Per frame, walk hooked
-   collections, compute deltas, write MVs into the pass's MV field over
-   each record's projected bounds, depth-gated (tier-1 lesson: a mover's
-   interior still ghosts without depth consistency).
-2. **The game's DLSS path** (medium): dlaa.cpp already holds the game's
-   MV texture at the NGX hand-off (pInMotionVectors, MVLowRes,
-   unjittered, scale 1.0). Copy it, overwrite regions belonging to known
-   records, pass the copy. No game-internal hooking; one bounded compute
-   pass.
+1. **EDVR's own temporal pass** (easy, diagnostic stepping stone): a
+   kinematic_motion module mirroring mesh_motion's interface. Per frame,
+   walk hooked collections, compute deltas, write MVs into the pass's MV
+   field over each record's projected bounds, depth-gated (tier-1 lesson:
+   a mover's interior still ghosts without depth consistency). Proves the
+   injected MVs are right with the existing temporal_aa_debug MV view
+   before anything touches DLSS history.
+2. **The game's DLSS path** (medium, the end goal): dlaa.cpp already
+   holds the game's MV texture at the NGX hand-off (pInMotionVectors,
+   MVLowRes, unjittered, scale 1.0). Copy it, overwrite regions belonging
+   to known records, pass the copy. No game-internal hooking; one bounded
+   compute pass.
 
 ## Phasing
 
