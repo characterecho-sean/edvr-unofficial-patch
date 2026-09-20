@@ -6881,3 +6881,32 @@ d3d11 d0caa44f0e926188, verified. Re-fly: movers HELD at a
 settlement -- expect no whole-eye cyan; a still-cyan mover sends the
 finding-2 per-pixel tightening next. The motion-view pulse (15:45) is
 separate: a burst held in the motion view.
+
+### 2026-09-20 17:02 -- disassembly: render path mover-blind; landscape-cyan answered
+
+Cross-entry from the kinematic arc (same-time foot entry there). Sean's
+16:56 questions, answered offline against analysis/decomp and dump
+163645 -- no flight spent:
+
+1. The landscape should NOT be entirely cyan. Terrain publishes no rig
+   records (separate terrain path), so the mask paints it only
+   incidentally where a structure sphere's rect+interval overlaps it:
+   54.4% of terrain pixels claimed on 163645 vs 37.1% of non-terrain;
+   open ground stays dark by design. Claimed terrain is benign once the
+   veto arms -- static terrain MV == camera-only MV either way. The
+   wrong case stays finding 2: a mover in front of terrain/structure
+   claimed by unioned intervals (the cyan turret, the landing ship near
+   the ground).
+2. The render traversal is MOVER-BLIND: eval 0x430EFE0 has exactly one
+   in-code caller (FUN_144312040, itself called by jobs 0/1 and by
+   itself recursively over child contexts -- the ~11x fan-out), and its
+   per-record gates are render-eligibility + draw-distance nibbles
+   only, no static/dynamic branch. Rig eval 0x431AFE0 dispatches
+   through a -0xD0 this-adjust vtable thunk, no signal there. The
+   engine's dynamic truth lives in the undecompiled physics jobs
+   (0x432B2A0, 0x42DF530, 0x42DF550). Ruled out: return-address caller
+   attribution at the eval hook (degenerate single caller). Next
+   discriminators: offline vtable/flag clustering on existing capture
+   JSON (seeded with the 064047 drone records), then a TLS
+   job-attribution bit on the existing job brackets riding the next
+   instrumented build.
