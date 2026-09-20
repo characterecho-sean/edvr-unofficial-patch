@@ -82,7 +82,9 @@
   (06:45 entry). INIs unchanged; fix.engine_motion defaults off and
   must be set on in the live ini for the tracker (the 12:46 flight
   had it under [advanced] -- dark, not evidence). Flight check:
-  --expect-build v0.17.0-119-g6899d0ff-dirty.
+  --expect-build v0.17.0-119-g6899d0ff-dirty. Stage B landed 14:45
+  (same-date entry): commit 6b90d0b installed to frontier, d3d11
+  sha256 81d5d27f434b2458, --verify-only green; unflown.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6747,3 +6749,25 @@ sketch; stasis compare extends to pose+sphere for the LOD-rewrite
 case; world centre computed as R^T x local + T, never read from
 +0x240). No code, no config change yet; the edvr.ini doc-block
 wording update ships with the implementation commit.
+
+### 2026-09-20 14:45 -- stage B landed (built, installed, unflown)
+
+Design doc same-date landed entry: the stage-B implementation shipped
+as 6b90d0b on codex/stage-b-ownership -- sphere-extended stasis
+compare, content-addressed upload snapshot, kinCover quarter-res
+ownership coverage (t19/t20), kinematicStatic compose veto at both
+meshPixel sites and down the mv() owner chain, cyan movers-view
+diagnostic. Gates: rig 78 checks 0 failures, shader self-test green,
+config contract 252/252, full native build green. Installed to
+frontier: d3d11.dll sha256 81d5d27f434b2458, --verify-only green.
+Three API-forced deviations from the 13:55 spec (two R32_UINT textures
+for SM5 atomics; probe.w bit 512u since 256 is staticOwner; full
+asuint bits instead of 24-bit depth quantization).
+
+Next flight is the 13:55 spec's verification protocol, unchanged:
+settlement, drone visibly moving, 30 s, fix.engine_motion=on in the
+live ini (it defaults off), eye dump; temporal_aa_debug = motion then
+movers. Expect cyan on settlement surfaces, NOT the drone, NOT
+occlusion edges against nearer geometry; generation/stand-down
+counters at zero. Environment line mandatory (runtime, headset,
+per-eye size, DLSS version, kTrackCap).

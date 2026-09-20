@@ -69,6 +69,9 @@
   layout -- sphere projection replaces the 10:52 AABB-corners sketch,
   the stasis compare extends to pose+sphere (the LOD-rewrite case),
   world centre is computed (R^T x local + T), never read.
+  Update 14:45: stage B LANDED (6b90d0b on codex/stage-b-ownership,
+  frontier install d3d11 sha256 81d5d27f434b2458) -- landed entry at
+  the foot; the 13:55 verification flight is next, not yet flown.
 
 ## Premise
 
@@ -735,3 +738,45 @@ render size, DLSS version, kTrackCap.
 No mover injection (phase 2, the kind=1 seam), no rotation injection,
 no DLSS-path change, no new config key, no eviction, no epsilon
 tuning anywhere in the chain.
+
+## 2026-09-20 (stage-B landed)
+
+Stage B shipped as 6b90d0b on codex/stage-b-ownership, built as
+v0.17.0-129-g305eeffc-dirty (pre-commit describe), installed to
+frontier (d3d11.dll sha256 81d5d27f434b2458, install_edvr.py
+--verify-only green). Gates: kinematic_motion_test 78 checks, 0
+failures (rig grew 0x280 -> 0x2C0 for the +0x270 sphere read; cases
+13-17 cover the LOD swap, three 132856 flight fixtures under 1 mm,
+radius x2 column scale, generation semantics across drop/republish,
+implausible-sphere rejection); temporal_shader_build self-test green
+with kTemporalKinBytecode in the generated header; config contract
+252/252; full native build green.
+
+What shipped, per the 13:55 spec: stasis compare extended to
+pose+sphere at all five observe() sites; worldSphereLocked (centre =
+R^T x local + T, radius x max column scale); rebuildSnapshotLocked
+content-addressed per ended frame; kinematicMotionSphereSnapshot with
+count = full set size under truncation; sphereChanges/sphereRejected/
+uploadGeneration/uploadStuck/uploadedLast stats and the stale-upload
+named log line; kinCover quarter-res ownership coverage on t19/t20;
+the kinematicStatic veto at both meshPixel sites and down the mv()
+owner chain; cyan paint last in both movers views; the edvr.ini doc
+block now describes phase 1 (proven-static takes camera-only motion;
+movers/unknowns stock).
+
+Deviations from the 13:55 spec, all forced by the API or the existing
+bit layout:
+1. Two R32_UINT coverage textures (near/far) instead of one
+   R32G32_UINT -- SM5 atomics (InterlockedMin/Max) require
+   single-component 32-bit UAVs.
+2. probe.w ownership bit 512u, not 256u -- 256 is the existing
+   staticOwner bit.
+3. The spec's 24-bit depth quantization dropped for full asuint float
+   bits (monotone for positive floats; no precision lost).
+
+Flight-untested by construction: kinCover runtime behaviour
+(projection, atomic clears), the stale-upload summary check, the
+kcBound plumbing on the own (non-DLSS) path -- Sean flies DLSS, so
+the NVIDIA path is what the verification flight exercises. Protocol
+unchanged from the 13:55 flight-verification plan; fix.engine_motion
+must be on in the live ini.
