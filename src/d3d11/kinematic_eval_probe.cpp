@@ -60,6 +60,7 @@ void KinematicEvalProbe::clearLocked() {
     ownershipIndex_.clear();ownerships_.clear();
     riglinkIndex_.clear();riglinks_.clear();
     samples_.clear();events_.clear();seenThisFrame_=0;
+    clockSamples_.clear();
     for(uint32_t i=0;i<kJobCount;++i) {
         jobs_[i].calls.store(0,std::memory_order_relaxed);
         jobs_[i].totalNs.store(0,std::memory_order_relaxed);
@@ -81,6 +82,9 @@ bool KinematicEvalProbe::arm(uint32_t meshFrame) noexcept {
         :std::strcmp(result,"opcode_mismatch")==0?HookStatus::OpcodeMismatch
         :HookStatus::InstallFailed;
     if(hookStatus_!=HookStatus::Installed)return false;
+    // The arm stamp is the legacy mesh clock; it only seeds frame_ as a
+    // baseline for lastSampledFrame compares. The first notePresentFrame
+    // (the real per-present clock feed) overwrites it.
     frame_.store(meshFrame,std::memory_order_release);
     clearLocked();
     active_.store(true,std::memory_order_release);
@@ -108,6 +112,23 @@ void KinematicEvalProbe::setFrame(uint32_t meshFrame) noexcept {
     const uint32_t prev=frame_.exchange(meshFrame,std::memory_order_acq_rel);
     if(prev==meshFrame)return;
     flushFrameStatsLocked();
+}
+
+void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame,uint32_t meshClock) noexcept {
+    // Gated on active like the rest of the probe: the clock log lives and
+    // dies with the capture lifecycle rather than running unarmed.
+    if(!active_.load(std::memory_order_acquire))return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint32_t prev=frame_.exchange(presentFrame,std::memory_order_acq_rel);
+    if(prev!=presentFrame)flushFrameStatsLocked();
+    // The mesh counter resets to 0 on every config re-poll (meshMotionShutdown
+    // via the once-per-second re-configure), so absolute mesh values are
+    // only meaningful between configure events; the per-window
+    // mesh-vs-present ratio is the signal.
+    if(clockSamples_.size()<kClockSampleCap) {
+        ClockSample c;c.present=presentFrame;c.mesh=meshClock;
+        clockSamples_.push_back(c);
+    } else ++summary_.clockSampleOverflow;
 }
 
 void KinematicEvalProbe::flushFrameStatsLocked() noexcept {
@@ -428,6 +449,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"zero_record_frames\":"<<summary_.zeroRecordFrames
      <<",\"min_frame_records\":"<<summary_.minFrameRecords
      <<",\"max_frame_records\":"<<summary_.maxFrameRecords
+     <<",\"clock_sample_overflow\":"<<summary_.clockSampleOverflow
      <<"},"
      <<"\"vtables\":[";
     for(size_t i=0;i<vtables_.size();++i) {
@@ -521,6 +543,12 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
         j<<"{\"record\":"<<s.recordId<<",\"frame\":"<<s.frame
          <<",\"t\":[\"0x"<<std::hex<<txb<<"\",\"0x"<<tyb<<"\",\"0x"<<tzb<<std::dec<<"\"]"
          <<",\"q\":["<<s.q0<<','<<s.q1<<','<<s.q2<<','<<s.q3<<"]}";
+    }
+    j<<"],\"clock_samples\":[";
+    for(size_t i=0;i<clockSamples_.size();++i) {
+        if(i)j<<',';
+        j<<"{\"present\":"<<clockSamples_[i].present
+         <<",\"mesh\":"<<clockSamples_[i].mesh<<'}';
     }
     j<<"]}";
 }
@@ -619,6 +647,10 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     e2.oldNode=0x1111222233334444ull;e2.newNode=0x99990000AAAABBBBull;
     events_.push_back(e2);
 
+    // Same mesh value twice: the staleness signature from flight 083323.
+    ClockSample c1{};c1.present=1001u;c1.mesh=13081u;clockSamples_.push_back(c1);
+    ClockSample c2{};c2.present=1002u;c2.mesh=13081u;clockSamples_.push_back(c2);
+
     jobs_[0].calls.store(2,std::memory_order_relaxed);
     jobs_[0].totalNs.store(1000,std::memory_order_relaxed);
     jobs_[0].maxNs.store(700,std::memory_order_relaxed);
@@ -637,6 +669,7 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     summary_.dupInFrame=2;summary_.gapEvents=1;summary_.nodeChangeEvents=1;summary_.quatChangeFrames=6;
     summary_.framesCounted=40;summary_.zeroRecordFrames=1;
     summary_.minFrameRecords=2;summary_.maxFrameRecords=17;
+    summary_.clockSampleOverflow=3;
 }
 
 } // namespace edvr

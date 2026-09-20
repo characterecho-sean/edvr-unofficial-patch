@@ -33,6 +33,7 @@ public:
     static constexpr uint32_t kRigLinkCap=256u;
     static constexpr uint32_t kPoseSampleCap=8192u;
     static constexpr uint32_t kIdentityEventCap=256u;
+    static constexpr uint32_t kClockSampleCap=4096u;
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 
@@ -102,6 +103,10 @@ public:
         uint32_t recordId=0,frame=0,kind=0,gapLen=0;
         uint64_t oldNode=0,newNode=0;
     };
+    // One present-clock vs mesh-clock sample, appended once per owned
+    // Present: the mesh-staleness discriminator (flight 083323: 3 mesh
+    // ticks in ~51 rendered frames).
+    struct ClockSample {uint32_t present=0,mesh=0;};
     struct Summary {
         uint64_t observed=0;uint32_t stored=0;
         uint64_t readFaults=0,recordOverflow=0,transitionOverflow=0,vtableOverflow=0;
@@ -114,12 +119,18 @@ public:
         uint64_t dupInFrame=0,gapEvents=0,nodeChangeEvents=0,quatChangeFrames=0;
         uint64_t framesCounted=0,zeroRecordFrames=0,maxFrameRecords=0;
         uint64_t minFrameRecords=~0ull; // the first real frame sets it
+        uint64_t clockSampleOverflow=0;
     };
 
     bool arm(uint32_t meshFrame) noexcept;
     void finish() noexcept;
     void reset() noexcept;
     void setFrame(uint32_t meshFrame) noexcept;
+    // The probe's clock feed: exactly once per owned Present, from
+    // device_hook. Replaces setFrame as the clock source (the mesh clock
+    // was refuted by flight 083323). Gated on active like the rest of the
+    // probe: the clock log lives and dies with the capture lifecycle.
+    void notePresentFrame(uint32_t presentFrame,uint32_t meshClock) noexcept;
     bool active() const noexcept{return active_.load(std::memory_order_acquire);}
     HookStatus hookStatus() const noexcept{return hookStatus_;}
     const char* hookStatusText() const noexcept;
@@ -160,6 +171,7 @@ private:
     std::vector<RigLinkUse> riglinks_;
     std::vector<PoseSample> samples_;
     std::vector<IdentityEvent> events_;
+    std::vector<ClockSample> clockSamples_;
     uint32_t seenThisFrame_=0;
     JobStat jobs_[kJobCount];
 

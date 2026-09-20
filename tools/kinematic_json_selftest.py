@@ -35,7 +35,8 @@ def self_test():
         pose_samples=2, pose_sample_overflow=5, identity_event_overflow=7,
         dup_in_frame=2, gap_events=1, node_change_events=1, quat_change_frames=6,
         frames_counted=40, zero_record_frames=1,
-        min_frame_records=2, max_frame_records=17), ke['summary']
+        min_frame_records=2, max_frame_records=17,
+        clock_sample_overflow=3), ke['summary']
     recs = ke['records']
     assert len(recs) == 2, recs
     mover, still = recs
@@ -98,6 +99,9 @@ def self_test():
         dict(record=0, frame=43,
              t=['0x3f000000', '0x40000000', '0x40400000'],
              q=[32768, 32768, 32768, 65534])], ke['mover_samples']
+    # Same mesh value twice: the staleness signature from flight 083323.
+    assert ke['clock_samples'] == [dict(present=1001, mesh=13081),
+                                   dict(present=1002, mesh=13081)], ke['clock_samples']
     print('kinematic json self-test passed')
 
 

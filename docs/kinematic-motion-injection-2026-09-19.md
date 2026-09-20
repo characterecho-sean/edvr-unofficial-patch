@@ -45,6 +45,9 @@
   per-frame translation+quat samples, dup-in-frame, gap-resume and
   node-change identity events (the slot-reuse probe for the shared-node
   records), frame stats, bounded mover sample log. Not yet flown.
+  Update 09:35: re-clocked per-present (flight 083323 refuted the mesh
+  clock) with a clock_samples mesh-staleness discriminator,
+  v0.17.0-107-g5fe9c004-dirty.
 
 ## Premise
 
