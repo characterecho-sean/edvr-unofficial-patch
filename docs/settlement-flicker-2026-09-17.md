@@ -6710,3 +6710,31 @@ supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). INIs unchanged.
   Stage B can then be spec'd on sphere bounds: world radius = local
   radius x max 3x3 column scale at +0xF0; world centre = +0x240, else
   M x local centre computed by us.
+
+### 2026-09-20 13:45 -- flight 132856: sphere layout CONFIRMED, transform identity exact
+
+- Right build (v0.17.0-123-gdae06c51-dirty, 6AB03222). Tracker clean
+  again: 62.5M observations by 13:31, faults 0, overflow 0, node
+  changes 0, same-frame invalidations 0; eligible 2,571-2,633 (census
+  band). Dump: part A frame 10744 (8 movers + 8 statics), part B
+  10745. Eye dump eye_133039_* pairs with this log.
+- s= reads valid on all 24 dump lines. Movers: local centre (0,0,0),
+  radius 10.6536 (seven records, one model) / 12.7671 (one) --
+  drone-to-ship-sized spheres; c=0 (updater guard off) as predicted;
+  sphere bit-identical between parts A and B. Statics: radii 3.7798
+  (five records, same model), 12.6486, 6.5903 (two); local centres a
+  few metres off origin; centre w zero except id=148 (0.00097 --
+  sphere-merge FUN_140A8C9A0 shifts all four lanes, so a unioned
+  record drifts; lanes 0-2 unaffected, harmless). Radius padding
+  lanes and +0x12C zero everywhere.
+- Transform identity: world centre +0x240 == R^T x local + T
+  EXACTLY (delta 0.0000 at 4 dp on all 8 statics) -- the +0xF0 3x3
+  is applied transposed relative to the naive row reading; its rows
+  are the basis vectors' images, unit length (scale 1.0). The naive
+  R x local + T misses by 0.13-5.07 m (scales with |local centre|,
+  as a wrong-rotation error should). Decode scripts:
+  analysis/decode_sphere_dump.py, analysis/sphere_transform_variants.py.
+- Stage B UNBLOCKED on flight evidence, not just the decomp: world
+  sphere = centre +0x240 where the guard wrote it, else R^T x
+  local(+0x270) + T(+0x120) computed by us; world radius = local
+  radius (+0x280) x max 3x3 column scale (1.0 observed).
