@@ -40,6 +40,8 @@
 
 namespace edvr {
 
+class Config;
+
 // Rewrites the forced panel resolution at every site. Returns true only if all
 // of them were written. Every failure path leaves the process untouched and
 // says why in the log.
@@ -47,5 +49,22 @@ bool applyVScreenModeResolution(uint32_t width, uint32_t height);
 
 // Restores 1920x1080 everywhere. Safe to call if nothing was patched.
 void revertVScreenModeResolution();
+
+// Resolves fix.vscreen_res_width -- "auto", or an explicit width in pixels --
+// into the width and height to force. (0, 0) means "leave the game's own
+// panel alone": the ini asks for the stock size, the value does not parse, or
+// "auto" has no prior session to go on yet (see ../common/vscreen_auto_state.h,
+// which is where that prior-session fact is recorded and read back). Height
+// is always DERIVED to keep 16:9; there is no independent height setting any
+// more. Called from both the panel patch (device_hook.cpp) and the intro-movie
+// upscaler (intro_upscale.cpp), which are documented as asking this exact
+// question of this exact value -- see vscreen_res.cpp for why "auto" cannot
+// use this session's own render width. `announce` logs the outcome; the panel
+// patch is the one call site that should (its caller is the only one with
+// nothing else to say about the value), so the intro upscaler -- which logs
+// its own dimensions separately -- passes false rather than printing the same
+// line twice on every reload.
+void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
+                                    bool announce = true);
 
 }  // namespace edvr

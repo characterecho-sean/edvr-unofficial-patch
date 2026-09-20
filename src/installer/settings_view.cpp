@@ -20,7 +20,6 @@ namespace {
 
 const wchar_t* kClassName = L"EdvrSettingsList";
 const int kEditId = 9001;
-const int kComboId = 9002;
 
 // Everything below is in 96-dpi units.
 const int kPad = 18;
@@ -28,11 +27,7 @@ const int kHeaderHeight = 38;
 const int kRowHeight = 68;
 const int kControlWidth = 240;
 
-// Resolution is the one composite row: vscreen_res_width and _height shown
-// as a single dropdown of standard 16:9 sizes, with the two raw rows
-// appearing beneath it only when the pair matches no preset (or Custom was
-// picked outright).
-enum class ItemKind { Header, Setting, Resolution };
+enum class ItemKind { Header, Setting };
 
 struct Item {
     ItemKind    kind = ItemKind::Setting;
@@ -45,7 +40,6 @@ struct Item {
 struct List {
     HWND           hwnd = nullptr;
     HWND           edit = nullptr;
-    HWND           combo = nullptr;  // the resolution dropdown, shared
     SettingsModel* model = nullptr;
     std::wstring   mirrorDir;  // where each write is echoed; see mirror.h
     UINT           dpi = 96;
@@ -57,11 +51,6 @@ struct List {
     std::string    error;
     bool           dragThumb = false;   // the slim scrollbar's drag state
     int            dragOffset = 0;      // grab point within the thumb
-    // The resolution pair's row indices (SIZE_MAX when the schema lacks
-    // them), and whether Custom stays open after being picked outright.
-    size_t         resWidthRow = SIZE_MAX;
-    size_t         resHeightRow = SIZE_MAX;
-    bool           resolutionCustom = false;
 };
 
 List* listOf(HWND hwnd) {
@@ -79,26 +68,10 @@ bool isVscreenKey(const SettingDef& def, const char* key) {
     return strcmp(def.section, "fix") == 0 && strcmp(def.key, key) == 0;
 }
 
-int presetIndexFor(const std::string& w, const std::string& h) {
-    const auto& presets = vscreenPresets();
-    for (size_t i = 0; i < presets.size(); ++i) {
-        if (w == presets[i].w && h == presets[i].h) return static_cast<int>(i);
-    }
-    return -1;
-}
-
-std::wstring presetLabel(const ResolutionPreset& preset) {
-    return fromUtf8(std::string(preset.w) + " x " + preset.h);
-}
-
 // A row's effective value: what the file says, or what it ships as when
 // the file says nothing.
 std::string effectiveValue(const SettingRow& row) {
     return row.value.empty() ? std::string(row.def->shipped) : row.value;
-}
-
-void hideCombo(List* list) {
-    if (list->combo) ShowWindow(list->combo, SW_HIDE);
 }
 
 bool matches(const SettingRow& row, const std::wstring& needle) {
@@ -131,21 +104,8 @@ void rebuildItems(List* list) {
 
     const std::vector<SettingRow>& rows = list->model->rows();
 
-    // The resolution pair, found fresh each rebuild (the schema decides
-    // whether it exists). Its raw rows show only while Custom is active.
-    list->resWidthRow = list->resHeightRow = SIZE_MAX;
-    for (size_t i = 0; i < rows.size(); ++i) {
-        if (isVscreenKey(*rows[i].def, "vscreen_res_width")) list->resWidthRow = i;
-        if (isVscreenKey(*rows[i].def, "vscreen_res_height")) list->resHeightRow = i;
-    }
-    const bool haveRes = list->resWidthRow != SIZE_MAX && list->resHeightRow != SIZE_MAX;
-    const bool customActive =
-        haveRes && (list->resolutionCustom ||
-                    presetIndexFor(effectiveValue(rows[list->resWidthRow]),
-                                   effectiveValue(rows[list->resHeightRow])) < 0);
-
     // fsr ignores fix.temporal_aa_model (NVIDIA's preset row): found fresh
-    // each rebuild, the same as the resolution pair above.
+    // each rebuild.
     bool hideAaPreset = false;
     for (const SettingRow& r : rows) {
         if (isVscreenKey(*r.def, "temporal_aa")) {
@@ -169,17 +129,6 @@ void rebuildItems(List* list) {
             list->items.push_back(header);
             y += kHeaderHeight;
         }
-        if (haveRes && i == list->resWidthRow) {
-            Item res;
-            res.kind = ItemKind::Resolution;
-            res.row = i;
-            res.y = y;
-            res.height = kRowHeight;
-            list->items.push_back(res);
-            y += kRowHeight;
-            if (!customActive) continue;   // the raw width row stays hidden
-        }
-        if (haveRes && i == list->resHeightRow && !customActive) continue;
         Item item;
         item.kind = ItemKind::Setting;
         item.row = i;
@@ -212,7 +161,6 @@ void hideEdit(List* list) {
 void scrollTo(List* list, int position) {
     commitEdit(list);
     hideEdit(list);
-    hideCombo(list);
     RECT client{};
     GetClientRect(list->hwnd, &client);
     const int page = client.bottom - client.top;
@@ -488,38 +436,6 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
     }
 }
 
-// The composite resolution row: one dropdown-shaped box showing the pair as
-// "1920 x 1080" (or "Custom"), backed by the two real keys. The label and
-// summary come from the width row's own def, so the ini's words are the
-// window's words here too.
-void paintResolutionRow(const List* list, HDC dc, const RECT& rowRect) {
-    const ui::Theme& t = ui::theme();
-    const ui::Fonts& f = ui::fonts();
-    const RowGeometry geo = geometryFor(list, rowRect);
-    const SettingRow& width = list->model->rows()[list->resWidthRow];
-    const SettingRow& height = list->model->rows()[list->resHeightRow];
-
-    const std::wstring label = L"On-foot screen resolution";
-    ui::drawText(dc, label, geo.label, f.bodyBold, t.text,
-                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (width.def->needsRestart) drawRestartBadge(list, dc, geo.label, label);
-    ui::drawText(dc, fromUtf8(width.def->summary), geo.description, f.caption, t.subtext,
-                 DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
-
-    const RECT box = valueRect(list, geo);
-    ui::fillRounded(dc, box, dp(list, 5), t.control);
-    ui::strokeRounded(dc, box, dp(list, 5), t.controlBorder);
-    const int preset = presetIndexFor(effectiveValue(width), effectiveValue(height));
-    RECT text = box;
-    text.left += dp(list, 8);
-    text.right -= dp(list, 24);
-    ui::drawText(dc, preset >= 0 ? presetLabel(vscreenPresets()[preset]) : L"Custom", text,
-                 f.body, t.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    RECT chevron{box.right - dp(list, 22), box.top, box.right - dp(list, 6), box.bottom};
-    ui::drawText(dc, L"\x25BE", chevron, f.caption, t.subtext,
-                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-}
-
 void paint(List* list) {
     PAINTSTRUCT ps;
     HDC screen = BeginPaint(list->hwnd, &ps);
@@ -555,11 +471,7 @@ void paint(List* list) {
             text.top += dp(list, 12);
             ui::drawText(dc, item.title, text, f.heading, t.subtext, DT_LEFT | DT_SINGLELINE);
         } else {
-            if (item.kind == ItemKind::Resolution) {
-                paintResolutionRow(list, dc, rect);
-            } else {
-                paintRow(list, dc, rect, list->model->rows()[item.row]);
-            }
+            paintRow(list, dc, rect, list->model->rows()[item.row]);
             RECT line{rect.left + dp(list, kPad), rect.bottom - 1, rect.right - dp(list, kPad),
                       rect.bottom};
             ui::fillRect(dc, line, t.cardBorder);
@@ -677,53 +589,6 @@ void beginEdit(List* list, size_t rowIndex, const RECT& box) {
     list->editingRow = rowIndex;
 }
 
-// The resolution dropdown is a real combo, created once and shown over the
-// row's box on demand -- the inline EDIT's pattern exactly, and for the
-// same reason: keyboard selection and the wheel are what a hand-rolled
-// dropdown gets subtly wrong.
-void openResolutionCombo(List* list, const RECT& box) {
-    if (!list->combo) {
-        list->combo = CreateWindowExW(0, L"COMBOBOX", L"",
-                                      WS_CHILD | WS_VSCROLL | CBS_DROPDOWNLIST |
-                                          CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
-                                      0, 0, 10, 10, list->hwnd,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kComboId)),
-                                      nullptr, nullptr);
-        SendMessageW(list->combo, WM_SETFONT,
-                     reinterpret_cast<WPARAM>(ui::fonts().body), TRUE);
-        if (ui::theme().dark) SetWindowTheme(list->combo, L"DarkMode_CFD", nullptr);
-    }
-    SendMessageW(list->combo, CB_RESETCONTENT, 0, 0);
-    for (const ResolutionPreset& preset : vscreenPresets()) {
-        SendMessageW(list->combo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(presetLabel(preset).c_str()));
-    }
-    SendMessageW(list->combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Custom..."));
-
-    const SettingRow& width = list->model->rows()[list->resWidthRow];
-    const SettingRow& height = list->model->rows()[list->resHeightRow];
-    const int preset = presetIndexFor(effectiveValue(width), effectiveValue(height));
-    SendMessageW(list->combo, CB_SETCURSEL,
-                 preset >= 0 ? static_cast<WPARAM>(preset) : vscreenPresets().size(), 0);
-
-    SendMessageW(list->combo, CB_SETITEMHEIGHT, 0, dp(list, 24));
-    const int fieldH = box.bottom - box.top;
-    SendMessageW(list->combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1),
-                 fieldH > dp(list, 8) ? fieldH - dp(list, 8) : fieldH);
-    MoveWindow(list->combo, box.left, box.top, box.right - box.left, fieldH + dp(list, 220),
-               TRUE);
-    // The combo's own FIELD never shows: an empty window region clips it to
-    // zero pixels, so the painted box underneath stays the only field
-    // anybody sees and opening the list changes nothing above it. The
-    // dropdown is the combo's separate popup window, which a region on the
-    // combo does not touch -- so the list still drops, drawn our way, with
-    // the combo's native keyboard and wheel behaviour intact.
-    SetWindowRgn(list->combo, CreateRectRgn(0, 0, 0, 0), FALSE);
-    ShowWindow(list->combo, SW_SHOW);
-    SetFocus(list->combo);
-    SendMessageW(list->combo, CB_SHOWDROPDOWN, TRUE, 0);
-}
-
 // The row whose link is under the pointer, if any. The click and the cursor
 // both ask this one question, so what is clickable can never drift from what
 // was drawn -- and the quiet text beside the link is no longer part of it.
@@ -769,14 +634,6 @@ void onClick(List* list, int x, int y) {
         RECT rect{client.left, dp(list, item.y) - list->scroll, client.right,
                   dp(list, item.y + item.height) - list->scroll};
         if (y < rect.top || y >= rect.bottom) continue;
-
-        if (item.kind == ItemKind::Resolution) {
-            const RowGeometry geo = geometryFor(list, rect);
-            const RECT box = valueRect(list, geo);
-            POINT point{x, y};
-            if (PtInRect(&box, point)) openResolutionCombo(list, box);
-            return;
-        }
 
         const SettingRow& row = list->model->rows()[item.row];
         const RowGeometry geo = geometryFor(list, rect);
@@ -905,63 +762,6 @@ LRESULT CALLBACK listProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
                 }
             }
             return DefWindowProcW(hwnd, message, wparam, lparam);
-        case WM_COMMAND:
-            if (list && list->combo &&
-                reinterpret_cast<HWND>(lparam) == list->combo) {
-                if (HIWORD(wparam) == CBN_SELCHANGE) {
-                    const LRESULT sel = SendMessageW(list->combo, CB_GETCURSEL, 0, 0);
-                    const auto& presets = vscreenPresets();
-                    if (sel >= 0 && static_cast<size_t>(sel) < presets.size()) {
-                        list->resolutionCustom = false;
-                        applyValue(list, list->resWidthRow, presets[sel].w);
-                        applyValue(list, list->resHeightRow, presets[sel].h);
-                    } else {
-                        // Custom: nothing is written; the raw width and
-                        // height rows appear for typing into.
-                        list->resolutionCustom = true;
-                    }
-                    hideCombo(list);
-                    rebuildItems(list);
-                    updateScrollbar(list);
-                    InvalidateRect(list->hwnd, nullptr, TRUE);
-                } else if (HIWORD(wparam) == CBN_CLOSEUP) {
-                    hideCombo(list);
-                }
-                return 0;
-            }
-            break;
-        case WM_DRAWITEM: {
-            const DRAWITEMSTRUCT* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
-            if (list && item->CtlID == kComboId) {
-                ui::drawComboItem(item, list->dpi);
-                return TRUE;
-            }
-            break;
-        }
-        case WM_MEASUREITEM: {
-            MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
-            if (list && measure->CtlID == kComboId) {
-                measure->itemHeight = static_cast<UINT>(dp(list, 24));
-                return TRUE;
-            }
-            break;
-        }
-        case WM_CTLCOLORLISTBOX: {
-            // The dropdown's list shares the EDIT's colours: the rows are
-            // owner-drawn, but the listbox paints its own background around
-            // them and its frame, and stock white behind house rows is the
-            // exact mismatch this control exists to remove.
-            const ui::Theme& t = ui::theme();
-            SetBkColor(reinterpret_cast<HDC>(wparam), t.cardBg);
-            static HBRUSH listBrush = nullptr;
-            static COLORREF listColour = 0;
-            if (!listBrush || listColour != t.cardBg) {
-                if (listBrush) DeleteObject(listBrush);
-                listBrush = CreateSolidBrush(t.cardBg);
-                listColour = t.cardBg;
-            }
-            return reinterpret_cast<LRESULT>(listBrush);
-        }
         case WM_CTLCOLOREDIT: {
             const ui::Theme& t = ui::theme();
             SetTextColor(reinterpret_cast<HDC>(wparam), t.text);

@@ -1451,9 +1451,12 @@ static void testSettings(const std::wstring& root, const std::wstring& scratch) 
                  (label + "and the row shows it as 20%").c_str());
     }
 
-    // The on-foot width's bounds come from the read that clamps them (the
-    // intro upscaler's getIntInRange), not from whichever file is walked
-    // first; the panel patch reads the same key plain, and used to hide them.
+    // The on-foot width's bounds come from edvr.ini's own `| range` annotation
+    // now: fix.vscreen_res_width is "auto" or a width, read with getString by
+    // every consumer (the panel patch and the intro upscaler both resolve it
+    // through resolveVScreenTargetResolution), so no typed, bounded read is
+    // left for the generator to detect on its own -- see apply_annotation's
+    // fallback in gen_settings_schema.py.
     for (const SettingRow& row : model.rows()) {
         if (std::string(row.def->key) != "vscreen_res_width") continue;
         expectEq(std::string(row.def->lo) + ".." + row.def->hi, "640..8192",

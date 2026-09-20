@@ -612,11 +612,14 @@ truth, and it validates the runtime's projection against the shape it expects
 before changing anything, standing down loudly on a mismatch. None of the three
 does anything until you configure it.
 
-**The resolution fix, off by default,** rewrites the twelve numbers that are
-the width and height the game forces for the on-foot screen, in the places it
-does so — nothing else: not the surrounding instructions, not the game's
-decision about which screen to draw. Its safeguards, because they are the
-reason to trust it:
+**The resolution fix, `auto` by default,** rewrites the twelve numbers that
+are the width and height the game forces for the on-foot screen, in the
+places it does so — nothing else: not the surrounding instructions, not the
+game's decision about which screen to draw. `auto` sizes it from what your
+headset actually rendered per eye last session (a fresh install runs it as
+"off," the same stock 1920x1080 as before, until one session with VR running
+has completed); typing a width in pixels overrides it, and the height always
+follows at 16:9. Its safeguards, because they are the reason to trust it:
 
 - **No file on disk is modified.** The change exists only in memory and the
   original values are put back when the game closes.
@@ -641,10 +644,10 @@ server sees. Nothing reads or changes gameplay state — position, ship, cargo,
 credits, missions. Nothing interacts with anti-cheat, and nothing attempts to
 hide from anything.
 
-If you would rather no part of this went near the game's code or memory, leave
-`vscreen_res_width`/`_height` at the stock 1920x1080 (the shipped default,
-which means "do not patch") and Explorer Cam unconfigured — the DLL then
-behaves as earlier versions did.
+If you would rather no part of this went near the game's code or memory, set
+`vscreen_res_width` to `1920` (the stock size, meaning "do not patch") and
+leave Explorer Cam unconfigured — the DLL then behaves as earlier versions
+did.
 
 ## Build
 

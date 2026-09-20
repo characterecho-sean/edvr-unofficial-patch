@@ -56,7 +56,7 @@
 //
 // ONE INTERACTION WORTH KNOWING. The blit's TARGETS were 1920x1080 in the
 // census, so the backdrop reaches the composite at that size whatever the
-// source was, and raising vscreen_res_width/_height does not raise it -- it
+// source was, and raising vscreen_res_width does not raise it -- it
 // magnifies it further while sharpening everything around it. A high panel
 // resolution makes this artifact MORE visible, not less. That is the opposite
 // of the intuition, and it is why the fix is here and not in fss_res.

@@ -37,7 +37,7 @@ on-foot panel. Two things defeated that guess, both silently:
 
 - **A panel raised to exactly your eye-texture size.** The panel exclusion
   then removed the eyes along with the panel. This is the one to suspect if
-  you set `vscreen_res_width`/`_height` to `3840`/`2160`.
+  you set `vscreen_res_width` to `3840` (the height follows it at 16:9).
 - **Eye textures under 2048 on an axis**, which never qualified at all. This
   is most headsets: a Quest 3 through SteamVR renders about 1832×1920 or
   1728×1824 per eye at ordinary settings, and only clears 2048 on both axes
@@ -48,8 +48,8 @@ submits and tells the graphics side, so it matches your real eye textures
 instead of guessing, and says so in both logs. If the count is still stuck at
 0, EDVR now prints a line naming every target size it did see — please attach
 it to an issue. As an immediate workaround on any version, set
-`vscreen_res_width`/`_height` to `2880`/`1620` (short enough that nothing
-collides) or back to `1920`/`1080`.
+`vscreen_res_width` to `2880` (short enough that nothing collides) or back to
+`1920` to turn the resolution fix off.
 
 ## An earlier version crashed alongside EDHM
 

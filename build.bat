@@ -436,7 +436,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\original_draw_probe.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
@@ -747,7 +747,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
-    "src\d3d11\native_render_settings.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & exit /b 1 )
@@ -1779,7 +1779,8 @@ REM dimensions and the tightest runtime/D3D maximum is shared by both eyes.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\native_render_settings\\" /Fe"%BUILD%\native_render_settings_test.exe" ^
     "tools\native_render_settings_test\native_render_settings_test.cpp" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & exit /b 1 )
 "%BUILD%\native_render_settings_test.exe" --dry-run || exit /b 1

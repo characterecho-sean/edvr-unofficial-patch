@@ -171,15 +171,18 @@ edges come nearer instead of falling away. `0.3` with `panel_distance = 0.7` is
 a comfortable starting point. `fix.panel_curvature = 0.0`.
 *[screen-curvature.md](screen-curvature.md).*
 
-**The screen's resolution.** *Off by default.* Elite renders that screen at
-1920x1080 regardless of headset, which is why on-foot text looks soft. This
-raises it — any 16:9 size from 640 to 8192 wide; **2880x1620**, **3200x1800**,
-**3840x2160** and **5120x2880** are the useful ones. It costs GPU time and video
-memory in proportion, and it is the one fix that changes the game's code in
-memory: read [What it does and does not
+**The screen's resolution.** *Auto by default.* Elite renders that screen at
+1920x1080 regardless of headset, which is why on-foot text looks soft. EDVR
+now sizes it itself — 125% of the width your headset actually rendered per
+eye last session, rounded to a clean 16:9 pair — so it tracks a sharper VR
+render resolution one restart later, with nothing to set. Type a width in
+pixels instead to pick your own; the height always follows it at 16:9 and is
+not a separate setting any more. Any 16:9 width from 640 to 8192 works;
+**2880**, **3200**, **3840** and **5120** are the useful ones. It costs GPU
+time and video memory in proportion, and it is the one fix that changes the
+game's code in memory: read [What it does and does not
 do](../README.md#what-it-does-and-does-not-do) first.
-`fix.vscreen_res_width = 1920`, `fix.vscreen_res_height = 1080` (both stock,
-meaning "do not patch").
+`fix.vscreen_res_width = auto` (default); `1920` turns it off, same as stock.
 
 **On foot not being in 3D — Explorer Cam.** First person on foot is a flat image
 shown to both eyes; the external camera renders real stereo. Explorer Cam puts

@@ -1163,8 +1163,8 @@ bool targetIsEyeSized(void* rtv, int* candOut = nullptr) {
                 "being counted as eye textures, which keeps the black void, the "
                 "transition flash fix and Explorer Cam fed; the panel distance fix "
                 "may match a draw into the panel and place it wrongly. Set "
-                "fix.vscreen_res_width/height to a size your eye textures are not "
-                "if the panel sits at the wrong distance.",
+                "fix.vscreen_res_width to a width your eye textures are not (the "
+                "height follows it at 16:9) if the panel sits at the wrong distance.",
                 info.a, info.b);
         }
         return true;
@@ -5056,9 +5056,9 @@ void vScreenFrameBoundary() {
                     "eye-draw count, which is what keeps the black void, the transition "
                     "flash fix and Explorer Cam fed -- but the panel distance fix can now "
                     "match a draw INTO the panel and put it at the wrong distance. If the "
-                    "panel sits wrong, set fix.vscreen_res_width/height to a size your "
-                    "eye textures are not: 2880x1620 is a safe pick at any headset "
-                    "resolution, and 1920x1080 turns the resolution fix off entirely.",
+                    "panel sits wrong, set fix.vscreen_res_width to a width your eye "
+                    "textures are not: 2880 is a safe pick at any headset resolution, "
+                    "and 1920 turns the resolution fix off entirely.",
                     w, h);
             }
         }
@@ -5158,7 +5158,7 @@ void vScreenFrameBoundary() {
             // list actually supports; see vr_runtime.h.
             snprintf(adviceBuf, sizeof(adviceBuf),
                      "If one of those sizes is your eye texture, that is the collision -- change "
-                     "fix.vscreen_res_width/height (2880x1620 is safe, 1920x1080 is off). If none "
+                     "fix.vscreen_res_width (2880 is safe, 1920 is off). If none "
                      "of them is, this side is guessing at your eye textures because the openvr "
                      "half has published nothing: %s. The next line says what to do about it.",
                      vrRuntimeShortWhy());
@@ -5167,8 +5167,8 @@ void vScreenFrameBoundary() {
         } else {
             advice =
                 "If one of those sizes is your eye texture, that is the "
-                "collision -- change fix.vscreen_res_width/height (2880x1620 "
-                "is safe, 1920x1080 is off). If none of them matches the "
+                "collision -- change fix.vscreen_res_width (2880 "
+                "is safe, 1920 is off). If none of them matches the "
                 "published size either, something between the game and the "
                 "headset is resizing the image -- an upscaler's input "
                 "resolution, or supersampling that moved mid-session. Report "
