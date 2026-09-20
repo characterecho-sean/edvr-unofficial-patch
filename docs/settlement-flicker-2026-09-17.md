@@ -6738,3 +6738,12 @@ supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). INIs unchanged.
   sphere = centre +0x240 where the guard wrote it, else R^T x
   local(+0x270) + T(+0x120) computed by us; world radius = local
   radius (+0x280) x max 3x3 column scale (1.0 observed).
+
+### 2026-09-20 13:55 -- stage-B spec written (no code)
+
+Design doc 13:55 section: sphere-backed ownership coverage, spec'd
+against the flight-proven layout (sphere projection replaces the AABB
+sketch; stasis compare extends to pose+sphere for the LOD-rewrite
+case; world centre computed as R^T x local + T, never read from
++0x240). No code, no config change yet; the edvr.ini doc-block
+wording update ships with the implementation commit.
