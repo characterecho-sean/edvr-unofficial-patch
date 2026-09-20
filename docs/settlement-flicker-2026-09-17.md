@@ -6846,6 +6846,27 @@ paint-none in kinCover, then re-check mover ownership; the motion-view
 pulse wants a burst held in the motion view (originStep/rebase cadence
 a suspect).
 
+### 2026-09-20 17:05 -- flip flown: whole-eye cyan gone, movers owned via unions, MV oscillation captured
+
+Flight 163300 (the flip build's content). Movers dumps 163619/163645:
+claimed 100% -> 45-53%, no paint-all signature, kc_paint_frame stamps
+correctly -- the flip holds in flight. Movers still cyan: Sean's
+moving turret in view, and the landing ship once near the ground --
+unioned [near,far] intervals from OTHER spheres own mover pixels when
+the mover's depth enters their span (finding 2 confirmed on movers;
+the published set is statics-only, so the mover's own records are not
+the source). Offline rect reproduction explains only 52-77% of claimed
+texels by camera row set -- the pass's exact inputs are not yet
+dumped; KCParams cbuffer in the burst is the next instrument, and
+per-mover attribution waits on it. Motion dump 163502 settles 15:45:
+the MV FIELD oscillates sign-alternating frame to frame at 45% of
+strongly-changing pixels (median ~3.7 px output-scaled), cadence
+matching the game's jitter sign flip (amplitude explains ~1/5; scale
+audit is an offline code read next); originStep zero throughout --
+rebase refuted for this window; worldTaken steady. Burst caveat: dtMs
+quadrupled mid-burst (staging overhead; oscillation present in both
+halves).
+
 ### 2026-09-20 16:35 -- straddle flip built + installed (unflown)
 
 Sean sanctioned the 16:20 fix direction ("go"). kinCover now paints
