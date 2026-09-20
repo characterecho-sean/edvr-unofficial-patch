@@ -31,6 +31,8 @@ public:
     static constexpr uint32_t kOwnershipCap=64u;
     static constexpr uintptr_t kRigEvalRva=0x431AFE0u;
     static constexpr uint32_t kRigLinkCap=256u;
+    static constexpr uint32_t kPoseSampleCap=8192u;
+    static constexpr uint32_t kIdentityEventCap=256u;
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 
@@ -53,6 +55,14 @@ public:
         uint32_t xfChanges=0,lastXfChangeFrame=0;
         uint8_t bool234=0,predByte=0,gate2=0;
         uint64_t calls=0;
+        // Frame-aligned pose sampling: one sample per record per frame,
+        // decoded from the same xf block the change compare already reads.
+        uint32_t lastSampledFrame=0,framesSampled=0,dupInFrame=0;
+        uint32_t gaps=0,maxGap=0,nodeChanges=0,quatChangeFrames=0;
+        float maxJump=0;double totalJump=0;
+        // 20-byte pose bits of the previous sample (12 translation + 8 quat).
+        uint8_t prevPose[20]={};
+        bool hasPrevSample=false;
     };
     struct Transition {
         uint32_t recordId=0,frame=0;
@@ -79,6 +89,19 @@ public:
         uint32_t rigState=0,firstFrame=0;
         uint64_t hits=0;
     };
+    // One frame-aligned pose sample for a mover-class record.
+    struct PoseSample {
+        uint32_t recordId=0,frame=0;
+        float tx=0,ty=0,tz=0;                 // record+0x170
+        uint16_t q0=0,q1=0,q2=0,q3=0;         // record+0x17C lanes, raw
+    };
+    // Identity event: kind 1 = gap-resume (record unseen for gapLen frames,
+    // then re-seen), kind 2 = node-change (node pointer changed while the
+    // record pointer stayed continuously seen -- possible slot reuse).
+    struct IdentityEvent {
+        uint32_t recordId=0,frame=0,kind=0,gapLen=0;
+        uint64_t oldNode=0,newNode=0;
+    };
     struct Summary {
         uint64_t observed=0;uint32_t stored=0;
         uint64_t readFaults=0,recordOverflow=0,transitionOverflow=0,vtableOverflow=0;
@@ -87,12 +110,16 @@ public:
         uint64_t ownershipChecks=0,ownerBackPtrMatch=0,ownerState4=0,ownershipOverflow=0;
         uint64_t riglinkChecks=0,riglinkState4=0,riglinkNullCollection=0,riglinkOverflow=0;
         uint64_t xfMovers=0,xfChanges=0;
+        uint64_t poseSamples=0,poseSampleOverflow=0,identityEventOverflow=0;
+        uint64_t dupInFrame=0,gapEvents=0,nodeChangeEvents=0,quatChangeFrames=0;
+        uint64_t framesCounted=0,zeroRecordFrames=0,maxFrameRecords=0;
+        uint64_t minFrameRecords=~0ull; // the first real frame sets it
     };
 
     bool arm(uint32_t meshFrame) noexcept;
     void finish() noexcept;
     void reset() noexcept;
-    void setFrame(uint32_t meshFrame) noexcept{frame_.store(meshFrame,std::memory_order_release);}
+    void setFrame(uint32_t meshFrame) noexcept;
     bool active() const noexcept{return active_.load(std::memory_order_acquire);}
     HookStatus hookStatus() const noexcept{return hookStatus_;}
     const char* hookStatusText() const noexcept;
@@ -131,11 +158,19 @@ private:
     std::vector<OwnershipUse> ownerships_;
     std::unordered_map<uint64_t,uint32_t> riglinkIndex_;
     std::vector<RigLinkUse> riglinks_;
+    std::vector<PoseSample> samples_;
+    std::vector<IdentityEvent> events_;
+    uint32_t seenThisFrame_=0;
     JobStat jobs_[kJobCount];
 
     void clearLocked();
     bool validateExecutableLocked() noexcept;
     void noteVtableLocked(uint64_t rva,uint32_t frame) noexcept;
+    void noteIdentityEventLocked(uint32_t recordId,uint32_t frame,uint32_t kind,
+        uint32_t gapLen,uint64_t oldNode,uint64_t newNode) noexcept;
+    void samplePoseLocked(uint32_t recordId,RecordState& r,const uint64_t* xf,
+        uintptr_t recordAddr) noexcept;
+    void flushFrameStatsLocked() noexcept;
     static bool guardedRead(uintptr_t address,void* output,size_t bytes) noexcept;
     static uint64_t read64(uintptr_t address,bool& ok) noexcept;
     static uint32_t read32(uintptr_t address,bool& ok) noexcept;

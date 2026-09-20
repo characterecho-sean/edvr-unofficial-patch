@@ -49,12 +49,12 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-101-g39e6a422-dirty installed to frontier (BE7E7188),
-  extending the transform snapshot to +0x130..0x188 (full +0x17C quat
-  word), the rotation decode and the JSON writer gate (07:45 entry);
-  supersedes v0.17.0-95-g873c4024-dirty (6AAFD0FB). The 064047 flight
-  proved record+0x170 is the per-frame world position (06:45 entry).
-  INIs unchanged. Flight check: --expect-build v0.17.0-101-g39e6a422-dirty.
+- Build: v0.17.0-103-g267d0430-dirty installed to frontier (D3CA6EA1),
+  adding the frame-aligned pose/identity capture to KinematicEvalProbe
+  (08:22 entry); supersedes v0.17.0-101-g39e6a422-dirty (BE7E7188).
+  The 064047 flight proved record+0x170 is the per-frame world position
+  (06:45 entry). INIs unchanged. Flight check: --expect-build
+  v0.17.0-103-g267d0430-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6201,3 +6201,38 @@ intact and remain readable.
 Build v0.17.0-101-g39e6a422-dirty installed to frontier (BE7E7188); all
 gates green, including the new JSON gate. INIs unchanged.
 
+### 2026-09-20 08:22 — instrument: frame-aligned pose/identity capture (installed to frontier)
+
+KinematicEvalProbe now takes one pose sample per record per frame,
+riding the xf[11] block the re-seen path already reads (no extra guarded
+reads for the transform; first-sight records sample from xfFirst).
+Decoded per the flight-verified layout: tx/ty/tz = 3 floats at
+record+0x170, q0..q3 = 4 raw uint16 lanes at +0x17C..0x184 (decode
+offline). Per record: frames_sampled, dup_in_frame (second observation
+of the same record in one frame), gaps/max_gap, node_changes,
+quat_change_frames (8-byte quat bit-compare), max_jump/total_jump (3D
+translation distance vs previous sample). Two identity events, bounded
+at 256: kind 1 = gap-resume (record unseen for gapLen frames, then
+re-seen), kind 2 = node-change (node pointer changed while the record
+pointer stayed continuously seen -- the slot-reuse probe for the ~5
+records sharing one node pointer). A bounded (8192) mover sample log
+appends on first-ever sample, any change in the 20 pose bytes, or the
+first sample after a gap. setFrame() flushes per-frame record counts
+into frames_counted/zero_record_frames/min/max_frame_records (the first
+flush after arm counts a partial frame -- acceptable). All of it rides
+the existing eye-dump lifecycle (arm/finish/reset/setFrame/writeJson);
+no new config keys, no rendering change.
+
+JSON gate extended in the same change, per its own contract: the
+fixture gained the per-record frame-sample stats, 2 PoseSamples and 2
+IdentityEvents, and tools\kinematic_json_selftest.py asserts the new
+summary counters, the pose_events array and the mover_samples array
+(translation as raw 32-bit hex strings, quat lanes as ints) with exact
+dict equality. Gate green on first run.
+
+Dead-instrument check: framesCounted increments in setFrame and
+poseSamples in observe, both already-live paths, so a zero reads as a
+dead instrument, not as success.
+
+Build v0.17.0-103-g267d0430-dirty installed to frontier (D3CA6EA1); all
+gates green. INIs unchanged. Not yet flown.

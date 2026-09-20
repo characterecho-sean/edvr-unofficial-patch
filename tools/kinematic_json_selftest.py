@@ -31,7 +31,11 @@ def self_test():
         epoch_matches=11, epoch_mismatches=22, epoch_changes=33,
         ownership_checks=44, owner_backptr_match=45, owner_state4=46, ownership_overflow=47,
         riglink_checks=48, riglink_state4=49, riglink_null_collection=50, riglink_overflow=51,
-        xf_movers=52, xf_changes=53), ke['summary']
+        xf_movers=52, xf_changes=53,
+        pose_samples=2, pose_sample_overflow=5, identity_event_overflow=7,
+        dup_in_frame=2, gap_events=1, node_change_events=1, quat_change_frames=6,
+        frames_counted=40, zero_record_frames=1,
+        min_frame_records=2, max_frame_records=17), ke['summary']
     recs = ke['records']
     assert len(recs) == 2, recs
     mover, still = recs
@@ -45,13 +49,18 @@ def self_test():
         hash='0xdeadbeefcafef00d', count298=31, flags='0xc3',
         bool234=1, pred_byte=90, gate2=2,
         epoch1b8='0x1122334455667788', desc_epoch38='0x8877665544332211',
-        xf_changes=7, last_xf_change=42, xf_first=first, xf_latest=latest), mover
+        xf_changes=7, last_xf_change=42,
+        frames_sampled=40, dup_in_frame=2, gaps=1, max_gap=3,
+        node_changes=1, quat_change_frames=6, max_jump=0.125, total_jump=4.5,
+        xf_first=first, xf_latest=latest), mover
     assert still == dict(
         id=1, record='0x2222333344445555', first_frame=10, last_frame=42, calls=120,
         node='0x6666777788889999', pose_ctx='0x0', pred='0x0', pred_vtable_rva='0x0',
         pred2='0x0', pred2_vtable_rva='0x0', hash='0x0', count298=0, flags='0x41',
         bool234=0, pred_byte=0, gate2=0, epoch1b8='0x0', desc_epoch38='0x0',
         xf_changes=0, last_xf_change=0,
+        frames_sampled=40, dup_in_frame=0, gaps=0, max_gap=0,
+        node_changes=0, quat_change_frames=0, max_jump=0, total_jump=0,
         xf_first=['0x800000008000'] * 11, xf_latest=['0x800000008000'] * 11), still
     assert ke['transitions'] == [dict(
         record=0, frame=42, old_flags='0x1', new_flags='0xc3',
@@ -77,6 +86,18 @@ def self_test():
         descriptor='0xf00d000000000004', owner='0xf00d000000000005',
         coll_epoch90='0xeeee', rig_state=4, first_frame=10, hits=58,
         collection_known=1)], ke['riglinks']
+    assert ke['pose_events'] == [dict(
+        record=1, frame=30, kind=1, gap_len=3,
+        old_node='0x6666777788889999', new_node='0x6666777788889999'),
+        dict(record=0, frame=41, kind=2, gap_len=0,
+             old_node='0x1111222233334444', new_node='0x99990000aaaabbbb')], ke['pose_events']
+    assert ke['mover_samples'] == [dict(
+        record=0, frame=42,
+        t=['0x3f800000', '0x40000000', '0x40400000'],
+        q=[32768, 32768, 32768, 65535]),
+        dict(record=0, frame=43,
+             t=['0x3f000000', '0x40000000', '0x40400000'],
+             q=[32768, 32768, 32768, 65534])], ke['mover_samples']
     print('kinematic json self-test passed')
 
 

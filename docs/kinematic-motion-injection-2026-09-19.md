@@ -39,6 +39,12 @@
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
+- **Capture landed (2026-09-20, settlement doc 08:22 entry):** the
+  frame-aligned pose/identity capture is in KinematicEvalProbe
+  (v0.17.0-103-g267d0430-dirty, installed to frontier) -- per-record
+  per-frame translation+quat samples, dup-in-frame, gap-resume and
+  node-change identity events (the slot-reuse probe for the shared-node
+  records), frame stats, bounded mover sample log. Not yet flown.
 
 ## Premise
 
