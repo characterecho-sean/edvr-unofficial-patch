@@ -38,16 +38,16 @@ expensive way to run this project, so instruments batch.
 
 ## Levers, cheapest measurement first
 
-### L1. Know the split: CPU job brackets (MEASURED 2026-09-19, eye run 205251)
+### L1. Know the split: CPU job brackets (first measurement 2026-09-19, eye run 205251)
 
-Answer: **kinematic render-data dominant**. Per settlement frame (~63 fps):
-UpdateRenderDataJob ~7.0 ms (138 calls x 51 us), RenderDataBatch
-(0x4320340) ~2.4 ms (24 x 98 us), physics jobs <= 0.05 ms, BA0 negligible.
-~9.4 ms of the 15.9 ms frame sits in the two kinematic jobs. The split is
-robust; absolute ms is an upper bound (the eval observer may nest inside
-the brackets). Gates L3 and the motion-injection phase 1. L4 is closed
-unless later flights contradict. Details: settlement-flicker-2026-09-17.md
-journal, 20:52 flight.
+First numbers: UpdateRenderDataJob ~7.0 ms summed per frame (138 calls
+x 51 us), RenderDataBatch (0x4320340) ~2.4 ms, physics <= 0.05 ms.
+**Do not read this as proved dominance** (Sean's review, settlement doc
+21:23 entry): summed job durations can overlap across worker threads;
+the detailed observer takes the probe mutex thousands of times per frame
+inside the measured jobs; PrePhysicsAdvanceJob was never hooked. Next
+measurement: brackets only (detailed observer disabled), job-3 included,
+before any lever is sized on these numbers.
 
 ### L2. Draw suppression of proven-zero-sample draws
 
@@ -61,22 +61,22 @@ one-frame restore path, proven on the smoke/static-surface rigs.
 
 ### L3. Kinematic eval narrowing
 
-If L1 shows the eval traversal dominating: the engine already caches
-has-work (record+0x234), content hash (record+0x268) and a change
-predicate (record+0x2C0). The lever is making the skip bit
-(render-record+0x688 bit 0x1000) fire for records the predicate itself
-proves unchanged — engine-validated stasis, not our heuristic. Shared
-with the motion-injection design's phase-0 gate; one census serves both.
+**Blocked pending proven signals** (Sean's review, settlement doc 21:23
+entry). The earlier formulation rested on two unproven foundations:
+render-record+0x688 is the engine's own intra-frame evaluation sequencer
+(its gates already consume it), and record+0x268 is a render-config hash
+that never reads the transform — not a motion signal.
 
-**2026-09-19 update:** L1 confirmed the eval side dominant. But the
-0x688 flags are the engine's own intra-frame evaluation sequencer, and
-the eval's gates already skip mid-sequence records — there is no spare
-intra-frame dedup to win there. The +0x2C0 "change predicate" does not
-exist (shared render-graph view object; settlement doc 21:05 entry).
-The cross-frame stasis signal is the +0x268 hash, pending a movers
-capture. L3's lever is therefore: skip the LOD/frustum/work path for
-records whose hash is unchanged since last frame, evaluated BEFORE the
-existing gate chain, keyed on node identity.
+What the eval actually does per record per frame (FUN_14430EFE0,
+decomp_430EFE0.txt): descriptor mask gate, node liveness bytes, two
+flag-word skip gates, then view-dependent work — LOD distance test and a
+plane-loop frustum test (FUN_1404f4e10). **LOD and frustum are
+view-dependent: they must still run for stationary objects** (buildings
+stand still while the head moves). The valid lever, if a clean L1
+remeasure still shows eval work dominant, is narrower: avoid REBUILDING
+unchanged object data while preserving every view-dependent decision.
+What proves "unchanged" is unresolved — the transform/dirty-state
+dependency chain is an open offline item.
 
 ### L4. Physics decimation for attached-static children
 

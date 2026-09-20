@@ -5682,3 +5682,40 @@ the closing quote on new_hash (analysis used regex; fixed in tree).
   codeInstructionLength does not recognise. Decoder extension deferred:
   physics jobs measured <=0.05 ms/frame, so the missing bracket has no
   decision value now.
+
+### 2026-09-19 21:23 review (Sean): four corrections and a shortcut
+
+Checked against the cited evidence before recording; all four stand.
+
+1. +0x268 is a RENDER-CONFIG hash, not a motion signal. FUN_14433C750
+   (decomp_433C750.txt; called from the record filler FUN_14432A4E8)
+   mixes *(helper+0x1A0), *(helper+0xF0) and a helper table (count at
+   helper2+8 >>0x11 AND 0x7ff, entries at +0x10) -- no transform reads.
+   A moving object with unchanged render config keeps the same hash.
+   RETRACTED: +0x268 as justification for static classification or
+   zero-motion injection, and the phase-0 "movers capture proves the
+   hash" plan (moot: it cannot prove motion content).
+2. "hash unchanged across 1.4M calls" was never established: stored
+   transitions capped at 8192 with 1436052 overflowed, and the probe
+   counts flags-or-hash transitions jointly (no hash-only counter).
+3. "9.4 ms of the 15.9 ms frame" overstates: summed job durations can
+   overlap across worker threads; the observer takes the probe mutex
+   thousands of times per frame inside the measured jobs; job-3
+   (PrePhysicsAdvanceJob) is unmeasured. Render-data jobs are a
+   candidate, not proved dominant. Remeasure with the detailed observer
+   disabled and job-3 hooked.
+4. Skipping LOD/frustum for unchanged records would be incorrect: those
+   decisions are view-dependent (camera/head move while buildings stand
+   still). The valid lever is avoiding rebuild of unchanged object DATA
+   while preserving view-dependent decisions. Zero OBJECT motion must
+   retain camera/head motion in the final MVs.
+5. Identity: 2633 records share 510 node pointers, so node alone cannot
+   key per-record history; projected bounds + depth gating do not
+   uniquely own pixels. Unresolved before any MV overwrite.
+6. Shortcut to trace offline: writer -> collection -> collection+0x18 is
+   a backing-owner pointer, possibly the KinematicRig itself; proving it
+   could avoid the planned submission hook.
+7. Architecture simplification (verified temporal_pass.cpp dlaaEvaluate
+   hand-off): NGX already consumes EDVRs own e.dlMv -- no separate
+   game-DLSS-path replacement; the diagnostic MV view and DLSS consume
+   the same corrected composition.
