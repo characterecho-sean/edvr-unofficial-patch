@@ -502,18 +502,23 @@ bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
 // Kinematic static ownership (stage B, docs/kinematic-motion-injection-2026-09-19.md,
 // 2026-09-20 13:55 spec): the coverage pass's quarter-res [near,far] reversed-Z
 // span of the union of proven-static engine records projecting to this texel.
-// Consulted FIRST at every object-motion candidate site: an owned pixel takes
-// the camera/depth motion and skips mesh/terrain/holo/screen. probe.w bit 512
-// says the pair is bound this frame; the bit-gate runs before any load so an
-// unbound path is byte-identical to before. uiCovered rejects: UI pixels never
-// take an object-motion override. Screen-covered pixels reject too: the
-// scanner's depth is a private encoding, incomparable with the span (the DT
-// trace's own comment says so). The depth gate is relative -- volumetric
-// bounds are looser than meshPixel's exact-depth 1e-6 -- and kKcMargin is
-// sized by the movers view's cyan mis-own diagnostic, never silently tuned.
+// This is the pure OWNERSHIP query: the movers views paint it cyan, and the
+// compose veto (kinVeto below) consults it FIRST at every object-motion
+// candidate site when armed. probe.w bit 512 says the pair is bound this
+// frame; the bit-gate runs before any load so an unbound path is
+// byte-identical to before. uiCovered rejects: UI pixels never take an
+// object-motion override. Screen-covered pixels reject too: the scanner's
+// depth is a private encoding, incomparable with the span (the DT trace's
+// own comment says so). The depth gate is relative -- volumetric bounds are
+// looser than meshPixel's exact-depth 1e-6 -- and kKcMargin is sized by the
+// movers view's cyan mis-own diagnostic, never silently tuned.
 bool kinematicStatic(int2 q) {
     if ((uint(probe.w + 0.5) & 512u) == 0u) return false;
-    int2 kq = q >> 2;   // the quarter-res coverage texel
+    // The coverage pair is eye-local; q arrives in source-texture coords, so
+    // the region origin comes off first (2026-09-20 review finding 5: a
+    // nonzero Submit region or a packed eye otherwise reads shifted or
+    // out-of-range coverage; out-of-range loads return 0, the reject side).
+    int2 kq = (q - region.xy) >> 2;   // the quarter-res coverage texel
     uint nearBits = KCNear.Load(int3(kq, 0));
     if (nearBits == 0u) return false;
     if (uiCovered(q)) return false;
@@ -527,6 +532,13 @@ bool kinematicStatic(int2 q) {
     const float kKcMargin = 0.02;
     float zn = asfloat(nearBits), zf = asfloat(farBits);
     return zraw <= zn * (1.0 + kKcMargin) && zraw >= zf * (1.0 - kKcMargin);
+}
+// The compose veto: ownership AND probe.w bit 1024 (fix.engine_motion_veto).
+// The bit defaults off -- the 2026-09-20 review keeps the veto dark until
+// current-frame validity, camera inputs and real pixel ownership are
+// flight-established; ownership alone only paints the movers-view cyan.
+bool kinVeto(int2 q) {
+    return ((uint(probe.w + 0.5) & 1024u) != 0u) && kinematicStatic(q);
 }
 // The mv pass's tile of this frame's scene depth: the group's 8x8 with a
 // two-texel apron, filled at the top of mv() and read by the pixel's own
@@ -717,9 +729,10 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     }
     hy = 0.0;
     float2 meshP;float meshZ;
-    // Kinematic ownership FIRST (stage B): an owned pixel takes the
-    // camera/depth path below and never the draw's own transform.
-    if(allowWorld && !kinematicStatic(region.xy+int2(round(p+jit.xy))) && meshPixel(p,jit.xy,meshP,meshZ)) {
+    // Kinematic ownership FIRST (stage B), when the veto is armed: an owned
+    // pixel takes the camera/depth path below and never the draw's own
+    // transform. Unarmed (the default) the query is not even run here.
+    if(allowWorld && !kinVeto(region.xy+int2(round(p+jit.xy))) && meshPixel(p,jit.xy,meshP,meshZ)) {
         if(any(meshP<0) || any(meshP>float2(size)-1))return false;
         mvOut=meshP-p;zPred=meshZ;world=0;
         hy=rgbToYcocg(catmullRom((meshP+.5)/float2(size),float2(size)).rgb);
@@ -957,13 +970,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bool projectionValid = false;
         bool staticConfirmed = false;
         bool worldAvailable = tvCam.w != 0.0 && split.x > 0.0 && knobs.y != 0.0;
-        // Kinematic ownership (stage B): a proven-static engine record under
-        // this pixel vetoes every object-motion candidate below -- mesh,
-        // terrain, holo, screen and the rigid-owner promotion -- so the pixel
-        // keeps the camera/depth motion computed above. Unbound or unowned
+        // Kinematic ownership (stage B): with the veto armed (probe.w 1024,
+        // off by default) a proven-static engine record under this pixel
+        // vetoes every object-motion candidate below -- mesh, terrain, holo,
+        // screen and the rigid-owner promotion -- so the pixel keeps the
+        // camera/depth motion computed above. Unbound, unowned or unarmed
         // leaves the path byte-identical; the movers view paints owned
         // pixels cyan as the mis-own diagnostic (the ship gate reads it).
         const bool kinOwned = kinematicStatic(region.xy + int2(round(p)));
+        const bool kinVetoed = kinOwned && ((uint(probe.w + 0.5) & 1024u) != 0u);
         if (dp.z < -1e-6) {
             float xt = dp.x / -dp.z;
             float yt = dp.y / -dp.z;
@@ -1023,7 +1038,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             // proposal. It uses the exact centre depth and the raw previous
             // coordinate; no neighbourhood erosion or dilated depth is
             // allowed to manufacture a match.
-            if (!kinOwned && haveHistory != 0 && (uint(probe.w + 0.5) & 256u) != 0u &&
+            if (!kinVetoed && haveHistory != 0 && (uint(probe.w + 0.5) & 256u) != 0u &&
                 decisionPath >= 3u && decisionPath <= 6u &&
                 worldAvailable && count15 != 0u &&
                 !uiCovered(region.xy + int2(p)) && isfinite(sceneZraw) &&
@@ -1060,12 +1075,12 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 }
             }
             float2 terrainP; float terrainZ;
-            if (!kinOwned && terrainPixel(p,d,terrainP,terrainZ)) {
+            if (!kinVetoed && terrainPixel(p,d,terrainP,terrainZ)) {
                 pp=terrainP; motion=pp-p; zPred=terrainZ;
                 decisionPath=7u;
             }
             float2 holoP; float holoZ;
-            if(!kinOwned && holoPixel(p,0,holoP,holoZ)) {
+            if(!kinVetoed && holoPixel(p,0,holoP,holoZ)) {
                 pp=holoP; motion=pp-p; zPred=holoZ;
                 trackedForeground=true;
                 decisionPath=8u;
@@ -1104,13 +1119,13 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
         }
         float2 meshP;float meshZ;
-        if(!kinOwned && meshPixel(p,0,meshP,meshZ)) {
+        if(!kinVetoed && meshPixel(p,0,meshP,meshZ)) {
             motion=meshP-p;zPred=meshZ;
             trackedForeground=true;
             decisionPath=9u;projectionValid=true;
             mover=movers.x!=0 && all(meshP>=0) && all(meshP<float2(size)) ? moverAt(meshP,meshZ,depthN>=6):0;
         }
-        if(!kinOwned && (uint(probe.w+.5)&32u)!=0u) {
+        if(!kinVetoed && (uint(probe.w+.5)&32u)!=0u) {
             float4 s=Screen.Load(int3(region.xy+int2(p),0));
             if(s.w>0) {
                 motion=s.w!=2?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;

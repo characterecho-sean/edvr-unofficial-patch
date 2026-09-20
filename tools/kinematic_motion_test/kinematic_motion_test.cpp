@@ -520,6 +520,32 @@ void caseImplausibleSphereRejected() {
     check(count == 0, "17: the published set is empty");
 }
 
+// 2026-09-20 review finding 4: the generation restarts from zero on a
+// tracker restart, so the GPU upload cache keys on (session, generation).
+// The session epoch must change across any state reset and hold within a
+// session, or an off/on cycle can re-publish different spheres under a
+// generation the renderer already holds.
+void caseSessionEpoch() {
+    fresh();
+    const uint32_t s0 = kinematicMotionSession();
+    check(kinematicMotionSession() == s0, "18: the session holds within a session");
+    FakeRecord a;
+    const float rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
+    const float t[3] = { 0.f, 0.f, 0.f };
+    initRecord(a, 0x5A, 0.f, 0.f, 0.f, 90); setTransform(a, rot, t); setSphere(a, 0,0,0, 2.f);
+    FakeDesc da = descFor(a);
+    const uintptr_t pa = reinterpret_cast<uintptr_t>(&da);
+    for (int i = 0; i < 4; ++i) { kinematicMotionObserve(pa); endFrame(); }
+    uint32_t count = 0, sframe = 0;
+    check(kinematicMotionSphereSnapshot(nullptr, 0, &count, &sframe) == 1 && count == 1,
+          "18: a published set before the restart (generation 1)");
+    fresh();   // shutdown + configure: state reset twice over
+    const uint32_t s1 = kinematicMotionSession();
+    check(s1 != s0, "18: a restart bumps the session epoch");
+    check(kinematicMotionSphereSnapshot(nullptr, 0, &count, &sframe) == 0 && count == 0,
+          "18: the restarted tracker has nothing published");
+}
+
 void caseConfigLifecycle() {
     kinematicMotionConfigure(false);
     check(!kinematicMotionActive(), "0: off is inactive");
@@ -557,6 +583,7 @@ int wmain(int argc, wchar_t** argv) {
     caseRadiusScale();
     caseUploadGeneration();
     caseImplausibleSphereRejected();
+    caseSessionEpoch();
     kinematicMotionShutdown();
     std::printf("kinematic_motion_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

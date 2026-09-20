@@ -1366,15 +1366,22 @@ ID3D11ComputeShader* kinShader(ID3D11DeviceContext* ctx) {
 }
 // The coverage pass's own state: the KCParams cbuffer and the uploaded sphere
 // set (structured, 4096 x 80 B -- the tracker's kTrackCap cap, so overflow is
-// impossible by construction). g_kinSphereGen is the last tracker generation
-// uploaded; an unchanged generation skips the copy.
+// impossible by construction). g_kinSphereGen/g_kinSphereSession are the last
+// tracker generation and session epoch uploaded; an unchanged pair skips the
+// copy (the session half closes the restart reuse, 2026-09-20 review
+// finding 4).
 ID3D11Buffer*              g_kinCb = nullptr;
 ID3D11Buffer*              g_kinSphereBuf = nullptr;
 ID3D11ShaderResourceView*  g_kinSphereSrv = nullptr;
 uint64_t                   g_kinSphereGen = 0;
+uint32_t                   g_kinSphereSession = 0;
 uint32_t                   g_kinSphereCount = 0;
 uint64_t                   g_kinEmptyFrames = 0;   // active frames with an empty upload (stand-down count)
 bool                       g_kinEmptyNoted = false;
+bool                       g_kinNoCamNoted = false;   // finding-1 stand-down, once
+// fix.engine_motion_veto (off): ownership alone paints the movers-view cyan;
+// the compose veto waits on the mask's flight validation (2026-09-20 review).
+bool                       g_engineMotionVeto = false;
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
 ID3D11ComputeShader*       g_csUiResolve = nullptr;
 bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
@@ -3082,6 +3089,20 @@ bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState
                            const PassParams& p, uint32_t w, uint32_t h) {
     if (!kinematicMotionActive()) return false;
     if (p.knobs[1] == 0.0f) return false;   // no scene depth bound: nothing to gate with
+    // The camera rows come from the frame's chosen set, not p.wR0..2: those
+    // are filled only by the body/ship motion paths, and a zero camera reads
+    // every sphere as straddling the eye -- a full-eye paint and a veto on
+    // real object motion (2026-09-20 review finding 1). Stand down instead.
+    chooseCameraRows();   // idempotent within the frame
+    if (!g_curValid) {
+        if (!g_kinNoCamNoted) {
+            g_kinNoCamNoted = true;
+            Log::get().note("engine motion coverage: no valid camera rows this frame -- the "
+                            "coverage pass stands down rather than project against a zero "
+                            "camera (2026-09-20 review finding 1). The stock path is untouched.");
+        }
+        return false;
+    }
     ID3D11ComputeShader* cs = kinShader(ctx);
     if (!cs) {
         if (!g_csKinNoted) {
@@ -3122,14 +3143,18 @@ bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState
         if (FAILED(dev->CreateShaderResourceView(g_kinSphereBuf, &sd, &g_kinSphereSrv)) ||
             !g_kinSphereSrv) return false;
     }
-    if (gen != g_kinSphereGen) {
-        // The generation changed: one copy. An idle settlement frame pays
-        // none -- the coverage textures still rebuild (the camera moves).
+    const uint32_t kinSession = kinematicMotionSession();
+    if (gen != g_kinSphereGen || kinSession != g_kinSphereSession) {
+        // The (session, generation) pair changed: one copy. An idle
+        // settlement frame pays none -- the coverage textures still rebuild
+        // (the camera moves). The session half makes a tracker restart's
+        // generation collision a fresh upload, never a reuse (finding 4).
         static std::vector<KinematicSphereGpu> staging(4096);
         const uint64_t upGen = kinematicMotionSphereSnapshot(staging.data(), 4096, &count, &snapFrame);
         ctx->UpdateSubresource(g_kinSphereBuf, 0, nullptr, staging.data(), 0, 0);
         g_kinSphereGen = upGen;
         g_kinSphereCount = count;
+        g_kinSphereSession = kinSession;
     }
     const uint32_t qw = (w + 3) / 4, qh = (h + 3) / 4;   // quarter-res, rounded out
     if (e.kcNear && (e.kcW != qw || e.kcH != qh)) releaseKc(e);
@@ -3156,10 +3181,12 @@ bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState
     float* f = static_cast<float*>(mapped.pData);
     // The camera rows of THIS frame, the same frame the compose projects by
     // (the 10:52 spec's #1 expected bug class is a last-frame matrix here).
+    // g_curRows is the frame's chosen set, gated on g_curValid above --
+    // p.wR0..2 are only populated when the body/ship motion paths ran.
     memcpy(f, p.tanNow, 16);
-    memcpy(f + 4, p.wR0, 16);
-    memcpy(f + 8, p.wR1, 16);
-    memcpy(f + 12, p.wR2, 16);
+    memcpy(f + 4, g_curRows + 0, 16);
+    memcpy(f + 8, g_curRows + 4, 16);
+    memcpy(f + 12, g_curRows + 8, 16);
     memcpy(f + 16, p.knobs, 16);
     int32_t* ii = reinterpret_cast<int32_t*>(f + 20);
     ii[0] = static_cast<int32_t>(e.kcW);
@@ -5786,6 +5813,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const bool kcBound = kinematicCoveragePass(ctx, dev, e, p, w, h);
                     if (kcBound) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
+                    // The compose veto itself waits on fix.engine_motion_veto
+                    // (off): bit 1024 arms it, ownership alone only paints.
+                    if (kcBound && g_engineMotionVeto) p.probe[3] =
+                        static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[21] = {};
@@ -6070,6 +6101,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             p.probe[3] = uiFlags();
             kcBound = kinematicCoveragePass(ctx, dev, e, p, w, h);
             if (kcBound) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
+            if (kcBound && g_engineMotionVeto) p.probe[3] =
+                static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
         }
         bool ran = usedDlaa || (ensureNative(dev, e, viewFmt) && setParams(ctx, p));
         // A native fallback also writes counters, even when the requested
@@ -7048,11 +7081,12 @@ void temporalPassConfigure(Config& cfg) {
     celestialMotionConfigure(g_wanted && cfg.getBool("advanced.terrain_motion", true));
     meshMotionConfigure(g_wanted && cfg.getBool("advanced.mesh_motion", true));
     // The kinematic tracker (docs/kinematic-motion-injection-2026-09-19.md):
-    // engine-truth stasis for settlement records. Stage A is diagnostics
-    // only -- no rendering change. auto is reserved until the scene gate
-    // lands and behaves as off, said once.
+    // engine-truth stasis for settlement records, feeding the temporal pass's
+    // ownership coverage. The mask is diagnostic-only (the movers view paints
+    // owned pixels cyan) unless fix.engine_motion_veto is on. auto is reserved
+    // until the scene gate lands and behaves as off, said once.
+    const std::string engineMotion = cfg.getString("fix.engine_motion", "off");
     {
-        const std::string engineMotion = cfg.getString("fix.engine_motion", "off");
         static bool engineMotionAutoNoted = false;
         if (_stricmp(engineMotion.c_str(), "auto") == 0 && !engineMotionAutoNoted) {
             engineMotionAutoNoted = true;
@@ -7060,6 +7094,18 @@ void temporalPassConfigure(Config& cfg) {
                             "scene gate lands -- behaving as off.");
         }
         kinematicMotionConfigure(g_wanted && _stricmp(engineMotion.c_str(), "on") == 0);
+    }
+    // fix.engine_motion_veto (off): the compose veto the coverage mask exists
+    // for. It waits on the mask's flight validation (2026-09-20 review); the
+    // bit arms per frame at the compose, only while coverage is bound.
+    g_engineMotionVeto = cfg.getBool("fix.engine_motion_veto", false);
+    if (g_engineMotionVeto && _stricmp(engineMotion.c_str(), "on") != 0) {
+        static bool vetoDarkNoted = false;
+        if (!vetoDarkNoted) {
+            vetoDarkNoted = true;
+            Log::get().note("engine motion: fix.engine_motion_veto=on but fix.engine_motion is "
+                            "not on -- there is no coverage to veto with; the veto is dark.");
+        }
     }
     const std::string staticFovea = cfg.getString("advanced.temporal_aa_fovea", "0");
     g_staticSurfacesOn = g_wanted && g_trainedWanted &&
@@ -8276,6 +8322,7 @@ void temporalPassShutdown() {
     if (g_csKin) { g_csKin->Release(); g_csKin = nullptr; }
     g_kinSphereGen = 0;
     g_kinSphereCount = 0;
+    g_kinSphereSession = 0;
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
     if (g_csFast) { g_csFast->Release(); g_csFast = nullptr; }
 }

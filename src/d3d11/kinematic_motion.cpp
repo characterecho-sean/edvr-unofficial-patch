@@ -85,6 +85,12 @@ std::vector<uint32_t> boundsDumpIds_;
 std::vector<KinematicSphereGpu> snapshot_;
 uint64_t snapshotGeneration_ = 0;
 uint32_t snapshotFrame_ = 0;
+// The GPU cache key's other half (2026-09-20 review finding 4): the
+// generation restarts from zero on every clearLocked, so a tracker off/on
+// cycle could re-publish different spheres under a generation the renderer
+// already holds. clearLocked bumps the session; the coverage pass uploads
+// on a (session, generation) mismatch, never a generation mismatch alone.
+std::atomic<uint32_t> sessionEpoch_{0};
 
 bool guardedRead(uintptr_t address, void* output, size_t bytes) noexcept {
     __try { std::memcpy(output, reinterpret_cast<const void*>(address), bytes); return true; }
@@ -102,6 +108,7 @@ void clearLocked() {
     standDownNoted_ = false; noMoverNoted_ = false; boundsWaitNoted_ = false;
     boundsDumpStage_ = 0; boundsDumpIds_.clear();
     snapshot_.clear(); snapshotGeneration_ = 0; snapshotFrame_ = 0;
+    sessionEpoch_.fetch_add(1, std::memory_order_release);
     lastSummaryEligible_ = 0; lastSummaryGeneration_ = 0; lastSummaryRejected_ = 0;
 }
 
@@ -353,10 +360,11 @@ void kinematicMotionConfigure(bool on) {
     }
     active_.store(true, std::memory_order_release);
     Log::get().note("engine motion: tracker live (fix.engine_motion=on) -- proven-static records' "
-                    "world spheres feed the temporal pass's ownership coverage (the t19/t20 compose "
-                    "veto): geometry proven bit-static takes camera-only motion; movers and unknowns "
-                    "keep the stock path. Stand-downs and zero-record frames are logged, never read "
-                    "as pass.");
+                    "world spheres feed the temporal pass's ownership coverage: the movers debug "
+                    "view paints owned pixels cyan, and with fix.engine_motion_veto=on they also "
+                    "take camera-only motion (the t19/t20 compose veto, off by default). Movers "
+                    "and unknowns keep the stock path. Stand-downs and zero-record frames are "
+                    "logged, never read as pass.");
 }
 
 void kinematicMotionShutdown() {
@@ -606,6 +614,10 @@ uint64_t kinematicMotionSphereSnapshot(KinematicSphereGpu* out, uint32_t cap,
     if (count) *count = n;   // the published set's size, even when cap truncates the copy
     if (frame) *frame = snapshotFrame_;
     return snapshotGeneration_;
+}
+
+uint32_t kinematicMotionSession() noexcept {
+    return sessionEpoch_.load(std::memory_order_acquire);
 }
 
 bool kinematicMotionRecordEligible(uint64_t record) noexcept {
