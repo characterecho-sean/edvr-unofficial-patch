@@ -134,6 +134,20 @@
   the game's jitter sign flip; originStep zero throughout (rebase
   refuted this window); jitter scale alone explains ~1/5 of the
   amplitude; worldTaken (path selection) steady.
+  Update 17:02: disassembly answers Sean's 16:56 questions (entry at
+  the foot). The render path is MOVER-BLIND: eval 0x430EFE0 has exactly
+  one in-code caller (traversal FUN_144312040 at 0x4312504; jobs 0/1
+  call it and it recurses over child contexts -- the ~11x fan-out), and
+  its per-record gates are render-eligibility only (ptr+0x290, bool234,
+  byte+0x298, draw-distance nibble) -- no static/dynamic branch.
+  Mover/static truth lives in the physics jobs (0x432B2A0 / 0x42DF530 /
+  0x42DF550; no decomps yet). Ruled out: return-address caller
+  attribution at the eval hook (degenerate single caller). Next
+  discriminators, no flight needed first: offline vtable/flag
+  clustering on existing capture JSON, then a TLS job-attribution bit
+  on the existing brackets. Landscape-cyan question: terrain has no rig
+  records -- 54.4% of terrain pixels claimed incidentally by structure
+  spheres (dump 163645), benign once the veto arms.
 
 ## Premise
 
@@ -1201,3 +1215,69 @@ finding-2 tightening design; (2) the MV oscillation's alternating
 term: jitter units/scale audit in the compose (input vs output pixels,
 single vs double application) is an OFFLINE code read before any
 flight is spent.
+
+## 2026-09-20 (17:02: disassembly answers -- render path mover-blind; landscape-cyan expected)
+
+Two questions from Sean (16:56), answered offline against
+analysis/decomp and dump 163645. No code change; no flight spent.
+
+**Shouldn't the landscape be entirely cyan? No.** Cross-tab on dump
+163645's movers view (499x531 sampled grid; TerrainIndex semantics per
+the terrain-history-shimmer doc: set = terrain pixel, the terrain
+path's exact gate being TerrainZ == sceneZ):
+
+| region                | claimed | not claimed |
+|-----------------------|---------|-------------|
+| terrain (46.6%)       | 67,228  | 56,285      |
+| non-terrain (53.4%)   | 52,472  | 88,984      |
+
+54.4% of terrain pixels are claimed; 37.1% of non-terrain are. The mask
+is built ONLY from rig-record bounding spheres, and terrain publishes no
+rig records -- terrain paints only where a structure sphere's rect +
+depth interval happens to overlap it; open ground stays dark by design.
+Where terrain IS claimed it is benign once the veto arms: static
+terrain's MV equals camera-only, so the veto emits the same value
+either way. The wrong case remains finding 2 -- a mover in front of
+terrain/structure claimed by unioned intervals (Sean's cyan turret, the
+landing ship near the ground).
+
+**Can disassembly categorize movers from static? Partly -- and it
+re-drew the map:**
+
+- eval 0x430EFE0's ONLY in-code caller is FUN_144312040+0x4C4
+  (0x4312504). Capturing the return address at the eval hook is
+  degenerate -- it always names the traversal. Ruled out as designed.
+- FUN_144312040's callers: job0 (UpdateRenderDataJob 0x4321940), job1
+  (render-data batch 0x4320340), and ITSELF -- recursion over the
+  child-context array at param_5+0xAA. Two jobs x recursive descent
+  explains the ~11x per-record fan-out with no physics involvement.
+- Neither the traversal nor job0's body branches on any static/dynamic
+  flag: the per-record gates are render eligibility (ptr+0x290 != 0,
+  bool234, byte+0x298) plus a 4-bit draw-distance category nibble
+  compared to a threshold. The render path treats movers and statics
+  uniformly -- MOVER-BLIND.
+- Rig eval 0x431AFE0's only caller is a -0xD0 this-adjust vtable thunk
+  (FUN_1442DF460, vtable slot 0x45591CB8): virtual dispatch, no
+  static/dynamic signal there either.
+- The engine's dynamic truth, if explicit, lives in the physics jobs:
+  UpdatePhysicsObjectsJob 0x432B2A0, PrePhysicsAdvance 0x42DF530,
+  CurveJob 0x42DF550. None have decomps in analysis/decomp, and no
+  direct xrefs to the eval/traversal exist (indirect calls would not
+  show) -- whether physics routes records through this eval is unknown.
+
+The instrument that answers it empirically, no new hook sites:
+bracket() already wraps all six job bodies; add a TLS current-job
+bitmask set at bracket entry and cleared at exit, and evalObserved ORs
+the bit into the record's per-frame mask. Movers evaluated under
+physics jobs light bits 2/3/4; statics never do. If physics never
+reaches this eval, that null result is itself the answer -- then
+decompile the three physics bodies to find the dynamic-list walk and
+the right hook point. Zero-flight fallback, runnable today on existing
+capture JSON: cluster the probe's per-record fields (pred_vtable_rva,
+flags, bool234, gate2) seeded with the known drone records (064047)
+against settlement statics.
+
+Order proposed: (a) offline vtable/flag clustering, no flight; (b) the
+TLS job-attribution bit rides the next instrumented build alongside the
+KCParams cbuffer dump (both probe-side, no new hook sites); (c)
+physics-job decomps if (b) comes back null.
