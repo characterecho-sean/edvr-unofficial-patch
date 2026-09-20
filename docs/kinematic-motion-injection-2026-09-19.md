@@ -60,8 +60,13 @@ screen-space work".
   FUN_144312040 (RVA 0x4312040) recomposes parent x child 3x4 matrices
   per node, recursing children at record+0x2A8/+0x2B0. Reaches the
   hidden skinning bone that defeated pool-based estimation.
-- Current-frame record transform: 3x4 at record+0x130..0x16C, view
-  products at record+0xF0..0x12C; world bounds at record+0xB0..0xEC.
+- Current-frame record WORLD POSITION: 3 floats at record+0x170,
+  flight-proven 2026-09-20 (settlement doc 06:45 entry): a moving
+  drone's ~11 sub-mesh records tracked 2.59 m there while the 4x4 at
+  record+0x130..0x16C stayed bit-static for every record — that
+  matrix is a static local/default, NOT the per-frame transform.
+  Object motion = per-frame delta of record+0x170. View products at
+  record+0xF0..0x12C; world bounds at record+0xB0..0xEC.
 - NOT provided, after the 2026-09-19 review (settlement doc 21:23
   entry): a proven stasis/change signal. record+0x268 is a
   render-config hash that never reads the transform (FUN_14433C750);
