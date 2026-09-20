@@ -23,16 +23,19 @@
   global owner for every collection, not a per-rig object — and killed
   the epoch pair as captured (record+0x1B8 a constant small enum, never
   changing; the eval-hook descriptor +0x38 is a pointer, not the job
-  descriptor's epoch field). The submission hook is NOT retired; the
-  direct FUN_14431AFE0 rig-link hook is IMPLEMENTED in build
-  v0.17.0-89-gbbfcded7-dirty (settlement doc 05:30 entry) — one flight
-  reads kinematicEval.riglinks, whose collection_known join closes
-  rig -> collection -> shared-global owner. Still open: job-cost
-  remeasure with the detailed observer disabled (job-3 =
-  PrePhysicsAdvanceJob was never hooked — CodeHook refused a
-  thunk/foreign-hook leading instruction; CurveJob hooked but never
-  invoked). No per-record identity, pixel-ownership, or stasis claim
-  survives without that work.
+  descriptor's epoch field). Flight 054002 (settlement doc 05:45
+  entry) then CLOSED per-rig reachability: rig -> *(rig+0x348)
+  collection is proven (58/58 job-0 collections joined a rig; one
+  shared global owner on both sides), with ~1,572 stable rigs, one
+  collection each, one FUN_14431AFE0 dispatch per rig per frame. The
+  engine-sourced motion path is now walkable: rig -> collection ->
+  records (+0x280, stride 0x2F0) -> record+0x130..0x16C transforms.
+  Still open: per-record identity (~5 records share one node
+  pointer), pixel ownership, and the job-cost remeasure with the
+  detailed observer disabled (job-3 = PrePhysicsAdvanceJob was never
+  hooked — CodeHook refused a thunk/foreign-hook leading instruction;
+  CurveJob hooked but never invoked). No per-record identity,
+  pixel-ownership, or stasis claim survives without that work.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.

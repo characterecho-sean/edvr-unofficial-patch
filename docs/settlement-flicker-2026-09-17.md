@@ -41,16 +41,18 @@
   discriminator flew (043344, 05:05 entry): collection+0x18 is a SHARED
   GLOBAL, not the rig — owner==rig refuted, submission capture NOT retired.
   Replicated on 050820 (05:15 entry); JSON quote fix flight-proven there.
-  The direct rig-link hook on FUN_14431AFE0 is built and installed
-  (05:30 entry); one flight reads kinematicEval.riglinks.
+  The rig-link hook flew (054002, 05:45 entry): rig -> collection via
+  *(rig+0x348) CLOSED (58/58 job-0 join, one shared global owner);
+  ~1,572 stable rigs, one collection each, one dispatch per rig per
+  frame. Job-1's batch arg is NOT a rig collection (0xa12… family).
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-89-gbbfcded7-dirty installed to frontier, adding the
-  direct rig-link hook on FUN_14431AFE0 (05:30 entry); supersedes
-  v0.17.0-85-ga02e1eee-dirty (6AAFBC12). INIs unchanged. Flight check:
-  --expect-build v0.17.0-89-gbbfcded7-dirty.
+- Build: v0.17.0-89-gbbfcded7-dirty installed to frontier (6AAFC286),
+  adding the direct rig-link hook on FUN_14431AFE0 (05:30 entry);
+  supersedes v0.17.0-85-ga02e1eee-dirty (6AAFBC12). INIs unchanged.
+  Flight check: --expect-build v0.17.0-89-gbbfcded7-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -5978,4 +5980,44 @@ Flight protocol: unchanged (eye dump, 30 s). After: python
 tools\edvr_log.py --target frontier --expect-build
 v0.17.0-89-gbbfcded7-dirty, then read kinematicEval.riglinks and the
 riglink_* counters.
+
+### 2026-09-20 05:45 — flight 054002: rig -> collection CLOSED; job-1 arg is not a rig collection
+
+Flight edvr_gfx_20260920_053816.log, eye run 054002, build verified
+--expect-build v0.17.0-89-gbbfcded7-dirty (6AAFC286). Parse clean.
+riglink_checks 81,744, read_faults 0, riglink_state4 == checks (every
+call render-ready), null_collection 0. Window: 52 frames starting
+frame 11327 — every stored row has first_frame 11327 and exactly 52
+hits, so FUN_14431AFE0 runs once per rig per frame and the rig set is
+STABLE: 256 stored + 68,432/52 overflow = ~1,572 distinct rigs, no
+churn. (kRigLinkCap 256 censuses only ~16% of rigs — raise it if a
+full census ever matters; noted, not changed.)
+
+confirmed: the rig -> collection link, because all 58 job-0 ownership
+collections appear as some rig's *(rig+0x348) (join saturated at the
+64-row ownership cap), and all 256 sampled rig collections point at
+the session's ONE shared global owner 0x1737817f7d0 — the same
+shared-global pattern the job side sees. The chain is proven end to
+end: rig -> collection (+0x348) -> shared global owner (+0x18), and
+each rig has its OWN collection (0x177… family on both sides).
+
+ruled out: the job-1 (batch) descriptor arg being a rig collection,
+because its 6 collections are a separate low-heap family (0xa12…, the
+SAME family as the shared pose/render context 0xa1197a6f0), with null
+or unique owners (alias20 == owner+0x270) and zero rig joins.
+FUN_144320340's descriptor arg is a batch-side structure, not
+*(rig+0x348).
+
+param_2 is ONE shared render context for all rigs (a single
+0xa1197a6f0 across all 256 rows; matches the decomp's render-record
+context: records at +0x40 stride 0x6A0, count at +0x1a940); it does
+not match record+0x290. Rig descriptors are shared type objects (22
+distinct across 256 rigs); game_obj (rig+0x20) is 1:1 with rig.
+
+Consequence for kinematic-motion-injection phase 0: per-rig
+reachability is SOLVED — enumerate rigs at FUN_14431AFE0, read
+*(rig+0x348), walk collection records (+0x280, stride 0x2F0) to the
+record+0x130..0x16C world transforms. Remaining phase-0 opens:
+per-record identity (~5 records share one node pointer), pixel
+ownership, and the observer-off job-cost remeasure.
 
