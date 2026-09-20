@@ -41,15 +41,16 @@
   discriminator flew (043344, 05:05 entry): collection+0x18 is a SHARED
   GLOBAL, not the rig — owner==rig refuted, submission capture NOT retired.
   Replicated on 050820 (05:15 entry); JSON quote fix flight-proven there.
-  Next reachability: hook FUN_14431AFE0 for the direct rig<->collection pair.
+  The direct rig-link hook on FUN_14431AFE0 is built and installed
+  (05:30 entry); one flight reads kinematicEval.riglinks.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-85-ga02e1eee-dirty installed to frontier, adding the
-  desc_epoch38 JSON quote fix (05:05 entry) to the owner discriminator +
-  epoch pair; supersedes v0.17.0-82-gba373645-dirty (6AAFB3C8). INIs
-  unchanged. Flight check: --expect-build v0.17.0-85-ga02e1eee-dirty.
+- Build: v0.17.0-89-gbbfcded7-dirty installed to frontier, adding the
+  direct rig-link hook on FUN_14431AFE0 (05:30 entry); supersedes
+  v0.17.0-85-ga02e1eee-dirty (6AAFBC12). INIs unchanged. Flight check:
+  --expect-build v0.17.0-89-gbbfcded7-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -5942,4 +5943,39 @@ RenderDataBatch 6,240 mean 107.5 us; UpdatePhysicsObjectsJob 1,248
 mean 8.1 us; PrePhysics pair 0 calls (job-3 unhookable, CurveJob not
 invoked); Unnamed_BA0 2,593 mean 0.6 us. transitions 8,192 kept /
 1,699,570 overflowed — cap unchanged.
+
+### 2026-09-20 05:30 — instrument: direct rig-link hook on FUN_14431AFE0 (installed to frontier)
+
+Build v0.17.0-89-gbbfcded7-dirty installed to frontier and verified;
+INIs untouched. Implements the reachability the 05:05 entry named: a
+CodeHook "kinematic-rig-eval" on FUN_14431AFE0 (RVA 0x431AFE0) itself
+— the per-rig render/update routine whose param_1 IS the rig
+(decomp_431AFE0.txt: two-param signature, +0x380 state check first).
+
+What was added (kinematic_eval_probe/hook):
+
+- noteRigLink at FUN_14431AFE0 entry, before the original runs, on
+  the same observer gate as the eval/job hooks. Captures per rig
+  (deduped, cap 256): rig, poseCtx (param_2), collection =
+  *(rig+0x348), gameObj = *(rig+0x20), descriptor = *(rig+0x50),
+  rigState = *(uint32*)(rig+0x380), and from the collection: owner =
+  *(collection+0x18), collEpoch90 = *(collection+0x90).
+- The dump joins each row's collection against the ownership capture
+  (collection_known): a hit closes rig -> collection -> shared-global
+  owner in one flight, tying rigs to the job-0/job-1 collection
+  families without any unwinding.
+- Failure modes distinguishable from success: riglink_checks == 0 with
+  status "installed" = the hook stood down (CodeHook logs the reason
+  under kinematic-rig-eval at arm) or FUN_14431AFE0 genuinely never
+  ran in the window; climbing read_faults = the +0x348/+0x380 layout
+  assumption failed; riglink_null_collection climbing = rigs without a
+  collection set (late init) — data, not a fault. None reads as a pass.
+- Cost: one hash lookup per call after the first sighting; guarded
+  reads only on new rigs plus two per known-rig call. No QPC bracket
+  added — job-cost attribution untouched.
+
+Flight protocol: unchanged (eye dump, 30 s). After: python
+tools\edvr_log.py --target frontier --expect-build
+v0.17.0-89-gbbfcded7-dirty, then read kinematicEval.riglinks and the
+riglink_* counters.
 

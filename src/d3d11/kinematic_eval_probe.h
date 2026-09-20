@@ -1,7 +1,10 @@
 #pragma once
 // Build-specific, bounded capture of the KinematicRig render-record evaluator
 // (FUN_14430EFE0, RVA 0x430EFE0) and a QPC bracket around the Kinematic job
-// bodies. Feeds docs/settlement-flicker-2026-09-17.md's next-flight spec:
+// bodies, plus a rig-link capture on FUN_14431AFE0 (RVA 0x431AFE0): the
+// direct rig -> *(rig+0x348) collection link the job descriptor cannot give,
+// joined against the ownership capture at dump time.
+// Feeds docs/settlement-flicker-2026-09-17.md's next-flight spec:
 // the predicate vtable at record+0x2C0, the skip flag at render-record+0x688,
 // the content hash at record+0x268, and per-job-family CPU attribution.
 // The hooks supply register state; this class only records evidence.
@@ -26,6 +29,8 @@ public:
     static constexpr uint32_t kVtableCap=128u;
     static constexpr uint32_t kJobCount=6u;
     static constexpr uint32_t kOwnershipCap=64u;
+    static constexpr uintptr_t kRigEvalRva=0x431AFE0u;
+    static constexpr uint32_t kRigLinkCap=256u;
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 
@@ -56,12 +61,23 @@ public:
         uint32_t ownerState=0,jobId=0,firstFrame=0;
         uint64_t hits=0;
     };
+    // One row per distinct rig seen at FUN_14431AFE0 entry (rig = param_1,
+    // pose context = param_2). collection = *(rig+0x348): the direct
+    // rig -> collection link the job descriptor cannot give. The dump joins
+    // each row's collection against the ownership capture.
+    struct RigLinkUse {
+        uint64_t rig=0,poseCtx=0,collection=0,gameObj=0,descriptor=0;
+        uint64_t owner=0,collEpoch90=0;
+        uint32_t rigState=0,firstFrame=0;
+        uint64_t hits=0;
+    };
     struct Summary {
         uint64_t observed=0;uint32_t stored=0;
         uint64_t readFaults=0,recordOverflow=0,transitionOverflow=0,vtableOverflow=0;
         uint64_t transitions=0,vtables=0;
         uint64_t epochMatches=0,epochMismatches=0,epochChanges=0;
         uint64_t ownershipChecks=0,ownerBackPtrMatch=0,ownerState4=0,ownershipOverflow=0;
+        uint64_t riglinkChecks=0,riglinkState4=0,riglinkNullCollection=0,riglinkOverflow=0;
     };
 
     bool arm(uint32_t meshFrame) noexcept;
@@ -79,6 +95,8 @@ public:
     // Called at job-body entry for jobs 0 (descriptor arg; collection =
     // read64(arg+0x10)-0x300) and 1 (collection arg) before the timed bracket.
     void noteOwnership(uint32_t jobId,uintptr_t arg) noexcept;
+    // Called at FUN_14431AFE0 entry: rig = param_1, pose context = param_2.
+    void noteRigLink(uintptr_t rig,uintptr_t poseCtx) noexcept;
 
     Summary summary() const noexcept;
     void writeJson(std::ostringstream& json) const;
@@ -97,6 +115,8 @@ private:
     std::vector<VtableUse> vtables_;
     std::unordered_map<uint64_t,uint32_t> ownershipIndex_;
     std::vector<OwnershipUse> ownerships_;
+    std::unordered_map<uint64_t,uint32_t> riglinkIndex_;
+    std::vector<RigLinkUse> riglinks_;
     JobStat jobs_[kJobCount];
 
     void clearLocked();

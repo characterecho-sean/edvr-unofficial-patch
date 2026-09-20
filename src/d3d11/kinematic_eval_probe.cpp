@@ -57,6 +57,7 @@ void KinematicEvalProbe::clearLocked() {
     index_.clear();records_.clear();transitions_.clear();
     vtableIndex_.clear();vtables_.clear();
     ownershipIndex_.clear();ownerships_.clear();
+    riglinkIndex_.clear();riglinks_.clear();
     for(uint32_t i=0;i<kJobCount;++i) {
         jobs_[i].calls.store(0,std::memory_order_relaxed);
         jobs_[i].totalNs.store(0,std::memory_order_relaxed);
@@ -220,6 +221,40 @@ void KinematicEvalProbe::noteOwnership(uint32_t jobId,uintptr_t arg) noexcept {
     ownerships_.push_back(o);
 }
 
+void KinematicEvalProbe::noteRigLink(uintptr_t rig,uintptr_t poseCtx) noexcept {
+    if(!rig)return;
+    if(!active_.load(std::memory_order_acquire))return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++summary_.riglinkChecks;
+    bool ok=true;
+    // FUN_14431AFE0 param_1 IS the rig (decomp: state check at +0x380 first).
+    const uint64_t collection=read64(rig+0x348,ok); // rig's collection slot
+    const uint32_t rigState=read32(rig+0x380,ok);   // 4 = render-ready
+    if(!ok){++summary_.readFaults;return;}
+    if(rigState==4)++summary_.riglinkState4;
+    if(!collection)++summary_.riglinkNullCollection;
+    const uint32_t frame=frame_.load(std::memory_order_acquire);
+    const auto it=riglinkIndex_.find(rig);
+    if(it!=riglinkIndex_.end()) {
+        RigLinkUse& r=riglinks_[it->second];
+        ++r.hits;r.poseCtx=poseCtx;r.collection=collection;r.rigState=rigState;
+        return;
+    }
+    if(riglinks_.size()>=kRigLinkCap){++summary_.riglinkOverflow;return;}
+    RigLinkUse r;
+    r.rig=rig;r.poseCtx=poseCtx;r.collection=collection;r.rigState=rigState;
+    r.gameObj=read64(rig+0x20,ok);      // associated game-object interface
+    r.descriptor=read64(rig+0x50,ok);   // rig descriptor
+    if(collection) {
+        r.owner=read64(collection+0x18,ok);    // shared-global owner candidate
+        r.collEpoch90=read64(collection+0x90,ok);
+    }
+    if(!ok)++summary_.readFaults;
+    r.firstFrame=frame;r.hits=1;
+    riglinkIndex_.emplace(rig,static_cast<uint32_t>(riglinks_.size()));
+    riglinks_.push_back(r);
+}
+
 KinematicEvalProbe::Summary KinematicEvalProbe::summary() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return summary_;
@@ -250,7 +285,11 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"ownership_checks\":"<<summary_.ownershipChecks
      <<",\"owner_backptr_match\":"<<summary_.ownerBackPtrMatch
      <<",\"owner_state4\":"<<summary_.ownerState4
-     <<",\"ownership_overflow\":"<<summary_.ownershipOverflow<<"},"
+     <<",\"ownership_overflow\":"<<summary_.ownershipOverflow
+     <<",\"riglink_checks\":"<<summary_.riglinkChecks
+     <<",\"riglink_state4\":"<<summary_.riglinkState4
+     <<",\"riglink_null_collection\":"<<summary_.riglinkNullCollection
+     <<",\"riglink_overflow\":"<<summary_.riglinkOverflow<<"},"
      <<"\"vtables\":[";
     for(size_t i=0;i<vtables_.size();++i) {
         if(i)j<<',';
@@ -298,6 +337,18 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<"\",\"alias20\":\"0x"<<o.alias20<<"\",\"epoch90\":\"0x"<<o.epoch90
          <<"\",\"backptr\":\"0x"<<o.backPtr<<"\",\"owner_state\":"<<std::dec<<o.ownerState
          <<",\"job\":"<<o.jobId<<",\"first_frame\":"<<o.firstFrame<<",\"hits\":"<<o.hits<<'}';
+    }
+    j<<"],\"riglinks\":[";
+    for(size_t i=0;i<riglinks_.size();++i) {
+        if(i)j<<',';
+        const RigLinkUse& r=riglinks_[i];
+        j<<"{\"rig\":\"0x"<<std::hex<<r.rig<<"\",\"pose_ctx\":\"0x"<<r.poseCtx
+         <<"\",\"collection\":\"0x"<<r.collection<<"\",\"game_obj\":\"0x"<<r.gameObj
+         <<"\",\"descriptor\":\"0x"<<r.descriptor<<"\",\"owner\":\"0x"<<r.owner
+         <<"\",\"coll_epoch90\":\"0x"<<r.collEpoch90<<std::dec
+         <<"\",\"rig_state\":"<<r.rigState<<",\"first_frame\":"<<r.firstFrame
+         <<",\"hits\":"<<r.hits
+         <<",\"collection_known\":"<<(r.collection&&ownershipIndex_.count(r.collection)?1:0)<<'}';
     }
     j<<"]}";
 }
