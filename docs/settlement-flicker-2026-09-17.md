@@ -5573,3 +5573,21 @@ What each outcome decides:
 
 Cost guard: one indirect call per job table per frame (5-9 calls), one raw
 64-byte copy each; no game-state writes; off by default behind a config key.
+
+## 2026-09-19 (evening): capture probes built and installed to frontier
+
+The two probes from the spec above are in, built green and installed to
+the frontier copy (commit 116a2e0). kinematic_eval_probe captures, per
+unique 0x2F0 record at FUN_14430EFE0 entry: record ptr, node, pose ctx,
+content hash (+0x268), count298, predicate ptrs (+0x2C0/+0x2C8) with
+vtable RVAs, bool234, render-record flags (+0x688) and both gate bytes,
+with transitions on flags/hash change. kinematic_eval_hook brackets the
+six job bodies (incl. 0x4320340 batch and both PrePhysicsAdvance jobs)
+with QPC for the settlement CPU-frame split. One build wrinkle, fixed
+before the build: this checkout had core.autocrlf=true from the bundle
+git's system config, so the tree was CRLF on disk and the
+original_draw_probe_test binary source-contract check failed at clean
+HEAD; set core.eol=lf + core.autocrlf=false repo-local and re-checked
+out the tree (744 LF / 20 CRLF, matching .gitattributes), gate passes,
+621 checks. After the flight:
+python tools\edvr_log.py --target frontier --expect-build HEAD
