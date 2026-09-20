@@ -45,6 +45,13 @@
   *(rig+0x348) CLOSED (58/58 job-0 join, one shared global owner);
   ~1,572 stable rigs, one collection each, one dispatch per rig per
   frame. Job-1's batch arg is NOT a rig collection (0xa12… family).
+  Pose/identity capture flew (083323, 08:50 entry): the mesh-frame
+  counter is REFUTED as the tracker clock (3 ticks in ~51 rendered
+  frames; gap/node-change detectors disabled by the stall — zero
+  identity events is uninformative). Tracker clock = EDVR's own
+  present/temporal-pass frame index. Drone group re-found with the
+  064047 fingerprint; quaternion decode validated (unit norms);
+  sign canonicalization required before differencing.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
@@ -6236,3 +6243,51 @@ dead instrument, not as success.
 
 Build v0.17.0-103-g267d0430-dirty installed to frontier (D3CA6EA1); all
 gates green. INIs unchanged. Not yet flown.
+
+### 2026-09-20 08:50 — pose/identity diagnostic flown (083323): frame clock refuted, drone series captured
+
+Flight 083323 (eye dump with the drone in motion, 30 s wait), build
+v0.17.0-103-g267d0430-dirty verified. 2,949 records, 1.6M evaluations,
+zero read faults. Analysis scratch: build\pose-diag-analysis-083323.md.
+
+- Frame clock REFUTED: the mesh-frame counter ticked 3 times in ~51
+  rendered frames (every record: calls=545, frames_sampled=4,
+  dup_in_frame=541, frame values 13081..13084 only). dup_in_frame
+  (1,595,409) is counter staleness, not duplicate evaluation. Gap and
+  node-change detection were unreachable by construction — zero
+  pose_events is UNINFORMATIVE, not proven stability.
+  zero_record_frames=1 shows the tick is decoupled from the evaluator
+  sweep. Tracker clock moves to EDVR's own present/temporal-pass frame
+  index: it ticks once per rendered frame, the pose data updates on
+  that cadence (xf_changes median exactly 51 = one rewrite per frame),
+  and it is the clock the MVs are consumed against.
+- The capture is a 4-instant pose census: all 2,949 records at tick
+  13081, movers only at ticks 13082-84 (276/324/341 re-logged). Up to
+  ~35 rendered frames between ticks 2 and 3 are invisible.
+- Drone re-found with the 064047 fingerprint: 11 records (2218, 2226,
+  2234, 2250, 2252, 2254, 2472, 2475, 2480, 2484, 2492), 11 distinct
+  sibling node pointers in two contiguous arrays (correcting the
+  one-shared-node note), moving 5.60-5.65 m straight-line (~9.9 m/s)
+  with translation AND quaternion changing at every sample. A separate
+  67-record rigid mover at ~14 km moved 65.5 m (~115 m/s) — a ship.
+- Quaternion decode validated: all 3,890 samples within 5e-5 of unit
+  norm. Sign canonicalization IS required before differencing: 3/941
+  consecutive pairs (records 2127, 2189, 2325) have negative dots;
+  2127 keeps a ~79-degree jump after flipping — genuinely erratic
+  rotation exists in the translation-static class.
+- record+0x130 4x4 bit-constant for all 2,949 records (zero qword 0-7
+  changes) — the static-matrix ruling re-confirmed on this build; all
+  341 movers' changes are confined to qwords 8-10 (+0x170..0x188).
+- The probed epoch fields are dead as a frame clock: epoch1b8 is a
+  small per-record enum (9 distinct values), desc_epoch38 pointer-like
+  (547 distinct); 100% mismatch with zero changes.
+- Jobs this flight: UpdateRenderDataJob 33,228 calls / 1.462 s /
+  44.0 us mean / 24.2 ms max; RenderDataBatch 6,240 / 0.689 s /
+  110.4 us; UpdatePhysicsObjectsJob 1,196 / 8.8 ms; Unnamed_BA0 2,533 /
+  1.25 ms; both PrePhysicsAdvance jobs 0 calls. ~2.16 s attributed over
+  ~0.57 s wall — heavily parallel; still not clean frame-time shares
+  (the 21:23 review point stands).
+
+Next flight discriminator: log the mesh-frame counter once per present
+frame to learn what it actually counts.
+
