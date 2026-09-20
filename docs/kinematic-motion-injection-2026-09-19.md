@@ -50,7 +50,11 @@
   v0.17.0-107-g5fe9c004-dirty. Update 10:38: capture v2 (arm-seed fix,
   32,768-sample cap, gap re-log backstop) flight-proven clean on 103339
   -- zero startup gap events, samples survive the full window, drone
-  per-frame series complete (settlement doc 10:38 entry).
+  per-frame series complete (settlement doc 10:38 entry). Update 10:52:
+  the Phase-1 implementation spec landed below (tracker + quarter-res
+  ownership coverage + static-zero compose veto, fix.engine_motion
+  default off) -- the build spec for the next branch, with its own
+  test rig and flight-verification plan.
 
 ## Premise
 
@@ -240,3 +244,245 @@ drops. End-to-end trace before flying, per build discipline.
 **Not in scope:** no DLSS-path change (surface 2 is the same e.dlMv
 hand-off), no skinned/particle injection, no sharpening or other
 compensation (root causes only).
+## 2026-09-20 (10:52) -- Phase-1 implementation spec: kinematic_motion
+
+Written after flight 103339 proved the capture instrument clean end to
+end (zero startup gaps, samples survive, drone series complete,
+rotating-in-place class quantified). This is the build spec for the
+tracker itself. Anchors verified against the tree at 516e93d.
+
+### Scope and ship gate
+
+Phase 1 injects ZERO object motion for proven-static records only.
+Movers keep the existing path (rigid-delta injection is phase 2).
+Ship gate, unchanged: shimmer gone in the temporal_aa_debug motion
+view on the drone scene, with the ownership diagnostic showing a
+negligible mis-own rate at occlusion edges. DLSS sees nothing until
+then -- the injection writes into the same e.dlMv composition the
+diagnostic view already shows.
+
+### Module shape
+
+New files src\d3d11\kinematic_motion.h / .cpp, free functions
+mirroring mesh_motion.h's pattern:
+
+    void kinematicMotionConfigure(bool on);
+    void kinematicMotionShutdown();
+    void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept;
+    void kinematicMotionObserve(uintptr_t record) noexcept;   // eval-hook feed
+    void kinematicMotionViews(ID3D11DeviceContext*, ID3D11Texture2D* scene,
+                              ID3D11ShaderResourceView** out); // 1 slot: KC
+
+Configure is called beside meshMotionConfigure
+(temporal_pass.cpp:6865-6866). NotePresentFrame is called beside the
+probe's (device_hook.cpp:1001, immediately after ++g_state->frameCounter
+-- NOT beside vScreenFrameBoundary, which sits behind the
+graphicsRuntimeDisabled early return). Views is called beside
+meshMotionViews (temporal_pass.cpp:3715), ensures this eye's ownership
+coverage for the current frame, and returns the SRV or nullptr
+(feature off / stand-down -- nullptr is the stock path, byte-identical).
+
+### Observation feed
+
+kinematic_eval_hook.cpp's relay currently gates one observer (the
+probe's armed state). Add a second observer atomic for the tracker:
+when tracker-active, the relay also calls kinematicMotionObserve with
+the record pointer (descriptor+0x10, the same pointer the probe reads).
+Cost when off: one extra atomic load per call -- same standard the
+hook header already states ("an unarmed hook is one atomic load plus
+the trampoline call"). When on: ~33k observe calls/frame (3,008
+records x ~11x fan-out, flight-measured), each O(1). Locking mirrors
+the probe's: a short mutex in observe; job timings across two flights
+show the probe's identical pattern costs nothing measurable.
+
+### Tracker (CPU)
+
+Bounded table, cap 4,096 records (= probe kRecordCap; flight max seen
+3,086). One entry per live record pointer:
+
+    struct TrackedRecord {
+        uint64_t record = 0;      // key; never trusted across a gap
+        uint64_t node = 0;        // reuse discriminator (record+node)
+        uint32_t lastFrame = 0;   // last present-domain frame observed
+        uint8_t  prevPose[20]{};  // 12 B translation (+0x170) + 8 B quat (+0x17C)
+        float    bMin[3]{}, bMax[3]{};  // world bounds record+0xB0..0xEC
+        uint32_t staticRun = 0;   // consecutive frames of bit-exact zero delta
+        uint32_t flags = 0;       // hasPrev, seenThisFrame
+    };
+
+Rules, each flight-grounded:
+
+- First-sample-wins dedup per frame (the ~11x fan-out; 094158/103339).
+- Stasis: BIT-EXACT zero delta across all 20 pose bytes between the two
+  latest samples of the same identity, sustained staticRun >= 3 present
+  frames before the record is eligible. Any non-zero byte resets the
+  run instantly -- a static label is per-frame evidence, never sticky.
+  The quat lanes are part of the compare: 103339's 292 rotating-in-place
+  records (0.8-1.6 deg/present, zero translation) must NEVER be labeled.
+  Phase 1 compares raw bits (a q == -q sign flip just resets the run --
+  conservative); canonicalization is a phase-2 requirement, as the
+  design doc already states.
+- Near-miss escape hatch: pose changed but translation moved < 1 mm --
+  count them (nearMiss). If a flight shows real statics accumulating
+  near-misses instead of bit-exact zeros, bit-exactness is refuted and
+  the compare, not a threshold, gets rethought. No epsilon tuning.
+- Identity: keyed on the record pointer, node as discriminator. A
+  pointer absent ANY frame, then re-seen -- new identity, run restarts,
+  no injection until re-proven. A pointer re-seen with a different
+  node -- new identity, full stop. Re-reading a pointer never stands
+  in for sameness (design doc). Post-gap pointer reuse is still
+  flight-untested; these rules are the conservative posture for it.
+- Reads via the probe's guardedRead idiom; read faults counted.
+- Overflow: pointer beyond the cap is never tracked, never injected;
+  recordOverflow counts; the existing path is preserved for those
+  pixels. Never evict to make room.
+
+### Ownership (GPU)
+
+One coverage texture per eye, QUARTER resolution of the eye target,
+R32G32_UINT: per texel the [near,far] reversed-Z depth span (24-bit
+quantized) of the union of eligible static records projecting there;
+a stated empty sentinel. One bounded compute pass per eye per frame,
+one thread per eligible record (<= 4,096, no selection step): project
+the bounds' 8 corners with THIS frame's per-eye view-projection,
+atomically InterlockedMin/Max the depth span over the screen rect.
+
+The matrix source is the #1 expected bug class: use the same
+current-frame camera rows the compose pass itself uses for zSceneAt's
+frame (chooseCameraRows' frame), never last frame's. The ownership
+debug paint (below) catches a mismatch directly.
+
+Quarter-res coverage + full-res depth gate is the precision split:
+bounds are coarse by nature (the design doc: bounds+depth is not
+unique-mesh), so coverage may be coarse; the per-pixel depth gate is
+where ownership is actually decided.
+
+### Compose integration
+
+temporal_shader_source.h: registers t0..t18 are taken; add
+
+    Texture2D<uint2> KC : register(t19);  // kinematic static ownership,
+                                          // quarter-res; sentinel = unowned
+
+Flag word at temporal_pass.cpp:4696 gains (kinSrv ? 256u : 0u) beside
+the existing 32/64/128 bits. Bind KC at all three SRV-array sites
+(5629 main compose; 6125 and 6409, which already pass nullptr for
+staticOwner when a path lacks it -- same precedent: nullptr = off for
+that path, no behavior change).
+
+New helper kinematicStatic(p) beside meshPixel (485): load KC at
+quarter-res, reject unowned, reject uiCovered(q) (UI pixels never take
+an object-motion override), accept when zSceneAt(q) lies inside the
+recorded [near,far] span with a stated relative margin (volumetric
+bounds are looser than meshPixel's exact-depth 1e-6; the margin is a
+named constant, and the mis-own diagnostic below is what sizes it --
+no silent tuning).
+
+Semantics at BOTH meshPixel call sites (687, 1065): consult
+kinematicStatic FIRST; owned pixels take the camera/depth motion and
+SKIP every object-motion candidate (mesh/screen/holo). Unowned pixels
+are byte-identical to today -- this is "unknown preserves the existing
+path, never guesses" in shader form. Precedence safety: a real mover
+in front of a static wall fails the depth span (its zScene is nearer),
+so only genuinely static-surface pixels are ever vetoed; a static
+surface mesh_motion also tracks computes the same camera-only vector
+anyway -- the two sources cannot disagree on an owned pixel.
+
+Debug: temporal_aa_debug = movers paints kinematic-owned pixels a
+distinct colour. Occlusion-edge mis-owning is visible as tinted mover
+pixels; the ship gate reads this view.
+
+### Config
+
+fix.engine_motion on|off|auto, [fix] section, commented out, default
+off. on = tracker + injection live. auto is parsed and behaves as off
+with a one-time log line ("reserved until the scene gate lands") --
+the enum is stable for when phase 1 proves out (design doc). off =
+one configure line, zero runtime cost beyond the hook's atomic load.
+Read site: temporal_pass.cpp:6865 area. Contract: add the commented
+key + doc block to edvr.ini in the same commit
+(tools/check_config_contract.py and the generated audit header enforce
+agreement; gen_settings_schema.py requires no ui:/dev: line for a
+commented [fix] key -- developer instrument, the log names it).
+Config off -> kinematicMotionShutdown() clears all state; labels
+re-prove from scratch on re-enable.
+
+### Failure modes, each logged distinctly
+
+- fix.engine_motion=off: exactly one line at configure. (Never-ran.)
+- on but zero observations 5 s after configure: stand-down note
+  (hook not feeding) -- distinct from healthy.
+- A frame with zero records while active: stand-down counter, NOT a
+  pass (103339's terminal-present teardown is the reference shape).
+- recordOverflow, readFaults, nearMiss, stale-identity drops: counters
+  in a periodic summary (20 s cadence, the existing pattern), each
+  named, zero included -- absence of the summary with the feature on
+  reads as dead instrument, never as success.
+- "No mover ever seen" note after a window with zero pose changes
+  anywhere: the mover-control principle from 064047, as a runtime
+  dead-feed detector.
+
+### Gates and tests
+
+New C++ rig tools\kinematic_motion_test\kinematic_motion_test.cpp,
+mirroring the kinematic_json_test pattern (links
+src\d3d11\kinematic_motion.cpp with stub Log/hook functions; the
+object_record_writer_probe/hook separation precedent). Feeds synthetic
+streams and asserts emitted labels + counters:
+
+1. 11x fan-out dups in one frame -> one state update, one sample.
+2. Bit-exact static for 3 frames -> eligible; injection set contains it.
+3. 1-ulp translation wobble -> never eligible; nearMiss counted when
+   < 1 mm.
+4. Quat lane churn with constant translation (the rotating-in-place
+   class) -> never eligible. THE 103339 regression case.
+5. Gap of 1+ frames, same node -> new identity, run restarts.
+6. Same pointer, different node -> new identity.
+7. > 4,096 distinct pointers -> recordOverflow counted, excess never
+   injected, no eviction.
+8. A zero-record frame mid-stream -> stand-down counter, not a pass.
+
+Added to build.bat beside :rig_kinematic_json_test (build.bat:1959-1973
+pattern), so tracker-logic drift fails the build, not a flight.
+UNTOUCHED: KinematicEvalProbe, its writeJson, its fixture, and
+tools/kinematic_json_selftest.py -- the tracker shares the hook feed,
+not the probe's JSON. temporal_shader_build.exe --self-test stays
+green; check the new shader symbol names against the entry-point
+collision class in AGENTS.md before flying.
+
+### Build, install, commit flow
+
+Branch codex/kinematic-tracker. Build via the detached PowerShell
+idiom (handoff file), ~5 min, read the tail for all gates green.
+Install: python tools\install_edvr.py --target frontier, then
+--verify-only. Journal: dated settlement-doc entry + both Status
+blocks. Commit message to a file, UTF-8 no BOM, git commit -F; merge
+--no-ff to main; push; git log origin/main -1. Trace every new
+instrument end to end before asking Sean to fly: what does the log
+show if the tracker never ran, and is that distinguishable from
+success (the logging section above is that contract).
+
+### Flight verification plan
+
+Protocol: unchanged (eye dump with the drone visibly moving, 30 s
+wait), fix.engine_motion = on, advanced.temporal_aa_debug = motion
+then movers. Expected: configure line; periodic summaries with tracked
+~3k, eligible ~2.5k, overflow/faults zero; stand-down counters zero.
+In the motion view: settlement geometry carries camera-only vectors;
+the drone's pixels unchanged from stock. In the movers view: static
+tint covers settlement surfaces, NOT the drone, and NOT occlusion
+edges against nearer geometry (the mis-own gate). Quantitative: the
+tracker's eligible-set size vs the census's <=1 mm band (2,583 on
+103339's window) must agree within the near-miss population. Ship
+gate per the design doc: shimmer gone in the diagnostic view; only
+then does any DLSS-consuming change get discussed. State the
+environment line at flight time (runtime, headset, per-eye size, DLSS
+version, kTrackCap).
+
+### Phase-2 seam (not built now)
+
+The tracker already stores prevPose per frame; the rigid delta is
+(curT - prevT) plus the canonicalized quat delta. The GPU record
+struct reserves kind (0 = static-zero, 1 = rigid-delta) and a 3x4
+prev-frame map slot so phase 2 is an upload-side change, not a
+re-plumb. Rotation injection stays out of v1 per the design table.
