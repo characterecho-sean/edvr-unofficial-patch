@@ -209,6 +209,29 @@ void caseNonFiniteRejected() {
     check(out.find("\"non_finite_pose\":2") != std::string::npos,
           "4: the counter serializes");
 }
+
+// Job attribution (kinematic doc 2026-09-20 17:10): the observation carries
+// the bracket TLS bits; the record accumulates the OR of every job it was
+// ever seen under, and the mask serializes to the JSON.
+void caseJobMaskAccumulates() {
+    KinematicEvalProbe p;
+    seed(p, 998);
+    p.notePresentFrame(5000, 998);
+    FakeRec r{}; setNode(r.b, 0xE2); setPose(r.b, 1.f, 2.f, 3.f);
+    FakeDesc d = descFor(r.b); FakeRender rd{};
+    const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
+    const uintptr_t rp = reinterpret_cast<uintptr_t>(&rd);
+    p.observe(dp, rp, 0x2u);
+    p.notePresentFrame(5001, 998);
+    p.observe(dp, rp, 0x10u);
+    check(p.records_[0].jobMask == 0x12u, "5: job bits accumulate across observations");
+    p.notePresentFrame(5002, 998);
+    p.observe(dp, rp); // default zero mask: no bit, no harm
+    check(p.records_[0].jobMask == 0x12u, "5: a zero-mask observation keeps the bits");
+    std::ostringstream j;
+    p.writeJson(j);
+    check(j.str().find("\"job_mask\":18") != std::string::npos, "5: the mask serializes");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -222,6 +245,7 @@ int wmain(int argc, wchar_t** argv) {
     caseFaultedReadCreatesNothing();
     caseNodeSwapCrossesNothing();
     caseNonFiniteRejected();
+    caseJobMaskAccumulates();
     std::printf("kinematic_probe_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

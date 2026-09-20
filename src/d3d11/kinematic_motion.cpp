@@ -38,6 +38,9 @@ constexpr uint64_t kStandDownMs = 5000;
 constexpr uint64_t kNoMoverMs = 10000;
 constexpr uint64_t kBoundsWaitMs = 20000; // one-time note if part A never fires
 constexpr uint32_t kBoundsDumpMovers = 8, kBoundsDumpStatics = 8;
+// The physics-side job bits (2 = UpdatePhysicsObjectsJob, 3/4 =
+// PrePhysicsAdvance[+Curve]) for the job-attribution census.
+constexpr uint32_t kPhysJobBits = (1u << 2) | (1u << 3) | (1u << 4);
 
 struct TrackedRecord {
     uint64_t record = 0;    // key: the live record pointer
@@ -49,6 +52,7 @@ struct TrackedRecord {
     uint8_t bounds[kBoundsBytes]{};
     uint8_t prevSphere[kSphereBytes]{}; // +0x270..+0x28F: part of the stasis compare (LOD refresh writes it with zero pose change)
     double path = 0;        // summed translation deltas, for the dump ranking
+    uint32_t jobMask = 0;   // jobs (bracket TLS bits) this record was ever observed under
     bool hasPrev = false, boundsValid = false, sphereValid = false, everMoved = false;
     uint64_t calls = 0;
 };
@@ -310,7 +314,8 @@ void summaryLocked(uint64_t now) {
         "(translation %llu, quat-only %llu, near-miss %llu), movers total %llu; "
         "gap drops %llu, node changes %llu, bounds changes %llu, same-frame "
         "invalidations %llu; sphere changes %llu, rejected %llu; frames %llu, "
-        "zero-record %llu, eligible-frames %llu; upload gen %llu, spheres %u. "
+        "zero-record %llu, eligible-frames %llu; phys-touched eligible %u movers %u; "
+        "upload gen %llu, spheres %u. "
         "Absence of this line with fix.engine_motion on reads as a dead "
         "instrument, never as success.",
         (unsigned long long)records_.size(),
@@ -326,6 +331,7 @@ void summaryLocked(uint64_t now) {
         (unsigned long long)stats_.sphereChanges, (unsigned long long)stats_.sphereRejected,
         (unsigned long long)stats_.framesCounted, (unsigned long long)stats_.zeroRecordFrames,
         (unsigned long long)stats_.eligibleFrames,
+        stats_.eligiblePhysLast, stats_.moversPhysLast,
         (unsigned long long)stats_.uploadGeneration, stats_.uploadedLast);
 }
 
@@ -394,14 +400,17 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept {
     // Frame `prev` just ended.
     ++stats_.framesCounted;
     if (seenThisFrame_ == 0) ++stats_.zeroRecordFrames;
-    uint32_t eligible = 0, movers = 0;
+    uint32_t eligible = 0, movers = 0, eligiblePhys = 0, moversPhys = 0;
     for (const TrackedRecord& r : records_) {
         if (r.lastFrame != prev) continue;
-        if (eligibleLocked(r, prev)) ++eligible;
-        if (r.everMoved && r.lastChangeFrame == prev) ++movers;
+        const bool phys = (r.jobMask & kPhysJobBits) != 0;
+        if (eligibleLocked(r, prev)) { ++eligible; if (phys) ++eligiblePhys; }
+        if (r.everMoved && r.lastChangeFrame == prev) { ++movers; if (phys) ++moversPhys; }
     }
     stats_.seenLast = static_cast<uint32_t>(seenThisFrame_);
     stats_.eligibleLast = eligible;
+    stats_.eligiblePhysLast = eligiblePhys;
+    stats_.moversPhysLast = moversPhys;
     stats_.moversLast = movers;
     stats_.tracked = static_cast<uint32_t>(records_.size());
     if (eligible > 0) ++stats_.eligibleFrames;
@@ -436,7 +445,7 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept {
     summaryLocked(now);
 }
 
-void kinematicMotionObserve(uintptr_t descriptor) noexcept {
+void kinematicMotionObserve(uintptr_t descriptor, uint32_t jobMask) noexcept {
     if (!active_.load(std::memory_order_acquire)) return;
     if (!descriptor) return;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -454,6 +463,7 @@ void kinematicMotionObserve(uintptr_t descriptor) noexcept {
         r.node = read64(record + 0x18, ok);
         r.lastFrame = frame;
         r.calls = 1;
+        r.jobMask = jobMask;
         if (guardedRead(record + 0x170, r.prevPose, kPoseBytes)) r.hasPrev = true;
         else { ++stats_.readFaults; }
         if (guardedRead(record + 0xB0, r.bounds, kBoundsBytes)) r.boundsValid = true;
@@ -466,6 +476,7 @@ void kinematicMotionObserve(uintptr_t descriptor) noexcept {
     }
     TrackedRecord& r = records_[it->second];
     ++r.calls;
+    r.jobMask |= jobMask;
     if (r.lastFrame == frame) {
         ++stats_.dupInFrame;
         // Fan-out dup: history does not advance twice in one frame, but the

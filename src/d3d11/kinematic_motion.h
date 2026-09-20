@@ -54,6 +54,11 @@ struct KinematicMotionStats {
     uint32_t eligibleLast = 0;      // proven-static records in the last ended frame
     uint32_t moversLast = 0;        // records whose pose changed in it
     uint32_t uploadedLast = 0;      // spheres in the current upload snapshot
+    // Job attribution (bits 2|3|4 = the physics-side jobs): records in the
+    // last ended frame EVER observed under a physics job. The discriminator
+    // flight asks whether movers carry these bits and eligible statics do not.
+    uint32_t eligiblePhysLast = 0;
+    uint32_t moversPhysLast = 0;
 };
 
 // One uploaded record for the ownership coverage pass: the world bounding
@@ -77,7 +82,8 @@ bool kinematicMotionActive() noexcept;
 // the probe's call. The first call after configure seeds the clock.
 void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept;
 // The eval-hook feed. Registered with the hook only while active.
-void kinematicMotionObserve(uintptr_t descriptor) noexcept;
+// jobMask carries the bracket TLS bits (1u<<jobId) at observation time.
+void kinematicMotionObserve(uintptr_t descriptor, uint32_t jobMask = 0) noexcept;
 KinematicMotionStats kinematicMotionStats() noexcept;
 // The upload snapshot for the coverage pass: reports the current published
 // sphere set (built at each ended frame) and copies up to cap entries into

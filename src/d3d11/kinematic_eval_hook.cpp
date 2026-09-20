@@ -156,12 +156,19 @@ HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
     {"kinematic-job-5",kJobRvas[5],reinterpret_cast<void*>(&job5)},
 };
 
+// Per-thread mask of the job brackets currently on the stack (1u<<jobId),
+// maintained by bracket() and read by evalObserved: attributes every eval
+// observation to the engine job that scheduled it. Nesting-safe (save/
+// restore), zero when no observed job is running.
+thread_local uint32_t t_jobMask=0;
+
 __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uintptr_t param2,
                                                        uintptr_t renderRecord) noexcept {
+    const uint32_t jobMask=t_jobMask;
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
-    if(probe)probe->observe(descriptor,renderRecord); // observe() gates on active()
+    if(probe)probe->observe(descriptor,renderRecord,jobMask); // observe() gates on active()
     const auto tracker=trackerObserver.load(std::memory_order_acquire);
-    if(tracker)tracker(descriptor); // kinematicMotionObserve gates on its own flag
+    if(tracker)tracker(descriptor,jobMask); // kinematicMotionObserve gates on its own flag
     const auto forward=reinterpret_cast<EvalFn>(g_evalEntry.forward.load(std::memory_order_acquire));
     return forward(descriptor,param2,renderRecord);
 }
@@ -177,6 +184,14 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
                              uintptr_t c,uintptr_t d) noexcept {
     const auto forward=reinterpret_cast<JobFn>(g_jobEntries[job].forward.load(std::memory_order_acquire));
     if(!forward)return 0; // this job stood down at install; the relay is unreachable then
+    // Job attribution: every eval observation made while this job runs on
+    // this thread carries its bit. Save/restore so nested jobs keep both
+    // bits and early returns always unwind the mask.
+    struct JobBit {
+        uint32_t prev;
+        explicit JobBit(uint32_t job):prev(t_jobMask){t_jobMask=prev|(1u<<job);}
+        ~JobBit(){t_jobMask=prev;}
+    } jobBit(job);
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
     if(!probe || !probe->active())return forward(a,b,c,d);
     // Ownership/epoch capture sits OUTSIDE the timed bracket so job-cost

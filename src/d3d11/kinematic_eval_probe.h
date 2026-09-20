@@ -63,6 +63,11 @@ public:
         uint32_t flags=0,firstFrame=0,lastFrame=0;
         uint32_t xfChanges=0,lastXfChangeFrame=0;
         uint8_t bool234=0,predByte=0,gate2=0;
+        // Bitmask of the jobs (bracket TLS, 1u<<jobId) under which this record
+        // was EVER observed: the engine-truth mover/static discriminator after
+        // the render path proved mover-blind and the captured record fields
+        // proved homogeneous (2026-09-20 17:10 entry, clustering null).
+        uint32_t jobMask=0;
         uint64_t calls=0;
         // Frame-aligned pose sampling: one sample per record per frame,
         // decoded from the same xf block the change compare already reads.
@@ -149,7 +154,8 @@ public:
     const char* hookStatusText() const noexcept;
 
     // Called from the eval hook's replacement before the original runs.
-    void observe(uintptr_t descriptor,uintptr_t renderRecord) noexcept;
+    // jobMask: the bracket TLS bits (1u<<jobId) active at observation.
+    void observe(uintptr_t descriptor,uintptr_t renderRecord,uint32_t jobMask=0) noexcept;
     // Job brackets call these around the original body.
     JobStat* jobStats() noexcept{return jobs_;}
     // Capture generation, bumped by clearLocked (arm/reset): a bracket that
