@@ -36,14 +36,17 @@
 - State: flight 134252 passes the guard but has zero owner links. Seventeen
   saved paths use worker dispatch, with no upstream KinematicRig ancestor; one
   truncates at recursion. Worker descriptors retain collection/registry but no
-  direct outer pointer. Submission capture is needed; filtering off.
+  direct outer pointer. Submission capture is needed; filtering off. The owner
+  discriminator in build 6AAFB3C8 may retire that capture: collection+0x18 IS
+  a direct outer pointer (offline proof, 21:58 entry); one flight confirms.
 - Open: exclude proven-static objects before expensive EDVR motion work while
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-57-ge700d4f-dirty installed (6AAEE376); static surfaces off,
-  DLSS and manual Insert capture retained. Payloads, INI and verification
-  receipts: build/kinematic-opcode-frontier-e700d4f; both INIs unchanged.
+- Build: v0.17.0-82-gba373645-dirty installed to frontier (6AAFB3C8; tree
+  == commit 8075da75), carrying the owner discriminator + epoch pair from
+  the 04:30 entry; supersedes v0.17.0-57-ge700d4f-dirty (6AAEE376). INIs
+  unchanged. Flight check: --expect-build v0.17.0-82-gba373645-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -5817,3 +5820,37 @@ engine-side motion truth the design needs; the epoch pair (collection+0x90
 vs record+0x1B8) is a genuine engine change signal worth capturing, unlike
 the retracted +0x268 render-config hash. The owner==rig discriminator above
 is the last open hop for retiring the submission hook.
+
+### 2026-09-20 04:30 — instrument: owner discriminator + epoch pair (installed to frontier)
+
+Build v0.17.0-82-gba373645-dirty (6AAFB3C8; tree == commit 8075da75)
+installed to frontier and verified; INIs untouched. Implements the runtime
+check the 21:58 offline trace named, so the NEXT flight can settle
+owner == KinematicRig and validate the epoch change-signal in one session.
+
+What was added (kinematic_eval_probe/hook):
+
+- noteOwnership at job-0/1 body entry, OUTSIDE the QPC bracket (job-cost
+  attribution stays clean). Job 0 (UpdateRenderDataJob body RVA 0x4321940)
+  arg = FUN_14431AFE0 descriptor: collection = *(arg+0x10) - 0x300 (its
+  +0x10 is the ADDRESS of collection+0x300). Job 1 (batch 0x4320340) arg =
+  the collection itself. Captures collection+0x18 (owner), +0x20 (alias),
+  +0x90 (epoch), *(owner+0x348) (backptr), *(uint*)(owner+0x380) (state),
+  deduped per collection (cap 64).
+- Discriminator verdict: owner == rig iff backptr == collection AND
+  owner_state == 4 across the captured collections. Consistent
+  backptr != collection refutes it; alias20 == owner would confirm the
+  +0x18/+0x20 aliasing inferred from the ctor/reinit paths.
+- Epoch pair in observe(): record+0x1B8 vs descriptor+0x38 with
+  epoch_matches / epoch_mismatches / epoch_changes counters, validating
+  the FUN_144331300 epoch semantics as a genuine per-record change signal.
+- Failure modes are distinguishable from success in the JSON:
+  ownership_checks == 0 with empty ownership[] = job hooks never fired;
+  climbing read_faults with no ownership rows = the job-0 descriptor
+  layout assumption failed; backptr == 0 = null owner. None reads as a
+  pass.
+
+Flight protocol: unchanged (eye dump, 30 s per the previous protocol).
+After: python tools\edvr_log.py --target frontier --expect-build
+v0.17.0-82-gba373645-dirty, then read kinematicEval.ownership and
+kinematicEval.summary epoch_* / owner_* counters.

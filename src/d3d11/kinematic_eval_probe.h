@@ -25,6 +25,7 @@ public:
     static constexpr uint32_t kTransitionCap=8192u;
     static constexpr uint32_t kVtableCap=128u;
     static constexpr uint32_t kJobCount=6u;
+    static constexpr uint32_t kOwnershipCap=64u;
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 
@@ -35,6 +36,7 @@ public:
     struct RecordState {
         uint64_t record=0,node=0,poseCtx=0,predPtr=0,predVtableRva=0;
         uint64_t pred2Ptr=0,pred2VtableRva=0,hash=0,count298=0;
+        uint64_t epoch1b8=0,descEpoch38=0;
         uint32_t flags=0,firstFrame=0,lastFrame=0;
         uint8_t bool234=0,predByte=0,gate2=0;
         uint64_t calls=0;
@@ -45,10 +47,21 @@ public:
         uint64_t oldHash=0,newHash=0;
     };
     struct VtableUse {uint64_t rva=0;uint32_t firstFrame=0;uint64_t hits=0;};
+    // One row per distinct collection seen at a job-body entry (jobs 0 and 1).
+    // Proves or refutes collection+0x18 == KinematicRig: backPtr == collection
+    // means *(owner+0x348) points back at the collection (the rig's own
+    // collection slot), and ownerState == 4 is the rig's render-ready state.
+    struct OwnershipUse {
+        uint64_t collection=0,owner=0,alias20=0,epoch90=0,backPtr=0;
+        uint32_t ownerState=0,jobId=0,firstFrame=0;
+        uint64_t hits=0;
+    };
     struct Summary {
         uint64_t observed=0;uint32_t stored=0;
         uint64_t readFaults=0,recordOverflow=0,transitionOverflow=0,vtableOverflow=0;
         uint64_t transitions=0,vtables=0;
+        uint64_t epochMatches=0,epochMismatches=0,epochChanges=0;
+        uint64_t ownershipChecks=0,ownerBackPtrMatch=0,ownerState4=0,ownershipOverflow=0;
     };
 
     bool arm(uint32_t meshFrame) noexcept;
@@ -63,6 +76,9 @@ public:
     void observe(uintptr_t descriptor,uintptr_t renderRecord) noexcept;
     // Job brackets call these around the original body.
     JobStat* jobStats() noexcept{return jobs_;}
+    // Called at job-body entry for jobs 0 (descriptor arg; collection =
+    // read64(arg+0x10)-0x300) and 1 (collection arg) before the timed bracket.
+    void noteOwnership(uint32_t jobId,uintptr_t arg) noexcept;
 
     Summary summary() const noexcept;
     void writeJson(std::ostringstream& json) const;
@@ -79,6 +95,8 @@ private:
     std::vector<Transition> transitions_;
     std::unordered_map<uint64_t,uint32_t> vtableIndex_;
     std::vector<VtableUse> vtables_;
+    std::unordered_map<uint64_t,uint32_t> ownershipIndex_;
+    std::vector<OwnershipUse> ownerships_;
     JobStat jobs_[kJobCount];
 
     void clearLocked();

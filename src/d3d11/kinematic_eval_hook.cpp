@@ -151,6 +151,10 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     if(!forward)return 0; // this job stood down at install; the relay is unreachable then
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
     if(!probe || !probe->active())return forward(a,b,c,d);
+    // Ownership/epoch capture sits OUTSIDE the timed bracket so job-cost
+    // attribution stays clean; jobs 0/1 only, two dereferences plus a
+    // dedupe lookup per call.
+    probe->noteOwnership(job,a);
     const int64_t start=qpcNow();
     const uintptr_t result=forward(a,b,c,d);
     const int64_t elapsed=qpcNow()-start;
