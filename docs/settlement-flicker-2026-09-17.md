@@ -49,12 +49,12 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-95-g873c4024-dirty installed to frontier (6AAFD0FB),
-  extending the transform snapshot to +0x130..0x180 (covers the +0x170
-  updater translation; 06:30 entry) and fixing writer quotes;
-  supersedes v0.17.0-93-gd6ed264f-dirty (6AAFCC46). The 064047 flight
+- Build: v0.17.0-101-g39e6a422-dirty installed to frontier (BE7E7188),
+  extending the transform snapshot to +0x130..0x188 (full +0x17C quat
+  word), the rotation decode and the JSON writer gate (07:45 entry);
+  supersedes v0.17.0-95-g873c4024-dirty (6AAFD0FB). The 064047 flight
   proved record+0x170 is the per-frame world position (06:45 entry).
-  INIs unchanged. Flight check: --expect-build v0.17.0-95-g873c4024-dirty.
+  INIs unchanged. Flight check: --expect-build v0.17.0-101-g39e6a422-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6159,4 +6159,45 @@ verification gate before DLSS sees anything, v1 = translation only
 (rotation needs the node matrix, unverified). The doc's injection
 table and phase-0 bullet were updated for the 064047 proofs. No code
 yet — Sean picks when phase 1 gets built.
+
+
+### 2026-09-20 07:45 — rotation decoded, spec revised per review, JSON gate catches a live writer bug
+
+Sean's 07:03 review (four corrections) is worked into the phase-1 spec
+(kinematic-motion-injection-2026-09-19.md): static claims are bounded
+per-frame evidence, never permanent labels; the tracker keeps
+frame-aligned pose history with identity re-established from the live
+stream every frame; unknown identity / ambiguous coverage / overflow
+PRESERVES the existing motion path instead of defaulting to static-zero;
+pixel ownership is a ship prerequisite.
+
+Rotation DECODED offline (review item 2): updater FUN_14433DB20 writes 8
+bytes at record+0x17C = 4x uint16 lanes, component = (lane - 32768) /
+32767; degenerate input maps to (0,0,0,65535) = identity. Runtime
+scale/bias constants are RAM-initialized (garbage in the disk image);
+the clamp constant 65535.0 x4 at RVA 0x5286470 and the (0,0,0,1.0f)
+select table at 0x50C80C0 read clean from the exe. Verified on the
+064047 capture: the drone's lanes tracked its yaw (0.2134 -> 0.1914)
+while statics stayed bit-constant. Sign canonicalization (q == -q) is
+still required before differencing two quats. Capture extended to
++0x130..0x188 (xf arrays 10 -> 11 qwords) so the full 8-byte quat word
+rides the first/latest snapshots.
+
+JSON writer gate, per Sean's "three serialization failures are enough"
+directive: KinematicEvalProbe.selfTestPopulateForJson() fills a
+deterministic fixture; tools\kinematic_json_test\kinematic_json_test.cpp
+serializes it through the production writeJson (hook functions stubbed,
+the mesh_motion_test pattern); tools\kinematic_json_selftest.py
+strict-parses the output and asserts every fixture value round-trips;
+wired as :rig_kinematic_json_test in build.bat. FIRST RUN caught a live
+production bug: writeJson emitted epoch1b8 and desc_epoch38 with the
+comma INSIDE the string value ("0x1122...,") — the line-leading literal
+closed the quote AFTER the comma instead of before it. Valid JSON, wrong
+values: a parse-only check would have passed. Two-line fix, verified by
+the gate. Every capture written since the epoch fields landed carries
+the trailing comma inside those two strings; the values themselves are
+intact and remain readable.
+
+Build v0.17.0-101-g39e6a422-dirty installed to frontier (BE7E7188); all
+gates green, including the new JSON gate. INIs unchanged.
 

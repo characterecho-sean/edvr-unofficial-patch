@@ -1,0 +1,94 @@
+"""Strict round-trip gate for the KinematicEvalProbe JSON writer.
+
+Runs build\\kinematic_json_test.exe --self-test, which serializes a
+deterministic fixture through the production writeJson, then json.loads
+the output (strict: any quoting regression raises here) and asserts every
+fixture value round-trips. Three writer failures -- a dropped closing
+quote after a hex value, a misplaced quote inside an array, a broken
+record termination -- reached the flight journal before this gate
+existed; compilation alone caught none of them.
+"""
+import argparse
+import json
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+EXE = ROOT / 'build' / 'kinematic_json_test.exe'
+
+
+def self_test():
+    if not EXE.exists():
+        raise AssertionError(f'{EXE} is missing; build.bat compiles it before this gate runs')
+    r = subprocess.run([str(EXE), '--self-test'], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AssertionError(f'kinematic_json_test --self-test failed:\n{r.stderr}')
+    ke = json.loads(r.stdout)['kinematicEval']
+    assert ke['status'] == 'not_run', ke['status']
+    assert ke['summary'] == dict(
+        observed=987654321, records=2, transitions=1, vtables=1,
+        read_faults=3, record_overflow=1, transition_overflow=2, vtable_overflow=4,
+        epoch_matches=11, epoch_mismatches=22, epoch_changes=33,
+        ownership_checks=44, owner_backptr_match=45, owner_state4=46, ownership_overflow=47,
+        riglink_checks=48, riglink_state4=49, riglink_null_collection=50, riglink_overflow=51,
+        xf_movers=52, xf_changes=53), ke['summary']
+    recs = ke['records']
+    assert len(recs) == 2, recs
+    mover, still = recs
+    first = [f'0x{0x1000 + k:x}' for k in range(11)]
+    latest = [f'0x{0x1000 + k:x}' for k in range(8)] + ['0x800000008000', '0xffff00008000', '0x80000000ffff']
+    assert mover == dict(
+        id=0, record='0x1234abcd5678ef00', first_frame=10, last_frame=42, calls=123,
+        node='0x1111222233334444', pose_ctx='0xaabbccddeeff0011',
+        pred='0x7777888899990000', pred_vtable_rva='0x4301234',
+        pred2='0x5555666677778888', pred2_vtable_rva='0x4305678',
+        hash='0xdeadbeefcafef00d', count298=31, flags='0xc3',
+        bool234=1, pred_byte=90, gate2=2,
+        epoch1b8='0x1122334455667788', desc_epoch38='0x8877665544332211',
+        xf_changes=7, last_xf_change=42, xf_first=first, xf_latest=latest), mover
+    assert still == dict(
+        id=1, record='0x2222333344445555', first_frame=10, last_frame=42, calls=120,
+        node='0x6666777788889999', pose_ctx='0x0', pred='0x0', pred_vtable_rva='0x0',
+        pred2='0x0', pred2_vtable_rva='0x0', hash='0x0', count298=0, flags='0x41',
+        bool234=0, pred_byte=0, gate2=0, epoch1b8='0x0', desc_epoch38='0x0',
+        xf_changes=0, last_xf_change=0,
+        xf_first=['0x800000008000'] * 11, xf_latest=['0x800000008000'] * 11), still
+    assert ke['transitions'] == [dict(
+        record=0, frame=42, old_flags='0x1', new_flags='0xc3',
+        old_hash='0x1111111111111111', new_hash='0xdeadbeefcafef00d')], ke['transitions']
+    assert ke['vtables'] == [dict(rva='0x4301234', first_frame=10, hits=123)], ke['vtables']
+    jobs = ke['jobs']
+    assert len(jobs) == 6, jobs
+    assert jobs[0] == dict(name='Kinematic::UpdateRenderDataJob', calls=2,
+                           total_ns=1000, mean_ns=500, max_ns=700), jobs[0]
+    assert jobs[3] == dict(name='Kinematic::PrePhysicsAdvanceJob', calls=1,
+                           total_ns=42, mean_ns=42, max_ns=42), jobs[3]
+    for i in (1, 2, 4, 5):
+        assert jobs[i]['calls'] == 0 and jobs[i]['total_ns'] == 0 \
+            and jobs[i]['mean_ns'] == 0 and jobs[i]['max_ns'] == 0, jobs[i]
+    assert ke['ownership'] == [dict(
+        collection='0xaaaa0000bbbb0001', owner='0xaaaa0000bbbb0002',
+        alias20='0xaaaa0000bbbb0003', epoch90='0xeeee',
+        backptr='0xaaaa0000bbbb0001', owner_state=4, job=1,
+        first_frame=10, hits=55)], ke['ownership']
+    assert ke['riglinks'] == [dict(
+        rig='0xf00d000000000001', pose_ctx='0xf00d000000000002',
+        collection='0xaaaa0000bbbb0001', game_obj='0xf00d000000000003',
+        descriptor='0xf00d000000000004', owner='0xf00d000000000005',
+        coll_epoch90='0xeeee', rig_state=4, first_frame=10, hits=58,
+        collection_known=1)], ke['riglinks']
+    print('kinematic json self-test passed')
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--self-test', action='store_true')
+    a = ap.parse_args()
+    if a.self_test:
+        self_test()
+        return
+    ap.error('Nothing to do without --self-test')
+
+
+if __name__ == '__main__':
+    main()

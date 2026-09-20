@@ -67,6 +67,11 @@ screen-space work".
   matrix is a static local/default, NOT the per-frame transform.
   Object motion = per-frame delta of record+0x170. View products at
   record+0xF0..0x12C; world bounds at record+0xB0..0xEC.
+- Current-frame record ORIENTATION: packed quaternion at record+0x17C
+  (4x uint16 lanes, component = (lane - 32768)/32767, degenerate ->
+  (0,0,0,65535) identity), decoded offline and flight-verified on the
+  064047 data (drone lanes tracked its yaw; statics bit-constant).
+  Sign canonicalization (q == -q) required before differencing.
 - NOT provided, after the 2026-09-19 review (settlement doc 21:23
   entry): a proven stasis/change signal. record+0x268 is a
   render-config hash that never reads the transform (FUN_14433C750);
@@ -137,34 +142,48 @@ with the existing temporal_aa_debug MV view before it ships.
 
 ## 2026-09-20 — Phase 1 spec: the diagnostic kinematic motion source
 
-**Inputs, all flight-proven.** The live record set comes from the eval
-hook (FUN_14430EFE0), which already sees every evaluated record every
-frame via descriptor+0x10 — per-frame re-resolution makes collection
-reallocs a non-issue for the live set. The motion signal is
-record+0x170 (world translation, 064047). Stasis is provable: zero
-delta across a window that contains a mover control (the drone was
-correctly isolated into the mover set, so the static label on the
-other 2,571 records is trustworthy, not instrument-dead). Rig
-attribution is available from the riglink rows but not needed for the
-MV itself.
+**Inputs, flight-proven — with bounded claims.** The live record set
+comes from the eval hook (FUN_14430EFE0), which already sees every
+evaluated record every frame via descriptor+0x10 — per-frame
+re-resolution makes collection reallocs a non-issue for the live set.
+The motion signals are record+0x170 (world translation, 064047) and
+the record+0x17C packed quaternion (decoded 2026-09-20, below).
+Stasis claims are BOUNDED (Sean's 2026-09-20 review): zero
+translation delta across a window with a mover control proves the
+instrument detects translation and that those records did not
+translate in that window. It does NOT prove they cannot rotate,
+deform, or start moving later. A static label is per-frame evidence,
+re-evaluated every frame; it never becomes a permanent property.
+Rig attribution is available from the riglink rows but not needed
+for the MV itself.
 
 **Module shape.** kinematic_motion, mirroring mesh_motion's interface
 (the per-class source pattern: compute per frame, write into the
 pass's MV field ahead of the e.dlMv hand-off). Three parts:
 
-1. Tracker (CPU): piggybacks the eval hook's per-frame record stream;
-   keeps previous +0x170 per record; computes the world delta; drops
-   records unseen for N frames (stream-out). Bounded (~4k records);
-   on overflow the source reports DEGRADED and injects nothing beyond
-   the static-zero class — it never guesses.
+1. Tracker (CPU): piggybacks the eval hook's per-frame record stream.
+   Per record it keeps a short pose history ALIGNED TO RENDERED
+   FRAMES (translation +0x170 plus the +0x17C quaternion) — the
+   probe's first/latest snapshots are evidence-grade, not
+   tracker-grade, and are not reused here. Identity is re-established
+   every frame from the live stream: a record pointer not re-seen
+   this frame writes nothing this frame; a reallocated record is
+   simply a new identity with no history and therefore no injection.
+   Re-reading a pointer never stands in for sameness. Bounded (~4k
+   records).
 2. Ownership: each tracked record's world bounds (record+0xB0..0xEC)
    projected to screen, depth-gated against the depth buffer (the
    tier-1 lesson: a mover's interior still ghosts without depth
-   consistency).
+   consistency). Ownership is a SHIP PREREQUISITE: bounds+depth is
+   not unique-mesh, and phase 1 ships only after the diagnostic view
+   shows the mis-own rate at occlusion edges is negligible.
 3. Compose: MV = existing camera/head motion + projected object delta
-   for owned pixels. Static records write zero object delta — the
-   camera term stays, shimmer dies at the source. Movers write their
-   measured delta.
+   for owned pixels. Records proven translation- AND rotation-static
+   this frame write zero object delta — the camera term stays,
+   shimmer dies at the source. Movers write their measured delta.
+   Unknown identity, ambiguous coverage, tracker overflow, or any
+   doubt PRESERVES THE EXISTING MOTION PATH for those pixels — the
+   source never defaults to static-zero and never guesses.
 
 **Config.** One functionality-named key (AGENTS.md: what the user
 gets, never the mechanism): proposal `fix.engine_motion on|off|auto`,
@@ -179,19 +198,28 @@ camera-only vectors. Quantitative check: the tracker logs per-frame
 match within projection error. Shimmer gone in the diagnostic view is
 the ship gate for phase 1; DLSS sees nothing until then.
 
-**v1 limits (stated, not hidden).** Translation only: rotation is not
-in record+0x170 and the +0x130 4x4 is static, so a spinning-in-place
-object reads as static — phase 2 needs the node's composed matrix
-(traversal FUN_144312040 output via record+0x18), UNVERIFIED. Only
-eval-population records are tracked (the drone is a member; skinned/
-smoke classes are not and get nothing). Pixel ownership is
-bounds+depth, not unique-mesh; occlusion edges can mis-own — the
-depth gate is the mitigation, not a cure.
+**Rotation (decoded 2026-09-20, settlement doc 07:05 entry).** The
+updater (FUN_14433DB20) writes an 8-byte orientation value at
+record+0x17C immediately after position: four uint16 lanes, component
+= (lane - 32768)/32767, degenerate norm -> (0,0,0,65535) = identity.
+Flight-verified on 064047 data: the drone group's lanes tracked its
+yaw while every static record's lanes stayed bit-constant. Remaining
+rotation work: sign canonicalization (q == -q) before differencing,
+and frame-aligned quat history (capture extends to the full 8 bytes
+from build v0.17.0-96).
 
-**Failure modes, each logged distinctly:** tracker overflow (degraded
-mode), zero records seen in a frame (hook stood down — reads as
-stand-down, never as pass), bounds read faults, stale-record drops.
-End-to-end trace before flying, per build discipline.
+**v1 limits (stated, not hidden).** Only eval-population records are
+tracked (the drone is a member; skinned/smoke classes are not and get
+nothing). Pixel ownership is bounds+depth, not unique-mesh; occlusion
+edges can mis-own — the depth gate is the mitigation, not a cure, and
+the mis-own rate gates shipping. Per-frame static labels cover
+translation and rotation only; deformation (vertex-level) is out of
+scope and stays on the existing path.
+
+**Failure modes, each logged distinctly:** tracker overflow (preserve
+existing path), zero records seen in a frame (hook stood down —
+reads as stand-down, never as pass), bounds read faults, stale-record
+drops. End-to-end trace before flying, per build discipline.
 
 **Not in scope:** no DLSS-path change (surface 2 is the same e.dlMv
 hand-off), no skinned/particle injection, no sharpening or other

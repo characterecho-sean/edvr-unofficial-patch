@@ -170,7 +170,7 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
     if(r.epoch1b8!=epoch1b8){++summary_.epochChanges;r.epoch1b8=epoch1b8;}
     r.descEpoch38=descEpoch38;
     // Engine-truth motion: bit-exact compare of the world transform block.
-    uint64_t xf[10];
+    uint64_t xf[11];
     if(guardedRead(static_cast<uintptr_t>(record)+0x130,xf,sizeof(xf))) {
         if(std::memcmp(xf,r.xfLatest,sizeof(xf))!=0) {
             std::memcpy(r.xfLatest,xf,sizeof(xf));
@@ -334,12 +334,12 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<"\",\"bool234\":"<<uint32_t(r.bool234)<<",\"pred_byte\":"<<uint32_t(r.predByte)
          <<",\"gate2\":"<<uint32_t(r.gate2)
          <<",\"epoch1b8\":\"0x"<<std::hex<<r.epoch1b8
-         <<",\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec
-         <<",\",\"xf_changes\":"<<r.xfChanges<<",\"last_xf_change\":"<<r.lastXfChangeFrame
+         <<"\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec
+         <<"\",\"xf_changes\":"<<r.xfChanges<<",\"last_xf_change\":"<<r.lastXfChangeFrame
          <<",\"xf_first\":[";
-        for(int k=0;k<10;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfFirst[k]<<std::dec<<"\"";}
+        for(int k=0;k<11;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfFirst[k]<<std::dec<<"\"";}
         j<<"],\"xf_latest\":[";
-        for(int k=0;k<10;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfLatest[k]<<std::dec<<"\"";}
+        for(int k=0;k<11;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfLatest[k]<<std::dec<<"\"";}
         j<<"]}";
     }
     j<<"],\"transitions\":[";
@@ -372,6 +372,91 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<",\"collection_known\":"<<(r.collection&&ownershipIndex_.count(r.collection)?1:0)<<'}';
     }
     j<<"]}";
+}
+
+void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    clearLocked();
+    // Every value is distinctive so tools\kinematic_json_selftest.py can
+    // assert an exact round-trip. The three historical writer bugs each
+    // dropped or misplaced a quote: after a hex value, inside an array,
+    // at record termination -- so the fixture exercises all three shapes.
+    RecordState mover{};
+    mover.record=0x1234ABCD5678EF00ull;
+    mover.node=0x1111222233334444ull;
+    mover.poseCtx=0xAABBCCDDEEFF0011ull;
+    mover.predPtr=0x7777888899990000ull;
+    mover.predVtableRva=0x4301234ull;
+    mover.pred2Ptr=0x5555666677778888ull;
+    mover.pred2VtableRva=0x4305678ull;
+    mover.hash=0xDEADBEEFCAFEF00Dull;
+    mover.count298=0x1Full;
+    mover.epoch1b8=0x1122334455667788ull;
+    mover.descEpoch38=0x8877665544332211ull;
+    for(int k=0;k<11;++k){mover.xfFirst[k]=0x1000ull+uint64_t(k);mover.xfLatest[k]=0x1000ull+uint64_t(k);}
+    mover.xfLatest[8]=0x0000800000008000ull;   // translation word moved
+    mover.xfLatest[9]=0x0000FFFF00008000ull;
+    mover.xfLatest[10]=0x000080000000FFFFull;  // packed-quat word changed
+    mover.flags=0xC3u;
+    mover.firstFrame=10u;mover.lastFrame=42u;
+    mover.xfChanges=7u;mover.lastXfChangeFrame=42u;
+    mover.bool234=1u;mover.predByte=0x5Au;mover.gate2=2u;
+    mover.calls=123u;
+
+    RecordState still{};
+    still.record=0x2222333344445555ull;
+    still.node=0x6666777788889999ull;
+    for(int k=0;k<11;++k){still.xfFirst[k]=0x0000800000008000ull;still.xfLatest[k]=0x0000800000008000ull;}
+    still.flags=0x41u;
+    still.firstFrame=10u;still.lastFrame=42u;
+    still.calls=120u;
+
+    index_[mover.record]=0;index_[still.record]=1;
+    records_.push_back(mover);records_.push_back(still);
+
+    Transition t{};
+    t.recordId=0u;t.frame=42u;t.oldFlags=0x1u;t.newFlags=0xC3u;
+    t.oldHash=0x1111111111111111ull;t.newHash=mover.hash;
+    transitions_.push_back(t);
+
+    VtableUse v{};
+    v.rva=0x4301234ull;v.firstFrame=10u;v.hits=123u;
+    vtableIndex_[v.rva]=0;vtables_.push_back(v);
+
+    OwnershipUse o{};
+    o.collection=0xAAAA0000BBBB0001ull;
+    o.owner=0xAAAA0000BBBB0002ull;
+    o.alias20=0xAAAA0000BBBB0003ull;
+    o.epoch90=0xEEEEull;
+    o.backPtr=o.collection;
+    o.ownerState=4u;o.jobId=1u;o.firstFrame=10u;o.hits=55u;
+    ownershipIndex_[o.collection]=0;ownerships_.push_back(o);
+
+    RigLinkUse rl{};
+    rl.rig=0xF00D000000000001ull;
+    rl.poseCtx=0xF00D000000000002ull;
+    rl.collection=o.collection;      // known -> collection_known = 1
+    rl.gameObj=0xF00D000000000003ull;
+    rl.descriptor=0xF00D000000000004ull;
+    rl.owner=0xF00D000000000005ull;
+    rl.collEpoch90=0xEEEEull;
+    rl.rigState=4u;rl.firstFrame=10u;rl.hits=58u;
+    riglinkIndex_[rl.rig]=0;riglinks_.push_back(rl);
+
+    jobs_[0].calls.store(2,std::memory_order_relaxed);
+    jobs_[0].totalNs.store(1000,std::memory_order_relaxed);
+    jobs_[0].maxNs.store(700,std::memory_order_relaxed);
+    jobs_[3].calls.store(1,std::memory_order_relaxed);
+    jobs_[3].totalNs.store(42,std::memory_order_relaxed);
+    jobs_[3].maxNs.store(42,std::memory_order_relaxed);
+
+    summary_.observed=987654321ull;
+    summary_.readFaults=3;summary_.recordOverflow=1;summary_.transitionOverflow=2;summary_.vtableOverflow=4;
+    summary_.transitions=1;summary_.vtables=1;
+    summary_.epochMatches=11;summary_.epochMismatches=22;summary_.epochChanges=33;
+    summary_.ownershipChecks=44;summary_.ownerBackPtrMatch=45;summary_.ownerState4=46;summary_.ownershipOverflow=47;
+    summary_.riglinkChecks=48;summary_.riglinkState4=49;summary_.riglinkNullCollection=50;summary_.riglinkOverflow=51;
+    summary_.xfMovers=52;summary_.xfChanges=53;
 }
 
 } // namespace edvr
