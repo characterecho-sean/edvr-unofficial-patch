@@ -36,7 +36,7 @@ def self_test():
         dup_in_frame=2, gap_events=1, node_change_events=1, quat_change_frames=6,
         frames_counted=40, zero_record_frames=1,
         min_frame_records=2, max_frame_records=17,
-        clock_sample_overflow=3, gap_relog_skipped=11), ke['summary']
+        clock_sample_overflow=3, gap_relog_skipped=11, non_finite_pose=9), ke['summary']
     recs = ke['records']
     assert len(recs) == 2, recs
     mover, still = recs

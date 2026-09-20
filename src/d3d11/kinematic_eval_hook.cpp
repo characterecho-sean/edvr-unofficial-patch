@@ -48,7 +48,10 @@ struct HookEntry {
     std::atomic<uintptr_t> forward{0};
     CodeHook hook;
     uint8_t* relay=nullptr;
-    bool ready=false;
+    // Published release AFTER the relay+trampoline are live; readers acquire.
+    // patchIsOurs reads this from contexts that do not hold g_installMutex,
+    // so a plain bool could observe a half-installed entry (finding 5).
+    std::atomic<bool> ready{false};
 };
 
 // Job bodies behind the run thunks (recovered from the hash-verified exe,
@@ -180,16 +183,25 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     // attribution stays clean; jobs 0/1 only, two dereferences plus a
     // dedupe lookup per call.
     probe->noteOwnership(job,a);
+    // Capture boundary (2026-09-20 review finding 8): samples commit only to
+    // the generation they started in -- a reset/re-arm mid-job drops the
+    // completion instead of contaminating the new capture -- and the three
+    // counters publish between seq toggles so the JSON writer's seqlocked
+    // read never serializes a torn snapshot. No drain: the finishing thread
+    // may itself be inside an observed job, so draining could self-deadlock.
+    const uint64_t gen=probe->jobGeneration();
     const int64_t start=qpcNow();
     const uintptr_t result=forward(a,b,c,d);
     const int64_t elapsed=qpcNow()-start;
-    if(elapsed>0 && g_qpcFreq>0) {
+    if(elapsed>0 && g_qpcFreq>0 && gen==probe->jobGeneration()) {
         auto* stats=probe->jobStats();
         const uint64_t ns=uint64_t(elapsed)*1000000000ull/uint64_t(g_qpcFreq);
+        stats[job].seq.fetch_add(1,std::memory_order_relaxed); // odd: commit in flight
         stats[job].calls.fetch_add(1,std::memory_order_relaxed);
         stats[job].totalNs.fetch_add(ns,std::memory_order_relaxed);
         uint64_t prev=stats[job].maxNs.load(std::memory_order_relaxed);
         while(prev<ns && !stats[job].maxNs.compare_exchange_weak(prev,ns,std::memory_order_relaxed)){}
+        stats[job].seq.fetch_add(1,std::memory_order_release); // even: coherent
     }
     return result;
 }
@@ -210,7 +222,7 @@ bool installOne(HookEntry& entry,uintptr_t base) noexcept;
 // job brackets. Jobs and the rig-link hook stand down alone on failure (the
 // eval capture is the primary evidence; CodeHook logs each reason).
 bool ensureInstalled(uintptr_t base) noexcept {
-    if(g_evalEntry.ready)return true;
+    if(g_evalEntry.ready.load(std::memory_order_acquire))return true;
     LARGE_INTEGER freq{};
     if(!QueryPerformanceFrequency(&freq)||freq.QuadPart<=0)return false;
     g_qpcFreq=freq.QuadPart;
@@ -265,14 +277,14 @@ bool installOne(HookEntry& entry,uintptr_t base) noexcept {
         entry.relay=nullptr;
         return false;
     }
-    entry.ready=true;
+    entry.ready.store(true,std::memory_order_release);
     return true;
     // Process-lifetime storage: do not free a relay or trampoline which an
     // in-flight call may already be executing. Captures only gate it.
 }
 
 bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
-    if(!entry.ready || !entry.relay)return false;
+    if(!entry.ready.load(std::memory_order_acquire) || !entry.relay)return false;
     const uintptr_t target=base+entry.rva;
     const intptr_t displacement=reinterpret_cast<intptr_t>(entry.relay)-intptr_t(target+5);
     // The evaluator's prologue past the five patch bytes, from the
@@ -300,6 +312,12 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
         if(active && active!=probe)return "observer_busy";
         const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         if(!base)return "identity_mismatch";
+        // Validation is part of the locked install operation: an unlocked
+        // pre-check raced a concurrent tracker install that had patched the
+        // prologue but not yet published ready, and rejected the supported
+        // executable (2026-09-20 review finding 5).
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
         if(!ensureInstalled(base))return "install_failed";
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         observer.store(probe,std::memory_order_release);
@@ -308,12 +326,23 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
     } catch(...) {return "install_failed";}
 }
 
+// The gate is recomputed under the install mutex from BOTH consumer cells;
+// every attach/detach transition holds that mutex. An unlocked check-then-set
+// raced: probe detach reads trackerWanted=false, tracker attach publishes
+// wanted=true/gate=1, detach then writes gate=0 and the live tracker goes
+// deaf (2026-09-20 review finding 4).
+void recomputeGateLocked() noexcept {
+    const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
+                    trackerWanted.load(std::memory_order_acquire);
+    evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
+}
+
 void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
-    observer.compare_exchange_strong(probe,nullptr,std::memory_order_acq_rel);
-    // The gate closes only when no consumer wants callbacks; the tracker
-    // keeps the feed open while fix.engine_motion is on.
-    if(!trackerWanted.load(std::memory_order_acquire))
-        evalGate.store(0,std::memory_order_release);
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        observer.compare_exchange_strong(probe,nullptr,std::memory_order_acq_rel);
+        recomputeGateLocked();
+    } catch(...) {}
 }
 
 void kinematicEvalSetTrackerObserver(KinematicTrackerObserverFn fn) noexcept {
@@ -325,7 +354,8 @@ const char* kinematicEvalTrackerAttach() noexcept {
         std::lock_guard<std::mutex> lock(g_installMutex);
         const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         if(!base)return "identity_mismatch";
-        if(!g_evalEntry.ready && !targetValid(base))return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
         if(!ensureInstalled(base))return "install_failed";
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         trackerWanted.store(true,std::memory_order_release);
@@ -335,9 +365,11 @@ const char* kinematicEvalTrackerAttach() noexcept {
 }
 
 void kinematicEvalTrackerDetach() noexcept {
-    trackerWanted.store(false,std::memory_order_release);
-    if(!observer.load(std::memory_order_acquire))
-        evalGate.store(0,std::memory_order_release);
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        trackerWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
 }
 
 } // namespace edvr

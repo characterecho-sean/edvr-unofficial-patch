@@ -1,0 +1,227 @@
+// Build gate for the KinematicEvalProbe's observe/clock logic -- the four
+// probe-side findings of the 2026-09-20 review (2, 3, 7, 9), reproduced
+// against the production source. The JSON writer's own gate
+// (kinematic_json_test) only exercises serialization; these cases drive
+// observe() itself. arm()/finish() are NOT used (they would hook the test
+// process); state is seeded directly, the pattern the review harness used.
+// VirtualProtect read-fault fixtures run on pages this process owns.
+#include <windows.h>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cwchar>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#define private public
+#include "../../src/d3d11/kinematic_eval_probe.h"
+#undef private
+#include "../../src/d3d11/kinematic_eval_hook.h"
+// The implementation under test is compiled INTO this TU: MSVC encodes
+// access specifiers in decorated names, so a separately linked
+// kinematic_eval_probe.obj would mangle clearLocked as private and not
+// resolve (the review harness used this same single-TU pattern).
+#include "../../src/d3d11/kinematic_eval_probe.cpp"
+
+namespace edvr {
+// Linker stubs: this rig never hooks anything (arm/finish/reset unused).
+const char* attachKinematicEvalHooks(KinematicEvalProbe*) noexcept { return "installed"; }
+void detachKinematicEvalHooks(KinematicEvalProbe*) noexcept {}
+bool kinematicEvalHooksMatch(uintptr_t) noexcept { return false; }
+}
+using namespace edvr;
+
+namespace {
+unsigned checks = 0, failures = 0;
+void check(bool ok, const char* name) {
+    ++checks;
+    if (!ok) { ++failures; std::fprintf(stderr, "FAIL: %s\n", name); }
+}
+
+// The record as the probe reads it: node +0x18, xf block +0x130 (88 B;
+// translation floats xf[8] lo/hi + xf[9] lo, quat lanes xf[9] hi + xf[10]
+// lo), hash +0x268, epoch +0x1B8. Descriptor: record pointer at +0x10,
+// epoch at +0x38. Render record: flags at +0x688.
+struct FakeRec { alignas(16) uint8_t b[0x300]; };
+struct FakeDesc { uint8_t b[0x60]; };
+struct FakeRender { uint8_t b[0x700]; };
+
+void put64(uint8_t* base, size_t off, uint64_t v) { std::memcpy(base + off, &v, 8); }
+void put32(uint8_t* base, size_t off, uint32_t v) { std::memcpy(base + off, &v, 4); }
+
+void setNode(uint8_t* rec, uint64_t node) { put64(rec, 0x18, node); }
+// Writes the xf block's translation floats and neutral quat lanes
+// (32768,32768,32768,65535), matching the flight-validated packing.
+void setPose(uint8_t* rec, float x, float y, float z) {
+    uint32_t xb, yb, zb;
+    std::memcpy(&xb, &x, 4); std::memcpy(&yb, &y, 4); std::memcpy(&zb, &z, 4);
+    const uint64_t w8 = uint64_t(xb) | (uint64_t(yb) << 32);
+    const uint64_t w9 = uint64_t(zb) | (uint64_t(32768) << 32) | (uint64_t(32768) << 48);
+    const uint64_t w10 = uint64_t(32768) | (uint64_t(65535) << 16);
+    put64(rec, 0x130 + 64, w8);
+    put64(rec, 0x130 + 72, w9);
+    put64(rec, 0x130 + 80, w10);
+}
+void setTranslationBits(uint8_t* rec, uint32_t xb, float y, float z) {
+    uint32_t yb, zb;
+    std::memcpy(&yb, &y, 4); std::memcpy(&zb, &z, 4);
+    const uint64_t w8 = uint64_t(xb) | (uint64_t(yb) << 32);
+    const uint64_t w9 = uint64_t(zb) | (uint64_t(32768) << 32) | (uint64_t(32768) << 48);
+    put64(rec, 0x130 + 64, w8);
+    put64(rec, 0x130 + 72, w9);
+}
+
+FakeDesc descFor(uint8_t* rec) {
+    FakeDesc d{};
+    put64(d.b, 0x10, reinterpret_cast<uint64_t>(rec));
+    return d;
+}
+
+// Seed as arm() leaves the probe, minus the hook install: cleared, active,
+// frame_ carrying the mesh-domain stamp the first present must overwrite.
+void seed(KinematicEvalProbe& p, uint32_t meshStamp) {
+    p.clearLocked();
+    p.active_.store(true);
+    p.frame_.store(meshStamp);
+}
+
+// Finding 7: the first present-domain tick must seed WITHOUT flushing --
+// before it, sampling is gated, so a flush fabricates an empty frame and
+// forces min_frame_records to zero on a healthy feed.
+void caseSeedWithoutFlush() {
+    KinematicEvalProbe p;
+    seed(p, 998);
+    p.notePresentFrame(1000, 998);
+    KinematicEvalProbe::Summary s = p.summary();
+    check(s.framesCounted == 0, "1: the seed tick counts no frame");
+    check(s.zeroRecordFrames == 0, "1: the seed tick is not a zero-record frame");
+    check(s.minFrameRecords == ~0ull, "1: min untouched until a real frame ends");
+    FakeRec r{}; setNode(r.b, 0xA1); setPose(r.b, 10.f, 20.f, 30.f);
+    FakeDesc d = descFor(r.b); FakeRender rd{};
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    p.notePresentFrame(1001, 998);
+    s = p.summary();
+    check(s.framesCounted == 1 && s.zeroRecordFrames == 0 && s.minFrameRecords == 1,
+          "1: the first real frame counts exactly one record");
+    p.notePresentFrame(1002, 998); // nothing observed
+    s = p.summary();
+    check(s.zeroRecordFrames == 1, "1: a genuinely empty frame still counts");
+}
+
+// Finding 2: a record straddling into an unreadable page must not be created
+// from a partial read -- the zero-filled transform baseline used to fabricate
+// a 100 m mover on recovery.
+void caseFaultedReadCreatesNothing() {
+    KinematicEvalProbe p;
+    seed(p, 998);
+    p.notePresentFrame(2000, 998);
+    auto* pages = static_cast<uint8_t*>(
+        VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    check(pages != nullptr, "2: VirtualAlloc");
+    if (!pages) return;
+    // Low half of the record (node, xf block) in page 0; epoch word (+0x1B8)
+    // in page 1, so the early epoch gate can pass while the rest faults.
+    uint8_t* rec = pages + 4096 - 0x190;
+    setNode(rec, 0xB1); setPose(rec, 100.f, 20.f, 30.f);
+    FakeDesc d = descFor(rec); FakeRender rd{};
+    DWORD old = 0;
+    if (!VirtualProtect(pages, 4096, PAGE_NOACCESS, &old)) { check(false, "2: VirtualProtect"); VirtualFree(pages, 0, MEM_RELEASE); return; }
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    KinematicEvalProbe::Summary s = p.summary();
+    check(s.readFaults > 0, "2: the fault is counted");
+    check(p.records_.empty(), "2: no record from a partial read");
+    if (!VirtualProtect(pages, 4096, PAGE_READWRITE, &old)) { check(false, "2: unprotect"); VirtualFree(pages, 0, MEM_RELEASE); return; }
+    p.notePresentFrame(2001, 998);
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    p.notePresentFrame(2002, 998);
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    s = p.summary();
+    check(p.records_.size() == 1, "2: recovery creates the record once");
+    check(s.xfMovers == 0 && s.xfChanges == 0, "2: recovery is not motion");
+    check(p.records_[0].totalJump == 0.0 && p.records_[0].maxJump == 0.f,
+          "2: no jump fabricated from a zero baseline");
+    check(p.records_[0].framesSampled == 2, "2: both good frames sampled");
+    VirtualFree(pages, 0, MEM_RELEASE);
+}
+
+// Finding 3: a node swap on a continuously-seen pointer ends the previous
+// occupant's history -- neither the xf diff nor the pose jump crosses the
+// identity boundary.
+void caseNodeSwapCrossesNothing() {
+    KinematicEvalProbe p;
+    seed(p, 998);
+    p.notePresentFrame(3000, 998);
+    FakeRec r{}; setNode(r.b, 0xC1); setPose(r.b, 10.f, 20.f, 30.f);
+    FakeDesc d = descFor(r.b); FakeRender rd{};
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    p.notePresentFrame(3001, 998);
+    setNode(r.b, 0xC2); setPose(r.b, 100.f, 20.f, 30.f); // new occupant, 90 m away
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    const KinematicEvalProbe::Summary s = p.summary();
+    check(s.nodeChangeEvents == 1, "3: the identity event is kept");
+    check(s.xfMovers == 0 && s.xfChanges == 0, "3: the boundary is not an xf change");
+    check(p.records_[0].totalJump == 0.0 && p.records_[0].maxJump == 0.f,
+          "3: the boundary is not a 90 m jump");
+    check(p.records_[0].framesSampled == 2, "3: both occupants sampled");
+    check(p.events_.size() == 1 && p.events_[0].kind == 2 &&
+          p.events_[0].oldNode == 0xC1 && p.events_[0].newNode == 0xC2,
+          "3: the event carries both nodes");
+    p.notePresentFrame(3002, 998);
+    setPose(r.b, 103.f, 20.f, 30.f); // the new occupant really moves 3 m
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    check(p.records_[0].totalJump > 2.9 && p.records_[0].totalJump < 3.1,
+          "3: post-boundary motion measures from the new baseline");
+    const KinematicEvalProbe::Summary s2 = p.summary();
+    check(s2.xfMovers == 1, "3: the new occupant's own move is a mover");
+}
+
+// Finding 9: a non-finite translation must not reach the JSON floats. The
+// raw bits stay in prevPose/mover_samples; the measurement is rejected.
+void caseNonFiniteRejected() {
+    KinematicEvalProbe p;
+    seed(p, 998);
+    p.notePresentFrame(4000, 998);
+    FakeRec r{}; setNode(r.b, 0xD1); setPose(r.b, 1.f, 2.f, 3.f);
+    FakeDesc d = descFor(r.b); FakeRender rd{};
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    p.notePresentFrame(4001, 998);
+    setTranslationBits(r.b, 0x7FC00000u, 2.f, 3.f); // NaN x
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    KinematicEvalProbe::Summary s = p.summary();
+    check(s.nonFinitePose == 1, "4: NaN jump rejected and counted");
+    check(p.records_[0].totalJump == 0.0 && p.records_[0].maxJump == 0.f,
+          "4: accumulators stay finite");
+    check(s.xfMovers == 1, "4: the raw bits still classify as motion");
+    p.notePresentFrame(4002, 998);
+    setPose(r.b, 4.f, 2.f, 3.f); // recovery: jump from NaN is NaN, rejected too
+    p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
+    s = p.summary();
+    check(s.nonFinitePose == 2 && p.records_[0].totalJump == 0.0,
+          "4: recovery off NaN bits stays finite");
+    std::ostringstream j;
+    p.writeJson(j);
+    const std::string out = j.str();
+    check(out.find("nan") == std::string::npos && out.find("inf") == std::string::npos,
+          "4: the JSON stays parseable");
+    check(out.find("\"non_finite_pose\":2") != std::string::npos,
+          "4: the counter serializes");
+}
+} // namespace
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc != 2) return 2;
+    if (!std::wcscmp(argv[1], L"--dry-run")) {
+        std::puts("kinematic_probe_test: dry-run (no runtime, device or files)");
+        return 0;
+    }
+    if (std::wcscmp(argv[1], L"--self-test")) return 2;
+    caseSeedWithoutFlush();
+    caseFaultedReadCreatesNothing();
+    caseNodeSwapCrossesNothing();
+    caseNonFiniteRejected();
+    std::printf("kinematic_probe_test: %u checks, %u failures\n", checks, failures);
+    return failures ? 1 : 0;
+}

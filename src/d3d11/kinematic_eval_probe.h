@@ -41,6 +41,11 @@ public:
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 
     struct JobStat {
+        // Seqlock: the bracket writer toggles seq odd/even around the three
+        // counter stores; the JSON writer retries until it reads an even seq
+        // unchanged across the snapshot. Never reset (parity must survive
+        // clearLocked, which only waits for even).
+        std::atomic<uint32_t> seq{0};
         std::atomic<uint64_t> calls{0},totalNs{0},maxNs{0};
     };
 
@@ -124,6 +129,10 @@ public:
         uint64_t minFrameRecords=~0ull; // the first real frame sets it
         uint64_t clockSampleOverflow=0;
         uint64_t gapRelogSkipped=0; // gap-resume re-logs past the per-frame cap
+        // Pose samples whose translation jump was NaN/Inf (non-finite input
+        // or overflow): rejected from maxJump/totalJump so the JSON stays
+        // valid; the raw bits are still kept in prevPose/mover_samples.
+        uint64_t nonFinitePose=0;
     };
 
     bool arm(uint32_t meshFrame) noexcept;
@@ -143,6 +152,10 @@ public:
     void observe(uintptr_t descriptor,uintptr_t renderRecord) noexcept;
     // Job brackets call these around the original body.
     JobStat* jobStats() noexcept{return jobs_;}
+    // Capture generation, bumped by clearLocked (arm/reset): a bracket that
+    // entered before the bump drops its sample instead of committing an
+    // old-capture completion into the new capture's counters.
+    uint64_t jobGeneration() const noexcept{return jobGeneration_.load(std::memory_order_acquire);}
     // Called at job-body entry for jobs 0 (descriptor arg; collection =
     // read64(arg+0x10)-0x300) and 1 (collection arg) before the timed bracket.
     void noteOwnership(uint32_t jobId,uintptr_t arg) noexcept;
@@ -183,14 +196,13 @@ private:
     bool clockSeeded_=false;
     uint32_t gapRelogsThisFrame_=0; // per-frame gap-resume re-log budget (256)
     JobStat jobs_[kJobCount];
+    std::atomic<uint64_t> jobGeneration_{0};
 
     void clearLocked();
-    bool validateExecutableLocked() noexcept;
     void noteVtableLocked(uint64_t rva,uint32_t frame) noexcept;
     void noteIdentityEventLocked(uint32_t recordId,uint32_t frame,uint32_t kind,
         uint32_t gapLen,uint64_t oldNode,uint64_t newNode) noexcept;
-    void samplePoseLocked(uint32_t recordId,RecordState& r,const uint64_t* xf,
-        uintptr_t recordAddr) noexcept;
+    void samplePoseLocked(uint32_t recordId,RecordState& r,const uint64_t* xf) noexcept;
     void flushFrameStatsLocked() noexcept;
     static bool guardedRead(uintptr_t address,void* output,size_t bytes) noexcept;
     static uint64_t read64(uintptr_t address,bool& ok) noexcept;

@@ -39,6 +39,7 @@ struct KinematicMotionStats {
     uint64_t moversTotal = 0;       // records that ever changed pose
     uint64_t gapDrops = 0;          // pointer re-seen after an absent frame
     uint64_t nodeChanges = 0;       // same pointer, different node (reuse)
+    uint64_t sameFrameChanges = 0;  // identity/pose changed between dups of one frame
     uint64_t boundsChanges = 0;     // bounds-block byte changes (diagnostic)
     uint64_t framesCounted = 0;     // ended frames with the clock live
     uint64_t zeroRecordFrames = 0;  // ended frames with zero records (stand-down shape)
@@ -62,5 +63,8 @@ void kinematicMotionObserve(uintptr_t descriptor) noexcept;
 KinematicMotionStats kinematicMotionStats() noexcept;
 // Test-rig introspection: eligibility of one record by its live pointer.
 bool kinematicMotionRecordEligible(uint64_t record) noexcept;
+// Test-rig introspection: the once-per-session bounds dump stage (0 = armed,
+// 1 = part A dumped, 2 = complete).
+int kinematicMotionBoundsDumpStage() noexcept;
 
 } // namespace edvr

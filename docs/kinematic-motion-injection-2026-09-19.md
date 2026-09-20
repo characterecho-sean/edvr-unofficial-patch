@@ -505,3 +505,9 @@ raw +0xB0..+0x130 block for movers and statics on one flight; the
 layout decodes offline (position fields shift by the +0x170 delta
 between consecutive frames; view products track the head). Stage B
 gets spec'd against that decode, not before.
+Review round (12:45 settlement entry): nine findings fixed before any
+flight -- same-frame dup verification and the both-populations bounds
+trigger in the tracker (rig cases 9-12), identity-before-motion,
+no-state-from-partial-reads, seed-without-flush and non-finite
+rejection in the probe (kinematic_probe_test, 25 checks), and the hook
+gate/validation/job-timing races closed by construction.

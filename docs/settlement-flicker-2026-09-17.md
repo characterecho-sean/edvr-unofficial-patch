@@ -72,15 +72,13 @@
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
   Stage B (ownership coverage + compose veto) is blocked on decoding the
   world-bounds layout from stage A's dump (11:20 entry).
-- Build: v0.17.0-117-g0d042f5c-dirty installed to frontier (2AAA67BF),
-  stage A of the kinematic tracker (11:20 entry): live static/mover
-  labels plus the bounds-layout capture, zero rendering change;
-  supersedes v0.17.0-111-g3b9fc127-dirty (76ED3EE3), flight-proven by
-  103339 (10:38 entry). The 064047 flight proved record+0x170 is the
-  per-frame world position (06:45 entry). INIs unchanged;
-  fix.engine_motion defaults off and must be set on in the live ini
-  for the tracker. Flight check: --expect-build
-  v0.17.0-117-g0d042f5c-dirty.
+- Build: v0.17.0-119-g6899d0ff-dirty installed to frontier (CFDEFA79),
+  the nine 2026-09-20 review fixes on stage A (12:45 entry);
+  supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). The 064047 flight
+  proved record+0x170 is the per-frame world position (06:45 entry).
+  INIs unchanged; fix.engine_motion defaults off and must be set on in
+  the live ini for the tracker. Flight check: --expect-build
+  v0.17.0-119-g6899d0ff-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6549,3 +6547,66 @@ firing (zero real events -- correct silence, see above).
   never ran. install_edvr.py does not touch the live ini --
   engine_motion = on must be set in the game-dir edvr.ini by hand
   before flying.
+### 2026-09-20 12:45 -- review fixes: nine findings, six under build-gate reproduction
+
+Sean's review of 6899d0f (native harness reproductions for five) found
+nine issues in the stage-A code; all fixed here, six now pinned by
+build-gate cases:
+
+Tracker (kinematic_motion):
+- Same-frame dedup returned before the identity/pose reads, so an
+  eligible record kept its static label through a node swap or pose
+  change inside one Present. Dup observations now verify node + pose
+  and invalidate exactly like a cross-frame change (new
+  same-frame-invalidations count in the 20 s summary). Rig cases 9-11.
+- The one-shot bounds dump fired on the first frame with >=8 movers --
+  frame 2 of a session, before any static can be eligible -- and
+  completed with zero static comparisons. Part A now waits for BOTH
+  populations (>=8 movers AND >=8 eligible statics in one ended
+  frame); a one-time 20 s note logs if it never fires, naming the
+  last-frame counts. Rig case 12 via the new
+  kinematicMotionBoundsDumpStage introspection.
+
+Probe (kinematic_eval_probe):
+- A faulted first transform read committed a zero pose baseline and
+  recovery fabricated a 100 m mover; faulted hash reads emitted false
+  transitions to zero and back. Record creation now aborts on ANY
+  faulted field read (no state from partial reads; the record is
+  created on a later fully-readable call), and a faulted hash keeps
+  the last valid pair with the compare skipped.
+- A detected node change kept the previous occupant's pose baseline:
+  the boundary was charged as a 90 m jump plus an xf_mover. observe()
+  now reads identity BEFORE the motion compares; a node change clears
+  hasPrevSample and re-baselines xfLatest uncharged. The kind-2
+  identity event (both nodes) is retained.
+- The first present tick flushed the pre-seed mesh-domain stamp,
+  fabricating an empty frame (zero_record_frames +1, min forced to 0).
+  The clock now seeds WITHOUT flushing, as the tracker does.
+  Consequence for flown captures: every zero_record_frames count since
+  the re-clock (094158, 103339) carries this +1. 103339's sole empty
+  frame is consistent with the artifact alone -- the terminal-teardown
+  attribution is unproven, but the substantive reading stands (a
+  mid-window gap would have fired ~3,008 gap events; none fired).
+- Non-finite pose floats could reach max_jump/total_jump and print
+  invalid JSON. Non-finite jumps are now rejected from the
+  accumulators (raw bits kept; new non_finite_pose summary counter,
+  round-tripped by the JSON gate).
+
+Hook (kinematic_eval_hook -- fixed by construction; the races need a
+104 MB fake module to exercise, no new rig):
+- Both detaches now hold g_installMutex and recompute the relay gate
+  from BOTH consumer cells; the probe-detach/tracker-attach
+  interleaving that left a live tracker deaf is closed.
+- Probe-side executable validation moved INSIDE the locked attach;
+  ready is published as an atomic only after relay+trampoline are
+  live. validateExecutableLocked is gone.
+- Job brackets commit between seqlock toggles and only into the
+  capture generation they started in (clearLocked bumps it); writeJson
+  reads each job seqlocked. No drain -- the finishing thread may
+  itself be inside an observed job.
+
+Gates: kinematic_motion_test 52 checks (was 35), new
+kinematic_probe_test 25 checks, kinematic_json gate round-trips the
+new key, full build green (71 jobs, config contract 252 keys).
+Build: v0.17.0-119-g6899d0ff-dirty installed to frontier (CFDEFA79);
+supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). INIs unchanged.
