@@ -148,6 +148,12 @@
   on the existing brackets. Landscape-cyan question: terrain has no rig
   records -- 54.4% of terrain pixels claimed incidentally by structure
   spheres (dump 163645), benign once the veto arms.
+  Update 17:10: the offline clustering (17:02 plan step a) came back
+  NULL across 12 labeled flights -- pred_vtable_rva/flags/gate2/
+  pred_byte are homogeneous over movers and statics alike (entry at
+  the foot; analysis/kinematic_vtable_cluster.txt). Ruled out:
+  record-field clustering as a mover/static discriminator. The TLS
+  job-attribution bit is now the sole engine-truth candidate.
 
 ## Premise
 
@@ -1281,3 +1287,36 @@ Order proposed: (a) offline vtable/flag clustering, no flight; (b) the
 TLS job-attribution bit rides the next instrumented build alongside the
 KCParams cbuffer dump (both probe-side, no new hook sites); (c)
 physics-job decomps if (b) comes back null.
+
+## 2026-09-20 (17:10: clustering flown offline -- the record population is homogeneous)
+
+Step (a) of the 17:02 plan, run across every classification capture in
+the pool (analysis/kinematic_vtable_cluster.py, report at
+analysis/kinematic_vtable_cluster.txt). Ground truth per the 06:45
+protocol: net +0x170 displacement (xf words 8/9) > 1 cm = mover;
+xf_changes == 0 = static; churn-without-displacement and node_changes
+excluded. Label validation: flight 064047 yields exactly the documented
+125 movers > 1 cm. 12 flights carry real labels (043344/061722/205251
+unparseable pre-quote-fix JSON; 050820/054002 pre-xf-capture, all
+ambiguous; 203342 pre-capture, zero records).
+
+VERDICT: NULL. Across all 12 labeled flights (~2.6k statics and
+35-569 movers per flight):
+
+- pred_vtable_rva: ONE value (0x52e9288) for every record, mover or
+  static, every flight. pred2_vtable_rva 0x0 and flags 0x4040 likewise.
+- gate2: 16 values, ALL shared between movers and statics.
+- pred_byte: both values shared. epoch1b8: epoch-counter coincidences
+  only (movers refresh in epochs statics skip -- consequence, not type).
+- Sole anomaly: bool234 == 0 appears on a handful of movers in 5
+  flights, never on a static -- but that byte is render eligibility in
+  job0's own gate, so those are teardown-frame records, not a class.
+
+ruled out: record-field clustering (pred vtable, flags, gate bytes,
+pred_byte) as a mover/static discriminator -- the eval population is
+homogeneous in every captured field across 12 flights. Combined with
+the 17:02 decomp result (render path mover-blind), the engine-truth
+candidates narrow to ONE: which jobs touch the record. The TLS
+job-attribution bit on the existing brackets is now THE discriminator
+experiment, and the behavioral displacement signal (what the tracker
+already ships) remains the only proven in-population split.
