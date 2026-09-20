@@ -170,7 +170,7 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
     if(r.epoch1b8!=epoch1b8){++summary_.epochChanges;r.epoch1b8=epoch1b8;}
     r.descEpoch38=descEpoch38;
     // Engine-truth motion: bit-exact compare of the world transform block.
-    uint64_t xf[8];
+    uint64_t xf[10];
     if(guardedRead(static_cast<uintptr_t>(record)+0x130,xf,sizeof(xf))) {
         if(std::memcmp(xf,r.xfLatest,sizeof(xf))!=0) {
             std::memcpy(r.xfLatest,xf,sizeof(xf));
@@ -334,12 +334,12 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<"\",\"bool234\":"<<uint32_t(r.bool234)<<",\"pred_byte\":"<<uint32_t(r.predByte)
          <<",\"gate2\":"<<uint32_t(r.gate2)
          <<",\"epoch1b8\":\"0x"<<std::hex<<r.epoch1b8
-         <<",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec
-         <<",\"xf_changes\":"<<r.xfChanges<<",\"last_xf_change\":"<<r.lastXfChangeFrame
+         <<",\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec
+         <<",\",\"xf_changes\":"<<r.xfChanges<<",\"last_xf_change\":"<<r.lastXfChangeFrame
          <<",\"xf_first\":[";
-        for(int k=0;k<8;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfFirst[k]<<std::dec<<"\"";}
+        for(int k=0;k<10;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfFirst[k]<<std::dec<<"\"";}
         j<<"],\"xf_latest\":[";
-        for(int k=0;k<8;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfLatest[k]<<std::dec<<"\"";}
+        for(int k=0;k<10;++k){if(k)j<<',';j<<"\"0x"<<std::hex<<r.xfLatest[k]<<std::dec<<"\"";}
         j<<"]}";
     }
     j<<"],\"transitions\":[";
