@@ -76,6 +76,10 @@
   DIAGNOSTIC-ONLY (fix.engine_motion_veto, default off, arms the veto);
   findings 1/4/5 fixed (5fb4f62, frontier d6d5ef39ceb2a0ca) -- review
   response entry at the foot. Flight protocol unchanged, veto dark.
+  Update 15:40: flight 152934 (same-date entry) -- all three fixes hold
+  in flight, tracker healthy at settlement scale (~2.6k published); the
+  movers-view cyan question is OPEN: the eye burst missed the debug
+  toggle window. Re-fly with the movers view HELD through the capture.
 
 ## Premise
 
@@ -852,3 +856,49 @@ sha256 d6d5ef39ceb2a0ca, --verify-only green. The verification flight
 protocol is unchanged and now carries zero motion-corruption risk:
 fix.engine_motion = on alone yields coverage + cyan with byte-identical
 motion; the movers view IS the instrument.
+
+## 2026-09-20 (flight 152934: review fixes hold, cyan question open)
+
+Flight 152934, frontier install d6d5ef39ceb2a0ca (= 5fb4f62, log build
+v0.17.0-132-g2c38d076-dirty), settlement, ~3 min, Quest 3 /
+VirtualDesktopXR / RTX 5090, DLSS DLAA 1996x2121 -> 3072x3264 per eye --
+the NVIDIA path, the one the coverage plumbing serves.
+
+All three review fixes behave in flight:
+
+- Finding 1: the no-camera-rows stand-down fired EXACTLY ONCE, at
+  15:29:40 during menu/load (zero-record phase), and never again -- in
+  the settlement every frame had valid chosen rows (upload generation
+  advanced continuously 27 -> 652 -> 827 -> 926 with the census).
+  Pre-fix this flight would have painted the whole eye off a zero
+  camera at menu.
+- Finding 4: no stale-upload suspicion line anywhere in the log; the
+  generation tracked content (sphere changes 12,448 cumulative into 926
+  bumps -- multiple same-frame changes collapse into one rebuild, as
+  designed).
+- Finding 5: no shifted-coverage symptom is visible at this level of
+  instrumentation (it would have read as mis-owning cyan -- see the
+  open question below).
+
+Tracker health at settlement scale: 3,247 tracked, ~2,600 eligible and
+published (spheres 2,569-2,606), movers 378-437 per frame, 87.7M
+observations with 91% fan-out dups (expected ~11x eval fan-out, all
+deduped), faults 0, overflow 0, same-frame invalidations 0, gap drops 5
+late (scene exit). The empty-snapshot stand-down note fired only
+pre-scene (menu/loading), as it should. Bounds dump part A/B re-fired
+clean (8 movers + 8 statics, svalid=1 on all 24 lines) -- the sphere
+layout re-confirmed on this build.
+
+One curiosity, not a defect: sphereRejected accumulates ~2.9 per
+eligible frame (8,886 total) -- a small persistent population of
+eligible records whose sphere bytes fail plausibility (zero radius,
+likely LOD'd sub-records). Excluded and counted as designed; worth a
+decode only if the coverage flight shows holes.
+
+OPEN -- the movers-view cyan question has no evidence: the eye burst
+(frames 11233-11248, ~0.18 s at 90 Hz) shows the plain render in every
+channel (C/P/T) with constant flags; the temporal_aa_debug toggle was
+not inside the burst window. The mask's pixel quality -- cyan on
+settlement surfaces, NOT on the drone, NOT across occlusion gaps (the
+finding-2 question) -- awaits a dump taken while the movers view is
+HELD active.

@@ -87,6 +87,9 @@
   sha256 81d5d27f434b2458, --verify-only green; unflown. The 13-finding
   review then kept the mask diagnostic-only: 5fb4f62 (15:20 entry)
   installed to frontier, sha256 d6d5ef39ceb2a0ca; veto dark by default.
+  Flight 152934 (kinematic doc same-date entry): all three fixes hold,
+  ~2.6k statics published clean; the cyan check needs a re-flight --
+  the eye burst missed the movers-view window.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6798,3 +6801,14 @@ now with zero motion-corruption risk. Reading: cyan on settlement
 surfaces = the mask working; cyan on the drone or across occlusion gaps
 = the interval union mis-owning (finding 2), and phase 1 needs
 surface-level ownership before the veto can arm.
+
+### 2026-09-20 15:40 -- flight 152934: fixes hold, cyan check open
+
+Kinematic doc same-date entry has the full read. Short form: right
+build (5fb4f62), settlement, DLSS path. Finding-1 stand-down fired once
+at menu and never in-scene; generation tracked the census with no
+stale-upload suspicion; ~2,600 eligible statics published, 378-437
+movers/frame, zero faults/overflow. The eye burst caught only the plain
+render (16 frames, ~0.18 s, constant flags) -- the movers-view cyan
+question (finding 2's pixel-ownership check) is still open. Next flight:
+hold temporal_aa_debug = movers THROUGH the eye-capture burst.
