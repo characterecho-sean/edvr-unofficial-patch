@@ -18,10 +18,12 @@
   backing-owner pointer (ctor FUN_14430A060 param_3, single writer) and
   mapped the transform chain (FUN_144331300 LOD evaluator ->
   FUN_14433DB20 world updater; epoch pair collection+0x90 vs record+0x1B8
-  as change-signal candidate). Still open: owner == rig proof (named
-  runtime discriminator ready), job-cost remeasure with the detailed
-  observer disabled and job-3 hooked. No per-record identity,
-  pixel-ownership, or stasis claim survives without that work.
+  as change-signal candidate). Still open: owner == rig proof (runtime
+  discriminator IMPLEMENTED in build 6AAFB3C8, installed to frontier
+  2026-09-20 04:30 — one flight reads kinematicEval.ownership), job-cost
+  remeasure with the detailed observer disabled and job-3 hooked. No
+  per-record identity, pixel-ownership, or stasis claim survives without
+  that work.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity
   (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
   match (self-confirming); estimating hidden-bone spin from the pool.
