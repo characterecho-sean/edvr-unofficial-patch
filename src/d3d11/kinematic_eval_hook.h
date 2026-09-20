@@ -28,7 +28,9 @@ void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
 // the probe while attached (attach/detach above) or the tracker while
 // fix.engine_motion is on (below). The tracker registers a raw callback;
 // the eval relay invokes it after the probe's observe, gated the same way.
-using KinematicTrackerObserverFn = void (*)(uintptr_t descriptor) noexcept;
+// jobMask carries the TLS bracket bits (1u<<jobId) active at observation --
+// the job-attribution discriminator (kinematic doc, 2026-09-20 17:10).
+using KinematicTrackerObserverFn = void (*)(uintptr_t descriptor, uint32_t jobMask) noexcept;
 void kinematicEvalSetTrackerObserver(KinematicTrackerObserverFn fn) noexcept;
 // Validates the executable (PE header + evaluator prologue, or our own patch
 // already in place) and installs the same hooks, then opens the gate for the

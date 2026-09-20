@@ -546,6 +546,34 @@ void caseSessionEpoch() {
           "18: the restarted tracker has nothing published");
 }
 
+void caseJobAttribution() {
+    fresh();
+    FakeRecord a; initRecord(a, 0xC4, 100.f, 200.f, 300.f, 4);
+    FakeDesc d = descFor(a);
+    const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
+    FakeRecord b; initRecord(b, 0xD5, 500.f, 600.f, 700.f, 5);
+    FakeDesc e = descFor(b);
+    const uintptr_t ep = reinterpret_cast<uintptr_t>(&e);
+    // a runs static while observed under the physics bits (2|3|4 = 0x1C);
+    // b moves, render-only at first then under a physics bit when moving.
+    kinematicMotionObserve(dp, 0x1Cu); kinematicMotionObserve(ep, 0x1u); endFrame(); // baselines
+    setPose(b, 501.f, 600.f, 700.f, 0, 0, 0, 65535);
+    kinematicMotionObserve(dp, 0x1Cu); kinematicMotionObserve(ep, 0x4u); endFrame(); // b moves, phys
+    kinematicMotionObserve(dp, 0x1Cu); kinematicMotionObserve(ep, 0x1Cu); endFrame();
+    kinematicMotionObserve(dp, 0x1Cu);                                              // a: run 3
+    setPose(b, 502.f, 600.f, 700.f, 0, 0, 0, 65535);
+    kinematicMotionObserve(ep, 0x1Cu);                                              // b moves again
+    check(kinematicMotionRecordEligible(ptrOf(a)), "19: physics-touched static still eligible");
+    check(!kinematicMotionRecordEligible(ptrOf(b)), "19: the mover is never eligible");
+    endFrame();
+    const KinematicMotionStats s = kinematicMotionStats();
+    check(s.eligibleLast == 1 && s.eligiblePhysLast == 1,
+          "19: the physics-touched eligible record is censused");
+    check(s.moversLast == 1 && s.moversPhysLast == 1,
+          "19: the mover moved under a physics bit and shows it");
+    check(s.moversTotal == 1, "19: one mover total");
+}
+
 void caseConfigLifecycle() {
     kinematicMotionConfigure(false);
     check(!kinematicMotionActive(), "0: off is inactive");
@@ -584,6 +612,7 @@ int wmain(int argc, wchar_t** argv) {
     caseUploadGeneration();
     caseImplausibleSphereRejected();
     caseSessionEpoch();
+    caseJobAttribution();
     kinematicMotionShutdown();
     std::printf("kinematic_motion_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

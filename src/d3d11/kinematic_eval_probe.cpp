@@ -259,7 +259,8 @@ void KinematicEvalProbe::noteVtableLocked(uint64_t rva,uint32_t frame) noexcept 
     ++summary_.vtables;
 }
 
-void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) noexcept {
+void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord,
+                                 uint32_t jobMask) noexcept {
     if(!active_.load(std::memory_order_acquire))return;
     if(!descriptor||!renderRecord)return;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -292,6 +293,7 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
         r.pred2Ptr=read64(record+0x2C8,ok);
         r.bool234=read8(record+0x234,ok);
         r.flags=flags;r.predByte=predByte;r.gate2=gate2;
+        r.jobMask=jobMask;
         r.epoch1b8=epoch1b8;r.descEpoch38=descEpoch38;
         r.firstFrame=frame;r.lastFrame=frame;r.calls=1;
         // No state from a partial read: a record straddling an unreadable
@@ -317,6 +319,7 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
     }
     RecordState& r=records_[it->second];
     ++r.calls;r.lastFrame=frame;
+    r.jobMask|=jobMask;
     if(r.epoch1b8!=epoch1b8){++summary_.epochChanges;r.epoch1b8=epoch1b8;}
     r.descEpoch38=descEpoch38;
     // Identity BEFORE motion: a changed node ends the previous occupant's
@@ -538,6 +541,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<",\"flags\":\"0x"<<std::hex<<r.flags<<std::dec
          <<"\",\"bool234\":"<<uint32_t(r.bool234)<<",\"pred_byte\":"<<uint32_t(r.predByte)
          <<",\"gate2\":"<<uint32_t(r.gate2)
+         <<",\"job_mask\":"<<r.jobMask
          <<",\"epoch1b8\":\"0x"<<std::hex<<r.epoch1b8
          <<"\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec
          <<"\",\"xf_changes\":"<<r.xfChanges<<",\"last_xf_change\":"<<r.lastXfChangeFrame
@@ -639,6 +643,7 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     mover.firstFrame=10u;mover.lastFrame=42u;
     mover.xfChanges=7u;mover.lastXfChangeFrame=42u;
     mover.bool234=1u;mover.predByte=0x5Au;mover.gate2=2u;
+    mover.jobMask=0x15u; // render + both physics-side bits, distinctive
     mover.calls=123u;
     mover.framesSampled=40u;mover.dupInFrame=2u;
     mover.gaps=1u;mover.maxGap=3u;mover.nodeChanges=1u;mover.quatChangeFrames=6u;
@@ -650,6 +655,7 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     still.node=0x6666777788889999ull;
     for(int k=0;k<11;++k){still.xfFirst[k]=0x0000800000008000ull;still.xfLatest[k]=0x0000800000008000ull;}
     still.flags=0x41u;
+    still.jobMask=0x1u; // render-only, distinctive from the mover's 0x15
     still.firstFrame=10u;still.lastFrame=42u;
     still.calls=120u;
     still.framesSampled=40u;still.lastSampledFrame=42u;still.hasPrevSample=true;

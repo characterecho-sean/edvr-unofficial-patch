@@ -6925,3 +6925,18 @@ as a mover/static discriminator. With the render path proven
 mover-blind (17:02 entry), the remaining engine-truth candidate is
 which jobs touch each record -- the TLS job-attribution bit on the
 existing brackets is the next instrument.
+
+### 2026-09-20 17:50 -- job-attribution instrument landed, unflown
+
+Cross-entry from the kinematic arc (same-time foot entry there). The
+TLS job-attribution bit Sean sanctioned is built, gated, and installed
+(frontier d3d11 5502228f87889997): bracket() maintains a per-thread job
+bitmask, the probe serializes per-record job_mask into the
+classification JSON, and the tracker's 20 s summary now reports
+"phys-touched eligible %u movers %u" (bits 2|3|4 = UpdatePhysicsObjects
+/PrePhysicsAdvance[Curve]). Gates 87/0 tracker, 28/0 probe, json
+self-test, contract 252/252. No new hook sites, no config key, no
+rendering change. Next flight with fix.engine_motion on at a settlement
+with a known mover reads the answer straight off the summary line;
+known caveat: job3 refused to hook in flight, so bit 3 may stay dark
+even if that job evaluates records -- bits 2 and 4 are the live probes.

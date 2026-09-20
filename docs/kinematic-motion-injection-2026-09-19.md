@@ -154,6 +154,13 @@
   the foot; analysis/kinematic_vtable_cluster.txt). Ruled out:
   record-field clustering as a mover/static discriminator. The TLS
   job-attribution bit is now the sole engine-truth candidate.
+  Update 17:50: the job-attribution instrument LANDED (entry at the
+  foot): bracket() keeps a TLS job bitmask, the probe serializes a
+  per-record job_mask, and the tracker censuses physics-touched
+  eligible/movers in the 20 s summary line. Gates 87/0 + 28/0 + json
+  self-test + contract 252/252; frontier d3d11 5502228f87889997,
+  verified. UNFLOWN -- the next flight answers the discriminator
+  question (protocol in the foot entry).
 
 ## Premise
 
@@ -1320,3 +1327,45 @@ candidates narrow to ONE: which jobs touch the record. The TLS
 job-attribution bit on the existing brackets is now THE discriminator
 experiment, and the behavioral displacement signal (what the tracker
 already ships) remains the only proven in-population split.
+
+## 2026-09-20 (17:50: job-attribution instrument landed -- the discriminator flies next)
+
+Sean sanctioned the 17:10 plan's step (b). Built, gated, installed
+(frontier d3d11 5502228f87889997, verified):
+
+- bracket() maintains a TLS current-job bitmask (1u<<jobId), set before
+  the early-return path so a stood-down probe never drops attribution;
+  a scoped guard restores on exit, so nested jobs keep both bits.
+  evalObserved reads it and passes it to both consumers; the tracker
+  observer signature gained the mask (default zero, rigs unchanged in
+  shape).
+- Probe: RecordState.jobMask accumulates the OR of every job the record
+  was EVER observed under; serialized as job_mask in the records array
+  (fixture 0x15/0x1, the selftest asserts the round-trip).
+- Tracker: TrackedRecord.jobMask accumulates the same way; the
+  ended-frame census adds eligiblePhysLast/moversPhysLast over the
+  physics bits (2|3|4 = UpdatePhysicsObjectsJob, PrePhysicsAdvance[Curve])
+  and the 20 s summary line reports "phys-touched eligible %u movers %u"
+  -- the discriminator answer lands in the gfx log with no eye dump.
+- No new hook sites, no config key, no rendering change; the veto stays
+  dark.
+
+The flight question, verbatim: do records that MOVE ever carry bits
+2/3/4, and do proven-static records never carry them? Reading it:
+moversPhysLast > 0 with eligiblePhysLast == 0 across a settlement
+flight with a known mover = the engine schedules dynamics under physics
+jobs and (jobMask & 0x1C)==0 becomes a publish gate candidate.
+eligiblePhysLast > 0 = physics jobs touch the render-eligible set too;
+attribution then does not discriminate, it joins the ruled-out list,
+and the physics-job decomps (0x432B2A0 / 0x42DF530 / 0x42DF550) become
+the next offline step. Per-record job_mask in the classification JSON
+gives the distribution offline. Known caveat: job3 refused to hook in
+flight (thunk/foreign-hook leading instruction), so bit 3 may stay dark
+even if that job evaluates records -- bits 2 and 4 are the live probes.
+
+Gates: 87/0 tracker (5 new checks incl. a phys-touched census case),
+28/0 probe (3 new: mask accumulation + serialization), kinematic json
+self-test passed, contract 252/252. Flight protocol: fix.engine_motion
+on, a settlement with a known mover (pad drone or ship traffic), >=60 s;
+the summary lines carry the census answer, an eye burst adds the
+per-record job_mask distribution.
