@@ -37,7 +37,6 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
 
 namespace edvr {
 
@@ -54,29 +53,18 @@ void revertVScreenModeResolution();
 // Resolves fix.vscreen_res_width -- "auto", or an explicit width in pixels --
 // into the width and height to force. (0, 0) means "leave the game's own
 // panel alone": the ini asks for the stock size, the value does not parse, or
-// "auto" has no prior session to go on yet (see the note on
-// noteResolvedEyeWidthForVScreenAuto below). Height is always DERIVED to keep
-// 16:9; there is no independent height setting any more. Called from both the
-// panel patch (device_hook.cpp) and the intro-movie upscaler
-// (intro_upscale.cpp), which are documented as asking this exact question of
-// this exact value -- see vscreen_res.cpp for why "auto" cannot use this
-// session's own render width. `announce` logs the outcome; the panel patch is
-// the one call site that should (its caller is the only one with nothing else
-// to say about the value), so the intro upscaler -- which logs its own
-// dimensions separately -- passes false rather than printing the same line
-// twice on every reload.
+// "auto" has no prior session to go on yet (see ../common/vscreen_auto_state.h,
+// which is where that prior-session fact is recorded and read back). Height
+// is always DERIVED to keep 16:9; there is no independent height setting any
+// more. Called from both the panel patch (device_hook.cpp) and the intro-movie
+// upscaler (intro_upscale.cpp), which are documented as asking this exact
+// question of this exact value -- see vscreen_res.cpp for why "auto" cannot
+// use this session's own render width. `announce` logs the outcome; the panel
+// patch is the one call site that should (its caller is the only one with
+// nothing else to say about the value), so the intro upscaler -- which logs
+// its own dimensions separately -- passes false rather than printing the same
+// line twice on every reload.
 void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
                                     bool announce = true);
-
-// Remembers the per-eye render width this session actually settled on, so a
-// LATER launch's "auto" panel size can track it. No-op for a width of 0.
-//
-// Called from native_render_settings.cpp once the OpenXR host resolves a real
-// size, which happens after the game's device has Presented -- well after the
-// panel patch already had to apply (device creation, before the game builds
-// its render chain). This session's own headset is not known yet at that
-// point, so "auto" always trails by one restart, the same restart this
-// setting already requires for a manual change to take effect.
-void noteResolvedEyeWidthForVScreenAuto(const std::wstring& logDir, uint32_t eyeWidth);
 
 }  // namespace edvr

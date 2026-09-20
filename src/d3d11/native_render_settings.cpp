@@ -11,7 +11,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
-#include "vscreen_res.h"
+#include "../common/vscreen_auto_state.h"
 
 namespace {
 std::mutex g_sizingMutex;
