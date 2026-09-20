@@ -49,10 +49,11 @@
   retaining camera/world motion. Classification must be cheaper than the work
   removed and detect new movement without stale labels. The separate coarse
   body-on-buildings and 16:48:57 camera-pulse problems remain unresolved.
-- Build: v0.17.0-93-gd6ed264f-dirty installed to frontier, adding
-  per-record world-transform snapshots (06:10 entry); supersedes
-  v0.17.0-89-gbbfcded7-dirty (6AAFC286). INIs unchanged. Flight check:
-  --expect-build v0.17.0-93-gd6ed264f-dirty.
+- Build: v0.17.0-95-g873c4024-dirty installed to frontier, extending
+  the transform snapshot to +0x130..0x180 (covers the +0x170 updater
+  translation; 06:30 entry) and fixing writer quotes; supersedes
+  v0.17.0-93-gd6ed264f-dirty (6AAFCC46). INIs unchanged. Flight check:
+  --expect-build v0.17.0-95-g873c4024-dirty.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6060,4 +6061,52 @@ Flight protocol: unchanged (eye dump, 30 s). After: python
 tools\edvr_log.py --target frontier --expect-build
 v0.17.0-93-gd6ed264f-dirty, then read kinematicEval.summary.xf_* and
 records[].xf_*.
+
+### 2026-09-20 06:30 — flight 061722: zero movers in 2,640 records, but a drone was moving; writer bug #3 fixed, coverage extended
+
+Flight edvr_gfx_20260920_061543.log, eye run 061722, build verified
+--expect-build v0.17.0-93-gd6ed264f-dirty (6AAFCC46). The report did
+NOT parse: my xf writer edit had dropped the closing quotes after
+epoch1b8 and desc_epoch38 — the line-leading \" idiom (each literal
+following a hex value must open with \" to close the PREVIOUS field)
+was stripped on exactly those two lines. Repaired offline (5,280
+fixes = 2 fields x 2,640 records). Third incident of this bug class
+(b70e3d0, desc_epoch38, now this) — a build-gate JSON self-test for
+the probe writer is formally proposed to Sean.
+
+kinematicEval: 2,640 records, read_faults 0, xf_movers 0,
+xf_changes 0 — every record's +0x130..0x170 transform block
+bit-identical across the 52-frame window; 0 hash changes across
+8,192 kept transitions (820 records churn flags only — the
+view-dependent flag class, not object motion). Sean confirms a drone
+was VISIBLY MOVING in the scene, so "all static" cannot be taken at
+face value. Three explanations, in order of likelihood:
+
+1. The drone's per-frame motion lands in the updater's translation
+   output at record+0x170 (FUN_14433DB20) — the field the 64-byte
+   block stopped just short of. Coverage extended to +0x130..0x180
+   (80 bytes) in build v0.17.0-95-g873c4024-dirty; the next flight
+   discriminates.
+2. The drone is not in the kinematic eval population at all
+   (skinned/animated actors move through a different pipeline — the
+   hidden-bone class that defeated pool estimation); its record
+   would then never appear in kinematicEval.records.
+3. The drone's record exists but its transform is composed
+   parent-relative (the parent rig moves; child locals stay
+   constant) — parent-relative composition is already established
+   for the +0x1C0 interface (slot +0x170 writes a parent-relative
+   3x4 pose to rig+0x58).
+
+If the extended block still shows zero changes with a known mover in
+view, explanation 1 is dead and the question becomes population
+membership (2 vs 3): find the drone's record via its game object
+(rig+0x20 is 1:1 with rig; the drone's rig is one of the ~1,572).
+
+Also from 061722: record calls cluster at 552 (2,612 records), 340
+(14), 117 (14) — ~10.6 eval passes per record per frame, plus 28
+partial-window records (streamed in/out or intermittent evaluation).
+
+Build v0.17.0-95-g873c4024-dirty installed to frontier and verified;
+INIs untouched. Flight check: --expect-build
+v0.17.0-95-g873c4024-dirty.
 
