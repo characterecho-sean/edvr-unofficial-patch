@@ -62,7 +62,9 @@
   children by sphere-merge FUN_140A8C9A0). The planned wide
   +0x130..+0x250 capture is replaced by a targeted 32-byte sphere read
   in the dump line (svalid/s=, v0.17.0-123-gdae06c51-dirty, installed
-  to frontier, verified).
+  to frontier, verified). Flight 132856 then CONFIRMED the sphere end
+  to end (settlement doc 13:45 entry): sane radii, and world centre
+  +0x240 == R^T x local + T exactly on all statics. Stage B unblocked.
 
 ## Premise
 
@@ -572,3 +574,15 @@ installed to frontier (d3d11 sha256 5F7626D7). Next flight confirms:
 radius > 0 for statics, finite values everywhere, and M x local
 centre == +0x240 where the guard allows. Detail: settlement doc,
 same-time entry.
+
+Flight 132856 (settlement doc 13:45 entry) confirmed every prediction
+on 24 dump lines: s= valid throughout; radii 3.78-12.77 m, plausible
+per model and bit-stable across frames; padding lanes and +0x12C zero;
+and world centre +0x240 == R^T x local centre + T EXACTLY on all eight
+statics -- the +0xF0 3x3 is applied transposed, its rows the basis
+vectors' images, unit scale. Movers show the predicted guard-off
+pattern (c=0 with the local sphere populated). One merge artifact: a
+unioned record's centre w drifts off zero (id=148, w=0.00097); lanes
+0-2 are unaffected. Stage B is unblocked on flight evidence, not just
+the decomp: world sphere = +0x240 where written, else R^T x +0x270 +
++0x120; world radius = +0x280 x max column scale (1.0 observed).
