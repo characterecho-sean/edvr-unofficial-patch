@@ -88,6 +88,12 @@ KinematicMotionStats kinematicMotionStats() noexcept;
 // with cap 0 peeks count and generation without copying).
 uint64_t kinematicMotionSphereSnapshot(KinematicSphereGpu* out, uint32_t cap,
                                        uint32_t* count, uint32_t* frame) noexcept;
+// The tracker's session epoch: bumped on every configure/shutdown state
+// reset (2026-09-20 review finding 4 -- the generation restarts from zero,
+// so without it an off/on cycle can re-publish different spheres under a
+// generation the GPU already holds). The coverage pass keys its upload
+// cache on (session, generation).
+uint32_t kinematicMotionSession() noexcept;
 // Test-rig introspection: eligibility of one record by its live pointer.
 bool kinematicMotionRecordEligible(uint64_t record) noexcept;
 // Test-rig introspection: the once-per-session bounds dump stage (0 = armed,

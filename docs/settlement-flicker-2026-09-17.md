@@ -84,7 +84,9 @@
   had it under [advanced] -- dark, not evidence). Flight check:
   --expect-build v0.17.0-119-g6899d0ff-dirty. Stage B landed 14:45
   (same-date entry): commit 6b90d0b installed to frontier, d3d11
-  sha256 81d5d27f434b2458, --verify-only green; unflown.
+  sha256 81d5d27f434b2458, --verify-only green; unflown. The 13-finding
+  review then kept the mask diagnostic-only: 5fb4f62 (15:20 entry)
+  installed to frontier, sha256 d6d5ef39ceb2a0ca; veto dark by default.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
@@ -6771,3 +6773,28 @@ movers. Expect cyan on settlement surfaces, NOT the drone, NOT
 occlusion edges against nearer geometry; generation/stand-down
 counters at zero. Environment line mandatory (runtime, headset,
 per-eye size, DLSS version, kTrackCap).
+
+### 2026-09-20 15:20 -- stage-B review: mask goes diagnostic-only
+
+Design doc same-date review-response entry: the 13-finding review of
+6b90d0b recommends the ownership mask fly diagnostic-only first. Landed
+as 5fb4f62: the compose veto now arms only with fix.engine_motion_veto
+(new key, default off); fix.engine_motion = on alone gives coverage plus
+the cyan movers-view paint with byte-identical motion. Fixed the three
+findings that gated a trustworthy diagnostic: all-zero camera rows now
+stand the coverage pass down instead of painting the whole eye (finding
+1); a tracker session epoch keys the GPU upload cache, closing the
+restart generation-reuse (finding 4, rig case 18); coverage lookups
+subtract the source-region origin (finding 5). The interval-vs-ownership
+question (finding 2) is exactly what the flight quantifies; findings
+3/6/7/10 are veto-enable blockers, documented in the design doc. Gates:
+rig 82/0, shader self-test green, contract 253/253, full build green.
+Installed to frontier: d3d11.dll sha256 d6d5ef39ceb2a0ca, --verify-only
+green.
+
+Flight protocol unchanged (settlement, drone visibly moving, 30 s,
+fix.engine_motion=on, eye dump; temporal_aa_debug = motion then movers),
+now with zero motion-corruption risk. Reading: cyan on settlement
+surfaces = the mask working; cyan on the drone or across occlusion gaps
+= the interval union mis-owning (finding 2), and phase 1 needs
+surface-level ownership before the veto can arm.

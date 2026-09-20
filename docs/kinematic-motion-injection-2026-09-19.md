@@ -72,6 +72,10 @@
   Update 14:45: stage B LANDED (6b90d0b on codex/stage-b-ownership,
   frontier install d3d11 sha256 81d5d27f434b2458) -- landed entry at
   the foot; the 13:55 verification flight is next, not yet flown.
+  Update 15:20: the 13-finding review of 6b90d0b keeps the mask
+  DIAGNOSTIC-ONLY (fix.engine_motion_veto, default off, arms the veto);
+  findings 1/4/5 fixed (5fb4f62, frontier d6d5ef39ceb2a0ca) -- review
+  response entry at the foot. Flight protocol unchanged, veto dark.
 
 ## Premise
 
@@ -780,3 +784,71 @@ kcBound plumbing on the own (non-DLSS) path -- Sean flies DLSS, so
 the NVIDIA path is what the verification flight exercises. Protocol
 unchanged from the 13:55 flight-verification plan; fix.engine_motion
 must be on in the live ini.
+
+## 2026-09-20 (stage-B review response: diagnostic-only + three fixes)
+
+The 13-finding review of 6b90d0b (frozen copy at build/review-stageb/
+review.md) recommends the ownership mask stay diagnostic-only until
+current-frame validity, camera inputs and actual pixel ownership are
+established. Accepted and landed as 5fb4f62 on codex/stage-b-review-fixes:
+ownership alone now only paints the movers-view cyan; the compose veto
+arms per frame with fix.engine_motion_veto (new key, default off) via
+probe.w bit 1024, and only while coverage is bound. Every finding was
+verified against the code before the triage below.
+
+Fixed now -- the three findings that gate a trustworthy diagnostic flight:
+
+1. Finding 1 (P1, all-zero camera transform): CONFIRMED -- PassParams is
+   zero-initialized and wR0..2 are filled only by the body/ship motion
+   paths; with neither, kinCover read every sphere as straddling the eye
+   (full-eye paint plus ~2.2B atomics/eye at cap). The coverage pass now
+   calls chooseCameraRows() (idempotent in-frame), stands down with a
+   one-time log line when g_curValid is false, and copies g_curRows --
+   the frame's chosen camera rows -- into KCParams.
+2. Finding 4 (P1, generation reuse across tracker restart): CONFIRMED --
+   the generation restarts from zero per session while the GPU cache
+   survived. The tracker now bumps a process-monotonic session epoch in
+   clearLocked (kinematicMotionSession()); the coverage pass uploads on a
+   (session, generation) mismatch, so a restart's generation 1 is a fresh
+   upload, never a reuse. Rig case 18 pins it.
+3. Finding 5 (P2, source-region offset in coverage lookups): CONFIRMED --
+   the coverage pair is eye-local but every caller passes source-texture
+   coords. kinematicStatic subtracts region.xy before the quarter-res
+   lookup; out-of-range loads were already the reject side. The copy path
+   (region origin zero) had hidden this.
+
+Deferred to the veto-enable batch, with the reviewer's verdict accepted:
+
+- Finding 2 (interval union is not pixel ownership): structurally correct
+  -- one [near,far] span per texel merges overlapping spheres, and no
+  sphere representation establishes visible-surface ownership anyway. THIS
+  is what the diagnostic flight quantifies: the cyan must not land on the
+  drone or across occlusion gaps. If it does, phase 1 needs surface-level
+  ownership, not margin tuning.
+- Finding 3 (movement-start frame keeps the veto): confirmed a one-present
+  stale window; it self-heals at the next frame census (unobserved records
+  drop out automatically). One frame of lag is harmless for the paint;
+  immediate invalidation on stasis-break lands with the veto.
+- Findings 6-10 (own-path veto consistency, UI-mask demand, conservative
+  tangent projection, sigma-max radius, scale-change revocation): all
+  confirmed in code; each matters only when the veto arms. Finding 9's
+  under-estimate and finding 8's under-coverage are the safe direction
+  (fewer false vetoes); 6/7/10 are wrong-veto directions and are
+  veto-blockers, all fixed before fix.engine_motion_veto loses its
+  developer-instrument warning.
+- Findings 11-13 (probe capture concurrency): the probe is flight
+  instrumentation, not the compose path; next probe touch, before the
+  next capture flight.
+
+Performance note accepted: kinCover's per-sphere rectangle expansion is
+unbounded work -- with the camera fix the full-eye case needs a real
+eye-straddling sphere, but the pass gets its own frame-time measurement
+before the veto is treated as an optimization.
+
+Gates: kinematic_motion_test 82 checks 0 failures (case 18 added),
+shader self-test green, config contract 253/253 (fix.engine_motion_veto
+documented), full native build green. Installed to frontier: d3d11.dll
+sha256 d6d5ef39ceb2a0ca, --verify-only green. The verification flight
+protocol is unchanged and now carries zero motion-corruption risk:
+fix.engine_motion = on alone yields coverage + cyan with byte-identical
+motion; the movers view IS the instrument.
