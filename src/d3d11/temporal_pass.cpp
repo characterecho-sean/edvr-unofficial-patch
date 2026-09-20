@@ -385,6 +385,20 @@ struct EyeState {
     // identity, remade when ui_depth remakes it.
     void*                      uiMaskRes = nullptr;
     ID3D11ShaderResourceView*  uiMaskSrv = nullptr;
+    // The kinematic ownership coverage pair (stage B, the 2026-09-20 13:55
+    // spec in docs/kinematic-motion-injection-2026-09-19.md): quarter-res
+    // R32_UINT [near,far] reversed-Z span textures, cleared and repainted by
+    // the coverage pass each frame while fix.engine_motion is live and its
+    // upload is non-empty; untouched otherwise. kcFrame names the tracker
+    // snapshot the pair describes. Live and die with the dl set.
+    ID3D11Texture2D*           kcNear = nullptr;
+    ID3D11Texture2D*           kcFar = nullptr;
+    ID3D11ShaderResourceView*  kcNearSrv = nullptr;
+    ID3D11ShaderResourceView*  kcFarSrv = nullptr;
+    ID3D11UnorderedAccessView* kcNearUav = nullptr;
+    ID3D11UnorderedAccessView* kcFarUav = nullptr;
+    uint32_t                   kcW = 0, kcH = 0;
+    uint32_t                   kcFrame = UINT32_MAX;
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -476,6 +490,7 @@ void releasePeriph(EyeState& e) {
     e.prReduced = false;
     e.prHaveHistory = false;
 }
+void releaseKc(EyeState& e);   // the kinematic coverage pair, defined beside the coverage pass
 void releaseDl(EyeState& e) {
     releasePeriph(e);   // the periphery's sizes follow the render's
     if (e.zPrevUav) { e.zPrevUav->Release(); e.zPrevUav = nullptr; }
@@ -486,6 +501,7 @@ void releaseDl(EyeState& e) {
     if (e.dlMask) { e.dlMask->Release(); e.dlMask = nullptr; }
     if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
     e.uiMaskRes = nullptr;
+    releaseKc(e);   // the kinematic coverage pair lives and dies with the dl set
     if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
@@ -1334,6 +1350,31 @@ ID3D11ComputeShader* ownShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     }
     return shader;
 }
+// The kinematic ownership coverage entry (stage B): one thread per uploaded
+// sphere, painting the quarter-res [near,far] span pair the compose's
+// kinematicStatic consults.
+ID3D11ComputeShader*       g_csKin = nullptr;
+bool                       g_csKinTried = false;
+bool                       g_csKinNoted = false;   // a failed create notes once
+ID3D11ComputeShader* kinShader(ID3D11DeviceContext* ctx) {
+    if (!g_csKin && !g_csKinTried) {
+        g_csKinTried = true;
+        g_csKin = shaderSwapCreateCs(ctx, kTemporalKinBytecode, sizeof(kTemporalKinBytecode),
+                                     "temporal_kin_cs", "temporal aa");
+    }
+    return g_csKin;
+}
+// The coverage pass's own state: the KCParams cbuffer and the uploaded sphere
+// set (structured, 4096 x 80 B -- the tracker's kTrackCap cap, so overflow is
+// impossible by construction). g_kinSphereGen is the last tracker generation
+// uploaded; an unchanged generation skips the copy.
+ID3D11Buffer*              g_kinCb = nullptr;
+ID3D11Buffer*              g_kinSphereBuf = nullptr;
+ID3D11ShaderResourceView*  g_kinSphereSrv = nullptr;
+uint64_t                   g_kinSphereGen = 0;
+uint32_t                   g_kinSphereCount = 0;
+uint64_t                   g_kinEmptyFrames = 0;   // active frames with an empty upload (stand-down count)
+bool                       g_kinEmptyNoted = false;
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
 ID3D11ComputeShader*       g_csUiResolve = nullptr;
 bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
@@ -3015,6 +3056,135 @@ bool ensureDecisionTexture(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t 
     if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
     if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision = nullptr; }
     return false;
+}
+
+// -- Stage B: the kinematic ownership coverage pass ------------------------------
+// (docs/kinematic-motion-injection-2026-09-19.md, the 2026-09-20 13:55 spec.)
+// One bounded compute dispatch per eye per frame while fix.engine_motion is
+// live: one thread per uploaded sphere paints the sphere's conservative
+// quarter-res screen rect with its [near,far] reversed-Z span. Returns true
+// only when this eye's pair was rebuilt off a non-empty current upload -- the
+// caller then binds the pair at t19/t20 and sets probe.w bit 512. Every other
+// path leaves the bit clear and the frame byte-identical to before.
+
+void releaseKc(EyeState& e) {
+    if (e.kcNearSrv) { e.kcNearSrv->Release(); e.kcNearSrv = nullptr; }
+    if (e.kcFarSrv) { e.kcFarSrv->Release(); e.kcFarSrv = nullptr; }
+    if (e.kcNearUav) { e.kcNearUav->Release(); e.kcNearUav = nullptr; }
+    if (e.kcFarUav) { e.kcFarUav->Release(); e.kcFarUav = nullptr; }
+    if (e.kcNear) { e.kcNear->Release(); e.kcNear = nullptr; }
+    if (e.kcFar) { e.kcFar->Release(); e.kcFar = nullptr; }
+    e.kcW = e.kcH = 0;
+    e.kcFrame = UINT32_MAX;
+}
+
+bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState& e,
+                           const PassParams& p, uint32_t w, uint32_t h) {
+    if (!kinematicMotionActive()) return false;
+    if (p.knobs[1] == 0.0f) return false;   // no scene depth bound: nothing to gate with
+    ID3D11ComputeShader* cs = kinShader(ctx);
+    if (!cs) {
+        if (!g_csKinNoted) {
+            g_csKinNoted = true;
+            Log::get().note("engine motion coverage: the temporal_kin_cs shader could not be "
+                            "created; the ownership veto stands down, the stock path is untouched.");
+        }
+        return false;
+    }
+    uint32_t count = 0, snapFrame = 0;
+    const uint64_t gen = kinematicMotionSphereSnapshot(nullptr, 0, &count, &snapFrame);
+    if (gen == 0 || count == 0) {
+        // A live tracker with an empty upload: a stand-down count, never a
+        // pass (the 13:55 spec's failure list).
+        ++g_kinEmptyFrames;
+        if (!g_kinEmptyNoted) {
+            g_kinEmptyNoted = true;
+            Log::get().note("engine motion coverage: the tracker is live but the upload snapshot "
+                            "is empty -- no proven-static spheres published. The coverage pass "
+                            "stands down; counted (see the tracker's summary line), not a pass.");
+        }
+        return false;
+    }
+    g_kinEmptyNoted = false;
+    if (!g_kinSphereBuf) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 4096 * sizeof(KinematicSphereGpu);   // the tracker's kTrackCap
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bd.StructureByteStride = sizeof(KinematicSphereGpu);
+        if (FAILED(dev->CreateBuffer(&bd, nullptr, &g_kinSphereBuf)) || !g_kinSphereBuf) return false;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_UNKNOWN;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        sd.Buffer.FirstElement = 0;
+        sd.Buffer.NumElements = 4096;
+        if (FAILED(dev->CreateShaderResourceView(g_kinSphereBuf, &sd, &g_kinSphereSrv)) ||
+            !g_kinSphereSrv) return false;
+    }
+    if (gen != g_kinSphereGen) {
+        // The generation changed: one copy. An idle settlement frame pays
+        // none -- the coverage textures still rebuild (the camera moves).
+        static std::vector<KinematicSphereGpu> staging(4096);
+        const uint64_t upGen = kinematicMotionSphereSnapshot(staging.data(), 4096, &count, &snapFrame);
+        ctx->UpdateSubresource(g_kinSphereBuf, 0, nullptr, staging.data(), 0, 0);
+        g_kinSphereGen = upGen;
+        g_kinSphereCount = count;
+    }
+    const uint32_t qw = (w + 3) / 4, qh = (h + 3) / 4;   // quarter-res, rounded out
+    if (e.kcNear && (e.kcW != qw || e.kcH != qh)) releaseKc(e);
+    if (!e.kcNear) {
+        const bool okA = makeTex(dev, qw, qh, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT,
+                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                 &e.kcNear, &e.kcNearSrv, &e.kcNearUav);
+        const bool okB = okA && makeTex(dev, qw, qh, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT,
+                                        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                        &e.kcFar, &e.kcFarSrv, &e.kcFarUav);
+        if (!okB) { releaseKc(e); return false; }
+        e.kcW = qw; e.kcH = qh;
+    }
+    if (!g_kinCb) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 96;   // KCParams: tanNow, wR0..wR2, knobs, size+count
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(dev->CreateBuffer(&bd, nullptr, &g_kinCb)) || !g_kinCb) return false;
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(ctx->Map(g_kinCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    float* f = static_cast<float*>(mapped.pData);
+    // The camera rows of THIS frame, the same frame the compose projects by
+    // (the 10:52 spec's #1 expected bug class is a last-frame matrix here).
+    memcpy(f, p.tanNow, 16);
+    memcpy(f + 4, p.wR0, 16);
+    memcpy(f + 8, p.wR1, 16);
+    memcpy(f + 12, p.wR2, 16);
+    memcpy(f + 16, p.knobs, 16);
+    int32_t* ii = reinterpret_cast<int32_t*>(f + 20);
+    ii[0] = static_cast<int32_t>(e.kcW);
+    ii[1] = static_cast<int32_t>(e.kcH);
+    ii[2] = static_cast<int32_t>(g_kinSphereCount);
+    ii[3] = 0;
+    ctx->Unmap(g_kinCb, 0);
+    const UINT clrNear[4] = {0u, 0u, 0u, 0u};   // near's empty sentinel
+    const UINT clrFar[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    ctx->ClearUnorderedAccessViewUint(e.kcNearUav, clrNear);
+    ctx->ClearUnorderedAccessViewUint(e.kcFarUav, clrFar);
+    ctx->CSSetShader(cs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 1, &g_kinSphereSrv);
+    ID3D11UnorderedAccessView* uavs[2] = {e.kcNearUav, e.kcFarUav};
+    ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &g_kinCb);
+    ctx->Dispatch((g_kinSphereCount + 63) / 64, 1, 1);
+    ID3D11ShaderResourceView* nullKcSrv = nullptr;
+    ID3D11UnorderedAccessView* nullKcUav[2] = {};
+    ID3D11Buffer* nullKcCb = nullptr;
+    ctx->CSSetShaderResources(0, 1, &nullKcSrv);
+    ctx->CSSetUnorderedAccessViews(0, 2, nullKcUav, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &nullKcCb);
+    e.kcFrame = snapFrame;
+    return true;
 }
 
 // The mask NVIDIA is handed is R8_UNORM written from a compute shader,
@@ -5610,16 +5780,22 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     if (staticOwnerBound) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 256u);
+                    // Stage B: rebuild this eye's kinematic ownership coverage
+                    // off the tracker's current upload; bound = bit 512 and the
+                    // t19/t20 pair below, clear = the stock path, byte-identical.
+                    const bool kcBound = kinematicCoveragePass(ctx, dev, e, p, w, h);
+                    if (kcBound) p.probe[3] =
+                        static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[19] = {};
+                    ID3D11ShaderResourceView* nullSrvM[21] = {};
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
                     ID3D11UnorderedAccessView* savedTraceUav = nullptr;
                     if (traceReady) ctx->CSGetUnorderedAccessViews(7, 1, &savedTraceUav);
-                    ctx->CSSetShaderResources(0, 19, nullSrvM);
+                    ctx->CSSetShaderResources(0, 21, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[19] = {deferredInput?e.dlColourSrv:separated?separatedCandidate.colourView:inSrv,
+                    ID3D11ShaderResourceView* srvsM[21] = {deferredInput?e.dlColourSrv:separated?separatedCandidate.colourView:inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
@@ -5627,7 +5803,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
                                                           uiTrack && !deferredInput && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], staticOwnerBound ? staticOwner[0] : nullptr, staticOwnerBound ? staticOwner[1] : nullptr};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], staticOwnerBound ? staticOwner[0] : nullptr, staticOwnerBound ? staticOwner[1] : nullptr,
+                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr};
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
@@ -5635,12 +5812,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                             traceReady ? e.dlDecisionUav : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 19, srvsM);
+                    ctx->CSSetShaderResources(0, 21, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 19, nullSrvM);
+                    ctx->CSSetShaderResources(0, 21, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     if (traceReady) {
                         EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
@@ -5883,6 +6060,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const int writeIdx = 1 - readIdx;
         // The own path: the interface's coverage mask at t4 for the body
         // path's exclusion (the trained block above binds its own).
+        bool kcBound = false;   // stage B: this eye's kinematic coverage pair is live this frame
         if (!usedDlaa) {
             if(e.uiResolvedHistory){e.uiHistoryValid=false;e.uiResolvedHistory=false;}
             ID3D11Texture2D* rm = nullptr;
@@ -5890,6 +6068,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                ensureUiMaskSrv(dev, e, rm);
             p.probe[2] = uiOwn ? 1.0f : 0.0f;
             p.probe[3] = uiFlags();
+            kcBound = kinematicCoveragePass(ctx, dev, e, p, w, h);
+            if (kcBound) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
         }
         bool ran = usedDlaa || (ensureNative(dev, e, viewFmt) && setParams(ctx, p));
         // A native fallback also writes counters, even when the requested
@@ -6112,18 +6292,19 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // own copy of the vectors, and this is the ONE dispatch
                     // that binds it -- everywhere else the slot stays null and
                     // the shader's store there is dropped.
-                    ID3D11ShaderResourceView* nullSrvM[19] = {};
+                    ID3D11ShaderResourceView* nullSrvM[21] = {};
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
-                    ctx->CSSetShaderResources(0, 19, nullSrvM);
+                    ctx->CSSetShaderResources(0, 21, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[19] = {inSrv, e.histSrv[readIdx], depthSrv,
+                    ID3D11ShaderResourceView* srvsM[21] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr,
+                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
@@ -6135,12 +6316,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                            e.dlMvLeadUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 19, srvsM);
+                    ctx->CSSetShaderResources(0, 21, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 8, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 19, nullSrvM);
+                    ctx->CSSetShaderResources(0, 21, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
                     endRegion(qs, Region::Prep, ctx);
                     // The vectors NVIDIA's crop will read carried the slide on
@@ -6387,9 +6568,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 }
                 setParams(ctx, p);
-                ID3D11ShaderResourceView* nullSrv[19] = {};
+                ID3D11ShaderResourceView* nullSrv[21] = {};
                 ID3D11UnorderedAccessView* nullUav[7] = {};
-                ctx->CSSetShaderResources(0, 19, nullSrv);
+                ctx->CSSetShaderResources(0, 21, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 ctx->CSSetShader(ownCs, nullptr, 0);
                 if (leanOwn && !g_leanNoted) {
@@ -6401,20 +6582,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         "compiled out; advanced.temporal_aa_diagnostics = 1 runs the "
                         "instrumented one, live, and the price line names which ran.");
                 }
-                ID3D11ShaderResourceView* srvs[19] = {inSrv, e.histSrv[readIdx], depthSrv,
+                ID3D11ShaderResourceView* srvs[21] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                      p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                      smokeSrv, uiDepthSrv,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr,
+                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr};
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
                                                       carry ? e.dlDepthUav : nullptr, nullptr,
                                                       uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                 ID3D11Buffer* cb = g_cb;
                 ID3D11SamplerState* smp = g_samp;
-                ctx->CSSetShaderResources(0, 19, srvs);
+                ctx->CSSetShaderResources(0, 21, srvs);
                 ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
                 ctx->CSSetConstantBuffers(0, 1, &cb);
                 ctx->CSSetSamplers(0, 1, &smp);
@@ -6429,7 +6611,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 if (foveaMode) beginRegion(qs, Region::Periphery, dev, ctx);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                 if (foveaMode) endRegion(qs, Region::Periphery, ctx);
-                ctx->CSSetShaderResources(0, 19, nullSrv);
+                ctx->CSSetShaderResources(0, 21, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 if (carry) zcWritten = true;
                 if (uiTrack) uiEvidenceWritten = true;
@@ -8088,6 +8270,12 @@ void temporalPassShutdown() {
     if (g_stats) { g_stats->Release(); g_stats = nullptr; }
     if (g_samp) { g_samp->Release(); g_samp = nullptr; }
     if (g_cb) { g_cb->Release(); g_cb = nullptr; }
+    if (g_kinCb) { g_kinCb->Release(); g_kinCb = nullptr; }
+    if (g_kinSphereSrv) { g_kinSphereSrv->Release(); g_kinSphereSrv = nullptr; }
+    if (g_kinSphereBuf) { g_kinSphereBuf->Release(); g_kinSphereBuf = nullptr; }
+    if (g_csKin) { g_csKin->Release(); g_csKin = nullptr; }
+    g_kinSphereGen = 0;
+    g_kinSphereCount = 0;
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
     if (g_csFast) { g_csFast->Release(); g_csFast = nullptr; }
 }
