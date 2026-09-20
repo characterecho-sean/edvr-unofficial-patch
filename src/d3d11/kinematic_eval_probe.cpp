@@ -56,6 +56,7 @@ void KinematicEvalProbe::clearLocked() {
     summary_=Summary{};
     index_.clear();records_.clear();transitions_.clear();
     vtableIndex_.clear();vtables_.clear();
+    ownershipIndex_.clear();ownerships_.clear();
     for(uint32_t i=0;i<kJobCount;++i) {
         jobs_[i].calls.store(0,std::memory_order_relaxed);
         jobs_[i].totalNs.store(0,std::memory_order_relaxed);
@@ -127,6 +128,13 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
     const uint8_t gate2=read8(descriptor+0x58,ok);      // second gate byte
     if(!ok){++summary_.readFaults;return;}
     if(!record){++summary_.readFaults;return;}
+    // Epoch pair (offline chain, 2026-09-19 21:58 entry): descriptor+0x38 is
+    // the collection epoch [collection+0x90]; record+0x1B8 is the record's
+    // last-refresh epoch. Equality says the record was refreshed this epoch.
+    const uint64_t epoch1b8=read64(record+0x1B8,ok);
+    const uint64_t descEpoch38=read64(descriptor+0x38,ok);
+    if(!ok){++summary_.readFaults;return;}
+    if(epoch1b8==descEpoch38)++summary_.epochMatches;else ++summary_.epochMismatches;
     const uint32_t frame=frame_.load(std::memory_order_acquire);
     auto it=index_.find(record);
     if(it==index_.end()) {
@@ -141,6 +149,7 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
         r.pred2Ptr=read64(record+0x2C8,ok);
         r.bool234=read8(record+0x234,ok);
         r.flags=flags;r.predByte=predByte;r.gate2=gate2;
+        r.epoch1b8=epoch1b8;r.descEpoch38=descEpoch38;
         r.firstFrame=frame;r.lastFrame=frame;r.calls=1;
         if(!ok)++summary_.readFaults;
         r.predVtableRva=vtableRvaLocked(static_cast<uintptr_t>(r.predPtr));
@@ -154,6 +163,8 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
     }
     RecordState& r=records_[it->second];
     ++r.calls;r.lastFrame=frame;
+    if(r.epoch1b8!=epoch1b8){++summary_.epochChanges;r.epoch1b8=epoch1b8;}
+    r.descEpoch38=descEpoch38;
     bool hashOk=true;
     const uint64_t hash=read64(record+0x268,hashOk);
     if(!hashOk)++summary_.readFaults;
@@ -166,6 +177,47 @@ void KinematicEvalProbe::observe(uintptr_t descriptor,uintptr_t renderRecord) no
         } else ++summary_.transitionOverflow;
         r.flags=flags;r.hash=hash;
     }
+}
+
+void KinematicEvalProbe::noteOwnership(uint32_t jobId,uintptr_t arg) noexcept {
+    if(jobId>1||!arg)return; // only jobs 0 (descriptor) and 1 (collection)
+    if(!active_.load(std::memory_order_acquire))return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool ok=true;
+    // Job 0 (UpdateRenderDataJob body) takes the FUN_14431AFE0 descriptor;
+    // its +0x10 is the ADDRESS of collection+0x300. Job 1 (render-data
+    // batch) takes the collection itself.
+    const uint64_t collection=
+        jobId==0?read64(arg+0x10,ok)-0x300:static_cast<uint64_t>(arg);
+    if(!ok){++summary_.readFaults;return;}
+    const uint64_t owner=read64(collection+0x18,ok);   // backing owner (ctor param_3)
+    const uint64_t alias20=read64(collection+0x20,ok); // ctor: vtable slot +0x60 result
+    const uint64_t epoch90=read64(collection+0x90,ok); // collection epoch
+    if(!ok){++summary_.readFaults;return;}
+    uint64_t backPtr=0;uint32_t ownerState=0;
+    if(owner) {
+        backPtr=read64(owner+0x348,ok);                // rig's collection slot?
+        ownerState=read32(owner+0x380,ok);             // rig state machine (4 = render-ready)
+        if(!ok){++summary_.readFaults;return;}
+    }
+    ++summary_.ownershipChecks;
+    if(backPtr==collection)++summary_.ownerBackPtrMatch;
+    if(ownerState==4)++summary_.ownerState4;
+    const uint32_t frame=frame_.load(std::memory_order_acquire);
+    const auto it=ownershipIndex_.find(collection);
+    if(it!=ownershipIndex_.end()) {
+        OwnershipUse& o=ownerships_[it->second];
+        ++o.hits;o.owner=owner;o.alias20=alias20;o.epoch90=epoch90;
+        o.backPtr=backPtr;o.ownerState=ownerState;
+        return;
+    }
+    if(ownerships_.size()>=kOwnershipCap){++summary_.ownershipOverflow;return;}
+    OwnershipUse o;
+    o.collection=collection;o.owner=owner;o.alias20=alias20;o.epoch90=epoch90;
+    o.backPtr=backPtr;o.ownerState=ownerState;o.jobId=jobId;
+    o.firstFrame=frame;o.hits=1;
+    ownershipIndex_.emplace(collection,static_cast<uint32_t>(ownerships_.size()));
+    ownerships_.push_back(o);
 }
 
 KinematicEvalProbe::Summary KinematicEvalProbe::summary() const noexcept {
@@ -191,7 +243,14 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"transitions\":"<<summary_.transitions<<",\"vtables\":"<<vtables_.size()
      <<",\"read_faults\":"<<summary_.readFaults<<",\"record_overflow\":"<<summary_.recordOverflow
      <<",\"transition_overflow\":"<<summary_.transitionOverflow
-     <<",\"vtable_overflow\":"<<summary_.vtableOverflow<<"},"
+     <<",\"vtable_overflow\":"<<summary_.vtableOverflow
+     <<",\"epoch_matches\":"<<summary_.epochMatches
+     <<",\"epoch_mismatches\":"<<summary_.epochMismatches
+     <<",\"epoch_changes\":"<<summary_.epochChanges
+     <<",\"ownership_checks\":"<<summary_.ownershipChecks
+     <<",\"owner_backptr_match\":"<<summary_.ownerBackPtrMatch
+     <<",\"owner_state4\":"<<summary_.ownerState4
+     <<",\"ownership_overflow\":"<<summary_.ownershipOverflow<<"},"
      <<"\"vtables\":[";
     for(size_t i=0;i<vtables_.size();++i) {
         if(i)j<<',';
@@ -219,7 +278,9 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
          <<"\",\"hash\":\"0x"<<std::hex<<r.hash<<std::dec<<"\",\"count298\":"<<r.count298
          <<",\"flags\":\"0x"<<std::hex<<r.flags<<std::dec
          <<"\",\"bool234\":"<<uint32_t(r.bool234)<<",\"pred_byte\":"<<uint32_t(r.predByte)
-         <<",\"gate2\":"<<uint32_t(r.gate2)<<'}';
+         <<",\"gate2\":"<<uint32_t(r.gate2)
+         <<",\"epoch1b8\":\"0x"<<std::hex<<r.epoch1b8
+         <<"\",\"desc_epoch38\":\"0x"<<r.descEpoch38<<std::dec<<'}';
     }
     j<<"],\"transitions\":[";
     for(size_t i=0;i<transitions_.size();++i) {
@@ -228,6 +289,15 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
         j<<"{\"record\":"<<t.recordId<<",\"frame\":"<<t.frame
          <<",\"old_flags\":\"0x"<<std::hex<<t.oldFlags<<"\",\"new_flags\":\"0x"<<t.newFlags
          <<"\",\"old_hash\":\"0x"<<t.oldHash<<"\",\"new_hash\":\"0x"<<t.newHash<<std::dec<<"\"}";
+    }
+    j<<"],\"ownership\":[";
+    for(size_t i=0;i<ownerships_.size();++i) {
+        if(i)j<<',';
+        const OwnershipUse& o=ownerships_[i];
+        j<<"{\"collection\":\"0x"<<std::hex<<o.collection<<"\",\"owner\":\"0x"<<o.owner
+         <<"\",\"alias20\":\"0x"<<o.alias20<<"\",\"epoch90\":\"0x"<<o.epoch90
+         <<"\",\"backptr\":\"0x"<<o.backPtr<<"\",\"owner_state\":"<<std::dec<<o.ownerState
+         <<",\"job\":"<<o.jobId<<",\"first_frame\":"<<o.firstFrame<<",\"hits\":"<<o.hits<<'}';
     }
     j<<"]}";
 }
