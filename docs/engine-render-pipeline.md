@@ -20,12 +20,14 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) frame-scheduler identity and cadence —
-  runtime stack capture at the worker entries (stage 0); (2) per-record
-  identity and change signal in the rig chain (stage 2); (3) EB52-family
-  per-eye bytes — its constants ride an 8-byte-stride instance VB, not cb0,
-  so naming/reading them wants an EB52-armed snapshot (the remaining
-  flight-quality gap); (4) the two unknown census families (stage 4).
+* **Open, highest value first:** (1) the payload-owner loop above the
+  dispatcher (stage 0 — probe flight named the live dispatcher RVA 0x5D6A81;
+  decompile of the owner trail is the remaining offline step); (2) per-record
+  identity and change signal in the rig chain (stage 2); (3) knob bisect —
+  which of MaterialQuality vs LODDistanceScale drove the 21% EB52 drop
+  (stage 1, one more paired pass); (4) naming unknown-A
+  (vh=8056C9D5F22007F9, ~550 draws/frame, immune to the sliders) via an
+  armed watch on it (stage 4).
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,
@@ -52,14 +54,19 @@ otherwise.
   C 0x145591…). 214 code refs land in Table C, all from the constructors.
   Nothing named in .text calls any of them. Evidence:
   vtable_key_refs.txt, decomp_42CD610/42CD680, engine doc 2026-09-21 trace.
-  2026-09-21: the scheduler stack-capture probe is built (src/d3d11/
-  scheduler_stack_probe; `advanced.scheduler_probe`, default off) — it
-  records return-address stacks at the four worker entries and reports
-  top-3 stack signatures per target every 20 s; flown pending. Expected
-  signature: the VA recurring at a consistent frame position above any
-  0x1462b…/0x145dd… stub is the scheduler.
-* **Open:** scheduler identity, thread, cadence — the probe flight answers
-  this; static RE cannot see through the tables.
+  2026-09-21: the scheduler stack-capture probe flew (first flight): the
+  live dispatcher loop is RVA 0x5D6A81 (instruction after `call qword ptr
+  [rax+8]` at 0x1405D6A7E) — top frame in ~70% of signatures at both worker
+  entries across two passes; the drain target has a single fixed stack. The
+  dispatch is INDIRECT through each payload's own vtable, so the scheduler
+  never appears as a return address — the scheduler is the payload object's
+  OWNER (data, not a frame); no captured VA falls in either stub range.
+  reset-repopulate took 0 calls in a parked minute (cadence not per-minute).
+  Follow-up offline: decompile 0x5D6A81/0x5D552F/0x48D8AF/0x4AD7BF to name
+  the owner loop and payload array.
+* **Open:** the owner loop and payload-array location above the dispatcher
+  (decompile in progress); the reset path's cadence (never fired while
+  parked).
 * **Lever:** any engine-side timing decision; where truth sampling is safe.
 * **Fragility:** VA-bound; table layout will move per build.
 
@@ -73,8 +80,11 @@ otherwise.
   current active mask (output+0x20) — no change detection; FUN_14430EFE0
   applies distance/LOD + frustum gates. EDVR already widens the frustum via
   `fix.terrain_cull_guard`.
-* **Open:** where the vh=EB5234DB scenery family's instance draw list is
-  finalized; whether stereo culling is shared across eyes.
+* **Open:** knob bisect (which of MaterialQuality vs LODDistanceScale drove
+  the -21.4% EB52 drop — one more paired pass); where unknown-A
+  (vh=8056C9D5F22007F9, ~550 draws/frame, immune to the sliders, kind-88
+  t33 pool reader, median 198 verts) gets selected — it is now the prime
+  unattributed draw source.
 * **Lever:** scene optimization — the selection gate for the ~78% family the
   census found; the settings A/B (MaterialQuality/LODDistanceScale today at
   max) discriminates it.
@@ -140,9 +150,20 @@ otherwise.
   (edvr_logs/pool/drawstate_064511.bin, frames 12761+; joins to the census
   via vh). Census caveats: 16384-line cap truncates to the first ~16% of the
   eye pass and frame 0 is copy-flooded — tally frames 1+.
-* **Open:** name the two unknown hashes (armed EyeDrawSnapshot pass);
-  EB52's constants ride an 8-byte-stride instance VB (@434), not cb0, so it
-  is invisible to cb-staged captures (stage 5 carries the consequence).
+  2026-09-21 A/B flight: EB52's per-eye instance buffers are CAPTURED and
+  readable offline (inst_123844_*.bin, 1.57 MB each, 19 frames, 8-byte
+  records, first u32 = t33 pool record index); layout confirmed
+  INSTANCEANDMODELDATAINDEX + PACKEDVERTEXDATA; both eye targets seen.
+  Named from the pool dump: E508648660A352B2 = pool skinned-prop VS (t33
+  336-byte records, t38 48-byte bone palette, <=4 bone rows);
+  D95905C18B7FAD93 = constant-driven billboard/impostor VS (per-draw CB1
+  world basis, +10 z bias). The two unknowns are characterized, not named:
+  kind-88 eye draws, pool=1 t33 readers; A ~547/frame median 198 verts,
+  B ~207/frame median 24 verts.
+* **Open:** name unknown-A (armed watch on vh=8056C9D5F22007F9 in a future
+  flight); its dxbc has never been captured. The 16k-line census cap
+  misranks A/B deltas (frame-0 prefix) — use the 20-frame draw ledger for
+  any future comparison.
 * **Lever:** motion write-point selection; A/B attribution for stage 1.
 * **Fragility:** hash families cross-session-stable; tokens session-local.
 
@@ -170,10 +191,9 @@ otherwise.
   (src/openxr).
 * **Open:** on a canted headset (Pimax 8KX) verify the cant term appears in
   the same re-staged b0 rows (environment-dependent; expected per the canted
-  arc's fix design); EB52-family per-eye bytes — its constants live in the
-  shared instance buffer, so an EB52-armed snapshot (or instance-buffer
-  read) is the remaining flight if those bytes matter; whether the blocked
-  pairs re-run culling per eye or reuse one scene list.
+  arc's fix design); whether the blocked pairs re-run culling per eye or
+  reuse one scene list. (Closed 2026-09-21: EB52's per-eye instance bytes —
+  captured by the A/B flight and readable offline; see stage 4.)
 * **Lever:** the motion write point — one hook, per-eye-final truth at draw
   time, feeding surface 1 then surface 2 (stage 6); any single-pass-stereo
   question (likely out of scope).
