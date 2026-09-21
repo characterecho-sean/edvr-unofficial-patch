@@ -29,7 +29,17 @@
   shared global owner on both sides), with ~1,572 stable rigs, one
   collection each, one FUN_14431AFE0 dispatch per rig per frame. The
   engine-sourced motion path is now walkable: rig -> collection ->
-  records (+0x280, stride 0x2F0) -> record+0x130..0x16C transforms.
+  records (+0x280, stride 0x2F0) -> record+0x170/+0x17C per-frame truth.
+  2026-09-21 transform-trace correction: this doc's earlier
+  "record+0x130..0x16C transforms" pointer is the static local 4x4 (init at
+  record creation; no reader in any render-chain function — do not key
+  motion on it). FUN_14433DB20 writes +0x170 (position) + +0x17C (packed
+  quat) + +0x240 bounds, copies +0xF0..0x128 -> +0x1C0..0x1F8 (prior-frame
+  products), and hands render-ward through the vtable interface at
+  record+0x2C8 (+0x68/70/78/80) into the slot array at
+  (*(record+0x290)+0x50, 0x58-stride groups, 0x20 items). The class behind
+  +0x2C8's vtable is the one runtime-only identity; everything upstream is
+  offline-proven (decomp_433DB20, transform_field_refs.txt).
   Still open: per-record identity (~5 records share one node
   pointer), pixel ownership, and the job-cost remeasure with the
   detailed observer disabled (job-3 = PrePhysicsAdvanceJob was never
