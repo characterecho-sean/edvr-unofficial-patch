@@ -2,9 +2,17 @@
 
 ## Status
 
-Opened 2026-09-21, from a supporter's log bundle. Hypothesis IDENTIFIED by
-reading a crash breadcrumb and the code it points at; NOT YET CONFIRMED by a
-targeted flight, and no code has been changed.
+Opened 2026-09-21, from a supporter's log bundle. Updated same day twice
+more: a second bundle ruled out SteamVR-the-runtime (identical crash on
+VirtualDesktopXR); then the user turned the Steam client's desktop overlay
+off for Elite Dangerous (Steam library > Properties > General > "Enable
+Steam Overlay") with EDHM left in place, and **the crash stopped** --
+reported directly by the user, no log bundle taken for this run. The Steam
+overlay is CONFIRMED NECESSARY. EDHM's necessity is still untested in
+isolation (no flight yet with the overlay on and EDHM out of the chain) --
+so "EDHM + overlay" cannot yet be narrowed to "overlay alone," only to
+"overlay is required." No code has been changed; this is a workaround, not
+a fix.
 
 Hypothesis: `host_graphics_reset` (`src\openxr\native_runtime_host.h:1797`)
 calls `NativeGraphicsClient::reset()` (`src\openxr\native_graphics_client.h:75`),
@@ -31,15 +39,25 @@ and some other explanation is needed); whether `stereo.drain()`, the stage
 immediately before this one, was meant to rule out exactly this and has a
 gap, or never covered a Present arriving from the game's or the overlay's
 own shutdown-time redraw; and whether this needs EDHM and the Steam overlay
-both, or reproduces with either alone.
+both, or reproduces with either alone -- three flights now, all with both
+present, all with the identical stack.
+
+Also worth a look if this reaches a fix: the gap from `host_gate_finish`
+(shutdown reporting clean) to the crash was 31 ms in *both* flights,
+exactly, despite otherwise-unrelated sessions. That is not what session
+jitter in a race normally looks like; it reads more like a fixed cadence
+(the overlay's or EDHM's own redraw or poll timer) than a coincidence, and
+might narrow which side owns the next call into the freed module.
 
 Next flight, if this is picked up: raise `log.max_mb` first so the gfx-side
-log survives to the close (see below -- this flight's did not). Reproduce
-once with EDHM's chain target switched to the system `d3d11.dll` (no EDHM),
-and once with the Steam overlay disabled for Elite Dangerous, to see which
-component the race needs.
+log survives to the close (the first flight's didn't; the second did).
+Reproduce once with EDHM's chain target switched to the system `d3d11.dll`
+(no EDHM), and once with the Steam overlay disabled for Elite Dangerous
+specifically (Steam library > Elite Dangerous > Properties > General --
+this is independent of the VR runtime and of "SteamVR", which the second
+flight already ruled out), to see which component the race needs.
 
-## The flight
+## First flight
 
 `edvr-logs-20260921-142342.zip`, supplied by the user, read with
 `tools\edvr_log.py`.
@@ -138,6 +156,74 @@ live-mode stub page is leaked on purpose rather than freed, because a
 thread can still be inside it) -- but that guard covers only the small stub
 pages, not the whole-module `FreeLibrary` the OpenXR side now performs.
 
+## Second flight -- 2026-09-21, SteamVR removed
+
+`edvr-logs-20260921-144712.zip`, supplied after asking the user to take
+SteamVR out of the picture. Build still v0.17.0 (6AAC7CA4), chain still
+`chain_target = d3d11_edhm.dll` per `edvr_install_state.ini` -- EDHM was not
+touched, only the VR runtime. This flight's `native benchmark` lines read
+`runtime="VirtualDesktopXR" headset="Meta Quest 3"`: SteamVR is confirmed
+gone from the VR side.
+
+The gfx log this time did not hit its size cap (716 KB of 2051 lines, well
+under the limit) -- but it carries nothing extra at the close either; the
+crash is D3D11-hook-chain territory that the gfx log's own instruments
+don't cover, cap or no cap.
+
+The shutdown sequence is the same shape, ending clean:
+
+    12:44:59.847 shutdown_stage,begin=host_graphics_reset,thread=37592,tick=10710515
+    12:44:59.847 shutdown_stage,end=host_graphics_reset,ok=1,thread=37592,tick=10710515
+    12:44:59.909 shutdown_stage,end=host_gate_finish,ok=1,thread=37592,tick=10710578
+    12:44:59.910 module_shutdown_return,exception=0
+
+`edvr_breadcrumbs.txt` (append-only across every session ever run -- it
+still carries the first flight's crash at tick 8472046, verbatim, further
+up the file) adds a new one at tick 10710609:
+
+    10710609 gfx: UNHANDLED exception 0xC0000005 at 0x7FFC594BF780 in no module (address is not in a loaded image)
+    10710609 crash: thread=0x9364 ...
+    10710609 crash: unwind frame=0x0 rip=0x7FFC594BF780 ... module=unknown
+    10710609 crash: unwind frame=0x1 rip=0x7FFC598F7009 ... module=d3d11.dll rva=0x177009
+    10710609 crash: unwind frame=0x2 rip=0x7FFC5F7813D5 ... module=gameoverlayrenderer64.dll rva=0x713D5
+    10710609 crash: unwind frame=0x3 rip=0x7FFC5F7CE368 ... module=gameoverlayrenderer64.dll rva=0xBE368
+    10710609 crash: unwind frame=0x4 rip=0x7FFC5F7D0DFA ... module=gameoverlayrenderer64.dll rva=0xC0DFA
+    10710609 crash: unwind frame=0x5 rip=0x7FFC5F7A3F05 ... module=gameoverlayrenderer64.dll rva=0x93F05
+    10710609 crash: unwind frame=0x6 rip=0x7FFC5C043AD7 ... module=d3d11_edhm.dll rva=0xD3AD7
+    10710609 crash: unwind frame=0x7 rip=0x7FFC597A0D8E ... module=d3d11.dll rva=0x20D8E
+    10710609 crash: unwind stop=frame-limit
+
+Every RVA matches the first flight's crash exactly -- `d3d11.dll+0x20D8E`,
+`d3d11_edhm.dll+0xD3AD7`, the same four `gameoverlayrenderer64.dll` offsets
+in the same order, `d3d11.dll+0x177009`, unmapped. `10710609 - 10710578 =
+31` ms after `host_gate_finish`, the same gap as the first flight to the
+millisecond. The same file also holds a third, still-earlier crash (tick
+27111687, from a session before either supplied bundle) with the same RVAs
+again -- this is the user's third-for-third reproduction on every close
+with this chain, not a rare race.
+
+`gameoverlayrenderer64.dll` is Steam's per-game desktop overlay. It is
+injected because the game is launched through the Steam client, and has
+nothing to do with SteamVR as a VR runtime -- so removing SteamVR (the
+runtime) left it untouched, which is exactly what this flight shows.
+
+## Third result -- 2026-09-21, Steam overlay disabled, no crash
+
+No log bundle for this one -- the user turned the Steam client's overlay
+off for Elite Dangerous specifically (Steam library > Elite Dangerous >
+Properties > General > "Enable Steam Overlay"), left EDHM chained, and
+reported the crash stopped. Taken as reported, not independently verified
+against a clean shutdown log; a future bundle from a since-quiet install
+would be worth reading once for a `module_shutdown_return,exception=0`
+with nothing after it in the breadcrumb file, to close this out with the
+same rigor as the other two results.
+
+This is the discriminating flight: it isolates the overlay as necessary
+without a flight that removes EDHM instead, and its result matches the
+mechanism -- with the overlay gone, nothing calls back into `d3d11.dll`
+through the chain after `host_graphics_reset` frees it, so there is no
+late call left to land in the unmapped module.
+
 ## Not ruled out
 
 - Whether the OpenXR-side `FreeLibrary` is the release that actually brings
@@ -149,12 +235,23 @@ pages, not the whole-module `FreeLibrary` the OpenXR side now performs.
   this and has a gap, or only ever covered EDVR's own in-flight XR frame,
   never a Present the game or the overlay issues on its own account during
   close.
-- Whether this needs EDHM and the Steam overlay both in the chain, or
-  reproduces with either alone. The one flight available has both.
+- Whether EDHM is required alongside the overlay, or the overlay alone
+  (EDHM out of the chain) would also crash. Not yet flown; lower priority
+  now that a workaround is confirmed, but relevant to how a real fix should
+  be scoped -- a fix aimed only at the EDHM link would miss an
+  overlay-alone case.
 
 ## Ruled out
 
 - EDVR's own OpenXR shutdown throwing: the log reports every stage `ok=1`
-  and `module_shutdown_return,exception=0` on its own thread. The exception
-  is not there; a different thread lands in unmapped memory 31 ms later.
-- A stale build: `edvr_log.py --expect-build v0.17.0` matched on both logs.
+  and `module_shutdown_return,exception=0` on its own thread, in both
+  logged flights. The exception is not there; a different thread lands in
+  unmapped memory 31 ms later, both times.
+- The Steam overlay as a bystander: turning it off (EDHM still chained)
+  stopped the crash. It is a required part of the chain, not incidental.
+- A stale build: `edvr_log.py --expect-build v0.17.0` matched on both logs,
+  both flights.
+- SteamVR as the VR runtime: the second flight ran on VirtualDesktopXR /
+  Meta Quest 3, no SteamVR anywhere in the picture, and reproduced the
+  identical crash. The runtime backend is not a factor; the D3D11-side
+  chain (EDHM + Steam's desktop overlay) is.
