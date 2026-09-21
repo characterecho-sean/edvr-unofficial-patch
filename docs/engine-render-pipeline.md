@@ -222,21 +222,24 @@ Every open runtime question, one visit. Install the probe build first
 the live INI unless a change is requested; identity-check logs with
 `edvr_log.py --expect-build HEAD`. Instruments, in flight order:
 
-1. **Settings A/B (stage 1 lever):** arm the census at the settlement,
-   current `Custom.4.4.fxcfg` (pass A). Game closed; set
-   MaterialQuality=0, SurfaceMaterialQuality=0, LODDistanceScale=0.1;
-   relaunch, same spot and heading, arm again (pass B). Discriminators:
-   EB52-family vh= count and total eye draws per frame (use
-   `edvr_log.py --tally vh`); outcome (a) family collapses → the sliders
-   gate settlement scenery, quantified; (b) unchanged → scenery ignores
-   the knobs, no settings-side lever; (c) partial → bisect which knob.
-   Validity rule: pass A and pass B must see the same scene, viewpoint,
-   AND render path — do not mix on-foot/cockpit between passes. Sanity
-   gate before pass A: 3 armed frames must show ~18k eye draws into two
-   eye targets (EDVR renders on-foot as true per-eye stereo through its
-   runtime; a flat vscreen fallback shows a handful of compositor draws
-   and one scene target — if seen, stop and fix the stereo path instead
-   of flying a meaningless A/B).
+1. **Settings A/B (stage 1 lever):** arm the census from the cockpit,
+   landed at the settlement (native VR — the state every settlement
+   capture in the evidence base came from), current `Custom.4.4.fxcfg`
+   (pass A). Game closed; set MaterialQuality=0, SurfaceMaterialQuality=0,
+   LODDistanceScale=0.1; relaunch, same spot and heading, arm again
+   (pass B). Discriminators: EB52-family vh= count and total eye draws
+   per frame (use `edvr_log.py --tally vh`); outcome (a) family collapses
+   → the sliders gate settlement scenery, quantified; (b) unchanged →
+   scenery ignores the knobs, no settings-side lever; (c) partial →
+   bisect which knob. Validity rule: pass A and pass B must see the same
+   scene, viewpoint, AND render path — stay in the ship for both passes:
+   disembarking switches to the flat vscreen panel (the scene then renders
+   ONCE into the 5120×2880 panel target, which EDVR excludes from
+   eye-draw counting), a different path that invalidates the comparison.
+   Sanity gate before pass A: 3 armed frames must show ~18k eye draws
+   into two 1996×2121 eye targets (native-VR cockpit state); if the scene
+   lands in a 5120×2880 target and eye draws collapse to compositor quads,
+   you are on the flat panel — stop and re-seat in the cockpit.
 2. **EB52-armed EyeDrawSnapshot (stage 4/5 gap):** in pass A, arm the
    snapshot with EB5234DB6ADB491D watched; captures the family's per-eye
    instance-buffer bytes the cb-staged captures cannot see, and names the
