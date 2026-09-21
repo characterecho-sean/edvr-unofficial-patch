@@ -193,23 +193,27 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
         ~JobBit(){t_jobMask=prev;}
     } jobBit(job);
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
-    if(!probe || !probe->active())return forward(a,b,c,d);
-    // Ownership/epoch capture sits OUTSIDE the timed bracket so job-cost
-    // attribution stays clean; jobs 0/1 only, two dereferences plus a
-    // dedupe lookup per call.
-    probe->noteOwnership(job,a);
+    // Timing runs whenever the hooks own the job bodies, probe armed or not
+    // (the L1 brackets-only remeasure, perf doc 2026-09-20 17:55): the
+    // detailed observer's cost enters the measured region only while it is
+    // actually capturing, which is exactly the with/without comparison L1
+    // wants. The probe global is process-lifetime, so the tracker-only path
+    // (fix.engine_motion on, probe never attached) times too. jobs[] now
+    // accumulates per-session, not per capture window. Ownership capture
+    // stays capture-gated: observe()/noteOwnership keep their active() gates.
+    if(probe && probe->active())probe->noteOwnership(job,a);
     // Capture boundary (2026-09-20 review finding 8): samples commit only to
     // the generation they started in -- a reset/re-arm mid-job drops the
     // completion instead of contaminating the new capture -- and the three
     // counters publish between seq toggles so the JSON writer's seqlocked
     // read never serializes a torn snapshot. No drain: the finishing thread
     // may itself be inside an observed job, so draining could self-deadlock.
-    const uint64_t gen=probe->jobGeneration();
+    const uint64_t gen=kinematicEvalProbe.jobGeneration();
     const int64_t start=qpcNow();
     const uintptr_t result=forward(a,b,c,d);
     const int64_t elapsed=qpcNow()-start;
-    if(elapsed>0 && g_qpcFreq>0 && gen==probe->jobGeneration()) {
-        auto* stats=probe->jobStats();
+    if(elapsed>0 && g_qpcFreq>0 && gen==kinematicEvalProbe.jobGeneration()) {
+        auto* stats=kinematicEvalProbe.jobStats();
         const uint64_t ns=uint64_t(elapsed)*1000000000ull/uint64_t(g_qpcFreq);
         stats[job].seq.fetch_add(1,std::memory_order_relaxed); // odd: commit in flight
         stats[job].calls.fetch_add(1,std::memory_order_relaxed);

@@ -131,3 +131,21 @@ dominate, but the 21:23 remeasure note explicitly includes it.
 If hoisted before the job-attribution flight, ONE flight batches both
 measurements: the mover/static discriminator census AND the L1
 brackets-only numbers.
+
+### 2026-09-20 18:12 -- L1 unblock landed: brackets time without the observer
+
+Sean sanctioned the hoist ("go"). bracket() now times whenever the hooks
+own the job bodies, on the process-lifetime probe global -- the probe's
+observer pointer is only consulted for noteOwnership, which keeps its
+active() gate alongside observe(). The detailed observer's cost enters
+the measured region only while it is capturing: the with/without
+comparison L1 asked for now falls out of one log (probe-armed eye-burst
+windows vs the tracker-only baseline around them). jobs[] semantics
+changed as flagged: per-session accumulation, not per capture window.
+Gates unchanged and green (87/0 tracker, 28/0 probe, json self-test,
+contract 252/252); frontier d3d11 87d036727d54c0c6, verified. Job-3
+remains unhooked (thunk-shaped prologue; physics <= 0.05 ms on 205251,
+so the gap is accepted, not extended). The next settlement flight with
+fix.engine_motion on batches both measurements: the mover/static
+discriminator census (kinematic doc 17:50) and the L1 brackets-only
+job costs.
