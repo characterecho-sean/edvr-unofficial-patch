@@ -7063,3 +7063,14 @@ complete) and the two node families are distinct by construction
 (record+0x18 is a ctor-built render-side sub-object; the dirty nodes
 are physics-side). The null is a family mismatch, not physics-inert
 movers; the dirty-queue route to mover/static truth is CLOSED.
+
+### 2026-09-21 06:37 -- shared flight note: census-join instrument landed
+
+The perf arc's census-join instrument (bucket item counter on the
+draw-item builder FUN_1442B4420) is built into the frontier install
+(d3d11 sha256:16 01f727ef8fe1e808). The next settlement eye burst on
+this build carries kinematicEval.bucket_items in the classification
+JSON alongside everything this doc's flights already read -- no
+separate flight needed. Engine layout, dead-instrument
+discriminators, and the flight protocol are in
+engine-render-performance-2026-09-19.md (06:37 entry).

@@ -32,6 +32,10 @@ public:
     static constexpr uint32_t kOwnershipCap=64u;
     static constexpr uintptr_t kRigEvalRva=0x431AFE0u;
     static constexpr uint32_t kRigLinkCap=256u;
+    // Per-rig draw-item builder FUN_1442B4420 (decomp_42B4420.txt): appends
+    // 0x150-byte items to per-bucket lists (bucket = *(model+0x20)), counting
+    // each append at bucket+0x2A4. The census-join hook site (perf arc).
+    static constexpr uintptr_t kBucketBuildRva=0x42B4420u;
     // Sized to cover a full capture window's mover demand: 31,514 samples
     // measured on flight 094158. 24 B/sample => ~768 KB, fine for a
     // diagnostic.
@@ -188,6 +192,19 @@ public:
     // total == nodes-in-ring + overflow. Same per-session discipline as
     // notePhysQueue: never gated on active(), NOT cleared by clearLocked.
     void notePhysNodes(const uint64_t* nodes,uint32_t count,uint32_t overflow) noexcept;
+    // The draw-item-builder bracket (FUN_1442B4420) reads each touched
+    // bucket's item counter (bucket+0x2A4) at entry and exit; buckets is the
+    // deduped set size, items the summed positive deltas, negDeltas the
+    // buckets whose counter fell (mid-call drain). flags: bit0 the entry
+    // walk faulted or found no sane array, bit1 an exit read faulted (that
+    // call's items dropped), bit2 the walk hit its bucket cap. Per-session,
+    // never gated on active(), NOT cleared by clearLocked -- same
+    // discipline as notePhysQueue, so tracker-only flights harvest it.
+    static constexpr uint32_t kBucketFlagEntryWild=1u;
+    static constexpr uint32_t kBucketFlagExitFault=2u;
+    static constexpr uint32_t kBucketFlagOverflow=4u;
+    void noteBucketBuild(uint32_t buckets,uint64_t items,uint32_t negDeltas,
+                         uint32_t flags) noexcept;
 
     Summary summary() const noexcept;
     void writeJson(std::ostringstream& json) const;
@@ -238,6 +255,17 @@ private:
     std::atomic<uint64_t> physNodeTotal_{0};
     std::atomic<uint64_t> physNodeOverflow_{0};
     std::vector<uint64_t> physNodeRing_; // last kPhysNodeCap nodes, oldest first
+    // Draw-item-builder bucket counts (noteBucketBuild): same per-session
+    // discipline as the phys counters -- relaxed atomics, no mutex side.
+    std::atomic<uint64_t> bucketCalls_{0};
+    std::atomic<uint64_t> bucketItems_{0};
+    std::atomic<uint64_t> bucketEmptyCalls_{0};   // walk sane, no buckets found
+    std::atomic<uint64_t> bucketEntryWild_{0};    // entry walk faulted/insane
+    std::atomic<uint64_t> bucketExitFault_{0};    // exit read faulted
+    std::atomic<uint64_t> bucketNegDeltas_{0};    // mid-call drain events
+    std::atomic<uint64_t> bucketOverflowCalls_{0};// bucket cap hit
+    std::atomic<uint32_t> bucketMaxBuckets_{0};
+    std::atomic<uint32_t> bucketMaxItems_{0};
 
     void clearLocked();
     void noteVtableLocked(uint64_t rva,uint32_t frame) noexcept;
