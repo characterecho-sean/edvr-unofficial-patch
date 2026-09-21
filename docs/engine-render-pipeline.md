@@ -20,14 +20,13 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) the payload-owner loop above the
-  dispatcher (stage 0 — probe flight named the live dispatcher RVA 0x5D6A81;
-  decompile of the owner trail is the remaining offline step); (2) per-record
-  identity and change signal in the rig chain (stage 2); (3) knob bisect —
-  which of MaterialQuality vs LODDistanceScale drove the 21% EB52 drop
-  (stage 1, one more paired pass); (4) naming unknown-A
-  (vh=8056C9D5F22007F9, ~550 draws/frame, immune to the sliders) via an
-  armed watch on it (stage 4).
+* **Open, highest value first:** (1) name unknown-A/B from the allow-list
+  build's first armed flight (stage 4 — dxbc dump, then identification);
+  (2) per-record identity and change signal in the rig chain (stage 2);
+  (3) where LODDistanceScale gates the EB52/unknown-B instance selection
+  (stage 1/stage 2 join — offline); (4) optionally close the scheduler's
+  runtime-built payload vtables: startup write-watch on 0x1460adcdc… or
+  enqueue-side (FUN_1405d5040) stack capture (stage 0).
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,
@@ -54,19 +53,19 @@ otherwise.
   C 0x145591…). 214 code refs land in Table C, all from the constructors.
   Nothing named in .text calls any of them. Evidence:
   vtable_key_refs.txt, decomp_42CD610/42CD680, engine doc 2026-09-21 trace.
-  2026-09-21: the scheduler stack-capture probe flew (first flight): the
-  live dispatcher loop is RVA 0x5D6A81 (instruction after `call qword ptr
-  [rax+8]` at 0x1405D6A7E) — top frame in ~70% of signatures at both worker
-  entries across two passes; the drain target has a single fixed stack. The
-  dispatch is INDIRECT through each payload's own vtable, so the scheduler
-  never appears as a return address — the scheduler is the payload object's
-  OWNER (data, not a frame); no captured VA falls in either stub range.
-  reset-repopulate took 0 calls in a parked minute (cadence not per-minute).
-  Follow-up offline: decompile 0x5D6A81/0x5D552F/0x48D8AF/0x4AD7BF to name
-  the owner loop and payload array.
-* **Open:** the owner loop and payload-array location above the dispatcher
-  (decompile in progress); the reset path's cadence (never fired while
-  parked).
+  2026-09-21 (probe flight + decompile): the scheduler is NAMED. Dispatcher
+  FUN_1405d6960 (0x5D6960): pops one 0x20-byte queue item, calls the
+  payload vtable's run slot. Frame scheduling is FUN_1405d6b20 (job-table
+  scheduler: payload array +0xD0, count +0xE8) driven by FUN_1405d6e40
+  (per-worker pump); scheduler object at TLS+0x4480, global manager
+  DAT_145f27db8. Cadence is QUEUE-EMPTY — producers enqueue and wake; no
+  frame counter exists; "per frame" is emergent. The worker storm precedes
+  the census window (producers burst, then the pump drains). Static chain
+  dead-ends at runtime-built payload vtables (0x1450C7B80/0x1450C7BA0 via
+  FUN_1405d3510); closure wants a startup write-watch or enqueue-side
+  (FUN_1405d5040) stack capture. reset-repopulate never fires while parked.
+* **Open:** who the per-frame producer is (runtime closure above); the
+  reset path's cadence (never fired while parked).
 * **Lever:** any engine-side timing decision; where truth sampling is safe.
 * **Fragility:** VA-bound; table layout will move per build.
 
@@ -80,11 +79,13 @@ otherwise.
   current active mask (output+0x20) — no change detection; FUN_14430EFE0
   applies distance/LOD + frustum gates. EDVR already widens the frustum via
   `fix.terrain_cull_guard`.
-* **Open:** knob bisect (which of MaterialQuality vs LODDistanceScale drove
-  the -21.4% EB52 drop — one more paired pass); where unknown-A
-  (vh=8056C9D5F22007F9, ~550 draws/frame, immune to the sliders, kind-88
-  t33 pool reader, median 198 verts) gets selected — it is now the prime
-  unattributed draw source.
+* **Open:** closed for the lever — 2026-09-21 step-3 bisect: LODDistanceScale
+  alone reproduces the total drop (EB52 -16.9%; material knobs add a further
+  ~5.5%); unknown-A (8056C9D5F22007F9) is immune to every knob (triply
+  confirmed). What remains here is WHERE LOD gates the EB52/unknown-B
+  instance selection (stage 2's eval chain is the likely gate) — an offline
+  question, and whether EDVR should offer an LOD-override below the game's
+  minimum (a product decision, not yet made).
 * **Lever:** scene optimization — the selection gate for the ~78% family the
   census found; the settings A/B (MaterialQuality/LODDistanceScale today at
   max) discriminates it.
@@ -160,10 +161,21 @@ otherwise.
   world basis, +10 z bias). The two unknowns are characterized, not named:
   kind-88 eye draws, pool=1 t33 readers; A ~547/frame median 198 verts,
   B ~207/frame median 24 verts.
-* **Open:** name unknown-A (armed watch on vh=8056C9D5F22007F9 in a future
-  flight); its dxbc has never been captured. The 16k-line census cap
-  misranks A/B deltas (frame-0 prefix) — use the 20-frame draw ledger for
-  any future comparison.
+  2026-09-21 step-3: the unknowns are narrowed to "CB-less GPU-driven
+  instanced prop batches": both bind NO constant buffer (every census row
+  c=-; the DCW watch matched but had no buffer to read), are 8-byte-stride
+  triangle strips with shared VB/IB and startInstance stepping +8 between
+  siblings (GPU-driven instancing), VS SRVs at t1/t4/t6; 8056 pairs PS
+  669CC896CA4AA988 (8-texture material set), avg n~432. Their t33 transform
+  records sit in the shared pool dumps, addressable via ledger
+  startInstance. Snapshot retention is a HARDCODED hash allow-list
+  (eye_draw_snapshot.h sourceMesh(), no config key) — census_cb_watch
+  cannot influence it; their dxbc has never been retained. The two VS
+  hashes were added to the allow-list the same day (build pending at this
+  writing); one armed flight then dumps their dxbc.
+* **Open:** name them from that flight's dxbc (disassemble with
+  tools/dxbc_disasm.py); say what the props actually are. The 16k-line
+  census cap misranks A/B deltas — use the 20-frame draw ledger.
 * **Lever:** motion write-point selection; A/B attribution for stage 1.
 * **Fragility:** hash families cross-session-stable; tokens session-local.
 
