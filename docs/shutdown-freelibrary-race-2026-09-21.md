@@ -2,15 +2,17 @@
 
 ## Status
 
-Opened 2026-09-21, from a supporter's log bundle. Updated same day after a
-second bundle: the user had them take SteamVR out of the picture (VR
-runtime switched to VirtualDesktopXR, streaming to a Meta Quest 3) and the
-identical crash reproduced anyway, 31 ms after the same shutdown stage,
-same RVAs down to the byte. SteamVR-the-runtime is RULED OUT. EDHM and the
-Steam client's desktop overlay (`gameoverlayrenderer64.dll` -- unrelated to
-SteamVR; it's Steam's per-game overlay, injected because the game is
-launched through Steam) are still both in the chain in every flight seen so
-far. No code has been changed.
+Opened 2026-09-21, from a supporter's log bundle. Updated same day twice
+more: a second bundle ruled out SteamVR-the-runtime (identical crash on
+VirtualDesktopXR); then the user turned the Steam client's desktop overlay
+off for Elite Dangerous (Steam library > Properties > General > "Enable
+Steam Overlay") with EDHM left in place, and **the crash stopped** --
+reported directly by the user, no log bundle taken for this run. The Steam
+overlay is CONFIRMED NECESSARY. EDHM's necessity is still untested in
+isolation (no flight yet with the overlay on and EDHM out of the chain) --
+so "EDHM + overlay" cannot yet be narrowed to "overlay alone," only to
+"overlay is required." No code has been changed; this is a workaround, not
+a fix.
 
 Hypothesis: `host_graphics_reset` (`src\openxr\native_runtime_host.h:1797`)
 calls `NativeGraphicsClient::reset()` (`src\openxr\native_graphics_client.h:75`),
@@ -205,6 +207,23 @@ injected because the game is launched through the Steam client, and has
 nothing to do with SteamVR as a VR runtime -- so removing SteamVR (the
 runtime) left it untouched, which is exactly what this flight shows.
 
+## Third result -- 2026-09-21, Steam overlay disabled, no crash
+
+No log bundle for this one -- the user turned the Steam client's overlay
+off for Elite Dangerous specifically (Steam library > Elite Dangerous >
+Properties > General > "Enable Steam Overlay"), left EDHM chained, and
+reported the crash stopped. Taken as reported, not independently verified
+against a clean shutdown log; a future bundle from a since-quiet install
+would be worth reading once for a `module_shutdown_return,exception=0`
+with nothing after it in the breadcrumb file, to close this out with the
+same rigor as the other two results.
+
+This is the discriminating flight: it isolates the overlay as necessary
+without a flight that removes EDHM instead, and its result matches the
+mechanism -- with the overlay gone, nothing calls back into `d3d11.dll`
+through the chain after `host_graphics_reset` frees it, so there is no
+late call left to land in the unmapped module.
+
 ## Not ruled out
 
 - Whether the OpenXR-side `FreeLibrary` is the release that actually brings
@@ -216,15 +235,20 @@ runtime) left it untouched, which is exactly what this flight shows.
   this and has a gap, or only ever covered EDVR's own in-flight XR frame,
   never a Present the game or the overlay issues on its own account during
   close.
-- Whether this needs EDHM and the Steam overlay both in the chain, or
-  reproduces with either alone. All three flights on file have both.
+- Whether EDHM is required alongside the overlay, or the overlay alone
+  (EDHM out of the chain) would also crash. Not yet flown; lower priority
+  now that a workaround is confirmed, but relevant to how a real fix should
+  be scoped -- a fix aimed only at the EDHM link would miss an
+  overlay-alone case.
 
 ## Ruled out
 
 - EDVR's own OpenXR shutdown throwing: the log reports every stage `ok=1`
   and `module_shutdown_return,exception=0` on its own thread, in both
-  flights. The exception is not there; a different thread lands in
+  logged flights. The exception is not there; a different thread lands in
   unmapped memory 31 ms later, both times.
+- The Steam overlay as a bystander: turning it off (EDHM still chained)
+  stopped the crash. It is a required part of the chain, not incidental.
 - A stale build: `edvr_log.py --expect-build v0.17.0` matched on both logs,
   both flights.
 - SteamVR as the VR runtime: the second flight ran on VirtualDesktopXR /
