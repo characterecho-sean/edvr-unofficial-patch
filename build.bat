@@ -446,6 +446,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
+    "src\d3d11\static_prop_gate.cpp" ^
     "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
@@ -2066,4 +2067,44 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: scheduler stack probe test build failed & exit /b 1 )
 "%BUILD%\scheduler_stack_probe_test.exe" --dry-run || exit /b 1
 "%BUILD%\scheduler_stack_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_static_prop_gate_test
+echo [edvr] === static_prop_gate_test.exe ===
+REM Build gate for the StaticPropGate's cache logic: the change test
+REM (hit/miss/first-sight), the forced-refresh failsafe, invalidation
+REM epochs, oldest-evict at capacity and the SEH fault tolerance. These run
+REM at ~432 calls/frame in flight; a cache defect costs a test flight AND
+REM can read as invisible success (a wrong skip just costs CPU), so the rig
+REM drives the production decide() on synthetic record arrays, including a
+REM VirtualProtect guard-page fixture.
+if not exist "%OBJ%\staticgate" mkdir "%OBJ%\staticgate"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\staticgate\\" /Fe"%BUILD%\static_prop_gate_test.exe" ^
+    "tools\static_prop_gate_test\static_prop_gate_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: static prop gate test build failed & exit /b 1 )
+"%BUILD%\static_prop_gate_test.exe" --dry-run || exit /b 1
+"%BUILD%\static_prop_gate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_static_prop_gate_json_test
+echo [edvr] === static_prop_gate_json_test.exe ===
+REM Build gate for the production StaticPropGate JSON writer: the kinematic
+REM writer shipped three serialization failures before its gate existed,
+REM and compilation cannot catch a dropped quote. The exe serializes a
+REM deterministic fixture through the real writeJson; the python gate
+REM strict-parses it and asserts every value round-trips.
+if not exist "%OBJ%\staticgatejson" mkdir "%OBJ%\staticgatejson"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\staticgatejson\\" /Fe"%BUILD%\static_prop_gate_json_test.exe" ^
+    "tools\static_prop_gate_json_test\static_prop_gate_json_test.cpp" ^
+    "src\d3d11\static_prop_gate.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: static prop gate JSON writer test build failed & exit /b 1 )
+"%BUILD%\static_prop_gate_json_test.exe" --dry-run || exit /b 1
+"%BUILD%\static_prop_gate_json_test.exe" --self-test || exit /b 1
+python "tools\static_prop_gate_json_selftest.py" --self-test || exit /b 1
 exit /b 0
