@@ -2,6 +2,7 @@
 #include "kinematic_eval_probe.h"
 #include "../common/code_hook.h"
 #include <windows.h>
+#include <intrin.h>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -47,6 +48,10 @@ static_assert(decltype(evalGate)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 std::atomic<bool> trackerWanted{false};
 alignas(8) std::atomic<KinematicTrackerObserverFn> trackerObserver{nullptr};
+// The scheduler stack probe's want: its targets 0/1 are the job bodies
+// themselves, already patched by this file, so it observes through the
+// job-0/1 relays and holds this gate open while armed.
+std::atomic<bool> schedulerWanted{false};
 
 // The probe is a process-lifetime global (kinematicEvalProbe), so a bracket
 // that loaded the pointer before a detach remains safe while it finishes;
@@ -261,6 +266,16 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
                              uintptr_t c,uintptr_t d) noexcept {
     const auto forward=reinterpret_cast<JobFn>(g_jobEntries[job].forward.load(std::memory_order_acquire));
     if(!forward)return 0; // this job stood down at install; the relay is unreachable then
+    // The scheduler stack probe's targets 0/1 ARE these job bodies (their
+    // RVAs already carry this hook's patch), so their capture rides here,
+    // before the timed region and before the forward -- the pre-forward
+    // point a dedicated hook would sit. The address handed over is this
+    // frame's return-address slot: one frame deeper than the target's
+    // entry RSP, so this wrapper's own return address (EDVR code, outside
+    // the probe's image range) scans as a filtered miss and the engine's
+    // return address lands at index 0 of the collected stack.
+    if(job<2)schedulerStackNoteJobEntry(job,
+        reinterpret_cast<uintptr_t>(_AddressOfReturnAddress()));
     // Job attribution: every eval observation made while this job runs on
     // this thread carries its bit. Save/restore so nested jobs keep both
     // bits and early returns always unwind the mask.
@@ -582,7 +597,8 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
 // deaf (2026-09-20 review finding 4).
 void recomputeGateLocked() noexcept {
     const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
-                    trackerWanted.load(std::memory_order_acquire);
+                    trackerWanted.load(std::memory_order_acquire) ||
+                    schedulerWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
 }
 
@@ -617,6 +633,29 @@ void kinematicEvalTrackerDetach() noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
         trackerWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
+}
+
+const char* kinematicEvalSchedulerAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        schedulerWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalSchedulerDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        schedulerWanted.store(false,std::memory_order_release);
         recomputeGateLocked();
     } catch(...) {}
 }
