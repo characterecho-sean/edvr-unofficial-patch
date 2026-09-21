@@ -39,6 +39,7 @@ struct State {
     uint32_t lastTransitionEnabled = 0;
     uint32_t lastResubmitEnabled = 0;
     uint32_t lastCullMode = 0;
+    uint32_t lastCullChannel = 0;
     uint32_t lastDeferredPacing = 0;
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
@@ -116,6 +117,12 @@ float wrappedYawRadians(float degrees) {
 uint32_t cullMode(const std::string& value) {
     if (_stricmp(value.c_str(), "symmetric") == 0) return 1;
     if (_stricmp(value.c_str(), "percent") == 0) return 2;
+    return 0;
+}
+
+uint32_t cullChannel(const std::string& value) {
+    if (_stricmp(value.c_str(), "raw") == 0) return 1;
+    if (_stricmp(value.c_str(), "matrix") == 0) return 2;
     return 0;
 }
 
@@ -307,31 +314,36 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1 or 2 caller is an openvr_api.dll from before turbo pacing
-    // (or, for version 1, the field-of-view trim) existed. Each gets exactly
-    // the fields it knows about, and whatever it cannot carry stays out of
-    // its struct entirely.
-    const bool wantsPacing = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
+    // A version 1, 2 or 3 caller is an openvr_api.dll from before the
+    // channel probe (or, earlier, turbo pacing or the field-of-view trim)
+    // existed. Each gets exactly the fields it knows about, and whatever it
+    // cannot carry stays out of its struct entirely.
+    const bool wantsChannel = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == sizeof(*output);
-    const bool wantsTrim = output && !wantsPacing &&
+    const bool wantsPacing = output && !wantsChannel &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
+    const bool wantsTrim = output && !wantsChannel && !wantsPacing &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsChannel && !wantsPacing && !wantsTrim &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsPacing ? sizeof(result)
+    result.size = wantsChannel ? sizeof(result)
+                 : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
+    result.version = wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
+                    : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
                                  : EDVR_NATIVE_FRAME_VERSION_1;
     result.headOffset[0] = boundedOffset(edvr::Config::get().getFloat(
@@ -367,6 +379,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.cullVerticalFraction = clampFraction(edvr::Config::get().getFloat(
         "fix.cull_guard_fraction_v", 1.0f));
     readSignatures(edvr::Config::get().getString("fix.cull_guard_headsets", ""), &result);
+    result.cullChannel = cullChannel(edvr::Config::get().getString(
+        "advanced.cull_guard_channel", "both"));
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};
@@ -429,13 +443,15 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         state->lastTransitionEnabled != result.transitionEnabled ||
         state->lastResubmitEnabled != result.resubmitEnabled ||
         state->lastCullMode != result.cullMode ||
+        state->lastCullChannel != result.cullChannel ||
         state->lastDeferredPacing != result.deferredPacing) {
         edvr::Log::get().note(
             "native frame: begin #%u seq=%llu offsets=%s (%+.3f,%+.3f,%+.3f), "
-            "cull=%u, transition=%s, resubmit=%s, pacing=%s.", state->beginCount,
+            "cull=%u, channel=%u, transition=%s, resubmit=%s, pacing=%s.", state->beginCount,
             static_cast<unsigned long long>(input->sequence),
             result.offsetEnabled ? "on" : "off", result.headOffset[0],
             result.headOffset[1], result.headOffset[2], result.cullMode,
+            result.cullChannel,
             result.transitionEnabled ? "on" : "off",
             result.resubmitEnabled ? "on" : "off",
             result.deferredPacing ? "turbo" : "runtime");
@@ -444,6 +460,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         state->lastTransitionEnabled = result.transitionEnabled;
         state->lastResubmitEnabled = result.resubmitEnabled;
         state->lastCullMode = result.cullMode;
+        state->lastCullChannel = result.cullChannel;
         state->lastDeferredPacing = result.deferredPacing;
     }
     // Only as many bytes as the caller's own struct holds.

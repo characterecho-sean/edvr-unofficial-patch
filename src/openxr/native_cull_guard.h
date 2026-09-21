@@ -30,6 +30,12 @@ struct NativeCullSettings {
   float trimOuterDeg = 0.0f;
   float trimNasalDeg = 0.0f;
   float trimVerticalDeg = 0.0f;
+  // Which projection query channel the widened frustum is told through once
+  // live (advanced.cull_guard_channel): 0 both, 1 GetProjectionRaw only, 2
+  // GetProjectionMatrix only. The other channel answers the content frustum.
+  // The size ask grows either way, so the rebuild the probe exists to force
+  // still happens; only the lie is split.
+  uint32_t channel = 0;
 };
 
 struct NativeCullFrustum { float left=0, right=0, down=0, up=0; };
@@ -267,15 +273,29 @@ class NativeCullGuard final {
     }
     return recommended(eye);
   }
-  NativeCullFrustum gameFrustum(unsigned eye) const noexcept {
-    return eye < 2 && stage_ == NativeCullStage::Live ? lied_[eye] : (eye < 2 ? true_[eye] : NativeCullFrustum{});
+  // What each projection query channel is told while live, per
+  // NativeCullSettings::channel. Channel 0 (both) is the historical lie:
+  // the widened frustum on both. A probe channel hands the widened frustum
+  // to the named channel and the content frustum to the other.
+  NativeCullFrustum gameFrustumRaw(unsigned eye) const noexcept {
+    if (eye >= 2) return {};
+    if (stage_ != NativeCullStage::Live) return true_[eye];
+    return settings_.channel == 2 ? target_[eye] : lied_[eye];
+  }
+  NativeCullFrustum gameFrustumMatrix(unsigned eye) const noexcept {
+    if (eye >= 2) return {};
+    if (stage_ != NativeCullStage::Live) return true_[eye];
+    return settings_.channel == 1 ? target_[eye] : lied_[eye];
   }
   // What the headset actually shows, inside what the game was asked to
   // render: the crop taken at submit. With a trim and no widening the two
-  // are the same frustum and this is exactly the whole image.
+  // are the same frustum and this is exactly the whole image. The crop is
+  // taken against the matrix channel, the one the renderer follows: with
+  // only the raw channel lied to, the grown target holds exactly the
+  // content frustum and the crop is the identity.
   NativeCullBounds cropBounds(unsigned eye) const noexcept {
     if (eye >= 2 || stage_ != NativeCullStage::Live) return {};
-    return inside(target_[eye], lied_[eye]);
+    return inside(target_[eye], settings_.channel == 1 ? target_[eye] : lied_[eye]);
   }
   // Where that cropped image belongs inside the eye's own full field, which
   // is what the XR layer still advertises. Identity without a trim.
@@ -328,6 +348,7 @@ class NativeCullGuard final {
   static bool validSettings(const NativeCullSettings& s) noexcept {
     for (float trim : {s.trimOuterDeg, s.trimNasalDeg, s.trimVerticalDeg})
       if (!std::isfinite(trim) || trim < 0 || trim > 30) return false;
+    if (s.channel > 2) return false;
     if (s.mode == NativeCullMode::Off) return true;
     if (s.mode != NativeCullMode::Symmetric && s.mode != NativeCullMode::Percent) return false;
     if (!std::isfinite(s.percent)||!std::isfinite(s.horizontalFraction)||!std::isfinite(s.verticalFraction)||
@@ -341,6 +362,7 @@ class NativeCullGuard final {
   }
   static bool sameSettings(const NativeCullSettings& a,const NativeCullSettings& b) noexcept {
     if (a.trimOuterDeg!=b.trimOuterDeg||a.trimNasalDeg!=b.trimNasalDeg||a.trimVerticalDeg!=b.trimVerticalDeg)return false;
+    if (a.channel!=b.channel)return false;
     if (a.mode!=b.mode||a.percent!=b.percent||a.horizontalFraction!=b.horizontalFraction||a.verticalFraction!=b.verticalFraction||a.signatureCount!=b.signatureCount)return false;
     for(uint32_t i=0;i<a.signatureCount;++i)if(a.signatures[i].horizontal!=b.signatures[i].horizontal||a.signatures[i].vertical!=b.signatures[i].vertical)return false;return true;
   }

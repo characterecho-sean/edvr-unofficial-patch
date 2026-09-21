@@ -190,6 +190,12 @@ test was keyed to the runtime's recommendation rather than to what the game
 actually submits, so it could never go live on any rig with HMD Quality below
 about 1.0. Fixed the same day (`sizeAdopted`); see the cull guard notes.
 
+(The probe flew on the legacy OpenVR proxy, which is gone; it was
+reimplemented in the native OpenXR runtime on 2026-09-20, again as
+`advanced.cull_guard_channel = raw | matrix` with `both` today's full
+guard — now with the grown targets and the crop kept, so the eye-target
+rebuild the missing cell needs still happens.)
+
 ### 2. The fold — `P · Reᵀ` handed to the game
 
 Built as `fix.canted_projection` (v0.14.1-49-g21b7d5f, reverted in

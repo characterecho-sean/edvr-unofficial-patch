@@ -20,7 +20,7 @@ int main(int argc,char** argv) {
   NativeCullFrustum fs[2]{f0,f1}; NativeCullDimensions ds[2]{d0,d1};
   CHECK(g.beginFrame(s,fs,ds,false,1)==NativeCullStage::WaitingScene);
   CHECK(g.beginFrame(s,fs,ds,true,1)==NativeCullStage::Adopting);
-  CHECK(g.gameFrustum(0).left==f0.left);
+  CHECK(g.gameFrustumRaw(0).left==f0.left);
   auto r0=g.recommended(0); CHECK(r0.width>=d0.width&&r0.height>=d0.height);
   g.noteSubmittedSize(0,r0.width,r0.height); g.noteSubmittedSize(1,g.recommended(1).width,g.recommended(1).height);
   CHECK(g.beginFrame(s,fs,ds,true,1)==NativeCullStage::Adopting);
@@ -87,7 +87,7 @@ int main(int argc,char** argv) {
   bad.signatures[0]={95,84}; NativeCullGuard allowed; CHECK(allowed.beginFrame(bad,fs,ds,true,1)==NativeCullStage::Adopting);
   NativeCullSettings pct{}; pct.mode=NativeCullMode::Percent; pct.percent=10;
   NativeCullGuard pg; CHECK(pg.beginFrame(pct,fs,ds,true,1)==NativeCullStage::Adopting);
-  auto pf=pg.gameFrustum(0); CHECK(pf.left==f0.left); // projection stays true during adoption
+  auto pf=pg.gameFrustumRaw(0); CHECK(pf.left==f0.left); // projection stays true during adoption
   NativeCullFrustum invalid[2]{f0,f1}; invalid[0].right=std::numeric_limits<float>::quiet_NaN();
   NativeCullGuard ig; CHECK(ig.beginFrame(pct,invalid,ds,true,1)==NativeCullStage::Off);
   NativeCullGuard scaled;
@@ -101,12 +101,12 @@ int main(int argc,char** argv) {
   scaled.noteSubmittedSize(1,660,467);scaled.noteSubmittedSize(0,704,560);
   CHECK(scaled.beginFrame(s,fs,ds,true,1)==NativeCullStage::Live);
   CHECK(scaled.canonical(0).width==645&&scaled.canonical(0).height==504);
-  CHECK(std::fabs(scaled.gameFrustum(1).left+1.1f)<.0001f&&std::fabs(scaled.gameFrustum(1).down+1.05f)<.0001f);
+  CHECK(std::fabs(scaled.gameFrustumRaw(1).left+1.1f)<.0001f&&std::fabs(scaled.gameFrustumRaw(1).down+1.05f)<.0001f);
   CHECK(scaled.beginFrame(s,fs,ds,true,2)==NativeCullStage::Live&&!scaled.changed());
   CHECK(scaled.canonical(0).width==645&&scaled.canonical(0).height==504); // recenter preserves adopted target evidence
   NativeCullSettings off;fs[0].left=-1.3f;ds[0]={900,800};
   CHECK(scaled.beginFrame(off,fs,ds,true,2)==NativeCullStage::Off&&scaled.changed());
-  CHECK(scaled.gameFrustum(0).left==-1.3f&&scaled.recommended(0).width==900);
+  CHECK(scaled.gameFrustumRaw(0).left==-1.3f&&scaled.recommended(0).width==900);
   CHECK(scaled.beginFrame(s,fs,ds,true,2)==NativeCullStage::Adopting);
   CHECK(scaled.beginFrame(s,fs,ds,true,3)==NativeCullStage::Adopting&&!scaled.changed());
   NativeCullSettings excessive=pct;excessive.percent=51;NativeCullGuard bounded;
@@ -158,14 +158,14 @@ int main(int argc,char** argv) {
   CHECK(trimGuard.widenFactorWidth()==1.0f&&trimGuard.widenFactorHeight()==1.0f);
   CHECK(std::fabs(trimGuard.appliedVerticalDeg(0)-10.f)<.001f&&trimGuard.appliedOuterDeg(0)==0);
   // The projection stays true until the game has actually shrunk its targets.
-  CHECK(trimGuard.gameFrustum(0).up==csVertical&&trimGuard.placementBounds(0).top==0);
+  CHECK(trimGuard.gameFrustumRaw(0).up==csVertical&&trimGuard.placementBounds(0).top==0);
   trimGuard.noteSubmittedSize(0,3964,3914);trimGuard.noteSubmittedSize(1,3964,3914);
   CHECK(trimGuard.beginFrame(trimOnly,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
   trimGuard.noteSubmittedSize(0,3964,2740);trimGuard.noteSubmittedSize(1,3964,2740); // within 3%
   CHECK(trimGuard.beginFrame(trimOnly,crystal,crystalDims,true,1)==NativeCullStage::Live);
-  CHECK(std::fabs(trimGuard.gameFrustum(0).up-trimmedUp)<.0005f&&
-        std::fabs(trimGuard.gameFrustum(0).down+trimmedUp)<.0005f);
-  CHECK(trimGuard.gameFrustum(0).left==-csOuter&&trimGuard.gameFrustum(0).right==csNasal);
+  CHECK(std::fabs(trimGuard.gameFrustumRaw(0).up-trimmedUp)<.0005f&&
+        std::fabs(trimGuard.gameFrustumRaw(0).down+trimmedUp)<.0005f);
+  CHECK(trimGuard.gameFrustumRaw(0).left==-csOuter&&trimGuard.gameFrustumRaw(0).right==csNasal);
   const auto trimCrop=trimGuard.cropBounds(0);
   CHECK(trimCrop.left==0.f&&trimCrop.top==0.f&&trimCrop.right==1.f&&trimCrop.bottom==1.f);
   const auto trimPlace=trimGuard.placementBounds(0);
@@ -188,7 +188,7 @@ int main(int argc,char** argv) {
   const float outerTrimmed=std::tan(std::atan(csOuter)-5.0f*3.1415926535f/180.0f);  // 56.81 - 5
   const float nasalTrimmed=std::tan(std::atan(csNasal)-10.0f*3.1415926535f/180.0f); // 45.91 - 10
   CHECK(std::fabs(outerTrimmed-1.2712f)<.001f&&std::fabs(nasalTrimmed-0.7243f)<.001f);
-  const auto left=sideGuard.gameFrustum(0),right=sideGuard.gameFrustum(1);
+  const auto left=sideGuard.gameFrustumRaw(0),right=sideGuard.gameFrustumRaw(1);
   CHECK(std::fabs(left.left+outerTrimmed)<.001f&&std::fabs(left.right-nasalTrimmed)<.001f);
   CHECK(std::fabs(right.right-outerTrimmed)<.001f&&std::fabs(right.left+nasalTrimmed)<.001f);
   CHECK(left.up==csVertical&&left.down==-csVertical&&sideGuard.recommended(0).height==3914);
@@ -239,7 +239,7 @@ int main(int argc,char** argv) {
   CHECK(std::fabs(outerGuard.appliedOuterDeg(0)-30.f)<.01f&&outerGuard.appliedNasalDeg(0)==0);
   CHECK(land(outerGuard,deepOuter,crystal,crystalDims)==NativeCullStage::Live);
   // The nasal edge of eye 0 is the 45.91 degree one and keeps every degree.
-  CHECK(outerGuard.gameFrustum(0).right==csNasal&&outerGuard.gameFrustum(1).left==-csNasal);
+  CHECK(outerGuard.gameFrustumRaw(0).right==csNasal&&outerGuard.gameFrustumRaw(1).left==-csNasal);
   CHECK(outerGuard.recommended(0).width<3964&&outerGuard.recommended(0).height==3914);
   const float narrow=std::tan(15.0f*3.1415926535f/180.0f);
   NativeCullFrustum tight[2]{{-csOuter,csNasal,-narrow,narrow},{-csNasal,csOuter,-narrow,narrow}};
@@ -258,7 +258,7 @@ int main(int argc,char** argv) {
   NativeCullGuard zeroGuard;
   CHECK(zeroGuard.beginFrame(zeroed,zf,zd,false,1)==NativeCullStage::WaitingScene);
   CHECK(zeroGuard.beginFrame(zeroed,zf,zd,true,1)==NativeCullStage::Adopting);
-  CHECK(zeroGuard.gameFrustum(0).left==zf[0].left&&!zeroGuard.trimmed());
+  CHECK(zeroGuard.gameFrustumRaw(0).left==zf[0].left&&!zeroGuard.trimmed());
   const auto z0=zeroGuard.recommended(0);
   zeroGuard.noteSubmittedSize(0,z0.width,z0.height);zeroGuard.noteSubmittedSize(1,zeroGuard.recommended(1).width,zeroGuard.recommended(1).height);
   CHECK(zeroGuard.beginFrame(zeroed,zf,zd,true,1)==NativeCullStage::Adopting);
@@ -499,5 +499,43 @@ int main(int argc,char** argv) {
     lastTold=told;
   }
   CHECK(started==23&&capped==1);
+
+  // ---- the channel probe (advanced.cull_guard_channel) --------------------
+  // Everything above ran at channel 0, both. A probe channel splits the
+  // lie: one projection query channel hears the widened frustum, the other
+  // the content frustum, while the size ask, the adoption and the crop run
+  // unchanged -- the rebuild the probe exists to force still happens.
+  NativeCullSettings probe=s;
+  NativeCullGuard probeBoth;
+  CHECK(probeBoth.beginFrame(probe,zf,zd,true,1)==NativeCullStage::Adopting);
+  CHECK(land(probeBoth,probe,zf,zd)==NativeCullStage::Live);
+  CHECK(std::fabs(probeBoth.gameFrustumRaw(0).left+1.2f)<.0001f&&
+        std::fabs(probeBoth.gameFrustumMatrix(0).left+1.2f)<.0001f);
+  const auto bothChannelCrop=probeBoth.cropBounds(0);
+  CHECK(std::fabs(bothChannelCrop.left-1.0f/12.0f)<.001f&&std::fabs(bothChannelCrop.bottom-.9f)<.001f);
+  probe.channel=1; // raw lied to; the matrix channel and the crop stay true
+  NativeCullGuard rawGuard;
+  CHECK(rawGuard.beginFrame(probe,zf,zd,true,1)==NativeCullStage::Adopting);
+  CHECK(land(rawGuard,probe,zf,zd)==NativeCullStage::Live);
+  CHECK(std::fabs(rawGuard.gameFrustumRaw(0).left+1.2f)<.0001f&&
+        std::fabs(rawGuard.gameFrustumRaw(0).down+1.0f)<.0001f);
+  CHECK(rawGuard.gameFrustumMatrix(0).left==f0.left&&rawGuard.gameFrustumMatrix(0).up==f0.up);
+  const auto rawCrop=rawGuard.cropBounds(0);
+  CHECK(rawCrop.left==0.f&&rawCrop.top==0.f&&rawCrop.right==1.f&&rawCrop.bottom==1.f);
+  CHECK(rawGuard.recommended(0).width==probeBoth.recommended(0).width&&
+        rawGuard.recommended(0).height==probeBoth.recommended(0).height); // the ask still grows
+  probe.channel=2; // matrix lied to; the raw channel stays true
+  NativeCullGuard matrixGuard;
+  CHECK(matrixGuard.beginFrame(probe,zf,zd,true,1)==NativeCullStage::Adopting);
+  CHECK(land(matrixGuard,probe,zf,zd)==NativeCullStage::Live);
+  CHECK(matrixGuard.gameFrustumRaw(0).left==f0.left&&matrixGuard.gameFrustumRaw(0).down==f0.down);
+  CHECK(std::fabs(matrixGuard.gameFrustumMatrix(0).left+1.2f)<.0001f&&
+        std::fabs(matrixGuard.gameFrustumMatrix(0).down+1.0f)<.0001f);
+  const auto matrixCrop=matrixGuard.cropBounds(0);
+  CHECK(std::fabs(matrixCrop.left-bothChannelCrop.left)<.0001f&&std::fabs(matrixCrop.bottom-bothChannelCrop.bottom)<.0001f);
+  // An out-of-range channel refuses the whole settings block.
+  NativeCullSettings badChannel=s; badChannel.channel=3;
+  NativeCullGuard badChannelGuard;
+  CHECK(badChannelGuard.beginFrame(badChannel,zf,zd,true,1)==NativeCullStage::Off);
   std::printf("native_cull_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

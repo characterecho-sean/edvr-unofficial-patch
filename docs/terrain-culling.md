@@ -2,30 +2,63 @@
 
 ## Status
 
-- **State (2026-09-20):** binary-analysis arc underway against build 332753
-  (the exe in `analysis\`, SHA-256 e6be8bbe…). Goal: a memory patch to the
-  culler replacing the render-wider-and-crop cull guard.
+- **State (2026-09-20):** binary-analysis arc against build 332753 (the exe
+  in `analysis\`, SHA-256 e6be8bbe…) has located the projection chokepoint;
+  the flown separability probe (canted-projection.md, 2026-09-09) then
+  reshaped the hypothesis. Goal: a memory patch replacing the
+  render-wider-and-crop cull guard. Patch designed, not yet built; see the
+  dated entry at the bottom.
+- **The asymmetry-loss point:** the game wraps IVRSystem in a class
+  (vtable VA 0x144E245B8; instance heap-held). Every VR projection query
+  flows through exactly two wrapper methods:
+  - `FUN_1404e2f50` (RVA **0x4E2F50**, slot 25): calls `GetProjectionRaw`
+    and returns `{aspect, atan(|r|)+atan(|b|), atan(|l|)+atan(|t|)}` —
+    tangent magnitudes folded into symmetric angle sums; the per-side
+    asymmetry is discarded here (asm: analysis\decomp\cull_projection9.txt).
+  - `FUN_1404e2d30` (RVA **0x4E2D30**, slot 27): calls
+    `GetProjectionMatrix` and returns the matrix with row 3 negated —
+    asymmetry (m02/m12) preserved. This is the renderer's path (the game
+    extracts the four tangent elements and builds its own projection —
+    canted-projection.md, the fold experiment).
+- **Probe-constrained model (H3):** the culler follows neither channel
+  live (`raw` lie inert, `matrix` lie inert for quads) and moved only in
+  `both`, which also rebuilt the eye targets. Working model: the cull
+  frustum is a **cached symmetric frustum computed at eye-target build**
+  from one of these channels, combined per frame with the live view
+  matrix. Which channel the cache derives from is unflown: the missing
+  probe cell is one channel lied-to plus a forced target rebuild.
+  Live-consumption variants (H1: culler reads the fov getter per frame;
+  H2: reads and symmetrizes the matrix per frame) are refuted by the
+  probe.
 - **Ruled out (pointers, do not re-propose):** the
-  `AstroSurfaceRenderManager::Cull` chain (`FUN_1412772b0` →
-  `FUN_143d097b0` → `FUN_14444b4a0` → `FUN_1444d0200`) is a **mono
+  `AstroSurfaceRenderManager::Cull` chain (`FUN_1412772b0` ->
+  `FUN_143d097b0` -> `FUN_14444b4a0` -> `FUN_1444d0200`) is a **mono
   horizon-cone LOD culler**, not the view-frustum culler: its 48-plane
   table is built once at construction from planet geometry
   (`FUN_144497d30`), its fov scalar feeds only the LOD screen-size gate
-  (`tan(fov/2)` at subobj+0x8E0, written by `FUN_14448e0b0`), and no
-  projection matrix or per-eye tangent ever enters it. Decompiles in
-  `analysis\decomp\cull_round3*.txt`. Also ruled out:
-  `EnableFrustum0Override` / `CullingBias` are shadow-cascade config
-  (`FUN_1428555A0`), unrelated to terrain tile culling.
+  (`tan(fov/2)` at subobj+0x8E0, written by `FUN_14448e0b0`), and the
+  per-object worker `FUN_14444d6c0` is LOD-band selection, not a frustum
+  window test. Decompiles in `analysis\decomp\cull_round3*.txt`. Also
+  ruled out: `EnableFrustum0Override` / `CullingBias` are shadow-cascade
+  config (`FUN_1428555A0`), unrelated to terrain tile culling.
 - **Established:** the game loads `openvr\win64\openvr_api.dll`
-  dynamically and holds the `IVRSystem_012` pointer in global
-  VA 0x145F1A860 (init at RVA 0x4E4870). Open lead: readers of that
-  global that call `GetProjectionMatrix` (vtable +0x8) /
-  `GetProjectionRaw` (+0x10) — the terrain draw-cull consumer is
-  downstream of one of them. The engine's generic plane-set frustum test
-  is `FUN_1404f4e10` (26 callers; analysis\decomp\decomp_04F4E10.txt).
-- **Next:** identify the draw-time terrain frustum culler and the
-  instruction(s) where per-eye asymmetry is lost; then design the patch
-  (code-hook machinery: `src\common\code_hook.cpp`).
+  dynamically (RVA 0x4E4870), holds `IVRSystem_012` in global
+  VA 0x145F1A860, and reaches it only via the wrapper. LibOVR impl
+  vtable at VA 0x144E243F0 with parallel slots (slot 25 -> RVA 0x4E2F30).
+- **Next:** fly the channel probe, which now exists in the native runtime
+  (2026-09-20) as `advanced.cull_guard_channel`: `raw` one session,
+  `matrix` another, guard on, watch the edges over terrain. Covered under
+  `raw` = the cache derives from the fov getter; covered only under
+  `matrix` = from the matrix getter. That answer gates the memory patch:
+  hook the fov getter (`0x4E2F50`) in observe+widen modes,
+  installed at startup so the game's initial eye-target build sees widened
+  values; guard OFF; fly. Tiles clean from session start = the cache
+  derives from this getter and the patch stands. Tiles still dropping =
+  the cache derives from the matrix channel; the getter census plus a
+  matrix-getter census guides the next static round. Note the implication
+  of H3 for tuning: mid-session margin changes are not live for the
+  culler — they take effect at the next target rebuild (quality toggle),
+  not on ini save.
 
 *Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
 "Culling of planet surface in VR too aggressive", a recurrence of
@@ -291,3 +324,110 @@ before the guard existed, but the guard itself has not. And the game's
 culler is being *covered*, not fixed: the tiles were always renderable,
 and the correct fix is one line of frustum arithmetic away from whoever
 owns the culler.
+
+---
+
+## 2026-09-20 — the projection chokepoint, and a proposed memory patch
+
+Static analysis against build 332753 (Ghidra project `analysis\ghidra`,
+scripts `analysis\ghidra_scripts\CullProjection*.java`, decompiles
+`analysis\decomp\cull_projection*.txt`) followed the projection query from
+the OpenVR import to the point where per-eye asymmetry is discarded.
+
+**The chokepoint.** The game loads `openvr\win64\openvr_api.dll`
+dynamically, stores `IVRSystem_012` in a global (VA 0x145F1A860), and wraps
+it in a class (concrete vtable VA 0x144E245B8, heap instance). Every
+projection query in the game flows through two wrapper methods — they are
+the only call sites of `GetProjectionRaw` (vtable +0x10) and
+`GetProjectionMatrix` (+0x8) in the binary:
+
+- **Fov getter** `FUN_1404e2f50` (RVA 0x4E2F50, wrapper slot 25). Per eye
+  it queries the raw tangents and the render-target size, then returns
+  three floats: `aspect = resX/resY`, `atan(|right|)+atan(|bottom|)`,
+  `atan(|left|)+atan(|top|)` (helper at RVA 0x48B54DC is the CRT `atanf`;
+  abs masks via `ANDPS 0x7fffffff`; full asm verified in
+  cull_projection9.txt). Angle sums of magnitudes — **the per-side
+  asymmetry dies here**. Whatever consumes this triple can only build a
+  symmetric frustum.
+- **Matrix getter** `FUN_1404e2d30` (RVA 0x4E2D30, wrapper slot 27).
+  Returns the projection matrix with row 3 negated; m02/m12 offsets
+  intact. The renderer's path — asymmetry survives.
+
+This bifurcation is the whole bug shape: the renderer draws the true
+asymmetric frustum, while any culler fed by the fov getter culls a
+centered one of the same total extent — on the Quest 3 rig, ±47° against
+an eye that sees 54° outward. It also explains why the cull guard works:
+it lies at the OpenVR query, upstream of both paths, and pays for the lie
+with extra rendered pixels because the *renderer* also believes it.
+
+**What the flown probes add (canted-projection.md, 2026-09-09).** The
+separability probe lied through one projection call at a time: `raw`
+alone did not move the terrain quads, `matrix` alone widened the picture
+but not the quads, and only `both` — which additionally enlarged the
+render targets and so forced an eye-target rebuild — covered them. Read
+against the chokepoint above, this says the terrain culler does **not**
+consume either getter live, per frame. The working model is a **cached
+cull frustum**: computed once per eye-target build from one of the two
+channels (which one is unflown — the probe's missing cell is one channel
+lied-to plus a forced rebuild), symmetric by construction if it derives
+from the fov getter's angle sums, and combined per frame with the live
+view matrix — which is why tiles still pop with head rotation under a
+cached frustum shape. It also explains the guard's own mechanics: the
+guard only moves the quads because its stage 1 forces the rebuild that
+recomputes the cache.
+
+**Proposed patch: replace the fov getter, leave the matrix getter alone.**
+Inline-hook `FUN_1404e2f50` via the existing `code_hook` relay machinery
+(same pattern as `kinematic_eval_hook.cpp`: RVA + prologue-bytes check +
+PE timestamp gate, inert on any other build). The hook reimplements the
+getter — it is 60 instructions — calling the wrapper's own IVRSystem
+pointer (`this+8`) for tangents and render size, then computes the
+outputs from tangents widened to the per-axis symmetric superset,
+`m_h = max(|l|,|r|)`, `m_v = max(|t|,|b|)`: both angle sums become
+`atan(m_h)+atan(m_v)`. Cullers fed by this getter then cover the true
+per-eye frusta; the renderer, on the matrix getter, never sees the
+change. Cost: zero extra pixels, zero crop machinery — the cull guard's
+entire stage 1-3 apparatus becomes unnecessary for rigs where this holds.
+Under H3 the hook must install **at startup**, so the game's initial
+eye-target build already sees widened values, and mid-session margin
+changes take effect only at the next target rebuild (a quality toggle),
+not on ini save.
+
+Modes (config names functionality): `off` (default until flown),
+`observe` (true values out, but log a census of call-site return addresses
+and per-eye values — names every consumer of the triple in one session),
+`widen` (symmetric-superset values out, plus the census). Mutually
+exclusive with `fix.cull_guard` at startup, loudly.
+
+**Verification, one flight:** guard OFF, hook in `widen` from launch, near
+a planet surface. Tiles clean from session start = the cache derives from
+the fov getter and the patch stands (H1-as-cached confirmed). Tiles still
+dropping after a forced target rebuild (toggle HMD quality to force it)
+= the cache derives from the matrix channel (H2-as-cached), and the
+census on both getters — call sites, rates, values — names the consumers
+for the next static round. **Watch item:** the AstroSurface LOD gate's
+scalar fov (renderer field +0x2C, read in `FUN_141277370`) may be fed
+from this getter; widening shifts terrain subdivision thresholds
+slightly. Compare LOD/pop behaviour and the `cull guard margins` numbers
+against a guard-off baseline in the same flight.
+
+**Why not patch the binary on disk:** EDVR's whole value is per-build
+gating and inert-by-default failure; a runtime hook with a prologue check
+keeps that. The RVA is build-specific (332753); other builds get the
+guard, as today.
+
+**The probe's missing cell is now flyable.** The legacy proxy's
+`advanced.cull_guard_channel` (976b4f2, removed with the proxy in 1a54e9e)
+is reimplemented in the native OpenXR runtime, with one deliberate
+difference from the flown probe: the split channel no longer shrinks the
+pipeline. The grown size ask, the adoption and the crop run unchanged, so
+the eye-target rebuild that recomputes the cull cache still happens; only
+the lie is split. `both` (the default) is the guard exactly as flown;
+`raw` tells the widened frustum to GetProjectionRaw alone (the matrix
+channel answers the content frustum, and the crop is the identity);
+`matrix` tells it to GetProjectionMatrix alone (the raw channel answers
+the content frustum). Flight protocol: guard on, `channel = raw` for one
+session, `= matrix` for another, parked over terrain, watching the edges.
+Tiles covered under `raw` means the cache derives from the fov getter;
+covered only under `matrix` means it derives from the matrix getter — and
+the patch above hooks the wrong place.
