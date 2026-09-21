@@ -111,6 +111,11 @@ def self_test():
     # (519 == 3 + 516); the native gate drives the invariant dynamically.
     assert ke['phys_nodes'] == dict(total=519, overflow=516, nodes=[
         '0x1111111111111111', '0x2222222222222222', '0x3333333333333333']), ke['phys_nodes']
+    # Draw-item-builder bucket counts (the census join, perf arc).
+    assert ke['bucket_items'] == dict(calls=9001, items=123456, empty_calls=31,
+                                      entry_wild=7, exit_fault=5, neg_deltas=11,
+                                      overflow_calls=3, max_buckets=17,
+                                      max_items_per_call=4711), ke['bucket_items']
     print('kinematic json self-test passed')
 
 

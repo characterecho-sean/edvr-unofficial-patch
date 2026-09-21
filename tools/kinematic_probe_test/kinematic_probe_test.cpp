@@ -287,6 +287,33 @@ void casePhysNodes() {
     check(j.str().find("\"phys_nodes\":{\"total\":313,\"overflow\":57,\"nodes\":[\"0x1036\"") !=
           std::string::npos, "7: the counters and ring serialize oldest-first");
 }
+
+// Draw-item-builder bucket counts (the census join, perf arc): per-session
+// counters for the FUN_1442B4420 bracket. A wild entry walk counts and
+// returns early; an empty walk counts separately; an exit fault drops the
+// call's items but keeps its bucket count; overflow and negative deltas
+// accumulate; the maxima track only what their path measured.
+void caseBucketItems() {
+    KinematicEvalProbe p;
+    p.noteBucketBuild(3, 25, 1, 0);                                    // normal: 3 buckets, +25, one drain
+    p.noteBucketBuild(0, 0, 0, 0);                                     // legitimately empty rig
+    p.noteBucketBuild(0, 0, 0, KinematicEvalProbe::kBucketFlagEntryWild); // faulted/insane walk
+    p.noteBucketBuild(5, 99, 0, KinematicEvalProbe::kBucketFlagExitFault);// exit fault: items dropped
+    p.noteBucketBuild(2, 7, 0, KinematicEvalProbe::kBucketFlagOverflow);  // cap hit, +7
+    check(p.bucketCalls_ == 5 && p.bucketItems_ == 32 &&
+          p.bucketEmptyCalls_ == 1 && p.bucketEntryWild_ == 1 &&
+          p.bucketExitFault_ == 1 && p.bucketNegDeltas_ == 1 &&
+          p.bucketOverflowCalls_ == 1,
+          "8: every path lands in its own counter, items skip the faulted call");
+    check(p.bucketMaxBuckets_.load() == 5 && p.bucketMaxItems_.load() == 25,
+          "8: maxima track the largest measured values");
+    std::ostringstream j;
+    p.writeJson(j);
+    check(j.str().find("\"bucket_items\":{\"calls\":5,\"items\":32,\"empty_calls\":1,"
+                       "\"entry_wild\":1,\"exit_fault\":1,\"neg_deltas\":1,"
+                       "\"overflow_calls\":1,\"max_buckets\":5,\"max_items_per_call\":25}") !=
+          std::string::npos, "8: the counters serialize");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -303,6 +330,7 @@ int wmain(int argc, wchar_t** argv) {
     caseJobMaskAccumulates();
     casePhysQueue();
     casePhysNodes();
+    caseBucketItems();
     std::printf("kinematic_probe_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

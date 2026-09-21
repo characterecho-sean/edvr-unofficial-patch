@@ -14,6 +14,14 @@ using JobFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 // FUN_14431AFE0 (decomp_431AFE0.txt): ulonglong f(longlong rig, longlong
 // poseCtx) -- exactly two register params, rig state checked at +0x380.
 using RigEvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t);
+// FUN_1442B4420 (decomp_42B4420.txt): f(param_1 rigOwner, param_2 ctx,
+// param_3 passedMask, param_4, param_5, param_6) -- SIX params, the last two
+// on the stack (param_6's 16 bytes are copied into every appended item).
+// The callback must declare all six so the compiler reproduces the stack
+// layout for the trampoline verbatim; truncating to four would shift
+// param_5/param_6 and corrupt the items.
+using BucketFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
+                                         uintptr_t,uintptr_t);
 
 // The evaluator and the job bodies live in the GAME'S module; this DLL loads
 // more than two gigabytes away, which a five-byte E9 patch cannot reach
@@ -188,6 +196,8 @@ bool prepareRelay(void* trampoline,void* context) noexcept {
 // the callbacks read the entries' forward trampolines.
 __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t,uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t,uintptr_t) noexcept;
+__declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t,uintptr_t,uintptr_t,
+                                                              uintptr_t,uintptr_t,uintptr_t) noexcept;
 #define EDVR_JOB_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall job##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_JOB_PROTO(0) EDVR_JOB_PROTO(1) EDVR_JOB_PROTO(2)
@@ -206,6 +216,8 @@ HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
     {"kinematic-job-4",kJobRvas[4],reinterpret_cast<void*>(&job4)},
     {"kinematic-job-5",kJobRvas[5],reinterpret_cast<void*>(&job5)},
 };
+HookEntry g_bucketEntry{"kinematic-bucket-build",KinematicEvalProbe::kBucketBuildRva,
+                        reinterpret_cast<void*>(&bucketBuildObserved)};
 
 // Per-thread mask of the job brackets currently on the stack (1u<<jobId),
 // maintained by bracket() and read by evalObserved: attributes every eval
@@ -308,6 +320,83 @@ EDVR_JOB_WRAPPER(0) EDVR_JOB_WRAPPER(1) EDVR_JOB_WRAPPER(2)
 EDVR_JOB_WRAPPER(3) EDVR_JOB_WRAPPER(4) EDVR_JOB_WRAPPER(5)
 #undef EDVR_JOB_WRAPPER
 
+// --- Draw-item-builder bracket (FUN_1442B4420, the census join) ------------
+// One call builds the draw items for one rig owner: it walks the owner's
+// instance entries (count u64 @ param_1+0x48, array @ +0x50, stride 0x58),
+// resolves each entry's model (entry+0x0) to its bucket (*(model+0x20)) and
+// appends 0x150-byte items to the bucket's list, counting every append at
+// bucket+0x2A4 (decomp_42B4420 lines 377-414, 661-735; the entry-array
+// offsets are byte offsets, param_1 being float* in the decompile). Reading
+// the counters at entry and exit attributes appends to this call; summed
+// per session they are the engine-side item production the D3D11 draw
+// census joins against. Both append paths are covered: the inline site and
+// FUN_1442B4130 run inside the forwarded call.
+constexpr uint32_t kBucketWalkCap=64u;
+struct BucketSnap { uintptr_t bucket; int32_t start; };
+
+uint32_t collectBuckets(uintptr_t rigOwner,BucketSnap* out,uint32_t cap,
+                        uint32_t* flags) noexcept {
+    __try {
+        uint64_t count=0;
+        std::memcpy(&count,reinterpret_cast<const void*>(rigOwner+0x48),8);
+        uintptr_t base=0;
+        std::memcpy(&base,reinterpret_cast<const void*>(rigOwner+0x50),8);
+        if(count==0)return 0;                    // legitimately empty rig
+        if(count>4096 || !base){*flags|=KinematicEvalProbe::kBucketFlagEntryWild;return 0;}
+        uint32_t n=0;
+        for(uint64_t i=0;i<count;++i) {
+            uintptr_t model=0;
+            std::memcpy(&model,reinterpret_cast<const void*>(base+i*0x58),8);
+            if(!model)continue;
+            uintptr_t bucket=0;
+            std::memcpy(&bucket,reinterpret_cast<const void*>(model+0x20),8);
+            if(!bucket)continue;
+            bool dup=false;
+            for(uint32_t k=0;k<n;++k)if(out[k].bucket==bucket){dup=true;break;}
+            if(dup)continue;
+            if(n==cap){*flags|=KinematicEvalProbe::kBucketFlagOverflow;break;}
+            int32_t start=0;
+            std::memcpy(&start,reinterpret_cast<const void*>(bucket+0x2A4),4);
+            out[n].bucket=bucket;out[n].start=start;++n;
+        }
+        return n;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        *flags|=KinematicEvalProbe::kBucketFlagEntryWild;
+        return 0;
+    }
+}
+
+__declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintptr_t b,
+                                                              uintptr_t c,uintptr_t d,
+                                                              uintptr_t e,uintptr_t f) noexcept {
+    const auto forward=reinterpret_cast<BucketFn>(g_bucketEntry.forward.load(std::memory_order_acquire));
+    if(!forward)return 0; // stood down at install; the relay is unreachable then
+    BucketSnap snaps[kBucketWalkCap];
+    uint32_t flags=0;
+    const uint32_t n=collectBuckets(a,snaps,kBucketWalkCap,&flags);
+    const uintptr_t result=forward(a,b,c,d,e,f);
+    if(n) {
+        uint64_t items=0;
+        uint32_t neg=0;
+        __try {
+            for(uint32_t k=0;k<n;++k) {
+                int32_t end=0;
+                std::memcpy(&end,reinterpret_cast<const void*>(snaps[k].bucket+0x2A4),4);
+                const int64_t delta=static_cast<int64_t>(end)-static_cast<int64_t>(snaps[k].start);
+                if(delta>0)items+=static_cast<uint64_t>(delta);
+                else if(delta<0)++neg; // drained mid-call: the residue is unknowable
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            items=0;neg=0;
+            flags|=KinematicEvalProbe::kBucketFlagExitFault;
+        }
+        kinematicEvalProbe.noteBucketBuild(n,items,neg,flags);
+    } else {
+        kinematicEvalProbe.noteBucketBuild(0,0,0,flags);
+    }
+    return result;
+}
+
 std::mutex g_installMutex;
 
 bool installOne(HookEntry& entry,uintptr_t base) noexcept;
@@ -332,6 +421,12 @@ bool ensureInstalled(uintptr_t base) noexcept {
         // The rig-link hook stands down alone too; riglink_checks == 0
         // with installed status then means the stand-down, and
         // CodeHook has logged the reason under kinematic-rig-eval.
+    }
+    if(!installOne(g_bucketEntry,base)) {
+        // The bucket-build bracket stands down alone as well:
+        // bucket_items.calls == 0 with installed status is the stand-down
+        // signature, and CodeHook has logged the reason under
+        // kinematic-bucket-build. (Job 3's thunk refused this way before.)
     }
     return true;
 }
