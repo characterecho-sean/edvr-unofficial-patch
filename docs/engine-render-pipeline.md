@@ -13,17 +13,19 @@ otherwise.
 
 ## Status
 
-* **State (2026-09-21):** seeded from the L2 trace and boundary attribution
-  (engine-render-performance-2026-09-19.md, 2026-09-21 entries), the
-  kinematic-motion-injection decision doc, terrain-culling, settlement-flicker
-  and canted-projection arcs. Six stages mapped at index depth; stages 2, 3
-  and 4 are the deep ones. Stage 5 (VR frame) is the least mapped and the
-  highest value for both current levers.
-* **Open, highest value first:** (1) VR frame layer — per-eye emission order,
-  stereo culling share, where truth becomes final per eye (stage 5); (2)
-  frame-scheduler identity and cadence — runtime stack capture at the worker
-  entries (stage 0); (3) the two unknown census families (stage 4); (4)
-  per-record identity and change signal in the rig chain (stage 2).
+* **State (2026-09-21, twice updated):** seeded from the L2 trace and boundary
+  attribution (engine-render-performance-2026-09-19.md, 2026-09-21 entries),
+  the kinematic-motion-injection decision doc, terrain-culling,
+  settlement-flicker and canted-projection arcs. Six stages mapped at index
+  depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
+  "least mapped" same day: existing census + EDVRDRW1 captures answered
+  emission order, stereo sharing, and the motion write point (see stage 5).
+* **Open, highest value first:** (1) frame-scheduler identity and cadence —
+  runtime stack capture at the worker entries (stage 0); (2) per-record
+  identity and change signal in the rig chain (stage 2); (3) EB52-family
+  per-eye bytes — its constants ride an 8-byte-stride instance VB, not cb0,
+  so naming/reading them wants an EB52-armed snapshot (the remaining
+  flight-quality gap); (4) the two unknown census families (stage 4).
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,
@@ -109,27 +111,44 @@ otherwise.
   flights), ~9% vh=8056C9D5F22007F9 and ~3% vh=2684F02B9B0BB0DE are unnamed,
   no DXBC on disk. Per-draw identity exists today: vh=/ph= content hashes,
   draw args, VB/IB tokens, viewport; EyeDrawSnapshot stages full VS
-  b0/b1/b2 + PS b2 + three IA streams per draw (binary EDVRDRW1 + per-shader
-  dxbc). Census caveats: 16384-line cap truncates to the first ~16% of the
+  b0–b3 + PS b2 + three IA streams per draw (binary EDVRDRW1 + per-shader
+  dxbc); a 4096-draw capture of flight 064511 exists
+  (edvr_logs/pool/drawstate_064511.bin, frames 12761+; joins to the census
+  via vh). Census caveats: 16384-line cap truncates to the first ~16% of the
   eye pass and frame 0 is copy-flooded — tally frames 1+.
 * **Open:** name the two unknown hashes (armed EyeDrawSnapshot pass);
-  compare staged constants across eye passes (ties to stage 5).
+  EB52's constants ride an 8-byte-stride instance VB (@434), not cb0, so it
+  is invisible to cb-staged captures (stage 5 carries the consequence).
 * **Lever:** motion write-point selection; A/B attribution for stage 1.
 * **Fragility:** hash families cross-session-stable; tokens session-local.
 
-## Stage 5 — VR submit and compositing (least mapped)
+## Stage 5 — VR submit and compositing
 
-* **Known:** the engine renders each eye as its own pass into eye textures
-  (census r=@ tokens, 1996×2121 RGBA8 + D32); the canted-projection arc
-  mapped the projection adjustment (docs/canted-projection.md); EDVR's own
-  OpenXR runtime observes the frame from the runtime side (src/openxr).
-* **Open:** per-eye emission order; where the canted projection enters per
-  eye; whether stereo culling/submission shares any work; where engine truth
-  becomes final per eye — the motion write-point question.
-* **Lever:** motion-vector truth finality; any single-pass-stereo question
-  (likely out of scope).
-* **Fragility:** VA-bound; partially observable from EDVR's runtime without
-  engine RE.
+* **Known (2026-09-21, from census + the drawstate_064511 EDVRDRW1 capture, no
+  new flight):** the engine emits each eye as its own pass into its own
+  1996×2121 RGBA8 + D32 target, strictly BLOCKED per layer — A×N then B×N,
+  never interleaved — with all offscreen/copies first. Shaders, geometry,
+  and constant-buffer *pointers* are shared across eyes; per-eye truth is
+  produced by re-staging the same buffers between passes: the shared b0
+  differs between eyes only in rows 4, 5, 7 (row 4 = ±0.242 eye-split
+  projection/rotation), and instanced families shift startInstance by a
+  constant +80148 into one shared instance buffer. Draw-time in the
+  immediate context inside each blocked eye pass is therefore a single hook
+  point that sees per-eye-final constants; the eye is known from the
+  render target / block ordinal, not from buffer contents. Canted
+  projection (docs/canted-projection.md) is the likely owner of the b0
+  row-4 split; EDVR's own OpenXR runtime observes the frame from the
+  runtime side (src/openxr).
+* **Open:** whether row 4's ±0.242 is exactly the canted-projection matrix
+  (compare against the canted arc's record); EB52-family per-eye bytes — its
+  constants live in the shared instance buffer, so an EB52-armed snapshot
+  (or instance-buffer read) is the remaining flight if those bytes matter;
+  whether the blocked pairs re-run culling per eye or reuse one scene list.
+* **Lever:** the motion write point — one hook, per-eye-final truth at draw
+  time, feeding surface 1 then surface 2 (stage 6); any single-pass-stereo
+  question (likely out of scope).
+* **Fragility:** VA-bound engine internals; the emission structure itself
+  is observable from EDVR's boundary without engine RE.
 
 ## Stage 6 — EDVR boundary and temporal surfaces
 
