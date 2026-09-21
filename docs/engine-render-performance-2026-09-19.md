@@ -2,15 +2,35 @@
 
 ## Status
 
-* **State (reviewed 2026-09-21):** job brackets and all three bucket-producer
-  instruments are built and flown. No L2 suppression is implemented or
-  validated. This doc owns the engine-performance arc; the settlement flicker
+* **State (2026-09-21, offline trace complete):** the consumer/scheduling
+  trace is done — 21 new decompiles plus DAT_145f27db4/vtable xref and
+  +0x2a0/+0x2b0 offset scans, all under `analysis/decomp/` and VA-specific to
+  binary E6BE8BBE…988. The bucket lifecycle is mapped end to end: factory →
+  vtable-worker entry → rekey → four producers append (0x150 record, u64 key)
+  batch nodes → drainer → per-bit weighted counting → lightweight command
+  enqueue into ring buffers. No L2 suppression is implemented; none is now
+  justified. This doc owns the engine-performance arc; the settlement flicker
   arc shares instruments and flights.
 
-* **Open:** the bucket-item -> D3D draw -> pass/eye census join, context and
-  bit ownership, upstream job scheduling, safe visibility revalidation, and a
-  matched settlement CPU baseline. Current producer counters measure item
-  creation, not submitted draw volume or recoverable frame time.
+* **Suppression refuted as scoped (2026-09-21):** five independent grounds —
+  (1) merge keys are copies of DAT_145f27db4, an unrelated Wwise
+  memory-category counter bumped unconditionally in FUN_1405d6260, so there is
+  no render generation or dirty surface to key on; (2) bucket items are not
+  draws — consumption is per-bit counting plus pointer/offset command records
+  (FUN_144c837b0 → FUN_144c7ef70), so the census 82% eye share has no proven
+  route from these lists; (3) the +0x2B0 dirty flag is written only inside
+  FUN_1401ea920's rekey sequence and has no conditional reader in .text; (4)
+  the frame scheduler is reachable only through vtable-table callbacks and is
+  unnamed by static RE; (5) one producer appends transform-derived packed
+  vectors (FUN_14434d470), so the subsystem may be light/probe batching, not
+  mesh draws. Do not build bucket clearing, rekeying or mask edits. See the
+  2026-09-21 trace entry at the end.
+
+* **Open (flight-worthy only):** what consumes the ring-buffer command records
+  (draws vs lights vs statistics) and the frame-scheduler identity. Both are
+  runtime-attributable: enqueue counters at FUN_144c7ef70 plus return-address
+  stacks at the worker entries. Everything else this arc needed is answered
+  offline. Producer counters measure item creation, not submitted volume.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -18,21 +38,9 @@
   AGENTS.md diagnosis discipline. Reusing prior zero samples solely from
   unchanged bindings/payload was refuted by the settlement arc's 2026-09-18
   targeted flight: three identical captures became visible next frame.
-
-* **L2 decision: continue investigation; suppression build is not yet
-  justified.** This supersedes the 07:45 GO and its shared settlement-doc note.
-  The LOD evaluator computes a current active mask, not changed bits. An
-  already-running job enters its clear/build path; calling the clear routine
-  alone does not enqueue work. Neither 82% bucket attribution nor a 40-frame
-  rebuild interval is established. See the independent review entry at the end
-  and `../handoff-prompt-l2-draw-suppression.md`.
-
-* **Next (offline first):** trace bucket consumers and upstream enqueue;
-  distinguish 0x6A0 context records from 0x2F0 collection records. Then build
-  one bounded, read-only instrument covering ownership, consumption, scheduling
-  and pass/eye attribution. Its next settlement capture must have explicit
-  discriminators before installation; no repeat flight with the unchanged
-  aggregate counters is requested.
+  Merge-key control of any kind — the key is an incidental audio counter
+  sampled at rekey. The 82% bucket attribution and 40-frame cadence — no
+  evidence route exists from the bucket lists to eye-pass draws.
 
 ## Frame budget philosophy
 
@@ -668,3 +676,104 @@ counter signatures before installing. Only then choose a suppression scope and
 visibility/restoration design; prefer investigating a per-job scoped mask over
 mutating shared content or externally clearing live lists. No suppression
 build, new flight, FPS gain or one-frame restoration is claimed by this review.
+
+
+### 2026-09-21 -- offline consumer/scheduling trace closed; bucket suppression refuted as scoped
+
+Method: Ghidra headless `-noanalysis` against the shared project (no analysis
+running; scripts preserved additively). 21 decompiles via DecompileTargets
+(now 21 RVAs), new xref scan FindBucketLinks (`vtable_key_refs.txt`), new
+offset scans FindDirtyFlagRefs/FindBucketStructUsers (`dirty_flag_refs.txt`,
+`bucket_struct_offsets.txt`). All addresses VA at image base 0x140000000 of
+EliteDangerous64.exe SHA-256 E6BE8BBE…988; not a hook contract. This closed
+the handoff's step 1 (consumer + scheduling trace) and thereby steps 2–4 as
+scoped: the capture spec, suppression decision and optimization design all
+collapse once the mechanism is known.
+
+**The lifecycle, end to end (evidence: decomp_*.txt cited per step).**
+
+1. Create: factories FUN_1442cd610/0x1442cd680 (gated by globals
+   DAT_146034260/DAT_146034350, pools DAT_1460341a0/DAT_146034290) construct
+   the worker via FUN_1442bf530/0x1442bf770, which install the
+   multiple-inheritance Table C vtables (0x145591xxx; decomp_42BF530/42BF770).
+   Factory callers are callback stubs inside Table A (0x1462b2234/0x1462b2240).
+   Bucket init FUN_14434ca90 zeroes key qword +0x2A0, sets +0x2A8, flag
+   +0x2B0=0 (decomp_434CA90).
+2. Rekey/reset, three paths: (a) worker entry FUN_144321940/FUN_144320340 →
+   FUN_1442b5670(owner, ctx) = 15-byte wrapper
+   `FUN_14434db60(owner+0x78, *(uint32_t*)(ctx+0x1A968))` (decomp_42B5670);
+   (b) batch repopulate FUN_1436a0f50: gates on a combined active mask built
+   from ctx records (+0x570 ANDed with interface masks, +0x580 ORed, +0x690
+   liveness), then clears the +0x88 bucket (FUN_14434dd50 + FUN_14434db60 with
+   key = DAT_145f27db4) and re-appends via FUN_14369c9c0 (decomp_36A0F50);
+   (c) FUN_1401ea920 → FUN_14434db30: flag +0x2B0=1, count=0, rekey to
+   DAT_145f27db4, then FUN_14434e1b0 drains pending items and re-clears the
+   flag (decomp_434DB30/434E1B0). Merge/absorb FUN_14434e20e and FUN_14434e28f
+   run under a critical section and merge sibling buckets only when +0x2A0
+   keys are equal AND +0x2A4 counts are nonzero (decomp_434E20E/434E28F).
+3. Key semantics: bucket+0x2A0 is a copy of ctx+0x1A968, itself a copy of
+   DAT_145F27DB4. The global has exactly one writer, FUN_1405d6260, whose
+   entire body is `DAT_145f27db4++; AK::MemoryMgr::GetCategoryStats(new_value,
+   …)` — an unconditional increment feeding Wwise memory-category stats, sole
+   caller FUN_1407f32d0 (decomp_05D6260, vtable_key_refs.txt). The merge key
+   is an unrelated audio counter sampled at rekey time.
+4. Produce: four producers append (0x150-byte record, u64 key) pairs to batch
+   nodes of eight from pool DAT_145efdd30, with a parallel key array at
+   node+0x154: FUN_1442b4420, FUN_144312e00, FUN_14369c9c0, and
+   FUN_14434d120 via FUN_14434d470 — the last builds its record as a
+   transform-derived packed 4-vector through SIMD plane-select/normalize/int-
+   pack before appending (decomp_434D120/434D470). A u64 "key" whose bits are
+   consumed per-bit (below) plus transform-derived vector payloads is
+   consistent with light/probe-style batching; the mesh-draw reading of this
+   subsystem is not supported by any decompile.
+5. Drain: FUN_1442df940 walks a fixed three-record window (stride 0x308 at
+   param_2+0x4f0..+0x610): notify FUN_1405d6df0, then FUN_14434d790 on the
+   bucket embedded at record+0x60, then zero record+0x58 (decomp_42DF940).
+   FUN_143681980 applies the same liveness gate as FUN_1436a0f50
+   (+0x1C378/+0x1C3D0) and drains the same +0x88 bucket that FUN_1436a0f50
+   resets — reset and drain are paired vtable methods on one owner
+   (decomp_3681980).
+6. Consume: the drainer hands each batch node to the shared run-length
+   accumulator FUN_144c837b0 (nine callers across the binary), which RLEs
+   consecutive equal u64 keys and, per run, adds run_length*n(n+1)/2 (n from
+   (*obj)+0x9c) into a 64-entry int table at receiver+0xd8 per set key bit,
+   then calls FUN_144c7ef70 (decomp_4C837B0). That function enqueues a
+   lightweight 0x48/0x50-byte command record — offsets, pointers, count, the
+   touched-bits mask, a sequence number — into one of four ring-buffer arrays
+   chosen by a 3-bit flag; it never copies item records and makes no virtual
+   calls (decomp_4C7EF70). Item payload reaches the queue only by pointer.
+
+**Why suppression is refuted as scoped.** Each ground independently fails the
+handoff's requirements (stable identity, pass/eye scope, conservative
+visibility, no side effects, serialized mutation, restoration):
+
+- Key control is impossible: the key is an incidental Wwise counter, not a
+  render generation; there is no dirty surface in this subsystem at all.
+- Items are not draws: consumption is per-bit weighted counting plus
+  pointer/offset command enqueue, so "one record -> one item -> one D3D draw
+  per eye" is false at the mechanism level and the census 82% eye share has
+  no route from these lists. The producer counters were never measuring
+  submitted draw volume.
+- The +0x2B0 dirty flag is set/cleared only inside FUN_1401ea920's rekey
+  sequence and has no conditional reader in .text; work gating is +0x2A4
+  count and +0x2A0 key equality inside the merge routines.
+- The frame scheduler — the cadence owner — invokes everything through
+  vtable-table callbacks (Tables A/B); no named .text caller exists and a
+  positional scan cannot see through the tables. Runtime stack capture is
+  the cheap way to name it, if it ever matters.
+- One producer's payload is a packed transform vector; the subsystem may not
+  be mesh draws in the first place, so "suppress unnecessary draws" was
+  likely aimed at the wrong object kind.
+
+ruled out: merge-key or bucket-clear based scheduling/control, because the
+key is an audio counter and clearing schedules nothing. ruled out: the
+82% eye attribution and the 40-frame rebuild cadence, because no evidence
+route connects bucket items to eye-pass draws and the scheduler is unnamed.
+ruled out: +0x2B0 as an enqueue trigger readable from .text.
+
+**Next (only if the question stays worth a flight).** One bounded read-only
+capture: enqueue counters at FUN_144c7ef70 (ring identity, touched mask,
+count, sequence) plus return-address stacks at FUN_144321940/0x144320340/
+0x1442df940/0x1436a0f50 to name the scheduler, correlated with the existing
+eye census to identify what the command rings drive. No bucket mutation, no
+clearing, no suppression build is justified by current evidence.
