@@ -256,47 +256,39 @@ otherwise.
   evidence; batch them into as few flights as the discriminators allow
   (AGENTS.md: enumerate before you build).
 
-## Next flight — batched protocol (one settlement visit)
+## Next flight — Phase 1/2 change-gate validation (one settlement visit)
 
-Every open runtime question, one visit. Install the probe build first
-(`tools/install_edvr.py --target frontier`, then `--verify-only`); preserve
-the live INI unless a change is requested; identity-check logs with
-`edvr_log.py --expect-build HEAD`. Instruments, in flight order:
+(The batched protocol above was flown 2026-09-21; its questions are
+answered in the engine arc. This is the gate build's validation flight —
+install the gate build first, `tools/install_edvr.py --target frontier`,
+then `--verify-only`; identity-check logs with
+`edvr_log.py --expect-build HEAD`.)
 
-1. **Settings A/B (stage 1 lever):** arm the census from the cockpit,
-   landed at the settlement (native VR — the state every settlement
-   capture in the evidence base came from), current `Custom.4.4.fxcfg`
-   (pass A). Game closed; set MaterialQuality=0, SurfaceMaterialQuality=0,
-   LODDistanceScale=0.1; relaunch, same spot and heading, arm again
-   (pass B). Discriminators: EB52-family vh= count and total eye draws
-   per frame (use `edvr_log.py --tally vh`); outcome (a) family collapses
-   → the sliders gate settlement scenery, quantified; (b) unchanged →
-   scenery ignores the knobs, no settings-side lever; (c) partial →
-   bisect which knob. Validity rule: pass A and pass B must see the same
-   scene, viewpoint, AND render path — stay in the ship for both passes:
-   disembarking switches to the flat vscreen panel (the scene then renders
-   ONCE into the 5120×2880 panel target, which EDVR excludes from
-   eye-draw counting), a different path that invalidates the comparison.
-   Sanity gate before pass A: 3 armed frames must show ~18k eye draws
-   into two 1996×2121 eye targets (native-VR cockpit state); if the scene
-   lands in a 5120×2880 target and eye draws collapse to compositor quads,
-   you are on the flat panel — stop and re-seat in the cockpit.
-2. **EB52-armed EyeDrawSnapshot (stage 4/5 gap):** in pass A, arm the
-   snapshot with EB5234DB6ADB491D watched; captures the family's per-eye
-   instance-buffer bytes the cb-staged captures cannot see, and names the
-   two unknown census hashes if their draws enter the snapshot window.
-3. **Scheduler stack capture (stage 0):** `advanced.scheduler_probe = 1`
-   in the install INI for the flight (default off); the built probe records
-   return-address stacks at FUN_144321940/0x144320340/0x1442df940/
-   0x1436a0f50 and reports top-3 stack signatures per target every 20 s.
-   Discriminator: the VA recurring at a consistent frame position above any
-   0x1462b…/0x145dd… stub is the scheduler; a named .text VA is a candidate
-   directly.
-4. Environment record for the log: VR runtime, headset, per-eye render
-   size (1996×2121 baseline), DLSS version, game build.
+Flight context: `temporal_aa = off` for both legs — the user's running
+choice until engine-truth motion vectors land, and the measurement-clean
+state (pass A's only frame-time confound was a mid-session temporal
+toggle; B/C ran off throughout, so off is the comparable baseline).
+`engine_motion` and `advanced.scheduler_probe` stay on; same settlement,
+cockpit, same parked spot and heading for both legs; >= 60 s parked per
+leg; census armed once per leg (~18k eye draws expected); eye-burst dump
+at the end of each leg (jobs[]).
 
-Signatures are stated per instrument so the visit cannot come back
-ambiguous; each outcome above already names its next move.
+1. **Leg 1, gate OFF** (`fix.static_prop_updates = 0`, the default):
+   brackets baseline at the settlement. This leg is the folded Phase 0 —
+   it replaces the extrapolated job costs with measured settlement
+   numbers.
+2. **Leg 2, gate ON** (`fix.static_prop_updates = 1`; game closed to edit
+   the INI): same spot. The gate's 20 s report lines (calls seen/skipped/
+   run, refreshes, invalidations, evictions) plus the bracket delta.
+
+Verdicts, pre-written: (a) bracket delta (job-0+batch wall share) below
+~1.5 ms -> the design DIES on the measured number, gate stays off;
+(b) census eye-draw counts differ between legs -> the gate broke the
+persistence invariant -> ABORT, default off forever, investigate; (c)
+brackets drop by the measured share AND census counts are identical AND
+frame-cycle improves -> Phase 2 regression pass (flicker instruments,
+mover-heavy window, a jump/dock transition to exercise invalidation)
+before default-on is even proposed.
 
 ## How to update
 
