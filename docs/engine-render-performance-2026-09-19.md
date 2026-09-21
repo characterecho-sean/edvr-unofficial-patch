@@ -1064,6 +1064,24 @@ for the settlement job breakdown vs the 10 ms; optionally one
 calibration flight with fpsVR running alongside EDVR's instruments to
 correlate fpsVR's CPU figure with the brackets.
 
+L1 re-read (2026-09-21): the brackets-only flight (193356) sums only
+~0.26 ms/frame of kinematic jobs over a MOSTLY NON-SETTLEMENT session
+(UpdateRenderDataJob 55 us mean, 0.167 ms/frame; RenderDataBatch 176 us,
+0.094) — the old ~7 ms figure was the detailed-observer artifact in a
+different scene, not reproduced. BUT the scheduler probe shows the
+settlement invocation volume is ~432 job-0 calls/frame + ~79 batch/frame
+(vs ~3/frame averaged over 193356): extrapolated ~24 ms + ~14 ms of CPU
+spread over worker threads, i.e. ~4-5 ms wall if overlap is poor —
+reachable toward the 10 ms wall, but per-call costs come from a
+non-settlement scene and thread overlap is unproven. NOT settled by
+existing data. The defined next flight (zero config changes needed —
+engine_motion and scheduler_probe are already on in the flight INI):
+parked at the settlement >= 60 s, then hotkey eye-burst to dump jobs[],
+census armed for scene confirmation (~18k eye draws = same scene as the
+fpsVR 10 ms), ideally fpsVR alongside to calibrate EDVR's job totals
+against fpsVR's CPU figure. Compare: UpdateRenderDataJob/RenderDataBatch
+calls+mean+total in the settlement window vs the 10 ms wall.
+
 ruled out: fixed-density scatter (A's instances are ordinary pool
 records); an alternate LOD keyed elsewhere (no LOD branch exists);
 identification via census_cb_watch (A/B bind no b0 — resolved: frame
