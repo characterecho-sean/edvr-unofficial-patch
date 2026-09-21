@@ -1024,6 +1024,26 @@ fade) is a product decision with the usual suppression-discipline
 requirements (visibility proof, restoration path) that the 2026-09-21
 trace entry records as still mandatory.
 
+Cost model prior (Sean's earlier testing, stock Elite included):
+settlements are CPU-bound — interpret draw-count deltas as CPU submission
+cost until the frame-time mining of the A/B/C passes proves otherwise;
+GPU-side levers (DLSS/render-scale) do not address the settlement wall.
+
+Cost baseline (2026-09-21, mined from the same passes' frame-cycle
+windows): the parked cockpit state at any of the three settings rides the
+pacer at 88–89 fps with ~9 ms/frame idle in wait_frame; the ~3.5k removed
+draws of passes B/C cost < ~0.15 ms/frame (delta mixed-sign within
+session scatter). No game-GPU timer exists in the logs; EDVR's own spans
+are sub-ms and identical across states. Conclusion: the PARKED census
+state is not bounding on this rig — there is no perf problem to fix in
+that state, and the draw-attribution lever has no measurable cost there.
+Confounds recorded: pass A straddled a live temporal-AA toggle (only its
+w3 window is matched); armed-census windows collapse fps (instrument
+overhead, excluded); 22–55 ms periodic hitches appear in ALL states.
+Side finding: ~9 ms/frame of pacer headroom means draw-time hook work
+(e.g. motion-truth sampling) fits the budget on this rig. Costing the
+REAL settlement state needs a traverse flight (below).
+
 ruled out: fixed-density scatter (A's instances are ordinary pool
 records); an alternate LOD keyed elsewhere (no LOD branch exists);
 identification via census_cb_watch (A/B bind no b0 — resolved: frame

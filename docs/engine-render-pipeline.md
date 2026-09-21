@@ -20,11 +20,13 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) per-record identity and change signal
-  in the rig chain (stage 2 — the motion arc's remaining pre-design item);
-  (2) where LODDistanceScale gates B's layer selection and why A has no
-  gate (stage 1/2 join — offline; the A-layer finding is recorded in the
-  engine arc as a design input); (3) optionally close the scheduler's
+* **Open, highest value first:** (1) the traverse flight — cost the real
+  settlement state: drive or fly through the settlement at baseline vs
+  LODDistanceScale=0.1, same instruments (all installed), the
+  frame-cycle windows then bound the draw volume in ms under genuine load
+  (the parked state proved non-bounding: < ~0.15 ms for 3.5k draws, ~9 ms
+  pacer headroom); (2) per-record identity and change signal in the rig
+  chain (stage 2 — motion arc); (3) optionally close the scheduler's
   runtime-built payload vtables (stage 0); (4) ring-buffer command
   consumers.
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
