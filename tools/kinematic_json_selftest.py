@@ -116,6 +116,12 @@ def self_test():
                                       entry_wild=7, exit_fault=5, neg_deltas=11,
                                       overflow_calls=3, max_buckets=17,
                                       max_items_per_call=4711), ke['bucket_items']
+    # Direct producers (bucket = param_2): per-producer stat sets, named.
+    assert ke['bucket_items_direct'] == [
+        dict(producer='fun_144312e00', calls=6101, items=777777, neg_deltas=13,
+             read_faults=2, max_items_per_call=909),
+        dict(producer='fun_14369c9c0', calls=6202, items=888888, neg_deltas=14,
+             read_faults=4, max_items_per_call=808)], ke['bucket_items_direct']
     print('kinematic json self-test passed')
 
 

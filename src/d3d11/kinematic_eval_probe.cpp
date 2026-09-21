@@ -517,6 +517,22 @@ void KinematicEvalProbe::noteBucketBuild(uint32_t buckets,uint64_t items,
           !bucketMaxBuckets_.compare_exchange_weak(prev,buckets,std::memory_order_relaxed)){}
 }
 
+void KinematicEvalProbe::noteDirectBuild(uint32_t producer,uint64_t items,
+                                         uint32_t negDeltas,bool readFault) noexcept {
+    if(producer>=kDirectProducerCount)return;
+    DirectBuildStat& s=direct_[producer];
+    s.calls.fetch_add(1,std::memory_order_relaxed);
+    if(readFault){s.readFaults.fetch_add(1,std::memory_order_relaxed);return;}
+    if(items) {
+        s.items.fetch_add(items,std::memory_order_relaxed);
+        const uint32_t perCall=items>0xFFFFFFFFull?0xFFFFFFFFu:static_cast<uint32_t>(items);
+        uint32_t prev=s.maxItems.load(std::memory_order_relaxed);
+        while(prev<perCall &&
+              !s.maxItems.compare_exchange_weak(prev,perCall,std::memory_order_relaxed)){}
+    }
+    if(negDeltas)s.negDeltas.fetch_add(negDeltas,std::memory_order_relaxed);
+}
+
 KinematicEvalProbe::Summary KinematicEvalProbe::summary() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return summary_;
@@ -711,7 +727,22 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"overflow_calls\":"<<bucketOverflowCalls_.load(std::memory_order_relaxed)
      <<",\"max_buckets\":"<<bucketMaxBuckets_.load(std::memory_order_relaxed)
      <<",\"max_items_per_call\":"<<bucketMaxItems_.load(std::memory_order_relaxed)
-     <<"}}"; // bucket_items+phys_nodes, kinematicEval
+     <<"},\"bucket_items_direct\":[";
+    {   // Names name the producer function; the fixture round-trips them verbatim.
+        static const char* const kNames[kDirectProducerCount]={"fun_144312e00","fun_14369c9c0"};
+        for(uint32_t i=0;i<kDirectProducerCount;++i) {
+            if(i)j<<',';
+            const DirectBuildStat& s=direct_[i];
+            j<<"{\"producer\":\""<<kNames[i]
+             <<"\",\"calls\":"<<s.calls.load(std::memory_order_relaxed)
+             <<",\"items\":"<<s.items.load(std::memory_order_relaxed)
+             <<",\"neg_deltas\":"<<s.negDeltas.load(std::memory_order_relaxed)
+             <<",\"read_faults\":"<<s.readFaults.load(std::memory_order_relaxed)
+             <<",\"max_items_per_call\":"<<s.maxItems.load(std::memory_order_relaxed)
+             <<'}';
+        }
+    }
+    j<<"]}"; // bucket_items+direct, kinematicEval
 }
 
 void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
@@ -848,6 +879,18 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     bucketOverflowCalls_.store(3,std::memory_order_relaxed);
     bucketMaxBuckets_.store(17,std::memory_order_relaxed);
     bucketMaxItems_.store(4711,std::memory_order_relaxed);
+
+    // Direct-producer fixture: distinctive values per producer.
+    direct_[0].calls.store(6101,std::memory_order_relaxed);
+    direct_[0].items.store(777777,std::memory_order_relaxed);
+    direct_[0].negDeltas.store(13,std::memory_order_relaxed);
+    direct_[0].readFaults.store(2,std::memory_order_relaxed);
+    direct_[0].maxItems.store(909,std::memory_order_relaxed);
+    direct_[1].calls.store(6202,std::memory_order_relaxed);
+    direct_[1].items.store(888888,std::memory_order_relaxed);
+    direct_[1].negDeltas.store(14,std::memory_order_relaxed);
+    direct_[1].readFaults.store(4,std::memory_order_relaxed);
+    direct_[1].maxItems.store(808,std::memory_order_relaxed);
 
     summary_.observed=987654321ull;
     summary_.readFaults=3;summary_.recordOverflow=1;summary_.transitionOverflow=2;summary_.vtableOverflow=4;
