@@ -2,637 +2,669 @@
 
 ## Status
 
-* **State:** seeded 2026-09-19 (Sean: "secondary goal — improve engine
-  render performance where possible"). Nothing built. This doc owns the
-  performance arc; settlement-flicker-2026-09-17.md keeps the flicker
-  diagnosis. The two share instruments and flights.
+* **State (reviewed 2026-09-21):** job brackets and all three bucket-producer
+  instruments are built and flown. No L2 suppression is implemented or
+  validated. This doc owns the engine-performance arc; the settlement flicker
+  arc shares instruments and flights.
 
-* **Open:** every lever below is a hypothesis until its named instrument
-  produces a number. The first shared measurement is the job-bracket
-  flight (probes installed 2026-09-19 evening, commit 116a2e0).
+* **Open:** the bucket-item -> D3D draw -> pass/eye census join, context and
+  bit ownership, upstream job scheduling, safe visibility revalidation, and a
+  matched settlement CPU baseline. Current producer counters measure item
+  creation, not submitted draw volume or recoverable frame time.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
   Compensation-style tweaks (sharpening over blur, threshold nudges) —
-  AGENTS.md diagnosis discipline.
+  AGENTS.md diagnosis discipline. Reusing prior zero samples solely from
+  unchanged bindings/payload was refuted by the settlement arc's 2026-09-18
+  targeted flight: three identical captures became visible next frame.
 
-* **L2 decision (2026-09-21 07:45): GO.** Two flights + the offline
-  producer map closed the census join: the eye pass (82% of draws)
-  is bucket-list draws, lists are rebuilt wholesale on LOD-mask
-  changes and retained between rebuilds, and suppression is
-  clear-bits + force-rebuild via the engine's own batch clear.
-  Details and the ruled-out list in the 07:45 entry.
+* **L2 decision: continue investigation; suppression build is not yet
+  justified.** This supersedes the 07:45 GO and its shared settlement-doc note.
+  The LOD evaluator computes a current active mask, not changed bits. An
+  already-running job enters its clear/build path; calling the clear routine
+  alone does not enqueue work. Neither 82% bucket attribution nor a 40-frame
+  rebuild interval is established. See the independent review entry at the end
+  and `../handoff-prompt-l2-draw-suppression.md`.
 
-* **Next (offline, no flight):** decode the force-rebuild mechanics
-  — the batch clear's +0x2A0 key provenance (ctx+0x1A968/0x1A96C)
-  and the record -> owner -> bucket reach — then the L2 build. A
-  flight is wanted only when a build exists.
+* **Next (offline first):** trace bucket consumers and upstream enqueue;
+  distinguish 0x6A0 context records from 0x2F0 collection records. Then build
+  one bounded, read-only instrument covering ownership, consumption, scheduling
+  and pass/eye attribution. Its next settlement capture must have explicit
+  discriminators before installation; no repeat flight with the unchanged
+  aggregate counters is requested.
 
 ## Frame budget philosophy
 
-Root causes over compensation. Every lever must name (a) the measured
-cost it attacks, (b) the instrument that proves the cost, (c) the
-expected saving, (d) the observable regression risk. A lever without a
-measurement does not get built — one flight per hypothesis is the most
-expensive way to run this project, so instruments batch.
+Root causes over compensation. Every lever must name (a) the measured cost it
+attacks, (b) the instrument that proves the cost, (c) the expected saving, (d)
+the observable regression risk. A lever without a measurement does not get
+built — one flight per hypothesis is the most expensive way to run this
+project, so instruments batch.
 
 ## What is measured so far (pointers, not restatements)
 
-* \~23k D3D11 calls per frame at settlements, \~76% zero-sample draws
-  (draws whose query never samples a pixel) — settlement-flicker arc,
-  draw census + original-draw probe.
+* \~23k D3D11 calls per frame at settlements, \~76% zero-sample draws (draws
+  whose query never samples a pixel) — settlement-flicker arc, draw census +
+  original-draw probe.
 
-* KinematicRig eval FUN\_14430EFE0 and its LOD-metric/traversal callers
-  are the suspected settlement CPU tax; the sibling jobs (physics
-  advance, render-data update, the 0x4320340 batch) are unmeasured.
+* KinematicRig eval FUN\_14430EFE0 and its LOD-metric/traversal callers remain
+  CPU candidates. Render update, batch and physics brackets have measurements
+  below; worker overlap, unmatched scenes and unhooked PrePhysicsAdvanceJob
+  prevent a complete CPU critical-path attribution.
 
 * The 0x4320340 caller/job-dispatch path and the visibility masks around
-  0x431B11D–0x431B221 (what decides a record dispatches at all) are
-  RESOLVED offline (2026-09-20 20:05 entry; no flight spent — every piece
-  was already in analysis\decomp). Four dispatch levels named, and the
-  engine's feedable visibility bit identified: render-record +0x570 mask
-  word. The +0x570 writer is IDENTIFIED (20:25 entry): the ctx builder
-  copies it from the source model record at ctx build time and nothing
-  rewrites it per frame — a cleared bit persists until content rebuild.
-  L2's remaining unknown: the census join. (Bit-to-draw-class semantics
-  resolved to the model at 21:45: source-record +0x560 is copied whole from
-  model+0x8E0 by the source-record builder; per-bit class names sit one
-  hop up, not needed for whole-word suppression.)
+  0x431B11D–0x431B221 (what decides a record dispatches at all) are RESOLVED
+  offline (2026-09-20 20:05 entry; no flight spent — every piece was already in
+  analysis\decomp). Four dispatch levels named, and the content-derived
+  render-record +0x570 mask is consumed by dispatch and draw building. The
+  known copy chain is model+0x8E0 -> source+0x560 -> render-record+0x570. No
+  per-frame writer was found in the inspected paths; this is not itself a
+  current-view occlusion result or proof of instance-local ownership. Census
+  attribution, bit/pass scope and safe mutation/restoration remain open even
+  for whole-word suppression.
 
 ## Levers, cheapest measurement first
 
 ### L1. Know the split: CPU job brackets (first measurement 2026-09-19, eye run 205251)
 
-First numbers: UpdateRenderDataJob \~7.0 ms summed per frame (138 calls
-x 51 us), RenderDataBatch (0x4320340) \~2.4 ms, physics <= 0.05 ms.
-**Do not read this as proved dominance** (Sean's review, settlement doc
-21:23 entry): summed job durations can overlap across worker threads;
-the detailed observer takes the probe mutex thousands of times per frame
-inside the measured jobs; PrePhysicsAdvanceJob was never hooked. Next
-measurement: brackets only (detailed observer disabled), job-3 included,
-before any lever is sized on these numbers.
+First numbers: UpdateRenderDataJob \~7.0 ms summed per frame (138 calls x 51
+us), RenderDataBatch (0x4320340) \~2.4 ms, physics <= 0.05 ms. **Do not read
+this as proved dominance** (Sean's review, settlement doc 21:23 entry): summed
+job durations can overlap across worker threads; the detailed observer takes
+the probe mutex thousands of times per frame inside the measured jobs;
+PrePhysicsAdvanceJob was never hooked. A later brackets-only flight is recorded
+at 19:45 below, but its unmatched scene mix does not bound observer overhead.
+Next sizing measurement needs a matched settlement window and
+critical-path/worker overlap evidence.
 
-### L2. Draw suppression of proven-zero-sample draws
+### L2. Investigate safe suppression of currently unnecessary draws
 
-If the census shows the same draw families sample zero pixels for many
-consecutive frames, suppress the original draw (not just skip our own
-work). The engine's own visibility bits are now mapped (2026-09-20 20:05
-entry): the feedable point is the render-record +0x570 mask word, ANDed
-against the dispatch mask at draw-build time in FUN\_1442B4420 and ORed
-into the rig accumulator in FUN\_14431AFE0 — clearing a proven-zero-sample
-record's bits there feeds the engine's own mechanism instead of
-second-guessing it. The +0x570 writer is now identified (2026-09-20
-20:25 entry) and is content-static: the mask is copied once from the
-source model record at ctx build and never rewritten per frame, so a
-cleared bit persists until the ctx is rebuilt — re-assert on rebuild,
-not per frame. The content pipeline is mapped end to end (2026-09-20
-21:45 entry): the mask is born on the model object (+0x8E0) and copied
-down whole at every hop — MOV-only at all three levels, never
-accumulated in place. The census join is CLOSED (2026-09-21 07:45
-entry; decision GO): the eye pass — 82% of draws — is bucket-list
-draws, lists are rebuilt wholesale on LOD-mask changes and retained
-between rebuilds, and suppression takes effect at the next rebuild.
-The mechanism is therefore clear-bits + force-rebuild via the
-engine's own batch clear, never the natural rebuild cadence.
-Remaining before building: the force-rebuild mechanics (the batch
-clear's +0x2A0 key provenance at ctx+0x1A968/0x1A96C and the
-record -> owner -> bucket reach, both in decompiles on disk) and
-per-bit draw-class names (the model+0x8E0 writer — 30 candidates
-listed in analysis/decomp/stores\_8e0.txt; a ctor default of 0x3C
-hints bits are draw-list slots), needed only for pass-selective
-suppression. Risk: suppressing a draw that becomes visible needs a
-one-frame restore path — re-set the bits and force a second
-rebuild; proven on the smoke/static-surface rigs.
+Repeated zero samples identify candidates for investigation, not permission to
+suppress a record. The settlement arc already observed zero-to-visible
+transitions with identical captured draw state. A safe decision needs stable
+engine identity, current-view validity, both-eye/pass coverage, absence of
+relevant side effects and a restoration/retest path that works while the
+original draw is suppressed. A longer history window alone supplies none of
+those guarantees.
+
+The +0x570 content mask is a candidate control point: FUN\_14431AFE0 ORs it
+into dispatch selection; FUN\_144331300 uses it for current LOD selection;
+FUN\_1442B4420 tests it before building items. Existing distance, frustum and
+optional visibility gates still matter for static objects. Masks can be
+combined into one item, and the 0x6A0 records do not yet have a proven unique
+link to the 0x2F0 collection records, buckets or D3D draws. Whole-word clearing
+therefore still requires ownership and pass-scope proof.
+
+FUN\_14434DB60 clears/rekeys a bucket. In the examined worker and batch paths,
+a nonzero current LOD mask causes clear followed by traversal/build in the same
+invocation. No old/new-mask comparison or enqueue exists in that clear. The
+upstream scheduling trigger and bucket lifetime across frames remain
+unresolved; do not implement an external clear as a forced rebuild.
+
+Before a suppression build: close the item-to-draw join, establish context/bit
+fanout and lifetime, locate a serialized instance/pass-scoped interception
+point, and define conservative visibility invalidation plus restoration. A
+per-job mask inside an already-running worker is a candidate to investigate,
+not yet a proven safe alternative. No smoke/static-surface restore test has
+validated engine suppression. The 2026-09-21 independent review gives the
+combined measurement plan.
 
 ### L3. Kinematic eval narrowing
 
-**Blocked pending proven signals** (Sean's review, settlement doc 21:23
-entry). The earlier formulation rested on two unproven foundations:
-render-record+0x688 is the engine's own intra-frame evaluation sequencer
-(its gates already consume it), and record+0x268 is a render-config hash
-that never reads the transform — not a motion signal.
+**Blocked pending proven signals** (Sean's review, settlement doc 21:23 entry).
+The earlier formulation rested on two unproven foundations: render-record+0x688
+is the engine's own intra-frame evaluation sequencer (its gates already consume
+it), and record+0x268 is a render-config hash that never reads the transform —
+not a motion signal.
 
 What the eval actually does per record per frame (FUN\_14430EFE0,
-decomp\_430EFE0.txt): descriptor mask gate, node liveness bytes, two
-flag-word skip gates, then view-dependent work — LOD distance test and a
-plane-loop frustum test (FUN\_1404f4e10). **LOD and frustum are
-view-dependent: they must still run for stationary objects** (buildings
-stand still while the head moves). The valid lever, if a clean L1
-remeasure still shows eval work dominant, is narrower: avoid REBUILDING
-unchanged object data while preserving every view-dependent decision.
-What proves "unchanged" is unresolved — the transform/dirty-state
-dependency chain is an open offline item.
+decomp\_430EFE0.txt): descriptor mask gate, node liveness bytes, two flag-word
+skip gates, then view-dependent work — LOD distance test and a plane-loop
+frustum test (FUN\_1404f4e10). **LOD and frustum are view-dependent: they must
+still run for stationary objects** (buildings stand still while the head
+moves). The valid lever, if a clean L1 remeasure still shows eval work
+dominant, is narrower: avoid REBUILDING unchanged object data while preserving
+every view-dependent decision. What proves "unchanged" is unresolved — the
+transform/dirty-state dependency chain is an open offline item.
 
 ### L4. Physics decimation for attached-static children
 
-If physics jobs dominate: children rigidly attached to a static parent
-do not need per-frame physics advance. Depends on the parent-physics
-interface map (KinematicRig +0x1C0, slots +0x90/+0x170) proving which
-classes distinguish static/kinematic/parent-relative — the other agent's
+The measured physics job was small in the mixed flight and its write queue is
+change-gated; no settlement-scale physics saving is established. Only if a
+matched baseline shows meaningful physics cost: children rigidly attached to a
+static parent do not need per-frame physics advance. Depends on the
+parent-physics interface map (KinematicRig +0x1C0, slots +0x90/+0x170) proving
+which classes distinguish static/kinematic/parent-relative — the other agent's
 current reversing target. Do not build on planet attachment alone.
 
 ### L5. Render-thread / submission overlap
 
-Only if L1 shows neither job set dominant: the 23k-call volume itself is
-the tax. Options: deferred-context command lists for the swallow/redraw
-paths we already own, or batching the swallow quads. Defer until the
+Only if L1 shows neither job set dominant: the 23k-call volume itself is the
+tax. Options: deferred-context command lists for the swallow/redraw paths we
+already own, or batching the swallow quads. Defer until the
 openxr-submit-performance arc notes are re-read; there is history there.
 
 ## Cross-cutting constraints
 
-* Every lever ships behind a config key naming the user-visible effect,
-  off or auto by default per the existing convention.
+* Every lever ships behind a config key naming the user-visible effect, off or
+  auto by default per the existing convention.
 
-* Every lever states its environment dependency at flight time: VR
-  runtime, headset, per-eye render size, DLSS version, record-table
-  sizes.
+* Every lever states its environment dependency at flight time: VR runtime,
+  headset, per-eye render size, DLSS version, record-table sizes.
 
-* Instruments are part of the deliverable. A lever that cannot report
-  its own before/after cost in the log does not merge.
+* Instruments are part of the deliverable. A lever that cannot report its own
+  before/after cost in the log does not merge.
 
 ## 2026-09-20 (17:55) -- the L1 catch in code: timing is gated on the observer
 
-Verified while wiring the job-attribution TLS mask (kinematic doc 17:50
-entry, build installed to frontier): bracket() early-returns the
+Verified while wiring the job-attribution TLS mask (kinematic doc 17:50 entry,
+build installed to frontier): bracket() early-returns the
 untimed forward when `!probe || !probe->active()`, so the QPC brackets
-measure ONLY while the detailed observer is capturing. That is the L1
-catch made concrete: probe on = the observer's per-record mutex/reads
-inside every measured job; probe off = no numbers at all, even with the
-tracker live (fix.engine\_motion on). The 17:50 instrument does not
-touch the timing path (its cost is one TLS read/OR/restore per job
-call), so L1's remeasure is neither advanced nor worsened -- it is
-blocked on exactly this gate.
+measure ONLY while the detailed observer is capturing. That is the L1 catch
+made concrete: probe on = the observer's per-record mutex/reads inside every
+measured job; probe off = no numbers at all, even with the tracker live
+(fix.engine\_motion on). The 17:50 instrument does not touch the timing path
+(its cost is one TLS read/OR/restore per job call), so L1's remeasure is
+neither advanced nor worsened -- it is blocked on exactly this gate.
 
-The unblock is small and probe-side: hoist the QPC bracket off the
-active() gate (time whenever the hooks own the job bodies), keeping
-observe()/noteOwnership gated as today. Every tracker flight then
-returns brackets-only job costs in the jobs\[] JSON with no extra
-flight, and a probe-armed window still gives the with-observer
-comparison for the overlap correction. Semantics change to note:
-jobs\[] becomes per-session rather than per-capture-window. Job-3
-(0x42DF530) still refuses the CodeHook (thunk-shaped leading
-instruction) -- extend the hook for that prologue or accept the gap;
-physics was <= 0.05 ms on eye run 205251, so job-3 is unlikely to
-dominate, but the 21:23 remeasure note explicitly includes it.
+The unblock is small and probe-side: hoist the QPC bracket off the active()
+gate (time whenever the hooks own the job bodies), keeping
+observe()/noteOwnership gated as today. Every tracker flight then returns
+brackets-only job costs in the jobs\[] JSON with no extra flight, and a
+probe-armed window still gives the with-observer comparison for the overlap
+correction. Semantics change to note: jobs\[] becomes per-session rather than
+per-capture-window. Job-3 (0x42DF530) still refuses the CodeHook (thunk-shaped
+leading instruction) -- extend the hook for that prologue or accept the gap;
+physics was <= 0.05 ms on eye run 205251, so job-3 is unlikely to dominate, but
+the 21:23 remeasure note explicitly includes it.
 
 If hoisted before the job-attribution flight, ONE flight batches both
-measurements: the mover/static discriminator census AND the L1
-brackets-only numbers.
+measurements: the mover/static discriminator census AND the L1 brackets-only
+numbers.
 
 ### 2026-09-20 18:12 -- L1 unblock landed: brackets time without the observer
 
-Sean sanctioned the hoist ("go"). bracket() now times whenever the hooks
-own the job bodies, on the process-lifetime probe global -- the probe's
-observer pointer is only consulted for noteOwnership, which keeps its
-active() gate alongside observe(). The detailed observer's cost enters
-the measured region only while it is capturing: the with/without
-comparison L1 asked for now falls out of one log (probe-armed eye-burst
-windows vs the tracker-only baseline around them). jobs\[] semantics
-changed as flagged: per-session accumulation, not per capture window.
-Gates unchanged and green (87/0 tracker, 28/0 probe, json self-test,
-contract 252/252); frontier d3d11 87d036727d54c0c6, verified. Job-3
-remains unhooked (thunk-shaped prologue; physics <= 0.05 ms on 205251,
-so the gap is accepted, not extended). The next settlement flight with
-fix.engine\_motion on batches both measurements: the mover/static
-discriminator census (kinematic doc 17:50) and the L1 brackets-only
-job costs.
+Sean sanctioned the hoist ("go"). bracket() now times whenever the hooks own
+the job bodies, on the process-lifetime probe global -- the probe's observer
+pointer is only consulted for noteOwnership, which keeps its active() gate
+alongside observe(). The detailed observer's cost enters the measured region
+only while it is capturing: the with/without comparison L1 asked for now falls
+out of one log (probe-armed eye-burst windows vs the tracker-only baseline
+around them). jobs\[] semantics changed as flagged: per-session accumulation,
+not per capture window. Gates unchanged and green (87/0 tracker, 28/0 probe,
+json self-test, contract 252/252); frontier d3d11 87d036727d54c0c6, verified.
+Job-3 remains unhooked (thunk-shaped prologue; physics <= 0.05 ms on 205251, so
+the gap is accepted, not extended). The next settlement flight with
+fix.engine\_motion on batches both measurements: the mover/static discriminator
+census (kinematic doc 17:50) and the L1 brackets-only job costs.
 
 ### 2026-09-20 19:10 -- flight 190122: brackets fine, but L1 numbers need a burst
 
-Cross-entry (full read-out in the kinematic doc's same-time foot
-entry). The hoisted timing ran all flight on the tracker-only path and
-the discriminator census came back a symmetric null (physics jobs never
-touch the eval stream -- ruled out as a classifier; this also narrows
-L4: physics decimation needs the physics-job decomps to find where
-dynamics actually advance, now the shared offline step). But L1's
-brackets-only NUMBERS are not in this log: jobs\[] accumulates
-per-session as designed, yet it only lands in the classification JSON
-at dump time -- and no eye burst was taken. The L1 remeasure owes one
+Cross-entry (full read-out in the kinematic doc's same-time foot entry). The
+hoisted timing ran all flight on the tracker-only path and the discriminator
+census came back a symmetric null (physics jobs never touch the eval stream --
+ruled out as a classifier; this also narrows L4: physics decimation needs the
+physics-job decomps to find where dynamics actually advance, now the shared
+offline step). But L1's brackets-only NUMBERS are not in this log: jobs\[]
+accumulates per-session as designed, yet it only lands in the classification
+JSON at dump time -- and no eye burst was taken. The L1 remeasure owes one
 burst next flight (any view; the JSON writes regardless).
 
 ### 2026-09-20 19:11 -- L4 evidence: physics writes are change-gated; the dirty queue sizes the volume
 
-Cross-entry from the kinematic arc (full entry in the kinematic doc,
-same time). UpdatePhysicsObjectsJob (decomp\_432B2A0.txt) composes
-physics x parent-chain per element (stride 0x30, state==4 bodies) and
-writes the node 4x4 ONLY on a bit-exact change, appending changed nodes
-to a dirty queue. For L4: sleeping dynamics already cost just one
-compare per element, so the decimatable volume is the compose+queue
-work of bodies that actually move -- measurable per frame as the dirty
-queue's append count (the planned job-2 bracket counter logs it).
-PrePhysicsAdvanceCurveJob (0x42DF550) advances animation curves on a
-stride-0x18 array, a separate subsystem. PrePhysicsAdvanceJob's real
-body is FUN\_14431E860 (the 0x42DF530 adapter explains the CodeHook
-refusal: it begins with a jump).
+Cross-entry from the kinematic arc (full entry in the kinematic doc, same
+time). UpdatePhysicsObjectsJob (decomp\_432B2A0.txt) composes physics x
+parent-chain per element (stride 0x30, state==4 bodies) and writes the node 4x4
+ONLY on a bit-exact change, appending changed nodes to a dirty queue. Unchanged
+results avoid the node write and queue append; the preceding composition and
+comparison can still cost work. The queue's append count measures changed-node
+output, not total physics/composition cost. PrePhysicsAdvanceCurveJob
+(0x42DF550) advances animation curves on a stride-0x18 array, a separate
+subsystem. PrePhysicsAdvanceJob's real body is FUN\_14431E860 (the 0x42DF530
+adapter explains the CodeHook refusal: it begins with a jump).
 
 ### 2026-09-20 19:30 -- the dirty-queue append counter is now measured
 
-Cross-entry from the kinematic arc (full entry in the kinematic doc,
-same time). The planned job-2 queue counter landed: bracket reads the
-atomic append count (descriptor +0x18) at job entry and exit, probe
-accumulates per-session runs/appended/max\_delta/resets plus the first
-64 non-trivial (entry,exit) pairs into the kinematicEval JSON's new
-phys\_queue key. For L4, `appended / runs` IS the per-frame physics
-write volume -- the decimatable work -- and it arrives in the same eye
-burst that finally harvests the L1 brackets-only jobs\[] numbers (owed
-from flight 190122). Gates green (87/0, 32/0, json self-test, contract
-252/252); frontier d3d11 34f9195432f98190, verified. UNFLOWN.
+Cross-entry from the kinematic arc (full entry in the kinematic doc, same
+time). The planned job-2 queue counter landed: bracket reads the atomic append
+count (descriptor +0x18) at job entry and exit, probe accumulates per-session
+runs/appended/max\_delta/resets plus the first 64 non-trivial (entry,exit)
+pairs into the kinematicEval JSON's new phys\_queue key. For L4, `appended /
+runs` measures appends per dispatch; per-frame volume requires a frame delta
+over the same window. It arrives in the same eye burst that finally harvests
+the L1 brackets-only jobs\[] numbers (owed from flight 190122). Gates green
+(87/0, 32/0, json self-test, contract 252/252); frontier d3d11
+34f9195432f98190, verified. UNFLOWN.
 
 ### 2026-09-20 19:45 -- flight 193356: L1 remeasured brackets-only; L4 write volume has its number
 
-The same burst (classification\_193539.json) paid both debts. Build
-label caveat in the kinematic doc 19:45 entry (installed sha
-34f9195432f98190 == 227cd41 content).
+The same burst (classification\_193539.json) paid both debts. Build label
+caveat in the kinematic doc 19:45 entry (installed sha 34f9195432f98190 ==
+227cd41 content).
 
 **L1, brackets-only, tracker-only path (\~103 s, 10758 frames):**
-UpdateRenderDataJob 32656 calls, mean 55.1 us, max 25.4 ms (the
-scene-load hitch), total 1.799 s (\~1.7% of one core); RenderDataBatch
-5772 calls, mean 176.0 us, max 3.34 ms, total 1.016 s;
-UpdatePhysicsObjectsJob 1196 working runs, mean 7.6 us, 9 ms total --
-negligible; Unnamed\_BA0 2395 x 0.5 us; PrePhysicsAdvanceJob still
-unhooked, CurveJob still never fires. The observer-tax question is
-answered for job 0: 51 us/call with the detailed observer (205251)
-vs 55.1 us/call without -- the tax is within noise, so 205251's
-settlement-scale \~7 ms/frame stands modulo the cross-thread overlap
-caveat brackets cannot resolve. Per-FRAME normalization still needs a
-parked-at-settlement window: this flight averaged only \~3 job-0
-calls/frame because settlement scale (2573 eligible) arrived in the
-last \~20 s. Note for readers: jobs\[2].calls counts runs whose body
-took >= 1 QPC tick; phys\_queue.runs (8124) counts dispatches -- the
-6.8x gap is the elapsed>0 gate, not a probe defect.
+UpdateRenderDataJob 32656 calls, mean 55.1 us, max 25.4 ms (the scene-load
+hitch), total 1.799 s (\~1.7% of one core); RenderDataBatch 5772 calls, mean
+176.0 us, max 3.34 ms, total 1.016 s; UpdatePhysicsObjectsJob 1196 working
+runs, mean 7.6 us, 9 ms total -- negligible; Unnamed\_BA0 2395 x 0.5 us;
+PrePhysicsAdvanceJob still unhooked, CurveJob still never fires. The 51 us/call
+with the detailed observer (205251) and 55.1 us/call without come from
+different scene mixes; they do not establish that observer tax is within noise
+or validate the earlier \~7 ms/frame as removable engine cost. The job timer
+also excludes the preceding ownership observation. Per-FRAME normalization
+still needs a parked-at-settlement window: this flight averaged only \~3 job-0
+calls/frame because settlement scale (2573 eligible) arrived in the last \~20
+s. Note for readers: jobs\[2].calls counts runs whose body took >= 1 QPC tick;
+phys\_queue.runs (8124) counts dispatches -- the 6.8x gap is the elapsed>0
+gate, not a probe defect.
 
-**L4, write volume measured:** 15174 node appends over 1196 working
-runs = \~12.7 node writes per working run, peak 133. The queue drains
-entirely between runs (resets 0 in 8124), so decimation math can
-treat the append count as the batch unit. Order settled: tens of
-node writes per frame at settlement scale, not hundreds -- L4's
-expected saving is capped accordingly.
+**L4, write volume measured:** 15174 node appends and 1196 timed working runs
+give a ratio of \~12.7; dispatches total 8124, peak append count 133. The timed
+subset and the queue counter are different denominators. The zero reset/anomaly
+counter is consistent with draining but does not turn appends/run into
+appends/frame. These mixed-flight totals do not establish "tens of writes per
+settlement frame"; use matched-window append and frame deltas before sizing
+decimation. The measured total cost remains small.
 
 ### 2026-09-20 20:05 -- L2 gate RESOLVED offline: what decides a record dispatches
 
-Zero flights, zero new Ghidra runs: the mask region 0x431B11D-0x431B221
-turned out to live INSIDE FUN\_14431AFE0 (the rig-link function the probe
-already hooks), and every piece of the dispatch path was already in
-analysis\decomp from the settlement arc. Assembled end to end:
+Zero flights, zero new Ghidra runs: the mask region 0x431B11D-0x431B221 turned
+out to live INSIDE FUN\_14431AFE0 (the rig-link function the probe already
+hooks), and every piece of the dispatch path was already in analysis\decomp
+from the settlement arc. Assembled end to end:
 
-**Level 1, per rig per frame -- FUN\_14431AFE0(rig, ctx).** Gate: rig
-state +0x380 == 4. If rig byte +0x3D1 set, walk the render records
-(stride 0x6A0, count *(ctx+0x1A940), base ctx+0x40); per record require
-context match (FUN\_142840840 vs rig+0x350, byte rig+0x3D2), the
-+0x68C-bit-5/dependency-token condition (+0x188 == -1 && rig+0x190),
-the per-record predicate FUN\_14432C520, and (if DAT\_145ea3479) three
-further predicates plus the rig+0x46C float gate. Each passing record
-ORs its mask word render-record+0x570 into the accumulator. Then the
-0x431B11D region proper: clear the per-class suppression bits
-(*(ctx+0x1A950/58/60), selected by collection+0x70 bit 7) from the
-accumulator. **Accumulator == 0 or collection+0x70 bit 0 clear => the
-whole collection is skipped** (collection+0x629 = 0, cleanup via
-FUN\_14434DD50 / FUN\_1442B5760); nonzero => dispatch UpdateRenderDataJob
-(FUN\_144321940) or its worker-slot equivalent with the mask in the
-descriptor (local\_50).
+**Level 1, per rig per frame -- FUN\_14431AFE0(rig, ctx).** Gate: rig state
++0x380 == 4. If rig byte +0x3D1 set, walk the render records (stride 0x6A0,
+count *(ctx+0x1A940), base ctx+0x40); per record require context match
+(FUN\_142840840 vs rig+0x350, byte rig+0x3D2), the
++0x68C-bit-5/dependency-token condition (+0x188 == -1 && rig+0x190), the
+per-record predicate FUN\_14432C520, and (if DAT\_145ea3479) three further
+predicates plus the rig+0x46C float gate. Each passing record ORs its mask word
+render-record+0x570 into the accumulator. Then the 0x431B11D region proper:
+clear the per-class suppression bits (*(ctx+0x1A950/58/60), selected by
+collection+0x70 bit 7) from the accumulator. **Accumulator == 0 or
+collection+0x70 bit 0 clear => the whole collection is skipped**
+(collection+0x629 = 0, count-clear via FUN\_14434DD50 / FUN\_1442B5760);
+nonzero => dispatch UpdateRenderDataJob (FUN\_144321940) or its worker-slot
+equivalent with the mask in the descriptor (local\_50).
 
 **Level 2, per collection -- FUN\_144320340 (RenderDataBatch).** The LOD
-evaluator FUN\_144331300 must return nonzero, else the collection takes
-the empty path. Nonzero runs the traversal FUN\_144312040 (the world
-update / eval fan-out) and then the per-record loop.
+evaluator FUN\_144331300 fills an output whose active mask at +0x20 must be
+nonzero, else the collection takes the empty path. Its return value is the
+output pointer, not a changed flag. Nonzero clears/rekeys the primary bucket,
+runs traversal FUN\_144312040, and enters secondary count-clear/build in the
+same invocation. This does not establish when the upstream scheduler invokes
+it.
 
-**Level 3, per record (stride 0x2F0).** Dispatch requires: pose ctx
-rec+0x290 != 0, byte rec+0x234 != 0, byte rec+0x298 != 0 (the probe's
-count298 -- the draw-distance nibble), and at least one pending bit in
-rec+0x208 whose 4-bit entry in the rec+0x210 nibble table (lane
-bit>>4, nibble (bit&0xF)\*4) is <= *(ushort*)(node+0x6A), node =
-rec+0x18. Passing records call FUN\_1442B4420(poseCtx, collection,
-traversalMask, nibbleTable) with the predicate pointer rec+0x2C0.
+**Level 3, per record (stride 0x2F0).** Dispatch requires: pose ctx rec+0x290
+!= 0, byte rec+0x234 != 0, byte rec+0x298 != 0 (the probe's count298 -- the
+draw-distance nibble), and at least one pending bit in rec+0x208 whose 4-bit
+entry in the rec+0x210 nibble table (lane bit>>4, nibble (bit&0xF)\*4) is <=
+*(ushort*)(node+0x6A), node = rec+0x18. Passing records call
+FUN\_1442B4420(poseCtx, ctx, traversalMask, nibbleTable) with the predicate
+pointer rec+0x2C0.
 
-**Level 4, draw-item build -- FUN\_1442B4420.** Gated on DAT\_145ea3398.
-Per render record of the collection: require (rec+0x570 & passedMask)
-!= 0, survive the frustum plane-loop FUN\_1404F4E10 (return -1 = culled),
-and (if DAT\_145ea3399 && rec+0x68D bit 0) a further visibility test on
-rec+0x688. Visible records OR +0x570 into the visible mask; per set bit,
-a table at collection+0x1A840 (uint per bit) maps bit -> render-record
-index, FUN\_1442B3FC0 tests the candidate, and survivors are appended to
-the per-bucket draw lists (FUN\_143696FA0 list nodes; item counter at
-bucket+0x2A4). Draws are born here.
+**Level 4, draw-item build -- FUN\_1442B4420.** Gated on DAT\_145ea3398. Per
+render record of the context: require (rec+0x570 & passedMask) != 0, survive
+the frustum plane-loop FUN\_1404F4E10 (return -1 = culled), and (if
+DAT\_145ea3399 && rec+0x68D bit 0) a further visibility test on rec+0x688.
+Visible records OR +0x570 into the visible mask; per set bit, a table at
+ctx+0x1A840 (uint per bit) maps bit -> render-record index, FUN\_1442B3FC0
+tests the candidate, and survivors are appended to the per-bucket draw lists
+(FUN\_143696FA0 list nodes; item counter at bucket+0x2A4). These are engine
+items; D3D draw attribution remains open.
 
-**Consequence for L2.** The engine visibility bit we should feed is
-**render-record +0x570**: consumed both at rig-mask accumulation
-(FUN\_14431AFE0) and at draw-build (FUN\_1442B4420's AND), so clearing
-a proven-zero-sample record's bits suppresses it through the engine's
-own mechanism at both levels. Unresolved before building: (a) the
-+0x570 writer -- a FindStores570 variant of the existing FindStores
-scripts finds it; the patch must land after the engine's own per-frame
-write; (b) bit semantics per draw class/LOD (the writer reveals them);
-(c) the join from these bucket lists to the draw census's 23k D3D11
-calls (bucket item counter +0x2A4 is countable per frame). Also
-correction-noted: the perf doc's L1 framing suspected eval cost without
-a dispatch map; level 3's rec+0x208/nibble test now names the per-record
-CPU gate precisely.
+**Consequence for L2 (corrected 2026-09-21).** Render-record +0x570 controls
+selection, but this map does not establish a safe mutable visibility bit. The
+later writer analysis identifies content construction, not an observed
+per-frame write. Remaining requirements include bit/instance/pass scope, the
+item-to-draw join and current visibility/restoration. Level 3's
+rec+0x208/nibble test names a CPU gate; its 0x2F0 record family must not be
+conflated with the 0x6A0 context records used in levels 1 and 4.
 
 ### 2026-09-20 20:25 -- +0x570 writer found: content-static, copied from the source model record
 
-The FindStores570 scan (analysis/decomp/stores\_570.txt; 19.6M
-instructions, 132 writer functions) stores to render-record +0x570 by
-**MOV only -- zero OR/AND stores anywhere**, so the mask word is never
-accumulated in place. The examined writers are all bookkeeping:
-FUN\_1442BE1F0 and FUN\_1443DE430 are constructors (+0x570 zero-init;
-the flag688 tag on the second was a vtable-install coincidence at
-index 0xd1), FUN\_1442BF9D0 is a move/transfer (dst = src, src = 0),
-and FUN\_1442D46C0 is a std::vector capacity field at +0x570 (offset
-collision).
+The FindStores570 scan (analysis/decomp/stores\_570.txt; 19.6M instructions,
+132 writer functions) stores to render-record +0x570 by **MOV only in the scan
+-- no direct OR/AND stores found**. This is evidence about the located writers,
+not exclusion of indirect/aliased stores or bulk copies. The examined writers
+are bookkeeping: FUN\_1442BE1F0 and FUN\_1443DE430 are constructors (+0x570
+zero-init; the flag688 tag on the second was a vtable-install coincidence at
+index 0xd1), FUN\_1442BF9D0 is a move/transfer (dst = src, src = 0), and
+FUN\_1442D46C0 is a std::vector capacity field at +0x570 (offset collision).
 
-Pivot: the render-record COUNT field ctx+0x1A940 has exactly two
-writers (FindStores1A940; analysis/decomp/stores\_1a940.txt) --
-FUN\_1401E4FD0 and FUN\_142819D90. FUN\_142819D90 calls FUN\_142819F70,
-the only +0x570 writer also touching the companion fields +0x688 /
-+0x68C at the 0x6a0 record stride. Decompiles:
-analysis/decomp/decomp\_2819F70.txt, decomp\_2819D90.txt.
+Pivot: the render-record COUNT field ctx+0x1A940 has exactly two writers
+(FindStores1A940; analysis/decomp/stores\_1a940.txt) -- FUN\_1401E4FD0 and
+FUN\_142819D90. FUN\_142819D90 calls FUN\_142819F70, the only +0x570 writer
+also touching the companion fields +0x688 / +0x68C at the 0x6a0 record stride.
+Decompiles: analysis/decomp/decomp\_2819F70.txt, decomp\_2819D90.txt.
 
-**FUN\_142819F70 is the render-record builder.** It copies the mask
-verbatim: source model record +0x560 -> render record +0x570. The
-same builder copies source +0x558 -> +0x688 (the flag word),
-assembles +0x68C from source +0x56C bits, copies source +0x568 ->
-+0x578 (the bit -> record-index value used by the ctx+0x1A840 table),
-and ORs entry-list masks into +0x580 / +0x588+idx. FUN\_142819D90
-builds the ctx (called twice from FUN\_1401EA920, a content/load path,
-not per frame): count at ctx+0x1A940 = (srcEnd - srcBegin) / 0x570
-capped at 0x40 (<= 64 records per ctx); source records are stride
-0x570; it also builds the bit -> record-index table at ctx+0x1A840
-and the exclusion accumulators ctx+0x1A948 (all records' masks) /
-+0x1A950 / +0x1A958, partitioned by rec+0x688 & 0x7FF0 / & 0xFF0 --
-the exact words FUN\_14431AFE0 subtracts per class.
+**FUN\_142819F70 is the render-record builder.** It copies the mask verbatim:
+source model record +0x560 -> render record +0x570. The same builder copies
+source +0x558 -> +0x688 (the flag word), assembles +0x68C from source +0x56C
+bits, copies source +0x568 -> +0x578 (the bit -> record-index value used by the
+ctx+0x1A840 table), and ORs entry-list masks into +0x580 / +0x588+idx.
+FUN\_142819D90 builds the ctx (called twice from FUN\_1401EA920, a content/load
+path, not per frame): count at ctx+0x1A940 = (srcEnd - srcBegin) / 0x570 capped
+at 0x40 (<= 64 records per ctx); source records are stride 0x570; it also
+builds the bit -> record-index table at ctx+0x1A840 and the exclusion
+accumulators ctx+0x1A948 (all records' masks) / +0x1A950 / +0x1A958,
+partitioned by rec+0x688 & 0x7FF0 / & 0xFF0 -- the exact words FUN\_14431AFE0
+subtracts per class.
 
-**Nothing rewrites +0x570 per frame.** L2 consequence: clearing a
-proven-zero-sample record's bits persists until the ctx is rebuilt;
-the re-assert cadence is "hook the builder or re-clear on ctx
-rebuild", not per frame. Remaining unknowns before L2 is buildable:
-the bit-to-draw-class semantics (the source-record +0x560 writer, in
-the content pipeline) and the census join from the bucket lists to
-the 23k D3D11 draws. New artifacts: analysis/ghidra\_scripts/
-FindStores570.java, FindStores1A940.java, run\_ghidra\_stores570.bat,
-run\_ghidra\_stores1a940.bat; decomp outputs under analysis/decomp/
-(gitignored, on disk only).
+**No per-frame +0x570 writer found in the inspected paths.** Content
+construction is established; persistent lifetime, safe mutation and
+re-assertion on reconstruction still require ownership/generation proof.
+Bit/pass scope, census attribution and visibility/restoration also remain open.
+New artifacts: analysis/ghidra\_scripts/ FindStores570.java,
+FindStores1A940.java, run\_ghidra\_stores570.bat, run\_ghidra\_stores1a940.bat;
+decomp outputs under analysis/decomp/ (gitignored, on disk only).
 
 ### 2026-09-20 21:45 -- +0x560 writer found: the mask is born on the model and copied down whole
 
-The L2 bit-semantics scan (FindStores560 + FindStores8E0, new scripts
-in analysis/ghidra\_scripts; outputs stores\_560.txt / stores\_8e0.txt)
-closes the content pipeline end to end:
+The L2 bit-semantics scan (FindStores560 + FindStores8E0, new scripts in
+analysis/ghidra\_scripts; outputs stores\_560.txt / stores\_8e0.txt) closes the
+content pipeline end to end:
 
-**Source-record +0x560 writer = FUN\_14280F800, the source-record
-builder** (decomp\_280F800.txt). It appends stride-0x570 source records
-(count at param\_1+0x15C00) and fills the new record from the model
-object: +0x560 <- model+0x8E0 (the mask), +0x558 <- model+0x18 (flag
-word), +0x568 <- model+0x8E8 (bit->index), +0x56C <- the bits that
-become render +0x68C, plus the +0x2F0/+0x2F8 pair, +0x300..+0x31C
-dwords and the two 16-byte arrays the render-record builder re-copies.
-Caller chain closed: the big content-load routine FUN\_1401EA920 (the
-ctx builder's caller, 20:25 entry) populates its stack arrays via
-FUN\_140200E20, which calls FUN\_14280F800 -- content load -> source
-records -> ctx build -> render records, one connected pipeline.
+**Source-record +0x560 writer = FUN\_14280F800, the source-record builder**
+(decomp\_280F800.txt). It appends stride-0x570 source records (count at
+param\_1+0x15C00) and fills the new record from the model object: +0x560 <-
+model+0x8E0 (the mask), +0x558 <- model+0x18 (flag word), +0x568 <- model+0x8E8
+(bit->index), +0x56C <- the bits that become render +0x68C, plus the
++0x2F0/+0x2F8 pair, +0x300..+0x31C dwords and the two 16-byte arrays the
+render-record builder re-copies. Caller chain closed: the big content-load
+routine FUN\_1401EA920 (the ctx builder's caller, 20:25 entry) populates its
+stack arrays via FUN\_140200E20, which calls FUN\_14280F800 -- content load ->
+source records -> ctx build -> render records, one connected pipeline.
 
-**The other +0x560 writers are bookkeeping.** FUN\_143AC3E60 (the other
-all-tag candidate) zero-inits +0x560 and sets +0x558=1 (ctor);
-FUN\_1442BE1F0 / FUN\_1443DE430 are the known ctors. MOV-only at every
-level, again: no OR/AND store to source+0x560 OR model+0x8E0 exists
-anywhere in the binary, so no engine path accumulates mask bits in
-place -- every hop copies a fully-computed word.
+**The other +0x560 writers are bookkeeping.** FUN\_143AC3E60 (the other all-tag
+candidate) zero-inits +0x560 and sets +0x558=1 (ctor); FUN\_1442BE1F0 /
+FUN\_1443DE430 are the known ctors. MOV-only at every level in the inspected
+chain: no direct OR/AND store to source+0x560 or model+0x8E0 was found by these
+scans. This establishes the copy chain, not a universal absence of indirect or
+bulk mutation.
 
-**Bit semantics live one hop up: model+0x8E0.** 48 writer functions,
-30 tagged with the 0x8E8 sibling; byte/word/dword stores are width
-collisions (9 dropped). The qword writers are ctor-family (the same
-FUN\_140869EC0/FUN\_140529550 sub-object helpers as the record ctor).
-One, FUN\_14331C0C0, stores a constant DEFAULT of 0x3C (bits 2-5) --
-first semantic hint: bits number draw-list slots, with a standard
-four-slot default set and bits 0-1 reserved for something special
-(unproven; labelled speculation). Named next hop, not flown/needed
-yet: decompile the model+0x8E0 writers (list in stores\_8e0.txt) when
-pass-selective suppression (shadow vs main) is wanted. L2 as scoped --
-clear the whole word of a proven-zero record -- does not need it.
+**Bit semantics live one hop up: model+0x8E0.** 48 writer functions, 30 tagged
+with the 0x8E8 sibling; byte/word/dword stores are width collisions (9
+dropped). The qword writers are ctor-family (the same
+FUN\_140869EC0/FUN\_140529550 sub-object helpers as the record ctor). One,
+FUN\_14331C0C0, stores a constant DEFAULT of 0x3C (bits 2-5) -- first semantic
+hint: bits number draw-list slots, with a standard four-slot default set and
+bits 0-1 reserved for something special (unproven; labelled speculation). Named
+next hop, not flown/needed yet: decompile the model+0x8E0 writers (list in
+stores\_8e0.txt) to determine bit ownership and pass scope. Whole-word
+suppression also needs that scope: an eye-pass query cannot certify shadow or
+other-view visibility.
 
-**L2 buildability status:** writer identified (20:25), re-assert
-cadence settled (on ctx rebuild, not per frame), pipeline mapped
-(21:45). Remaining: the census join from the bucket draw lists to the
-23k D3D11 calls, then a build decision.
+**L2 buildability status (corrected 2026-09-21):** writer and copy chain
+identified. Census attribution, instance/pass scope, scheduling and
+visibility/restoration remain open; see the independent review below.
 
 ### 2026-09-21 06:37 -- census-join instrument landed (bucket item counter)
 
-The last L2 unknown Sean sanctioned at 05:07 is now built and
-installed: the engine bucket item counter (+0x2A4) rides the existing
-kinematic-eval hook set, so ONE settlement flight answers "which
-engine draw lists become which D3D11 calls" (join against the draw
-census in the gfx log, offline).
+The engine bucket item counter (+0x2A4) is built and installed in the existing
+kinematic-eval hook set. It measures production volume. Review correction:
+aggregate deltas alone cannot answer which engine items become which D3D11
+calls; that needs consumer and pass/eye provenance.
 
-**Engine truth, from decomp\_42B4420.txt (no flight spent).** The
-per-rig draw-item builder FUN\_1442B4420 walks its owner's instance
-entries -- count u64 @ rigOwner+0x48, array @ +0x50, stride 0x58
-(the decompile's param\_1+0x12/+0x14 are float\*-ELEMENT offsets; the
-byte offsets are 0x48/0x50, resolving the overlapping-fields paradox).
-Each entry's model (entry+0x0) names its bucket: bucket = \*(model+0x20),
-list head bucket+0x260, item counter bucket+0x2A4. Items are 0x150
-bytes, eight per pool block (pool DAT\_145efdd30), with a parallel
-per-item mask array after the block's items. The FindBucketOps scan
-(new analysis script; output analysis/decomp/bucket\_ops.txt) found 136
-functions touching +0x2A4 but only FOUR that also reference the block
-pool: the two producers inside the bracket (FUN\_1442B4420 inline and
-its helper FUN\_1442B4130), FUN\_14369c9c0 (a second producer family,
-callers unknown -- caveat below) and FUN\_14431305c (a dispatch-side
-fragment that also INCs). Resets exist (FUN\_14434CD90 /
-FUN\_14434DB30 zero the counter), so +0x2A4 drains per frame and the
-entry/exit delta is the robust read, exactly as designed. Correction
-to a line in the 21:45 entry's wake: the local\_478 path in
-FUN\_1442B4420 is NOT dead -- FUN\_1442B2730 can set it through a
-pointer (the binary's call list shows CALL 0x1442b4130 at 1442b4843);
-both append paths run inside the forwarded call, so the bracket
-covers both either way.
+**Engine truth, from decomp\_42B4420.txt (no flight spent).** The per-rig
+draw-item builder FUN\_1442B4420 walks its owner's instance entries -- count
+u64 @ rigOwner+0x48, array @ +0x50, stride 0x58 (the decompile's
+param\_1+0x12/+0x14 are float\*-ELEMENT offsets; the byte offsets are
+0x48/0x50, resolving the overlapping-fields paradox). Each entry's model
+(entry+0x0) names its bucket: bucket = \*(model+0x20), list head bucket+0x260,
+item counter bucket+0x2A4. Items are 0x150 bytes, eight per pool block (pool
+DAT\_145efdd30), with a parallel per-item mask array after the block's items.
+The FindBucketOps scan (new analysis script; output
+analysis/decomp/bucket\_ops.txt) found 136 functions touching +0x2A4 but only
+FOUR that also reference the block pool: the two producers inside the bracket
+(FUN\_1442B4420 inline and its helper FUN\_1442B4130), FUN\_14369c9c0 (a second
+producer family, callers unknown -- caveat below) and FUN\_14431305c (a
+dispatch-side fragment that also INCs). Resets exist (FUN\_14434CD90 /
+FUN\_14434DB30 zero the counter). Their existence does not establish a
+per-frame drain cadence; entry/exit deltas measure net production inside the
+bracket. Correction to a line in the 21:45 entry's wake: the local\_478 path in
+FUN\_1442B4420 is NOT dead -- FUN\_1442B2730 can set it through a pointer (the
+binary's call list shows CALL 0x1442b4130 at 1442b4843); both append paths run
+inside the forwarded call, so the bracket covers both either way.
 
-**The instrument.** kinematic\_eval\_hook.cpp gains a sixth-param
-callback on RVA 0x42B4420 (param\_6's 16 bytes are copied into every
-item, so the full stack layout must pass through verbatim -- a
-four-param forward would have corrupted items). The bracket walks the
-entry array at call entry (deduped, cap 64, \_\_try discipline from the
-phys-queue capture), reads each bucket's +0x2A4 before and after the
-forwarded call, and accumulates per-session into the probe:
-calls / items / empty\_calls / entry\_wild / exit\_fault / neg\_deltas /
+**The instrument.** kinematic\_eval\_hook.cpp gains a sixth-param callback on
+RVA 0x42B4420 (param\_6's 16 bytes are copied into every item, so the full
+stack layout must pass through verbatim -- a four-param forward would have
+corrupted items). The bracket walks the entry array at call entry (deduped, cap
+64, \_\_try discipline from the phys-queue capture), reads each bucket's +0x2A4
+before and after the forwarded call, and accumulates per-session into the
+probe: calls / items / empty\_calls / entry\_wild / exit\_fault / neg\_deltas /
 overflow\_calls / max\_buckets / max\_items\_per\_call, serialized as
-kinematicEval.bucket\_items in the classification JSON. Per-session,
-never active()-gated -- tracker-only flights harvest it. Prologue
-verified hookable from the exe bytes (mov r11,rsp; pushes; sub
-rsp,0x4D8 -- no thunk). Gates: kinematic\_probe\_test 38/0 (new case 8
-drives every counter path), kinematic json self-test extended and
-green, config contract 253/253. Frontier install d3d11 sha256:16
-01f727ef8fe1e808 (build predates its commit; hash is truth).
+kinematicEval.bucket\_items in the classification JSON. Per-session, never
+active()-gated -- tracker-only flights harvest it. Prologue verified hookable
+from the exe bytes (mov r11,rsp; pushes; sub rsp,0x4D8 -- no thunk). Gates:
+kinematic\_probe\_test 38/0 (new case 8 drives every counter path), kinematic
+json self-test extended and green, config contract 253/253. Frontier install
+d3d11 sha256:16 01f727ef8fe1e808 (build predates its commit; hash is truth).
 
-**Flight protocol (next flight).** One settlement eye burst on this
-build; read classification\_\*.json -> kinematicEval.bucket\_items.
-Dead-instrument discriminators, named before flying: calls == 0 while
-draws proceed = the hook stood down at install (CodeHook logs under
-kinematic-bucket-build); calls > 0 but empty\_calls == calls = the
-walk offsets (+0x48/+0x50) are wrong for live rigs -- re-derive, do
-not trust a zero. Success shape: calls \~ rig count per frame
-(\~1.5k), items per call in the tens, and a session items-total that
-pairs against the census's \~23k D3D11 calls.
+**Original flight protocol (completed; revised below).** One settlement eye
+burst on this build; read classification\_\*.json ->
+kinematicEval.bucket\_items. Dead-instrument discriminators, named before
+flying: calls == 0 while draws proceed requires checking CodeHook installation
+and scene/path coverage. calls > 0 but empty\_calls == calls requires
+distinguishing legitimate empty production from bad walk offsets; neither is
+success by itself. The original expected shape was calls \~ rig count per frame
+(\~1.5k), items per call in the tens, and a session items-total that pairs
+against the census's \~23k D3D11 calls.
 
-**Caveat for the read.** FUN\_14369c9c0 / FUN\_14431305c /
-FUN\_14434D120 INC the same counter pattern on what may be other
-passes' lists (shadow etc.). If engine items land far BELOW 23k, the
-remainder is those producers plus non-bucket draw sources -- the join
-still answers the suppression question for the main list, which is
-the only one L2 proposes to feed.
+**Caveat for the read.** FUN\_14369c9c0 / FUN\_14431305c / FUN\_14434D120 INC
+the same counter pattern on what may be other passes' lists (shadow etc.). A
+gap between produced items and D3D draws could reflect other producers, reuse,
+fanout or non-bucket sources. The counters alone do not distinguish them or
+establish a suppression join.
 
 ### 2026-09-21 06:55 -- flight 064511: instrument live; production is churn, not volume
 
-First bucket-counter flight read (classification\_064511.json; flown
-DLL verified by hash 01f727ef8fe1e808 -- the --expect-build label
-mismatch is the known pre-commit label, same as the node-capture
-build). Session: frames 0..12,759 at dump (log 06:43:19 -> 06:45:11);
-the settlement scene (depth-probe 25,885 draws/frame at 06:45:07;
-DC census 55,058 draws over the 3 capture frames) covers roughly the
-last 2-3k frames.
+First bucket-counter flight read (classification\_064511.json; flown DLL
+verified by hash 01f727ef8fe1e808 -- the --expect-build label mismatch is the
+known pre-commit label, same as the node-capture build). Session: frames
+0..12,759 at dump (log 06:43:19 -> 06:45:11); the settlement scene (depth-probe
+25,885 draws/frame at 06:45:07; DC census 55,058 draws over the 3 capture
+frames) covers roughly the last 2-3k frames.
 
-bucket\_items: calls 462,089; items 6,889,852; empty\_calls 48,960
-(10.6%, legitimately empty rigs); entry\_wild / exit\_fault /
-neg\_deltas / overflow\_calls ALL ZERO -- the walk offsets are right,
-no torn reads, no mid-call drains. max\_buckets = 1 across 462k calls:
-each builder call feeds exactly ONE bucket; the dedup path never
-fired in anger. max\_items\_per\_call = 1,286 (one big rig build --
-settlement arrival).
+bucket\_items: calls 462,089; items 6,889,852; empty\_calls 48,960 (10.6%, no
+bucket discovered by the entry walk); entry\_wild / exit\_fault / neg\_deltas /
+overflow\_calls ALL ZERO -- no reported walk/read faults, negative net changes
+or overflow. This does not exclude a drain followed by refill inside a bracket.
+max\_buckets = 1 across 462k calls: each observed entry walk found at most ONE
+bucket; the dedup path never fired in anger. max\_items\_per\_call = 1,286 (one
+big rig build -- settlement arrival).
 
-**The join, and it is robust to windowing.** Lifetime averages: 36
-builder calls/frame, 540 items/frame. Windowed to settlement-only
-(\~2.5k frames, the most favorable reading): \~185 calls and \~2.8k
-items per frame -- still \~10x below the 23-26k D3D11 draws/frame.
-Engine item PRODUCTION is an order of magnitude under draw VOLUME.
-Two readings, both with the same consequence: (a) the bucket lists
-are retained and replayed per frame, rebuilt incrementally for dirty
-rigs -- production is churn, consumption is replay; (b) most draws
-flow from the other producers (FUN\_14369c9c0 family) or non-bucket
-paths. Either way L2's +0x570 suppression feeds the BUILD side, so
-its effect timing is decided by the CONSUMER: if consumption re-tests
-the per-item mask array (block+0xAA0, decoded 06:37) suppression is
-instant; if it replays retained lists until the next rebuild, it
-lags. No neg\_deltas in 462k calls says builds and drains never
-interleave on the build thread, consistent with a retained model.
+**Production/draw discrepancy, not a completed join.** Lifetime averages: 36
+builder calls/frame, 540 items/frame. Windowed to settlement-only (\~2.5k
+frames, the most favorable reading): \~185 calls and \~2.8k items per frame --
+still \~10x below the 23-26k D3D11 draws/frame. The instrument's item
+production is well below total draw volume. The settlement-only figures assign
+the entire session's numerator to an estimated window; they are favorable
+bounds, not actual windowed measurements. Possible explanations include other
+producers, repeated consumption, one-to-many item submission and non-bucket
+paths. They do not prove list retention or a dirty rebuild schedule. A per-item
+mask reader, if found, would also not by itself prove that changing a source
+record updates the mask already copied into an item. No negative net deltas
+does not exclude interleaved drain/refill.
 
-**Ruled out, do not re-propose:** reading per-frame bucket production
-as the drawn volume -- the numbers refute a 1:1 build-per-frame
-model (540 vs 23,000).
+**Ruled out, do not re-propose:** reading per-frame bucket production as the
+total drawn volume -- this instrument cannot be equated 1:1 with all D3D
+submissions (540 vs 23,000).
 
-**Named next question (offline, no flight):** identify the
-bucket-list consumer. The FindBucketOps 0x434Dxxx cluster is the
-prime suspect -- FUN\_14434D790 (CMP +0x2A4,0: empty-bucket gate),
-FUN\_14434CD90 / FUN\_14434DB30 (zero the counter: the resets),
-FUN\_1436EEFF0 (reads +0x2A4 into a register: loop bound?),
-FUN\_14434E28F (four +0x2A4 hits, refs260). Decompile the cluster and
-its callers; check for a consumption-time re-test of the per-item
-mask array. That decides whether L2 suppresses instantly or on
-rebuild -- the last semantic unknown before the build decision.
+**Named next question (offline, no flight):** identify the bucket-list
+consumer. The FindBucketOps 0x434Dxxx cluster is the prime suspect --
+FUN\_14434D790 (CMP +0x2A4,0: empty-bucket gate), FUN\_14434CD90 /
+FUN\_14434DB30 (zero the counter: the resets), FUN\_1436EEFF0 (reads +0x2A4
+into a register: loop bound?), FUN\_14434E28F (four +0x2A4 hits, refs260).
+Decompile the cluster and its callers; check for a consumption-time re-test of
+the per-item mask array and trace it to actual submission. Scope, lifetime and
+safe visibility/restoration remain separate unknowns before a build decision.
 
 ### 2026-09-21 07:29 -- producer map resolved; instrument extended to all three producers
 
-The consumer hunt (06:55's named question) resolved into a producer
-map instead -- all offline, no flight spent.
+The consumer hunt (06:55's named question) resolved into a producer map instead
+-- all offline, no flight spent.
 
-**The +0x2A4 cluster is list maintenance, not submission.**
-FUN\_14434CD90 clears a bucket (counter zeroed at REBUILD START;
-callers include a destructor FUN\_14430DA30 and rebuild entry
-FUN\_1442B3E00). FUN\_14434D790 merges/compacts item spans with their
-mask arrays. FUN\_14434E28F merges worker-local buckets into shared
-ones, keyed on +0x2A0, under a critical section -- parallel build,
-single merge. FUN\_1436EEFF0's +0x2A4 was a matrix float (struct
-collision, ruled out). The mask-array reader hunt (FindMaskReaders
-scan, 62 functions touch +0xAA0) found only struct-family collisions
-(float/vector/pointer slots): NO reader of the per-item mask array
-exists in anything scanned -- mask semantics stay unproven
-(pass-selection bookkeeping is the surviving hypothesis; not needed
-for whole-word suppression).
+**The +0x2A4 cluster is list maintenance, not submission.** FUN\_14434CD90
+clears a bucket (counter zeroed at REBUILD START; callers include a destructor
+FUN\_14430DA30 and rebuild entry FUN\_1442B3E00). FUN\_14434D790
+merges/compacts item spans with their mask arrays. FUN\_14434E28F merges
+worker-local buckets into shared ones, keyed on +0x2A0, under a critical
+section -- parallel build, single merge. FUN\_1436EEFF0's +0x2A4 was a matrix
+float (struct collision, ruled out). The mask-array reader hunt
+(FindMaskReaders scan, 62 functions touch +0xAA0) found only struct-family
+collisions (float/vector/pointer slots), without locating a submission-time
+mask test. Indirect consumers and mask semantics remain unresolved. Whole-word
+suppression still needs scope and ownership proof.
 
-**Three producers feed the same bucket structure.** FUN\_1442B4420
-(hooked 06:37; the per-record gate path), FUN\_144312E00 (bucket =
-param\_2; called via FUN\_144312040 from the SAME per-collection batch
-FUN\_144320340, building a second item class; the "FUN\_14431305C
-fragment" is inside it -- two producers, not four) and FUN\_14369C9C0
-(bucket = param\_2; FUN\_1436A0F50's four call sites -- the non-eye
-passes' family: the 256x256 and 3072x1024 draw targets).
-FUN\_144320340's own decompile closes the cadence: per collection it
-runs the LOD evaluator FUN\_144331300 and rebuilds items only for
-records passing a per-batch LOD gate -- the incremental/dirty build
-cadence the flight measured (36 calls/frame) is written in the
-dispatch itself.
+**Three producers feed the same bucket structure.** FUN\_1442B4420 (hooked
+06:37; the per-record gate path), FUN\_144312E00 (bucket = param\_2; called via
+FUN\_144312040 from the SAME per-collection batch FUN\_144320340, building a
+second item class; the "FUN\_14431305C fragment" is inside it -- two producers,
+not four) and FUN\_14369C9C0 (bucket = param\_2; FUN\_1436A0F50's four call
+sites). Assigning the third producer to particular non-eye targets remains a
+hypothesis. FUN\_144320340 runs the LOD evaluator FUN\_144331300 and builds
+items for records passing current selection gates. It does not compare old/new
+LOD masks or establish an incremental/dirty schedule. The 36 calls/frame is an
+all-session mean, not a measured collection cadence.
 
-**Corrected join reading.** Production x (eyes x passes) is the
-right shape; the settlement-windowed read of flight 064511 (\~2.8k
-items/frame from the ONE hooked producer) already lands within \~3x
-of the 18k eye-pair volume. The other producers' shares were the
-missing term -- so the instrument now measures them.
+**Join hypothesis (still open).** Additional producers and eye/pass fanout
+could help explain the count gap, so their production was instrumented. The
+\~2.8k figure is a favorable window bound, not measured settlement-only
+production. Fitting a multiplicity to the draw total cannot prove attribution;
+consumer provenance and actual window deltas are required.
 
-**The extension (installed, d3d11 sha256:16 99885e3a092df662).** Two
-direct brackets read param\_2+0x2A4 entry/exit on FUN\_144312E00 (RVA
-0x4312E00) and FUN\_14369C9C0 (RVA 0x369C9C0), both prologue-verified;
-serialized as kinematicEval.bucket\_items\_direct (per producer:
-calls / items / neg\_deltas / read\_faults / max\_items\_per\_call).
-Same per-session, never-gated discipline. Gates: probe test 41/0
-(new case 9), json self-test extended, config 253/253.
+**The extension (installed, d3d11 sha256:16 99885e3a092df662).** Two direct
+brackets read param\_2+0x2A4 entry/exit on FUN\_144312E00 (RVA 0x4312E00) and
+FUN\_14369C9C0 (RVA 0x369C9C0), both prologue-verified; serialized as
+kinematicEval.bucket\_items\_direct (per producer: calls / items / neg\_deltas
+/ read\_faults / max\_items\_per\_call). Same per-session, never-gated
+discipline. Gates: probe test 41/0 (new case 9), json self-test extended,
+config 253/253.
 
-**Flight #2 protocol.** One settlement eye burst on this build. Join
-bucket\_items + bucket\_items\_direct against the per-pass depth-probe
-census (#2/#5 = the eye pair \~9k each, #1 256x256 \~3.8k, #7
-3072x10 24 \~3.4k). Discriminators: direct calls == 0 = stand-down
-(CodeHook logs the site's own name); calls > 0 with items == 0 and
-read\_faults == 0 = param\_2 is not the bucket there -- re-derive, do
-not trust a zero. If total production x multiplicity lands on the
-23k, every draw is a bucket-list draw and L2's +0x570 suppression
-covers the universe; a shortfall names the non-bucket draw sources
-that bound L2.
+**Original flight #2 protocol (completed; limitations corrected).** One
+settlement eye burst on this build. Compare bucket\_items +
+bucket\_items\_direct against the per-pass depth-probe census (#2/#5 = the eye
+pair \~9k each, #1 256x256 \~3.8k, #7 3072x1024 \~3.4k). Direct calls == 0
+requires checking installation and scene/path coverage; calls > 0 with items ==
+0 requires distinguishing legitimate zero appends from incorrect layout.
+Neither raw totals nor production times an assumed multiplicity proves draw
+provenance, complete coverage or suppressibility.
 
-### 2026-09-21 07:45 -- flight 073348: all three producers live; rebuild semantics decoded; L2 decision: GO
+### 2026-09-21 07:45 -- flight 073348: producer coverage; original GO superseded by review
 
-Flight #2 read (classification_073348.json; flown DLL verified by
-hash 99885e3a092df662). Session 11,741 frames, almost all
-menu/hangar/space (depth probe 32-34 draws/frame until 07:33:51,
-AFTER the dump) -- so this flight measures the producers, not the
-settlement join. All three CodeHook install lines present in the
-log: every hook hooked, including 14369c9c0.
+Flight #2 read (classification_073348.json; flown DLL verified by hash
+99885e3a092df662). Session 11,741 frames, almost all menu/hangar/space (depth
+probe 32-34 draws/frame until 07:33:51, AFTER the dump) -- so this flight
+measures the producers, not the settlement join. All three CodeHook install
+lines present in the log: every hook hooked, including 14369c9c0.
 
-Producers: FUN_1442B4420 -- 252,659 calls, 3,824,820 items, zero
-faults (mean refill 15.1 items/call, max 1,273). FUN_144312E00 --
-1,081,188 calls (92/frame) but a trickle: 430,886 items, max 3 per
-call (singleton slot items, the second item class). FUN_14369C9C0 --
-ZERO calls in 11.7k frames with the hook confirmed installed: it is
-not a per-frame producer in these scenes at all. The non-eye passes
-(#7 3072x1024 3.4k, #0/#10) are NOT fed by it here; the eye pair
-(18k of 21.9k draws = 82%) is the bucket-fed target L2 cares about.
+Producers: FUN_1442B4420 -- 252,659 calls, 3,824,820 items, zero faults (mean
+refill 15.1 items/call, max 1,273). FUN_144312E00 -- 1,081,188 calls (92/frame)
+but a trickle: 430,886 items, max 3 per call (singleton slot items, the second
+item class). FUN_14369C9C0 -- ZERO calls in 11.7k frames with the hook
+confirmed installed: it is not an observed producer in this captured scene
+window. This cannot assign the later settlement non-eye passes or establish the
+eye pair's producer. The earlier eye pair (18k of 21.9k draws = 82%) remains a
+draw-census figure, not a measured bucket-list share.
 
-**Rebuild semantics, decoded offline (decomp_434DB60).**
-FUN_14434DB60 is the batch's clear+rekey: bucket+0x2A0 = key,
-+0x2A4 = 0, list cleanup -- called per collection from the batch
-(directly and via FUN_1442B5670) whenever the LOD evaluator reports
-changed masks, BEFORE the per-record refill loop. So bucket lists
-are rebuilt WHOLESALE on LOD-mask changes and retained between
-rebuilds; +0x2A4 reads the LIVE LIST SIZE at any quiet moment, and
-our deltas measure refill churn. The join then reads: eye-pass draw
-volume ~= sum of live list sizes across visible rigs, ~1 draw per
-item per eye (flight-1 numbers: eye pair ~18k; mean refill 15 items
-x O(600) visible non-empty rigs -- order-of-magnitude consistent).
+**Correction to the original interpretation.** The clear routine does reset
+bucket+0x2A4 and clean the list, but its caller tests a freshly computed active
+mask, not a changed mask. Neither retained cross-frame lists nor a forced
+enqueue follows from that code. The original GO, 40-frame cadence, completed
+census join and claimed one-frame restore are withdrawn. The absence of a
+direct per-item mask reader in a scan is also not a proof against indirect or
+bulk consumption. The independent review below gives the replacement decision.
 
-**The L2 consequence, called.** Suppressing a record's +0x570 bits
-takes effect at its rig's NEXT rebuild, not instantly. Natural
-rebuild cadence averages ~40 frames at a settlement (flight-1 36
-rebuilds/frame over ~1.5k rigs; the LOD evaluator is view-dependent,
-so head motion keeps the cadence high) -- but the tail is exactly
-L2's targets: static distant rigs may not rebuild for arbitrarily
-long. The decision therefore stands on the engine's own mechanics,
-not the cadence: GO, built as clear-bits + force-rebuild -- clear
-the victim record's +0x570 mask, then force its bucket's clear via
-the batch's own path so the next batch refills without the
-suppressed items; restore = re-set the bits and force again (the
-one-frame restore the risk line wants). Remaining unknowns are
-BUILD mechanics, offline-decodable: the clear path's exact key/arg
-contract (+0x2A0 key provenance at ctx+0x1A968/0x1A96C) and the
-victim-bucket reach (record -> owner -> bucket), both in decompiles
-already on disk. No flight needed until a build exists.
+### 2026-09-21 -- independent disassembly review and corrected L2 decision
 
-**Ruled out, do not re-propose:** consumption-side instant
-suppression as the mechanism (no per-item mask reader exists
-anywhere scanned; the retained lists replay regardless), and
-waiting on natural rebuild cadence for static targets (unbounded
-tail).
+Reviewed main through 9048b2d, including the new handoff, the saved decompiles
+and producer-counter implementation. Critical control flow was checked directly
+with MSVC dumpbin against `analysis/EliteDangerous64.exe`, SHA-256
+`E6BE8BBE04E6A7AE226D4318945AF7F367DE13DC5A007A261964D9BA8144E988`. Addresses
+below are VAs at image base 0x140000000 for that binary; do not treat them as a
+cross-version hook contract. This was an offline review, not a new flight or
+performance result.
+
+**1. Current selection is not change detection.** FUN_144331300 zeroes its
+six-qword output at 0x14433134A-0x144331359, walks context records at stride
+0x6A0, tests descriptor+0x48 against record+0x570 at 0x14433148B-0x144331497,
+computes LOD lanes, and ORs the selected bits into output+0x20 at 0x144331584.
+There is no old/new output comparison. The entry field-mismatch check can call
+FUN_14433C870; it does not make the returned active mask a changed mask.
+
+In FUN_144321940, 0x144321965 calls the evaluator; 0x14432196A reads
+output+0x20; 0x144321973 tests it. Nonzero reaches FUN_14434DB60 at 0x14432199D
+and traversal FUN_144312040 at 0x1443219BB, followed by secondary clear/build
+in that same job. FUN_144320340 has the corresponding batch path. FUN_14434DB60
+itself only writes the key (0x14434DB60), zeroes count (0x14434DB6D) and
+tail-calls list cleanup (0x14434DB7B). Direct clearing does not request another
+job and is not a safe asynchronous force-rebuild API. Upstream cadence and
+serialization need tracing.
+
+ruled out: interpreting FUN_144331300's active mask as changed bits, because it
+constructs the output from zero. Ruled out: treating FUN_14434DB60 itself as an
+enqueue/dirty operation, because the instructions only clear/rekey storage.
+
+**2. Ownership and granularity are missing links.** The +0x570 records live at
+ctx+0x40, stride 0x6A0, count ctx+0x1A940. The separate collection array is at
+collection+0x280 with count +0x298 and stride 0x2F0; its +0x290 pointer reaches
+the builder's owner. The primary bucket is collection+0x300; collection+0x2E0
+names the secondary owner. The known forward links do not supply a unique
+context-record -> collection/bucket backlink or prove contexts are unshared.
+
+FUN_1442B4420 maps set bits through ctx+0x1A840, combines record masks, merges
+them across LOD slots, and stores an aggregate mask with each appended item
+(decomp_42B4420.txt, lines 505-577 and 662-735). Neither one item per record
+nor one D3D draw per item/eye is established. FUN_142819D90 also caches
+aggregate masks at ctx+0x1A948/950/958/960; FUN_14431AFE0 uses the class
+exclusions. Changing +0x570 alone leaves these caches untouched. Bit aliasing,
+pass scope, context fanout and exact original-value restoration must be
+understood first.
+
+**3. The clear key gates merges, not a proven refresh request.** FUN_142819D90
+writes ctx+0x1A968 from DAT_145F27DB4 and ctx+0x1A96C from constructor argument
+4. FUN_1401EA920 supplies the latter from its caller object's param_1[0xF30]
+low 32 bits (dword), or zero, to both contexts. FUN_14434E28F compares
+source/destination bucket+0x2A0 before merging; a mismatch skips the merge.
+This is merge compatibility evidence, not proof that a particular key schedules
+refresh. The exact FUN_1442B5670 body is not present as a standalone saved
+decompile; nested-key propagation remains open.
+
+**4. Counts do not close the census or cadence.** The hooks measure aggregate
+entry/exit +0x2A4 deltas. They do not record consumption, frame, pass/eye or
+D3D draw identity. Flight 064511 covers settlement volume but only the first
+producer; 073348 covers the three hooks but not the same settlement window. The
+82% eye figure cannot be assigned to these lists from that combination.
+Likewise 1500/36 = 41.7 mixes an assumed rig population with an all-session
+call rate. The earlier favorable settlement-window rate is 185, yielding 8.1
+under the same assumptions; neither quotient measures a per-rig interval. Count
+unique objects and recurrence in one actual window instead.
+
+**5. Historical zero samples are insufficient for suppression.** The settlement
+doc's 2026-09-18 targeted flight recorded three zero-to-nonzero transitions
+despite identical captured bindings, IDs and t33 payload. Hidden NPCs and a
+moving drone are also reasons to validate changing occluders; static geometry
+does not make camera/depth visibility static. The builder already runs frustum
+and optional visibility gates (decomp_42B4420.txt, lines 250-274), and eval
+runs distance/LOD and frustum gates (decomp_430EFE0.txt). A family-level zero
+fraction does not certify a particular engine record or its other passes.
+Suppression also removes the original draw's query, so retest/restore cannot
+depend on that draw becoming nonzero while absent. A conservative independent
+visibility test or explicit invalidation/restoration path must precede
+mutation.
+
+**Next work, bundled to avoid wasted flights.** First trace the consumer and
+upstream enqueue offline. Then one bounded read-only capture should correlate
+frame/thread/caller, rig, ctx, collection, bucket, keys, input/active masks,
+append/item provenance and actual D3D pass/eye consumption. Include context
+fanout and unique collection recurrence, and a matched settlement CPU window.
+Unknown mappings, missing hooks, capacity overflow and incomplete consumption
+coverage must be explicit outcomes. Define the overhead budget and expected
+counter signatures before installing. Only then choose a suppression scope and
+visibility/restoration design; prefer investigating a per-job scoped mask over
+mutating shared content or externally clearing live lists. No suppression
+build, new flight, FPS gain or one-frame restoration is claimed by this review.
