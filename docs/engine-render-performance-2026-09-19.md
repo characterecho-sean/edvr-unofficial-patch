@@ -34,7 +34,10 @@ expensive way to run this project, so instruments batch.
   advance, render-data update, the 0x4320340 batch) are unmeasured.
 - The 0x4320340 caller/job-dispatch path and the visibility masks around
   0x431B11D–0x431B221 (what decides a record dispatches at all) are
-  unresolved — they gate any culling-side lever.
+  RESOLVED offline (2026-09-20 20:05 entry; no flight spent — every piece
+  was already in analysis\decomp). Four dispatch levels named, and the
+  engine's feedable visibility bit identified: render-record +0x570 mask
+  word. L2 is unblocked up to the +0x570 writer, the next offline target.
 
 ## Levers, cheapest measurement first
 
@@ -53,11 +56,16 @@ before any lever is sized on these numbers.
 
 If the census shows the same draw families sample zero pixels for many
 consecutive frames, suppress the original draw (not just skip our own
-work). Engine-analogous to the visibility masks the game itself computes
-at 0x431B11D–0x431B221 — resolve those first; if the game already has a
-visibility bit we can tighten, prefer feeding it over second-guessing it
-from the pipeline. Risk: suppressing a draw that becomes visible needs a
-one-frame restore path, proven on the smoke/static-surface rigs.
+work). The engine's own visibility bits are now mapped (2026-09-20 20:05
+entry): the feedable point is the render-record +0x570 mask word, ANDed
+against the dispatch mask at draw-build time in FUN_1442B4420 and ORed
+into the rig accumulator in FUN_14431AFE0 — clearing a proven-zero-sample
+record's bits there feeds the engine's own mechanism instead of
+second-guessing it. Before building: identify the +0x570 writer (a
+FindStores570 variant of the existing FindStores scripts) so the patch
+lands after the engine's own per-frame write. Risk: suppressing a draw
+that becomes visible needs a one-frame restore path, proven on the
+smoke/static-surface rigs.
 
 ### L3. Kinematic eval narrowing
 
@@ -220,3 +228,63 @@ entirely between runs (resets 0 in 8124), so decimation math can
 treat the append count as the batch unit. Order settled: tens of
 node writes per frame at settlement scale, not hundreds -- L4's
 expected saving is capped accordingly.
+
+### 2026-09-20 20:05 -- L2 gate RESOLVED offline: what decides a record dispatches
+
+Zero flights, zero new Ghidra runs: the mask region 0x431B11D-0x431B221
+turned out to live INSIDE FUN_14431AFE0 (the rig-link function the probe
+already hooks), and every piece of the dispatch path was already in
+analysis\decomp from the settlement arc. Assembled end to end:
+
+**Level 1, per rig per frame -- FUN_14431AFE0(rig, ctx).** Gate: rig
+state +0x380 == 4. If rig byte +0x3D1 set, walk the render records
+(stride 0x6A0, count *(ctx+0x1A940), base ctx+0x40); per record require
+context match (FUN_142840840 vs rig+0x350, byte rig+0x3D2), the
++0x68C-bit-5/dependency-token condition (+0x188 == -1 && rig+0x190),
+the per-record predicate FUN_14432C520, and (if DAT_145ea3479) three
+further predicates plus the rig+0x46C float gate. Each passing record
+ORs its mask word render-record+0x570 into the accumulator. Then the
+0x431B11D region proper: clear the per-class suppression bits
+(*(ctx+0x1A950/58/60), selected by collection+0x70 bit 7) from the
+accumulator. **Accumulator == 0 or collection+0x70 bit 0 clear => the
+whole collection is skipped** (collection+0x629 = 0, cleanup via
+FUN_14434DD50 / FUN_1442B5760); nonzero => dispatch UpdateRenderDataJob
+(FUN_144321940) or its worker-slot equivalent with the mask in the
+descriptor (local_50).
+
+**Level 2, per collection -- FUN_144320340 (RenderDataBatch).** The LOD
+evaluator FUN_144331300 must return nonzero, else the collection takes
+the empty path. Nonzero runs the traversal FUN_144312040 (the world
+update / eval fan-out) and then the per-record loop.
+
+**Level 3, per record (stride 0x2F0).** Dispatch requires: pose ctx
+rec+0x290 != 0, byte rec+0x234 != 0, byte rec+0x298 != 0 (the probe's
+count298 -- the draw-distance nibble), and at least one pending bit in
+rec+0x208 whose 4-bit entry in the rec+0x210 nibble table (lane
+bit>>4, nibble (bit&0xF)*4) is <= *(ushort*)(node+0x6A), node =
+rec+0x18. Passing records call FUN_1442B4420(poseCtx, collection,
+traversalMask, nibbleTable) with the predicate pointer rec+0x2C0.
+
+**Level 4, draw-item build -- FUN_1442B4420.** Gated on DAT_145ea3398.
+Per render record of the collection: require (rec+0x570 & passedMask)
+!= 0, survive the frustum plane-loop FUN_1404F4E10 (return -1 = culled),
+and (if DAT_145ea3399 && rec+0x68D bit 0) a further visibility test on
+rec+0x688. Visible records OR +0x570 into the visible mask; per set bit,
+a table at collection+0x1A840 (uint per bit) maps bit -> render-record
+index, FUN_1442B3FC0 tests the candidate, and survivors are appended to
+the per-bucket draw lists (FUN_143696FA0 list nodes; item counter at
+bucket+0x2A4). Draws are born here.
+
+**Consequence for L2.** The engine visibility bit we should feed is
+**render-record +0x570**: consumed both at rig-mask accumulation
+(FUN_14431AFE0) and at draw-build (FUN_1442B4420's AND), so clearing
+a proven-zero-sample record's bits suppresses it through the engine's
+own mechanism at both levels. Unresolved before building: (a) the
++0x570 writer -- a FindStores570 variant of the existing FindStores
+scripts finds it; the patch must land after the engine's own per-frame
+write; (b) bit semantics per draw class/LOD (the writer reveals them);
+(c) the join from these bucket lists to the draw census's 23k D3D11
+calls (bucket item counter +0x2A4 is countable per frame). Also
+correction-noted: the perf doc's L1 framing suspected eval cost without
+a dispatch map; level 3's rec+0x208/nibble test now names the per-record
+CPU gate precisely.
