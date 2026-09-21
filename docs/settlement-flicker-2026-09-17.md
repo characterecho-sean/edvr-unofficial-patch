@@ -7049,3 +7049,18 @@ Gates 35/0 + json round-trip + contract 253/253; frontier d3d11
 aa88369d7a608415, verified. UNFLOWN -- one settlement eye burst joins
 the ring against records[].node: physics-inert movers (nodes absent
 from the tail) are exactly the veto's false-static risk.
+
+### 2026-09-20 21:05 -- flight 205106: node capture healthy, join a complete null, premise in doubt
+
+Cross-entry from the kinematic arc (full entry there, same timestamp).
+The dirty-queue node capture flew: total == appended == 178650 exactly,
+resets 0, ring 256/256 with the invariant holding -- the instrument is
+proven. The join is a complete null: 11 distinct always-dirty nodes in
+the tail, 0/625 record+0x18 values overlap, with 400 movers in-frame at
+the burst. BUT the offline type check casts the premise: the composer
+FUN_14433DB20 treats record+0x18 as a node CONTAINER (+0x48 count,
++0x50 array of 0x58-stride entries), while job 2 dirties a flag+4x4
+object -- the null may be a category error rather than physics-inert
+movers. Named before the veto can lean on this signal: (a) job-3 body
+decompile for the same append shape (coverage), (b) the record+0x18
+writer and the 0x58-entry contents (node type). Both offline.
