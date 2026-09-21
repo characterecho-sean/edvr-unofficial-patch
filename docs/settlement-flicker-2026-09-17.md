@@ -7037,3 +7037,15 @@ Stores to +0x570 are MOV-only (132 writer functions, zero OR/AND),
 and none runs per frame: the ctx builder FUN_142819D90 is reached
 from FUN_1401EA920, a content/load path. A cleared visibility bit
 therefore persists until the ctx is rebuilt.
+
+### 2026-09-20 20:50 -- node-capture refuter landed (kinematic arc cross-entry)
+
+The false-static refuter this arc's 19:45 decode unblocked is built and
+installed (full entry in the kinematic doc, same timestamp): the job-2
+bracket walks the dirty queue's node array (descriptor +0x10, 8-byte
+pointers) over [entry, exit) at job exit; the probe keeps the last 256
+per session as kinematicEval.phys_nodes {total, overflow, nodes[]}.
+Gates 35/0 + json round-trip + contract 253/253; frontier d3d11
+aa88369d7a608415, verified. UNFLOWN -- one settlement eye burst joins
+the ring against records[].node: physics-inert movers (nodes absent
+from the tail) are exactly the veto's false-static risk.

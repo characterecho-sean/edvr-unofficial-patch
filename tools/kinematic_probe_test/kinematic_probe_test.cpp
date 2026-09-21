@@ -260,6 +260,33 @@ void casePhysQueue() {
                        "\"samples\":[{\"entry\":10,\"exit\":14}") != std::string::npos,
           "6: the counters and samples serialize");
 }
+
+// Physics dirty-queue NODE capture (sanctioned 2026-09-20 20:27): the
+// probe keeps the last kPhysNodeCap walked pointers per session; overflow
+// counts every walked node no longer in the ring, so the gate can assert
+// the invariant total == ring + overflow. The hook clamps its walk to the
+// cap; the probe still defends against an over-cap batch.
+void casePhysNodes() {
+    KinematicEvalProbe p;
+    uint64_t batch[300];
+    for (uint32_t i = 0; i < 300; ++i) batch[i] = 0x1000ull + i;
+    p.notePhysNodes(batch, 300, 0); // over-cap batch: newest 256 kept, 44 drop
+    check(p.physNodeTotal_ == 300 && p.physNodeOverflow_ == 44 &&
+          p.physNodeRing_.size() == KinematicEvalProbe::kPhysNodeCap &&
+          p.physNodeRing_.front() == 0x102Cull && p.physNodeRing_.back() == 0x112Bull,
+          "7: an over-cap batch keeps the newest and counts the drop");
+    uint64_t more[10];
+    for (uint32_t i = 0; i < 10; ++i) more[i] = 0xF000ull + i;
+    p.notePhysNodes(more, 10, 3); // +10 ring (10 oldest drop), +3 hook-side excess
+    check(p.physNodeTotal_ == 313 && p.physNodeOverflow_ == 57 &&
+          p.physNodeRing_.size() == KinematicEvalProbe::kPhysNodeCap &&
+          p.physNodeRing_.front() == 0x1036ull && p.physNodeRing_.back() == 0xF009ull,
+          "7: the ring drops oldest and total stays ring + overflow");
+    std::ostringstream j;
+    p.writeJson(j);
+    check(j.str().find("\"phys_nodes\":{\"total\":313,\"overflow\":57,\"nodes\":[\"0x1036\"") !=
+          std::string::npos, "7: the counters and ring serialize oldest-first");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -275,6 +302,7 @@ int wmain(int argc, wchar_t** argv) {
     caseNonFiniteRejected();
     caseJobMaskAccumulates();
     casePhysQueue();
+    casePhysNodes();
     std::printf("kinematic_probe_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

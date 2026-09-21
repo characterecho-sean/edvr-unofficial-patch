@@ -470,6 +470,31 @@ void KinematicEvalProbe::notePhysQueue(uint32_t entryCount,uint32_t exitCount) n
     }
 }
 
+void KinematicEvalProbe::notePhysNodes(const uint64_t* nodes,uint32_t count,uint32_t overflow) noexcept {
+    // The hook clamps its walk to kPhysNodeCap and counts the clamped
+    // excess in overflow; defend the invariant anyway (the gate feeds
+    // over-cap batches): total counts every walked node, overflow every
+    // walked node that is no longer in the ring.
+    if(count>kPhysNodeCap) {
+        overflow+=count-kPhysNodeCap;
+        nodes+=count-kPhysNodeCap;
+        count=kPhysNodeCap;
+    }
+    physNodeTotal_.fetch_add(uint64_t(count)+overflow,std::memory_order_relaxed);
+    uint64_t dropped=overflow;
+    if(count) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const size_t have=physNodeRing_.size();
+        if(have+count>kPhysNodeCap) {
+            const size_t drop=have+count-kPhysNodeCap;
+            physNodeRing_.erase(physNodeRing_.begin(),physNodeRing_.begin()+drop);
+            dropped+=drop;
+        }
+        physNodeRing_.insert(physNodeRing_.end(),nodes,nodes+count);
+    }
+    if(dropped)physNodeOverflow_.fetch_add(dropped,std::memory_order_relaxed);
+}
+
 KinematicEvalProbe::Summary KinematicEvalProbe::summary() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return summary_;
@@ -648,7 +673,14 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
         j<<"{\"entry\":"<<physQueueSamples_[i].first
          <<",\"exit\":"<<physQueueSamples_[i].second<<'}';
     }
-    j<<"]}}"; // samples, phys_queue, kinematicEval
+    j<<"]},\"phys_nodes\":{\"total\":"<<physNodeTotal_.load(std::memory_order_relaxed)
+     <<",\"overflow\":"<<physNodeOverflow_.load(std::memory_order_relaxed)
+     <<",\"nodes\":[";
+    for(size_t i=0;i<physNodeRing_.size();++i) {
+        if(i)j<<',';
+        j<<"\"0x"<<std::hex<<physNodeRing_[i]<<std::dec<<'"';
+    }
+    j<<"]}}"; // samples+phys_queue, nodes+phys_nodes, kinematicEval
 }
 
 void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
@@ -766,6 +798,14 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     physQueueResets_.store(1,std::memory_order_relaxed);
     physQueueSamples_.push_back({10u,14u});
     physQueueSamples_.push_back({20u,21u});
+
+    // Node-capture fixture: total == ring + overflow (519 == 3 + 516), the
+    // invariant casePhysNodes drives dynamically in the native gate.
+    physNodeTotal_.store(519,std::memory_order_relaxed);
+    physNodeOverflow_.store(516,std::memory_order_relaxed);
+    physNodeRing_.push_back(0x1111111111111111ull);
+    physNodeRing_.push_back(0x2222222222222222ull);
+    physNodeRing_.push_back(0x3333333333333333ull);
 
     summary_.observed=987654321ull;
     summary_.readFaults=3;summary_.recordOverflow=1;summary_.transitionOverflow=2;summary_.vtableOverflow=4;

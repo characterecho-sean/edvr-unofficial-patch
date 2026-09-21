@@ -77,7 +77,8 @@ int64_t qpcNow() noexcept {
 // (decomp_432B2A0, param_1[3]; flushed in 0x20 batches by FUN_144899F50).
 // Reading the counter at job entry and exit yields the per-run append
 // count -- the write-volume number the perf arc's L4 needs and the
-// lifecycle evidence a node capture would have to respect. Counts only.
+// lifecycle evidence the node capture respected (kinematic arc, flight
+// 193356: append-only within a run, drained entirely between runs).
 bool readQueueCount(uintptr_t descriptor,uint32_t* out) noexcept {
     __try {
         uintptr_t counter=0;
@@ -86,6 +87,37 @@ bool readQueueCount(uintptr_t descriptor,uint32_t* out) noexcept {
         uint32_t count=0;
         std::memcpy(&count,reinterpret_cast<const void*>(counter),4);
         *out=count;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+
+// The queue's node-pointer array base is descriptor +0x10 (param_1[2];
+// decomp_432B2A0 lines 257-268: FUN_144899f50(param_1[2] + idx*8, batch,
+// count*8)). With the lifecycle decoded, the slice [entry, exit) at job-2
+// exit is this run's appended nodes, intact. Reads the newest
+// min(delta, cap) entries; the clamped excess counts as overflow. A reset
+// (exit < entry) captures only the post-reset residue [0, exit) -- the
+// pre-reset slice was drained mid-run and is unknowable (phys_queue.resets
+// flags the event). Same __try discipline as readQueueCount: a fault or a
+// wild counter drops the run's capture, never the flight.
+bool readQueueNodes(uintptr_t descriptor,uint32_t entry,uint32_t exit,
+                    uint64_t* out,uint32_t cap,uint32_t* kept,uint32_t* overflow) noexcept {
+    __try {
+        uintptr_t base=0;
+        std::memcpy(&base,reinterpret_cast<const void*>(descriptor+0x10),8);
+        if(!base)return false;
+        const uint32_t first=exit<entry?0u:entry;
+        const uint32_t delta=exit-first;
+        // Append-only between drains (max_delta 133 on flight 193356): a
+        // large exit means a torn read, not a busy run -- drop it.
+        if(delta==0||exit>0x100000u)return false;
+        uint32_t start=first;
+        uint32_t excess=0;
+        if(delta>cap){start=exit-cap;excess=delta-cap;}
+        for(uint32_t i=start;i<exit;++i)
+            std::memcpy(&out[i-start],reinterpret_cast<const void*>(base+uintptr_t(i)*8),8);
+        *kept=exit-start;
+        *overflow=excess;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
@@ -241,8 +273,19 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
         // Exit read after the timing stops: the measured region stays the
         // job body alone. A torn/missing exit read drops the pair.
         uint32_t queueExit=0;
-        if(readQueueCount(a,&queueExit))
+        if(readQueueCount(a,&queueExit)) {
             kinematicEvalProbe.notePhysQueue(queueEntry,queueExit);
+            // The node capture rides the same exit read (sanctioned
+            // 2026-09-20 20:27): [entry, exit) is this run's intact
+            // appended slice. Zero-delta runs have nothing to walk.
+            if(queueExit!=queueEntry) {
+                uint64_t nodes[KinematicEvalProbe::kPhysNodeCap];
+                uint32_t kept=0,nodeOverflow=0;
+                if(readQueueNodes(a,queueEntry,queueExit,nodes,
+                                  KinematicEvalProbe::kPhysNodeCap,&kept,&nodeOverflow))
+                    kinematicEvalProbe.notePhysNodes(nodes,kept,nodeOverflow);
+            }
+        }
     }
     if(elapsed>0 && g_qpcFreq>0 && gen==kinematicEvalProbe.jobGeneration()) {
         auto* stats=kinematicEvalProbe.jobStats();

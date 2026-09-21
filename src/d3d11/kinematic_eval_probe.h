@@ -41,6 +41,7 @@ public:
     // Dirty-queue (entry,exit) pairs: non-trivial runs only, so 64 covers
     // the append/reset pattern rather than a static scene's zero runs.
     static constexpr uint32_t kPhysQueueSampleCap=64u;
+    static constexpr uint32_t kPhysNodeCap=256u; // node-capture ring (arc 19:45: peak delta 133)
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 
@@ -175,8 +176,18 @@ public:
     // entry and exit (descriptor +0x18 points at it; decomp_432B2A0,
     // param_1[3]). Counts only, per-session like jobs[] -- NOT cleared by
     // clearLocked -- and never gated on active(): a tracker-only flight
-    // harvests the lifecycle too. Node capture waits on this decode.
+    // harvests the lifecycle too.
     void notePhysQueue(uint32_t entryCount,uint32_t exitCount) noexcept;
+    // The job-2 node capture (lifecycle decoded on flight 193356, kinematic
+    // arc 19:45 entry; sanctioned 2026-09-20 20:27): node pointers walked
+    // from queue[entry..exit) at job-2 exit by the bracket (array base
+    // descriptor +0x10, 8-byte entries; decomp_432B2A0 lines 257-268). The
+    // probe keeps the last kPhysNodeCap per session -- movers re-append
+    // every frame, so the tail holds every active mover at dump time;
+    // overflow counts every walked node no longer in the ring. Invariant:
+    // total == nodes-in-ring + overflow. Same per-session discipline as
+    // notePhysQueue: never gated on active(), NOT cleared by clearLocked.
+    void notePhysNodes(const uint64_t* nodes,uint32_t count,uint32_t overflow) noexcept;
 
     Summary summary() const noexcept;
     void writeJson(std::ostringstream& json) const;
@@ -222,6 +233,11 @@ private:
     std::atomic<uint32_t> physQueueMaxDelta_{0};
     std::atomic<uint64_t> physQueueResets_{0};
     std::vector<std::pair<uint32_t,uint32_t>> physQueueSamples_;
+    // Job-2 node capture (notePhysNodes): same discipline as the counters
+    // above -- relaxed atomics written lock-free, ring under mutex_.
+    std::atomic<uint64_t> physNodeTotal_{0};
+    std::atomic<uint64_t> physNodeOverflow_{0};
+    std::vector<uint64_t> physNodeRing_; // last kPhysNodeCap nodes, oldest first
 
     void clearLocked();
     void noteVtableLocked(uint64_t rva,uint32_t frame) noexcept;
