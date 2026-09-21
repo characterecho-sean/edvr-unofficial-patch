@@ -102,6 +102,11 @@ def self_test():
     # Same mesh value twice: the staleness signature from flight 083323.
     assert ke['clock_samples'] == [dict(present=1001, mesh=13081),
                                    dict(present=1002, mesh=13081)], ke['clock_samples']
+    # Physics dirty-queue counts: max_delta 5 exceeds every kept sample's
+    # delta (4, 1), proving the counter is independent of the sample cap.
+    assert ke['phys_queue'] == dict(runs=3, appended=7, max_delta=5, resets=1,
+                                    samples=[dict(entry=10, exit=14),
+                                             dict(entry=20, exit=21)]), ke['phys_queue']
     print('kinematic json self-test passed')
 
 

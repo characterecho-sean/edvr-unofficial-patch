@@ -6975,3 +6975,22 @@ engine-truth discriminator is the dirty-node queue joined by
 record+0x18 -- a refuter of false statics, which is all the veto needs.
 Next instrument: job-2 bracket logs queue entry/exit counts for one
 flight (no new hook sites), node capture after the lifecycle is known.
+### 2026-09-20 19:30 -- dirty-queue count probe landed (counts only, no new hook sites)
+
+Cross-entry from the kinematic arc (full entry in the kinematic doc,
+same time). The 19:11 instrument sketch is built exactly as scoped:
+the existing job-2 bracket guarded-reads the dirty queue atomic append
+counter (descriptor +0x18, decomp_432B2A0 param_1[3]) at job entry and
+exit; the probe accumulates per-session runs / appended / max_delta /
+resets -- exit < entry counts a mid-run drain and adds only the
+post-reset residue -- plus the first 64 non-trivial (entry,exit) pairs,
+serialized as phys_queue in the kinematicEval JSON. Per-session like
+jobs[] (clearLocked does not touch it), captured on the tracker-only
+path too. Absence stays distinguishable in the same JSON: jobs[2].calls
+> 0 with phys_queue.runs == 0 reads as the counter read failing;
+jobs[2].calls == 0 is the job-2 stand-down. Gates 87/0 + 32/0 + json
+self-test + contract 252/252; frontier d3d11 34f9195432f98190,
+verified. UNFLOWN: fix.engine_motion on, settlement with a mover,
+>= 60 s, ONE eye burst (any view) -- it harvests phys_queue (queue
+lifecycle: append rate, reset cadence) and jobs[] (the L1 remeasure
+190122 owed).
