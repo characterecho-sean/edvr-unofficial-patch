@@ -5,6 +5,8 @@
     python tools/edvr_log.py --target steam --expect-build HEAD
     python tools/edvr_log.py --target steam --grep "Stats\\[4[0-9]\\]"
     python tools/edvr_log.py --target steam --tail 80
+    python tools/edvr_log.py --target frontier --tally vh
+    python tools/edvr_log.py --target frontier --tally vh --frame 1
     python tools/edvr_log.py --list
 
 This is the sanctioned replacement for `Get-Content <some path> -Tail 200 |
@@ -35,6 +37,15 @@ is exactly when you would rather not be told there are no logs.
 Read-only by construction: it opens files for reading and nothing else,
 which is why it has no --dry-run.
 
+--tally vh aggregates a draw-census log instead of dumping lines: it
+counts eye-texture DC lines per vh= shader-content hash, splits each
+hash's count by its r= render-target token (the per-eye view), and
+averages the n=/i= draw arguments, with the DC frame summary lines as
+the totals row. The census caps its log output at 16384 lines
+(draw_census.cpp), so a long census keeps per-draw detail only for the
+first frames; --tally says which frames survive only as summaries
+rather than printing an empty table.
+
 Exit 0 when a log was read, 1 when none was found, 2 when --expect-build
 did not match.
 """
@@ -62,6 +73,30 @@ VERSION_RE = re.compile(r"^(?:\[[\d:.]+\]\s*)?version\s+(?P<ver>\S+)"
 NATIVE_VERSION_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} UTC "
     r"pid=\d+ tid=\d+ module_init,version=(?P<ver>[^,\s]+),durable_log=1$")
+
+# Draw-census lines, written by src/d3d11/draw_census.cpp. Every note
+# carries the [HH:MM:SS.mmm] prefix like anything else Log::note() writes.
+# The per-draw head is fixed: "DC <frame> #<n> <type> n=.. i=.. r=.."; the
+# variable tail (vs=/vh=/ia=/...) comes after. DC begin/end/frame/id and
+# the DCC/DCL/DCS/DCX/DCS lines must not match: the frame-and-# anchor
+# excludes them, so a grep for "] DC " counts spurious lines this doesn't.
+CENSUS_DRAW_RE = re.compile(
+    r"^(?:\[[\d:.]+\]\s*)?(?P<kind>DC|DCO) (?P<frame>\d+) #(?P<idx>\d+) "
+    r"(?P<type>\S+) n=(?P<n>\d+) i=(?P<i>\d+) r=(?P<r>\S+)")
+# vh= lives in the IA tail, which readDrawState can skip under budget
+# pressure -- a draw line without it is real and lands in the "(none)"
+# bucket. Anchored on whitespace: an unanchored search also matches the
+# "pr=" token two fields later.
+VH_RE = re.compile(r"(?:^|\s)vh=([0-9A-Fa-f]+)")
+# "DC frame <n> draws=.. off=.. copies=.. disp=.. clears=.. unseen=.."
+CENSUS_FRAME_RE = re.compile(
+    r"^(?:\[[\d:.]+\]\s*)?DC frame (?P<frame>\d+) draws=(?P<draws>\d+) "
+    r"off=(?P<off>\d+) copies=(?P<copies>\d+) disp=(?P<disp>\d+) "
+    r"clears=(?P<clears>\d+) unseen=(?P<unseen>\d+)")
+# "DC end census=.. draws=.. ... lines=<cap> ... truncated=<dropped>"
+CENSUS_END_RE = re.compile(r"^(?:\[[\d:.]+\]\s*)?DC end\b")
+CENSUS_LINES_RE = re.compile(r"\blines=(\d+)")
+CENSUS_TRUNC_RE = re.compile(r"\btruncated=(\d+)")
 
 
 def repo_root():
@@ -217,6 +252,149 @@ def version_matches(actual, expect):
     return expect in actual or actual in expect
 
 
+def parse_census(text):
+    """Split a log into census draw records, frame summaries and the
+    truncation stats from its DC end line.
+
+    Returns (draws, summaries, cap, dropped): draws are dicts with kind
+    ("DC" eye-texture / "DCO" offscreen), frame, r (render-target token),
+    vh (content hash or None) and the n=/i= arguments; summaries map a
+    frame ordinal to the DC frame line's counters; cap and dropped come
+    from the DC end line (None when the log has none).
+    """
+    draws = []
+    summaries = {}
+    cap = None
+    dropped = None
+    for raw in text.splitlines():
+        m = CENSUS_DRAW_RE.match(raw)
+        if m:
+            vh = VH_RE.search(raw)
+            draws.append({
+                "kind": m.group("kind"),
+                "frame": int(m.group("frame")),
+                "r": m.group("r"),
+                "vh": vh.group(1).upper() if vh else None,
+                "n": int(m.group("n")),
+                "i": int(m.group("i")),
+            })
+            continue
+        m = CENSUS_FRAME_RE.match(raw)
+        if m:
+            summaries[int(m.group("frame"))] = m.groupdict()
+            continue
+        if CENSUS_END_RE.match(raw):
+            lines_m = CENSUS_LINES_RE.search(raw)
+            trunc_m = CENSUS_TRUNC_RE.search(raw)
+            if lines_m:
+                cap = int(lines_m.group(1))
+            if trunc_m:
+                dropped = int(trunc_m.group(1))
+    return draws, summaries, cap, dropped
+
+
+def tally_vh(draws, frame=None):
+    """Group eye-texture DC lines by vh= hash for one tally table.
+
+    Returns (rows, eye_total, off_total): rows are dicts sorted by count
+    descending -- vh, count, sub (r= token -> count, so the per-eye
+    split is visible), avg_n and avg_i -- eye_total is the number of DC
+    lines the percentages divide by, off_total the DCO lines kept out of
+    the table. frame restricts to one frame ordinal; DCO lines never
+    enter the rows, only the off_total.
+    """
+    scope = [d for d in draws if frame is None or d["frame"] == frame]
+    eye = [d for d in scope if d["kind"] == "DC"]
+    off_total = sum(1 for d in scope if d["kind"] == "DCO")
+    by_vh = {}
+    for d in eye:
+        row = by_vh.setdefault(d["vh"], {"count": 0, "sub": {}, "n": 0, "i": 0})
+        row["count"] += 1
+        row["sub"][d["r"]] = row["sub"].get(d["r"], 0) + 1
+        row["n"] += d["n"]
+        row["i"] += d["i"]
+    rows = []
+    for vh, row in by_vh.items():
+        rows.append({
+            "vh": vh,
+            "count": row["count"],
+            "sub": row["sub"],
+            "avg_n": row["n"] / float(row["count"]),
+            "avg_i": row["i"] / float(row["count"]),
+        })
+    rows.sort(key=lambda r: (-r["count"], r["vh"] or ""))
+    return rows, len(eye), off_total
+
+
+def print_vh_tally(text, frame):
+    """The --tally vh report: per-hash table, then the summary totals.
+    Returns the process exit code."""
+    draws, summaries, cap, dropped = parse_census(text)
+    if not draws and not summaries:
+        print("[edvr] no draw-census lines (DC/DCO/DC frame) in this log")
+        return 0
+
+    detail_frames = sorted({d["frame"] for d in draws})
+    summary_frames = sorted(summaries)
+    if dropped:
+        only_summary = [f for f in summary_frames if f not in detail_frames]
+        where = (", ".join(str(f) for f in detail_frames) or "none")
+        print("[edvr] census truncated: %d line(s) dropped past the %s-line "
+              "cap; per-draw detail survives for frame(s) %s%s."
+              % (dropped, cap or "?", where,
+                 (", %s summary-only" % ", ".join(str(f) for f in only_summary))
+                 if only_summary else ""))
+
+    if frame is not None:
+        scope_summary = summaries.get(frame)
+        if frame not in detail_frames:
+            if scope_summary is not None:
+                s = scope_summary
+                print("[edvr] frame %d has no per-draw lines -- only its "
+                      "summary survived the census line cap:" % frame)
+                print("[edvr] frame %d summary: draws=%s off=%s copies=%s "
+                      "disp=%s clears=%s unseen=%s"
+                      % (frame, s["draws"], s["off"], s["copies"],
+                         s["disp"], s["clears"], s["unseen"]))
+                return 0
+            print("[edvr] frame %d appears in no census line or summary"
+                  % frame)
+            return 0
+
+    rows, eye_total, off_total = tally_vh(draws, frame)
+    label = "frame %d" % frame if frame is not None else "all frames"
+    print("[edvr] tally vh, %s: %d eye-texture DC lines, %d offscreen DCO "
+          "lines" % (label, eye_total, off_total))
+    if not rows:
+        print("[edvr] no eye-texture DC lines in scope")
+        return 0
+    sub_width = max([len("per r=")] + [
+        len("  ".join("%s:%d" % (r, c) for r, c in
+                      sorted(row["sub"].items(),
+                             key=lambda kv: (-kv[1], kv[0]))))
+        for row in rows])
+    print("%-4s  %-16s  %5s  %6s  %-*s  %9s  %9s"
+          % ("rank", "vh", "count", "% eye", sub_width, "per r=",
+             "avg n", "avg i"))
+    for rank, row in enumerate(rows, 1):
+        sub = "  ".join("%s:%d" % (r, c) for r, c in
+                        sorted(row["sub"].items(),
+                               key=lambda kv: (-kv[1], kv[0])))
+        pct = 100.0 * row["count"] / eye_total if eye_total else 0.0
+        print("%-4d  %-16s  %5d  %5.1f%%  %-*s  %9.1f  %9.2f"
+              % (rank, row["vh"] or "(no vh=)", row["count"], pct,
+                 sub_width, sub, row["avg_n"], row["avg_i"]))
+    for f in summary_frames:
+        if frame is not None and f != frame:
+            continue
+        s = summaries[f]
+        print("[edvr] frame %d summary: draws=%s off=%s copies=%s disp=%s "
+              "clears=%s unseen=%s"
+              % (f, s["draws"], s["off"], s["copies"], s["disp"],
+                 s["clears"], s["unseen"]))
+    return 0
+
+
 def _products_under(root):
     found = []
     products = os.path.join(root, "Products")
@@ -286,6 +464,14 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
+    ap.add_argument("--tally", choices=["vh"], default=None,
+                    help="aggregate instead of dumping: vh counts eye-texture "
+                         "DC lines per vh= hash, split by r= render-target "
+                         "token, with the DC frame summaries as totals")
+    ap.add_argument("--frame", type=int, default=None,
+                    help="with --tally, restrict to this census frame ordinal; "
+                         "frames past the census line cap have no per-draw "
+                         "lines and are reported as summaries")
     ap.add_argument("--root", default=None,
                     help="repository to resolve --expect-build against")
     ap.add_argument("--self-test", action="store_true",
@@ -352,6 +538,9 @@ def main(argv=None):
 
     if args.version:
         return 0
+
+    if args.tally:
+        return print_vh_tally(text, args.frame)
 
     lines = text.splitlines()
     if args.grep:
@@ -554,6 +743,132 @@ def self_test():
             ok = False
         if main(["--file", os.path.join(logs, "nope.log")]) != 1:
             print("a missing log did not exit 1")
+            ok = False
+
+        # --tally vh: the fixture feeds the parser the way a located log
+        # does, through main() on a directory the tool discovers on its
+        # own. Frame 2 carries only a DC frame summary -- the shape a
+        # truncated census leaves behind.
+        import contextlib
+        import io
+
+        census_dir = os.path.join(tmp, "census_logs")
+        os.makedirs(census_dir)
+        census_lines = [
+            "[00:00:00.001] version 0.14.1-93-gf78eba4 (build 68C0A1F2)\n",
+            "[00:00:01.000] DC begin census=1 frames=3 frame=100 offscreen=yes\n",
+            "[00:00:01.001] DC 0 #0 X n=10 i=1 r=@10 d=@50 c=- s=-,-,-,- "
+            "vs=@1 vh=AAAAAAAAAAAAAAAA vb=@2 sd=8 of=0 tp=4 ia=0,0,0 "
+            "ib=@3 x=-,-,-,- q=0\n",
+            "[00:00:01.002] DC 0 #1 X n=20 i=1 r=@10 d=@50 c=- s=-,-,-,- "
+            "vs=@1 vh=aaaaaaaaaaaaaaaa vb=@2 ia=0,0,0 ib=@3 q=1\n",
+            "[00:00:01.003] DC 0 #2 X n=60 i=1 r=@11 d=@50 c=- s=-,-,-,- "
+            "vs=@1 vh=AAAAAAAAAAAAAAAA vb=@2 ia=0,0,0 ib=@3 q=2\n",
+            "[00:00:01.004] DC 0 #3 X n=30 i=2 r=@11 d=@50 c=- s=-,-,-,- "
+            "vs=@1 vh=BBBBBBBBBBBBBBBB vb=@2 ia=0,0,0 ib=@3 q=3\n",
+            "[00:00:01.005] DC 0 #4 X n=40 i=4 r=@12 d=@50 c=- s=-,-,-,- "
+            "vs=@1 vh=BBBBBBBBBBBBBBBB vb=@2 ia=0,0,0 ib=@3 q=4\n",
+            # A draw whose IA tail was skipped under budget pressure has
+            # no vh=: it tallies, in its own bucket.
+            "[00:00:01.006] DC 0 #5 X n=50 i=1 r=- d=@50 c=- s=-,-,-,- q=5\n",
+            "[00:00:01.007] DCO 0 #0 X n=5 i=1 r=- d=@51 c=- s=-,-,-,- "
+            "vs=@4 vh=CCCCCCCCCCCCCCCC vb=@5 ia=0,0,0 ib=@6 q=6\n",
+            "[00:00:01.008] DCO 0 #1 X n=6 i=1 r=@20 d=@51 c=- s=-,-,-,- "
+            "vs=@4 vh=CCCCCCCCCCCCCCCC vb=@5 ia=0,0,0 ib=@6 q=7\n",
+            "[00:00:01.009] DC frame 0 draws=8 off=2 copies=7 disp=9 "
+            "clears=3 unseen=0\n",
+            "[00:00:01.010] DC 1 #0 X n=8 i=1 r=@10 d=@50 c=- s=-,-,-,- "
+            "vs=@1 vh=DDDDDDDDDDDDDDDD vb=@2 ia=0,0,0 ib=@3 q=8\n",
+            "[00:00:01.011] DC 1 #1 X n=2 i=1 r=@30 d=@50 c=- s=-,-,-,- "
+            "vs=@1 vh=DDDDDDDDDDDDDDDD vb=@2 ia=0,0,0 ib=@3 q=9\n",
+            "[00:00:01.012] DC frame 1 draws=2 off=0 copies=0 disp=0 "
+            "clears=0 unseen=0\n",
+            "[00:00:01.013] DC frame 2 draws=9 off=1 copies=0 disp=0 "
+            "clears=1 unseen=0\n",
+            "[00:00:01.014] DC end census=1 draws=19 off=3 copies=7 disp=9 "
+            "clears=4 unseen=0 lines=16384 interned=2048 overflow=0 "
+            "truncated=12\n",
+        ]
+        census_log = os.path.join(census_dir, "edvr_gfx_20260910_070000.log")
+        with open(census_log, "wb") as f:
+            f.write("".join(census_lines).encode("utf-8"))
+
+        # Parser-level: counting order, percent base, per-eye split by
+        # r=, DCO separation, lowercase hash folding, the no-vh bucket.
+        draws, summaries, cap, dropped = parse_census("".join(census_lines))
+        if len(draws) != 10 or set(summaries) != {0, 1, 2} \
+                or cap != 16384 or dropped != 12:
+            print("parse_census -> %d draws, frames %r, cap %r, dropped %r"
+                  % (len(draws), sorted(summaries), cap, dropped))
+            ok = False
+        rows, eye_total, off_total = tally_vh(draws)
+        if eye_total != 8 or off_total != 2:
+            print("tally_vh totals -> eye %d off %d, want 8/2"
+                  % (eye_total, off_total))
+            ok = False
+        if [r["vh"] for r in rows] != ["AAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBB",
+                                       "DDDDDDDDDDDDDDDD", None]:
+            print("tally_vh order/vh -> %r" % [r["vh"] for r in rows])
+            ok = False
+        if rows[0]["count"] != 3 or rows[0]["sub"] != {"@10": 2, "@11": 1} \
+                or rows[0]["avg_n"] != 30.0 or rows[0]["avg_i"] != 1.0:
+            print("tally_vh row A -> %r" % rows[0])
+            ok = False
+        if rows[1]["count"] != 2 or rows[1]["sub"] != {"@11": 1, "@12": 1} \
+                or rows[1]["avg_n"] != 35.0 or rows[1]["avg_i"] != 3.0:
+            print("tally_vh row B -> %r" % rows[1])
+            ok = False
+        if any(r["vh"] == "CCCCCCCCCCCCCCCC" for r in rows):
+            print("an offscreen DCO hash leaked into the eye table")
+            ok = False
+
+        # Frame restriction keeps only that frame's lines.
+        rows1, eye1, _ = tally_vh(draws, frame=1)
+        if eye1 != 2 or len(rows1) != 1 or rows1[0]["vh"] != "DDDDDDDDDDDDDDDD" \
+                or rows1[0]["sub"] != {"@10": 1, "@30": 1}:
+            print("tally_vh frame=1 -> %r eye %d" % (rows1, eye1))
+            ok = False
+        # A frame with a summary but no lines -- the truncated-census
+        # shape -- tallies empty instead of guessing.
+        rows2, eye2, _ = tally_vh(draws, frame=2)
+        if rows2 or eye2 != 0:
+            print("tally_vh frame=2 -> %r eye %d" % (rows2, eye2))
+            ok = False
+
+        def run_census_tally(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        rc, out = run_census_tally(["--dir", census_dir, "--tally", "vh",
+                                    "--frame", "0"])
+        if rc != 0 or "6 eye-texture DC lines, 2 offscreen DCO lines" not in out:
+            print("--tally vh --frame 0 rc=%d header missing:\n%s" % (rc, out))
+            ok = False
+        for want in ("50.0%", "AAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBB",
+                     "@10:2", "frame 0 summary: draws=8 off=2 copies=7 "
+                     "disp=9 clears=3 unseen=0"):
+            if want not in out:
+                print("--tally vh --frame 0 output lacks %r:\n%s" % (want, out))
+                ok = False
+        rc, out = run_census_tally(["--dir", census_dir, "--tally", "vh",
+                                    "--frame", "2"])
+        if rc != 0 or "only its summary survived" not in out \
+                or "frame 2 summary: draws=9" not in out:
+            print("--tally vh --frame 2 did not report the summary-only "
+                  "frame (rc=%d):\n%s" % (rc, out))
+            ok = False
+        rc, out = run_census_tally(["--dir", census_dir, "--tally", "vh"])
+        if rc != 0 or "truncated: 12 line(s)" not in out \
+                or "2 summary-only" not in out:
+            print("--tally vh did not report truncation (rc=%d):\n%s"
+                  % (rc, out))
+            ok = False
+        rc, out = run_census_tally(["--dir", census_dir, "--tally", "vh",
+                                    "--frame", "9"])
+        if rc != 0 or "appears in no census line or summary" not in out:
+            print("--tally vh --frame 9 rc=%d:\n%s" % (rc, out))
             ok = False
     finally:
         import shutil
