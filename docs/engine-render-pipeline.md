@@ -20,13 +20,13 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) name unknown-A/B from the allow-list
-  build's first armed flight (stage 4 — dxbc dump, then identification);
-  (2) per-record identity and change signal in the rig chain (stage 2);
-  (3) where LODDistanceScale gates the EB52/unknown-B instance selection
-  (stage 1/stage 2 join — offline); (4) optionally close the scheduler's
-  runtime-built payload vtables: startup write-watch on 0x1460adcdc… or
-  enqueue-side (FUN_1405d5040) stack capture (stage 0).
+* **Open, highest value first:** (1) per-record identity and change signal
+  in the rig chain (stage 2 — the motion arc's remaining pre-design item);
+  (2) where LODDistanceScale gates B's layer selection and why A has no
+  gate (stage 1/2 join — offline; the A-layer finding is recorded in the
+  engine arc as a design input); (3) optionally close the scheduler's
+  runtime-built payload vtables (stage 0); (4) ring-buffer command
+  consumers.
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,
@@ -161,21 +161,22 @@ otherwise.
   world basis, +10 z bias). The two unknowns are characterized, not named:
   kind-88 eye draws, pool=1 t33 readers; A ~547/frame median 198 verts,
   B ~207/frame median 24 verts.
-  2026-09-21 step-3: the unknowns are narrowed to "CB-less GPU-driven
-  instanced prop batches": both bind NO constant buffer (every census row
-  c=-; the DCW watch matched but had no buffer to read), are 8-byte-stride
-  triangle strips with shared VB/IB and startInstance stepping +8 between
-  siblings (GPU-driven instancing), VS SRVs at t1/t4/t6; 8056 pairs PS
-  669CC896CA4AA988 (8-texture material set), avg n~432. Their t33 transform
-  records sit in the shared pool dumps, addressable via ledger
-  startInstance. Snapshot retention is a HARDCODED hash allow-list
-  (eye_draw_snapshot.h sourceMesh(), no config key) — census_cb_watch
-  cannot influence it; their dxbc has never been retained. The two VS
-  hashes were added to the allow-list the same day (build pending at this
-  writing); one armed flight then dumps their dxbc.
-* **Open:** name them from that flight's dxbc (disassemble with
-  tools/dxbc_disasm.py); say what the props actually are. The 16k-line
-  census cap misranks A/B deltas — use the 20-frame draw ledger.
+  2026-09-21 (identified, allow-list flight 141800): unknown-A/B are two
+  MATERIAL LAYERS of the same pooled settlement-structure system as
+  EB52/E508 (t33 12,288-record pool; 16 draw-ranges byte-identical between
+  A and B — the same instances drawn twice). A = heavy weathering/detail
+  layer (world-space projected detail, deferred G-buffer, PS distance-fade,
+  NO LOD gate — ~550 draws/frame submitted unconditionally and invisible
+  at range); B = light baked-lit layer (per-instance light-class table),
+  LOD-gated. Corrections: the 8-byte stream is the INSTANCE data (vertex
+  stride 40 B, skinning idle); "CB-less" resolves to frame constants in
+  CB1 + instance data in the t33/t36/t38 SRV pool. Naming A/B visually
+  (which specific props) needs a crop flight; the shader identity is
+  proven.
+* **Open:** none for identification. The A-layer gating question is a
+  design input: gate A by its own fade distance (~550 draws/frame at far
+  LODs, zero visual change) — product decision, suppression discipline
+  from the 2026-09-21 trace entry still mandatory.
 * **Lever:** motion write-point selection; A/B attribution for stage 1.
 * **Fragility:** hash families cross-session-stable; tokens session-local.
 
