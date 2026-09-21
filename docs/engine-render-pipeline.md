@@ -150,7 +150,13 @@ otherwise.
 
 * **Build identity:** EDVR finds targets by behavior, not address; adding a
   build to kVerifiedBuilds is a claim someone re-ran the capture (build-
-  332753.md). Each row's fragility note says what re-verification costs.
+  332753.md). Each row's fragility note says what re-verification costs. The
+  first capture pass is now offline: `python tools/build_diff.py diff --exe
+  <new exe>` fingerprints the VA-bound rows against the 4.4.1.1 baseline
+  (tools/build_diff_targets.json) — per-target MATCH/CHANGED/UNRELIABLE plus
+  a 4 KiB-block .text change map that tells Ghidra where to look first;
+  `capture` re-baselines after a verified update. Extend the targets JSON as
+  new VA-bound rows land.
 * **Tool gap (recorded):** tools/edvr_log.py has no aggregation mode; the
   census tallies ran as one-off Python. A sanctioned `--tally <field>` mode
   with self-test is the fix when the tally becomes routine.
