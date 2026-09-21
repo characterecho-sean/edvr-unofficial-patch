@@ -20082,6 +20082,15 @@
    "rva": 5123376,
    "size": 64,
    "stage": "cull-lod"
+  },
+  {
+   "name": "drainer-fun_1442df940",
+   "stage": "bucket-workers",
+   "rva": 70121792,
+   "size": 64,
+   "fnv1a64": "D9C225A06AA3FD86",
+   "prologue_hex": "48895c24104889742418574883ec",
+   "bytes_hex": "48895c24104889742418574883ec204885d2488d4248b938020000488d9af0040000480f44c1488b00488b7018b8e0060000480f44d8488dbb10060000483bdf"
   }
  ]
 }

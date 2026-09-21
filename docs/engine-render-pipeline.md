@@ -52,8 +52,14 @@ otherwise.
   C 0x145591…). 214 code refs land in Table C, all from the constructors.
   Nothing named in .text calls any of them. Evidence:
   vtable_key_refs.txt, decomp_42CD610/42CD680, engine doc 2026-09-21 trace.
-* **Open:** scheduler identity, thread, cadence. Static RE cannot see through
-  the tables; runtime return-address stacks at the entries are the cheap path.
+  2026-09-21: the scheduler stack-capture probe is built (src/d3d11/
+  scheduler_stack_probe; `advanced.scheduler_probe`, default off) — it
+  records return-address stacks at the four worker entries and reports
+  top-3 stack signatures per target every 20 s; flown pending. Expected
+  signature: the VA recurring at a consistent frame position above any
+  0x1462b…/0x145dd… stub is the scheduler.
+* **Open:** scheduler identity, thread, cadence — the probe flight answers
+  this; static RE cannot see through the tables.
 * **Lever:** any engine-side timing decision; where truth sampling is safe.
 * **Fragility:** VA-bound; table layout will move per build.
 
@@ -228,10 +234,13 @@ the live INI unless a change is requested; identity-check logs with
    snapshot with EB5234DB6ADB491D watched; captures the family's per-eye
    instance-buffer bytes the cb-staged captures cannot see, and names the
    two unknown census hashes if their draws enter the snapshot window.
-3. **Scheduler stack capture (stage 0):** the read-only probe records
+3. **Scheduler stack capture (stage 0):** `advanced.scheduler_probe = 1`
+   in the install INI for the flight (default off); the built probe records
    return-address stacks at FUN_144321940/0x144320340/0x1442df940/
-   0x1436a0f50 for one settlement minute. Discriminator: a single named
-   dispatcher above the vtable stubs = the cadence owner.
+   0x1436a0f50 and reports top-3 stack signatures per target every 20 s.
+   Discriminator: the VA recurring at a consistent frame position above any
+   0x1462b…/0x145dd… stub is the scheduler; a named .text VA is a candidate
+   directly.
 4. Environment record for the log: VR runtime, headset, per-eye render
    size (1996×2121 baseline), DLSS version, game build.
 
