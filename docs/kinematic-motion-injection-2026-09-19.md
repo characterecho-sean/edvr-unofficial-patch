@@ -193,6 +193,16 @@
   252/252; frontier d3d11 34f9195432f98190, verified. UNFLOWN -- one
   eye burst harvests phys_queue (queue lifecycle) and jobs[] (the L1
   remeasure flight 190122 owed).
+  Update 19:45: FLIGHT 193356 read (entry at the foot) -- the queue
+  lifecycle is DECODED: append-only within job 2, drained ENTIRELY
+  between runs by an external consumer (resets 0 in 8124 runs; 33/64
+  sampled entries exactly 0). A node capture at job-2 exit sees
+  queue[entry..exit) intact -- the capture is unblocked. Write volume:
+  15174 appends over 1196 working runs (~12.7/run, peak 133). L1's
+  brackets-only numbers landed in the same burst (perf doc same-time
+  entry). The runs 8124 vs calls 1196 gap is the timing gate's
+  elapsed>0 dropping sub-QPC-tick early-outs (idle physics array),
+  not a probe defect.
 
 ## Premise
 
@@ -1545,3 +1555,57 @@ sawtooth-free sample tail means a steady consumer -- a large resets
 share or sawtooth samples mark a drain boundary the node capture must
 respect. appended == 0 with movers visibly moving refutes the queue as
 the mover truth and kills the node-capture plan before it costs a build.
+
+## 2026-09-20 (19:45: flight 193356 -- the dirty-queue lifecycle is DECODED; node capture unblocked)
+
+Flight 193356 (log 19:33:56, burst classification_193539.json 19:35:39,
+~103 s, 10758 frames, tracker live, settlement scale 2819 tracked /
+2573 eligible / 37 movers in-frame by 19:35:36). Build stamp reads
+v0.17.0-166-g71cbed3f-dirty because the install preceded the commit;
+installed d3d11 sha256 34f9195432f98190 == the 227cd41 content, so
+--expect-build HEAD mismatches on the label only (same situation as
+the 17:05 flight note). DLL re-hashed unchanged post-flight.
+
+phys_queue: runs 8124, appended 15174, max_delta 133, resets 0, 64/64
+non-trivial samples kept (cap fills in the opening seconds -- the
+uncapped counters are what answer the cadence question, exactly the
+split the design intended).
+
+**Lifecycle, decoded.** The append counter is CUMULATIVE across job-2
+runs and is drained entirely BETWEEN runs by an external consumer:
+sampled entries are exactly 0 in 33/64 pairs, small residues (1-28)
+otherwise, and exits climb across consecutive runs (25, 66, 71, 91,
+105, 122) before dropping between runs. Job 2 never observes the
+counter go backward: resets 0 in 8124 runs, zero in-run drops. So a
+node capture at job-2 exit reads queue[entry..exit) = this run's
+appended nodes, intact, synchronously inside the bracket. The capture
+the 19:11 entry deferred is now a buildable instrument: at job-2 exit,
+walk queue-base[entry..exit) (param_1[2]) reading node pointers, join
+to records by record+0x18. ~12.7 nodes/run steady, 133 peak -- a 256-
+slot cap with an overflow counter covers it.
+
+**Write volume (perf L4).** 15174 appends over 1196 working runs:
+~12.7 node writes per working run, peak 133 (busy frame). Working
+runs concentrate at settlement scale (idle-array runs early-out); a
+parked-at-settlement window would tighten the per-frame rate, but the
+order is set: tens of node writes per frame, not hundreds.
+
+**runs 8124 vs jobs[2].calls 1196 -- explained, not a defect.**
+notePhysQueue counts every bracket with a successful pair of reads;
+the jobs[] timing commit gates on elapsed>0, which drops sub-QPC-tick
+runs. Job 2 is dispatched ~every frame (~79 Hz here) but early-outs
+when the physics array is idle -- most of this flight pre-settlement
+-- and those bodies finish inside one QPC tick. The 1196 timed runs
+are the working ones (mean 7.6 us). Consequence for readers:
+jobs[2].calls undercounts DISPATCHES by design; phys_queue.runs is
+the dispatch count. No code change warranted -- noted here so the
+next reader does not burn a session on the 6.8x gap.
+
+jobs[] this flight (brackets-only, tracker-only path; the L1 remeasure
+190122 owed): UpdateRenderDataJob 32656 calls, mean 55.1 us, max 25.4
+ms (scene-load hitch), total 1.799 s; RenderDataBatch 5772 calls,
+mean 176.0 us, max 3.34 ms, total 1.016 s; UpdatePhysicsObjectsJob
+1196 calls, mean 7.6 us; Unnamed_BA0 2395 x 0.5 us;
+PrePhysicsAdvanceJob 0 (unhooked thunk, known); CurveJob 0 (hooked,
+never fired -- consistent with 17:50). Full L1 read-out in the perf
+doc same-time entry.

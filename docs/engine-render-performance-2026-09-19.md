@@ -190,3 +190,33 @@ write volume -- the decimatable work -- and it arrives in the same eye
 burst that finally harvests the L1 brackets-only jobs[] numbers (owed
 from flight 190122). Gates green (87/0, 32/0, json self-test, contract
 252/252); frontier d3d11 34f9195432f98190, verified. UNFLOWN.
+
+### 2026-09-20 19:45 -- flight 193356: L1 remeasured brackets-only; L4 write volume has its number
+
+The same burst (classification_193539.json) paid both debts. Build
+label caveat in the kinematic doc 19:45 entry (installed sha
+34f9195432f98190 == 227cd41 content).
+
+**L1, brackets-only, tracker-only path (~103 s, 10758 frames):**
+UpdateRenderDataJob 32656 calls, mean 55.1 us, max 25.4 ms (the
+scene-load hitch), total 1.799 s (~1.7% of one core); RenderDataBatch
+5772 calls, mean 176.0 us, max 3.34 ms, total 1.016 s;
+UpdatePhysicsObjectsJob 1196 working runs, mean 7.6 us, 9 ms total --
+negligible; Unnamed_BA0 2395 x 0.5 us; PrePhysicsAdvanceJob still
+unhooked, CurveJob still never fires. The observer-tax question is
+answered for job 0: 51 us/call with the detailed observer (205251)
+vs 55.1 us/call without -- the tax is within noise, so 205251's
+settlement-scale ~7 ms/frame stands modulo the cross-thread overlap
+caveat brackets cannot resolve. Per-FRAME normalization still needs a
+parked-at-settlement window: this flight averaged only ~3 job-0
+calls/frame because settlement scale (2573 eligible) arrived in the
+last ~20 s. Note for readers: jobs[2].calls counts runs whose body
+took >= 1 QPC tick; phys_queue.runs (8124) counts dispatches -- the
+6.8x gap is the elapsed>0 gate, not a probe defect.
+
+**L4, write volume measured:** 15174 node appends over 1196 working
+runs = ~12.7 node writes per working run, peak 133. The queue drains
+entirely between runs (resets 0 in 8124), so decimation math can
+treat the append count as the batch unit. Order settled: tens of
+node writes per frame at settlement scale, not hundreds -- L4's
+expected saving is capped accordingly.
