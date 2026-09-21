@@ -211,6 +211,15 @@
   contract 253/253; frontier d3d11 aa88369d7a608415, verified. UNFLOWN
   -- one eye burst at a settlement harvests the ring for the offline
   join against records[].node.
+  Update 21:05: FLIGHT 205106 read (entry at the foot) -- the capture is
+  HEALTHY (total == appended == 178650 exactly, resets 0, invariant
+  holds) and the join is a COMPLETE NULL: 11 distinct nodes in the tail,
+  0/625 record nodes overlap, with 400 movers in-frame at the burst.
+  BUT the type check casts the premise: the composer treats record+0x18
+  as a node CONTAINER (+0x48 count / +0x50 array of 0x58 entries), not
+  the flag+4x4 object job 2 dirties -- the null may be a category
+  error, not physics-inert movers. Two offline discriminators named in
+  the entry before the veto can lean on this signal.
 
 ## Premise
 
@@ -1665,3 +1674,62 @@ nodes intersect records[].node -- any overlap proves physics touches
 tracked records; a mover record whose node never appears in the tail is
 the physics-inert case the veto needs. Cross-check phys_nodes.total
 against phys_queue.appended before trusting the join.
+
+## 2026-09-20 (21:05: flight 205106 -- node capture healthy, join a COMPLETE NULL; node-type premise in doubt)
+
+Flight 205106 (log 20:51:06, burst 20:54:07, ~3 min at a settlement;
+tracker at the burst: tracked 3284, movers 400 in-frame / 623 total,
+1.34M pose changes). Build stamp v0.17.0-176-gd015f7b0-dirty == the
+d7108cf content (installed pre-commit); DLL re-hashed unchanged
+post-flight: sha256 aa88369d7a608415.
+
+**Instrument health, end to end.** phys_queue: runs 94445, appended
+178650, max_delta 122, resets 0. phys_nodes: total 178650 == appended
+EXACTLY -- the capture saw every append through every job-2 dispatch --
+overflow 178394, ring 256/256, and the invariant total == ring +
+overflow holds. The 20:50 dead-capture discriminator (total 0 with
+appended > 0) does not fire. The instrument is proven; what follows is
+the measurement, not a defect.
+
+**The join is a complete null.** The ring holds 11 DISTINCT nodes in a
+repeating pattern (4 x32, 1 x20, 6 x18 -- a small always-dirty set,
+arenas 0x1effa89*/0x1eb33f9*/0x1eb3584*). Overlap with the capture's
+records: 0 of 2971 records, 0 of 625 distinct record+0x18 values, 0 of
+408 xf-changed records, 0 of 173 distinct xf-mover nodes. The 11 ring
+nodes appear nowhere else either (riglinks, ownership, pose_events all
+negative). Movers were in-frame and changing at the dump frame.
+
+**But the join premise is in doubt (offline type check, same night).**
+The composer FUN_14433DB20 dereferences record+0x18 as a node
+CONTAINER: gates on node+8 != 0 (pointer-style), reads a count at
++0x48 and an array at +0x50 of 0x58-stride entries (0x58 = 88 B, the
+xf-block size) -- and never reads a matrix off it. Job 2's dirty nodes
+instead carry a flag word at +8 (bits 2/4 toggled), a guard pointer at
++0x70, and a 4x4 matrix written at +0x90..0xCC. Two different layouts.
+Pointer equality between the queue family and record+0x18 may be a
+category error; if so, the null join is expected by construction and
+says nothing about movers. NOT ruled out either: a big struct could
+host both layouts, and the composer only null-checks node+8 (a flags
+value of 2/4/6 would pass). Genuinely ambiguous.
+
+**Coverage gaps ruled out / noted.** Job 4 (CurveJob) fired 0 times, as
+on 17:50 -- not the path at settlement scale. Job 3
+(PrePhysicsAdvanceJob) is UNHOOKED; a same-shaped append there would be
+invisible to this capture. jobs[2].calls 1196 again (the elapsed>0
+gate); phys_queue.runs 94445 (~522/s) vs 8124 (~79/s) on 193356 -- the
+job-2 dispatch rate scales with scene activity; noted, unexplained.
+
+**Verdict.** The refuter instrument works. Its first flight says the
+physics dirty queue, as joined by record+0x18, touches nothing the
+tracker sees -- either movers are physics-inert through job 2 (the
+veto-relevant case) or the join pairs the wrong node families. The
+type question must settle before the veto leans on this signal.
+
+**Next discriminators, both offline, no flight needed.** (a) Decompile
+job 3's body (0x42DF530, run IS the body) for the same append shape
+(param_1[3] CAS + param_1[2] array) -- closes the coverage gap.
+(b) Resolve the node-type question: find who writes record+0x18 (a
+FindStores scan) and what the 0x58-stride entries carry (a node
+pointer? the 88-B xf?). The 11 always-dirty ring nodes are the foot in
+the door -- any engine structure referencing one names the family
+(player ship / head rig suspected).
