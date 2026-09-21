@@ -31,7 +31,12 @@ otherwise.
   decision). Bucket suppression — five independent grounds,
   engine-render-performance-2026-09-19.md. Merge-key or bucket-key control —
   the key is an incidental Wwise counter. The 82% bucket attribution and
-  40-frame cadence — no evidence route exists.
+  40-frame cadence — no evidence route exists. Exe-embedded render shaders:
+  the exe embeds exactly ONE shader, Frontier FGDK's clear_indirect_buffer
+  compute utility (.rdata RVA 0x4E27600–0x4E2B200, full sweep 2026-09-21) —
+  census families cannot be named from the exe (only armed snapshots), and
+  build_diff cannot do shader-recompile detection from the exe (that would
+  need the game's external shader assets, not the binary).
 * **Next (no flight):** compare the staged VS b0/b1/b2 constants across the
   two eye passes in existing EDVRDRW1 captures (stereo culling share; where
   truth becomes final per eye). **Next (one flight, user's to spend):** the
@@ -74,12 +79,25 @@ otherwise.
 
 * **Known:** rig → *(rig+0x348) collection (58/58 joined; ~1,572 stable rigs;
   one collection each; one FUN_14431AFE0 dispatch per rig per frame);
-  collection+0x280 records, stride 0x2F0; transforms at record+0x130..0x16C;
-  eval → world-update chain FUN_144331300 → FUN_14433DB20. collection+0x18 is
-  ONE shared global owner, not per-rig (flight-refuted); the +0x90/+0x1B8
-  epoch pair is refuted. Source: kinematic-motion-injection-2026-09-19.md.
-* **Open:** per-record identity (~5 records share one node); the change
-  signal that says a transform is new this frame.
+  collection+0x280 records, stride 0x2F0. 2026-09-21 correction from the
+  transform trace: the per-frame updater FUN_14433DB20 writes record+0x170
+  (world position) + +0x17C (packed quat), +0x240..+0x24C bounds, and copies
+  +0xF0..0x128 → +0x1C0..0x1F8 (previous-frame products) — record+0x130..0x16C
+  is the static local 4x4 (init at record creation, NO reader in any
+  render-chain function; do not key motion on it). The render-ward handoff
+  is a vtable interface at record+0x2C8 (methods +0x68/+0x70/+0x78/+0x80):
+  slot-array fill ((*(record+0x290)+0x50, 0x58-stride groups, 0x20 items,
+  FUN_1405db720), notify, bulk update, matrix+position submit (+0x2D0),
+  hide. That slot array is the last offline-proven structure; collection+0x18
+  is one shared global owner, not per-rig (flight-refuted); the +0x90/+0x1B8
+  epoch pair is refuted. Source: kinematic-motion-injection-2026-09-19.md,
+  transform trace 2026-09-21 (decomp_433DB20, transform_field_refs.txt).
+* **Open:** the identity of the class behind record+0x2C8's vtable — one
+  runtime capture of that pointer (e.g. extending the existing
+  KinematicEvalProbe) names the implementing class, i.e. the function that
+  fills the instanced/pool data; per-record identity (~5 records share one
+  node) and the change signal (a transform is new this frame). Everything
+  upstream of the vtable call is proven offline.
 * **Lever:** cost-effective motion vectors — engine-truth injection (decided
   2026-09-19); replaces boundary-side estimation classes.
 * **Fragility:** VA-bound; identity must be re-proven per build by capture,
@@ -129,21 +147,27 @@ otherwise.
   1996×2121 RGBA8 + D32 target, strictly BLOCKED per layer — A×N then B×N,
   never interleaved — with all offscreen/copies first. Shaders, geometry,
   and constant-buffer *pointers* are shared across eyes; per-eye truth is
-  produced by re-staging the same buffers between passes: the shared b0
-  differs between eyes only in rows 4, 5, 7 (row 4 = ±0.242 eye-split
-  projection/rotation), and instanced families shift startInstance by a
-  constant +80148 into one shared instance buffer. Draw-time in the
-  immediate context inside each blocked eye pass is therefore a single hook
-  point that sees per-eye-final constants; the eye is known from the
-  render target / block ordinal, not from buffer contents. Canted
-  projection (docs/canted-projection.md) is the likely owner of the b0
-  row-4 split; EDVR's own OpenXR runtime observes the frame from the
-  runtime side (src/openxr).
-* **Open:** whether row 4's ±0.242 is exactly the canted-projection matrix
-  (compare against the canted arc's record); EB52-family per-eye bytes — its
-  constants live in the shared instance buffer, so an EB52-armed snapshot
-  (or instance-buffer read) is the remaining flight if those bytes matter;
-  whether the blocked pairs re-run culling per eye or reuse one scene list.
+  produced by re-staging the same buffers between passes: b0 rows 4–7 are
+  the per-eye PROJECTION matrix (transposed layout, infinite-far reversed-Z,
+  off-axis stereo) — row 4's z term is the principal-point offset ∓0.2425,
+  a mirror pair decoding to the Quest 3 frustum (40°/54° vs 54°/40°,
+  matching the canted arc's Quest 3 record; rows 9–11 view rotation and all
+  other rows are eye-identical to ≥6 dp); instanced families shift
+  startInstance by a constant +80148 into one shared instance buffer whose
+  b1 payload (336 float4) is eye-independent (8/336 rows carry per-instance
+  animation). Draw-time in the immediate context inside each blocked eye
+  pass is therefore a single hook point that sees per-eye-final constants;
+  the eye is known from the render target / block ordinal, not from buffer
+  contents. On this rig (Quest 3, 0.00° cant) no canted term exists in any
+  captured family; the canted arc's only measured cant is 10°/eye on Pimax
+  8KX. EDVR's own OpenXR runtime observes the frame from the runtime side
+  (src/openxr).
+* **Open:** on a canted headset (Pimax 8KX) verify the cant term appears in
+  the same re-staged b0 rows (environment-dependent; expected per the canted
+  arc's fix design); EB52-family per-eye bytes — its constants live in the
+  shared instance buffer, so an EB52-armed snapshot (or instance-buffer
+  read) is the remaining flight if those bytes matter; whether the blocked
+  pairs re-run culling per eye or reuse one scene list.
 * **Lever:** the motion write point — one hook, per-eye-final truth at draw
   time, feeding surface 1 then surface 2 (stage 6); any single-pass-stereo
   question (likely out of scope).
@@ -176,12 +200,43 @@ otherwise.
   a 4 KiB-block .text change map that tells Ghidra where to look first;
   `capture` re-baselines after a verified update. Extend the targets JSON as
   new VA-bound rows land.
-* **Tool gap (recorded):** tools/edvr_log.py has no aggregation mode; the
-  census tallies ran as one-off Python. A sanctioned `--tally <field>` mode
-  with self-test is the fix when the tally becomes routine.
+* **Tooling:** `python tools/edvr_log.py --tally vh [--frame N]` aggregates
+  census draws per shader content hash with per-eye subcounts, percentages,
+  and avg n=/i= (landed 2026-09-21; self-tested, reproduces the flight-064511
+  reference counts exactly). Census caveat it encodes: per-draw detail dies
+  at the 16384-line cap — later frames may exist only as summaries.
 * **Flight economy:** stages 0, 2, 4 and the stage-1 A/B all want runtime
   evidence; batch them into as few flights as the discriminators allow
   (AGENTS.md: enumerate before you build).
+
+## Next flight — batched protocol (one settlement visit)
+
+Every open runtime question, one visit. Install the probe build first
+(`tools/install_edvr.py --target frontier`, then `--verify-only`); preserve
+the live INI unless a change is requested; identity-check logs with
+`edvr_log.py --expect-build HEAD`. Instruments, in flight order:
+
+1. **Settings A/B (stage 1 lever):** arm the census at the settlement on
+   foot, current `Custom.4.4.fxcfg` (pass A). Game closed; set
+   MaterialQuality=0, SurfaceMaterialQuality=0, LODDistanceScale=0.1;
+   relaunch, same spot and heading, arm again (pass B). Discriminators:
+   EB52-family vh= count and total eye draws per frame (use
+   `edvr_log.py --tally vh`); outcome (a) family collapses → the sliders
+   gate settlement scenery, quantified; (b) unchanged → scenery ignores
+   the knobs, no settings-side lever; (c) partial → bisect which knob.
+2. **EB52-armed EyeDrawSnapshot (stage 4/5 gap):** in pass A, arm the
+   snapshot with EB5234DB6ADB491D watched; captures the family's per-eye
+   instance-buffer bytes the cb-staged captures cannot see, and names the
+   two unknown census hashes if their draws enter the snapshot window.
+3. **Scheduler stack capture (stage 0):** the read-only probe records
+   return-address stacks at FUN_144321940/0x144320340/0x1442df940/
+   0x1436a0f50 for one settlement minute. Discriminator: a single named
+   dispatcher above the vtable stubs = the cadence owner.
+4. Environment record for the log: VR runtime, headset, per-eye render
+   size (1996×2121 baseline), DLSS version, game build.
+
+Signatures are stated per instrument so the visit cannot come back
+ambiguous; each outcome above already names its next move.
 
 ## How to update
 
