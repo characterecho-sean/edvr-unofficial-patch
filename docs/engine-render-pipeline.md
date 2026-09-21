@@ -20,15 +20,14 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) the traverse flight — cost the real
-  settlement state: drive or fly through the settlement at baseline vs
-  LODDistanceScale=0.1, same instruments (all installed), the
-  frame-cycle windows then bound the draw volume in ms under genuine load
-  (the parked state proved non-bounding: < ~0.15 ms for 3.5k draws, ~9 ms
-  pacer headroom); (2) per-record identity and change signal in the rig
-  chain (stage 2 — motion arc); (3) optionally close the scheduler's
-  runtime-built payload vtables (stage 0); (4) ring-buffer command
-  consumers.
+* **Open, highest value first:** (1) attribute the ~10 ms stock CPU: mine
+  the existing L1-bracket flights (190122/193356) for the settlement job
+  breakdown, optionally calibrated by one flight with fpsVR alongside
+  EDVR's instruments (the draw stream is refuted as the wall — < 0.15 ms
+  for 3.5k draws; the job pipeline is the suspect, brackets summed ~7 ms);
+  (2) per-record identity and change signal in the rig chain (stage 2 —
+  motion arc); (3) optionally close the scheduler's runtime-built payload
+  vtables (stage 0); (4) ring-buffer command consumers.
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,

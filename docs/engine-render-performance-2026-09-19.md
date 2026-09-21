@@ -1044,6 +1044,26 @@ Side finding: ~9 ms/frame of pacer headroom means draw-time hook work
 (e.g. motion-truth sampling) fits the budget on this rig. Costing the
 REAL settlement state needs a traverse flight (below).
 
+Stock cross-check (Sean, fpsVR at this same settlement, stock runtime):
+GPU ~6.8 ms, CPU ~10 ms against the 11.1 ms budget — CPU-bound confirmed
+and quantified; the scene lives ~1 ms from the edge. Paradox with the
+mined passes: if the ~10 ms CPU were eye-pass draw submission, removing
+3.5k draws (passes B/C) would have recovered >= ~1 ms; it recovered
+< 0.15 ms. Conclusion: the settlement CPU wall is NOT in the draw
+stream — census draws are near-free CPU-side (GPU-driven instanced
+strips; heavy work is upstream). The LOD-override and A-gate ideas are
+dead as PERFORMANCE features (preference options at most). The 10 ms
+points at the per-frame job pipeline — kinematic eval over ~1,572 rigs,
+physics, the bucket worker storm — matching the L1 job brackets' summed
+~7 ms/frame that the 2026-09-19/20 flights measured but never placed on
+the critical path. The perf lever pivots to the L3/L4 candidates
+(kinematic-eval narrowing, physics decimation); this arc has already
+mapped their structures (stage 2, the bucket lifecycle, the named
+scheduler). Next: mine the existing L1-bracket flights (190122/193356)
+for the settlement job breakdown vs the 10 ms; optionally one
+calibration flight with fpsVR running alongside EDVR's instruments to
+correlate fpsVR's CPU figure with the brackets.
+
 ruled out: fixed-density scatter (A's instances are ordinary pool
 records); an alternate LOD keyed elsewhere (no LOD branch exists);
 identification via census_cb_watch (A/B bind no b0 — resolved: frame
