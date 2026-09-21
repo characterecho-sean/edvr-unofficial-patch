@@ -26,11 +26,26 @@
   mesh draws. Do not build bucket clearing, rekeying or mask edits. See the
   2026-09-21 trace entry at the end.
 
-* **Open (flight-worthy only):** what consumes the ring-buffer command records
-  (draws vs lights vs statistics) and the frame-scheduler identity. Both are
-  runtime-attributable: enqueue counters at FUN_144c7ef70 plus return-address
-  stacks at the worker entries. Everything else this arc needed is answered
-  offline. Producer counters measure item creation, not submitted volume.
+* **Boundary-first attribution (2026-09-21):** the armed-census tally of the
+  2026-09-19..21 settlement flights isolates ~78% of the retained eye-pass
+  draws to one instanced sourceMesh family (vh=EB5234DB6ADB491D, ~282 verts x
+  ~5 instances per draw, stable across three flights), ~9% to an unidentified
+  instanced family (vh=8056C9D5F22007F9) and ~3% to small-instance draws
+  (vh=2684F02B9B0BB0DE). Eye pass is ~18.3k draws/frame, offscreen ~4.1k. The
+  high settlement draw count is one dominant small-batch scenery family — not
+  the bucket subsystem, whose items never reach the boundary as draws.
+
+* **Open (flight-worthy only):** one matched A/B census flight at a
+  settlement: game material/LOD keys at minimum vs the current Custom preset
+  (today MaterialQuality=3, LODDistanceScale=1.0 in Custom.4.4.fxcfg), same
+  spot and heading, census armed in both passes. Discriminators: EB-family
+  draw count, total eye draws, the two unknown-family shares. If the family
+  collapses at min settings, the recoverable-draw lever is proven and
+  quantified; if it does not move, settlement scenery ignores the sliders and
+  the only remaining lever is EDVR-side work at the boundary. Optional add-on:
+  arm EyeDrawSnapshot in the A pass to name the two unknown hashes via
+  tools/dxbc_disasm.py. Also still open from the trace: ring-buffer command
+  consumers and the frame-scheduler identity (offline-unnamed).
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -777,3 +792,76 @@ count, sequence) plus return-address stacks at FUN_144321940/0x144320340/
 0x1442df940/0x1436a0f50 to name the scheduler, correlated with the existing
 eye census to identify what the command rings drive. No bucket mutation, no
 clearing, no suppression build is justified by current evidence.
+
+
+### 2026-09-21 -- boundary-first attribution: the settlement draws are one scenery family
+
+Prompted by the question of whether the high settlement draw counts had ever
+been traced backwards from the d3d11 boundary (they had not — the closed
+trace ran forwards from the engine's bucket producers, and its items never
+reach the boundary as draws). The armed-census logs of the three settlement
+flights (205251, 205106, 064511, 073348; builds v0.17.0-64..-188, game build
+332841) were tallied per VS content hash. `vh=`/`ph=` hashes are
+cross-session-stable; identification via the named families in
+src/d3d11/eye_draw_snapshot.h and doc names.
+
+**Representative frame (064511, frame 0; 3020 retained eye lines).**
+Caveat first: the 16384-line census cap is eaten by ~15k DCC copy lines on
+frame 0, so retained draws are eye ordinals #1-#3020 of 18357 — the first
+16% of the eye pass. The distribution below is therefore a biased sample;
+it was stable across three independent flights (EB share 78.2/80.9/80.5%),
+which bounds the bias.
+
+| vh hash | share | avg n x i | identity |
+|---|---|---|---|
+| EB5234DB6ADB491D | 78.2% | 282 x 4.9 | sourceMesh settlement scenery family (named in eye_draw_snapshot.h; the settlement-flicker zero-sample family) |
+| 8056C9D5F22007F9 | 9.3% | 413 x 6.7 | UNKNOWN — no DXBC on disk anywhere |
+| 2684F02B9B0BB0DE | 3.4% | 36 x 5.1 | UNKNOWN — no DXBC on disk |
+| ACE405F428C17EF6 | 3.3% | 88,994 x 1 | large terrain chunks (watches family) |
+| F516BF0201303B87 | 2.4% | 221 x 1 | sourceMesh |
+| DE545DC8EE4FBB87 | 0.8% | 84 x 2.9 | sourceMesh |
+| rest | ~2% | | sky dome, solar, rifle glow, panels, tails |
+
+Per-frame totals from the DC frame summary lines: eye ~18.3k, offscreen
+~4.1k, copies ~1.6k (frames 1-2; frame 0's 15k copies are a one-time flood),
+dispatches ~105. The eye share of draws+offscreen is 81.8% — the origin of
+the "82%" figure. Conclusion: the settlement eye pass is dominated by
+thousands of small instanced batches of ONE scenery material family. That
+is the "more detail than is strictly necessary" candidate, and it is
+measurable from the boundary without any engine mutation.
+
+**Game settings inventory (this machine).** No model-quality key exists by
+that name; the game's GraphicsConfiguration.xml defines MaterialQuality
+(internal MaterialQualityLevel 0-3), LODsToDrop, LODDistanceScale,
+SurfaceMaterialQuality, EnvironmentQuality, TerrainQuality,
+TerrainLodBlending. Active profile Custom.4.4.fxcfg (mtime 2026-09-20, in
+the flight window): MaterialQuality=3, LODDistanceScale=1.0,
+SurfaceMaterialQuality=2, TerrainQuality=3, EnvironmentQuality=0 (already
+minimum), DirectionalShadowQuality=2, SpotShadowQuality=2,
+HMDRenderTargetMultiplier=0.65. GraphicsConfigurationOverride.xml pins
+GalaxyMap/Planets/Envmap only. So the material/LOD headroom is real:
+MaterialQuality and LODDistanceScale are at maximum while EnvironmentQuality
+is already at minimum — the A/B changes one cluster at a time and the
+current config is the high side.
+
+**A/B flight protocol (no build needed; census is hotkey-armed today).**
+Game closed, edit Custom.4.4.fxcfg: MaterialQuality=0,
+SurfaceMaterialQuality=0, LODDistanceScale=0.1 (keep shadows, terrain, and
+EnvironmentQuality untouched to isolate geometry). Relaunch, stand at the
+same settlement spot and heading as an A-pass reference (use flight 064511's
+position or re-capture pass A first in the same session), arm the census
+both passes, 3 frames each. Compare per-frame DC summaries and the vh=
+tally: EB-family count, eye draws, unknown-family shares. Expected
+signatures: (a) EB count collapses — the sliders gate settlement
+source-mesh instance selection; the recoverable fraction is measured, not
+assumed; (b) EB count unchanged — settlement scenery ignores these knobs
+and draws unconditionally, in which case no settings-side lever exists and
+any further win is EDVR-side boundary work; (c) partial — bisect
+MaterialQuality vs LODDistanceScale in one further pass. Optional: arm
+EyeDrawSnapshot in pass A so the two unknown hashes get named via
+tools/dxbc_disasm.py.
+
+**Tool gap (recorded, not yet built):** the per-vh tally needed read-only
+python one-liners because tools/edvr_log.py has no aggregation mode; a
+`--tally <field>` mode would close it. Also noted: census truncation makes
+frame 0 samples copy-flooded — tally frames 1+ in future analyses.
