@@ -1124,3 +1124,87 @@ ruled out: fixed-density scatter (A's instances are ordinary pool
 records); an alternate LOD keyed elsewhere (no LOD branch exists);
 identification via census_cb_watch (A/B bind no b0 — resolved: frame
 constants in b1, instance data in SRVs).
+
+
+### 2026-09-21 -- Design: change-gated render-data updates (targeting the 5.3 ms view-dependent content)
+
+**Cost (measured):** ~5.3 ms/frame of view-dependent settlement content
+(stock fpsVR view test: 9.5 ms cockpit-with-settlement vs 4.2 ms bare
+ground, same rig). Composition: eval + kinematic jobs + physics for the
+passed set; draw submission refuted (< 0.15 ms for 3.5k draws). Extrapolated
+suspect: ~432 UpdateRenderDataJob (55 us) + ~79 RenderDataBatch (176 us)
+calls/frame at the settlement = ~4-5 ms wall if thread overlap is poor —
+EXTRAPOLATED from a non-settlement scene; Phase 0 replaces this with
+measured settlement numbers.
+
+**Mechanism.** Settlement structure/prop records are static: their
+per-frame truth (record+0x170 position, +0x17C packed quat — the fields
+FUN_14433DB20 writes) is bit-identical frame after frame, yet the engine
+re-composes and re-writes their render data every frame; the bucket items
+and instance buffers persist cross-frame and the eye-pass draws re-execute
+from them unchanged. Skipping the re-production for unchanged records
+removes the CPU while producing byte-identical output. This is change
+gating (the L4 idiom), not suppression: nothing is hidden, nothing is
+culled — redundant work is not repeated. It does NOT touch the ungated
+A-layer question, culling, or LOD selection.
+
+**Hook point.** job-0's params carry the collection array + count
+(FUN_144321940 param struct [5]/[6]); one call processes one collection
+(~1.7 records average, 2,672 records over 1,572 rigs). Gate at the call:
+if EVERY record of the collection matches its cache entry, skip the call
+(forward past, run nothing). Movers' collections (any changed record)
+re-run whole — conservative, correct. The eval hook already brackets
+FUN_144321940, so the install point exists in-tree.
+
+**Change test (v1, deliberately conservative).** Cache per collection:
+collection pointer + per record {record pointer, +0x170, +0x17C,
+record+0x570 mask}. Run the job if any field differs from cache, on first
+sight of the collection, or every N frames (forced refresh, N=30
+failsafe). Invalidate ALL caches on: journal boundaries EDVR already
+watches (LoadGame/Disembark/StartJump — engine doc's journal watcher), the
+reset path firing (FUN_1436a0f50 — already probed), and session
+boundaries. Open dependency named honestly: per-record identity (~5
+records share one node) means the cache keys by ARRAY SLOT (record
+pointer) with the truth fields as the change oracle; the slot-reuse
+events the landed-but-unflown KinematicEvalProbe capture would detect are
+exactly what the forced refresh bounds.
+
+**What must be true for it to be safe (verified in Phase 2, not
+assumed):** (a) bucket items persist while their producer is skipped —
+the 2026-09-21 trace shows items live in batch nodes until rekey/reset;
+the reset probe doubles as the invalidation trigger; (b) skipped
+collections produce unchanged instance/slot data — true by construction
+(bit-identical inputs, deterministic compose), validated by census
+draw-count equality and eye-draw snapshots; (c) stereo/moving occluders/
+shadows consume the same persistent items — unchanged items mean all
+passes unchanged; (d) scene transitions covered by journal + reset
+invalidation.
+
+**Phases and gates.**
+- Phase 0 (flight, zero new code): the attribution flight — park >= 60 s,
+  eye-burst, jobs[] dump; replaces extrapolated per-call costs with
+  settlement-measured ones; ALSO a cpu_profile capture inside job-0 (the
+  tool exists) to check the alternative hypothesis that the 55 us is one
+  hot inner loop rather than irreducible compose work. Gate: if measured
+  job-0+batch wall share < ~1.5 ms, this design is not worth building —
+  the 5.3 ms is elsewhere and the design returns to evidence.
+- Phase 1 (build, config `fix.static_prop_updates = on|off`, default off):
+  the gate as above + counters (calls skipped/run, forced refreshes,
+  invalidations; brackets before/after). One flight: census draw counts
+  MUST equal baseline (draws unchanged), brackets must show the expected
+  call drop, frame-cycle must improve by the Phase-0-measured wall share
+  (not just the CPU sum — thread overlap is the open variable).
+- Phase 2 (validation, no new code): settlement-flicker instruments as
+  the regression harness (the arc's zero-to-visible detection), a
+  mover-heavy window (ship launch/NPC activity) to prove movers re-run,
+  and a journal-transition pass (jump out/in, dock) to prove invalidation.
+  Gate for default-on: zero census delta + zero flicker-instrument hits +
+  measured wall saving >= the Phase-0 number, across all three.
+
+**Expected saving (to be replaced by Phase 0):** most of the static
+collections' job time — order 3-4 ms CPU on the settlement mix if the
+extrapolation holds; wall saving subject to thread overlap. **Regression
+surface:** stale props after missed changes (bounded by the forced
+refresh + movers-always-run), invalidation bugs across transitions (the
+journal/reset triggers), and identity collisions (bounded by N-frame
+refresh; the probe capture quantifies if needed).

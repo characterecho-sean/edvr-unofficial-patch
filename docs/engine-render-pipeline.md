@@ -20,16 +20,15 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) the attribution flight — parked at
-  the settlement >= 60 s (engine_motion + scheduler_probe already on in
-  the flight INI), then eye-burst dump + census, ideally fpsVR alongside:
-  the L1 re-read shows brackets-only sums ~0.26 ms/frame over a mostly
-  non-settlement session, but the probe shows ~432 UpdateRenderDataJob +
-  ~79 RenderDataBatch calls/frame at the settlement (~4-5 ms wall
-  extrapolated, unproven) — this flight places the kinematic jobs on or
-  off the 10 ms wall; (2) per-record identity and change signal (stage 2
-  — motion arc); (3) scheduler payload-vtable closure (stage 0);
-  (4) ring-buffer command consumers.
+* **Open, highest value first:** (1) Phase 0 of the change-gate design —
+  the attribution flight (park >= 60 s, eye-burst, jobs[] dump, plus a
+  cpu_profile capture inside job-0; engine_motion + scheduler_probe
+  already on): it replaces the extrapolated ~4-5 ms with measured
+  settlement numbers, and its gate kills the design cheaply if the job
+  wall share is < ~1.5 ms; (2) per-record identity and change signal
+  (stage 2 — motion arc, and the change-gate design's bounded dependency);
+  (3) scheduler payload-vtable closure (stage 0); (4) ring-buffer command
+  consumers.
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,
@@ -119,7 +118,13 @@ otherwise.
   node) and the change signal (a transform is new this frame). Everything
   upstream of the vtable call is proven offline.
 * **Lever:** cost-effective motion vectors — engine-truth injection (decided
-  2026-09-19); replaces boundary-side estimation classes.
+  2026-09-19); replaces boundary-side estimation classes. 2026-09-21: the
+  settlement-CPU design lands here too — change-gated render-data updates
+  (engine doc's design entry): skip re-producing render data for records
+  whose truth is bit-identical frame-over-frame; Phase 0 = attribution
+  flight, Phase 1 = config-gated build, Phase 2 = flicker-instrument
+  validation; per-record identity is a bounded dependency (N-frame forced
+  refresh, slot-reuse probe quantifies).
 * **Fragility:** VA-bound; identity must be re-proven per build by capture,
   per the kVerifiedBuilds rule in build-332753.md.
 
