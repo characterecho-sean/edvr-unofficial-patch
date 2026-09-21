@@ -1188,6 +1188,10 @@ invalidation.
   hot inner loop rather than irreducible compose work. Gate: if measured
   job-0+batch wall share < ~1.5 ms, this design is not worth building —
   the 5.3 ms is elsewhere and the design returns to evidence.
+  (2026-09-21: folded into the Phase 1 flight by decision — the build
+  logs brackets with the gate off vs on, so the kill-gate is evaluated
+  from that flight's before/after; the cpu_profile inner-loop check
+  remains optional.)
 - Phase 1 (build, config `fix.static_prop_updates = on|off`, default off):
   the gate as above + counters (calls skipped/run, forced refreshes,
   invalidations; brackets before/after). One flight: census draw counts
