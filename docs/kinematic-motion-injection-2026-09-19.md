@@ -161,6 +161,10 @@
   self-test + contract 252/252; frontier d3d11 5502228f87889997,
   verified. UNFLOWN -- the next flight answers the discriminator
   question (protocol in the foot entry).
+  Update 18:12: the L1 unblock landed too (perf doc same-time entry) --
+  the brackets now time with the observer OFF, so the same flight
+  batches the brackets-only job-cost remeasure with the discriminator
+  census. Frontier d3d11 87d036727d54c0c6, verified.
 
 ## Premise
 
