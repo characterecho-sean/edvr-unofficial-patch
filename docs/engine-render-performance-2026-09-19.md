@@ -40,7 +40,10 @@ expensive way to run this project, so instruments batch.
   word. The +0x570 writer is IDENTIFIED (20:25 entry): the ctx builder
   copies it from the source model record at ctx build time and nothing
   rewrites it per frame — a cleared bit persists until content rebuild.
-  L2's remaining unknowns: bit-to-draw-class semantics and the census join.
+  L2's remaining unknown: the census join. (Bit-to-draw-class semantics
+  resolved to the model at 21:45: source-record +0x560 is copied whole from
+  model+0x8E0 by the source-record builder; per-bit class names sit one
+  hop up, not needed for whole-word suppression.)
 
 ## Levers, cheapest measurement first
 
@@ -68,11 +71,15 @@ second-guessing it. The +0x570 writer is now identified (2026-09-20
 20:25 entry) and is content-static: the mask is copied once from the
 source model record at ctx build and never rewritten per frame, so a
 cleared bit persists until the ctx is rebuilt — re-assert on rebuild,
-not per frame. Remaining before building: the bit-to-draw-class
-semantics (the source-record +0x560 writer, in the content pipeline)
-and the census join to the observed draw families. Risk: suppressing
-a draw that becomes visible needs a one-frame restore path, proven on
-the smoke/static-surface rigs.
+not per frame. The content pipeline is mapped end to end (2026-09-20
+21:45 entry): the mask is born on the model object (+0x8E0) and copied
+down whole at every hop — MOV-only at all three levels, never
+accumulated in place. Remaining before building: per-bit draw-class
+names (the model+0x8E0 writer — 30 candidates listed in
+analysis/decomp/stores_8e0.txt; a ctor default of 0x3C hints bits are
+draw-list slots) and the census join to the observed draw families.
+Risk: suppressing a draw that becomes visible needs a one-frame
+restore path, proven on the smoke/static-surface rigs.
 
 ### L3. Kinematic eval narrowing
 
@@ -339,3 +346,45 @@ the 23k D3D11 draws. New artifacts: analysis/ghidra_scripts/
 FindStores570.java, FindStores1A940.java, run_ghidra_stores570.bat,
 run_ghidra_stores1a940.bat; decomp outputs under analysis/decomp/
 (gitignored, on disk only).
+
+### 2026-09-20 21:45 -- +0x560 writer found: the mask is born on the model and copied down whole
+
+The L2 bit-semantics scan (FindStores560 + FindStores8E0, new scripts
+in analysis/ghidra_scripts; outputs stores_560.txt / stores_8e0.txt)
+closes the content pipeline end to end:
+
+**Source-record +0x560 writer = FUN_14280F800, the source-record
+builder** (decomp_280F800.txt). It appends stride-0x570 source records
+(count at param_1+0x15C00) and fills the new record from the model
+object: +0x560 <- model+0x8E0 (the mask), +0x558 <- model+0x18 (flag
+word), +0x568 <- model+0x8E8 (bit->index), +0x56C <- the bits that
+become render +0x68C, plus the +0x2F0/+0x2F8 pair, +0x300..+0x31C
+dwords and the two 16-byte arrays the render-record builder re-copies.
+Caller chain closed: the big content-load routine FUN_1401EA920 (the
+ctx builder's caller, 20:25 entry) populates its stack arrays via
+FUN_140200E20, which calls FUN_14280F800 -- content load -> source
+records -> ctx build -> render records, one connected pipeline.
+
+**The other +0x560 writers are bookkeeping.** FUN_143AC3E60 (the other
+all-tag candidate) zero-inits +0x560 and sets +0x558=1 (ctor);
+FUN_1442BE1F0 / FUN_1443DE430 are the known ctors. MOV-only at every
+level, again: no OR/AND store to source+0x560 OR model+0x8E0 exists
+anywhere in the binary, so no engine path accumulates mask bits in
+place -- every hop copies a fully-computed word.
+
+**Bit semantics live one hop up: model+0x8E0.** 48 writer functions,
+30 tagged with the 0x8E8 sibling; byte/word/dword stores are width
+collisions (9 dropped). The qword writers are ctor-family (the same
+FUN_140869EC0/FUN_140529550 sub-object helpers as the record ctor).
+One, FUN_14331C0C0, stores a constant DEFAULT of 0x3C (bits 2-5) --
+first semantic hint: bits number draw-list slots, with a standard
+four-slot default set and bits 0-1 reserved for something special
+(unproven; labelled speculation). Named next hop, not flown/needed
+yet: decompile the model+0x8E0 writers (list in stores_8e0.txt) when
+pass-selective suppression (shadow vs main) is wanted. L2 as scoped --
+clear the whole word of a proven-zero record -- does not need it.
+
+**L2 buildability status:** writer identified (20:25), re-assert
+cadence settled (on ctx rebuild, not per frame), pipeline mapped
+(21:45). Remaining: the census join from the bucket draw lists to the
+23k D3D11 calls, then a build decision.
