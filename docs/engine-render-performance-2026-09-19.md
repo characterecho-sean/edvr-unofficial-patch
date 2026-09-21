@@ -35,17 +35,14 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **Open (flight-worthy only):** one matched A/B census flight at a
-  settlement: game material/LOD keys at minimum vs the current Custom preset
-  (today MaterialQuality=3, LODDistanceScale=1.0 in Custom.4.4.fxcfg), same
-  spot and heading, census armed in both passes. Discriminators: EB-family
-  draw count, total eye draws, the two unknown-family shares. If the family
-  collapses at min settings, the recoverable-draw lever is proven and
-  quantified; if it does not move, settlement scenery ignores the sliders and
-  the only remaining lever is EDVR-side work at the boundary. Optional add-on:
-  arm EyeDrawSnapshot in the A pass to name the two unknown hashes via
-  tools/dxbc_disasm.py. Also still open from the trace: ring-buffer command
-  consumers and the frame-scheduler identity (offline-unnamed).
+* **Open (flown 2026-09-21, see the flight entry):** the A/B flight is done —
+  verdict (c) partial: the sliders gate ~21% of the EB52 family but
+  vh=8056C9D5F22007F9 (~550 draws/frame) is immune; knob bisect and
+  UNKNOWN-A naming are the remaining scene-lever work. The scheduler probe
+  named the live dispatcher loop (RVA 0x5D6A81) and proved the scheduler is
+  the payload object's owner, not a stack frame. EB52 per-eye instance
+  buffers were captured and are readable offline. Still open: ring-buffer
+  command consumers; per-record identity/change signal (motion arc).
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -865,3 +862,67 @@ tools/dxbc_disasm.py.
 python one-liners because tools/edvr_log.py has no aggregation mode; a
 `--tally <field>` mode would close it. Also noted: census truncation makes
 frame 0 samples copy-flooded — tally frames 1+ in future analyses.
+
+
+### 2026-09-21 -- A/B flight (123700 / 124159): settings lever partial, dispatcher named, EB52 instance truth captured
+
+Flown from the cockpit, landed at a settlement, native VR (the state all
+prior settlement evidence came from; on-foot is the flat 5120x2880 vscreen
+panel and would have invalidated the comparison). Environment: build
+v0.17.0-217-g2b7a471-dirty (6AB174F9), game 332841, VirtualDesktopXR /
+Meta Quest 3, 3072x3264 per eye, 90 Hz, no DLSS (EDVR temporal ran).
+Identity proven by the probe hook lines, not assumed. Config restored to
+the pass-A baseline after pass B (backup Custom.4.4.fxcfg.passA-bak-20260921).
+
+**A/B verdict: (c) partial.** Per-frame DC summaries: pass A eye ~18.4k,
+pass B ~14.9k (-19%). The 20-frame draw ledger (authoritative; the 16k-line
+census prefix misranks the delta and says EB52 *up* — the prefix is
+unrepresentative, do not tally it for A/B):
+
+| family | A /frame | B /frame | delta |
+|---|---|---|---|
+| EB5234DB6ADB491D | 9,216 | 7,244 | **-21.4%** |
+| 8056C9D5F22007F9 (unknown-A) | 547 | 538 | **-1.7% (immune)** |
+| 2684F02B9B0BB0DE (unknown-B) | 207 | 169 | -18.4% |
+
+The sliders gate roughly two thousand EB52 draws/frame but a ~550-draw
+unnamed pool family ignores them completely. Next: bisect MaterialQuality
+vs LODDistanceScale (one more paired pass); name unknown-A
+(vh=8056C9D5F22007F9) with an armed watch on it — characterized here as a
+kind-88 eye draw, pool=1 (t33 reader), median 198 verts, <=8 instances.
+
+**Scheduler probe (advanced.scheduler_probe, first flight):** 20-second
+reports fired for all four targets in both passes. The drain target has ONE
+fixed stack (100% of 2,783/1,242 calls). The two worker entries share their
+top signature: RVA 0x5D6A81 at the top frame in ~70% of signatures across
+both entries and both passes — the instruction after `call qword ptr
+[rax+8]` at 0x1405D6A7E, matching the unwind doc's confirmed worker-dispatch
+site. The dispatch is INDIRECT through each payload's own vtable, so the
+scheduler never appears as a return address: the scheduler is the payload
+object's OWNER (data, not a stack frame). No captured VA falls in either
+table-stub range. reset-repopulate took 0 calls in all 16 reports — the
+reset path never fired during a parked minute (its cadence is not
+per-minute). Worker calls run flat for minutes then explode to ~44k/s
+exactly at the armed window — the worker storm under study coincides with
+the census moment. Follow-up offline: decompile the dispatcher window
+(0x5D6A81, 0x5D552F, 0x48D8AF, 0x4AD7BF) to name the owner loop.
+
+**EB52 snapshot (pass A, 12:38:44 window):** both eye targets seen.
+drawstate eyemesh ring kept 4,096 eye draws (27,891 dropped) of which 3,956
+are EB52; layout confirmed INSTANCEANDMODELDATAINDEX (8-byte instance
+stream) + PACKEDVERTEXDATA. **The per-eye instance buffers are fully
+captured**: inst_123844_*.bin, 1,572,864 bytes each, 19 frames, 8-byte
+records, first u32 = t33 pool record index — the EB52 per-eye truth is
+readable offline, no further flight needed for it. Two incidental shaders
+named from the pool dump: E508648660A352B2 = pool skinned-prop VS (t33
+336-byte model records, t38 48-byte bone palette, up to 4 bone rows,
+camera-pivot-subtract, projects via cb0[4..7]); D95905C18B7FAD93 =
+constant-driven billboard/impostor VS (per-draw CB1 carries world
+center/scale/rotation; camera-facing frame; +10 z bias; 38 quads/frame,
+settings-independent). Not captured: dxbc for 8056/2684 (watch list was
+EB52); the unknowns stay unnamed until an armed watch on 8056.
+
+ruled out: "the settings sliders don't affect settlement draw count" —
+~21% of the dominant family moves with them. ruled out: "the scheduler
+appears on the worker-entry stack" — indirect dispatch hides it; the
+dispatcher loop and payload-owner trail are the route.
