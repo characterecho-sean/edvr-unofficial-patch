@@ -6994,3 +6994,15 @@ verified. UNFLOWN: fix.engine_motion on, settlement with a mover,
 >= 60 s, ONE eye burst (any view) -- it harvests phys_queue (queue
 lifecycle: append rate, reset cadence) and jobs[] (the L1 remeasure
 190122 owed).
+
+### 2026-09-20 19:45 -- flight 193356: queue lifecycle decoded, node capture unblocked
+
+Cross-entry from the kinematic arc (full read-out in the kinematic
+doc's same-time foot entry). Burst classification_193539.json carried
+phys_queue: 8124 runs, 15174 appends, resets 0, max_delta 133. The
+dirty queue is append-only within UpdatePhysicsObjectsJob and is
+drained entirely BETWEEN runs by an external consumer -- a node
+capture at job-2 exit sees this run's appended nodes intact. The
+false-static refuter (queue nodes joined by record+0x18) is now a
+buildable instrument. runs 8124 vs jobs[2].calls 1196 is the
+elapsed>0 timing gate dropping sub-tick early-outs, not a defect.
