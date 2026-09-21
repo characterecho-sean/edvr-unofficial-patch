@@ -1080,14 +1080,36 @@ Stock view-dependence test (Sean, fpsVR, stock install, same settlement,
 2026-09-21): model-draw-distance UI slider change -> CPU ~9.5 ms, NO
 noticeable change (independent stock-side corroboration of the EDVR-side
 < 0.15 ms draw finding). On foot (flat panel): 7.8 ms. Looking down at a
-bare surface patch: 4.2 ms. Interpretation: the frame is ~4.2 ms FLOOR
-(engine base + VR runtime + empty scene) + ~5.3 ms VIEW-DEPENDENT
-settlement content; the ~1.7 ms cockpit-vs-foot delta is the second eye
-pass. The 5.3 ms content cost is what the eval gates let through for the
-current view (looking away shrinks it - consistent with the eval chain's
-distance/LOD/frustum gates and the heading-dependent worker storm): draw
-submission is refuted as its cause, so it is eval + kinematic jobs +
-physics for the passed set. The attribution flight (below) now REFINES
+bare surface patch: 4.2 ms. In space, CPU frame time is typically HALF the
+surface figure (~2 ms). Interpretation: TWO floors - a universal floor of
+~2 ms (engine base + VR runtime + fpsVR; the space number) plus a
+PLANET-SURFACE floor of ~2.2 ms that runs regardless of view; then ~1.7 ms
+for the stereo second eye pass (cockpit vs on-foot), then ~5.3 ms of
+view-dependent settlement content. The surface floor's prime suspect is
+the terrain subsystem's per-frame CPU (quadtree/LOD evaluation, chunk
+culling, streaming - the ground under a 'bare patch' is still resident,
+managed terrain; the draw stream is refuted as the cost, so it is
+system-side; see docs/terrain-culling.md), with atmosphere/volumetrics
+secondary. The eval gates (distance/LOD/frustum - the exact chain this arc
+mapped) are what size the view-dependent content: looking away shrinks it,
+consistent with the heading-dependent worker storm. Draw submission is
+refuted as its cause, so it is eval + kinematic jobs + physics for the
+passed set.
+
+Stutter track (LONG FRAME forensics, 2026-09-21): the recurring 22-55 ms
+'hitches every >= 5 s' in the flight logs were first mis-read as a 5 s
+cadence - that regularity is the LONG FRAME report's OWN throttle ('at
+most one of these lines every 5 s'), not a source. The hitches themselves
+are ENGINE game-thread CPU stalls that EDVR only observes: thread busy
+22-414 ms with EDVR boundary/hook costs ~0.00 ms and 'EDVR events: none'
+on the same frames. The 5 s gate HIDES duplicates, so true frequency is
+higher than the log shows (frame deltas cluster at 371-900 frames, right
+at the gate). No consistent coincidence: the 5 s metrics tick is density
+not cause; most hitches show zero texture creations, though occasional
+bursts sit near some (681 tex/342 MB; 139/208 MB) - streaming stalls
+possible but unproven. Catch the true cadence on stock with PresentMon or
+the SteamVR timing overlay; EDVR-side, a de-throttled LONG FRAME variant
+would count what the gate hides. The attribution flight (below) now REFINES
 the split (UpdateRenderDataJob vs RenderDataBatch vs physics vs
 eval-gate overhead; thread overlap) rather than discovering the wall.
   The attribution flight (zero config changes needed — engine_motion and
