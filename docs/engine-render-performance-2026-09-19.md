@@ -177,3 +177,16 @@ PrePhysicsAdvanceCurveJob (0x42DF550) advances animation curves on a
 stride-0x18 array, a separate subsystem. PrePhysicsAdvanceJob's real
 body is FUN_14431E860 (the 0x42DF530 adapter explains the CodeHook
 refusal: it begins with a jump).
+
+### 2026-09-20 19:30 -- the dirty-queue append counter is now measured
+
+Cross-entry from the kinematic arc (full entry in the kinematic doc,
+same time). The planned job-2 queue counter landed: bracket reads the
+atomic append count (descriptor +0x18) at job entry and exit, probe
+accumulates per-session runs/appended/max_delta/resets plus the first
+64 non-trivial (entry,exit) pairs into the kinematicEval JSON's new
+phys_queue key. For L4, `appended / runs` IS the per-frame physics
+write volume -- the decimatable work -- and it arrives in the same eye
+burst that finally harvests the L1 brackets-only jobs[] numbers (owed
+from flight 190122). Gates green (87/0, 32/0, json self-test, contract
+252/252); frontier d3d11 34f9195432f98190, verified. UNFLOWN.

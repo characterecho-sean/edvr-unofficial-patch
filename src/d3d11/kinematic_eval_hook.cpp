@@ -71,6 +71,25 @@ int64_t qpcNow() noexcept {
     return t.QuadPart;
 }
 
+// Job 2 (UpdatePhysicsObjectsJob, 0x432B2A0) bit-compare-gates its NODE
+// matrix writes and appends every changed node to a dirty queue: the job
+// descriptor's +0x18 is a pointer to the queue's atomic append counter
+// (decomp_432B2A0, param_1[3]; flushed in 0x20 batches by FUN_144899F50).
+// Reading the counter at job entry and exit yields the per-run append
+// count -- the write-volume number the perf arc's L4 needs and the
+// lifecycle evidence a node capture would have to respect. Counts only.
+bool readQueueCount(uintptr_t descriptor,uint32_t* out) noexcept {
+    __try {
+        uintptr_t counter=0;
+        std::memcpy(&counter,reinterpret_cast<const void*>(descriptor+0x18),8);
+        if(!counter)return false;
+        uint32_t count=0;
+        std::memcpy(&count,reinterpret_cast<const void*>(counter),4);
+        *out=count;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+
 // --- Relay machinery, mirrored from object_record_writer_hook.cpp. --------
 // Kept as a copy rather than a shared unit so the flight-proven writer hook
 // file is not touched; if one changes, change both.
@@ -202,6 +221,12 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     // accumulates per-session, not per capture window. Ownership capture
     // stays capture-gated: observe()/noteOwnership keep their active() gates.
     if(probe && probe->active())probe->noteOwnership(job,a);
+    // Job 2's dirty-queue append counter, read at entry (exit read after
+    // the body below). Outside the timed region: L1 measures the job body,
+    // not this probe. Goes to the process-lifetime global, not the observer
+    // pointer, so tracker-only flights capture it too.
+    uint32_t queueEntry=0;
+    const bool queueArmed=(job==2)&&readQueueCount(a,&queueEntry);
     // Capture boundary (2026-09-20 review finding 8): samples commit only to
     // the generation they started in -- a reset/re-arm mid-job drops the
     // completion instead of contaminating the new capture -- and the three
@@ -212,6 +237,13 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     const int64_t start=qpcNow();
     const uintptr_t result=forward(a,b,c,d);
     const int64_t elapsed=qpcNow()-start;
+    if(queueArmed) {
+        // Exit read after the timing stops: the measured region stays the
+        // job body alone. A torn/missing exit read drops the pair.
+        uint32_t queueExit=0;
+        if(readQueueCount(a,&queueExit))
+            kinematicEvalProbe.notePhysQueue(queueEntry,queueExit);
+    }
     if(elapsed>0 && g_qpcFreq>0 && gen==kinematicEvalProbe.jobGeneration()) {
         auto* stats=kinematicEvalProbe.jobStats();
         const uint64_t ns=uint64_t(elapsed)*1000000000ull/uint64_t(g_qpcFreq);

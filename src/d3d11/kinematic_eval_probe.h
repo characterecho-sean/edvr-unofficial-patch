@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace edvr {
@@ -37,6 +38,9 @@ public:
     static constexpr uint32_t kPoseSampleCap=32768u;
     static constexpr uint32_t kIdentityEventCap=256u;
     static constexpr uint32_t kClockSampleCap=4096u;
+    // Dirty-queue (entry,exit) pairs: non-trivial runs only, so 64 covers
+    // the append/reset pattern rather than a static scene's zero runs.
+    static constexpr uint32_t kPhysQueueSampleCap=64u;
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 
@@ -167,6 +171,12 @@ public:
     void noteOwnership(uint32_t jobId,uintptr_t arg) noexcept;
     // Called at FUN_14431AFE0 entry: rig = param_1, pose context = param_2.
     void noteRigLink(uintptr_t rig,uintptr_t poseCtx) noexcept;
+    // The job-2 bracket reads the physics dirty-queue append counter at job
+    // entry and exit (descriptor +0x18 points at it; decomp_432B2A0,
+    // param_1[3]). Counts only, per-session like jobs[] -- NOT cleared by
+    // clearLocked -- and never gated on active(): a tracker-only flight
+    // harvests the lifecycle too. Node capture waits on this decode.
+    void notePhysQueue(uint32_t entryCount,uint32_t exitCount) noexcept;
 
     Summary summary() const noexcept;
     void writeJson(std::ostringstream& json) const;
@@ -203,6 +213,15 @@ private:
     uint32_t gapRelogsThisFrame_=0; // per-frame gap-resume re-log budget (256)
     JobStat jobs_[kJobCount];
     std::atomic<uint64_t> jobGeneration_{0};
+    // Physics dirty-queue counts (job 2, notePhysQueue): per-session like
+    // jobs_ -- deliberately NOT cleared by clearLocked. Counters are relaxed
+    // atomics written lock-free from the bracket; the verbatim (entry,exit)
+    // pairs sit under mutex_.
+    std::atomic<uint64_t> physQueueRuns_{0};
+    std::atomic<uint64_t> physQueueAppended_{0};
+    std::atomic<uint32_t> physQueueMaxDelta_{0};
+    std::atomic<uint64_t> physQueueResets_{0};
+    std::vector<std::pair<uint32_t,uint32_t>> physQueueSamples_;
 
     void clearLocked();
     void noteVtableLocked(uint64_t rva,uint32_t frame) noexcept;

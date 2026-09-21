@@ -232,6 +232,34 @@ void caseJobMaskAccumulates() {
     p.writeJson(j);
     check(j.str().find("\"job_mask\":18") != std::string::npos, "5: the mask serializes");
 }
+
+// Physics dirty-queue counts (sanctioned 2026-09-20 19:13): entry/exit
+// pairs accumulate runs/appended/max-delta per session; exit < entry is a
+// mid-run reset and adds only the post-reset residue; only non-trivial
+// pairs reach the capped sample vector. No seed(): like jobs[], the counts
+// never gate on active().
+void casePhysQueue() {
+    KinematicEvalProbe p;
+    p.notePhysQueue(10, 14); // +4
+    p.notePhysQueue(20, 21); // +1
+    p.notePhysQueue(9, 2);   // reset mid-run: +2 residue only
+    check(p.physQueueRuns_ == 3 && p.physQueueAppended_ == 7 &&
+          p.physQueueMaxDelta_.load() == 4 && p.physQueueResets_ == 1,
+          "6: counters accumulate; a reset adds only the residue");
+    check(p.physQueueSamples_.size() == 3 &&
+          p.physQueueSamples_[0].first == 10 && p.physQueueSamples_[0].second == 14 &&
+          p.physQueueSamples_[2].first == 9 && p.physQueueSamples_[2].second == 2,
+          "6: non-trivial pairs are kept verbatim, resets included");
+    p.notePhysQueue(5, 5); // zero delta: counted, not sampled
+    check(p.physQueueRuns_ == 4 && p.physQueueAppended_ == 7 &&
+          p.physQueueSamples_.size() == 3,
+          "6: a zero-delta run counts but does not sample");
+    std::ostringstream j;
+    p.writeJson(j);
+    check(j.str().find("\"phys_queue\":{\"runs\":4,\"appended\":7,\"max_delta\":4,\"resets\":1,"
+                       "\"samples\":[{\"entry\":10,\"exit\":14}") != std::string::npos,
+          "6: the counters and samples serialize");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -246,6 +274,7 @@ int wmain(int argc, wchar_t** argv) {
     caseNodeSwapCrossesNothing();
     caseNonFiniteRejected();
     caseJobMaskAccumulates();
+    casePhysQueue();
     std::printf("kinematic_probe_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

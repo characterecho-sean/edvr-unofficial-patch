@@ -183,6 +183,16 @@
   movers exist), which is exactly the veto's need. Next instrument:
   job-2 bracket logs the queue's entry/exit counts for one flight, no
   new hook sites.
+  Update 19:30: the dirty-queue count probe LANDED (entry at the foot):
+  the existing job-2 bracket reads the queue's atomic append counter
+  (descriptor +0x18) at entry and exit; the probe accumulates
+  per-session runs/appended/max_delta/resets plus the first 64
+  non-trivial (entry,exit) pairs, serialized as phys_queue in the
+  kinematicEval JSON. Counts only -- node capture waits on the
+  lifecycle decode. Gates 87/0 + 32/0 + json self-test + contract
+  252/252; frontier d3d11 34f9195432f98190, verified. UNFLOWN -- one
+  eye burst harvests phys_queue (queue lifecycle) and jobs[] (the L1
+  remeasure flight 190122 owed).
 
 ## Premise
 
@@ -1484,3 +1494,54 @@ Perf cross-reference (L4): a sleeping dynamic costs one bit-exact
 compare per element, no write; the compose cost concentrates in
 state==4 bodies with live elements. The dirty queue's per-frame size
 IS the physics-write volume L4 would decimate.
+
+## 2026-09-20 (19:30: dirty-queue count probe landed -- counts only, no new hook sites)
+
+The 19:11 instrument sketch, built exactly as scoped: no new hook sites.
+The existing job-2 bracket reads the dirty queue atomic append counter
+at entry and exit; the probe accumulates counts only. Node capture waits
+for the lifecycle decode this flight provides.
+
+- Hook (kinematic_eval_hook.cpp): readQueueCount() guarded-reads the
+  counter pointer at descriptor +0x18 (decomp_432B2A0 param_1[3]) and
+  the uint32 count behind it. The bracket takes the entry read BEFORE
+  the timed region and the exit read AFTER it, so L1 keeps measuring
+  the job body alone. Job 2 only; the pair goes to the process-lifetime
+  kinematicEvalProbe global, not the observer pointer, so tracker-only
+  flights (fix.engine_motion on, probe never attached) capture it too.
+- Probe (kinematic_eval_probe): notePhysQueue(entry,exit) accumulates
+  per-session runs / appended / max_delta / resets -- exit < entry is a
+  mid-run drain or reset and adds only the post-reset residue -- plus
+  the first 64 NON-TRIVIAL (entry,exit) pairs under the mutex. Zero-
+  delta runs still count in runs/appended but are not sampled: a static
+  scene would fill the cap with zeros and crowd out the append/reset
+  pattern that decodes the lifecycle. Per-session like jobs[] --
+  clearLocked deliberately does not touch any of it.
+- JSON: new top-level kinematicEval key phys_queue = {runs, appended,
+  max_delta, resets, samples[{entry,exit}]}. The exact-match gate fixture
+  sets runs=3 appended=7 max_delta=5 resets=1 samples [(10,14),(20,21)];
+  max_delta exceeding every kept sample delta proves the counter is
+  independent of the sample cap. First build attempt dropped the
+  kinematicEval closing brace -- caught by the classification pipeline
+  offline reader before the json gate even ran; fixed and re-gated. The
+  phys_queue addition itself is exactly what the new-chapter top-level
+  key is for: summary/records/jobs stay byte-stable for the gate.
+- Absence is distinguishable in the same JSON: jobs[2].calls > 0 with
+  phys_queue.runs == 0 reads as the counter read failing (wrong offset
+  or torn descriptor); jobs[2].calls == 0 is the job-2 stand-down.
+
+Gates: kinematic_motion_test 87/0, kinematic_probe_test 32/0 (4 new),
+kinematic json self-test passed, config contract 252/252, all gates
+passed. Frontier d3d11 sha256 34f9195432f98190, install verified.
+
+FLIGHT PROTOCOL (next flight): fix.engine_motion on; a settlement with
+a visible mover (landing pad or the turret); >= 60 s; ONE eye burst --
+any view, no debug toggle needed. The burst classification JSON carries
+phys_queue (queue lifecycle: per-run append counts, reset cadence) AND
+jobs[] (the brackets-only L1 remeasure flight 190122 owed). Reading it:
+runs should track the frame count once job 2 is warm; appended/runs is
+the per-frame physics write volume (perf L4); resets 0-or-rare with a
+sawtooth-free sample tail means a steady consumer -- a large resets
+share or sawtooth samples mark a drain boundary the node capture must
+respect. appended == 0 with movers visibly moving refutes the queue as
+the mover truth and kills the node-capture plan before it costs a build.

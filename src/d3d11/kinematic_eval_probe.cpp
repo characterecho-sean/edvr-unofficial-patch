@@ -448,6 +448,28 @@ void KinematicEvalProbe::noteRigLink(uintptr_t rig,uintptr_t poseCtx) noexcept {
     riglinks_.push_back(r);
 }
 
+void KinematicEvalProbe::notePhysQueue(uint32_t entryCount,uint32_t exitCount) noexcept {
+    // exit < entry means the queue was drained or reset mid-run; only the
+    // post-reset residue counts as appended, and the reset cadence itself
+    // is the lifecycle evidence the node capture waits on.
+    const bool reset=exitCount<entryCount;
+    const uint32_t delta=reset?exitCount:exitCount-entryCount;
+    physQueueRuns_.fetch_add(1,std::memory_order_relaxed);
+    physQueueAppended_.fetch_add(delta,std::memory_order_relaxed);
+    if(reset)physQueueResets_.fetch_add(1,std::memory_order_relaxed);
+    uint32_t prev=physQueueMaxDelta_.load(std::memory_order_relaxed);
+    while(prev<delta &&
+          !physQueueMaxDelta_.compare_exchange_weak(prev,delta,std::memory_order_relaxed)){}
+    // Only non-trivial pairs are kept: with the cap at 64, zero-delta runs
+    // from a static scene would crowd out the reset/append pattern that
+    // decodes the lifecycle. Zero runs still count in runs_/appended_.
+    if(exitCount!=entryCount) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(physQueueSamples_.size()<kPhysQueueSampleCap)
+            physQueueSamples_.emplace_back(entryCount,exitCount);
+    }
+}
+
 KinematicEvalProbe::Summary KinematicEvalProbe::summary() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return summary_;
@@ -613,7 +635,20 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
         j<<"{\"present\":"<<clockSamples_[i].present
          <<",\"mesh\":"<<clockSamples_[i].mesh<<'}';
     }
-    j<<"]}";
+    // Per-session counters (relaxed atomics written outside this mutex): a
+    // torn cross-field read is acceptable -- flight analysis reads orders
+    // of magnitude, and the gate's fixture runs quiescent.
+    j<<"],\"phys_queue\":{\"runs\":"<<physQueueRuns_.load(std::memory_order_relaxed)
+     <<",\"appended\":"<<physQueueAppended_.load(std::memory_order_relaxed)
+     <<",\"max_delta\":"<<physQueueMaxDelta_.load(std::memory_order_relaxed)
+     <<",\"resets\":"<<physQueueResets_.load(std::memory_order_relaxed)
+     <<",\"samples\":[";
+    for(size_t i=0;i<physQueueSamples_.size();++i) {
+        if(i)j<<',';
+        j<<"{\"entry\":"<<physQueueSamples_[i].first
+         <<",\"exit\":"<<physQueueSamples_[i].second<<'}';
+    }
+    j<<"]}}"; // samples, phys_queue, kinematicEval
 }
 
 void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
@@ -722,6 +757,15 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     jobs_[3].calls.store(1,std::memory_order_relaxed);
     jobs_[3].totalNs.store(42,std::memory_order_relaxed);
     jobs_[3].maxNs.store(42,std::memory_order_relaxed);
+
+    // max_delta 5 exceeds both kept samples' deltas (4, 1): the counter is
+    // independent of the sample cap, and the gate asserts exactly that.
+    physQueueRuns_.store(3,std::memory_order_relaxed);
+    physQueueAppended_.store(7,std::memory_order_relaxed);
+    physQueueMaxDelta_.store(5,std::memory_order_relaxed);
+    physQueueResets_.store(1,std::memory_order_relaxed);
+    physQueueSamples_.push_back({10u,14u});
+    physQueueSamples_.push_back({20u,21u});
 
     summary_.observed=987654321ull;
     summary_.readFaults=3;summary_.recordOverflow=1;summary_.transitionOverflow=2;summary_.vtableOverflow=4;
