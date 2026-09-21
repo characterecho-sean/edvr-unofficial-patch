@@ -203,6 +203,14 @@
   entry). The runs 8124 vs calls 1196 gap is the timing gate's
   elapsed>0 dropping sub-QPC-tick early-outs (idle physics array),
   not a probe defect.
+  Update 20:50: the node-capture refuter LANDED (entry at the foot) --
+  the job-2 bracket now walks queue[entry..exit) at exit (array base
+  descriptor +0x10) and the probe keeps the last 256 node pointers per
+  session as kinematicEval.phys_nodes {total, overflow, nodes[]}, with
+  total == ring + overflow checkable. Gates 35/0 + json round-trip +
+  contract 253/253; frontier d3d11 aa88369d7a608415, verified. UNFLOWN
+  -- one eye burst at a settlement harvests the ring for the offline
+  join against records[].node.
 
 ## Premise
 
@@ -1609,3 +1617,51 @@ mean 176.0 us, max 3.34 ms, total 1.016 s; UpdatePhysicsObjectsJob
 PrePhysicsAdvanceJob 0 (unhooked thunk, known); CurveJob 0 (hooked,
 never fired -- consistent with 17:50). Full L1 read-out in the perf
 doc same-time entry.
+
+## 2026-09-20 (20:50: the node-capture refuter LANDED)
+
+Sanctioned 20:27, built on the 19:45 lifecycle decode. The queue's
+node-pointer array base is descriptor +0x10 (param_1[2]) -- confirmed in
+decomp_432B2A0 lines 257-268: the batch flush is
+FUN_144899f50(param_1[2] + idx*8, batch, count*8), a memcpy of 8-byte
+node pointers at the CAS-claimed index. New readQueueNodes()
+(kinematic_eval_hook.cpp) walks queue[entry..exit) at job-2 exit, inside
+the bracket but outside the timed region, riding the same exit read as
+notePhysQueue. Clamps: newest min(delta, 256) entries kept, the clamped
+excess counts as overflow; a reset (exit < entry) captures only the
+post-reset residue [0, exit) (the pre-reset slice was drained mid-run;
+phys_queue.resets flags it); an exit over 0x100000 or a read fault drops
+the run's capture under __try, never the flight.
+
+Probe side (kinematic_eval_probe.{h,cpp}): notePhysNodes() keeps the
+last kPhysNodeCap = 256 pointers per session, oldest-first ring, plus
+total and overflow counters -- per-session like phys_queue (never gated
+on active(), not cleared by clearLocked), so tracker-only flights
+harvest it too. Serialized as kinematicEval.phys_nodes {total, overflow,
+nodes[]}. Invariant, asserted by the new casePhysNodes gate:
+total == ring + overflow. 256 covers the observed burst shape (steady
+~12.7/run, peak 133 on 193356); the tail suffices for the join because
+movers re-append EVERY frame -- at dump time the ring holds every
+recently-active mover, while statics never append at all.
+
+End-to-end trace (what "dead" looks like, per the build-discipline
+rule): if the capture never fires, phys_nodes reads
+{"total":0,"overflow":0,"nodes":[]} while phys_queue.appended > 0 --
+distinct from a healthy flight, where total ~= appended (it counts the
+same walked nodes pre-clamp) and overflow << total.
+
+Gates: kinematic_probe_test 35/0 (casePhysNodes drives over-cap clamp,
+ring drop-oldest and the invariant), kinematic_json_test round-trip
+with the fixture seeded total 519 == 3 + 516, config contract 253/253.
+Full build green (build log build\build_physnodes.log). Installed to
+frontier, d3d11 sha256 aa88369d7a608415, install verified. Built and
+installed pre-commit (the 19:45 pattern): --expect-build HEAD will
+mismatch on the label; the content hash above is the truth.
+
+Flight protocol: one eye burst at a settlement with movers in-frame (a
+landing ship, tracking turret or drone), movers view not needed. The
+burst's kinematicEval JSON now carries phys_nodes. Offline join: ring
+nodes intersect records[].node -- any overlap proves physics touches
+tracked records; a mover record whose node never appears in the tail is
+the physics-inert case the veto needs. Cross-check phys_nodes.total
+against phys_queue.appended before trusting the join.

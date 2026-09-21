@@ -107,6 +107,10 @@ def self_test():
     assert ke['phys_queue'] == dict(runs=3, appended=7, max_delta=5, resets=1,
                                     samples=[dict(entry=10, exit=14),
                                              dict(entry=20, exit=21)]), ke['phys_queue']
+    # Dirty-queue node capture: total == ring + overflow by construction
+    # (519 == 3 + 516); the native gate drives the invariant dynamically.
+    assert ke['phys_nodes'] == dict(total=519, overflow=516, nodes=[
+        '0x1111111111111111', '0x2222222222222222', '0x3333333333333333']), ke['phys_nodes']
     print('kinematic json self-test passed')
 
 
