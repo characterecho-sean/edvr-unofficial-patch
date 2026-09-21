@@ -6959,3 +6959,19 @@ point: the +0x170 updater; the physics-job decomps (0x432B2A0 /
 0x42DF530 / 0x42DF550) are the offline step, serving perf L4 too. L1's
 brackets-only job costs are not in this log -- no eye burst taken;
 jobs[] lands in the classification JSON at dump time.
+
+### 2026-09-20 19:11 -- physics jobs decompiled: physics writes nodes, render reads
+
+Cross-entry from the kinematic arc (full entry there). The three
+physics job bodies are decompiled (analysis/decomp/: decomp_432B2A0,
+decomp_42DF530, decomp_42DF550). UpdatePhysicsObjectsJob composes
+physics x parent-chain per element and writes the NODE's 4x4
+(node+0x90..+0xCC) only on a bit-exact change, appending changed nodes
+to a dirty queue (descriptor param_1[2], atomic count param_1[3]); the
+render updater FUN_14433DB20 composes the same chain into record+0x170
+for every record. That split explains flight 190122's symmetric null:
+physics never evaluates records, it writes nodes. The surviving
+engine-truth discriminator is the dirty-node queue joined by
+record+0x18 -- a refuter of false statics, which is all the veto needs.
+Next instrument: job-2 bracket logs queue entry/exit counts for one
+flight (no new hook sites), node capture after the lifecycle is known.

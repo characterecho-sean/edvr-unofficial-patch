@@ -162,3 +162,18 @@ brackets-only NUMBERS are not in this log: jobs[] accumulates
 per-session as designed, yet it only lands in the classification JSON
 at dump time -- and no eye burst was taken. The L1 remeasure owes one
 burst next flight (any view; the JSON writes regardless).
+
+### 2026-09-20 19:11 -- L4 evidence: physics writes are change-gated; the dirty queue sizes the volume
+
+Cross-entry from the kinematic arc (full entry in the kinematic doc,
+same time). UpdatePhysicsObjectsJob (decomp_432B2A0.txt) composes
+physics x parent-chain per element (stride 0x30, state==4 bodies) and
+writes the node 4x4 ONLY on a bit-exact change, appending changed nodes
+to a dirty queue. For L4: sleeping dynamics already cost just one
+compare per element, so the decimatable volume is the compose+queue
+work of bodies that actually move -- measurable per frame as the dirty
+queue's append count (the planned job-2 bracket counter logs it).
+PrePhysicsAdvanceCurveJob (0x42DF550) advances animation curves on a
+stride-0x18 array, a separate subsystem. PrePhysicsAdvanceJob's real
+body is FUN_14431E860 (the 0x42DF530 adapter explains the CodeHook
+refusal: it begins with a jump).
