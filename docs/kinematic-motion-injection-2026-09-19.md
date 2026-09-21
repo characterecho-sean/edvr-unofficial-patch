@@ -174,6 +174,15 @@
   are now closed. Next engine-truth point: the +0x170 updater itself
   (decompile the physics job bodies; serves perf L4 too). L1's numbers
   still owe an eye burst (jobs[] lands at dump time; none taken).
+  Update 19:11: physics jobs DECOMPILED (entry at the foot) -- physics
+  writes NODE matrices (node+0x90..0xCC) bit-compare-gated, appending
+  changed nodes to a dirty queue; the render updater FUN_14433DB20
+  composes the chain into record+0x170 for every record. Hence the
+  symmetric null. The SURVIVING discriminator: the physics dirty-node
+  queue, joined to records by record+0x18 -- a refuter (physics-inert
+  movers exist), which is exactly the veto's need. Next instrument:
+  job-2 bracket logs the queue's entry/exit counts for one flight, no
+  new hook sites.
 
 ## Premise
 
@@ -1423,3 +1432,55 @@ Consequences:
 - L1's brackets-only numbers are NOT in this log: jobs[] lands in the
   classification JSON at dump time and no eye burst was taken. The L1
   remeasure still owes one burst next flight.
+
+## 2026-09-20 (19:11: physics jobs decompiled -- physics WRITES nodes, the render side READS; the dirty queue is the surviving truth)
+
+Offline, no flight. Tooling: analysis/run_ghidra_decomp.bat (headless
+Ghidra 12.1.3, EDAnalysis project) with DecompileTargets.java pointed at
+the three physics bodies; outputs in analysis/decomp/ (decomp_432B2A0,
+decomp_42DF530, decomp_42DF550).
+
+**UpdatePhysicsObjectsJob (0x432B2A0).** Iterates the physics-object
+array (count at job+8), gated on state==4 (obj+0x380); a virtual call
+(+0x1F8) yields the body context. Inner loop over the body's elements
+(*(ctx+0x290), stride 0x30, count +0x2A0): element+0x18 is the NODE,
++0x08 the physics-state matrix. It composes physics x parent-chain
+(parent pointer at matrix+0x50), compares BIT-EXACT against the node's
+current 4x4 at node+0x90..+0xCC, and WRITES ONLY ON CHANGE -- appending
+the changed node to a dirty queue (job descriptor param_1[2], atomic
+append counter param_1[3], flushed in batches of 0x20 by FUN_144899F50).
+Node+8 flag bits 2/4 are maintained on element state flips.
+
+**The updater closes the chain.** FUN_14433DB20 (decomp_433DB20.txt)
+writes record+0x170 by composing the record's own matrix chain (matrix
+pointer record+0x190, parent at matrix+0x50) -- the same compose shape
+the physics job performs. So: physics writes NODE matrices on change;
+the render traversal's updater composes the chain into record+0x170 for
+EVERY visited record. That is exactly why flight 190122's attribution
+was a symmetric null -- movers and statics are all evaluated by the
+render side; physics never evaluates records at all.
+
+**Job3/job4.** PrePhysicsAdvanceJob (0x42DF530) is a 13-byte adapter to
+FUN_14431E860(*desc, desc[1]) -- its first instruction is the jump
+CodeHook rightly refused; the real body (0x431E860) is not yet
+decompiled. PrePhysicsAdvanceCurveJob (0x42DF550) is a time-gated
+curve/animation advance over a stride-0x18 array (FUN_141B41550 per
+live entry) -- a different subsystem, not render records.
+
+**The discriminator that survives: the physics dirty-node queue.**
+Nodes appended during a job-2 run = moved under physics this frame;
+records join by node pointer (record+0x18). It is a REFUTER, not a
+complete mover oracle: keyframed/curve-driven movers never appear
+(job4's curves move objects without physics), but an eligible-static
+record whose node lands in the queue is a false static caught with
+engine truth -- exactly the veto's need. Instrument sketch (next build,
+no new hook sites): at the job-2 bracket, snapshot the atomic count at
+entry and exit and log the per-frame delta for one flight (queue
+lifecycle -- consumer/reset cadence -- is unknown; counts first, node
+capture second). The queue's consumer can also be found offline by
+decompiling FUN_14431E860 and the job descriptor's other readers.
+
+Perf cross-reference (L4): a sleeping dynamic costs one bit-exact
+compare per element, no write; the compose cost concentrates in
+state==4 bodies with live elements. The dirty queue's per-frame size
+IS the physics-write volume L4 would decimate.
