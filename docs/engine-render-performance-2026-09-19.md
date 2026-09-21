@@ -1074,13 +1074,29 @@ settlement invocation volume is ~432 job-0 calls/frame + ~79 batch/frame
 spread over worker threads, i.e. ~4-5 ms wall if overlap is poor —
 reachable toward the 10 ms wall, but per-call costs come from a
 non-settlement scene and thread overlap is unproven. NOT settled by
-existing data. The defined next flight (zero config changes needed —
-engine_motion and scheduler_probe are already on in the flight INI):
-parked at the settlement >= 60 s, then hotkey eye-burst to dump jobs[],
-census armed for scene confirmation (~18k eye draws = same scene as the
-fpsVR 10 ms), ideally fpsVR alongside to calibrate EDVR's job totals
-against fpsVR's CPU figure. Compare: UpdateRenderDataJob/RenderDataBatch
-calls+mean+total in the settlement window vs the 10 ms wall.
+existing data.
+
+Stock view-dependence test (Sean, fpsVR, stock install, same settlement,
+2026-09-21): model-draw-distance UI slider change -> CPU ~9.5 ms, NO
+noticeable change (independent stock-side corroboration of the EDVR-side
+< 0.15 ms draw finding). On foot (flat panel): 7.8 ms. Looking down at a
+bare surface patch: 4.2 ms. Interpretation: the frame is ~4.2 ms FLOOR
+(engine base + VR runtime + empty scene) + ~5.3 ms VIEW-DEPENDENT
+settlement content; the ~1.7 ms cockpit-vs-foot delta is the second eye
+pass. The 5.3 ms content cost is what the eval gates let through for the
+current view (looking away shrinks it - consistent with the eval chain's
+distance/LOD/frustum gates and the heading-dependent worker storm): draw
+submission is refuted as its cause, so it is eval + kinematic jobs +
+physics for the passed set. The attribution flight (below) now REFINES
+the split (UpdateRenderDataJob vs RenderDataBatch vs physics vs
+eval-gate overhead; thread overlap) rather than discovering the wall.
+  The attribution flight (zero config changes needed — engine_motion and
+  scheduler_probe are already on in the flight INI): parked at the
+  settlement >= 60 s, then hotkey eye-burst to dump jobs[], census armed
+  for scene confirmation (~18k eye draws = same scene as the fpsVR
+  numbers), ideally fpsVR alongside to calibrate EDVR's job totals against
+  fpsVR's CPU figure. Compare: UpdateRenderDataJob / RenderDataBatch
+  calls+mean+total in the settlement window vs the wall.
 
 ruled out: fixed-density scatter (A's instances are ordinary pool
 records); an alternate LOD keyed elsewhere (no LOD branch exists);
