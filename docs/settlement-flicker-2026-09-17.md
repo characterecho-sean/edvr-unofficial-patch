@@ -7074,3 +7074,14 @@ JSON alongside everything this doc's flights already read -- no
 separate flight needed. Engine layout, dead-instrument
 discriminators, and the flight protocol are in
 engine-render-performance-2026-09-19.md (06:37 entry).
+
+### 2026-09-21 07:29 -- shared flight note: three-producer build installed
+
+Flight 064511's classification JSON carried the first bucket-items
+read (instrument live, zero faults in 462k calls); the producer map
+is resolved offline and the instrument now covers all three bucket
+producers (frontier d3d11 sha256:16 99885e3a092df662). The next
+settlement eye burst carries kinematicEval.bucket_items_direct
+alongside the rest -- the per-pass depth-probe census this doc
+already reads is the join target. Details in
+engine-render-performance-2026-09-19.md (06:55 and 07:29 entries).

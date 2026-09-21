@@ -36,6 +36,14 @@ public:
     // 0x150-byte items to per-bucket lists (bucket = *(model+0x20)), counting
     // each append at bucket+0x2A4. The census-join hook site (perf arc).
     static constexpr uintptr_t kBucketBuildRva=0x42B4420u;
+    // The two DIRECT producers of the same bucket lists: the bucket arrives
+    // as param_2, so their brackets skip the entry walk and read param_2+0x2A4
+    // directly. 0 = FUN_144312E00 (decomp_4312E00.txt; the collection batch's
+    // second item class via FUN_144312040; FUN_14431305C is inside it).
+    // 1 = FUN_14369C9C0 (decomp_369C9C0.txt; FUN_1436A0F50's four call
+    // sites -- the non-eye passes' builder family).
+    static constexpr uintptr_t kDirectBuildRvas[2]={0x4312E00u,0x369C9C0u};
+    static constexpr uint32_t kDirectProducerCount=2u;
     // Sized to cover a full capture window's mover demand: 31,514 samples
     // measured on flight 094158. 24 B/sample => ~768 KB, fine for a
     // diagnostic.
@@ -205,6 +213,11 @@ public:
     static constexpr uint32_t kBucketFlagOverflow=4u;
     void noteBucketBuild(uint32_t buckets,uint64_t items,uint32_t negDeltas,
                          uint32_t flags) noexcept;
+    // The direct-producer brackets (bucket = param_2): per-call counter
+    // deltas, no walk. A fault on either read drops the call's items and
+    // counts in readFaults. Same per-session discipline as noteBucketBuild.
+    void noteDirectBuild(uint32_t producer,uint64_t items,uint32_t negDeltas,
+                         bool readFault) noexcept;
 
     Summary summary() const noexcept;
     void writeJson(std::ostringstream& json) const;
@@ -266,6 +279,15 @@ private:
     std::atomic<uint64_t> bucketOverflowCalls_{0};// bucket cap hit
     std::atomic<uint32_t> bucketMaxBuckets_{0};
     std::atomic<uint32_t> bucketMaxItems_{0};
+    // Direct producers (noteDirectBuild): one stat set per producer.
+    struct DirectBuildStat {
+        std::atomic<uint64_t> calls{0};
+        std::atomic<uint64_t> items{0};
+        std::atomic<uint64_t> negDeltas{0};
+        std::atomic<uint64_t> readFaults{0};
+        std::atomic<uint32_t> maxItems{0};
+    };
+    DirectBuildStat direct_[kDirectProducerCount];
 
     void clearLocked();
     void noteVtableLocked(uint64_t rva,uint32_t frame) noexcept;

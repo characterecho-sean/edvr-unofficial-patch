@@ -22,6 +22,10 @@ using RigEvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t);
 // param_5/param_6 and corrupt the items.
 using BucketFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
                                          uintptr_t,uintptr_t);
+// The direct bucket producers take the bucket as param_2: FUN_144312E00
+// has four register params, FUN_14369C9C0 three. One four-param forward
+// covers both -- the three-param callee never reads r9, which is volatile.
+using DirectBuildFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
 // The evaluator and the job bodies live in the GAME'S module; this DLL loads
 // more than two gigabytes away, which a five-byte E9 patch cannot reach
@@ -198,6 +202,10 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t,uintptr_t,uintp
 __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t,uintptr_t,uintptr_t,
                                                               uintptr_t,uintptr_t,uintptr_t) noexcept;
+#define EDVR_DIRECT_PROTO(i) \
+    __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
+EDVR_DIRECT_PROTO(0) EDVR_DIRECT_PROTO(1)
+#undef EDVR_DIRECT_PROTO
 #define EDVR_JOB_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall job##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_JOB_PROTO(0) EDVR_JOB_PROTO(1) EDVR_JOB_PROTO(2)
@@ -218,6 +226,12 @@ HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
 };
 HookEntry g_bucketEntry{"kinematic-bucket-build",KinematicEvalProbe::kBucketBuildRva,
                         reinterpret_cast<void*>(&bucketBuildObserved)};
+HookEntry g_directEntries[KinematicEvalProbe::kDirectProducerCount]={
+    {"kinematic-build-144312e00",KinematicEvalProbe::kDirectBuildRvas[0],
+     reinterpret_cast<void*>(&directBuild0)},
+    {"kinematic-build-14369c9c0",KinematicEvalProbe::kDirectBuildRvas[1],
+     reinterpret_cast<void*>(&directBuild1)},
+};
 
 // Per-thread mask of the job brackets currently on the stack (1u<<jobId),
 // maintained by bracket() and read by evalObserved: attributes every eval
@@ -397,6 +411,44 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
     return result;
 }
 
+// --- Direct-producer brackets (bucket = param_2) -----------------------------
+// Same counter-delta discipline as the 42B4420 bracket without the entry
+// walk: param_2 IS the bucket (decomp_4312E00 line 250, decomp_369C9C0 line
+// 318 -- both INC param_2+0x2A4 per appended item). A fault on either read
+// drops the call's items, never the flight.
+uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
+                                   uintptr_t c,uintptr_t d) noexcept {
+    const auto forward=reinterpret_cast<DirectBuildFn>(
+        g_directEntries[producer].forward.load(std::memory_order_acquire));
+    if(!forward)return 0; // stood down at install; the relay is unreachable then
+    int32_t start=0;
+    bool fault=false;
+    __try {
+        std::memcpy(&start,reinterpret_cast<const void*>(b+0x2A4),4);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {fault=true;}
+    const uintptr_t result=forward(a,b,c,d);
+    uint64_t items=0;
+    uint32_t neg=0;
+    if(!fault) {
+        __try {
+            int32_t end=0;
+            std::memcpy(&end,reinterpret_cast<const void*>(b+0x2A4),4);
+            const int64_t delta=static_cast<int64_t>(end)-static_cast<int64_t>(start);
+            if(delta>0)items=static_cast<uint64_t>(delta);
+            else if(delta<0)neg=1; // drained mid-call: residue unknowable
+        } __except(EXCEPTION_EXECUTE_HANDLER) {items=0;neg=0;fault=true;}
+    }
+    kinematicEvalProbe.noteDirectBuild(producer,items,neg,fault);
+    return result;
+}
+
+#define EDVR_DIRECT_WRAPPER(i) \
+    __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d) noexcept { \
+        return directBracket(i,a,b,c,d); \
+    }
+EDVR_DIRECT_WRAPPER(0) EDVR_DIRECT_WRAPPER(1)
+#undef EDVR_DIRECT_WRAPPER
+
 std::mutex g_installMutex;
 
 bool installOne(HookEntry& entry,uintptr_t base) noexcept;
@@ -427,6 +479,14 @@ bool ensureInstalled(uintptr_t base) noexcept {
         // bucket_items.calls == 0 with installed status is the stand-down
         // signature, and CodeHook has logged the reason under
         // kinematic-bucket-build. (Job 3's thunk refused this way before.)
+    }
+    for(uint32_t i=0;i<KinematicEvalProbe::kDirectProducerCount;++i) {
+        if(!installOne(g_directEntries[i],base)) {
+            // Same stand-down-alone rule; bucket_items_direct[i].calls == 0
+            // with installed status is the signature, and CodeHook logs
+            // under the site's own name (kinematic-build-144312e00 /
+            // kinematic-build-14369c9c0).
+        }
     }
     return true;
 }

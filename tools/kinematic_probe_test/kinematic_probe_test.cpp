@@ -314,6 +314,34 @@ void caseBucketItems() {
                        "\"overflow_calls\":1,\"max_buckets\":5,\"max_items_per_call\":25}") !=
           std::string::npos, "8: the counters serialize");
 }
+
+// Direct bucket producers (the census-join completion, perf arc): the
+// param_2-bucket brackets accumulate per producer; a read fault counts and
+// drops the call's items; an out-of-range producer index is ignored; both
+// producers serialize under their function names.
+void caseDirectBuild() {
+    KinematicEvalProbe p;
+    p.noteDirectBuild(0, 40, 0, false);   // producer 0: +40
+    p.noteDirectBuild(0, 7, 1, false);    // +7, one mid-call drain
+    p.noteDirectBuild(0, 0, 0, true);     // read fault: counted, no items
+    p.noteDirectBuild(1, 900, 0, false);  // producer 1: +900
+    p.noteDirectBuild(2, 5, 0, false);    // out of range: ignored entirely
+    check(p.direct_[0].calls == 3 && p.direct_[0].items == 47 &&
+          p.direct_[0].negDeltas == 1 && p.direct_[0].readFaults == 1 &&
+          p.direct_[0].maxItems.load() == 40,
+          "9: producer 0 accumulates; the fault drops its items");
+    check(p.direct_[1].calls == 1 && p.direct_[1].items == 900 &&
+          p.direct_[1].maxItems.load() == 900,
+          "9: producer 1 keeps a separate stat set (index 2 ignored)");
+    std::ostringstream j;
+    p.writeJson(j);
+    check(j.str().find("\"bucket_items_direct\":[{\"producer\":\"fun_144312e00\","
+                       "\"calls\":3,\"items\":47,\"neg_deltas\":1,\"read_faults\":1,"
+                       "\"max_items_per_call\":40},{\"producer\":\"fun_14369c9c0\","
+                       "\"calls\":1,\"items\":900,\"neg_deltas\":0,\"read_faults\":0,"
+                       "\"max_items_per_call\":900}]") != std::string::npos,
+          "9: both producers serialize");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -331,6 +359,7 @@ int wmain(int argc, wchar_t** argv) {
     casePhysQueue();
     casePhysNodes();
     caseBucketItems();
+    caseDirectBuild();
     std::printf("kinematic_probe_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
