@@ -7057,10 +7057,9 @@ The dirty-queue node capture flew: total == appended == 178650 exactly,
 resets 0, ring 256/256 with the invariant holding -- the instrument is
 proven. The join is a complete null: 11 distinct always-dirty nodes in
 the tail, 0/625 record+0x18 values overlap, with 400 movers in-frame at
-the burst. BUT the offline type check casts the premise: the composer
-FUN_14433DB20 treats record+0x18 as a node CONTAINER (+0x48 count,
-+0x50 array of 0x58-stride entries), while job 2 dirties a flag+4x4
-object -- the null may be a category error rather than physics-inert
-movers. Named before the veto can lean on this signal: (a) job-3 body
-decompile for the same append shape (coverage), (b) the record+0x18
-writer and the 0x58-entry contents (node type). Both offline.
+the burst. Update 21:25: both discriminators resolved offline
+(kinematic doc, same timestamp) -- job 3 has no queue (coverage
+complete) and the two node families are distinct by construction
+(record+0x18 is a ctor-built render-side sub-object; the dirty nodes
+are physics-side). The null is a family mismatch, not physics-inert
+movers; the dirty-queue route to mover/static truth is CLOSED.

@@ -215,11 +215,14 @@
   HEALTHY (total == appended == 178650 exactly, resets 0, invariant
   holds) and the join is a COMPLETE NULL: 11 distinct nodes in the tail,
   0/625 record nodes overlap, with 400 movers in-frame at the burst.
-  BUT the type check casts the premise: the composer treats record+0x18
-  as a node CONTAINER (+0x48 count / +0x50 array of 0x58 entries), not
-  the flag+4x4 object job 2 dirties -- the null may be a category
-  error, not physics-inert movers. Two offline discriminators named in
-  the entry before the veto can lean on this signal.
+  Update 21:25: both discriminators RESOLVED offline (entry at the
+  foot) -- job 3 has no queue (it walks render records stride 0x2F0 in
+  place; coverage complete) and the two node families are distinct by
+  construction: record+0x18 is a ctor-built render-side sub-object, the
+  dirty nodes are physics-side. The null is a family mismatch, not
+  physics-inert movers; the dirty-queue route to mover/static truth is
+  CLOSED (0-for-4 on engine-truth signals). The veto leans on the
+  tracker's own pose evidence, which is flight-proven.
 
 ## Premise
 
@@ -1699,18 +1702,20 @@ records: 0 of 2971 records, 0 of 625 distinct record+0x18 values, 0 of
 nodes appear nowhere else either (riglinks, ownership, pose_events all
 negative). Movers were in-frame and changing at the dump frame.
 
-**But the join premise is in doubt (offline type check, same night).**
-The composer FUN_14433DB20 dereferences record+0x18 as a node
-CONTAINER: gates on node+8 != 0 (pointer-style), reads a count at
-+0x48 and an array at +0x50 of 0x58-stride entries (0x58 = 88 B, the
-xf-block size) -- and never reads a matrix off it. Job 2's dirty nodes
-instead carry a flag word at +8 (bits 2/4 toggled), a guard pointer at
-+0x70, and a 4x4 matrix written at +0x90..0xCC. Two different layouts.
-Pointer equality between the queue family and record+0x18 may be a
-category error; if so, the null join is expected by construction and
-says nothing about movers. NOT ruled out either: a big struct could
-host both layouts, and the composer only null-checks node+8 (a flags
-value of 2/4/6 would pass). Genuinely ambiguous.
+**But the join premise is in doubt (offline type check, same night;
+corrected 21:25 -- see the same-date entry below).** The composer
+FUN_14433DB20 dereferences record+0x18 ONLY as a +8 non-null gate --
+the count at +0x48 / array at +0x50 of 0x58-stride entries belongs to
+record+0x290's pose ctx (this entry's first writing mis-attributed it
+to record+0x18). Job 2's dirty nodes instead carry a flag word at +8
+(bits 2/4 toggled), a guard pointer at +0x70, and a 4x4 matrix written
+at +0x90..0xCC. Two different layouts. Pointer equality between the
+queue family and record+0x18 may be a category error; if so, the null
+join is expected by construction and says nothing about movers. NOT
+ruled out either: a big struct could host both layouts, and the
+composer only null-checks node+8 (a flags value of 2/4/6 would pass).
+Genuinely ambiguous -- resolved toward family mismatch in the 21:25
+entry.
 
 **Coverage gaps ruled out / noted.** Job 4 (CurveJob) fired 0 times, as
 on 17:50 -- not the path at settlement scale. Job 3
@@ -1733,3 +1738,57 @@ FindStores scan) and what the 0x58-stride entries carry (a node
 pointer? the 88-B xf?). The 11 always-dirty ring nodes are the foot in
 the door -- any engine structure referencing one names the family
 (player ship / head rig suspected).
+
+## 2026-09-20 (21:25: discriminators resolved -- coverage CLOSED, node families distinct; dirty-queue route closed)
+
+Both 21:05 discriminators ran offline (Ghidra, no flight). This entry
+also corrects a mis-attribution in the 21:05 entry: the +0x48 count /
++0x50 array of 0x58-stride entries belongs to record+0x290's pose ctx,
+not record+0x18 (the composer reads record+0x18 only as a +8 non-null
+gate). Fixed in place there and in the settlement cross-entry.
+
+**Discriminator (a), coverage -- CLOSED, no gap.** Job 3's hooked thunk
+0x42DF530 is a 13-byte forward to the real body FUN_14431E860
+(decomp_431E860.txt): it iterates a stride-0x14 float array
+(+0xC0, count +0xC8), detects per-entry changes into a local bitmap,
+then walks RENDER RECORDS directly (base +0x280, stride 0x2F0, count
++0x298) calling FUN_14432CCC0 per record gated by the bitmap. No CAS
+append, no node-pointer queue. Job 4's body 0x42DF550 is a 287-byte
+curve evaluator (FUN_141B41550), no queue, and fired 0 times on both
+flights. The job-2 queue is the ONLY dirty-node queue of its shape;
+the capture's coverage of that mechanism is complete. The null join is
+not a coverage artifact.
+
+**Discriminator (b), node origin -- the families are distinct by
+construction.** The render-record ctor FUN_1442BE1F0 creates
+record+0x18 at construction via FUN_140869EC0(slot, source model
+record, DAT_145F02E58) (decomp_42BE1F0.txt lines 46-48), the same
+helper pattern that builds the +0x10/+0x20/+0x28 siblings. An xref scan
+on DAT_145F02E58 (FindDataXrefs.java; data_xrefs.txt) returns 89 hits
+-- it is a ubiquitous engine global, not a per-type id, so it cannot
+discriminate families; the record+0x18 object is nonetheless a
+render-side sub-object built per record (factory sharing by model
+explains the ~5-records-per-node pattern). Job 2's dirty nodes are
+reached the other way: physics object (state +0x380 == 4) -> +0x58
+vtable slot 0x1F8 -> container (array +0x290, count +0x2A0) ->
+stride-0x30 entries -> node pointer at entry+0x18, whose +0x90..0xCC
+4x4 the job bit-compare-rewrites (decomp_432B2A0 lines 106-146). Two
+construction paths, two layouts, and 178k appends against 625 record
+nodes producing zero overlap: the queue family and record+0x18 do not
+share pointers.
+
+**Consequence for the arc.** The dirty-queue join by record+0x18 is
+dead by family mismatch -- NOT evidence of physics-inert movers. That
+closes the fourth engine-truth route for the mover/static question
+(vtable/flag clustering null 17:10, job-attribution symmetric null
+19:10, +0x268 retracted at 21:23 review, dirty-queue family null here).
+The veto's false-static protection therefore leans on the tracker's own
+pose evidence (mover_samples / xf changes), which is flight-proven --
+that is the design signal, and it is already in hand. Open curiosity,
+not a blocker: the identity of the 11 always-dirty nodes (nothing in
+the capture references them; the gfx log never prints them).
+
+**Also corrected from the 21:05 entry:** its worry that job 3 could
+hide mover appends is disposed of by the decompile above. The 21:05
+runs-vs-calls note stands (94445 runs vs jobs[2].calls 1196 -- the
+elapsed>0 gate).
