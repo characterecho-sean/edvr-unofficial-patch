@@ -7006,3 +7006,21 @@ capture at job-2 exit sees this run's appended nodes intact. The
 false-static refuter (queue nodes joined by record+0x18) is now a
 buildable instrument. runs 8124 vs jobs[2].calls 1196 is the
 elapsed>0 timing gate dropping sub-tick early-outs, not a defect.
+
+### 2026-09-20 20:05 -- record dispatch decision mapped end to end (offline, no flight)
+
+Cross-entry from the perf arc (full analysis in the perf doc's same-time
+entry). The visibility-mask region 0x431B11D-0x431B221 lives inside
+FUN_14431AFE0 -- already decompiled here -- and is the mask-subtract +
+dispatch-decision block: render-record +0x570 mask words are ORed per
+passing record, per-class suppression bits (ctx+0x1A950/58/60 by
+collection+0x70 bit 7) are cleared, and accumulator == 0 or
+collection+0x70 bit 0 clear skips the whole collection (byte +0x629 =
+0), else job 0 dispatches with the mask in the descriptor. Downstream:
+FUN_144320340 gates per record on pose ctx +0x290, bytes +0x234/+0x298,
+and pending bits +0x208 with nibble table +0x210 vs *(node+0x6A);
+FUN_1442B4420 then re-tests +0x570 & mask, frustum (FUN_1404F4E10),
+and the +0x688/+0x68D gate before appending draw items to the bucket
+lists (counter +0x2A4). The engine's feedable visibility bit for draw
+suppression is render-record +0x570; its writer is the next offline
+target (FindStores570 variant).
