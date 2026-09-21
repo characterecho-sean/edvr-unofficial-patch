@@ -35,14 +35,14 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **Open (flown 2026-09-21, see the flight entry):** the A/B flight is done —
-  verdict (c) partial: the sliders gate ~21% of the EB52 family but
-  vh=8056C9D5F22007F9 (~550 draws/frame) is immune; knob bisect and
-  UNKNOWN-A naming are the remaining scene-lever work. The scheduler probe
-  named the live dispatcher loop (RVA 0x5D6A81) and proved the scheduler is
-  the payload object's owner, not a stack frame. EB52 per-eye instance
-  buffers were captured and are readable offline. Still open: ring-buffer
-  command consumers; per-record identity/change signal (motion arc).
+* **Open (post step-3, see the step-3 entry):** the settings lever is closed —
+  LODDistanceScale is dominant (material knobs add ~5.5% of EB52) and
+  unknown-A is triply immune. Remaining: (1) name unknown-A/B via the
+  snapshot allow-list build + one armed flight (built 2026-09-21); (2)
+  per-record identity/change signal (motion arc); (3) optionally close the
+  scheduler's runtime-built payload vtables (startup write-watch or
+  enqueue-side stack capture). Ring-buffer command consumers remain the
+  one untouched trace question.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -926,3 +926,64 @@ ruled out: "the settings sliders don't affect settlement draw count" —
 ~21% of the dominant family moves with them. ruled out: "the scheduler
 appears on the worker-entry stack" — indirect dispatch hides it; the
 dispatcher loop and payload-owner trail are the route.
+
+
+### 2026-09-21 -- Step 3 (pass C, two sessions): LOD is the lever; unknowns are CB-less GPU-driven batches; scheduler named
+
+Pass C isolated LODDistanceScale=0.1 (material knobs at baseline), flown
+twice: census-only (134203) and with the eye run armed (135000). Same rig
+and build as the A/B flight; probe still on; config restored to baseline
+after (backup Custom.4.4.fxcfg.baseline-bak-20260921).
+
+**Bisect verdict: LODDistanceScale is the dominant draw-count lever, with a
+material-knob refinement.** Census frame 0 was the COMPLETE eye pass this
+time (copies=81, no snapshot flood): EB52 9,216 -> 7,663 (-16.9%) with
+LOD-only vs 7,244 (-21.4%) with all three knobs — the material quality
+keys cut a further ~5.5% of EB52 on top of LOD. Totals: 18.4k -> 14,952
+(LOD-only) vs 14,944 (all-knobs): LOD reproduces the total. Unknown-A
+(8056C9D5F22007F9) confirmed immune for the third time (568 vs 547
+baseline = jitter): it ignores LOD and material knobs alike. Unknown-B
+(2684F02B9B0BB0DE) tracks LOD (-14%).
+
+**Unknown identification: narrowed, not closed.** census_cb_watch was set
+for both hashes; the watch matched (568/178 draws ran cbWatchOnDraw) but
+produced zero bytes: these shaders bind NO constant buffer at b0 (every
+census row c=-; PS b0 also null) — the DCW instrument has no buffer to
+read. From the census rows themselves: both are indexed instanced batches,
+8-byte vertex stride, triangle strips, shared VB/IB, startInstance stepping
++8 between sibling draws (GPU-driven instancing), VS SRVs at t1/t4/t6;
+8056 pairs PS 669CC896CA4AA988 with an 8-texture material set; avg n~432.
+Plain terms: instanced prop/rock batches fed by instance streams and SRVs,
+not constants. Naming now requires the snapshot path: the 13:51 eye run
+again retained zero of their draws — retention is a hardcoded hash
+allow-list (eye_draw_snapshot.h sourceMesh(), no config key), so
+census_cb_watch cannot influence it. Their t33 transform records ARE in
+the shared pool dumps (pool_135147_*.bin, addressable via ledger
+startInstance), but geometry/shader bytes were never retained. Fix built
+same day: the two VS hashes (plus paired PS if required) added to the
+allow-list — one more armed flight then names them.
+
+**Scheduler (from the probe + decompile, closing the 2026-09-21 A/B
+entry's follow-up):** the live dispatcher is FUN_1405d6960 (0x5D6960,
+441 B): pops ONE 0x20-byte queue item (ring at queue+0x10, CAS ticket
+0x1405471d0) and calls [item[0]->vtable+8] — the worker run method. The
+frame-level scheduler is the pair FUN_1405d6b20 (job-table scheduler:
+payload pointers at scheduler object +0xD0, count +0xE8, descriptors +0x90
+stride 0x28, ring cursors +0x108/+0x110) driven by FUN_1405d6e40
+(per-worker pump), object at TLS+0x4480, global manager DAT_145f27db8
+(per-worker queue array +0x20). Cadence is QUEUE-EMPTY, not a frame
+counter: the pump sleeps on a condition variable and producers wake it —
+"per frame" is emergent. Minority stack frames were interior code pointers
+(a Scaleform-render payload family), not callers. The static chain
+dead-ends at runtime-built payload vtables (0x1450C7B80/0x1450C7BA0,
+installed by FUN_1405d3510; registration slots 0x1460adcdc..0x1460adf4c in
+runtime-only memory). Closure options: a startup write-watch on those
+slots, or stack-capture on the enqueue side (FUN_1405d5040) to name the
+per-frame producer. Probe timing note: the worker storm now runs
+IMMEDIATELY BEFORE the armed window (flat ~2.9k calls parked, +155k in the
+20 s pre-arming, census captures the drained aftermath).
+
+ruled out: MaterialQuality/SurfaceMaterialQuality as draw-count levers
+(their ~5.5% EB52 effect is secondary); census_cb_watch as an
+identification channel for CB-less shaders; ring/budget settings as a fix
+for missing unknown-family retention (hardcoded allow-list is the gate).
