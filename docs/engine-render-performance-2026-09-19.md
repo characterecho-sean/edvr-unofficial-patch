@@ -35,14 +35,13 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **Open (post step-3, see the step-3 entry):** the settings lever is closed —
-  LODDistanceScale is dominant (material knobs add ~5.5% of EB52) and
-  unknown-A is triply immune. Remaining: (1) name unknown-A/B via the
-  snapshot allow-list build + one armed flight (built 2026-09-21); (2)
-  per-record identity/change signal (motion arc); (3) optionally close the
-  scheduler's runtime-built payload vtables (startup write-watch or
-  enqueue-side stack capture). Ring-buffer command consumers remain the
-  one untouched trace question.
+* **Open (identification arc closed, see the entry below):** unknown-A/B
+  are the settlement pool's material layers; A is an ungated detail pass
+  (~550 draws/frame, invisible at range — a design input, not a build
+  order). Remaining: (1) per-record identity/change signal (motion arc);
+  (2) where LOD gates B's layer selection (offline, stage 2 chain);
+  (3) optionally close the scheduler's runtime-built payload vtables;
+  (4) ring-buffer command consumers.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -987,3 +986,45 @@ ruled out: MaterialQuality/SurfaceMaterialQuality as draw-count levers
 (their ~5.5% EB52 effect is secondary); census_cb_watch as an
 identification channel for CB-less shaders; ring/budget settings as a fix
 for missing unknown-family retention (hardcoded allow-list is the gate).
+
+
+### 2026-09-21 -- Unknown families identified: the settlement pool's material layers; unknown-A is an ungated detail pass
+
+The allow-list flight (141800 session) captured all four shaders. Identity:
+**unknown-A (vs_8056C9D5F22007F9 / ps_669CC896CA4AA988)** and
+**unknown-B (vs_2684F02B9B0BB0DE / ps_2376A8D9AA874372)** are two MATERIAL
+LAYERS of the same pooled settlement-structure system as EB52/E508: t33
+quat+pose instancing from the shared 12,288-record pool, 16 draw-ranges
+byte-identical between A and B (the same instances drawn twice). B is the
+light baked-lit layer (albedo/normal + per-instance light-class table);
+A is the heavy weathering/detail layer — deferred G-buffer with
+world-space PROJECTED detail (4-tap jittered arrays + 3D noise), distance-
+faded in the PS (v1.w), and the material-modulation tables idle here.
+Corrections to the earlier characterization: the "8-byte stride" is the
+INSTANCE stream; vertex stride is 40 bytes (PACKEDVERTEXDATA with optional
+4-bone skinning — idle, bone-count 0). The "CB-less" finding resolves: b0
+is empty by construction; frame view-proj+camera live in CB1 (cb1[270..275]),
+per-instance data in the t33/t36/t38 SRV pool.
+
+**Why unknown-A ignores every quality knob (resolved):** no LOD gate
+exists for it. The shader has no LOD branch at all — only the PS detail
+fade — while sibling layer B IS distance-culled (-18% at LOD 0.1). A's
+~550 draws/frame are submitted unconditionally for every visible cluster,
+and at LODDistanceScale distances its own fade makes it INVISIBLE — the
+settlement pays full draw cost for a detail layer that renders nothing at
+range. Optional confirmation test (not yet flown): diff the A-family
+t33-record sets via ledger startInstance between LOD 1.0 and 0.1 — an
+identical set alongside B's shrinking set proves the absence of any gate.
+
+Design input (not a build order): gating A by its own fade distance —
+matching B's behavior — would remove ~550 draws/frame at far LODs with
+zero visual change. That is an engine-behavior change; whether EDVR
+should approximate it boundary-side (suppress A-family draws beyond the
+fade) is a product decision with the usual suppression-discipline
+requirements (visibility proof, restoration path) that the 2026-09-21
+trace entry records as still mandatory.
+
+ruled out: fixed-density scatter (A's instances are ordinary pool
+records); an alternate LOD keyed elsewhere (no LOD branch exists);
+identification via census_cb_watch (A/B bind no b0 — resolved: frame
+constants in b1, instance data in SRVs).
