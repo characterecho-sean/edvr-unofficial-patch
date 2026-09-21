@@ -358,7 +358,11 @@ int selfTest(bool bootstrap=false,bool separate=false) {
   check(api.token()==0&&api.valid(vr::IVRSystem_Version)&&!api.valid("IVROverlay_011"),"exact support table exists before Init");
   check(!api.generic(vr::IVRSystem_Version,&error)&&error==vr::VRInitError_Init_NotInitialized,"uninitialized interface retrieval");
   api.shutdown();
-  EdvrNativeRuntimeConfig config{sizeof(config),EDVR_NATIVE_MODULE_VERSION_1,missingLoader.c_str(),graphicsPath.c_str(),100,0};
+  // 5000, not a shorter bound: this window admits the first render callback,
+  // and a full build saturates every core so WARP Present can take far longer
+  // than 100 ms to complete one frame. The module's own diagnostic default
+  // (native_module.cpp configureModule) and nativeRun above both use 5000.
+  EdvrNativeRuntimeConfig config{sizeof(config),EDVR_NATIVE_MODULE_VERSION_1,missingLoader.c_str(),graphicsPath.c_str(),5000,0};
   auto invalid=config;invalid.size=4;check(api.configure(&invalid)==E_INVALIDARG,"short module config rejected");
   invalid=config;invalid.version=99;check(api.configure(&invalid)==E_INVALIDARG,"unknown module config version rejected");
   invalid=config;invalid.reserved=EDVR_NATIVE_GRAPHICS_SEPARATE_DEVICE;check(api.configure(&invalid)==E_INVALIDARG,"v1 separate-device flag rejected");
