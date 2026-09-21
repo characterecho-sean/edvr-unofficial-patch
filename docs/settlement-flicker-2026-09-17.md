@@ -7024,3 +7024,16 @@ and the +0x688/+0x68D gate before appending draw items to the bucket
 lists (counter +0x2A4). The engine's feedable visibility bit for draw
 suppression is render-record +0x570; its writer is the next offline
 target (FindStores570 variant).
+
+### 2026-09-20 20:25 -- +0x570 is content data: copied from the source model record, never per frame
+
+Cross-entry from the perf arc (full analysis in the perf doc's
+same-time entry). The +0x570 writer is found: the render-record
+builder FUN_142819F70 copies the mask word verbatim from the source
+model record's +0x560 at ctx build time, and the +0x688 flag word is
+a copy of source +0x558 -- the "predicate class" this arc left open
+is now traceable to content data rather than runtime evaluation.
+Stores to +0x570 are MOV-only (132 writer functions, zero OR/AND),
+and none runs per frame: the ctx builder FUN_142819D90 is reached
+from FUN_1401EA920, a content/load path. A cleared visibility bit
+therefore persists until the ctx is rebuilt.

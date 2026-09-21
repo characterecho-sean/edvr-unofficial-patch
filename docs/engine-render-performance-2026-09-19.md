@@ -37,7 +37,10 @@ expensive way to run this project, so instruments batch.
   RESOLVED offline (2026-09-20 20:05 entry; no flight spent — every piece
   was already in analysis\decomp). Four dispatch levels named, and the
   engine's feedable visibility bit identified: render-record +0x570 mask
-  word. L2 is unblocked up to the +0x570 writer, the next offline target.
+  word. The +0x570 writer is IDENTIFIED (20:25 entry): the ctx builder
+  copies it from the source model record at ctx build time and nothing
+  rewrites it per frame — a cleared bit persists until content rebuild.
+  L2's remaining unknowns: bit-to-draw-class semantics and the census join.
 
 ## Levers, cheapest measurement first
 
@@ -61,11 +64,15 @@ entry): the feedable point is the render-record +0x570 mask word, ANDed
 against the dispatch mask at draw-build time in FUN_1442B4420 and ORed
 into the rig accumulator in FUN_14431AFE0 — clearing a proven-zero-sample
 record's bits there feeds the engine's own mechanism instead of
-second-guessing it. Before building: identify the +0x570 writer (a
-FindStores570 variant of the existing FindStores scripts) so the patch
-lands after the engine's own per-frame write. Risk: suppressing a draw
-that becomes visible needs a one-frame restore path, proven on the
-smoke/static-surface rigs.
+second-guessing it. The +0x570 writer is now identified (2026-09-20
+20:25 entry) and is content-static: the mask is copied once from the
+source model record at ctx build and never rewritten per frame, so a
+cleared bit persists until the ctx is rebuilt — re-assert on rebuild,
+not per frame. Remaining before building: the bit-to-draw-class
+semantics (the source-record +0x560 writer, in the content pipeline)
+and the census join to the observed draw families. Risk: suppressing
+a draw that becomes visible needs a one-frame restore path, proven on
+the smoke/static-surface rigs.
 
 ### L3. Kinematic eval narrowing
 
@@ -288,3 +295,47 @@ calls (bucket item counter +0x2A4 is countable per frame). Also
 correction-noted: the perf doc's L1 framing suspected eval cost without
 a dispatch map; level 3's rec+0x208/nibble test now names the per-record
 CPU gate precisely.
+
+### 2026-09-20 20:25 -- +0x570 writer found: content-static, copied from the source model record
+
+The FindStores570 scan (analysis/decomp/stores_570.txt; 19.6M
+instructions, 132 writer functions) stores to render-record +0x570 by
+**MOV only -- zero OR/AND stores anywhere**, so the mask word is never
+accumulated in place. The examined writers are all bookkeeping:
+FUN_1442BE1F0 and FUN_1443DE430 are constructors (+0x570 zero-init;
+the flag688 tag on the second was a vtable-install coincidence at
+index 0xd1), FUN_1442BF9D0 is a move/transfer (dst = src, src = 0),
+and FUN_1442D46C0 is a std::vector capacity field at +0x570 (offset
+collision).
+
+Pivot: the render-record COUNT field ctx+0x1A940 has exactly two
+writers (FindStores1A940; analysis/decomp/stores_1a940.txt) --
+FUN_1401E4FD0 and FUN_142819D90. FUN_142819D90 calls FUN_142819F70,
+the only +0x570 writer also touching the companion fields +0x688 /
++0x68C at the 0x6a0 record stride. Decompiles:
+analysis/decomp/decomp_2819F70.txt, decomp_2819D90.txt.
+
+**FUN_142819F70 is the render-record builder.** It copies the mask
+verbatim: source model record +0x560 -> render record +0x570. The
+same builder copies source +0x558 -> +0x688 (the flag word),
+assembles +0x68C from source +0x56C bits, copies source +0x568 ->
++0x578 (the bit -> record-index value used by the ctx+0x1A840 table),
+and ORs entry-list masks into +0x580 / +0x588+idx. FUN_142819D90
+builds the ctx (called twice from FUN_1401EA920, a content/load path,
+not per frame): count at ctx+0x1A940 = (srcEnd - srcBegin) / 0x570
+capped at 0x40 (<= 64 records per ctx); source records are stride
+0x570; it also builds the bit -> record-index table at ctx+0x1A840
+and the exclusion accumulators ctx+0x1A948 (all records' masks) /
++0x1A950 / +0x1A958, partitioned by rec+0x688 & 0x7FF0 / & 0xFF0 --
+the exact words FUN_14431AFE0 subtracts per class.
+
+**Nothing rewrites +0x570 per frame.** L2 consequence: clearing a
+proven-zero-sample record's bits persists until the ctx is rebuilt;
+the re-assert cadence is "hook the builder or re-clear on ctx
+rebuild", not per frame. Remaining unknowns before L2 is buildable:
+the bit-to-draw-class semantics (the source-record +0x560 writer, in
+the content pipeline) and the census join from the bucket lists to
+the 23k D3D11 draws. New artifacts: analysis/ghidra_scripts/
+FindStores570.java, FindStores1A940.java, run_ghidra_stores570.bat,
+run_ghidra_stores1a940.bat; decomp outputs under analysis/decomp/
+(gitignored, on disk only).
