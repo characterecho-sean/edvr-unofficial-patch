@@ -149,3 +149,16 @@ so the gap is accepted, not extended). The next settlement flight with
 fix.engine_motion on batches both measurements: the mover/static
 discriminator census (kinematic doc 17:50) and the L1 brackets-only
 job costs.
+
+### 2026-09-20 19:10 -- flight 190122: brackets fine, but L1 numbers need a burst
+
+Cross-entry (full read-out in the kinematic doc's same-time foot
+entry). The hoisted timing ran all flight on the tracker-only path and
+the discriminator census came back a symmetric null (physics jobs never
+touch the eval stream -- ruled out as a classifier; this also narrows
+L4: physics decimation needs the physics-job decomps to find where
+dynamics actually advance, now the shared offline step). But L1's
+brackets-only NUMBERS are not in this log: jobs[] accumulates
+per-session as designed, yet it only lands in the classification JSON
+at dump time -- and no eye burst was taken. The L1 remeasure owes one
+burst next flight (any view; the JSON writes regardless).
