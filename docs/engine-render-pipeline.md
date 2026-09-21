@@ -222,14 +222,21 @@ Every open runtime question, one visit. Install the probe build first
 the live INI unless a change is requested; identity-check logs with
 `edvr_log.py --expect-build HEAD`. Instruments, in flight order:
 
-1. **Settings A/B (stage 1 lever):** arm the census at the settlement on
-   foot, current `Custom.4.4.fxcfg` (pass A). Game closed; set
+1. **Settings A/B (stage 1 lever):** arm the census at the settlement,
+   current `Custom.4.4.fxcfg` (pass A). Game closed; set
    MaterialQuality=0, SurfaceMaterialQuality=0, LODDistanceScale=0.1;
    relaunch, same spot and heading, arm again (pass B). Discriminators:
    EB52-family vh= count and total eye draws per frame (use
    `edvr_log.py --tally vh`); outcome (a) family collapses → the sliders
    gate settlement scenery, quantified; (b) unchanged → scenery ignores
    the knobs, no settings-side lever; (c) partial → bisect which knob.
+   Validity rule: pass A and pass B must see the same scene, viewpoint,
+   AND render path — do not mix on-foot/cockpit between passes. Sanity
+   gate before pass A: 3 armed frames must show ~18k eye draws into two
+   eye targets (EDVR renders on-foot as true per-eye stereo through its
+   runtime; a flat vscreen fallback shows a handful of compositor draws
+   and one scene target — if seen, stop and fix the stereo path instead
+   of flying a meaningless A/B).
 2. **EB52-armed EyeDrawSnapshot (stage 4/5 gap):** in pass A, arm the
    snapshot with EB5234DB6ADB491D watched; captures the family's per-eye
    instance-buffer bytes the cb-staged captures cannot see, and names the
