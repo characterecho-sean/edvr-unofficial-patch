@@ -304,6 +304,31 @@ int wmain(int argc, wchar_t** argv) {
         solar.draws.back().ps=123;
         check(solar.writeShaders(dir.c_str())==1,"unexpected solar PS reported missing, never silently substituted");
     }
+    {
+        // Census unknown-A/B settlement prop batches, 2026-09-21. The VS
+        // alone enters sourceMesh(), but the paired PS dxbc needs BOTH the
+        // creation-time retention gate (device_hook hookedCreatePS) and the
+        // writeShaders pixel branch -- prove the write half per family here.
+        edvr::EyeDrawSnapshot unknowns;
+        const char bytes[]="unknown-bytecode";
+        const uint64_t vs[]={edvr::EyeDrawSnapshot::kUnknownA,edvr::EyeDrawSnapshot::kUnknownB};
+        const uint64_t ps[]={edvr::EyeDrawSnapshot::kUnknownAPs,edvr::EyeDrawSnapshot::kUnknownBPs};
+        for(unsigned family=0;family<2;++family) {
+            edvr::EyeDrawSnapshot::rememberShader(vs[family],bytes,sizeof(bytes));
+            edvr::EyeDrawSnapshot::rememberShader(ps[family],bytes,sizeof(bytes));
+            edvr::EyeDrawSnapshot::rememberLayout(nightLayout.Get(),&nightElement,1,vs[family]);
+            unknowns.capture(ctx.Get(),1100,family,vs[family],ps[family],'X',6,1,0,0,0,true);
+        }
+        check(unknowns.draws.size()==2,"unknown-A/B draws retained via sourceMesh");
+        std::wstring udir=argv[1];udir.resize(udir.find_last_of(L"\\/"));
+        check(unknowns.writeShaders(udir.c_str())==0,"unknown-A/B vertex and pixel shader writes");
+        for(const wchar_t* name:{L"vs_8056C9D5F22007F9.dxbc",L"ps_669CC896CA4AA988.dxbc",
+                                L"vs_2684F02B9B0BB0DE.dxbc",L"ps_2376A8D9AA874372.dxbc"}) {
+            FILE* f=nullptr;
+            check(_wfopen_s(&f,(udir+L"\\"+name).c_str(),L"rb")==0 && f,"unknown shader file written");
+            if(f)fclose(f);
+        }
+    }
     ComPtr<ID3D11Texture2D> nightTexture[5];ComPtr<ID3D11ShaderResourceView> nightView[5];
     UINT nightRow[5]{},nightRows[5]{};
     for(UINT slot=0;slot<5;++slot) {

@@ -624,7 +624,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         uiDeferredRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         staticSurfaceRememberPs(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
-        if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
+        if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));
         GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
