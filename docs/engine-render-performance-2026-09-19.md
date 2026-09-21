@@ -13,7 +13,11 @@
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
   Compensation-style tweaks (sharpening over blur, threshold nudges) —
   AGENTS.md diagnosis discipline.
-- **Next flight:** settlement flight on the 116a2e0 build; read with
+- **Next flight:** one settlement eye burst on the census-join build
+  (bucket item counter landed 2026-09-21 06:37; frontier d3d11
+  sha256:16 01f727ef8fe1e808). Read kinematicEval.bucket_items in the
+  classification JSON against the gfx-log draw census; discriminators
+  named in the 06:37 entry. Verify build first:
   `python tools\edvr_log.py --target frontier --expect-build HEAD`.
 
 ## Frame budget philosophy
@@ -74,10 +78,13 @@ cleared bit persists until the ctx is rebuilt — re-assert on rebuild,
 not per frame. The content pipeline is mapped end to end (2026-09-20
 21:45 entry): the mask is born on the model object (+0x8E0) and copied
 down whole at every hop — MOV-only at all three levels, never
-accumulated in place. Remaining before building: per-bit draw-class
-names (the model+0x8E0 writer — 30 candidates listed in
-analysis/decomp/stores_8e0.txt; a ctor default of 0x3C hints bits are
-draw-list slots) and the census join to the observed draw families.
+accumulated in place. The census join is INSTRUMENTED (2026-09-21
+06:37 entry): the bucket item counter bracket on the draw-item
+builder reads engine item production per frame, joining against the
+D3D11 draw census on one settlement flight. Remaining before
+building: per-bit draw-class names (the model+0x8E0 writer — 30
+candidates listed in analysis/decomp/stores_8e0.txt; a ctor default
+of 0x3C hints bits are draw-list slots) and the join flight itself.
 Risk: suppressing a draw that becomes visible needs a one-frame
 restore path, proven on the smoke/static-surface rigs.
 
@@ -388,3 +395,68 @@ clear the whole word of a proven-zero record -- does not need it.
 cadence settled (on ctx rebuild, not per frame), pipeline mapped
 (21:45). Remaining: the census join from the bucket draw lists to the
 23k D3D11 calls, then a build decision.
+
+### 2026-09-21 06:37 -- census-join instrument landed (bucket item counter)
+
+The last L2 unknown Sean sanctioned at 05:07 is now built and
+installed: the engine bucket item counter (+0x2A4) rides the existing
+kinematic-eval hook set, so ONE settlement flight answers "which
+engine draw lists become which D3D11 calls" (join against the draw
+census in the gfx log, offline).
+
+**Engine truth, from decomp_42B4420.txt (no flight spent).** The
+per-rig draw-item builder FUN_1442B4420 walks its owner's instance
+entries -- count u64 @ rigOwner+0x48, array @ +0x50, stride 0x58
+(the decompile's param_1+0x12/+0x14 are float*-ELEMENT offsets; the
+byte offsets are 0x48/0x50, resolving the overlapping-fields paradox).
+Each entry's model (entry+0x0) names its bucket: bucket = *(model+0x20),
+list head bucket+0x260, item counter bucket+0x2A4. Items are 0x150
+bytes, eight per pool block (pool DAT_145efdd30), with a parallel
+per-item mask array after the block's items. The FindBucketOps scan
+(new analysis script; output analysis/decomp/bucket_ops.txt) found 136
+functions touching +0x2A4 but only FOUR that also reference the block
+pool: the two producers inside the bracket (FUN_1442B4420 inline and
+its helper FUN_1442B4130), FUN_14369c9c0 (a second producer family,
+callers unknown -- caveat below) and FUN_14431305c (a dispatch-side
+fragment that also INCs). Resets exist (FUN_14434CD90 /
+FUN_14434DB30 zero the counter), so +0x2A4 drains per frame and the
+entry/exit delta is the robust read, exactly as designed. Correction
+to a line in the 21:45 entry's wake: the local_478 path in
+FUN_1442B4420 is NOT dead -- FUN_1442B2730 can set it through a
+pointer (the binary's call list shows CALL 0x1442b4130 at 1442b4843);
+both append paths run inside the forwarded call, so the bracket
+covers both either way.
+
+**The instrument.** kinematic_eval_hook.cpp gains a sixth-param
+callback on RVA 0x42B4420 (param_6's 16 bytes are copied into every
+item, so the full stack layout must pass through verbatim -- a
+four-param forward would have corrupted items). The bracket walks the
+entry array at call entry (deduped, cap 64, __try discipline from the
+phys-queue capture), reads each bucket's +0x2A4 before and after the
+forwarded call, and accumulates per-session into the probe:
+calls / items / empty_calls / entry_wild / exit_fault / neg_deltas /
+overflow_calls / max_buckets / max_items_per_call, serialized as
+kinematicEval.bucket_items in the classification JSON. Per-session,
+never active()-gated -- tracker-only flights harvest it. Prologue
+verified hookable from the exe bytes (mov r11,rsp; pushes; sub
+rsp,0x4D8 -- no thunk). Gates: kinematic_probe_test 38/0 (new case 8
+drives every counter path), kinematic json self-test extended and
+green, config contract 253/253. Frontier install d3d11 sha256:16
+01f727ef8fe1e808 (build predates its commit; hash is truth).
+
+**Flight protocol (next flight).** One settlement eye burst on this
+build; read classification_*.json -> kinematicEval.bucket_items.
+Dead-instrument discriminators, named before flying: calls == 0 while
+draws proceed = the hook stood down at install (CodeHook logs under
+kinematic-bucket-build); calls > 0 but empty_calls == calls = the
+walk offsets (+0x48/+0x50) are wrong for live rigs -- re-derive, do
+not trust a zero. Success shape: calls ~ rig count per frame
+(~1.5k), items per call in the tens, and a session items-total that
+pairs against the census's ~23k D3D11 calls.
+
+**Caveat for the read.** FUN_14369c9c0 / FUN_14431305c /
+FUN_14434D120 INC the same counter pattern on what may be other
+passes' lists (shadow etc.). If engine items land far BELOW 23k, the
+remainder is those producers plus non-bucket draw sources -- the join
+still answers the suppression question for the main list, which is
+the only one L2 proposes to feed.

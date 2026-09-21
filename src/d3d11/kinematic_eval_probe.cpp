@@ -495,6 +495,28 @@ void KinematicEvalProbe::notePhysNodes(const uint64_t* nodes,uint32_t count,uint
     if(dropped)physNodeOverflow_.fetch_add(dropped,std::memory_order_relaxed);
 }
 
+void KinematicEvalProbe::noteBucketBuild(uint32_t buckets,uint64_t items,
+                                         uint32_t negDeltas,uint32_t flags) noexcept {
+    bucketCalls_.fetch_add(1,std::memory_order_relaxed);
+    if(flags&kBucketFlagEntryWild){bucketEntryWild_.fetch_add(1,std::memory_order_relaxed);return;}
+    if(buckets==0){bucketEmptyCalls_.fetch_add(1,std::memory_order_relaxed);return;}
+    if(flags&kBucketFlagOverflow)bucketOverflowCalls_.fetch_add(1,std::memory_order_relaxed);
+    if(negDeltas)bucketNegDeltas_.fetch_add(negDeltas,std::memory_order_relaxed);
+    // An exit fault drops the call's items (partial reads are not evidence)
+    // but the entry-side bucket count already measured stands.
+    if(!(flags&kBucketFlagExitFault) && items) {
+        bucketItems_.fetch_add(items,std::memory_order_relaxed);
+        const uint32_t perCall=items>0xFFFFFFFFull?0xFFFFFFFFu:static_cast<uint32_t>(items);
+        uint32_t prevItems=bucketMaxItems_.load(std::memory_order_relaxed);
+        while(prevItems<perCall &&
+              !bucketMaxItems_.compare_exchange_weak(prevItems,perCall,std::memory_order_relaxed)){}
+    }
+    if(flags&kBucketFlagExitFault)bucketExitFault_.fetch_add(1,std::memory_order_relaxed);
+    uint32_t prev=bucketMaxBuckets_.load(std::memory_order_relaxed);
+    while(prev<buckets &&
+          !bucketMaxBuckets_.compare_exchange_weak(prev,buckets,std::memory_order_relaxed)){}
+}
+
 KinematicEvalProbe::Summary KinematicEvalProbe::summary() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return summary_;
@@ -680,7 +702,16 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
         if(i)j<<',';
         j<<"\"0x"<<std::hex<<physNodeRing_[i]<<std::dec<<'"';
     }
-    j<<"]}}"; // samples+phys_queue, nodes+phys_nodes, kinematicEval
+    j<<"]},\"bucket_items\":{\"calls\":"<<bucketCalls_.load(std::memory_order_relaxed)
+     <<",\"items\":"<<bucketItems_.load(std::memory_order_relaxed)
+     <<",\"empty_calls\":"<<bucketEmptyCalls_.load(std::memory_order_relaxed)
+     <<",\"entry_wild\":"<<bucketEntryWild_.load(std::memory_order_relaxed)
+     <<",\"exit_fault\":"<<bucketExitFault_.load(std::memory_order_relaxed)
+     <<",\"neg_deltas\":"<<bucketNegDeltas_.load(std::memory_order_relaxed)
+     <<",\"overflow_calls\":"<<bucketOverflowCalls_.load(std::memory_order_relaxed)
+     <<",\"max_buckets\":"<<bucketMaxBuckets_.load(std::memory_order_relaxed)
+     <<",\"max_items_per_call\":"<<bucketMaxItems_.load(std::memory_order_relaxed)
+     <<"}}"; // bucket_items+phys_nodes, kinematicEval
 }
 
 void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
@@ -806,6 +837,17 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     physNodeRing_.push_back(0x1111111111111111ull);
     physNodeRing_.push_back(0x2222222222222222ull);
     physNodeRing_.push_back(0x3333333333333333ull);
+
+    // Bucket-build fixture: distinctive values, one per counter.
+    bucketCalls_.store(9001,std::memory_order_relaxed);
+    bucketItems_.store(123456,std::memory_order_relaxed);
+    bucketEmptyCalls_.store(31,std::memory_order_relaxed);
+    bucketEntryWild_.store(7,std::memory_order_relaxed);
+    bucketExitFault_.store(5,std::memory_order_relaxed);
+    bucketNegDeltas_.store(11,std::memory_order_relaxed);
+    bucketOverflowCalls_.store(3,std::memory_order_relaxed);
+    bucketMaxBuckets_.store(17,std::memory_order_relaxed);
+    bucketMaxItems_.store(4711,std::memory_order_relaxed);
 
     summary_.observed=987654321ull;
     summary_.readFaults=3;summary_.recordOverflow=1;summary_.transitionOverflow=2;summary_.vtableOverflow=4;
