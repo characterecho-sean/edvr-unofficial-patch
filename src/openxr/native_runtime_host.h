@@ -180,7 +180,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeCullGuard cullGuard;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_3};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_4};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t offsetFrames=0,fssHealedEyes[2]{},featureChanges=0;
@@ -826,7 +826,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_3};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_4};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -847,7 +847,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;
         settings.verticalFraction=featureFrame.cullVerticalFraction;settings.signatureCount=featureFrame.cullSignatureCount;
         settings.trimOuterDeg=featureFrame.trimOuterDeg;settings.trimNasalDeg=featureFrame.trimNasalDeg;
-        settings.trimVerticalDeg=featureFrame.trimVerticalDeg;
+        settings.trimVerticalDeg=featureFrame.trimVerticalDeg;settings.channel=featureFrame.cullChannel;
         for(unsigned i=0;i<(std::min)(settings.signatureCount,8u);++i)
           settings.signatures[i]={featureFrame.cullSignatures[i][0],featureFrame.cullSignatures[i][1]};
         NativeCullFrustum frusta[2]{};NativeCullDimensions dimensions[2]{};
@@ -894,10 +894,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         features.cull(stage==NativeCullStage::Live?2u:stage==NativeCullStage::Adopting?1u:0u,
             cullGuard.widenFactorWidth(),cullGuard.widenFactorHeight());
         for(unsigned e=0;e<2;++e) {
-          const auto raw=cullGuard.gameFrustum(e);const auto dims=cullGuard.recommended(e);
-          gameGeometry.views[e].fov={std::atan(raw.left),std::atan(raw.right),std::atan(raw.up),std::atan(raw.down)};
+          const auto matrix=cullGuard.gameFrustumMatrix(e);const auto dims=cullGuard.recommended(e);
+          const auto query=cullGuard.gameFrustumRaw(e);
+          gameGeometry.views[e].fov={std::atan(matrix.left),std::atan(matrix.right),std::atan(matrix.up),std::atan(matrix.down)};
+          gameGeometry.queryFov[e]={std::atan(query.left),std::atan(query.right),std::atan(query.up),std::atan(query.down)};
           gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
         }
+        gameGeometry.queryFovValid=true;
       }
     }
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);

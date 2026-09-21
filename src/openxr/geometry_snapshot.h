@@ -16,12 +16,19 @@ struct GeometryInput {
   XrPosef headPose{};
   XrSpaceLocationFlags headFlags = 0;
   uint32_t width[2]{}, height[2]{};
+  // What the GetProjectionRaw channel answers when it differs from
+  // views[].fov (the cull guard's channel probe). Unset, every projection
+  // query shares views[].fov, as before.
+  XrFovf queryFov[2]{};
+  bool queryFovValid = false;
 };
 
 struct GeometrySnapshot {
   GeometryInput native;
   vr::HmdMatrix34_t headToLocal{}, eyeToHead[2]{};
   RawFov raw[2]{};
+  RawFov queryRaw[2]{};
+  bool queryRawValid = false;
 };
 
 namespace detail {
@@ -67,9 +74,12 @@ inline bool makeGeometrySnapshot(const GeometryInput& in, GeometrySnapshot& out)
   for(int i=0;i<2;++i) if(!in.width[i] || !in.height[i] || in.width[i]>0x7fffffffu || in.height[i]>0x7fffffffu ||
       in.views[i].type!=XR_TYPE_VIEW || in.views[i].next || !detail::poseValid(in.views[i].pose)) return false;
   RawFov raw[2]{}; for(int i=0;i<2;++i) if(!fovToRaw(in.views[i].fov,raw[i])) return false;
+  RawFov queryRaw[2]{};
+  if(in.queryFovValid) for(int i=0;i<2;++i) if(!fovToRaw(in.queryFov[i],queryRaw[i])) return false;
   double head[4][4], inv[4][4]; detail::rigid(in.headPose,head); detail::inverseRigid(head,inv);
   GeometrySnapshot c{}; c.native=in; if(!detail::narrow(head,c.headToLocal))return false;
   for(int i=0;i<2;++i){c.raw[i]=raw[i];double eye[4][4],rel[4][4];detail::rigid(in.views[i].pose,eye);detail::product(inv,eye,rel);if(!detail::narrow(rel,c.eyeToHead[i]))return false;}
+  if(in.queryFovValid){c.queryRaw[0]=queryRaw[0];c.queryRaw[1]=queryRaw[1];c.queryRawValid=true;}
   out=c; return true;
 }
 }

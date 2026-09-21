@@ -16,6 +16,10 @@
 // versions a caller's struct shape asks for, and a version 1 or 2 caller
 // simply never turbo-paces, exactly as it never got a trim before version 2.
 #define EDVR_NATIVE_FRAME_VERSION_3 3u
+// Version 4 adds cullChannel to the END and nothing else, under the same
+// hand-copied-DLLs rule: a version 1, 2 or 3 caller simply gets the guard's
+// lie on both projection channels, exactly as before the key existed.
+#define EDVR_NATIVE_FRAME_VERSION_4 4u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -55,6 +59,10 @@ struct EdvrNativeFrameOutput {
     // (fix.weapon_stability while on foot); 0: the wait stays in
     // WaitGetPoses.
     uint32_t deferredPacing;
+    // Version 4 and later. Which projection query channel the cull guard's
+    // widened frustum is told through (advanced.cull_guard_channel):
+    // 0 both, 1 GetProjectionRaw only, 2 GetProjectionMatrix only.
+    uint32_t cullChannel;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -67,6 +75,10 @@ struct EdvrNativeFrameOutput {
 // with no tail padding before deferredPacing.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, deferredPacing))
+// The size the fields through deferredPacing occupy, which is what a
+// version 3 caller's struct is, with no tail padding before cullChannel.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, cullChannel))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

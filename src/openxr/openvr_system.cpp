@@ -194,7 +194,9 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
   const unsigned eye=unsigned(e);
   const bool liveGeometry=geometryValid(s);
   if(opticsAvailable(s)&&eyeValid(e)) {
-    const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
+    // The cull guard's channel probe (advanced.cull_guard_channel) may hand
+    // this channel a different frustum from the one the game renders.
+    const RawFov base=liveGeometry?(s.geometry.queryRawValid?s.geometry.queryRaw[eye]:s.geometry.raw[eye]):s.optics.raw[eye];
     if(liveGeometry) shiftedRawFov(base,s.tangentShift[eye][0],
                                    s.tangentShift[eye][1],out);
     else out=base;

@@ -18,7 +18,7 @@ class NativeFrameClient final {
     if(candidate.size!=sizeof(candidate)||candidate.version!=EDVR_NATIVE_FRAME_VERSION_1||!candidate.context||
        !owned(provider,candidate.beginFrame)||!owned(provider,candidate.latchSubmit)||
        !owned(provider,candidate.setCullState)||!owned(provider,candidate.invalidate)||!owned(provider,candidate.close))return E_NOINTERFACE;
-    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_3;return S_OK;
+    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_4;return S_OK;
   }
   bool acquired()const{return table_.context!=nullptr;}
   HRESULT begin(const GeometryInput& geometry,uint64_t reference,EdvrNativeFrameOutput& out) {
@@ -33,7 +33,8 @@ class NativeFrameClient final {
     // consumes nothing when it does, so the same frame can be asked again
     // the only way that one knows: one step down at a time, until version 1
     // (which every provider answers) or an acceptance settles what shape to
-    // ask for first next time. It then carries no trim/pacing field, ever.
+    // ask for first next time. It then carries no trim/pacing/channel field,
+    // ever.
     while(r==E_INVALIDARG&&providerVersion_>EDVR_NATIVE_FRAME_VERSION_1) {
       --providerVersion_;
       out=ask(providerVersion_);
@@ -43,6 +44,8 @@ class NativeFrameClient final {
       out.trimOuterDeg=out.trimNasalDeg=out.trimVerticalDeg=0;
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_3)
       out.deferredPacing=0;
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_4)
+      out.cullChannel=0;
     return r;
   }
   bool legacyProvider() const{return providerVersion_==EDVR_NATIVE_FRAME_VERSION_1;}
@@ -54,7 +57,7 @@ class NativeFrameClient final {
     return acquired()?table_.setCullState(table_.context,stage,width,height):S_FALSE;
   }
   HRESULT invalidate(){return acquired()?table_.invalidate(table_.context):S_FALSE;}
-  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_3;}return r;}
+  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_4;}return r;}
  private:
   template<class T>static bool owned(HMODULE provider,T address) {
     if(!address)return false;HMODULE actual=nullptr;
@@ -62,15 +65,17 @@ class NativeFrameClient final {
       reinterpret_cast<LPCWSTR>(address),&actual)&&actual==provider;
   }
   static EdvrNativeFrameOutput ask(uint32_t version) {
-    if(version>=EDVR_NATIVE_FRAME_VERSION_3)
-      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_3};
+    if(version>=EDVR_NATIVE_FRAME_VERSION_4)
+      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_4};
+    if(version==EDVR_NATIVE_FRAME_VERSION_3)
+      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3,EDVR_NATIVE_FRAME_VERSION_3};
     if(version==EDVR_NATIVE_FRAME_VERSION_2)
       return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_2,EDVR_NATIVE_FRAME_VERSION_2};
     return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_1,EDVR_NATIVE_FRAME_VERSION_1};
   }
   EdvrNativeFrameTable table_{};uint64_t generation_=0;
-  // The shape (3/2/1) the provider last accepted; begin() asks this one
+  // The shape (4/3/2/1) the provider last accepted; begin() asks this one
   // first, so a provider once found to be older is not re-probed every frame.
-  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_3;
+  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_4;
 };
 }
