@@ -4,7 +4,7 @@
     python tools/fetch_ngx.py --verify DIR
 
 A sparse, shallow clone of https://github.com/NVIDIA/DLSS at ONE pinned
-commit (the 310.7.0 SDK), taking the headers, the x64 static library, the
+commit (the 310.9.1 SDK), taking the headers, the x64 static library, the
 release runtime and NVIDIA's licence: about 200 MB on disk, most of it the
 runtimes. The runtime's SHA-256 is pinned here as well and checked after
 every fetch and by every build, so an SDK that moved fails loudly instead of
@@ -32,9 +32,9 @@ import sys
 
 URL = "https://github.com/NVIDIA/DLSS"
 # The pinned SDK: the commit and the runtime it carries. Both change together.
-COMMIT = "a291cc7d2cc642a51566f3dfd5376f635cd1b284"   # "DLSS 310.7.0 SDK", 2026-06-23
-DLL_SHA256 = "be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e"
-DLL_VERSION = "310.7.0"
+COMMIT = "374959484e79a640feaba44c93ac8cfb0a03f5b5"   # "DLSS 310.9.1 SDK", 2026-09-21
+DLL_SHA256 = "3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983"
+DLL_VERSION = "310.9.1"
 PATHS = ["include", "lib/Windows_x86_64/x64", "lib/Windows_x86_64/rel"]
 
 HEADER = os.path.join("include", "nvsdk_ngx.h")
