@@ -22,6 +22,16 @@ alignas(8) std::atomic<SchedulerStackProbe*> observer{nullptr};
 static_assert(decltype(observer)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 
+// The relays gate on this cell, not on `observer` directly: the static
+// prop gate (fix.static_prop_updates) needs resetObserved to fire even
+// while the probe is dark, so it holds the relays open through its own
+// want and the cell is recomputed from both under g_installMutex (the
+// kinematic eval hook's evalGate/recomputeGateLocked discipline -- the
+// 2026-09-20 review finding 4 race was an unlocked check-then-set).
+alignas(8) std::atomic<uintptr_t> relayGate{0};
+std::atomic<bool> gateWanted{false};
+alignas(8) std::atomic<SchedulerResetObserverFn> resetObserver{nullptr};
+
 // The prologues, from the hash-verified exe (SHA-256 e6be8bbe...4e988;
 // verified 2026-09-21 against analysis/EliteDangerous64.exe and against
 // tools/build_diff_targets.json's prologue_hex for 0x36A0F50):
@@ -135,6 +145,11 @@ __declspec(noinline) uintptr_t __fastcall resetObserved(uintptr_t a,uintptr_t b,
                                                         uintptr_t c,uintptr_t d) noexcept {
     SchedulerStackProbe* probe=observer.load(std::memory_order_acquire);
     if(probe)probe->noteEntry(3,reinterpret_cast<uintptr_t>(_AddressOfReturnAddress()));
+    // The static prop gate's invalidation trigger: the reset path is about
+    // to rebuild the bucket population, so every cached collection must
+    // re-run once. One atomic load when no observer is registered.
+    const auto gateReset=resetObserver.load(std::memory_order_acquire);
+    if(gateReset)gateReset();
     const auto forward=reinterpret_cast<ObservedFn>(g_entries[1].forward.load(std::memory_order_acquire));
     if(!forward)return 0;
     return forward(a,b,c,d);
@@ -168,7 +183,9 @@ bool targetValid(uintptr_t base) noexcept {
 bool installOne(HookEntry& entry,uintptr_t base) noexcept {
     entry.relay=allocateRelay(base+entry.rva);
     if(!entry.relay)return false;
-    buildRelay(entry.relay,&observer,entry.callback);
+    // The relays gate on relayGate (probe OR static-gate want), not on
+    // `observer` -- see the cell's declaration above.
+    buildRelay(entry.relay,&relayGate,entry.callback);
     if(!entry.hook.install(reinterpret_cast<void*>(base+entry.rva),entry.relay,nullptr,
                            entry.name,&prepareRelay,&entry)) {
         VirtualFree(entry.relay,0,MEM_RELEASE);
@@ -213,6 +230,9 @@ bool schedulerStackHooksMatch(uintptr_t base) noexcept {
     return base && patchIsOurs(g_entries[0],base) && patchIsOurs(g_entries[1],base);
 }
 
+// Defined below; used by both attach/detach pairs.
+void recomputeRelayGateLocked() noexcept;
+
 const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
     if(!probe)return "install_failed";
     try {
@@ -229,10 +249,11 @@ const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
         if(!schedulerStackHooksMatch(base))return "opcode_mismatch";
         // Targets 0/1 are observed through the kinematic eval hook's job
         // relays; hold that gate open (it may already be open for the probe
-        // or the tracker -- the gate is recomputed from all three cells).
+        // or the tracker -- the gate is recomputed from all four cells).
         const char* feed=kinematicEvalSchedulerAttach();
         if(std::strcmp(feed,"installed")!=0)return feed;
         observer.store(probe,std::memory_order_release);
+        recomputeRelayGateLocked();
         return "installed";
     } catch(...) {return "install_failed";}
 }
@@ -242,7 +263,45 @@ void detachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
         std::lock_guard<std::mutex> lock(g_installMutex);
         if(observer.load(std::memory_order_acquire)!=probe)return;
         observer.store(nullptr,std::memory_order_release);
+        recomputeRelayGateLocked();
         kinematicEvalSchedulerDetach();
+    } catch(...) {}
+}
+
+// Recomputed under the install mutex from BOTH consumer cells, exactly like
+// the kinematic eval hook's recomputeGateLocked: every attach/detach
+// transition holds this mutex, so an unlocked check-then-set cannot race
+// (finding 4 over there applies verbatim here now that a second consumer
+// exists).
+void recomputeRelayGateLocked() noexcept {
+    const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
+                    gateWanted.load(std::memory_order_acquire);
+    relayGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
+}
+
+void schedulerStackSetResetObserver(SchedulerResetObserverFn fn) noexcept {
+    resetObserver.store(fn,std::memory_order_release);
+}
+
+const char* schedulerStackGateAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!targetValid(base))return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!schedulerStackHooksMatch(base))return "opcode_mismatch";
+        gateWanted.store(true,std::memory_order_release);
+        recomputeRelayGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void schedulerStackGateDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        gateWanted.store(false,std::memory_order_release);
+        recomputeRelayGateLocked();
     } catch(...) {}
 }
 

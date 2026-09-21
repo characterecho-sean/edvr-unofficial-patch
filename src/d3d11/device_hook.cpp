@@ -55,6 +55,7 @@
 #include "kinematic_eval_probe.h"
 #include "kinematic_motion.h"
 #include "scheduler_stack_probe.h"
+#include "static_prop_gate.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "perf_monitor.h"
 #include "vscreen.h"
@@ -1008,6 +1009,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // The scheduler stack probe's report tick, same call site and the
         // same one-atomic-load-when-off cost.
         schedulerStackProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+        // The static prop gate's frame clock, journal-boundary poll and 20 s
+        // report tick, same call site and the same one-atomic-load-when-off
+        // cost.
+        staticPropGate.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
         // The write watch's per-frame work, here rather than inside
         // vScreenReclaimTick where the re-arm used to sit behind
         // `if (!g_state) return;`. In the two context probes vScreen never

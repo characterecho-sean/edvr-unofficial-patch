@@ -9,9 +9,10 @@
 // CodeHook refuses to patch a function whose first instruction is a jump --
 // so they are observed through that hook's job-0/1 relays instead; the
 // attach below holds the eval gate open via kinematicEvalSchedulerAttach()
-// and the wrappers feed schedulerStackNoteJobEntry(). Observation is gated
-// on the probe's armed state; an unarmed relay is one atomic load plus the
-// trampoline call.
+// and the wrappers feed schedulerStackNoteJobEntry(). The relays gate on a
+// cell recomputed from BOTH consumers of these hooks (the probe and the
+// static prop gate's reset feed); a dark consumer is one atomic load plus
+// the trampoline call.
 #include <cstdint>
 
 namespace edvr {
@@ -38,5 +39,24 @@ bool schedulerStackHooksMatch(uintptr_t base) noexcept;
 // which the relay tail-jumps into, so that address IS the target's entry
 // stack pointer and [entryRsp] is the engine caller's return address).
 void schedulerStackNoteJobEntry(uint32_t target, uintptr_t entryRsp) noexcept;
+
+// The static prop gate's reset feed (fix.static_prop_updates). The gate's
+// invalidation trigger is THIS hook's reset target (FUN_1436a0f50); a
+// second patch is impossible (CodeHook refuses) and unnecessary. The
+// resetObserved callback invokes the registered observer before the
+// forward; the gate module registers it the way the kinematic tracker
+// registers its eval observer, so this file carries no link dependency on
+// the gate.
+using SchedulerResetObserverFn = void (*)(void) noexcept;
+void schedulerStackSetResetObserver(SchedulerResetObserverFn fn) noexcept;
+// Installs this file's own hook set (validating the executable) and holds
+// the relays open for the gate even while the probe itself is dark. Same
+// return vocabulary as attachSchedulerStackHooks; idempotent across
+// re-arms. Takes the scheduler install mutex only -- callers must not hold
+// the kinematic eval hook's install mutex (attachSchedulerStackHooks nests
+// scheduler-then-eval; this stays unnested so the two orders agree).
+const char* schedulerStackGateAttach() noexcept;
+// Closes the gate's want; the relays stay open while the probe holds them.
+void schedulerStackGateDetach() noexcept;
 
 } // namespace edvr

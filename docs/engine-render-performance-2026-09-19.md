@@ -2,6 +2,17 @@
 
 ## Status
 
+* **State (2026-09-21, Phase 1 built):** the change gate is implemented
+  (`fix.static_prop_updates`, default off) and build-gated; the Phase-1
+  flight is next. Mechanism: at the job-0 entry the bracket consults a
+  bounded cache keyed by the call's record-array pointer; if every record's
+  truth bytes (+0x170 x16, +0x570 x8, memcmp) match and the entry is younger
+  than 30 frames, the call forwards past with no engine work. Invalidation:
+  reset path (FUN_1436a0f50 via the existing scheduler hook), journal
+  boundaries polled per frame (LoadGame/Disembark/StartJump), session
+  boundaries, enable. Phase-2 gate before default-on: zero census delta +
+  zero flicker-instrument hits + wall saving >= the Phase-0 number.
+
 * **State (2026-09-21, offline trace complete):** the consumer/scheduling
   trace is done — 21 new decompiles plus DAT_145f27db4/vtable xref and
   +0x2a0/+0x2b0 offset scans, all under `analysis/decomp/` and VA-specific to
@@ -1212,3 +1223,47 @@ surface:** stale props after missed changes (bounded by the forced
 refresh + movers-always-run), invalidation bugs across transitions (the
 journal/reset triggers), and identity collisions (bounded by N-frame
 refresh; the probe capture quantifies if needed).
+
+
+### 2026-09-21 -- Phase 1 implemented (build-gated, unflown)
+
+The change gate landed on branch `static-prop-gate-2026-09-21`:
+`src/d3d11/static_prop_gate.{h,cpp}` (bounded 4096-collection cache, 16
+records each, raw 24 B truth copies memcmp'd, one mutex, no hot-path
+allocation, SEH-guarded reads), consulted from the kinematic eval hook's
+existing job-0 bracket BEFORE its timed region (a skip forwards past the
+call entirely -- skipped wall time reads off the jobs[0] bracket drop, the
+kill-gate comparison the folded Phase-0/1 flight needs). Reset
+invalidation rides the existing scheduler-stack hook's resetObserved
+(its relays now gate on a cell recomputed from probe OR gate want, the
+evalGate discipline verbatim); journal boundaries are polled once per
+frame from the present tick (the watcher exposes state, not events --
+LoadGame rising, Disembark/Embark counter steps, StartJump's tunnel latch).
+Forced refresh N=30. Counters per design (calls seen/skipped/run, forced
+refreshes, invalidations split journal/reset/session, cache size,
+evictions, verify_faults) at the shared 20 s cadence, `static_prop_gate:`
+prefix. Config `fix.static_prop_updates` (bool, default off) documented in
+edvr.ini; rig `tools/static_prop_gate_test` (4141 checks: change-test
+hit/miss, first-sight, forced refresh, reset/journal/session
+invalidation, eviction at capacity, guard-page fault tolerance, oversize
+runs-uncached) plus a JSON round-trip gate.
+
+**Param layout verified against decomp_4321940:** param_1[5] = record-array
+base (local_78/pcVar3), param_1[6] = count (uVar2), records at
+base+i*0x2F0. The design's "collection+0x280" is the collection object's
+record-array SLOT (engine-render-pipeline.md stage 2); the call hands the
+array directly, so the cache keys on the param[5] pointer.
+
+**Deviations from the design text, both conservative:** (1) the +0x570
+mask read exceeds the 0x2F0 record stride (it lands in the next record's
++0x280 tail; on the last record it may cross the array end) -- kept as an
+extra oracle field because a false mismatch only ever re-runs, never
+wrongly skips, and faults are SEH-counted; (2) collections larger than 16
+records run uncached every frame (fixed pool, counted as `oversize` in the
+JSON rather than silently cached). The watcher has no consumer callback;
+the v1 set is session + reset + journal-poll + forced refresh, per the
+design's own fallback.
+
+Next flight: brackets with the gate off vs on at the settlement
+(Phase-0 kill-gate: job-0+batch wall share), then census draw-count
+equality, movers re-running, and a jump/dock invalidation pass (Phase 2).

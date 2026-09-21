@@ -42,6 +42,7 @@
 #include "mesh_motion.h"
 #include "kinematic_motion.h"
 #include "scheduler_stack_probe.h"
+#include "static_prop_gate.h"
 #include "static_surface.h"
 #include "perf_monitor.h"
 #include "shader_swap.h"
@@ -7254,6 +7255,11 @@ void temporalPassConfigure(Config& cfg) {
     // tables hide from static RE. Independent of the temporal pass fixes:
     // it observes the engine, not the renderer, so it arms on its own key.
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
+    // The static prop gate (docs/engine-render-performance-2026-09-19.md,
+    // 2026-09-21 design entry): change-gated render-data updates at the
+    // job-0 entry. Default off; Phase 1 build, the Phase-2 flight must show
+    // census draw-count equality before this can default on.
+    staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
     // fix.engine_motion_veto (off): the compose veto the coverage mask exists
     // for. It waits on the mask's flight validation (2026-09-20 review); the
     // bit arms per frame at the compose, only while coverage is bound.
