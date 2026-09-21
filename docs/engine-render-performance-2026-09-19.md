@@ -16,14 +16,17 @@
   Compensation-style tweaks (sharpening over blur, threshold nudges) —
   AGENTS.md diagnosis discipline.
 
-* **Next flight:** one settlement eye burst on the three-producer
-  build (direct brackets landed 2026-09-21 07:29; frontier d3d11
-  sha256:16 99885e3a092df662). Read kinematicEval.bucket\_items +
-  bucket\_items\_direct in the classification JSON against the per-pass
-  depth-probe census; discriminators named in the 07:29 entry. Flight
-  064511 already proved the instrument live (462k calls, zero faults)
-  and gave the first join: production x (eyes x passes), other
-  producers' shares are the missing term this flight measures.
+* **L2 decision (2026-09-21 07:45): GO.** Two flights + the offline
+  producer map closed the census join: the eye pass (82% of draws)
+  is bucket-list draws, lists are rebuilt wholesale on LOD-mask
+  changes and retained between rebuilds, and suppression is
+  clear-bits + force-rebuild via the engine's own batch clear.
+  Details and the ruled-out list in the 07:45 entry.
+
+* **Next (offline, no flight):** decode the force-rebuild mechanics
+  — the batch clear's +0x2A0 key provenance (ctx+0x1A968/0x1A96C)
+  and the record -> owner -> bucket reach — then the L2 build. A
+  flight is wanted only when a build exists.
 
 ## Frame budget philosophy
 
@@ -85,15 +88,21 @@ cleared bit persists until the ctx is rebuilt — re-assert on rebuild,
 not per frame. The content pipeline is mapped end to end (2026-09-20
 21:45 entry): the mask is born on the model object (+0x8E0) and copied
 down whole at every hop — MOV-only at all three levels, never
-accumulated in place. The census join is INSTRUMENTED (2026-09-21
-06:37 entry): the bucket item counter bracket on the draw-item
-builder reads engine item production per frame, joining against the
-D3D11 draw census on one settlement flight. Remaining before
-building: per-bit draw-class names (the model+0x8E0 writer — 30
-candidates listed in analysis/decomp/stores\_8e0.txt; a ctor default
-of 0x3C hints bits are draw-list slots) and the join flight itself.
-Risk: suppressing a draw that becomes visible needs a one-frame
-restore path, proven on the smoke/static-surface rigs.
+accumulated in place. The census join is CLOSED (2026-09-21 07:45
+entry; decision GO): the eye pass — 82% of draws — is bucket-list
+draws, lists are rebuilt wholesale on LOD-mask changes and retained
+between rebuilds, and suppression takes effect at the next rebuild.
+The mechanism is therefore clear-bits + force-rebuild via the
+engine's own batch clear, never the natural rebuild cadence.
+Remaining before building: the force-rebuild mechanics (the batch
+clear's +0x2A0 key provenance at ctx+0x1A968/0x1A96C and the
+record -> owner -> bucket reach, both in decompiles on disk) and
+per-bit draw-class names (the model+0x8E0 writer — 30 candidates
+listed in analysis/decomp/stores\_8e0.txt; a ctor default of 0x3C
+hints bits are draw-list slots), needed only for pass-selective
+suppression. Risk: suppressing a draw that becomes visible needs a
+one-frame restore path — re-set the bits and force a second
+rebuild; proven on the smoke/static-surface rigs.
 
 ### L3. Kinematic eval narrowing
 
@@ -574,3 +583,56 @@ not trust a zero. If total production x multiplicity lands on the
 23k, every draw is a bucket-list draw and L2's +0x570 suppression
 covers the universe; a shortfall names the non-bucket draw sources
 that bound L2.
+
+### 2026-09-21 07:45 -- flight 073348: all three producers live; rebuild semantics decoded; L2 decision: GO
+
+Flight #2 read (classification_073348.json; flown DLL verified by
+hash 99885e3a092df662). Session 11,741 frames, almost all
+menu/hangar/space (depth probe 32-34 draws/frame until 07:33:51,
+AFTER the dump) -- so this flight measures the producers, not the
+settlement join. All three CodeHook install lines present in the
+log: every hook hooked, including 14369c9c0.
+
+Producers: FUN_1442B4420 -- 252,659 calls, 3,824,820 items, zero
+faults (mean refill 15.1 items/call, max 1,273). FUN_144312E00 --
+1,081,188 calls (92/frame) but a trickle: 430,886 items, max 3 per
+call (singleton slot items, the second item class). FUN_14369C9C0 --
+ZERO calls in 11.7k frames with the hook confirmed installed: it is
+not a per-frame producer in these scenes at all. The non-eye passes
+(#7 3072x1024 3.4k, #0/#10) are NOT fed by it here; the eye pair
+(18k of 21.9k draws = 82%) is the bucket-fed target L2 cares about.
+
+**Rebuild semantics, decoded offline (decomp_434DB60).**
+FUN_14434DB60 is the batch's clear+rekey: bucket+0x2A0 = key,
++0x2A4 = 0, list cleanup -- called per collection from the batch
+(directly and via FUN_1442B5670) whenever the LOD evaluator reports
+changed masks, BEFORE the per-record refill loop. So bucket lists
+are rebuilt WHOLESALE on LOD-mask changes and retained between
+rebuilds; +0x2A4 reads the LIVE LIST SIZE at any quiet moment, and
+our deltas measure refill churn. The join then reads: eye-pass draw
+volume ~= sum of live list sizes across visible rigs, ~1 draw per
+item per eye (flight-1 numbers: eye pair ~18k; mean refill 15 items
+x O(600) visible non-empty rigs -- order-of-magnitude consistent).
+
+**The L2 consequence, called.** Suppressing a record's +0x570 bits
+takes effect at its rig's NEXT rebuild, not instantly. Natural
+rebuild cadence averages ~40 frames at a settlement (flight-1 36
+rebuilds/frame over ~1.5k rigs; the LOD evaluator is view-dependent,
+so head motion keeps the cadence high) -- but the tail is exactly
+L2's targets: static distant rigs may not rebuild for arbitrarily
+long. The decision therefore stands on the engine's own mechanics,
+not the cadence: GO, built as clear-bits + force-rebuild -- clear
+the victim record's +0x570 mask, then force its bucket's clear via
+the batch's own path so the next batch refills without the
+suppressed items; restore = re-set the bits and force again (the
+one-frame restore the risk line wants). Remaining unknowns are
+BUILD mechanics, offline-decodable: the clear path's exact key/arg
+contract (+0x2A0 key provenance at ctx+0x1A968/0x1A96C) and the
+victim-bucket reach (record -> owner -> bucket), both in decompiles
+already on disk. No flight needed until a build exists.
+
+**Ruled out, do not re-propose:** consumption-side instant
+suppression as the mechanism (no per-item mask reader exists
+anywhere scanned; the retained lists replay regardless), and
+waiting on natural rebuild cadence for static targets (unbounded
+tail).
