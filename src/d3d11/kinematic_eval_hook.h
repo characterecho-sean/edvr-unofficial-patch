@@ -39,4 +39,22 @@ const char* kinematicEvalTrackerAttach() noexcept;
 // Closes the tracker's want; the gate stays open while the probe holds it.
 void kinematicEvalTrackerDetach() noexcept;
 
+// --- The scheduler stack probe's feed (advanced.scheduler_probe) ------------
+// Targets 0/1 of SchedulerStackProbe are the job bodies' own RVAs, which
+// already carry this hook's patch -- CodeHook refuses a second patch and
+// there is nothing to gain by double-hooking. Instead the job-0/1 relay
+// wrappers call schedulerStackNoteJobEntry() (scheduler_stack_hook.h) before
+// their timed bracket, at exactly the pre-forward point a dedicated hook
+// would sit. For that to happen the eval relays must be live even when the
+// eval probe and the tracker are both dark, so the scheduler probe is a
+// third gate consumer:
+void schedulerStackNoteJobEntry(uint32_t target, uintptr_t entryRsp) noexcept;
+// Installs the shared kinematic hook set (validating the executable) and
+// holds the eval gate open for the scheduler probe. Same return vocabulary
+// as attachKinematicEvalHooks; idempotent across re-arms.
+const char* kinematicEvalSchedulerAttach() noexcept;
+// Closes the scheduler probe's want; the gate stays open while any other
+// consumer holds it.
+void kinematicEvalSchedulerDetach() noexcept;
+
 } // namespace edvr

@@ -54,6 +54,7 @@
 #include "mesh_motion.h"
 #include "kinematic_eval_probe.h"
 #include "kinematic_motion.h"
+#include "scheduler_stack_probe.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "perf_monitor.h"
 #include "vscreen.h"
@@ -1004,6 +1005,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // The kinematic tracker's clock, same call site for the same
         // exactly-once-per-owned-present guarantee. One atomic load when off.
         kinematicMotionNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+        // The scheduler stack probe's report tick, same call site and the
+        // same one-atomic-load-when-off cost.
+        schedulerStackProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
         // The write watch's per-frame work, here rather than inside
         // vScreenReclaimTick where the re-arm used to sit behind
         // `if (!g_state) return;`. In the two context probes vScreen never

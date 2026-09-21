@@ -445,6 +445,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
+    "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
@@ -1258,6 +1259,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     "tools\object_classification_test\object_classification_test.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
+    "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\common\code_hook.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" "src\common\guard.cpp" ^
     "%OBJ%\classification\source_owner_unwind.obj" ^
@@ -2024,4 +2026,44 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: kinematic probe test build failed & exit /b 1 )
 "%BUILD%\kinematic_probe_test.exe" --dry-run || exit /b 1
 "%BUILD%\kinematic_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_scheduler_stack_json_test
+echo [edvr] === scheduler_stack_json_test.exe ===
+REM Build gate for the production SchedulerStackProbe JSON writer: the
+REM kinematic writer shipped three serialization failures before its gate
+REM existed, and compilation cannot catch a dropped quote. The exe
+REM serializes a deterministic fixture through the real writeJson; the
+REM python gate strict-parses it and asserts every value round-trips.
+if not exist "%OBJ%\schedjson" mkdir "%OBJ%\schedjson"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\schedjson\\" /Fe"%BUILD%\scheduler_stack_json_test.exe" ^
+    "tools\scheduler_stack_json_test\scheduler_stack_json_test.cpp" ^
+    "src\d3d11\scheduler_stack_probe.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: scheduler stack JSON writer test build failed & exit /b 1 )
+"%BUILD%\scheduler_stack_json_test.exe" --dry-run || exit /b 1
+"%BUILD%\scheduler_stack_json_test.exe" --self-test || exit /b 1
+python "tools\scheduler_stack_json_selftest.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_scheduler_stack_probe_test
+echo [edvr] === scheduler_stack_probe_test.exe ===
+REM Build gate for the SchedulerStackProbe's capture/table logic: the
+REM stride-tolerant stack scan (range filter, gap budget, cap, fault
+REM handling), the FNV-1a-64 signature, and the bounded per-target
+REM signature table (aggregation, overflow). These run at 36-540
+REM calls/frame in flight; a capture-path defect costs a test flight to
+REM find. Drives the production noteEntry/captureStack on synthetic
+REM stacks, including a VirtualProtect guard-page fault fixture.
+if not exist "%OBJ%\schedprobe" mkdir "%OBJ%\schedprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\schedprobe\\" /Fe"%BUILD%\scheduler_stack_probe_test.exe" ^
+    "tools\scheduler_stack_probe_test\scheduler_stack_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: scheduler stack probe test build failed & exit /b 1 )
+"%BUILD%\scheduler_stack_probe_test.exe" --dry-run || exit /b 1
+"%BUILD%\scheduler_stack_probe_test.exe" --self-test || exit /b 1
 exit /b 0
