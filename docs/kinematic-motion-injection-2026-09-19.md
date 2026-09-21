@@ -165,6 +165,15 @@
   the brackets now time with the observer OFF, so the same flight
   batches the brackets-only job-cost remeasure with the discriminator
   census. Frontier d3d11 87d036727d54c0c6, verified.
+  Update 19:10: FLIGHT 190122 read (entry at the foot) -- job
+  attribution is a SYMMETRIC NULL: ~500 movers/frame and ~2.6k eligible
+  statics, and phys-touched eligible 0 / movers 0 on every summary
+  line. Physics jobs (2 and 4 hooked and firing) never evaluate these
+  records through FUN_14430EFE0. Ruled out as the mover/static
+  discriminator -- all three engine-truth routes at the current hooks
+  are now closed. Next engine-truth point: the +0x170 updater itself
+  (decompile the physics job bodies; serves perf L4 too). L1's numbers
+  still owe an eye burst (jobs[] lands at dump time; none taken).
 
 ## Premise
 
@@ -1373,3 +1382,44 @@ self-test passed, contract 252/252. Flight protocol: fix.engine_motion
 on, a settlement with a known mover (pad drone or ship traffic), >=60 s;
 the summary lines carry the census answer, an eye burst adds the
 per-record job_mask distribution.
+
+## 2026-09-20 (19:10: flight 190122 -- job attribution is a symmetric null)
+
+Flight edvr_gfx_20260920_190122.log (build v0.17.0-160-g4ee8c97d-dirty
+= the 89bbfd5 content, hoist included; verified via edvr_log.py).
+fix.engine_motion on, >60 s, normal view, no eye burst. CodeHook:
+eval, jobs 0/1/2/4/5 and rig-eval all installed; job3 refused as usual
+(thunk prologue). One STAND-DOWN note is the menu period (10,554 of
+13,872 frames zero-record -- load + menus), scene records from ~19:02,
+settlement-scale from 19:03.
+
+The settlement window (19:03:02-19:04:02): ~2,570 eligible statics and
+426-510 movers per ended frame, 672 movers total, feed healthy (95.6M
+observations, 63% dup fan-out as expected). The discriminator answer:
+**phys-touched eligible 0, movers 0 -- on every summary line.** With
+~500 records moving per frame under live job-2 (UpdatePhysicsObjects)
+and job-4 (Curve) brackets, no eval observation ever landed inside a
+physics bracket. The 205251 JSON measured jobs 2/4 firing (>0 calls),
+so the brackets work; the physics path simply never routes these
+records through FUN_14430EFE0.
+
+ruled out: job attribution as the mover/static discriminator -- not
+because physics touches everything, but because it touches NOTHING in
+this population. All three engine-truth routes at the current hook
+points are now closed: mover-blind render path (17:02), homogeneous
+record fields (17:10), physics never on the eval stream (19:10).
+
+Consequences:
+
+- The tracker's behavioral stasis proof IS the mover/static classifier;
+  no cheaper engine truth exists at the hooked points. Stage B's
+  publish gate stays as built -- and it worked this flight: ~2,570
+  eligible published per frame, movers excluded, no stand-down after
+  scene load, bounds part A/B fired 19:03:01 (decode offline, pending).
+- The next engine-truth hook point is the +0x170 updater itself
+  (FUN_14433DB20 in the 21:58 transform chain): decompile the physics
+  job bodies (0x432B2A0 / 0x42DF530 / 0x42DF550) offline and find where
+  dynamics actually advance. Serves perf L4 (physics decimation) too.
+- L1's brackets-only numbers are NOT in this log: jobs[] lands in the
+  classification JSON at dump time and no eye burst was taken. The L1
+  remeasure still owes one burst next flight.

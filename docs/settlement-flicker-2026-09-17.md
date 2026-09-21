@@ -6940,3 +6940,22 @@ rendering change. Next flight with fix.engine_motion on at a settlement
 with a known mover reads the answer straight off the summary line;
 known caveat: job3 refused to hook in flight, so bit 3 may stay dark
 even if that job evaluates records -- bits 2 and 4 are the live probes.
+
+### 2026-09-20 19:10 -- flight 190122: job attribution is a symmetric null
+
+Cross-entry from the kinematic arc (full read-out in the kinematic
+doc's same-time foot entry; perf doc updated too). Build
+v0.17.0-160-g4ee8c97d-dirty verified (the 89bbfd5 content), hooks all
+installed except job3 as usual. Settlement window 19:03-19:04: ~2.6k
+eligible statics, 426-510 movers per ended frame, 95.6M observations --
+and phys-touched eligible 0 / movers 0 on EVERY summary line. Physics
+jobs never evaluate the kinematic render records through FUN_14430EFE0.
+Ruled out: job attribution as the mover/static discriminator (third
+engine-truth route closed, after mover-blind render path and
+homogeneous record fields). The tracker's behavioral stasis proof is
+confirmed as THE classifier -- and it published ~2,570 statics/frame
+with movers correctly excluded this flight. Next engine-truth hook
+point: the +0x170 updater; the physics-job decomps (0x432B2A0 /
+0x42DF530 / 0x42DF550) are the offline step, serving perf L4 too. L1's
+brackets-only job costs are not in this log -- no eye burst taken;
+jobs[] lands in the classification JSON at dump time.
