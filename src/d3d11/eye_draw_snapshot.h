@@ -394,6 +394,28 @@ public:
         geoMeshes.clear();geoStates.clear();geoDraws.clear();geoMeshIndex.clear();geoStateIndex.clear();
         geoFrame=frame;geoBytes=geoDeclined=geoDrawsDropped=0;
     }
+    // The arm across a reset (design-occlusion-culling-2026-09-22.md §10).
+    // reset() clears the arm with the rest of the snapshot: on run 152632
+    // the pool's first sighting, 60 ms after the gate probe armed frame 2,
+    // ran releasePool -> ledgerRelease -> reset() and the section came back
+    // empty. A caller releasing mid-run calls this instead. The arm comes
+    // back only when the release cost it nothing -- `now` (the ledger frame
+    // whose draws are being submitted) is not past the armed frame and none
+    // of its draws has been mapped; otherwise it stays disarmed and the loss
+    // is kept for the run's log line, never re-armed as a partial frame. Only
+    // geo* state is touched: no other capture's arm can be cleared by it.
+    // The fate outlives reset(); clearGeometryFate() starts a run.
+    enum GeoRelease : uint32_t { kGeoNotArmed=0, kGeoRearmed=1, kGeoLost=2 };
+    uint32_t geoRearms=0,geoLostFrame=0,geoLostAt=0,geoLostDraws=0;
+    void clearGeometryFate() { geoRearms=geoLostFrame=geoLostAt=geoLostDraws=0; }
+    GeoRelease resetKeepingGeometry(uint32_t now) {
+        const uint32_t armed=geoFrame,mapped=uint32_t(geoDraws.size());
+        reset();
+        if(!armed)return kGeoNotArmed;
+        if(now<=armed && !mapped){armGeometry(armed);++geoRearms;return kGeoRearmed;}
+        geoLostFrame=armed;geoLostAt=now;geoLostDraws=mapped;
+        return kGeoLost;
+    }
     // One ledger row of the armed frame; the caller has already decided
     // the draw is instanced and that t33 held the pool.
     void captureGeometry(ID3D11DeviceContext* ctx,uint32_t frame,uint32_t ordinal,uint64_t vs,uint64_t ps,

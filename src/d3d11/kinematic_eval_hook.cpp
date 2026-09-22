@@ -66,6 +66,18 @@ alignas(8) std::atomic<StaticGateDecideFn> staticGateObserver{nullptr};
 std::atomic<bool> gateProbeWanted{false};
 alignas(8) std::atomic<GateProbeGateFn> gateProbeGate{nullptr};
 alignas(8) std::atomic<GateProbeBuilderFn> gateProbeBuilder{nullptr};
+alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
+// FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
+// per-part patch (installed only for the gate probe) costs the tracker and
+// the other evalGate consumers nothing. Open only while the probe is
+// attached AND the patch is verified ours.
+alignas(8) std::atomic<uintptr_t> partGate{0};
+static_assert(decltype(partGate)::is_always_lock_free,
+              "The x64 relay reads the aligned atomic cell directly.");
+// The builder call's return address for the part test (base+0x42B4B96), set
+// before the part patch goes in; the observer compares _ReturnAddress().
+std::atomic<uintptr_t> g_partReturn{0};
+std::atomic<const char*> g_partStatus{"not requested"};
 
 // The probe is a process-lifetime global (kinematicEvalProbe), so a bracket
 // that loaded the pointer before a detach remains safe while it finishes;
@@ -76,6 +88,7 @@ struct HookEntry {
     const char* name;
     uintptr_t rva;
     void* callback;
+    const void* gate=nullptr;   // the relay's gate cell; null = evalGate
     std::atomic<uintptr_t> forward{0};
     CodeHook hook;
     uint8_t* relay=nullptr;
@@ -221,6 +234,7 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t,uintptr_t,uintp
 __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t,uintptr_t,uintptr_t,
                                                               uintptr_t,uintptr_t,uintptr_t) noexcept;
+__declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t,uintptr_t,uintptr_t) noexcept;
 #define EDVR_DIRECT_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_DIRECT_PROTO(0) EDVR_DIRECT_PROTO(1)
@@ -252,11 +266,65 @@ HookEntry g_directEntries[KinematicEvalProbe::kDirectProducerCount]={
      reinterpret_cast<void*>(&directBuild1)},
 };
 
+// --- The builder's per-part test (FUN_1442B3FC0), the gate probe's third site
+// decomp_42B3FC0.txt: f(param_1 = the builder's six-pointer block at its
+// rbp+0x70, param_2 = {u32 LOD, u8 passed}, param_3 = the view); frustum
+// (FUN_1404F4E10 at 0x1442B4066) and screen-size/LOD on the part's own sphere.
+// Its only caller is the builder's sub-item loop (0x1442B4B91; the other
+// xref, 0x1462B1388, is outside any function). The observer reads the
+// builder's frame around that call, so the signature below is not only the
+// prologue: it is every instruction the frame offsets were read from, in the
+// hash-verified exe (build 332841). Any mismatch stands this hook down alone.
+constexpr uintptr_t kPartTestRva=0x42B3FC0u;
+constexpr uintptr_t kPartCallReturnRva=0x42B4B96u;   // after the call at 0x1442B4B91
+// mov [rsp+10h],rbx; mov [rsp+18h],rsi; push rdi; sub rsp,50h; mov rax,[rcx]; mov rdi,r8
+constexpr uint8_t kPartPrologue[21]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,
+                                     0x48,0x83,0xEC,0x50,0x48,0x8B,0x01,0x49,0x8B,0xF8};
+struct CodeBytes { uintptr_t rva; uint8_t n; uint8_t b[17]; const char* why; };
+constexpr CodeBytes kPartFrame[]={
+    {0x42B4429u,7,{0x49,0x8D,0xAB,0x08,0xFC,0xFF,0xFF},
+     "builder frame mismatch at RVA 0x42B4429 (lea rbp,[r11-3F8h]: the frame base)"},
+    {0x42B4455u,4,{0x48,0x89,0x55,0xB8},
+     "builder frame mismatch at RVA 0x42B4455 (mov [rbp-48h],rdx: the render context)"},
+    {0x42B445Cu,4,{0x48,0x89,0x4D,0x98},
+     "builder frame mismatch at RVA 0x42B445C (mov [rbp-68h],rcx: the pose context)"},
+    {0x42B4868u,4,{0x48,0x89,0x75,0xA8},
+     "builder frame mismatch at RVA 0x42B4868 (mov [rbp-58h],rsi: the instance entry)"},
+    {0x42B48B8u,4,{0x48,0x89,0x4D,0xC0},
+     "builder frame mismatch at RVA 0x42B48B8 (mov [rbp-40h],rcx: the entry's model)"},
+    {0x42B48CDu,4,{0x48,0x89,0x45,0xB0},
+     "builder frame mismatch at RVA 0x42B48CD (mov [rbp-50h],rax: the model's +0x40)"},
+    {0x42B498Bu,4,{0x48,0x89,0x5D,0x90},
+     "builder frame mismatch at RVA 0x42B498B (mov [rbp-70h],rbx: the first sub-item)"},
+    {0x42B4FEBu,4,{0x48,0x83,0xC3,0x20},
+     "builder frame mismatch at RVA 0x42B4FEB (add rbx,20h: the next sub-item)"},
+    {0x42B4FF7u,4,{0x48,0x89,0x5D,0x90},
+     "builder frame mismatch at RVA 0x42B4FF7 (mov [rbp-70h],rbx: the sub-item stored back)"},
+    {0x42B49E3u,4,{0x48,0x8D,0x45,0x50},
+     "builder frame mismatch at RVA 0x42B49E3 (lea rax,[rbp+50h]: the world centre)"},
+    {0x42B49F4u,4,{0x48,0x89,0x45,0x70},
+     "builder frame mismatch at RVA 0x42B49F4 (mov [rbp+70h],rax: param_1[0])"},
+    {0x42B4B1Du,4,{0x48,0x8D,0x45,0x60},
+     "builder frame mismatch at RVA 0x42B4B1D (lea rax,[rbp+60h]: the model's +0x10 copy)"},
+    {0x42B4B21u,4,{0x48,0x89,0x45,0x78},
+     "builder frame mismatch at RVA 0x42B4B21 (mov [rbp+78h],rax: param_1[1])"},
+    {0x42B4B67u,7,{0x48,0x8D,0x95,0xB0,0x00,0x00,0x00},
+     "builder call-site mismatch at RVA 0x42B4B67 (lea rdx,[rbp+0B0h]: param_2)"},
+    {0x42B4B85u,17,{0x4C,0x8B,0xC0,0x48,0x89,0x44,0x24,0x30,0x48,0x8D,0x4D,0x70,0xE8,0x2A,0xF4,0xFF,0xFF},
+     "builder call-site mismatch at RVA 0x42B4B85 (mov r8,rax; mov [rsp+30h],rax; lea rcx,[rbp+70h]; "
+     "call FUN_1442B3FC0)"},
+};
+HookEntry g_partEntry{"cull-gate-part-test",kPartTestRva,reinterpret_cast<void*>(&partTestObserved),&partGate};
+
 // Per-thread mask of the job brackets currently on the stack (1u<<jobId),
 // maintained by bracket() and read by evalObserved: attributes every eval
 // observation to the engine job that scheduled it. Nesting-safe (save/
 // restore), zero when no observed job is running.
 thread_local uint32_t t_jobMask=0;
+// The gate probe's row for the builder call on this thread's stack (set by
+// bucketBuildObserved around its forward, save/restore), read by the part
+// test's observer: joins each FUN_1442B3FC0 verdict to its builder row.
+thread_local uint32_t t_builderRow=kGateProbeNoRow;
 
 __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uintptr_t param2,
                                                        uintptr_t renderRecord) noexcept {
@@ -430,13 +498,16 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
     if(!forward)return 0; // stood down at install; the relay is unreachable then
     // The cull gate probe sees the builder's inputs as the builder will:
     // before the forward (a = pose context, b = render context, c = the
-    // collection's active view mask, d = rec+0x210).
+    // collection's active view mask, d = rec+0x210). The row it keeps is
+    // this thread's for the forward: the per-part tests inside carry it.
     const auto builderProbe=gateProbeBuilder.load(std::memory_order_acquire);
-    if(builderProbe)builderProbe(a,b,c,d);
+    const uint32_t outerRow=t_builderRow;
+    t_builderRow=builderProbe?builderProbe(a,b,c,d):kGateProbeNoRow;
     BucketSnap snaps[kBucketWalkCap];
     uint32_t flags=0;
     const uint32_t n=collectBuckets(a,snaps,kBucketWalkCap,&flags);
     const uintptr_t result=forward(a,b,c,d,e,f);
+    t_builderRow=outerRow;
     if(n) {
         uint64_t items=0;
         uint32_t neg=0;
@@ -455,6 +526,26 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
         kinematicEvalProbe.noteBucketBuild(n,items,neg,flags);
     } else {
         kinematicEvalProbe.noteBucketBuild(0,0,0,flags);
+    }
+    return result;
+}
+
+// --- The per-part test's observer (FUN_1442B3FC0) ---------------------------
+// Reached only through its own relay (partGate: the gate probe attached and
+// the patch verified ours). Forwards first; the probe then reads the verdict
+// the call just wrote (param_2) and the builder's frame around it, read-only.
+// The return address names the caller: the relay JUMPS here, so the slot
+// holds the builder's return address (base+0x42B4B96) when the call came
+// from its sub-item loop.
+__declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintptr_t out,
+                                                           uintptr_t view) noexcept {
+    const auto forward=reinterpret_cast<EvalFn>(g_partEntry.forward.load(std::memory_order_acquire));
+    if(!forward)return 0; // stood down at install; the relay is unreachable then
+    const uintptr_t result=forward(items,out,view);
+    const auto part=gateProbePart.load(std::memory_order_acquire);
+    if(part) {
+        const uintptr_t from=reinterpret_cast<uintptr_t>(_ReturnAddress());
+        part(items,out,view,t_builderRow,from==g_partReturn.load(std::memory_order_relaxed));
     }
     return result;
 }
@@ -567,7 +658,7 @@ bool targetValid(uintptr_t base) noexcept {
 bool installOne(HookEntry& entry,uintptr_t base) noexcept {
     entry.relay=allocateRelay(base+entry.rva);
     if(!entry.relay)return false;
-    buildRelay(entry.relay,&evalGate,entry.callback);
+    buildRelay(entry.relay,entry.gate?entry.gate:static_cast<const void*>(&evalGate),entry.callback);
     if(!entry.hook.install(reinterpret_cast<void*>(base+entry.rva),entry.relay,nullptr,
                            entry.name,&prepareRelay,&entry)) {
         VirtualFree(entry.relay,0,MEM_RELEASE);
@@ -592,6 +683,69 @@ bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
     __except(EXCEPTION_EXECUTE_HANDLER){return false;}
     int32_t actual=0;std::memcpy(&actual,bytes+1,4);
     return bytes[0]==0xE9 && actual==displacement && std::memcmp(bytes+5,tail,sizeof(tail))==0;
+}
+
+// FUN_1442B3FC0's build-keyed signature: null when the image is build
+// 332841 and every byte the part observer's frame offsets rest on is in
+// place (the prologue, or our own patch followed by the prologue's rest);
+// otherwise the reason the hook stands down.
+const char* partTestSignature(uintptr_t base,const HookEntry& entry) noexcept {
+    __try {
+        uint32_t peOff=0;
+        std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
+        if(peOff>0x1000)return "not build 332841 (no PE header)";
+        uint32_t timestamp=0,imageSize=0;
+        std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
+        std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
+        if(timestamp!=KinematicEvalProbe::kExpectedTimestamp ||
+           imageSize!=KinematicEvalProbe::kExpectedImageSize)return "not build 332841 (PE timestamp/size)";
+        uint8_t got[sizeof(kPartPrologue)]{};
+        std::memcpy(got,reinterpret_cast<const void*>(base+kPartTestRva),sizeof(got));
+        if(std::memcmp(got,kPartPrologue,sizeof(got))!=0) {
+            // Our own patch from an earlier attach: E9 to our relay, then the rest.
+            int32_t actual=0;std::memcpy(&actual,got+1,4);
+            const intptr_t displacement=entry.relay
+                ?reinterpret_cast<intptr_t>(entry.relay)-intptr_t(base+kPartTestRva+5):0;
+            if(!(entry.relay && got[0]==0xE9 && actual==displacement &&
+                 std::memcmp(got+5,kPartPrologue+5,sizeof(got)-5)==0))
+                return "prologue mismatch at RVA 0x42B3FC0";
+        }
+        for(const CodeBytes& c:kPartFrame)
+            if(std::memcmp(reinterpret_cast<const void*>(base+c.rva),c.b,c.n)!=0)return c.why;
+        return nullptr;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return "unreadable executable image";}
+}
+
+bool partPatchIsOurs(uintptr_t base) noexcept {
+    if(!g_partEntry.ready.load(std::memory_order_acquire) || !g_partEntry.relay)return false;
+    const uintptr_t target=base+kPartTestRva;
+    const intptr_t displacement=reinterpret_cast<intptr_t>(g_partEntry.relay)-intptr_t(target+5);
+    uint8_t bytes[sizeof(kPartPrologue)]{};
+    __try {std::memcpy(bytes,reinterpret_cast<const void*>(target),sizeof(bytes));}
+    __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+    int32_t actual=0;std::memcpy(&actual,bytes+1,4);
+    return bytes[0]==0xE9 && actual==displacement &&
+           std::memcmp(bytes+5,kPartPrologue+5,sizeof(bytes)-5)==0;
+}
+
+// Installs the part test's patch once (process lifetime, like the others),
+// under g_installMutex. Stands down alone: the status says why.
+void ensurePartTest(uintptr_t base) noexcept {
+    if(g_partEntry.ready.load(std::memory_order_acquire)) {
+        g_partStatus.store(partPatchIsOurs(base)?"hooked"
+                           :"our patch is gone (FUN_1442B3FC0's entry was rewritten)",std::memory_order_release);
+        return;
+    }
+    const char* why=partTestSignature(base,g_partEntry);
+    if(why) {g_partStatus.store(why,std::memory_order_release);return;}
+    g_partReturn.store(base+kPartCallReturnRva,std::memory_order_release);
+    if(!installOne(g_partEntry,base)) {
+        g_partStatus.store("CodeHook refused the patch (its cull-gate-part-test line says why)",
+                           std::memory_order_release);
+        return;
+    }
+    g_partStatus.store(partPatchIsOurs(base)?"hooked":"the patch did not verify after install",
+                       std::memory_order_release);
 }
 
 } // namespace
@@ -722,9 +876,11 @@ void kinematicEvalStaticGateDetach() noexcept {
     } catch(...) {}
 }
 
-void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate,GateProbeBuilderFn builder) noexcept {
+void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate,GateProbeBuilderFn builder,
+                                        GateProbePartFn part) noexcept {
     gateProbeGate.store(gate,std::memory_order_release);
     gateProbeBuilder.store(builder,std::memory_order_release);
+    gateProbePart.store(part,std::memory_order_release);
 }
 
 const char* kinematicEvalGateProbeAttach() noexcept {
@@ -736,8 +892,11 @@ const char* kinematicEvalGateProbeAttach() noexcept {
             return "identity_mismatch";
         if(!ensureInstalled(base))return "install_failed";
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        // The per-part test: this probe's own patch, standing down alone.
+        ensurePartTest(base);
         gateProbeWanted.store(true,std::memory_order_release);
         recomputeGateLocked();
+        partGate.store(partPatchIsOurs(base)?uintptr_t(1):uintptr_t(0),std::memory_order_release);
         return "installed";
     } catch(...) {return "install_failed";}
 }
@@ -745,6 +904,7 @@ const char* kinematicEvalGateProbeAttach() noexcept {
 void kinematicEvalGateProbeDetach() noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
+        partGate.store(0,std::memory_order_release);
         gateProbeWanted.store(false,std::memory_order_release);
         recomputeGateLocked();
     } catch(...) {}
@@ -753,6 +913,10 @@ void kinematicEvalGateProbeDetach() noexcept {
 bool kinematicEvalBuilderHooked() noexcept {
     return g_bucketEntry.ready.load(std::memory_order_acquire) &&
            g_bucketEntry.forward.load(std::memory_order_acquire)!=0;
+}
+
+const char* kinematicEvalPartTestStatus() noexcept {
+    return g_partStatus.load(std::memory_order_acquire);
 }
 
 } // namespace edvr

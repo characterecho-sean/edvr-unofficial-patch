@@ -32,21 +32,40 @@
 // packed quaternion), its bounding sphere (+0x240 world centre, +0x270 local,
 // +0x280 radius), its view mask (+0x208) and LOD nibbles (+0x210), and the
 // pose context's instance entries (count +0x48, array +0x50 stride 0x58;
-// per entry the model at +0x00, the sub-item count at +0x20 and array at
-// +0x28, 32-byte sub-items = float4 quaternion + float4 position, the local
+// per entry the model at +0x00 -- its local sphere, centre at model+0x00 and
+// radius at model+0x10 -- the sub-item count at +0x20 and array at +0x28,
+// 32-byte sub-items = float4 quaternion + float4 position, the local
 // transforms FUN_14433DB20 composes into each part's world matrix) -- the
 // offline join to the t33 pool's per-part records. Once per (context,
 // frame) it dumps the context's view array: every view's raw 0x6A0 bytes and
 // its plane array, the context's LOD scale (+0x30) and bit table (+0x1A840).
 //
+// A third function, through its own patch (kinematic_eval_hook.cpp, installed
+// only for this probe after a build-keyed signature): FUN_1442B3FC0, which the
+// builder calls per (sub-item, admitted view) from its sub-item loop
+// (decomp_42B4420.txt:504-523) -- the per-PART admission. It tests the part's
+// own sphere: param_1[0] -> the world centre the builder composed from the
+// model's +0x00 through the sub-item and the pose, param_1[1] -> a copy of
+// the model's +0x10 (its first float the radius), with FUN_1404F4E10 for the
+// frustum half and a screen-size and LOD pick against view +0x540/+0x550/
+// +0x560 (decomp_42B3FC0.txt), and writes {u32 LOD, u8 passed} to param_2;
+// the builder ORs the view's +0x570 bits into the item's mask on a pass. The
+// probe records each call AFTER its forward (the verdict never touched), with
+// the part's identity read from the builder's frame around the call -- the
+// current entry and sub-item, verified against the engine's own arrays before
+// it is believed -- and the builder row of the enclosing call, joined through
+// a thread-local the builder bracket holds across its forward.
+//
 // Frames are the eye run's ledger frames (object_probe's g_frame+1, the frame
 // the draws submitted now belong to), published by the render thread; the
 // jobs run on worker threads and are stamped with the value current when
 // they observe, so the reader tests the alignment against the ledger rather
-// than assuming it. Everything is preallocated at arm; the workers append
-// with one atomic reservation each and never allocate. The file is
-// edvr_logs\pool\gate_<stamp>.bin ('EDVRGATE' v1); tools/cull_gate_probe.py
-// reads it.
+// than assuming it. A part row takes its builder row's frame, so a builder
+// call the stamp moves across keeps all its parts. Everything is
+// preallocated at arm; the workers append with one atomic reservation each
+// and never allocate. The file is edvr_logs\pool\gate_<stamp>.bin
+// ('EDVRGATE' v2; v1 had no part rows and no model spheres);
+// tools/cull_gate_probe.py reads both.
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -61,23 +80,45 @@ public:
     // outside a plane, 1 inside all, 0 straddling (decomp_04F4E10.txt).
     using FrustumFn = uint64_t (__fastcall*)(uintptr_t view, const float* point, const float* interval);
 
-    static constexpr uint32_t kVersion = 1;
+    static constexpr uint32_t kVersion = 2;
+    static constexpr uint32_t kNoRow = 0xFFFFFFFFu;  // == kGateProbeNoRow (kinematic_eval_hook.h)
     static constexpr uint32_t kFrames = 3;          // the first complete frame and two after it
     static constexpr uint32_t kMaxViews = 64;       // ctx+0x1A940 is capped at 0x40 by its builder
     static constexpr uint32_t kViewBytes = 0x6A0;
     static constexpr uint32_t kMaxPlanes = 32;
     static constexpr uint32_t kMaxDumps = 16;       // (context, frame) pairs
-    // Window caps, preallocated at arm (~50 MB): ~11 views x ~10k records a
+    // Window caps, preallocated at arm (~80 MB): ~11 views x ~10k records a
     // frame reach the gate, ~1.5k rigs the builder, ~12k parts the pool.
     static constexpr uint32_t kGateCap = 1u << 19;  // gate observations over the window
     static constexpr uint32_t kBuilderCap = 1u << 15;
     static constexpr uint32_t kEntryCap = 1u << 18;
     static constexpr uint32_t kSubItemCap = 1u << 19;
     static constexpr uint32_t kEntriesPerRecord = 256;
+    // Part tests over the window: ~13.5k builder sub-items a frame, each
+    // tested per admitted view -- the two eyes (~27k, §10) plus the
+    // shadow-like views the record admits -- so 2^18 rows hold three frames
+    // at up to ~87k tests a frame (~6.5 views a part); past it, counted.
+    static constexpr uint32_t kPartCap = 1u << 18;
 
     // Engine offsets (build 332841, the hash-verified executable).
     static constexpr uintptr_t kFrustumRva = 0x4F4E10u;     // FUN_1404F4E10
     static constexpr uintptr_t kVisGlobalRva = 0x5EA3399u;  // DAT_145ea3399
+    // The builder's frame around its FUN_1442B3FC0 call, from the part test's
+    // param_1 (= the builder's rbp+0x70, a six-pointer block it fills per
+    // sub-item). Read out of the builder's machine code 0x1442B4429..
+    // 0x1442B4B91 (decomp_42B4420.txt:434-512); the hook installs only when
+    // those instructions are byte-for-byte in place, and notePart still
+    // checks every relation below before it believes an identity.
+    static constexpr intptr_t kFrameCentre = -0x20;     // param_1[0] -> the world centre (local_3a8, rbp+0x50)
+    static constexpr intptr_t kFrameSphere = -0x10;     // param_1[1] -> the model's +0x10 copy (local_398, rbp+0x60)
+    static constexpr intptr_t kFrameMeshCell = -0xC0;   // param_1[3] -> *(model+0x40) (local_448, rbp-0x50)
+    static constexpr intptr_t kFrameLodTable = 0xD0;    // param_1[4] -> *(entry+8)'s 0x80 bytes (rbp+0x140)
+    static constexpr intptr_t kFrameView = -0x140;      // the view it passes as param_3 (local_4c8, rsp+0x30)
+    static constexpr intptr_t kFramePose = -0xD8;       // the builder's param_1 (rbp-0x68) == param_1[2]
+    static constexpr intptr_t kFrameCtx = -0xB8;        // the render context (rbp-0x48) == param_1[5]
+    static constexpr intptr_t kFrameEntry = -0xC8;      // the current instance entry (local_450, rbp-0x58)
+    static constexpr intptr_t kFrameModel = -0xB0;      // the entry's model (local_438, rbp-0x40)
+    static constexpr intptr_t kFrameSub = -0xE0;        // the current 32-byte sub-item (local_468, rbp-0x70)
 
     struct GateObs {
         uint64_t record = 0, ctx = 0;
@@ -105,8 +146,30 @@ public:
     struct EntryObs {
         uint64_t model = 0;
         uint32_t subCount = 0, subFirst = 0, subCopied = 0;
+        // The model's local sphere as the builder reads it (decomp_42B4420.txt:
+        // 391-397): +0x00 the centre (xyz; w carried through the transform),
+        // +0x10 the four floats FUN_1442B3FC0 gets as param_1[1], [0] the radius.
+        float modelCentre[4] = {}, modelSphere[4] = {};
     };
     struct SubItem { float q[4], p[4]; };
+    // One FUN_1442B3FC0 call, read after its forward.
+    struct PartObs {
+        uint64_t pose = 0;       // param_1[2]: the builder's pose context (its row carries the same)
+        uint64_t subItem = 0;    // the sub-item under test (the builder's rbp-0x70); 0 unless verified
+        uint64_t viewBits = 0;   // view +0x570: what the builder ORs into the item's mask on a pass
+        float centre[3] = {};    // *param_1[0]: the part's world sphere centre, as tested
+        float radius = 0;        // *param_1[1]: the model's +0x10, as tested
+        uint32_t frame = 0, builderRow = kNoRow, entry = kNoRow, sub = kNoRow, lod = 0;
+        uint16_t view = 0xFFFF;  // index in the render context's view array (param_1[5])
+        uint8_t pass = 0, flags = 0;
+        uint32_t valid = 0;
+    };
+    // PartObs.flags
+    static constexpr uint8_t kPartViewForeign = 1u,      // the view is not in the context's view array
+                             kPartUnverified = 2u,       // the builder's frame did not verify: no identity
+                             kPartForeignCaller = 4u,    // not called from the builder's sub-item loop
+                             kPartOwnerMismatch = 8u,    // the enclosing builder row's pose is not param_1[2]
+                             kPartSphereFault = 16u;     // the sphere or the view's bits could not be read
     struct ViewDump {
         uint64_t ctx = 0;
         uint32_t frame = 0, count = 0;
@@ -135,7 +198,18 @@ public:
 
     // The relay observers (worker threads, noexcept, allocation-free).
     void noteGate(uintptr_t gateCtx, uintptr_t out, uintptr_t view) noexcept;
-    void noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
+    // Returns the row it kept, or kNoRow (outside the window, a fault-free
+    // reservation past the cap): the bracket hands it to this call's parts.
+    uint32_t noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
+    // FUN_1442B3FC0 after its forward: items = param_1, out = param_2, view =
+    // param_3; builderRow = the enclosing builder call's row; fromBuilder =
+    // the call came from the builder's sub-item loop (its return address).
+    void notePart(uintptr_t items, uintptr_t out, uintptr_t view, uint32_t builderRow, bool fromBuilder) noexcept;
+    // Whether FUN_1442B3FC0's patch is live for this window (set by the
+    // caller after the attach): the file's header flag bit 1, so a reader
+    // tells "stood down, no rows by construction" from "hooked, no calls".
+    void setPartHooked(bool on) noexcept { partHooked_ = on; }
+    bool partHooked() const noexcept { return partHooked_; }
 
     // Writes gate_<stamp>.bin. False on an I/O failure (the counters still
     // say what was captured).
@@ -147,6 +221,11 @@ public:
         uint32_t builderCalls = 0, builderKept = 0, builderDropped = 0;
         uint32_t entriesDropped = 0, subItemsDropped = 0;
         uint32_t faults = 0, recordMismatch = 0, dumps = 0, dumpsDropped = 0;
+        // Part tests in the window; kept rows; reserved past the cap; rows
+        // whose builder frame did not verify (verdict kept, no identity);
+        // calls from another caller; calls outside a kept builder row.
+        uint32_t partCalls = 0, partKept = 0, partDropped = 0;
+        uint32_t partUnverified = 0, partForeign = 0, partUnlinked = 0;
     };
     Counts counts() const noexcept;
     uint32_t distinctRecords() const noexcept;   // builder records in the kept observations
@@ -161,15 +240,18 @@ private:
     uint32_t first_ = 0;
     FrustumFn frustum_ = nullptr;
     uint8_t visGlobal_ = 0;
+    bool partHooked_ = false;
 
     std::vector<GateObs> gate_;
     std::vector<BuilderObs> builder_;
     std::vector<EntryObs> entries_;
     std::vector<SubItem> subs_;
+    std::vector<PartObs> parts_;
     std::unique_ptr<ViewDump[]> dumps_;
-    std::atomic<uint32_t> gateNext_{0}, builderNext_{0}, entryNext_{0}, subNext_{0};
+    std::atomic<uint32_t> gateNext_{0}, builderNext_{0}, entryNext_{0}, subNext_{0}, partNext_{0};
     std::atomic<uint32_t> gateCalls_{0}, builderCalls_{0}, faults_{0}, recordMismatch_{0};
     std::atomic<uint32_t> entriesDropped_{0}, subItemsDropped_{0}, dumpsDropped_{0};
+    std::atomic<uint32_t> partCalls_{0}, partUnverified_{0}, partForeign_{0}, partUnlinked_{0};
     std::atomic<uint32_t> dumpCount_{0};
     std::atomic<uint64_t> dumpKey_[kMaxDumps];   // ctx ^ (frame << 48): claimed slots, zeroed by arm()
     std::mutex dumpMutex_;
@@ -180,6 +262,8 @@ extern CullGateProbe cullGateProbe;
 // Free-function observers for kinematicEvalSetGateProbeObservers: forward to
 // the global probe while it is armed.
 void cullGateProbeGateObserver(uintptr_t gateCtx, uintptr_t out, uintptr_t view) noexcept;
-void cullGateProbeBuilderObserver(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
+uint32_t cullGateProbeBuilderObserver(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
+void cullGateProbePartObserver(uintptr_t items, uintptr_t out, uintptr_t view, uint32_t builderRow,
+                               bool fromBuilder) noexcept;
 
 }  // namespace edvr

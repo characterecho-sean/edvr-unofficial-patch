@@ -84,16 +84,38 @@ void kinematicEvalStaticGateDetach() noexcept;
 // forward (gateCtx, out, view), the builder's inputs BEFORE it (pose, ctx,
 // mask, nibbles = rec+0x210). Raw callbacks, no link dependency; null means
 // off (one atomic load per call).
+//
+// The builder observer returns the row it kept for the call (or
+// kGateProbeNoRow); the bracket holds it in a thread-local across the forward,
+// so every per-part test the builder makes inside that call reaches the part
+// observer with its enclosing row. FUN_1442B3FC0 -- the builder's per-(sub-
+// item, view) frustum + LOD test (decomp_42B3FC0.txt, called only from the
+// builder's sub-item loop at 0x1442B4B91) -- is observed AFTER its forward:
+// items = its param_1 (the builder's rbp+0x70 block), out = param_2 {u32 LOD,
+// u8 passed}, view = param_3; fromBuilder = its return address is that call
+// site's. Read-only: the verdict is never written.
+constexpr uint32_t kGateProbeNoRow = 0xFFFFFFFFu;
 using GateProbeGateFn = void (*)(uintptr_t gateCtx, uintptr_t out, uintptr_t view) noexcept;
-using GateProbeBuilderFn = void (*)(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
-void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate, GateProbeBuilderFn builder) noexcept;
+using GateProbeBuilderFn = uint32_t (*)(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
+using GateProbePartFn = void (*)(uintptr_t items, uintptr_t out, uintptr_t view, uint32_t builderRow,
+                                 bool fromBuilder) noexcept;
+void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate, GateProbeBuilderFn builder,
+                                        GateProbePartFn part) noexcept;
 // Installs the shared kinematic hook set (validating the executable) and
 // holds the eval gate open for the probe's window. Same return vocabulary as
-// attachKinematicEvalHooks.
+// attachKinematicEvalHooks. It also installs, once, FUN_1442B3FC0's own patch
+// -- for this probe only, never for the other consumers -- after a build-keyed
+// signature (PE timestamp and size, the prologue, the builder's frame and call
+// site the observer reads); its relay has a gate cell of its own, open only
+// while the probe is attached. A mismatch stands that hook down alone.
 const char* kinematicEvalGateProbeAttach() noexcept;
 void kinematicEvalGateProbeDetach() noexcept;
 // True while the builder bracket (FUN_1442B4420) is installed: the probe's
 // builder verdicts depend on it separately from the evaluator.
 bool kinematicEvalBuilderHooked() noexcept;
+// FUN_1442B3FC0's hook: "hooked", or why it stood down ("not requested",
+// "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
+// "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").
+const char* kinematicEvalPartTestStatus() noexcept;
 
 } // namespace edvr
