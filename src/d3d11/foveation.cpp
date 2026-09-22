@@ -23,7 +23,19 @@
 #include "temporal_pass.h"
 
 namespace edvr {
+
+// foveationWantsDraws reads these from the header with no call: asked per
+// draw, and the build has no /GL to fold a cross-TU getter. FoveationPhase
+// itself is declared in the header, so the inline function there can
+// name its Wanted/Armed values.
+namespace detail {
+FoveationPhase g_foveationPhase = FoveationPhase::Off;
+IUnknown* g_foveationBound = nullptr;
+bool      g_foveationBoundUnknown = false;
+}  // namespace detail
+
 namespace {
+using Phase = detail::FoveationPhase;
 
 // ------------------------------------------------------------------ NvAPI
 //
@@ -350,8 +362,6 @@ const char* modeName(Mode m) {
 }
 
 // --------------------------------------------------------------- state
-enum class Phase { Off, Wanted, Armed, Down };
-Phase g_phase = Phase::Off;
 
 // One shading-rate image per eye-texture size and eye. The views are never
 // released: OpenXR Toolkit found releasing them, and NvAPI_Unload, crashed,
@@ -730,8 +740,6 @@ const char* fmtName(uint32_t fmt) {
     }
 }
 
-IUnknown* g_bound = nullptr;        // the view the context holds, as far as we know
-bool      g_boundUnknown = false;   // ClearState: whatever was bound may be gone
 bool      g_ratesOn = false;
 uint32_t  g_lastRtvGen = ~0u;
 Mask*     g_lastMask = nullptr;
@@ -855,8 +863,8 @@ void applyView(ID3D11DeviceContext* ctx, IUnknown* view) {
         rc2 = g_nv.setRateView(ctx, view);
     });
     if (!survived || rc1 != kNvOk || rc2 != kNvOk) {
-        g_bound = nullptr;
-        g_boundUnknown = false;
+        detail::g_foveationBound = nullptr;
+        detail::g_foveationBoundUnknown = false;
         g_ratesOn = false;
         char e[96], why[240];
         snprintf(why, sizeof(why), "%s answered %s while %s the image",
@@ -872,19 +880,19 @@ void applyView(ID3D11DeviceContext* ctx, IUnknown* view) {
         Log::get().note("foveation: the shading-rate image is bound for the first time -- the game "
                         "now shades the edges of each eye coarsely.");
     }
-    g_bound = view;
-    g_boundUnknown = false;
+    detail::g_foveationBound = view;
+    detail::g_foveationBoundUnknown = false;
     g_ratesOn = view != nullptr;
     ++g_switches;
     ++g_switchesFrame;
 }
 
 void standDown(ID3D11DeviceContext* ctx, const char* why) {
-    if (g_phase == Phase::Down) return;
-    g_phase = Phase::Down;
+    if (detail::g_foveationPhase == Phase::Down) return;
+    detail::g_foveationPhase = Phase::Down;
     Log::get().note("foveation: OFF for this session -- %s. The game shades at full rate everywhere, "
                     "as with experimental.foveation off.", why);
-    if (g_nv.ok && ctx && (g_bound || g_boundUnknown)) {
+    if (g_nv.ok && ctx && (detail::g_foveationBound || detail::g_foveationBoundUnknown)) {
         // Best effort, unbudgeted for the answer: a failure here has nothing
         // left to stand down.
         fillRates(false, kRate1x1, kRate2x2, outerRate());
@@ -893,8 +901,8 @@ void standDown(ID3D11DeviceContext* ctx, const char* why) {
             g_nv.setViewportRates(ctx, &g_ratesDesc);
         });
     }
-    g_bound = nullptr;
-    g_boundUnknown = false;
+    detail::g_foveationBound = nullptr;
+    detail::g_foveationBoundUnknown = false;
     g_ratesOn = false;
 }
 
@@ -1406,7 +1414,7 @@ void arm(ID3D11DeviceContext* ctx) {
                        "/ GTX 16-series or newer)");
         return;
     }
-    g_phase = Phase::Armed;
+    detail::g_foveationPhase = Phase::Armed;
     Log::get().note(
         "foveation: ARMED (experimental.foveation = %s) -- NvAPI is up and %s. Full-rate shading inside %.0f "
         "degrees about each eye's fixation point (%.2f m), one shade per 2x2 pixels out to %.0f "
@@ -1659,22 +1667,22 @@ void foveationConfigure(Config& cfg) {
                         "performance); treated as off.", mode.c_str());
     }
     if (m == Mode::Off) {
-        if (g_phase != Phase::Down) {
-            if (g_phase == Phase::Armed) {
+        if (detail::g_foveationPhase != Phase::Down) {
+            if (detail::g_foveationPhase == Phase::Armed) {
                 Log::get().note("foveation: off (experimental.foveation) -- the image is cleared at the next draw.");
             }
-            g_phase = Phase::Off;
+            detail::g_foveationPhase = Phase::Off;
         }
         return;
     }
-    if (g_phase == Phase::Off) {
-        g_phase = Phase::Wanted;
+    if (detail::g_foveationPhase == Phase::Off) {
+        detail::g_foveationPhase = Phase::Wanted;
         Log::get().note("foveation: ON (experimental.foveation = %s): full rate inside %.0f degrees, 2x2 to %.0f, "
                         "%s beyond, fixation %.2f m, %s draws, %s. Arms at the first eye draw "
                         "(docs/performance.md, feature 2).",
                         modeName(m), inner, outer, outerRate() == kRate4x4 ? "4x4" : "2x2", dist,
                         geom ? "geometry" : "all", monoEdgeName(mono, overlapKeep));
-    } else if (changed && g_phase == Phase::Armed) {
+    } else if (changed && detail::g_foveationPhase == Phase::Armed) {
         Log::get().note("foveation: settings changed (experimental.foveation = %s, %.0f/%.0f degrees, %.2f m, %s "
                         "draws, %s; the rate table now reads %s inside, %s in the ring, %s beyond) -- the images "
                         "refill at their next use.",
@@ -1683,23 +1691,19 @@ void foveationConfigure(Config& cfg) {
     }
 }
 
-bool foveationWantsDraws() {
-    return g_phase == Phase::Wanted || g_phase == Phase::Armed || g_bound != nullptr || g_boundUnknown;
-}
-
 void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint32_t rtvGen,
                      char /*kind*/, uint32_t count, uint32_t instances) {
     if (!ctx) return;
-    if (g_phase == Phase::Off || g_phase == Phase::Down) {
-        if (g_bound || g_boundUnknown) {
-            if (g_phase == Phase::Off && g_nv.ok) applyView(ctx, nullptr);
-            g_bound = nullptr;
-            g_boundUnknown = false;
+    if (detail::g_foveationPhase == Phase::Off || detail::g_foveationPhase == Phase::Down) {
+        if (detail::g_foveationBound || detail::g_foveationBoundUnknown) {
+            if (detail::g_foveationPhase == Phase::Off && g_nv.ok) applyView(ctx, nullptr);
+            detail::g_foveationBound = nullptr;
+            detail::g_foveationBoundUnknown = false;
         }
         return;
     }
     // The census's resolve, once per rebind, for every target.
-    if (g_phase == Phase::Armed && rtvGen != g_censusGen) {
+    if (detail::g_foveationPhase == Phase::Armed && rtvGen != g_censusGen) {
         g_censusGen = rtvGen;
         g_censusSig = nullptr;
         g_censusKnown = nullptr;
@@ -1714,24 +1718,24 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
     }
     const bool fullScreenPass = count <= 6 && instances <= 1;
     if (!rtvEyeSized) {
-        if (g_phase == Phase::Armed) {
+        if (detail::g_foveationPhase == Phase::Armed) {
             ++g_otherDraws;
             if (g_censusSig) ++g_censusSig->other;
         }
-        if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
+        if (detail::g_foveationBound || detail::g_foveationBoundUnknown) applyView(ctx, nullptr);
         return;
     }
     if (g_geometryOnly && fullScreenPass) {
-        if (g_phase == Phase::Armed) {
+        if (detail::g_foveationPhase == Phase::Armed) {
             ++g_eyeDraws;
             if (g_censusSig) ++g_censusSig->bare;
         }
-        if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
+        if (detail::g_foveationBound || detail::g_foveationBoundUnknown) applyView(ctx, nullptr);
         return;
     }
-    if (g_phase == Phase::Wanted) {
+    if (detail::g_foveationPhase == Phase::Wanted) {
         arm(ctx);
-        if (g_phase != Phase::Armed) return;
+        if (detail::g_foveationPhase != Phase::Armed) return;
     }
     if (g_forcedSamplesSeen) {
         char why[200];
@@ -1763,7 +1767,7 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
             Known* k = knownFor(info.resource);
             if (k && k->settled) {
                 g_lastMask = maskFor(ctx, info.a, info.b, eye);
-                if (!g_lastMask && g_phase == Phase::Armed) ++g_noTangentFrames;
+                if (!g_lastMask && detail::g_foveationPhase == Phase::Armed) ++g_noTangentFrames;
                 // Once a frame per target, and before the draws that will
                 // leave the strip untouched.
                 if (g_lastMask && g_monoEdge && k->lastCleared != g_frame) {
@@ -1782,11 +1786,11 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
     // the working implementations set the image after every bind, and a
     // driver that drops it on a rebind would otherwise leave this module
     // believing it bound while the game shaded at full rate.
-    if (want != g_bound || g_boundUnknown || (want && rtvGen != g_appliedGen)) {
+    if (want != detail::g_foveationBound || detail::g_foveationBoundUnknown || (want && rtvGen != g_appliedGen)) {
         applyView(ctx, want);
         g_appliedGen = rtvGen;
     }
-    if (g_phase == Phase::Armed) {
+    if (detail::g_foveationPhase == Phase::Armed) {
         ++g_eyeDraws;
         if (g_lastEyeUnknown) ++g_unknownEyeDraws;
         if (want) {
@@ -1802,12 +1806,12 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
 
 void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
-    if (g_phase == Phase::Armed) {
+    if (detail::g_foveationPhase == Phase::Armed) {
         // Unbound between frames: the draws between the last eye draw and
         // the next frame's first are not all seen here (indirect draws,
         // replayed command lists), and an image of the wrong size under
         // them is not a state to leave lying about.
-        if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
+        if (detail::g_foveationBound || detail::g_foveationBoundUnknown) applyView(ctx, nullptr);
         ++g_framesArmed;
         if (g_framesArmed % 90 == 0) gpuBusySample();
         // Every mask the settings or the gaze have moved on from, rewritten
@@ -1912,11 +1916,11 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
     // nine seconds in and this line printed one second before the feature
     // armed perfectly well (the flight of 2026-09-06 11:14). A count is not
     // a clock on a screen with nothing to draw.
-    if (g_phase == Phase::Wanted && !g_wantedNoted) {
+    if (detail::g_foveationPhase == Phase::Wanted && !g_wantedNoted) {
         ++g_wantedFrames;
         if (g_wantedSince == 0) g_wantedSince = GetTickCount64();
     }
-    if (g_phase == Phase::Wanted && !g_wantedNoted && g_wantedFrames >= 1800 && g_wantedSince != 0 &&
+    if (detail::g_foveationPhase == Phase::Wanted && !g_wantedNoted && g_wantedFrames >= 1800 && g_wantedSince != 0 &&
         GetTickCount64() - g_wantedSince >= 60000) {
         g_wantedNoted = true;
         Log::get().note(
@@ -1941,19 +1945,19 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void foveationOnClearState() {
-    if (g_bound) g_boundUnknown = true;
+    if (detail::g_foveationBound) detail::g_foveationBoundUnknown = true;
 }
 
 void foveationShutdown() {
-    if (g_phase == Phase::Armed && g_framesArmed) summary("at exit");
+    if (detail::g_foveationPhase == Phase::Armed && g_framesArmed) summary("at exit");
     // No NvAPI calls here: the views are left to the process (see Mask) and
     // NvAPI_Unload is never called, on OpenXR Toolkit's experience of both.
     for (Mask& m : g_masks) releaseMask(m);
     delete[] g_scratch;
     g_scratch = nullptr;
     g_scratchCap = 0;
-    g_bound = nullptr;
-    g_boundUnknown = false;
+    detail::g_foveationBound = nullptr;
+    detail::g_foveationBoundUnknown = false;
     g_ratesOn = false;
 }
 

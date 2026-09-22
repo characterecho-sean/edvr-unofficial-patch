@@ -41,7 +41,16 @@ void panelQuadConfigure(Config& cfg);
 // Is a capture still wanted? False once one has been taken, which is what
 // keeps this out of the draw path's early-return condition for the rest of
 // the session.
-bool panelQuadWants();
+//
+// Inline: asked at the panel composite draw, and the build has no /GL to
+// fold a cross-TU getter for two bool loads.
+namespace detail {
+extern bool g_panelQuadWanted;
+extern bool g_panelQuadPending;
+}  // namespace detail
+inline bool panelQuadWants() {
+    return detail::g_panelQuadWanted || detail::g_panelQuadPending;
+}
 
 // Called at a draw already recognised as the panel composite -- eye-sized
 // target, panel-sized SRV0. Runs the copy on the first such draw and the

@@ -14,6 +14,13 @@
 #include "exposure_fix.h"   // lookupShaderHash: the shared shader registry
 
 namespace edvr {
+
+// resolveBindWants reads this from the header with no call: asked per
+// eye draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_resolveBindOn = false;
+}  // namespace detail
+
 namespace {
 
 // The deferred resolve's PIXEL shader -- the same content hash
@@ -31,8 +38,6 @@ constexpr ShadowMatch shadowMatch(bool hasShader, uint64_t hash) {
 }
 
 FaultBudget g_budget("resolveBind", 8);
-
-bool g_on = false;
 
 // The remembered quad. A reference is held: the game reuses one buffer for
 // both eyes and every frame (the healthy captures show the same token all
@@ -69,8 +74,8 @@ void resolveBindConfigure(Config& cfg) {
     // the ini in the zip. One line at first sight, whatever the state, so
     // every bundle names it.
     static bool announced = false;
-    if (want == g_on) {
-        if (!announced && !g_on) {
+    if (want == detail::g_resolveBindOn) {
+        if (!announced && !detail::g_resolveBindOn) {
             announced = true;
             Log::get().note("scanner body fix off: resolve draws are left "
                             "as the game issues them.");
@@ -79,8 +84,8 @@ void resolveBindConfigure(Config& cfg) {
         return;
     }
     announced = true;
-    g_on = want;
-    if (g_on) {
+    detail::g_resolveBindOn = want;
+    if (detail::g_resolveBindOn) {
         Log::get().note(
             "scanner body fix ON: a lighting-resolve draw that arrives with "
             "no vertex buffer is drawn with the buffer the other eye's "
@@ -93,10 +98,8 @@ void resolveBindConfigure(Config& cfg) {
     }
 }
 
-bool resolveBindWants() { return g_on; }
-
 bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx) {
-    if (!g_on || !ctx) return false;
+    if (!detail::g_resolveBindOn || !ctx) return false;
 
     // beginPanelOverride calls this only after rejecting foreign contexts, so
     // these are the owner immediate context's bindings. The PS setter records
@@ -129,7 +132,7 @@ bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx) {
 }
 
 void resolveBindBegin(ID3D11DeviceContext* ctx) {
-    if (!g_on || !ctx) return;
+    if (!detail::g_resolveBindOn || !ctx) return;
     guardedBudget(g_budget, [&] {
         ID3D11Buffer* vb = nullptr;
         UINT stride = 0, offset = 0;

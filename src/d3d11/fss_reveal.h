@@ -62,7 +62,16 @@ class Config;
 void fssRevealConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set and the body-frame gate.
-bool fssRevealWantsDraws();
+//
+// Inline: asked per eye draw and from the Map/Unmap tees, and the build
+// has no /GL to fold a cross-TU getter for two bool loads.
+namespace detail {
+extern bool g_fssRevealSteady;
+extern bool g_fssRevealLockstep;
+}  // namespace detail
+inline bool fssRevealWantsDraws() {
+    return detail::g_fssRevealSteady || detail::g_fssRevealLockstep;
+}
 
 // The Map/Unmap and UpdateSubresource tees, called from vscreen's hooks
 // while steady: the scene block's writes keep the shadow current, so the

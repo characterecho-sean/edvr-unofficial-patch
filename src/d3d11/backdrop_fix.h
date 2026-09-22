@@ -85,7 +85,13 @@ class Config;
 void backdropConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.
-bool backdropWantsDraws();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_backdropOn;
+}  // namespace detail
+inline bool backdropWantsDraws() { return detail::g_backdropOn; }
 
 // Is this draw the backdrop blit? Matched by shape and by what it reads: a
 // four-vertex non-indexed draw, one instance, whose pixel shader slot 0

@@ -13,11 +13,18 @@
 #include "exposure_fix.h"   // lookupShaderHash: the shared shader registry
 
 namespace edvr {
+
+// stencilProbeWantsDraws reads this from the header with no call: asked
+// per eye draw while armed, and the build has no /GL to fold a cross-TU
+// getter.
+namespace detail {
+uint64_t g_stencilProbeVsHash = 0;
+}  // namespace detail
+
 namespace {
 
 FaultBudget g_budget("stencilProbe", 8);
 
-uint64_t g_vsHash = 0;      // zero is off
 uint32_t g_ref = 0;
 
 ID3D11DepthStencilState* g_savedDs = nullptr;
@@ -112,9 +119,9 @@ void stencilProbeConfigure(Config& cfg) {
         wantRef = 0;
     }
 
-    if (wantHash == g_vsHash && wantRef == g_ref) return;
+    if (wantHash == detail::g_stencilProbeVsHash && wantRef == g_ref) return;
     logTally();   // the outgoing run's receipt, before its counters reset
-    g_vsHash = wantHash;
+    detail::g_stencilProbeVsHash = wantHash;
     g_ref = wantRef;
     g_engagedNoted = false;
     g_applied = 0;
@@ -123,7 +130,7 @@ void stencilProbeConfigure(Config& cfg) {
     g_haveOther = false;
     g_firstOther = 0;
 
-    if (g_vsHash) {
+    if (detail::g_stencilProbeVsHash) {
         Log::get().note(
             "stencil probe ARMED: every eye draw running vertex shader "
             "%016llX is issued with stencil reference %u. The game's own "
@@ -132,22 +139,20 @@ void stencilProbeConfigure(Config& cfg) {
             "them -- and only the reference beside it differs, so anything "
             "that changes can be attributed to that number alone. Both are "
             "put back after every draw.",
-            static_cast<unsigned long long>(g_vsHash), g_ref);
+            static_cast<unsigned long long>(detail::g_stencilProbeVsHash), g_ref);
     } else {
         Log::get().note("stencil probe: off, the game's own reference.");
     }
 }
 
-bool stencilProbeWantsDraws() { return g_vsHash != 0; }
-
 bool stencilProbeOnEyeDraw(ID3D11DeviceContext* ctx) {
-    if (!g_vsHash || !ctx) return false;
+    if (!detail::g_stencilProbeVsHash || !ctx) return false;
     bool match = false;
     guardedBudget(g_budget, [&] {
         ID3D11VertexShader* vs = nullptr;
         ctx->VSGetShader(&vs, nullptr, nullptr);
         if (vs) {
-            match = lookupShaderHash(vs) == g_vsHash;
+            match = lookupShaderHash(vs) == detail::g_stencilProbeVsHash;
             vs->Release();
         }
     });
@@ -155,7 +160,7 @@ bool stencilProbeOnEyeDraw(ID3D11DeviceContext* ctx) {
 }
 
 void stencilProbeBegin(ID3D11DeviceContext* ctx) {
-    if (!g_vsHash || !ctx) return;
+    if (!detail::g_stencilProbeVsHash || !ctx) return;
     guardedBudget(g_budget, [&] {
         ctx->OMGetDepthStencilState(&g_savedDs, &g_savedRef);
 

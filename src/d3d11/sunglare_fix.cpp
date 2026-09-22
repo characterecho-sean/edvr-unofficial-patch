@@ -18,6 +18,16 @@
 #include "sunglare_vs.h"
 
 namespace edvr {
+
+// sunglareProbeActive, sunglareSteady and sunglareWorldActive read these
+// from the header with no call: sunglareWorldActive in particular is
+// asked per draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_sunglareProbe = false;
+bool g_sunglareSteady = false;
+int  g_sunglareWorld = 0;
+}  // namespace detail
+
 namespace {
 
 // The glare train, as the sun census resolved it: DrawInstanced, 6
@@ -41,7 +51,6 @@ enum class Mode { kStock, kOff, kRealistic, kVivid };
 
 Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
-bool     g_steady = false;
 int      g_steadyMode = 0;   // 0 off, 1 counter-rotate, 2 fixed-30 test
 float    g_recenter = 0;     // fix.sun_glare_recenter, REPURPOSED after
                              // the eye-pair measurement: the eye-sync
@@ -82,11 +91,6 @@ bool     g_shadersNoted = false;
 // 2 = visibility gate bypassed, 3 = every element world-anchored,
 // 4 = every element on the ported flat path.
 constexpr int kWorldVariants = 4;
-int                  g_world = 0;
-bool                 g_probe = false;   // the debug instrument switch:
-                                        // telemetry, identity line,
-                                        // census and stream dumps all
-                                        // sit behind it, default silent
 ID3D11VertexShader*  g_worldVs[kWorldVariants] = {};   // owned, lazy
 bool                 g_worldTried[kWorldVariants] = {};
 ID3D11VertexShader*  g_savedVs = nullptr;  // the game's, across one draw
@@ -553,22 +557,22 @@ void sunglareConfigure(Config& cfg) {
     // bypassed, 3 = all elements world-anchored, 4 = all flat).
     const int variant =
         cfg.getIntInRange("advanced.sun_glare_variant", 0, 0, kWorldVariants);
-    const int wasWorld = g_world;
-    g_world = (g_mode == Mode::kRealistic || g_mode == Mode::kVivid)
+    const int wasWorld = detail::g_sunglareWorld;
+    detail::g_sunglareWorld = (g_mode == Mode::kRealistic || g_mode == Mode::kVivid)
                   ? (variant ? variant : 1)
                   : 0;
     // The debug instruments (per-second telemetry, b0 identity line,
     // camera-block census, instance-stream dumps) behind one switch,
     // default silent: a shipped log should carry findings, not vitals.
-    g_probe = cfg.getBool("advanced.sun_glare_probe", false);
+    detail::g_sunglareProbe = cfg.getBool("advanced.sun_glare_probe", false);
     // The corner-rotation steady path and its eyeshape/recenter levers
     // are superseded by the world shader and no longer configurable.
-    g_steady = false;
+    detail::g_sunglareSteady = false;
     // The billboard loan's tee stays armed for world mode and for the
     // probe: the telemetry and the per-draw camera solve read the
     // shadowed CB.
-    billboardGlareWatch(g_world != 0 || g_probe);
-    if (legacy && (g_mode != was || g_world != wasWorld)) {
+    billboardGlareWatch(detail::g_sunglareWorld != 0 || detail::g_sunglareProbe);
+    if (legacy && (g_mode != was || detail::g_sunglareWorld != wasWorld)) {
         Log::get().note("sun glare: legacy value \"%s\" accepted (%s). The "
                         "shipped modes are stock, realistic and vivid.",
                         v.c_str(),
@@ -602,14 +606,8 @@ void sunglareConfigure(Config& cfg) {
 // must keep running even with the glare fix itself stock, because the
 // last-seen stamp is what scopes the damper to the sun.
 bool sunglareWantsDraws() {
-    return g_mode != Mode::kStock || exposureDampingActive() || g_probe;
+    return g_mode != Mode::kStock || exposureDampingActive() || detail::g_sunglareProbe;
 }
-
-bool sunglareProbeActive() { return g_probe; }
-
-bool sunglareSteady() { return g_steady; }
-
-bool sunglareWorldActive() { return g_world != 0; }
 
 uint64_t sunglareLastSeenMs() { return g_lastSeenMs; }
 
@@ -645,7 +643,7 @@ void* g_sceneCbTarget = nullptr;
 void sunglareSceneCb(void* cb) { g_sceneCbTarget = cb; }
 
 void* sunglareSceneCbTarget() {
-    return g_world ? g_sceneCbTarget : nullptr;
+    return detail::g_sunglareWorld ? g_sceneCbTarget : nullptr;
 }
 
 // One whole-buffer binary dump of the big scene-constants block (the
@@ -660,7 +658,7 @@ void sunglareSceneDump(const void* data, uint32_t bytes) {
     // FOLLOWED the head between the shots is the true one, the offset
     // frozen at forty-five degrees is the head-look camera. Level-head
     // dumps alone cannot tell them apart, which shot one proved.
-    if (!g_probe || !g_world || g_camDumpShot >= 2 || g_lastSeenMs == 0 ||
+    if (!detail::g_sunglareProbe || !detail::g_sunglareWorld || g_camDumpShot >= 2 || g_lastSeenMs == 0 ||
         !data ||
         bytes < 1024) {
         return;
@@ -688,7 +686,7 @@ void sunglareSceneRows(const void* data, uint32_t bytes) {
     // turned the full 150 degrees with the head while the glare
     // camera's constants froze at the clamp. Three 3x4 rows, rotation
     // plus translation; validated as near-unit orthogonal before use.
-    if (!g_world || !data || bytes < (944 * 4)) return;
+    if (!detail::g_sunglareWorld || !data || bytes < (944 * 4)) return;
     const float* f = static_cast<const float*>(data) + 932;
     const float l0 = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
     const float l1 = sqrtf(f[4] * f[4] + f[5] * f[5] + f[6] * f[6]);
@@ -722,13 +720,13 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // stream stays the game's own. The probe instruments run in EVERY
     // mode -- including stock, where the draws go untouched -- so a
     // stock-vs-mode record diff is one hot swap apart.
-    if (g_world || g_probe) {
+    if (detail::g_sunglareWorld || detail::g_sunglareProbe) {
         // The cutoff telemetry: matched draws per second and the
         // eccentricity range the CB reports, so a disappearance names
         // its side -- draws stopping = the game culled upstream; draws
         // continuing = our shader killed them.
         ++g_worldDraws;
-        if (g_probe) {
+        if (detail::g_sunglareProbe) {
             bool found = false;
             for (int i = 0; i < g_trainCount; ++i) {
                 if (g_trains[i].start == g_drawStart &&
@@ -743,7 +741,7 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 ++g_trainCount;
             }
         }
-        if (g_probe) {
+        if (detail::g_sunglareProbe) {
             uint32_t nf = 0;
             const float* sh = billboardShadowFloats(&nf);
             if (sh && nf >= 32) {
@@ -939,9 +937,9 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 }
             }
         }
-        if (!g_world) return;   // probe-only: instruments ran, draw stock
-        const int v = g_world - 1;
-        if (!g_worldTried[v]) buildWorldShader(ctx, g_world);
+        if (!detail::g_sunglareWorld) return;   // probe-only: instruments ran, draw stock
+        const int v = detail::g_sunglareWorld - 1;
+        if (!g_worldTried[v]) buildWorldShader(ctx, detail::g_sunglareWorld);
         if (g_worldVs[v]) {
             ctx->VSGetShader(&g_savedVs, nullptr, nullptr);
             ctx->VSSetShader(g_worldVs[v], nullptr, 0);
@@ -1062,7 +1060,7 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         return;
     }
 
-    if (!g_steady) return;
+    if (!detail::g_sunglareSteady) return;
 
     // The shader-swap arc's identification, once per session: which
     // vertex and pixel shader the train binds. With glare_shader_dump

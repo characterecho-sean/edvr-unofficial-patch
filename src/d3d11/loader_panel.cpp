@@ -15,6 +15,13 @@
 #include "../common/log.h"
 
 namespace edvr {
+
+// loaderPanelWants reads this from the header with no call: it is asked
+// per draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_loaderPanelOn = false;
+}  // namespace detail
+
 namespace {
 
 // Six indices to a quad at topology 4, which is what the census reports for
@@ -105,8 +112,6 @@ constexpr uint32_t kRefuseCool = 3;
 constexpr uint32_t kMaxDropStreak = 3;
 
 FaultBudget g_budget("loaderPanel", 6);
-
-bool g_on = false;
 
 struct Rect {
     float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
@@ -280,35 +285,33 @@ void recordNone(const char* why) {
 }  // namespace
 
 void loaderPanelConfigure(Config& cfg) {
-    const bool was = g_on;
-    g_on = loadingDimParse(cfg.getString("fix.loading_dim", "screen")).withhold;
-    if (was != g_on) {
-        if (!g_on) {
+    const bool was = detail::g_loaderPanelOn;
+    detail::g_loaderPanelOn = loadingDimParse(cfg.getString("fix.loading_dim", "screen")).withhold;
+    if (was != detail::g_loaderPanelOn) {
+        if (!detail::g_loaderPanelOn) {
             dropPending();
             resetMeasured();
         }
         Log::get().note(
             "loading panel: %s. The full-view scrim behind the loader's "
             "dialog is %s (docs/loading-panel-handoff.md).",
-            g_on ? "FIT" : "stock",
-            g_on ? "withheld -- the dialog's own black backing, an eye-level "
+            detail::g_loaderPanelOn ? "FIT" : "stock",
+            detail::g_loaderPanelOn ? "withheld -- the dialog's own black backing, an eye-level "
                    "layer, already carries the box, so no tint reaches "
                    "anything beyond it"
                  : "the game's own");
     }
 }
 
-bool loaderPanelWants() { return g_on; }
-
 bool loaderPanelDimWanted() {
-    return g_on && g_dimLive;
+    return detail::g_loaderPanelOn && g_dimLive;
 }
 
 bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t startIndex, int baseVertex,
                        uint32_t targetW, uint32_t targetH, bool textured) {
     (void)instances;
-    if (!g_on || !ctx || kind != 'X' || count == 0) return false;
+    if (!detail::g_loaderPanelOn || !ctx || kind != 'X' || count == 0) return false;
 
     // This draw's place in the frame's composition. The hash folds shape AND
     // target size, so a render-scale change reads as a new composition.
@@ -802,7 +805,7 @@ bool tryAnalyze(ID3D11DeviceContext* ctx, bool allowWait) {
 
 void loaderPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
     ++g_frame;
-    if (!g_on) {
+    if (!detail::g_loaderPanelOn) {
         if (g_ibStage || g_vbStage || g_collecting) dropPending();
         if (g_chainOn) chainOff();
         resetFrameAcc();

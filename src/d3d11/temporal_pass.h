@@ -97,7 +97,13 @@ void temporalPassArmEyeDump();
 // while the scanner's screen is up (docs/fss-scanner.md, 2026-09-16), and
 // the tracker's stamp is how the pass knows the screen is up. The heal
 // gates the tracker too, but a rig with the heal off still needs the path.
-bool temporalPassWantsFssChrome();
+//
+// Inline: asked by vscreen.cpp's beginPanelOverride, and the build has no
+// /GL to fold a cross-TU getter for one bool load.
+namespace detail {
+extern bool g_temporalPassWantedFssChrome;
+}  // namespace detail
+inline bool temporalPassWantsFssChrome() { return detail::g_temporalPassWantedFssChrome; }
 
 // The eye's offset from the head as the runtime last handed it to the pass
 // (metres, x toward the right), for the foveation's nasal shift. False

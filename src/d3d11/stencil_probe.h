@@ -69,7 +69,13 @@ class Config;
 void stencilProbeConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set.
-bool stencilProbeWantsDraws();
+//
+// Inline: asked per eye draw while armed, and the build has no /GL to
+// fold a cross-TU getter for one scalar load.
+namespace detail {
+extern uint64_t g_stencilProbeVsHash;
+}  // namespace detail
+inline bool stencilProbeWantsDraws() { return detail::g_stencilProbeVsHash != 0; }
 
 // Called for every eye draw while armed: true when this draw runs the named
 // VERTEX shader. Matched on the vertex shader because that is the key the

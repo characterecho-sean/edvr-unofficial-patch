@@ -79,7 +79,13 @@ class Config;
 void scrimConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.
-bool scrimWantsDraws();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_scrimOn;
+}  // namespace detail
+inline bool scrimWantsDraws() { return detail::g_scrimOn; }
 
 // Is this eye draw the loader's UI composite carrying the wash? Matched by
 // what it SAMPLES, not by shader hash: A888D51024D9798E is the engine's

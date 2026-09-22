@@ -52,7 +52,13 @@ class Config;
 void hudGrainConfigure(Config& cfg);
 
 // False in stock mode, which keeps the eye-draw path free.
-bool hudGrainWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_hudGrainSteady;
+}  // namespace detail
+inline bool hudGrainWantsDraws() { return detail::g_hudGrainSteady; }
 
 // Is this eye draw one of the flight HUD's? Slot 1 being the 256x256 noise
 // table and slot 0 an eye-sized depth resolve, then the vertex shader's

@@ -57,7 +57,16 @@ class Config;
 void targetSharpConfigure(Config& cfg);
 
 // False in stock mode and once stood down, which keeps the draw path free.
-bool targetSharpWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for two bool loads.
+namespace detail {
+extern bool g_targetSharpSharp;
+extern bool g_targetSharpFailed;
+}  // namespace detail
+inline bool targetSharpWantsDraws() {
+    return detail::g_targetSharpSharp && !detail::g_targetSharpFailed;
+}
 
 // Is this eye draw the indicator's composite? Shape first (6 indices, one
 // instance), then slot 0 being a non-eye-sized Texture2D with slots 1-3

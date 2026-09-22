@@ -13,6 +13,13 @@
 #include "vscreen.h"  // vScreenIsEyeSized
 
 namespace edvr {
+
+// witchstarWantsDraws reads this from the header with no call: asked per
+// eye draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_witchstarPinned = false;
+}  // namespace detail
+
 namespace {
 
 // The family, as the witchspace census resolved it: DrawIndexedInstanced,
@@ -26,7 +33,6 @@ constexpr uint32_t kAtlasH = 1024;
 constexpr uint32_t kAtlasFmt = 99;
 constexpr uint32_t kArmIndexCount = 100;
 
-bool g_pinned = false;
 bool g_flipX = false;
 bool g_flipY = false;
 // Compensation gain. 1.0 is the geometric answer -- pixels-per-tangent
@@ -80,13 +86,11 @@ void witchstarConfigure(Config& /*cfg*/) {
     // as ordinary suns (field-verified 2026-08-21), so the sun-glare
     // modes cover witchspace and the viewport-shift mechanism never
     // engages. No keys are read; the machinery stays for reference.
-    g_pinned = false;
+    detail::g_witchstarPinned = false;
 }
 
-bool witchstarWantsDraws() { return g_pinned; }
-
 bool witchstarOnEyeDraw(char kind, uint32_t count, uint32_t /*instances*/) {
-    if (!g_pinned) return false;
+    if (!detail::g_witchstarPinned) return false;
     // Only while the journal says a jump tunnel is plausibly on screen. The
     // family this matcher recognises also draws a sun's flare in ordinary
     // space -- where the game positions it correctly and the pin is pure

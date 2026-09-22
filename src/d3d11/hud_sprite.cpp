@@ -25,6 +25,14 @@
 #include "fsr_hlsl_gen.h"   // the same two files, as HLSL string chunks
 
 namespace edvr {
+
+// hudSpriteWantsDraws reads these from the header with no call: asked per
+// eye draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_hudSpriteSharp = false;
+bool g_hudSpriteFailed = false;
+}  // namespace detail
+
 namespace {
 
 // The quad's shape, from the bisection that named it.
@@ -131,8 +139,6 @@ struct Atlas {
 
 FaultBudget g_budget("hudSprite", 4);
 
-bool     g_sharp = false;
-bool     g_failed = false;
 uint64_t g_vsHash = kVsHash;
 uint32_t g_scale = 2;
 float    g_sharpen = 0.25f;   // RCAS stops; negative = off
@@ -150,8 +156,8 @@ ID3D11ShaderResourceView* g_displaced = nullptr;
 uint64_t                  g_applied = 0;
 
 void standDown(const char* why) {
-    if (g_failed) return;
-    g_failed = true;
+    if (detail::g_hudSpriteFailed) return;
+    detail::g_hudSpriteFailed = true;
     Log::get().note("hud icons: %s. The HUD's atlases are sampled the way "
                     "the game samples them for the rest of this session.",
                     why);
@@ -399,16 +405,16 @@ void dropAtlases() {
 }  // namespace
 
 void hudSpriteConfigure(Config& cfg) {
-    const bool was = g_sharp;
+    const bool was = detail::g_hudSpriteSharp;
     const uint32_t wasScale = g_scale;
     const float wasSharpen = g_sharpen;
     const std::string m = cfg.getString("experimental.hud_icons", "stock");
     if (m == "stock") {
-        g_sharp = false;
+        detail::g_hudSpriteSharp = false;
     } else if (m == "sharp") {
-        g_sharp = true;
+        detail::g_hudSpriteSharp = true;
     } else {
-        g_sharp = false;
+        detail::g_hudSpriteSharp = false;
         Log::get().note("hud_icons \"%s\" is not stock or sharp; running "
                         "stock.", m.c_str());
     }
@@ -448,7 +454,7 @@ void hudSpriteConfigure(Config& cfg) {
                         g_scale, g_sharpen >= 0.0f ? "on" : "off");
     }
 
-    if (was != g_sharp) {
+    if (was != detail::g_hudSpriteSharp) {
         Log::get().note(
             "hud icons: %s. The target direction indicator is drawn by one "
             "six-vertex quad per eye sampling a fixed-size sprite atlas -- "
@@ -456,13 +462,11 @@ void hudSpriteConfigure(Config& cfg) {
             "sharp resamples that atlas ONCE with AMD's EASU (%ux, sharpening "
             "%s) and hands the game's own draw the bigger copy. Watching for "
             "vs %016llX.",
-            g_sharp ? "sharp" : "stock", g_scale,
+            detail::g_hudSpriteSharp ? "sharp" : "stock", g_scale,
             g_sharpen >= 0.0f ? "on" : "off",
             static_cast<unsigned long long>(g_vsHash));
     }
 }
-
-bool hudSpriteWantsDraws() { return g_sharp && !g_failed; }
 
 bool hudSpriteOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         uint32_t instances) {
@@ -486,7 +490,7 @@ bool hudSpriteOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 void hudSpriteBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (g_failed) return;
+    if (detail::g_hudSpriteFailed) return;
 
     ID3D11ShaderResourceView* srcSrv = static_cast<ID3D11ShaderResourceView*>(
         bindingGet(BindSlot::PsSrv0));

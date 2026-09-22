@@ -14,6 +14,13 @@
 #include "vscreen.h"        // vScreenIsEyeSized
 
 namespace edvr {
+
+// hudGrainWantsDraws reads this from the header with no call: asked per
+// eye draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_hudGrainSteady = false;
+}  // namespace detail
+
 namespace {
 
 // The noise table, as the census resolves it: 256x256, B8G8R8A8-class.
@@ -25,7 +32,6 @@ constexpr uint32_t kNoiseH = 256;
 // changing what it does.
 constexpr uint64_t kVsHash = 0xB7790CBFC6554097ull;
 
-bool     g_steady = false;
 uint32_t g_level = 255;
 uint64_t g_vsHash = kVsHash;
 
@@ -89,14 +95,14 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void hudGrainConfigure(Config& cfg) {
-    const bool was = g_steady;
+    const bool was = detail::g_hudGrainSteady;
     const std::string m = cfg.getString("experimental.hud_grain", "stock");
     if (m == "stock") {
-        g_steady = false;
+        detail::g_hudGrainSteady = false;
     } else if (m == "steady") {
-        g_steady = true;
+        detail::g_hudGrainSteady = true;
     } else {
-        g_steady = false;
+        detail::g_hudGrainSteady = false;
         Log::get().note("hud_grain \"%s\" is not stock or steady; running "
                         "stock.", m.c_str());
     }
@@ -118,7 +124,7 @@ void hudGrainConfigure(Config& cfg) {
         }
     }
 
-    if (was != g_steady) {
+    if (was != detail::g_hudGrainSteady) {
         Log::get().note(
             "hud grain: %s. The flight HUD is vector geometry drawn at full "
             "eye resolution -- there is nothing in it to upscale -- but its "
@@ -127,17 +133,15 @@ void hudGrainConfigure(Config& cfg) {
             "level %u for those draws, so the shimmer becomes a constant and "
             "the glyph edges are left alone. The level is a taste control, "
             "not a correct value. Watching for vs %016llX.",
-            g_steady ? "steady" : "stock", g_level,
+            detail::g_hudGrainSteady ? "steady" : "stock", g_level,
             static_cast<unsigned long long>(g_vsHash));
     }
 }
 
-bool hudGrainWantsDraws() { return g_steady; }
-
 bool hudGrainOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances) {
     (void)kind; (void)count; (void)instances;
-    if (!g_steady) return false;
+    if (!detail::g_hudGrainSteady) return false;
     // Slot 1 first: the 256x256 is the cheaper resolve and the rarer
     // binding, so most HUD draws fail here without touching slot 0.
     ResourceInfo noise;

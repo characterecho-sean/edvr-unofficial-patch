@@ -25,12 +25,23 @@ class Config;
 enum class SunglareAction { kStock, kSkip, kClamp, kMatch };
 
 void sunglareConfigure(Config& cfg);
+// Not inlined: calls exposureDampingActive() across module boundaries, so
+// there is no single scalar load here for the header to fold.
 bool sunglareWantsDraws();
-bool sunglareSteady();
-bool sunglareWorldActive();
+
+// sunglareSteady, sunglareWorldActive and sunglareProbeActive read these
+// from the header with no call: sunglareWorldActive is asked per draw,
+// and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+extern bool g_sunglareProbe;
+extern bool g_sunglareSteady;
+extern int  g_sunglareWorld;
+}  // namespace detail
+inline bool sunglareSteady() { return detail::g_sunglareSteady; }
+inline bool sunglareWorldActive() { return detail::g_sunglareWorld != 0; }
 // advanced.sun_glare_probe: the debug instruments run in EVERY mode,
 // stock included, so a stock-vs-mode record diff is one hot swap apart.
-bool sunglareProbeActive();
+inline bool sunglareProbeActive() { return detail::g_sunglareProbe; }
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();

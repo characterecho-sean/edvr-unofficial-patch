@@ -9,6 +9,13 @@
 #include "binding_shadow.h"
 
 namespace edvr {
+
+// fssScanWantsDraws reads this from the header with no call: asked per
+// draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_fssScanSteady = false;
+}  // namespace detail
+
 namespace {
 
 // The matrix, as the round-four census resolved it on every body: one
@@ -19,7 +26,6 @@ constexpr uint32_t kMatrixW = 16;
 constexpr uint32_t kMatrixH = 16;
 constexpr uint32_t kMatrixFmt = 60;   // DXGI_FORMAT_R16_UINT, as resolved
 
-bool     g_steady = false;
 uint32_t g_level = 0;
 
 // The substitute: a 16x16 R16_UINT filled with the level -- full-size, not
@@ -90,21 +96,21 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void fssScanConfigure(Config& cfg) {
-    const bool was = g_steady;
+    const bool was = detail::g_fssScanSteady;
     const std::string m = cfg.getString("experimental.fss_scan", "stock");
     if (m == "stock") {
-        g_steady = false;
+        detail::g_fssScanSteady = false;
     } else if (m == "steady") {
-        g_steady = true;
+        detail::g_fssScanSteady = true;
     } else {
-        g_steady = false;
+        detail::g_fssScanSteady = false;
         Log::get().note("fss_scan \"%s\" is not stock or steady; running "
                         "stock.", m.c_str());
     }
     g_level = static_cast<uint32_t>(
         cfg.getIntInRange("advanced.fss_scan_level", 0, 0, 65535));
 
-    if (was != g_steady) {
+    if (was != detail::g_fssScanSteady) {
         Log::get().note(
             "fss scan: %s. The scanner's tile-dissolve matrix -- the black "
             "16-pixel squares while a body resolves -- is %s; level %u. If "
@@ -112,18 +118,16 @@ void fssScanConfigure(Config& cfg) {
             "fss_scan_level = 65535 under [advanced]: the level's meaning "
             "depends on the shader's comparison direction, and one flip "
             "tells us which way this one reads.",
-            g_steady ? "steady" : "stock",
-            g_steady ? "held uniform for exactly the body-layer draws that "
+            detail::g_fssScanSteady ? "steady" : "stock",
+            detail::g_fssScanSteady ? "held uniform for exactly the body-layer draws that "
                        "bind it"
                      : "the game's own",
             g_level);
     }
 }
 
-bool fssScanWantsDraws() { return g_steady; }
-
 bool fssScanOnBodyDraw() {
-    if (!g_steady) return false;
+    if (!detail::g_fssScanSteady) return false;
     g_slots = 0;
     for (uint32_t i = 0; i < 4; ++i) {
         const BindSlot slot =

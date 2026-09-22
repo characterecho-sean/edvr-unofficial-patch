@@ -16,6 +16,13 @@
 #include "shader_swap.h"
 
 namespace edvr {
+
+// fssPanelWantsDraws reads this from the header with no call: asked per
+// draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_fssPanelEnabled = false;
+}  // namespace detail
+
 namespace {
 
 // The pair, as dumped and transcribed. A game update that rebuilds them
@@ -24,7 +31,6 @@ namespace {
 constexpr uint64_t kColorHash   = 0xA888D51024D9798Eull;
 constexpr uint64_t kPrepassHash = 0xB018D143700AB803ull;
 
-bool  g_enabled = false;
 float g_factor = 1.0f;
 
 // The compiled pair, and the factor they were compiled at. A change
@@ -97,7 +103,7 @@ void ensureCompiled(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void fssPanelConfigure(Config& cfg) {
-    const bool  was = g_enabled;
+    const bool  was = detail::g_fssPanelEnabled;
     const float wasFactor = g_factor;
 
     // Stock by default. Inheriting panel_distance when the key is ABSENT
@@ -116,11 +122,11 @@ void fssPanelConfigure(Config& cfg) {
     g_factor = f;
     // Within a percent of stock there is nothing worth swapping a shader
     // pair for.
-    g_enabled = f < 0.99f || f > 1.01f;
+    detail::g_fssPanelEnabled = f < 0.99f || f > 1.01f;
 
-    if (g_enabled != was || (g_enabled && g_factor != wasFactor)) {
+    if (detail::g_fssPanelEnabled != was || (detail::g_fssPanelEnabled && g_factor != wasFactor)) {
         Log::get().note(
-            g_enabled
+            detail::g_fssPanelEnabled
                 ? "fss panel: the scanner's screen sits at %.2f of its stock "
                   "distance (%s). Angular size is unchanged -- the screen "
                   "moves, it does not grow."
@@ -136,11 +142,9 @@ void fssPanelConfigure(Config& cfg) {
     if (g_factor != wasFactor) g_compileTried = false;
 }
 
-bool fssPanelWantsDraws() { return g_enabled; }
-
 bool fssPanelOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances) {
-    if (!g_enabled || kind != 'X' || count != 6 || instances != 1 || !ctx) {
+    if (!detail::g_fssPanelEnabled || kind != 'X' || count != 6 || instances != 1 || !ctx) {
         return false;
     }
     // The hash read costs a VSGetShader on the few 6-index instanced quads

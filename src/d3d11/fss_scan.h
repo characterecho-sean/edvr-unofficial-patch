@@ -36,7 +36,13 @@ class Config;
 void fssScanConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set.
-bool fssScanWantsDraws();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_fssScanSteady;
+}  // namespace detail
+inline bool fssScanWantsDraws() { return detail::g_fssScanSteady; }
 
 // Called for a draw into the BODY-LAYER target only (vscreen gates on the
 // target being eye/2-sized or fss_res-inflated, cached per binding

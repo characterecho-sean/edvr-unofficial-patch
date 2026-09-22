@@ -38,7 +38,16 @@ namespace edvr {
 // Is a census pending or capturing? Read on the draw path; it is what keeps
 // beginPanelOverride counting eye draws while a census runs even when every
 // other subscriber of that count is off.
-bool drawCensusArmed();
+//
+// Inline: asked from beginPanelOverride on every draw, and the build has
+// no /GL to fold a cross-TU getter for two scalar loads.
+namespace detail {
+extern bool     g_drawCensusPending;
+extern uint32_t g_drawCensusFramesLeft;
+}  // namespace detail
+inline bool drawCensusArmed() {
+    return detail::g_drawCensusPending || detail::g_drawCensusFramesLeft > 0;
+}
 
 // The hotkey. Arms a capture of the next few WHOLE frames -- recording starts
 // at the coming frame boundary, so a census never contains a partial frame.
@@ -157,7 +166,13 @@ void drawCensusNoteUnseen(char why);
 // frame where an FSS view is hundreds, and three frames of that would spend
 // the line cap on the way past. Turned on only when the question is "where
 // is this drawn", which is exactly when the extra volume is the answer.
-bool drawCensusWantsOffscreen();
+//
+// Inline: asked per offscreen draw, and the build has no /GL to fold a
+// cross-TU getter for one bool load.
+namespace detail {
+extern bool g_drawCensusOffscreen;
+}  // namespace detail
+inline bool drawCensusWantsOffscreen() { return detail::g_drawCensusOffscreen; }
 
 // One draw that reached a target which is NOT an eye texture, recorded only
 // while a census is running AND advanced.census_offscreen is set. Same

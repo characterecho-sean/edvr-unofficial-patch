@@ -16,6 +16,17 @@
 #include "shader_swap.h"    // shaderSwapCompileCs: the series reducer
 
 namespace edvr {
+
+// fssDumpWantsDraws reads these from the header with no call: asked per
+// eye draw behind the body-frame gate, and the build has no /GL to fold a
+// cross-TU getter.
+namespace detail {
+uint32_t g_fssDumpFrame = 0;
+bool     g_fssDumpDone = false;
+uint32_t g_fssDumpSeriesWant = 0;
+bool     g_fssDumpSeriesDone = false;
+}  // namespace detail
+
 namespace {
 
 constexpr uint64_t kRingQuadHash  = 0x7E38A6AA1269C901ull;
@@ -46,11 +57,9 @@ const char* const kTags[kCheckpoints] = {"pre-ring",  "post-ring",
                                          "post-tone", "end-hdr", "end-ldr",
                                          "recon-in",  "recon-out"};
 
-uint32_t g_dumpFrame = 0;      // N from the key; 0 = off
 uint32_t g_bodyFrames = 0;     // distinct frames with matched draws
 uint32_t g_lastFrameNo = 0;
 bool     g_dumping = false;    // this frame is a dump frame
-bool     g_done = false;       // one dump per arming
 // TWO consecutive frames per dump (round 26): the scan art FLICKERS frame
 // to frame while real content holds still, so the difference between the
 // passes is an art map the single-frame hole counter never was -- ring
@@ -142,8 +151,6 @@ DXGI_FORMAT seriesTypedOf(DXGI_FORMAT f) {
         default:                               return f;   // already typed
     }
 }
-uint32_t g_seriesWant = 0;            // frames from the key; 0 = off
-bool     g_seriesDone = false;
 uint32_t g_seriesCount[2] = {};
 uint32_t g_seriesTw = 0, g_seriesTh = 0;
 ID3D11ComputeShader*       g_seriesCs = nullptr;
@@ -188,7 +195,7 @@ void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
         for (int e = 0; e < 2 && ok; ++e) {
             D3D11_TEXTURE2D_DESC ad{};
             ad.Width = tw;
-            ad.Height = th * g_seriesWant;
+            ad.Height = th * detail::g_fssDumpSeriesWant;
             ad.MipLevels = 1;
             ad.ArraySize = 1;
             ad.Format = DXGI_FORMAT_R32_FLOAT;
@@ -295,7 +302,7 @@ void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
     D3D11_MAPPED_SUBRESOURCE m{};
     if (SUCCEEDED(ctx->Map(g_seriesCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
         m.pData) {
-        uint32_t vals[4] = {(g_seriesRing % g_seriesWant) * g_seriesTh,
+        uint32_t vals[4] = {(g_seriesRing % detail::g_fssDumpSeriesWant) * g_seriesTh,
                             g_seriesTw, g_seriesTh, 0};
         memcpy(m.pData, vals, sizeof(vals));
         ctx->Unmap(g_seriesCb, 0);
@@ -373,8 +380,8 @@ void seriesWrite(ID3D11DeviceContext* ctx) {
                 Log::get().note(
                     "FSSSERIES eye=%d tw=%u th=%u frames=%u srcfmt=%u "
                     "ringstart=%u gate=%u file=%s", e, g_seriesTw,
-                    g_seriesTh, g_seriesWant, g_seriesFmt[e],
-                    g_seriesRing % g_seriesWant, g_seriesGateSlice, path);
+                    g_seriesTh, detail::g_fssDumpSeriesWant, g_seriesFmt[e],
+                    g_seriesRing % detail::g_fssDumpSeriesWant, g_seriesGateSlice, path);
             }
             ctx->Unmap(stage, 0);
         }
@@ -580,16 +587,16 @@ void fssDumpConfigure(Config& cfg) {
         if (n < 0) n = 0;
         if (n > static_cast<int>(kSeriesMax)) n = kSeriesMax;
         const uint32_t want = static_cast<uint32_t>(n);
-        if (want != g_seriesWant) {
-            g_seriesWant = want;
-            g_seriesDone = false;
+        if (want != detail::g_fssDumpSeriesWant) {
+            detail::g_fssDumpSeriesWant = want;
+            detail::g_fssDumpSeriesDone = false;
             g_seriesTried = false;
             g_seriesGateSlice = ~0u;
             g_seriesRing = 0;
             g_seriesTotal = 0;
             g_seriesAfter = 0;
             seriesRelease();
-            if (g_seriesWant) {
+            if (detail::g_fssDumpSeriesWant) {
                 Log::get().note(
                     "fss series ARMED: from the first scanner frame, every "
                     "submitted eye image is folded to a 16-pixel tile "
@@ -597,21 +604,21 @@ void fssDumpConfigure(Config& cfg) {
                     "written to edvr_logs\\dumps\\fssseries_eye*.bin "
                     "when the count fills. No hitches; the per-eye flash "
                     "CADENCE is the measurement.",
-                    g_seriesWant);
+                    detail::g_fssDumpSeriesWant);
             }
         }
     }
     const int n = cfg.getInt("advanced.fss_eye_dump", 0);
     const uint32_t want = n > 0 ? static_cast<uint32_t>(n) : 0;
-    if (want == g_dumpFrame) return;
-    g_dumpFrame = want;
+    if (want == detail::g_fssDumpFrame) return;
+    detail::g_fssDumpFrame = want;
     g_bodyFrames = 0;
     g_lastFrameNo = 0;
     g_dumping = false;
-    g_done = false;
+    detail::g_fssDumpDone = false;
     g_dumpPass = 0;
     g_armedNoted = false;
-    if (g_dumpFrame) {
+    if (detail::g_fssDumpFrame) {
         Log::get().note(
             "fss dump ARMED: on body frame %u after this note and again "
             "the frame after, both eyes are captured around the ring quad, "
@@ -620,12 +627,8 @@ void fssDumpConfigure(Config& cfg) {
             "per arm. Tiles that BLINK between the passes are the scan art; "
             "tiles that hold are content. Zoom a ringed body and let the "
             "build play.",
-            g_dumpFrame);
+            detail::g_fssDumpFrame);
     }
-}
-
-bool fssDumpWantsDraws() {
-    return (g_dumpFrame != 0 && !g_done) || (g_seriesWant != 0 && !g_seriesDone);
 }
 
 bool fssDumpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
@@ -708,7 +711,7 @@ void fssDumpDispatchPre(ID3D11DeviceContext* ctx) {
 }
 
 void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
-    const bool seriesLive = g_seriesWant != 0 && !g_seriesDone;
+    const bool seriesLive = detail::g_fssDumpSeriesWant != 0 && !detail::g_fssDumpSeriesDone;
     if ((!g_dumping && !seriesLive) || !ctx) return;
     guardedBudget(g_budget, [&] {
         // The output pass is matched by SHAPE, not hash: the 32c probe
@@ -785,11 +788,11 @@ void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
     // shared mapping by the openvr half at each Submit. A rolling ring:
     // every frame while armed, the gate position marked when the scanner
     // first draws, the window closed kSeriesPostGate frames later.
-    if (g_seriesWant && !g_seriesDone && ctx) {
+    if (detail::g_fssDumpSeriesWant && !detail::g_fssDumpSeriesDone && ctx) {
         guardedBudget(g_budget, [&] {
             static bool s_feedNoted = false;
             if (g_seriesGateSlice == ~0u && g_occComp != 0) {
-                g_seriesGateSlice = g_seriesRing % (g_seriesWant ? g_seriesWant : 1);
+                g_seriesGateSlice = g_seriesRing % (detail::g_fssDumpSeriesWant ? detail::g_fssDumpSeriesWant : 1);
                 Log::get().note("fss series: scanner gate opened at ring "
                                 "slice %u (total %u captured).",
                                 g_seriesGateSlice, g_seriesTotal);
@@ -826,11 +829,11 @@ void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
             if (g_seriesGateSlice != ~0u) ++g_seriesAfter;
         });
     }
-    if (g_seriesWant && !g_seriesDone && ctx &&
+    if (detail::g_fssDumpSeriesWant && !detail::g_fssDumpSeriesDone && ctx &&
         g_seriesGateSlice != ~0u && g_seriesAfter >= kSeriesPostGate &&
-        g_seriesTotal >= g_seriesWant) {
+        g_seriesTotal >= detail::g_fssDumpSeriesWant) {
         guardedBudget(g_budget, [&] { seriesWrite(ctx); });
-        g_seriesDone = true;
+        detail::g_fssDumpSeriesDone = true;
         seriesRelease();
     }
     const bool sawBody = g_occRing != 0 || g_occComp != 0;
@@ -854,7 +857,7 @@ void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
                 return;
             }
             g_dumping = false;
-            g_done = true;
+            detail::g_fssDumpDone = true;
             releaseAll();
             return;
         }
@@ -864,7 +867,7 @@ void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
                 g_armedNoted = true;
                 Log::get().note("fss dump: body frames counting.");
             }
-            if (g_bodyFrames == g_dumpFrame) g_dumping = true;
+            if (g_bodyFrames == detail::g_fssDumpFrame) g_dumping = true;
         }
     });
 }

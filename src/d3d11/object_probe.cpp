@@ -36,6 +36,15 @@
 #include "kinematic_eval_hook.h"
 
 namespace edvr {
+
+// objectProbeWantsDraws and objectProbeLedgerActive read these from the
+// header with no call: asked per eye draw, and the build has no /GL to
+// fold a cross-TU getter.
+namespace detail {
+bool g_objectProbeOn = false;
+bool g_objectProbeLedgerOn = false;
+}  // namespace detail
+
 namespace {
 
 constexpr uint32_t kRecordBytes = 336;   // docs/per-object-motion.md, question 5: 71 of 71 shaders
@@ -70,7 +79,6 @@ constexpr uint64_t kDumpEveryMs = 30000;
 constexpr uint32_t kDumpMax = 8;
 constexpr uint32_t kSceneSlot = 1;       // the scene block, VS b1: cb1[275] is the camera in the record's frame
 
-bool     g_on = false;        // the pool is copied and diffed (the probe, or the fix that reads it)
 bool     g_details = false;   // explicit temporal diagnostics; captures also opt in
 bool     g_verbose = false;   // advanced.object_probe: the totals, the dumps, the absent line
 bool     g_wasOn = false;
@@ -542,8 +550,7 @@ struct LedgerCopy {
     uint32_t frame = 0;
     bool     inUse = false;
 };
-bool     g_ledgerOn = false;
-bool steppedTrackingWanted() { return kObjectSteppedMotionEnabled || g_details || g_ledgerOn; }
+bool steppedTrackingWanted() { return kObjectSteppedMotionEnabled || g_details || detail::g_objectProbeLedgerOn; }
 wchar_t  g_ledgerStamp[16] = L"";
 uint32_t g_ledgerFrame0 = 0, g_ledgerLastFrame = 0;
 int      g_ledgerCropFrame[kLedgerCrops];
@@ -2283,7 +2290,7 @@ void enqueueDiff(const uint8_t* now, uint32_t bytes, float dtMs, const float* ca
         g_job.haveCamPrev = haveCamPrev;
         if (haveCamPrev) memcpy(g_job.camPrev, g_keepCam, sizeof(g_job.camPrev));
         g_job.lagFrames = lagFrames;
-        g_job.diagnostics = g_details || g_ledgerOn;
+        g_job.diagnostics = g_details || detail::g_objectProbeLedgerOn;
         g_jobPending = true;
         if (!g_worker) g_worker = new std::thread(workerMain);
     }
@@ -3235,7 +3242,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
     Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
-    g_ledgerOn = false;
+    detail::g_objectProbeLedgerOn = false;
     ledgerRelease();
     objectClassificationProbe.reset();
 }
@@ -3271,7 +3278,7 @@ void poll(ID3D11DeviceContext* ctx) {
             sceneBytes = s->sceneBytes;
         }
         if (steppedTrackingWanted()) trackFrame(bytes, s->bytes, s->frame, s->stampMs);
-        if (g_ledgerOn && s->frame >= g_ledgerFrame0 && s->frame <= g_ledgerLastFrame) {
+        if (detail::g_objectProbeLedgerOn && s->frame >= g_ledgerFrame0 && s->frame <= g_ledgerLastFrame) {
             g_ledgerPool[s->frame - g_ledgerFrame0].assign(bytes, bytes + s->bytes);   // the ledger's frame
         }
         if (s->role == 1) {
@@ -3362,10 +3369,8 @@ void objectProbeConfigure(Config& cfg) {
     g_details = cfg.getBool("advanced.temporal_aa_diagnostics", false);
     g_eyeDepthCapture.configure(cfg.getBool("advanced.eye_depth_capture", false));
     cullGateProbe.configure(cfg.getBool("advanced.cull_gate_capture", false));
-    g_on = g_verbose || temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    detail::g_objectProbeOn = g_verbose || temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
 }
-
-bool objectProbeWantsDraws() { return g_on || g_ledgerOn; }
 
 bool objectMotionGet(ObjectMotion* out) {
     if (!out) return false;
@@ -3410,7 +3415,7 @@ void objectShipsSetRange(float metres) {
 
 void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
                               uint32_t startInstance,uint32_t start,int32_t base) {
-    if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
+    if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureSource(ctx,g_frame+1,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),
                                  kind,count,instances,startInstance,start,base);
     g_drawSnapshot.captureSourceMesh(ctx,g_frame+1,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),
@@ -3424,13 +3429,13 @@ void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
         ++g_panelSkipped;
         g_panelCaptureArgs = {};
     }
-    if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
+    if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureEffectEnd(ctx);
     g_tonemapSnapshot.end(ctx);
 }
 
 void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx) {
-    if (!g_ledgerOn || !ctx || g_panelCaptureArgs.ctx != ctx) return;
+    if (!detail::g_objectProbeLedgerOn || !ctx || g_panelCaptureArgs.ctx != ctx) return;
     const PanelCaptureArgs args = g_panelCaptureArgs;
     g_panelCaptureArgs = {};
     if (args.frame != g_frame+1) {++g_panelSkipped;return;}
@@ -3440,20 +3445,70 @@ void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx) {
 }
 
 void objectProbePanelDrawEnd(ID3D11DeviceContext* ctx) {
-    if (g_ledgerOn && ctx) g_panelSnapshot.end(ctx);
+    if (detail::g_objectProbeLedgerOn && ctx) g_panelSnapshot.end(ctx);
 }
 
 void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
                                  uint32_t startInstance,uint32_t start,int32_t base) {
-    if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
+    if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs);if(!GuiDrawSnapshot::gui(vs))return;
     g_guiSnapshot.capture(ctx,g_frame+1,vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,start,base,startInstance);
 }
 
+namespace {
+
+// NOINLINE: buf->GetDesc writes into a local D3D11_BUFFER_DESC, which is
+// what earns objectProbeOnEyeDraw its /GS stack cookie despite this branch
+// running only when the pool buffer's identity first changes, not once per
+// draw. Lifted out verbatim (the precedent: vscreen.cpp's forwardQuadSkip,
+// device_hook.cpp's noteDeviceCreateFailure) so the per-draw function is
+// relieved of it.
+__declspec(noinline) void objectProbeNotePoolFirstSeen(ID3D11Buffer* buf) {
+    // The usage decides what an unwritten slot holds: a
+    // dynamic buffer is renamed on every discarding map,
+    // so a slot the game did not write this frame carries
+    // whatever the allocation held last time round -- a
+    // stale record, counted live (the 11:36 flight: 175-206
+    // "allocated" a pair against 3-20 freed, on the pad).
+    D3D11_BUFFER_DESC bd{};
+    buf->GetDesc(&bd);
+    const char* usage = bd.Usage == D3D11_USAGE_DEFAULT     ? "default"
+                        : bd.Usage == D3D11_USAGE_IMMUTABLE ? "immutable"
+                        : bd.Usage == D3D11_USAGE_DYNAMIC
+                            ? "dynamic (renamed on every discarding map: a slot the "
+                              "game did not write this frame may hold a stale record)"
+                            : "staging";
+    Log::get().note(
+        "object probe: the instanced-mesh pool is at VS t33 on the scene's draws -- "
+        "a structured buffer of %u bytes, %u records of %u (%.1f MB), object %p, "
+        "usage %s, cpu access 0x%X, bind 0x%X, misc 0x%X. Two frames in a row are "
+        "copied on the GPU every %u frames and read back late; the totals every 20 s "
+        "say whether a record keeps its slot between frames (question 3 of "
+        "docs\\per-object-motion.md), how many distinct rigid motions a frame carries "
+        "(question 6) and when the origin rebased (question 7). Nothing on the draw "
+        "path but one shader-resource read a second.",
+        g_poolBytes, g_records, kRecordBytes,
+        static_cast<double>(g_poolBytes) / 1048576.0,
+        static_cast<void*>(g_pool), usage, static_cast<unsigned>(bd.CPUAccessFlags),
+        static_cast<unsigned>(bd.BindFlags), static_cast<unsigned>(bd.MiscFlags),
+        kPairEvery);
+}
+
+// NOINLINE for the same reason: scene->GetDesc writes into a local
+// D3D11_BUFFER_DESC, only when the scene constant buffer's identity
+// changes.
+__declspec(noinline) void objectProbeNoteSceneChanged(ID3D11Buffer* scene) {
+    D3D11_BUFFER_DESC sd{};
+    scene->GetDesc(&sd);
+    g_sceneBytes = sd.ByteWidth;
+}
+
+}  // namespace
+
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
                           uint32_t startInstance,uint32_t start,int32_t base) {
-    if ((!g_on && !g_ledgerOn) || !ctx) return;
-    if (g_ledgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance,start,base);
+    if ((!detail::g_objectProbeOn && !detail::g_objectProbeLedgerOn) || !ctx) return;
+    if (detail::g_objectProbeLedgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance,start,base);
     if (g_checksLeft == 0) return;
     // The record-carrying families are instanced (question 5: every carrier
     // declares INSTANCEANDMODELDATAINDEX); a plain draw is not asked.
@@ -3487,34 +3542,7 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
                 if (had) ++g_poolChanges;
                 if (!g_noted) {
                     g_noted = true;
-                    // The usage decides what an unwritten slot holds: a
-                    // dynamic buffer is renamed on every discarding map,
-                    // so a slot the game did not write this frame carries
-                    // whatever the allocation held last time round -- a
-                    // stale record, counted live (the 11:36 flight: 175-206
-                    // "allocated" a pair against 3-20 freed, on the pad).
-                    D3D11_BUFFER_DESC bd{};
-                    buf->GetDesc(&bd);
-                    const char* usage = bd.Usage == D3D11_USAGE_DEFAULT     ? "default"
-                                        : bd.Usage == D3D11_USAGE_IMMUTABLE ? "immutable"
-                                        : bd.Usage == D3D11_USAGE_DYNAMIC
-                                            ? "dynamic (renamed on every discarding map: a slot the "
-                                              "game did not write this frame may hold a stale record)"
-                                            : "staging";
-                    Log::get().note(
-                        "object probe: the instanced-mesh pool is at VS t33 on the scene's draws -- "
-                        "a structured buffer of %u bytes, %u records of %u (%.1f MB), object %p, "
-                        "usage %s, cpu access 0x%X, bind 0x%X, misc 0x%X. Two frames in a row are "
-                        "copied on the GPU every %u frames and read back late; the totals every 20 s "
-                        "say whether a record keeps its slot between frames (question 3 of "
-                        "docs\\per-object-motion.md), how many distinct rigid motions a frame carries "
-                        "(question 6) and when the origin rebased (question 7). Nothing on the draw "
-                        "path but one shader-resource read a second.",
-                        g_poolBytes, g_records, kRecordBytes,
-                        static_cast<double>(g_poolBytes) / 1048576.0,
-                        static_cast<void*>(g_pool), usage, static_cast<unsigned>(bd.CPUAccessFlags),
-                        static_cast<unsigned>(bd.BindFlags), static_cast<unsigned>(bd.MiscFlags),
-                        kPairEvery);
+                    objectProbeNotePoolFirstSeen(buf);
                 }
             } else {
                 buf->Release();
@@ -3529,9 +3557,7 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
                 if (scene != g_scene) {
                     if (g_scene) g_scene->Release();
                     g_scene = scene;   // the Get's reference is the one held
-                    D3D11_BUFFER_DESC sd{};
-                    scene->GetDesc(&sd);
-                    g_sceneBytes = sd.ByteWidth;
+                    objectProbeNoteSceneChanged(scene);
                 } else {
                     scene->Release();
                 }
@@ -3544,7 +3570,7 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 }
 
 void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
-    if (!g_on && !g_ledgerOn) {
+    if (!detail::g_objectProbeOn && !detail::g_objectProbeLedgerOn) {
         if (cullGateProbe.armed()) closeGateProbe();   // switched off mid-window: release the relays
         if (g_wasOn) {
             // Switched off live: the copies and the reference go, the
@@ -3552,7 +3578,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             if (g_verbose) report();
             releaseRing();
             releasePool();
-            g_ledgerOn = false;
+            detail::g_objectProbeLedgerOn = false;
             g_wasOn = false;
             g_noted = false;
             {
@@ -3606,7 +3632,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
         }
         // A non-pool celestial/UI capture must still finish and report its
         // draw snapshots, even if no scene instance pool was discovered.
-        if (g_ledgerOn) {
+        if (detail::g_objectProbeLedgerOn) {
             if (g_frame <= g_ledgerLastFrame) ledgerIssue(ctx);
             ledgerPoll(ctx);
             for (AuxSlot& a : g_aux) a.seenThisFrame = false;
@@ -3620,15 +3646,13 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     }
 }
 
-bool objectProbeLedgerActive() { return g_ledgerOn; }
-
 void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                              uint32_t instances, uint32_t startInstance,uint32_t start,int32_t base) {
     if (objectProbeLedgerActive() && ctx) ledgerNoteDraw(ctx, kind, count, instances, startInstance,start,base);
 }
 
 void objectProbeArmLedger(const wchar_t* stamp) {
-    if (g_ledgerOn) return;
+    if (detail::g_objectProbeLedgerOn) return;
     wcsncpy_s(g_ledgerStamp, 16, stamp ? stamp : L"000000", _TRUNCATE);
     g_ledgerFrame0 = g_frame + 1;   // this frame's draws get their copy at the next boundary
     g_ledgerLastFrame = g_ledgerFrame0 + static_cast<uint32_t>(kLedgerFrames) - 1u;
@@ -3642,7 +3666,7 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     }
     g_ledgerSkipped = 0;
     ledgerRelease();
-    g_ledgerOn = true;
+    detail::g_objectProbeLedgerOn = true;
     g_gateRun = false;
     g_eyeMeshSnapshot.armGeometry(0);
     if (cullGateProbe.enabled()) armGateProbe();   // advanced.cull_gate_capture rides the eye run
@@ -3659,7 +3683,7 @@ void objectProbeArmLedger(const wchar_t* stamp) {
 }
 
 void objectProbeLedgerMark(int k) {
-    if (!g_ledgerOn || k < 0 || k >= kLedgerCrops) return;
+    if (!detail::g_objectProbeLedgerOn || k < 0 || k >= kLedgerCrops) return;
     g_ledgerCropFrame[k] = static_cast<int>(g_frame + 1);   // as ledgerNoteDraw counts this frame
 }
 
@@ -3669,8 +3693,8 @@ void objectProbeShutdown() {
     stopWorker();
     releaseRing();
     releasePool();
-    g_ledgerOn = false;
-    g_on = false;
+    detail::g_objectProbeLedgerOn = false;
+    detail::g_objectProbeOn = false;
     g_wasOn = false;
     std::lock_guard<std::mutex> lk(g_publish);
     g_motionPubValid = false;

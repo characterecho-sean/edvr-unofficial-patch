@@ -16,6 +16,13 @@
 #include "exposure_fix.h"   // lookupShaderHash
 
 namespace edvr {
+
+// fssProbeWants reads this from the header with no call: asked per eye
+// draw while armed, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_fssProbeArmed = false;
+}  // namespace detail
+
 namespace {
 
 // The body composite, as every capture since round two has named it.
@@ -38,7 +45,6 @@ uint32_t packedColor(ProbeColor c) {
     return 0u;
 }
 
-bool       g_armed = false;
 bool       g_depthMode = false;   // "depth": disable the depth test for the
                                   // composite instead of touching a slot --
                                   // the one per-eye input (the depth buffer)
@@ -142,14 +148,14 @@ void fssProbeConfigure(Config& cfg) {
     if (spec.length() >= sizeof(g_spec) || spec == g_spec) return;
     memcpy(g_spec, spec.c_str(), spec.length() + 1);
 
-    const bool wasArmed = g_armed;
+    const bool wasArmed = detail::g_fssProbeArmed;
     const uint64_t had = g_applied;
-    g_armed = false;
+    detail::g_fssProbeArmed = false;
     g_depthMode = false;
     g_blendMode = false;
     g_engagedNoted = false;
     if (spec == "blend") {
-        g_armed = true;
+        detail::g_fssProbeArmed = true;
         g_blendMode = true;
         Log::get().note(
             "fss probe ARMED: the body composite draws OPAQUE, no blending. "
@@ -160,7 +166,7 @@ void fssProbeConfigure(Config& cfg) {
         return;
     }
     if (spec == "depth") {
-        g_armed = true;
+        detail::g_fssProbeArmed = true;
         g_depthMode = true;
         Log::get().note(
             "fss probe ARMED: the body composite draws with its DEPTH TEST "
@@ -193,7 +199,7 @@ void fssProbeConfigure(Config& cfg) {
             return;
         }
         g_slot = static_cast<uint32_t>(spec[0] - '0');
-        g_armed = true;
+        detail::g_fssProbeArmed = true;
         Log::get().note(
             "fss probe ARMED: the body composite's PS slot %u is replaced "
             "with flat %s for exactly that draw. Zoom a body and look; "
@@ -207,11 +213,9 @@ void fssProbeConfigure(Config& cfg) {
     }
 }
 
-bool fssProbeWants() { return g_armed; }
-
 bool fssProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances) {
-    if (!g_armed || kind != 'N' || count != 6 || instances != 1 || !ctx) {
+    if (!detail::g_fssProbeArmed || kind != 'N' || count != 6 || instances != 1 || !ctx) {
         return false;
     }
     uint64_t h = 0;
@@ -228,7 +232,7 @@ void fssProbeBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_depthEngaged = false;
     g_blendEngaged = false;
-    if (!ctx || !g_armed) return;
+    if (!ctx || !detail::g_fssProbeArmed) return;
     if (g_blendMode) {
         guardedBudget(g_budget, [&] {
             if (!g_noBlend) {

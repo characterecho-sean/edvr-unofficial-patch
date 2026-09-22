@@ -100,7 +100,13 @@ class Config;
 void loaderPanelConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.
-bool loaderPanelWants();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_loaderPanelOn;
+}  // namespace detail
+inline bool loaderPanelWants() { return detail::g_loaderPanelOn; }
 
 // True on frames where the game wanted its scrim (a withhold happened this
 // frame or a couple back). splash_dim.h rides this to dim the splash

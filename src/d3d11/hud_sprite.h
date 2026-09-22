@@ -67,7 +67,16 @@ class Config;
 void hudSpriteConfigure(Config& cfg);
 
 // False in stock mode and once stood down, which keeps the draw path free.
-bool hudSpriteWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for two bool loads.
+namespace detail {
+extern bool g_hudSpriteSharp;
+extern bool g_hudSpriteFailed;
+}  // namespace detail
+inline bool hudSpriteWantsDraws() {
+    return detail::g_hudSpriteSharp && !detail::g_hudSpriteFailed;
+}
 
 // Is this eye draw one of the atlas quads? Shape first (six vertices, one
 // instance), then slot 0 being a small Texture2D, then the vertex shader's

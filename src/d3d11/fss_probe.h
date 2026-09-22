@@ -34,7 +34,13 @@ void fssProbeConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set; also keeps the body-frame
 // stamp maintained while a probe is armed.
-bool fssProbeWants();
+//
+// Inline: asked per eye draw while armed, and the build has no /GL to fold
+// a cross-TU getter for one bool load.
+namespace detail {
+extern bool g_fssProbeArmed;
+}  // namespace detail
+inline bool fssProbeWants() { return detail::g_fssProbeArmed; }
 
 // Called for eye draws while armed: matches the composite by kind/count
 // then vertex-shader hash. True means wrap in fssProbeBegin/End.

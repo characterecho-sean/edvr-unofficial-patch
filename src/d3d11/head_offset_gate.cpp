@@ -7,6 +7,16 @@
 #include "../common/timing.h"
 
 namespace edvr {
+
+// headOffsetGateWantsPanel reads this from the header with no call:
+// asked by the render hooks per eye-sized draw, and the build has no /GL
+// to fold a cross-TU getter. Out here, not in Gate, because Gate is reset
+// wholesale (g = Gate()) in headOffsetGateReset -- see the explicit reset
+// there, which mirrors this field's default member initializer.
+namespace detail {
+bool g_headOffsetGateWantsPanel = false;
+}  // namespace detail
+
 namespace {
 
 // EVERY THRESHOLD BELOW IS A DURATION, so it is milliseconds. See timing.h for
@@ -94,7 +104,6 @@ constexpr uint64_t kHeartbeatMs = 6700;
 // player in one mode -- and keeping it out of the render hooks' State is what
 // lets the same logic serve both builds instead of being forked into each.
 struct Gate {
-    bool     gateWantsPanel = false;     // config: is the gate switched on
     uint32_t gatePanelRun = 0;           // consecutive frames settled on the panel
     uint32_t gateSincePanel = 0;         // frames since the panel was last seen
     uint32_t gateIdleFrames = 0;         // frames with neither panel nor scene
@@ -215,7 +224,7 @@ void headOffsetGateConfigure() {
     // The gate costs a GetDesc per eye-sized draw, so it is only paid for when
     // something wants the answer. Default ON: the head offset it feeds is the
     // feature, and an ungated offset moves the cockpit view.
-    g.gateWantsPanel = cfg.getBool("fix.head_offset_gate", true);
+    detail::g_headOffsetGateWantsPanel = cfg.getBool("fix.head_offset_gate", true);
     // 60, not 5.
     //
     // 5 came from two entries that both logged "2 frames", and a sample of two
@@ -269,6 +278,11 @@ void headOffsetGateReset() {
     const bool keyBound = g.gateKeyBound;   // config, not state
     g = Gate();
     g.gateKeyBound = keyBound;
+    // gateWantsPanel used to be a Gate member and so was reset to false by
+    // g = Gate() above like every other field; it moved out to detail (see
+    // head_offset_gate.cpp's namespace-open comment), so that reset is now
+    // spelled out here to keep this call doing exactly what it did before.
+    detail::g_headOffsetGateWantsPanel = false;
     // Publish OFF explicitly before going quiet. A reader that only sees the
     // heartbeat stop has to wait out its staleness window; one that is told
     // stops immediately.
@@ -519,8 +533,6 @@ void headOffsetGateViewUnbumped() { headOffsetGateStepView(-1); }
 
 void headOffsetGateSetView(int view) { g.viewOverride = view; }
 
-bool headOffsetGateWantsPanel() { return g.gateWantsPanel; }
-
 bool headOffsetGateInCamera() { return g.gateInCamera; }
 
 bool headOffsetGatePanelSettled() { return g.panelSettled; }
@@ -528,7 +540,7 @@ bool headOffsetGatePanelSettled() { return g.panelSettled; }
 void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraws) {
     g.gateFrameNo = frameNo;    // the clock NewFootSession dedupes against
     g.panelSettled = false;     // recomputed every frame, below
-    if (!g.gateWantsPanel) {
+    if (!detail::g_headOffsetGateWantsPanel) {
         // Switched off: CLEAR, do not freeze.
         //
         // This used to be a bare early return, which stopped the exits, the

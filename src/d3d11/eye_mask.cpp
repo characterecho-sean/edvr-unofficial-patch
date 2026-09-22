@@ -25,9 +25,19 @@
 // mechanism and the cross-DLL ABI. This file is the implementation only.
 
 namespace edvr {
+
+// eyeMaskWantsDraws reads this from the header with no call: asked per
+// draw, and the build has no /GL to fold a cross-TU getter. EyeMaskMode
+// itself is declared in the header, so the inline function there can name
+// its Off value.
+namespace detail {
+EyeMaskMode g_eyeMaskMode = EyeMaskMode::Off;
+}  // namespace detail
+
 namespace {
 
 using Microsoft::WRL::ComPtr;
+using Mode = detail::EyeMaskMode;
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -150,8 +160,6 @@ DeviceResources g_res;
 
 // -------------------------------------------------------------- config/state
 
-enum class Mode { Off, Auto, Lens };
-Mode g_mode = Mode::Off;
 int g_trimDeg = 0;
 bool g_loggedOff = false;
 
@@ -504,7 +512,7 @@ void maybeLogEffectiveChange(int eye, int targetIdx, const EyeMaskGeometry& geom
     es.lastL = l; es.lastR = r; es.lastD = d; es.lastU = u;
 
     const float pct = maskedFraction(geom) * 100.0f;
-    const char* modeText = g_mode == Mode::Auto ? "auto" : (g_mode == Mode::Lens ? "lens" : "off");
+    const char* modeText = detail::g_eyeMaskMode == Mode::Auto ? "auto" : (detail::g_eyeMaskMode == Mode::Lens ? "lens" : "off");
 
     char triText[64];
     if (reported) {
@@ -578,11 +586,11 @@ void eyeMaskConfigure(Config& cfg) {
     }
 
     const int newTrim = cfg.getIntInRange("fix.eye_mask_trim", 0, -15, 30);
-    const bool changed = (newMode != g_mode) || (newTrim != g_trimDeg);
-    g_mode = newMode;
+    const bool changed = (newMode != detail::g_eyeMaskMode) || (newTrim != g_trimDeg);
+    detail::g_eyeMaskMode = newMode;
     g_trimDeg = newTrim;
 
-    if (g_mode != Mode::Off) {
+    if (detail::g_eyeMaskMode != Mode::Off) {
         g_loggedOff = false;
         if (changed) {
             g_eyeState[0].forceLog = true;
@@ -593,10 +601,8 @@ void eyeMaskConfigure(Config& cfg) {
     }
 }
 
-bool eyeMaskWantsDraws() { return g_mode != Mode::Off; }
-
 void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* dsvIdentity) {
-    if (g_mode == Mode::Off || !ctx) return;
+    if (detail::g_eyeMaskMode == Mode::Off || !ctx) return;
     if ((g_maskedEyesThisFrameBits & 3u) == 3u) return;   // both eyes already handled
     // Cheap pointer compare against each eye's DSV identity this frame,
     // before paying OMGetRenderTargets + depthProbeSceneEyeOf again --
@@ -655,7 +661,7 @@ void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* dsvIdentity) {
 
     uint32_t triL = 0, triR = 0;
     const bool reported = runtimeMaskTriangles(&triL, &triR);
-    if (g_mode == Mode::Auto && !reported) {
+    if (detail::g_eyeMaskMode == Mode::Auto && !reported) {
         dsv->Release();
         noteWaiting(kReasonNotReported);
         return;
@@ -667,7 +673,7 @@ void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* dsvIdentity) {
     ++g_eyeState[eye].framesObserved;
 
     bool shouldDraw = true;
-    if (g_mode == Mode::Auto) {
+    if (detail::g_eyeMaskMode == Mode::Auto) {
         // Runtime already gives a mask: only add to it if trim asks for
         // more (trim > 0). Runtime gives none (0 triangles): draw ours.
         shouldDraw = (reported && myTri > 0) ? (g_trimDeg > 0) : true;
@@ -704,7 +710,7 @@ void eyeMaskOnEyeDraw(ID3D11DeviceContext* ctx, void* dsvIdentity) {
 }
 
 void eyeMaskOnClear(void* dsv) {
-    if (g_mode == Mode::Off || !dsv) return;
+    if (detail::g_eyeMaskMode == Mode::Off || !dsv) return;
     for (int eye = 0; eye < 2; ++eye) {
         EyeState& es = g_eyeState[eye];
         if (es.drawnDsv == dsv && es.frameDrawn == g_frameNo) {
@@ -720,7 +726,7 @@ void eyeMaskFrameBoundary(ID3D11DeviceContext* ctx) {
     g_maskedEyesThisFrameBits = 0;
     g_maskedDsvThisFrame[0] = nullptr;
     g_maskedDsvThisFrame[1] = nullptr;
-    if (g_mode != Mode::Off) logSummaryIfDue();
+    if (detail::g_eyeMaskMode != Mode::Off) logSummaryIfDue();
 }
 
 void eyeMaskShutdown() {

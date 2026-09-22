@@ -52,7 +52,13 @@ class Config;
 void resolveBindConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set.
-bool resolveBindWants();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_resolveBindOn;
+}  // namespace detail
+inline bool resolveBindWants() { return detail::g_resolveBindOn; }
 
 // True when this eye draw is the lighting resolve (matched by PIXEL shader
 // content hash, the same key resolve_probe matches on). Uses the owner

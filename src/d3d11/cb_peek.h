@@ -34,7 +34,12 @@ class Config;
 
 // Retired instrument (no keys read; always off): the decode arcs are closed.
 void cbPeekConfigure(Config& cfg);
-bool cbPeekEnabled();
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_cbPeekOn;
+}  // namespace detail
+inline bool cbPeekEnabled() { return detail::g_cbPeekOn; }
 
 // Every eye draw while enabled: matches the sprite family (the flare and
 // corona material -- DrawIndexedInstanced, eye-sized depth in PS slot 0,

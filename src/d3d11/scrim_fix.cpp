@@ -12,6 +12,13 @@
 #include "binding_shadow.h"
 
 namespace edvr {
+
+// scrimWantsDraws reads this from the header with no call: asked per
+// draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_scrimOn = false;
+}  // namespace detail
+
 namespace {
 
 // The wash's own texture: sixteen pixels, block-compressed, stretched across
@@ -43,7 +50,6 @@ bool isBc1(uint32_t fmt) {
            fmt == DXGI_FORMAT_BC1_UNORM_SRGB;
 }
 
-bool     g_on = false;
 // 0, and the disassembly is why. From ps 9107E72CB016CC02:
 //
 //   mad r0.xyzw, r2.xyzw, r0.xxxx, r3.xyzw   ; r0.x, r0.y are the t0 samples
@@ -173,35 +179,33 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void scrimConfigure(Config& cfg) {
-    const bool was = g_on;
+    const bool was = detail::g_scrimOn;
     const std::string m = cfg.getString("fix.loading_dim", "screen");
     const LoadingDimMode dm = loadingDimParse(m);
     if (!dm.recognised) {
         Log::get().note("loading_dim \"%s\" is not screen or stock; running "
                         "the default, screen.", m.c_str());
     }
-    g_on = dm.washOff;
+    detail::g_scrimOn = dm.washOff;
     g_level = static_cast<uint32_t>(
         cfg.getIntInRange("advanced.loading_dim_level", 0, 0, 255));
 
-    if (was != g_on) {
+    if (was != detail::g_scrimOn) {
         resetMetadataCaches();
         Log::get().note(
             "loading dim: %s. The wash the loader's dialog lays over "
             "everything behind it is %s; level %u. Found by diffing two "
             "censuses -- it is a 16x16 texture stretched over the interface "
             "composite, not a draw of its own (docs/loading-scrim.md).",
-            g_on ? "OFF" : "stock",
-            g_on ? "replaced with a uniform for that one draw"
+            detail::g_scrimOn ? "OFF" : "stock",
+            detail::g_scrimOn ? "replaced with a uniform for that one draw"
                  : "the game's own",
             g_level);
     }
 }
 
-bool scrimWantsDraws() { return g_on; }
-
 bool scrimOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
-    if (!g_on) return false;
+    if (!detail::g_scrimOn) return false;
     if (kind != kKind || instances != kInstances || count < kMinIndices) {
         return false;
     }
