@@ -507,14 +507,16 @@ void dropLine(const Frame& f, float budgetMs) {
         "monitor: %s -- %.1f ms between Presents (budget %.1f), of which the thread waited %.1f in "
         "Present and %.1f in WaitGetPoses (busy %.1f); %s; the game's creations in it: %u "
         "textures, %u buffers (%.1f MB together), %u shaders; EDVR this frame: boundary %.2f ms, "
-        "door %.2f ms, draw hooks ~%.2f ms (sampled), door GPU %.2f ms; EDVR events: %s.%s At most "
+        "door %.2f ms, draw hooks ~%.2f ms (sampled: every %uth draw of a sampled frame, scaled), "
+        "door GPU %.2f ms; EDVR events: %s.%s At most "
         "one of these lines every %u s, %u a session.",
         f.dropped ? "DROPPED FRAME" : "LONG FRAME", static_cast<double>(f.presentMs),
         static_cast<double>(budgetMs), static_cast<double>(f.presentWaitMs),
         static_cast<double>(f.posesWaitMs), static_cast<double>(busy > 0.0f ? busy : 0.0f), comp,
         f.createTextures, f.createBuffers, static_cast<double>(f.createMb), f.createShaders,
         static_cast<double>(f.cpuBoundaryMs), static_cast<double>(f.cpuDoorMs),
-        static_cast<double>(f.cpuDrawsMs), static_cast<double>(f.doorGpuMs), ev, stamp,
+        static_cast<double>(f.cpuDrawsMs), static_cast<unsigned>(kPerfMonitorDrawTimeStride),
+        static_cast<double>(f.doorGpuMs), ev, stamp,
         static_cast<unsigned>(kDropLogEveryMs / 1000), kDropLogMax);
 }
 
@@ -824,7 +826,12 @@ void perfMonitorFrame(ID3D11Device* dev) {
     f.eventMs = static_cast<float>(s.eventUs.exchange(0)) / 1000.0f;
     f.cpuDoorMs = static_cast<float>(takeDoorCpuUs()) / 1000.0f;
     if (detail::g_perfMonitorSampleDraws && qpcFrequency() > 0) {
-        const int64_t own = s.drawWholeTicks - s.drawRealTicks;
+        // Scaled: only every kPerfMonitorDrawTimeStride-th draw of a sampled
+        // frame is clocked (perf_monitor.h says why), so the frame's figure is
+        // the clocked draws' own time times the stride -- an estimate of the
+        // same quantity the line has always reported, not a new one.
+        const int64_t own = (s.drawWholeTicks - s.drawRealTicks) *
+                            static_cast<int64_t>(kPerfMonitorDrawTimeStride);
         s.drawsMsRunning = own > 0 ? static_cast<float>(static_cast<double>(own) * 1000.0 /
                                                         static_cast<double>(qpcFrequency()))
                                    : 0.0f;
@@ -837,9 +844,10 @@ void perfMonitorFrame(ID3D11Device* dev) {
     // explain a settlement's many thousands of hook invocations. Average
     // only measured frames, never the held value copied into the ring.
     if (s.frameNo % 1800 == 0) {
-        Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); excludes forwarded game draw time, includes EDVR reissues; zero samples means unavailable.",
+        Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); excludes forwarded game draw time, includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every %uth draw, scaled by %u.",
             s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
-            double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery));
+            double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
+            unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
     }
     f.cpuDrawsMs = s.drawsMsRunning;

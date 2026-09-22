@@ -13,6 +13,51 @@ constexpr uint64_t kUiDeferredGlassVs=0xF512712C40D93C12ull;
 constexpr uint64_t kUiDeferredGlassPs=0x4A71EB0D34E9F2EFull;
 class Config;
 void uiDeferredConfigure(Config&);
+
+// CAN THE PER-DRAW FAMILY BELOW DO ANYTHING THIS FRAME?
+//
+// forwardWithVerdict calls eight of these per owner-context draw --
+// TraceDrawEnter, BeforeDraw, TraceBeforeTone, BeforeTone, Begin,
+// TraceOriginalIssued, WorldReplayBegin, End -- about 18k times a frame each,
+// and in a session without an external temporal engine every one of them
+// returned without effect: 0.33 ms a frame of cross-TU calls in the flown
+// profile of 2026-09-22 (this build is /O2 with no /GL). The draw path now
+// asks this once per draw and skips the family when it is false.
+//
+// WHY FALSE MEANS NOTHING WOULD HAPPEN. False is `enabled` off and no
+// diagnostic window ever requested (diagnosticUntilGeneration == 0), so
+// diagnosticWindow() is false too. Then, in ui_deferred.cpp:
+//   - TraceDrawEnter returns on `!enabled && !diagnosticWindow()`.
+//   - BeforeDraw returns on `!active && !diagnosticWindow()`, and `active`
+//     (either eye's capture count) is zero: counts grow only inside begin(),
+//     which requires `enabled`, and uiDeferredFrameBoundary zeroes them.
+//   - BeforeTone reports or counts only while `observe` (the same counts, or
+//     the diagnostic window) or `enabled` -- all false.
+//   - Begin: begin() opens with `if(!enabled ...) return false`, so
+//     `deferred` is false either way.
+//   - TraceBeforeTone and TraceOriginalIssued act only on writerTracePending
+//     >= 0, which uiDeferredFrameBoundary resets to -1 every frame and which
+//     only TraceDrawEnter's body (not reached) sets.
+//   - WorldReplayBegin and End act only on state begin() sets and End clears
+//     within the same draw.
+// The entry resets the family performs (writerTracePending = -1,
+// routeHandledThisDraw = false) are therefore either already in their reset
+// state, or -- routeHandledThisDraw after a draw that returned early -- never
+// read before the next draw that runs the family resets it first, since
+// BeforeDraw always precedes Begin within one call.
+//
+// AND IT CANNOT CHANGE MID-FRAME: `enabled` and diagnosticUntilGeneration are
+// written by uiDeferredConfigure (the config poll, at Present), by
+// uiDeferredShutdown, and by decline() -- which clears `enabled` but opens a
+// diagnostic window in the same statement, so this stays true.
+namespace detail {
+extern bool g_uiDeferredEnabled;
+extern uint64_t g_uiDeferredDiagnosticUntil;
+}  // namespace detail
+inline bool uiDeferredMayAct() {
+    return detail::g_uiDeferredEnabled || detail::g_uiDeferredDiagnosticUntil != 0;
+}
+
 void uiDeferredRemember(ID3D11DeviceChild*,const void*,size_t,bool linked);
 void uiDeferredBeforeDraw(ID3D11DeviceContext*, char kind, uint32_t count,
                           uint32_t instances, uint32_t start, int32_t base,

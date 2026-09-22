@@ -151,6 +151,20 @@ void perfMonitorNotePresentWait(double ms);
 // can only be made cheap to ask.
 namespace detail { extern bool g_perfMonitorSampleDraws; }
 inline bool perfMonitorSampleDraws() { return detail::g_perfMonitorSampleDraws; }
+
+// ...and on a sample frame, only every this-many-th draw is clocked; the
+// frame's figure is scaled back up by the same factor (perf_monitor.cpp).
+//
+// Clocking every draw of a sampled frame took four QueryPerformanceCounter
+// reads a draw -- about 72k at a settlement, ~1.8 ms spent on ONE frame in
+// sixteen: a periodic hitch the flown profile of 2026-09-22 averaged to 0.11
+// ms a frame. At one draw in 64 the sampled frame pays ~1.1k clock reads,
+// under 0.03 ms. The line keeps its meaning -- EDVR's own time in the draw
+// hooks on a sampled frame, forwarded draw excluded -- and now says that it
+// is an estimate. The selection is by draw ordinal on the drawing thread, so
+// a scene whose costly draws recur with a period of exactly 64 would bias it;
+// nothing in a frame's draw order is known to.
+constexpr uint32_t kPerfMonitorDrawTimeStride = 64;
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
 
 void perfMonitorShutdown();

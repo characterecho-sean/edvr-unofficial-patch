@@ -19,12 +19,20 @@
 #include <memory>
 #include <vector>
 
+// The two flags uiDeferredMayAct() reads inline (ui_deferred.h). Out here only
+// so the header can see them; the names this file has always used are bound
+// to them below, so every line of it reads -- and writes -- exactly as before.
+namespace edvr { namespace detail {
+bool g_uiDeferredEnabled = false;
+uint64_t g_uiDeferredDiagnosticUntil = 0;
+} }
+
 namespace edvr { namespace {
 template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 thread_local bool inside=false;
 thread_local bool routeHandledThisDraw=false;
 struct Scope { bool before=inside; Scope(){inside=true;} ~Scope(){inside=before;} };
-bool enabled=false;
+bool& enabled = detail::g_uiDeferredEnabled;
 bool failed=false,resetPending[2]{};
 constexpr uint64_t kToneVsConstantExposure=0x642017A6FEDAE0E8ull;
 constexpr uint64_t kPostToneVs=0x20F383BBAC05C031ull,kPostTonePs=0xDED8796049C7BB4Aull;
@@ -138,7 +146,7 @@ struct DiagnosticCounters {
     uint64_t postToneCaptures=0,tailCaptures=0;
 } diagnostic;
 uint64_t generation=1;
-uint64_t diagnosticUntilGeneration=0;
+uint64_t& diagnosticUntilGeneration = detail::g_uiDeferredDiagnosticUntil;
 unsigned toneReports=0,aliasReports=0,prepareReports=0,postToneReports=0,lateCompositeReports=0,boundaryReports=0;
 unsigned routeCaptureReports=0;
 struct CaptureFailure { uint64_t vs=0,ps=0;std::string reason;char stage=0;int slot=-1; };
