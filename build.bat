@@ -1916,6 +1916,17 @@ python "%ROOT%\tools\pool_pair.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === eye-run ledger self-test ===
+REM The reader of the object probe's eye-run ledger (draws_HHMMSS.bin beside
+REM the crops, since 2026-09-10; version 2 rows since 2026-09-21 also carry
+REM the pixel shader hash and the render-target token). Its row layout must
+REM match LedgerDraw in src\d3d11\object_probe.cpp byte for byte -- a field
+REM one off reads as a plausible table of draws. It fails HERE.
+python "%ROOT%\tools\eye_run_ledger.py" --self-test || (
+    echo [edvr] ERROR: the eye-run ledger tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === eye-split diff self-test ===
 REM The tool that compares the two eyes of one frame. It registers the
 REM eyes before it compares them, because their projections are off-centre

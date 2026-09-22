@@ -6,21 +6,115 @@ python eye_run_ledger.py <edvr_logs\\pool> <HHMMSS> [--hub-radius 500] [--ring-r
 
 Reads draws_<stamp>.bin (a 160-byte header: magic, version, frames, frame0, the instance
 stream's stride, the palette's stride, the pool's bytes, then 32 crop-to-frame entries; then per
-frame the frame, a count and 24-byte rows: the vertex shader hash, the vertex or index count,
-the instance count, the start instance, the draw kind, and whether t33 was the pool), and for
-each frame pool_<stamp>_<frame>.bin (the pair dumps' format), inst_<stamp>_<frame>.bin (the
-instance stream: 8 bytes an instance, the record index first) and bones_<stamp>_<frame>.bin (the
-palette's first megabyte, 48-byte rows: three float4 rows of a 3x4 matrix).
+frame the frame, a count and the rows). Version 1 rows are 24 bytes: the vertex shader hash, the
+vertex or index count, the instance count, the start instance, the draw kind, and whether t33 was
+the pool. Version 2 rows are 40 bytes and add the pixel shader hash and the render-target token:
+the census intern id of the bound RTV (the same @N a census line's r= token carries, so a row
+joins a census line), -1 for no RTV bound (a depth-only or shadow pass), -2 when the census's
+intern table was full. The per-row RT token distinguishes EVERY distinct render-target view --
+the two eye targets intern separately, as do offscreen targets; only a depth-only pass reads -1.
+And for each frame pool_<stamp>_<frame>.bin (the pair dumps' format), inst_<stamp>_<frame>.bin
+(the instance stream: 8 bytes an instance, the record index first) and bones_<stamp>_<frame>.bin
+(the palette's first megabyte, 48-byte rows: three float4 rows of a 3x4 matrix).
 
 Per pair of consecutive crops it prints, for the records the pool draws took: how many were
 drawn in each radius band about the station's axis (the axis fitted from the moving records),
 the median turn of the drawn ones and of the undrawn, the skinned records' turn with their first
 bone composed in, and the big instanced draws that were NOT the pool's, for the next look.
 """
-import argparse, glob, math, os, struct, sys
+import argparse, glob, math, os, struct, sys, tempfile
 import numpy as np
 
 REC = 336
+
+# The draws file's two row layouts, kept in step with LedgerDraw in
+# src/d3d11/object_probe.cpp (its static_asserts) and the version field in the
+# file's own 160-byte header. Version 1: 24-byte rows. Version 2: 40-byte
+# rows adding the pixel shader hash and the render-target token.
+ROW_V1 = np.dtype([('vs', '<u8'), ('count', '<u4'), ('inst', '<u4'), ('start', '<u4'),
+                   ('kind', 'u1'), ('pool', 'u1'), ('pad', '<u2')])
+ROW_V2 = np.dtype([('vs', '<u8'), ('count', '<u4'), ('inst', '<u4'), ('start', '<u4'),
+                   ('pad0', '<u4'), ('ps', '<u8'), ('rt', '<i4'),
+                   ('kind', 'u1'), ('pool', 'u1'), ('pad', '<u2')])
+assert ROW_V1.itemsize == 24 and ROW_V2.itemsize == 40
+
+def load_draws(path):
+    """the draws_<stamp>.bin file: header, then per frame the frame, a count
+    and n rows of the version's width. Returns (ver, frames, frame0,
+    instStride, bonesStride, poolBytes, crop, draws) with draws[frame] a
+    structured array whose dtype is ROW_V1 or ROW_V2."""
+    b = open(path, 'rb').read()
+    magic, ver, frames, frame0, instStride, bonesStride, poolBytes = struct.unpack('<8sIIIIII', b[:32])
+    assert magic == b'EDVRLDGR', path
+    if ver == 1:
+        row = ROW_V1
+    elif ver == 2:
+        row = ROW_V2
+    else:
+        raise ValueError(f"{path}: unsupported ledger version {ver}")
+    crop = struct.unpack('<32i', b[32:160])
+    off = 160
+    draws = {}
+    for i in range(frames):
+        frame, n = struct.unpack('<II', b[off:off + 8]); off += 8
+        rows = np.frombuffer(b, dtype=row, count=n, offset=off).copy()
+        off += n * row.itemsize
+        draws[frame] = rows
+    return ver, frames, frame0, instStride, bonesStride, poolBytes, crop, draws
+
+def self_test():
+    """synthetic v1 and v2 fixtures, written and read back: the version
+    dispatch, both row widths, and the ps/rt values v2 added."""
+    def write(name, ver, rows):
+        p = os.path.join(tmp, name)
+        with open(p, 'wb') as f:
+            f.write(struct.pack('<8sIIIIII', b'EDVRLDGR', ver, 2, 100, 8, 48, 336 * 2048))
+            f.write(struct.pack('<32i', *range(32)))
+            for fr in (100, 101):
+                f.write(struct.pack('<II', fr, len(rows)))
+                for r in rows:
+                    f.write(r)
+        return p
+    with tempfile.TemporaryDirectory() as tmp:
+        # v1: the 24-byte row, no ps/rt anywhere.
+        v1row = struct.pack('<QIII BBH', 0x1111111111111111, 320, 7, 42, ord('X'), 1, 0)
+        assert len(v1row) == 24
+        p1 = write('draws_v1.bin', 1, [v1row, v1row])
+        ver, frames, frame0, instStride, bonesStride, poolBytes, crop, draws = load_draws(p1)
+        assert ver == 1 and frames == 2 and frame0 == 100 and instStride == 8 and bonesStride == 48
+        assert draws[100].dtype == ROW_V1 and draws[100].shape == (2,)
+        assert draws[101]['vs'][0] == 0x1111111111111111 and draws[101]['inst'][1] == 7
+        assert draws[101]['start'][0] == 42 and draws[101]['kind'][0] == ord('X') and draws[101]['pool'][0] == 1
+        assert 'ps' not in draws[100].dtype.names and 'rt' not in draws[100].dtype.names
+        # v2: two eye targets intern apart (3 and 4), a depth-only pass is
+        # -1, and a pixel shader hash rides along.
+        v2a = struct.pack('<QIII I Q i BBH', 0x2222222222222222, 100, 3, 1, 0, 0xAAAAAAAAAAAAAAAA, 3, ord('N'), 0, 0)
+        v2b = struct.pack('<QIII I Q i BBH', 0x2222222222222222, 100, 3, 1, 0, 0xAAAAAAAAAAAAAAAA, 4, ord('N'), 0, 0)
+        v2c = struct.pack('<QIII I Q i BBH', 0x3333333333333333, 4, 1, 0, 0, 0xBBBBBBBBBBBBBBBB, -1, ord('D'), 0, 0)
+        assert len(v2a) == 40 and len(v2b) == 40 and len(v2c) == 40
+        p2 = write('draws_v2.bin', 2, [v2a, v2b, v2c])
+        ver, frames, frame0, instStride, bonesStride, poolBytes, crop, draws = load_draws(p2)
+        assert ver == 2 and draws[100].dtype == ROW_V2 and draws[100].shape == (3,)
+        r = draws[100]
+        assert r['ps'][0] == 0xAAAAAAAAAAAAAAAA and r['ps'][2] == 0xBBBBBBBBBBBBBBBB
+        # the two eye targets intern as DIFFERENT tokens; the depth-only pass is -1
+        assert r['rt'][0] == 3 and r['rt'][1] == 4 and r['rt'][0] != r['rt'][1]
+        assert r['rt'][2] == -1
+        assert r['vs'][1] == 0x2222222222222222 and r['count'][2] == 4 and r['kind'][2] == ord('D')
+        # an unknown version must fail loudly, not mis-parse
+        bad = os.path.join(tmp, 'draws_v9.bin')
+        with open(bad, 'wb') as f:
+            f.write(struct.pack('<8sIIIIII', b'EDVRLDGR', 9, 0, 0, 0, 0, 0))
+            f.write(struct.pack('<32i', *([-1] * 32)))
+        try:
+            load_draws(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("version 9 must not parse")
+    print("eye_run_ledger: self-test ok (v1 24-byte rows, v2 40-byte rows with ps/rt)")
+    return 0
+
 
 def load_pool(path):
     b = open(path, 'rb').read()
@@ -126,31 +220,28 @@ def load_aux(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('dir'); ap.add_argument('stamp')
+    ap.add_argument('dir', nargs='?'); ap.add_argument('stamp', nargs='?')
     ap.add_argument('--hub-radius', type=float, default=500.0)
     ap.add_argument('--ring-radius', type=float, default=800.0)
     ap.add_argument('--big', type=int, default=50, help='a non-pool instanced draw with at least this many instances is listed')
     ap.add_argument('--pool-vs', help='a file of vertex shader hashes (hex, one a line) that read t33: the pool draws. Without it the '
                                      'ledger flag decides, which only says t33 HELD the pool at the draw -- true of every draw after a '
                                      'pool draw, the game never unbinding it (the run of 2026-09-10 05:37)')
+    ap.add_argument('--self-test', action='store_true', help='write synthetic version 1 and 2 fixtures to a temp '
+                                                           'directory and check the parser against them')
     a = ap.parse_args()
+    if a.self_test:
+        return self_test()
+    if not a.dir or not a.stamp:
+        ap.error('dir and stamp are required (or --self-test)')
     readers = None
     if a.pool_vs:
         readers = set(int(l.strip(), 16) for l in open(a.pool_vs) if l.strip())
     dp = os.path.join(a.dir, f'draws_{a.stamp}.bin')
-    b = open(dp, 'rb').read()
-    magic, ver, frames, frame0, instStride, bonesStride, poolBytes = struct.unpack('<8sIIIIII', b[:32])
-    assert magic == b'EDVRLDGR', dp
-    crop = struct.unpack('<32i', b[32:160])
-    off = 160
-    draws = {}
-    for i in range(frames):
-        frame, n = struct.unpack('<II', b[off:off + 8]); off += 8
-        rows = np.frombuffer(b, dtype=np.dtype([('vs', '<u8'), ('count', '<u4'), ('inst', '<u4'), ('start', '<u4'), ('kind', 'u1'), ('pool', 'u1'), ('pad', '<u2')]), count=n, offset=off).copy()
-        off += n * 24
-        if readers is not None:
+    ver, frames, frame0, instStride, bonesStride, poolBytes, crop, draws = load_draws(dp)
+    if readers is not None:
+        for rows in draws.values():
             rows['pool'] = np.array([1 if int(v) in readers else 0 for v in rows['vs']], dtype=np.uint8)
-        draws[frame] = rows
     cropFrames = [(k, f) for k, f in enumerate(crop) if f >= 0]
     print(f"ledger {a.stamp}: {frames} frames from {frame0}; instance stride {instStride}, palette stride {bonesStride}, pool {poolBytes} bytes")
     print("crops: " + " ".join(f"C{k:02d}=f{f}" for k, f in cropFrames))
