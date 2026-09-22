@@ -6,10 +6,12 @@
       <BufferSize Value="1024" />
       <Buffers Value="512" />
     </SystemCollector>
-    <!-- WPR's profile schema expects a file variant even though the flight tool uses memory mode. -->
+    <!-- The flight tool starts this FILE-mode variant by default (the memory-ring option
+         selects EDVRCPU.Verbose.Memory above instead). File mode flushes buffers to disk
+         rather than wrapping a fixed ring, so more buffers means more burst slack. -->
     <SystemCollector Id="EDVRCPUFileSystemCollector" Name="EDVR CPU file system collector">
       <BufferSize Value="1024" />
-      <Buffers Value="20" />
+      <Buffers Value="256" />
     </SystemCollector>
     <!-- EDVR markers are separate; 4 MiB retains the marker stream beyond the kernel tail. -->
     <EventCollector Id="EDVRCPUEventCollector" Name="EDVR CPU marker collector">

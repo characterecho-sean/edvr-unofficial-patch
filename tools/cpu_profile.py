@@ -5,6 +5,13 @@ Run --self-test without elevation. Capture requires an administrator token.
 --dry-run validates and prints the plan without creating files or sessions.
 The private WPR instance is stopped on game exit, timeout or handled failure.
 Use --smoke-first to validate the real provider/decoder before waiting for Elite.
+
+Records in WPR file mode by default (buffers flush to disk; not a fixed ring);
+pass --memory-ring for the old 512 x 1 MiB memory ring instead.
+--start-key/--stop-key arm and end the flight leg on a hotkey (F1-F12, or a
+single letter/digit); --start-after-seconds bounds or replaces the arm wait.
+--status-json samples Status.json at 4 Hz while recording (on by default when
+the Frontier Saved Games copy exists) into <output>\\status_samples.jsonl.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -20,6 +27,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -132,10 +140,22 @@ def session_command(wpr, operation, *arguments, instance):
     return [str(wpr), operation, *map(str, arguments), "-instancename", instance]
 
 
-def record(wpr, profile, output, instance, workload, runner=invoke):
-    start = session_command(wpr, "-start", str(profile) + "!EDVRCPU", instance=instance)
-    stop = session_command(wpr, "-stop", output, instance=instance)
-    cancel = session_command(wpr, "-cancel", instance=instance)
+def wpr_commands(wpr, profile, trace, instance, filemode, recordtempto):
+    """Build the exact start/stop/cancel commands record() will run.
+
+    Shared by plan() (to preview them in --dry-run) and record() (to run
+    them), so the printed plan can never drift from what actually executes.
+    """
+    extra = ["-filemode", "-recordtempto", str(recordtempto)] if filemode else []
+    return dict(start=session_command(wpr, "-start", str(profile) + "!EDVRCPU", *extra, instance=instance),
+                stop=session_command(wpr, "-stop", trace, instance=instance),
+                cancel=session_command(wpr, "-cancel", instance=instance))
+
+
+def record(wpr, profile, output, instance, workload, runner=invoke, filemode=False, recordtempto=None,
+          on_started=None, on_stopped=None):
+    commands = wpr_commands(wpr, profile, output, instance, filemode, recordtempto)
+    start, stop, cancel = commands["start"], commands["stop"], commands["cancel"]
     # A failed start can leave partially-created sessions. The randomized
     # instance belongs only to this invocation, including in the error path.
     try:
@@ -146,6 +166,8 @@ def record(wpr, profile, output, instance, workload, runner=invoke):
         except Exception:
             pass
         raise
+    if on_started:
+        on_started()
     failure = None
     value = None
     try:
@@ -160,6 +182,8 @@ def record(wpr, profile, output, instance, workload, runner=invoke):
         except Exception:
             pass
         raise
+    if on_stopped:
+        on_stopped()
     if failure:
         raise failure
     return value
@@ -278,13 +302,113 @@ def wait_for_game(executable, timeout, finder=find_game, clock=time.monotonic, s
         sleep(min(1.0, max(0.0, end - clock())))
 
 
-def wait_for_exit(process, timeout, clock=time.monotonic, sleep=time.sleep):
+_VK_FUNCTION_KEYS = {"F%d" % n: 0x6F + n for n in range(1, 13)}
+_user32 = None
+
+
+def virtual_key_code(name):
+    """Map a hotkey name (F1..F12, or a single letter/digit) to its Windows virtual-key code."""
+    upper = name.upper()
+    if upper in _VK_FUNCTION_KEYS:
+        return _VK_FUNCTION_KEYS[upper]
+    if len(upper) == 1 and (upper.isalpha() or upper.isdigit()) and upper.isascii():
+        return ord(upper)
+    raise ValueError("Unsupported key name %r; use F1..F12 or a single letter/digit" % name)
+
+
+def key_is_down(vk_code):
+    """Default hotkey reader: GetAsyncKeyState's bit 0x8000, true only while the key is held.
+
+    Works while the game window has focus. Never called by --self-test, which
+    always supplies its own fake reader instead of touching user32.
+    """
+    global _user32
+    if _user32 is None:
+        _user32 = ctypes.WinDLL("user32", use_last_error=True)
+        _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        _user32.GetAsyncKeyState.restype = ctypes.c_ushort
+    return bool(_user32.GetAsyncKeyState(vk_code) & 0x8000)
+
+
+def wait_for_exit(process, timeout, clock=time.monotonic, sleep=time.sleep, stop_vk=None, reader=key_is_down):
     end = clock() + timeout
+    poll = 0.05 if stop_vk is not None else 0.5
     while not process.exited():
+        if stop_vk is not None and reader(stop_vk):
+            return "stop_key"
         if clock() >= end:
             return "capture_limit"
-        sleep(min(0.5, max(0.0, end - clock())))
+        sleep(min(poll, max(0.0, end - clock())))
     return "game_exit"
+
+
+def wait_for_start_trigger(start_vk, delay_seconds, reader, clock=time.monotonic, sleep=time.sleep):
+    """Block until the start key is pressed or the delay elapses, whichever comes first."""
+    end = clock() + delay_seconds if delay_seconds is not None else None
+    while True:
+        if start_vk is not None and reader(start_vk):
+            return "start_key"
+        if end is not None and clock() >= end:
+            return "start_after_seconds"
+        sleep(0.05)
+
+
+STATUS_SAMPLE_FIELDS = ("Flags", "Flags2", "Latitude", "Longitude", "Altitude", "Heading",
+                        "PlanetRadius", "BodyName")
+
+
+def utc_now_iso_ms(now=None):
+    now = now or datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (now.microsecond // 1000)
+
+
+def default_status_json():
+    """The Frontier Status.json path, or None when it is not there (sampling stays off)."""
+    candidate = Path(os.environ.get("USERPROFILE", "")) / "Saved Games" / "Frontier Developments" / \
+        "Elite Dangerous" / "Status.json"
+    return candidate if candidate.is_file() else None
+
+
+def newest_journal(folder):
+    """The most recently written Journal*.log in folder, or None."""
+    try:
+        candidates = list(Path(folder).glob("Journal*.log"))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    return str(max(candidates, key=lambda path: path.stat().st_mtime_ns))
+
+
+def status_sampler_tick(path, previous, now=utc_now_iso_ms):
+    """Read and parse Status.json once. Returns (new_previous, sample_or_None).
+
+    A partial write during the game's own replace-in-place raises ValueError
+    (or OSError if the file is briefly absent); both are swallowed so the
+    caller just retries on the next tick.
+    """
+    try:
+        parsed = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return previous, None
+    if parsed == previous:
+        return previous, None
+    sample = dict(utc=now(), timestamp=parsed.get("timestamp"))
+    for key in STATUS_SAMPLE_FIELDS:
+        if key in parsed:
+            sample[key] = parsed[key]
+    return parsed, sample
+
+
+def run_status_sampler(path, out_path, stop_event, interval=0.25, sleep=time.sleep, now=utc_now_iso_ms):
+    """Daemon-thread body: append a line to out_path whenever Status.json's content changes."""
+    previous = None
+    while not stop_event.is_set():
+        previous, sample = status_sampler_tick(path, previous, now=now)
+        if sample is not None:
+            with open(out_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(sample) + "\n")
+        sleep(interval)
 
 
 def native_log_time(line):
@@ -375,11 +499,21 @@ def plan(args):
         "cpu-profile-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
     if output.exists():
         raise ValueError("Use a new output directory: " + str(output))
+    instance = "EDVRCPU_" + uuid.uuid4().hex[:12]
+    start_vk = virtual_key_code(args.start_key) if args.start_key else None
+    stop_vk = virtual_key_code(args.stop_key) if args.stop_key else None
+    status_json = Path(args.status_json).resolve() if args.status_json else default_status_json()
+    logging_mode = "memory" if args.memory_ring else "file"
+    commands = wpr_commands(wpr, PROFILE, output / "flight.etl", instance, logging_mode == "file", output)
     return dict(target=str(target), executable=str(executable), expected_build=expected, receipt=receipt_path,
                 installed_files=receipt["files"], output=str(output), wpr=str(wpr),
                 profile=str(PROFILE), analyzer=str(ANALYZER), dotnet=dotnet,
-                instance="EDVRCPU_" + uuid.uuid4().hex[:12], wait_seconds=args.wait_seconds,
-                max_seconds=args.max_seconds, smoke_first=args.smoke_first)
+                instance=instance, wait_seconds=args.wait_seconds,
+                max_seconds=args.max_seconds, smoke_first=args.smoke_first,
+                logging_mode=logging_mode, start_command=commands["start"],
+                stop_command=commands["stop"], cancel_command=commands["cancel"],
+                start_vk=start_vk, stop_vk=stop_vk, start_after_seconds=args.start_after_seconds,
+                status_json=str(status_json) if status_json else None)
 
 
 def smoke_test_capture(p, directory):
@@ -401,14 +535,15 @@ def smoke_test_capture(p, directory):
         if process.returncode:
             raise RuntimeError("C++ marker smoke fixture failed: " + stdout[-4000:] + stderr[-1000:])
 
-    record(p["wpr"], p["profile"], trace, p["instance"] + "_smoke", workload)
+    record(p["wpr"], p["profile"], trace, p["instance"] + "_smoke", workload,
+          filemode=(p["logging_mode"] == "file"), recordtempto=directory)
     report = directory / "smoke-report.json"
     print(analyze(p["dotnet"], p["analyzer"], trace, smoke_result["pid"], report), flush=True)
     validated = validate_smoke_report(json.loads(report.read_text(encoding="utf-8")))
     return dict(pid=smoke_result["pid"], report=str(report), **validated)
 
 
-def capture(args):
+def capture(args, key_reader=key_is_down):
     p = plan(args)
     if args.dry_run:
         print(json.dumps(p, indent=2))
@@ -419,6 +554,8 @@ def capture(args):
     directory = Path(p["output"])
     directory.mkdir(parents=True, exist_ok=False)
     process = None
+    sampler_stop = threading.Event()
+    sampler_thread = None
     try:
         write_status(directory, "preparing", **p)
         if args.smoke_first:
@@ -431,14 +568,39 @@ def capture(args):
         verified = wait_for_flight_version(Path(p["target"]), process, p["expected_build"])
         write_status(directory, "starting", flight=verified)
 
+        if p["start_vk"] is not None or p["start_after_seconds"] is not None:
+            print("[edvr] cpu profile: armed at " + utc_now_iso_ms(), flush=True)
+            write_status(directory, "armed")
+            wait_for_start_trigger(p["start_vk"], p["start_after_seconds"], key_reader)
+
+        def on_started():
+            nonlocal sampler_thread
+            now = utc_now_iso_ms()
+            print("[edvr] cpu profile: recording started at " + now, flush=True)
+            journal_path = newest_journal(Path(p["status_json"]).parent) if p["status_json"] else None
+            write_status(directory, "recording", recording_started_utc=now, journal_path=journal_path)
+            if p["status_json"]:
+                sampler_thread = threading.Thread(
+                    target=run_status_sampler,
+                    args=(p["status_json"], directory / "status_samples.jsonl", sampler_stop),
+                    daemon=True)
+                sampler_thread.start()
+
+        def on_stopped():
+            now = utc_now_iso_ms()
+            print("[edvr] cpu profile: recording stopped at " + now, flush=True)
+            write_status(directory, "saving", recording_stopped_utc=now)
+
         def workload():
-            write_status(directory, "recording")
-            reason = wait_for_exit(process, p["max_seconds"])
+            reason = wait_for_exit(process, p["max_seconds"], stop_vk=p["stop_vk"], reader=key_reader)
+            sampler_stop.set()
             write_status(directory, "saving", stop_reason=reason)
             return reason
 
         trace = directory / "flight.etl"
-        record(p["wpr"], p["profile"], trace, p["instance"], workload)
+        record(p["wpr"], p["profile"], trace, p["instance"], workload,
+              filemode=(p["logging_mode"] == "file"), recordtempto=directory,
+              on_started=on_started, on_stopped=on_stopped)
         write_status(directory, "analyzing", flight=verified, trace=str(trace))
         report = directory / "report.json"
         print(analyze(p["dotnet"], p["analyzer"], trace, process.pid, report), flush=True)
@@ -448,6 +610,9 @@ def capture(args):
         write_status(directory, "failed", error=str(exc))
         raise
     finally:
+        sampler_stop.set()
+        if sampler_thread:
+            sampler_thread.join(timeout=2)
         if process:
             process.close()
 
@@ -512,6 +677,40 @@ def self_test():
         except RuntimeError as exc:
             check(str(exc) == failure)
             check(calls[-1][1] == "-cancel")
+
+    commands = wpr_commands("wpr", "profile", "out.etl", "EDVRCPU_x", True, "C:\\cap dir")
+    check(commands["start"] == ["wpr", "-start", "profile!EDVRCPU", "-filemode", "-recordtempto", "C:\\cap dir",
+                                "-instancename", "EDVRCPU_x"])
+    check(commands["stop"] == ["wpr", "-stop", "out.etl", "-instancename", "EDVRCPU_x"])
+    check(commands["cancel"] == ["wpr", "-cancel", "-instancename", "EDVRCPU_x"])
+    commands = wpr_commands("wpr", "profile", "out.etl", "EDVRCPU_x", False, "C:\\cap dir")
+    check("-filemode" not in commands["start"] and "-recordtempto" not in commands["start"])
+    check(commands["start"] == ["wpr", "-start", "profile!EDVRCPU", "-instancename", "EDVRCPU_x"])
+
+    calls.clear()
+    started, stopped = [], []
+    check(record("wpr", "profile", "out.etl", "EDVRCPU_test4", lambda: 7, runner, filemode=True,
+                 recordtempto="C:\\cap", on_started=lambda: started.append(True),
+                 on_stopped=lambda: stopped.append(True)) == 7)
+    check(calls[0] == ["wpr", "-start", "profile!EDVRCPU", "-filemode", "-recordtempto", "C:\\cap",
+                       "-instancename", "EDVRCPU_test4"])
+    check(started == [True] and stopped == [True])
+
+    calls.clear()
+    started.clear()
+
+    def failing_start_runner(command, **kw):
+        calls.append(command)
+        if command[1] == "-start":
+            raise RuntimeError("fixture")
+        return ""
+
+    try:
+        record("wpr", "profile", "out.etl", "EDVRCPU_test5", lambda: None, failing_start_runner,
+              filemode=True, recordtempto="C:\\cap", on_started=lambda: started.append(True))
+        check(False)
+    except RuntimeError:
+        check(started == [])
 
     expected_executable = Path(r"C:\fixture\EliteDangerous64.exe")
     fake_processes = []
@@ -582,6 +781,52 @@ def self_test():
     process.exited.side_effect = None
     process.exited.return_value = False
     check(wait_for_exit(process, 2, clock=lambda: current[0], sleep=sleep) == "capture_limit")
+
+    check(virtual_key_code("F1") == 0x70)
+    check(virtual_key_code("f9") == 0x78)
+    check(virtual_key_code("F12") == 0x7B)
+    check(virtual_key_code("a") == 0x41)
+    check(virtual_key_code("Z") == 0x5A)
+    check(virtual_key_code("5") == 0x35)
+    for bad in ("F0", "F13", "Ctrl", "@", "", "AB"):
+        try:
+            virtual_key_code(bad)
+            check(False)
+        except ValueError:
+            check(True)
+
+    current[0] = 0.0
+    reader_calls = []
+
+    def fake_reader(vk):
+        reader_calls.append(vk)
+        return len(reader_calls) >= 3
+
+    check(wait_for_start_trigger(99, None, fake_reader, clock=lambda: current[0], sleep=sleep) == "start_key")
+    check(reader_calls == [99, 99, 99] and current[0] == 0.10)
+
+    current[0] = 0.0
+    reader_calls.clear()
+    check(wait_for_start_trigger(None, 0.1, fake_reader, clock=lambda: current[0], sleep=sleep)
+         == "start_after_seconds")
+    check(reader_calls == [])
+
+    current[0] = 0.0
+    process = mock.Mock()
+    process.exited.return_value = False
+    reader_calls.clear()
+
+    def stop_reader(vk):
+        reader_calls.append(vk)
+        return len(reader_calls) >= 2
+
+    check(wait_for_exit(process, 100, clock=lambda: current[0], sleep=sleep, stop_vk=42,
+                        reader=stop_reader) == "stop_key")
+    check(reader_calls == [42, 42])
+
+    current[0] = 0.0
+    check(wait_for_exit(process, 0.12, clock=lambda: current[0], sleep=sleep, stop_vk=42,
+                        reader=lambda vk: False) == "capture_limit")
 
     current[0] = 0.0
     process = mock.Mock(pid=77)
@@ -659,6 +904,11 @@ def self_test():
         profile.write_text("fixture", encoding="utf-8")
         analyzer = directory / "fixture.dll"
         analyzer.write_text("fixture", encoding="utf-8")
+        # A subdirectory, never directory itself: directory/status.json is the tool's own
+        # output file, and Windows filesystems collide "status.json" with "Status.json".
+        status_fixture = directory / "saved_games" / "Status.json"
+        status_fixture.parent.mkdir()
+        status_fixture.write_text(json.dumps({"timestamp": "fixture"}), encoding="utf-8")
 
         def snapshot():
             return [(str(path.relative_to(directory)), path.is_dir(),
@@ -670,7 +920,8 @@ def self_test():
         before = snapshot()
         args = argparse.Namespace(dry_run=True, target="frontier", expect_build="HEAD",
                                   output=str(directory / "absent"), wait_seconds=10,
-                                  max_seconds=10, smoke_first=False)
+                                  max_seconds=10, smoke_first=False, start_key=None, stop_key=None,
+                                  start_after_seconds=None, memory_ring=False, status_json=None)
         import install_edvr
         sibling_receipt = target / "edvr_native_receipt.json.pre-fixture-20260918-120000.bak"
         sibling_receipt.write_text("{}", encoding="utf-8")
@@ -688,8 +939,42 @@ def self_test():
                             mock.patch(__name__ + ".subprocess.Popen",
                                        side_effect=AssertionError("dry-run started a workload")), \
                             mock.patch(__name__ + ".shutil.which", return_value="dotnet"), \
+                            mock.patch(__name__ + ".default_status_json", return_value=None), \
                             mock.patch.dict(os.environ, {"SystemRoot": str(system)}):
                         check(capture(args) == 0)
+
+                        p = plan(args)
+                        check(p["logging_mode"] == "file")
+                        check("-filemode" in p["start_command"] and "-recordtempto" in p["start_command"])
+                        check(p["start_command"][p["start_command"].index("-recordtempto") + 1] == p["output"])
+                        check(p["start_command"][-2:] == ["-instancename", p["instance"]])
+                        check(p["stop_command"] == [p["wpr"], "-stop", str(Path(p["output"]) / "flight.etl"),
+                                                    "-instancename", p["instance"]])
+                        check(p["start_vk"] is None and p["stop_vk"] is None and p["start_after_seconds"] is None)
+                        check(p["status_json"] is None)
+
+                        ring_args = argparse.Namespace(**{**vars(args), "memory_ring": True})
+                        ring = plan(ring_args)
+                        check(ring["logging_mode"] == "memory")
+                        check("-filemode" not in ring["start_command"] and
+                             "-recordtempto" not in ring["start_command"])
+                        check(ring["start_command"] == [ring["wpr"], "-start", ring["profile"] + "!EDVRCPU",
+                                                        "-instancename", ring["instance"]])
+
+                        armed_args = argparse.Namespace(**{**vars(args), "start_key": "F9", "stop_key": "f10",
+                                                           "start_after_seconds": 30.0,
+                                                           "status_json": str(status_fixture)})
+                        armed = plan(armed_args)
+                        check(armed["start_vk"] == 0x78 and armed["stop_vk"] == 0x79)
+                        check(armed["start_after_seconds"] == 30.0)
+                        check(armed["status_json"] == str(status_fixture.resolve()))
+                        check(capture(armed_args) == 0)
+
+                        try:
+                            plan(argparse.Namespace(**{**vars(args), "start_key": "Ctrl"}))
+                            check(False)
+                        except ValueError:
+                            check(True)
         check(before == snapshot())
         write_status(directory, "fixture", pid=123)
         write_status(directory, "done")
@@ -712,15 +997,82 @@ def self_test():
                 mock.patch(__name__ + ".invoke", side_effect=AssertionError("dry-run invoked compiler")):
             check(build_analyzer(argparse.Namespace(trace_event_directory=str(dependency), dry_run=True)) == 0)
         check(before == snapshot())
+
+    with tempfile.TemporaryDirectory() as tmp2:
+        saved_games = Path(tmp2)
+        check(newest_journal(saved_games) is None)
+        check(newest_journal(saved_games / "missing") is None)
+        old_journal = saved_games / "Journal.2026-01-01T000000.01.log"
+        old_journal.write_text("old", encoding="utf-8")
+        new_journal = saved_games / "Journal.2026-01-02T000000.02.log"
+        new_journal.write_text("new", encoding="utf-8")
+        os.utime(old_journal, (1000000, 1000000))
+        os.utime(new_journal, (2000000, 2000000))
+        check(newest_journal(saved_games) == str(new_journal))
+
+        with mock.patch.dict(os.environ, {"USERPROFILE": tmp2}):
+            check(default_status_json() is None)
+            frontier_saves = saved_games / "Saved Games" / "Frontier Developments" / "Elite Dangerous"
+            frontier_saves.mkdir(parents=True)
+            check(default_status_json() is None)
+            (frontier_saves / "Status.json").write_text("{}", encoding="utf-8")
+            check(default_status_json() == frontier_saves / "Status.json")
+
+        status_path = saved_games / "live_status.json"
+        times = iter(["T1", "T2", "T3", "T4"])
+        status_path.write_text(json.dumps({"timestamp": "t0", "Flags": 1, "Latitude": 10.5, "Extra": "ignored"}),
+                               encoding="utf-8")
+        previous, sample = status_sampler_tick(status_path, None, now=lambda: next(times))
+        check(sample == {"utc": "T1", "timestamp": "t0", "Flags": 1, "Latitude": 10.5})
+        previous2, sample2 = status_sampler_tick(status_path, previous, now=lambda: next(times))
+        check(sample2 is None and previous2 == previous)
+        status_path.write_text(json.dumps({"timestamp": "t1", "Flags": 2}), encoding="utf-8")
+        previous3, sample3 = status_sampler_tick(status_path, previous2, now=lambda: next(times))
+        check(sample3 == {"utc": "T2", "timestamp": "t1", "Flags": 2})
+        status_path.write_text('{"timestamp": "t2", "Flags"', encoding="utf-8")  # a partial write mid-rewrite
+        previous4, sample4 = status_sampler_tick(status_path, previous3, now=lambda: next(times))
+        check(sample4 is None and previous4 == previous3)
+        missing_previous, missing_sample = status_sampler_tick(saved_games / "absent.json", previous3,
+                                                                now=lambda: next(times))
+        check(missing_sample is None and missing_previous == previous3)
+
+        out_path = saved_games / "status_samples.jsonl"
+        status_path.write_text(json.dumps({"timestamp": "t0", "Flags": 0}), encoding="utf-8")
+        stop_event = threading.Event()
+        ticks = [0]
+        loop_times = iter(["A", "B", "C", "D"])
+
+        def fake_sleep(interval):
+            ticks[0] += 1
+            if ticks[0] in (1, 2):
+                status_path.write_text(json.dumps({"timestamp": "t1", "Flags": 1}), encoding="utf-8")
+            else:
+                stop_event.set()
+
+        run_status_sampler(status_path, out_path, stop_event, interval=0.25, sleep=fake_sleep,
+                           now=lambda: next(loop_times))
+        lines = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()]
+        check(lines == [{"utc": "A", "timestamp": "t0", "Flags": 0}, {"utc": "B", "timestamp": "t1", "Flags": 1}])
+
     with mock.patch("sys.stderr", io.StringIO()):
         try:
             main(["--capture", "--dry-run", "--max-seconds", "301"])
             check(False)
         except SystemExit as exc:
             check(exc.code == 2)
+    with mock.patch("sys.stderr", io.StringIO()):
+        try:
+            main(["--capture", "--dry-run", "--start-after-seconds", "0"])
+            check(False)
+        except SystemExit as exc:
+            check(exc.code == 2)
     profile = ET.parse(PROFILE).getroot()
     memory = profile.find("./Profiles/Profile[@Id='EDVRCPU.Verbose.Memory']")
     check(memory is not None and memory.attrib.get("LoggingMode") == "Memory")
+    file_profile = profile.find("./Profiles/Profile[@Id='EDVRCPU.Verbose.File']")
+    check(file_profile is not None and file_profile.attrib.get("LoggingMode") == "File")
+    file_buffers = profile.find("./Profiles/SystemCollector[@Id='EDVRCPUFileSystemCollector']/Buffers")
+    check(file_buffers is not None and int(file_buffers.attrib["Value"]) >= 256)
     keywords = {element.attrib["Value"] for element in profile.findall("./Profiles/SystemProvider/Keywords/Keyword")}
     stacks = {element.attrib["Value"] for element in profile.findall("./Profiles/SystemProvider/Stacks/Stack")}
     check({"CSwitch", "ReadyThread", "SampledProfile", "Loader", "ProcessThread"}.issubset(keywords))
@@ -763,6 +1115,14 @@ def main(argv=None):
     parser.add_argument("--max-seconds", type=int, default=300)
     parser.add_argument("--smoke-first", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--memory-ring", action="store_true",
+                        help="use the legacy 512x1MiB memory-ring WPR profile instead of file mode")
+    parser.add_argument("--start-key", help="hotkey (F1-F12, or a letter/digit) that arms the WPR start")
+    parser.add_argument("--stop-key", help="hotkey (F1-F12, or a letter/digit) that ends the flight leg early")
+    parser.add_argument("--start-after-seconds", type=float,
+                        help="arm delay in seconds; races --start-key when both are set")
+    parser.add_argument("--status-json", help="Status.json to sample at 4 Hz while recording; "
+                        "defaults to the Frontier Saved Games copy when it exists")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
@@ -774,8 +1134,10 @@ def main(argv=None):
             return 1
     if not args.capture:
         parser.error("choose --capture, --build-analyzer or --self-test")
-    if not 1 <= args.wait_seconds <= 3600 or not 1 <= args.max_seconds <= 300:
-        parser.error("wait-seconds must be 1..3600 and max-seconds must be 1..300")
+    if not 1 <= args.wait_seconds <= 3600 or not 1 <= args.max_seconds <= 300 or (
+            args.start_after_seconds is not None and args.start_after_seconds <= 0):
+        parser.error("wait-seconds must be 1..3600, max-seconds must be 1..300, "
+                     "and start-after-seconds must be positive")
     try:
         return capture(args)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
