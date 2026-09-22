@@ -1540,3 +1540,44 @@ are known, so the analyzer can be proven before a flight is spent.
 
 ruled out: nothing new. Un-ruled: occlusion culling of the job pipeline -
 its Phase A gate is UNMEASURED, not failed.
+
+### 2026-09-22 (addendum) -- The sub-90, decomposed: steady 88-89 is 2-3% one-cycle-late VDXR releases; the mid-40s are VDXR half-rate throttle stretches
+
+Mining the session logs' per-30 s native_frame_cycle_windows (boundary =
+host wait-return -> next wait-return, the same Present->Present quantity
+the overlay monitor reports, perf_monitor.cpp:714,1068): steady-state
+p50 sits exactly on 11.111 ms with the mean 0.22-0.4 ms above - the
+signature of 2-3% of xrWaitFrame returns arriving a full 11.111 ms
+period late (window mean reproduced exactly by 98% at 11.113 + 2% at
+22.2). The game chain carries ~9.5 ms of slack on every phase
+(per_frame_residual 0.000), so the lateness is in VDXR's frame-signal
+release inside the blocking wait, not the game: ~1.7-3.1 missed display
+cycles per second (~100-190/min), plus a 40-90 ms shader-compile stall
+every 30-60 s. That is the entire 90 -> 86.9-88.3 gap. Turbo pacing
+moves the loss into a broadened jitter band with the same net - not a
+fix. No reprojection is logged anywhere (0 DROPPED FRAME lines).
+
+The user's mid-40s/low-60s readings are REAL and different in kind: the
+logs show multi-minute stretches where VDXR releases waits at exactly
+1/2 of 90 Hz (45.0 fps, cycle p50 22.22 ms - 4.5 min in the 081018
+session) and once 1/7 (12.86 fps, p50 77.79 ms - 3.5 min), plus 44-49
+fps tails at session ends: VDXR's idle/motion-smoothing throttle
+engaging for stretches. No counter in EDVR's runtime names it. The
+monitor reads these faithfully - the app paces at 88-89 THROUGH the
+throttle (cycle window still counts app frames) while the delivered
+rate halves.
+
+Actionable surface: (1) USER-SIDE zero-code experiment first - Virtual
+Desktop's motion smoothing / SSW toggle: if the half-rate stretches
+vanish with smoothing off, VD is engaging SSW on the engine's periodic
+stalls and sticking (its detection misfiring on a 2-3% miss app that
+otherwise holds 90 with 9.5 ms slack). (2) INSTRUMENT (small runtime
+add): the single missing line - per-frame xrWaitFrame return timestamp
+and xrEndFrame submit timestamp vs VDXR's predictedDisplayTime,
+window-histogrammed like native_frame_cycle_phase. If submits land
+before the deadline while the signal still slips, the throttle is
+VDXR-side (out of reach; the user-side setting is the fix); if submits
+straddle, EDVR's submit path is the fix. (3) The engine's periodic
+stalls (true rate far above the throttled log; shader compiles 40-90 ms
+every 30-60 s) remain the engine-side trigger worth a PresentMon stock
+capture + the de-throttled counter.
