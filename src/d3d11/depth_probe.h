@@ -33,6 +33,8 @@
 
 #include <cstdint>
 
+#include <d3d11.h>   // DXGI_FORMAT: depthReadFormat below shares the probe's table
+
 struct ID3D11DeviceContext;
 struct ID3D11DepthStencilView;
 struct ID3D11Texture2D;
@@ -157,6 +159,36 @@ bool depthProbeTargetIsSceneSized(int targetIndex);
 uint32_t depthProbeSceneDraws();
 
 void depthProbeShutdown();
+
+// The view format that reads the depth channel of a texture of this
+// format, and the typeless format an owned copy of it must have. UNKNOWN
+// when this build knows no such view. Inline in the header: the eye-run
+// depth capture (eye_depth_capture.h) converts the R32G8X24 family through
+// this same table, and its test rig does not link depth_probe.cpp.
+inline DXGI_FORMAT depthReadFormat(DXGI_FORMAT tex, DXGI_FORMAT* copyFmt) {
+    switch (tex) {
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+            *copyFmt = DXGI_FORMAT_R24G8_TYPELESS;
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R32_FLOAT:
+            *copyFmt = DXGI_FORMAT_R32_TYPELESS;
+            return DXGI_FORMAT_R32_FLOAT;
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            *copyFmt = DXGI_FORMAT_R32G8X24_TYPELESS;
+            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_D16_UNORM:
+            *copyFmt = DXGI_FORMAT_R16_TYPELESS;
+            return DXGI_FORMAT_R16_UNORM;
+        default:
+            *copyFmt = DXGI_FORMAT_UNKNOWN;
+            return DXGI_FORMAT_UNKNOWN;
+    }
+}
 
 }  // namespace edvr
 

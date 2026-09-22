@@ -160,34 +160,6 @@ const char* fmtName(DXGI_FORMAT f) {
     }
 }
 
-// The view format that reads the depth channel of a texture of this
-// format, and the typeless format an owned copy of it must have. UNKNOWN
-// when this build knows no such view.
-DXGI_FORMAT depthReadFormat(DXGI_FORMAT tex, DXGI_FORMAT* copyFmt) {
-    switch (tex) {
-        case DXGI_FORMAT_R24G8_TYPELESS:
-        case DXGI_FORMAT_D24_UNORM_S8_UINT:
-            *copyFmt = DXGI_FORMAT_R24G8_TYPELESS;
-            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-        case DXGI_FORMAT_R32_TYPELESS:
-        case DXGI_FORMAT_D32_FLOAT:
-        case DXGI_FORMAT_R32_FLOAT:
-            *copyFmt = DXGI_FORMAT_R32_TYPELESS;
-            return DXGI_FORMAT_R32_FLOAT;
-        case DXGI_FORMAT_R32G8X24_TYPELESS:
-        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
-            *copyFmt = DXGI_FORMAT_R32G8X24_TYPELESS;
-            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
-        case DXGI_FORMAT_R16_TYPELESS:
-        case DXGI_FORMAT_D16_UNORM:
-            *copyFmt = DXGI_FORMAT_R16_TYPELESS;
-            return DXGI_FORMAT_R16_UNORM;
-        default:
-            *copyFmt = DXGI_FORMAT_UNKNOWN;
-            return DXGI_FORMAT_UNKNOWN;
-    }
-}
-
 int findTarget(void* dsv) {
     for (int i = 0; i < g_targetCount; ++i) {
         if (g_targets[i].dsv == dsv) return i;
