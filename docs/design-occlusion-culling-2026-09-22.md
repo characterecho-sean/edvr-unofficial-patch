@@ -14,20 +14,28 @@ context; every load-bearing claim cites its evidence.
   the engine's own frustum-reject path (§3.3), swapped the oracle for an
   exact one (§3.4) and put the one flight that can kill the arc first (§4).
   Not implemented; no flight committed.
-- **Prize:** the unseen FRACTION is measured — 90.7% (r=1 m) to 96.2%
-  (r=0.3 m) of the 12,287 submitted records per frame are unseen in both
-  eyes at one parked cockpit view (depth-join, run 055252; engine arc
-  2026-09-22 entry). The ms figure (~4.8–5.1 of the ~5.3 ms view-dependent
-  cost) is an ESTIMATE by proportionality: the job time it rests on is
-  summed across worker threads and its wall-clock share is unproven (§2.2).
-- **Open (re-scoped, §8):** the prize is now draw submission on the
-  caller thread (the settlement's ~8.5 ms per frame at the parked view,
-  91-96% of its records unseen), not the job pipeline (KILLED, below).
-  Phase B' offline: the record -> draw join, the unseen share of the
-  caller's draw time at cockpit poses, the camera the engine's frustum
-  gate reads and the readers of its active mask (§3.3), which surfaces
-  occlude the measured unseen set. Preceded by the EDVR per-draw path
-  cut (engine arc, 2026-09-22 per-draw entry) and a GPU-side reading.
+- **Prize (re-priced by Phase B', §9):** at the parked cockpit pose
+  (three eye runs) 71-72% of the settlement's eye draws come ONLY from
+  records unseen in both eyes (R = 1 m; 51-88% over R = 3..0.3 m), i.e.
+  6.0-6.1 ms of the caller thread's ~8.5 ms settlement share. The old
+  job-pipeline figure (~4.8-5.1 of ~5.3 ms) is dead with Phase A.
+- **Open (§9):** B' PASSES on the exact join and on its measurable
+  ceiling: a 256x128 coverage buffer fed IDEAL occluders removes 36-41%
+  of the pool draws (3.1-3.5 ms against the 1.5 ms bar). It is
+  CONDITIONAL on one unmeasured number: the occluders are the front
+  buildings' exteriors 30-100 m out (83% of the unseen set; the cockpit
+  carries <= 2% of draws at buffer resolution), and a qualified
+  inventory of their solid parts must reproduce >= ~45% of the ideal
+  (68-79% if EDVR's own per-draw cost were cut to zero: the two levers
+  price the same draws). The gate's camera is its own argument (a view
+  record, one per eye) and its occludee spheres are there too, BUT its
+  verdict feeds only the type-2 item path: which per-view test admits
+  the pool draws (FUN_144308B30, the gate, Level 4) is unproven (§9).
+- **Next (§9):** decompile FUN_144308B30; then one armed capture at the
+  parked pose, no reject: per-view results beside each engine record's
+  t33 slots, the gate's view array (eye identity, same-frame proof) and
+  mesh geometry for the ~300 occluder records; then the inventory's
+  recall offline against the three depth captures.
 - **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
   rendering from the ship. On foot is out of scope for now; the corpus and
   the profile legs are cockpit poses. Also to instrument: CPU frame time
@@ -37,15 +45,14 @@ context; every load-bearing claim cites its evidence.
   occlusion queries as the runtime mechanism (they remain the offline
   oracle, §3.4); same-frame depth readback; boundary-side draw-call motion
   estimation (pipeline doc, 2026-09-19 decision); whole-structure boxes as
-  occluders; single-occluder rect coverage as the test.
-- **Tooling (2026-09-22, on main):** the capture tool records in file
-  mode with hotkey-armed legs (`--start-key`/`--stop-key`) and samples
-  Status.json; the analyzer covers the whole cycle (regions R1-R6,
-  per-thread busy table, waits attributed by the waker's last sample per
-  region and blocking site, RVA classes on decompile sizes, `--runtime-log`
-  reconciliation) and reproduces the runtime log's cycle phases for the
-  old trace's windows 30-31 to within 0.001 ms — the analyzer is proven;
-  the old trace itself remains a tool input, not gate evidence.
+  occluders; single-occluder rect coverage as the test. Phase B' (§9):
+  the cockpit as the parked prize's occluder; nesting as what hides the
+  parked view; the 2026-09-21 "<0.15 ms for 3.5k draws" baseline (§1:
+  its windows held no settlement frames).
+- **Tooling (2026-09-22, on main):** file-mode capture with hotkey legs;
+  the analyzer (regions R1-R6, per-thread busy, waker attribution,
+  `--runtime-log` reconciliation) reproduces the runtime's cycle phases
+  to 0.001 ms.
 - **VERDICT (2026-09-22 evening, valid Phase A): KILL.** Two clean
   file-mode legs on build 2d8fbda (engine arc, "Phase A, valid: KILL"
   entry). Parked cockpit: the job pipeline is 5.24 ms thread-summed on
@@ -413,3 +420,242 @@ path (3.94 ms per frame of EDVR leaf time on the caller thread at the
 same view, named in the engine arc's 2026-09-22 per-draw entry) is pure
 overhead and is being cut first; and the GPU side at Pimax resolution is
 unmeasured in the CPU trace and must be read next to any CPU saving.
+
+## 9. Phase B' (2026-09-22, offline): the join is exact and the ceiling clears the bar; the occluders and the site are open
+
+**Corpus and method.** Three armed eye runs of the one parked cockpit
+pose at Cranfield (055252, 082019, 094038; Pimax OpenXR, two render
+scales). Their record distances (p10/p50/p90 91/158/356 m) agree to
+1 m: they replicate ONE pose, they are not the >= 5-pose corpus of
+§3.4. Frame 2 of each: the v2 ledger (every eye draw: VS, PS, RT token,
+start and instance count), the instance stream (8 bytes an instance,
+first u32 = the t33 record), the pool (position at +16), both eyes'
+depth (R32, reversed-Z, near 0.025 m) and, for the camera, the eyemesh
+snapshot's VS b1: registers cb1[270..273] are the clip matrix's columns
+and cb1[275] the eye origin in the record frame (the game's VS computes
+clip = M (pos - cb1[275]); vs_EB5234DB6ADB491D, instructions 101-141).
+Eye, camera and depth pair by self-consistency (record origins landing
+exactly on their own depth: 36-54 hits right, <= 13 wrong). Pool draws
+are the eye draws whose VS reads t33 (21 dumped VS, by disassembly)
+plus the undumped families whose instance ranges come from the pool's
+allocator: 5B4D8E894EEDA8B4 and BBE58E40FE88EC80, which the flicker
+arc's disassembly also shows reading t33. That is 18,005-18,577 draws a
+frame, 98.5% of the eye pass. Visibility is §2.5's footprint test (a
+sphere of radius R about each record origin against the stored depth);
+on 055252 it reproduces 96.2% / 90.7% as 96.5% / 88.9% (12,199
+records; the earlier union counted 12,287). The scripts are throwaway,
+in the session's scratch.
+
+**1. The record -> draw join is exact** (every eye draw names its pool
+records through its instance range), so neither bound is needed. R =
+1 m, the trustworthy band of §2.5; brackets span R = 0.3..3 m:
+
+| per frame | 055252 | 082019 | 094038 |
+|---|---|---|---|
+| pool eye draws / records | 18,200 / 12,199 | 18,005 / 12,181 | 18,577 / 12,220 |
+| records unseen in both eyes | 88.9% [96.5..75.6] | 89.1% [96.5..76.1] | 88.9% [96.4..75.2] |
+| draws ALL of whose records are unseen | 70.9% [88.1..51.3] | 71.8% [88.0..52.6] | 71.5% [87.7..51.2] |
+| draws mixing seen and unseen records | 25.3% | 24.2% | 24.5% |
+| instances of unseen records | 87.6% | 87.7% | 87.7% |
+| draws per record, unseen / seen | 7.44 / 8.43 | 7.15 / 8.25 | 7.55 / 8.48 |
+
+Per family (055252, R = 1 m; share of the pool draws, then all-unseen /
+mixed / all-seen): EB52 58.1%, 70.4 / 26.2 / 3.5; 5B4D 19.7%, 64.7 /
+31.8 / 3.5; BBE5 9.2%, 72.3 / 24.5 / 3.1; 8056 3.3%, 78.9 / 19.9 / 1.2;
+7B0D 1.9%, 96.0 / 0 / 4.0; 2684 1.5%, 72.3 / 19.3 / 8.3; 23 others
+6.3%, 81.2 / 9.6 / 9.2. The other two runs agree within 3 points except
+7B0D (86%). Every family is mostly unseen. The bounds the brief asked
+for land where the evidence puts them: unseen records carry 0.87-0.89
+of the seen records' draws, so uniform multiplicity (the record share,
+88.9%) holds for instances and half multiplicity (80%) is refuted. The
+draw share (71%) sits below both because a quarter of the draws mix
+seen and unseen instances. It is the conservative price (a draw goes
+only when every instance goes); re-batching the survivors would raise
+it to 85%. An exact truth at other poses agrees: the flicker arc's
+per-draw query census found ~76% of stable-settlement draws passing
+zero samples (its Status), inside the R = 0.3..1 m band here.
+
+**2. The gate**, on the caller thread's ~8.5 ms settlement share (§8),
+per removed draw:
+
+| | removed pool draws | x 8.5 ms |
+|---|---|---|
+| depth truth (the ceiling), R = 1 m | 70.9-71.8% | 6.0-6.1 ms (4.4-7.5 over R) |
+| §3.2 ceiling: 256x128 buffer, IDEAL occluders | 35.9-41.2% | 3.1-3.5 ms (1.9-3.9 over R) |
+| same, 256x256 | 46.0-52.8% | 3.9-4.5 ms |
+| cockpit-only occluders, even at 512x512 | <= 1.9% | <= 0.16 ms |
+
+The ideal-occluder rows are the most the §3.2 test can deliver: the
+stored depth itself as the occluder, the farthest occluder depth per
+tile, the occludee's rect dilated by one tile, culled only if occluded
+in both eyes. They cull no record outside the truth, and recall 72% of
+its records and 53% of its draws at 256x128 (055252). **Verdict: B'
+passes** — the join is exact and the ceiling clears the 1.5 ms bar by
+2.0-2.3x at R = 1 m (1.3-1.7x at the pessimistic R = 3 m) — **and it is
+conditional on one number this corpus cannot measure:** the qualified
+occluder inventory must reproduce >= 43-49% of the ideal removal (R =
+1 m; up to 78% at R = 3 m). Two things price it down. (1) The 8.5 ms
+predates the per-draw cut and holds ~3.2 ms of EDVR's own per-draw time
+on the settlement's draws (Phase A's R1 EDVR leaf 3.94 ms parked against
+the gfx log's draw-hook line at 0.5-1.0 ms away from the settlement). At
+zero EDVR cost the same draws are worth ~5.3 ms, the ceiling 1.9-2.2 ms
+and the requirement 68-79%: the cut and the cull price the same draws
+and do not add. (2) The gate's unit is the engine record (stride 0x2F0,
+below), not the t33 record priced here. One record's sphere bounds all
+it emits and the link between the two is unrecorded (§6.7), so the
+engine-record recall can only be lower.
+
+**3a. The camera at the gate (§3.3 (a), from the decompiles in
+analysis\decomp).** FUN_14430EFE0's third argument IS the view. The
+traversal FUN_144312040 walks the render context's view array
+(ctx+0x40, stride 0x6A0, count ctx+0x1A940) and calls the gate once per
+view for each engine record (decomp_4312040.txt:303-304). In the gate
+(decomp_430EFE0.txt): the view's bits +0x570 against the incoming mask
+(line 76); the record's world sphere (record+0x240 centre; +0x280, the
+pair plane distances are compared against — the extents the flicker
+arc lists as unlocated) against the view's frustum (lines 84-90;
+FUN_1404F4E10 reads float4 planes at view+0x30 and a u16 count at
+view+0x44, -1 = outside: decomp_04F4E10.txt:54-78); distance and
+screen size from the view's camera position view+0x540 and LOD scale
++0x550/+0x560 (lines 92-128). So the camera is a context field handed
+to the call — not a constant buffer (cb1[270..275] is written at draw
+time, after the gate) and not job-0's arguments. The draw-item
+builder's Level-4 frustum loop reads the same array (FUN_1404F4E10 from
+FUN_1442B4420). The eyes are separate entries: every record drawn in
+one eye only projects outside the other eye's rendered viewport
+(055252: 358 and 152 records, 100%), and records drawn but centred
+outside their own viewport straddle its edge (median 0.013 NDC), so the
+engine culls per eye with the rendered projection. From any call the
+other eye's entry is in the same array (ctx = **gate): per-eye and
+both-eyes verdicts are both available (the per-eye rule adds 1-2.5
+points of draws here). Unknown until a dump: which index is which eye,
+whether the entry stores the full view-projection (its planes and
++0x540 determine it) and whether the planes are this frame's.
+
+**A correction to the site (§3.3, §8), from the same decompile.** The
+gate's per-view verdicts (local_288, lines 206-321) feed only the
+type-2 item path (FUN_142817260 -> FUN_144312E00, lines 326-337). The
+record's stored view mask rec+0x208, Level 3's dispatch input toward
+the draw-item builder FUN_1442B4420, is local_290 (line 346), fixed
+BEFORE the gate loop by the per-view LOD-nibble filter (lines 137-149)
+and FUN_144308B30 on the record's own sphere (lines 156-165; not
+decompiled). Which of the three per-view tests (FUN_144308B30, the
+gate, Level 4) admits the instanced eye draws is unproven; the
+2026-09-21 trace found no route from either item list to the D3D
+draws. Clearing a bit at FUN_14430EFE0 may therefore not remove the
+pool draws at all. The camera answer holds for all three; the site does
+not yet.
+
+**3b. Occluders.** By the nearer eye's surface at each unseen record
+(R = 1 m, three runs): surfaces >= 30 m out 83.0-84.1%, the cockpit
+(< 3 m: canopy frame, dashboard, consoles) 15.1-16.4%, own hull and pad
+(3-30 m) 0.5-0.6%. The >= 30 m occluders are the settlement's own
+structures, not bare terrain (055252, eye A): 93.4% of their surface
+points lie within 5 m of a SEEN record's origin (control, all >= 30 m
+texels: 29.3%); 61% face sideways (wall-like normals), 21.5% are
+ground-like (ground, pads or roofs), and 5.7% are ground-like AND away
+from any seen record (the bare-terrain candidates). They stand far in
+front of what they hide: median 73 m, within 2 m for 0.1-0.2%. The
+parked view's unseen set is behind the settlement's FRONT — the
+exteriors of the nearest buildings 30-100 m out — not nested inside
+each record's own shell. The nearest-seen-origin association names
+~310-340 occluder records; ~25 carry half of the structure class, the
+top 10 a third. §3.2's representation (a coverage buffer rasterising
+eroded inner boxes of individually solid opaque parts; whole-structure
+boxes are rejected in §5) therefore needs the front buildings' wall and
+roof parts, and this corpus cannot qualify them: no record -> mesh
+identity, no index buffers (no closedness test), vertex data for 127 of
+the snapshot's 4,096 draws (its 32 MB cap), no per-pixel ownership.
+The occludees need no offline model: the gate already holds each
+engine record's sphere.
+
+**3c. Cost (instruction count; Phase C measures it).** Occludee test
+per (record, eye): transform the centre (4 SIMD FMAs), divide, rect
+from the radius, clamp to tiles (~25 instructions), then the depth
+compares over the dilated rect. At 256x128 a tile is ~8x17 eye pixels
+and a 1 m sphere at the median 158 m spans 1-2 tiles, so 9-12 tiles,
+2-4 SIMD compares: ~50-60 instructions, ~20-25 cycles cached. 24k
+tests (12k records x 2 eyes; fewer at the engine-record unit) are
+~0.1-0.15 ms thread-summed, on the job workers where the traversal
+runs, not the caller. Occluder rasterisation, once per eye per frame:
+~300 parts x <= 3 eye-facing faces x 2 triangles is ~2k triangles an
+eye, each over a few 8x4 blocks at this size: ~0.05-0.3 ms for both
+eyes, depending on SIMD batching. Total ~0.15-0.45 ms against the
+0.3 ms target. The rasterisation must finish before the traversal
+starts; on the caller thread it would be paid in R1.
+
+**4. Safety at the site (§3.4 mapped).** (1) Oracle: this depth join is
+a ceiling (§2.5), not the exact truth. The site's unit is (engine
+record, view), so validation must chain engine record -> t33 records
+-> draws (this entry's join) -> per-draw truth (passed samples); the
+first link is unrecorded. (2) Shadow mode, a hook in front of the
+admitting test: after the engine's own verdict passes, compute the
+occlusion verdict for that view and apply none. Counters per frame and
+per eye view: calls, engine passes, would-reject; fail-open by reason
+(no validated view, eye inside an occluder, a mover whose +0x170
+changed in the last K frames, a non-eye view); hysteresis promotions
+(after K frames) and immediate demotions; the draws predicted removed
+(the would-reject records' draws through the instance stream the draw
+hook already reads). The counter that makes a wrong reject provably
+absent: every eye draw whose instances are all would-reject in that
+eye runs inside an occlusion query; a violation is a query with passed
+samples > 0. It must read zero over the whole corpus before any real
+reject, with the queries dropped for want of slots reported beside it
+(original_draw_probe.cpp holds 64 a frame against ~6-13k would-reject
+draws: a rotating sample, or a wider pool). Census equality shadow-on
+vs off stays the Phase C gate. (3) The flicker instrument, the flicker
+arc's per-draw query census of zero<->nonzero sample transitions at
+held draw identities (2026-09-18: three zero->nonzero at identical
+captured state), would show a pop as an identity ABSENT from frame N's
+census that returns with passed samples in frame N+1 after the
+immediate un-cull. At the draw level that is also what a legitimate
+reveal looks like, which is why the zero-violation proof has to come
+from shadow mode, where the would-reject draw still runs inside its
+query. Live mode adds one check: the draws removed per frame equal the
+ledger-predicted draws of the culled records.
+
+ruled out: the ship's own cockpit as the occluder that carries the
+parked prize, because with ideal cockpit geometry the coverage buffer
+culls <= 6% of the unseen records and <= 1.9% of the pool draws at any
+R, even at 512x512 (the dashboard's top edge is where the settlement
+sits; the canopy struts are thinner than a tile).
+ruled out: nesting inside the record's own shell as what hides the
+parked view, because the occluding surface sits a median 73 m in front
+of the record it hides and within 2 m of it for 0.1-0.2%.
+ruled out: half draw multiplicity for unseen records as the pricing
+worst case, because unseen records carry 0.87-0.89 of the seen
+records' draws per record in all three runs.
+ruled out: "no join" as a B' kill, because each eye draw names its pool
+records through its instance range (98.5% of the eye pass).
+ruled out: §1's "removing 3.5k draws recovered < 0.15 ms" (the
+2026-09-21 A/B/C cost baseline) as evidence against a
+draw-proportional caller cost, because its mined windows held no
+settlement frames: the gfx logs' draw-hook CPU line reads 0.023 ms per
+sampled frame through them (passes A and B) against 3.84-3.98 ms parked
+at ~18k draws; the heavy scene was drawn only in the seconds before
+each census.
+ruled out: keying as the reason the depth files' constants block is
+unusable (§2.5; the engine arc's caveat 4), because
+src/d3d11/eye_depth_capture.h:191-192 and 258-271 copy cb1 BYTES
+1024-2367 (float4 registers 64-147) while the view-projection is
+registers 270-273 (bytes 4320-4383) and the eye origin register 275:
+no key draw can supply them in that window. The fix is the offset, not
+the key; not made here (the snapshot's cb1 served instead).
+
+**Next (offline first, then one armed capture at the parked pose, no
+reject).** (1) Decompile FUN_144308B30 and settle which per-view test
+admits the pool eye draws; the capture then confirms it by logging, for
+the armed frame, each engine record's three per-view results beside
+its t33 slots (the missing record -> t33 link) and matching them to the
+ledger's per-eye records. (2) In the same frame, dump the view array
+at the first gate call (count; each entry's +0x30 planes and +0x44
+count, +0x540, +0x550/+0x560, +0x570/+0x578/+0x688) to name the eye
+entries, prove same-frame against that frame's cb1[270..273] and find
+a stored view-projection. (3) Mesh identity and geometry for the ~300
+occluder records (the snapshot's vertex cap lifted to first use per
+mesh, index buffers, PS blend state), so the solid-part inventory can
+be built and rasterised offline against the three depth captures.
+Gate before Phase C: the site proven, and the inventory reproducing
+>= ~45% of the ideal removal at R = 1 m (>= 1.5 ms), re-priced after the
+per-draw cut; a second cockpit pose (the approach, ~1 km) before the
+flight gates.
