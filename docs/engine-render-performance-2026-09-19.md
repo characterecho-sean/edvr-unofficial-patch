@@ -1958,3 +1958,29 @@ hookedUnmap / CreateBuffer / CreateTexture2D before any bookkeeping,
 O(1) binding hash per draw, verdict-lambda test order. Measured
 afterwards with the same two legs against the analyzer's R1 module
 split; the bar is the 3.94 ms itself.
+
+Addendum, the uncapped table (analyzer --edvr-export, all 6826 R1
+samples with an EDVR frame keyed by innermost EDVR frame, 1459 RVAs,
+symbolized 0 failures): per function, samples and ms/frame -
+beginPanelOverride 658 / 0.49 (the single largest), forwardWithVerdict
+557 / 0.41 + its verdict lambda 490 / 0.36, hookedMap 432 / 0.32,
+edvr::begin (celestial_motion) 249 / 0.18, CreateBuffer hook 228,
+/GS cookies 221, hookedDrawIndexedInstanced itself 181, meshMotionDraw
+165, guarded<> 158, beforeTone 153, qpcNow 135, gpuFrameCommand 116,
+srv0IsPanelSized 115, mapWaitNote 114, screenMotionUiDraw 113,
+uiDeferredTraceDrawEnter 105, hookedUnmap 104, bindingShaderHash 97,
+bindingGet 97, an unordered_map<u64,u32>::find 96, hashOf 79, then
+uiSeparationToneBegin 72, uiDeferredBegin 66, uiDeferredBeforeDraw 66,
+journalGameplay 59, staticSurfaceBegin 53, uiDepthDeferredEye 52,
+bindingGeneration 51, scrimOnEyeDraw 50, introProbeWants 49,
+particleOnDraw 48, screenMotionDraw 48, uiDepthPlanetBegin 44,
+Controller::owns 42, billboardVariantFor 39, uiDeferredEnd 37,
+quadProbeWants 37, backdropOnComposite 37. By hook entry: the draw hook
+(hookedDrawIndexedInstanced) carries 5088 of 6826 (75%), hookedMap
+~525, hookedUnmap ~280, CreateBuffer 228, hookedVSSetShader 40. Two
+families are retired outright by Sean's rule that fix.ui_depth and
+fix.engine_motion do nothing while fix.temporal_aa is off (they feed
+the temporal pass and had no consumer in this session): ui_depth's
+deferred path (~600 samples, 0.44 ms) and engine motion's draw hooks
+(~575, 0.43 ms). The first top-30 table above was the head of this
+list; 48% of the samples lay outside it.
