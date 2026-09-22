@@ -27,34 +27,47 @@
   game itself is unaffected and keeps rendering flatscreen (gfx log
   shows normal frames, menu, loading panel afterward — this is not a
   game crash, VR just never comes up).
-- Open hypothesis: `XR_ERROR_INITIALIZATION_FAILED` comes from either
-  `xrConvertWin32PerformanceCounterToTimeKHR` or `xrLocateSpace` inside
-  `HeadLocator::locate` (`head_locator.h:21-49`) — the log can't
-  currently tell which, since both failure paths return the same
-  `lastResetResult` up through `centreAtStartup`. Leaning towards the
-  Win32 time-conversion extension: it is Windows-specific, only reached
-  through whatever Wine/Proton-side shim bridges it to a Linux-native
-  runtime, and it is new exposure for EDVR's OpenXR-native path — 0.16.2
-  never called it because the legacy proxy just forwarded to the user's
-  own real `openvr_api.dll` (OpenComposite) and never spoke OpenXR
-  itself. `centreAtStartup`'s tolerance list was set deliberately narrow
-  during the 2026-09-12 port work (`openxr-compositor-interface-
-  2026-09-12.md:46-48`: "other unexpected locate results stop the
-  diagnostic conservatively") against SteamVR/Quest3/Pimax native
-  OpenXR, which apparently never produced this code.
+- CONFIRMED 2026-09-22 (flight, diagnostic branch
+  `linux-openxr-launch-centre-diag`, `v0.17.0-1-g9693a8a`, same
+  supporter/WiVRn/Quest2 rig): `XR_ERROR_INITIALIZATION_FAILED` comes
+  from `xrConvertWin32PerformanceCounterToTimeKHR`, never
+  `xrLocateSpace` — every `stage=` in the log, at startup and in 20700+
+  consecutive per-frame `head_locate_failed` lines, reads `convert`.
+  Ruled out: NOT transient. 100% failure rate from session start through
+  the whole captured session (~31 s, 20700 calls), zero
+  `head_locate_recovered` lines. The tolerance widening itself worked as
+  designed — `centreAtStartup` waited 2008 ms/145 samples, hit
+  `tracking_deadline`, and let native startup complete this time
+  (`module_startup,...,result=0`; frames submit, `native_temporal`/
+  `native_sharpen` engage with real projection matrices) — but
+  `locateHead`, the per-frame OpenVR-facing pose query
+  (`native_runtime_host.h`, `locateHead`), fails every single call
+  through the same broken `convert()`. Net effect: VR now starts instead
+  of aborting, but delivers no head tracking at all (fixed/frozen view)
+  — a different failure, not a fix.
 - Ruled out: not a game-side crash (gfx log runs fine after); not the
-  E_ACCESSDENIED device-acquire flake (that resolved itself by the third
-  launch and is a separate, lower-priority issue — possibly a Proton/GPU
-  handoff race worth a one-line memory note if it recurs, not yet worth
-  its own arc).
-- Next flight: needs a decision from Sean before any build goes back to
-  the supporter (see chat) — either add trace to disambiguate convert()
-  vs locate() inside `HeadLocator::locate`, or widen
-  `centreAtStartup`'s tolerance list to also treat
-  `XR_ERROR_INITIALIZATION_FAILED` like `TIME_INVALID`/`POSE_INVALID`
-  (self-expires after 2 s via the existing `launchCentre` wait/expire
-  path — `native_runtime_host.h:1635`) and fly that directly. No code
-  changed yet.
+  E_ACCESSDENIED device-acquire flake (didn't recur this flight — only
+  one launch attempt was needed, so still unresolved either way, still
+  not worth its own arc).
+- New angle: the main frame loop's own time source is NOT broken —
+  `projection_query` lines in the same log carry real, sane matrices at
+  sequence 146+, meaning whatever supplies `xrWaitFrame`'s
+  `predictedDisplayTime` (or the view-locate that rides on it) works
+  fine on this stack. Only `HeadLocator`'s on-demand path (`locateHead`,
+  `resetSeated`, `applyIntroRecentre`, `centreAtStartup` — all four
+  callers in `head_locator.h`/`native_runtime_host.h`) calls
+  `xrConvertWin32PerformanceCounterToTimeKHR` to turn an arbitrary QPC
+  sample into an `XrTime`. A real fix likely means sourcing that
+  mapping from the frame loop's already-working `XrTime` instead (cache
+  one `(predictedDisplayTime, QueryPerformanceCounter)` pair per frame,
+  then convert any later QPC sample by elapsed-ticks arithmetic,
+  bypassing the broken extension entirely) rather than calling
+  `xrConvertWin32PerformanceCounterToTimeKHR` at all on this stack. Not
+  investigated yet: where in the frame-loop code that `XrTime` is
+  produced and whether it's reachable/cacheable for `HeadLocator`'s use.
+- Next flight: none queued. Needs investigation into the frame loop's
+  `XrTime` source before a real fix is shaped — reported to Sean for
+  direction, not started this turn.
 
 ## Log evidence (2026-09-22)
 
@@ -81,3 +94,31 @@ reads of the 1528-line breadcrumbs file.
   (`frame 728` by 11:12:11) — the game runs on, just without VR.
 - `edvr_install_state.ini`: v0.17.0, installed 2026-09-22T16:22:59Z,
   matches build HEAD.
+
+## Diagnostic flight (2026-09-22, 14:24 local / 18:24 UTC)
+
+Build: `linux-openxr-launch-centre-diag` branch (off `v0.17.0`),
+commit `9693a8a`, `git describe` = `v0.17.0-1-g9693a8a` — DLL reports
+`v0.17.0-dirty (build 6AB2B91F)`. Same supporter, same WiVRn/Quest2 rig
+(`v26.2.3`, `Oculus Quest2 on WiVRn`, 1832x2016/eye, 72 Hz). One launch
+this time, no repeat of the E_ACCESSDENIED device-acquire flake.
+
+`native_launch_centre,waiting_for_tracking=1,stage=convert,flags=0,
+result=-6` at session start, then `tracking_deadline=1,samples=145,
+elapsed_ms=2008` — the widened tolerance let `centreAtStartup` give up
+gracefully instead of aborting. `runtime_startup,...,geometry_ready=1`
+and `module_startup,...,result=0` follow: native startup completed.
+`native_temporal`/`native_sharpen` engage `first_treated_eye=0` and `=1`
+at sequence 146 with real `projection_query` matrices (`m00=0.930073`
+etc., sane FOV numbers) — the render/submit side works.
+
+Then `head_locate_failed,stage=convert,result=-6` fires at
+`consecutive=1,2,3`, then every 300th call as designed
+(300/600/900/.../20700), continuously for the rest of the captured
+session, always `stage=convert`. No `head_locate_recovered` line
+anywhere. `xrLocateSpace` itself was never reached in any of these
+failures — `convert()` fails first, every time.
+
+Reported to Sean; no code changed this turn. See Status block for the
+new-angle hypothesis (source `XrTime` from the frame loop's own
+prediction rather than calling the broken conversion extension).
