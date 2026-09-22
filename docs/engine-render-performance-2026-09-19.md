@@ -81,7 +81,12 @@
   hooks 0.7, wrappers 0.26, live per-draw features ~0.5, the DrawClock's
   2 ms every-16th-frame hitch. Even at zero EDVR cost the caller sits at
   ~11.9 ms: necessary, not sufficient — the draw count (1b) is what
-  reaches 90 Hz; a second cut round runs in parallel with it; Phase B'
+  reaches 90 Hz; round two of the cut is BUILT and gated (a606157,
+  2026-09-22 round-two entry: verdict ladder, deferred-UI guard, the
+  draw clock's spike, cookies, 38 more inline predicates, the SRV
+  private-data tag, the Map/Create guards), NOT FLOWN — measured on the
+  same parked leg against parked-4 (EDVR leaf 3.25 ms by top module,
+  draw-hook line 3.0-3.2); Phase B'
   of the re-scoped cull is DONE offline (design doc §9, 2026-09-22):
   the record -> draw join is exact (each eye draw names its pool
   records through its instance range), 71-72% of the settlement's eye
@@ -2219,3 +2224,63 @@ caller at ~11.9 ms per frame, over the 11.1 ms of a 90 Hz frame at this
 view. EDVR's per-draw cost is necessary to cut and not sufficient: the
 draw count itself (the re-scoped cull, design doc §8, or the LOD lever)
 is what reaches 90 Hz here. ruled out: nothing new.
+
+### 2026-09-22 -- Per-draw cut, round two: built and gated (a606157), NOT FLOWN; two accounting corrections from the named stacks
+
+Four pieces merged behind the full gate (EDVR_PROFILE_SYMBOLS=1, all
+rigs): the verdict ladder, the deferred-UI family and the draw clock
+(cd00e4e, f91667f); the Map/Create path and GPU-timing owner check
+(440a276); the panel-size resolve cache and two static_surface cookie
+blocks (5dad30a); 38 more inline predicates and two object_probe /
+particle_fix cookie blocks (10678d6). Two hand-resolved overlaps, both
+behaviour-preserving: object_probe.cpp (main's cull-gate lines beside
+renamed flags) and ui_deferred (two publications kept in one detail
+block: the draw path's uiDeferredMayAct over the file's own enabled /
+diagnostic generation, and the Map path's uiDeferredResourceWriteLive
+mirror).
+
+**Corrections to the parked-4 table above, from checking each hot
+address against the flown DLL:** the draw lambda's 0.36 ms is mostly
+NOT EDVR's time - 299 of its 487 samples sit at the return of the
+forwarded game draw (call rbx = realDrawIndexedInstanced), i.e. the
+runtime and driver executing the game's own draw, which the export's
+any-EDVR-frame population attributes to the innermost EDVR frame; the
+lambda's own work is ~0.05 ms. And "celestial begin 0.06" was a
+ui_deferred static begin() (ui_deferred.cpp:554/461), now behind the
+deferred-UI guard. EDVR's leaf time by top-of-stack module (3.25 ms in
+parked-4) remains the honest number.
+
+**What changed, expected upper bound (ms/frame, window 8 prices):**
+forwardWithVerdict's 43 verdict compares per draw -> one v != kNone
+test with the rare bodies in two noinline switches, owner read once
+(<= 0.37, order of kResolveProbe's two calls and kBackdrop-before-splash
+kept); the deferred-UI family's eight cross-file calls per owner draw ->
+one inline test (<= 0.41); the DrawClock -> every 64th draw on the
+sampled frame, scaled (the "draw hook CPU" line is now an ESTIMATE and
+says so; the 1.8 ms spike on one frame in 16 is gone); stack cookies
+moved off noteStaleForward, beginPanelOverride (x2), the draw lambda,
+object_probe, particle_fix and two static_surface blocks into cold
+functions, verified cookie-free on the built DLL (<= 0.15 in all);
+depthProbeWanted and staticSurfaceLive inline guards; 38 xWantsDraws
+predicates inline (<= 0.25; three skipped because they call into other
+modules); srv0IsPanelSized's four guarded COM calls per draw -> one
+guarded private-data tag read (<= 0.29; EDVR now attaches a 12-byte
+tag under its own GUID to game SRVs it resolves; a recycled address
+reads back untagged, which is why the v0.5.2 pointer-keyed cache bugs
+cannot recur); hookedMap/hookedUnmap's ~6 cross-file calls per Map ->
+inline guards (<= 0.39); mapWaitNote inline; the CreateBuffer hook's
+terrain unknown-write call guarded; Controller::owns caches the thread
+id per thread (the TEB route does not compile against this SDK); the
+shader-hash memo widened 32 -> 64 entries; uiDepthMotionResourceWritten
+inline early-out. Not done, with reasons: gpuFrameCommandMightAct at
+the draw hooks (app_gpu_timing defaults on, the guard would only add a
+load); hashOf caching at the reader sites (the hot callers are the two
+shader-set hooks, hence the memo); no rig can reach srv0IsPanelSized,
+so its cache is checked by the flight only.
+
+**Measurement:** the same parked leg, same environment as parked-4
+(Pimax OpenXR 0.566, the pad, instruments off), compared on EDVR's
+leaf time by top module and the draw-hook line. Paper ceiling of round
+two: ~1.5-2 ms of the remaining 3.25; the honest expectation is less,
+because inlining relocates loads and the forwarded draws' time is the
+game's.
