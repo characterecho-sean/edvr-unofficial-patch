@@ -199,19 +199,39 @@ internal static class SelfTests
     private static void RvaClassTable()
     {
         Check(RvaTable.Classes.Length == 14, "every RVA class is defined");
-        // A function-style class is bounded by the next known entry when that is
-        // nearer than 0x2000. record_drain sits between two thunks and takes the
-        // 0x42df9a0 region with it.
-        Check(RvaTable.Classes[ClassId("thunk_42df540")].Bound == 0x42DF940, "thunk bounded by the next entry");
-        Check(RvaTable.Classes[ClassId("record_drain")].Bound == 0x42DFAF0, "record_drain bounded by the next thunk");
+        // A function whose decompile note carries a size ends at entry+size; the
+        // 0x2000 guess is only a fallback, and only table_ba0 still needs one.
+        Check(RvaTable.Classes[ClassId("update_render_data_job")].Bound == 0x4321940 + 503,
+              "update_render_data_job ends at its decompile size");
+        Check(RvaTable.Classes[ClassId("render_data_batch")].Bound == 0x4320340 + 565,
+              "render_data_batch ends at its decompile size");
+        Check(RvaTable.Classes[ClassId("update_physics_objects_job")].Bound == 0x432B2A0 + 62,
+              "update_physics_objects_job ends at its decompile size");
+        Check(RvaTable.Classes[ClassId("eval_430efe0")].Bound == 0x430EFE0 + 1006,
+              "eval ends at its decompile size");
+        Check(RvaTable.Classes[ClassId("reset_repopulate")].Bound == 0x36A0F50 + 687,
+              "reset_repopulate ends at its decompile size");
+        Check(RvaTable.Classes[ClassId("record_drain")].Bound == 0x42DF940 + 134,
+              "record_drain ends at its decompile size");
+        Check(RvaTable.Classes[ClassId("lod_evaluator_4331300")].Bound == 0x4331300 + 9,
+              "the LOD evaluator is a nine-byte jmp thunk");
+        Check(Matches("lod_evaluator_4331300", 0x4331308) && !Matches("lod_evaluator_4331300", 0x4331309),
+              "the LOD thunk matches nine bytes and no more");
+        Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("record_drain")]) == "decompile size (134 bytes)",
+              "the decompile size is named in the bound rule");
+        Check(RvaTable.Classes[ClassId("table_ba0")].Bound == 0x4321940,
+              "table_ba0 has no decompile and keeps the next known entry");
+        Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("table_ba0")]) == "next known entry",
+              "the fallback rule is named");
+        // record_drain's 134 bytes still cover the 0x42df9a0 region the earlier
+        // hand count saw under EDVR's d3d11 frames.
         Check(Matches("record_drain", 0x42DF9A0), "0x42df9a0 is inside record_drain");
+        Check(!Matches("record_drain", 0x42DF9C6), "record_drain ends at 134 bytes");
         Check(!Matches("thunk_42df540", 0x42DF9A0), "0x42df9a0 is not the earlier thunk");
-        Check(RvaTable.Classes[ClassId("update_render_data_job")].Bound == 0x4321940 + 0x2000,
-              "job body takes the 0x2000 window");
-        Check(RvaTable.Classes[ClassId("render_data_batch")].Bound == 0x4321810, "batch bounded by table_ba0");
-        Check(RvaTable.Classes[ClassId("reset_repopulate")].Bound == 0x36A0F50 + 0x2000,
-              "reset_repopulate takes the 0x2000 window");
-        Check(Matches("reset_repopulate", 0x36A1000) && !Matches("reset_repopulate", 0x36A2F50),
+        Check(RvaTable.Classes[ClassId("thunk_42df540")].Bound == 0x42DF550, "a thunk takes 16 bytes");
+        Check(Matches("thunk_42df540", 0x42DF54F) && !Matches("thunk_42df540", 0x42DF550),
+              "thunk window edges");
+        Check(Matches("reset_repopulate", 0x36A1000) && !Matches("reset_repopulate", 0x36A11FF),
               "reset_repopulate window edges");
         Check(!RvaTable.Classes[ClassId("reset_repopulate")].Pipeline,
               "reset_repopulate is matched but is not part of the pipeline");
@@ -224,8 +244,8 @@ internal static class SelfTests
         Check(!RvaTable.Classes[ClassId("scheduler_range")].Pipeline, "the job scheduler is not the pipeline");
         Check(RvaTable.Classes.Count(item => item.Pipeline) == 12, "twelve classes make up the pipeline");
         foreach (var item in RvaTable.Classes) Check(item.Bound > item.Entry, $"{item.Name} has a positive window");
-        Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("thunk_42df540")]) == "next known entry",
-              "bound rule is reported");
+        Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("thunk_42df540")]) == "entry+0x10 (thunk)",
+              "the thunk bound rule is reported");
     }
 
     private static void StackLabels()
@@ -311,7 +331,7 @@ internal static class SelfTests
         CallerThread: Caller, NextWaitThread: Caller, Status: 0,
         Flags: Markers.PostValid | Markers.SinglePresent, SceneReady: 1);
 
-    private static Collected Fixture()
+    private static Collected Fixture(bool boundaryWait = false)
     {
         var data = new Collected { HasCallStacks = true, EventsLost = 0 };
         var epoch = new DateTime(2026, 9, 22, 14, 23, 50, DateTimeKind.Utc);
@@ -335,6 +355,13 @@ internal static class SelfTests
 
         var caller = data.Timeline(Caller);
         caller.Add(900, CpuState.Running);
+        if (boundaryWait)
+        {
+            // A wait that straddles the R1/R2 boundary at the first Submit entry.
+            caller.Add(2900, CpuState.Waiting);
+            caller.Add(3100, CpuState.Ready);
+            caller.Add(3150, CpuState.Running);
+        }
         caller.Add(4000, CpuState.Waiting);
         caller.Add(5000, CpuState.Ready);
         caller.Add(5200, CpuState.Running);
@@ -496,6 +523,32 @@ internal static class SelfTests
         unready.ReadiesByThread[Caller].Clear();
         Check(Analyzer(unready).Analyze(unready.Frames[0]).Waits[0].WakerClass == "no_ready_event",
               "a wait with no ready event has no waker");
+        RegionSplit();
+    }
+
+    private static void RegionSplit()
+    {
+        var data = Fixture();
+        var cycle = Analyzer(data).Analyze(data.Frames[0]);
+        Check(CycleAnalyzer.PartitionRegionNames.Length == 8, "eight regions partition the cycle");
+        for (var i = 0; i < CycleAnalyzer.PartitionRegionNames.Length; i++)
+            Check(cycle.Regions[i].Name == CycleAnalyzer.PartitionRegionNames[i],
+                  $"region {i} is {CycleAnalyzer.PartitionRegionNames[i]}");
+        foreach (var segment in cycle.Waits)
+            Near(segment.RegionUs.Sum(), segment.InsideUs, "a wait's region parts sum to its time in the cycle");
+        // The 4000..5000 wait sits wholly inside R4, the second Submit roundtrip.
+        Near(cycle.Waits[0].RegionUs[3], 1000, "the pacer wait lands in R4");
+        Near(cycle.Waits[0].RegionUs[0], 0, "and not in R1");
+        Near(cycle.Waits[1].RegionUs[7], 700, "the next-wait block lands in R6");
+
+        var straddled = Fixture(true);
+        var split = Analyzer(straddled).Analyze(straddled.Frames[0]);
+        Check(split.Waits.Count == 3, "the boundary wait is a third segment");
+        var straddle = split.Waits[0];
+        Near(straddle.StartUs, 2900, "the boundary wait starts in R1");
+        Near(straddle.RegionUs[0], 100, "clipped into R1");
+        Near(straddle.RegionUs[1], 100, "clipped into R2");
+        Near(straddle.RegionUs.Sum(), straddle.InsideUs, "the clipped parts still sum to the whole");
     }
 
     private static void ThreadBusyAndGate()
@@ -614,6 +667,28 @@ internal static class SelfTests
             var attribution = (Dictionary<string, object?>)report["attributionSummary"]!;
             Check(Convert.ToInt32(attribution["waitSegments"]) == 2, "attribution counts both waits");
             Near(Convert.ToDouble(attribution["pipelineWaitShare"]), 1000.0 / 1700.0, "pipeline wait share", 0.001);
+            Near(Convert.ToDouble(attribution["regionSplitResidualUs"]), 0, "the region split loses no time");
+            var byRegion = (List<Dictionary<string, object?>>)attribution["byRegion"]!;
+            Check(byRegion.Count == 8, "the region split covers every partition region");
+            var r4 = byRegion.Single(row => (string)row["region"]! == "R4");
+            Near(Convert.ToDouble(r4["waitUs"]), 1000, "R4 carries the pacer wait");
+            Near(Convert.ToDouble(r4["waitUsPerFrame"]), 500, "R4 wait per frame over both cycles");
+            var r4Classes = (Dictionary<string, object?>[])r4["byClass"]!;
+            Check(r4Classes.Length == 1 && (string)r4Classes[0]["class"]! == "pipeline",
+                  "R4's wait is attributed to a pipeline waker");
+            var r6 = byRegion.Single(row => (string)row["region"]! == "R6");
+            Check(((Dictionary<string, object?>[])r6["byClass"]!)[0]["class"] as string == "other_process",
+                  "R6's wait was ended from outside the process");
+            Near(Convert.ToDouble(byRegion.Single(row => (string)row["region"]! == "R1")["waitUs"]), 0,
+                 "R1 has no wait in this fixture");
+            var cross = (List<Dictionary<string, object?>>)attribution["byBlockingSiteAndWakerClass"]!;
+            Check(cross.Count == 1, "one blocking site in this fixture");
+            Check((string)cross[0]["site"]! == "0x5d6d7f < 0x5d4141 < 0x5d67a6", "the site is named by RVA");
+            Check(Convert.ToInt32(cross[0]["segments"]) == 2, "both waits share the site");
+            var crossClasses = (Dictionary<string, object?>[])cross[0]["byClass"]!;
+            Check(crossClasses.Length == 2, "the site splits by waker class");
+            Check((string)crossClasses[0]["class"]! == "pipeline" &&
+                  Convert.ToDouble(crossClasses[0]["us"]) == 1000, "the larger class comes first");
             var threads = (Dictionary<string, object?>[])report["threads"]!;
             Check(threads.Length == 2, "the per-thread table lists both threads");
             Check(Convert.ToInt32(threads[0]["threadId"]) == Caller, "the busiest thread is the caller");

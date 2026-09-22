@@ -546,6 +546,11 @@ internal static class Report
                     ["usPerFrame"] = Numeric.Round(frames.Count > 0 ? pair.Value.Us / frames.Count : 0),
                     ["shareOfWaitUs"] = Numeric.Round4(totalUs > 0 ? pair.Value.Us / totalUs : 0),
                 }).ToArray(),
+            ["byRegion"] = RegionSplit(segments, frames.Count),
+            ["regionSplitResidualUs"] = Numeric.Round(segments
+                .Select(segment => Math.Abs(segment.RegionUs.Sum() - segment.InsideUs))
+                .DefaultIfEmpty(0).Max()),
+            ["byBlockingSiteAndWakerClass"] = SiteCrossTab(segments, frames.Count, 12),
             ["byBlockingSite"] = Top(blocking, totalUs, 20),
             ["byWakerReadyTop"] = Top(wakerTops, totalUs, 20),
             ["byWakerThread"] = wakerThreads.OrderByDescending(pair => pair.Value.Us).Take(20)
@@ -563,6 +568,90 @@ internal static class Report
                 ? byClass.GetValueOrDefault("pipeline").Us / totalUs : 0),
         };
     }
+
+    /// Wait time by region of the cycle crossed with the waker class, so R1's
+    /// own waits read separately from the pacer block inside R4.
+    private static object RegionSplit(List<WaitSegment> segments, int frames)
+    {
+        var rows = new List<Dictionary<string, object?>>();
+        for (var i = 0; i < CycleAnalyzer.PartitionRegionNames.Length; i++)
+        {
+            var byClass = new Dictionary<string, (long Count, double Us)>();
+            var total = 0.0;
+            foreach (var segment in segments)
+            {
+                if (i >= segment.RegionUs.Length) continue;
+                var us = segment.RegionUs[i];
+                if (us <= 0) continue;
+                var entry = byClass.GetValueOrDefault(segment.WakerClass);
+                byClass[segment.WakerClass] = (entry.Count + 1, entry.Us + us);
+                total += us;
+            }
+            rows.Add(new Dictionary<string, object?>
+            {
+                ["region"] = CycleAnalyzer.PartitionRegionNames[i],
+                ["segments"] = byClass.Values.Sum(value => value.Count),
+                ["waitUs"] = Numeric.Round(total),
+                ["waitUsPerFrame"] = Numeric.Round(frames > 0 ? total / frames : 0),
+                ["byClass"] = ByClass(byClass, total, frames),
+            });
+        }
+        return rows;
+    }
+
+    /// The largest blocking sites by wait time, each split by waker class: a
+    /// scheduler-site wait whose waker was stale or idle is a different finding
+    /// from one whose waker had just been in a job body.
+    private static object SiteCrossTab(List<WaitSegment> segments, int frames, int take)
+    {
+        var sites = new Dictionary<string, double>();
+        foreach (var segment in segments)
+        {
+            var key = Site(segment.BlockingTops);
+            sites[key] = sites.GetValueOrDefault(key) + segment.InsideUs;
+        }
+        var rows = new List<Dictionary<string, object?>>();
+        foreach (var site in sites.OrderByDescending(pair => pair.Value).Take(take))
+        {
+            var byClass = new Dictionary<string, (long Count, double Us)>();
+            var count = 0L;
+            foreach (var segment in segments.Where(segment => Site(segment.BlockingTops) == site.Key))
+            {
+                var entry = byClass.GetValueOrDefault(segment.WakerClass);
+                byClass[segment.WakerClass] = (entry.Count + 1, entry.Us + segment.InsideUs);
+                count++;
+            }
+            rows.Add(new Dictionary<string, object?>
+            {
+                ["site"] = site.Key,
+                ["segments"] = count,
+                ["waitUs"] = Numeric.Round(site.Value),
+                ["waitUsPerFrame"] = Numeric.Round(frames > 0 ? site.Value / frames : 0),
+                ["byClass"] = ByClass(byClass, site.Value, frames),
+            });
+        }
+        return rows;
+    }
+
+    private static Dictionary<string, object?> RegionUs(WaitSegment segment)
+    {
+        var map = new Dictionary<string, object?>();
+        for (var i = 0; i < segment.RegionUs.Length && i < CycleAnalyzer.PartitionRegionNames.Length; i++)
+            if (segment.RegionUs[i] > 0)
+                map[CycleAnalyzer.PartitionRegionNames[i]] = Numeric.Round(segment.RegionUs[i]);
+        return map;
+    }
+
+    private static object ByClass(Dictionary<string, (long Count, double Us)> byClass, double totalUs,
+                                  int frames) =>
+        byClass.OrderByDescending(pair => pair.Value.Us).Select(pair => new Dictionary<string, object?>
+        {
+            ["class"] = pair.Key,
+            ["segments"] = pair.Value.Count,
+            ["us"] = Numeric.Round(pair.Value.Us),
+            ["usPerFrame"] = Numeric.Round(frames > 0 ? pair.Value.Us / frames : 0),
+            ["share"] = Numeric.Round4(totalUs > 0 ? pair.Value.Us / totalUs : 0),
+        }).ToArray();
 
     private static object Top(Dictionary<string, (long Count, double Us)> table, double totalUs, int take) =>
         table.OrderByDescending(pair => pair.Value.Count).Take(take)
@@ -809,6 +898,7 @@ internal static class Report
             ["wakerReadyTop"] = segment.WakerReadyStackId < 0 ? null : Site(segment.WakerReadyTops),
             ["wakerClass"] = segment.WakerClass,
             ["wakerSampleAgeUs"] = segment.WakerSampleFound ? Numeric.Round(segment.WakerSampleAgeUs) : null,
+            ["regionUs"] = RegionUs(segment),
         }).ToArray();
         var callerByClass = new Dictionary<string, object?>();
         for (var i = 0; i < cycle.CallerClassSamples.Length; i++)

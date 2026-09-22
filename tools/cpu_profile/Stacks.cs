@@ -28,26 +28,32 @@ internal sealed record RvaClass(string Name, uint Entry, uint Bound, RvaKind Kin
 internal static class RvaTable
 {
     private const uint BodyWindow = 0x2000;
+    private const uint ThunkWindow = 0x10;
     private const uint CallSiteWindow = 0x10;
 
-    // (name, entry, kind, pipeline). reset_repopulate is matched like a job body
+    // (name, entry, size, kind, pipeline). Size is the function's byte length
+    // from the Ghidra decompile note analysis\decomp\decomp_<rva>.txt, which is
+    // exact; zero means no decompile exists for that entry and the bound falls
+    // back to the next known entry. reset_repopulate is matched like a job body
     // but deliberately excluded from "pipeline": it is a one-shot settlement
     // admission candidate, not part of the steady-state chain the gate measures.
-    private static readonly (string Name, uint Entry, RvaKind Kind, bool Pipeline)[] Seeds =
+    private static readonly (string Name, uint Entry, uint Size, RvaKind Kind, bool Pipeline)[] Seeds =
     [
-        ("update_render_data_job", 0x4321940, RvaKind.Body, true),
-        ("render_data_batch", 0x4320340, RvaKind.Body, true),
-        ("update_physics_objects_job", 0x432B2A0, RvaKind.Body, true),
-        ("table_ba0", 0x4321810, RvaKind.Body, true),
-        ("record_drain", 0x42DF940, RvaKind.Body, true),
-        ("reset_repopulate", 0x36A0F50, RvaKind.Body, false),
-        ("thunk_42df520", 0x42DF520, RvaKind.Thunk, true),
-        ("thunk_42df540", 0x42DF540, RvaKind.Thunk, true),
-        ("thunk_42dfaf0", 0x42DFAF0, RvaKind.Thunk, true),
-        ("thunk_42dfba0", 0x42DFBA0, RvaKind.Thunk, true),
-        ("call_site_431b21f", 0x431B21F, RvaKind.CallSite, true),
-        ("eval_430efe0", 0x430EFE0, RvaKind.Eval, true),
-        ("lod_evaluator_4331300", 0x4331300, RvaKind.Lod, true),
+        ("update_render_data_job", 0x4321940, 503, RvaKind.Body, true),
+        ("render_data_batch", 0x4320340, 565, RvaKind.Body, true),
+        ("update_physics_objects_job", 0x432B2A0, 62, RvaKind.Body, true),
+        ("table_ba0", 0x4321810, 0, RvaKind.Body, true),
+        ("record_drain", 0x42DF940, 134, RvaKind.Body, true),
+        ("reset_repopulate", 0x36A0F50, 687, RvaKind.Body, false),
+        ("thunk_42df520", 0x42DF520, 0, RvaKind.Thunk, true),
+        ("thunk_42df540", 0x42DF540, 0, RvaKind.Thunk, true),
+        ("thunk_42dfaf0", 0x42DFAF0, 0, RvaKind.Thunk, true),
+        ("thunk_42dfba0", 0x42DFBA0, 0, RvaKind.Thunk, true),
+        ("call_site_431b21f", 0x431B21F, 0, RvaKind.CallSite, true),
+        ("eval_430efe0", 0x430EFE0, 1006, RvaKind.Eval, true),
+        // Nine bytes: a jmp thunk, so this class will rarely match a sampled
+        // frame. Kept because the name is the evaluator the arc is chasing.
+        ("lod_evaluator_4331300", 0x4331300, 9, RvaKind.Lod, true),
     ];
 
     public const uint SchedulerStart = 0x5D6B20;
@@ -56,10 +62,11 @@ internal static class RvaTable
     public static readonly RvaClass[] Classes = Build();
     public static readonly int SchedulerClassId = Array.FindIndex(Classes, c => c.Kind == RvaKind.Scheduler);
 
-    /// No PDB exists for the game, so no function sizes are available. The bound
-    /// of a function-style class is the next known entry when that is closer than
-    /// 0x2000, and entry+0x2000 otherwise; a call site matches only the 16 bytes
-    /// after it, where a return address lands.
+    /// No PDB exists for the game, but the decompile notes carry exact function
+    /// sizes, so a function-style class ends at entry+size. Where no decompile
+    /// exists the bound is the next known entry (or entry+0x2000 if that is
+    /// nearer). A thunk or a call site matches only the 16 bytes after it, which
+    /// is where a return address lands.
     private static RvaClass[] Build()
     {
         var entries = Seeds.Select(seed => seed.Entry).Append(SchedulerStart).Distinct().OrderBy(x => x).ToArray();
@@ -67,19 +74,28 @@ internal static class RvaTable
         foreach (var seed in Seeds)
         {
             var next = entries.FirstOrDefault(entry => entry > seed.Entry, uint.MaxValue);
-            var bound = seed.Kind == RvaKind.CallSite
-                ? seed.Entry + CallSiteWindow
-                : Math.Min(next, seed.Entry + BodyWindow);
+            var bound = seed.Kind switch
+            {
+                RvaKind.CallSite => seed.Entry + CallSiteWindow,
+                RvaKind.Thunk => seed.Entry + ThunkWindow,
+                _ when seed.Size > 0 => seed.Entry + seed.Size,
+                _ => Math.Min(next, seed.Entry + BodyWindow),
+            };
             classes.Add(new RvaClass(seed.Name, seed.Entry, bound, seed.Kind, seed.Pipeline));
         }
         classes.Add(new RvaClass("scheduler_range", SchedulerStart, SchedulerEnd, RvaKind.Scheduler, false));
         return classes.OrderBy(c => c.Entry).ToArray();
     }
 
+    public static uint SizeOf(string name) =>
+        Seeds.FirstOrDefault(seed => seed.Name == name).Size;
+
     public static string BoundRule(RvaClass item) => item.Kind switch
     {
         RvaKind.CallSite => "entry+0x10 (return address after the call)",
+        RvaKind.Thunk => "entry+0x10 (thunk)",
         RvaKind.Scheduler => "explicit range",
+        _ when SizeOf(item.Name) > 0 => $"decompile size ({SizeOf(item.Name)} bytes)",
         _ => item.Bound == item.Entry + BodyWindow ? "entry+0x2000" : "next known entry",
     };
 }

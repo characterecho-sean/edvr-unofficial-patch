@@ -40,6 +40,11 @@ internal sealed class WaitSegment
     public string WakerClass = "";
     public double WakerSampleAgeUs;
     public bool WakerSampleFound;
+    /// The segment clipped into each of the eight partition regions, in
+    /// CycleAnalyzer.PartitionRegionNames order. A wait that spans a boundary
+    /// belongs partly to each region, so R1's own waiting is readable apart from
+    /// the pacer block inside R4.
+    public double[] RegionUs = [];
     public double LengthUs => EndUs - StartUs;
 }
 
@@ -105,6 +110,9 @@ internal sealed class CycleAnalyzer
 {
     public const double StaleWakerSampleUs = 2000.0;
     public static readonly string[] RegionNames = ["R1", "R2", "R3", "R4", "R5a", "R5b", "R5c", "R6", "C1", "C2", "C3"];
+    /// The first eight regions partition the cycle exactly; C1..C3 are coarse
+    /// views over the same time and would double-count a split wait.
+    public static readonly string[] PartitionRegionNames = ["R1", "R2", "R3", "R4", "R5a", "R5b", "R5c", "R6"];
 
     private readonly Collected _data;
     private readonly Func<long, double> _qpcUs;
@@ -364,11 +372,26 @@ internal sealed class CycleAnalyzer
                 InsideUs = Math.Max(0, Math.Min(raw.End, end) - raw.Start),
             };
             Attribute(segment, caller);
+            segment.RegionUs = SplitByRegion(cycle, segment);
             cycle.Waits.Add(segment);
             if (segment.WakerClass == "pipeline") cycle.PipelineWaitUs += segment.InsideUs;
         }
         cycle.CallerSwitchOutStacks = CountObs(_data.SwitchOutStacksByThread, caller, start, end);
         cycle.CallerReadyStacks = CountReady(caller, start, end);
+    }
+
+    /// Clips one wait into the eight partition regions. The parts sum to the
+    /// segment's time inside the cycle, which the report asserts per segment.
+    public static double[] SplitByRegion(FrameCycle cycle, WaitSegment segment)
+    {
+        var split = new double[PartitionRegionNames.Length];
+        for (var i = 0; i < split.Length && i < cycle.Regions.Length; i++)
+        {
+            var region = cycle.Regions[i];
+            split[i] = Math.Max(0, Math.Min(segment.EndUs, region.EndUs) -
+                                   Math.Max(segment.StartUs, region.StartUs));
+        }
+        return split;
     }
 
     private int CountObs(Dictionary<int, List<StackObs>> map, int thread, double start, double end)
