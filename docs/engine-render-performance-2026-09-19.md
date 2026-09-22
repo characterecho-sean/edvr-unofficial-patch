@@ -1581,3 +1581,97 @@ straddle, EDVR's submit path is the fix. (3) The engine's periodic
 stalls (true rate far above the throttled log; shader compiles 40-90 ms
 every 30-60 s) remain the engine-side trigger worth a PresentMon stock
 capture + the de-throttled counter.
+
+Correction (2026-09-22, later): the 081018 session did not run on VDXR.
+Its runtime log names the runtime (headset_key,pimax-openxr/
+pimax-crystal-super,runtime=Pimax OpenXR,system=Pimax Crystal Super;
+openxr_resolution headset=5424x5356 requested=0.7559), so the half-rate
+stretches above are Pimax OpenXR's, and the user-side toggle to try is
+Pimax's smart smoothing, not Virtual Desktop's SSW.
+
+### 2026-09-22 -- The ~1 km onset: candidates, their log signatures, and the one approach flight that separates them (desk work, no flight)
+
+Scope is cockpit only (Sean, 2026-09-22). The observation to locate: CPU
+frame time rises noticeably once the ship is within ~1 km of a
+settlement. Desk research over the pipeline map and the 2026-09-21
+entries (analysis\ is gitignored; the docs carry what it found) gives
+five candidates, each with a discriminating signature that ONE
+file-mode trace of the approach can read at per-frame resolution. The
+runtime log's 30 s cycle windows are the coarse cross-check, not the
+instrument: at 100 m/s a 30 s window is 3 km.
+
+* **C1 Stage 1 per-record distance/LOD gate** (FUN_14430EFE0 applies the
+  distance/LOD + frustum gates, FUN_144331300 computes the active mask;
+  LODDistanceScale alone reproduced the EB52 family's drop, pipeline map
+  Stage 1). Admission is per record as its screen-size test passes, so
+  job-0 load RAMPS with 1/distance, in LOD bands (several small steps),
+  with no one-shot event.
+* **C2 Collection admission at a radius** (reset-repopulate
+  FUN_1436a0f50, RVA 0x36A0F50, never fires while parked; the scheduler
+  probe counted ~432 job-0 calls/frame + ~79 batch/frame at a
+  settlement vs ~3/frame elsewhere, 2026-09-21). One frame with samples
+  inside 0x36A0F50, then job-0 STEPS from ~3 to ~432 calls/frame; the
+  journal's ApproachSettlement event may or may not coincide (its
+  firing radius is unknown; this flight measures it).
+* **C3 Physics/kinematic scope** (job 2, UpdatePhysicsObjectsJob
+  0x432B2A0): the passed set's physics grows while job-0 does not.
+* **C4 Not the pipeline**: the caller thread's game_before_first_submit
+  grows as WAITING at D3D/driver/kernel blocking sites (GPU
+  back-pressure or the half-rate throttle), or as EDVR's own per-draw
+  hook time (samples in EDVR's d3d11.dll on the caller thread scaling
+  with the draw count). The 2026-09-22 cockpit windows (12 ms before
+  first submit, 5.1 ms after Present, 22.3 ms cycle) do not say which;
+  the analyzer's running/waiting split per region does.
+* **C5 Streaming**: no settlement asset-streaming mechanism is
+  evidenced (the "streaming burst" of the 2026-09-21 design entry is
+  job-0's internal cache refresh); it would show as I/O blocking sites
+  and worker time outside every pipeline class.
+
+**Signatures, all from one trace plus two files:** (S1) per-second
+series from the analyzer's frames.jsonl: before_first mean, its
+running/ready/waiting split, thread-summed samples per RVA class
+(job0/job1/job2/eval/LOD/record_drain/reset_repopulate/scheduler/EDVR
+d3d11/other) and the first frame that samples 0x36A0F50; (S2)
+distance: haversine between Status.json (Latitude, Longitude, Altitude,
+PlanetRadius, ~1 Hz, sampled by cpu_profile.py into
+status_samples.jsonl) and the settlement (ApproachSettlement: Cranfield
+Nutrition Biosphere on 38 Lyncis 4 f, lat 68.075294, lon 121.067451);
+(S3) the journal's ApproachSettlement timestamp. Draw counts are not in
+the trace (the census is hotkey-armed only, tens of ms per census
+frame), so one NUMLOCK census at the far end and one when parked give
+the eye-draw count at the two ends only. Read: a step at one frame with
+reset_repopulate sampled = C2; a ramp or bands without it = C1; job-2
+rising alone = C3; waiting share rising with running flat, or the EDVR
+module share rising = C4; I/O sites = C5.
+
+**Not evidence:** the 081018 log's ApproachSettlement at 14:11:44 UTC
+sits one window before the heavy cockpit windows 7-15, but that session
+LOADED IN parked at the settlement (journal: LoadGame 14:11:08,
+Location 14:12:02, no Liftoff/Touchdown), so the coincidence says
+nothing about a radius.
+
+**The flight (one session, one ini, two legs, two captures):**
+environment to state in the entry: build HEAD (`python tools\edvr_log.py
+--target frontier --expect-build HEAD --version`), Pimax Crystal Super on
+Pimax OpenXR with the log's openxr_resolution line, DLSS state, Pimax
+smart smoothing OFF (a half-rate throttle fills the regions with
+waiting; the analyzer separates it, a clean leg is cheaper). Instruments
+OFF: `advanced.scheduler_probe = 0` (the live Frontier ini has 1: a
+return-address signature walk at every job entry, ~432/frame, and it was
+ON during the 2026-09-22 cockpit leg), `advanced.eye_depth_capture = 0`
+(live ini has 1), `advanced.object_probe` absent or 0, no NUMLOCK census
+and no classification capture during leg 1. Leg 1, the Phase A gate:
+loaded parked at the settlement, cockpit, head still; from an elevated
+console `python tools\cpu_profile.py --capture --target frontier
+--start-key F9 --stop-key F11 --max-seconds 90 --output
+build\phaseA-parked-2`; F9 in the cockpit, 60-75 s, F11 (pick two keys
+that are not in the .binds; F10 is Elite's screenshot). Leg 2, the
+onset: lift off, fly out past 5 km (nav-target distance on the HUD),
+turn, F9 at or beyond 5 km, approach at 100 m/s or slower and 50 m/s
+inside 2 km, land or park, F11; second run of the tool with
+`--max-seconds 420 --output build\onset-approach`. Analysis: both traces
+through the analyzer with `--runtime-log` (the per-window reconciliation
+must hold before any number is read); leg 1 gives the gate (caller
+pipeline running + pipeline-attributed waits, the critical-path share,
+recall x share x 5.3 ms against ~1.5 ms); leg 2 gives the onset per the
+signatures above, joined to distance by UTC.
