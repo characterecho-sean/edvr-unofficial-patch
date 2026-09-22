@@ -8,64 +8,62 @@ context; every load-bearing claim cites its evidence.
 
 ## Status
 
-- **State:** design for external review, one iteration after three measured
-  refutations of simpler approaches (evidence §2), then an in-repo review
-  that replaced the per-frame test (§3.2), moved the integration point to
-  the engine's own frustum-reject path (§3.3), swapped the oracle for an
-  exact one (§3.4) and put the one flight that can kill the arc first (§4).
-  Not implemented; no flight committed.
-- **Prize (re-priced by Phase B', §9, §10):** at the parked cockpit
-  pose (four eye runs) 70-72% of the settlement's eye draws come ONLY
-  from t33 PARTS unseen in both eyes (R = 1 m), ~6.0 ms of the caller
-  thread's ~8.5 ms settlement share -- reachable only by a per-part
-  reject: whole engine records carry 13.2% (1.12 ms, §10). The old
-  job-pipeline figure is dead with Phase A.
-- **Open (§10, run 152632):** B' FAILS at the proven site; CONDITIONAL and
-  unmeasured at a per-part one. The draw-item builder's view loop
-  (FUN_1442B4420:250-275) is proven the admission for the records it sees
-  (0 drawn slots it rejects, 0 admitted records undrawn; the mask
-  over-admits 8 records an eye, FUN_14430EFE0 rejects 20,232 drawn
-  slot-eyes) but culls WHOLE engine records: ideal occluders remove
-  0.17-0.91 ms there. Per sub-item and view the builder calls FUN_1442B3FC0
-  (frustum + LOD per part; the 217 one-eye parts all lie outside the other
-  eye): ideal occluders remove 2.54 / 3.27 ms of builder parts (256x128 /
-  256x256); real solid ones must reproduce >= 59% / 46% of that (95% / 74%
-  at 5.3 ms). Unmeasured: 152632's version 9 geometry is EMPTY (its
-  one-shot arm was wiped by the pool's first sighting; fixed, §11).
-- **Next (§11):** the probe is fixed and extended -- BUILT, gated, NOT
-  FLOWN: the geometry arm survives a pool release that cost it nothing,
-  and EDVRGATE v2 records every FUN_1442B3FC0 call (verdict, LOD, the
-  part's own sphere, its builder row / entry / sub-item). One parked
-  capture, both keys, no reject: prove the part site (the reader's
-  per-part tally), qualify the solid inventory, measure real/ideal.
-- **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
-  rendering from the ship. On foot is out of scope for now; the corpus and
-  the profile legs are cockpit poses. Also to instrument: CPU frame time
-  rises noticeably once the ship is within ~1 km of the settlement.
-- **Ruled out (do not re-propose; evidence in §5):** draw-dedup culling;
-  static/PVS culling; skip-based work gating (the change-gate abort); GPU
-  occlusion queries as the runtime mechanism (they remain the offline
-  oracle, §3.4); same-frame depth readback; boundary-side draw-call motion
-  estimation (pipeline doc, 2026-09-19 decision); whole-structure boxes as
-  occluders; single-occluder rect coverage as the test. Phase B' (§9,
-  §10): the cockpit as the parked prize's occluder; nesting as what
-  hides the parked view; the 2026-09-21 "<0.15 ms for 3.5k draws"
-  baseline (§1: its windows held no settlement frames); a reject at
-  FUN_14430EFE0 as the pool-draw cull (type-2 items only); a
-  record-level reject in the builder's view loop (whole engine
-  records); the collection mask as the admission; full occluder meshes
-  as §3.2's occluders within 0.3 ms (155k triangles an eye).
-- **VERDICT (2026-09-22 evening, valid Phase A): KILL.** Two clean
-  file-mode legs on build 2d8fbda (engine arc, "Phase A, valid: KILL"
-  entry). Parked cockpit: the job pipeline is 5.24 ms thread-summed on
-  seven workers (the ~5.3 ms reproduced) but only 0.81 ms on the caller
-  thread's critical path (0.67 ms running, all post-present, + 0.14 ms
-  of pipeline-attributed waits; share 0.155): recall x critical path =
-  0.78 ms against the ~1.5 ms bar. The caller thread's wall is draw
-  submission (11 ms before first submit, 98.6% running, 3.94 ms of it
-  innermost in EDVR's own d3d11.dll), which no eval-level cull touches.
-  Nothing of §3 is built; §4 stops at Phase A. The arc's successor is
-  the EDVR per-draw cost on the caller thread (engine arc Status).
+- **VERDICT (2026-09-22 night, §12, run 165433, offline): B' FAILS at
+  the part site.** The site is PROVEN: FUN_1442B3FC0's per-(part, eye)
+  verdicts admit exactly the builder parts' pool draws (0 rejected and
+  drawn, 0 admitted and undrawn, 20,728 admitted and drawn, 0 untested;
+  reach 85.2% of the pool draws). The occluders are REFUTED: the
+  settlement's occluding surface is open panels and shells (89.6%;
+  closed meshes own 3.5%), and §3.2 built from qualified closed solids
+  -- raw triangles or eroded inner boxes -- removes 0 pool draws at
+  256x128 and 256x256: 0% of the ideal (bar ~45%), 0 ms (bar 1.5 ms at
+  the 6.3 ms post-cut share). 0 false rejects (slot and draw level)
+  against the exact re-draw truth.
+- **Ceiling at the site (§12):** ideal occluders on the engine's own part
+  spheres remove 19.5 / 25.9% of the pool draws (256x128 / 256x256):
+  1.66 / 2.20 ms at the 8.5 ms pre-cut share, 1.23 / 1.63 ms post-cut.
+  Only raw opaque open-panel triangles plus the terrain reach it
+  (1.57-1.63 ms at 256x256), at 0.5-2.3 M triangles an eye against room
+  for ~30-60 k in 0.3 ms.
+- **Prize (exact re-draw truth, §12):** 74.1% of the pool eye draws hold
+  only slots unseen in both eyes (6.30 / 4.67 ms pre / post-cut); the
+  builder parts' share is 63.0% (5.35 / 3.97 ms).
+- **State:** B' measured to its verdict offline (§9 on 055252/082019/
+  094038, §10 on 152632, §12 on 165433). Nothing of §3 is built; the
+  only code is the instrument (advanced.cull_gate_capture, default off)
+  and its reader, tools/cull_gate_probe.py.
+- **Open:** a sound, cheap representation of one-sided opaque panels
+  (quads on their faces, cull mode kept) plus a terrain occluder, whose
+  geometry no capture holds (version 9 carries pool draws only); 14.8%
+  of the pool draws hold a slot no builder part claims, out of the part
+  site's reach (the 197 unclaimed one-eye slots, all VS
+  4435F2E50020E7F3, belong to no captured record).
+- **Next:** Sean's call, no flight: close B' (the site's own post-cut
+  ceiling is 1.63 ms, 9% over the bar), or measure the panel-quad
+  inventory offline on 165433 against >= 92% of the 256x256 ideal.
+- **Scope (Sean, 2026-09-22):** cockpit only -- true stereoscopic
+  settlement rendering from the ship; on foot is out of scope for now.
+  Also to instrument: CPU frame time rises noticeably once the ship is
+  within ~1 km of the settlement.
+- **Ruled out (do not re-propose; evidence in §5, §9-§12):** draw-dedup
+  culling; static/PVS culling; skip-based work gating (the change-gate
+  abort); GPU occlusion queries as the runtime mechanism (the offline
+  oracle, §3.4); same-frame depth readback; boundary-side draw-call
+  motion estimation; whole-structure boxes as occluders; single-occluder
+  rect coverage; the cockpit as the parked prize's occluder; nesting as
+  what hides the parked view; the "<0.15 ms for 3.5k draws" baseline; a
+  reject at FUN_14430EFE0 as the pool-draw cull; a record-level reject in
+  the builder's view loop; the collection mask as the admission; full
+  occluder meshes within 0.3 ms. From §12: closed solids and their
+  eroded inner boxes as the occluders; R = 1 m about the slot origin as
+  the occludee, and the R = 1 m footprint as a zero-violation truth; the
+  nearest-seen-origin association and the reader's range as occluder
+  identity and selection.
+- **Phase A (2026-09-22 evening, valid): KILL** of the job-pipeline
+  prize: 5.24 ms thread-summed on seven workers, 0.81 ms on the caller
+  thread's critical path (x recall = 0.78 ms against ~1.5 ms). The
+  caller thread's wall is draw submission (3.94 ms of it innermost in
+  EDVR's own d3d11.dll); §8 re-scoped the arc to it (engine arc Status).
 
 ## 1. Context and goal
 
@@ -1004,3 +1002,259 @@ read as 5 rejected-and-drawn. Existing data, not planted: of the 217
 one-eye slots only 19 are claimed by a builder part; 198 by none (the
 records the builder never sees), so the part site can explain at most
 19 of them.
+
+## 12. Phase B' at the part site (2026-09-22, run 165433, offline): the site is proven, qualified solid occluders remove nothing
+
+**Capture.** Eye run 165433 (16:54, parked on the pad at Cranfield
+Nutrition Biosphere, Pimax OpenXR; the gfx log's version line names
+b706df9), both keys on, no reject: gate_165433.bin (EDVRGATE v2, ledger
+frames 2..4: 95,008 gate calls, 2,037 builder calls on 679 engine
+records, 3 view dumps, 0 faults, 0 pose mismatches; 109,291
+FUN_1442B3FC0 rows, all kept, 0 unverified, 0 foreign, 0 outside a
+builder row), version 2 depth for frame 2, and version 9 geometry for
+frame 2 (19,482 draws, 4,865 meshes, 32 states, 0 declined; §11's
+re-arm fired 70 ms after the arm). Frame 2: 18,267 pool eye draws (A
+9,133, B 9,134), 12,285 t33 slots, 88.0% unseen at R = 1 m. Scripts are
+throwaway, in the session scratch (phaseB3), with a small C rasteriser.
+
+**1. The reader** (tools/cull_gate_probe.py, unchanged) repeats §10 at
+the record unit and proves the part unit:
+
+| test | drawn (slot, eye) it rejects | admitted, nothing drawn | admitted, drawn |
+|---|---|---|---|
+| builder view loop (record, eye) | 0 | 0 | 1,062 |
+| collection mask rec+0x208 (record, eye) | 0 | 16 | 1,062 |
+| gate FUN_14430EFE0 (record, eye) | 20,232 | 0 | 144 |
+| **FUN_1442B3FC0 (part, eye)** | **0** | **0** | **20,728** |
+
+The part row also has 512 (part, eye) pairs rejected and undrawn and 0
+untested. 12,013 parts carry rows in frame 2; 10,698 builder parts
+claim a slot (10,427 of the 12,285 drawn slots are claimed, 473 by two
+or more records); 10,647 were tested, the other 51 sit on records whose
+view loop rejected the eye. Eyes: view 0 (bits 0x2) and view 5
+(0x400000), |cos| 1.00000. The engine stores a plane as an outward n
+with n.x = d: the four sides meet at the view's camera (+0x540) to
+0.001 mm and the near plane is 25 mm ahead. Against the frame-2 depth
+files: cameras 0.31 / 0.32 mm apart, planes within 0.035 degrees and
+4.9 mm. The view record holds no clip matrix (only column 3, the
+generic (0, 0, 0.025, 0), matches), so every projection below is the
+depth files' cb1[270..273]; 0.035 degrees is under one texel of the
+3070-wide eye.
+
+**The one-eye slots:** 219 (A 136, B 83). 20 are claimed by a part the
+part test rejects in the other eye. 2 are aliases: slots 12935 and
+12936 are two of four slots at one pivot that three parts claim
+(records 0x1e645fd7c30 and 0x1e645fd67a0), each part admitted in both
+eyes; eye A draws the pivot through 12856, 12911 and 12936, eye B
+through 12856, 12911 and 12935. The other 197 belong to no captured
+record: one family draws them all (VS 4435F2E50020E7F3: 82 draws,
+1,499 instances, 0.4% of the pool draws, no claimed slot among them),
+each lies outside the other eye's viewport, and the nearest engine
+record origin is 343 / 667 / 781 m away (p10/50/90). Neither the
+builder's parts nor the gate's records hold them; whatever admits them
+per eye, this probe does not see it. (At the origins of records the
+builder never sees: 798 slots, all drawn in both eyes, the gate passing
+the drawn eye for 788 -- §10's 784 of 794.) 2,704 pool draws (14.8%)
+hold a slot no builder part claims.
+
+**Site verdict: PROVEN at the part unit.** FUN_1442B3FC0's verdict per
+(part, eye) admits exactly the builder parts' pool draws: no drawn slot
+all of whose claimants it rejects, no admitted part with nothing drawn,
+nothing untested, and it explains every one-eye slot it can reach. A
+reject there removes one part in one eye; its reach is the 85.2% of the
+pool draws all of whose slots a builder part claims.
+
+**2. The geometry, and an exact truth.** The pool families pack
+positions the way src/d3d11/fss_panel_vs.h's edvrDecodePos reads them
+(PACKEDVERTEXDATAA; two encodings by pva.z bits 24..30) and place them
+by the t33 head (boneBase +0, scale +4, unorm16 quaternion +8, position
++16): world = R(q) p scale + position, clip = M (world - cb1[275]).
+Checked by re-drawing every static instance of the frame (4.70 / 4.47 M
+triangles an eye) against the stored depth: of the texels that opaque,
+depth-writing, non-discarding instances cover, 38.1 / 36.9% land on the
+stored depth (0.02% + 2 mm) and 0.03% in front of it, the rest hidden
+(on a 15k-instance subset, 46.8% land on it with the draw's cull mode
+and 2.6% with it flipped). Of the stored non-sky texels (eyes A / B)
+the pool's depth-writing instances reproduce 51.7 / 48.8%; the rest is
+terrain, own hull and pad (non-pool, >= 3 m: 38.1 / 41.1%) and the
+cockpit (10.1 / 10.0%). The re-draw is the exact
+per-instance truth of §3.4 (a): an instance is seen if a texel of it
+equals the stored depth (a non-depth-writing one: is not behind it);
+skinned instances (200 an eye) and the 29 draws without geometry count
+seen. It and §9's footprint (R = 1 m about the slot origin) disagree on
+1,261 of the 12,285 slots: 861 the footprint calls seen are hidden, and
+400 it calls unseen are visible.
+
+The engine's part sphere is a sound occludee: over the 7,639 drawn
+slots one part claims, every vertex of every mesh drawn there lies
+within 1.026 radii of the v2 centre (p99 1.001; 8 slots exceed the
+radius by more than 1 cm, the worst by 0.13 m). Centre to slot origin
+p50 1.68 m; radius p50 1.63 m, p90 3.62 m.
+
+**3. The occluders.** Of the 10,743 slots unseen in both eyes that lie
+in eye A's view, 98.0% sit behind a surface >= 30 m out, and the
+re-draw names that surface's owner exactly: an opaque OPEN pool mesh
+89.6%, a closed one 3.5%, no pool instance (terrain, hull) 6.9%, a
+discarding pixel shader 0.0%. §10's association (the nearest seen slot
+origin within 5 m) names the owner's own slot for 13.7% of the points
+the re-draw attributes. The settlement's walls are open by
+construction: 187 of the 4,864 meshes are closed (every welded edge
+shared by exactly two oppositely wound triangles; the 154 instanced in
+eye A are all outward: for all 1.57 M of their instance triangles the
+rasteriser's front face is the outside), and of the 15 meshes that own
+half the occluding points 14 are open and keep their boundary edges
+(within 8%) from a 0.1 mm weld to a 5 cm one: panels with 58-96% of
+their area facing one way, and shells open along their edges.
+
+Per instance, solid = static, opaque, depth-writing, a pixel shader
+dumped and without discard (31 of the 40 pool PS dumped, 9 of them with
+discard), AND a closed mesh; "opaque, open" = the same without
+closedness. Eye A, the reader's range (slots seen at R = 1 m within 120
+m: 531) and the association (359 slots):
+
+| set | class | instances | distinct meshes (triangles) | instance triangles | states |
+|---|---|---|---|---|---|
+| reader range | solid (closed) | 67 | 32 (1,884) | 4,482 | 4 |
+| | opaque, open | 1,371 | 493 (33,738) | 78,639 | 4 |
+| | PS discard or undumped | 15 | 6 (5,041) | 5,077 | 5, 4 |
+| | blended or no depth write | 763 | 254 (16,363) | 52,203 | 8, 12, 14 |
+| | skinned | 16 | 16 (56,386) | 56,386 | 1, 2, 8 |
+| association | solid (closed) | 38 | 15 (864) | 3,114 | 4 |
+| | opaque, open | 1,022 | 409 (31,206) | 81,902 | 4 |
+| | PS discard or undumped | 8 | 5 (6,910) | 6,922 | 5, 4 |
+| | blended or no depth write | 620 | 252 (17,530) | 58,274 | 8, 12, 14 |
+| every instance an eye draws | solid (closed) | 957 | 114 (6,128) | 53,842 | |
+| | opaque (open or closed) | 30,527 | 3,109 (480,251) | 2,266,034 | |
+
+States: 4 opaque, depth write, cull back; 5 the same, cull none; 1 and
+2 as 4; 8 blended, no depth write; 12 opaque, no depth write; 14
+blended, no depth write, cull front. The solid set's z-buffer
+reproduces the stored depth at 3.5% of the >= 30 m occluding points,
+its eroded boxes at 1.7%, the opaque set at 93.1%. Form (b), §3.2's
+representation: per solid mesh the largest axis-aligned box inside it
+(voxelised in the mesh frame, 40 cells an axis, parity rays, eroded to
+the inside cells' centres): 81 of the 114 meshes (the rest thin or
+zero-volume shells), box / mesh volume p50 0.28; 679 boxes an eye,
+2,011 eye-facing faces, 4,022 triangles; no box texel in front of the
+solid surface.
+
+**4. Recall** (frame 2, 18,267 pool eye draws). Unit: FUN_1442B3FC0's
+part with its own sphere. Both-eyes rule with the engine's verdicts: a
+part goes when, in each eye, the part test rejected it or it is
+occluded (or off-screen); a slot goes when every part claiming it goes
+(a part the engine rejects in both eyes keeps no slot); a draw goes
+when every slot of its instance range goes. Coverage buffer as §9/§10:
+per eye a full-resolution z-buffer of the occluders (the stored depth
+for the ideal), the farthest depth per tile, a tile with any uncovered
+texel open; the occludee's rect x 1.05, dilated one tile. ms = share x
+8.5 (pre-cut) / x 6.3 (post-cut):
+
+| occluders (triangles an eye) | 256x128 | 256x256 | real / ideal |
+|---|---|---|---|
+| truth, exact re-draw (part unit) | 63.0%, 5.35 / 3.97 ms | - | |
+| truth, footprint R = 1 m (part unit) | 58.9%, 5.00 / 3.71 [75.5..40.3 over R 0.3..3] | - | |
+| ideal (the stored depth) | 19.5%, 1.66 / 1.23 | 25.9%, 2.20 / 1.63 | 1 |
+| **(a) solid set, raw triangles (53.8 k)** | **0 draws** | **0 draws** (4 slots) | **0 / 0** |
+| **(b) solid set, eroded inner boxes (4.0 k)** | **0** | **0** | **0 / 0** |
+| bound: every opaque instance, open meshes too (2.27 M) | 14.6%, 1.24 / 0.92 | 20.7%, 1.76 / 1.30 | 0.75 / 0.80 |
+| bound: the same + terrain (stored non-pool, >= 3 m) | 19.5%, 1.66 / 1.23 | 25.9%, 2.20 / 1.63 | 1.00 / 1.00 |
+| bound: opaque instances the re-draw shows seen (519 k) + terrain | 18.4%, 1.57 / 1.16 | 24.9%, 2.12 / 1.57 | 0.94 / 0.96 |
+| same, slots within 120 m (282 k) + terrain | 16.2%, 1.38 / 1.02 | 19.1%, 1.62 / 1.20 | 0.83 / 0.74 |
+| opaque on the reader's range, + terrain | 4 draws | 30 draws (0.2%) | 0.00 / 0.01 |
+
+The bridge to §10 on this capture (§10's unit, R = 1 m about each
+claimed slot): ideal 29.2 / 37.8% (§10: 29.8 / 38.5); the engine's own
+spheres, larger and off the pivot, cost a third of it. At 512x512
+(context, not the brief) the ideal is 31.0%, 2.64 / 1.95 ms, the solid
+set 2 draws. Admitting the five undumped pixel shaders the re-draw
+shows hole-free (texels in front of the stored depth < 0.01%; chiefly
+026709B54867F893 on family 4435F2E50020E7F3's closed ~2k-triangle
+meshes) grows the solid set to 1,730 instances and 1.56 M triangles an
+eye, and it still removes 0 draws. Where the ideal comes from: the
+pool-owned texels of the stored depth alone remove 0.0 / 0.6%, the
+non-pool ones alone 0; it is fusion, building fronts with the terrain
+between and below them.
+Without the terrain the opaque set keeps 75-80% of the ideal because
+hidden instances stand in for it; with the terrain it matches the ideal
+to the draw. The reader's range fails as a selection because it picks
+occluders by the R = 1 m footprint: 41.8% of the texel weight the full
+opaque set culls with sits on slots the re-draw shows seen and the
+footprint calls unseen (a panel whose pivot hides behind its own face).
+The terrain rows are bounds: the version 9 section carries only pool
+draws, so the terrain's own geometry, and what it would cost, are not
+in this capture.
+
+**5. False rejects: 0** against the exact re-draw, at slot and draw
+level, in every row above and at 512x512. Two classes of candidates,
+neither a loss: (i) 3-5 culled parts (8 at 512x512) claim a seen slot
+that two to four parts share at one pivot; the slot stays because a
+co-claimant is not culled, and each culled part's own sphere is
+occluded in both eyes, so the seen texels are the co-claimant's; (ii)
+against the footprint, 1-2 removed slots (10230, 8425; 0-6 draws) that
+it calls seen and the re-draw shows hidden in both eyes. The footprint
+is no zero-violation truth at this unit: its own part-unit truth would
+remove 1,058 draws holding a slot the re-draw shows seen, and §10's
+occludee (R = 1 m about the slot) with ideal occluders removes 176 /
+342 such draws on claimed slots (388 / 644 on every slot) at 256x128 /
+256x256; the engine's sphere removes none.
+
+**6. Cost at the part site** (instruction level, as §10). The test runs
+only where the engine passed a part in an eye view: 20,728 (part, eye)
+tests a frame (of 11,771 rows an eye view), ~40 instructions / 15-20
+cycles each, ~0.1-0.12 ms thread-summed on the builder's thread. Form
+(b) rasterises 4,022 triangles an eye: < 0.02 ms an eye, ~0.15 ms in
+all, inside 0.3 ms -- for zero draws. What does recover draws costs
+triangles: the seen opaque set is 519 k an eye (282 k within 120 m),
+~2-3 ms an eye at 10-20 cycles a triangle; 0.3 ms less the tests
+leaves room for ~30-60 k triangles for both eyes.
+
+**Verdict: B' FAILS at the part site with a qualified inventory.** The
+site is proven. The recall is not: real solid occluders, raw or as
+§3.2's eroded boxes, reproduce 0% of the ideal at 256x128 and 256x256
+(FAIL against >= ~45% at the 8.5 ms pre-cut share) and remove 0 ms
+against the 1.5 ms bar at the 6.3 ms post-cut share (FAIL). The bar is
+also steeper than §9's 45% at this unit: the ideal itself is 1.66 /
+2.20 ms pre-cut and 1.23 / 1.63 ms post-cut, so a real set needs >= 90%
+/ 68% of it pre-cut and >= 92% at 256x256 post-cut (at 256x128 not even
+ideal occluders reach 1.5 ms). Only raw open-panel triangles plus the
+terrain get there (1.57-1.63 ms at 256x256), at 0.5-2.3 M triangles an
+eye, on a soundness argument §3.2 never made (a one-sided panel
+occludes only from its front, so the draw's cull mode must ride with
+every triangle) and with a terrain this capture does not carry.
+
+ruled out: a closed-solid inventory (§3.1's qualification) as the
+occluder for the parked prize, because closed meshes own 3.5% of the
+occluding surface and their raw triangles remove 0 pool draws at
+256x128 and 256x256 (2 at 512x512; still 0 with the hole-free undumped
+shaders admitted, 1.56 M triangles an eye).
+ruled out: §3.2's eroded inner boxes as the representation for this
+content, because they cover 1.7% of the occluding points (a subset of
+the closed solids') and remove 0 draws.
+ruled out: R = 1 m about the slot origin as the occludee (§9/§10's
+unit), because it does not bound the part (centre offset p50 1.7 m,
+radius p50 1.6 m): with ideal occluders it removes 176-644 draws that
+hold a slot the exact re-draw shows seen; the engine's part sphere
+(every vertex within 1.026 radii) removes none.
+ruled out: the R = 1 m footprint as the truth of a zero-violation gate
+at the part unit, because 400 of the 12,285 slots it calls unseen are
+visible in the exact re-draw (its part-unit truth would remove 1,058
+draws holding one).
+ruled out: §10's nearest-seen-origin association as the occluder's
+identity, because it names the owning slot for 13.7% of the occluding
+points the re-draw attributes.
+ruled out: the reader's range (slots seen at R = 1 m within 120 m) as
+the occluder selection, because the opaque set on it removes 0.0-0.2%
+of draws: panels whose pivot hides behind their own face are
+footprint-unseen yet carry 41.8% of the occluding texel weight.
+ruled out: the part test as the admission of the 197 unclaimed one-eye
+slots, because no builder part or engine record lies within 343 m of
+90% of them (one family, VS 4435F2E50020E7F3).
+
+**Next.** Sean's call; nothing here needs a flight. Either close B'
+(the §3.2 test's own post-cut ceiling at the proven site is 1.63 ms at
+256x256, 9% over the bar, and the qualified inventory recovers
+nothing), or measure one more representation offline on 165433: a few
+inner quads per open opaque panel on its planar faces (cull mode kept)
+plus a terrain occluder -- whose geometry must first be captured, the
+version 9 section holding only pool draws -- against the >= 92% of the
+256x256 ideal it would need within ~30-60 k triangles for both eyes.
