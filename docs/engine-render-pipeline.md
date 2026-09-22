@@ -20,15 +20,18 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) Phase 0 of the change-gate design —
-  the attribution flight (park >= 60 s, eye-burst, jobs[] dump, plus a
-  cpu_profile capture inside job-0; engine_motion + scheduler_probe
-  already on): it replaces the extrapolated ~4-5 ms with measured
-  settlement numbers, and its gate kills the design cheaply if the job
-  wall share is < ~1.5 ms; (2) per-record identity and change signal
-  (stage 2 — motion arc, and the change-gate design's bounded dependency);
-  (3) scheduler payload-vtable closure (stage 0); (4) ring-buffer command
-  consumers.
+* **Open, highest value first:** (1) the dynamic eval-level culling
+  design — measured prize ~4.8-5.1 ms of the 5.3 ms view-dependent
+  content bound at a parked settlement view (91-97% of submitted records
+  provably unseen, engine arc 2026-09-22 entry): per-frame, conservative,
+  depth-join as the regression oracle; the static unseen set is a
+  CEILING, not a cull list (head rotation un-occludes); (2) fix the
+  depth capture's constants keying (this frame's first pool-carrying
+  draw was a 3-vertex eval pass — key on a structure-family draw); (3) a
+  view sweep to size the DYNAMIC average prize (every armed eye run now
+  yields depth); (4) per-record identity and change signal (stage 2 —
+  motion arc); (5) scheduler payload-vtable closure (stage 0); (6)
+  ring-buffer command consumers.
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,
