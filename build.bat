@@ -1284,6 +1284,8 @@ if errorlevel 1 ( echo [edvr] ERROR: eye draw snapshot test build failed & exit 
 "%OBJ%\drawsnapshot\eye_draw_snapshot_test.exe" "%OBJ%\drawsnapshot\fixture.bin" || exit /b 1
 python "tools\eye_draw_snapshot.py" --self-test || exit /b 1
 python "tools\eye_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin" --verify-fixture || exit /b 1
+python "tools\eye_depth_dump.py" --self-test || exit /b 1
+python "tools\eye_depth_dump.py" "%OBJ%\drawsnapshot" || exit /b 1
 python "tools\gui_draw_snapshot.py" --self-test || exit /b 1
 python "tools\eye_inputs.py" --self-test || exit /b 1
 python "tools\eye_decisions.py" --self-test || exit /b 1
