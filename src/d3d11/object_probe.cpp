@@ -622,6 +622,10 @@ const char* g_gateHookStatus = "off";
 bool        g_gateBuilderHooked = false;
 bool        g_gateFrustumOk = false;
 uint8_t     g_gateVisGlobal = 0;
+const char* g_gatePartStatus = "off";    // FUN_1442B3FC0's hook: "hooked" or why it stood down
+uint32_t    g_gateGeoFrame = 0;         // the frame armGateProbe armed the pool-draw geometry for (0: none)
+static_assert(CullGateProbe::kNoRow == kGateProbeNoRow,
+              "the builder bracket's thread-local row and the probe's 'no row' must agree");
 
 // FUN_1404F4E10's first sixteen bytes in the hash-verified executable
 // (analysis EliteDangerous64.exe at RVA 0x4F4E10): movups xmm3,[r8];
@@ -635,7 +639,7 @@ bool gateReadImage(void* dst, uintptr_t src, size_t n) {
 }
 
 void closeGateProbe() {
-    kinematicEvalSetGateProbeObservers(nullptr, nullptr);
+    kinematicEvalSetGateProbeObservers(nullptr, nullptr, nullptr);
     if (g_gateHooked) kinematicEvalGateProbeDetach();
     cullGateProbe.disarm();
 }
@@ -643,6 +647,8 @@ void closeGateProbe() {
 void armGateProbe() {
     g_gateRun = true;
     g_gateHooked = false;
+    g_gatePartStatus = "off";
+    g_gateGeoFrame = 0;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     uint8_t prologue[sizeof(kFrustumPrologue)] = {};
     g_gateFrustumOk = base && gateReadImage(prologue, base + CullGateProbe::kFrustumRva, sizeof(prologue)) &&
@@ -658,24 +664,38 @@ void armGateProbe() {
                         "nothing will be captured (advanced.cull_gate_capture).", g_ledgerStamp);
         return;
     }
-    kinematicEvalSetGateProbeObservers(&cullGateProbeGateObserver, &cullGateProbeBuilderObserver);
+    kinematicEvalSetGateProbeObservers(&cullGateProbeGateObserver, &cullGateProbeBuilderObserver,
+                                       &cullGateProbePartObserver);
     g_gateHookStatus = kinematicEvalGateProbeAttach();
     g_gateHooked = std::strcmp(g_gateHookStatus, "installed") == 0;
     g_gateBuilderHooked = g_gateHooked && kinematicEvalBuilderHooked();
+    // The per-part test's own patch is installed by the attach, after its
+    // build-keyed signature; it stands down alone ("hooked" or the reason).
+    g_gatePartStatus = g_gateHooked ? kinematicEvalPartTestStatus() : "not attempted (engine hooks refused)";
+    cullGateProbe.setPartHooked(g_gateHooked && std::strcmp(g_gatePartStatus, "hooked") == 0);
     if (!g_gateHooked) {
-        kinematicEvalSetGateProbeObservers(nullptr, nullptr);
+        kinematicEvalSetGateProbeObservers(nullptr, nullptr, nullptr);
         cullGateProbe.disarm();
     }
+    g_eyeMeshSnapshot.clearGeometryFate();
     g_eyeMeshSnapshot.armGeometry(first);
+    g_gateGeoFrame = first;
     Log::get().note("cull gate probe: armed with eye run %ls for ledger frames %u..%u: engine hooks %s "
                     "(the traversal's per-view gate FUN_14430EFE0 through the evaluator relay; the "
                     "draw-item builder FUN_1442B4420 %s), the builder's plane test FUN_1404F4E10 %s, "
-                    "visibility global DAT_145ea3399 = %u; pool-draw geometry for frame %u in the eye "
-                    "mesh snapshot. No reject, nothing on screen (advanced.cull_gate_capture).",
+                    "the builder's per-part test FUN_1442B3FC0 %s, visibility global DAT_145ea3399 = %u; "
+                    "pool-draw geometry for frame %u in the eye mesh snapshot. No reject, nothing on screen "
+                    "(advanced.cull_gate_capture).",
                     g_ledgerStamp, first, cullGateProbe.lastFrame(), g_gateHookStatus,
                     g_gateBuilderHooked ? "hooked" : "NOT hooked (no builder verdicts)",
                     g_gateFrustumOk ? "matched" : "MISMATCHED (builder frustum verdicts absent)",
+                    cullGateProbe.partHooked() ? "hooked (prologue, builder frame and call site matched)"
+                                               : g_gatePartStatus,
                     static_cast<unsigned>(g_gateVisGlobal), first);
+    if (g_gateHooked && !cullGateProbe.partHooked())
+        Log::get().note("cull gate probe: the per-part test FUN_1442B3FC0 STOOD DOWN (%s): no part rows will be "
+                        "captured for eye run %ls; the gate and builder rows are unaffected "
+                        "(advanced.cull_gate_capture).", g_gatePartStatus, g_ledgerStamp);
 }
 struct AuxFrame {   // one watched shader's buffers in one frame
     uint64_t vs;
@@ -690,6 +710,23 @@ void releaseCopy(LedgerCopy& c) {
     c.bytes = 0;
     c.inUse = false;
 }
+// The gate probe's geometry arm at a mid-run pool release, said when it
+// happens; the run's line at the ledger write repeats the outcome.
+void noteGeometryRelease(EyeDrawSnapshot::GeoRelease r) {
+    const auto& geo = g_eyeMeshSnapshot;
+    if (r == EyeDrawSnapshot::kGeoRearmed)
+        Log::get().note("eye mesh snapshot: the pool was re-seen at ledger frame %u after the cull gate probe armed the "
+                        "pool-draw geometry for frame %u; the release cleared the arm before any draw of that frame "
+                        "was mapped, so it is re-armed (advanced.cull_gate_capture).",
+                        g_frame + 1, geo.geoFrame);
+    else if (r == EyeDrawSnapshot::kGeoLost)
+        Log::get().note("eye mesh snapshot: pool-draw geometry for frame %u disarmed by pool release at ledger frame %u "
+                        "(the frame is %s; %u of its draws already mapped are gone): the version 9 section will be "
+                        "empty (advanced.cull_gate_capture).",
+                        geo.geoLostFrame, geo.geoLostAt, geo.geoLostAt > geo.geoLostFrame ? "over" : "in progress",
+                        geo.geoLostDraws);
+}
+
 void ledgerRelease() {
     g_drawSnapshot.reset();
     g_tonemapSnapshot.reset();
@@ -697,7 +734,16 @@ void ledgerRelease() {
     g_eyeDepthCapture.reset();
     g_panelCaptureArgs = {};
     g_panelSkipped = 0;
-    g_eyeMeshSnapshot.reset();
+    // A pool re-seen mid-run (objectProbeOnEyeDraw) releases every snapshot
+    // learned on the old one. The gate probe's one-shot geometry arm comes
+    // back when the release cost it nothing, and the log says which (design
+    // doc §10: run 152632's arm was wiped here, 60 ms after it was made).
+    // Only while an armed ledger runs: the arm path and the ledger write
+    // reach here with the ledger off and reset outright.
+    if (g_gateRun && detail::g_objectProbeLedgerOn)
+        noteGeometryRelease(g_eyeMeshSnapshot.resetKeepingGeometry(g_frame + 1));
+    else
+        g_eyeMeshSnapshot.reset();
     g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
@@ -3126,6 +3172,39 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                             static_cast<unsigned>(geo.geoMeshes.size()), static_cast<unsigned>(geo.geoStates.size()),
                             geo.geoDeclined, geo.geoDrawsDropped, g_ledgerStamp);
         }
+        // The per-part test (FUN_1442B3FC0): its rows, or why there are none.
+        if (g_gateHooked) {
+            if (!cullGateProbe.partHooked())
+                Log::get().note("cull gate probe: per-part test FUN_1442B3FC0 STOOD DOWN (%s): the gate file's part "
+                                "section is empty by construction for eye run %ls.", g_gatePartStatus, g_ledgerStamp);
+            else
+                Log::get().note("cull gate probe: per-part test FUN_1442B3FC0 for eye run %ls: %u calls in the window "
+                                "(%u rows kept, %u dropped over the %u-row cap); of the kept rows %u with the builder's "
+                                "frame unverified (verdict kept, no part identity), %u from a caller other than the "
+                                "builder's sub-item loop, %u outside a kept builder call; verdicts read after the "
+                                "forward, never written.%s",
+                                g_ledgerStamp, gc.partCalls, gc.partKept, gc.partDropped, CullGateProbe::kPartCap,
+                                gc.partUnverified, gc.partForeign, gc.partUnlinked,
+                                gc.partCalls ? "" : " NOTHING captured: no part test ran inside the window.");
+        }
+        // Which happened to the geometry arm (design doc §10): each outcome
+        // reads differently, whether or not the release path ever ran.
+        if (g_gateGeoFrame && geo.geoFrame == g_gateGeoFrame)
+            Log::get().note("eye mesh snapshot: geometry armed for %u draws of ledger frame %u (%u distinct meshes, "
+                            "%u states, %u declined, %u over the cap)%s.",
+                            static_cast<unsigned>(geo.geoDraws.size()), g_gateGeoFrame,
+                            static_cast<unsigned>(geo.geoMeshes.size()), static_cast<unsigned>(geo.geoStates.size()),
+                            geo.geoDeclined, geo.geoDrawsDropped,
+                            geo.geoRearms ? "; re-armed after a pool release cleared it before any of its draws was "
+                                            "mapped" : "");
+        else if (g_gateGeoFrame && geo.geoLostFrame)
+            Log::get().note("eye mesh snapshot: geometry for ledger frame %u disarmed by pool release at ledger frame %u "
+                            "(%u mapped draws lost): the version 9 section is empty.",
+                            geo.geoLostFrame, geo.geoLostAt, geo.geoLostDraws);
+        else if (g_gateGeoFrame)
+            Log::get().note("eye mesh snapshot: geometry for ledger frame %u disarmed by a reset outside a recorded pool "
+                            "release (the arm reads frame %u): the version 9 section is empty.",
+                            g_gateGeoFrame, geo.geoFrame);
         g_gateRun = false;
     }
     Log::get().note("object probe: tone-map snapshots %ls: %u draws, actual first matching frame %u, %u reserved bytes, %u declines, %u failed copies/shaders; %s. At most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.firstFrame(),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
@@ -3689,6 +3768,7 @@ void objectProbeLedgerMark(int k) {
 
 void objectProbeShutdown() {
     if (cullGateProbe.armed()) closeGateProbe();
+    g_gateRun = false;   // no run survives shutdown: its geometry arm is released, not kept
     objectClassificationProbe.reset();
     stopWorker();
     releaseRing();

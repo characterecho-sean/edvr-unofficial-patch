@@ -30,13 +30,14 @@ context; every load-bearing claim cites its evidence.
   (frustum + LOD per part; the 217 one-eye parts all lie outside the other
   eye): ideal occluders remove 2.54 / 3.27 ms of builder parts (256x128 /
   256x256); real solid ones must reproduce >= 59% / 46% of that (95% / 74%
-  at 5.3 ms). Unmeasured: the version 9 geometry is EMPTY, its one-shot
-  arm wiped 60 ms later by the pool's first sighting (armGeometry(0)).
-- **Next (§10):** fix the geometry arm (C++, object_probe.cpp); extend
-  the gate probe to FUN_1442B3FC0 (per sub-item and view: verdict, LOD,
-  the model's +0x00 centre / +0x10 radius); one parked capture, both
-  keys, no reject: prove the part site, qualify the solid inventory,
-  measure real/ideal.
+  at 5.3 ms). Unmeasured: 152632's version 9 geometry is EMPTY (its
+  one-shot arm was wiped by the pool's first sighting; fixed, §11).
+- **Next (§11):** the probe is fixed and extended -- BUILT, gated, NOT
+  FLOWN: the geometry arm survives a pool release that cost it nothing,
+  and EDVRGATE v2 records every FUN_1442B3FC0 call (verdict, LOD, the
+  part's own sphere, its builder row / entry / sub-item). One parked
+  capture, both keys, no reject: prove the part site (the reader's
+  per-part tally), qualify the solid inventory, measure real/ideal.
 - **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
   rendering from the ship. On foot is out of scope for now; the corpus and
   the profile legs are cockpit poses. Also to instrument: CPU frame time
@@ -953,3 +954,53 @@ the model's +0x00 centre and +0x10 radius, the part's own occludee. (3)
 One parked capture, both keys, no reject: prove the part site against
 the ledger's one-eye parts, qualify the solid inventory from the
 geometry, and measure real/ideal against the thresholds above.
+
+## 11. The part-site probe (2026-09-22): built and gated, NOT FLOWN
+
+Both instruments of §10's Next (1) and (2); no cull, no reject.
+
+**The geometry arm.** ledgerRelease, while an armed ledger runs a gate
+run, now calls EyeDrawSnapshot::resetKeepingGeometry(g_frame + 1)
+instead of reset(): the arm comes back when the release cost it
+nothing (the armed frame not over, none of its draws mapped -- 152632's
+case: g_pool was null until the sighting, so nothing could have been
+mapped), else it stays disarmed and the loss is kept. It touches only
+geo* state, so it cannot clear another capture's arm (deferring
+ledgerRelease would have kept the instance stream and palettes of the
+old pool). Log: at the release "eye mesh snapshot: ... re-armed" or
+"... disarmed by pool release at ledger frame N"; at the write
+"eye mesh snapshot: geometry armed for N draws of ledger frame F", "...
+disarmed by pool release ...", or, if the arm was cleared by any other
+path, "... disarmed by a reset outside a recorded pool release".
+
+**FUN_1442B3FC0.** Its own patch (kinematic_eval_hook.cpp), installed
+only by the gate probe's attach, relay gated on its own cell (open only
+while attached), standing down alone. Signature: PE timestamp/size of
+332841, the 21-byte prologue (48 89 5C 24 10 48 89 74 24 18 57 48 83 EC
+50 48 8B 01 49 8B F8), and the 15 builder instructions the observer's
+frame offsets were read from (0x1442B4429 .. the call at 0x1442B4B91).
+After the forward it reads param_2 {LOD, passed} and param_1: [0] the
+world centre, [1] the model's +0x10 copy, [2] the pose, [5] the context;
+the part's identity (entry, sub-item) comes from the builder's frame
+(rbp-0x58, rbp-0x70), believed only when the pointer block, the view
+(local_4c8), pose and context agree and entry / sub-item index the
+engine's own arrays. The builder bracket holds its row in a thread-local
+across the forward, so each row names its builder row. 2^18 rows (three
+frames at up to ~87k tests), drop counter; EDVRGATE v2 (reader
+docstring). Offsets checked against the decompiles and the machine
+code: the test never reads a model; param_1[0] is model+0x00 (float4)
+composed through sub-item and pose (0x1442B48D5 .. 0x1442B4B15),
+param_1[1] a copy of model+0x10 (0x1442B48D1/48D9) whose [0] is the
+radius in all three uses (screen size 3FC0:68-71, FUN_1404F4E10's
+interval, the LOD distance 3FC0:79); [1..3] never reach the verdict.
+FUN_1404F4E10 is the frustum half (called at 0x1442B4066); not hooked.
+
+**Reader.** tools/cull_gate_probe.py reads v1 and v2. On 152632 (v1)
+its output is unchanged plus one line: 88.4% unseen at R = 1 m, builder
+0 / 0 / 1,062. With verdicts planted over 152632's real files (a part
+passes an eye iff the ledger drew a slot of it there) the v2 path joins
+10,697 builder parts and tallies 0 / 0 / 20,789; five flipped verdicts
+read as 5 rejected-and-drawn. Existing data, not planted: of the 217
+one-eye slots only 19 are claimed by a builder part; 198 by none (the
+records the builder never sees), so the part site can explain at most
+19 of them.

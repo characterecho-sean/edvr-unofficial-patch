@@ -2127,10 +2127,12 @@ echo [edvr] === cull_gate_probe_test.exe ===
 REM Build gate for the cull gate probe (advanced.cull_gate_capture): the
 REM production observers driven with synthetic engine memory laid out as the
 REM decompiles read it (render context and views, record, pose context with
-REM entries and sub-items, the traversal's gate context), a wild pointer and
-REM a pose mismatch; the real writer's file is then parsed by the reader,
-REM which asserts every field. A probe that records nothing or a writer one
-REM field off fails here, not ten minutes into a settlement capture.
+REM entries, models and sub-items, the traversal's gate context, the draw
+REM builder's frame around its FUN_1442B3FC0 part test), wild pointers, a
+REM pose mismatch, an unverifiable frame and a foreign caller; the real
+REM writer's version 2 file is then parsed by the reader, which asserts every
+REM field. A probe that records nothing or a writer one field off fails here,
+REM not ten minutes into a settlement capture.
 if not exist "%OBJ%\cullgate" mkdir "%OBJ%\cullgate"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^

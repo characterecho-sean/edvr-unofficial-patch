@@ -61,6 +61,7 @@ bool CullGateProbe::arm(uint32_t first, FrustumFn frustum, uint8_t visGlobal) no
         if (builder_.size() != kBuilderCap) builder_.assign(kBuilderCap, BuilderObs{});
         if (entries_.size() != kEntryCap) entries_.assign(kEntryCap, EntryObs{});
         if (subs_.size() != kSubItemCap) subs_.assign(kSubItemCap, SubItem{});
+        if (parts_.size() != kPartCap) parts_.assign(kPartCap, PartObs{});
         if (!dumps_) dumps_.reset(new ViewDump[kMaxDumps]);
     } catch (...) {
         return false;
@@ -69,6 +70,7 @@ bool CullGateProbe::arm(uint32_t first, FrustumFn frustum, uint8_t visGlobal) no
     first_ = first;
     frustum_ = frustum;
     visGlobal_ = visGlobal;
+    partHooked_ = false;   // the caller says, after the attach
     armed_.store(true, std::memory_order_release);
     return true;
 }
@@ -76,11 +78,13 @@ bool CullGateProbe::arm(uint32_t first, FrustumFn frustum, uint8_t visGlobal) no
 void CullGateProbe::reset() noexcept {
     for (auto& g : gate_) g.valid = 0;
     for (auto& b : builder_) b.valid = 0;
+    for (auto& p : parts_) p.valid = 0;
     if (dumps_) for (uint32_t i = 0; i < kMaxDumps; ++i) dumps_[i].valid = 0;
     for (auto& k : dumpKey_) k.store(0, std::memory_order_relaxed);
-    gateNext_.store(0); builderNext_.store(0); entryNext_.store(0); subNext_.store(0);
+    gateNext_.store(0); builderNext_.store(0); entryNext_.store(0); subNext_.store(0); partNext_.store(0);
     gateCalls_.store(0); builderCalls_.store(0); faults_.store(0); recordMismatch_.store(0);
     entriesDropped_.store(0); subItemsDropped_.store(0); dumpsDropped_.store(0); dumpCount_.store(0);
+    partCalls_.store(0); partUnverified_.store(0); partForeign_.store(0); partUnlinked_.store(0);
 }
 
 bool CullGateProbe::inWindow(uint32_t* frame) const noexcept {
@@ -168,13 +172,13 @@ void CullGateProbe::noteGate(uintptr_t gateCtx, uintptr_t out, uintptr_t view) n
     g.valid = 1;
 }
 
-void CullGateProbe::noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept {
+uint32_t CullGateProbe::noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept {
     uint32_t frame = 0;
-    if (!inWindow(&frame)) return;
+    if (!inWindow(&frame)) return kNoRow;
     builderCalls_.fetch_add(1, std::memory_order_relaxed);
     dumpViews(ctx, frame);
     const uint32_t i = builderNext_.fetch_add(1, std::memory_order_relaxed);
-    if (i >= builder_.size()) return;
+    if (i >= builder_.size()) return kNoRow;
     BuilderObs& b = builder_[i];
     b = BuilderObs{};
     b.frame = frame;
@@ -240,6 +244,11 @@ void CullGateProbe::noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mask, u
                 b.flags |= kFlagEntriesFault;
                 continue;
             }
+            // The model's local sphere, what every part test of this entry is
+            // made of: +0x00 the centre, +0x10 the radius (param_1[1]'s copy).
+            if (eo.model && (!rd(eo.modelCentre, static_cast<uintptr_t>(eo.model), 16) ||
+                             !rd(eo.modelSphere, static_cast<uintptr_t>(eo.model) + 0x10, 16)))
+                b.flags |= kFlagEntriesFault;
             const uint32_t take = eo.subCount > 4096 ? 4096 : eo.subCount;
             if (!take) continue;
             const uint32_t s0 = subNext_.fetch_add(take, std::memory_order_relaxed);
@@ -260,6 +269,103 @@ void CullGateProbe::noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mask, u
         faults_.fetch_add(1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
     b.valid = 1;
+    return i;
+}
+
+void CullGateProbe::notePart(uintptr_t items, uintptr_t out, uintptr_t view, uint32_t builderRow,
+                             bool fromBuilder) noexcept {
+    if (!armed_.load(std::memory_order_acquire)) return;
+    // A part test belongs to the builder call around it: while that call's
+    // row was kept, the part takes the row's frame, so a stamp that moves
+    // mid-call never splits a record's parts across the window's edge.
+    const BuilderObs* owner = nullptr;
+    uint32_t frame = 0;
+    if (builderRow != kNoRow && builderRow < builder_.size() &&
+        builderRow < builderNext_.load(std::memory_order_relaxed) && builder_[builderRow].valid) {
+        owner = &builder_[builderRow];
+        frame = owner->frame;
+    } else if (!inWindow(&frame)) {
+        return;
+    }
+    partCalls_.fetch_add(1, std::memory_order_relaxed);
+    // The verdict FUN_1442B3FC0 just wrote (decomp_42B3FC0.txt:106-112) and
+    // param_1's six pointers: [0] centre, [1] sphere, [2] pose, [3] the
+    // model's +0x40 cell, [4] the LOD table, [5] the render context.
+    uint64_t block[6] = {};
+    uint32_t lod = 0;
+    uint8_t pass = 0;
+    if (!rd(block, items, sizeof(block)) || !rdv(&lod, out) || !rdv(&pass, out + 4)) {
+        faults_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t i = partNext_.fetch_add(1, std::memory_order_relaxed);
+    if (i >= parts_.size()) return;   // dropped: partCalls - partKept - its faults say how many
+    PartObs& p = parts_[i];
+    p = PartObs{};
+    p.frame = frame;
+    p.pose = block[2];
+    p.lod = lod;
+    p.pass = pass;
+    const uintptr_t ctx = static_cast<uintptr_t>(block[5]);
+    if (!owner) {
+        partUnlinked_.fetch_add(1, std::memory_order_relaxed);
+        if (fromBuilder) dumpViews(ctx, frame);   // no builder row made this (context, frame)'s dump
+    } else {
+        p.builderRow = builderRow;
+        if (owner->pose != p.pose) p.flags |= kPartOwnerMismatch;
+    }
+    const uintptr_t base = ctx + 0x40;
+    if (view >= base && (view - base) % kViewBytes == 0 && (view - base) / kViewBytes < kMaxViews)
+        p.view = static_cast<uint16_t>((view - base) / kViewBytes);
+    else
+        p.flags |= kPartViewForeign;
+    // The sphere as tested and the bits a pass would OR into the item's mask.
+    float centre[4] = {}, sphere[4] = {};
+    if (rd(centre, static_cast<uintptr_t>(block[0]), 16) && rd(sphere, static_cast<uintptr_t>(block[1]), 16) &&
+        rdv(&p.viewBits, view + 0x570)) {
+        std::memcpy(p.centre, centre, 12);
+        p.radius = sphere[0];
+    } else {
+        p.flags |= kPartSphereFault;
+    }
+    // The part's identity: the builder's frame around the call, believed
+    // only when every relation holds (kFrame*, cull_gate_probe.h).
+    bool verified = false;
+    if (!fromBuilder) {
+        p.flags |= kPartForeignCaller;
+        partForeign_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        const auto at = [items](intptr_t off) { return items + static_cast<uintptr_t>(off); };
+        uint64_t frameView = 0, framePose = 0, frameCtx = 0, entry = 0, model = 0, sub = 0, meshCell = 0;
+        uint64_t entryModel = 0, modelMesh = 0, entryBase = 0, entryCount = 0, subBase = 0, subCount = 0;
+        const bool layout = block[0] == at(kFrameCentre) && block[1] == at(kFrameSphere) &&
+                            block[3] == at(kFrameMeshCell) && block[4] == at(kFrameLodTable) &&
+                            rdv(&frameView, at(kFrameView)) && frameView == view &&
+                            rdv(&framePose, at(kFramePose)) && framePose == block[2] &&
+                            rdv(&frameCtx, at(kFrameCtx)) && frameCtx == block[5] &&
+                            rdv(&entry, at(kFrameEntry)) && rdv(&model, at(kFrameModel)) &&
+                            rdv(&sub, at(kFrameSub)) && rdv(&meshCell, at(kFrameMeshCell));
+        const bool arrays = layout && rdv(&entryModel, static_cast<uintptr_t>(entry)) && entryModel == model &&
+                            rdv(&modelMesh, static_cast<uintptr_t>(model) + 0x40) && modelMesh == meshCell &&
+                            rdv(&entryCount, static_cast<uintptr_t>(block[2]) + 0x48) &&
+                            rdv(&entryBase, static_cast<uintptr_t>(block[2]) + 0x50) &&
+                            rdv(&subCount, static_cast<uintptr_t>(entry) + 0x20) &&
+                            rdv(&subBase, static_cast<uintptr_t>(entry) + 0x28);
+        if (arrays && entry >= entryBase && (entry - entryBase) % 0x58 == 0 &&
+            (entry - entryBase) / 0x58 < entryCount && sub >= subBase && (sub - subBase) % 0x20 == 0 &&
+            (sub - subBase) / 0x20 < subCount) {
+            verified = true;
+            p.subItem = sub;
+            p.entry = static_cast<uint32_t>((entry - entryBase) / 0x58);
+            p.sub = static_cast<uint32_t>((sub - subBase) / 0x20);
+        }
+    }
+    if (!verified) {
+        p.flags |= kPartUnverified;
+        partUnverified_.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    p.valid = 1;
 }
 
 CullGateProbe::Counts CullGateProbe::counts() const noexcept {
@@ -278,6 +384,13 @@ CullGateProbe::Counts CullGateProbe::counts() const noexcept {
     c.recordMismatch = recordMismatch_.load();
     c.dumps = dumpCount_.load();
     c.dumpsDropped = dumpsDropped_.load();
+    c.partCalls = partCalls_.load();
+    const uint32_t pn = partNext_.load();
+    c.partKept = pn < parts_.size() ? pn : static_cast<uint32_t>(parts_.size());
+    c.partDropped = pn - c.partKept;
+    c.partUnverified = partUnverified_.load();
+    c.partForeign = partForeign_.load();
+    c.partUnlinked = partUnlinked_.load();
     return c;
 }
 
@@ -309,11 +422,16 @@ bool CullGateProbe::write(const wchar_t* path) noexcept {
     u32(kVersion);
     u32(first_);
     u32(first_ + kFrames - 1);
-    u32((frustum_ ? 1u : 0u));
+    // Flags: bit 0 the builder's plane test ran, bit 1 FUN_1442B3FC0's patch
+    // was live (no part rows with it clear is a stand-down, not a quiet run).
+    u32((frustum_ ? 1u : 0u) | (partHooked_ ? 2u : 0u));
     u32(visGlobal_);
     // The counters first: a reader states what was dropped before it reads a row.
     for (uint32_t v : {c.gateCalls, c.gateKept, c.gateDropped, c.builderCalls, c.builderKept, c.builderDropped,
                        c.entriesDropped, c.subItemsDropped, c.faults, c.recordMismatch, c.dumps, c.dumpsDropped})
+        u32(v);
+    // Version 2: the part tests' counters.
+    for (uint32_t v : {c.partCalls, c.partKept, c.partDropped, c.partUnverified, c.partForeign, c.partUnlinked})
         u32(v);
     // View dumps.
     uint32_t dumps = 0;
@@ -343,9 +461,16 @@ bool CullGateProbe::write(const wchar_t* path) noexcept {
         if (!g.valid) continue;
         u64(g.record); u64(g.ctx); u32(g.frame); u32(g.lod); u16(g.view); u8(g.pass); u8(g.flags);
     }
-    // Builder observations.
+    // Builder observations. A part row names its builder by the index the
+    // row has IN THE FILE (valid rows only), remapped here.
+    std::vector<uint32_t> fileRow;
+    try { fileRow.assign(c.builderKept, kNoRow); } catch (...) { fileRow.clear(); }
     uint32_t builders = 0;
-    for (uint32_t i = 0; i < c.builderKept; ++i) builders += builder_[i].valid ? 1u : 0u;
+    for (uint32_t i = 0; i < c.builderKept; ++i) {
+        if (!builder_[i].valid) continue;
+        if (i < fileRow.size()) fileRow[i] = builders;
+        ++builders;
+    }
     u32(builders);
     for (uint32_t i = 0; i < c.builderKept; ++i) {
         const BuilderObs& b = builder_[i];
@@ -365,11 +490,26 @@ bool CullGateProbe::write(const wchar_t* path) noexcept {
     for (uint32_t i = 0; i < entries; ++i) {
         const EntryObs& e = entries_[i];
         u64(e.model); u32(e.subCount); u32(e.subFirst); u32(e.subCopied);
+        raw(e.modelCentre, 16); raw(e.modelSphere, 16);   // version 2
     }
     const uint32_t sn = subNext_.load();
     const uint32_t subs = sn < subs_.size() ? sn : static_cast<uint32_t>(subs_.size());
     u32(subs);
     raw(subs_.data(), size_t(subs) * sizeof(SubItem));
+    // Version 2: the part tests (valid rows only).
+    uint32_t parts = 0;
+    for (uint32_t i = 0; i < c.partKept; ++i) parts += parts_[i].valid ? 1u : 0u;
+    u32(parts);
+    for (uint32_t i = 0; i < c.partKept; ++i) {
+        const PartObs& p = parts_[i];
+        if (!p.valid) continue;
+        u64(p.pose); u64(p.subItem); u64(p.viewBits);
+        raw(p.centre, 12); raw(&p.radius, 4);
+        u32(p.frame);
+        u32(p.builderRow < fileRow.size() ? fileRow[p.builderRow] : kNoRow);
+        u32(p.entry); u32(p.sub); u32(p.lod);
+        u16(p.view); u8(p.pass); u8(p.flags);
+    }
     raw("EDVE", 4);
     ok = !ferror(f) && ok;
     return fclose(f) == 0 && ok;
@@ -379,8 +519,13 @@ void cullGateProbeGateObserver(uintptr_t gateCtx, uintptr_t out, uintptr_t view)
     cullGateProbe.noteGate(gateCtx, out, view);
 }
 
-void cullGateProbeBuilderObserver(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept {
-    cullGateProbe.noteBuilder(pose, ctx, mask, nibbles);
+uint32_t cullGateProbeBuilderObserver(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept {
+    return cullGateProbe.noteBuilder(pose, ctx, mask, nibbles);
+}
+
+void cullGateProbePartObserver(uintptr_t items, uintptr_t out, uintptr_t view, uint32_t builderRow,
+                               bool fromBuilder) noexcept {
+    cullGateProbe.notePart(items, out, view, builderRow, fromBuilder);
 }
 
 }  // namespace edvr

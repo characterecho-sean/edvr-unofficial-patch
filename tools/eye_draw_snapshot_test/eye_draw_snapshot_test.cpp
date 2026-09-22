@@ -501,6 +501,35 @@ int wmain(int argc, wchar_t** argv) {
     check(eyeMesh.geoDraws[0].mesh==0 && eyeMesh.geoDraws[1].mesh==0 && eyeMesh.geoDraws[2].mesh==1 &&
           eyeMesh.geoDraws[2].state==1 && eyeMesh.geoMeshes[0].vBytes==16 && eyeMesh.geoMeshes[0].iBytes==12,
           "geometry map rows, the clamped vertex window and the index window");
+    // The geometry arm across a reset (design-occlusion-culling §10, run
+    // 152632: the pool's first sighting 60 ms after the arm wiped it). A
+    // release before any draw of the armed frame is mapped keeps the arm; one
+    // after draws were mapped, or past the frame, loses it and records it.
+    // (object_probe.cpp's call site -- ledgerRelease under an armed gate run,
+    // and the log lines -- is beyond this rig: only a flight reaches it.)
+    {
+        edvr::EyeDrawSnapshot geoArm;
+        check(geoArm.resetKeepingGeometry(5)==edvr::EyeDrawSnapshot::kGeoNotArmed && !geoArm.geoFrame,
+              "a release with no geometry arm leaves none");
+        geoArm.armGeometry(12);
+        check(geoArm.resetKeepingGeometry(11)==edvr::EyeDrawSnapshot::kGeoRearmed && geoArm.geoFrame==12 &&
+              geoArm.geoRearms==1 && !geoArm.geoLostFrame,"a release before the armed frame re-arms it");
+        check(geoArm.resetKeepingGeometry(12)==edvr::EyeDrawSnapshot::kGeoRearmed && geoArm.geoFrame==12 &&
+              geoArm.geoRearms==2,"a release in the armed frame before any draw is mapped re-arms it");
+        geoArm.captureGeometry(ctx.Get(),12,3,meshVs,0x77,'X',6,2,16,1,2);
+        check(geoArm.geoDraws.size()==1,"the re-armed frame maps its draws");
+        check(geoArm.resetKeepingGeometry(12)==edvr::EyeDrawSnapshot::kGeoLost && !geoArm.geoFrame &&
+              geoArm.geoLostFrame==12 && geoArm.geoLostAt==12 && geoArm.geoLostDraws==1 && geoArm.geoDraws.empty(),
+              "a release after draws were mapped disarms and records the loss");
+        geoArm.captureGeometry(ctx.Get(),12,4,meshVs,0x77,'X',6,2,16,1,2);
+        check(geoArm.geoDraws.empty(),"a disarmed frame maps nothing");
+        geoArm.clearGeometryFate();geoArm.armGeometry(20);
+        check(geoArm.resetKeepingGeometry(21)==edvr::EyeDrawSnapshot::kGeoLost && geoArm.geoLostFrame==20 &&
+              geoArm.geoLostAt==21 && !geoArm.geoLostDraws && !geoArm.geoRearms,
+              "a release past the armed frame loses it; a new run's fate starts clear");
+        geoArm.armGeometry(30);geoArm.reset();
+        check(!geoArm.geoFrame && geoArm.geoLostFrame==20,"plain reset() still disarms; the fate outlives it");
+    }
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     // The eye-run depth capture (advanced.eye_depth_capture): each pass's
