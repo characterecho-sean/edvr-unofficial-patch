@@ -1006,19 +1006,20 @@ for missing unknown-family retention (hardcoded allow-list is the gate).
 
 The allow-list flight (141800 session) captured all four shaders. Identity:
 **unknown-A (vs_8056C9D5F22007F9 / ps_669CC896CA4AA988)** and
-**unknown-B (vs_2684F02B9B0BB0DE / ps_2376A8D9AA874372)** are two MATERIAL
-LAYERS of the same pooled settlement-structure system as EB52/E508: t33
-quat+pose instancing from the shared 12,288-record pool, 16 draw-ranges
-byte-identical between A and B (the same instances drawn twice). B is the
-light baked-lit layer (albedo/normal + per-instance light-class table);
-A is the heavy weathering/detail layer — deferred G-buffer with
-world-space PROJECTED detail (4-tap jittered arrays + 3D noise), distance-
-faded in the PS (v1.w), and the material-modulation tables idle here.
-Corrections to the earlier characterization: the "8-byte stride" is the
-INSTANCE stream; vertex stride is 40 bytes (PACKEDVERTEXDATA with optional
-4-bone skinning — idle, bone-count 0). The "CB-less" finding resolves: b0
-is empty by construction; frame view-proj+camera live in CB1 (cb1[270..275]),
-per-instance data in the t33/t36/t38 SRV pool.
+**unknown-B (vs_2684F02B9B0BB0DE / ps_2376A8D9AA874372)** are the pooled
+settlement pool's weathering/detail (A) and baked-lit trim (B) materials —
+t33 quat+pose instancing, deferred G-buffer, A world-space projected with
+a PS distance-fade and NO LOD gate, B light baked-lit and LOD-gated.
+Corrections to the earlier characterization stand (the 8-byte stream is
+instance data, vertex stride 40 B, skinning idle; frame constants in CB1,
+instance data in SRVs). SIZING-STUDY CORRECTION (same day): A and B are
+NOT the same instances drawn twice — instance overlap is only 6.3%. The
+real duplication is across ALL pool draws: 75,779 submissions/frame of
+9,373 unique records (8.08x); EB52 41,281 of 6,817 (6.06x), 7,951 draws
+collapsing to 1,271 record-sets drawn ~6.3x each; 7,298 fully
+byte-identical excess commands/frame. Repeat legitimacy (same-pass waste
+vs per-eye/per-pass duplicates) is unproven — the draw ledger lacks PS/RT
+per row; logging them is the named next instrument.
 
 **Why unknown-A ignores every quality knob (resolved):** no LOD gate
 exists for it. The shader has no LOD branch at all — only the PS detail

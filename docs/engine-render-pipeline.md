@@ -80,7 +80,16 @@ otherwise.
   caches at ctx+0x1A948/950/958/960. LOD evaluator FUN_144331300 computes a
   current active mask (output+0x20) — no change detection; FUN_14430EFE0
   applies distance/LOD + frustum gates. EDVR already widens the frustum via
-  `fix.terrain_cull_guard`.
+  `fix.terrain_cull_guard`. 2026-09-21 architectural confirmation: these
+  distance/LOD/frustum gates are the ONLY culling — Elite has NO occlusion
+  stage; all in-frustum content (both material layers, nested/enclosed
+  structures included) is submitted per frame and occlusion-rejected only
+  per-pixel by GPU early-z (vertex processing still runs for occluded
+  draws; D3D11 does not cull draws). Consequence: frustum-visible-but-
+  occluded content costs its FULL eval+job CPU (part of the 5.3 ms wall) —
+  an eval-level occlusion stage is the only cull that touches the wall; a
+  depth-based visibility study (instrument gap: eye captures are color-
+  only) would size it.
 * **Open:** closed for the lever — 2026-09-21 step-3 bisect: LODDistanceScale
   alone reproduces the total drop (EB52 -16.9%; material knobs add a further
   ~5.5%); unknown-A (8056C9D5F22007F9) is immune to every knob (triply
@@ -171,18 +180,22 @@ otherwise.
   world basis, +10 z bias). The two unknowns are characterized, not named:
   kind-88 eye draws, pool=1 t33 readers; A ~547/frame median 198 verts,
   B ~207/frame median 24 verts.
-  2026-09-21 (identified, allow-list flight 141800): unknown-A/B are two
-  MATERIAL LAYERS of the same pooled settlement-structure system as
-  EB52/E508 (t33 12,288-record pool; 16 draw-ranges byte-identical between
-  A and B — the same instances drawn twice). A = heavy weathering/detail
-  layer (world-space projected detail, deferred G-buffer, PS distance-fade,
-  NO LOD gate — ~550 draws/frame submitted unconditionally and invisible
-  at range); B = light baked-lit layer (per-instance light-class table),
-  LOD-gated. Corrections: the 8-byte stream is the INSTANCE data (vertex
-  stride 40 B, skinning idle); "CB-less" resolves to frame constants in
-  CB1 + instance data in the t33/t36/t38 SRV pool. Naming A/B visually
-  (which specific props) needs a crop flight; the shader identity is
-  proven.
+  2026-09-21 (identified, allow-list flight 141800): unknown-A/B are the
+  pool's weathering/detail (A, heavy world-space-projected deferred layer,
+  NO LOD gate, ~550 draws/frame, PS-faded invisible at range) and
+  baked-lit trim (B, LOD-gated) materials — same t33 pool, frame
+  constants in CB1, instance data in SRVs. Sizing-study CORRECTION
+  (same day): A/B are NOT the same instances drawn twice (only 6.3%
+  instance overlap) — the real duplication is global: 75,779 pool
+  instance submissions/frame of 9,373 unique records (8.08x); EB52 41,281
+  submissions of 6,817 unique (6.06x), 7,951 draws collapsing to 1,271
+  record-sets drawn ~6.3x each, plus 7,298 fully byte-identical excess
+  commands/frame. Whether the repeats are waste (same pass) or legitimate
+  (per-eye/per-pass/per-cascade) is UNPROVEN — the ledger has no PS/RT
+  per row; logging them is the named next instrument. Footprint-nesting
+  candidates are 48% of active records (heuristic, NOT sealed-interior
+  proof); no per-structure bounds or enterability exists in any capture
+  (render-record bounds live in-game at +0xF0/+0x1C0, center +0x240).
 * **Open:** none for identification. The A-layer gating question is a
   design input: gate A by its own fade distance (~550 draws/frame at far
   LODs, zero visual change) — product decision, suppression discipline
