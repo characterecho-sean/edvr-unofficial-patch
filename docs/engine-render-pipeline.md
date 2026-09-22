@@ -119,12 +119,14 @@ otherwise.
   upstream of the vtable call is proven offline.
 * **Lever:** cost-effective motion vectors — engine-truth injection (decided
   2026-09-19); replaces boundary-side estimation classes. 2026-09-21: the
-  settlement-CPU design lands here too — change-gated render-data updates
-  (engine doc's design entry): skip re-producing render data for records
-  whose truth is bit-identical frame-over-frame; Phase 0 = attribution
-  flight, Phase 1 = config-gated build, Phase 2 = flicker-instrument
-  validation; per-record identity is a bounded dependency (N-frame forced
-  refresh, slot-reuse probe quantifies).
+  settlement-CPU design landed here — change-gated render-data updates
+  (engine doc's design entry), Phase 1 built (config fix.static_prop_updates,
+  default off) and flown same day: ABORTED. The gate skipped 91.2% of job-0
+  calls with a healthy change oracle and structures flickered because
+  job-0's output is CONSUMED per frame — production must run every frame;
+  every downstream skip variant is dead. Survivors: (a) cheaper job-0
+  (cpu_profile inside it), (b) inside-job change detection with per-frame
+  re-emission. Leg-1 jobs[] baseline retained as the cost reference.
 * **Fragility:** VA-bound; identity must be re-proven per build by capture,
   per the kVerifiedBuilds rule in build-332753.md.
 
