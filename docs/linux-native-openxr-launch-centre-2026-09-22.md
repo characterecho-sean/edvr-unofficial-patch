@@ -2,72 +2,44 @@
 
 ## Status
 
-- State: a supporter's Elite worked in VR on Linux/Proton through 0.16.2
-  (legacy OpenVR proxy chained to their real OpenVR runtime, e.g.
-  OpenComposite) but gets no VR on 0.17.0, which replaced that proxy with
+- State: a supporter's Elite worked in VR on Linux/Proton (WiVRn/Quest2)
+  through 0.16.2 (legacy OpenVR proxy chained to their real OpenVR
+  runtime) but got no VR on 0.17.0, which replaced that proxy with
   EDVR's own native OpenXR runtime (`edvr-native-steamvr-only-goal`
-  memory, DONE 2026-09-16). They report trying WiVRn, xrizer,
-  OpenComposite and VapoR under Proton; only one attempt's logs are in
-  hand (WiVRn — `edvr-logs-20260922-122318.zip`, all three log sets
-  confirmed build-matched to this HEAD via
-  `tools\edvr_log.py --expect-build HEAD`).
-- Two launches (111010, 111049) died at `module_startup,
-  graphics_unavailable=80070005` (E_ACCESSDENIED from
-  `RenderBinding::acquire` in `native_module.cpp:40-48`) before the
-  OpenXR instance/system was even created — no runtime/system/size lines
-  follow. The third launch (111203) got past device acquisition, created
-  a session against WiVRn (`runtime 'v26.2.3'`, `Oculus Quest2 on
-  WiVRn`, correct 1832x2016/eye, 72 Hz), then aborted at the startup
-  auto-recentre: `result,launch_centre_locate,-6` (`XR_ERROR_
-  INITIALIZATION_FAILED`) inside `centreAtStartup`
-  (`native_runtime_host.h:1618-1656`), which only tolerates
-  `XR_ERROR_TIME_INVALID`/`XR_ERROR_POSE_INVALID` from that locate and
-  aborts native startup (`VRInitError_Init_Internal`, code 124) on
-  anything else. The whole native module then shuts down cleanly; the
-  game itself is unaffected and keeps rendering flatscreen (gfx log
-  shows normal frames, menu, loading panel afterward — this is not a
-  game crash, VR just never comes up).
-- CONFIRMED 2026-09-22 (flight, diagnostic branch
-  `linux-openxr-launch-centre-diag`, `v0.17.0-1-g9693a8a`, same
-  supporter/WiVRn/Quest2 rig): `XR_ERROR_INITIALIZATION_FAILED` comes
-  from `xrConvertWin32PerformanceCounterToTimeKHR`, never
-  `xrLocateSpace` — every `stage=` in the log, at startup and in 20700+
-  consecutive per-frame `head_locate_failed` lines, reads `convert`.
-  Ruled out: NOT transient. 100% failure rate from session start through
-  the whole captured session (~31 s, 20700 calls), zero
-  `head_locate_recovered` lines. The tolerance widening itself worked as
-  designed — `centreAtStartup` waited 2008 ms/145 samples, hit
-  `tracking_deadline`, and let native startup complete this time
-  (`module_startup,...,result=0`; frames submit, `native_temporal`/
-  `native_sharpen` engage with real projection matrices) — but
-  `locateHead`, the per-frame OpenVR-facing pose query
-  (`native_runtime_host.h`, `locateHead`), fails every single call
-  through the same broken `convert()`. Net effect: VR now starts instead
-  of aborting, but delivers no head tracking at all (fixed/frozen view)
-  — a different failure, not a fix.
-- Ruled out: not a game-side crash (gfx log runs fine after); not the
-  E_ACCESSDENIED device-acquire flake (didn't recur this flight — only
-  one launch attempt was needed, so still unresolved either way, still
-  not worth its own arc).
-- New angle: the main frame loop's own time source is NOT broken —
-  `projection_query` lines in the same log carry real, sane matrices at
-  sequence 146+, meaning whatever supplies `xrWaitFrame`'s
-  `predictedDisplayTime` (or the view-locate that rides on it) works
-  fine on this stack. Only `HeadLocator`'s on-demand path (`locateHead`,
-  `resetSeated`, `applyIntroRecentre`, `centreAtStartup` — all four
-  callers in `head_locator.h`/`native_runtime_host.h`) calls
-  `xrConvertWin32PerformanceCounterToTimeKHR` to turn an arbitrary QPC
-  sample into an `XrTime`. A real fix likely means sourcing that
-  mapping from the frame loop's already-working `XrTime` instead (cache
-  one `(predictedDisplayTime, QueryPerformanceCounter)` pair per frame,
-  then convert any later QPC sample by elapsed-ticks arithmetic,
-  bypassing the broken extension entirely) rather than calling
-  `xrConvertWin32PerformanceCounterToTimeKHR` at all on this stack. Not
-  investigated yet: where in the frame-loop code that `XrTime` is
-  produced and whether it's reachable/cacheable for `HeadLocator`'s use.
-- Next flight: none queued. Needs investigation into the frame loop's
-  `XrTime` source before a real fix is shaped — reported to Sean for
-  direction, not started this turn.
+  memory, DONE 2026-09-16). Root cause CONFIRMED by flight (see journal):
+  `xrConvertWin32PerformanceCounterToTimeKHR` fails 100% of the time on
+  this stack (`XR_ERROR_INITIALIZATION_FAILED`), never `xrLocateSpace`,
+  never recovering. A real fix is BUILT + PUSHED, NOT YET FLOWN:
+  `linux-openxr-launch-centre-diag` branch (off `v0.17.0`), commit
+  `e40dd73` (`v0.17.0-2-ge40dd73`) — bypasses that broken call using the
+  frame loop's own already-working time source instead of widening
+  tolerance around it. Zip sent to Sean for the supporter.
+- The fix: `FrameBoundary` (`frame_boundary.h`) already calibrates a
+  `(steady_clock, XrTime)` pair from every real `xrWaitFrame` result, for
+  turbo mode's `synthesizedTime()` — proven working on this stack, since
+  the same flight's `projection_query` lines carried real matrices.
+  `FrameBoundary::estimateNow()` (new) exposes that calibration.
+  `HeadLocator::locate` (`head_locator.h`) gained a `fallbackNow`
+  parameter: tried ONLY when `xrConvertWin32PerformanceCounterToTimeKHR`
+  itself fails, so a runtime where that call works (everything flown so
+  far — SteamVR, Quest3, Pimax) sees no behavior change at all. All four
+  callers (`locateHead`, `resetSeated`, `applyIntroRecentre`,
+  `centreAtStartup` in `native_runtime_host.h`) now pass
+  `boundary.estimateNow()`. Builds clean, all existing self-tests pass.
+- Ruled out: not a game-side crash (gfx log runs fine when VR fails to
+  start); not transient (100% failure rate across 20700+ calls in one
+  session); not `xrLocateSpace` (never reached — `convert()` fails
+  first, every time); the earlier tolerance-only patch (`9693a8a`)
+  proved VR could start but left head tracking completely dead, which is
+  why this second commit exists. E_ACCESSDENIED device-acquire flake
+  from the first flight (two launches before WiVRn succeeded) didn't
+  recur on the second flight — still unresolved either way, not worth
+  its own arc yet.
+- Next flight: the supporter needs to test `v0.17.0-2-ge40dd73`
+  (zip already sent). Confirms or refutes: does VR now start AND track
+  the head? Watch for `head_locate_failed` — should disappear entirely,
+  or at least stop being 100% of calls, once `estimateNow()` is
+  supplying `fallbackNow`.
 
 ## Log evidence (2026-09-22)
 
@@ -122,3 +94,50 @@ failures — `convert()` fails first, every time.
 Reported to Sean; no code changed this turn. See Status block for the
 new-angle hypothesis (source `XrTime` from the frame loop's own
 prediction rather than calling the broken conversion extension).
+
+## Fix: bypass convert() using the frame loop's own time (2026-09-22)
+
+Traced where a working `XrTime` already exists on this stack.
+`geometry_locator.h:31` locates the head for the main per-frame geometry
+snapshot with `api.locateSpace(...,frame.predictedDisplayTime,...)` —
+straight from the current `Frame`, no Win32 conversion. `session_state.h`
+(`SessionState::predictedDisplayTime()`) mirrors that value but zeroes it
+on every frame close (`clearFrame()`, line 278) — no good for
+`centreAtStartup`/`resetSeated`/`applyIntroRecentre`/`locateHead`, all
+four of which explicitly run *between* frames.
+
+`FrameBoundary` (owns the actual `xrWaitFrame` calls) turned out to
+already solve this for a different reason: `noteReal()` records
+`lastReal_` (an `XrTime`) and `lastRealAt_` (a `std::chrono::steady_clock`
+timestamp) on every real, non-synthesized wait result, purely to support
+turbo-mode's `synthesizedTime()` prediction. Critically, `lastReal_`/
+`lastRealAt_` are never cleared by `clear()`/`finish()` — they persist
+across frame boundaries, unlike `SessionState`'s own copy. That is
+exactly the calibration needed: a `(wall-clock, XrTime)` anchor that
+survives between frames and lets any later instant be estimated by
+elapsed-time arithmetic, no runtime call required.
+
+Added `FrameBoundary::estimateNow()`: returns `lastReal_ + elapsed since
+lastRealAt_` (0 if no real frame observed yet — `canSynthesize()`
+false). Gave `HeadLocator::locate` a `fallbackNow` parameter, used only
+when `xrConvertWin32PerformanceCounterToTimeKHR` itself returns non-
+success (checked via the existing `stage` tracking from the prior
+commit). All four call sites in `native_runtime_host.h` now pass
+`boundary.estimateNow()`. On any runtime where `convert()` succeeds
+(everything flown to date), `fallbackNow` is computed but never used —
+zero behavior change there.
+
+`centreAtStartup` calls this before the first `waitPoses()`... no —
+confirmed order: `start()`'s loop calls `waitPoses()` (which drives
+`boundary.waitAndBegin()`, populating the calibration) *before*
+`centreAtStartup` runs each iteration, so by the time `centreAtStartup`
+needs `estimateNow()`, at least one real frame has already been
+observed. Matches the flight log: `waiting_for_tracking=1` was already
+`launchCentreSamples==1` (first attempt), which happens after the first
+successful wait.
+
+Built, all `build.bat` gates and self-tests green (`vtable_test`,
+`openxr_module_test`, `openxr_native_tests`, config contract, etc.).
+Not flown. Zip (`edvr-linux-openxr-diag-v0.17.0-2-ge40dd73.zip`) sent to
+Sean for the supporter; branch pushed as `e40dd73` on
+`linux-openxr-launch-centre-diag`.
