@@ -1443,7 +1443,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
        !state.running()||state.terminal()||!seated.space()||origin!=vr::TrackingUniverseSeated)return false;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     HeadLocatorStage headLocateStage=HeadLocatorStage::None;
-    lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),prediction,head,&lastHeadTime,counterNow,&headLocateStage);
+    lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),prediction,head,&lastHeadTime,counterNow,&headLocateStage,boundary.estimateNow());
     if(lastHeadResult!=XR_SUCCESS) {
       // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md):
       // this per-frame path was silent before this build. Rate-limited so a
@@ -1477,7 +1477,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // Finish a partial pair before replacing the space referenced by it.
     lastResetResult=boundary.clear();if(lastResetResult!=XR_SUCCESS)return false;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow);
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
     if(lastResetResult!=XR_SUCCESS)return false;
     return applySeatedReset(head,"seated_reset",true);
   }
@@ -1520,7 +1520,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool applyIntroRecentre() {
     if(GetCurrentThreadId()!=ownerThread||state.frameOpen()||!seated.space()||!changes.active())return false;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow);
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
     if(lastResetResult!=XR_SUCCESS)return false;
     return applySeatedReset(head,"intro_recentre",true);
   }
@@ -1535,7 +1535,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     ++launchCentreSamples;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     HeadLocatorStage headLocateStage=HeadLocatorStage::None;
-    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,&headLocateStage);
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,&headLocateStage,boundary.estimateNow());
     // A temporarily unavailable current-time pose must not trigger a reset
     // using a cached/predicted pose or extend startup indefinitely.
     // XR_ERROR_INITIALIZATION_FAILED joined the tolerated set 2026-09-22:

@@ -29,9 +29,15 @@ inline const char* headLocatorStageName(HeadLocatorStage s) {
 // No frame call, cached display prediction or extrapolation.
 class HeadLocator {
  public:
+  // fallbackNow, when nonzero, is a caller-supplied XrTime instant from a
+  // source that never calls xrConvertWin32PerformanceCounterToTimeKHR (the
+  // frame loop's own calibrated estimate) -- used only if that runtime call
+  // itself fails. Some Linux/Proton OpenXR stacks (WiVRn observed) never
+  // implement it (docs/linux-native-openxr-launch-centre-2026-09-22.md);
+  // on a runtime where it works, this changes nothing.
   XrResult locate(const LocatorDispatch& d,XrInstance instance,XrSpace view,XrSpace origin,
                   float prediction,XrSpaceLocation& out,XrTime* exact=nullptr,CounterNow now=nullptr,
-                  HeadLocatorStage* stage=nullptr) const {
+                  HeadLocatorStage* stage=nullptr,XrTime fallbackNow=0) const {
     if(stage)*stage=HeadLocatorStage::None;
     if(!d.convert||!d.locate)return XR_ERROR_FUNCTION_UNSUPPORTED;
     if(!instance||!view||!origin)return XR_ERROR_HANDLE_INVALID;
@@ -40,14 +46,18 @@ class HeadLocator {
     if(delta>=bound||delta< -bound)return XR_ERROR_TIME_INVALID;
     const XrTime offset=static_cast<XrTime>(delta);
     LARGE_INTEGER counter{};
-    if(!now||!now(&counter))return XR_ERROR_RUNTIME_FAILURE;
-    XrTime time=0;XrResult r=d.convert(instance,&counter,&time);
-    if(r!=XR_SUCCESS){if(stage)*stage=HeadLocatorStage::Convert;return r;}
+    XrTime time=0;
+    const XrResult convertResult=(!now||!now(&counter))?XR_ERROR_RUNTIME_FAILURE:d.convert(instance,&counter,&time);
+    if(convertResult!=XR_SUCCESS) {
+      if(stage)*stage=HeadLocatorStage::Convert;
+      if(!fallbackNow)return convertResult;
+      time=fallbackNow;
+    }
     if((offset>0&&time>(std::numeric_limits<XrTime>::max)()-offset)||
        (offset<0&&time<(std::numeric_limits<XrTime>::min)()-offset))return XR_ERROR_TIME_INVALID;
     const XrTime target=time+offset;
     XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
-    r=d.locate(view,origin,target,&location);
+    const XrResult r=d.locate(view,origin,target,&location);
     if(r!=XR_SUCCESS){if(stage)*stage=HeadLocatorStage::Locate;return r;}
     if(location.type!=XR_TYPE_SPACE_LOCATION||location.next)return XR_ERROR_VALIDATION_FAILURE;
     constexpr auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;

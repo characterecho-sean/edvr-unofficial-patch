@@ -301,6 +301,19 @@ class FrameBoundary final {
 
   XrResult lastResult() const { return lastResult_; }
   double endFrameMs() const { return endFrameMs_; }
+  // Best-effort current instant in the runtime's own XrTime domain, derived
+  // from the last real (non-synthesized) xrWaitFrame result plus wall-clock
+  // time elapsed since -- the same calibration synthesizedTime() already
+  // keeps for turbo mode, exposed here for HeadLocator's convert()-failure
+  // fallback (docs/linux-native-openxr-launch-centre-2026-09-22.md): some
+  // Linux/Proton OpenXR stacks never implement
+  // xrConvertWin32PerformanceCounterToTimeKHR. 0 before any real frame has
+  // been observed yet.
+  XrTime estimateNow() const {
+    if (!canSynthesize()) return 0;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - lastRealAt_).count();
+    return lastReal_ + static_cast<XrTime>(elapsed);
+  }
   // A failed boundary has consumed an uncertain XR operation or observed an
   // irreversible composition/end failure. Callers must retire their native
   // publications before admitting another frame.
