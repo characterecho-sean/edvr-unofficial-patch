@@ -80,6 +80,10 @@ internal sealed class FrameCycle
     public List<WaitSegment> Waits = [];
     public List<ThreadBusy> Threads = [];
     public int[] CallerClassSamples = [];
+    /// Every SampledProfile stack of the caller thread inside the cycle, tagged
+    /// with which coarse region of the cycle it landed in. This is what answers
+    /// "what is the caller actually executing during R1".
+    public List<(byte Group, int StackId)> CallerSamplesByRegion = [];
     public int CallerSamples;
     public int CallerPipelineSamples;
     public int CallerSwitchOutStacks;
@@ -113,6 +117,10 @@ internal sealed class CycleAnalyzer
     /// The first eight regions partition the cycle exactly; C1..C3 are coarse
     /// views over the same time and would double-count a split wait.
     public static readonly string[] PartitionRegionNames = ["R1", "R2", "R3", "R4", "R5a", "R5b", "R5c", "R6"];
+    /// The four coarse legs a caller sample is bucketed into: the game's own
+    /// work, the stereo Submit pair, everything after the second Submit up to
+    /// the next wait, and the wait itself.
+    public static readonly string[] SampleRegionNames = ["R1", "R2-R4", "R5a-R5c", "R6"];
 
     private readonly Collected _data;
     private readonly Func<long, double> _qpcUs;
@@ -327,6 +335,7 @@ internal sealed class CycleAnalyzer
                 cycle.CallerSamples = busy.Samples;
                 cycle.CallerPipelineSamples = busy.PipelineSamples;
                 cycle.CallerClassSamples = busy.ClassSamples ?? new int[RvaTable.Classes.Length];
+                CollectCallerSamples(cycle, caller);
             }
             if (running > 0 || busy.Samples > 0 || thread == caller) cycle.Threads.Add(busy);
         }
@@ -353,6 +362,27 @@ internal sealed class CycleAnalyzer
                 perThread[classId]++;
             }
         }
+    }
+
+    private void CollectCallerSamples(FrameCycle cycle, int caller)
+    {
+        if (!_data.SamplesByThread.TryGetValue(caller, out var samples)) return;
+        var start = (double)cycle.WaitReturnUs;
+        var end = (double)cycle.NextWaitReturnUs;
+        var low = Numeric.LowerBound(samples.Count, index => _qpcUs(samples[index].Qpc) >= start);
+        for (var i = low; i < samples.Count && _qpcUs(samples[i].Qpc) < end; i++)
+            cycle.CallerSamplesByRegion.Add((SampleRegion(cycle, _qpcUs(samples[i].Qpc)), samples[i].StackId));
+    }
+
+    /// Which coarse leg a timestamp falls in. R2-R4 is the whole stereo Submit
+    /// pair and R5a-R5c everything from the second Submit's return to the next
+    /// WaitGetPoses entry, which is the split the module breakdown reads.
+    public static byte SampleRegion(FrameCycle cycle, double us)
+    {
+        if (us < cycle.FirstSubmitEntryUs) return 0;
+        if (us < cycle.SecondSubmitReturnUs) return 1;
+        if (us < cycle.NextWaitEntryUs) return 2;
+        return 3;
     }
 
     private void CollectWaits(FrameCycle cycle, int caller)
