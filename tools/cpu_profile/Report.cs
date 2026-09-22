@@ -593,6 +593,8 @@ internal static class Report
         {
             var byModule = new Dictionary<string, long>();
             var bySignature = new Dictionary<string, long>();
+            var edvrInnermost = new Dictionary<string, long>();
+            var edvrChains = new Dictionary<(string Chain, string Site), long>();
             long total = 0, edvr = 0, system = 0, nvidia = 0, pipeline = 0, census = 0, scheduler = 0;
             long topUnresolved = 0, anyUnresolved = 0;
             foreach (var frame in frames)
@@ -611,6 +613,11 @@ internal static class Report
                     if (stack.Scheduler) scheduler++;
                     if (stack.TopUnresolved) topUnresolved++;
                     if (stack.AnyUnresolved) anyUnresolved++;
+                    if (!stack.AnyEdvrD3d11) continue;
+                    var chain = data.Stacks.EdvrFrames(stack, 6, out var site);
+                    if (chain.Count == 0) continue;
+                    Numeric.Increment(edvrInnermost, chain[0]);
+                    Numeric.Increment(edvrChains, (string.Join(" < ", chain), site));
                 }
             rows.Add(new Dictionary<string, object?>
             {
@@ -644,6 +651,22 @@ internal static class Report
                     {
                         ["count"] = pair.Value,
                         ["stack"] = pair.Key,
+                    }).ToArray(),
+                // RVAs inside EDVR's own d3d11.dll, for symbolizing against the
+                // built DLL: the innermost frame of each sample, and the chain
+                // through our hook with the game call site that entered it.
+                ["edvrInnermostRvas"] = edvrInnermost.OrderByDescending(pair => pair.Value).Take(40)
+                    .Select(pair => new Dictionary<string, object?>
+                    {
+                        ["rva"] = pair.Key,
+                        ["count"] = pair.Value,
+                    }).ToArray(),
+                ["edvrChains"] = edvrChains.OrderByDescending(pair => pair.Value).Take(25)
+                    .Select(pair => new Dictionary<string, object?>
+                    {
+                        ["chain"] = pair.Key.Chain.Split(" < "),
+                        ["gameCallSite"] = pair.Key.Site,
+                        ["count"] = pair.Value,
                     }).ToArray(),
             });
         }
