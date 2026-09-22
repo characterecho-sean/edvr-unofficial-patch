@@ -503,8 +503,26 @@ int wmain(int argc, wchar_t** argv) {
         cb1Desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         ComPtr<ID3D11Buffer> cb1;hr(dev->CreateBuffer(&cb1Desc,nullptr,&cb1));
         ctx->VSSetConstantBuffers(1,1,cb1.GetAddressOf());
+        // THE 2026-09-21 FLIGHT REGRESSION: the engine runs offscreen stages
+        // BEFORE the eye passes, and those draws reach the armed ledger with
+        // their own depth targets. The caller's eye verdict (depthProbeScene
+        // EyeOf: 0/1 for the scene pair, -1 otherwise) must send them to
+        // nonEyeSkips without touching the two eye slots -- the first build
+        // interned them instead and wrote zero files. Two offscreen targets
+        // of different sizes, drawn before AND between the eye passes.
+        D3D11_TEXTURE2D_DESC offDepthDesc{};offDepthDesc.Width=4;offDepthDesc.Height=4;
+        offDepthDesc.MipLevels=offDepthDesc.ArraySize=offDepthDesc.SampleDesc.Count=1;
+        offDepthDesc.Format=DXGI_FORMAT_R32_TYPELESS;offDepthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        ComPtr<ID3D11Texture2D> offTex[2];ComPtr<ID3D11DepthStencilView> offDsv[2];
+        for(int o=0;o<2;++o) {
+            if(o)offDepthDesc.Width=offDepthDesc.Height=16;
+            ComPtr<ID3D11Texture2D> t;hr(dev->CreateTexture2D(&offDepthDesc,nullptr,&t));offTex[o]=t;
+            hr(dev->CreateDepthStencilView(t.Get(),&eyeDsvDesc,&offDsv[o]));
+        }
         const unsigned firstFrame=9000;
         for(unsigned frame=firstFrame;frame<=firstFrame+4;++frame) {
+            depth.noteEyeDraw(ctx.Get(),frame,offDsv[0].Get(),false,-1);
+            depth.noteEyeDraw(ctx.Get(),frame,offDsv[1].Get(),false,-1);
             for(unsigned eye=0;eye<2;++eye) {
                 ID3D11RenderTargetView* eyeRt=eyeRtv[eye].Get();
                 ctx->OMSetRenderTargets(1,&eyeRt,depthDsv[eye].Get());
@@ -517,16 +535,19 @@ int wmain(int argc, wchar_t** argv) {
                 for(size_t k=0;k<cb1Data.size();++k)
                     cb1Data[k]=float(frame)+0.5f*float(eye)+0.0001f*float(k);
                 ctx->UpdateSubresource(cb1.Get(),0,nullptr,cb1Data.data(),0,0);
-                depth.noteEyeDraw(ctx.Get(),frame,depthDsv[eye].Get(),true);
+                depth.noteEyeDraw(ctx.Get(),frame,depthDsv[eye].Get(),true,int(eye));
                 // A second pool draw of the same pass must not replace the
-                // first draw's constants block.
-                depth.noteEyeDraw(ctx.Get(),frame,depthDsv[eye].Get(),true);
+                // first draw's constants block. A non-eye draw between the
+                // passes must not end the open one either.
+                depth.noteEyeDraw(ctx.Get(),frame,depthDsv[eye].Get(),true,int(eye));
+                if(!eye)depth.noteEyeDraw(ctx.Get(),frame,offDsv[0].Get(),false,-1);
             }
         }
         // Frames firstFrame..firstFrame+3 kept (kMaxFrames=4); the last
         // frame's eye B is never followed by a switch, so it is not captured.
         check(depth.count()==8,"four frames of two completed eye passes staged");
         check(depth.declined>=1,"frames past the cap declined explicitly");
+        check(depth.nonEyeSkips==15,"the frame's three non-eye phases skipped per frame, never staged");
         // Late overwrites of both source textures must not change the copies.
         float pollution[64];for(float& v:pollution)v=0.99f;
         ctx->UpdateSubresource(depthTex[0].Get(),0,nullptr,pollution,8*4,0);
@@ -576,11 +597,12 @@ int wmain(int argc, wchar_t** argv) {
         }
         // Off is a no-op: one bool, no copies, no files.
         edvr::EyeDepthCapture off;
-        off.noteEyeDraw(ctx.Get(),firstFrame,depthDsv[0].Get(),true);
+        off.noteEyeDraw(ctx.Get(),firstFrame,depthDsv[0].Get(),true,0);
         check(off.count()==0 && !off.enabled(),"depth capture stays silent while off");
-        // A third distinct depth target in one frame is declined, and a
-        // constants buffer shorter than cb1[256..592) keeps an explicit
-        // zero-float block on disk.
+        // A non-eye draw between the two eye passes is skipped (not
+        // declined), must not end the open pass, and a constants buffer
+        // shorter than cb1[256..592) keeps an explicit zero-float block on
+        // disk.
         edvr::EyeDepthCapture odd;
         odd.configure(true);
         ComPtr<ID3D11Texture2D> thirdTex;ComPtr<ID3D11DepthStencilView> thirdDsv;
@@ -591,12 +613,13 @@ int wmain(int argc, wchar_t** argv) {
         ComPtr<ID3D11Buffer> smallCb1;hr(dev->CreateBuffer(&smallDesc,nullptr,&smallCb1));
         ctx->VSSetConstantBuffers(1,1,smallCb1.GetAddressOf());
         const unsigned oddFrame=9100;
-        odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[0].Get(),true);
-        odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[1].Get(),true);
-        odd.noteEyeDraw(ctx.Get(),oddFrame,thirdDsv.Get(),true);
-        check(odd.declined==1 && odd.count()==2,
-              "third depth target declined, and the pass it ended is staged at its arrival");
-        odd.noteEyeDraw(ctx.Get(),oddFrame+1,depthDsv[0].Get(),true);
+        odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[0].Get(),true,0);
+        odd.noteEyeDraw(ctx.Get(),oddFrame,thirdDsv.Get(),true,-1);
+        check(odd.nonEyeSkips==1 && odd.declined==0 && odd.count()==0,
+              "a non-eye draw mid-pass is skipped and does not end the open pass");
+        odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[1].Get(),true,1);
+        check(odd.count()==1,"the eye pass ends at the next eye pass's first draw");
+        odd.noteEyeDraw(ctx.Get(),oddFrame+1,depthDsv[0].Get(),true,0);
         check(odd.count()==2,"an already-staged pass is never enqueued twice");
         wait_gpu(ctx.Get(),dev.Get());
         check(odd.write(ctx.Get(),depthDir.c_str(),L"ODD")==2,"odd-run depth files written");
@@ -614,11 +637,12 @@ int wmain(int argc, wchar_t** argv) {
         D3D11_DEPTH_STENCIL_VIEW_DESC msaaView=eyeDsvDesc;
         msaaView.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2DMS;
         hr(dev->CreateDepthStencilView(msaaTex.Get(),&msaaView,&msaaDsv));
-        msaa.noteEyeDraw(ctx.Get(),9200,msaaDsv.Get(),true);
-        msaa.noteEyeDraw(ctx.Get(),9200,depthDsv[0].Get(),true);
+        msaa.noteEyeDraw(ctx.Get(),9200,msaaDsv.Get(),true,0);
+        msaa.noteEyeDraw(ctx.Get(),9200,depthDsv[0].Get(),true,0);
         check(msaa.declined==1 && msaa.count()==0,"multisampled depth declined explicitly");
         odd.reset();
-        check(odd.count()==0 && !odd.declined && !odd.failures,"depth capture reset clears the run");
+        check(odd.count()==0 && !odd.declined && !odd.failures && !odd.nonEyeSkips,
+              "depth capture reset clears the run");
         ctx->VSSetConstantBuffers(1,1,&b);
     }
     wait_gpu(ctx.Get(),dev.Get());
