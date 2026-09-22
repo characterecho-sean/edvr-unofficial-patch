@@ -39,7 +39,10 @@ otherwise.
   compute utility (.rdata RVA 0x4E27600–0x4E2B200, full sweep 2026-09-21) —
   census families cannot be named from the exe (only armed snapshots), and
   build_diff cannot do shader-recompile detection from the exe (that would
-  need the game's external shader assets, not the binary).
+  need the game's external shader assets, not the binary). Draw-dedup
+  culling: the v2 ledger proves the 8.08x submission duplication is
+  architecture (eyes x parts/LODs x materials), with only ~213/frame
+  (~0.3%) fully identical — no dedup lever exists.
 * **Next (no flight):** compare the staged VS b0/b1/b2 constants across the
   two eye passes in existing EDVRDRW1 captures (stereo culling share; where
   truth becomes final per eye). **Next (one flight, user's to spend):** the
@@ -185,17 +188,22 @@ otherwise.
   NO LOD gate, ~550 draws/frame, PS-faded invisible at range) and
   baked-lit trim (B, LOD-gated) materials — same t33 pool, frame
   constants in CB1, instance data in SRVs. Sizing-study CORRECTION
-  (same day): A/B are NOT the same instances drawn twice (only 6.3%
-  instance overlap) — the real duplication is global: 75,779 pool
-  instance submissions/frame of 9,373 unique records (8.08x); EB52 41,281
-  submissions of 6,817 unique (6.06x), 7,951 draws collapsing to 1,271
-  record-sets drawn ~6.3x each, plus 7,298 fully byte-identical excess
-  commands/frame. Whether the repeats are waste (same pass) or legitimate
-  (per-eye/per-pass/per-cascade) is UNPROVEN — the ledger has no PS/RT
-  per row; logging them is the named next instrument. Footprint-nesting
-  candidates are 48% of active records (heuristic, NOT sealed-interior
-  proof); no per-structure bounds or enterability exists in any capture
-  (render-record bounds live in-game at +0xF0/+0x1C0, center +0x240).
+  (same day): A/B are NOT the same instances drawn twice (6.3% overlap).
+  LEDGER DECOMPOSITION (PS/RT instrument, flight 184120, v2 ledger):
+  the 8.08x duplication is ARCHITECTURE, not waste — ~2x stereo eyes x
+  2-4 part/LOD index-range draws per eye (EB52 up to 12) x material
+  layers (EB52 carries 4 pixel shaders per eye); every family's repeats
+  stay within ONE render target per record-set; the pass map is exactly
+  3 render targets (2 eyes + 1 offscreen), ONE pass per eye, NO shadow/
+  depth pass in the ledger. The provably redundant dedup target is ~213
+  fully-identical submissions/frame (~0.3%) — the draw-dedup lever is
+  dead. KEY STRUCTURAL FACT: the game re-walks the same ~9,200 records
+  ~8x per frame to emit part x material x eye draws, so keeping one
+  record out of the instance stream removes ~8 submissions — the
+  culling prize is at the EVAL/instance-stream level, never the draw
+  level. Footprint nesting (48% of records) remains heuristic-only; no
+  bounds or enterability in any capture (in-game render-record bounds
+  +0xF0/+0x1C0, center +0x240).
 * **Open:** none for identification. The A-layer gating question is a
   design input: gate A by its own fade distance (~550 draws/frame at far
   LODs, zero visual change) — product decision, suppression discipline
