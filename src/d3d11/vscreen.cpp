@@ -4329,7 +4329,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
                             uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
+        // staticSurfaceLive() (static_surface.h) is staticSurfaceBegin's own
+        // decline -- it re-tests `!enabled || failed` under its lock before
+        // anything observable -- read inline, so a draw on a session with the
+        // feature off or failed skips the call and its stack cookie.
         const bool staticOwner=t_colourOriginal && !separate && self==g_state->ownerCtx &&
+            staticSurfaceLive() &&
             staticSurfaceBegin(self,perInstance,instances,startIndex,baseVertex,
                                startInstance,bindingShaderHash(BindSlot::Vs));
         const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate || staticOwner);
