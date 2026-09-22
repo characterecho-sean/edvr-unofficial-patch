@@ -38,6 +38,15 @@
 #include "../common/config.h"
 
 namespace edvr {
+
+// The draw clock's arm (perf_monitor.h). Out of State only so the header can
+// answer without a call: DrawClock constructs it in all four draw thunks, so
+// this is asked about 18k times a frame and says no on fifteen frames in
+// sixteen. Set at the frame boundary, from the same expression as before.
+namespace detail {
+bool g_perfMonitorSampleDraws = false;
+}  // namespace detail
+
 namespace {
 
 // Ten seconds at 90 Hz for the statistics; the graph shows the tail.
@@ -162,7 +171,6 @@ struct State {
     // sample, all cleared at the boundary.
     std::atomic<uint32_t> events{0};
     std::atomic<int32_t>  eventUs{0};
-    bool     sampleDraws = false;
     int64_t  drawWholeTicks = 0;
     int64_t  drawRealTicks = 0;
     float    drawsMsRunning = 0.0f;
@@ -815,7 +823,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
     f.events = static_cast<uint16_t>(ev & 0xFFFFu);
     f.eventMs = static_cast<float>(s.eventUs.exchange(0)) / 1000.0f;
     f.cpuDoorMs = static_cast<float>(takeDoorCpuUs()) / 1000.0f;
-    if (s.sampleDraws && qpcFrequency() > 0) {
+    if (detail::g_perfMonitorSampleDraws && qpcFrequency() > 0) {
         const int64_t own = s.drawWholeTicks - s.drawRealTicks;
         s.drawsMsRunning = own > 0 ? static_cast<float>(static_cast<double>(own) * 1000.0 /
                                                         static_cast<double>(qpcFrequency()))
@@ -836,7 +844,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;
-    s.sampleDraws = (s.frameNo % kDrawSampleEvery) == 0;
+    detail::g_perfMonitorSampleDraws = (s.frameNo % kDrawSampleEvery) == 0;
     f.doorGpuMs = s.doorGpuMs[0] + s.doorGpuMs[1];
     const DeviceCreates made = deviceCreatesTake();
     f.createTextures = made.textures;
@@ -933,7 +941,7 @@ void perfMonitorNotePresentWait(double ms) {
     if (ms >= 0.0 && ms < 5000.0) g_s.pendingPresentWaitMs = static_cast<float>(ms);
 }
 
-bool perfMonitorSampleDraws() { return g_s.sampleDraws; }
+// perfMonitorSampleDraws is inline in the header now (perf_monitor.h).
 
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {
     if (wholeTicks > 0) g_s.drawWholeTicks += wholeTicks;

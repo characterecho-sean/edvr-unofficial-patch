@@ -7,6 +7,28 @@ struct NativeBenchmarkReport;
 // Exact rigid mesh motion in either eye. Animated meshes retain their
 // existing path; a pool index is never an object's persistent identity.
 void meshMotionConfigure(bool on);
+
+// Is this fix live? meshMotionDraw's own first reject, published so the draw
+// path can decline without a call.
+//
+// The module keeps an admission census of every entry, including the ones it
+// rejects as Disabled -- which is why the call could not simply be skipped
+// without an answer to "who reads it". The answer is that the ONLY reader is
+// meshMotionFrameBoundary's 1800-frame report (mesh_motion.cpp:669-673), and
+// that whole function opens with `if(!enabled)return;` (:655), with the frame
+// counter driving the report incremented inside it. While the feature is off
+// the census is written and never read by anyone, so declining out here
+// silences nothing observable -- and mesh motion is bundled with
+// fix.temporal_aa (temporal_pass.cpp), which was off for the measurement.
+// 165 innermost samples of the 1349-frame window of 2026-09-22.
+//
+// The regression rig drives meshMotionDraw directly and flips `enabled`
+// itself, so it is unaffected by a guard at vscreen's call site.
+namespace mesh_motion_detail { extern bool enabled, failed; }
+inline bool meshMotionLive() {
+    return mesh_motion_detail::enabled && !mesh_motion_detail::failed;
+}
+
 void meshMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,unsigned start,int base,unsigned startInstance,uint64_t vs);
 void meshMotionViews(ID3D11DeviceContext*,ID3D11Texture2D* scene,ID3D11ShaderResourceView** views);
 void meshMotionFrameBoundary(ID3D11DeviceContext*);

@@ -11,6 +11,16 @@
 #include <cstring>
 
 namespace edvr {
+
+// The two flags celestialMotionLive reads without a call (celestial_motion.h).
+// Out here rather than in the anonymous namespace below purely so the header
+// can see them; written only from this file, on the render thread, exactly as
+// before.
+namespace detail {
+bool g_celestialMotionEnabled = false;
+bool g_celestialMotionFailed = false;
+}  // namespace detail
+
 namespace {
 using Microsoft::WRL::ComPtr;
 constexpr uint64_t kTerrainDepth = 0xACE405F428C17EF6ull;
@@ -135,7 +145,7 @@ struct Eye {
     bool cleared=false, original=false;
 };
 Eye g_eyes[2];
-bool g_enabled=false, g_failed=false, g_noted=false, g_capNoted=false;
+bool g_noted=false, g_capNoted=false;
 // The three VS constant buffers (b0/b1/b2) only ever contribute these three
 // byte ranges to the terrain draw's per-row capture. begin(), flush() and
 // every tee below share this one table, so nothing ever shadows more than
@@ -284,17 +294,17 @@ bool ensure(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
         SUCCEEDED(dev->CreateBlendState(&blend,&g_blend)) && SUCCEEDED(dev->CreateDepthStencilState(&depth,&g_depth));
 }
 void fail() {
-    g_failed=true;
+    detail::g_celestialMotionFailed=true;
     Log::get().note("terrain motion: resource setup failed; original scene and camera motion retained.");
 }
 } // namespace
 
 void celestialMotionConfigure(bool enabled) {
-    if (g_enabled!=enabled) celestialMotionShutdown();
-    g_enabled=enabled;
+    if (detail::g_celestialMotionEnabled!=enabled) celestialMotionShutdown();
+    detail::g_celestialMotionEnabled=enabled;
 }
 static bool begin(ID3D11DeviceContext* ctx, uint64_t vs, bool original) {
-    if (!g_enabled || g_failed || vs!=kTerrainDepth || g_saved.active) return false;
+    if (!detail::g_celestialMotionEnabled || detail::g_celestialMotionFailed || vs!=kTerrainDepth || g_saved.active) return false;
     HookCpu cpu;
     if (original) {
         // The observed prepass has no PS: adding colour outputs cannot
@@ -493,7 +503,7 @@ static void flush(ID3D11DeviceContext* ctx, Eye& e) {
     now.built=count;
 }
 void celestialMotionFrameBoundary(ID3D11DeviceContext* ctx) {
-    if (!g_enabled) return;
+    if (!detail::g_celestialMotionEnabled) return;
     // Build any eye the temporal pass never consumed this frame, so next
     // frame's "previous" table is complete before write swaps under it.
     if(ctx) { g_gpu.poll(ctx); g_buildGpu.poll(ctx); for (auto& e:g_eyes) flush(ctx,e); }
@@ -506,7 +516,7 @@ void celestialMotionFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 void celestialMotionViews(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views) {
     views[0]=views[1]=views[2]=nullptr;
-    if (!g_enabled || g_failed || !scene) return;
+    if (!detail::g_celestialMotionEnabled || detail::g_celestialMotionFailed || !scene) return;
     for (auto& e:g_eyes) if (e.scene.Get()==scene && e.cleared && e.records[e.write].count) {
         if (ctx) flush(ctx,e);
         views[0]=e.indexSrv.Get(); views[1]=e.original?e.originalDepthSrv.Get():e.depthSrv.Get(); views[2]=e.records[e.write].srv.Get();
@@ -519,7 +529,7 @@ void celestialMotionShutdown() {
     g_dump.Reset(); g_dumpCount=0;
     g_gpu.reset();g_costFrames=g_costDraws=g_originalDraws=0;
     g_buildGpu.reset();g_buildBatches=0;
-    g_failed=g_noted=g_capNoted=false;
+    detail::g_celestialMotionFailed=g_noted=g_capNoted=false;
     for (auto& w:g_watched) { w.buffer=nullptr; w.valid=false; w.mapped=nullptr; }
 }
 // Hot: the game Maps roughly 1100 buffers a frame over terrain. Every tee
@@ -579,7 +589,7 @@ void celestialMotionConstantsCensus(unsigned* cpuSlots, unsigned* gpuSlots, unsi
 }
 void celestialMotionStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
     g_dump.Reset(); g_dumpCount=0;
-    if (!g_enabled || g_failed) return;
+    if (!detail::g_celestialMotionEnabled || detail::g_celestialMotionFailed) return;
     for (auto& e:g_eyes) if (e.scene.Get()==scene && e.cleared) {
         flush(ctx,e);
         const auto& r=e.records[e.write];

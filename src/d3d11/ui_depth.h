@@ -35,7 +35,39 @@ void uiDepthConfigure(Config& cfg);
 
 // True while the key is on, the pass is on and nothing stood down: the
 // draw path's one bool.
-bool uiDepthWantsDraws();
+//
+// Inline, with the state it reads, because "the draw path's one bool" was a
+// cross-TU call in a build with no /GL -- and it is asked from the subscriber
+// gate and again inside beginPanelOverride, every draw.
+//
+// uiDepthPlanetPending() and uiDepthReissuingScene() are published for the
+// same reason and are each the FIRST test of the function they guard, so a
+// call declined out here is a call that would have declined inside:
+//   - uiDepthPlanetBegin clears both pending flags and then returns false
+//     unless one of them was set; clearing flags that are already false is
+//     what the guard skips, and nothing else.
+//   - uiDepthDeferredEye returns -1 unless the mode is kReissueScene.
+// The MODE ITSELF moves here rather than a bool mirroring it. ui_depth.cpp
+// writes g_uiDepthMode in seven places, and a mirror maintained at seven call
+// sites is a desync waiting to happen -- the failure this codebase has paid
+// for more than once. One variable, read inline, written where it always was.
+namespace detail {
+enum class UiDepthMode : unsigned char { kNone, kReissue, kReissueScene };
+extern UiDepthMode g_uiDepthMode;
+extern bool g_uiDepthOn;
+extern bool g_uiDepthStoodDown;
+extern bool g_uiDepthPlanetPending;
+extern bool g_uiDepthPlanetSolarPending;
+}  // namespace detail
+inline bool uiDepthWantsDraws() {
+    return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown;
+}
+inline bool uiDepthPlanetPending() {
+    return detail::g_uiDepthPlanetPending || detail::g_uiDepthPlanetSolarPending;
+}
+inline bool uiDepthReissuingScene() {
+    return detail::g_uiDepthMode == detail::UiDepthMode::kReissueScene;
+}
 
 // Every draw that did NOT land in an eye texture: learn the target as a UI
 // surface when the bound vertex shader is one of the GUI renderer's

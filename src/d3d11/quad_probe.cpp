@@ -13,8 +13,17 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/timing.h"  // the wall-clock gate
+#include "draw_gate.h"         // drawGateArm: the key lands mid-frame
 
 namespace edvr {
+
+// The two flags quadProbeWants reads inline (quad_probe.h). Written only
+// from this file, on the render thread, exactly as before.
+namespace detail {
+bool g_quadProbeArmed = false;
+bool g_quadProbeTaken = false;   // one capture per session
+}  // namespace detail
+
 namespace {
 
 // Six indices to a quad at topology 4, which the census reports for this
@@ -70,7 +79,6 @@ constexpr uint32_t kTailBytesMax = 32;
 
 FaultBudget g_budget("quadProbe", 4);
 
-bool     g_armed = false;
 uint32_t g_wantW = 0, g_wantH = 0;
 char     g_wantKind = 0;
 uint32_t g_wantN = 0;
@@ -108,8 +116,8 @@ uint32_t g_lastSkipFrame = 0;
 // ends" is expressible, and neither alone could say it.
 uint32_t g_wantAtMs = 0;
 uint64_t g_firstTickMs = 0;
-bool     g_taken = false;          // one capture per session; re-arm by
-                                   // setting the spec off and on again
+// detail::g_quadProbeTaken -- one capture per session, re-armed by setting
+// the spec off and on again -- is published above for quad_probe.h.
 
 // Distinct vertex buffers one capture may hold.
 //
@@ -257,7 +265,7 @@ void quadProbeConfigure(Config& cfg) {
     if (armed && (w != g_wantW || h != g_wantH || kind != g_wantKind ||
                   n != g_wantN || atLeastWanted != g_wantAtLeast ||
                   skip != g_wantSkip || atMs != g_wantAtMs)) {
-        g_taken = false;
+        detail::g_quadProbeTaken = false;
         g_skipLeft = skip;
         g_lastSkipFrame = 0;
     }
@@ -265,7 +273,7 @@ void quadProbeConfigure(Config& cfg) {
     g_wantAtLeast = atLeastWanted;
     g_wantSkip = skip;
     g_wantAtMs = atMs;
-    if (armed && !g_armed) {
+    if (armed && !detail::g_quadProbeArmed) {
         char when[128] = "";
         if (atMs) {
             snprintf(when, sizeof(when),
@@ -282,20 +290,21 @@ void quadProbeConfigure(Config& cfg) {
                         kind, atLeastWanted ? "at least " : "", n, w, h,
                         skip, when);
     }
-    g_armed = armed;
+    detail::g_quadProbeArmed = armed;
 }
 
-bool quadProbeWants() { return g_armed && !g_taken; }
-
 void quadProbeRequest() {
-    if (!g_armed) return;
+    if (!detail::g_quadProbeArmed) return;
     // A marker that only shows during a hyperspace jump cannot be caught by
     // a probe that fires the first time the panel appears, and the clock
     // gate is a poor way to hit a fifteen-second window. The census key asks
     // for a capture NOW, and asks again for each press.
-    const bool again = g_taken;
+    const bool again = detail::g_quadProbeTaken;
     dropCapture();
-    g_taken = false;
+    detail::g_quadProbeTaken = false;
+    // quadProbeWants() has just gone from false to true, inside a frame whose
+    // gate was sampled before the key was pressed (draw_gate.h).
+    drawGateArm();
     g_skipLeft = g_wantSkip;
     g_lastSkipFrame = 0;
     Log::get().note("quad probe: capture requested by key -- the next frame "
@@ -306,7 +315,7 @@ void quadProbeRequest() {
 bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                      uint32_t targetH, char kind, uint32_t count,
                      uint32_t instances, uint32_t startIndex, int baseVertex) {
-    if (!g_armed || g_taken || g_pendingFrame || !ctx) return false;
+    if (!detail::g_quadProbeArmed || detail::g_quadProbeTaken || g_pendingFrame || !ctx) return false;
     if (targetW != g_wantW || targetH != g_wantH) return false;
     if (kind != g_wantKind) return false;
     if (g_wantAtLeast) {
@@ -457,7 +466,7 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
             } else {
                 failOnce("the staging buffers could not be created");
                 dropCapture();
-                g_taken = true;   // do not retry into the same failure
+                detail::g_quadProbeTaken = true;   // do not retry into the same failure
             }
             dev->Release();
         }
@@ -476,7 +485,7 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
     // The capture frame ended: close the window and let the copies settle.
     if (g_windowOpen && g_frame > g_windowFrame) {
         g_windowOpen = false;
-        g_taken = true;   // one window per session, whatever it yields
+        detail::g_quadProbeTaken = true;   // one window per session, whatever it yields
         g_pendingFrame = g_occCount ? g_frame + kSettleFrames : 0;
         if (!g_pendingFrame) dropCapture();
     }

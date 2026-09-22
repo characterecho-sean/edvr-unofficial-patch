@@ -88,7 +88,19 @@ void introProbeNoteMovieFill();
 
 // Is the probe recording? False when off and false once the window has
 // closed, which keeps it out of the draw path for the rest of the session.
-bool introProbeWants();
+//
+// Inline, and the two flags with it, because "keeps it out of the draw path"
+// was costing a cross-TU call for two bool loads on every draw: beginPanelOverride
+// asks three times a draw and the build has no /GL, so nothing could inline it.
+// 49 innermost samples of the 1349-frame window of 2026-09-22 -- for a probe
+// that has been closed since the main menu.
+namespace detail {
+extern bool g_introProbeOn;
+extern bool g_introProbeClosed;
+}  // namespace detail
+inline bool introProbeWants() {
+    return detail::g_introProbeOn && !detail::g_introProbeClosed;
+}
 
 // One draw, with the size of the target it lands in (0x0 when the binding
 // could not be resolved) and whether that target is one the headset is shown.

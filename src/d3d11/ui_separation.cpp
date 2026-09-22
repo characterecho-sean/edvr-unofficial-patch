@@ -9,7 +9,15 @@
 #include "../common/temporal_mode.h"
 #include <vector>
 
-namespace edvr { namespace {
+namespace edvr {
+
+// The two flags uiSeparationLive reads inline (ui_separation.h). Written
+// only from this file.
+namespace detail {
+bool g_uiSeparationEnabled = false;
+bool g_uiSeparationFailed = false;
+}  // namespace detail
+ namespace {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 const GUID bytesKey={0xf95e498e,0xf733,0x4f23,{0x9f,0xc1,0x62,0x20,0xa1,0xa8,0xd5,0xeb}};
 const GUID cloneKey={0xf95e498e,0xf733,0x4f23,{0x9f,0xc1,0x62,0x20,0xa1,0xa8,0xd5,0xec}};
@@ -22,7 +30,7 @@ struct Eye {
     uint32_t uiDraws=0,lateDraws=0;
 };
 Eye eyes[2];
-bool enabled=false,failed=false,noted=false,usedNoted=false;
+bool noted=false,usedNoted=false;
 // Device shader creation may run concurrently with the render-context hooks.
 // An internal render operation must not suppress another thread's bytecode.
 thread_local bool internal=false;
@@ -32,8 +40,8 @@ Ptr<ID3D11RenderTargetView> toneTarget;
 Ptr<ID3D11DepthStencilView> toneDepth;
 struct InternalScope {bool before=internal;InternalScope(){internal=true;}~InternalScope(){internal=before;}};
 void decline(const char* why) {
-    if(!failed)Log::get().note("UI separation: disabled for this session: %s. Original game colour retained; temporal history will restart once.",why);
-    failed=true;for(auto& e:eyes){e.complete=false;e.layer.invalidate();}uiDepthSeparatedInvalidate();
+    if(!detail::g_uiSeparationFailed)Log::get().note("UI separation: disabled for this session: %s. Original game colour retained; temporal history will restart once.",why);
+    detail::g_uiSeparationFailed=true;for(auto& e:eyes){e.complete=false;e.layer.invalidate();}uiDepthSeparatedInvalidate();
 }
 Ptr<ID3D11PixelShader> shader(ID3D11DeviceContext* ctx) {
     Ptr<ID3D11PixelShader> original;ctx->PSGetShader(&original,nullptr,nullptr);if(!original)return {};
@@ -68,10 +76,10 @@ void uiSeparationRemember(ID3D11PixelShader* ps,const void* data,size_t n,bool l
 }
 void uiSeparationConfigure(Config& cfg) {
     const auto m=cfg.getString("fix.temporal_aa","off");
-    enabled=temporalExternalEngine(m);
+    detail::g_uiSeparationEnabled=temporalExternalEngine(m);
 }
 bool uiSeparationBegin(ID3D11DeviceContext* ctx) {
-    if(!enabled || failed || internal || active>=0 || !ctx)return false;
+    if(!detail::g_uiSeparationEnabled || detail::g_uiSeparationFailed || internal || active>=0 || !ctx)return false;
     int eye=uiDepthTargetSpriteEye();const bool remove=eye>=0;
     void* target=currentTarget();
     if(eye<0)for(int i=0;i<2;++i) {
@@ -94,7 +102,7 @@ void uiSeparationEnd(ID3D11DeviceContext* ctx) {
     if(active<0)return;InternalScope scope;eyes[active].layer.end(ctx);active=-1;
 }
 bool uiSeparationToneBegin(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances) {
-    if(!enabled || failed || internal || tone>=0 ||
+    if(!detail::g_uiSeparationEnabled || detail::g_uiSeparationFailed || internal || tone>=0 ||
        bindingShaderHash(BindSlot::Vs)!=EyeTonemapSnapshot::kVs || bindingShaderHash(BindSlot::Ps)!=EyeTonemapSnapshot::kPs)return false;
     Ptr<ID3D11ShaderResourceView> hdr;ctx->PSGetShaderResources(1,1,&hdr);if(!hdr)return false;
     Ptr<ID3D11Resource> resource;hdr->GetResource(&resource);int eye=-1;
@@ -151,7 +159,7 @@ void uiSeparationToneEnd(ID3D11DeviceContext* ctx) {
     eyes[tone].complete=true;tone=-1;toneInput.Reset();toneTarget.Reset();toneDepth.Reset();
 }
 bool uiSeparationInputs(ID3D11Texture2D* submitted,ID3D11Texture2D* scene,int eye,uint32_t w,uint32_t h,UiSeparatedInputs& out) {
-    out={};if(!enabled || failed || eye<0 || eye>1)return false;auto& e=eyes[eye];
+    out={};if(!detail::g_uiSeparationEnabled || detail::g_uiSeparationFailed || eye<0 || eye>1)return false;auto& e=eyes[eye];
     if(!e.complete)return false;
     if(submitted!=e.toneOutput.Get()){decline("submitted colour differs from tracked tone-map output");return false;}
     D3D11_TEXTURE2D_DESC d{};e.converted->GetDesc(&d);if(d.Width!=w || d.Height!=h)return false;
@@ -161,18 +169,18 @@ bool uiSeparationInputs(ID3D11Texture2D* submitted,ID3D11Texture2D* scene,int ey
     return true;
 }
 void uiSeparationResourceWrite(ID3D11Resource* destination) {
-    if(internal || failed || !enabled || !destination)return;
+    if(internal || detail::g_uiSeparationFailed || !detail::g_uiSeparationEnabled || !destination)return;
     for(auto& e:eyes)if((e.layer.ready() && destination==e.layer.original()) || (e.complete && destination==e.toneOutput.Get())){decline("non-draw write to tracked colour");return;}
 }
 void uiSeparationViewWrite(ID3D11View* destination) {
-    if(internal || failed || !enabled || !destination ||
+    if(internal || detail::g_uiSeparationFailed || !detail::g_uiSeparationEnabled || !destination ||
        (!eyes[0].layer.ready() && !eyes[1].layer.ready()))return;
     Ptr<ID3D11Resource> resource;destination->GetResource(&resource);
     uiSeparationResourceWrite(resource.Get());
 }
-void uiSeparationUnknownWrite(){if(!internal && enabled && (eyes[0].layer.ready()||eyes[1].layer.ready()))decline("untracked draw or command list");}
+void uiSeparationUnknownWrite(){if(!internal && detail::g_uiSeparationEnabled && (eyes[0].layer.ready()||eyes[1].layer.ready()))decline("untracked draw or command list");}
 void uiSeparationFrameBoundary(){for(auto& e:eyes){e.layer.frameBoundary();e.complete=false;e.uiDraws=e.lateDraws=0;}}
-bool uiSeparationFailed(){return failed;}
+bool uiSeparationFailed(){return detail::g_uiSeparationFailed;}
 void uiSeparationEvaluated(){if(!usedNoted){usedNoted=true;Log::get().note("UI separation: DLSS evaluated world-only colour; current target sprites composited after temporal reconstruction.");}}
-void uiSeparationShutdown(){for(auto& e:eyes)e=Eye{};toneInput.Reset();toneTarget.Reset();toneDepth.Reset();active=tone=-1;enabled=failed=noted=usedNoted=internal=false;}
+void uiSeparationShutdown(){for(auto& e:eyes)e=Eye{};toneInput.Reset();toneTarget.Reset();toneDepth.Reset();active=tone=-1;detail::g_uiSeparationEnabled=detail::g_uiSeparationFailed=noted=usedNoted=internal=false;}
 }

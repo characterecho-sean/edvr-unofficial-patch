@@ -1,5 +1,8 @@
 // Exercises the production controller. Only game classification and shader
 // creation/logging are supplied by this standalone D3D11 harness.
+// This rig supplies its own binding shadow readers (below), so it asks the
+// header for declarations rather than the inline production ones.
+#define EDVR_BINDING_SHADOW_EXTERNAL 1
 #include "../../src/d3d11/ui_deferred.cpp"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 #include <cstdio>

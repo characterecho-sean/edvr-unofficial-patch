@@ -83,7 +83,7 @@ o.b=o.p.xyw;o.c=float3(0,0,100);o.uv=v.uv;return o;}
         Capture results[2];
         for(int enabled=0;enabled<2;++enabled) {
             ctx->ClearState();uiDepthFrameBoundary(ctx);g_holoMotion[0]=HoloMotion{};
-            g_on=true;g_stoodDown=false;g_smokeOn=true;g_reactive=0;g_smokeReactive=1;g_smokeFloor=.08f;
+            detail::g_uiDepthOn=true;detail::g_uiDepthStoodDown=false;g_smokeOn=true;g_reactive=0;g_smokeReactive=1;g_smokeFloor=.08f;
             std::vector<float> art(8*8*4,fringe?.005f:.5f);ctx->UpdateSubresource(streak.Get(),0,nullptr,art.data(),8*16,0);
             bind(12);check(g_holoMotion[0].prepare(ctx,scene.tex.Get(),{'X',3,1,0,0,0},1,4,0),"seed affine surface record before corona");
             auto* hc=g_holoMotion[0].target();
@@ -95,7 +95,7 @@ o.b=o.p.xyw;o.c=float3(0,0,100);o.uv=v.uv;return o;}
             auto privateBefore=read(dev,ctx,privateResource.Get());std::vector<float> colourBefore[4];
             for(UINT channel=0;channel<4;++channel)colourBefore[channel]=read(dev,ctx,colour.Get(),channel);
             bind(44);
-            g_coronaPending=enabled!=0;g_coronaMotion=false;g_holoDraw={'X',3,1,0,0,0};g_mode=Mode::kReissueScene;
+            g_coronaPending=enabled!=0;g_coronaMotion=false;g_holoDraw={'X',3,1,0,0,0};detail::g_uiDepthMode=Mode::kReissueScene;
             g_reissueShader=&g_depthShaders[4];g_drawEye=0;g_reissueMaskSlot=3;g_reissueMaskOffset=0;
             g_rebindW=g_rebindH=8;g_wantRebind=false;g_wantMask=true;
             check(uiDepthReissueBegin(ctx),"production smoke/corona coverage begins");

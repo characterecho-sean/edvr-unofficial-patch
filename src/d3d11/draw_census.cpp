@@ -13,6 +13,8 @@
 #include "../common/log.h"
 #include "../common/timing.h"  // the startup schedule's clock
 #include "binding_shadow.h"
+#include "draw_gate.h"      // drawGateArm: a census armed mid-frame must not
+                            // lose the frame it counts from
 #include "exposure_fix.h"   // lookupShaderHash: the shader hash registry
 
 namespace edvr {
@@ -717,6 +719,10 @@ void drawCensusRequest() {
         return;
     }
     g_pending = true;
+    // The hotkey lands inside a frame, after that frame's gate sample. The
+    // census counts frames from here, so a gate that stayed false until the
+    // next boundary would hand it an empty frame 1 (draw_gate.h).
+    drawGateArm();
     Log::get().note("DC: census armed -- the next whole frames of eye-texture "
                     "draws will be logged. Diff two of these with "
                     "tools/diff_draw_census.py.");
@@ -729,6 +735,7 @@ void drawCensusAutoRequest() {
     if (drawCensusArmed()) return;
     g_pending = true;
     g_forceOffscreen = true;
+    drawGateArm();   // the trigger is a draw, so this is mid-frame (draw_gate.h)
     // The caller logs WHY (the size that tripped it); this side owns only the
     // census mechanics, which the begin line below reports as it always has.
 }
@@ -1516,6 +1523,7 @@ static void runCensusSchedule(uint32_t frameNo) {
         g_scheduleFired |= (1u << i);
         g_pending = true;
         g_forceOffscreen = true;
+        drawGateArm();   // draw_gate.h: this tick is not the gate's sample
         Log::get().note(
             "DC: census armed by advanced.census_at_ms entry %u of %u -- it "
             "asked for %llu ms and landed at %llu ms, frame %u.",

@@ -21,6 +21,19 @@ uint64_t frequency() {
 
 namespace edvr {
 
+namespace detail {
+std::atomic<bool> g_mapWaitArmed{false};
+}  // namespace detail
+
+void mapWaitArm(bool on) {
+    detail::g_mapWaitArmed.store(on, std::memory_order_relaxed);
+    // Disarming drops whatever has accumulated. The totals are per reporting
+    // window, and a window nobody closed is not a measurement -- carrying it
+    // into the next runtime session would put one session's Map time on
+    // another session's first line.
+    if (!on) mapWaitTake();
+}
+
 void mapWaitNote(D3D11_MAP type, uint64_t ticks) {
     const bool read = type == D3D11_MAP_READ || type == D3D11_MAP_READ_WRITE;
     (read ? g_readCalls : g_writeCalls).fetch_add(1, std::memory_order_relaxed);

@@ -39,6 +39,7 @@
 // GetType wrote a 44-byte texture description into a 20-byte buffer struct.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -91,12 +92,47 @@ struct ResourceInfo {
     void*    resource = nullptr;
 };
 
+// The shadow itself, in the header for ONE reason: the three readers below are
+// each a single load, and the draw path performs them about four times a draw
+// (vscreen's verdict block alone asks for the VS hash four times). The build
+// compiles with /O2 and NO /GL, so a one-line getter in a .cpp cannot be
+// inlined across the translation unit -- it is a real call, a real stack frame
+// and a real return for one field read. Measured 2026-09-22 on the caller
+// thread, parked at a settlement: bindingGet 78 samples and bindingShaderHash
+// 67 of a 1349-frame window, which is 0.11 ms a frame spent entirely on call
+// overhead for three loads.
+//
+// Writers stay in the .cpp. They run once per bind, not once per draw, and the
+// generation policy in the comment above is worth keeping in one place.
+// EDVR_BINDING_SHADOW_EXTERNAL: a standalone test rig that supplies its own
+// three readers defines this before including, and gets declarations instead.
+// Several rigs drive a fake shadow, and one of them (ui_deferred_test) asserts
+// how many hash reads the code under test performs -- a contract an inline
+// field read cannot keep, and worth keeping.
+#ifndef EDVR_BINDING_SHADOW_EXTERNAL
+namespace detail {
+struct BindingSlot {
+    void*    ptr = nullptr;
+    uint32_t gen = 1;   // starts at 1 so a caller's zero-initialised cache is stale
+    uint64_t hash = 0;  // a shader slot's content hash (bindingSetShader)
+};
+extern BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
+}  // namespace detail
+
 // The pointer last seen bound to a slot, or nullptr.
-void* bindingGet(BindSlot slot);
+inline void* bindingGet(BindSlot slot) {
+    return detail::g_bindingSlots[static_cast<size_t>(slot)].ptr;
+}
 
 // How many times that slot's binding could have changed. A cached answer is
 // stale when this differs from the value it was computed at.
+inline uint32_t bindingGeneration(BindSlot slot) {
+    return detail::g_bindingSlots[static_cast<size_t>(slot)].gen;
+}
+#else
+void* bindingGet(BindSlot slot);
 uint32_t bindingGeneration(BindSlot slot);
+#endif
 
 // Record a new binding. Bumps that slot's generation even when the pointer is
 // unchanged: an identical address after a rebind is not evidence of an identical
@@ -111,7 +147,13 @@ void bindingSet(BindSlot slot, void* ptr);
 // hash is 0 for a slot never set; a caller that finds the pointer null falls
 // back to the Get, since the shadow follows the owner context only.
 void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash);
+#ifndef EDVR_BINDING_SHADOW_EXTERNAL
+inline uint64_t bindingShaderHash(BindSlot slot) {
+    return detail::g_bindingSlots[static_cast<size_t>(slot)].hash;
+}
+#else
 uint64_t bindingShaderHash(BindSlot slot);
+#endif
 
 // Everything is unbound -- ClearState, or ExecuteCommandList without restore.
 // The only place forgetting a pointer is the truth rather than a guess.

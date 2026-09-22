@@ -629,8 +629,14 @@ bool backdropOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 bool backdropOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                          uint32_t instances) {
     if (!g_on || g_failed || !ctx || g_slotsUsed == 0) return false;
-    if (journalGameplay()) return false;
+    // The draw's SHAPE before the journal, which is a cross-TU call for one
+    // bool that this build cannot inline (/O2, no /GL). Both are pure reads
+    // and the answer is unchanged; the difference is that the call is now
+    // made for six-index quads rather than for every draw in the frame. 59
+    // innermost samples of the 1349-frame window of 2026-09-22 were spent in
+    // journalGameplay, reached from here.
     if (kind != 'X' || count != 6 || instances != 1) return false;
+    if (journalGameplay()) return false;
 
     void* srv = bindingGet(BindSlot::PsSrv0);
     if (!srv) return false;
