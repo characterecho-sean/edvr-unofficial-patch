@@ -254,6 +254,7 @@ internal static class Report
             ["spanOffsets"] = SpanOffsets(cycles),
             ["cycleCoveredWithoutDerivation"] = analyzer.CoveredWithoutDerivation,
             ["threads"] = Threads(covered, data),
+            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data),
             ["rvaClasses"] = RvaClasses(covered, data, analyzer),
             ["attributionSummary"] = Attribution(covered, data),
             ["gate"] = Gate(covered),
@@ -359,6 +360,7 @@ internal static class Report
             ["spanOffsets"] = SpanOffsets(frames),
             ["regions"] = Regions(covered),
             ["threads"] = Threads(covered, data),
+            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data),
             ["attribution"] = Attribution(covered, data),
             ["gate"] = Gate(covered),
         };
@@ -481,16 +483,26 @@ internal static class Report
         {
             ["definitions"] = definitions,
             ["gameDirectory"] = data.Stacks.GameDirectory,
+            // Every module a stack frame landed in, with how many interned frames
+            // landed there. Nothing is filtered out: a module missing from this
+            // list is a module no sampled or switched stack ever reached.
             ["modules"] = data.Stacks.Modules
-                .Where(module => module.Class is not (ModuleClass.Other or ModuleClass.SystemModule))
-                .OrderBy(module => module.Class).ThenBy(module => module.Name)
+                .OrderByDescending(module => module.Frames).ThenBy(module => module.Name)
                 .Select(module => new Dictionary<string, object?>
                 {
-                    ["name"] = module.Name,
+                    ["name"] = module.Display,
                     ["path"] = module.Path,
                     ["imageBase"] = $"0x{module.ImageBase:x}",
                     ["class"] = module.Class.ToString(),
+                    ["frames"] = module.Frames,
                 }).ToArray(),
+            ["frameResolution"] = new Dictionary<string, object?>
+            {
+                // Per distinct stack frame, not per observation.
+                ["resolvedByTraceEvent"] = data.Stacks.ResolvedFrames,
+                ["recoveredFromLoadedModules"] = data.Stacks.RecoveredFrames,
+                ["unresolved"] = data.Stacks.UnresolvedFrames,
+            },
             ["sampleCountsByClass"] = sampleCounts,
             ["callerSampleCountsByClass"] = callerLabels,
             ["firstSampledFrameSequence"] = firstSeen,
@@ -567,6 +579,75 @@ internal static class Report
             ["pipelineWaitShare"] = Numeric.Round4(totalUs > 0
                 ? byClass.GetValueOrDefault("pipeline").Us / totalUs : 0),
         };
+    }
+
+    /// What the caller thread was executing, by coarse region of the cycle: the
+    /// innermost frame's module, the modules and classes anywhere in the stack,
+    /// and the stacks themselves. One sample is one sampling interval, so a
+    /// count is also a time.
+    public static object CallerStacksByRegion(List<FrameCycle> frames, Collected data, int topGroups = 30)
+    {
+        var rows = new List<Dictionary<string, object?>>();
+        var interval = data.SampleIntervalUs;
+        for (byte group = 0; group < CycleAnalyzer.SampleRegionNames.Length; group++)
+        {
+            var byModule = new Dictionary<string, long>();
+            var bySignature = new Dictionary<string, long>();
+            long total = 0, edvr = 0, system = 0, nvidia = 0, pipeline = 0, census = 0, scheduler = 0;
+            long topUnresolved = 0, anyUnresolved = 0;
+            foreach (var frame in frames)
+                foreach (var (sampleGroup, stackId) in frame.CallerSamplesByRegion)
+                {
+                    if (sampleGroup != group || stackId < 0) continue;
+                    var stack = data.Stacks[stackId];
+                    total++;
+                    Numeric.Increment(byModule, data.Stacks.DisplayName(stack.TopModuleId));
+                    Numeric.Increment(bySignature, data.Stacks.Signature(stack));
+                    if (stack.AnyEdvrD3d11) edvr++;
+                    if (stack.AnySystemD3d11) system++;
+                    if (stack.AnyNvidiaUserMode) nvidia++;
+                    if (stack.Pipeline) pipeline++;
+                    if (stack.Census) census++;
+                    if (stack.Scheduler) scheduler++;
+                    if (stack.TopUnresolved) topUnresolved++;
+                    if (stack.AnyUnresolved) anyUnresolved++;
+                }
+            rows.Add(new Dictionary<string, object?>
+            {
+                ["region"] = CycleAnalyzer.SampleRegionNames[group],
+                ["samples"] = total,
+                ["msPerFrame"] = Numeric.Round(frames.Count > 0 ? total * interval / 1000.0 / frames.Count : 0),
+                ["byTopModule"] = byModule.OrderByDescending(pair => pair.Value)
+                    .Select(pair => new Dictionary<string, object?>
+                    {
+                        ["module"] = pair.Key,
+                        ["samples"] = pair.Value,
+                        ["msPerFrame"] = Numeric.Round(frames.Count > 0
+                            ? pair.Value * interval / 1000.0 / frames.Count : 0),
+                        ["share"] = Numeric.Round4(total > 0 ? (double)pair.Value / total : 0),
+                    }).ToArray(),
+                // These overlap by construction: one stack can pass through the
+                // game, EDVR's d3d11 and the display driver on its way down.
+                ["anyFrameIn"] = new Dictionary<string, object?>
+                {
+                    ["edvrD3d11"] = edvr,
+                    ["systemD3d11"] = system,
+                    ["nvidiaUserMode"] = nvidia,
+                    ["pipelineClass"] = pipeline,
+                    ["censusBracket"] = census,
+                    ["schedulerRange"] = scheduler,
+                    ["topFrameUnresolved"] = topUnresolved,
+                    ["anyFrameUnresolved"] = anyUnresolved,
+                },
+                ["topStacks"] = bySignature.OrderByDescending(pair => pair.Value).Take(topGroups)
+                    .Select(pair => new Dictionary<string, object?>
+                    {
+                        ["count"] = pair.Value,
+                        ["stack"] = pair.Key,
+                    }).ToArray(),
+            });
+        }
+        return rows;
     }
 
     /// Wait time by region of the cycle crossed with the waker class, so R1's

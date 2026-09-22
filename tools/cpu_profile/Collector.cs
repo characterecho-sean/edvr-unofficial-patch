@@ -104,7 +104,7 @@ internal static class Collector
         progress?.Invoke($"markers: clocks={result.Clocks.Count} spans={result.Spans.Count} " +
                          $"frames={result.Frames.Count} callerThreads={result.CallerThreads.Count}");
 
-        result.Stacks = new StackStore(log);
+        result.Stacks = new StackStore(log, pid);
         result.SampleIntervalFromLogUs = log.SampleProfileInterval.TotalMilliseconds * 1000.0;
         var processThreads = log.Threads.Where(thread => thread.Process.ProcessID == pid)
             .Select(thread => thread.ThreadID).ToHashSet();
@@ -216,7 +216,7 @@ internal static class Collector
             return;
         }
         Collected.Append(result.SwitchOutStacksByThread, data.OldThreadID,
-                         new StackObs(data.TimeStampQPC, result.Stacks.Intern(index)));
+                         new StackObs(data.TimeStampQPC, result.Stacks.Intern(index, data.TimeStampRelativeMSec)));
     }
 
     public static bool StackOwnerMatches(int ownerProcess, int ownerThread,
@@ -239,7 +239,7 @@ internal static class Collector
             else if (owner.ThreadID == data.ThreadID) result.ReadyStackEmitterOwned++;
             else if (owner.ThreadID == data.AwakenedThreadID) result.ReadyStackAwakenedOwned++;
             else result.ReadyStackUnownedOwner++;
-            stackId = result.Stacks.Intern(index);
+            stackId = result.Stacks.Intern(index, data.TimeStampRelativeMSec);
         }
         Collected.Append(result.ReadiesByThread, data.AwakenedThreadID,
                          new ReadyObs(data.TimeStampQPC, data.ThreadID, data.ProcessID, stackId));
@@ -257,6 +257,6 @@ internal static class Collector
             return;
         }
         Collected.Append(result.SamplesByThread, data.ThreadID,
-                         new StackObs(data.TimeStampQPC, result.Stacks.Intern(index)));
+                         new StackObs(data.TimeStampQPC, result.Stacks.Intern(index, data.TimeStampRelativeMSec)));
     }
 }

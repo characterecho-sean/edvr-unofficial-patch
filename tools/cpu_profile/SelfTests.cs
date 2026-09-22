@@ -198,7 +198,15 @@ internal static class SelfTests
 
     private static void RvaClassTable()
     {
-        Check(RvaTable.Classes.Length == 14, "every RVA class is defined");
+        Check(RvaTable.Classes.Length == 15, "every RVA class is defined");
+        Check(RvaTable.Classes[ClassId("census_bracket")].Bound == 0x42B4420 + 0x1000,
+              "the census bracket takes its assumed 0x1000 window");
+        Check(!RvaTable.Classes[ClassId("census_bracket")].Pipeline,
+              "the census bracket is matched but is not part of the pipeline");
+        Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("census_bracket")]) ==
+              "entry+0x1000 (assumed, no decompile)", "the assumed window is named as assumed");
+        Check(Matches("census_bracket", 0x42B4500) && !Matches("census_bracket", 0x42B5420),
+              "census bracket window edges");
         // A function whose decompile note carries a size ends at entry+size; the
         // 0x2000 guess is only a fallback, and only table_ba0 still needs one.
         Check(RvaTable.Classes[ClassId("update_render_data_job")].Bound == 0x4321940 + 503,
@@ -322,6 +330,7 @@ internal static class SelfTests
     private const int Pid = 4242;
     private const int Caller = 7;
     private const int Worker = 11;
+    private const ulong GameBase = 0x140000000;
 
     private static FrameMarker Frame(ulong offset, ulong sequence) => new(
         TimestampUs: 10000 + offset, Sequence: sequence, Generation: 1, FeatureEpoch: 4,
@@ -372,50 +381,92 @@ internal static class SelfTests
         worker.Add(4200, CpuState.Running);
         worker.Add(5000, CpuState.Waiting);
 
-        var stacks = new StackStore();
+        var stacks = new StackStore(@"c:\game");
+        var exe = stacks.AddModuleForTest(@"c:\game\elitedangerous64.exe", "elitedangerous64.exe", GameBase);
+        var edvrD3d11 = stacks.AddModuleForTest(@"c:\game\d3d11.dll", "d3d11.dll", 0x7FF000000000);
+        var systemD3d11 = stacks.AddModuleForTest(@"c:\windows\system32\d3d11.dll", "d3d11.dll", 0x7FF100000000);
+        var nvidia = stacks.AddModuleForTest(@"c:\windows\system32\driverstore\nvwgf2umx.dll",
+                                             "nvwgf2umx.dll", 0x7FF200000000);
+        stacks.AddModuleForTest(@"c:\windows\system32\ntdll.dll", "ntdll.dll", 0x7FF300000000);
+        Check(stacks.DisplayName(edvrD3d11) == "d3d11.dll [edvr]", "EDVR's d3d11 is named apart");
+        Check(stacks.DisplayName(systemD3d11) == "d3d11.dll [system32]", "System32's d3d11 is named apart");
+        Check(stacks.DisplayName(nvidia) == "nvwgf2umx.dll", "the display driver is named");
+        Check(stacks.DisplayName(-1) == "unresolved", "an unresolved frame is named as such");
         var pipeline = stacks.AddForTest(new StackInfo
         {
-            ModuleIds = [0, 0],
-            Addresses = [0x42DF9A0, 0x431B21F],
+            ModuleIds = [exe, exe],
+            Addresses = [GameBase + 0x42DF9A0, GameBase + 0x431B21F],
             ClassIds = [ClassId("record_drain"), ClassId("call_site_431b21f")],
             Label = StackLabel.Pipeline,
             Pipeline = true,
             GameTops = new GameTop(0x42DF9A0, 0x431B21F, 0, 2),
             Depth = 2,
+            TopModuleId = exe,
         });
         var scheduler = stacks.AddForTest(new StackInfo
         {
-            ModuleIds = [0, 0, 0],
-            Addresses = [0x5D6D7F, 0x5D4141, 0x5D67A6],
+            ModuleIds = [exe, exe, exe],
+            Addresses = [GameBase + 0x5D6D7F, GameBase + 0x5D4141, GameBase + 0x5D67A6],
             ClassIds = [ClassId("scheduler_range")],
             Label = StackLabel.Scheduler,
             Scheduler = true,
             GameTops = new GameTop(0x5D6D7F, 0x5D4141, 0x5D67A6, 3),
             Depth = 3,
+            TopModuleId = exe,
         });
         var other = stacks.AddForTest(new StackInfo
         {
-            ModuleIds = [0],
-            Addresses = [0x1234],
+            ModuleIds = [exe],
+            Addresses = [GameBase + 0x1234],
             ClassIds = [],
             Label = StackLabel.GameOther,
             GameTops = new GameTop(0x1234, 0, 0, 1),
             Depth = 1,
+            TopModuleId = exe,
         });
         var wakerReady = stacks.AddForTest(new StackInfo
         {
-            ModuleIds = [0],
-            Addresses = [0x5D6DCD],
+            ModuleIds = [exe],
+            Addresses = [GameBase + 0x5D6DCD],
             ClassIds = [ClassId("scheduler_range")],
             Label = StackLabel.Scheduler,
             Scheduler = true,
             GameTops = new GameTop(0x5D6DCD, 0, 0, 1),
             Depth = 1,
+            TopModuleId = exe,
         });
+        // A draw submitted through EDVR's d3d11 into the display driver, with an
+        // unresolved frame between them.
+        var submit = stacks.AddForTest(new StackInfo
+        {
+            ModuleIds = [nvidia, -1, systemD3d11, edvrD3d11, exe],
+            Addresses = [0x7FF200001000, 0x66600000, 0x7FF100002000, 0x7FF000003000, GameBase + 0x42B4500],
+            ClassIds = [ClassId("census_bracket")],
+            Label = StackLabel.OtherModule,
+            Census = true,
+            AnyEdvrD3d11 = true,
+            AnySystemD3d11 = true,
+            AnyNvidiaUserMode = true,
+            AnyUnresolved = true,
+            GameTops = new GameTop(0x42B4500, 0, 0, 1),
+            Depth = 5,
+            TopModuleId = nvidia,
+        });
+        Check(stacks.Signature(stacks[pipeline]) == "0x42df9a0 < 0x431b21f", "a game stack signs as its RVAs");
+        Check(stacks.Signature(stacks[submit]) ==
+              "nvwgf2umx.dll < unresolved < d3d11.dll [system32] < d3d11.dll [edvr] < 0x42b4500",
+              "a mixed stack signs as modules and RVAs");
+        Check(stacks.Signature(new StackInfo
+        {
+            ModuleIds = [4, 4, 4, exe],
+            Addresses = [0x7FF300000100, 0x7FF300000200, 0x7FF300000300, GameBase + 0x10],
+            Depth = 4,
+        }) == "ntdll.dll*3 < 0x10", "a run in one module collapses");
         data.Stacks = stacks;
 
         Collected.Append(data.SamplesByThread, Caller, new StackObs(2000, pipeline));
         Collected.Append(data.SamplesByThread, Caller, new StackObs(6000, other));
+        Collected.Append(data.SamplesByThread, Caller, new StackObs(6500, submit));
         Collected.Append(data.SamplesByThread, Worker, new StackObs(4500, pipeline));
         Collected.Append(data.SamplesByThread, Worker, new StackObs(4600, pipeline));
         Collected.Append(data.SwitchOutStacksByThread, Caller, new StackObs(4000, scheduler));
@@ -560,7 +611,7 @@ internal static class SelfTests
         var worker = cycle.Threads.Single(thread => thread.ThreadId == Worker);
         Near(caller.RunningUs, 7000, "caller running in the cycle");
         Near(worker.RunningUs, 800, "worker running in the cycle");
-        Check(caller.Samples == 2 && caller.PipelineSamples == 1, "caller samples");
+        Check(caller.Samples == 3 && caller.PipelineSamples == 1, "caller samples");
         Check(worker.Samples == 2 && worker.PipelineSamples == 2, "worker samples");
         Check(caller.ClassSamples![ClassId("record_drain")] == 1, "per-class sample counts per thread");
         Check(caller.ClassSamples![ClassId("call_site_431b21f")] == 1, "a stack counts in every class it hits");
@@ -572,11 +623,56 @@ internal static class SelfTests
         Check(analyzer.ClassLastSequence[ClassId("record_drain")] == 1, "last frame that sampled a class");
         Check(analyzer.ClassSamplesByThread[Worker][ClassId("record_drain")] == 2, "per-thread class totals");
 
+        CallerBreakdown(cycle, data);
+
         var second = analyzer.Analyze(data.Frames[1]);
         Near(second.Threads.Single(thread => thread.ThreadId == Caller).RunningUs, 9000,
              "an uninterrupted cycle is all running");
         Check(second.Waits.Count == 0, "an uninterrupted cycle has no waits");
         Near(second.CriticalPathShare, 0, "no pipeline samples means no share");
+    }
+
+    private static void CallerBreakdown(FrameCycle cycle, Collected data)
+    {
+        // Sample at 2000 is in R1 (first Submit entry is 3000); 6000 and 6500 are
+        // in R2-R4 (the second Submit returns at 7000).
+        Check(CycleAnalyzer.SampleRegionNames.Length == 4, "four coarse sample regions");
+        Check(CycleAnalyzer.SampleRegion(cycle, 2999) == 0 && CycleAnalyzer.SampleRegion(cycle, 3000) == 1,
+              "the R1 boundary is the first Submit entry");
+        Check(CycleAnalyzer.SampleRegion(cycle, 6999) == 1 && CycleAnalyzer.SampleRegion(cycle, 7000) == 2,
+              "the R2-R4 boundary is the second Submit return");
+        Check(CycleAnalyzer.SampleRegion(cycle, 8999) == 2 && CycleAnalyzer.SampleRegion(cycle, 9000) == 3,
+              "the R5 boundary is the next wait entry");
+        Check(cycle.CallerSamplesByRegion.Count == 3, "every caller sample is bucketed");
+        Check(cycle.CallerSamplesByRegion.Count(item => item.Group == 0) == 1, "one sample in R1");
+        Check(cycle.CallerSamplesByRegion.Count(item => item.Group == 1) == 2, "two samples in R2-R4");
+
+        var rows = (List<Dictionary<string, object?>>)Report.CallerStacksByRegion([cycle], data);
+        Check(rows.Count == 4, "one row per coarse region");
+        var r1 = rows[0];
+        Check((string)r1["region"]! == "R1" && Convert.ToInt64(r1["samples"]) == 1, "R1 sample count");
+        Near(Convert.ToDouble(r1["msPerFrame"]), 1.0, "one sample is one interval of a frame");
+        var r1Modules = (Dictionary<string, object?>[])r1["byTopModule"]!;
+        Check((string)r1Modules[0]["module"]! == "elitedangerous64.exe", "R1's top frame is game code");
+        var r1Any = (Dictionary<string, object?>)r1["anyFrameIn"]!;
+        Check(Convert.ToInt64(r1Any["pipelineClass"]) == 1 && Convert.ToInt64(r1Any["edvrD3d11"]) == 0,
+              "R1's sample is pipeline and touches no runtime module");
+
+        var submit = rows[1];
+        var modules = (Dictionary<string, object?>[])submit["byTopModule"]!;
+        Check(modules.Any(module => (string)module["module"]! == "nvwgf2umx.dll"),
+              "a driver frame is named in the top-module table");
+        var any = (Dictionary<string, object?>)submit["anyFrameIn"]!;
+        // The five counts overlap: one stack carries all of them.
+        Check(Convert.ToInt64(any["edvrD3d11"]) == 1 && Convert.ToInt64(any["systemD3d11"]) == 1 &&
+              Convert.ToInt64(any["nvidiaUserMode"]) == 1 && Convert.ToInt64(any["censusBracket"]) == 1,
+              "overlapping any-frame counts are independent");
+        Check(Convert.ToInt64(any["anyFrameUnresolved"]) == 1 && Convert.ToInt64(any["topFrameUnresolved"]) == 0,
+              "an unresolved frame inside a stack is counted without hiding the top");
+        var stacksInRegion = (Dictionary<string, object?>[])submit["topStacks"]!;
+        Check(stacksInRegion.Length == 2 && Convert.ToInt64(stacksInRegion[0]["count"]) == 1,
+              "the region's stacks are grouped by signature");
+        Check(rows[3] is not null && Convert.ToInt64(rows[3]["samples"]) == 0, "R6 has no samples here");
     }
 
     private static void WindowGrouping()
