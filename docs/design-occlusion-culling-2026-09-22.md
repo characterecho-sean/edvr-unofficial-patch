@@ -14,31 +14,29 @@ context; every load-bearing claim cites its evidence.
   the engine's own frustum-reject path (§3.3), swapped the oracle for an
   exact one (§3.4) and put the one flight that can kill the arc first (§4).
   Not implemented; no flight committed.
-- **Prize (re-priced by Phase B', §9):** at the parked cockpit pose
-  (three eye runs) 71-72% of the settlement's eye draws come ONLY from
-  records unseen in both eyes (R = 1 m; 51-88% over R = 3..0.3 m), i.e.
-  6.0-6.1 ms of the caller thread's ~8.5 ms settlement share. The old
-  job-pipeline figure (~4.8-5.1 of ~5.3 ms) is dead with Phase A.
-- **Open (§9):** B' PASSES on the exact join and on its measurable
-  ceiling: a 256x128 coverage buffer fed IDEAL occluders removes 36-41%
-  of the pool draws (3.1-3.5 ms against the 1.5 ms bar). It is
-  CONDITIONAL on one unmeasured number: the occluders are the front
-  buildings' exteriors 30-100 m out (83% of the unseen set; the cockpit
-  carries <= 2% of draws at buffer resolution), and a qualified
-  inventory of their solid parts must reproduce >= ~45% of the ideal
-  (68-79% if EDVR's own per-draw cost were cut to zero: the two levers
-  price the same draws). SITE (§9 close-out 1): FUN_144308B30 is a
-  per-view distance/LOD test with no planes; FUN_14430EFE0's frustum
-  verdict reaches only the type-2 items. The pool draws' only per-view
-  frustum is the draw-item builder's view loop (FUN_1442B4420, one view
-  array for all three tests), which becomes the candidate site,
-  conditional on its items being the instanced pool draws.
-- **Next (§9):** fly the gate probe (BUILT, gated, not flown:
-  advanced.cull_gate_capture with eye_depth_capture, the eye-run
-  hotkey, parked pose): the builder's and the gate's per-view verdicts
-  beside each engine record's t33 records, the view array and the
-  occluders' geometry; tools\cull_gate_probe.py names the admitting
-  test, then the inventory's recall is measured offline.
+- **Prize (re-priced by Phase B', §9, §10):** at the parked cockpit
+  pose (four eye runs) 70-72% of the settlement's eye draws come ONLY
+  from t33 PARTS unseen in both eyes (R = 1 m), ~6.0 ms of the caller
+  thread's ~8.5 ms settlement share -- reachable only by a per-part
+  reject: whole engine records carry 13.2% (1.12 ms, §10). The old
+  job-pipeline figure is dead with Phase A.
+- **Open (§10, run 152632):** B' FAILS at the proven site; CONDITIONAL and
+  unmeasured at a per-part one. The draw-item builder's view loop
+  (FUN_1442B4420:250-275) is proven the admission for the records it sees
+  (0 drawn slots it rejects, 0 admitted records undrawn; the mask
+  over-admits 8 records an eye, FUN_14430EFE0 rejects 20,232 drawn
+  slot-eyes) but culls WHOLE engine records: ideal occluders remove
+  0.17-0.91 ms there. Per sub-item and view the builder calls FUN_1442B3FC0
+  (frustum + LOD per part; the 217 one-eye parts all lie outside the other
+  eye): ideal occluders remove 2.54 / 3.27 ms of builder parts (256x128 /
+  256x256); real solid ones must reproduce >= 59% / 46% of that (95% / 74%
+  at 5.3 ms). Unmeasured: the version 9 geometry is EMPTY, its one-shot
+  arm wiped 60 ms later by the pool's first sighting (armGeometry(0)).
+- **Next (§10):** fix the geometry arm (C++, object_probe.cpp); extend
+  the gate probe to FUN_1442B3FC0 (per sub-item and view: verdict, LOD,
+  the model's +0x00 centre / +0x10 radius); one parked capture, both
+  keys, no reject: prove the part site, qualify the solid inventory,
+  measure real/ideal.
 - **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
   rendering from the ship. On foot is out of scope for now; the corpus and
   the profile legs are cockpit poses. Also to instrument: CPU frame time
@@ -48,11 +46,14 @@ context; every load-bearing claim cites its evidence.
   occlusion queries as the runtime mechanism (they remain the offline
   oracle, §3.4); same-frame depth readback; boundary-side draw-call motion
   estimation (pipeline doc, 2026-09-19 decision); whole-structure boxes as
-  occluders; single-occluder rect coverage as the test. Phase B' (§9):
-  the cockpit as the parked prize's occluder; nesting as what hides the
-  parked view; the 2026-09-21 "<0.15 ms for 3.5k draws" baseline (§1:
-  its windows held no settlement frames); a reject at FUN_14430EFE0 as
-  the pool-draw cull (type-2 items only).
+  occluders; single-occluder rect coverage as the test. Phase B' (§9,
+  §10): the cockpit as the parked prize's occluder; nesting as what
+  hides the parked view; the 2026-09-21 "<0.15 ms for 3.5k draws"
+  baseline (§1: its windows held no settlement frames); a reject at
+  FUN_14430EFE0 as the pool-draw cull (type-2 items only); a
+  record-level reject in the builder's view loop (whole engine
+  records); the collection mask as the admission; full occluder meshes
+  as §3.2's occluders within 0.3 ms (155k triangles an eye).
 - **VERDICT (2026-09-22 evening, valid Phase A): KILL.** Two clean
   file-mode legs on build 2d8fbda (engine arc, "Phase A, valid: KILL"
   entry). Parked cockpit: the job pipeline is 5.24 ms thread-summed on
@@ -764,3 +765,191 @@ and its fixture check, the snapshot rig's version-9 geometry.
 must agree with the ledger's per-eye draws where the gate does not; if
 the builder also disagrees, the per-eye split is decided after the
 items and the site moves again.
+
+## 10. Phase B' close-out (2026-09-22, run 152632): the builder is the site, its record unit fails the bar, the part unit is unmeasured
+
+**Capture.** Eye run 152632 (session B, 15:26, parked cockpit at
+Cranfield on the pad, Pimax OpenXR, EDVR a606157), both keys on:
+gate_152632.bin (ledger frames 2..4: 86,760 gate calls, 2,037 builder
+calls on 679 engine records, nothing dropped, 0 faults, 0 pose
+mismatches), version 2 depth for frame 2 (3070x3032 an eye, camera in
+the block), pool, instance stream and ledger for frames 2..20. Frame 2:
+18,151 pool eye draws (A 9,075, B 9,076), 12,274 t33 records. Scripts
+are throwaway, in the session scratch (phaseB2).
+
+**1. The reader**, corrected here in two places: it read rec+0x208 at
+each eye view's array INDEX, but masks carry the view's own +0x570 bits
+(eye A = view 0 = bit 1, eye B = view 5 = bit 22; its first run scored
+the mask 0 of 544); and its join kept one owner per t33 slot, so
+shadow-only twins counted as builder disagreements (18 of 544). It now
+reads the bits and tallies per slot with every claimant kept
+(self-test extended). Frame 2: 10,852 of 12,274 drawn t33 records
+(88.4%) unseen in both eyes at R = 1 m; 10,426 joined to a builder
+record (484 slots claimed by two or more). Over the 679 builder records
+no test ever splits the eyes: builder AB 614 / none 65, mask AB 632 /
+none 47, gate AB 72 / none 607 (911 of its 2,892). Against the ledger's
+per-eye draws (frames 3 and 4 have no depth file, which the reader
+needs; their tallies, from the scratch, are identical):
+
+| test | drawn (slot, eye) it rejects | admitted (record, eye), nothing drawn | admitted, drawn |
+|---|---|---|---|
+| builder view loop | 0 | 0 | 1,062 |
+| collection mask rec+0x208 | 0 | 16 | 1,062 |
+| gate FUN_14430EFE0 | 20,232 | 0 | 144 |
+
+**2. The site.** The builder's view loop (42B4420:250-275) admits
+exactly the pool draws of the records it sees. The mask over-admits 8
+records an eye (a 212-part structure among them) whose slots the pool
+holds and nothing draws, exactly those the builder's frustum rejects;
+472 of the 544 drawn records have gate passed = 0 in both eyes. The 18
+"disagreements" were twins: 22 records whose active mask holds only
+non-eye bits (views 4, 7, 8) have drawn slots at the pivots of
+eye-admitted records, and all 93 of those slots are also claimed by the
+admitted twin. Two facts bound the site. Its unit is the WHOLE engine
+record: one call a record a frame, every entry and sub-item under one
+view mask (local_4b8), and records are coarse (the top one draws 1,287
+parts, 238 of them seen).
+And the per-eye split is finer than a record: 217 t33 parts are drawn
+in one eye only (139 A, 78 B), each outside the other eye's viewport
+(NDC > 1), 19 of them on records admitted in both eyes. The sub-item
+loop explains it: per sub-item and admitted view the builder calls
+FUN_1442B3FC0 (decompiled here, analysis\decomp\decomp_42B3FC0.txt:
+distance and screen size against view +0x540/+0x550/+0x560, then
+FUN_1404F4E10 on the part's own sphere, then the LOD pick) and ORs only
+the passing views into the item's mask (42B4420:504-523, stored at 732)
+-- a per-part, per-eye admission inside the same builder, whose verdicts
+the probe does not record. Records the builder never sees (2,213 of the
+gate's 2,892; 14.5% of the pool draws hold a part joined to no builder
+record) take the gate's verdict and the type-2 path: of the 794 drawn
+slots at such a record's origin, the gate passes the drawn eye for 784
+in each eye.
+
+**Eyes and same frame.** View 0 is eye A (bits 0x2), view 5 eye B (bits
+0x400000), in all three dumps (|cos| 1.00000). Each has five planes: a
+near plane 25.0 mm ahead and four sides through its own camera (+0x540)
+to 0.001 mm. Against the frame-2 depth files' cb1[270..275]: cameras
+0.087 mm apart, side planes within 0.08 mm and 0.0006 degrees; the dumps
+stamped 3 and 4 sit 1.3 and 2.2 mm and up to 0.03 degrees away (the
+head's drift), so the dump stamped 2 is the depth's frame. The pose
+entries cannot discriminate frames here: no builder record's
++0x170/+0x17C changed over frames 2..4, their parts land on frame 2's
+slots at a median 0.6 mm (consistent with the packed quaternion's
+quantization) and join pools 2, 3 and 4 identically. Views 1-4 (bits
+4-7, cameras 2.2 km and 340 km out), 6 (bit 39) and 7-9 (bits 25-27,
+cascade-like) are the others.
+
+**3. Occluders.** §9's association on eye A: of 10,784 unseen records
+in its view, 97.6% sit behind a surface >= 30 m out (1.8% at 3-30 m,
+0.6% the cockpit); 93.9% of those points lie within 5 m of a seen t33
+origin, naming 344 occluder parts (top 10: 30.6% of the points, top 25:
+47.6%). Through the join they are 54 engine records with 95.8% of the
+points (31 unjoined parts, 4.2%); the top record alone 37.3%, the top
+two 51.4%, the top eight 74.8%. Triangles are the ledger's index count
+/ 3 an instance (every eye pool draw is indexed; lists assumed, the eye
+pass's topology was not captured):
+
+| set | parts | eye draws | triangles an eye |
+|---|---|---|---|
+| §9 association (>= 30 m) | 344 | 1,664 | 155,250 (a part: p50 132, p90 1,120, max 3,466) |
+| of which the top record 0x1f8f5a1a750 | 78 | | 32,292 |
+| the reader's range (seen, <= 120 m) | 523 | | 199,213 |
+
+Solid versus not is NOT MEASURABLE from this capture, so neither are
+the solid set's triangles (155,250 bound them from above) nor its share
+of the points. The version 9 section that should carry every pool
+draw's vertex and index windows and blend / depth-stencil / raster
+state is empty (0 draws mapped, header frame 0), and the census logged
+only offscreen state (4,207 lines, the depth-only shadow passes). Cause,
+from the code and the log: armGateProbe armed it (armGeometry(2),
+object_probe.cpp:669, 15:26:32.036); 60 ms later the object probe saw
+the pool for the first time (15:26:32.096, "the instanced-mesh pool is
+at VS t33"), and that path (object_probe.cpp:3535-3537) runs
+releasePool() -> ledgerRelease() -> g_eyeMeshSnapshot.reset() ->
+armGeometry(0) (1906, 700; eye_draw_snapshot.h:312), after which
+captureGeometry returns at `!geoFrame` on every draw. The snapshot's own
+draws survive (firstFrame re-arms at the next frame it sees); the
+geometry arm is one-shot.
+
+**4. Recall** (frame 2, R = 1 m, both-eyes rule: a draw goes only when
+every record in it goes in both eyes; ms = share of the 18,151 pool
+draws x 8.5; brackets R = 0.3..3 m). The ideal is §9's method recomputed
+on this capture (the stored depth as the occluder, the farthest depth a
+tile, the occludee's rect dilated one tile); 055252's rows reproduce
+within a point (70.9 / 35.9 / 46.0%):
+
+| unit (site) | depth truth | ideal 256x128 | ideal 256x256 |
+|---|---|---|---|
+| t33 part, every record (§9's unit) | 70.3%, 5.98 ms [86.8..49.5] | 35.0%, 2.97 [40.0..21.8] | 45.9%, 3.90 [55.4..32.4] |
+| part, builder parts only (FUN_1442B3FC0) | 59.5%, 5.05 [74.8..41.2] | 29.8%, 2.54 [34.3..18.3] | 38.5%, 3.27 [46.6..26.8] |
+| entry: one model in a record (no site) | 49.7%, 4.22 [70.1..33.0] | 22.7%, 1.93 | 31.3%, 2.66 |
+| engine record, every part occluded (view loop) | 13.2%, 1.12 [33.4..11.4] | 5.9%, 0.50 | 10.7%, 0.91 |
+| engine record, its own sphere (view loop) | - | 2.0%, 0.17 | 3.5%, 0.29 |
+| real solid occluders | - | NOT MEASURED | NOT MEASURED |
+
+The part rows use §9's R about each slot (the engine's own per-part
+sphere, the model's +0x00 centre and +0x10 radius, is not captured).
+The record's own sphere is the builder's frustum-test bound (pose +0x80
+transformed, +0x90.x; rec+0x240/+0x280 differ from it by up to 42 and 47
+m), and 43 of 553 records have a part origin up to 10 m outside it, so
+it is no safe occludee either. False rejects against the depth truth: 0
+in every ideal row, at every R and size.
+
+**Verdict: B' FAILS at the proven site; at the per-part one it stays
+CONDITIONAL and unmeasured.** A reject in the builder's view loop culls
+whole engine records; there, ideal occluders remove 0.17-0.91 ms and
+the depth truth itself 1.12 ms, against 1.5 ms. At FUN_1442B3FC0
+(decompile plus the 217 one-eye parts; its verdicts unrecorded) ideal
+occluders remove 2.54 / 3.27 ms of builder parts (2.97 / 3.90 if the
+parts the builder never sees were culled too): real solid occluders
+must reproduce >= 59% / 46% of the ideal (50% / 38%) at the 8.5 ms
+price, or >= 95% / 74% (81% / 62%) if EDVR's per-draw cost is taken as
+already cut (5.3 ms). The real ratio needs the geometry this capture
+lost.
+
+**5. Cost** (instruction level; Phase C measures). Occludee test per
+(part, eye): project the centre (4 SIMD FMAs, a reciprocal), the rect
+from the radius, clamp to tiles (~20 instructions), then the dilated
+rect: a 1 m part at 100 m is ~12 px in radius against 12x24-px tiles at
+256x128, ~4x3 tiles, two 8-wide compares; ~40 instructions, ~15-20
+cycles. The part site sees ~13,500 builder sub-items a frame: ~27k
+tests, ~0.12 ms thread-summed on the job workers (the record site's
+1,358 tests: ~0.01 ms). Occluder rasterisation per eye: the named
+occluders' full meshes are 155,250 triangles; a masked 8-wide
+rasteriser spends ~30 instructions a triangle (transform amortised, edge
+setup, 1-2 tiles each at this size), ~10-20 cycles: 0.4-0.8 ms an eye,
+0.8-1.6 ms for both, 3-5x the 0.3 ms budget. §3.2's eroded boxes (~2k
+triangles an eye) cost < 0.02 ms an eye, but only a qualified solid
+inventory yields them, and this capture cannot qualify one.
+
+ruled out: a record-level reject in the builder's view loop
+(42B4420:250-275) as the B' site, because its unit is the whole engine
+record: ideal occluders remove 5.9-10.7% of the pool draws there
+(0.50-0.91 ms) by the parts form and 2.0-3.5% (0.17-0.29 ms) by the
+record's own sphere, and the depth truth at that unit is 13.2% (1.12
+ms; 0.97-2.84 ms over R), below 1.5 ms before any real occluder.
+ruled out: the collection mask rec+0x208 as the pool-draw admission,
+because it admits 8 records an eye whose slots are written and never
+drawn, which the builder's frustum rejects.
+ruled out: FUN_14430EFE0's verdict as the admission for builder records,
+because 20,232 drawn (slot, eye) pairs belong only to records it
+rejects.
+ruled out: the first reader run's 18 builder disagreements as evidence
+against the builder, because they are shadow-only twins (active mask
+without the eye bits) at the pivots of eye-admitted records, whose 93
+drawn slots the admitted twin also claims.
+ruled out: declined draws as why the version 9 section is empty,
+because its counters read 0 declined and 0 over the cap with header
+frame 0: the arm was wiped 60 ms after it (above).
+ruled out: the occluder set's full meshes as §3.2's rasterised
+occluders within 0.3 ms, because they are 155,250 triangles an eye
+(0.4-0.8 ms an eye by the estimate above).
+
+**Next (no capture until the probe is fixed).** (1) The geometry arm:
+re-arm it after ledgerRelease while g_gateRun, or arm it lazily at the
+window's first frame (C++, object_probe.cpp). (2) Extend the gate probe
+to the per-part site: at FUN_1442B3FC0 (its call at 0x1442B4B91 in the
+sub-item loop) record per (sub-item, view) the verdict and LOD beside
+the model's +0x00 centre and +0x10 radius, the part's own occludee. (3)
+One parked capture, both keys, no reject: prove the part site against
+the ledger's one-eye parts, qualify the solid inventory from the
+geometry, and measure real/ideal against the thresholds above.

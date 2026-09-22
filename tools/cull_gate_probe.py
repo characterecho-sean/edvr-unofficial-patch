@@ -17,9 +17,13 @@ When the stamp has a gate_<stamp>.bin: which engine views are the eyes
 between the engine's and the pool's coordinates, the engine record behind
 each t33 record (its parts' world positions matched to the pool), and per
 engine record the per-eye verdicts of the three per-view tests -- the
-distance/LOD mask rec+0x208, the traversal gate FUN_14430EFE0, the draw-item
-builder's frustum -- beside the ledger's per-eye draws of its parts, with an
-agreement tally that says which test admits the pool draws. With version 9
+distance/LOD mask rec+0x208 (read by each eye view's own +0x570 bits, not its
+array index), the traversal gate FUN_14430EFE0, the draw-item builder's
+frustum -- beside the ledger's per-eye draws of its parts, with a per-slot
+tally (every claimant of a t33 slot kept, so a shadow-only twin at the same
+pivot never counts against a test) that says which test admits the pool
+draws: the admitting test rejects no drawn slot and admits no record with
+nothing drawn. With version 9
 geometry in drawstate_<stamp>.eyemesh.bin: the occluder set (seen records
 within --occluder-range metres), its meshes' triangle counts and whether
 their states are opaque and depth-writing.
@@ -255,6 +259,42 @@ def part_positions(builder, entries, subs, conjugate):
     return out
 
 
+def mask_admits(mask, view_bits):
+    """A view mask (rec+0x208, the builder's active mask) admits a view when
+    it shares a bit with the view's own bits (+0x570). The bits are NOT the
+    view's array index: on 152632 eye A is view 0 with bit 1 and eye B is
+    view 5 with bit 22 (decomp_42B4420.txt:250-275 tests view+0x570 & mask)."""
+    return bool(mask & view_bits)
+
+
+def tally(claims, drawn, verdict):
+    """Per test, over (t33 slot, eye) and (engine record, eye) pairs:
+    'rejected, drawn' -- a slot drawn in an eye whose every claiming engine
+    record the test rejects there (a reject that did not remove the draw);
+    'admitted, undrawn' -- a record the test admits in an eye none of whose
+    claimed slots is drawn there; 'admitted, drawn'. A slot can be claimed by
+    two records at one pivot (a shadow-only twin beside the eye record, same
+    parts): judged per slot, a twin never counts against a test. The test
+    that predicts the pool draws has zero in both violation columns."""
+    parts_of = {}
+    for k, rids in claims.items():
+        for rid in rids:
+            parts_of.setdefault(rid, []).append(k)
+    out = {}
+    for name in ('mask', 'gate', 'builder'):
+        c = {'rejected, drawn': 0, 'admitted, undrawn': 0, 'admitted, drawn': 0}
+        for e in 'AB':
+            for k in drawn[e]:
+                rids = claims.get(k)
+                if rids and not any(verdict[r][name][e] for r in rids if r in verdict):
+                    c['rejected, drawn'] += 1
+            for rid, v in verdict.items():
+                if v[name][e] and parts_of.get(rid):
+                    c['admitted, drawn' if any(k in drawn[e] for k in parts_of[rid]) else 'admitted, undrawn'] += 1
+        out[name] = c
+    return out
+
+
 # --------------------------------------------------------------------------- the run join
 
 def eye_cameras(pool_dir, stamp, frame, depth, pool_pos):
@@ -420,7 +460,7 @@ def run(pool_dir, stamp, args):
                                                  c['builder_calls'], c['builder_kept'], c['dumps'], c['faults'],
                                                  c['record_mismatch'], 'ran' if gate['flags'] & 1 else 'ABSENT'))
     # Name the eye views: the view whose planes share each eye's orientation.
-    eye_views, offsets = {}, {}
+    eye_views, offsets, eye_bits = {}, {}, {}
     for d in gate['dumps']:
         scores = {}
         for e in 'AB':
@@ -433,6 +473,7 @@ def run(pool_dir, stamp, args):
         if named and (d['frame'] == frame or not eye_views):
             for e in 'AB':
                 eye_views[e] = scores[e][1]
+                eye_bits[e] = d['views'][scores[e][1]]['bits']
                 offsets[e] = [a - b for a, b in zip(d['views'][scores[e][1]]['camera'][:3], cams[e][1][:3])]
     if len(eye_views) != 2:
         print('  the eyes are not among the engine views (no two distinct views match above 0.99): '
@@ -440,7 +481,8 @@ def run(pool_dir, stamp, args):
         return 0
     off = [(offsets['A'][k] + offsets['B'][k]) / 2 for k in range(3)]
     spread = math.sqrt(sum((offsets['A'][k] - offsets['B'][k]) ** 2 for k in range(3)))
-    print('  engine -> pool frame offset %s (the two eyes agree to %.3f m)' % (['%.3f' % v for v in off], spread))
+    print('  engine -> pool frame offset %s (the two eyes agree to %.3f m); eye view bits A %#x, B %#x' % (
+        ['%.3f' % v for v in off], spread, eye_bits['A'], eye_bits['B']))
     # Join engine records to t33 records by their parts' world positions.
     # The jobs are stamped with the frame current when they ran: use this
     # frame's observations, else the window frame nearest it.
@@ -455,50 +497,51 @@ def run(pool_dir, stamp, args):
     tree_pos = pool['pos'].astype(np.float64)
     best = None
     for conj in (False, True):
-        owner = {}
+        claims = {}
         for rid, b in by_record.items():
             for p in part_positions(b, gate['entries'], gate['subs'], conj):
                 q = np.array([p[0] - off[0], p[1] - off[1], p[2] - off[2]])
                 d2 = ((tree_pos - q[None, :]) ** 2).sum(axis=1)
                 # Every pool record at the part's position (5 cm): parts that
-                # share a pivot and a pose are one object to a cull.
+                # share a pivot and a pose are one object to a cull. Every
+                # claimant is kept: two engine records at one pivot (a
+                # shadow-only twin) both claim the slot.
                 for k in np.nonzero(d2 < 0.05 ** 2)[0]:
-                    owner[int(k)] = rid
-        if best is None or len(owner) > len(best[1]):
-            best = (conj, owner)
-    conj, owner = best
+                    claims.setdefault(int(k), set()).add(rid)
+        if best is None or len(claims) > len(best[1]):
+            best = (conj, claims)
+    conj, claims = best
     parts_of = {}
-    for k, rid in owner.items():
-        parts_of.setdefault(rid, []).append(k)
-    joined = sum(1 for x in recs if int(x) in owner)
-    print('  t33 records joined to an engine record: %d of %d (parts rotated by %s)' % (
-        joined, len(recs), 'the conjugate' if conj else 'the quaternion'))
+    for k, rids in claims.items():
+        for rid in rids:
+            parts_of.setdefault(rid, []).append(k)
+    joined = sum(1 for x in recs if int(x) in claims)
+    print('  t33 records joined to an engine record: %d of %d (parts rotated by %s; %d slots claimed by two or more '
+          'engine records)' % (joined, len(recs), 'the conjugate' if conj else 'the quaternion',
+                               sum(1 for v in claims.values() if len(v) > 1)))
     gate_verdict = {}
     for gc in gate['gates']:
         if gc['frame'] == obs_frame:
             gate_verdict.setdefault(gc['record'], {})[gc['view']] = gc['passed']
     # Per engine record, beside the ledger's per-eye draws of its parts.
     seen_of = {int(r): bool(s) for r, s in zip(recs, seen)}
-    agree = {'mask': [0, 0], 'gate': [0, 0], 'builder': [0, 0]}
+    verdicts = {}
     table = []
     for rid, b in by_record.items():
-        parts = [k for k in parts_of.get(rid, []) if k in seen_of]
-        if not parts:
-            continue
-        ledger_eyes = {e: any(k in drawn[e] for k in parts) for e in 'AB'}
-        verdict = {
-            'mask': {e: bool(b['rec_mask'] >> eye_views[e] & 1) for e in 'AB'},
+        verdicts[rid] = {
+            'mask': {e: mask_admits(b['rec_mask'], eye_bits[e]) for e in 'AB'},
             'gate': {e: bool(gate_verdict.get(rid, {}).get(eye_views[e], 0)) for e in 'AB'},
             'builder': {e: bool(b['bit_ok'] >> eye_views[e] & 1 and b['frustum_pass'] >> eye_views[e] & 1)
                         for e in 'AB'},
         }
-        for name, v in verdict.items():
-            ok = all(v[e] == ledger_eyes[e] for e in 'AB')
-            agree[name][0 if ok else 1] += 1
-        table.append((len(parts), rid, sum(seen_of[k] for k in parts), verdict, ledger_eyes))
-    for name, (ok, bad) in agree.items():
-        print('  per-eye admission vs the ledger\'s per-eye draws: %-7s agrees on %d engine records, disagrees on %d' % (
-            name, ok, bad))
+        parts = [k for k in parts_of.get(rid, []) if k in seen_of]
+        if parts:
+            ledger_eyes = {e: any(k in drawn[e] for k in parts) for e in 'AB'}
+            table.append((len(parts), rid, sum(seen_of[k] for k in parts), verdicts[rid], ledger_eyes))
+    for name, c in tally(claims, drawn, verdicts).items():
+        print('  per-eye admission vs the ledger\'s per-eye draws: %-7s %d (slot, eye) draws it rejects, %d admitted '
+              '(record, eye) pairs with nothing drawn, %d admitted and drawn' % (
+                  name, c['rejected, drawn'], c['admitted, undrawn'], c['admitted, drawn']))
     print('  top engine records by parts (parts seen/all; mask, gate, builder and ledger per eye):')
     for parts, rid, nseen, v, led in sorted(table, key=lambda x: -x[0])[:args.records]:
         fmt = lambda d: ''.join(e if d[e] else '.' for e in 'AB')
@@ -519,6 +562,10 @@ def occluders(pool_dir, stamp, frame, recs, seen, cams, rows_of, args):
         print('  no eyemesh snapshot: no occluder geometry')
         return
     geo = snap.read(path).get('geometry') or snap.empty_geometry()
+    if not geo['draws'] and not geo['meshes']:
+        print('  the eyemesh snapshot\'s version 9 geometry section is EMPTY (frame %d, 0 draws mapped, %d declined): '
+              'no occluder geometry or state was captured' % (geo['frame'], geo['declined']))
+        return
     if geo['frame'] != frame:
         print('  the eyemesh snapshot has no version 9 geometry for frame %d (it has frame %d)' % (frame, geo['frame']))
         return
@@ -630,6 +677,17 @@ def self_test():
     assert plane_match(normals, planes) > 0.9999, 'a frustum matches its own planes'
     turned = [[n[1], -n[0], n[2], 0.0] for n in normals]
     assert plane_match(normals, turned) < 0.99, 'a turned frustum does not match'
+    # A mask admits a view by the view's own bits, not its array index (152632: eye B is view 5, bit 22).
+    assert mask_admits(0x8006400082, 1 << 22) and not mask_admits(0x8006400082, 1 << 5), 'mask by view bits'
+    # The tally: slot 1 is claimed by an admitted record and its rejected shadow-only twin, slot 2 by a
+    # record every test rejects and that is not drawn, slot 3 by a record admitted but not drawn in B.
+    both = {'A': True, 'B': True}
+    none = {'A': False, 'B': False}
+    v = {10: {'mask': both, 'gate': none, 'builder': both}, 11: {'mask': none, 'gate': none, 'builder': none},
+         12: {'mask': none, 'gate': none, 'builder': none}, 13: {'mask': both, 'gate': both, 'builder': both}}
+    t = tally({1: {10, 11}, 2: {12}, 3: {13}}, {'A': {1, 3}, 'B': {1}}, v)
+    assert t['builder'] == {'rejected, drawn': 0, 'admitted, undrawn': 1, 'admitted, drawn': 3}, t['builder']
+    assert t['gate'] == {'rejected, drawn': 2, 'admitted, undrawn': 1, 'admitted, drawn': 1}, t['gate']
     # Quaternion rotation: +90 degrees about z turns x into y.
     s = math.sqrt(0.5)
     assert all(abs(a - x) < 1e-9 for a, x in zip(rotate([0, 0, s, s], [1, 0, 0]), [0, 1, 0]))
